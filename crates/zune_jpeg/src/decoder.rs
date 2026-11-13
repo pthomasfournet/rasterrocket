@@ -18,9 +18,14 @@ use zune_core::colorspace::ColorSpace;
 use zune_core::log::{error, trace, warn};
 use zune_core::options::DecoderOptions;
 
+use crate::bitstream::BitStreamHuffman;
+#[cfg(feature = "arith")]
+use crate::bitstream_arith::{ArithACTables, ArithDCTables, BitStreamArithmetic};
 use crate::color_convert::choose_ycbcr_to_rgb_convert_func;
 use crate::components::{Components, SampleRatios};
 use crate::errors::{DecodeErrors, UnsupportedSchemes};
+#[cfg(feature = "arith")]
+use crate::headers::parse_dac;
 use crate::headers::{
     parse_app1, parse_app13, parse_app14, parse_app2, parse_dqt, parse_huffman, parse_sos,
     parse_start_of_frame,
@@ -76,6 +81,20 @@ pub(crate) struct ICCChunk {
     pub(crate) data: Vec<u8>,
 }
 
+// A separate struct to allow &borrowing tables while &mut borrowing components
+pub(crate) struct EntropyTables {
+    /// DC Huffman Tables with a maximum of 4 tables for each  component
+    pub(crate) dc_huffman: [Option<HuffmanTable>; MAX_COMPONENTS],
+    /// AC Huffman Tables with a maximum of 4 tables for each component
+    pub(crate) ac_huffman: [Option<HuffmanTable>; MAX_COMPONENTS],
+    /// Arithmetic coding initial conditioning parameters and statistics (has a default value)
+    #[cfg(feature = "arith")]
+    pub(crate) dc_arithmetic: [ArithDCTables; MAX_COMPONENTS],
+    /// Arithmetic coding initial conditioning parameters and statistics  (has a default value)
+    #[cfg(feature = "arith")]
+    pub(crate) ac_arithmetic: [ArithACTables; MAX_COMPONENTS],
+}
+
 /// A JPEG Decoder Instance.
 #[allow(clippy::upper_case_acronyms, clippy::struct_excessive_bools)]
 pub struct JpegDecoder<T> {
@@ -84,10 +103,8 @@ pub struct JpegDecoder<T> {
     ///  Quantization tables, will be set to none and the tables will
     /// be moved to `components` field
     pub(crate) qt_tables: [Option<[i32; 64]>; MAX_COMPONENTS],
-    /// DC Huffman Tables with a maximum of 4 tables for each  component
-    pub(crate) dc_huffman_tables: [Option<HuffmanTable>; MAX_COMPONENTS],
-    /// AC Huffman Tables with a maximum of 4 tables for each component
-    pub(crate) ac_huffman_tables: [Option<HuffmanTable>; MAX_COMPONENTS],
+    // Entropy coding tables
+    pub(crate) entropy_tables: EntropyTables,
     /// Image components, holds information like DC prediction and quantization
     /// tables of a component
     pub(crate) components: Vec<Components>,
@@ -108,6 +125,8 @@ pub struct JpegDecoder<T> {
     /// Image input colorspace, should be YCbCr for a sane image, might be
     /// grayscale too
     pub(crate) input_colorspace: ColorSpace,
+    // Is the image using arithmetic coding?
+    pub(crate) is_arithmetic: bool,
     // Progressive image details
     /// Is the image progressive?
     pub(crate) is_progressive: bool,
@@ -168,8 +187,24 @@ where
         JpegDecoder {
             info: ImageInfo::default(),
             qt_tables: [None, None, None, None],
-            dc_huffman_tables: [None, None, None, None],
-            ac_huffman_tables: [None, None, None, None],
+            entropy_tables: EntropyTables {
+                dc_huffman: [None, None, None, None],
+                ac_huffman: [None, None, None, None],
+                #[cfg(feature = "arith")]
+                dc_arithmetic: [
+                    ArithDCTables::default(),
+                    ArithDCTables::default(),
+                    ArithDCTables::default(),
+                    ArithDCTables::default(),
+                ],
+                #[cfg(feature = "arith")]
+                ac_arithmetic: [
+                    ArithACTables::default(),
+                    ArithACTables::default(),
+                    ArithACTables::default(),
+                    ArithACTables::default(),
+                ],
+            },
             components: vec![],
             // Interleaved information
             h_max: 1,
@@ -179,6 +214,7 @@ where
             mcu_x: 0,
             mcu_y: 0,
             is_interleaved: false,
+            is_arithmetic: false,
             is_progressive: false,
             spec_start: 0,
             spec_end: 0,
@@ -341,6 +377,7 @@ where
     pub fn set_options(&mut self, options: DecoderOptions) {
         self.options = options;
     }
+    #[allow(clippy::cast_possible_truncation)]
     fn reassemble_extended_xmp(&mut self) {
         if self.extended_xmp_segments.is_empty() {
             return;
@@ -511,7 +548,7 @@ where
                         let mut is_rgb = self.components.len() == 3;
                         let chars = ['R', 'G', 'B'];
                         for (comp, single_char) in self.components.iter().zip(chars.iter()) {
-                            is_rgb &= comp.id == (*single_char) as u8
+                            is_rgb &= comp.id == (*single_char) as u8;
                         }
                         // Image is RGB, change colorspace
                         if is_rgb {
@@ -523,7 +560,7 @@ where
                 } else {
                     bytes_before_marker = 0;
 
-                    warn!("Marker 0xFF{:X} not known", m);
+                    warn!("Marker 0xFF{m:X} not known");
 
                     let length = self.stream.get_u16_be_err()?;
 
@@ -546,17 +583,35 @@ where
     pub(crate) fn parse_marker_inner(&mut self, m: Marker) -> Result<(), DecodeErrors> {
         match m {
             Marker::SOF(0..=2) => {
-                let marker = {
-                    // choose marker
-                    if m == Marker::SOF(0) || m == Marker::SOF(1) {
-                        SOFMarkers::BaselineDct
-                    } else {
+                // choose marker
+                let marker = match m {
+                    Marker::SOF(0 | 1) => SOFMarkers::BaselineDct,
+                    Marker::SOF(2) => {
                         self.is_progressive = true;
                         SOFMarkers::ProgressiveDctHuffman
                     }
+                    _ => unreachable!(),
                 };
 
-                trace!("Image encoding scheme =`{:?}`", marker);
+                trace!("Image encoding scheme =`{marker:?}`");
+                // get components
+                parse_start_of_frame(marker, self)?;
+            }
+            #[cfg(feature = "arith")]
+            Marker::SOF(9..=10) => {
+                // choose marker
+                self.is_arithmetic = true;
+                let marker = match m {
+                    Marker::SOF(9) => SOFMarkers::ExtendedSequentialDctArithmetic,
+                    Marker::SOF(10) => {
+                        self.is_progressive = true;
+                        self.is_arithmetic = true;
+                        SOFMarkers::ProgressiveDctArithmetic
+                    }
+                    _ => unreachable!(),
+                };
+
+                trace!("Image encoding scheme =`{marker:?}`");
                 // get components
                 parse_start_of_frame(marker, self)?;
             }
@@ -568,7 +623,9 @@ where
                     return Err(DecodeErrors::Unsupported(feature));
                 }
 
-                return Err(DecodeErrors::Format("Unsupported image format".to_string()));
+                return Err(DecodeErrors::Format(format!(
+                    "Unsupported image format (SOF_{v})"
+                )));
             }
             //APP(0) segment
             Marker::APP(0) => {
@@ -614,7 +671,12 @@ where
             }
             Marker::EOI => return Err(DecodeErrors::FormatStatic("Premature End of image")),
 
-            Marker::DAC | Marker::DNL => {
+            #[cfg(feature = "arith")]
+            Marker::DAC => {
+                parse_dac(self)?;
+            }
+
+            Marker::DNL => {
                 return Err(DecodeErrors::Format(format!(
                     "Parsing of the following header `{m:?}` is not supported,\
                                 cannot continue"
@@ -639,10 +701,7 @@ where
                 parse_app13(self)?;
             }
             _ => {
-                warn!(
-                    "Capabilities for processing marker \"{:?}\" not implemented",
-                    m
-                );
+                warn!("Capabilities for processing marker \"{m:?}\" not implemented");
 
                 let length = self.stream.get_u16_be_err()?;
 
@@ -785,7 +844,7 @@ where
     /// output is, if this is called after `decode` it indicates the colorspace
     /// the output is currently in
     ///
-    /// Additionally not all input->output colorspace mappings are supported
+    /// Additionally, not all input->output colorspace mappings are supported
     /// but all input colorspaces can map to RGB colorspace, so that's a safe bet
     /// if one is handling image formats
     ///
@@ -841,10 +900,21 @@ where
         let out_len = core::cmp::min(out.len(), expected_size);
         let out = &mut out[0..out_len];
 
-        if self.is_progressive {
-            self.decode_mcu_ycbcr_progressive(out)
+        if self.is_arithmetic {
+            #[cfg(feature = "arith")]
+            {
+                if self.is_progressive {
+                    self.decode_mcu_ycbcr_progressive::<BitStreamArithmetic>(out)
+                } else {
+                    self.decode_mcu_ycbcr_baseline::<BitStreamArithmetic>(out)
+                }
+            }
+            #[cfg(not(feature = "arith"))]
+            unreachable!();
+        } else if self.is_progressive {
+            self.decode_mcu_ycbcr_progressive::<BitStreamHuffman>(out)
         } else {
-            self.decode_mcu_ycbcr_baseline(out)
+            self.decode_mcu_ycbcr_baseline::<BitStreamHuffman>(out)
         }
     }
 
@@ -883,11 +953,11 @@ where
     }
 
     /// Set up-sampling routines in case an image is down sampled
-    pub(crate) fn set_upsampling(&mut self) -> Result<(), DecodeErrors> {
+    pub(crate) fn set_upsampling(&mut self) {
         // no sampling, return early
         // check if horizontal max ==1
         if self.h_max == self.v_max && self.h_max == 1 {
-            return Ok(());
+            return;
         }
 
         for comp in &mut self.components {
@@ -919,8 +989,6 @@ where
             comp.setup_upsample_scanline();
             comp.up_sampler = samp_factor;
         }
-
-        return Ok(());
     }
     #[must_use]
     /// Get the width of the image as a u16

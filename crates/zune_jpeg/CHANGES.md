@@ -1,9 +1,9 @@
 # Changes from upstream
 
 This crate is a local fork of `zune-jpeg`, vendored from upstream commit
-`31d81fed7551c8ccea456d9d8e2b1fd8bebb6995` (2026-03-26, crate version
-0.5.15, the release on crates.io). It is not published and changes are not
-sent upstream.
+`9706202c268cd69276a4a1144261a988a0d77440` (2026-05-01, crate version 0.5.15
+plus unreleased changes). It is not published and changes are not sent
+upstream.
 
 Every change keeps decoded output byte-identical to the vendored baseline
 unless the entry says otherwise.
@@ -16,6 +16,18 @@ unless the entry says otherwise.
   newer crates.io releases and RustSec advisories after that base. Bring
   wanted upstream changes over by hand and update `UPSTREAM.toml`.
 
+- The fork was first vendored at the 0.5.15 release (upstream commit
+  `31d81fed`, 2026-03-26), then moved to the base above. The base is ahead
+  of the release by: arithmetic entropy decoding (SOF9 and SOF10, the
+  `arith` feature); a bounds check missing from the AVX2 and NEON
+  YCbCr → RGB conversions; a corrected component stride for unusual
+  sampling factors and the up-sampling scratch space sized for them; no
+  panic on an unusual component count, nor on an oversized DC prediction;
+  wrapping multiplication when a coefficient is dequantised. It predates upstream's resumable (incremental) decoding, which this
+  project does not use; upstream history after the base has not been
+  reviewed as a whole, and the entries below name the later upstream
+  commits whose fixes were brought over.
+
 - Kept: `src/`, `tests/`, `README.md`, `Changelog.md`, `Benches.md` and the
   three licence files (upstream's symlinks to its repository root replaced
   by the files themselves). Left out: `fuzz/` (upstream's fuzz targets) and
@@ -24,9 +36,9 @@ unless the entry says otherwise.
 - `Cargo.toml`: `rust-version` is inherited from the workspace, so every
   crate of the repository builds with the same minimum toolchain;
   `publish = false`; `zune-core` is the crates.io release instead of
-  upstream's sibling directory; the unused `zune-ppm` dev-dependency is
-  dropped; the lint table is empty, so the crate is linted with clippy's
-  defaults.
+  upstream's sibling directory (the crate builds against 0.5.3 unchanged);
+  the unused `zune-ppm` dev-dependency is dropped; the lint table is
+  empty, so the crate is linted with clippy's defaults.
 
 - `tests/`: the images the suites read from upstream's repository-level
   `test-images/jpeg/` directory are copied into `tests/images/` and the
@@ -38,12 +50,9 @@ unless the entry says otherwise.
   for the fuzz target left out above).
 
 - Clippy's default findings are fixed in place, none changing behaviour:
-  `div_ceil` for the hand-written round-up divisions, `as_chunks` /
-  `as_chunks_mut` for `chunks_exact` with a constant size (and the array
-  conversions that made redundant), a derived `Default`, `sort_by_key`,
-  `if let` for `Option::map` with a unit closure, a slice fill for a
-  hand-counted loop in the Huffman lookup table, `slice::swap` in a NEON
-  test, and doc-comment layout.
+  `as_chunks` / `as_chunks_mut` for `chunks_exact` with a constant size
+  (and the array conversions that made redundant), a redundant reference
+  in a `write!` argument, and doc-comment layout.
 
 - The sources are formatted with the workspace's rustfmt settings
   (upstream uses nightly-only options).
@@ -55,14 +64,14 @@ unless the entry says otherwise.
   spread over several scans is buffered whole and decoded scan by scan.
   Three defects, all in `mcu.rs`:
 
-  - The bit reader finds the marker that follows a scan up to eight bytes
-    before the decoder reaches it, and the row loop acted on it at the end
-    of the row in progress: a scan whose last rows fit in those bytes lost
-    them (a flat 16×16 image with one scan per component decoded its
-    second block row as zero coefficients). A marker that ends the scan is
-    now acted on after the scan's last row, or when the scan's data is
-    used up. The same held for a single-scan frame followed by a marker
-    other than EOI.
+  - The entropy decoder finds the marker that follows a scan before the
+    decoder reaches it (the bit reader up to eight bytes early), and the
+    row loop acted on it at the end of the row in progress: a scan whose
+    last rows fit in those bytes lost them (a flat 16×16 image with one
+    scan per component decoded its second block row as zero
+    coefficients). A marker that ends the scan is now acted on after the
+    scan's last row, or when the scan's data is used up. The same held
+    for a single-scan frame followed by a marker other than EOI.
   - A scan of one component of a subsampled frame was read with the MCU
     row count and each row placed `vertical_sample` block rows apart; the
     scan has the component's own number of block rows, one after the
@@ -75,3 +84,12 @@ unless the entry says otherwise.
   Upstream fixed the first two later (commits `90b6bbca`, `0346b875`); the
   code here is ours. `tests/scan_layouts.rs` decodes one set of
   coefficients in every scan layout and requires identical pixels.
+
+- **Arithmetic decoding, three fixes brought over from upstream.**
+  `BitStream::marker_ends_data` (upstream `52300d39`): a row of an
+  arithmetic-coded scan is not cut short at a marker, the decoder being
+  fed zero bytes until the scan is complete. The decoder is fed zeros
+  after an acknowledged EOI as after any marker (`99a07c79`). A
+  progressive AC scan in which the decoder finds no end of band keeps the
+  coefficients decoded so far and skips the scan's remaining blocks
+  instead of failing the image (`8cccb0b0`).

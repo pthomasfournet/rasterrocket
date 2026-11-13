@@ -18,7 +18,7 @@ use core::ops::{Add, AddAssign, BitOr, BitOrAssign, Mul, MulAssign, Sub};
 pub type VecType = int32x4x2_t;
 
 pub unsafe fn loadu(src: *const i32) -> VecType {
-    unsafe { vld1q_s32_x2(src as *const _) }
+    unsafe { vld1q_s32_x2(src.cast()) }
 }
 
 /// An abstraction of an AVX ymm register that
@@ -283,6 +283,7 @@ mod tests {
 
     #[test]
     fn test_transpose() {
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         fn get_val(i: usize, j: usize) -> i32 {
             ((i * 8) / (j + 1)) as i32
         }

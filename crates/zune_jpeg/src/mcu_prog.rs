@@ -48,12 +48,11 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         clippy::too_many_lines
     )]
     #[inline(never)]
-    pub(crate) fn decode_mcu_ycbcr_progressive(
+    pub(crate) fn decode_mcu_ycbcr_progressive<B: BitStream>(
         &mut self,
         pixels: &mut [u8],
     ) -> Result<(), DecodeErrors> {
         setup_component_params(self)?;
-
         let mut mcu_height;
 
         // memory location for decoded pixels for components
@@ -69,7 +68,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
         if self.is_interleaved {
             // this helps us catch component errors.
-            self.set_upsampling()?;
+            self.set_upsampling();
         }
         if self.is_interleaved {
             mcu_width = self.mcu_x;
@@ -99,14 +98,13 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
         mcu_width *= 64;
 
-        for i in 0..self.input_colorspace.num_components() {
-            let comp = &self.components[i];
+        for (i, comp) in self.components.iter().enumerate() {
             let len = mcu_width * comp.vertical_sample * comp.horizontal_sample * mcu_height;
 
             block[i] = vec![0; len];
         }
 
-        let mut stream = BitStream::new_progressive(self.succ_low, self.spec_start, self.spec_end);
+        let mut stream = B::new_progressive(self.succ_low, self.spec_start, self.spec_end);
 
         // there are multiple scans in the stream, this should resolve the first scan
         let result = self.parse_entropy_coded_data(&mut stream, &mut block);
@@ -123,7 +121,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
         // extract marker
         let mut marker = stream
-            .marker
+            .marker()
             .take()
             .ok_or(DecodeErrors::FormatStatic("Marker missing where expected"))?;
 
@@ -170,13 +168,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             }
 
                             stream.reset();
+                            B::reset_arith_tables(&mut self.entropy_tables);
                             continue 'eoi;
                         }
                         Err(msg) => {
                             if self.options.strict_mode() {
                                 return Err(msg);
                             }
-                            error!("{:?}", msg);
+                            error!("{msg:?}");
                             break 'eoi;
                         }
                     }
@@ -197,7 +196,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     if self.options.strict_mode() {
                         return Err(e);
                     }
-                    error!("{}", e);
+                    error!("{e}");
                     // If we can't get the marker, just break away
                     // allows us to decode some corrupt images
                     // e.g https://github.com/etemesi254/zune-image/issues/294
@@ -210,9 +209,13 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     }
 
     /// Reset progressive parameters
-    fn reset_prog_params(&mut self, stream: &mut BitStream) {
+    fn reset_prog_params<B: BitStream>(&mut self, stream: &mut B) {
         stream.reset();
-        self.components.iter_mut().for_each(|x| x.dc_pred = 0);
+        B::reset_arith_tables(&mut self.entropy_tables);
+        self.components.iter_mut().for_each(|x| {
+            x.dc_pred = 0;
+            x.dc_diff = 0;
+        });
 
         // Also reset JPEG restart intervals
         self.todo = if self.restart_interval != 0 {
@@ -223,9 +226,9 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
-    fn parse_entropy_coded_data(
+    fn parse_entropy_coded_data<B: BitStream>(
         &mut self,
-        stream: &mut BitStream,
+        stream: &mut B,
         buffer: &mut [Vec<i16>; MAX_COMPONENTS],
     ) -> Result<(), DecodeErrors> {
         self.reset_prog_params(stream);
@@ -263,9 +266,9 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
             for i in 0..mcu_height {
                 for j in 0..mcu_width {
-                    if self.spec_start != 0 && self.succ_high == 0 && stream.eob_run > 0 {
+                    if self.spec_start != 0 && self.succ_high == 0 && *stream.eob_run() > 0 {
                         // handle EOB runs here.
-                        stream.eob_run -= 1;
+                        *stream.eob_run() -= 1;
                     } else {
                         let start = 64 * (j + i * (self.components[k].width_stride / 8));
 
@@ -278,19 +281,13 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             .unwrap();
 
                         if self.spec_start == 0 {
-                            let pos = self.components[k].dc_huff_table & (MAX_COMPONENTS - 1);
-                            let dc_table = self
-                                .dc_huffman_tables
-                                .get(pos)
-                                .ok_or(DecodeErrors::FormatStatic(
-                                    "No huffman table for DC component",
-                                ))?
-                                .as_ref()
-                                .ok_or(DecodeErrors::FormatStatic(
-                                    "Huffman table at index  {} not initialized",
-                                ))?;
+                            let dc_pos = self.components[k].dc_huff_table & (MAX_COMPONENTS - 1);
+                            let dc_table: &mut B::DCEntropyTable =
+                                B::get_dc_table(&mut self.entropy_tables, dc_pos)?;
 
-                            let dc_pred = &mut self.components[k].dc_pred;
+                            let component = &mut self.components[k];
+                            let dc_pred = &mut component.dc_pred;
+                            let dc_diff = &mut component.dc_diff;
 
                             if self.succ_high == 0 {
                                 // first scan for this mcu
@@ -299,32 +296,25 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                     dc_table,
                                     &mut data[0],
                                     dc_pred,
+                                    dc_diff,
                                 )?;
                             } else {
                                 // refining scans for this MCU
                                 stream.decode_prog_dc_refine(&mut self.stream, &mut data[0])?;
                             }
                         } else {
-                            let pos = self.components[k].ac_huff_table;
-                            let ac_table = self
-                                .ac_huffman_tables
-                                .get(pos)
-                                .ok_or_else(|| {
-                                    DecodeErrors::Format(format!(
-                                        "No huffman table for component:{pos}"
-                                    ))
-                                })?
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    DecodeErrors::Format(format!(
-                                        "Huffman table at index  {pos} not initialized"
-                                    ))
-                                })?;
+                            let ac_pos = self.components[k].ac_huff_table;
+                            let ac_table = B::get_ac_table(&mut self.entropy_tables, ac_pos)?;
 
                             if self.succ_high == 0 {
-                                debug_assert!(stream.eob_run == 0, "EOB run is not zero");
+                                debug_assert!(*stream.eob_run() == 0, "EOB run is not zero");
 
-                                stream.decode_mcu_ac_first(&mut self.stream, ac_table, data)?;
+                                if !stream.decode_mcu_ac_first(&mut self.stream, ac_table, data)? {
+                                    // The arithmetic decoder gave up on the
+                                    // scan; its remaining blocks keep the
+                                    // coefficients they have.
+                                    return Ok(());
+                                }
                             } else {
                                 // refinement scan
                                 stream.decode_mcu_ac_refine(&mut self.stream, ac_table, data)?;
@@ -363,22 +353,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 }
 
                 let component = &mut self.components[n];
-                let _ = self
-                    .dc_huffman_tables
-                    .get(component.dc_huff_table)
-                    .ok_or_else(|| {
-                        DecodeErrors::Format(format!(
-                            "No huffman table for component:{}",
-                            component.dc_huff_table
-                        ))
-                    })?
-                    .as_ref()
-                    .ok_or_else(|| {
-                        DecodeErrors::Format(format!(
-                            "Huffman table at index  {} not initialized",
-                            component.dc_huff_table
-                        ))
-                    })?;
+                let _ = B::get_dc_table(&mut self.entropy_tables, component.dc_huff_table)?;
             }
             // Interleaved scan
 
@@ -390,14 +365,8 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     for k in 0..self.num_scans {
                         let n = self.z_order[k as usize];
                         let component = &mut self.components[n];
-                        let huff_table = self
-                            .dc_huffman_tables
-                            .get(component.dc_huff_table)
-                            .ok_or(DecodeErrors::FormatStatic("No huffman table for component"))?
-                            .as_ref()
-                            .ok_or(DecodeErrors::FormatStatic(
-                                "Huffman table at index not initialized",
-                            ))?;
+                        let huff_table =
+                            B::get_dc_table(&mut self.entropy_tables, component.dc_huff_table)?;
 
                         for v_samp in 0..component.vertical_sample {
                             for h_samp in 0..component.horizontal_sample {
@@ -418,6 +387,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                         huff_table,
                                         data,
                                         &mut component.dc_pred,
+                                        &mut component.dc_diff,
                                     )?;
                                 } else {
                                     stream.decode_prog_dc_refine(&mut self.stream, data)?;
@@ -436,15 +406,19 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         return Ok(());
     }
 
-    pub(crate) fn handle_rst_main(&mut self, stream: &mut BitStream) -> Result<(), DecodeErrors> {
+    #[allow(clippy::used_underscore_binding)]
+    pub(crate) fn handle_rst_main<B: BitStream>(
+        &mut self,
+        stream: &mut B,
+    ) -> Result<(), DecodeErrors> {
         if self.todo == 0 {
             stream.refill(&mut self.stream)?;
         }
 
         if self.todo == 0
             && self.restart_interval != 0
-            && stream.marker.is_none()
-            && !stream.seen_eoi
+            && stream.marker().is_none()
+            && !*stream.seen_eoi()
         {
             // if no marker and we are to reset RST, look for the marker, this matches
             // libjpeg-turbo behaviour and allows us to decode images in
@@ -461,7 +435,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // until that point
             if let Ok(marker) = marker {
                 let _end = self.stream.position()?;
-                stream.marker = Some(marker);
+                *stream.marker() = Some(marker);
                 // NB some warnings may be false positives.
                 warn!(
                     "{} Extraneous bytes before marker {:?}",
@@ -469,11 +443,11 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     marker
                 );
             } else {
-                warn!("RST marker was not found, where expected, image may be garbled")
+                warn!("RST marker was not found, where expected, image may be garbled");
             }
         }
         if self.todo == 0 {
-            self.handle_rst(stream)?
+            self.handle_rst(stream)?;
         }
         Ok(())
     }
@@ -513,7 +487,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
         // Size of our output image(width*height)
         let is_hv = usize::from(self.is_interleaved);
-        let upsampler_scratch_size = is_hv * self.components[0].width_stride;
+        let upsampler_scratch_size = is_hv
+            * self
+                .components
+                .iter()
+                .map(|x| x.width_stride)
+                .max()
+                .unwrap_or(0)
+            * 8;
         let width = usize::from(self.info.width);
         let padded_width = calculate_padded_width(width, self.info.sample_ratio);
 
@@ -651,15 +632,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 ///Get a marker from the bit-stream.
 ///
 /// This reads until it gets a marker or end of file is encountered
-pub fn get_marker<T>(
+pub fn get_marker<T, B: BitStream>(
     reader: &mut ZReader<T>,
-    stream: &mut BitStream,
+    stream: &mut B,
 ) -> Result<Marker, DecodeErrors>
 where
     T: ZByteReaderTrait,
 {
-    if let Some(marker) = stream.marker {
-        stream.marker = None;
+    if let Some(marker) = stream.marker().take() {
         return Ok(marker);
     }
 

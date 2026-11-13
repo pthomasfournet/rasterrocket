@@ -88,7 +88,8 @@ impl HuffmanTable {
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss,
         clippy::too_many_lines,
-        clippy::needless_range_loop
+        clippy::needless_range_loop,
+        clippy::explicit_counter_loop
     )]
     fn make_derived_table(
         &mut self,
@@ -176,10 +177,12 @@ impl HuffmanTable {
                 // l -> Current code length,
                 // p => Its index in self.code and self.values
                 // Generate left justified code followed by all possible bit sequences
-                let look_bits = (huff_code[p] as usize) << (HUFF_LOOKAHEAD - l);
+                let mut look_bits = (huff_code[p] as usize) << (HUFF_LOOKAHEAD - l);
 
-                for entry in &mut self.lookup[look_bits..look_bits + (1 << (HUFF_LOOKAHEAD - l))] {
-                    *entry = (i32::from(l) << HUFF_LOOKAHEAD) | i32::from(self.values[p]);
+                for _ in 0..1 << (HUFF_LOOKAHEAD - l) {
+                    self.lookup[look_bits] =
+                        (i32::from(l) << HUFF_LOOKAHEAD) | i32::from(self.values[p]);
+                    look_bits += 1;
                 }
 
                 p += 1;
@@ -229,7 +232,7 @@ impl HuffmanTable {
 
                         if k < m {
                             k += (!0_i16 << mag_bits) + 1;
-                        };
+                        }
 
                         // if result is small enough fit into fast ac table
                         if (-128..=127).contains(&k) {

@@ -175,9 +175,6 @@ fn decode_non_interleaved_422_65x65() {
     );
     assert!(
         (r - 96).abs() <= 20 && (g - 96).abs() <= 20 && (b - 128).abs() <= 20,
-        "Center pixel wrong: expected ~(96,96,128), got ({},{},{})",
-        r,
-        g,
-        b
+        "Center pixel wrong: expected ~(96,96,128), got ({r},{g},{b})"
     );
 }

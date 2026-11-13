@@ -13,7 +13,7 @@
 //!
 //!
 //! # The implementation
-//! The implementation is neatly broken down into two operations.
+//! - The implementation is neatly broken down into two operations.
 //!
 //! 1. Test for zeroes
 //! > There is a shortcut method for idct  where when all AC values are zero, we can get the answer really quickly.
@@ -277,7 +277,7 @@ mod test {
             assert_eq!(
                 result,
                 [0, 0, 0, 4, 255, 255, 255, 240, 0, 255, 2, 3, 4, 5, 6, 7]
-            )
+            );
         }
     }
 }

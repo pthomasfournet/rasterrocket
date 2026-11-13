@@ -5,7 +5,11 @@
  *
  * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
  */
-
+#![allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
 use alloc::format;
 use core::cmp::min;
 
@@ -111,7 +115,7 @@ pub(crate) fn color_convert(
             //
             // There may be a bit more complex ways
             // of doing it but won't get onto it
-            convert_luma_to_rgb(unprocessed, width, padded_width, output)
+            convert_luma_to_rgb(unprocessed, width, padded_width, output);
         }
         (ColorSpace::Luma, ColorSpace::RGBA) => {
             // duplicate the luma channel  three times to form RGB
@@ -121,7 +125,7 @@ pub(crate) fn color_convert(
             //
             // There may be a bit more complex ways
             // of doing it but won't get onto it
-            convert_luma_to_rgba(unprocessed, width, padded_width, output)
+            convert_luma_to_rgba(unprocessed, width, padded_width, output);
         }
 
         // For the other components we do nothing(currently)
@@ -612,6 +616,6 @@ pub(crate) fn upsample(
             }
         }
         SampleRatios::None => {}
-    };
+    }
     Ok(())
 }

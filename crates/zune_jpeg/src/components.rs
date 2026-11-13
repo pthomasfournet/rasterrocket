@@ -51,6 +51,8 @@ pub(crate) struct Components {
     pub quantization_table: [i32; 64],
     /// dc prediction for the component
     pub dc_pred: i32,
+    /// most recent difference in dc prediction for the component
+    pub dc_diff: i32,
     /// An up-sampling function, can be basic or SSE, depending
     /// on the platform
     pub up_sampler: UpSampler,
@@ -141,11 +143,7 @@ impl Components {
             return Err(DecodeErrors::Format("Vertical sample is zero".to_string()));
         }
         trace!(
-            "Component ID:{:?} \tHS:{} VS:{} QT:{}",
-            id,
-            horizontal_sample,
-            vertical_sample,
-            quantization_table_number
+            "Component ID:{id:?} \tHS:{horizontal_sample} VS:{vertical_sample} QT:{quantization_table_number}"
         );
 
         Ok(Components {
@@ -159,6 +157,7 @@ impl Components {
             ac_huff_table: 0,
             quantization_table: [0; 64],
             dc_pred: 0,
+            dc_diff: 0,
             up_sampler: upsample_no_op,
             // set later
             width_stride: horizontal_sample,
@@ -220,6 +219,7 @@ pub enum SampleRatios {
 }
 
 impl SampleRatios {
+    #[must_use]
     pub fn sample(self) -> usize {
         match self {
             SampleRatios::HV => 4,

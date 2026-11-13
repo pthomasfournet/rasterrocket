@@ -13,12 +13,11 @@
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use core::cmp::max;
 
 use zune_core::bytestream::ZByteReaderTrait;
 use zune_core::colorspace::ColorSpace;
 use zune_core::log::{debug, trace, warn};
-
-use core::cmp::max;
 
 use crate::components::{Components, SampleRatios};
 use crate::decoder::{ExtendedXmpSegment, GainMapInfo, ICCChunk, JpegDecoder, MAX_COMPONENTS};
@@ -87,7 +86,7 @@ where
         // store
         match dc_or_ac {
             0 => {
-                decoder.dc_huffman_tables[index] = Some(HuffmanTable::new(
+                decoder.entropy_tables.dc_huffman[index] = Some(HuffmanTable::new(
                     &num_symbols,
                     symbols,
                     true,
@@ -95,7 +94,7 @@ where
                 )?);
             }
             _ => {
-                decoder.ac_huffman_tables[index] = Some(HuffmanTable::new(
+                decoder.entropy_tables.ac_huffman[index] = Some(HuffmanTable::new(
                     &num_symbols,
                     symbols,
                     false,
@@ -107,6 +106,81 @@ where
 
     if dht_length > 0 {
         return Err(DecodeErrors::FormatStatic("Bogus Huffman table definition"));
+    }
+
+    Ok(())
+}
+
+///**B.2.4.3 Arithmetic conditioning table-specification syntax**
+#[cfg(feature = "arith")]
+#[allow(clippy::similar_names, clippy::cast_sign_loss)]
+pub(crate) fn parse_dac<T: ZByteReaderTrait>(
+    decoder: &mut JpegDecoder<T>,
+) -> Result<(), DecodeErrors>
+where
+{
+    // Read the length of the segment
+    let dac_length =
+        decoder
+            .stream
+            .get_u16_be_err()?
+            .checked_sub(2)
+            .ok_or(DecodeErrors::FormatStatic(
+                "Invalid Arithmetic-coding conditioning length in image",
+            ))?;
+    if dac_length % 2 != 0 {
+        return Err(DecodeErrors::FormatStatic(
+            "Bogus (odd) Arithmetic-coding conditioning segment length",
+        ));
+    }
+    let n = dac_length / 2;
+
+    for _ in 0..n {
+        let mut entry = [0u8; 2];
+        decoder.stream.read_exact_bytes(&mut entry)?;
+
+        let [ht_info, cs_value] = entry;
+
+        let dc_or_ac = (ht_info >> 4) & 0xF;
+        let index = (ht_info & 0xF) as usize;
+
+        if index >= MAX_COMPONENTS {
+            return Err(DecodeErrors::ArithmeticDecode(format!(
+                "Invalid DAC index {index}, expected between 0 and 3"
+            )));
+        }
+
+        // todo: value 1 is also forbidden in lossless mode
+        match dc_or_ac {
+            0 => {
+                /* DC */
+                let (u, l) = (cs_value >> 4, cs_value & 0xF);
+                if l > u {
+                    return Err(DecodeErrors::ArithmeticDecode(format!(
+                        "Invalid conditioning table value {cs_value:x} for AC table, lower nibble should not exceed upper"
+                    )));
+                }
+                // overwrite the previous value
+                let t = &mut decoder.entropy_tables.dc_arithmetic[index];
+                t.l = l;
+                t.u = u;
+            }
+            1 => {
+                /* AC */
+                if cs_value == 0 || cs_value >= 64 {
+                    return Err(DecodeErrors::ArithmeticDecode(format!(
+                        "Invalid conditioning table value {cs_value} for AC table, should be in [1,63]"
+                    )));
+                }
+                // overwrite the previous value
+                decoder.entropy_tables.ac_arithmetic[index].kx = cs_value;
+            }
+            _ => {
+                return Err(DecodeErrors::ArithmeticDecode(format!(
+                    "Invalid DHT position {dc_or_ac}, should be 0 or 1"
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -209,8 +283,8 @@ pub(crate) fn parse_start_of_frame<T: ZByteReaderTrait>(
     let img_width = img.stream.get_u16_be_err()?;
     img.info.set_width(img_width);
 
-    trace!("Image width  :{}", img_width);
-    trace!("Image height :{}", img_height);
+    trace!("Image width  :{img_width}");
+    trace!("Image height :{img_height}");
 
     if usize::from(img_width) > img.options.max_width() {
         return Err(DecodeErrors::Format(format!("Image width {} greater than width limit {}. If use `set_limits` if you want to support huge images", img_width, img.options.max_width())));
@@ -242,7 +316,7 @@ pub(crate) fn parse_start_of_frame<T: ZByteReaderTrait>(
         )));
     }
 
-    trace!("Image components : {}", num_components);
+    trace!("Image components : {num_components}");
 
     if num_components == 1 {
         // SOF sets the number of image components
@@ -511,7 +585,7 @@ pub(crate) fn parse_app14<T: ZByteReaderTrait>(
         // transform = 1
         length = length.saturating_sub(14);
     } else {
-        warn!("Not a valid Adobe APP14 Segment, skipping {} bytes", length);
+        warn!("Not a valid Adobe APP14 Segment, skipping {length} bytes");
         length = length.saturating_sub(2);
     }
     // skip any proceeding lengths.
