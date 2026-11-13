@@ -477,9 +477,12 @@ tests/compare/compare.sh [OPTIONS] <DIR>   # every *.pdf under DIR, one summary 
   -o DIR          Write diff images to DIR
   -n              Dry run: print commands without executing
   -s              Print one tab-separated summary row instead of the report
+  -E FILE         Expectations registry (default tests/compare/expectations.json; '' for none)
+  -U              Rewrite the registry from this run (--update-expectations)
+  -S              Fail on surprise passes too (--strict)
 ```
 
-Exit code 0 if all pages are within threshold; 1 on failures or errors.
+Exit code 0 when no page fails unexpectedly (see below); 1 on unexpected failures or errors.
 
 ```bash
 # Example output
@@ -493,9 +496,43 @@ Exit code 0 if all pages are within threshold; 1 on failures or errors.
   Max tile:   5.1200 / 255  (page-3)
   Thresholds: RMSE 2.0 / 255, tile 12.0 / 255
   rrocket stderr: 0 lines
+  Verdicts:   0 unexpected failures, 0 expected failures, 0 surprise passes
+  Registry:   tests/compare/expectations.json
 ─────────────────────────────────────────────────────────────────────────
 PASSED
 ```
+
+### Expected results
+
+`compare.sh` and `tests/compare/pdfium_corpus.py` (rrocket on pdfium's own test corpus, scored against its expected images) share an expectations registry, `tests/compare/expectations.json`, so that known, accepted differences do not hide a new one. The registry holds one list of entries per suite: the harness with the settings that decide what passes (reference renderer, resolution, RMSE and tile limits). An entry names a document, or one of its pages, the failure expected (`differs`, `size`, `missing`, `unreadable` for a page; `error`, `strict`, `panic`, … for a document), a mandatory `reason`, and for `differs` optional `rmse` / `tile` limits that replace the suite's for that page:
+
+```json
+{"file": "tests/fixtures/corpus-01-native-text-small.pdf", "page": 3,
+ "outcome": "differs", "rmse": 15.32, "reason": "unclassified (seeded 2026-11-13)"}
+```
+
+Each document and page is classified:
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | within the limits, not registered |
+| `XFAIL` | a registered failure, within the registered limits |
+| `FAIL` | unexpected: not registered, a different failure, or worse than registered |
+| `XPASS` | surprise pass: registered but now passing; remove or tighten the entry |
+
+Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
+
+`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each `FAIL` becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values, each `XPASS` entry is removed, and entries for documents or pages the run did not cover are kept. Review the diff, and replace each seeded reason with the actual cause once it is known.
+
+```bash
+# Seed or refresh the entries for the corpus fixtures
+for f in tests/fixtures/corpus-*.pdf; do tests/compare/compare.sh -s -U "$f"; done
+
+# The same for pdfium's corpus
+python3 -I tests/compare/pdfium_corpus.py --pdfium ~/pdfium-src --out /tmp/pc --update-expectations
+```
+
+A PDF inside the repository is registered under its repository path, any other under its file name. The classification logic has a unit test, `python3 -I tests/compare/test_expectations.py`, which CI runs.
 
 ---
 

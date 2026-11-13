@@ -3,6 +3,8 @@
 
     python3 -I tests/compare/pdfium_corpus.py --pdfium PDFIUM_SRC --out DIR
         [--rrocket BIN] [--jobs N] [--timeout S] [--pdftoppm] [--match TEXT]
+        [--rmse-limit T] [--tile-limit K] [--expectations FILE]
+        [--update-expectations] [--strict]
 
 The corpus is PDFIUM_SRC/testing/resources (BSD-3-Clause, see
 PDFIUM_SRC/LICENSE).  It is read in place; nothing from it is copied into
@@ -11,7 +13,9 @@ this repository.  Every generated file goes under DIR:
 - DIR/expanded/: the `.in` templates without a sibling `.pdf`, expanded by
   pdfium's own testing/tools/fixup_pdf_template.py;
 - DIR/results.tsv: one row per document;
-- DIR/pages.tsv: one row per scored page.
+- DIR/pages.tsv: one row per scored page;
+
+each row ending in its verdict (below).
 
 Each document is rendered by rrocket at 72 dpi (1 px per point, the scale
 of pdfium's expected images) with `--strict --backend cpu`, under a
@@ -35,6 +39,18 @@ Pages with a plain `<stem>_expected.pdf.<N>.png` next to the source (no
 platform or backend suffix) are scored against it with score_pair.sh: RMSE,
 tile delta, or a size mismatch.  With --pdftoppm, pages of documents
 without an expected image are scored against `pdftoppm -cropbox -r 72`.
+A scored page passes when its RMSE is at most --rmse-limit and its tile
+delta at most --tile-limit (2 and 12, compare.sh's defaults).
+
+Every document and reference page is then classified against the
+expectations registry (tests/compare/expectations.json; see
+expectations.py): PASS, XFAIL (a registered failure within its limits),
+FAIL (unexpected) or XPASS (registered but passing: remove or tighten the
+entry).  A document fails unless its class is `ok`.  The exit status is 1
+on any FAIL, and on any XPASS under --strict.  --update-expectations
+rewrites the registry from the run, seeding each FAIL with the reason
+`unclassified (seeded YYYY-MM-DD)` and removing each XPASS entry; the
+entries of documents the run skipped (--match) are kept.  It exits 0.
 
 Requires: rrocket (release build), ImageMagick, python3; pdftoppm for
 --pdftoppm.
@@ -55,8 +71,11 @@ import tempfile
 from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
-# The shared helpers live in scripts/; `python3 -I` puts no script directory on the path.
+# The shared helpers live in scripts/ and here; `python3 -I` puts no script
+# directory on the path.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import expectations as ex
 from runtool import (
     executable,
     last_line,
@@ -291,6 +310,40 @@ def write_tsv(
         f.writelines("\t".join(str(v) for v in r) + "\n" for r in sorted(rows))
 
 
+def observations(
+    results: Sequence[DocResult], pages: Sequence[PageRow]
+) -> tuple[list[ex.Observation], list[ex.Observation]]:
+    """Return the observations of the documents and of the reference pages."""
+    docs = [ex.Observation(r.document, None, r.cls) for r in results]
+    rows = []
+    for p in pages:
+        if p.result == "scored":
+            metrics = {"rmse": float(p.rmse_or_ref_size), "tile": float(p.tile_or_new_size)}
+            rows.append(ex.Observation(p.document, p.page, ex.SCORED, metrics))
+        else:
+            rows.append(ex.Observation(p.document, p.page, p.result))
+    return docs, rows
+
+
+LISTED = 40
+
+
+def report(results: Sequence[ex.Result], *, strict: bool) -> None:
+    """Print the verdict counts and the unexpected failures and surprise passes."""
+    counts = ex.tally(results)
+    print(
+        "verdicts: "
+        + ", ".join(f"{v} {counts[v]}" for v in ex.Verdict)
+        + (" (surprise passes fatal: --strict)" if strict else "")
+    )
+    for verdict in (ex.Verdict.FAIL, ex.Verdict.XPASS):
+        listed = [r for r in results if r.verdict is verdict]
+        for r in listed[:LISTED]:
+            print(f"  {verdict:5} {ex.test_label(r.observation.test)}  [{r.why}]")
+        if len(listed) > LISTED:
+            print(f"  ... {len(listed) - LISTED} more {verdict} (the verdict column of the tables)")
+
+
 def summarise(results: list[DocResult], pages: list[PageRow]) -> None:
     """Print the class counts, the failures and the largest tile deltas."""
     counts = collections.Counter(r.cls for r in results)
@@ -332,7 +385,60 @@ def parse_args() -> argparse.Namespace:
         help="score documents without an expected image against pdftoppm",
     )
     ap.add_argument("--match", default="", help="only documents whose path contains TEXT")
+    ap.add_argument("--rmse-limit", type=float, default=2.0, help="largest passing page RMSE")
+    ap.add_argument("--tile-limit", type=float, default=12.0, help="largest passing tile delta")
+    ap.add_argument(
+        "--expectations",
+        type=ex.registry_path,
+        default=ex.DEFAULT_REGISTRY,
+        help="expectations registry ('' for none)",
+    )
+    ap.add_argument(
+        "--update-expectations", action="store_true", help="rewrite the registry from this run"
+    )
+    ap.add_argument("--strict", action="store_true", help="fail on surprise passes too")
     return ap.parse_args()
+
+
+def classify_run(
+    args: argparse.Namespace, results: Sequence[DocResult], pages: Sequence[PageRow]
+) -> tuple[list[ex.Result], list[ex.Result]]:
+    """Return the verdicts on the documents and on the pages; update the registry if asked."""
+    suite = ex.suite_name(
+        "pdfium_corpus.py", reference="pdfium", dpi=72, rmse=args.rmse_limit, tile=args.tile_limit
+    )
+    doc_obs, page_obs = observations(results, pages)
+    try:
+        verdicts = ex.run_suite(
+            args.expectations,
+            suite,
+            [*doc_obs, *page_obs],
+            {"rmse": args.rmse_limit, "tile": args.tile_limit},
+            update=args.update_expectations,
+        )
+    except ex.RegistryError as e:
+        sys.exit(f"expectations: {e}")
+    return verdicts[: len(doc_obs)], verdicts[len(doc_obs) :]
+
+
+def write_tables(
+    out: pathlib.Path,
+    results: Sequence[DocResult],
+    pages: Sequence[PageRow],
+    verdicts: tuple[list[ex.Result], list[ex.Result]],
+) -> None:
+    """Write results.tsv and pages.tsv under `out`, each row ending in its verdict."""
+    doc_verdicts, page_verdicts = verdicts
+    write_tsv(
+        out / "results.tsv",
+        ("document", "class", "exit", "pages", "reference", "first_stderr_line", "verdict"),
+        [(*r, str(v.verdict)) for r, v in zip(results, doc_verdicts, strict=True)],
+    )
+    write_tsv(
+        out / "pages.tsv",
+        (*PageRow._fields, "verdict"),
+        [(*p, str(v.verdict)) for p, v in zip(pages, page_verdicts, strict=True)],
+    )
 
 
 def main() -> None:
@@ -363,14 +469,16 @@ def main() -> None:
     finally:
         shutil.rmtree(cfg.work, ignore_errors=True)
 
-    write_tsv(
-        args.out / "results.tsv",
-        ("document", "class", "exit", "pages", "reference", "first_stderr_line"),
-        results,
-    )
-    write_tsv(args.out / "pages.tsv", PageRow._fields, pages)
+    verdicts = classify_run(args, results, pages)
+    write_tables(args.out, results, pages, verdicts)
     summarise(results, pages)
+    every = [*verdicts[0], *verdicts[1]]
+    report(every, strict=args.strict)
     print(f"tables: {args.out / 'results.tsv'}, {args.out / 'pages.tsv'}")
+    if args.expectations is not None and args.update_expectations:
+        print(f"registry updated: {args.expectations}")
+    elif ex.is_fatal(every, strict=args.strict):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

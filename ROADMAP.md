@@ -2663,6 +2663,13 @@ moved by whole pixels could lose a cell where it ends on a cell boundary
 by one level where compositing meets them (5 713 pixels of those pages);
 `round_half_up_i32` took 0.49999999999999994 to 1; and `rectify` could
 return a page one rounding past its twice-the-source bound.
+`tests/compare/compare.sh` and `pdfium_corpus.py` classify every page and
+document against a checked-in registry of expected failures,
+`tests/compare/expectations.json` (a reason per entry, optional per-page
+RMSE and tile limits): `PASS`, `XFAIL`, `FAIL` (new, or worse than
+registered) and `XPASS` (registered but passing).  They exit non-zero on
+`FAIL` only, on `XPASS` too with `--strict`, and `--update-expectations`
+seeds the registry from a run (see docs/cli-reference.md).
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

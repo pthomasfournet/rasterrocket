@@ -16,11 +16,28 @@
 #   -o DIR          Write diff images to DIR (default: discarded)
 #   -n              Dry run: print commands without executing
 #   -s              Print one tab-separated summary row instead of the report
+#   -E FILE         Expectations registry (default: tests/compare/expectations.json;
+#                   an empty FILE disables it).  Also --expectations FILE.
+#   -U              Rewrite the registry from this run.  Also --update-expectations.
+#   -S              Fail on surprise passes too.  Also --strict.
 #
 # A page fails when its RMSE exceeds -t, when its tile delta exceeds -k, or
 # when the two renders differ in size by more than 1 px in either dimension
 # (reported as SIZE: a page-box or rotation disagreement).  Renders within
-# 1 px of each other are cropped to their common size before scoring.
+# 1 px of each other are cropped to their common size before scoring.  A
+# document fails as a whole when rrocket exits non-zero.
+#
+# Each test is then looked up in the expectations registry (expectations.py
+# documents the format), under the suite of this reference, -r, -t and -k:
+#   PASS    within the limits and not registered
+#   XFAIL   a registered failure, within the registered limits
+#   FAIL    unexpected: not registered, another kind, or worse than registered
+#   XPASS   surprise pass: registered as failing but passing; remove or
+#           tighten the entry
+# -U records every FAIL as a new entry, reason "unclassified (seeded DATE)",
+# and removes the entry of every XPASS; entries for documents and pages
+# this run did not render are kept.  A PDF inside the repository is
+# registered under its repository path, any other under its basename.
 #
 # The tile delta (scored by score_pair.sh) is the largest difference in mean
 # luminance between the two renders over 32 x 32 px tiles.  Anti-aliasing
@@ -32,8 +49,12 @@
 # Summary row (-s, and each row of directory mode), tab-separated:
 #   status pages failed size_mismatches avg_rmse max_rmse max_tile_delta
 #   rrocket_stderr_lines pdf
+# status is the worst verdict: FAIL, XPASS, XFAIL or PASS (ERROR in
+# directory mode when the run stopped before scoring); failed counts the
+# pages over the limits, expected or not.
 #
-# Exit code: 0 = all pages within threshold; 1 = failures or errors.
+# Exit code: 0 = no unexpected failure (and, with -S, no surprise pass);
+# 1 = otherwise, or an error.  With -U, 0 unless an error stopped the run.
 # Dry-run always exits 0.
 #
 # Several independent references are supported so that a disagreement can be
@@ -50,7 +71,7 @@
 # PDF_OXIDE_BIN to override discovery.
 #
 # Requires: pdftoppm (or the pdfium venv, or pdf-oxide), rrocket (release
-#           build), ImageMagick (compare, identify, convert), bc
+#           build), ImageMagick (compare, identify, convert), bc, python3
 
 set -euo pipefail
 
@@ -73,6 +94,9 @@ VERBOSE=false
 OUT_DIR=""
 DRY_RUN=false
 SUMMARY=false
+EXPECTATIONS="${SCRIPT_DIR}/expectations.json"
+UPDATE=false
+STRICT=false
 
 # The header comment block, from the line after the shebang to the first
 # line that is not a comment; exits with status $1 (default 0).
@@ -101,7 +125,25 @@ ref_page_range() {
 }
 is_pos_number()   { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 
-while getopts ":r:f:l:t:k:R:vo:nsh" opt; do
+# The long options, rewritten to their short forms for getopts.
+short_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --update-expectations) short_args+=(-U) ;;
+        --strict) short_args+=(-S) ;;
+        --expectations)
+            [[ $# -ge 2 ]] || die "option --expectations requires an argument."
+            short_args+=(-E "$2")
+            shift ;;
+        --expectations=*) short_args+=(-E "${1#*=}") ;;
+        --) short_args+=("$@"); break ;;
+        *) short_args+=("$1") ;;
+    esac
+    shift
+done
+set -- "${short_args[@]}"
+
+while getopts ":r:f:l:t:k:R:vo:nsE:USh" opt; do
     case $opt in
         r) DPI="$OPTARG" ;;
         f) FIRST="$OPTARG" ;;
@@ -113,6 +155,9 @@ while getopts ":r:f:l:t:k:R:vo:nsh" opt; do
         o) OUT_DIR="$OPTARG" ;;
         n) DRY_RUN=true ;;
         s) SUMMARY=true ;;
+        E) EXPECTATIONS="$OPTARG" ;;
+        U) UPDATE=true ;;
+        S) STRICT=true ;;
         h) usage ;;
         :) die "option -$OPTARG requires an argument." ;;
        \?) die "unknown option -$OPTARG." ;;
@@ -137,13 +182,17 @@ esac
 
 # ── directory mode: one summary row per PDF ───────────────────────────────────
 if [[ -d "$PDF" ]]; then
-    file_opts=(-s -r "$DPI" -f "$FIRST" -t "$THRESHOLD" -k "$TILE_LIMIT" -R "$REFERENCE")
+    file_opts=(-s -r "$DPI" -f "$FIRST" -t "$THRESHOLD" -k "$TILE_LIMIT" -R "$REFERENCE"
+               -E "$EXPECTATIONS")
     [[ -n "$LAST" ]] && file_opts+=(-l "$LAST")
+    $UPDATE && file_opts+=(-U)
+    $STRICT && file_opts+=(-S)
     mapfile -d '' pdfs < <(find "$PDF" -type f -iname '*.pdf' -print0 | sort -z)
     [[ ${#pdfs[@]} -gt 0 ]] || die "no PDF files under $PDF"
     $DRY_RUN && { printf '%s\n' "${pdfs[@]}"; exit 0; }
     printf "status\tpages\tfailed\tsize\tavg_rmse\tmax_rmse\ttile\tstderr\tpdf\n"
     any_fail=0
+    declare -A by_status=()
     for pdf in "${pdfs[@]}"; do
         opts=("${file_opts[@]}")
         # Diff images of each PDF go to their own subdirectory.
@@ -153,9 +202,19 @@ if [[ -d "$PDF" ]]; then
         if [[ -n "$row" ]]; then
             printf '%s\n' "$row"
         else
+            row=ERROR
             printf "ERROR\t-\t-\t-\t-\t-\t-\t-\t%s\n" "$pdf"
         fi
+        status="${row%%$'\t'*}"
+        by_status[$status]=$(( ${by_status[$status]:-0} + 1 ))
     done
+    tally=""
+    for status in PASS XFAIL XPASS FAIL ERROR; do
+        tally+=" ${by_status[$status]:-0} ${status}"
+    done
+    echo "documents:${tally}" >&2
+    (( ${by_status[XPASS]:-0} == 0 )) \
+        || echo "XPASS rows: run those PDFs alone to see which entries to remove or tighten" >&2
     exit "$any_fail"
 fi
 
@@ -199,7 +258,7 @@ if $DRY_RUN; then
 fi
 
 # ── dependency check ──────────────────────────────────────────────────────────
-for cmd in compare identify convert bc; do
+for cmd in compare identify convert bc python3; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found in PATH"
 done
 if [[ "$REFERENCE" == oxide ]]; then
@@ -226,6 +285,53 @@ REF_DIR="${WORK_DIR}/ref"
 NEW_DIR="${WORK_DIR}/new"
 DIFF_DIR="${OUT_DIR:-${WORK_DIR}/diff}"
 mkdir -p "$REF_DIR" "$NEW_DIR" "$DIFF_DIR"
+# One row per test for expectations.py: label page outcome rmse tile detail,
+# page `-` for the document.
+ROWS="${WORK_DIR}/rows.tsv"
+: > "$ROWS"
+
+# Per-page lines; suppressed in summary-row mode.
+# shellcheck disable=SC2059  # forwards the caller's format string
+say() { $SUMMARY || printf "$@"; }
+
+# Classifies the rows against the registry, prints the report lines (through
+# `say`) and sets STATUS (the worst verdict), FATAL (1 when the run fails)
+# and N_FAIL, N_XFAIL, N_XPASS.
+classify_rows() {
+    local helper_args=(compare --registry "$EXPECTATIONS" --reference "$REFERENCE"
+                       --dpi "$DPI" --rmse-limit "$THRESHOLD" --tile-limit "$TILE_LIMIT"
+                       --file "$PDF")
+    $UPDATE && helper_args+=(--update)
+    $STRICT && helper_args+=(--strict)
+    $VERBOSE && helper_args+=(--verbose)
+    local out status_line
+    out="$(python3 -I "${SCRIPT_DIR}/expectations.py" "${helper_args[@]}" "$ROWS")" \
+        || die "expectations.py failed"
+    status_line="${out##*$'\n'}"
+    [[ "$out" == *$'\n'* ]] && say "%s\n" "${out%$'\n'*}"
+    read -r _ STATUS FATAL N_FAIL N_XFAIL N_XPASS <<< "$status_line"
+    [[ -n "${N_XPASS:-}" ]] || die "unexpected expectations.py output: $status_line"
+}
+
+# Ends the report with the classification and the verdict; the caller exits
+# with FATAL.
+finish() {
+    if ! $SUMMARY; then
+        printf "  Verdicts:   %d unexpected failures, %d expected failures, %d surprise passes\n" \
+            "$N_FAIL" "$N_XFAIL" "$N_XPASS"
+        if [[ -n "$EXPECTATIONS" ]]; then
+            printf "  Registry:   %s%s\n" "${EXPECTATIONS#"$REPO_ROOT"/}" "$($UPDATE && echo ' (updated)')"
+        fi
+        echo "─────────────────────────────────────────────────────────────────────────"
+        local word=PASSED
+        [[ $FATAL -eq 0 ]] || word=FAILED
+        if [[ "$STATUS" == PASS ]]; then
+            echo "$word"
+        else
+            echo "$word ($STATUS)"
+        fi
+    fi
+}
 
 # ── render: reference ─────────────────────────────────────────────────────────
 if [[ "$REFERENCE" == oxide ]]; then
@@ -283,7 +389,20 @@ fi
 if ! "$RASTER_BIN" "${new_args[@]}" "$PDF" "${NEW_DIR}/page" 2>"${WORK_DIR}/new.log"; then
     echo "Error: rrocket failed — see log:" >&2
     cat "${WORK_DIR}/new.log" >&2
-    exit 1
+    printf "document\t-\terror\t\t\trrocket exited non-zero\n" >> "$ROWS"
+    classify_rows
+    if $SUMMARY; then
+        printf "%s\t-\t-\t-\t-\t-\t-\t%d\t%s\n" "$STATUS" \
+            "$(grep -c . "${WORK_DIR}/new.log" || true)" "$PDF"
+    else
+        echo ""
+        echo "── Summary ──────────────────────────────────────────────────────────────"
+        printf "  PDF:        %s\n" "$(basename "$PDF")"
+        printf "  rrocket failed; no page was compared\n"
+    fi
+    finish
+    [[ $FATAL -eq 0 ]] || exit 1
+    exit 0
 fi
 
 # ── normalise a PNG reference onto rrocket's filenames ────────────────────────
@@ -311,10 +430,6 @@ if [[ -n "${RAW_REF_DIR:-}" ]]; then
 fi
 
 # ── compare page by page ──────────────────────────────────────────────────────
-# Per-page lines; suppressed in summary-row mode.
-# shellcheck disable=SC2059  # forwards the caller's format string
-say() { $SUMMARY || printf "$@"; }
-
 fail=0
 pass=0
 size_mismatch=0
@@ -339,11 +454,12 @@ fi
 
 for ref_file in "${ref_pages[@]}"; do
     page_tag="$(basename "$ref_file" .ppm)"   # e.g. "page-001"
+    page_no=$((10#${page_tag#page-}))
     new_file="${NEW_DIR}/${page_tag}.ppm"
     diff_file="${DIFF_DIR}/${page_tag}-diff.png"
 
     if [[ ! -f "$new_file" ]]; then
-        say "MISSING  %s — rrocket produced no output\n" "$page_tag"
+        printf "%s\t%d\tmissing\t\t\trrocket produced no output\n" "$page_tag" "$page_no" >> "$ROWS"
         fail=$((fail + 1))
         continue
     fi
@@ -351,26 +467,26 @@ for ref_file in "${ref_pages[@]}"; do
     read -r kind a b c d < <("${SCRIPT_DIR}/score_pair.sh" "$ref_file" "$new_file" "$diff_file") \
         || die "scoring failed for $page_tag"
     if [[ "$kind" == SIZE ]]; then
-        say "SIZE     %-12s  ref=%dx%d  rrocket=%dx%d\n" "$page_tag" "$a" "$b" "$c" "$d"
+        printf "%s\t%d\tsize\t\t\tref=%dx%d  rrocket=%dx%d\n" \
+            "$page_tag" "$page_no" "$a" "$b" "$c" "$d" >> "$ROWS"
         size_mismatch=$((size_mismatch + 1))
         fail=$((fail + 1))
         continue
     fi
     rmse_255="$a"
     tile_255="$b"
+    detail="$(printf "RMSE=%8s/255  tile=%8s/255" "$rmse_255" "$tile_255")"
+    [[ -n "$OUT_DIR" ]] && detail+="  diff→${diff_file}"
+    printf "%s\t%d\tscored\t%s\t%s\t%s\n" "$page_tag" "$page_no" "$rmse_255" "$tile_255" \
+        "$detail" >> "$ROWS"
 
     total_rmse="$(bc -l <<< "scale=4; ${total_rmse} + ${rmse_255}")"
 
     rmse_over="$(bc -l <<< "${rmse_255} > ${THRESHOLD}")"
     tile_over="$(bc -l <<< "${tile_255} > ${TILE_LIMIT}")"
     if [[ "$rmse_over" -eq 1 || "$tile_over" -eq 1 ]]; then
-        say "FAIL     %-12s  RMSE=%8s/255  tile=%8s/255  (limits %s, %s)  diff→%s\n" \
-            "$page_tag" "$rmse_255" "$tile_255" "$THRESHOLD" "$TILE_LIMIT" "$diff_file"
         fail=$((fail + 1))
     else
-        if $VERBOSE; then
-            say "OK       %-12s  RMSE=%8s/255  tile=%8s/255\n" "$page_tag" "$rmse_255" "$tile_255"
-        fi
         pass=$((pass + 1))
     fi
 
@@ -392,12 +508,13 @@ avg_rmse="0"
 # could not decode.
 stderr_lines="$(grep -c . "${WORK_DIR}/new.log" || true)"
 
+classify_rows
+
 if $SUMMARY; then
-    status=PASS
-    [[ $fail -eq 0 ]] || status=FAIL
-    printf "%s\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\t%d\t%s\n" "$status" "$total" "$fail" \
+    printf "%s\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\t%d\t%s\n" "$STATUS" "$total" "$fail" \
         "$size_mismatch" "$avg_rmse" "$max_rmse" "$max_tile" "$stderr_lines" "$PDF"
-    [[ $fail -eq 0 ]] || exit 1
+    finish
+    [[ $FATAL -eq 0 ]] || exit 1
     exit 0
 fi
 
@@ -406,7 +523,7 @@ echo "── Summary ───────────────────�
 printf "  PDF:        %s\n" "$(basename "$PDF")"
 printf "  Reference:  %s\n" "$REFERENCE"
 printf "  DPI:        %s\n" "$DPI"
-printf "  Pages:      %d total, %d passed, %d failed (%d size mismatches)\n" \
+printf "  Pages:      %d total, %d within the limits, %d over (%d size mismatches)\n" \
     "$total" "$pass" "$fail" "$size_mismatch"
 printf "  Avg RMSE:   %.4f / 255\n" "$avg_rmse"
 printf "  Max RMSE:   %.4f / 255  (%s)\n" "$max_rmse" "${worst_page:-none}"
@@ -414,11 +531,5 @@ printf "  Max tile:   %.4f / 255  (%s)\n" "$max_tile" "${worst_tile_page:-none}"
 printf "  Thresholds: RMSE %.1f / 255, tile %.1f / 255\n" "$THRESHOLD" "$TILE_LIMIT"
 printf "  rrocket stderr: %d lines\n" "$stderr_lines"
 [[ -n "$OUT_DIR" ]] && printf "  Diff dir:   %s\n" "$DIFF_DIR"
-echo "─────────────────────────────────────────────────────────────────────────"
-
-if [[ $fail -eq 0 ]]; then
-    echo "PASSED"
-else
-    echo "FAILED"
-    exit 1
-fi
+finish
+[[ $FATAL -eq 0 ]] || exit 1
