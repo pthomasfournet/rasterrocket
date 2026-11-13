@@ -2648,6 +2648,21 @@ region's included, drew one pixel too many on its last kept row; it now
 ends that row where the unclipped line does, so a region render of a
 hairline crossing the region's bottom matches the whole page (this changes
 pixels on that row only).
+Property tests (`proptest`, a dev-dependency only) cover the parser, the
+rasteriser's fills and clips, the colour conversions, every encoder and the
+camera geometry (see Testing strategy).  They found five bugs, now fixed:
+an aliased fill skipped the cells of a winding-count-0 intersection met
+outside the shape (a horizontal edge, an edge's first scanline), so an
+integer-aligned rectangle lost its top row, shapes under about two pixels
+vanished and the result depended on the outline's direction — **this
+changes pixels** of `--aaVector no` renders (0.07 % of the pixels of the 164
+fixture pages at 72 dpi), antialiased renders unchanged; a sloped edge
+moved by whole pixels could lose a cell where it ends on a cell boundary
+(fixture renders unchanged); `div255` rounded down at 126 of its inputs,
+12 of them byte products, instead of to nearest — **this changes pixels**
+by one level where compositing meets them (5 713 pixels of those pages);
+`round_half_up_i32` took 0.49999999999999994 to 1; and `rectify` could
+return a page one rounding past its twice-the-source bound.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
@@ -2878,31 +2893,40 @@ The implementation plans under `docs/superpowers/plans/` (gitignored) are comple
 
 ## Testing strategy
 
-### proptest — property-based testing for geometric primitives
+### proptest — property-based testing
 
-`proptest` is the right tool for algorithmic correctness in the raster and path layers.
-Shrinking finds the minimal failing input automatically, which is valuable for geometric
-edge cases that are hard to construct by hand.
+`proptest` (a workspace dev-dependency, without its `fork` and `timeout`
+features) checks invariants on generated inputs, and shrinks a failure to a
+minimal case.  Properties state what an operation must preserve, compared
+against an independent reference (a decoder, an encoder written from the
+specification, a transformed copy of the input), not against a restatement
+of the implementation.
 
-**High-value targets:**
+Each suite runs a fixed case count in CI (well under 10 s a crate in a debug
+build); `PROPTEST_CASES=N` overrides it for a longer local run.  Seeds of
+failures found are kept in each crate's `proptest-regressions/` and replayed
+first.  Generated sizes stay small: bitmaps up to a few hundred pixels a
+side, byte inputs up to a few KiB.
 
-| Area | What to test | Why |
+| Crate | Suite | Properties |
 |---|---|---|
-| Path flattening | Arbitrary Bézier control points including degenerate (coincident, collinear, zero-length) | Recursive subdivision blows the stack or produces NaN coordinates on degenerate input |
-| Clipping | Random clip rect × path combinations; assert output is subset of input bbox | Clip intersection logic has winding-number edge cases |
-| Transformation matrix composition | Arbitrary CTM chains; assert round-trip inverse within ε | Accumulated floating-point error in nested Form XObjects |
-| `cmyk_to_rgb_reflectance` | All 256⁴ is too large; proptest over random (C,M,Y,K) tuples; assert output ∈ [0,255]³ | Overflow/underflow in the subtractive formula |
-| `grid_to_u8` in icc.rs | `i ∈ [0, grid_n-1]`, assert endpoints map exactly to 0 and 255 | Off-by-one at boundary nodes corrupts CLUT edges |
+| parser | `src/proptests/` (in-crate, CI runs `--lib`) | objects written in every spelling ISO 32000-2 §7.3 allows (separators and comments, name and string escapes, octal escapes and line continuations, hex digit case, number forms) parse back and end where written; a stream with an indirect `/Length` finds its body; chains of up to three filters (Flate, LZW with either `EarlyChange`, ASCIIHex, ASCII85, RunLength) with PNG and TIFF predictors invert reference encoders with no truncation reported; TIFF predictor 2 keeps a partial last row; `RunLengthDecode` under an output bound returns a prefix within the bound |
+| render | `src/proptests.rs` (in-crate) | random polygons and curves, aliased and antialiased, both winding rules: fills stay inside the clip rectangle and, aliased, the clip paths; a clip rectangle masks the unclipped fill exactly; reversing every subpath changes nothing; whole-pixel moves of outline and clip move the render; simple polygons fill alike under both rules; integer rectangles cover exactly their closed cells; flattening stays finite and within the control points' box |
+| color | `tests/properties.rs` | the CMYK row converter (every SIMD tier) matches the per-pixel conversion at any length and alignment; more ink is not lighter; ink rows match the per-pixel spot union; `floor_i32` / `ceil_i32` / `round_half_up_i32` near integers and half-integers; `div255`, `lerp_u8`, `luminosity` |
+| encode | `tests/properties.rs` | PGM, PBM, PPM, PNG (alpha included), TIFF (every compression, bilevel with Group 4) read back by independent decoders hold the live pixels of padded bitmaps, CMYK and `DeviceN` as their process-ink conversion; the fax coder round-trips under Group 3 MH and MR (any `k`, aligned EOLs or not) and Group 4; JPEG decodes to its size |
+| camera | `tests/properties.rs` | `crop` and `split_at` return exactly the named pixels and refuse out-of-image requests; `Quad::bounding_rect` holds exactly the centres in the corners' extent; `rectify` on any quad returns a bounded page or declines |
 
-**Where fuzzing beats proptest** (already covered by `fuzz/`):
+The suites found five bugs (aliased span walk, scanner translation
+rounding, `div255`, `round_half_up_i32`, the rectified-area bound); see the
+unreleased notes under Current status.
 
-- PDF stream parsing — coverage-guided fuzzing finds parser bugs that proptest's
-  random generation misses; shrinking is less valuable when the bug is a specific
-  byte sequence
-- CCITTFaxDecode / JBIG2Decode — malformed bitstreams need coverage guidance, not
-  algebraic shrinking
+**Where fuzzing beats proptest** (covered by `fuzz/`): crashes and hangs on
+arbitrary bytes in the parser, the content stream, fonts, functions, images,
+the filter chain and the CCITT and JBIG2 decoders.  Coverage guidance finds
+the specific byte sequences that random generation misses; the property
+suites check invariants on well-formed input instead.
 
-**To add proptest:** reinstate `proptest = { workspace = true }` in the relevant
-crate's `[dev-dependencies]` when writing the tests. The workspace declaration was
-removed (commit 4334283) because it was unused; add it back alongside the actual
-test code.
+**Not covered by a property suite:** CTM composition and inversion (the
+interpreter's `invert_affine` rejects a determinant below 1e-12 in absolute
+terms, so a uniformly tiny but invertible matrix counts as singular), and
+the ICC CLUT grid, whose 254 sizes an exhaustive unit test covers.
