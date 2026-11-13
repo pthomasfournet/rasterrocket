@@ -23,6 +23,10 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - `open_session` + `render_page_rgb_with` / `render_page_gray`: one open
   document, per-page renders from any thread, with `RenderParams` for
   per-axis scale, a `RenderRegion` window and a `CancelToken`.
+- `transparent_background` (off by default) renders over a transparent
+  backdrop: RGBA pages (`PixelFormat::Rgba8`, straight alpha) from the batch
+  entry points and `render_page_rgba`, and an RGB bitmap with an alpha plane
+  from `render_page_rgb_with` with `RenderParams::with_transparent_background`.
 - `encode_for_gcv`: a size-fitted grayscale JPEG for Google Cloud Vision.
 - Encrypted documents are decrypted in process when `decrypt_authorized` is set.
 - `overprint` (off by default) simulates overprint and spot inks on pages

@@ -125,7 +125,17 @@ pub fn render_page_gray(
 ) -> Result<RenderedPage, RasterError>
 ```
 
-Renders one page to the grayscale `RenderedPage` that `raster_pdf` yields for it: `opts.dpi` and `opts.deskew` apply; the page-selection fields are ignored, and the fields mirrored on `SessionConfig` were fixed when the session was opened.
+Renders one page to the grayscale `RenderedPage` that `raster_pdf` yields for it: `opts.dpi` and `opts.deskew` apply; the page-selection fields are ignored, and the fields mirrored on `SessionConfig` were fixed when the session was opened. `opts.transparent_background` is not consulted: `render_page_rgba` is its counterpart.
+
+```rust
+pub fn render_page_rgba(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError>
+```
+
+Renders one page over a transparent backdrop to the `PixelFormat::Rgba8` `RenderedPage` that `raster_pdf` yields when `opts.transparent_background` is set: `opts.dpi` and `opts.cancel` apply; `opts.deskew` is `RasterError::InvalidOptions`.
 
 ```rust
 pub fn render_page_rgb_with(
@@ -141,6 +151,7 @@ pub struct RenderParams {
     pub region: Option<RenderRegion>,    // None = whole page
     pub policy: Option<BackendPolicy>,   // None = the session's
     pub cancel: Option<CancelToken>,     // None = render to completion
+    pub transparent_background: bool,    // false = composited onto white
 }
 impl RenderParams {
     pub const fn new(scale: f64) -> Self                     // same scale on both axes
@@ -148,6 +159,7 @@ impl RenderParams {
     pub const fn with_region(self, region: RenderRegion) -> Self
     pub const fn with_policy(self, policy: BackendPolicy) -> Self
     pub fn with_cancel(self, cancel: CancelToken) -> Self
+    pub const fn with_transparent_background(self) -> Self
 }
 
 pub struct RenderRegion { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
@@ -241,6 +253,7 @@ pub struct RasterOptions {
     pub system_fonts: bool,
     pub image_budget: usize,
     pub page_box: PageBox,
+    pub transparent_background: bool,
     pub cancel: Option<CancelToken>,
 }
 ```
@@ -265,6 +278,7 @@ pub struct RasterOptions {
 | `system_fonts` | — | When `false`, the standard font directories are not searched; see [`SessionConfig`](#sessionconfig). |
 | `image_budget` | — | Host bytes of decoded images kept for reuse by later pages; 0 keeps none. See [`SessionConfig`](#sessionconfig). |
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
+| `transparent_background` | not with `deskew` | When `true`, pages are rendered over a transparent backdrop instead of white paper and yielded as `PixelFormat::Rgba8`: `[R, G, B, A]`, alpha the page's coverage × opacity, colour not premultiplied, `[0, 0, 0, 0]` where nothing paints. The page is painted as an isolated transparency group (knockout when its `/Group` says so). With `deskew` the options are `RasterError::InvalidOptions`. |
 
 `RasterOptions` implements `Default` and is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
 
@@ -273,7 +287,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `page_box = PageBox::Crop`, `cancel = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `page_box = PageBox::Crop`, `transparent_background = false`, `cancel = None`.
 
 ---
 
@@ -334,8 +348,16 @@ pub struct RenderedPage {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    pub format: PixelFormat,
     pub dpi: f32,
     pub diagnostics: PageDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PixelFormat { Gray8, Rgba8 }
+impl PixelFormat {
+    pub const fn bytes_per_pixel(self) -> usize   // 1 or 4
 }
 ```
 
@@ -343,7 +365,8 @@ pub struct RenderedPage {
 |---|---|
 | `page_num` | 1-based page number. |
 | `width`, `height` | Output bitmap dimensions in pixels. |
-| `pixels` | 8-bit grayscale, tightly packed (`stride == width`), top-to-bottom. Length is exactly `width * height`. |
+| `pixels` | In `format`, tightly packed, top-to-bottom. Length is exactly `width * height * format.bytes_per_pixel()`: `width * height` for the default 8-bit grayscale pages. |
+| `format` | `PixelFormat::Gray8` (one byte per pixel, 0 black), or `PixelFormat::Rgba8` (`[R, G, B, A]`, straight alpha) under `RasterOptions::transparent_background`. |
 | `dpi` | Pixels per physical inch (`opts.dpi`). The page size includes its `/UserUnit`, so this holds for any unit. Pass it to `tesseract::set_source_resolution`. |
 | `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. |
 
@@ -651,6 +674,7 @@ impl GcvImage {
 pub enum GcvError {
     Unfittable { smallest_base64: usize, budget: usize },
     Encode(rasterrocket_encode::EncodeError),
+    NotGray(PixelFormat),   // the page is not PixelFormat::Gray8
 }
 ```
 

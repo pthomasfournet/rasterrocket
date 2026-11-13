@@ -2548,6 +2548,17 @@ now interpolates with `fma`, byte-identical to the CUDA kernel and the CPU
 evaluator on the RTX 5070 and RADV, and a device failing a one-time
 exactness check converts on the CPU. `PageDiagnostics::device_icc_conversions`
 and `device_icc_failures` (public, additive) count the device's conversions.
+Pages render over a transparent background, for capability parity with
+`pdftocairo -transp`: `--transparent` (alias `--transp`) writes RGBA PNG
+or TIFF (unassociated alpha) and refuses PPM, JPEG, `--gray` and `--mono`
+with the formats that carry alpha; `RasterOptions::transparent_background`
+yields `PixelFormat::Rgba8` pages (the new `RenderedPage::format`) through
+the new `render_page_rgba`, and `RenderParams::transparent_background`
+gives `render_page_rgb_with` a bitmap with an alpha plane, colour not
+premultiplied. The page is painted as an isolated page group and its alpha
+kept (`PageRenderer::try_finish_transparent` and `transparent_page_group`
+in `rasterrocket-interp`); `encode_for_gcv` refuses an RGBA page with
+`GcvError::NotGray`. Gray and RGB output is byte-identical.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
