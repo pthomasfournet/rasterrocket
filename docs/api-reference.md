@@ -683,8 +683,10 @@ rest, matching `raster_pdf`. `len()` is the number of pages still to come, and
 **Content routing** (decided after the entry list is built):
 
 - **Page images present** → render the images (numeric-aware natural sort by
-  filename, magic-byte format detection over JPEG/PNG/WebP/TIFF). Any PDF entry
-  is ignored with a warning — images always win.
+  filename, magic-byte format detection over JPEG/PNG/WebP/TIFF). A multi-page
+  TIFF entry yields one page per image, its reduced-resolution copies and
+  transparency masks skipped. Any PDF entry is ignored with a warning — images
+  always win.
 - **No images, exactly one PDF** → render that PDF's pages via
   `open_session_from_bytes` and `render_page_gray` (the PDF's own page
   numbering).

@@ -2490,6 +2490,9 @@ sevenz-rust2 0.25 rejects entries whose data ends short or fails its CRC.
 `.cbr` (RAR 1.3 to RAR 7) comic archives are read, through the pure-Rust
 `rars` decoder, decoded whole on open under the same entry and 1 GiB
 dictionary bounds as `.cb7`; `ComicError::RarUnsupported` is gone.
+A multi-page TIFF entry of a comic archive yields one page per image (its
+reduced-resolution copies and transparency masks skipped) instead of its
+first page only.
 The GPU composite and soft-mask kernels, which nothing in the render path
 dispatched, are deleted with their `GpuBackend::record_composite` /
 `record_apply_soft_mask` methods, parameter structs, thresholds and CPU

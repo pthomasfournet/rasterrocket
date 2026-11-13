@@ -13,6 +13,7 @@ mod test_helpers;
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 pub use pdf_raster::RenderedPage;
 
@@ -30,11 +31,22 @@ pub struct ComicPages {
     source: Source,
 }
 
+/// One page of a page-image entry, rendered on demand.
+struct ImagePage {
+    /// 1-based page number; 0 until the pages are numbered.
+    page: u32,
+    /// The entry's name, with the page within it for a multi-page image.
+    name: String,
+    /// The entry's bytes, shared by its pages, or the error reading them.
+    bytes: Result<Arc<[u8]>, ComicError>,
+    /// The page within the entry, as [`decode::image_pages`] lists it.
+    index: usize,
+}
+
 /// What [`ComicPages`] renders its pages from.
 enum Source {
-    /// Page images in reading order: page number, entry name, entry bytes
-    /// (or the error reading them).
-    Images(VecDeque<(u32, String, Result<Vec<u8>, ComicError>)>),
+    /// Page images in reading order.
+    Images(VecDeque<ImagePage>),
     /// The archive's single embedded PDF and the page numbers to render.
     Pdf {
         session: Box<pdf_raster::RasterSession>,
@@ -47,7 +59,7 @@ impl ComicPages {
     /// discarded unrendered.
     pub fn retain(&mut self, mut keep: impl FnMut(u32) -> bool) {
         match &mut self.source {
-            Source::Images(entries) => entries.retain(|(page, _, _)| keep(*page)),
+            Source::Images(entries) => entries.retain(|image| keep(image.page)),
             Source::Pdf { pages, .. } => pages.retain(|page| keep(*page)),
         }
     }
@@ -59,8 +71,14 @@ impl Iterator for ComicPages {
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.source {
             Source::Images(entries) => {
-                let (page, name, raw) = entries.pop_front()?;
-                let rendered = raw.and_then(|bytes| render_one(&name, &bytes, page, &self.opts));
+                let ImagePage {
+                    page,
+                    name,
+                    bytes,
+                    index,
+                } = entries.pop_front()?;
+                let rendered =
+                    bytes.and_then(|bytes| render_one(&name, &bytes, index, page, &self.opts));
                 Some((page, rendered))
             }
             Source::Pdf { session, pages } => {
@@ -292,15 +310,34 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
     // skipped with a format-named warning — graceful degradation — and never
     // consumes a page number, so the page window applies to decodable pages
     // only. An entry that genuinely fails to read is kept so it can surface as a
-    // per-page Err in the second pass, preserving its reading-order slot.
-    let mut decodable: Vec<(String, Result<Vec<u8>, ComicError>)> = Vec::new();
+    // per-page Err in the second pass, preserving its reading-order slot. A
+    // multi-page image (a TIFF) yields one page per image it holds.
+    let image = |name, bytes, index| ImagePage {
+        page: 0,
+        name,
+        bytes,
+        index,
+    };
+    let mut decodable: Vec<ImagePage> = Vec::new();
     for name in image_names {
         match archive.take_entry(&name) {
-            Ok(raw) if decode::sniff(&raw).is_some() => decodable.push((name, Ok(raw))),
+            Ok(raw) if decode::sniff(&raw).is_some() => {
+                let indices = decode::image_pages(&raw).unwrap_or_else(|_| vec![0]);
+                let bytes: Arc<[u8]> = raw.into();
+                let several = indices.len() > 1;
+                for (n, index) in (1..).zip(indices) {
+                    let label = if several {
+                        format!("{name} (page {n})")
+                    } else {
+                        name.clone()
+                    };
+                    decodable.push(image(label, Ok(Arc::clone(&bytes)), index));
+                }
+            }
             Ok(_) => log::warn!(
                 "comic: skipping {name}: unrecognised image format; convert it to PNG or JPG"
             ),
-            Err(e) => decodable.push((name, Err(e))),
+            Err(e) => decodable.push(image(name, Err(e), 0)),
         }
     }
     if decodable.is_empty() {
@@ -312,7 +349,7 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
     let entries: VecDeque<_> = (1..=u32::MAX)
         .zip(decodable)
         .filter(|(page, _)| (opts.first_page..=opts.last_page).contains(page))
-        .map(|(page, (name, raw))| (page, name, raw))
+        .map(|(page, image)| ImagePage { page, ..image })
         .collect();
     if entries.is_empty() {
         // The window excluded every kept page.
@@ -352,10 +389,11 @@ fn validate_options(opts: &ComicOptions) -> Result<(), ComicError> {
 fn render_one(
     name: &str,
     raw: &[u8],
+    index: usize,
     page_num: u32,
     opts: &ComicOptions,
 ) -> Result<RenderedPage, ComicError> {
-    let mut bmp = decode::decode_image(raw).map_err(|e| match e {
+    let mut bmp = decode::decode_image(raw, index).map_err(|e| match e {
         decode::DecodeError::TooLarge { width, height } => ComicError::TooLarge {
             entry: name.to_owned(),
             width,
@@ -484,6 +522,27 @@ startxref\n180\n%%EOF"
         let p2 = r2.as_ref().unwrap();
         assert!(p1.pixels[0] < p2.pixels[0], "page2 darker than page10");
         assert_eq!((p1.width, p1.height), (4, 4));
+    }
+
+    #[test]
+    fn a_multi_page_tiff_entry_yields_a_page_per_image() {
+        let tif = crate::decode::tests::multi_tiff_gray(4, 4, &[(10, 0), (99, 1), (30, 2)]);
+        let cbz = make_cbz(&[("1.tif", &tif), ("2.jpg", &jpeg_page(4, 4, 200))]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .expect("open")
+            .map(|(n, page)| (n, page.expect("page").pixels[0]))
+            .collect();
+        let numbers: Vec<u32> = pages.iter().map(|&(n, _)| n).collect();
+        assert_eq!(
+            numbers,
+            [1, 2, 3],
+            "two TIFF pages, the thumbnail skipped, then the JPEG"
+        );
+        assert!(
+            pages[0].1 < pages[1].1 && pages[1].1 < pages[2].1,
+            "{pages:?}"
+        );
     }
 
     #[test]

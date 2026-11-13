@@ -81,20 +81,36 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-/// Decode arbitrary image bytes to a packed grayscale bitmap, sniffing the
-/// format first. Gray streams are returned as decoded; RGB streams are
-/// converted in their own allocation by [`pdf_raster::rgb_into_gray`].
+/// The pages of an image file, each named by the index [`decode_image`]
+/// takes: the image file directories that are pages of a TIFF, and the
+/// single image of any other format.
+///
+/// # Errors
+///
+/// [`DecodeError::Codec`] when a TIFF's header or first directory is
+/// unreadable.
+pub(crate) fn image_pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
+    match sniff(bytes) {
+        Some(ImageFormat::Tiff) => tiff::pages(bytes),
+        _ => Ok(vec![0]),
+    }
+}
+
+/// Decode page `page` (an index [`image_pages`] lists) of arbitrary image
+/// bytes to a packed grayscale bitmap, sniffing the format first. Gray
+/// streams are returned as decoded; RGB streams are converted in their own
+/// allocation by [`pdf_raster::rgb_into_gray`].
 ///
 /// # Errors
 ///
 /// [`DecodeError::Unsupported`] if no codec matches the magic bytes;
 /// [`DecodeError::Codec`] if the matched codec rejects the stream.
-pub(crate) fn decode_image(bytes: &[u8]) -> Result<Bitmap<Gray8>, DecodeError> {
+pub(crate) fn decode_image(bytes: &[u8], page: usize) -> Result<Bitmap<Gray8>, DecodeError> {
     let pixels = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
         ImageFormat::Jpeg => jpeg::decode(bytes)?,
         ImageFormat::Png => png::decode(bytes)?,
         ImageFormat::WebP => webp::decode(bytes)?,
-        ImageFormat::Tiff => tiff::decode(bytes)?,
+        ImageFormat::Tiff => tiff::decode(bytes, page)?,
     };
     Ok(match pixels {
         CodecPixels::Gray(gray) => gray,
@@ -190,7 +206,7 @@ fn keep_leading_samples(buf: &mut Vec<u8>, channels: usize, keep: usize) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
@@ -232,6 +248,35 @@ mod tests {
             .write_image::<colortype::Gray8>(w, h, &pixels)
             .unwrap();
         out.into_inner()
+    }
+
+    /// A TIFF of solid 8-bit gray images, one per `(value, subfile)`: each
+    /// `w × h` of `value`, its `NewSubfileType` set to `subfile`.
+    pub(crate) fn multi_tiff_gray(w: u32, h: u32, images: &[(u8, u32)]) -> Vec<u8> {
+        use ::tiff::encoder::{TiffEncoder, colortype};
+        use ::tiff::tags::Tag;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        for &(value, subfile) in images {
+            let mut image = enc.new_image::<colortype::Gray8>(w, h).unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::NewSubfileType, subfile)
+                .unwrap();
+            image.write_data(&vec![value; (w * h) as usize]).unwrap();
+        }
+        out.into_inner()
+    }
+
+    #[test]
+    fn tiff_pages_skip_thumbnails_and_masks_and_decode_by_directory() {
+        let tif = multi_tiff_gray(2, 2, &[(10, 0), (99, 1), (77, 4), (30, 2)]);
+        assert_eq!(image_pages(&tif).unwrap(), [0, 3]);
+        assert_eq!(decode_image(&tif, 0).unwrap().data()[0], 10);
+        assert_eq!(decode_image(&tif, 3).unwrap().data()[0], 30);
+        // A file of nothing but thumbnails still shows its first image.
+        assert_eq!(image_pages(&multi_tiff_gray(2, 2, &[(5, 1)])).unwrap(), [0]);
+        assert_eq!(image_pages(&solid_jpeg_gray(2, 2, 9)).unwrap(), [0]);
     }
 
     /// An uncompressed little-endian TIFF of one strip per plane:
@@ -307,7 +352,7 @@ mod tests {
     fn low_bit_gray_tiffs_unpack_to_luma() {
         // 1 bit, 10 px wide: rows of two bytes, the second padded.
         let tif = raw_tiff(10, 2, 1, 1, false, &[0b1010_0000, 0b1100_0000, 0xFF, 0x00]);
-        let img = decode_image(&tif).expect("1-bit tiff decodes");
+        let img = decode_image(&tif, 0).expect("1-bit tiff decodes");
         assert_eq!(
             img.data(),
             [
@@ -317,19 +362,19 @@ mod tests {
         );
         // 4 bits: samples 0, 5 and 15 scale to 0, 85 and 255.
         let tif = raw_tiff(3, 1, 4, 1, false, &[0x05, 0xF0]);
-        assert_eq!(decode_image(&tif).unwrap().data(), [0, 85, 255]);
+        assert_eq!(decode_image(&tif, 0).unwrap().data(), [0, 85, 255]);
     }
 
     #[test]
     fn gray_alpha_and_planar_rgb_tiffs_decode() {
         let tif = raw_tiff(2, 1, 8, 2, false, &[10, 255, 200, 0]);
-        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif) else {
+        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif, 0) else {
             panic!("a gray+alpha TIFF must decode to Gray8");
         };
         assert_eq!(bmp.data(), [10, 200]);
         // Planes R, G, B of two pixels.
         let tif = raw_tiff(2, 1, 8, 3, true, &[1, 2, 10, 20, 100, 200]);
-        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif) else {
+        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0) else {
             panic!("a planar RGB TIFF must decode to Rgb8");
         };
         assert_eq!(bmp.data(), [1, 10, 100, 2, 20, 200]);
@@ -357,7 +402,7 @@ mod tests {
     #[test]
     fn decode_png_to_expected_pixels() {
         let png = solid_png(2, 2, [10, 200, 30]);
-        let img = decode_image(&png).expect("png decodes");
+        let img = decode_image(&png, 0).expect("png decodes");
         assert_eq!((img.width, img.height), (2, 2));
         assert_eq!(img.data().len(), 4);
         assert!(
@@ -370,7 +415,7 @@ mod tests {
     #[test]
     fn decode_jpeg_to_gray() {
         let jpg = solid_jpeg_gray(4, 4, 137);
-        let img = decode_image(&jpg).expect("jpeg decodes");
+        let img = decode_image(&jpg, 0).expect("jpeg decodes");
         assert_eq!((img.width, img.height), (4, 4));
         assert!(img.data().iter().all(|&p| (i16::from(p) - 137).abs() <= 4));
     }
@@ -380,7 +425,7 @@ mod tests {
         // Exercises the TIFF wrapper's DecodingResult::U8 + ColorType::Gray
         // path end-to-end (the most logic-heavy codec match).
         let tif = solid_tiff_gray(3, 2, 90);
-        let img = decode_image(&tif).expect("tiff decodes");
+        let img = decode_image(&tif, 0).expect("tiff decodes");
         assert_eq!((img.width, img.height), (3, 2));
         assert_eq!(img.data().len(), 6);
         assert!(
@@ -411,7 +456,7 @@ mod tests {
         };
         assert_eq!((bmp.width, bmp.height), (3, 2));
         assert_eq!(bmp.data(), luma);
-        assert_eq!(decode_image(&png).unwrap().data(), luma);
+        assert_eq!(decode_image(&png, 0).unwrap().data(), luma);
     }
 
     #[test]
@@ -438,13 +483,13 @@ mod tests {
     fn truncated_bytes_error_not_panic() {
         let mut png = solid_png(8, 8, [1, 2, 3]);
         png.truncate(png.len() / 2);
-        assert!(decode_image(&png).is_err(), "must return Err, not panic");
+        assert!(decode_image(&png, 0).is_err(), "must return Err, not panic");
     }
 
     #[test]
     fn unknown_format_is_unsupported() {
         assert!(matches!(
-            decode_image(b"xxxx not an image xxxx"),
+            decode_image(b"xxxx not an image xxxx", 0),
             Err(DecodeError::Unsupported)
         ));
     }

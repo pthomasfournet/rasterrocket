@@ -1,8 +1,9 @@
 //! TIFF decode for comic/scan pages, via the pure-Rust `tiff` crate.
 //!
-//! A TIFF file can hold multiple pages (IFDs). Comics/scans in archives are
-//! one-image-per-entry, so only the first IFD is decoded; a warning fires if
-//! the file carries additional pages.  The crate returns `WhiteIsZero`
+//! A TIFF file can hold several pages, one per image file directory (IFD);
+//! [`pages`] lists the directories that are pages, and [`decode`] decodes one.
+//! A directory marked as a reduced-resolution copy or a transparency mask
+//! (`NewSubfileType` bits 0 and 2) is no page.  The crate returns `WhiteIsZero`
 //! samples inverted to `BlackIsZero`, gray samples of fewer than eight bits
 //! packed most significant first with each row padded to a byte, and a planar
 //! image (`PlanarConfiguration` 2) one plane after another.
@@ -19,19 +20,67 @@ use super::{
 /// `PlanarConfiguration` value of an image stored one plane per component.
 const PLANAR: u32 = 2;
 
-/// Decode the first page of a TIFF: a gray page of 1 to 16 bits per sample
-/// yields a `Gray8` bitmap of its first sample, an RGB page an `Rgb8` bitmap
-/// with any alpha channel dropped.
+/// `NewSubfileType` bits of a directory that is no page of its own: a
+/// reduced-resolution copy (bit 0) or a transparency mask (bit 2).
+const NOT_A_PAGE: u32 = 0b101;
+
+/// The most pages read from one TIFF; the directories after it are ignored
+/// with a warning.
+const MAX_PAGES: usize = 10_000;
+
+/// The directory indices of the pages of a TIFF, in file order.  A file
+/// whose every directory is marked as no page yields its first directory.
+/// A directory chain that breaks after the first page ends the list there,
+/// with a warning; the tiff decoder refuses a chain that loops.
+///
+/// # Errors
+///
+/// [`DecodeError::Codec`] when the header or the first directory is
+/// unreadable.
+pub(super) fn pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
+    let codec = |e: tiff::TiffError| DecodeError::Codec(format!("tiff: {e}"));
+    let mut dec = Decoder::new(std::io::Cursor::new(bytes)).map_err(codec)?;
+    let mut pages = Vec::new();
+    for ifd in 0.. {
+        let subfile = dec.get_tag_u32(Tag::NewSubfileType).unwrap_or(0);
+        if subfile & NOT_A_PAGE == 0 {
+            if pages.len() == MAX_PAGES {
+                log::warn!("tiff: more than {MAX_PAGES} pages; the rest are not read");
+                break;
+            }
+            pages.push(ifd);
+        }
+        if !dec.more_images() {
+            break;
+        }
+        if let Err(e) = dec.next_image() {
+            log::warn!(
+                "tiff: directory {} unreadable ({e}); the pages after it are not read",
+                ifd + 1
+            );
+            break;
+        }
+    }
+    if pages.is_empty() {
+        pages.push(0);
+    }
+    Ok(pages)
+}
+
+/// Decode the page in image file directory `ifd` (an index [`pages`]
+/// lists): a gray page of 1 to 16 bits per sample yields a `Gray8` bitmap of
+/// its first sample, an RGB page an `Rgb8` bitmap with any alpha channel
+/// dropped.
 ///
 /// # Errors
 ///
 /// [`DecodeError::TooLarge`] when the header dimensions exceed the page
 /// limits; [`DecodeError::Codec`] on malformed or unsupported streams.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], ifd: usize) -> Result<CodecPixels, DecodeError> {
     let codec = |e: tiff::TiffError| DecodeError::Codec(format!("tiff: {e}"));
     let mut dec = Decoder::new(std::io::Cursor::new(bytes)).map_err(codec)?;
-    if dec.more_images() {
-        log::warn!("tiff: multi-page TIFF; only the first page is decoded");
+    if ifd > 0 {
+        dec.seek_to_image(ifd).map_err(codec)?;
     }
     let (w, h) = dec.dimensions().map_err(codec)?;
     if w == 0 || h == 0 {
