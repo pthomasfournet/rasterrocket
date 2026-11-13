@@ -49,6 +49,33 @@ impl std::fmt::Display for BitmapAllocError {
 
 impl std::error::Error for BitmapAllocError {}
 
+// ── BitmapBuffers ─────────────────────────────────────────────────────────────
+
+/// The storage of a [`Bitmap`], detached from it.
+///
+/// A later bitmap can be built in the same allocations: see
+/// [`Bitmap::try_new_filled_in`] and [`Bitmap::into_buffers`].  The
+/// contents are unspecified; only the capacities carry over.
+#[derive(Debug, Default)]
+pub struct BitmapBuffers {
+    /// Colour buffer.
+    pub data: Vec<u8>,
+    /// Alpha plane buffer.
+    pub alpha: Vec<u8>,
+}
+
+/// `buf` holding `len` copies of `value`, in its own allocation when its
+/// capacity is at least `len` and in a new one otherwise.
+fn refill(mut buf: Vec<u8>, len: usize, value: u8) -> Option<Vec<u8>> {
+    buf.clear();
+    if buf.capacity() < len {
+        buf = Vec::new();
+        buf.try_reserve_exact(len).ok()?;
+    }
+    buf.resize(len, value);
+    Some(buf)
+}
+
 // ── Bitmap ────────────────────────────────────────────────────────────────────
 
 /// A typed, top-down pixel buffer.
@@ -128,17 +155,43 @@ impl<P: Pixel> Bitmap<P> {
         with_alpha: bool,
         fill: u8,
     ) -> Result<Self, BitmapAllocError> {
+        Self::try_new_filled_in(
+            BitmapBuffers::default(),
+            width,
+            height,
+            row_pad,
+            with_alpha,
+            fill,
+        )
+    }
+
+    /// [`Bitmap::try_new_filled`] built in `buffers`: a buffer whose
+    /// capacity suffices is reused without allocating, a shorter one is
+    /// replaced.  The alpha buffer is dropped when `with_alpha` is false.
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when a buffer that must be allocated cannot be.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row_pad` is 0.
+    pub fn try_new_filled_in(
+        buffers: BitmapBuffers,
+        width: u32,
+        height: u32,
+        row_pad: usize,
+        with_alpha: bool,
+        fill: u8,
+    ) -> Result<Self, BitmapAllocError> {
         let error = BitmapAllocError { width, height };
         let (stride, data_len, alpha_len) =
             Self::layout(width, height, row_pad, with_alpha).ok_or(error)?;
-        let filled = |len: usize, value: u8| {
-            let mut buf = Vec::new();
-            buf.try_reserve_exact(len).map_err(|_| error)?;
-            buf.resize(len, value);
-            Ok(buf)
+        let data = refill(buffers.data, data_len, fill).ok_or(error)?;
+        let alpha = match alpha_len {
+            Some(len) => Some(refill(buffers.alpha, len, 0).ok_or(error)?),
+            None => None,
         };
-        let data = filled(data_len, fill)?;
-        let alpha = alpha_len.map(|len| filled(len, 0)).transpose()?;
         Ok(Self {
             width,
             height,
@@ -359,6 +412,17 @@ impl<P: Pixel> Bitmap<P> {
     #[must_use]
     pub fn into_data(self) -> Vec<u8> {
         self.data
+    }
+
+    /// Consume the bitmap and return its colour buffer and alpha plane for
+    /// reuse by [`Bitmap::try_new_filled_in`]; the alpha buffer is empty
+    /// when the bitmap has no alpha plane.
+    #[must_use]
+    pub fn into_buffers(self) -> BitmapBuffers {
+        BitmapBuffers {
+            data: self.data,
+            alpha: self.alpha.unwrap_or_default(),
+        }
     }
 
     /// A bitmap without an alpha plane over `data`, rows packed with no
@@ -790,5 +854,29 @@ mod tests {
         let mut bm = Bitmap::<Rgb8>::new(0, 3, 1, true);
         bm.clear(Rgb8 { r: 1, g: 2, b: 3 }, 9);
         assert_eq!(bm.data_len(), 0);
+    }
+
+    #[test]
+    fn try_new_filled_in_reuses_a_large_enough_buffer() {
+        let first = Bitmap::<Rgb8>::try_new_filled(8, 4, 1, true, 7).unwrap();
+        let buffers = first.into_buffers();
+        let (data_ptr, alpha_ptr) = (buffers.data.as_ptr(), buffers.alpha.as_ptr());
+        let b = Bitmap::<Rgb8>::try_new_filled_in(buffers, 4, 4, 1, true, 255).unwrap();
+        assert_eq!(b.data().as_ptr(), data_ptr, "colour buffer reused");
+        assert_eq!(b.alpha_plane().unwrap().as_ptr(), alpha_ptr, "alpha reused");
+        assert_eq!(b.data_len(), 4 * 4 * 3);
+        assert!(b.data().iter().all(|&v| v == 255));
+        assert!(b.alpha_plane().unwrap().iter().all(|&v| v == 0));
+        let want = Bitmap::<Rgb8>::new_filled(4, 4, 1, true, 255);
+        assert_eq!(b.stride, want.stride);
+    }
+
+    #[test]
+    fn try_new_filled_in_grows_a_short_buffer() {
+        let small = Bitmap::<Rgb8>::new_filled(2, 2, 1, false, 1).into_buffers();
+        let b = Bitmap::<Rgb8>::try_new_filled_in(small, 5, 3, 4, false, 9).unwrap();
+        assert_eq!(b.data_len(), Bitmap::<Rgb8>::new(5, 3, 4, false).data_len());
+        assert!(b.data().iter().all(|&v| v == 9));
+        assert!(b.alpha_plane().is_none());
     }
 }
