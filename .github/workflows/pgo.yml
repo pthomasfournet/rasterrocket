@@ -1,0 +1,106 @@
+name: PGO + BOLT build
+
+# Builds the rrocket CLI with scripts/release_pgo_build.sh: an instrumented
+# build, a training render, a profile-guided rebuild, then BOLT block and
+# function reordering from an instrumented run of that binary.  The BOLT
+# profile comes from instrumentation (`llvm-bolt -instrument`), so the job
+# needs neither perf nor LBR, which hosted runners do not expose.  The
+# training input is the script's synthetic document set, generated from
+# files committed to the repository.  The stripped binary is uploaded as an
+# artifact.
+#
+# Codegen targets the x86-64 baseline (`-C target-cpu=generic`), not the
+# runner's CPU, so the binary runs on any x86-64 machine; the SIMD kernels
+# are selected at run time.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pgo-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C target-cpu=generic"
+  # A missing llvm-bolt or a failed BOLT step fails the job instead of
+  # uploading a PGO-only binary.
+  PGO_REQUIRE_BOLT: "1"
+
+jobs:
+  pgo-bolt:
+    name: PGO + BOLT rrocket (linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      # nasm assembles the x86 kernels of the AV1 decoder (crates/rav1d).
+      # LLVM BOLT is packaged as `bolt-N`; the newest one in the archive is
+      # installed, and its llvm-bolt and merge-fdata are passed to the
+      # script by path.
+      - name: Install nasm and LLVM BOLT
+        run: |
+          sudo apt-get update -qq
+          version="$(apt-cache search --names-only '^bolt-[0-9]+$' \
+            | sed -n 's/^bolt-\([0-9]*\) .*/\1/p' | sort -n | tail -1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::no bolt-N package in the apt archive"
+            exit 1
+          fi
+          sudo apt-get install -y --no-install-recommends nasm "bolt-$version"
+          bin="/usr/lib/llvm-$version/bin"
+          for tool in llvm-bolt merge-fdata; do
+            [[ -x "$bin/$tool" ]] || { echo "::error::$bin/$tool missing"; exit 1; }
+          done
+          {
+            echo "LLVM_BOLT=$bin/llvm-bolt"
+            echo "MERGE_FDATA=$bin/merge-fdata"
+          } >> "$GITHUB_ENV"
+          "$bin/llvm-bolt" --version
+
+      # Registry and git sources only: every build of the script runs with
+      # its own profile flags, so cached build artifacts would not be reused.
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-pgo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pgo-
+
+      # The script ends by rendering the training set with the final binary.
+      - name: PGO + BOLT build
+        run: |
+          scripts/release_pgo_build.sh
+          target/release/rrocket --version
+
+      - name: Name the artifact
+        run: |
+          echo "ARTIFACT=rrocket-pgo-bolt-linux-x86_64-${GITHUB_REF_NAME//\//-}-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          {
+            echo "### PGO + BOLT rrocket, \`$(git rev-parse --short HEAD)\`"
+            echo
+            echo "- $("$LLVM_BOLT" --version | grep -m1 -i 'version')"
+            echo "- codegen: \`$RUSTFLAGS\`"
+            echo "- size: $(stat -c %s target/release/rrocket) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: target/release/rrocket
+          if-no-files-found: error

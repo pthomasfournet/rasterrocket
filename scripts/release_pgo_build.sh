@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
 # PGO + BOLT release build of the rrocket CLI.
 #
-# Usage: ./scripts/release_pgo_build.sh
+# Usage: ./scripts/release_pgo_build.sh [TRAINING.pdf ...]
 #
 # Prereqs:
 #   - rustup component add llvm-tools-preview      (for `llvm-profdata`)
-#   - llvm-bolt on PATH for the optional BOLT step
-#       apt install bolt          # Ubuntu 24.04+
-#       or download a build from  https://github.com/llvm/llvm-project/releases
+#   - llvm-bolt and merge-fdata for the optional BOLT step: $LLVM_BOLT and
+#     $MERGE_FDATA, else `llvm-bolt` and `merge-fdata` on PATH.  Ubuntu
+#     ships both in `bolt-N` (under /usr/lib/llvm-N/bin; the package named
+#     `bolt` is the Thunderbolt daemon), or download a build from
+#     https://github.com/llvm/llvm-project/releases.  The BOLT profile comes
+#     from instrumentation, so neither perf nor LBR is needed.
+#   - python3, when the synthetic training set is used
+#
+# Training input: the PDFs given as arguments; else
+# tests/fixtures/corpus-04-ebook-mixed.pdf when present; else the synthetic
+# documents of tests/bench/instructions.py, generated from files committed
+# to the repository (hinted TrueType text, vector paths with dashes and
+# shadings, a transparency group, DCT, JPX and soft-masked Flate images,
+# CMYK fills).  The first 10 pages of each are rendered twice, RGB at
+# 150 dpi and gray at 300 dpi.
+#
+# PGO_REQUIRE_BOLT=1 makes a missing llvm-bolt or a failed BOLT step an
+# error; otherwise either leaves the PGO-only binary.
 #
 # Codegen flags: $RUSTFLAGS when set, else `-C target-cpu=native` (the
 # `.cargo/config.toml` default, which any RUSTFLAGS value replaces).  The
@@ -42,29 +57,56 @@ if [[ ! -x "$PROFDATA" ]]; then
     fi
 fi
 
-# --- Verify training fixture is present. --------------------------------------
-TRAINING_PDF="tests/fixtures/corpus-04-ebook-mixed.pdf"
-if [[ ! -f "$TRAINING_PDF" ]]; then
-    echo "error: training fixture missing: $TRAINING_PDF" >&2
-    exit 1
-fi
-
 # --- Scratch dirs cleaned on exit. --------------------------------------------
 PROFDIR="$(mktemp -d -t pdf_raster_pgo.XXXXXX)"
 TRAIN_OUTDIR="$(mktemp -d -t pdf_raster_train.XXXXXX)"
+TRAIN_INDIR="$(mktemp -d -t pdf_raster_train_in.XXXXXX)"
 cleanup() {
-    rm -rf "$PROFDIR" "$TRAIN_OUTDIR"
+    rm -rf "$PROFDIR" "$TRAIN_OUTDIR" "$TRAIN_INDIR"
 }
 trap cleanup EXIT
 
-# train BIN: render the training pages with BIN, discarding the output.
-# Fails when BIN fails or writes no page.
-train() {
-    rm -rf "${TRAIN_OUTDIR:?}"/*
-    if ! "$1" "$TRAINING_PDF" "$TRAIN_OUTDIR/page" -f 1 -l 10 >/dev/null; then
-        echo "error: the training run of $1 failed." >&2
-        return 1
+# --- Training documents. -------------------------------------------------------
+REQUIRE_BOLT="${PGO_REQUIRE_BOLT:-0}"
+CORPUS_PDF="tests/fixtures/corpus-04-ebook-mixed.pdf"
+if [[ $# -gt 0 ]]; then
+    TRAINING_PDFS=("$@")
+elif [[ -f "$CORPUS_PDF" ]]; then
+    TRAINING_PDFS=("$CORPUS_PDF")
+else
+    echo "==> Generating the synthetic training set"
+    python3 -I - "$REPO_ROOT/tests/bench" "$TRAIN_INDIR" <<'PY'
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from instructions import synthetic
+
+for path in synthetic(pathlib.Path(sys.argv[2])):
+    print(f"         {path.name}")
+PY
+    TRAINING_PDFS=("$TRAIN_INDIR"/*.pdf)
+fi
+for pdf in "${TRAINING_PDFS[@]}"; do
+    if [[ ! -f "$pdf" ]]; then
+        echo "error: training document missing: $pdf" >&2
+        exit 1
     fi
+done
+
+# train BIN: render the training pages with BIN, discarding the output.
+# Fails when BIN fails on a document or writes no page.
+train() {
+    local pdf i=0
+    rm -rf "${TRAIN_OUTDIR:?}"/*
+    for pdf in "${TRAINING_PDFS[@]}"; do
+        i=$((i + 1))
+        if ! "$1" "$pdf" "$TRAIN_OUTDIR/$i-rgb" -f 1 -l 10 >/dev/null \
+            || ! "$1" "$pdf" "$TRAIN_OUTDIR/$i-gray" -f 1 -l 10 --gray -r 300 >/dev/null; then
+            echo "error: the training run of $1 on $pdf failed." >&2
+            return 1
+        fi
+    done
     local pages
     pages="$(find "$TRAIN_OUTDIR" -type f | wc -l)"
     if [[ "$pages" -eq 0 ]]; then
@@ -74,11 +116,16 @@ train() {
     echo "         rendered $pages page(s)"
 }
 
-if command -v llvm-bolt >/dev/null 2>&1; then
+LLVM_BOLT="${LLVM_BOLT:-llvm-bolt}"
+MERGE_FDATA="${MERGE_FDATA:-merge-fdata}"
+if command -v "$LLVM_BOLT" >/dev/null 2>&1 && command -v "$MERGE_FDATA" >/dev/null 2>&1; then
     BOLT=true
     # BOLT rewrites relocation-mode binaries only, and refuses stripped ones.
     PGO_RUSTFLAGS_EXTRA="-C link-arg=-Wl,--emit-relocs"
     export CARGO_PROFILE_RELEASE_STRIP=none
+elif [[ "$REQUIRE_BOLT" == 1 ]]; then
+    echo "error: PGO_REQUIRE_BOLT=1 and $LLVM_BOLT or $MERGE_FDATA is not found." >&2
+    exit 1
 else
     BOLT=false
     PGO_RUSTFLAGS_EXTRA=""
@@ -88,7 +135,7 @@ echo "==> [1/4] Instrumented build (profile-generate)"
 echo "         PROFDIR=$PROFDIR"
 RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-generate=$PROFDIR" cargo build --release -p rasterrocket-cli
 
-echo "==> [2/4] Profile training: rendering 10 pages of $TRAINING_PDF"
+echo "==> [2/4] Profile training: ${#TRAINING_PDFS[@]} document(s)"
 train "$BINARY" || exit 1
 RAW_PROFILES="$(find "$PROFDIR" -name '*.profraw' | wc -l)"
 if [[ "$RAW_PROFILES" -eq 0 ]]; then
@@ -104,22 +151,42 @@ echo "==> [4/4] PGO-guided rebuild (profile-use)"
 RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-use=$PROFDIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function $PGO_RUSTFLAGS_EXTRA" \
     cargo build --release -p rasterrocket-cli
 
+# bolt_optimise: instrument $BINARY, train the instrumented copy and write
+# the reordered binary to $BOLT_OUT.  Each training process writes its own
+# profile (`--instrumentation-file-append-pid`); merge-fdata combines them.
+BOLT_INSTRUMENTED="$PROFDIR/rrocket.bolt-instrumented"
+BOLT_OUT="$PROFDIR/rrocket.bolt"
+BOLT_PROFDIR="$PROFDIR/bolt"
+BOLT_FDATA="$PROFDIR/rrocket.fdata"
+bolt_optimise() {
+    mkdir -p "$BOLT_PROFDIR"
+    "$LLVM_BOLT" "$BINARY" -instrument -o "$BOLT_INSTRUMENTED" \
+        --instrumentation-file="$BOLT_PROFDIR/rrocket" \
+        --instrumentation-file-append-pid || return 1
+    train "$BOLT_INSTRUMENTED" || return 1
+    local profiles=("$BOLT_PROFDIR"/*)
+    if [[ ! -e "${profiles[0]}" ]]; then
+        echo "error: the instrumented training wrote no BOLT profile." >&2
+        return 1
+    fi
+    echo "         collected ${#profiles[@]} BOLT profile(s)"
+    "$MERGE_FDATA" "${profiles[@]}" >"$BOLT_FDATA" || return 1
+    "$LLVM_BOLT" "$BINARY" -o "$BOLT_OUT" -data="$BOLT_FDATA" \
+        -reorder-blocks=ext-tsp \
+        -reorder-functions=hfsort \
+        -split-functions \
+        -split-all-cold \
+        -dyno-stats
+}
+
 if $BOLT; then
-    echo "==> [bonus] BOLT optimisation"
-    BOLT_INSTRUMENTED="$PROFDIR/rrocket.bolt-instrumented"
-    BOLT_OUT="$PROFDIR/rrocket.bolt"
-    BOLT_FDATA="$PROFDIR/rrocket.fdata"
-    if llvm-bolt "$BINARY" -instrument -o "$BOLT_INSTRUMENTED" \
-            --instrumentation-file="$BOLT_FDATA" \
-        && train "$BOLT_INSTRUMENTED" \
-        && llvm-bolt "$BINARY" -o "$BOLT_OUT" -data="$BOLT_FDATA" \
-            -reorder-blocks=ext-tsp \
-            -reorder-functions=hfsort \
-            -split-functions \
-            -split-all-cold \
-            -dyno-stats; then
+    echo "==> [bonus] BOLT optimisation ($LLVM_BOLT)"
+    if bolt_optimise; then
         cp "$BOLT_OUT" "$BINARY"
         echo "    BOLT applied."
+    elif [[ "$REQUIRE_BOLT" == 1 ]]; then
+        echo "error: BOLT failed and PGO_REQUIRE_BOLT=1." >&2
+        exit 1
     else
         echo "    BOLT failed; keeping the PGO-only binary." >&2
     fi
@@ -130,9 +197,12 @@ if $BOLT; then
         echo "    strip not on PATH; $BINARY keeps its symbol table." >&2
     fi
 else
-    echo "==> [bonus] BOLT not on PATH — skipping."
-    echo "         Install: apt install bolt   (Ubuntu 24.04+)"
+    echo "==> [bonus] $LLVM_BOLT or $MERGE_FDATA not found — skipping BOLT."
+    echo "         Install: apt install bolt-N   (Ubuntu; or set LLVM_BOLT and MERGE_FDATA)"
 fi
+
+echo "==> Smoke render with the final binary"
+train "$BINARY" || exit 1
 
 echo
 echo "==> Done. Binary at $BINARY"

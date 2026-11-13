@@ -2675,6 +2675,14 @@ crates (vendored forks, `pdf_bridge` and the bench crate left out) under
 CI's CPU-only test sets with `cargo-llvm-cov`, uploads the lcov and HTML
 reports as an artifact and writes a per-package table to the job summary;
 it reports only and gates nothing.
+A PGO + BOLT workflow (on `v*` tags and by hand) runs
+`scripts/release_pgo_build.sh` on a hosted runner and uploads the stripped
+`rrocket` binary as an artifact: x86-64 baseline codegen, trained on the
+synthetic documents generated from committed files, BOLT profiled by
+instrumentation (no perf or LBR needed) and required to apply.  The script
+now takes training PDFs as arguments, falls back to that synthetic set when
+the corpus fixture is absent, merges the per-process BOLT profiles, and
+ends with a smoke render of the final binary.
 
 A file opened by path can be read into memory instead of memory-mapped
 (`SessionConfig::read_into_memory`, `RasterOptions::read_into_memory`,
