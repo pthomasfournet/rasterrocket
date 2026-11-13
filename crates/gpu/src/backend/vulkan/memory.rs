@@ -151,16 +151,24 @@ impl DeviceBuffer {
     pub const fn device_address(&self) -> vk::DeviceAddress {
         self.device_address
     }
-}
 
-#[cfg(test)]
-impl DeviceBuffer {
     /// Property flags of the memory type backing the buffer.
     pub(crate) fn memory_properties(&self) -> vk::MemoryPropertyFlags {
         self.allocation.as_ref().map_or_else(
             vk::MemoryPropertyFlags::empty,
             Allocation::memory_properties,
         )
+    }
+
+    /// Whether the host reads the buffer in place through its cache: the
+    /// memory is mapped and `HOST_CACHED`.  Host reads of mapped memory
+    /// without `HOST_CACHED` are uncached and run at a small fraction of
+    /// memory bandwidth.
+    pub(super) fn host_reads_cached(&self) -> bool {
+        self.is_mapped()
+            && self
+                .memory_properties()
+                .contains(vk::MemoryPropertyFlags::HOST_CACHED)
     }
 }
 

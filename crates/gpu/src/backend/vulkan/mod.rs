@@ -404,11 +404,15 @@ impl GpuBackend for VulkanBackend {
         self.recorder.with_quiescent(|| dst.write_mapped(src))?
     }
 
-    /// A mapped buffer (integrated GPU) is read in place under
+    /// A mapped buffer in `HOST_CACHED` memory (an integrated GPU's
+    /// read-back buffers) is read in place under
     /// [`recorder::PageRecorder::with_quiescent`]: no page writes it while
-    /// the host reads.
+    /// the host reads.  Any other buffer, a mapped one in uncached memory
+    /// included, is copied by the device into a `HOST_CACHED` staging
+    /// buffer and read from there: host reads of uncached memory run at a
+    /// small fraction of the bandwidth of the copy and the cached read.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-        if !src.is_mapped() {
+        if !src.host_reads_cached() {
             return self.transfer.download(&self.memory, src, dst);
         }
         if dst.is_empty() {
@@ -518,6 +522,25 @@ mod tests {
                 read.memory_properties()
             );
         }
+    }
+
+    #[test]
+    fn vulkan_shared_memory_download_of_an_uncached_buffer_is_staged() {
+        let Some(backend) = integrated() else { return };
+        let buf = backend.alloc_device(4096).expect("alloc_device");
+        if buf.host_reads_cached() {
+            eprintln!("skipping: the written buffer is in host-cached memory");
+            return;
+        }
+        let data: Vec<u8> = (0..=u8::MAX).cycle().take(4096).collect();
+        backend.upload(&buf, &data).expect("upload");
+        let mut out = vec![0; 4096];
+        backend.download(&buf, &mut out).expect("download");
+        assert_eq!(out, data);
+        assert!(
+            backend.transfer.download_staging_properties().is_some(),
+            "the download read uncached memory in place"
+        );
     }
 
     #[test]
