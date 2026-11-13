@@ -23,6 +23,14 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - `open_session` + `render_page_rgb_with` / `render_page_gray`: one open
   document, per-page renders from any thread, with `RenderParams` for
   per-axis scale, a `RenderRegion` window and a `CancelToken`.
+- `PageBuffer::render_gray_into` / `render_rgb_into` / `render_rgba_into`:
+  pages written into a buffer the caller owns and reuses, at its stride,
+  with the page canvas kept between renders; `RasterSession::page_size_px`
+  sizes the buffer first.
+- `open_session_from_shared` (`Arc<[u8]>`, `&'static [u8]` or any other
+  `AsRef<[u8]>` storage, read in place) and `open_session_from_reader`
+  (any `Read`, read to its end) beside `open_session` and
+  `open_session_from_bytes`.
 - `transparent_background` (off by default) renders over a transparent
   backdrop: RGBA pages (`PixelFormat::Rgba8`, straight alpha) from the batch
   entry points and `render_page_rgba`, and an RGB bitmap with an alpha plane

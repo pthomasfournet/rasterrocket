@@ -92,14 +92,21 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ### Session API
 
-Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `rgb_to_gray` and `rgb_into_gray`.
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `rgb_to_gray` and `rgb_into_gray`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
 pub fn open_session_from_bytes(bytes: Vec<u8>, config: &SessionConfig) -> Result<RasterSession, RasterError>
+pub fn open_session_from_shared(
+    bytes: impl AsRef<[u8]> + Send + Sync + 'static,
+    config: &SessionConfig,
+) -> Result<RasterSession, RasterError>
+pub fn open_session_from_reader(reader: impl std::io::Read, config: &SessionConfig) -> Result<RasterSession, RasterError>
 ```
 
 `open_session_from_bytes` is the in-memory counterpart to `open_session` (the session-level analogue of `raster_pdf_from_bytes`): same behaviour, taking owned PDF bytes instead of a path.
+
+The parser reads the document as one contiguous slice, indexed by the cross-reference offsets: a file is memory-mapped (from 256 KiB; a shorter one is read), owned bytes are held as they are, and `open_session_from_shared` holds any `AsRef<[u8]>` storage the caller shares (`Arc<[u8]>`, `&'static [u8]`, a reference-counted byte buffer type such as `bytes::Bytes`, a mapping the caller made) and reads it in place, never copying it. `bytes.as_ref()` must return the same bytes on every call. `open_session_from_reader` reads a `Read` source (a socket, an archive member) to its end into memory and opens that; a `Seek` source gains nothing, since nothing is parsed before the whole document is in memory, and a file on disk is better opened by path. A reader's I/O error is `RasterError::Pdf`. Every source renders the same document to identical pixels.
 
 An encrypted document (Standard security handler, revisions 2–6: RC4 40–128-bit, AES-128, AES-256, crypt filters) is refused with `RasterError::Pdf` unless `config.decrypt_authorized` is `true`; with it, the document is decrypted in process — no subprocess, no temporary file. The empty user password is tried first (a permissions-only document needs none), then `config.password` as the user and as the owner password; a wrong password, or none where one is needed, is a `RasterError::Pdf` saying which. A document using another security handler (public-key encryption, `/Adobe.PubSec`) is refused by name.
 
@@ -208,6 +215,68 @@ Errors with `RasterError::PageOutOfRange` or `RasterError::InvalidPageGeometry` 
 
 ---
 
+### `PageBuffer`
+
+```rust
+#[derive(Debug, Default)]
+pub struct PageBuffer { /* the page canvas, kept between renders */ }
+
+impl PageBuffer {
+    pub fn new() -> Self
+    pub fn render_gray_into(&mut self, session: &RasterSession, page_num: u32,
+        opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
+    pub fn render_rgb_into(&mut self, session: &RasterSession, page_num: u32,
+        opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
+    pub fn render_rgba_into(&mut self, session: &RasterSession, page_num: u32,
+        opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct PageInfo {
+    pub page_num: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,     // Gray8, Rgb8 or Rgba8
+    pub dpi: f32,
+    pub diagnostics: PageDiagnostics,
+}
+```
+
+Renders whole pages at `opts.dpi` into memory the caller owns. Every page is drawn on an RGB canvas the size of the page; a `PageBuffer` keeps that canvas's allocation between renders and writes the finished page into `out`, row `y` at `out[y * stride..]`, in the method's format. Once the canvas has grown to the largest page rendered through it, a render allocates no page-sized buffer: neither canvas nor output. Allocations of the drawing itself (decoded images, glyphs, transparency groups) are unchanged.
+
+| Method | Pixels written | `opts` fields used |
+|---|---|---|
+| `render_gray_into` | those of `render_page_gray`, one byte per pixel; with `deskew` the canvas is converted to gray in place and rotated straight into `out` | `dpi`, `deskew`, `cancel` |
+| `render_rgb_into` | those of `render_page_rgb` at `dpi / 72`, `[R, G, B]` | `dpi`, `cancel`; `deskew` is `InvalidOptions` |
+| `render_rgba_into` | those of `render_page_rgba`, `[R, G, B, A]` straight alpha over a transparent backdrop | `dpi`, `cancel`; `deskew` is `InvalidOptions` |
+
+`stride` is in bytes and at least `width * format.bytes_per_pixel()`; `out` holds at least `(height - 1) * stride + width * bytes_per_pixel` bytes (the last row needs no padding); bytes between rows are left alone. A shorter stride is `RasterError::OutputStrideTooSmall`, a shorter buffer `RasterError::OutputBufferTooSmall`, both returned before anything is drawn and with `out` untouched. `RasterSession::page_size_px(page_num, dpi)` gives `(width, height)` beforehand. The methods take `&mut self`, so a thread rendering in parallel keeps its own `PageBuffer`; a failed render releases the canvas and the next render allocates it again.
+
+```rust
+let mut buffer = PageBuffer::new();
+let mut out = Vec::new();
+for page in 1..=session.total_pages() {
+    let (w, h) = session.page_size_px(page, opts.dpi)?;
+    out.resize(w as usize * h as usize, 0);   // grows to the largest page, then stays
+    let info = buffer.render_gray_into(&session, page, &opts, &mut out, w as usize)?;
+    // out[..w * h] holds the page
+}
+```
+
+Measured with a counting global allocator (`examples/page_buffer_allocs.rs`), 20 pages at 150 dpi, gray, warm session caches, CPU, against `render_page_gray`:
+
+| Fixture | `render_page_gray` bytes / page | page-sized allocations / page | ms / page | `PageBuffer` bytes / page | page-sized allocations / page | ms / page |
+|---|---|---|---|---|---|---|
+| corpus-01 (native text) | 8.89 MB | 2.00 | 1.79 | 0.47 MB | 0.00 | 1.14 |
+| corpus-04 (ebook, mixed) | 14.16 MB | 2.20 | 4.58 | 5.47 MB | 0.20 | 4.43 |
+| corpus-06 (DCT layout) | 39.52 MB | 6.20 | 15.3 | 30.82 MB | 4.20 | 15.2 |
+| corpus-08 (DCT scan) | 41.40 MB | 2.00 | 43.5 | 12.48 MB | 0.00 | 43.9 |
+
+The remaining page-sized allocations are decoded images; the allocation count falls by three per page, out of the thousands the drawing makes.
+
+---
+
 ### `RasterSession`
 
 ```rust
@@ -218,6 +287,7 @@ impl RasterSession {
     pub const fn policy(&self) -> BackendPolicy
     pub const fn form_type(&self) -> FormType
     pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
+    pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError>
     #[cfg(feature = "cache")]
     pub const fn image_cache(&self) -> Option<&gpu::cache::ImageCache>  // diagnostics; CUDA or Vulkan
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
@@ -226,7 +296,7 @@ impl RasterSession {
 
 An opened, read-only document. `Sync + Send` — safe to share across Rayon threads.
 
-`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering.
+`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering. `page_size_px(page_num, dpi)` is that size for a whole-page render at `dpi` (scale `dpi / 72` on both axes, rounded to nearest as the renderer rounds it; deskew keeps it), and it fails with the `InvalidOptions`, `PageDegenerate`, `PageTooLarge` or `PageAreaTooLarge` that render would.
 
 ---
 
@@ -355,9 +425,9 @@ pub struct RenderedPage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PixelFormat { Gray8, Rgba8 }
+pub enum PixelFormat { Gray8, Rgba8, Rgb8 }
 impl PixelFormat {
-    pub const fn bytes_per_pixel(self) -> usize   // 1 or 4
+    pub const fn bytes_per_pixel(self) -> usize   // 1, 4 or 3
 }
 ```
 
@@ -366,7 +436,7 @@ impl PixelFormat {
 | `page_num` | 1-based page number. |
 | `width`, `height` | Output bitmap dimensions in pixels. |
 | `pixels` | In `format`, tightly packed, top-to-bottom. Length is exactly `width * height * format.bytes_per_pixel()`: `width * height` for the default 8-bit grayscale pages. |
-| `format` | `PixelFormat::Gray8` (one byte per pixel, 0 black), or `PixelFormat::Rgba8` (`[R, G, B, A]`, straight alpha) under `RasterOptions::transparent_background`. |
+| `format` | `PixelFormat::Gray8` (one byte per pixel, 0 black), or `PixelFormat::Rgba8` (`[R, G, B, A]`, straight alpha) under `RasterOptions::transparent_background`. `PixelFormat::Rgb8` is only written by `PageBuffer::render_rgb_into`. |
 | `dpi` | Pixels per physical inch (`opts.dpi`). The page size includes its `/UserUnit`, so this holds for any unit. Pass it to `tesseract::set_source_resolution`. |
 | `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. |
 
@@ -574,6 +644,8 @@ pub enum RasterError {
     PageAreaTooLarge { width: u32, height: u32, area: u64 },
     PageAllocationFailed { width: u32, height: u32 },
     Deskew(String),
+    OutputStrideTooSmall { stride: usize, row_bytes: usize },  // PageBuffer output
+    OutputBufferTooSmall { len: usize, needed: usize },       // PageBuffer output
     InvalidPageGeometry(String),
     BackendUnavailable(String),  // forced backend failed to init
     ImageDecodeFailed(Vec<String>),

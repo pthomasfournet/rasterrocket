@@ -2594,6 +2594,30 @@ Vulkan NVIDIA and RADV and from 16 000 px under MoltenVK, end to end from
 128 000 px on one thread (500 000 px: CUDA 315 vs 447 ms for eight
 images).  `threshold_bench --only clut` and `startup_bench` (gpu crate)
 measure both.
+A library caller renders pages into memory it owns: a `PageBuffer` keeps
+the page canvas between renders and its `render_gray_into` /
+`render_rgb_into` / `render_rgba_into` write the page at the caller's
+stride, byte-identical to `render_page_gray` / `render_page_rgb` /
+`render_page_rgba`; deskew rotates from the canvas straight into the
+output.  Once the canvas has grown to the largest page, a render allocates
+no page-sized buffer (20 pages at 150 dpi, gray, against
+`render_page_gray`: corpus-01 8.89 → 0.47 MB allocated a page,
+1.79 → 1.14 ms; corpus-08 41.4 → 12.5 MB, time level; the page-sized
+allocations left are decoded images).  `RasterSession::page_size_px` gives
+a page's pixel size at a dpi before the render; a short stride or buffer
+is `RasterError::OutputStrideTooSmall` / `OutputBufferTooSmall`, returned
+before drawing.  `open_session_from_shared` opens a document from any
+`AsRef<[u8]>` storage the caller shares (`Arc<[u8]>`, `&'static [u8]`, a
+reference-counted buffer, its own mapping) without a copy, and
+`open_session_from_reader` from any `Read` source, read to its end first
+since the parser needs the whole document as one slice.  Public API, all
+additive: `PageBuffer`, `PageInfo`, `PixelFormat::Rgb8`,
+`RasterSession::page_size_px`, `open_session_from_shared`,
+`open_session_from_reader` and the two `RasterError` variants; in
+`rasterrocket-parser`, `Document::from_shared(_with)`; in
+`rasterrocket-interp`, `open_shared_with` and
+`PageRenderer::try_with_page_group_in`; in `rasterrocket-render`,
+`BitmapBuffers`, `Bitmap::try_new_filled_in` and `Bitmap::into_buffers`.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
