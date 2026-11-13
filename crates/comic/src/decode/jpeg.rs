@@ -20,17 +20,36 @@ use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_fro
 /// own per-side cap is raised to the shared limit so that check is the single
 /// size policy across codecs.
 ///
+/// A stream whose scan data is incomplete or damaged is drawn as far as it
+/// decodes, with a warning.
+///
 /// # Errors
 ///
 /// [`DecodeError::TooLarge`] when the frame exceeds the rendered-page
 /// limits; [`DecodeError::Codec`] if the stream is not decodable or reports
 /// zero dimensions.
 pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+    let (pixels, intact_rows, height) = decode_counting_rows(bytes)?;
+    if intact_rows < height {
+        log::warn!(
+            "jpeg: the scan data is incomplete or damaged ({intact_rows} of {height} rows are \
+             whole); the page is drawn as far as it decodes"
+        );
+    }
+    Ok(pixels)
+}
+
+/// [`decode`], with the number of leading rows decoded from scan data that
+/// was present and well formed, and the frame height.
+fn decode_counting_rows(bytes: &[u8]) -> Result<(CodecPixels, u32, u32), DecodeError> {
     let side_cap = pdf_raster::MAX_PX_DIMENSION as usize;
+    // Not strict: the rows a damaged stream still holds are drawn, and the
+    // decoder counts them.
     let opts = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::RGB)
         .set_max_width(side_cap)
-        .set_max_height(side_cap);
+        .set_max_height(side_cap)
+        .set_strict_mode(false);
     let mut dec = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
     dec.decode_headers()
         .map_err(|e| DecodeError::Codec(format!("jpeg: {e}")))?;
@@ -49,9 +68,55 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     let pixels = dec
         .decode()
         .map_err(|e| DecodeError::Codec(format!("jpeg: {e}")))?;
-    if gray {
+    // At most the frame height, which fits `u16`.
+    let intact_rows = u32::try_from(dec.intact_rows()).map_or(h, |rows| rows.min(h));
+    let pixels = if gray {
         gray_from_tight(w, h, pixels)
     } else {
         rgb_from_tight(w, h, pixels)
+    }?;
+    Ok((pixels, intact_rows, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4:2:0 colour frame of noise with restart markers, 64 rows.
+    const NOISE: &[u8] = include_bytes!("../../../zune_jpeg/tests/images/cut/noise_420_rst.jpg");
+
+    fn rgb(pixels: CodecPixels) -> Vec<u8> {
+        match pixels {
+            CodecPixels::Rgb(bitmap) => bitmap.data().to_vec(),
+            CodecPixels::Gray(_) => panic!("a colour frame decodes to RGB"),
+        }
+    }
+
+    #[test]
+    fn a_complete_stream_is_whole() {
+        let (pixels, intact_rows, height) = decode_counting_rows(NOISE).expect("decodes");
+        assert_eq!(intact_rows, height);
+        assert_eq!(rgb(pixels), rgb(decode(NOISE).expect("decodes")));
+    }
+
+    #[test]
+    fn a_stream_cut_short_is_drawn_and_counted() {
+        let (whole, _, height) = decode_counting_rows(NOISE).expect("decodes");
+        let whole = rgb(whole);
+        let width = whole.len() / 3 / height as usize;
+
+        let cut = &NOISE[..NOISE.len() * 2 / 3];
+        let (pixels, intact_rows, cut_height) = decode_counting_rows(cut).expect("decodes");
+        assert_eq!(cut_height, height);
+        assert!(
+            0 < intact_rows && intact_rows < height,
+            "{intact_rows} of {height} rows"
+        );
+        // The rows counted whole are the complete decode's, but for the last
+        // two, whose chroma is interpolated from the row of MCUs below.
+        let same = (intact_rows as usize).saturating_sub(2) * width * 3;
+        let pixels = rgb(pixels);
+        assert_eq!(pixels.len(), whole.len());
+        assert_eq!(pixels[..same], whole[..same]);
     }
 }
