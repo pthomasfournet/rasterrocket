@@ -297,6 +297,25 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     }
 }
 
+/// Whether [`BackendPolicy::Auto`] initialises a GPU backend: only while a
+/// device kernel that its dispatch threshold leaves dormant by default is
+/// enabled, the AA fill or the parallel-Huffman JPEG decoder
+/// ([`pdf_interp::device_kernel_enabled`]).  Otherwise an `Auto` session
+/// renders on the CPU: no Vulkan device, CUDA context, image cache or
+/// nvJPEG decoder is created, and an nvJPEG2000 decoder only on a thread
+/// that meets an image it takes.
+#[cfg(any(
+    feature = "gpu-aa",
+    feature = "gpu-icc",
+    feature = "cache",
+    feature = "vulkan",
+    feature = "nvjpeg"
+))]
+pub(crate) fn auto_uses_device() -> bool {
+    use pdf_interp::{DeviceKernel, device_kernel_enabled};
+    device_kernel_enabled(DeviceKernel::AaFill) || device_kernel_enabled(DeviceKernel::HuffmanJpeg)
+}
+
 /// The CUDA context of a session under `policy`.  Under `Auto` a Vulkan
 /// backend wins (`vk_won_auto`) and CUDA is not initialised, which saves
 /// its ~240 ms start-up for a path the session will not use.
@@ -520,7 +539,8 @@ fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
 
 /// Initialise the CUDA GPU context for AA fill and ICC colour transforms.
 ///
-/// Returns `None` on `CpuOnly` and `ForceVulkan`.  Errors loudly on
+/// Returns `None` on `CpuOnly` and `ForceVulkan`, and on `Auto` unless
+/// [`auto_uses_device`].  Errors loudly on
 /// `ForceCuda` if init fails; logs a warning and returns `None` on
 /// `Auto` / `ForceVaapi` if init fails.
 ///
@@ -546,7 +566,9 @@ static GPU_CTX: std::sync::OnceLock<Result<Arc<gpu::GpuCtx>, String>> = std::syn
 
 #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
 fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
-    if matches!(policy, BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan) {
+    if matches!(policy, BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan)
+        || (matches!(policy, BackendPolicy::Auto) && !auto_uses_device())
+    {
         return Ok(None);
     }
 

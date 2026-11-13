@@ -210,6 +210,8 @@ impl PageRenderer<'_> {
         draw_size: Option<(u32, u32)>,
     ) -> (ImageResolution, bool) {
         let curtailed = self.tint_budget.curtailments();
+        #[cfg(feature = "nvjpeg2k")]
+        let nvjpeg2k = self.nvjpeg2k_for_draw(name, draw_size);
         let request = crate::resources::ImageRequest { name, draw_size };
         #[cfg(feature = "gpu-icc")]
         let icc_counts = crate::resources::image::DeviceIccCounts::default();
@@ -222,7 +224,7 @@ impl PageRenderer<'_> {
             #[cfg(feature = "vaapi")]
             vaapi: self.vaapi_jpeg_queue.as_ref(),
             #[cfg(feature = "nvjpeg2k")]
-            nvjpeg2k: self.nvjpeg2k.as_mut(),
+            nvjpeg2k: self.nvjpeg2k.as_mut().filter(|_| nvjpeg2k),
             #[cfg(feature = "gpu-icc")]
             icc: crate::resources::image::IccHandles {
                 gpu_ctx: self.gpu_ctx.as_ref(),

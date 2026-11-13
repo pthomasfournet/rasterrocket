@@ -401,8 +401,11 @@ pub(crate) struct Args {
     // ── Backend selection ─────────────────────────────────────────────────────
     /// Compute backend for image decoding and GPU fills.
     ///
-    /// `auto`   — Vulkan if compiled in and present, else CUDA, else CPU
-    ///            (silent fallback at every step).  This is the default.
+    /// `auto`   — CPU, unless a GPU kernel is enabled by its threshold
+    ///            override (`PDF_RASTER_AA_FILL_THRESHOLD`,
+    ///            `PDF_RASTER_HUFFMAN_THRESHOLD`); then Vulkan if compiled in
+    ///            and present, else CUDA, else CPU (silent fallback at every
+    ///            step).  This is the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
     /// `cuda`   — Require CUDA (nvJPEG/AA fill/ICC); exit with error if unavailable.
     /// `vaapi`  — Require VA-API JPEG; exit with error if the DRM device cannot be opened.

@@ -11,7 +11,10 @@ use crate::{BackendPolicy, RasterError, RasterSession};
 /// [`BackendPolicy::CpuOnly`] to skip GPU decoder init for this page regardless
 /// of the session-level policy — used by affinity dispatch for `CpuOnly` pages.
 ///
-/// On `CpuOnly` this is a no-op.  On `ForceCuda`/`ForceVaapi` init failure is
+/// On `CpuOnly` this is a no-op.  On `Auto` the nvJPEG decoder is built
+/// only when [`crate::open::auto_uses_device`], and the nvJPEG2000 decoder
+/// only when the page draws an image it takes.  On
+/// `ForceCuda`/`ForceVaapi` init failure is
 /// returned as `RasterError::BackendUnavailable` rather than silently falling back.
 #[cfg_attr(
     not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
@@ -64,7 +67,8 @@ pub(crate) fn lend_decoders(
             {
                 true
             }
-        };
+        } && (!matches!(effective_policy, BackendPolicy::Auto)
+            || crate::open::auto_uses_device());
         if dispatch_nvjpeg {
             gpu_init::ensure_nvjpeg(effective_policy).map_err(RasterError::BackendUnavailable)?;
             gpu_init::NVJPEG_DEC.with(|cell| {
@@ -87,7 +91,16 @@ pub(crate) fn lend_decoders(
                 true
             }
         };
-        if dispatch_nvjpeg2k {
+        if matches!(effective_policy, BackendPolicy::Auto) {
+            // A decoder this thread already built is lent; otherwise the
+            // renderer builds one when it first meets an image it takes.
+            gpu_init::NVJPEG2K_DEC.with(|cell| {
+                if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
+                    renderer.set_nvjpeg2k(slot.take());
+                }
+            });
+            renderer.set_nvjpeg2k_source(Some(gpu_init::take_nvjpeg2k_for_auto));
+        } else if dispatch_nvjpeg2k {
             gpu_init::ensure_nvjpeg2k(effective_policy).map_err(RasterError::BackendUnavailable)?;
             gpu_init::NVJPEG2K_DEC.with(|cell| {
                 if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {

@@ -10,24 +10,10 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::open::auto_uses_device;
+use crate::{BackendPolicy, RasterError};
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
-use pdf_interp::{DeviceKernel, device_kernel_enabled};
-
-use crate::{BackendPolicy, RasterError};
-
-/// Whether [`BackendPolicy::Auto`] initialises the Vulkan backend: only
-/// when a kernel that runs on it in production is enabled, the AA fill or
-/// the parallel-Huffman JPEG decoder ([`device_kernel_enabled`]).
-///
-/// A Vulkan backend that wins `Auto` also keeps the CUDA context from
-/// initialising, so with every Vulkan kernel disabled `Auto` falls through
-/// to CUDA (whose CLUT kernel is live), then the CPU; conversely, enabling a
-/// Vulkan kernel moves the CLUT and the device image cache onto Vulkan
-/// under `Auto`.
-fn auto_wants_vulkan() -> bool {
-    device_kernel_enabled(DeviceKernel::AaFill) || device_kernel_enabled(DeviceKernel::HuffmanJpeg)
-}
 
 /// Why a backend could not be constructed.
 #[derive(Debug, Clone)]
@@ -59,8 +45,8 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// Return the Vulkan backend for `selector` under `policy`.
 ///
 /// Policies other than `Auto` and `ForceVulkan` return `Ok(None)` without
-/// touching Vulkan, and so does `Auto` while every Vulkan kernel is dormant
-/// (see [`auto_wants_vulkan`]).  An unavailable Vulkan is `Ok(None)` under `Auto` (the
+/// touching Vulkan, and so does `Auto` while every device kernel is dormant
+/// (see [`auto_uses_device`]).  An unavailable Vulkan is `Ok(None)` under `Auto` (the
 /// caller falls through to CUDA, then CPU) and an error under
 /// `ForceVulkan`.  A selector that does not resolve is an error whenever
 /// Vulkan is initialised, under either policy, since it is a configuration
@@ -80,8 +66,8 @@ pub(crate) fn init_vk_backend(
     if !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan) {
         return Ok(None);
     }
-    if matches!(policy, BackendPolicy::Auto) && !auto_wants_vulkan() {
-        log::debug!("rasterrocket: every Vulkan kernel is dormant; Auto leaves Vulkan idle");
+    if matches!(policy, BackendPolicy::Auto) && !auto_uses_device() {
+        log::debug!("rasterrocket: every device kernel is dormant; Auto leaves Vulkan idle");
         if let Some(selector) = selector
             && let Err(InitError::Selection(msg)) = checked_selector(selector)
         {
@@ -166,7 +152,7 @@ mod tests {
     use crate::{BackendPolicy, RasterError};
 
     /// A selector naming no device is a configuration error under `Auto`
-    /// even while every Vulkan kernel is dormant (the default thresholds of
+    /// even while every device kernel is dormant (the default thresholds of
     /// this test process) and no device is opened.
     #[test]
     fn auto_rejects_an_unresolvable_selector_while_vulkan_is_idle() {

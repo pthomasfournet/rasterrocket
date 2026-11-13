@@ -142,6 +142,21 @@ pub(crate) fn ensure_nvjpeg2k(policy: BackendPolicy) -> Result<(), String> {
     })
 }
 
+/// This thread's nvJPEG2000 decoder, built on first call under
+/// [`BackendPolicy::Auto`] and taken out of its slot; `None` when it failed
+/// to initialise (logged once per thread).  The renderer's source of the
+/// decoder under `Auto` (`PageRenderer::set_nvjpeg2k_source`); the decoder
+/// returns to the slot with the renderer's other decoders after the page.
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) fn take_nvjpeg2k_for_auto() -> Option<gpu::nvjpeg2k::NvJpeg2kDecoder> {
+    // Under `Auto` an initialisation failure is logged, not returned.
+    let _ = ensure_nvjpeg2k(BackendPolicy::Auto);
+    NVJPEG2K_DEC.with(|cell| match &mut *cell.borrow_mut() {
+        DecoderInit::Ready(slot) => slot.take(),
+        _ => None,
+    })
+}
+
 // ── Release helpers (called via rayon::broadcast before pool drop) ────────────
 
 /// Drop this thread's nvJPEG decoder immediately so the TLS destructor at

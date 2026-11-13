@@ -11,9 +11,10 @@ use crate::{PageBox, Password, RenderPurpose};
 
 /// Controls which compute backend is used for image decoding and GPU fills.
 ///
-/// The default is [`Auto`](BackendPolicy::Auto), which prefers Vulkan when
-/// compiled in and one of its kernels is enabled, falls through to CUDA, and
-/// finally to the CPU paths.  The `Force*` variants turn silent fallbacks into hard
+/// The default is [`Auto`](BackendPolicy::Auto), which renders on the CPU
+/// unless a device kernel is enabled by its threshold, and then prefers
+/// Vulkan when compiled in, falls through to CUDA, and finally to the CPU
+/// paths.  The `Force*` variants turn silent fallbacks into hard
 /// errors so you can tell immediately whether the expected hardware path is
 /// actually being taken.
 ///
@@ -24,9 +25,14 @@ use crate::{PageBox, Password, RenderPurpose};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    /// Auto: prefer Vulkan when present and one of its kernels (the AA fill,
-    /// the parallel-Huffman JPEG decoder) is enabled by its threshold, fall
-    /// through to CUDA, then CPU.  Silent fallback at every step.
+    /// Auto: the CPU, unless a device kernel (the AA fill, the
+    /// parallel-Huffman JPEG decoder) is enabled by its threshold, which
+    /// none is by default; then prefer Vulkan when present, fall through to
+    /// CUDA, then CPU.  Silent fallback at every step.  A CPU session
+    /// initialises no GPU backend, image cache or nvJPEG decoder; with the
+    /// `nvjpeg2k` feature a rendering thread builds its nvJPEG2000 decoder
+    /// when it first draws a `JPXDecode` image the decoder takes at more
+    /// than half its size on some axis; smaller draws decode on the CPU.
     #[default]
     Auto,
     /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.

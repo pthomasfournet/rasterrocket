@@ -708,6 +708,23 @@ impl<'doc> PageResources<'doc> {
         Some(ExtGStateParams::from_dict(self.doc, &gs))
     }
 
+    /// The dimensions of the `XObject` resource `name` when it is an image
+    /// the GPU JPEG 2000 decoder takes: terminal filter `JPXDecode` and at
+    /// least [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels by its dictionary.
+    #[cfg(feature = "nvjpeg2k")]
+    #[must_use]
+    pub(crate) fn xobject_device_jpx_size(&self, name: &[u8]) -> Option<(u32, u32)> {
+        let obj = self.doc.get_object(self.xobject_id(name)?).ok()?;
+        let dict = &obj.as_ref().as_stream()?.dict;
+        let chain = image::image_filter_chain(dict.get(b"Filter")?);
+        if chain.last().is_none_or(|f| f != "JPXDecode") {
+            return None;
+        }
+        let dim = |key: &[u8]| dict.get_i64(key).and_then(|v| u32::try_from(v).ok());
+        let (w, h) = (dim(b"Width")?, dim(b"Height")?);
+        (w.saturating_mul(h) >= image::GPU_JPEG2K_THRESHOLD_PX).then_some((w, h))
+    }
+
     /// The object the `XObject` resource `name` refers to, when the entry is
     /// an indirect reference (as `XObject` streams must be).
     #[must_use]

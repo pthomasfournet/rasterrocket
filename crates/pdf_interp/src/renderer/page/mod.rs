@@ -123,6 +123,20 @@ use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::NvJpeg2kDecoder;
 
+/// How a renderer obtains its GPU JPEG 2000 decoder and which decodes it
+/// offers it.
+#[cfg(feature = "nvjpeg2k")]
+#[derive(Clone, Copy)]
+enum Nvjpeg2kSupply {
+    /// The attached decoder, if any, is offered every decode.
+    Attached,
+    /// The decoder is offered only the draws
+    /// `PageRenderer::nvjpeg2k_for_draw` selects, and is obtained from the
+    /// source, while it is `Some`, by the first of them that finds none
+    /// attached.
+    OnDemand(Option<fn() -> Option<NvJpeg2kDecoder>>),
+}
+
 /// Identity CTM for passing to raster functions — coordinate transform is
 /// already baked into the path points by `to_device`.
 const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -333,6 +347,9 @@ pub struct PageRenderer<'doc> {
     /// enabled and a CUDA device is available.  `None` means CPU-only JPX decode.
     #[cfg(feature = "nvjpeg2k")]
     nvjpeg2k: Option<NvJpeg2kDecoder>,
+    /// Which decodes are offered [`Self::nvjpeg2k`], and how it is obtained.
+    #[cfg(feature = "nvjpeg2k")]
+    nvjpeg2k_supply: Nvjpeg2kSupply,
     /// Shared GPU context for AA fill dispatch and ICC CMYK→RGB colour conversion.
     /// Present when `gpu-aa` or `gpu-icc` features are enabled.
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
@@ -552,6 +569,8 @@ impl<'doc> PageRenderer<'doc> {
             vaapi_jpeg_queue: None,
             #[cfg(feature = "nvjpeg2k")]
             nvjpeg2k: None,
+            #[cfg(feature = "nvjpeg2k")]
+            nvjpeg2k_supply: Nvjpeg2kSupply::Attached,
             #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]

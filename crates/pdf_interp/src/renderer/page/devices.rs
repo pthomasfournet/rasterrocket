@@ -116,6 +116,47 @@ impl PageRenderer<'_> {
         self.nvjpeg2k = dec;
     }
 
+    /// Obtain the GPU JPEG 2000 decoder from `source` on demand.  With a
+    /// source set, an image `XObject` is offered the decoder only when it
+    /// is one the decoder takes (`JPXDecode`, at least
+    /// [`crate::resources::image::GPU_JPEG2K_THRESHOLD_PX`] pixels) and the
+    /// draw does not reduce it to half its size or less on both axes (such
+    /// a draw decodes on the CPU at a reduced resolution level); the first
+    /// such image obtains the decoder from `source` when none is attached.
+    /// `source` is called at most once per renderer; its `None` leaves
+    /// JPEG 2000 decode on the CPU.
+    #[cfg(feature = "nvjpeg2k")]
+    pub fn set_nvjpeg2k_source(&mut self, source: Option<fn() -> Option<NvJpeg2kDecoder>>) {
+        self.nvjpeg2k_supply = source.map_or(super::Nvjpeg2kSupply::Attached, |source| {
+            super::Nvjpeg2kSupply::OnDemand(Some(source))
+        });
+    }
+
+    /// Whether the decode of image `XObject` `name` drawn at `draw_size`
+    /// is offered the GPU JPEG 2000 decoder (see
+    /// [`Self::set_nvjpeg2k_source`]), attaching it from the source first
+    /// when needed.  Without a source every decode is offered it.
+    #[cfg(feature = "nvjpeg2k")]
+    pub(super) fn nvjpeg2k_for_draw(&mut self, name: &[u8], draw_size: Option<(u32, u32)>) -> bool {
+        let super::Nvjpeg2kSupply::OnDemand(source) = self.nvjpeg2k_supply else {
+            return true;
+        };
+        let Some((w, h)) = self.resources.xobject_device_jpx_size(name) else {
+            return false;
+        };
+        if draw_size.is_some_and(|(dw, dh)| dw.saturating_mul(2) <= w && dh.saturating_mul(2) <= h)
+        {
+            return false;
+        }
+        if self.nvjpeg2k.is_none()
+            && let Some(source) = source
+        {
+            self.nvjpeg2k_supply = super::Nvjpeg2kSupply::OnDemand(None);
+            self.nvjpeg2k = source();
+        }
+        true
+    }
+
     /// Detach and return the nvJPEG decoder so the caller can reuse it.
     ///
     /// Returns `None` if no decoder was attached (e.g. GPU init failed).
