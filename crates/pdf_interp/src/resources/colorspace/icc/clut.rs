@@ -174,6 +174,21 @@ mod tests {
         Arc::new(IccConversion::compile(CMYK_PROFILE, 4).expect("CMYK profile compiles"))
     }
 
+    /// For every grid size the baker accepts, the first node is byte 0, the
+    /// last byte 255, and the nodes strictly increase between them.
+    #[test]
+    fn grid_nodes_span_the_byte_range() {
+        for grid_n in 2u8..=255 {
+            let step = 255.0_f32 / f32::from(grid_n - 1);
+            let nodes: Vec<u8> = (0..usize::from(grid_n))
+                .map(|i| grid_to_u8(i, step))
+                .collect();
+            assert_eq!(nodes.first(), Some(&0), "grid_n = {grid_n}");
+            assert_eq!(nodes.last(), Some(&255), "grid_n = {grid_n}");
+            assert!(nodes.windows(2).all(|w| w[0] < w[1]), "grid_n = {grid_n}");
+        }
+    }
+
     #[test]
     fn rejects_invalid_grid_sizes() {
         let conv = cmyk_transform();
