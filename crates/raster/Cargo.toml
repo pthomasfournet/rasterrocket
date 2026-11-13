@@ -23,5 +23,8 @@ bytemuck = { workspace = true }
 bitflags = { workspace = true }
 log      = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

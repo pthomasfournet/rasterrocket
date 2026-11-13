@@ -37,6 +37,8 @@ pub mod fill;
 pub mod glyph;
 pub mod path;
 pub mod pipe;
+#[cfg(test)]
+mod proptests;
 pub(crate) mod scanner;
 pub(crate) mod screen;
 pub mod shading;

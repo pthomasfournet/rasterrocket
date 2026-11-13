@@ -1751,6 +1751,7 @@ dependencies = [
  "bitflags",
  "bytemuck",
  "log",
+ "proptest",
  "rasterrocket-color",
 ]
 
