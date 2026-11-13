@@ -153,8 +153,8 @@ fn is_object_stream(dict: &Dictionary) -> bool {
 /// The [`Document::instance_id`] of the next document constructed.
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
-/// A lazily-parsed PDF document backed by a memory-mapped file or an owned
-/// buffer.
+/// A lazily-parsed PDF document backed by a memory-mapped file, an owned
+/// buffer or bytes shared with the caller.
 pub struct Document {
     /// The file bytes.  `Arc` so callers can hold byte slices.
     data: Arc<MmapOrVec>,
@@ -200,10 +200,12 @@ pub struct Document {
 }
 
 /// Memory source: a mapping for files of at least [`MMAP_MIN_LEN`] bytes, an
-/// owned buffer for shorter files and for bytes supplied by the caller.
+/// owned buffer for shorter files and for a `Vec` supplied by the caller,
+/// and any other storage the caller supplies as shared bytes.
 enum MmapOrVec {
     Mapped(Mmap),
     Owned(Vec<u8>),
+    Shared(Box<dyn AsRef<[u8]> + Send + Sync>),
 }
 
 impl MmapOrVec {
@@ -211,6 +213,7 @@ impl MmapOrVec {
         match self {
             Self::Mapped(m) => m,
             Self::Owned(v) => v,
+            Self::Shared(b) => (**b).as_ref(),
         }
     }
 }
@@ -345,6 +348,34 @@ impl Document {
     /// The errors of [`Self::open_with`] other than I/O.
     pub fn from_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Self, PdfError> {
         Self::from_source(Arc::new(MmapOrVec::Owned(bytes)), options)
+    }
+
+    /// Construct from PDF bytes the caller keeps shared, without copying
+    /// them: `Arc<[u8]>`, `&'static [u8]`, a reference-counted byte buffer
+    /// type, or a mapping the caller made.  The document holds `bytes`
+    /// until it is dropped.
+    ///
+    /// `bytes.as_ref()` must return the same bytes on every call: the
+    /// cross-reference offsets read at open index them later.  Storage
+    /// whose contents change makes later objects fail to parse or parse
+    /// differently.
+    ///
+    /// # Errors
+    /// The errors of [`Self::from_bytes_owned`].
+    pub fn from_shared(bytes: impl AsRef<[u8]> + Send + Sync + 'static) -> Result<Self, PdfError> {
+        Self::from_shared_with(bytes, &OpenOptions::default())
+    }
+
+    /// [`Self::from_shared`] with `options` deciding how an encrypted
+    /// document is treated, as for [`Self::open_with`].
+    ///
+    /// # Errors
+    /// The errors of [`Self::open_with`] other than I/O.
+    pub fn from_shared_with(
+        bytes: impl AsRef<[u8]> + Send + Sync + 'static,
+        options: &OpenOptions,
+    ) -> Result<Self, PdfError> {
+        Self::from_source(Arc::new(MmapOrVec::Shared(Box::new(bytes))), options)
     }
 
     fn from_source(data: Arc<MmapOrVec>, options: &OpenOptions) -> Result<Self, PdfError> {
@@ -703,7 +734,7 @@ impl Document {
 
     /// The file from `base` on: the bytes cross-reference offsets index.
     fn body(&self) -> &[u8] {
-        &self.data.as_bytes()[self.base..]
+        self.data.as_bytes().get(self.base..).unwrap_or_default()
     }
 
     /// The entries a whole-file header scan finds, computed on first use.
@@ -1868,6 +1899,24 @@ mod tests {
         let obj = doc.get_object((2, 0)).expect("object 2");
         assert_eq!(obj.as_str(), Some(&b"small"[..]));
         assert_eq!(doc.bytes(), &bytes[..]);
+    }
+
+    /// Shared storage is borrowed, not copied, and parses as the owned
+    /// copy of its bytes does.
+    #[test]
+    fn shared_bytes_are_not_copied() {
+        let bytes = pdf_with_objects(&[(2, "(shared)".to_owned())]);
+        let shared: Arc<[u8]> = Arc::from(bytes.as_slice());
+        let doc = Document::from_shared(Arc::clone(&shared)).expect("opens");
+        assert!(matches!(*doc.data, MmapOrVec::Shared(_)));
+        assert_eq!(doc.bytes().as_ptr(), shared.as_ptr(), "no copy");
+        let obj = doc.get_object((2, 0)).expect("object 2");
+        assert_eq!(obj.as_str(), Some(&b"shared"[..]));
+
+        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        let doc = Document::from_shared(leaked).expect("opens");
+        assert_eq!(doc.bytes().as_ptr(), leaked.as_ptr(), "no copy");
+        assert!(Document::from_shared(&b"not a pdf"[..]).is_err());
     }
 
     /// A file of at least `MMAP_MIN_LEN` bytes is memory-mapped.

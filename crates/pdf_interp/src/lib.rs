@@ -247,6 +247,21 @@ pub fn open_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Document
     Ok(doc)
 }
 
+/// [`open_bytes_with`] for bytes the caller keeps shared, read in place
+/// without a copy; see [`Document::from_shared`].
+///
+/// # Errors
+/// The errors of [`open_with`] other than file I/O.
+pub fn open_shared_with(
+    bytes: impl AsRef<[u8]> + Send + Sync + 'static,
+    options: &OpenOptions,
+) -> Result<Document, InterpError> {
+    let doc = Document::from_shared_with(bytes, options)?;
+    warn_if_javascript(&doc);
+    form_type::warn_if_dynamic_xfa(&doc);
+    Ok(doc)
+}
+
 /// Scan the document catalog for JavaScript entry points and emit a loud
 /// `WARN` for every location present.  Never fails: rasterrocket has no
 /// JavaScript engine and never executes `/JS`, so a script's structural
