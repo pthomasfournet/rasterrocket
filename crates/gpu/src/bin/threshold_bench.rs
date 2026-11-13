@@ -13,8 +13,11 @@
 //! Run:
 //! ```text
 //! CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-gpu --bin threshold_bench
-//! target/release/threshold_bench [--iters N] [--warmup N]
+//! target/release/threshold_bench [--iters N] [--warmup N] [--only aa|icc|clut]
 //! ```
+//!
+//! With the `vulkan` feature, `--vulkan-device NAME` (repeatable) adds the
+//! ICC CLUT sweep on each named Vulkan device.
 //!
 //! Output: a table per kernel and a recommended threshold per constant.
 
@@ -23,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rasterrocket_gpu::backend::cuda::CudaBackend;
-use rasterrocket_gpu::backend::{AaFillScratch, aa_fill_page};
+use rasterrocket_gpu::backend::{AaFillScratch, GpuBackend, aa_fill_page, icc_clut};
 use rasterrocket_gpu::{
     AA_SIZE, AaFillRect, AaScanTable, GpuCtx, ScanIntersect, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
 };
@@ -44,6 +47,10 @@ struct Config {
     iters: u32,
     /// Number of warmup iterations (timed but discarded).
     warmup: u32,
+    /// Run only the named benchmark (`aa`, `icc` or `clut`).
+    only: Option<String>,
+    /// Vulkan devices the ICC CLUT sweep also runs on.
+    vulkan_devices: Vec<String>,
 }
 
 impl Default for Config {
@@ -51,6 +58,8 @@ impl Default for Config {
         Self {
             iters: 20,
             warmup: 5,
+            only: None,
+            vulkan_devices: Vec::new(),
         }
     }
 }
@@ -70,6 +79,8 @@ fn parse_config() -> Config {
                     cfg.warmup = v.parse().unwrap_or(cfg.warmup);
                 }
             }
+            "--only" => cfg.only = args.next(),
+            "--vulkan-device" => cfg.vulkan_devices.extend(args.next()),
             _ => {}
         }
     }
@@ -292,6 +303,107 @@ fn bench_icc_cmyk(ctx: &GpuCtx, cfg: &Config) {
     }
 }
 
+// ── ICC CMYK→RGB CLUT benchmark ─────────────────────────────────────────────
+
+/// Smooth CMYK test input (gradients, as in photographs and scans) of `n`
+/// pixels.
+fn smooth_cmyk(n: usize) -> Vec<u8> {
+    let width = 2000;
+    let height = n.div_ceil(width);
+    (0..n)
+        .flat_map(|i| {
+            let (col, row) = (i % width, i / width);
+            let cyan = col * 255 / width;
+            let magenta = row * 255 / height;
+            #[expect(clippy::cast_possible_truncation, reason = "each value is at most 255")]
+            [
+                cyan as u8,
+                magenta as u8,
+                cyan.midpoint(magenta) as u8,
+                ((col + 2 * row) % 256) as u8,
+            ]
+        })
+        .collect()
+}
+
+/// The production device conversion ([`icc_clut`]: allocation, uploads, one
+/// page, download) on `backend` against the CPU evaluator the renderer runs
+/// below the threshold, both on a 17-node CLUT, across image sizes.
+fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
+    const GRID_N: u32 = 17;
+    println!(
+        "\n══ icc_clut on {label}: device call vs CPU evaluator (grid {GRID_N}, smooth input) ══"
+    );
+    println!(
+        "{:>10}  {:>12}  {:>12}  {:>8}  winner",
+        "pixels", "cpu", "device", "ratio"
+    );
+    println!("{}", "─".repeat(60));
+    #[expect(clippy::cast_possible_truncation, reason = "i % 251 is below 256")]
+    let table: Vec<u8> = (0..(GRID_N as usize).pow(4) * 3)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut crossover: Option<usize> = None;
+    for n in [
+        1_000, 4_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000, 2_000_000,
+        4_000_000, 8_000_000,
+    ] {
+        let cmyk = smooth_cmyk(n);
+        let cpu_ns = time_ns(
+            || {
+                let _ = std::hint::black_box(icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, GRID_N))));
+            },
+            cfg.warmup.min(2),
+            cfg.iters.min(7),
+        );
+        let dev_ns = time_ns(
+            || {
+                let _ =
+                    std::hint::black_box(gpu_unwrap(icc_clut(backend, &cmyk, &table), "icc_clut"));
+            },
+            cfg.warmup,
+            cfg.iters,
+        );
+        let winner = if dev_ns < cpu_ns { "device ✓" } else { "CPU" };
+        println!(
+            "{:>10}  {:>12}  {:>12}  {:>7.2}x  {}",
+            n,
+            fmt_ns(cpu_ns),
+            fmt_ns(dev_ns),
+            cpu_ns as f64 / dev_ns as f64,
+            winner
+        );
+        if crossover.is_none() && dev_ns < cpu_ns {
+            crossover = Some(n);
+        }
+    }
+    match crossover {
+        Some(px) => println!("  → device faster from {px} px"),
+        None => println!("  → device never faster"),
+    }
+}
+
+/// [`bench_icc_clut`] on each Vulkan device named in `cfg`, timing the
+/// backend's construction and first exactness check.
+#[cfg(feature = "vulkan")]
+fn bench_icc_clut_vulkan(cfg: &Config) {
+    use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+    for name in &cfg.vulkan_devices {
+        let selector: DeviceSelector = gpu_unwrap(name.parse(), "device selector");
+        let t = Instant::now();
+        let backend = gpu_unwrap(VulkanBackend::with_selector(Some(&selector)), "Vulkan init");
+        let init = t.elapsed();
+        let t = Instant::now();
+        let exact = backend.icc_clut_is_exact();
+        println!(
+            "\nVulkan {name}: backend init {init:.1?}, exactness check {:.1?} (exact: {exact}), integrated: {}",
+            t.elapsed(),
+            backend.is_integrated()
+        );
+        bench_icc_clut(&format!("Vulkan {name}"), &backend, cfg);
+    }
+}
+
 // ── Formatting ──────────────────────────────────────────────────────────────
 
 fn fmt_ns(ns: u64) -> String {
@@ -313,14 +425,29 @@ fn main() {
     println!("iters={}, warmup={}", cfg.iters, cfg.warmup);
     println!("Machine: Ryzen 9 9900X3D + RTX 5070 (CC 12.0, PCIe 5.0)");
 
-    let ctx = Arc::new(GpuCtx::init().unwrap_or_else(|e| {
-        eprintln!("threshold_bench: GPU init failed: {e}");
-        eprintln!("Run `nvidia-smi` to verify the driver is loaded.");
-        std::process::exit(1);
-    }));
-
-    bench_aa_fill(&ctx, &cfg);
-    bench_icc_cmyk(&ctx, &cfg);
+    let ctx = match GpuCtx::init() {
+        Ok(ctx) => Some(Arc::new(ctx)),
+        Err(e) => {
+            eprintln!("threshold_bench: CUDA init failed ({e}); CUDA benchmarks skipped");
+            None
+        }
+    };
+    let run = |name: &str| cfg.only.as_deref().is_none_or(|only| only == name);
+    if let Some(ctx) = &ctx {
+        if run("aa") {
+            bench_aa_fill(ctx, &cfg);
+        }
+        if run("icc") {
+            bench_icc_cmyk(ctx, &cfg);
+        }
+        if run("clut") {
+            bench_icc_clut("CUDA", &CudaBackend::from_ctx(Arc::clone(ctx)), &cfg);
+        }
+    }
+    #[cfg(feature = "vulkan")]
+    if run("clut") {
+        bench_icc_clut_vulkan(&cfg);
+    }
 
     println!("\nDone.");
 }

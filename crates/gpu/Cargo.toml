@@ -10,6 +10,10 @@ name = "threshold_bench"
 path = "src/bin/threshold_bench.rs"
 
 [[bin]]
+name = "startup_bench"
+path = "src/bin/startup_bench.rs"
+
+[[bin]]
 name = "vulkan_phase_bench"
 path = "src/bin/vulkan_phase_bench.rs"
 required-features = ["vulkan", "cache"]
