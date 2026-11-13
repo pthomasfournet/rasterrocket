@@ -500,36 +500,11 @@ impl XPathScanner {
 
     /// Call `emit(x0, x1)` for each covered span `[x0, x1]` (inclusive,
     /// unclamped) of scanline `scan_y`, in increasing `x0`; the spans are
-    /// disjoint.  A row that ends inside the shape reaches `i32::MAX`.
-    ///
-    /// Every intersection covers its own cells `[x0, x1]`, whatever its
-    /// winding count: a horizontal edge, or a sloped or vertical edge on the
-    /// scanline where it starts, carries count 0 yet still bounds the shape.
-    /// A span starts at an intersection and absorbs the following ones while
-    /// they touch it or the running winding count is inside (`count & eo_mask
-    /// != 0`: parity for even-odd, non-zero for non-zero winding).
+    /// disjoint: the spans of [`ScanIterator`], which an aliased fill
+    /// paints, so both fills cover the same cells of a scanline.
     fn covered_spans(&self, scan_y: i32, mut emit: impl FnMut(i32, i32)) {
-        let row = self.row(scan_y);
-        let eo_mask = if self.eo { 1i32 } else { !0i32 };
-        let mut count = 0i32;
-        let mut i = 0usize;
-
-        while i < row.len() {
-            let xx0 = row[i].x0;
-            let mut xx1 = row[i].x1;
-            count = count.wrapping_add(row[i].count);
-            i += 1;
-            while i < row.len() && (row[i].x0 <= xx1 || (count & eo_mask) != 0) {
-                xx1 = xx1.max(row[i].x1);
-                count = count.wrapping_add(row[i].count);
-                i += 1;
-            }
-            let last = if i >= row.len() && (count & eo_mask) != 0 {
-                i32::MAX
-            } else {
-                xx1
-            };
-            emit(xx0, last);
+        for (x0, x1) in iter::ScanIterator::new(self, scan_y) {
+            emit(x0, x1);
         }
     }
 

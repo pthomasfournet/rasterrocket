@@ -1,42 +1,32 @@
 //! Coalescing span iterator over a scanner's intersection row.
 //!
-//! [`crate::ScanIterator`] merges adjacent and overlapping
-//! intersections into contiguous `(x0, x1)` spans (inclusive) and handles
-//! both even-odd and non-zero winding fill rules via the `eo_mask`.
+//! [`crate::ScanIterator`] yields the covered spans of one scanline as
+//! inclusive `(x0, x1)` pixel ranges, under the even-odd or non-zero
+//! winding rule.
+//!
+//! ## Coverage
+//!
+//! Every intersection covers its own cells `[x0, x1]`, whatever its winding
+//! count: a horizontal edge, or a sloped or vertical edge on the scanline
+//! where it starts, carries count 0 yet still bounds the shape.  A span
+//! starts at an intersection and absorbs the following ones while they
+//! overlap it or the running winding count is inside.  The covered cells
+//! are therefore the union of the intersections' cells and of the gaps
+//! between intersections where the winding count is inside, whatever order
+//! intersections with equal `x0` are stored in.
 //!
 //! ## Winding-rule semantics
 //!
-//! The iterator maintains a running `count` — the sum of all
-//! [`Intersect::count`] values consumed so far. Whether the current pixel
-//! position is *inside* the path depends on the fill rule:
+//! The iterator keeps the running `count`, the sum of the
+//! [`Intersect::count`] values consumed so far:
 //!
 //! - **Non-zero winding** (`eo = false`): inside when `count != 0`.
 //!   `eo_mask = !0` so `count & eo_mask` is non-zero iff `count != 0`.
 //! - **Even-odd** (`eo = true`): inside when the crossing count is odd.
 //!   `eo_mask = 1` so `count & eo_mask` isolates the low bit (parity).
 //!
-//! ## Algorithm (`next`)
-//!
-//! ### Phase 1 — find the span start
-//!
-//! Before consuming each entry, check `count & eo_mask`:
-//!
-//! - Already non-zero → we are inside from a previous span's count residue;
-//!   the current entry (`row[idx]`) is the span start. Record its `x0` and go
-//!   to phase 2 *without* consuming it yet (phase 2 will consume it).
-//! - Zero → consume the entry (add its `count`, advance `idx`). If now
-//!   non-zero → this entry is the span start; record its `x0` (from
-//!   `row[idx - 1]`) and go to phase 2 (the entry is already consumed).
-//! - Still zero → continue to the next entry.
-//!
-//! ### Phase 2 — collect the span
-//!
-//! Starting from `row[phase2_start_idx]` (inclusive), consume entries, tracking
-//! the maximum `x1` seen, until `count & eo_mask == 0`. Emit `(x0, x1)`.
-//!
-//! Each `Intersect` entry's `count` is accumulated **exactly once** across the
-//! two phases. After `next` returns, `count` equals the winding number
-//! immediately after the rightmost covered pixel `x1`.
+//! A row whose intersections end inside the shape (unbalanced winding)
+//! yields a last span reaching `i32::MAX`.
 
 use super::{Intersect, XPathScanner};
 
@@ -52,9 +42,6 @@ pub struct ScanIterator<'a> {
     /// Index of the next un-consumed entry in `row`.
     idx: usize,
     /// Running winding count: sum of `Intersect::count` for all consumed entries.
-    ///
-    /// Represents the winding number immediately *after* the rightmost pixel
-    /// covered by the last consumed entry. Starts at 0 (outside the path).
     count: i32,
     /// Fill-rule mask.
     ///
@@ -79,72 +66,35 @@ impl<'a> ScanIterator<'a> {
             eo_mask,
         }
     }
+
+    const fn inside(&self) -> bool {
+        (self.count & self.eo_mask) != 0
+    }
 }
 
 impl Iterator for ScanIterator<'_> {
     /// `(x0, x1)` — both inclusive pixel coordinates.
     type Item = (i32, i32);
 
-    /// Advance to the next filled span.
-    ///
-    /// See the `scanner::iter` module documentation for a precise
-    /// account of the two-phase skip-then-collect approach and the
-    /// winding-rule semantics governing each phase.
+    /// The next covered span: from the next intersection, through every
+    /// following one that overlaps it or is reached while inside.
     fn next(&mut self) -> Option<(i32, i32)> {
-        // ── Phase 1: find the entry that starts the next filled span ──────────
-        //
-        // We peek at `count & eo_mask` *before* consuming each entry:
-        //   • Non-zero already → inside from previous call's count residue.
-        //     `row[idx]` is the span start; leave idx unchanged for phase 2.
-        //   • Zero → consume the entry; if count goes non-zero this entry is
-        //     the span start (idx was already advanced).
-        //   • Still zero → not inside; continue to the next entry.
-        let (x0, phase2_start) = loop {
-            if self.idx >= self.row.len() {
-                return None;
+        let first = self.row.get(self.idx)?;
+        let x0 = first.x0;
+        let mut x1 = first.x1;
+        self.count = self.count.wrapping_add(first.count);
+        self.idx += 1;
+        while let Some(next) = self.row.get(self.idx) {
+            if next.x0 > x1 && !self.inside() {
+                break;
             }
-            if (self.count & self.eo_mask) != 0 {
-                // Already inside (residue from previous span).
-                // The span starts at row[idx]; do NOT consume it here —
-                // phase 2 will consume it as the first collected entry.
-                let x0 = self.row[self.idx].x0;
-                break (x0, self.idx);
-            }
-            // Try consuming this entry.
-            let new_count = self.count.wrapping_add(self.row[self.idx].count);
-            self.idx += 1;
-            self.count = new_count;
-            if (self.count & self.eo_mask) != 0 {
-                // This entry pushed us inside; it is the span start.
-                let x0 = self.row[self.idx - 1].x0;
-                break (x0, self.idx - 1);
-            }
-            // Still outside; continue.
-        };
-
-        // ── Phase 2: collect entries while inside the path ────────────────────
-        //
-        // `phase2_start` is the index of the entry that starts the span.
-        //
-        // "transition" branch: that entry was already consumed in phase 1
-        //   (self.idx == phase2_start + 1); seed x1 from it, then continue.
-        // "already inside" branch: that entry has NOT been consumed yet
-        //   (self.idx == phase2_start); consume it now to seed x1.
-        let mut x1 = self.row[phase2_start].x1;
-        if self.idx == phase2_start {
-            // "already inside": consume the span-start entry.
-            self.count = self.count.wrapping_add(self.row[self.idx].count);
+            x1 = x1.max(next.x1);
+            self.count = self.count.wrapping_add(next.count);
             self.idx += 1;
         }
-        // "transition": span-start is already consumed; self.idx is correct.
-
-        // Continue consuming while still inside.
-        while self.idx < self.row.len() && (self.count & self.eo_mask) != 0 {
-            x1 = x1.max(self.row[self.idx].x1);
-            self.count = self.count.wrapping_add(self.row[self.idx].count);
-            self.idx += 1;
+        if self.idx == self.row.len() && self.inside() {
+            x1 = i32::MAX;
         }
-
         Some((x0, x1))
     }
 }
@@ -219,6 +169,41 @@ mod tests {
         };
         let spans: Vec<_> = ScanIterator::new(&scanner_stub, 0).collect();
         assert_eq!(spans, vec![(0, 7)]);
+    }
+
+    /// An intersection of winding count 0 met outside the shape covers its
+    /// own cells, as the antialiased scanline walk covers them.
+    #[test]
+    fn count_zero_intersection_outside_is_covered() {
+        use crate::scanner::Intersect;
+        let row = vec![
+            Intersect {
+                x0: 0,
+                x1: 2,
+                count: 0,
+            },
+            Intersect {
+                x0: 4,
+                x1: 5,
+                count: 1,
+            },
+            Intersect {
+                x0: 8,
+                x1: 9,
+                count: -1,
+            },
+        ];
+        let scanner_stub = XPathScanner {
+            eo: false,
+            x_min: 0,
+            x_max: 9,
+            y_min: 0,
+            y_max: 0,
+            row_start: vec![0, 3],
+            intersects: row,
+        };
+        let spans: Vec<_> = ScanIterator::new(&scanner_stub, 0).collect();
+        assert_eq!(spans, vec![(0, 2), (4, 9)]);
     }
 
     #[test]

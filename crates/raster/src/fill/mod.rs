@@ -625,9 +625,9 @@ mod tests {
         let pipe = simple_pipe();
         let color = [200u8, 100, 50];
         let src = PipeSrc::Solid(&color);
-        // Rect (1,1)→(5,5): horizontal edges at y=1 and y=5 have count=0 and
-        // produce no interior spans; interior rows are y=2,3,4.
-        // Columns span x=1..5 (the two vertical edges at x=1 and x=5).
+        // Rect (1,1)→(5,5): every pixel its closed outline touches is
+        // painted, rows 1..=5 and columns 1..=5; the horizontal edges carry
+        // winding count 0 yet cover their own cells.
         let path = rect_path(1.0, 1.0, 5.0, 5.0);
 
         fill::<Rgb8>(
@@ -641,20 +641,51 @@ mod tests {
             false,
         );
 
-        // Interior pixels (rows 2..4, cols 1..5) should be painted.
-        for y in 2..5u32 {
-            let row = bmp.row(y);
-            for (x, px) in row.iter().enumerate().skip(1).take(5) {
-                assert_eq!(px.r, 200, "y={y} x={x} R");
-                assert_eq!(px.g, 100, "y={y} x={x} G");
-                assert_eq!(px.b, 50, "y={y} x={x} B");
+        for y in 0..8u32 {
+            for (x, px) in bmp.row(y).iter().enumerate() {
+                let want = if (1..=5).contains(&y) && (1..=5).contains(&x) {
+                    color
+                } else {
+                    [0; 3]
+                };
+                assert_eq!([px.r, px.g, px.b], want, "y={y} x={x}");
             }
         }
+    }
 
-        // Pixels outside should be untouched (zero).
-        assert_eq!(bmp.row(0)[0].r, 0, "row 0 should be untouched");
-        assert_eq!(bmp.row(1)[0].r, 0, "top edge row should be untouched");
-        assert_eq!(bmp.row(2)[0].r, 0, "x=0 should be untouched");
+    /// An aliased fill does not depend on the direction of its outline: a
+    /// thin triangle whose edges share a cell on a scanline paints the
+    /// same pixels traversed either way.
+    #[test]
+    fn aliased_fill_is_independent_of_orientation() {
+        let triangle = |pts: [(f64, f64); 3]| {
+            let mut b = PathBuilder::new();
+            b.move_to(pts[0].0, pts[0].1).unwrap();
+            b.line_to(pts[1].0, pts[1].1).unwrap();
+            b.line_to(pts[2].0, pts[2].1).unwrap();
+            b.close(false).unwrap();
+            b.build()
+        };
+        let (a, b, c) = ((0.0, -0.0625), (0.0, 1.25), (5.0, 0.625));
+        let draw = |path: &Path| {
+            let mut bmp: Bitmap<Rgb8> = Bitmap::new(6, 2, 1, false);
+            fill::<Rgb8>(
+                &mut bmp,
+                &make_clip(6, 2),
+                path,
+                &simple_pipe(),
+                &PipeSrc::Solid(&[255, 255, 255]),
+                &identity_matrix(),
+                1.0,
+                false,
+            );
+            (0..2)
+                .flat_map(|y| bmp.row(y).iter().map(|p| p.r).collect::<Vec<_>>())
+                .collect::<Vec<u8>>()
+        };
+        let forward = draw(&triangle([a, b, c]));
+        assert_eq!(forward, draw(&triangle([c, b, a])));
+        assert_eq!(forward[0], 255, "the triangle covers pixel (0, 0)");
     }
 
     #[test]
