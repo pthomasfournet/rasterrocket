@@ -109,8 +109,10 @@ jobs:
 
       # The cache is saved after a successful run.  Test executables relink
       # in seconds; leaving them out keeps it within the repository's quota.
+      # Cargo writes each unit's outputs to build/<package>/<hash>/out; the
+      # build-script executables there are kept, so a cache hit runs none.
       - name: Drop test executables from the build cache
-        run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.*' -delete
+        run: find target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
 
   # ── aarch64 cross-check ───────────────────────────────────────────────────
   #
@@ -272,7 +274,7 @@ jobs:
 
       # As in the CPU-only job: test executables stay out of the cache.
       - name: Drop test executables from the build cache
-        run: find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+        run: find target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
 
   # ── Fuzz target build ─────────────────────────────────────────────────────
   #
