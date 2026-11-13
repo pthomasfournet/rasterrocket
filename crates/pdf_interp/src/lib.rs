@@ -20,6 +20,7 @@ pub mod page_group;
 pub(crate) mod prescan;
 pub mod renderer;
 pub mod resources;
+mod rotation;
 #[cfg(test)]
 mod test_helpers;
 pub mod unsupported;
@@ -28,6 +29,7 @@ pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
+pub use rotation::{InvalidRotation, Rotation};
 pub use unsupported::{
     MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
     page_has_javascript, page_unsupported_features,
