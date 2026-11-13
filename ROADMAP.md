@@ -2510,6 +2510,15 @@ first page only.
 JPEG XL page images (`.jxl`, bare codestream or container) decode through
 the JPEG XL project's pure-Rust `jxl` decoder: the first frame, as 8-bit
 gray or sRGB.
+AVIF page images (`.avif`) decode: the HEIF container is parsed by the comic
+crate itself (primary item, coded picture or `grid` of tiles, `iloc`
+versions 0 to 2 with `idat`, `clap` / `irot` / `imir` applied, the `nclx`
+colour box over the sequence header, alpha and ICC profiles not read) and
+the AV1 pictures by `rav1d`, the Rust port of dav1d, vendored as a local
+fork in `crates/rav1d` with a safe single-picture entry point; 8, 10 and 12
+bits, 4:0:0 to 4:4:4, chroma interpolated bilinearly.  The fork's assembly
+kernels are built by default (`av1-asm`), which makes `nasm` a build
+requirement on x86; `--no-default-features` builds without them.
 The GPU composite and soft-mask kernels, which nothing in the render path
 dispatched, are deleted with their `GpuBackend::record_composite` /
 `record_apply_soft_mask` methods, parameter structs, thresholds and CPU

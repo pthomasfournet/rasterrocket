@@ -33,6 +33,14 @@ png        = "0.18"
 image-webp = { workspace = true }
 tiff       = { workspace = true }
 jxl        = "0.8"
+# AV1 pictures of AVIF pages: the workspace's local fork.
+rav1d      = { path = "../rav1d", version = "1.1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+
+[features]
+default = ["av1-asm"]
+# The AV1 decoder's assembly kernels.  An x86 build then needs the nasm
+# executable; without the feature the decoder is Rust alone.
+av1-asm = ["rav1d/asm", "rav1d/asm_arm64_dotprod", "rav1d/asm_arm64_i8mm", "rav1d/asm_arm64_sve2"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -26,7 +26,7 @@ not implemented, and the CropBox, not the MediaBox, is rendered by default).
 - `<OUTPUT_PREFIX>` — output filename prefix. The page number and extension are appended automatically, the number zero-padded to the width of the document's page count (prefix `out` → `out-1.ppm` … `out-9.ppm` for a 9-page document, `out-01.ppm` … `out-12.ppm` for a 12-page one). A bare prefix such as `out` writes to a temporary directory in RAM, not the current directory; see [Output destination](#output-destination-ram-backed-by-default).
 
 **Comic archives:** pages are the archive's image entries, ordered by a
-numeric-aware natural sort, decoded from JPEG/PNG/WebP/TIFF/JPEG XL (a multi-page TIFF
+numeric-aware natural sort, decoded from JPEG/PNG/WebP/TIFF/JPEG XL/AVIF (a multi-page TIFF
 gives one page per image). All output flags
 below (page range, format, `--gray`/`--mono`, `--odd`/`--even`, `--singlefile`,
 the camera-capture flags) behave identically to the PDF path. Pages are decoded

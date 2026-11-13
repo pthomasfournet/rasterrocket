@@ -525,6 +525,24 @@ startxref\n180\n%%EOF"
     }
 
     #[test]
+    fn an_avif_page_renders_from_a_cbz() {
+        // 8 × 4 lossless, pixel (30x, 60y, 255 − 30x): see avif-fixtures.py.
+        let avif: &[u8] = include_bytes!("../tests/data/rgb-8x4.avif");
+        let cbz = make_cbz(&[("2.avif", avif), ("1.jpg", &jpeg_page(4, 4, 200))]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .unwrap()
+            .collect();
+        assert_eq!(pages.len(), 2);
+        let page = pages[1].1.as_ref().unwrap();
+        assert_eq!((page.width, page.height), (8, 4));
+        // Gray falls along the row as red gives way to blue's smaller
+        // weight... the first pixel (0, 0, 255) is darker than the last of
+        // the row (210, 0, 45).
+        assert!(page.pixels[0] < page.pixels[7], "{:?}", &page.pixels[..8]);
+    }
+
+    #[test]
     fn a_multi_page_tiff_entry_yields_a_page_per_image() {
         let tif = crate::decode::tests::multi_tiff_gray(4, 4, &[(10, 0), (99, 1), (30, 2)]);
         let cbz = make_cbz(&[("1.tif", &tif), ("2.jpg", &jpeg_page(4, 4, 200))]);

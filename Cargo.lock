@@ -1587,6 +1587,7 @@ dependencies = [
  "rasterrocket-color",
  "rasterrocket-encode",
  "rasterrocket-render",
+ "rav1d",
  "sevenz-rust2",
  "tar",
  "tempfile",

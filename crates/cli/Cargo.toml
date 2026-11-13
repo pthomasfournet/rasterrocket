@@ -31,12 +31,15 @@ vulkan           = ["pdf_raster/vulkan"]
 gpu-jpeg-huffman = ["pdf_raster/gpu-jpeg-huffman"]
 gpu-validation   = ["pdf_raster/gpu-validation"]
 # Bundled Noto fallback faces; on by default, off with --no-default-features.
-default          = ["bundled-fonts"]
+default          = ["bundled-fonts", "av1-asm"]
 bundled-fonts    = ["pdf_raster/bundled-fonts"]
+# Assembly kernels of the AV1 decoder behind AVIF comic pages; on by default.
+# An x86 build with it needs the nasm executable.
+av1-asm          = ["comic/av1-asm"]
 
 [dependencies]
 pdf_raster  = { package = "rasterrocket",        path = "../pdf_raster", version = "2.1", default-features = false }
-comic       = { package = "rasterrocket-comic",  path = "../comic",      version = "2.1" }
+comic       = { package = "rasterrocket-comic",  path = "../comic",      version = "2.1", default-features = false }
 camera      = { package = "rasterrocket-camera", path = "../camera",     version = "2.1" }
 encode      = { package = "rasterrocket-encode", path = "../encode",     version = "2.1" }
 color       = { package = "rasterrocket-color",  path = "../color",      version = "2.1" }

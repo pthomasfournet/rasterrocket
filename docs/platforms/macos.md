@@ -9,7 +9,10 @@ cores. It needs no Homebrew packages and no extra fonts.
   behave differently on macOS also run there: system font discovery, the
   predefined CJK character maps and the memory probe.
 - **Intel Macs:** the x86-64 code paths (AVX2, with a scalar fallback) are
-  the ones every Linux PC uses, but they are not tested on macOS.
+  the ones every Linux PC uses, but they are not tested on macOS. An Intel
+  build also needs the `nasm` assembler (`brew install nasm`) for the AV1
+  decoder's kernels; Apple-silicon builds assemble theirs with the Xcode
+  tools.
 
 ## Install
 

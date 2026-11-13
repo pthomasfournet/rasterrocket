@@ -14,14 +14,17 @@ is developed and tested on it.
 ## Install
 
 ```bash
-sudo apt install build-essential        # the C linker (Debian, Ubuntu)
+sudo apt install build-essential nasm   # the C linker and, on x86, the assembler (Debian, Ubuntu)
 git clone https://github.com/pthomasfournet/rasterrocket
 cd rasterrocket
 cargo build --release -p rasterrocket-cli
 ```
 
 You also need Rust 1.100 or newer, from [rustup.rs](https://rustup.rs). The
-binary is `target/release/rrocket`.
+binary is `target/release/rrocket`. `nasm` assembles the x86 kernels of the
+AV1 decoder behind AVIF comic pages; an arm64 build does not use it, and
+`--no-default-features --features bundled-fonts` builds without those
+kernels on any CPU.
 
 ## GPU
 

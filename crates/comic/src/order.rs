@@ -41,7 +41,7 @@ pub(crate) fn is_image_file(name: &str) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "webp" | "tiff" | "tif" | "jxl"
+        "jpg" | "jpeg" | "png" | "webp" | "tiff" | "tif" | "jxl" | "avif"
     )
 }
 

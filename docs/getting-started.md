@@ -366,8 +366,12 @@ The CLI crate forwards each of these feature names to the library.
 
 ### Dependencies
 
-**To build:** a Rust toolchain (1.100 or newer, edition 2024) and the platform's C linker
-(`build-essential` on Debian/Ubuntu, the Xcode Command Line Tools on macOS). The CPU build
+**To build:** a Rust toolchain (1.100 or newer, edition 2024), the platform's C linker
+(`build-essential` on Debian/Ubuntu, the Xcode Command Line Tools on macOS) and, on x86,
+the `nasm` assembler (`nasm` on Debian/Ubuntu and in Homebrew), which assembles the AV1
+decoder's kernels for AVIF comic pages; arm64 builds assemble theirs with the C compiler.
+`--no-default-features --features bundled-fonts` builds without those kernels and without
+`nasm`, with a slower AVIF decode. The CPU build
 needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`).
 Build the CLI with `-p rasterrocket-cli`.  `cargo build --workspace` also builds the
 `pdf_bridge` reference crate, which needs a poppler source tree (`POPPLER_SRC`).

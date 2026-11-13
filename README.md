@@ -435,8 +435,12 @@ All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon RO
 ## Build
 
 ```bash
-# CPU-only (no CUDA)
+# CPU-only (no CUDA).  An x86 build needs the nasm assembler on PATH, for
+# the AV1 decoder's kernels (AVIF comic pages); arm64 uses the C compiler.
 cargo build --release -p rasterrocket-cli
+
+# Without those assembly kernels, and without nasm (AVIF decodes slower)
+cargo build --release -p rasterrocket-cli --no-default-features --features bundled-fonts
 
 # With all GPU features (CUDA 13 toolkit, NVIDIA GPU required)
 # Default CUDA_ARCH is sm_80 (Ampere); override for older or newer GPUs.
@@ -560,7 +564,9 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   rasteriser; no C font library is linked. JPEG 2000 is decoded in pure Rust
   (`hayro-jpeg2000`). The only C code in the default build is libdeflate
   and, in the `rrocket` binary, the mimalloc allocator, both compiled from
-  vendored source; the optional `nvjpeg` / `nvjpeg2k` GPU paths
+  vendored source; AVIF comic pages are decoded by a local fork of `rav1d`,
+  Rust with hand-written assembly kernels (the `av1-asm` feature, on by
+  default); the optional `nvjpeg` / `nvjpeg2k` GPU paths
   call NVIDIA's libraries and the optional `vaapi` path calls libva. `cargo audit` covers the registry dependency tree;
   the vendored forks are checked weekly against upstream commits, releases
   and RustSec advisories (`scripts/check_vendored.py`).

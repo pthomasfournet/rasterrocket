@@ -7,6 +7,7 @@
 //! allocates pixels ([`guard_dimensions`]); the caller names the archive entry
 //! in the resulting [`DecodeError::TooLarge`].
 
+mod avif;
 mod jpeg;
 mod jxl;
 mod png;
@@ -38,6 +39,9 @@ pub(crate) enum ImageFormat {
     /// JPEG XL: a bare codestream (`FF 0A`) or an ISO BMFF container
     /// (`00 00 00 0C 'JXL ' 0D 0A 87 0A`).
     Jxl,
+    /// AVIF: an ISO BMFF file whose `ftyp` box names the brand `avif`,
+    /// `avis` or `mif1`.
+    Avif,
 }
 
 /// Why decoding a single entry failed.
@@ -87,6 +91,9 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     {
         return Some(ImageFormat::Jxl);
     }
+    if avif::is_avif(bytes) {
+        return Some(ImageFormat::Avif);
+    }
     None
 }
 
@@ -121,6 +128,7 @@ pub(crate) fn decode_image(bytes: &[u8], page: usize) -> Result<Bitmap<Gray8>, D
         ImageFormat::WebP => webp::decode(bytes)?,
         ImageFormat::Tiff => tiff::decode(bytes, page)?,
         ImageFormat::Jxl => jxl::decode(bytes)?,
+        ImageFormat::Avif => avif::decode(bytes)?,
     };
     Ok(match pixels {
         CodecPixels::Gray(gray) => gray,
