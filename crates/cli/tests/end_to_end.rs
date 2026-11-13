@@ -714,6 +714,41 @@ fn box_flag_selects_the_rendered_page_box() {
 }
 
 #[test]
+fn rotate_flag_turns_the_page_before_it_is_sized_and_cropped() {
+    // 100 × 50 pt; a black 10 pt square in the lower-left corner.
+    let pdf = with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] /Contents 4 0 R >>".to_vec(),
+        stream_object("", b"0 g 0 0 10 10 re f"),
+    ]);
+    // Lower-left turns to upper-left at 90° clockwise, to lower-right at
+    // 90° counter-clockwise, to upper-right at 180°.
+    for (deg, size, black) in [
+        ("90", (50, 100), (5, 5)),
+        ("-90", (50, 100), (45, 95)),
+        ("180", (100, 50), (95, 5)),
+        ("360", (100, 50), (5, 45)),
+    ] {
+        let (w, h, px) = gray_page(&pdf, &["--rotate", deg]);
+        assert_eq!((w, h), size, "--rotate {deg}");
+        let (x, y) = black;
+        assert_eq!(px[y * w as usize + x], 0, "--rotate {deg}");
+        assert_eq!(
+            px.iter().map(|&p| usize::from(p == 0)).sum::<usize>(),
+            100,
+            "--rotate {deg}"
+        );
+    }
+    let (w, h, _) = gray_page(&pdf, &["--rotate", "90", "--scale-to-x", "25"]);
+    assert_eq!((w, h), (25, 50));
+    let (w, h, crop) = gray_page(&pdf, &["--rotate", "90", "-W", "10", "-H", "10"]);
+    assert_eq!((w, h), (10, 10));
+    assert!(
+        crop.iter().all(|&p| p == 0),
+        "the crop is the turned square"
+    );
+}
+
+#[test]
 fn scale_to_flags_size_the_page() {
     let pdf = two_page_pdf(); // page 1 is 100 × 50 pt
     let size = |args: &[&str]| {

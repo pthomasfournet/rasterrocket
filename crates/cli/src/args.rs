@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 
 use camera::CameraOptions;
 use clap::Parser;
-use pdf_raster::{BackendPolicy, PageBox, RenderPurpose, RenderRegion, SessionConfig};
+use pdf_raster::{BackendPolicy, PageBox, RenderPurpose, RenderRegion, Rotation, SessionConfig};
 
 /// Parse `--jpegopt`: comma-separated `quality=N` (0–100),
 /// `progressive=y|n` and `optimize=y|n`, as `pdftoppm -jpegopt` takes them.
@@ -37,6 +37,14 @@ fn parse_jpeg_options(s: &str) -> Result<encode::JpegOptions, String> {
         }
     }
     Ok(options)
+}
+
+/// Parse `--rotate`: an integer number of degrees, a multiple of 90.
+fn parse_rotation(s: &str) -> Result<Rotation, String> {
+    let degrees: i64 = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a whole number of degrees"))?;
+    Rotation::from_degrees(degrees).map_err(|e| e.to_string())
 }
 
 /// Parser that rejects non-positive or non-finite DPI values at the CLI boundary.
@@ -169,6 +177,18 @@ pub(crate) struct Args {
     /// Render the `CropBox`: `--box crop`, the default.
     #[arg(long = "cropbox")]
     pub cropbox: bool,
+
+    /// Turn every page DEG degrees clockwise in addition to its own
+    /// rotation: a multiple of 90, negative for counter-clockwise (default
+    /// 0).  The page is drawn turned, so -x, -y, -W, -H and the --scale-to
+    /// flags apply to the turned page.
+    #[arg(
+        long = "rotate",
+        value_name = "DEG",
+        allow_negative_numbers = true,
+        value_parser = parse_rotation
+    )]
+    pub rotate: Option<Rotation>,
 
     // ── Output format ────────────────────────────────────────────────────────
     /// Output PNG (default: PPM).
@@ -1185,6 +1205,7 @@ impl Args {
         config.vector_antialias = self.vector_antialias == AaFlag::Yes;
         config.overprint = self.overprint;
         config.page_box = self.page_box.into();
+        config.rotation = self.rotate.unwrap_or_default();
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -1453,6 +1474,32 @@ mod page_list_tests {
             Args::try_parse_from(["rrocket", "--cropbox", "--box", "media", "in.pdf", "out"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rotate_flag_reaches_session_config() {
+        assert_eq!(
+            base_args().session_config().unwrap().rotation,
+            Rotation::None
+        );
+        for (degrees, rotation) in [
+            ("0", Rotation::None),
+            ("90", Rotation::Cw90),
+            ("180", Rotation::Cw180),
+            ("270", Rotation::Cw270),
+            ("-90", Rotation::Cw270),
+            ("450", Rotation::Cw90),
+            ("-720", Rotation::None),
+        ] {
+            let config = args_with(&["--rotate", degrees]).session_config().unwrap();
+            assert_eq!(config.rotation, rotation, "--rotate {degrees}");
+        }
+        for bad in ["45", "-1", "90.0", "right"] {
+            assert!(
+                Args::try_parse_from(["rrocket", "--rotate", bad, "in.pdf", "out"]).is_err(),
+                "--rotate {bad}"
+            );
+        }
     }
 
     #[test]
