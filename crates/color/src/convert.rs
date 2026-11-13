@@ -214,11 +214,14 @@ pub fn ceil_i32(x: f64) -> i32 {
     saturate_f64_to_i32(x.ceil())
 }
 
-/// Round half-integers toward +∞, returning `i32`.
+/// Round to the nearest integer, half-integers toward +∞, returning `i32`.
 ///
-/// Implements `floor(x + 0.5)`. This means:
 /// - 0.5 rounds to 1 (toward +∞).
 /// - −0.5 rounds to 0 (toward +∞, i.e. not away from zero).
+///
+/// The fraction `x − floor(x)` is exact in `f64`, so a value just below a
+/// half-integer rounds down: `floor(x + 0.5)` would round the sum itself
+/// and take 0.49999999999999994 to 1.
 ///
 /// # Valid input range
 ///
@@ -230,7 +233,9 @@ pub fn ceil_i32(x: f64) -> i32 {
 #[inline]
 #[must_use]
 pub fn round_half_up_i32(x: f64) -> i32 {
-    floor_i32(x + 0.5)
+    let below = x.floor();
+    // Non-finite `x` gives a NaN fraction and keeps `below`.
+    floor_i32(if x - below >= 0.5 { below + 1.0 } else { below })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,10 +372,20 @@ mod tests {
         assert_eq!(round_half_up_i32(-1.5), -1);
     }
 
+    /// A value one ulp below a half-integer rounds down, also where adding
+    /// one half would round up to the next integer.
+    #[test]
+    fn round_half_up_just_below_a_half() {
+        let below_half = 0.5f64.next_down();
+        assert_eq!(round_half_up_i32(below_half), 0);
+        assert_eq!(round_half_up_i32((-0.5f64).next_down()), -1);
+        assert_eq!(round_half_up_i32(2.5f64.next_down()), 2);
+    }
+
     /// Non-finite inputs must not invoke UB and must return a defined sentinel.
     #[test]
     fn floor_ceil_round_non_finite() {
-        // +∞ — INFINITY + 0.5 is still INFINITY, so round_half_up_i32 goes to i32::MAX.
+        // +∞
         assert_eq!(floor_i32(f64::INFINITY), i32::MAX);
         assert_eq!(ceil_i32(f64::INFINITY), i32::MAX);
         assert_eq!(round_half_up_i32(f64::INFINITY), i32::MAX);
@@ -378,8 +393,7 @@ mod tests {
         assert_eq!(floor_i32(f64::NEG_INFINITY), i32::MIN);
         assert_eq!(ceil_i32(f64::NEG_INFINITY), i32::MIN);
         assert_eq!(round_half_up_i32(f64::NEG_INFINITY), i32::MIN);
-        // NaN — treated as non-positive (returns i32::MIN). NaN + 0.5 is NaN
-        // so round_half_up_i32 also returns i32::MIN.
+        // NaN — treated as non-positive (returns i32::MIN).
         assert_eq!(floor_i32(f64::NAN), i32::MIN);
         assert_eq!(ceil_i32(f64::NAN), i32::MIN);
         assert_eq!(round_half_up_i32(f64::NAN), i32::MIN);
