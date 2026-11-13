@@ -2690,6 +2690,25 @@ A file opened by path can be read into memory instead of memory-mapped
 so a long-running process whose input file another process truncates no
 longer dies of `SIGBUS` on the next read of a mapped page.  The CLI keeps
 the mapping.
+The JPEG decoder is a local fork (`crates/zune_jpeg`: zune-jpeg 0.5.15,
+then moved to upstream's commit of 2026-05-01, with the fork's own changes
+in its `CHANGES.md`), tested and linted in CI and tracked by
+`scripts/check_vendored.py`.  A baseline JPEG that spreads its components
+over several scans (what an encoder that optimises its Huffman tables
+writes) decodes correctly: a scan lost its last rows when they fitted in
+the bit reader's lookahead (a flat 16 × 16 image came out half dark red),
+and every subsampled frame in several scans was garbage; **this changes
+pixels** of such images only (none among the 18 859 JPEG streams of the
+archive).  Arithmetic-coded JPEG (SOF9, SOF10) decodes; it failed the
+image.  A `DCTDecode` image is reported partial exactly when its stream
+lacks data: the decoder counts the rows it decodes from data that is
+there (`JpegDecoder::intact_rows`), so a complete stream without its EOI
+marker is whole, progressive or not, and a stream cut at a marker (a scan
+stopped at a restart marker, a progressive frame missing its later scans)
+is reported, where it was drawn zero-filled as if complete; a stream cut
+inside a marker segment or inside the first scan of a progressive frame is
+drawn as far as it decodes, where it failed.  Decode time is within noise
+of zune-jpeg 0.5.15.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

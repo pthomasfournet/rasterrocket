@@ -562,7 +562,8 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   among the highest-CVE inputs of any PDF stack, are parsed by local forks of
   `read-fonts` / `skrifa` and rasterised by rasterrocket's own coverage
   rasteriser; no C font library is linked. JPEG 2000 is decoded in pure Rust
-  (`hayro-jpeg2000`). The only C code in the default build is libdeflate
+  (`hayro-jpeg2000`), JPEG by a local fork of `zune-jpeg`. The only C code
+  in the default build is libdeflate
   and, in the `rrocket` binary, the mimalloc allocator, both compiled from
   vendored source; AVIF comic pages are decoded by a local fork of `rav1d`,
   Rust with hand-written assembly kernels (the `av1-asm` feature, on by
