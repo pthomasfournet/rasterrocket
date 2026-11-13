@@ -42,15 +42,18 @@ use crate::xpath::{XPath, XPathFlags};
 
 // ── Fixed-point helpers ───────────────────────────────────────────────────────
 
-/// Convert an `f64` device-space coordinate to 48.16 fixed point, saturating
-/// at the `i64` range (`as` saturates; NaN converts to 0).
+/// Convert an `f64` device-space coordinate to 48.16 fixed point, rounding
+/// toward −∞ and saturating at the `i64` range (`as` saturates; NaN converts
+/// to 0).  Flooring commutes with adding a whole number of pixels, so
+/// `fp_from_f64(x + k) == fp_from_f64(x) + (k << 16)` whenever `x + k` is
+/// exact.
 #[inline]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the conversion saturates, far beyond any coordinate the scanner keeps"
 )]
 const fn fp_from_f64(x: f64) -> i64 {
-    (x * 65536.0) as i64
+    (x * 65536.0).floor() as i64
 }
 
 /// The pixel column of the 48.16 fixed-point `fp`: its floor, saturated to
@@ -69,7 +72,7 @@ fn fp_column(fp: i64) -> i32 {
 ///
 /// Stepping by the rounded slope drifts by at most 2⁻¹⁷ px per row, so an
 /// edge's position on any row is within `REANCHOR_ROWS`·2⁻¹⁷ px (1/32 px) plus
-/// one 2⁻¹⁶ conversion of the exact value, whatever the segment's length.
+/// two 2⁻¹⁶ conversions of the exact value, whatever the segment's length.
 const REANCHOR_ROWS: i32 = 4096;
 
 // ── Intersect ─────────────────────────────────────────────────────────────────
@@ -679,7 +682,7 @@ fn fill_intersections(
             } else {
                 -1
             };
-            let x_base = seg.y0.mul_add(-seg.dxdy, seg.x0);
+            let x_start = fp_from_f64(seg.x0);
             let sloped_x_min = seg.x0.min(seg.x1);
             let sloped_x_max = seg.x0.max(seg.x1);
 
@@ -688,19 +691,23 @@ fn fill_intersections(
             let fp_clamp_max = fp_from_f64(sloped_x_max);
 
             // 48.16 fixed-point accumulator for the right edge of each span:
-            // set from f64 at the segment's first row and every
-            // `REANCHOR_ROWS` rows after it, stepped by `dxdy_fp` (integer
-            // add) in between.  The value at a row depends only on
-            // the segment and the row, never on the clip's first row, so a
-            // translated copy of the geometry yields translated spans
-            // wherever the clip starts.
+            // set at the segment's first row and every `REANCHOR_ROWS` rows
+            // after it, stepped by `dxdy_fp` (integer add) in between.  An
+            // anchor is the segment's start column plus its run to the
+            // anchor row's bottom, each converted on its own: the run
+            // depends only on the row's offset from the start and the
+            // slope, and the start's conversion commutes with whole-pixel
+            // moves, so the value at a row depends only on the segment and
+            // the row, never on the clip's first row, and a copy of the
+            // geometry moved by whole pixels yields spans moved by as many.
             let first_row = floor_i32(seg_y_min);
             // Rows since the last anchor at or above `row` (`row ≥ first_row`):
             // the low bits of the difference, exact even when it wraps.
             let stepped = |row: i32| row.wrapping_sub(first_row) & (REANCHOR_ROWS - 1);
             let xx1_at = |row: i32| {
                 let n = stepped(row);
-                let anchored = fp_from_f64((f64::from(row - n) + 1.0).mul_add(seg.dxdy, x_base));
+                let run = (f64::from(row - n) + 1.0 - seg.y0) * seg.dxdy;
+                let anchored = x_start.saturating_add(fp_from_f64(run));
                 i64::from(n)
                     .saturating_mul(seg.dxdy_fp)
                     .saturating_add(anchored)
@@ -843,6 +850,30 @@ mod tests {
             .iter()
             .map(|i| (i.x0, i.x1, i.count))
             .collect()
+    }
+
+    /// Geometry moved by whole pixels yields spans moved by as many, also
+    /// where a sloped edge ends exactly on a cell boundary and the rounding
+    /// of its slope decides the last cell.
+    #[test]
+    fn whole_pixel_moves_move_the_spans() {
+        let triangle = |dx: f64, dy: f64| {
+            let mut b = PathBuilder::new();
+            b.move_to(-15.0 + dx, 41.75 + dy).unwrap();
+            b.line_to(dx, dy).unwrap();
+            b.line_to(42.0 + dx, 54.0 + dy).unwrap();
+            b.close(false).unwrap();
+            XPath::new(&b.build(), &identity(), 1.0, true)
+        };
+        let here = XPathScanner::new(&triangle(0.0, 0.0), false, 0, 60);
+        let moved = XPathScanner::new(&triangle(16.0, 20.0), false, 20, 80);
+        for y in 0..=60 {
+            let shifted: Vec<_> = spans(&moved, y + 20)
+                .into_iter()
+                .map(|(x0, x1, c)| (x0 - 16, x1 - 16, c))
+                .collect();
+            assert_eq!(shifted, spans(&here, y), "row {y}");
+        }
     }
 
     /// A row's spans do not depend on the first row the scanner covers: a

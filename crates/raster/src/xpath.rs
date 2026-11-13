@@ -94,7 +94,7 @@ pub struct XPathSeg {
     /// Used by the scanner's incremental x-accumulator: `xx_fp += dxdy_fp` per
     /// scanline.  The scanner recomputes the accumulator from f64 every 4096
     /// rows counted from the segment's first row, so an edge's position on any
-    /// row is within 1/32 pixel (plus one 2⁻¹⁶ conversion) of the exact value,
+    /// row is within 1/32 pixel (plus two 2⁻¹⁶ conversions) of the exact value,
     /// however far above the scanned range the segment starts.
     pub dxdy_fp: i64,
     /// Orientation and flip flags; see [`XPathFlags`] for the set of valid bits.
