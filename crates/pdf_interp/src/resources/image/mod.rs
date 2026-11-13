@@ -331,11 +331,11 @@ pub(crate) fn dominant_filter(counts: &[u32; IMAGE_FILTER_COUNT]) -> Option<Imag
 ///
 /// - [`ImageData::Cpu`] always available; produced by every CPU
 ///   decode path (CCITT, JBIG2, raw, JPEG fallback).
-/// - `ImageData::Gpu` (feature `cache`) — `Arc<CachedDeviceImage>`
-///   handed back from the device image cache.  Produced by
-///   `decode_dct` when a cache is wired in; consumed by the GPU
-///   blit kernel which writes transformed pixels into the page's
-///   `DevicePageBuffer` without a `PCIe` round-trip.
+/// - `ImageData::Gpu` (feature `cache`) — a `gpu::cache::CachedImage`
+///   handed back from the device image cache of the session's backend.
+///   Produced by `decode_dct` when a cache is wired in; consumed by the
+///   GPU blit kernel, which samples the slab in device memory without
+///   uploading the pixels again.
 ///
 /// The enum is [`#[non_exhaustive]`] so future variants (e.g. an
 /// `Arc<[u8]>` shared-host variant) can be added without breaking
@@ -350,11 +350,11 @@ pub(crate) fn dominant_filter(counts: &[u32; IMAGE_FILTER_COUNT]) -> Option<Imag
 pub enum ImageData {
     /// Host-resident pixel bytes — layout defined by [`ImageColorSpace`].
     Cpu(Vec<u8>),
-    /// Device-resident image, owned by the device image cache.  The `Arc`
+    /// Device-resident image, owned by the device image cache.  The handle
     /// keeps the slab alive past in-flight kernel reads even if the
     /// cache evicts; see `gpu::cache::CachedDeviceImage` docs.
     #[cfg(feature = "cache")]
-    Gpu(std::sync::Arc<gpu::cache::CachedDeviceImage>),
+    Gpu(gpu::cache::CachedImage),
 }
 
 impl ImageData {
@@ -383,7 +383,7 @@ impl ImageData {
         not(feature = "cache"),
         expect(
             clippy::missing_const_for_fn,
-            reason = "the cache-feature path calls a non-const cudarc method; keep one signature"
+            reason = "the cache-feature path calls a non-const method of the cached image; keep one signature"
         )
     )]
     pub fn len(&self) -> usize {
@@ -752,7 +752,7 @@ pub struct ImageDecodeCtx<'a> {
     pub icc: IccHandles<'a>,
     /// Device-resident image cache.
     #[cfg(feature = "cache")]
-    pub image_cache: Option<&'a std::sync::Arc<gpu::cache::DeviceImageCache>>,
+    pub image_cache: Option<&'a gpu::cache::ImageCache>,
     /// Identity of the document within the cache.
     #[cfg(feature = "cache")]
     pub doc_id: Option<gpu::cache::DocId>,

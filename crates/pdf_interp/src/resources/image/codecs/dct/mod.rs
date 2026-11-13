@@ -2,9 +2,6 @@
 //! features, and the device image cache.
 
 #[cfg(feature = "cache")]
-use std::sync::Arc;
-
-#[cfg(feature = "cache")]
 use crate::resources::image::ImageData;
 use crate::resources::image::colorspace::{Layout, Samples};
 
@@ -16,8 +13,8 @@ use stream::jpeg_sof;
 
 #[cfg(feature = "cache")]
 use gpu::cache::{
-    CachedDeviceImage, ContentHash, DeviceImageCache, DocId, ImageLayout as CacheImageLayout,
-    InsertRequest, ObjId,
+    CachedImage, ContentHash, DocId, ImageCache, ImageLayout as CacheImageLayout, InsertRequest,
+    ObjId,
 };
 
 // ── DCTDecode (JPEG) ──────────────────────────────────────────────────────────
@@ -353,7 +350,7 @@ pub(in crate::resources::image) fn decode_dct<
 pub(in crate::resources::image) struct DctCacheCtx<'a> {
     /// Device-resident image cache.  Borrowed; the cache outlives the
     /// renderer for the duration of a `raster_pdf` call.
-    pub cache: &'a Arc<DeviceImageCache>,
+    pub cache: &'a ImageCache,
     /// Stable identifier for the source PDF.
     pub doc_id: DocId,
     /// Per-image PDF object id (the `XObject`'s stream object number).
@@ -373,7 +370,7 @@ impl<'a> DctCacheCtx<'a> {
     /// the generation.  See [`gpu::cache::ObjId`] for the lossy-
     /// mapping rationale.
     pub(in crate::resources::image) fn from_resources(
-        cache: Option<&'a Arc<DeviceImageCache>>,
+        cache: Option<&'a ImageCache>,
         doc_id: Option<DocId>,
         stream_id: pdf::ObjectId,
     ) -> Option<Self> {
@@ -411,7 +408,7 @@ fn try_decode_dct_cached_lookup(
     // Three-tier probe: VRAM → host RAM → disk (when enabled).
     // Re-binds the alias on hit so the same image referenced from a
     // later page goes through the alias fast path.
-    let hash = DeviceImageCache::hash_bytes(data);
+    let hash = ContentHash::of(data);
     if let Some(cached) = ctx
         .cache
         .lookup_by_hash_for_doc(ctx.doc_id, ctx.obj_id, &hash)
@@ -463,16 +460,16 @@ fn try_decode_dct_cached_insert(cpu: Samples, hash: ContentHash, ctx: &DctCacheC
 }
 
 #[cfg(feature = "cache")]
-fn samples_from_cached(cached: Arc<CachedDeviceImage>, pdf_w: u32, pdf_h: u32) -> Samples {
-    let layout = match cached.layout {
+fn samples_from_cached(cached: CachedImage, pdf_w: u32, pdf_h: u32) -> Samples {
+    let layout = match cached.layout() {
         CacheImageLayout::Rgb => Layout::Color(3),
         CacheImageLayout::Gray => Layout::Color(1),
         CacheImageLayout::Mask => Layout::Mask,
     };
     // Prefer the cached entry's actual dimensions over the PDF
     // dict's claim — the dict can lie; the decoded image can't.
-    let width = cached.width;
-    let height = cached.height;
+    let width = cached.width();
+    let height = cached.height();
     if (width, height) != (pdf_w, pdf_h) {
         log::debug!(
             "decode_dct: cache hit dimensions {width}×{height} differ from PDF dict {pdf_w}×{pdf_h}; using cache",

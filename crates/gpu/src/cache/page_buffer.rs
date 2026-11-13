@@ -25,21 +25,14 @@ use cudarc::driver::{CudaSlice, CudaStream, DriverError};
 /// Drop releases the device memory; the buffer doesn't need to outlive
 /// the page render.
 ///
-/// # Backend abstraction
+/// # Backend
 ///
-/// `DevicePageBuffer` is intentionally **not** generic over
-/// [`crate::backend::GpuBackend`].  The internals call
-/// `CudaStream::alloc_zeros`, `memcpy_dtoh`, `memset_zeros`, and
-/// `synchronize` directly — the `GpuBackend` trait abstracts away streams
-/// (Vulkan has command buffers + fences, not streams) and does not yet
-/// expose a sub-range download / zero-fill equivalent.  Generifying would
-/// either require those trait methods (not yet designed) or a
-/// `PhantomData` type parameter that adds noise without buying abstraction.
-///
-/// Same applies to [`crate::cache::DeviceImageCache`], which is more
-/// deeply CUDA-coupled (`clone_htod`, `memcpy_dtoh`, pinned-pool
-/// promotion).  Generification of both is tracked as follow-up after
-/// the Vulkan backend's transfer / upload surface settles.
+/// The page buffer is the CUDA blit target.  Its row download and clear are
+/// stream-ordered behind the blit kernel on the rendering thread's stream,
+/// so a blit costs no host synchronisation beyond the download itself.  A
+/// Vulkan page records one blit as one submission instead, into a target
+/// the size of the blit's bounding box
+/// ([`crate::backend::blit_image_box`]).
 pub struct DevicePageBuffer {
     /// Width × height × 4 bytes, row-major RGBA8.
     pub rgba: CudaSlice<u8>,

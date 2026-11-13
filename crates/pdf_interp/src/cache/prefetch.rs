@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use gpu::cache::{DeviceImageCache, DocId, ObjId};
+use gpu::cache::{DocId, ImageCache, ObjId};
 use pdf::{Document, Object, ObjectId};
 
 use crate::resources::image::{ImageFilter, filter_name};
@@ -130,7 +130,7 @@ impl Drop for PrefetchHandle {
 /// is returned; the caller renders without prefetching.
 pub fn spawn_prefetch(
     doc: Arc<Document>,
-    cache: Arc<DeviceImageCache>,
+    cache: ImageCache,
     doc_id: DocId,
     config: PrefetchConfig,
 ) -> std::io::Result<PrefetchHandle> {
@@ -205,7 +205,7 @@ struct PrefetchJob {
 /// the only writer, so the dedup set is a plain `HashSet` owned
 /// inside [`discover_pages`].
 struct PrefetchState {
-    cache: Arc<DeviceImageCache>,
+    cache: ImageCache,
     doc: Arc<Document>,
     doc_id: DocId,
     cancel: Arc<AtomicBool>,
@@ -319,7 +319,7 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<PrefetchJob>>, state: &PrefetchState) {
 /// [`resolve_image`] entry point with all GPU back-ends disabled.
 /// `resolve_image` logs its own failures at warn level; this fn
 /// is fire-and-forget from the worker's perspective.
-fn decode_one(doc: &Document, doc_id: DocId, cache: &Arc<DeviceImageCache>, job: &PrefetchJob) {
+fn decode_one(doc: &Document, doc_id: DocId, cache: &ImageCache, job: &PrefetchJob) {
     let Ok(xobjects) = doc.get_page_resource_dict(job.page_id, b"XObject") else {
         return;
     };

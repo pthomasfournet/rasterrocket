@@ -75,12 +75,13 @@ pub struct RasterSession {
     /// failure on `Auto`).
     #[cfg(feature = "vaapi")]
     pub(crate) vaapi_queue: Option<Arc<gpu::DecodeQueue<gpu::vaapi::VapiJpegDecoder>>>,
-    /// Device-resident image cache.  `Some` when the `cache`
-    /// feature is enabled and a CUDA device is available; `None`
+    /// Device-resident image cache, on the session's GPU backend.  `Some`
+    /// when the `cache` feature is enabled and the session resolved to a
+    /// Vulkan backend or a CUDA context (see [`new_image_cache`]); `None`
     /// otherwise (CPU-only fallback).  Shared across all pages so
     /// content-hash dedup spans the whole render.
     #[cfg(feature = "cache")]
-    pub(crate) image_cache: Option<Arc<gpu::cache::DeviceImageCache>>,
+    pub(crate) image_cache: Option<gpu::cache::ImageCache>,
     /// Stable document identifier used as the cache's secondary alias
     /// key.  Today derived from the file path or a per-session UUID;
     /// any 32-byte content-addressable identifier works.
@@ -147,14 +148,15 @@ impl RasterSession {
         self.policy
     }
 
-    /// The device-resident image cache this session renders through, or
-    /// `None` when no CUDA context was initialised (CPU-only session).
+    /// The device-resident image cache this session renders through, on
+    /// its Vulkan backend or CUDA context, or `None` when neither was
+    /// initialised (CPU-only session).
     ///
     /// Exposed for diagnostics and tests that need to observe which images
     /// took the cached path; the renderer wires the cache in itself.
     #[cfg(feature = "cache")]
     #[must_use]
-    pub const fn image_cache(&self) -> Option<&Arc<gpu::cache::DeviceImageCache>> {
+    pub const fn image_cache(&self) -> Option<&gpu::cache::ImageCache> {
         self.image_cache.as_ref()
     }
 
@@ -349,7 +351,11 @@ fn open_session_with_doc(
         .map(Arc::new);
 
     #[cfg(feature = "cache")]
-    let image_cache = gpu_ctx.as_deref().map(new_image_cache);
+    let image_cache = new_image_cache(
+        gpu_ctx.as_deref(),
+        #[cfg(feature = "vulkan")]
+        vk_backend.as_ref(),
+    );
 
     // DocId: BLAKE3 of the PDF bytes.  Stable per content; editing
     // the PDF naturally invalidates the disk tier because the hash
@@ -359,7 +365,7 @@ fn open_session_with_doc(
     // so the hash adds zero IO.
     #[cfg(feature = "cache")]
     let doc_id = {
-        let hash = gpu::cache::DeviceImageCache::hash_bytes(doc.bytes());
+        let hash = gpu::cache::ContentHash::of(doc.bytes());
         gpu::cache::DocId(hash.0)
     };
 
@@ -372,7 +378,7 @@ fn open_session_with_doc(
     {
         pdf_interp::cache::spawn_prefetch(
             Arc::clone(&doc),
-            Arc::clone(cache),
+            cache.clone(),
             doc_id,
             pdf_interp::cache::PrefetchConfig::default(),
         )
@@ -423,31 +429,75 @@ fn open_session_with_doc(
     })
 }
 
-/// Build a session's device image cache on `ctx`.
+/// Build a session's device image cache on the backend the session
+/// resolved to: the Vulkan backend when it holds one, otherwise the CUDA
+/// context, otherwise none.  The two are not initialised together (see
+/// `open_session_with_doc`), so the cache follows the backend every other
+/// kernel of the session runs on, under `Auto` as under `Force*`.
+///
+/// The disk tier is attached when its root resolves (`HOME`,
+/// `XDG_CACHE_HOME` or `PDF_RASTER_CACHE_DIR` set); otherwise the cache
+/// is in-process only.  The host tier's budget is the default.
+#[cfg(feature = "cache")]
+fn new_image_cache(
+    ctx: Option<&gpu::GpuCtx>,
+    #[cfg(feature = "vulkan")] vk_backend: Option<&Arc<gpu::backend::vulkan::VulkanBackend>>,
+) -> Option<gpu::cache::ImageCache> {
+    #[cfg(feature = "vulkan")]
+    if let Some(backend) = vk_backend {
+        return Some(gpu::cache::ImageCache::Vulkan(Arc::new(with_disk_tier(
+            new_vulkan_image_cache(backend),
+        ))));
+    }
+    let ctx = ctx?;
+    Some(gpu::cache::ImageCache::Cuda(Arc::new(with_disk_tier(
+        new_cuda_image_cache(ctx),
+    ))))
+}
+
+/// `cache` with the disk tier attached when its root resolves.
+#[cfg(feature = "cache")]
+fn with_disk_tier<B: gpu::cache::CacheBackend>(
+    cache: gpu::cache::DeviceImageCache<B>,
+) -> gpu::cache::DeviceImageCache<B> {
+    match gpu::cache::DiskTier::try_new() {
+        Some(disk) => cache.with_disk(disk),
+        None => cache,
+    }
+}
+
+/// A device image cache on `ctx`, under the default VRAM budget.
 ///
 /// The cache owns a stream of its own, so uploads issued by any page
 /// worker queue independently of that worker's stream; each blit waits
-/// on the write event of the upload it reads.  Budgets are the defaults.
-/// The disk tier is attached when its root resolves (`HOME`,
-/// `XDG_CACHE_HOME` or `PDF_RASTER_CACHE_DIR` set); otherwise the cache
-/// is in-process only.
+/// on the write event of the upload it reads.
 #[cfg(feature = "cache")]
-fn new_image_cache(ctx: &gpu::GpuCtx) -> Arc<gpu::cache::DeviceImageCache> {
+fn new_cuda_image_cache(ctx: &gpu::GpuCtx) -> gpu::cache::DeviceImageCache {
     let stream = ctx.new_stream().unwrap_or_else(|e| {
         log::warn!(
             "rasterrocket: image-cache stream creation failed ({e}); sharing this thread's stream"
         );
         ctx.stream()
     });
-    let mut cache = gpu::cache::DeviceImageCache::new(
+    gpu::cache::DeviceImageCache::new(
         stream,
         gpu::cache::VramBudget::DEFAULT,
         gpu::cache::HostBudget::DEFAULT,
-    );
-    if let Some(disk) = gpu::cache::DiskTier::try_new() {
-        cache = cache.with_disk(disk);
-    }
-    Arc::new(cache)
+    )
+}
+
+/// A device image cache on `backend`, under the VRAM budget the device
+/// reports ([`gpu::cache::VramBudget::from_backend`]), or the default one
+/// when the query fails.
+#[cfg(all(feature = "cache", feature = "vulkan"))]
+fn new_vulkan_image_cache(
+    backend: &Arc<gpu::backend::vulkan::VulkanBackend>,
+) -> gpu::cache::DeviceImageCache<gpu::backend::vulkan::VulkanBackend> {
+    let vram = gpu::cache::VramBudget::from_backend(&**backend).unwrap_or_else(|e| {
+        log::warn!("rasterrocket: Vulkan VRAM budget query failed ({e}); using the default cap");
+        gpu::cache::VramBudget::DEFAULT
+    });
+    gpu::cache::DeviceImageCache::new(Arc::clone(backend), vram, gpu::cache::HostBudget::DEFAULT)
 }
 
 /// Makes [`log_auto_resolution_once`] fire once per process;

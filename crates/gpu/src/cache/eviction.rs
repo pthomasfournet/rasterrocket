@@ -13,39 +13,37 @@ use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
 
-use super::host_tier::HostTier;
-use super::{CacheError, CachedDeviceImage, ContentHash, DeviceImageCache};
+use super::host_tier::HostEntry;
+use super::{CacheBackend, CacheError, CachedDeviceImage, ContentHash, DeviceImageCache};
 
-impl DeviceImageCache {
-    /// Copy the bytes of an evicted VRAM entry into pinned host memory
-    /// and install in the host tier so a future lookup avoids re-decode.
+impl<B: CacheBackend> DeviceImageCache<B> {
+    /// Copy the bytes of an evicted VRAM entry into host memory and
+    /// install in the host tier so a future lookup avoids re-decode.
     ///
     /// Skipped when the host tier already holds this hash (re-demoting
     /// would waste pinned RAM on identical bytes), or when the host
-    /// budget is zero (host tier disabled), or when the D2H copy fails
+    /// budget is zero (host tier disabled), or when the copy fails
     /// (logged; not propagated — demotion is a best-effort optimisation,
     /// not a correctness requirement).
-    pub(super) fn demote_to_host(&self, hash: ContentHash, evicted: &Arc<CachedDeviceImage>) {
+    pub(super) fn demote_to_host(&self, hash: ContentHash, evicted: &Arc<CachedDeviceImage<B>>) {
         if self.host.budget_bytes() == 0 {
             return;
         }
         if self.host.lookup(&hash, self.next_tick()).is_some() {
             return;
         }
-        match HostTier::build_from_device(
-            self.stream.context(),
-            &self.stream,
-            &evicted.device_ptr,
-            evicted.width,
-            evicted.height,
-            evicted.layout,
-        ) {
-            Ok(host_entry) => {
+        let bytes = (evicted.width as usize)
+            .saturating_mul(evicted.height as usize)
+            .saturating_mul(evicted.layout.bytes_per_pixel());
+        match B::demote(&self.device, &evicted.device_ptr, bytes) {
+            Ok(slab) => {
+                let host_entry =
+                    HostEntry::new(slab, evicted.width, evicted.height, evicted.layout);
                 let _ = self.host.insert(hash, host_entry, self.next_tick());
             }
             Err(e) => {
                 log::warn!(
-                    "demotion D2H copy failed (hash={hash:?}, {}×{} {:?}): {e}",
+                    "demotion copy failed (hash={hash:?}, {}×{} {:?}): {e}",
                     evicted.width,
                     evicted.height,
                     evicted.layout,
@@ -109,9 +107,9 @@ impl DeviceImageCache {
                 );
                 let _ = self.used_bytes.fetch_sub(bytes, Ordering::Relaxed);
                 // Demote to host RAM if not already cached there.  The
-                // copy runs on `self.stream` and synchronises before
-                // returning, so when `removed` (and its `CudaSlice`)
-                // drops at end of scope the bytes are stable on host.
+                // copy has completed when `demote` returns, so when
+                // `removed` (and its slab) drops at end of scope the
+                // bytes are stable on host.
                 self.demote_to_host(key, &removed);
             }
             // Invite the OS scheduler if budget hasn't moved.  Cheap on x86.
@@ -143,8 +141,8 @@ impl DeviceImageCache {
 /// kernel can read from the freed slab).  Returns `None` when every
 /// entry is pinned by an outstanding `Arc`; the caller surfaces that
 /// as [`CacheError::OverBudget`].
-fn pick_oldest_unpinned(
-    primary: &DashMap<ContentHash, Arc<CachedDeviceImage>>,
+fn pick_oldest_unpinned<B: CacheBackend>(
+    primary: &DashMap<ContentHash, Arc<CachedDeviceImage<B>>>,
 ) -> Option<(ContentHash, u64)> {
     primary
         .iter()

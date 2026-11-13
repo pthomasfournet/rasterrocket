@@ -1,10 +1,10 @@
-//! Phase 9 task 3 — host RAM tier.
+//! Host RAM tier.
 //!
 //! The VRAM tier lives in `crates/gpu/src/cache/mod.rs`.  When VRAM
-//! eviction reclaims a slab, we don't drop its bytes outright; instead
-//! we copy them into pinned host memory and stash them here so a
-//! subsequent lookup can DMA back to VRAM (O(1) host probe + one `PCIe`
-//! upload) rather than re-decode JPEG (~15 ms of CPU work per image).
+//! eviction reclaims a slab, its bytes are not dropped outright; they are
+//! copied into host memory and stashed here so a subsequent lookup can
+//! copy them back to VRAM (O(1) host probe + one upload) rather than
+//! re-decode the JPEG (~15 ms of CPU work per image).
 //!
 //! # Invariants
 //!
@@ -14,12 +14,15 @@
 //!   that reaches us by content hash will not auto-bind a new alias —
 //!   that's fine because hash lookups are themselves O(1) once the
 //!   caller already has the hash.
-//! - Each entry stores its bytes in a [`PinnedHostSlice<u8>`] allocated
-//!   with `cuMemAllocHost(CU_MEMHOSTALLOC_WRITECOMBINED)`.  Write-
-//!   combined memory is fast for upload-on-promote and fast to fill on
-//!   demote, but slow for general CPU reads — the cache writes to it
+//! - Each entry stores its bytes in the backend's
+//!   [`super::CacheBackend::HostSlab`].  On CUDA that is page-locked memory
+//!   allocated with `cuMemAllocHost(CU_MEMHOSTALLOC_WRITECOMBINED)`:
+//!   write-combined memory is fast for upload-on-promote and fast to fill
+//!   on demote, but slow for general CPU reads — the cache writes to it
 //!   from a `cudaMemcpyAsync(D2H)` and reads from it via
-//!   `cudaMemcpyAsync(H2D)`.  The CPU never inspects the bytes.
+//!   `cudaMemcpyAsync(H2D)`, and the CPU never inspects the bytes.  On
+//!   Vulkan it is ordinary host memory, since the backend's transfers
+//!   stage through mapped buffers of their own.
 //! - The LRU clock is shared with the VRAM tier (callers pass it in)
 //!   so cross-tier freshness is comparable.  Used-bytes accounting is
 //!   per-tier; each tier evicts on its own pressure.
@@ -27,10 +30,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cudarc::driver::{CudaStream, PinnedHostSlice};
 use dashmap::DashMap;
 
-use super::{ContentHash, ImageLayout};
+use super::{CacheBackend, ContentHash, ImageLayout};
 
 /// Budget for the host RAM tier.  Independent of [`super::VramBudget`].
 #[derive(Debug, Clone, Copy)]
@@ -55,10 +57,9 @@ impl HostBudget {
 ///
 /// Implementation detail of [`HostTier`]; the parent `host_tier` module
 /// is private, so `pub` here is already crate-bounded.
-pub(crate) struct HostEntry {
-    /// Pinned host memory holding the decoded bytes.  Allocated with
-    /// `CU_MEMHOSTALLOC_WRITECOMBINED` for fast DMA in both directions.
-    pub pinned: PinnedHostSlice<u8>,
+pub(crate) struct HostEntry<B: CacheBackend> {
+    /// Host memory holding the decoded bytes.
+    pub pinned: B::HostSlab,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
@@ -71,13 +72,13 @@ pub(crate) struct HostEntry {
     last_used: AtomicU64,
 }
 
-impl HostEntry {
-    /// Build a new entry from a populated pinned slab.  `last_used` is
+impl<B: CacheBackend> HostEntry<B> {
+    /// Build a new entry from a populated host slab.  `last_used` is
     /// initialised to zero and is bumped to the current tick by the
     /// host tier on insert.
     #[must_use]
     pub(crate) const fn new(
-        pinned: PinnedHostSlice<u8>,
+        pinned: B::HostSlab,
         width: u32,
         height: u32,
         layout: ImageLayout,
@@ -91,10 +92,10 @@ impl HostEntry {
         }
     }
 
-    /// Bytes occupied in pinned host memory by this entry.
+    /// Bytes occupied in host memory by this entry.
     #[must_use]
     pub(crate) fn host_bytes(&self) -> u64 {
-        self.pinned.num_bytes() as u64
+        B::host_slab_len(&self.pinned) as u64
     }
 
     fn touch(&self, tick: u64) {
@@ -106,7 +107,7 @@ impl HostEntry {
     }
 }
 
-impl std::fmt::Debug for HostEntry {
+impl<B: CacheBackend> std::fmt::Debug for HostEntry<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostEntry")
             .field("width", &self.width)
@@ -123,13 +124,13 @@ impl std::fmt::Debug for HostEntry {
 /// `host_tier` module is private, and `mod.rs` re-exports this type
 /// as `pub(crate)`, which is where the crate-wide visibility bound
 /// is actually enforced.
-pub(crate) struct HostTier {
-    entries: DashMap<ContentHash, Arc<HostEntry>>,
+pub(crate) struct HostTier<B: CacheBackend> {
+    entries: DashMap<ContentHash, Arc<HostEntry<B>>>,
     used_bytes: AtomicU64,
     budget: HostBudget,
 }
 
-impl HostTier {
+impl<B: CacheBackend> HostTier<B> {
     /// Build an empty host tier with the given budget.
     #[must_use]
     pub(crate) fn new(budget: HostBudget) -> Self {
@@ -173,34 +174,10 @@ impl HostTier {
     /// uploading to VRAM if it needs a device-resident copy; the host
     /// entry stays in place to amortise repeated VRAM evictions.
     #[must_use]
-    pub(crate) fn lookup(&self, hash: &ContentHash, tick: u64) -> Option<Arc<HostEntry>> {
+    pub(crate) fn lookup(&self, hash: &ContentHash, tick: u64) -> Option<Arc<HostEntry<B>>> {
         let entry = self.entries.get(hash)?.clone();
         entry.touch(tick);
         Some(entry)
-    }
-
-    /// Allocate a fresh pinned slab of `bytes` bytes.  Returned as an
-    /// uninitialised `PinnedHostSlice<u8>` ready for a `D2H` copy.
-    ///
-    /// # Errors
-    /// Returns the underlying [`cudarc::driver::DriverError`] if
-    /// `cuMemAllocHost` fails (typically OOM in pinned memory pool).
-    ///
-    /// # Safety note
-    /// The returned slice is uninitialised; the caller MUST overwrite
-    /// every byte (e.g. via [`CudaStream::memcpy_dtoh`]) before another
-    /// reader observes it.  In production the only caller is
-    /// [`Self::build_from_device`], which immediately fills the slab
-    /// from a `D2H` copy and synchronises the stream before returning
-    /// the populated entry.  The `gpu-validation` test fixtures call
-    /// it directly and fill the buffer before any read.
-    pub(crate) fn alloc_pinned(
-        ctx: &Arc<cudarc::driver::CudaContext>,
-        bytes: usize,
-    ) -> Result<PinnedHostSlice<u8>, cudarc::driver::DriverError> {
-        // Safety: the caller fills the buffer immediately; no caller
-        // observes the uninitialised contents.
-        unsafe { ctx.alloc_pinned::<u8>(bytes) }
     }
 
     /// Install a freshly populated host entry.  Evicts in LRU order if
@@ -214,15 +191,20 @@ impl HostTier {
     /// # Accounting semantics
     ///
     /// `used_bytes` tracks **bytes managed by this tier's index**, not
-    /// bytes physically allocated as pinned memory.  When this method
+    /// bytes physically allocated as host memory.  When this method
     /// removes a prior same-hash entry whose `Arc` has `strong_count >
     /// 1` (a concurrent lookup-holder is still reading it), the
-    /// `PinnedHostSlice` stays allocated until the holder drops, but
+    /// host slab stays allocated until the holder drops, but
     /// `used_bytes` is decremented immediately.  The transient
     /// undercount is bounded by the number of in-flight lookups and
     /// resolves the moment those `Arc`s drop.  This matches the VRAM
     /// tier's contract; both tiers charge bytes to the index.
-    pub(crate) fn insert(&self, hash: ContentHash, entry: HostEntry, tick: u64) -> Arc<HostEntry> {
+    pub(crate) fn insert(
+        &self,
+        hash: ContentHash,
+        entry: HostEntry<B>,
+        tick: u64,
+    ) -> Arc<HostEntry<B>> {
         entry.touch(tick);
         let bytes = entry.host_bytes();
         let arc = Arc::new(entry);
@@ -242,9 +224,8 @@ impl HostTier {
     /// Drop entries in LRU order until the new `needed` bytes fit.
     ///
     /// Unlike the VRAM tier, host entries don't need refcount-based
-    /// pinning — kernel reads of pinned memory are explicit DMA copies
-    /// scheduled on a stream, and we don't keep `Arc<HostEntry>`s alive
-    /// past the upload synchronisation that schedules them.  So a host
+    /// pinning — device reads of host memory are explicit copies, and no
+    /// `Arc<HostEntry>` is kept alive past the upload that reads it.  So a host
     /// entry is always reclaimable as long as its `Arc` `strong_count`
     /// is 1.  We still respect that bound to avoid yanking memory from
     /// under an in-flight DMA.
@@ -290,37 +271,22 @@ impl HostTier {
             std::hint::spin_loop();
         }
     }
-
-    /// Build a new `HostEntry` by allocating pinned memory and
-    /// scheduling a device-to-host copy on `stream`.  The stream is
-    /// **synchronised** before this returns so the bytes are observed-
-    /// stable on the host before the caller drops the source device
-    /// slab.
-    ///
-    /// # Errors
-    /// Returns the underlying [`cudarc::driver::DriverError`] if
-    /// allocation, copy, or sync fails.
-    pub(crate) fn build_from_device<D: cudarc::driver::DevicePtr<u8>>(
-        ctx: &Arc<cudarc::driver::CudaContext>,
-        stream: &Arc<CudaStream>,
-        device: &D,
-        width: u32,
-        height: u32,
-        layout: ImageLayout,
-    ) -> Result<HostEntry, cudarc::driver::DriverError> {
-        let bytes = (width as usize) * (height as usize) * layout.bytes_per_pixel();
-        let mut pinned = Self::alloc_pinned(ctx, bytes)?;
-        // memcpy_dtoh enqueues on the stream; synchronise so the
-        // caller can drop the source device slab safely afterwards.
-        stream.memcpy_dtoh(device, pinned.as_mut_slice()?)?;
-        stream.synchronize()?;
-        Ok(HostEntry::new(pinned, width, height, layout))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::cuda::CudaBackend;
+
+    /// A pinned slab of `bytes` bytes in device 0's context, through the
+    /// CUDA cache's host-slab allocator.
+    #[cfg(feature = "gpu-validation")]
+    fn alloc_pinned(
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        bytes: usize,
+    ) -> cudarc::driver::PinnedHostSlice<u8> {
+        <CudaBackend as CacheBackend>::alloc_host_slab(stream, bytes).expect("alloc_pinned")
+    }
 
     #[test]
     fn host_budget_default_is_two_gib() {
@@ -329,7 +295,7 @@ mod tests {
 
     #[test]
     fn empty_host_tier_reports_zero() {
-        let tier = HostTier::new(HostBudget {
+        let tier = HostTier::<CudaBackend>::new(HostBudget {
             host_bytes: 1 << 20,
         });
         assert_eq!(tier.len(), 0);
@@ -343,11 +309,13 @@ mod tests {
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn pinned_round_trip_through_host_tier() {
-        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
-        let tier = HostTier::new(HostBudget {
+        let stream = cudarc::driver::CudaContext::new(0)
+            .expect("CUDA device 0")
+            .default_stream();
+        let tier = HostTier::<CudaBackend>::new(HostBudget {
             host_bytes: 1 << 20,
         });
-        let mut pinned = HostTier::alloc_pinned(&ctx, 256).expect("alloc_pinned");
+        let mut pinned = alloc_pinned(&stream, 256);
         // Fill with a known pattern.  Note: write-combined memory is
         // slow for CPU reads but writes are fine.
         for (i, b) in pinned
@@ -373,12 +341,14 @@ mod tests {
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn host_tier_evicts_oldest_on_overflow() {
-        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
+        let stream = cudarc::driver::CudaContext::new(0)
+            .expect("CUDA device 0")
+            .default_stream();
         // Budget for two 256-byte entries but not three.
-        let tier = HostTier::new(HostBudget { host_bytes: 600 });
+        let tier = HostTier::<CudaBackend>::new(HostBudget { host_bytes: 600 });
 
-        let mk_entry = |fill: u8| -> HostEntry {
-            let mut pinned = HostTier::alloc_pinned(&ctx, 256).expect("alloc_pinned");
+        let mk_entry = |fill: u8| -> HostEntry<CudaBackend> {
+            let mut pinned = alloc_pinned(&stream, 256);
             for b in pinned.as_mut_slice().expect("as_mut_slice").iter_mut() {
                 *b = fill;
             }

@@ -160,6 +160,20 @@ impl VulkanBackend {
     }
 }
 
+/// The backend of the device `PDF_RASTER_VULKAN_DEVICE` names, or of the
+/// automatically ranked one when it is unset or empty; `None` (the calling
+/// test is skipped) when no Vulkan device opens.
+#[cfg(all(test, feature = "cache"))]
+pub(crate) fn test_backend() -> Option<VulkanBackend> {
+    let selector = std::env::var("PDF_RASTER_VULKAN_DEVICE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
+    VulkanBackend::with_selector(selector.as_ref())
+        .inspect_err(|e| eprintln!("skipping: no Vulkan backend: {e}"))
+        .ok()
+}
+
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
         // Wait for all in-flight work before any handle in any submodule

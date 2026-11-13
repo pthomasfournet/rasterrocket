@@ -57,6 +57,7 @@
 
 mod annotations;
 mod canvas;
+mod device_blit;
 mod devices;
 mod diagnostics;
 mod fill_stroke;

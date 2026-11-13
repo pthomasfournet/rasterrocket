@@ -1055,8 +1055,8 @@ pub(crate) enum BackendArg {
     #[cfg(feature = "vaapi")]
     Vaapi,
     /// Require the Vulkan compute backend — error loudly if Vulkan
-    /// initialisation fails.  The device-resident image cache is
-    /// CUDA-only; under this mode the session runs without it.
+    /// initialisation fails.  In a build with the `cache` feature the
+    /// device-resident image cache runs on the Vulkan device.
     Vulkan,
 }
 

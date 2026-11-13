@@ -7,12 +7,14 @@ use std::sync::Arc;
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
+#[cfg(all(feature = "cache", feature = "vulkan"))]
+use gpu::backend::BlitScratch;
 #[cfg(feature = "gpu-jpeg-huffman")]
 use gpu::backend::cuda::CudaBackend;
 #[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
 #[cfg(feature = "cache")]
-use gpu::cache::{DeviceImageCache, DevicePageBuffer, DocId};
+use gpu::cache::{DevicePageBuffer, DocId, ImageCache};
 #[cfg(feature = "gpu-jpeg-huffman")]
 use gpu::jpeg_decoder::JpegGpuDecoder;
 #[cfg(feature = "nvjpeg")]
@@ -31,18 +33,22 @@ use super::PageRenderer;
 /// using the all-zeros doc id, a sharp foot-gun.
 #[cfg(feature = "cache")]
 pub(super) struct CacheState {
-    /// Device-resident image cache.  Shared across pages so
-    /// content-hash dedup spans the whole render session.
-    pub(super) cache: Arc<DeviceImageCache>,
+    /// Device-resident image cache, on the session's backend.  Shared
+    /// across pages so content-hash dedup spans the whole render session.
+    pub(super) cache: ImageCache,
     /// Stable identifier for the source PDF — combined with the
     /// per-image PDF object id, forms the cache's `(DocId, ObjId)`
     /// alias key for fast same-document lookups.
     pub(super) doc_id: DocId,
-    /// Lazy-allocated device-resident page buffer.  `None` until the
-    /// first GPU image blit allocates it.  Between blits every pixel is
-    /// zero (alpha 0): each blit composites its rows onto `bitmap` and
-    /// clears them before returning.
+    /// Lazy-allocated device-resident page buffer, the target of a CUDA
+    /// image blit.  `None` until the first such blit allocates it.  Between
+    /// blits every pixel is zero (alpha 0): each blit composites its rows
+    /// onto `bitmap` and clears them before returning.
     pub(super) page_buffer: Option<DevicePageBuffer>,
+    /// Buffers of a Vulkan image blit, grown to the largest blit of the
+    /// page and freed with the renderer.
+    #[cfg(feature = "vulkan")]
+    pub(super) vk_blit: BlitScratch<VulkanBackend>,
 }
 
 impl PageRenderer<'_> {
@@ -149,8 +155,8 @@ impl PageRenderer<'_> {
     /// Attach a Vulkan compute backend for kernel dispatch.
     ///
     /// When set, GPU-eligible AA fills and ICC CMYK→RGB conversions run
-    /// on it, ahead of any CUDA context. Image blits and the device image
-    /// cache are CUDA-only and stay on the CPU under Vulkan.
+    /// on it, ahead of any CUDA context.  Image blits run on the backend of
+    /// the attached image cache ([`Self::set_image_cache`]).
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {
         self.vk_backend = backend;
@@ -159,13 +165,12 @@ impl PageRenderer<'_> {
     /// Attach a device-resident image cache.
     ///
     /// When set, JPEG image decode goes through the cache: a content-
-    /// hash hit returns an `Arc<CachedDeviceImage>` with no decode
-    /// work; a miss decodes on CPU, uploads to VRAM, caches, and
-    /// returns the same handle.  The renderer dispatches `Gpu`-variant
-    /// images to a CUDA blit kernel that writes into a per-page
-    /// `DevicePageBuffer` and composites the result onto `bitmap` in
-    /// content-stream order, so the page renders byte-identically to
-    /// the CPU-only path.
+    /// hash hit returns a `CachedImage` with no decode work; a miss
+    /// decodes on CPU, uploads to VRAM, caches, and returns the same
+    /// handle.  The renderer dispatches `Gpu`-variant images to the blit
+    /// kernel of the cache's backend (CUDA or Vulkan), downloads the
+    /// pixels it wrote and composites them onto `bitmap` in content-stream
+    /// order, so the page renders byte-identically to the CPU-only path.
     ///
     /// `doc_id` should be a stable identifier for the source PDF
     /// (typically `BLAKE3(pdf_bytes)` or similar).  It's combined
@@ -178,11 +183,13 @@ impl PageRenderer<'_> {
     /// execute on this renderer; today no caller wires or unwires a
     /// cache mid-page.
     #[cfg(feature = "cache")]
-    pub fn set_image_cache(&mut self, cache: Option<Arc<DeviceImageCache>>, doc_id: DocId) {
+    pub fn set_image_cache(&mut self, cache: Option<ImageCache>, doc_id: DocId) {
         self.cache_state = cache.map(|cache| CacheState {
             cache,
             doc_id,
             page_buffer: None,
+            #[cfg(feature = "vulkan")]
+            vk_blit: BlitScratch::default(),
         });
     }
 }

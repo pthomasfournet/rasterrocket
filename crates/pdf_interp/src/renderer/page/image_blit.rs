@@ -1,9 +1,6 @@
 //! Drawing a decoded image or stencil mask onto the page through the clip,
 //! on the CPU or through the device blit kernel.
 
-#[cfg(feature = "cache")]
-use std::sync::Arc;
-
 use color::convert::div255;
 use raster::ClipResult;
 
@@ -11,14 +8,10 @@ use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend_u8, with_canvas};
 use super::image_compositor::ImageCompositor;
-#[cfg(feature = "cache")]
-use super::image_compositor::composite_rgba_rows;
 use super::image_reduce::{self, DeviceWindow};
 use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask};
-#[cfg(feature = "cache")]
-use gpu::cache::DevicePageBuffer;
 
 impl PageRenderer<'_> {
     /// Count the drawn image in the page diagnostics (presence, filter) and
@@ -226,72 +219,6 @@ impl PageRenderer<'_> {
         Ok(true)
     }
 
-    /// A host-resident copy of `img` when its samples are device-resident
-    /// and `grid` has no tables, which are all the blit kernel reads;
-    /// `None` otherwise, or when the copy fails.
-    #[cfg(feature = "cache")]
-    fn host_copy_for_table_less_grid(
-        &self,
-        img: &crate::resources::ImageDescriptor,
-        grid: &SampleGrid,
-    ) -> Option<crate::resources::ImageDescriptor> {
-        grid.tables()
-            .is_none()
-            .then(|| self.host_copy(img, "a draw beyond the blit tables"))
-            .flatten()
-    }
-
-    /// `decoded` with its samples host-resident when they are
-    /// device-resident and the canvas holds ink, which the blit kernel
-    /// cannot write; unchanged otherwise, or when the copy fails.  Applied
-    /// before the image enters the image memo, so the samples are read
-    /// back once per page however often the image is drawn.
-    #[cfg(feature = "cache")]
-    pub(super) fn host_resident_for_ink(
-        &self,
-        mut decoded: crate::resources::DecodedImage,
-    ) -> crate::resources::DecodedImage {
-        if self.canvas.kind() == CanvasKind::Ink
-            && let Some(host) = self.host_copy(&decoded.image, "an ink canvas")
-        {
-            decoded.image = host;
-        }
-        decoded
-    }
-
-    /// A host-resident copy of `img` when its samples are device-resident,
-    /// read back from the image cache for `purpose`; `None` when they are
-    /// host-resident or the read-back fails.
-    #[cfg(feature = "cache")]
-    pub(super) fn host_copy(
-        &self,
-        img: &crate::resources::ImageDescriptor,
-        purpose: &str,
-    ) -> Option<crate::resources::ImageDescriptor> {
-        use crate::resources::image::ImageData;
-
-        let ImageData::Gpu(cached) = &img.data else {
-            return None;
-        };
-        let cache = &self.cache_state.as_ref()?.cache;
-        let pixels = cache
-            .download(cached)
-            .map_err(|e| {
-                log::warn!(
-                    "rasterrocket-interp: reading a cached image back for {purpose} failed: {e}"
-                );
-            })
-            .ok()?;
-        Some(crate::resources::ImageDescriptor {
-            width: img.width,
-            height: img.height,
-            color_space: img.color_space,
-            data: ImageData::Cpu(pixels),
-            smask: None,
-            filter: img.filter,
-        })
-    }
-
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
     /// draws it.  `Err` carries the reason a decoded image cannot be drawn,
@@ -308,8 +235,8 @@ impl PageRenderer<'_> {
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
     ) -> Result<(), String> {
-        // GPU image-blit path: device-resident pixels sampled by the CUDA
-        // kernel through the same grid, composited onto `bitmap` before
+        // GPU image-blit path: device-resident pixels sampled by the blit
+        // kernel of the cache's backend through the same grid, composited onto `bitmap` before
         // this call returns so later operators paint over the image in
         // content-stream order.
         //
@@ -478,121 +405,6 @@ impl PageRenderer<'_> {
                 .paint_row(b, grid.x0, dy, &colours, &shape));
         }
         Ok(())
-    }
-
-    /// GPU image blit: sample `cached` through `grid` on the device, then
-    /// download the touched rows of the page buffer and composite them onto
-    /// `bitmap`.  Returns `true` once the pixels are on the host bitmap;
-    /// `false` if any prerequisite is missing (no `GpuCtx`, page-buffer
-    /// alloc fails, kernel dispatch or download errors), in which case the
-    /// bitmap is untouched.
-    ///
-    /// Compositing before returning keeps content-stream order: anything
-    /// painted after the image lands on top of it, and an image inside a
-    /// transparency group lands in the group's bitmap.
-    #[cfg(feature = "cache")]
-    pub(super) fn try_gpu_blit_image(
-        &mut self,
-        cached: &Arc<gpu::cache::CachedDeviceImage>,
-        grid: &SampleGrid,
-        grid_clip: &mut GridClip<'_>,
-    ) -> bool {
-        use gpu::blit::BlitBbox;
-
-        // The kernel's samples are sRGB, composited onto an RGB canvas only.
-        if self.canvas.kind() != CanvasKind::Rgb {
-            return false;
-        }
-        let paint = {
-            let gs = self.gstate.current();
-            self.paint_params(gs.fill_alpha, gs.blend_mode, None)
-        };
-        let Some(gpu_ctx) = self.gpu_ctx.as_deref() else {
-            log::debug!("blit_image: GPU image blit skipped — no GpuCtx attached");
-            return false;
-        };
-        let Some(cache_state) = self.cache_state.as_mut() else {
-            // Shouldn't happen: ImageData::Gpu only originates from a
-            // wired-in cache.  Defensive check; cheap.
-            return false;
-        };
-        // Stream ordering: the blit kernel and the page buffer's row
-        // download and clear all run on this thread's stream, so they
-        // execute in order.  The kernel writes the page buffer through a
-        // shared device pointer, which records no cross-stream write event;
-        // the buffer is therefore bound to the stream of the thread that
-        // renders the page.  `cached` was uploaded on the cache's stream;
-        // the launch waits on its write event.
-
-        // Grid edges are clamped to the page, so they fit i32 whenever the
-        // page does; a page wider than i32::MAX pixels cannot exist.
-        let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
-            i32::try_from(grid.x0),
-            i32::try_from(grid.y0),
-            i32::try_from(grid.x1),
-            i32::try_from(grid.y1),
-        ) else {
-            return false;
-        };
-        let bbox = BlitBbox { x0, y0, x1, y1 };
-        let Some((cols, rows)) = grid.tables() else {
-            return false;
-        };
-
-        // Lazy-allocate the per-page device buffer on first GPU
-        // image; subsequent images on the same page reuse it.
-        if cache_state.page_buffer.is_none() {
-            match DevicePageBuffer::new(gpu_ctx.stream(), self.width, self.height) {
-                Ok(buf) => cache_state.page_buffer = Some(buf),
-                Err(e) => {
-                    log::warn!("blit_image: DevicePageBuffer alloc failed: {e}");
-                    return false;
-                }
-            }
-        }
-        let Some(buf) = cache_state.page_buffer.as_mut() else {
-            return false;
-        };
-
-        if let Err(e) =
-            gpu_ctx.blit_image_to_buffer(cached, buf, bbox, cols, rows, grid.filter().bits())
-        {
-            log::warn!("blit_image: GPU kernel dispatch failed: {e}");
-            return false;
-        }
-        let super::canvas::PageCanvas::Rgb(bitmap) = &mut self.canvas else {
-            return false;
-        };
-        let compositor = ImageCompositor::new(bitmap, &paint);
-        let transfer = self.gstate.current().transfer.clone();
-        let downloaded = buf.download_rows_with(grid.y0, grid.y1, |y, rows| {
-            composite_rgba_rows(
-                bitmap,
-                rows,
-                y,
-                grid,
-                grid_clip,
-                compositor,
-                transfer.as_deref(),
-            );
-        });
-        if let Err(e) = downloaded {
-            log::warn!("blit_image: device page buffer download failed: {e}");
-            // The buffer now holds this image's pixels with alpha set;
-            // drop it so a later blit starts from a zeroed buffer.  Bands
-            // composited before the failure stay on the bitmap; the image
-            // is still reported as not drawn.
-            cache_state.page_buffer = None;
-            return false;
-        }
-        // Clear the touched rows so the next blit's alpha test sees only
-        // its own writes.  On failure drop the buffer for the same reason
-        // as above; the composite already succeeded.
-        if let Err(e) = buf.zero_rows(grid.y0, grid.y1) {
-            log::warn!("blit_image: device page buffer clear failed: {e}");
-            cache_state.page_buffer = None;
-        }
-        true
     }
 }
 

@@ -251,7 +251,7 @@ fn render_page_rgb_with_geom(
     renderer.set_vk_backend(session.vk_backend.as_ref().map(Arc::clone));
 
     #[cfg(feature = "cache")]
-    renderer.set_image_cache(session.image_cache.as_ref().map(Arc::clone), session.doc_id);
+    renderer.set_image_cache(session.image_cache.clone(), session.doc_id);
 
     // RAII guard armed BEFORE lend_decoders, not after.  lend_decoders moves
     // handles out of TLS into the renderer one decoder at a time and is

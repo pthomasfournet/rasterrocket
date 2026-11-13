@@ -26,7 +26,7 @@ use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 use crate::GpuCtx;
 use crate::backend::params::blit_extents;
 pub use crate::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y};
-use crate::cache::{CachedDeviceImage, DevicePageBuffer, ImageLayout};
+use crate::cache::{CachedDeviceImage, DevicePageBuffer};
 
 /// `u32` words per sampling-table entry: `[x_hi, x_lo, y_hi, y_lo]`.
 pub const SAMPLE_ENTRY_WORDS: usize = 4;
@@ -113,11 +113,10 @@ impl GpuCtx {
             bbox.y1,
         );
 
-        let layout_code: i32 = match src.layout {
-            ImageLayout::Rgb => 0,
-            ImageLayout::Gray => 1,
-            ImageLayout::Mask => return Err(BlitError::UnsupportedLayout),
+        let Some(layout_code) = src.layout.blit_layout() else {
+            return Err(BlitError::UnsupportedLayout);
         };
+        let layout_code = i32::try_from(layout_code).map_err(|_| BlitError::UnsupportedLayout)?;
         if bbox.width() == 0 || bbox.height() == 0 {
             return Ok(());
         }
@@ -466,7 +465,7 @@ mod tests {
         let pixels: Vec<u8> = (0..SRC * SRC * 3)
             .map(|i| u8::try_from(((i * 7) + 3) % 251).expect("fits"))
             .collect();
-        let hash = DeviceImageCache::hash_bytes(&pixels);
+        let hash = crate::cache::ContentHash::of(&pixels);
 
         let cache = DeviceImageCache::new(
             Arc::clone(&stream),
@@ -619,7 +618,7 @@ mod tests {
             .insert(InsertRequest {
                 doc: DocId([0; 32]),
                 obj: ObjId(1),
-                hash: DeviceImageCache::hash_bytes(&pixels),
+                hash: crate::cache::ContentHash::of(&pixels),
                 width: 4,
                 height: 4,
                 layout: ImageLayout::Rgb,

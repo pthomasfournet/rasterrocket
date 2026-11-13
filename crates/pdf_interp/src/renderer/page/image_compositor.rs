@@ -14,17 +14,28 @@ use super::image_blit::blend_rgb;
 use super::image_sampler::{GridClip, SampleGrid};
 use super::paint::PaintParams;
 
-/// Source-over whole rows of a downloaded RGBA8 page buffer, the first of
-/// which is page row `y0`, onto `bitmap`, restricted to the grid's columns
-/// and to the pixels `grid_clip` covers.  Alpha is `255` where the blit
-/// kernel wrote a sample and `0` elsewhere, so the composite copies each
-/// written sample, blended by the clip coverage on rows the clip edge
-/// crosses.  Samples map through `transfer` when one is in effect.
+/// Whole rows of RGBA8 pixels downloaded from a blit target: `width`
+/// pixels per row, the first pixel of the first row at page position
+/// `(x0, y0)`.
+#[cfg(feature = "cache")]
+#[derive(Clone, Copy)]
+pub(super) struct RgbaRows<'a> {
+    pub(super) bytes: &'a [u8],
+    pub(super) x0: u32,
+    pub(super) y0: u32,
+    pub(super) width: u32,
+}
+
+/// Source-over `rows` onto `bitmap`, restricted to the grid's columns,
+/// which the rows span, and to the pixels `grid_clip` covers.  Alpha is
+/// `255` where the blit kernel wrote a sample and `0` elsewhere, so the
+/// composite copies each written sample, blended by the clip coverage on
+/// rows the clip edge crosses.  Samples map through `transfer` when one is
+/// in effect.
 #[cfg(feature = "cache")]
 pub(super) fn composite_rgba_rows(
     bitmap: &mut Bitmap<color::Rgb8>,
-    rgba: &[u8],
-    y0: u32,
+    rows: RgbaRows<'_>,
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
     compositor: ImageCompositor<'_>,
@@ -32,16 +43,20 @@ pub(super) fn composite_rgba_rows(
 ) {
     use gpu::cache::RGBA_BPP;
 
-    let width = bitmap.width as usize;
-    let src_stride = width * RGBA_BPP;
+    debug_assert!(
+        rows.x0 <= grid.x0 && grid.x1 - rows.x0 <= rows.width,
+        "blit rows do not span the grid's columns"
+    );
+    let src_stride = rows.width as usize * RGBA_BPP;
+    let (c0, c1) = ((grid.x0 - rows.x0) as usize, (grid.x1 - rows.x0) as usize);
     let span = (grid.x1 - grid.x0) as usize;
     let mut colours = vec![0u8; span * 3];
     let mut shape = vec![0u8; span];
-    for (src_row, dy) in rgba.chunks_exact(src_stride.max(1)).zip(y0..) {
+    for (src_row, dy) in rows.bytes.chunks_exact(src_stride.max(1)).zip(rows.y0..) {
         let Some(row_clip) = grid_clip.row(dy) else {
             continue;
         };
-        let samples = &src_row[grid.x0 as usize * RGBA_BPP..grid.x1 as usize * RGBA_BPP];
+        let samples = &src_row[c0 * RGBA_BPP..c1 * RGBA_BPP];
         for (((dx, s), out), shape) in (grid.x0..grid.x1)
             .zip(samples.as_chunks::<RGBA_BPP>().0)
             .zip(colours.as_chunks_mut::<3>().0)

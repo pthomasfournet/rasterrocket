@@ -46,11 +46,9 @@ pub enum BackendPolicy {
     /// [`RasterError::BackendUnavailable`] if Vulkan initialisation fails
     /// (or the binary was built without `--features vulkan`).
     ///
-    /// AA fill and tile fill kernels dispatch through `VulkanBackend`;
-    /// the device-resident image cache (`DeviceImageCache`,
-    /// `DevicePageBuffer`) is CUDA-only, so under `ForceVulkan` JPEG
-    /// images decode and composite on the CPU, and ICC CMYK→RGB runs on
-    /// the CPU as well.
+    /// The AA fill, ICC CMYK→RGB CLUT and image blit kernels dispatch
+    /// through `VulkanBackend`, and in a build with the `cache` feature the
+    /// device-resident image cache keeps its slabs on the Vulkan device.
     ForceVulkan,
 }
 

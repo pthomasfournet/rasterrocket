@@ -13,8 +13,12 @@
 //! buffer-device-addresses (Vulkan) at record time.
 
 mod aa_fill;
+#[cfg(feature = "cache")]
+mod blit_page;
 mod staged;
 pub use aa_fill::{AaFillScratch, AaFillScratchPool, aa_fill, aa_fill_page};
+#[cfg(feature = "cache")]
+pub use blit_page::{BlitScratch, BlitSource, blit_image_box};
 mod icc_clut;
 pub use icc_clut::{icc_clut, icc_clut_matches_cpu};
 pub mod cuda;

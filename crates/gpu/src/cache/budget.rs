@@ -10,9 +10,9 @@
 use cudarc::driver::CudaStream;
 
 use super::CacheError;
+use crate::backend::GpuBackend;
 
-/// VRAM budget for the cache.  See `CacheBudget` in the Phase 9 spec for
-/// the full three-tier struct; this is the VRAM-only subset.
+/// VRAM budget for the cache: the cap on the bytes its VRAM tier holds.
 #[derive(Debug, Clone, Copy)]
 pub struct VramBudget {
     /// Maximum bytes the cache is allowed to hold on the device.  When a
@@ -22,7 +22,7 @@ pub struct VramBudget {
 }
 
 impl VramBudget {
-    /// Spec-mandated VRAM hard cap: 6 GiB.  Caps `auto_detect` so we
+    /// VRAM hard cap: 6 GiB.  Caps `auto_detect` so we
     /// don't claim every byte on a workstation GPU shared with a
     /// desktop compositor, and serves as the value of [`Self::DEFAULT`]
     /// for tests and callers who can't probe the device.
@@ -35,8 +35,7 @@ impl VramBudget {
     };
 
     /// Auto-tune from `cudaMemGetInfo`.  Returns `min(75% of free,
-    /// HARD_CAP_BYTES)`, matching the spec's "default min(75% of free
-    /// VRAM, 6 GB)" rule.
+    /// HARD_CAP_BYTES)`.
     ///
     /// # Errors
     /// Returns an error if `cudaMemGetInfo` fails (e.g. no CUDA device).
@@ -47,6 +46,20 @@ impl VramBudget {
         let three_quarters = (free as u64).saturating_mul(3) / 4;
         Ok(Self {
             vram_bytes: three_quarters.min(Self::HARD_CAP_BYTES),
+        })
+    }
+
+    /// Auto-tune from the driver query of `backend`
+    /// ([`GpuBackend::detect_vram_budget`]): `min(usable, HARD_CAP_BYTES)`,
+    /// where `usable` already holds the backend's safety margin (three
+    /// quarters of the free VRAM on both backends).
+    ///
+    /// # Errors
+    /// The backend's error when the query fails.
+    pub fn from_backend<B: GpuBackend>(backend: &B) -> Result<Self, CacheError> {
+        let detected = backend.detect_vram_budget()?;
+        Ok(Self {
+            vram_bytes: detected.usable_bytes.min(Self::HARD_CAP_BYTES),
         })
     }
 }

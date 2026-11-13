@@ -23,8 +23,8 @@ use crate::{BackendPolicy, RasterError};
 /// A Vulkan backend that wins `Auto` also keeps the CUDA context from
 /// initialising, so with every Vulkan kernel disabled `Auto` falls through
 /// to CUDA (whose CLUT kernel is live), then the CPU; conversely, enabling a
-/// Vulkan kernel moves the CLUT onto Vulkan and turns the device image
-/// cache off under `Auto`.
+/// Vulkan kernel moves the CLUT and the device image cache onto Vulkan
+/// under `Auto`.
 fn auto_wants_vulkan() -> bool {
     device_kernel_enabled(DeviceKernel::AaFill) || device_kernel_enabled(DeviceKernel::HuffmanJpeg)
 }

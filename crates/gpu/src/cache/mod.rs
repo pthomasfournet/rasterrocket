@@ -1,21 +1,24 @@
-//! Phase 9 device-resident image cache — three tiers.
+//! Device-resident image cache — three tiers.
 //!
-//! See `docs/superpowers/specs/2026-05-07-phase-9-device-resident-image-cache.md`
-//! for the full architecture.  This module ships:
-//!
-//! - VRAM tier (Task 2): primary `DashMap<ContentHash, Arc<...>>` +
+//! - VRAM tier: primary `DashMap<ContentHash, Arc<...>>` +
 //!   `(DocId, ObjId)` alias index, refcount-pinned LRU eviction.
-//! - Host RAM tier (Task 3): pinned-memory demote-on-evict /
-//!   promote-on-hit; in-process only.
-//! - Disk tier (Task 5): `<root>/<doc>/<hash>.bin` sidecar files for
+//! - Host RAM tier: demote-on-evict / promote-on-hit; in-process only.
+//! - Disk tier: `<root>/<doc>/<hash>.bin` sidecar files for
 //!   cross-process persistence; opt-in via [`DeviceImageCache::with_disk`].
+//!
+//! The cache is generic over the backend its slabs live on
+//! ([`CacheBackend`]: CUDA, and Vulkan with the `vulkan` feature); the disk
+//! tier is host-only and shared by both.  [`ImageCache`] and [`CachedImage`]
+//! hold a cache and an image of either backend.
 //!
 //! # Module layout (private; named for orientation only)
 //!
-//! - `budget` — VRAM cap struct; auto-detect from `cudaMemGetInfo`.
+//! - `any` — the backend-erased [`ImageCache`] and [`CachedImage`].
+//! - `backend` — the per-backend transfers ([`CacheBackend`]).
+//! - `budget` — VRAM cap struct; auto-detect from the driver.
 //! - `eviction` — LRU scan, demote-to-host, monotonic LRU clock.
 //! - `promotion` — host-tier and disk-tier promote-on-hit paths.
-//! - `host_tier` — pinned-memory tier.
+//! - `host_tier` — host-memory tier.
 //! - `disk_tier` — sidecar-file tier (re-exported via [`DiskTier`]).
 //! - `page_buffer` — per-page composition target ([`DevicePageBuffer`]).
 //!
@@ -35,6 +38,8 @@
 //! until the last consumer drops its `Arc` — that's the desired behaviour:
 //! pulling memory from under an in-flight kernel would corrupt the page.
 
+mod any;
+mod backend;
 mod budget;
 mod disk_tier;
 mod eviction;
@@ -43,6 +48,8 @@ mod page_buffer;
 mod promotion;
 
 pub use crate::RGBA_BPP;
+pub use any::{CachedImage, ImageCache};
+pub use backend::CacheBackend;
 pub use budget::VramBudget;
 pub use disk_tier::{DiskTier, LookupCallbackError};
 pub use host_tier::HostBudget;
@@ -52,8 +59,11 @@ pub use page_buffer::DevicePageBuffer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cudarc::driver::{CudaSlice, CudaStream, DeviceRepr};
+use cudarc::driver::CudaStream;
 use dashmap::DashMap;
+
+use crate::backend::BackendError;
+use crate::backend::cuda::CudaBackend;
 use dashmap::mapref::entry::Entry;
 
 /// Stable identifier for a PDF document.
@@ -102,6 +112,18 @@ impl ImageLayout {
             Self::Rgb => 3,
         }
     }
+
+    /// The blit kernels' source layout code
+    /// ([`crate::backend::params::BlitParams::src_layout`]): `0` for RGB,
+    /// `1` for gray; `None` for a mask, which the kernels do not sample.
+    #[must_use]
+    pub const fn blit_layout(self) -> Option<u32> {
+        match self {
+            Self::Rgb => Some(0),
+            Self::Gray => Some(1),
+            Self::Mask => None,
+        }
+    }
 }
 
 /// One cached decoded image living in VRAM.
@@ -111,31 +133,47 @@ impl ImageLayout {
 /// or [`DeviceImageCache::insert`], the slab is guaranteed alive for the
 /// lifetime of the `Arc` — eviction may drop the cache's reference, but
 /// the device memory is reclaimed only when the last `Arc` drops.  This
-/// guarantee is what makes the cache safe to use across multiple
-/// in-flight CUDA streams.
-pub struct CachedDeviceImage {
+/// guarantee is what makes the cache safe to use across in-flight device
+/// work: a blit holds the `Arc` until the work reading the slab completes.
+pub struct CachedDeviceImage<B: CacheBackend = CudaBackend> {
     /// Owned device-side allocation.  Dropping `CachedDeviceImage` frees it.
-    pub device_ptr: CudaSlice<u8>,
+    pub device_ptr: B::DeviceBuffer,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
     /// Pixel layout — determines bytes per pixel and renderer interpretation.
     pub layout: ImageLayout,
+    /// Byte length of `device_ptr`.
+    vram_bytes: u64,
     /// LRU timestamp.  Updated on every cache hit via a single atomic store
     /// (no CAS needed; later writes always win and exact ordering doesn't
     /// matter for LRU correctness).
     pub(super) last_used: AtomicU64,
 }
 
-impl CachedDeviceImage {
+impl<B: CacheBackend> CachedDeviceImage<B> {
+    /// An entry owning `slab`, `vram_bytes` long, last used at `tick`.
+    pub(super) const fn new(
+        slab: B::DeviceBuffer,
+        vram_bytes: u64,
+        (width, height, layout): (u32, u32, ImageLayout),
+        tick: u64,
+    ) -> Self {
+        Self {
+            device_ptr: slab,
+            width,
+            height,
+            layout,
+            vram_bytes,
+            last_used: AtomicU64::new(tick),
+        }
+    }
+
     /// Bytes in VRAM occupied by this entry.  Used for budget accounting.
     #[must_use]
-    pub fn vram_bytes(&self) -> u64 {
-        // CudaSlice::len is not yet const in cudarc 0.19; can't make
-        // this const fn until it is.  Caller perf is fine — this is
-        // only used in `evict_to_fit` and diagnostic accessors.
-        self.device_ptr.len() as u64
+    pub const fn vram_bytes(&self) -> u64 {
+        self.vram_bytes
     }
 
     pub(super) fn touch(&self, tick: u64) {
@@ -149,7 +187,7 @@ impl CachedDeviceImage {
     }
 }
 
-impl std::fmt::Debug for CachedDeviceImage {
+impl<B: CacheBackend> std::fmt::Debug for CachedDeviceImage<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedDeviceImage")
             .field("width", &self.width)
@@ -165,6 +203,9 @@ impl std::fmt::Debug for CachedDeviceImage {
 pub enum CacheError {
     /// A `cudarc` driver call failed (allocation, upload, sync, or budget probe).
     Cuda(cudarc::driver::DriverError),
+    /// A [`crate::backend::GpuBackend`] call failed (allocation, transfer,
+    /// or budget probe).
+    Backend(BackendError),
     /// The cache cannot fit a new entry because every reclaimable slab is
     /// pinned by an outstanding `Arc` (e.g. an in-flight CUDA stream).
     /// This condition is **transient**: once consumers drop their `Arc`s
@@ -189,10 +230,18 @@ pub enum CacheError {
         /// Total budget in bytes.
         budget: u64,
     },
-    /// `insert` was called with a zero-length pixel buffer.  cudarc
-    /// rejects zero-size allocations, so we surface this as a typed
-    /// caller error rather than a `Cuda` driver error.
+    /// `insert` was called with a zero-length pixel buffer.  Device
+    /// allocators reject zero-size allocations, so this is surfaced as a
+    /// typed caller error rather than a driver error.
     EmptyPayload,
+    /// An image of one backend was passed to a cache of another.
+    BackendMismatch,
+}
+
+impl From<BackendError> for CacheError {
+    fn from(e: BackendError) -> Self {
+        Self::Backend(e)
+    }
 }
 
 impl CacheError {
@@ -205,6 +254,7 @@ impl std::fmt::Display for CacheError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cuda(e) => write!(f, "cuda: {e}"),
+            Self::Backend(e) => write!(f, "gpu backend: {e}"),
             Self::OverBudget {
                 needed,
                 used,
@@ -218,6 +268,7 @@ impl std::fmt::Display for CacheError {
                 "single image {needed} B does not fit in cache budget of {budget} B",
             ),
             Self::EmptyPayload => write!(f, "insert called with zero-length pixel buffer"),
+            Self::BackendMismatch => write!(f, "image belongs to a cache of another backend"),
         }
     }
 }
@@ -226,7 +277,11 @@ impl std::error::Error for CacheError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Cuda(e) => Some(e),
-            Self::OverBudget { .. } | Self::EntryExceedsBudget { .. } | Self::EmptyPayload => None,
+            Self::Backend(e) => Some(e),
+            Self::OverBudget { .. }
+            | Self::EntryExceedsBudget { .. }
+            | Self::EmptyPayload
+            | Self::BackendMismatch => None,
         }
     }
 }
@@ -235,10 +290,18 @@ impl std::error::Error for CacheError {
 ///
 /// Newtype so it can't be confused with [`DocId`] (also `[u8; 32]`)
 /// at a call site — different roles, different keys.  Construct via
-/// [`DeviceImageCache::hash_bytes`] or `ContentHash(bytes)` directly
-/// when the caller already has the hash.
+/// [`ContentHash::of`] or `ContentHash(bytes)` directly when the caller
+/// already has the hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash(pub [u8; 32]);
+
+impl ContentHash {
+    /// The BLAKE3 content hash of `bytes`.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+}
 
 /// Two-tier in-process image cache.
 ///
@@ -258,8 +321,8 @@ pub struct ContentHash(pub [u8; 32]);
 /// "freshness" is comparable to a VRAM hit's; otherwise a freshly
 /// promoted slab would look like the oldest VRAM entry to the next
 /// eviction.
-pub struct DeviceImageCache {
-    pub(super) primary: DashMap<ContentHash, Arc<CachedDeviceImage>>,
+pub struct DeviceImageCache<B: CacheBackend = CudaBackend> {
+    pub(super) primary: DashMap<ContentHash, Arc<CachedDeviceImage<B>>>,
     /// Maps `(DocId, ObjId)` to the content hash that resolves it.  An
     /// alias entry is cheap (40 bytes) and lets us skip BLAKE3 hashing
     /// on every same-document re-render.
@@ -267,8 +330,8 @@ pub struct DeviceImageCache {
     /// Host RAM demotion target.  Populated when the eviction path
     /// reclaims a VRAM slab; consulted by [`Self::lookup_by_hash`] on
     /// a primary miss.
-    pub(super) host: HostTier,
-    /// Phase 9 disk tier — sidecar cache directory keyed by
+    pub(super) host: HostTier<B>,
+    /// Disk tier — sidecar cache directory keyed by
     /// `(DocId, ContentHash)`.  `None` disables disk persistence
     /// (fully in-process cache).  Wired in via [`Self::with_disk`].
     pub(super) disk: Option<DiskTier>,
@@ -279,11 +342,9 @@ pub struct DeviceImageCache {
     /// Sum of `vram_bytes()` over every entry currently held by the
     /// primary index.  Maintained on insert / evict.
     pub(super) used_bytes: AtomicU64,
-    /// Owned CUDA stream for upload work.  Held by `Arc` so per-call
-    /// upload paths can clone cheaply, and so the host tier's D2H copy
-    /// can synchronise on it before publishing a demoted entry.  The
-    /// CUDA context is reachable as `self.stream.context()`.
-    pub(super) stream: Arc<CudaStream>,
+    /// The handle every transfer of the cache goes through
+    /// ([`CacheBackend::Device`]).
+    pub(super) device: B::Device,
 }
 
 /// Bundled arguments for [`DeviceImageCache::insert`].
@@ -301,7 +362,7 @@ pub struct InsertRequest<'a> {
     pub obj: ObjId,
     /// Content hash (BLAKE3) of the encoded source bytes — primary key
     /// for cross-document deduplication.  Caller computes via
-    /// [`DeviceImageCache::hash_bytes`].
+    /// [`ContentHash::of`].
     pub hash: ContentHash,
     /// Width in pixels.
     pub width: u32,
@@ -315,12 +376,12 @@ pub struct InsertRequest<'a> {
     pub pixels: &'a [u8],
 }
 
-impl DeviceImageCache {
-    /// Build an empty cache bound to a CUDA stream, a VRAM budget, and
+impl<B: CacheBackend> DeviceImageCache<B> {
+    /// Build an empty cache bound to a backend handle, a VRAM budget, and
     /// a host-RAM demotion budget.  The disk tier is off by default;
     /// enable it via [`Self::with_disk`].
     #[must_use]
-    pub fn new(stream: Arc<CudaStream>, vram: VramBudget, host: HostBudget) -> Self {
+    pub fn new(device: B::Device, vram: VramBudget, host: HostBudget) -> Self {
         Self {
             primary: DashMap::new(),
             by_doc_obj: DashMap::new(),
@@ -329,7 +390,7 @@ impl DeviceImageCache {
             budget: vram,
             tick: AtomicU64::new(0),
             used_bytes: AtomicU64::new(0),
-            stream,
+            device,
         }
     }
 
@@ -346,13 +407,6 @@ impl DeviceImageCache {
     pub fn with_disk(mut self, disk: DiskTier) -> Self {
         self.disk = Some(disk);
         self
-    }
-
-    /// Compute the BLAKE3 content hash of an encoded byte stream.  Exposed
-    /// for callers that already have a hash and want to skip recomputation.
-    #[must_use]
-    pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
-        ContentHash(*blake3::hash(bytes).as_bytes())
     }
 
     /// Live entry count — for diagnostics, tests, and benches.
@@ -384,7 +438,7 @@ impl DeviceImageCache {
     /// host-tier hit, transparently promotes to VRAM (one `PCIe`
     /// upload).  Updates LRU.
     #[must_use]
-    pub fn lookup_by_id(&self, doc: DocId, obj: ObjId) -> Option<Arc<CachedDeviceImage>> {
+    pub fn lookup_by_id(&self, doc: DocId, obj: ObjId) -> Option<Arc<CachedDeviceImage<B>>> {
         let hash = *self.by_doc_obj.get(&(doc, obj))?;
         // Try the in-process tiers first; on miss, fall through to the
         // disk tier which is keyed by `(doc, hash)` (cross-document
@@ -406,7 +460,7 @@ impl DeviceImageCache {
     /// and only [`Self::lookup_by_id`] has the doc-id needed for the
     /// lookup.
     #[must_use]
-    pub fn lookup_by_hash(&self, hash: &ContentHash) -> Option<Arc<CachedDeviceImage>> {
+    pub fn lookup_by_hash(&self, hash: &ContentHash) -> Option<Arc<CachedDeviceImage<B>>> {
         if let Some(entry) = self.primary.get(hash) {
             let entry = entry.clone();
             entry.touch(self.next_tick());
@@ -430,7 +484,7 @@ impl DeviceImageCache {
         doc: DocId,
         obj: ObjId,
         hash: &ContentHash,
-    ) -> Option<Arc<CachedDeviceImage>> {
+    ) -> Option<Arc<CachedDeviceImage<B>>> {
         if let Some(entry) = self.lookup_by_hash(hash) {
             self.alias(doc, obj, *hash);
             return Some(entry);
@@ -471,31 +525,35 @@ impl DeviceImageCache {
     /// return the cached handle.  Evicts in LRU order if the new entry
     /// would exceed the budget.
     ///
-    /// # Stream contract
+    /// # Ordering contract
     ///
-    /// The upload is enqueued on the cache's internal stream (see
-    /// [`Self::stream`]) and records the slab's write event.  A kernel
-    /// launched against [`CachedDeviceImage::device_ptr`] through cudarc on
-    /// any other stream of the same context waits on that event, so it
-    /// never reads the slab before the H→D DMA completes.  A consumer that
-    /// reads the slab through a raw device pointer must synchronise the
-    /// cache's stream first.
+    /// On Vulkan the upload has completed when this returns.  On CUDA it
+    /// is enqueued on the cache's internal stream (see
+    /// `DeviceImageCache::<CudaBackend>::stream`) and records the slab's
+    /// write event.  A kernel launched against
+    /// [`CachedDeviceImage::device_ptr`] through cudarc on any other stream
+    /// of the same context waits on that event, so it never reads the slab
+    /// before the H→D DMA completes.  A consumer that reads the slab
+    /// through a raw device pointer must synchronise the cache's stream
+    /// first.
     ///
     /// # Errors
     ///
-    /// - [`CacheError::EmptyPayload`] — `pixels.is_empty()` (cudarc
-    ///   refuses zero-size allocations; this is a typed caller error).
+    /// - [`CacheError::EmptyPayload`] — `pixels.is_empty()` (device
+    ///   allocators refuse zero-size allocations; this is a typed caller
+    ///   error).
     /// - [`CacheError::EntryExceedsBudget`] — the entry alone is larger
     ///   than the configured budget.
     /// - [`CacheError::OverBudget`] — no eviction can free enough space
     ///   (every other entry is pinned by an outstanding `Arc`).  The
     ///   condition is transient.
-    /// - [`CacheError::Cuda`] — the upload itself failed.
+    /// - [`CacheError::Cuda`] / [`CacheError::Backend`] — the upload itself
+    ///   failed.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "all fields are trivially movable (Copy newtypes plus a `&[u8]` slice header); by-value conveys ownership transfer at the call site without changing codegen vs `&InsertRequest`"
     )]
-    pub fn insert(&self, req: InsertRequest<'_>) -> Result<Arc<CachedDeviceImage>, CacheError> {
+    pub fn insert(&self, req: InsertRequest<'_>) -> Result<Arc<CachedDeviceImage<B>>, CacheError> {
         let InsertRequest {
             doc,
             obj,
@@ -533,14 +591,13 @@ impl DeviceImageCache {
         // Single Entry transition below so concurrent inserts of the same
         // hash can't both fetch_add `used_bytes` after their Vacant probe.
         self.evict_to_fit(needed)?;
-        let device_ptr = self.stream.clone_htod(pixels).map_err(CacheError::cuda)?;
-        let new_entry = Arc::new(CachedDeviceImage {
-            device_ptr,
-            width,
-            height,
-            layout,
-            last_used: AtomicU64::new(self.next_tick()),
-        });
+        let slab = B::upload_slab(&self.device, pixels)?;
+        let new_entry = Arc::new(CachedDeviceImage::new(
+            slab,
+            needed,
+            (width, height, layout),
+            self.next_tick(),
+        ));
         match self.primary.entry(hash) {
             Entry::Occupied(occ) => {
                 // Lost the dedup race.  `new_entry` drops on function
@@ -570,12 +627,10 @@ impl DeviceImageCache {
         }
     }
 
-    /// The CUDA stream on which the cache enqueues uploads.  Exposed so
-    /// a caller reading a freshly inserted [`CachedDeviceImage::device_ptr`]
-    /// through a raw device pointer can synchronise it first.
+    /// The handle the cache issues its transfers through.
     #[must_use]
-    pub fn stream(&self) -> &CudaStream {
-        &self.stream
+    pub const fn device(&self) -> &B::Device {
+        &self.device
     }
 
     /// The pixels of `image` copied back to the host, in the layout
@@ -583,365 +638,36 @@ impl DeviceImageCache {
     /// this returns.
     ///
     /// # Errors
-    /// The CUDA error of the copy or the synchronisation.
-    pub fn download(
-        &self,
-        image: &CachedDeviceImage,
-    ) -> Result<Vec<u8>, cudarc::driver::DriverError> {
-        let mut pixels = vec![0u8; image.device_ptr.len()];
-        self.stream.memcpy_dtoh(&image.device_ptr, &mut pixels)?;
-        self.stream.synchronize()?;
+    /// The backend's error of the copy.
+    pub fn download(&self, image: &CachedDeviceImage<B>) -> Result<Vec<u8>, CacheError> {
+        let len = usize::try_from(image.vram_bytes())
+            .map_err(|_| CacheError::Backend(BackendError::msg("slab exceeds usize")))?;
+        let mut pixels = vec![0u8; len];
+        B::download_slab(&self.device, &image.device_ptr, &mut pixels)?;
         Ok(pixels)
     }
 }
 
-// Compile-time assertion: the cache and its handle are thread-safe.
-// `CudaSlice<u8>` is `Send + Sync` (cudarc requires `T: DeviceRepr`,
-// which `u8` satisfies); the rest of the state is atomics, `dashmap`,
-// and `Arc<CudaStream>`.  The `DeviceRepr` bound on `u8` is referenced
-// to keep the file compiling if cudarc ever loosens the `T` bound.
+impl DeviceImageCache<CudaBackend> {
+    /// The CUDA stream on which the cache enqueues uploads.  Exposed so
+    /// a caller reading a freshly inserted [`CachedDeviceImage::device_ptr`]
+    /// through a raw device pointer can synchronise it first.
+    #[must_use]
+    pub fn stream(&self) -> &CudaStream {
+        &self.device
+    }
+}
+
+// Compile-time assertion: the cache and its handle are thread-safe.  The
+// slabs are the backends' `DeviceBuffer`s and the handles their
+// `Device`s, both `Send + Sync` by the trait bounds; the rest of the
+// state is atomics and `dashmap`.
 const fn _assert_thread_safety()
 where
     DeviceImageCache: Send + Sync,
     Arc<CachedDeviceImage>: Send + Sync,
-    u8: DeviceRepr,
 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn doc(byte: u8) -> DocId {
-        DocId([byte; 32])
-    }
-
-    fn hash(byte: u8) -> ContentHash {
-        ContentHash([byte; 32])
-    }
-
-    /// Build a 16×16 [`InsertRequest`] for a tiny test image.  The
-    /// `pixels` slice must outlive the returned request — call sites
-    /// keep it in a local binding.
-    #[cfg(feature = "gpu-validation")]
-    fn req(obj: u32, h: ContentHash, layout: ImageLayout, pixels: &[u8]) -> InsertRequest<'_> {
-        InsertRequest {
-            doc: doc(1),
-            obj: ObjId(obj),
-            hash: h,
-            width: 16,
-            height: 16,
-            layout,
-            pixels,
-        }
-    }
-
-    /// Build a fresh cache on CUDA device 0 with the given VRAM budget.
-    /// Returns `(stream, cache)` so tests that need the stream after the
-    /// cache is built (e.g. for a readback) can use it directly.  The
-    /// host tier is configured large enough to never evict so each test
-    /// can isolate the behaviour under inspection; tests that exercise
-    /// the host tier explicitly use `mk_cache_with_host`.
-    #[cfg(feature = "gpu-validation")]
-    fn mk_cache(vram_bytes: u64) -> (Arc<CudaStream>, DeviceImageCache) {
-        mk_cache_with_host(vram_bytes, /* host */ 1 << 24)
-    }
-
-    #[cfg(feature = "gpu-validation")]
-    fn mk_cache_with_host(vram_bytes: u64, host_bytes: u64) -> (Arc<CudaStream>, DeviceImageCache) {
-        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
-        let stream = ctx.default_stream();
-        let cache = DeviceImageCache::new(
-            Arc::clone(&stream),
-            VramBudget { vram_bytes },
-            HostBudget { host_bytes },
-        );
-        (stream, cache)
-    }
-
-    /// Smoke test: basic API shape sanity that does not require a CUDA
-    /// device.  Verifies that newtype keys and the budget struct
-    /// round-trip and have the documented properties.
-    #[test]
-    fn doc_id_and_obj_id_are_hashable() {
-        use std::collections::HashSet;
-        let mut set: HashSet<(DocId, ObjId)> = HashSet::new();
-        let _ = set.insert((doc(0), ObjId(1)));
-        let _ = set.insert((doc(0), ObjId(2)));
-        let _ = set.insert((doc(0), ObjId(1))); // dup
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn image_layout_bytes_per_pixel() {
-        assert_eq!(ImageLayout::Gray.bytes_per_pixel(), 1);
-        assert_eq!(ImageLayout::Mask.bytes_per_pixel(), 1);
-        assert_eq!(ImageLayout::Rgb.bytes_per_pixel(), 3);
-    }
-
-    #[test]
-    fn blake3_hash_is_deterministic() {
-        let bytes = b"hello phase 9";
-        let h1 = DeviceImageCache::hash_bytes(bytes);
-        let h2 = DeviceImageCache::hash_bytes(bytes);
-        assert_eq!(h1, h2);
-        // Different input → different hash with overwhelming probability.
-        let h3 = DeviceImageCache::hash_bytes(b"hello phase 8");
-        assert_ne!(h1, h3);
-    }
-
-    #[test]
-    fn cache_error_is_std_error() {
-        let e = CacheError::EntryExceedsBudget {
-            needed: 1 << 30,
-            budget: 1 << 20,
-        };
-        // Display contains the byte counts so an operator can read it.
-        let msg = e.to_string();
-        assert!(msg.contains("1073741824"));
-        assert!(msg.contains("1048576"));
-        // The Error::source call below is the load-bearing proof that
-        // CacheError satisfies std::error::Error (a separate trait-bound
-        // assertion would just be redundant ceremony).
-        assert!(std::error::Error::source(&e).is_none());
-
-        // Pinning hash is unused; reference it to verify the helper compiles.
-        let _ = hash(7);
-    }
-
-    /// GPU integration test: round-trip a 16×16 RGB image through the
-    /// cache.  Gated behind `gpu-validation` so workstations without
-    /// CUDA can still run `cargo test -p gpu --lib`.
-    #[cfg(feature = "gpu-validation")]
-    #[test]
-    fn round_trip_rgb_image() {
-        let (stream, cache) = mk_cache(1 << 20);
-
-        // 16×16×3 = 768; (i % 256) always fits u8, hence the unwrap.
-        let pixels: Vec<u8> = (0_i32..16 * 16 * 3)
-            .map(|i| u8::try_from(i % 256).expect("i % 256 fits u8"))
-            .collect();
-        let h = DeviceImageCache::hash_bytes(&pixels);
-        let entry = cache
-            .insert(req(42, h, ImageLayout::Rgb, &pixels))
-            .expect("insert");
-        assert_eq!(entry.width, 16);
-        assert_eq!(entry.height, 16);
-
-        // Lookup by both keys hits.
-        let by_id = cache.lookup_by_id(doc(1), ObjId(42)).expect("alias hit");
-        let by_hash = cache.lookup_by_hash(&h).expect("primary hit");
-        assert!(Arc::ptr_eq(&entry, &by_id));
-        assert!(Arc::ptr_eq(&entry, &by_hash));
-
-        // Read back to confirm the upload landed correctly.
-        let mut readback = vec![0u8; pixels.len()];
-        stream
-            .memcpy_dtoh(&entry.device_ptr, &mut readback)
-            .expect("dtoh");
-        stream.synchronize().expect("sync");
-        assert_eq!(readback, pixels);
-
-        // Used bytes accounting reflects the entry.
-        assert_eq!(cache.used_bytes(), pixels.len() as u64);
-    }
-
-    #[cfg(feature = "gpu-validation")]
-    #[test]
-    fn lru_evicts_oldest_unpinned_entry() {
-        // Budget for two 256-byte entries but not three.  Host tier
-        // disabled so an evicted entry truly disappears (otherwise the
-        // demote-then-promote machinery would resurrect it on lookup).
-        let (_stream, cache) = mk_cache_with_host(600, /* host */ 0);
-
-        let make_pixels = |fill: u8| -> Vec<u8> { vec![fill; 256] };
-
-        let h_a = ContentHash([0xAA; 32]);
-        let h_b = ContentHash([0xBB; 32]);
-        let h_c = ContentHash([0xCC; 32]);
-
-        let pixels_a = make_pixels(1);
-        let pixels_b = make_pixels(2);
-        let entry_a = cache
-            .insert(req(1, h_a, ImageLayout::Gray, &pixels_a))
-            .expect("a");
-        let entry_b = cache
-            .insert(req(2, h_b, ImageLayout::Gray, &pixels_b))
-            .expect("b");
-        // Drop the local Arcs so eviction can reclaim them.
-        drop(entry_a);
-        drop(entry_b);
-
-        // Touch B so A is the oldest.
-        let _ = cache.lookup_by_hash(&h_b);
-
-        // Inserting C must evict A (oldest).
-        let pixels_c = make_pixels(3);
-        let _entry_c = cache
-            .insert(req(3, h_c, ImageLayout::Gray, &pixels_c))
-            .expect("c");
-
-        assert!(
-            cache.lookup_by_hash(&h_a).is_none(),
-            "A should have been evicted"
-        );
-        assert!(cache.lookup_by_hash(&h_b).is_some(), "B should remain");
-        assert!(cache.lookup_by_hash(&h_c).is_some(), "C just inserted");
-    }
-
-    #[cfg(feature = "gpu-validation")]
-    #[test]
-    fn pinned_entries_block_eviction() {
-        // Budget for one 256-byte entry.
-        let (_stream, cache) = mk_cache(300);
-
-        let h_a = ContentHash([0xAA; 32]);
-        let h_b = ContentHash([0xBB; 32]);
-
-        // Hold the Arc — A is now pinned.
-        let pixels_a = vec![1u8; 256];
-        let _pinned_a = cache
-            .insert(req(1, h_a, ImageLayout::Gray, &pixels_a))
-            .expect("a");
-
-        // Inserting B must fail because A is pinned and there's no other
-        // entry to evict.
-        let pixels_b = vec![2u8; 256];
-        let err = cache
-            .insert(req(2, h_b, ImageLayout::Gray, &pixels_b))
-            .unwrap_err();
-        match err {
-            CacheError::OverBudget {
-                needed,
-                used,
-                budget,
-            } => {
-                assert_eq!(needed, 256);
-                assert_eq!(used, 256);
-                assert_eq!(budget, 300);
-            }
-            other => panic!("expected OverBudget, got {other:?}"),
-        }
-    }
-
-    /// Bombard the cache with concurrent inserts of overlapping hashes
-    /// from many threads.  After the dust settles, the cache should hold
-    /// at most one entry per unique hash, and `used_bytes` should equal
-    /// the sum of those unique entries' sizes — proving the dedup-race
-    /// fix in `insert` (the `Entry::Vacant` atomic transition) accounts
-    /// `used_bytes` exactly once per slab.
-    #[cfg(feature = "gpu-validation")]
-    #[test]
-    fn concurrent_inserts_dedup_correctly() {
-        const THREADS: u8 = 16;
-        const PER_THREAD: u8 = 64;
-        const UNIQUE_HASHES: u8 = 8;
-        const PIXEL_BYTES: usize = 256;
-
-        // Generous budget so eviction doesn't enter the picture; the
-        // test is only about dedup accounting.
-        let (_stream, cache) = mk_cache(u64::from(UNIQUE_HASHES) * (PIXEL_BYTES as u64) * 2);
-        let cache = Arc::new(cache);
-
-        // Each thread inserts PER_THREAD requests cycling through the
-        // same UNIQUE_HASHES values, so threads heavily collide on each
-        // hash and each request also legitimately overwrites the prior.
-        std::thread::scope(|s| {
-            for t in 0..THREADS {
-                let cache = Arc::clone(&cache);
-                let _ = s.spawn(move || {
-                    for i in 0..PER_THREAD {
-                        let hi = (t.wrapping_add(i)) % UNIQUE_HASHES;
-                        let h = ContentHash([hi + 1; 32]);
-                        // Pixel content keyed on hash so all threads
-                        // racing on the same hash upload identical bytes.
-                        let pixels = vec![hi + 1; PIXEL_BYTES];
-                        let _ = cache.insert(InsertRequest {
-                            doc: doc(1),
-                            obj: ObjId(u32::from(t) * u32::from(PER_THREAD) + u32::from(i)),
-                            hash: h,
-                            width: 16,
-                            height: 16,
-                            layout: ImageLayout::Gray,
-                            pixels: &pixels,
-                        });
-                    }
-                });
-            }
-        });
-
-        // Every unique hash should have produced exactly one cache
-        // entry; `len()` counts primary entries.
-        let len = cache.len();
-        assert!(
-            len <= usize::from(UNIQUE_HASHES),
-            "cache holds {len} entries, expected ≤ {UNIQUE_HASHES}",
-        );
-        // `used_bytes` must equal exactly `len × PIXEL_BYTES` — one
-        // fetch_add per surviving Vacant transition, no double-count.
-        assert_eq!(
-            cache.used_bytes(),
-            (len as u64) * (PIXEL_BYTES as u64),
-            "used_bytes drifted: {} B for {len} entries × {PIXEL_BYTES} B",
-            cache.used_bytes(),
-        );
-    }
-
-    /// End-to-end host tier round trip: insert entry A, evict it by
-    /// inserting B, then look up A again — it must come back via the
-    /// host tier's promotion path with bit-identical bytes.
-    #[cfg(feature = "gpu-validation")]
-    #[test]
-    fn evicted_vram_entry_promotes_back_from_host() {
-        // Budget for exactly one 768-byte (16×16×3) RGB entry.  Host
-        // tier large enough to hold the demoted copy.
-        let (stream, cache) = mk_cache_with_host(/* vram */ 1000, /* host */ 1 << 20);
-
-        let pixels_a: Vec<u8> = (0_i32..16 * 16 * 3)
-            .map(|i| u8::try_from((i * 7) % 256).expect("fits u8"))
-            .collect();
-        let pixels_b = vec![0xCDu8; 16 * 16 * 3];
-        let h_a = DeviceImageCache::hash_bytes(&pixels_a);
-        let h_b = DeviceImageCache::hash_bytes(&pixels_b);
-
-        // Insert A and drop the local Arc so eviction can reclaim it.
-        let entry_a = cache
-            .insert(req(1, h_a, ImageLayout::Rgb, &pixels_a))
-            .expect("insert a");
-        drop(entry_a);
-
-        // Insert B — must evict A and demote it to the host tier.
-        let entry_b = cache
-            .insert(req(2, h_b, ImageLayout::Rgb, &pixels_b))
-            .expect("insert b");
-
-        // Host tier should now have A.
-        assert_eq!(
-            cache.host.len(),
-            1,
-            "host tier should hold the demoted A; got {} entries",
-            cache.host.len(),
-        );
-
-        // Drop B so the upcoming promote-of-A has room in VRAM (the
-        // budget is one-entry-wide; promoting A while B is pinned would
-        // legitimately fail with OverBudget).
-        drop(entry_b);
-
-        // Look up A — promotion from host should succeed and the
-        // returned bytes must match the original pixels exactly.  The
-        // bit-for-bit readback below is the load-bearing assertion;
-        // checking Arc-pointer identity isn't (the heap may reuse a
-        // slot under load and produce false negatives).
-        let entry_a_promoted = cache.lookup_by_hash(&h_a).expect("promote hit");
-        let mut readback = vec![0u8; pixels_a.len()];
-        stream
-            .memcpy_dtoh(&entry_a_promoted.device_ptr, &mut readback)
-            .expect("dtoh");
-        stream.synchronize().expect("sync");
-        assert_eq!(
-            readback, pixels_a,
-            "promoted bytes must match the originally inserted pixels",
-        );
-    }
-}
+mod tests;
