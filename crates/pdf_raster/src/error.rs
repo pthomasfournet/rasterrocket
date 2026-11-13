@@ -55,6 +55,24 @@ pub enum RasterError {
     },
     /// Deskew rotation failed.
     Deskew(String),
+    /// The row stride given for a caller-owned output buffer is shorter
+    /// than one row of the page.
+    OutputStrideTooSmall {
+        /// The stride given, in bytes.
+        stride: usize,
+        /// The bytes of one row of the page: its width in pixels times
+        /// the bytes per pixel of the output format.
+        row_bytes: usize,
+    },
+    /// A caller-owned output buffer is shorter than the page at the stride
+    /// given.
+    OutputBufferTooSmall {
+        /// Length of the buffer given, in bytes.
+        len: usize,
+        /// The bytes the page needs: `(height - 1) * stride + row_bytes`,
+        /// or `usize::MAX` when that overflows.
+        needed: usize,
+    },
     /// A Page dictionary entry is structurally valid but outside permitted range
     /// (e.g. `UserUnit` outside `[0.1, 10.0]`).
     InvalidPageGeometry(String),
@@ -135,6 +153,14 @@ impl std::fmt::Display for RasterError {
                  or render the page in smaller regions"
             ),
             Self::Deskew(msg) => write!(f, "deskew failed: {msg}"),
+            Self::OutputStrideTooSmall { stride, row_bytes } => write!(
+                f,
+                "output stride {stride} is shorter than a page row of {row_bytes} bytes"
+            ),
+            Self::OutputBufferTooSmall { len, needed } => write!(
+                f,
+                "output buffer of {len} bytes is shorter than the {needed} bytes the page needs"
+            ),
             Self::InvalidPageGeometry(msg) => write!(f, "invalid page geometry: {msg}"),
             Self::BackendUnavailable(msg) => write!(f, "backend unavailable: {msg}"),
             Self::ImageDecodeFailed(v) => write!(f, "image decode failed: {}", v.join("; ")),

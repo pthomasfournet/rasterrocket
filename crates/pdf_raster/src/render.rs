@@ -73,7 +73,14 @@ pub fn render_page_rgb_with_diagnostics(
 ) -> Result<(Bitmap<Rgb8>, crate::PageDiagnostics), RasterError> {
     let page_id = session.resolve_page(page_num)?;
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
-    render_page_rgb_with_geom(session, page_num, page_id, geom, params)
+    render_page_rgb_with_geom(
+        session,
+        page_num,
+        page_id,
+        geom,
+        params,
+        raster::BitmapBuffers::default(),
+    )
 }
 
 /// Render page `page_num` (1-based) of `session` to the grayscale
@@ -101,7 +108,14 @@ pub fn render_page_gray(
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0);
     params.cancel.clone_from(&opts.cancel);
-    let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
+    let (rgb, diagnostics) = render_page_rgb_with_geom(
+        session,
+        page_num,
+        page_id,
+        geom,
+        &params,
+        raster::BitmapBuffers::default(),
+    )?;
     let mut gray = rgb_into_gray(rgb);
 
     if opts.deskew {
@@ -146,7 +160,14 @@ pub fn render_page_rgba(
     let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_transparent_background();
     params.cancel.clone_from(&opts.cancel);
-    let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
+    let (rgb, diagnostics) = render_page_rgb_with_geom(
+        session,
+        page_num,
+        page_id,
+        geom,
+        &params,
+        raster::BitmapBuffers::default(),
+    )?;
     Ok(crate::page::rgb8_to_rgba_rendered_page(
         &rgb,
         page_num,
@@ -158,7 +179,7 @@ pub fn render_page_rgba(
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
 /// whole page, or `region` of it.  Enforces the pixel-size limits on what is
 /// drawn.
-fn page_view(
+pub(crate) fn page_view(
     geom: &pdf_interp::PageGeometry,
     scales: (f64, f64),
     region: Option<RenderRegion>,
@@ -203,6 +224,18 @@ fn page_view(
     Ok(whole.window(r.x, r.y, r.width, r.height))
 }
 
+/// [`RasterError::InvalidOptions`] unless `scale` is a positive finite
+/// number.
+pub(crate) fn check_scale(scale: f64) -> Result<(), RasterError> {
+    if scale.is_finite() && scale > 0.0 {
+        Ok(())
+    } else {
+        Err(RasterError::InvalidOptions(format!(
+            "scale must be a positive finite number, got {scale}"
+        )))
+    }
+}
+
 /// The group page `page_id` is painted as: always one over a
 /// `transparent` backdrop, so that the page's alpha is kept.
 fn page_group(
@@ -225,25 +258,21 @@ const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
     }
 }
 
-/// Inner implementation shared by [`render_page_rgb_with_diagnostics`] and
-/// [`render_page_gray`].
+/// Inner implementation shared by every page render entry point.  The
+/// bitmap is built in `buffers` ([`raster::Bitmap::try_new_filled_in`]).
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
-fn render_page_rgb_with_geom(
+pub(crate) fn render_page_rgb_with_geom(
     session: &RasterSession,
     page_num: u32,
     page_id: pdf::ObjectId,
     geom: pdf_interp::PageGeometry,
     params: &RenderParams,
+    buffers: raster::BitmapBuffers,
 ) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
-    for scale in [params.scale_x, params.scale_y] {
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(RasterError::InvalidOptions(format!(
-                "scale must be a positive finite number, got {scale}"
-            )));
-        }
-    }
+    check_scale(params.scale_x)?;
+    check_scale(params.scale_y)?;
     let effective_policy = params.policy.unwrap_or(session.policy);
     if params
         .cancel
@@ -284,9 +313,10 @@ fn render_page_rgb_with_geom(
     let ink =
         session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
     let group = page_group(doc, page_id, params.transparent_background);
-    let mut renderer =
-        pdf_interp::renderer::PageRenderer::try_with_page_group(&view, doc, page_id, group, ink)
-            .map_err(allocation_failed)?;
+    let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
+        &view, doc, page_id, group, ink, buffers,
+    )
+    .map_err(allocation_failed)?;
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }

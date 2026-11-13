@@ -129,25 +129,9 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
     dpi: f32,
     diagnostics: PageDiagnostics,
 ) -> RenderedPage {
-    let w = bmp.width as usize;
-    let mut pixels = Vec::with_capacity(w * bmp.height as usize * 4);
-    for y in 0..bmp.height {
-        let rgb = bmp.row_bytes(y)[..w * 3].as_chunks::<3>().0;
-        match bmp.alpha_row(y) {
-            Some(alpha) => {
-                for (px, &a) in rgb.iter().zip(&alpha[..w]) {
-                    pixels.extend_from_slice(px);
-                    pixels.push(a);
-                }
-            }
-            None => {
-                for px in rgb {
-                    pixels.extend_from_slice(px);
-                    pixels.push(u8::MAX);
-                }
-            }
-        }
-    }
+    let row_bytes = bmp.width as usize * 4;
+    let mut pixels = vec![0; row_bytes * bmp.height as usize];
+    rgb_rows_to_rgba(bmp, &mut pixels, row_bytes);
     RenderedPage {
         page_num,
         width: bmp.width,
@@ -156,6 +140,44 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
         format: PixelFormat::Rgba8,
         dpi,
         diagnostics,
+    }
+}
+
+/// Write the pixels of `bmp` as RGBA to `out`, row `y` at
+/// `out[y * stride..y * stride + width * 4]`, alpha not premultiplied; a
+/// bitmap without an alpha plane is opaque.
+///
+/// `out` must hold `(height - 1) * stride + width * 4` bytes and
+/// `stride ≥ width * 4`.
+pub(crate) fn rgb_rows_to_rgba(bmp: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
+    let w = bmp.width as usize;
+    for y in 0..bmp.height {
+        let rgb = bmp.row_bytes(y)[..w * 3].as_chunks::<3>().0;
+        let dst = out[y as usize * stride..][..w * 4].as_chunks_mut::<4>().0;
+        match bmp.alpha_row(y) {
+            Some(alpha) => {
+                for ((d, px), &a) in dst.iter_mut().zip(rgb).zip(&alpha[..w]) {
+                    *d = [px[0], px[1], px[2], a];
+                }
+            }
+            None => {
+                for (d, px) in dst.iter_mut().zip(rgb) {
+                    *d = [px[0], px[1], px[2], u8::MAX];
+                }
+            }
+        }
+    }
+}
+
+/// Copy the RGB rows of `bmp` to `out`, row `y` at
+/// `out[y * stride..y * stride + width * 3]`.
+///
+/// `out` must hold `(height - 1) * stride + width * 3` bytes and
+/// `stride ≥ width * 3`.
+pub(crate) fn rgb_rows_copy(bmp: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
+    let row = bmp.width as usize * 3;
+    for y in 0..bmp.height {
+        out[y as usize * stride..][..row].copy_from_slice(&bmp.row_bytes(y)[..row]);
     }
 }
 

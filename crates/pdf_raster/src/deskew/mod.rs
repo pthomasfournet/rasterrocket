@@ -74,3 +74,36 @@ pub fn apply(img: &mut Bitmap<Gray8>) -> Result<(), DeskewError> {
 
     rotate::rotate_inplace(img, angle_deg)
 }
+
+/// [`apply`] writing the corrected image to `out`, row `y` at
+/// `out[y * stride..y * stride + img.width]`, and leaving `img` as it is.
+/// A failed GPU rotation falls back to the CPU, which cannot fail.
+///
+/// `out` must hold `(img.height - 1) * stride + img.width` bytes and
+/// `stride ≥ img.width`.
+pub(crate) fn apply_into(img: &Bitmap<Gray8>, out: &mut [u8], stride: usize) {
+    let angle_deg = detect::find_skew_deg(img);
+    if angle_deg.abs() < MIN_CORRECT_DEG {
+        copy_rows(img, out, stride);
+        return;
+    }
+    #[cfg(feature = "gpu-deskew")]
+    match rotate::rotate_gpu(img, angle_deg) {
+        Ok(rotated) => {
+            copy_rows(&rotated, out, stride);
+            return;
+        }
+        Err(e) => {
+            log::warn!("rotate_inplace: GPU rotation failed ({e}); falling back to CPU");
+        }
+    }
+    rotate::rotate_cpu_into(img, angle_deg, out, stride);
+}
+
+/// Copy the rows of `img` to `out`, row `y` at `out[y * stride..]`.
+fn copy_rows(img: &Bitmap<Gray8>, out: &mut [u8], stride: usize) {
+    let w = img.width as usize;
+    for y in 0..img.height {
+        out[y as usize * stride..][..w].copy_from_slice(&img.row_bytes(y)[..w]);
+    }
+}

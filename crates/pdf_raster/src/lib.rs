@@ -117,6 +117,7 @@ pub(crate) mod gpu_init;
 mod gray;
 mod open;
 pub(crate) mod page;
+mod page_buffer;
 mod render;
 mod request;
 #[cfg(feature = "vulkan")]
@@ -133,6 +134,7 @@ pub use page::{
     MAX_PX_AREA, MAX_PX_DIMENSION, gray8_into_rendered_page, gray8_to_rendered_page,
     validate_dimensions,
 };
+pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;
 pub use pdf_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, ImageFailure, PageDiagnostics,
@@ -491,6 +493,9 @@ pub enum PixelFormat {
     /// Four bytes per pixel, `[R, G, B, A]` in sRGB; alpha 0 is
     /// transparent and the colour is not premultiplied by it.
     Rgba8,
+    /// Three bytes per pixel, `[R, G, B]` in sRGB.  Written by
+    /// [`PageBuffer::render_rgb_into`]; a [`RenderedPage`] is never in it.
+    Rgb8,
 }
 
 impl PixelFormat {
@@ -499,6 +504,7 @@ impl PixelFormat {
     pub const fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Gray8 => 1,
+            Self::Rgb8 => 3,
             Self::Rgba8 => 4,
         }
     }

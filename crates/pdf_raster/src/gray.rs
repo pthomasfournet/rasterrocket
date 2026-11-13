@@ -32,13 +32,21 @@ const LUMA_SHIFT: u32 = 15;
 #[must_use]
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
     let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
+    let stride = dst.stride;
+    rgb_rows_to_gray(src, dst.data_mut(), stride);
+    dst
+}
+
+/// [`rgb_to_gray`] writing gray row `y` to `out[y * stride..y * stride + width]`.
+///
+/// `out` must hold `(height - 1) * stride + width` bytes and
+/// `stride ≥ width`.
+pub(crate) fn rgb_rows_to_gray(src: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
     let w = src.width as usize;
     for y in 0..src.height {
         let src_row = &src.row_bytes(y)[..w * 3];
-        let dst_row = &mut dst.row_bytes_mut(y)[..w];
-        convert_row(src_row, dst_row);
+        convert_row(src_row, &mut out[y as usize * stride..][..w]);
     }
-    dst
 }
 
 /// [`rgb_to_gray`] in the RGB bitmap's own allocation.

@@ -126,6 +126,25 @@ impl RasterSession {
             .map_err(RasterError::from)
     }
 
+    /// The pixel size `(width, height)` of page `page_num` (1-based)
+    /// rendered whole at `dpi`: the size of the page every render entry
+    /// point produces at that resolution, rounded as the renderer rounds
+    /// it.  Deskew keeps the size.  No content is parsed.
+    ///
+    /// # Errors
+    /// The errors of [`Self::page_geometry`];
+    /// [`RasterError::InvalidOptions`] when `dpi` is not a positive finite
+    /// number; [`RasterError::PageDegenerate`],
+    /// [`RasterError::PageTooLarge`] or [`RasterError::PageAreaTooLarge`]
+    /// when a render at `dpi` would fail with them.
+    pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError> {
+        let scale = f64::from(dpi) / 72.0;
+        crate::render::check_scale(scale)?;
+        let geom = self.page_geometry(page_num)?;
+        let view = crate::render::page_view(&geom, (scale, scale), None)?;
+        Ok((view.width, view.height))
+    }
+
     /// Borrow the underlying [`pdf::Document`] for read-only operations.
     ///
     /// Prefer [`prescan_session`] over calling this directly — it avoids

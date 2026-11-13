@@ -547,22 +547,43 @@ pub(crate) fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
     rotate_cpu_with(src, angle_deg, dispatch_rotate_row)
 }
 
-/// Row-loop driver shared by [`rotate_cpu`] and the per-row parity tests:
-/// computes the per-row inverse-map parameters and hands each output row to
-/// `row_fn`.
-#[expect(
-    clippy::similar_names,
-    reason = "sx_*/sy_* are paired coordinate variables; renaming would obscure the symmetry"
-)]
+/// [`rotate_cpu`] writing output row `y` to
+/// `dst[y * stride..y * stride + src.width]`.
+///
+/// `dst` must hold `(src.height - 1) * stride + src.width` bytes and
+/// `stride ≥ src.width`.
+pub(crate) fn rotate_cpu_into(src: &Bitmap<Gray8>, angle_deg: f32, dst: &mut [u8], stride: usize) {
+    rotate_rows(src, angle_deg, dst, stride, dispatch_rotate_row);
+}
+
+/// [`rotate_rows`] into a new packed bitmap.
 fn rotate_cpu_with(
     src: &Bitmap<Gray8>,
     angle_deg: f32,
     row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams),
 ) -> Bitmap<Gray8> {
+    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
+    let stride = dst.stride;
+    rotate_rows(src, angle_deg, dst.data_mut(), stride, row_fn);
+    dst
+}
+
+/// Row-loop driver shared by [`rotate_cpu`], [`rotate_cpu_into`] and the
+/// per-row parity tests: computes the per-row inverse-map parameters and
+/// hands each output row, `dst[oy * stride..][..width]`, to `row_fn`.
+#[expect(
+    clippy::similar_names,
+    reason = "sx_*/sy_* are paired coordinate variables; renaming would obscure the symmetry"
+)]
+fn rotate_rows(
+    src: &Bitmap<Gray8>,
+    angle_deg: f32,
+    dst: &mut [u8],
+    stride: usize,
+    row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams),
+) {
     let w = src.width as usize;
     let h = src.height as usize;
-
-    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
 
     let rad = angle_deg.to_radians();
     let cos_a = rad.cos();
@@ -600,11 +621,7 @@ fn rotate_cpu_with(
 
     for oy in 0..h {
         // oy < h ≤ 32768; safe to cast to u32.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "oy < h ≤ MAX_PX_DIMENSION = 32768; fits in u32"
-        )]
-        let dst_row = dst.row_bytes_mut(oy as u32);
+        let dst_row = &mut dst[oy * stride..][..w];
 
         // Pre-compute y-dependent terms outside the x loop.
         // oy ≤ 32768; exact in f32.
@@ -626,13 +643,14 @@ fn rotate_cpu_with(
         };
         row_fn(dst_row, src, &params);
     }
-
-    dst
 }
 
 /// GPU rotation via CUDA NPP (`nppiRotate_8u_C1R_Ctx`).
 #[cfg(feature = "gpu-deskew")]
-fn rotate_gpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Result<Bitmap<Gray8>, DeskewError> {
+pub(crate) fn rotate_gpu(
+    src: &Bitmap<Gray8>,
+    angle_deg: f32,
+) -> Result<Bitmap<Gray8>, DeskewError> {
     let pixels =
         gpu::npp_rotate::rotate_gray8(src.data(), src.stride, src.width, src.height, angle_deg)
             .map_err(|e| DeskewError(e.to_string()))?;
