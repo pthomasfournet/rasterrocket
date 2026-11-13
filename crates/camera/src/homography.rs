@@ -109,7 +109,8 @@ const DEFAULT_FOCAL_REL: f64 = 1.0;
 /// Output dimensions for rectifying `quad` from an `img_w × img_h` image.
 /// The width-to-height ratio is [`physical_aspect`]; the scale is the
 /// largest that no quad edge is shrunk by.  Declined when either side would
-/// be < 16 px or the area would exceed twice the source area.
+/// be < 16 px or the area, in whole pixels, would exceed twice the source
+/// area.
 pub(crate) fn rectified_size(
     quad: &Quad,
     img_w: usize,
@@ -129,12 +130,13 @@ pub(crate) fn rectified_size(
             "rectified page would be {w:.1}×{h:.1} px; both sides must be at least 16 px"
         ));
     }
-    if w * h > 2.0 * to_f64(img_w) * to_f64(img_h) {
+    let (out_w, out_h) = (round_index(w), round_index(h));
+    if out_w.saturating_mul(out_h) > img_w.saturating_mul(img_h).saturating_mul(2) {
         return Err(format!(
-            "rectified page would be {w:.0}×{h:.0} px, more than twice the {img_w}×{img_h} source"
+            "rectified page would be {out_w}×{out_h} px, more than twice the {img_w}×{img_h} source"
         ));
     }
-    Ok((round_index(w), round_index(h)))
+    Ok((out_w, out_h))
 }
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -156,6 +158,23 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The area bound holds for the rounded output: this quad's page is
+    /// just under twice its 59 × 52 source (6 136 px) unrounded, but 93 × 66
+    /// = 6 138 px rounded, so it is declined.
+    #[test]
+    fn rectified_area_is_bounded_after_rounding() {
+        let quad = Quad {
+            corners: [
+                [-8.851_214_969_025_492, 1.027_322_617_673_430_5],
+                [76.115_071_820_075_23, 18.703_885_226_440_526],
+                [73.757_173_749_430_17, 69.369_278_664_071_8],
+                [-1.205_020_838_750_007_4, 66.393_555_040_064_48],
+            ],
+        };
+        let size = rectified_size(&quad, 59, 52);
+        assert!(size.is_err(), "{size:?}");
+    }
 
     #[test]
     fn homography_maps_corners() {
