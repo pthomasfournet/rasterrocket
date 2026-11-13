@@ -10,8 +10,8 @@ name: Coverage
 # workflow, with its own cache, beside CI rather than inside its jobs.
 #
 # Out of the report: the vendored forks (hayro-jpeg2000, hayro-jbig2,
-# hayro-ccitt, read-fonts, skrifa, harfrust, rav1d, font_test_data), whose
-# tests are upstream's; pdf_bridge, which is not built; and the bench crate,
+# hayro-ccitt, read-fonts, skrifa, harfrust, rav1d, zune-jpeg,
+# font_test_data), whose tests are upstream's; pdf_bridge, which is not built; and the bench crate,
 # which has no tests.  Code behind the GPU features is not compiled, so it
 # is not in the report either.
 
@@ -38,7 +38,7 @@ env:
   # use debug info.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # Paths dropped from every report.
-  COVERAGE_IGNORE: "crates/(ccitt|jbig2|jpeg2000|read_fonts|skrifa|harfrust|rav1d|font_test_data|pdf_bridge|bench)/"
+  COVERAGE_IGNORE: "crates/(ccitt|jbig2|jpeg2000|read_fonts|skrifa|harfrust|rav1d|zune_jpeg|font_test_data|pdf_bridge|bench)/"
 
 jobs:
   coverage:
