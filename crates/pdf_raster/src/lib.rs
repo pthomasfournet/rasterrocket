@@ -111,6 +111,8 @@ mod config;
 pub(crate) mod decode_queue;
 mod decoders;
 pub mod deskew;
+#[cfg(feature = "vulkan")]
+mod device_pages;
 mod error;
 pub(crate) mod gcv;
 pub(crate) mod gpu_init;
@@ -140,7 +142,7 @@ pub use page::{
 pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;
 pub use pdf_interp::renderer::{
-    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, ImageFailure, PageDiagnostics,
+    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, ImageFailure, PageDiagnostics,
 };
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{

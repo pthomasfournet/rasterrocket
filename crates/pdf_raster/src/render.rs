@@ -304,49 +304,21 @@ pub(crate) fn render_page_rgb_with_geom(
     // some graphics state that is drawn sets it.
     let ink =
         session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
-    let group = page_group(doc, page_id, params.transparent_background);
-    let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
-        &view, doc, page_id, group, ink, buffers,
-    )
-    .map_err(allocation_failed)?;
-    if let Some(cancel) = &params.cancel {
-        renderer.set_cancel(cancel.flag());
-    }
-    renderer.set_antialias(session.text_antialias, session.vector_antialias);
-    renderer.set_document_fonts(Arc::clone(&session.fonts));
-    renderer.set_document_images(Arc::clone(&session.images));
-    renderer.set_optional_content(Arc::clone(&session.optional_content));
-
-    #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
-    renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));
-
+    let job = PageJob {
+        session,
+        page_num,
+        page_id,
+        view: &view,
+        ops: &ops,
+        group: page_group(doc, page_id, params.transparent_background),
+        ink,
+        params,
+        policy: effective_policy,
+    };
     #[cfg(feature = "vulkan")]
-    renderer.set_vk_backend(session.vk_backend.as_ref().map(Arc::clone));
-
-    #[cfg(feature = "cache")]
-    renderer.set_image_cache(session.image_cache.clone(), session.doc_id);
-
-    // RAII guard armed BEFORE lend_decoders, not after.  lend_decoders moves
-    // handles out of TLS into the renderer one decoder at a time and is
-    // fallible per step: a `?` early-return from a later `ensure_*` would
-    // otherwise drop the renderer (and any handle already moved in) without
-    // reclaim — a partial-move leak.  Arming the guard first makes lend
-    // transactional: every exit from lend OR the render body — `?`-early-return,
-    // normal return, or panic-unwind — drops the guard and runs reclaim exactly
-    // once.  reclaim is safe after a partial lend: each decoder's
-    // ensure+take+set runs atomically per feature, so earlier features are
-    // fully lent (TLS cell `Ready(None)`, handle in renderer) and reclaim
-    // restores them, while a feature whose `ensure_*` failed left its TLS cell
-    // non-`Ready` and reclaim's `if let Ready` guard skips it (no clobber).
-    let guard = DecoderReclaim(&mut renderer);
-    lend_decoders(session, guard.0, effective_policy)?;
-    guard.0.execute(&ops);
-    if session.annotations {
-        guard.0.render_annotations(page_id);
-    }
-    // Drop reclaims exactly once and releases the &mut borrow, so `renderer`
-    // is usable directly for the budget/image-failure/finish tail below.
-    drop(guard);
+    let (mut renderer, device_page) = crate::device_pages::render(&job, buffers)?;
+    #[cfg(not(feature = "vulkan"))]
+    let mut renderer = job.run(buffers)?;
 
     // A budget breach takes precedence over image failures: the page may not
     // have finished rendering at all.
@@ -392,7 +364,104 @@ pub(crate) fn render_page_rgb_with_geom(
     .map_err(allocation_failed)?;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
+    #[cfg(feature = "vulkan")]
+    {
+        diag.device_page = device_page;
+    }
     Ok((bitmap, diag))
+}
+
+/// A page to render: its content, the view it is drawn in and how.
+pub(crate) struct PageJob<'a> {
+    pub(crate) session: &'a RasterSession,
+    #[cfg_attr(
+        not(feature = "vulkan"),
+        expect(dead_code, reason = "read by the GPU page queue")
+    )]
+    pub(crate) page_num: u32,
+    page_id: pdf::ObjectId,
+    view: &'a pdf_interp::renderer::PageView,
+    pub(crate) ops: &'a [pdf_interp::content::Operator<'a>],
+    /// The page group the page is painted as.
+    pub(crate) group: Option<pdf_interp::resources::TransparencyGroupParams>,
+    /// Whether the page is painted on an ink canvas.
+    pub(crate) ink: bool,
+    params: &'a RenderParams,
+    /// The backend policy for GPU decoder selection.
+    policy: crate::BackendPolicy,
+}
+
+impl<'a> PageJob<'a> {
+    /// A renderer of the page, configured from the session, its bitmap
+    /// built in `buffers`.
+    pub(crate) fn renderer(
+        &self,
+        buffers: raster::BitmapBuffers,
+    ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
+        let session = self.session;
+        let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
+            self.view,
+            &session.doc,
+            self.page_id,
+            self.group,
+            self.ink,
+            buffers,
+        )
+        .map_err(allocation_failed)?;
+        if let Some(cancel) = &self.params.cancel {
+            renderer.set_cancel(cancel.flag());
+        }
+        renderer.set_antialias(session.text_antialias, session.vector_antialias);
+        renderer.set_document_fonts(Arc::clone(&session.fonts));
+        renderer.set_document_images(Arc::clone(&session.images));
+        renderer.set_optional_content(Arc::clone(&session.optional_content));
+
+        #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+        renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));
+
+        #[cfg(feature = "vulkan")]
+        renderer.set_vk_backend(session.vk_backend.as_ref().map(Arc::clone));
+
+        #[cfg(feature = "cache")]
+        renderer.set_image_cache(session.image_cache.clone(), session.doc_id);
+        Ok(renderer)
+    }
+
+    /// Execute the page's content and annotations on `renderer`.
+    pub(crate) fn execute(
+        &self,
+        renderer: &mut pdf_interp::renderer::PageRenderer<'_>,
+    ) -> Result<(), RasterError> {
+        // RAII guard armed BEFORE lend_decoders, not after.  lend_decoders moves
+        // handles out of TLS into the renderer one decoder at a time and is
+        // fallible per step: a `?` early-return from a later `ensure_*` would
+        // otherwise drop the renderer (and any handle already moved in) without
+        // reclaim — a partial-move leak.  Arming the guard first makes lend
+        // transactional: every exit from lend OR the render body — `?`-early-return,
+        // normal return, or panic-unwind — drops the guard and runs reclaim exactly
+        // once.  reclaim is safe after a partial lend: each decoder's
+        // ensure+take+set runs atomically per feature, so earlier features are
+        // fully lent (TLS cell `Ready(None)`, handle in renderer) and reclaim
+        // restores them, while a feature whose `ensure_*` failed left its TLS cell
+        // non-`Ready` and reclaim's `if let Ready` guard skips it (no clobber).
+        let guard = DecoderReclaim(renderer);
+        lend_decoders(self.session, guard.0, self.policy)?;
+        guard.0.execute(self.ops);
+        if self.session.annotations {
+            guard.0.render_annotations(self.page_id);
+        }
+        Ok(())
+    }
+
+    /// A renderer that has executed the page.
+    pub(crate) fn run(
+        &self,
+        buffers: raster::BitmapBuffers,
+    ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
+        let mut renderer = self.renderer(buffers)?;
+        self.execute(&mut renderer)?;
+        Ok(renderer)
+    }
 }
 
 /// Warn about the first page found to carry JavaScript and the first

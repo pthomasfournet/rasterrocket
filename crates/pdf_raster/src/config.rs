@@ -371,6 +371,24 @@ pub struct SessionConfig {
     /// reports and renders, and a [`RenderRegion`](crate::RenderRegion) is
     /// placed on the turned page.  Default [`Rotation::None`].
     pub rotation: Rotation,
+    /// Whether pages are rendered whole on a Vulkan GPU beside the CPU
+    /// workers.
+    ///
+    /// Default `false`.  `true` opens the device of
+    /// [`vulkan_device`](Self::vulkan_device) on a thread of its own when the
+    /// session opens; once it is open, a page whose every paint the GPU
+    /// raster renders (fills and strokes of solid colours under rectangular
+    /// clips, `Normal` blend, constant alpha) is rendered on it while it is
+    /// idle, and every other page on the CPU, with the same bytes.
+    /// [`PageDiagnostics::device_page`](crate::PageDiagnostics::device_page)
+    /// reports where each page rendered and why.  A device that does not
+    /// open is logged at `error` and leaves every page on the CPU.
+    ///
+    /// Requires a build with the `vulkan` feature and
+    /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan); otherwise
+    /// [`open_session`] returns [`RasterError::InvalidOptions`].
+    pub gpu_pages: bool,
 }
 
 impl SessionConfig {
@@ -405,6 +423,7 @@ impl SessionConfig {
             image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
             page_box: PageBox::Crop,
             rotation: Rotation::None,
+            gpu_pages: false,
         }
     }
 

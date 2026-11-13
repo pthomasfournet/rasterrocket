@@ -461,6 +461,16 @@ pub(crate) struct Args {
     )]
     pub vulkan_device: Option<String>,
 
+    /// Render pages whole on a Vulkan GPU beside the CPU workers.
+    ///
+    /// The device opens in the background; once open, a page made only of
+    /// solid fills and strokes (rectangle clips, Normal blend, constant
+    /// alpha) renders on it while it is idle, every other page on the CPU,
+    /// with identical output.  Needs a build with the `vulkan` feature and
+    /// --backend auto or vulkan.
+    #[arg(long = "gpu-pages", verbatim_doc_comment)]
+    pub gpu_pages: bool,
+
     /// Fail a page when one of its images or content streams cannot be
     /// decoded or drawn.
     ///
@@ -1187,6 +1197,7 @@ impl Args {
             .vulkan_device
             .clone()
             .or_else(SessionConfig::vulkan_device_from_env);
+        config.gpu_pages = self.gpu_pages;
         config.font_dirs = SessionConfig::font_dirs_from_env();
         config.system_fonts = !self.no_system_fonts;
         config.strict = self.strict;

@@ -72,6 +72,10 @@ pub struct RasterSession {
     /// returns `None` regardless.  Shared across all pages.
     #[cfg(feature = "vulkan")]
     pub(crate) vk_backend: Option<Arc<gpu::backend::vulkan::VulkanBackend>>,
+    /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
+    /// renders every page on the CPU.
+    #[cfg(feature = "vulkan")]
+    pub(crate) device_pages: Option<crate::device_pages::DevicePages>,
     /// [`crate::SessionConfig::vulkan_device`], for the per-thread Vulkan
     /// JPEG decoders, which open their own logical device.
     #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
@@ -439,6 +443,31 @@ fn session_gpu_ctx(
     Ok(ctx)
 }
 
+/// [`RasterError::InvalidOptions`] unless `config` can render GPU pages
+/// when it asks for them: a build with the `vulkan` feature, under the
+/// `Auto` or `ForceVulkan` policy.
+fn check_gpu_pages(config: &SessionConfig) -> Result<(), RasterError> {
+    if !config.gpu_pages {
+        return Ok(());
+    }
+    if !cfg!(feature = "vulkan") {
+        return Err(RasterError::InvalidOptions(
+            "GPU page rendering needs a build with the `vulkan` feature".to_owned(),
+        ));
+    }
+    if !matches!(
+        config.policy,
+        BackendPolicy::Auto | BackendPolicy::ForceVulkan
+    ) {
+        return Err(RasterError::InvalidOptions(format!(
+            "GPU page rendering runs on Vulkan, which backend policy {} does not use; \
+             use auto or vulkan",
+            config.policy.name()
+        )));
+    }
+    Ok(())
+}
+
 /// Shared session assembly from an already-opened document — the backend init,
 /// image cache, doc id, prefetcher, and `RasterSession` construction common to
 /// both the path and in-memory entry points.
@@ -452,6 +481,7 @@ fn open_session_with_doc(
     if let Some(reason) = uncompiled_backend(config.policy) {
         return Err(RasterError::BackendUnavailable(reason.to_owned()));
     }
+    check_gpu_pages(config)?;
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
     #[cfg(feature = "vulkan")]
@@ -460,6 +490,8 @@ fn open_session_with_doc(
     let vk_won_auto = vk_backend.is_some() && matches!(config.policy, BackendPolicy::Auto);
     #[cfg(not(feature = "vulkan"))]
     let vk_won_auto = false;
+    #[cfg(feature = "vulkan")]
+    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
 
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     let gpu_ctx = session_gpu_ctx(config.policy, vk_won_auto)?;
@@ -543,6 +575,8 @@ fn open_session_with_doc(
         gpu_ctx,
         #[cfg(feature = "vulkan")]
         vk_backend,
+        #[cfg(feature = "vulkan")]
+        device_pages,
         #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
         vulkan_device: config.vulkan_device.clone(),
         #[cfg(feature = "vaapi")]

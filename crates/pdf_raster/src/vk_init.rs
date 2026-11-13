@@ -119,6 +119,19 @@ fn checked_selector(selector: &str) -> Result<(), InitError> {
     })
 }
 
+/// The backend for `selector`, opened on first use and shared by every
+/// session naming the same selector, under any policy.
+///
+/// # Errors
+///
+/// Why the device did not open: a selector that does not resolve, or an
+/// unavailable Vulkan.
+pub(crate) fn open_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, String> {
+    cached_backend(selector).map_err(|e| match e {
+        InitError::Selection(msg) | InitError::Unavailable(msg) => msg,
+    })
+}
+
 /// Look up or construct the backend for `selector`.  The lock is held
 /// across construction so concurrent first sessions build one device.
 fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
