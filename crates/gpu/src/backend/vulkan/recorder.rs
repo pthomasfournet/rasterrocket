@@ -893,7 +893,7 @@ impl PageRecorder {
     /// dispatch, emit a barrier to every later page command.  Holds the mutex
     /// for the whole body so two threads can't race on `s.cmd` (command
     /// buffers are not externally synchronised by default).
-    fn dispatch_kernel(
+    pub(super) fn dispatch_kernel(
         &self,
         id: KernelId,
         buffers: &[vk::Buffer],

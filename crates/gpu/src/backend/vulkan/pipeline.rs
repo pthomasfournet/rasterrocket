@@ -1,6 +1,6 @@
 //! Pipeline cache: SPIR-V → `VkPipeline` per kernel.
 //!
-//! Each kernel (`aa_fill`, `icc_clut`, `blit_image`, and under the
+//! Each kernel (`aa_fill`, `icc_clut`, `blit_image`, `page_raster`, and under the
 //! `gpu-jpeg-huffman` feature the scan, Huffman and IDCT entry points) gets
 //! its own descriptor set layout + pipeline layout + compute pipeline,
 //! lazy-created on first dispatch.
@@ -30,6 +30,8 @@ pub(super) enum KernelId {
     AaFill,
     IccClut,
     BlitImage,
+    /// Page raster from a binned command list (Vulkan only).
+    PageRaster,
     /// Blelloch scan, per-workgroup phase. Same SPIR-V as the other
     /// two scan phases (`blelloch_scan.spv` has 3 entry points); the
     /// pipeline is compiled with this specific entry.
@@ -79,9 +81,9 @@ pub(super) enum KernelId {
 /// at build time: if `slot_index()` ever returns a value
 /// `>= NUM_KERNELS` for any variant, the build fails.
 #[cfg(feature = "gpu-jpeg-huffman")]
-const NUM_KERNELS: usize = 13;
+const NUM_KERNELS: usize = 14;
 #[cfg(not(feature = "gpu-jpeg-huffman"))]
-const NUM_KERNELS: usize = 3;
+const NUM_KERNELS: usize = 4;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
 /// here would surface as a runtime panic when `self.slots[idx]` is
@@ -92,6 +94,7 @@ const _: () = {
     assert!(KernelId::AaFill.slot_index() < NUM_KERNELS);
     assert!(KernelId::IccClut.slot_index() < NUM_KERNELS);
     assert!(KernelId::BlitImage.slot_index() < NUM_KERNELS);
+    assert!(KernelId::PageRaster.slot_index() < NUM_KERNELS);
 };
 #[cfg(feature = "gpu-jpeg-huffman")]
 const _: () = {
@@ -144,12 +147,42 @@ fn spirv_words(spirv: &[u8], label: &str) -> Result<Vec<u32>> {
 }
 
 impl KernelId {
+    /// Every kernel of this build.
+    #[cfg(test)]
+    const ALL: &[Self] = &[
+        Self::AaFill,
+        Self::IccClut,
+        Self::BlitImage,
+        Self::PageRaster,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::ScanPerWorkgroup,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::ScanBlockSums,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::ScanScatter,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::Phase1IntraSync,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::Phase2InterSync,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::Phase4Redecode,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::JpegPhase1IntraSync,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::JpegPhase2InterSync,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::JpegPhase4Redecode,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        Self::IdctColor,
+    ];
+
     /// SPIR-V blob for this kernel, baked into the binary at build time.
     const fn spirv(self) -> &'static [u8] {
         match self {
             Self::AaFill => include_bytes!(concat!(env!("OUT_DIR"), "/aa_fill.spv")),
             Self::IccClut => include_bytes!(concat!(env!("OUT_DIR"), "/icc_clut.spv")),
             Self::BlitImage => include_bytes!(concat!(env!("OUT_DIR"), "/blit_image.spv")),
+            Self::PageRaster => include_bytes!(concat!(env!("OUT_DIR"), "/page_raster.spv")),
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => {
                 include_bytes!(concat!(env!("OUT_DIR"), "/blelloch_scan.spv"))
@@ -209,26 +242,27 @@ impl KernelId {
             Self::AaFill => 0,
             Self::IccClut => 1,
             Self::BlitImage => 2,
+            Self::PageRaster => 3,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => 3,
+            Self::ScanPerWorkgroup => 4,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => 4,
+            Self::ScanBlockSums => 5,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => 5,
+            Self::ScanScatter => 6,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => 6,
+            Self::Phase1IntraSync => 7,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 7,
+            Self::Phase2InterSync => 8,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => 8,
+            Self::Phase4Redecode => 9,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 9,
+            Self::JpegPhase1IntraSync => 10,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 10,
+            Self::JpegPhase2InterSync => 11,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => 11,
+            Self::JpegPhase4Redecode => 12,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => 12,
+            Self::IdctColor => 13,
         }
     }
 
@@ -239,6 +273,7 @@ impl KernelId {
             Self::AaFill => "aa_fill",
             Self::IccClut => "icc_cmyk_clut",
             Self::BlitImage => "blit_image",
+            Self::PageRaster => "page_raster",
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup => "scan_per_workgroup",
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -313,6 +348,7 @@ impl KernelId {
             // Everyone else: sequential 0..n.
             Self::BlitImage => &[0, 1, 2, 3],
             Self::AaFill | Self::IccClut => &[0, 1, 2],
+            Self::PageRaster => &[0, 1, 2, 3, 4, 5],
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => &[0, 1],
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -339,6 +375,8 @@ impl KernelId {
             Self::IccClut => 3,
             // (src, dst_rgba, cols, rows) — dimensions and bbox travel as push constants
             Self::BlitImage => 4,
+            // (cmds, intersects, row_starts, tile_offsets, tile_cmds, page)
+            Self::PageRaster => 6,
             // (data, block_sums) — len_elems travels as push constant
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => 2,
@@ -685,6 +723,7 @@ mod tests {
         };
         assert!(!declares(KernelId::AaFill, CAPABILITY_INT64));
         assert!(!declares(KernelId::IccClut, CAPABILITY_INT64));
+        assert!(!declares(KernelId::PageRaster, CAPABILITY_INT64));
         #[cfg(feature = "gpu-jpeg-huffman")]
         {
             assert!(declares(KernelId::IdctColor, CAPABILITY_INT64));
@@ -720,31 +759,7 @@ mod tests {
     /// addition can't silently drift.
     #[test]
     fn binding_slots_len_matches_n_storage_buffers_for_every_kernel() {
-        let kernels = [
-            KernelId::AaFill,
-            KernelId::IccClut,
-            KernelId::BlitImage,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanPerWorkgroup,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanBlockSums,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanScatter,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase1IntraSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase2InterSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase4Redecode,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase1IntraSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase2InterSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase4Redecode,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::IdctColor,
-        ];
+        let kernels = KernelId::ALL;
         for id in kernels {
             let slots = id.binding_slots();
             let n = id.n_storage_buffers();
@@ -764,31 +779,7 @@ mod tests {
     /// `< NUM_KERNELS` at build time; this test confirms uniqueness.
     #[test]
     fn slot_indices_are_unique_across_kernels() {
-        let kernels = [
-            KernelId::AaFill,
-            KernelId::IccClut,
-            KernelId::BlitImage,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanPerWorkgroup,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanBlockSums,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::ScanScatter,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase1IntraSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase2InterSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::Phase4Redecode,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase1IntraSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase2InterSync,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::JpegPhase4Redecode,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            KernelId::IdctColor,
-        ];
+        let kernels = KernelId::ALL;
         let mut indices: Vec<usize> = kernels.iter().map(|k| k.slot_index()).collect();
         indices.sort_unstable();
         let unique_count = indices.windows(2).filter(|w| w[0] != w[1]).count() + 1;

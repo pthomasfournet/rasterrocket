@@ -48,6 +48,10 @@ const KERNELS: &[&str] = &[
     "idct_color",
 ];
 
+/// Compute kernels with a Slang source only, compiled to SPIR-V for the
+/// Vulkan backend; the CUDA backend has no twin of them.
+const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster"];
+
 /// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
 /// capabilities.
 const SLANG_PROFILE: &str = "spirv_1_5";
@@ -73,6 +77,7 @@ fn slang_entry(kernel: &str) -> Option<&'static str> {
         // Default: single entry point named after the file.
         "aa_fill" => Some("aa_fill"),
         "blit_image" => Some("blit_image"),
+        "page_raster" => Some("page_raster"),
         _ => panic!("unknown kernel name: {kernel}"),
     }
 }
@@ -325,7 +330,7 @@ fn write_placeholder_ptx(out_dir: &Path) {
 fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
     let slangc = env::var("SLANGC").unwrap_or_else(|_| "slangc".to_owned());
 
-    for kernel in KERNELS {
+    for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
         let src = kernels_dir.join(format!("{kernel}.slang"));
         assert!(
             src.exists(),

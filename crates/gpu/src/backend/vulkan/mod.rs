@@ -11,6 +11,7 @@
 //! - `device` — loader, physical-device pick, logical device + queue.
 //! - `error` — `vk::Result → BackendError` adaptor.
 //! - `memory` — slab sub-allocator, host-visible staging pool.
+//! - `page` — whole-page raster from a command list.
 //! - `pipeline` — descriptor set layouts + pipeline cache (lazy SPIR-V compile).
 //! - `select` — device selector parsing and physical-device ranking.
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
@@ -20,6 +21,7 @@ mod barrier;
 mod device;
 mod error;
 mod memory;
+mod page;
 mod pipeline;
 mod recorder;
 mod select;
@@ -44,6 +46,8 @@ pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
     aa_scratch: crate::backend::AaFillScratchPool<Self>,
+    /// Buffers of [`Self::render_page`], kept between pages.
+    page_scratch: std::sync::Mutex<page::PageScratch>,
     /// Whether the CLUT kernel reproduces the CPU evaluator on this
     /// device; measured on first use ([`Self::icc_clut_is_exact`]).
     icc_clut_exact: std::sync::OnceLock<bool>,
@@ -90,6 +94,7 @@ impl VulkanBackend {
         let transfer = transfer::TransferContext::new(device.clone())?;
         Ok(Self {
             aa_scratch: crate::backend::AaFillScratchPool::new(),
+            page_scratch: std::sync::Mutex::default(),
             icc_clut_exact: std::sync::OnceLock::new(),
             transfer,
             recorder,
@@ -163,7 +168,7 @@ impl VulkanBackend {
 /// The backend of the device `PDF_RASTER_VULKAN_DEVICE` names, or of the
 /// automatically ranked one when it is unset or empty; `None` (the calling
 /// test is skipped) when no Vulkan device opens.
-#[cfg(all(test, feature = "cache"))]
+#[cfg(test)]
 pub(crate) fn test_backend() -> Option<VulkanBackend> {
     let selector = std::env::var("PDF_RASTER_VULKAN_DEVICE")
         .ok()
