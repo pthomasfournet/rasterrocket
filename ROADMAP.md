@@ -2493,6 +2493,9 @@ dictionary bounds as `.cb7`; `ComicError::RarUnsupported` is gone.
 A multi-page TIFF entry of a comic archive yields one page per image (its
 reduced-resolution copies and transparency masks skipped) instead of its
 first page only.
+JPEG XL page images (`.jxl`, bare codestream or container) decode through
+the JPEG XL project's pure-Rust `jxl` decoder: the first frame, as 8-bit
+gray or sRGB.
 The GPU composite and soft-mask kernels, which nothing in the render path
 dispatched, are deleted with their `GpuBackend::record_composite` /
 `record_apply_soft_mask` methods, parameter structs, thresholds and CPU

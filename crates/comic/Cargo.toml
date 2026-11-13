@@ -32,6 +32,7 @@ zune-jpeg  = { workspace = true }
 png        = "0.18"
 image-webp = { workspace = true }
 tiff       = { workspace = true }
+jxl        = "0.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }

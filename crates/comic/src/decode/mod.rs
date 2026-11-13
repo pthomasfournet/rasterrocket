@@ -8,6 +8,7 @@
 //! in the resulting [`DecodeError::TooLarge`].
 
 mod jpeg;
+mod jxl;
 mod png;
 mod tiff;
 mod webp;
@@ -34,6 +35,9 @@ pub(crate) enum ImageFormat {
     WebP,
     /// TIFF (`II*\0` little-endian or `MM\0*` big-endian).
     Tiff,
+    /// JPEG XL: a bare codestream (`FF 0A`) or an ISO BMFF container
+    /// (`00 00 00 0C 'JXL ' 0D 0A 87 0A`).
+    Jxl,
 }
 
 /// Why decoding a single entry failed.
@@ -78,6 +82,11 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     {
         return Some(ImageFormat::Tiff);
     }
+    if bytes.starts_with(&[0xFF, 0x0A])
+        || bytes.starts_with(b"\x00\x00\x00\x0CJXL \x0D\x0A\x87\x0A")
+    {
+        return Some(ImageFormat::Jxl);
+    }
     None
 }
 
@@ -111,6 +120,7 @@ pub(crate) fn decode_image(bytes: &[u8], page: usize) -> Result<Bitmap<Gray8>, D
         ImageFormat::Png => png::decode(bytes)?,
         ImageFormat::WebP => webp::decode(bytes)?,
         ImageFormat::Tiff => tiff::decode(bytes, page)?,
+        ImageFormat::Jxl => jxl::decode(bytes)?,
     };
     Ok(match pixels {
         CodecPixels::Gray(gray) => gray,

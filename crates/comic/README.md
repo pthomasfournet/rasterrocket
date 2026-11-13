@@ -1,7 +1,7 @@
 # rasterrocket-comic
 
 Comic and scan archives as rasterrocket input: `open_comic` reads a `.cbz`
-(ZIP), `.cb7` (7-Zip), `.cbt` (TAR) or `.cbr` (RAR) archive, decodes its JPEG, PNG, WebP or
+(ZIP), `.cb7` (7-Zip), `.cbt` (TAR) or `.cbr` (RAR) archive, decodes its JPEG, PNG, WebP, JPEG XL or
 TIFF pages (every page of a multi-page TIFF) in natural (numeric-aware)
 filename order, and returns the same
 grayscale `RenderedPage`s the PDF path produces. An archive holding a single
