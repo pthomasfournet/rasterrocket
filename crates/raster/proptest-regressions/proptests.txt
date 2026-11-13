@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc caec295a1845fb2715ce45f919277c92038f021ab2014d151bb54f795c9f965a # orientation_does_not_matter: aliased fill of a curved outline and its reverse
+cc f0555630117bf5a1e3b4786f0526bb0bc70cd8d2e0ff7ebfd6921a87ea00432b # a_clip_rectangle_masks_the_unclipped_fill: aliased even-odd fill of two curved subpaths
+cc c5540fa95c7f05a75395cdbec215af55abc4ac761e1f8448cf8173ca566ae227 # integer_translation_moves_the_render: antialiased triangle moved by (4, 5)

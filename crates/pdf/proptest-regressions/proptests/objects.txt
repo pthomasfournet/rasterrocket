@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 21db0784215f4f1e47330e6216b8ec9c11147b38405ad498251a21cee7550304 # shrinks to obj = Array([String([0, 0, 0, 0, 0, 0, 0, 0, 0, 10], Literal)]): a bare CR line continuation before a raw LF
