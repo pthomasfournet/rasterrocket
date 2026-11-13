@@ -1605,6 +1605,9 @@ dependencies = [
 [[package]]
 name = "rasterrocket-camera"
 version = "2.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "rasterrocket-cli"

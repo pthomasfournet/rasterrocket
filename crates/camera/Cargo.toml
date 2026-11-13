@@ -12,5 +12,8 @@ description          = "Camera-capture page cleanup on 8-bit grayscale images: p
 keywords             = ["camera", "scan", "perspective", "dewarp", "book"]
 categories           = ["multimedia::images", "computer-vision"]
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true
