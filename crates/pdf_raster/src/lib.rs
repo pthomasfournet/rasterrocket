@@ -141,6 +141,7 @@ pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{FormType, PageBox, PageGeometry, RenderPurpose};
 pub use render::{
     render_page_gray, render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics,
+    render_page_rgba,
 };
 pub use request::{CancelToken, RenderParams, RenderRegion};
 
@@ -425,6 +426,13 @@ pub struct RasterOptions {
     /// [`SessionConfig::page_box`].  Default [`PageBox::Crop`].
     pub page_box: PageBox,
 
+    /// Whether pages are rendered over a transparent backdrop instead of
+    /// white paper.  Default `false`: pages are 8-bit gray.  `true` yields
+    /// [`PixelFormat::Rgba8`] pages whose alpha is the page's coverage ×
+    /// opacity, colour not premultiplied by it; a pixel nothing paints is
+    /// `[0, 0, 0, 0]`.  Incompatible with [`deskew`](Self::deskew).
+    pub transparent_background: bool,
+
     /// Cancellation flag polled while each page renders; default `None`.
     ///
     /// Once it is raised, the page in progress stops before its next
@@ -468,12 +476,36 @@ impl Default for RasterOptions {
             system_fonts: true,
             image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
             page_box: PageBox::Crop,
+            transparent_background: false,
             cancel: None,
         }
     }
 }
 
-/// A single rendered page, returned as 8-bit grayscale pixels.
+/// The layout of the pixels of a [`RenderedPage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PixelFormat {
+    /// One byte of gray per pixel, 0 black.
+    Gray8,
+    /// Four bytes per pixel, `[R, G, B, A]` in sRGB; alpha 0 is
+    /// transparent and the colour is not premultiplied by it.
+    Rgba8,
+}
+
+impl PixelFormat {
+    /// Bytes per pixel.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Gray8 => 1,
+            Self::Rgba8 => 4,
+        }
+    }
+}
+
+/// A single rendered page: 8-bit grayscale pixels, or RGBA pixels when
+/// rendered over a transparent backdrop.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RenderedPage {
@@ -483,9 +515,14 @@ pub struct RenderedPage {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// Raw pixel bytes: 8-bit grayscale, tightly packed (`stride == width`),
-    /// top-to-bottom, left-to-right.  Length is `width * height`.
+    /// Raw pixel bytes in [`format`](Self::format), tightly packed
+    /// (`stride == width * format.bytes_per_pixel()`), top-to-bottom,
+    /// left-to-right.  Length is `width * height * format.bytes_per_pixel()`:
+    /// `width * height` for the default gray pages.
     pub pixels: Vec<u8>,
+    /// The layout of [`pixels`](Self::pixels): [`PixelFormat::Gray8`], or
+    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`].
+    pub format: PixelFormat,
     /// Physical resolution of the bitmap in pixels per inch (`opts.dpi`).
     ///
     /// The page's size includes its `/UserUnit` (ISO 32000-2 §14.11.2), so a

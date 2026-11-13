@@ -3,7 +3,7 @@
 
 use crate::{
     PageSet, RasterError, RasterOptions, RasterSession, RenderedPage, SessionConfig, open_session,
-    open_session_from_bytes, render_page_gray,
+    open_session_from_bytes, render_page_gray, render_page_rgba,
 };
 
 // ── Sequential iterator ───────────────────────────────────────────────────────
@@ -66,6 +66,11 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
             "dpi must be a positive finite number, got {}",
             opts.dpi
         )));
+    }
+    if opts.deskew && opts.transparent_background {
+        return Some(RasterError::InvalidOptions(
+            "deskew applies to gray pages, not to a transparent background".to_owned(),
+        ));
     }
     if opts.pages.is_none() {
         if opts.first_page == 0 {
@@ -341,10 +346,14 @@ pub(crate) fn render_channel(
     rx
 }
 
-// ── Single-page render (gray + deskew) ───────────────────────────────────────
+// ── Single-page render (gray + deskew, or RGBA) ───────────────────────────────────────
 
 fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, RasterError> {
-    render_page_gray(&state.session, page_num, &state.opts)
+    if state.opts.transparent_background {
+        render_page_rgba(&state.session, page_num, &state.opts)
+    } else {
+        render_page_gray(&state.session, page_num, &state.opts)
+    }
 }
 
 #[cfg(test)]
@@ -559,6 +568,7 @@ mod channel_tests {
             width: 1,
             height: 1,
             pixels: vec![128u8],
+            format: crate::PixelFormat::Gray8,
             dpi: 72.0,
             diagnostics: crate::PageDiagnostics::default(),
         };
@@ -583,6 +593,7 @@ mod channel_tests {
                     width: 1,
                     height: 1,
                     pixels: vec![0u8],
+                    format: crate::PixelFormat::Gray8,
                     dpi: 72.0,
                     diagnostics: crate::PageDiagnostics::default(),
                 })

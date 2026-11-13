@@ -12,7 +12,7 @@ use base64::Engine as _;
 use color::Gray8;
 use raster::Bitmap;
 
-use crate::RenderedPage;
+use crate::{PixelFormat, RenderedPage};
 
 /// Budget for a single GCV `images:annotate` request.
 #[derive(Debug, Clone)]
@@ -81,6 +81,9 @@ pub enum GcvError {
     },
     /// The underlying JPEG codec failed.
     Encode(encode::EncodeError),
+    /// The page is not [`PixelFormat::Gray8`]; GCV input is encoded from
+    /// gray pages only.
+    NotGray(PixelFormat),
 }
 
 impl std::fmt::Display for GcvError {
@@ -94,6 +97,9 @@ impl std::fmt::Display for GcvError {
                 "page does not fit GCV budget: smallest {smallest_base64} B base64 > {budget} B"
             ),
             Self::Encode(e) => write!(f, "JPEG encode failed: {e}"),
+            Self::NotGray(format) => {
+                write!(f, "GCV input is encoded from gray pages, not {format:?}")
+            }
         }
     }
 }
@@ -102,7 +108,7 @@ impl std::error::Error for GcvError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Encode(e) => Some(e),
-            Self::Unfittable { .. } => None,
+            Self::Unfittable { .. } | Self::NotGray(_) => None,
         }
     }
 }
@@ -181,7 +187,11 @@ fn encode_jpeg(pixels: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, Gc
 /// [`GcvError::Unfittable`] if the page cannot meet the budget without
 /// dropping below the OCR resolution floor, or would exceed GCV's 75 MP
 /// limit even downscaled. Never returns an over-budget or > 75 MP payload.
+/// [`GcvError::NotGray`] for a page that is not [`PixelFormat::Gray8`].
 pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImage, GcvError> {
+    if page.format != PixelFormat::Gray8 {
+        return Err(GcvError::NotGray(page.format));
+    }
     // A degenerate (zero-area) page has no valid payload.
     if page.width == 0 || page.height == 0 {
         return Err(GcvError::Unfittable {
@@ -363,9 +373,21 @@ mod tests {
             width: w,
             height: h,
             pixels,
+            format: PixelFormat::Gray8,
             dpi: 300.0,
             diagnostics: crate::PageDiagnostics::default(),
         }
+    }
+
+    #[test]
+    fn an_rgba_page_is_refused() {
+        let mut page = noisy_page(4, 4);
+        page.format = PixelFormat::Rgba8;
+        page.pixels.resize(4 * 4 * 4, 0);
+        assert!(matches!(
+            encode_for_gcv(&page, &GcvBudget::default()),
+            Err(GcvError::NotGray(PixelFormat::Rgba8))
+        ));
     }
 
     #[test]

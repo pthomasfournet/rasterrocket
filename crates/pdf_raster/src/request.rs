@@ -100,6 +100,12 @@ pub struct RenderParams {
     pub policy: Option<BackendPolicy>,
     /// Cancellation flag polled during the render; `None` renders to completion.
     pub cancel: Option<CancelToken>,
+    /// Render over a transparent backdrop instead of white paper.  The
+    /// bitmap then has an alpha plane holding the page's coverage × opacity,
+    /// its colour not premultiplied by it; a pixel nothing paints has colour
+    /// and alpha 0.  `false` (the default) composites the page onto white
+    /// and returns an opaque bitmap without an alpha plane.
+    pub transparent_background: bool,
 }
 
 impl RenderParams {
@@ -120,6 +126,7 @@ impl RenderParams {
             region: None,
             policy: None,
             cancel: None,
+            transparent_background: false,
         }
     }
 
@@ -134,6 +141,14 @@ impl RenderParams {
     #[must_use]
     pub const fn with_policy(mut self, policy: BackendPolicy) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Render over a transparent backdrop (see
+    /// [`transparent_background`](Self::transparent_background)).
+    #[must_use]
+    pub const fn with_transparent_background(mut self) -> Self {
+        self.transparent_background = true;
         self
     }
 
@@ -165,13 +180,16 @@ mod tests {
         let params = RenderParams::new(2.0)
             .with_region(RenderRegion::new(1, 2, 3, 4))
             .with_policy(BackendPolicy::CpuOnly)
-            .with_cancel(token);
+            .with_cancel(token)
+            .with_transparent_background();
         assert!((params.scale_x - 2.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 2.0).abs() < f64::EPSILON);
         assert_eq!(params.region, Some(RenderRegion::new(1, 2, 3, 4)));
         assert_eq!(params.policy, Some(BackendPolicy::CpuOnly));
         assert!(params.cancel.is_some());
+        assert!(params.transparent_background);
         let params = RenderParams::new_xy(3.0, 1.5);
+        assert!(!params.transparent_background);
         assert!((params.scale_x - 3.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 1.5).abs() < f64::EPSILON);
     }

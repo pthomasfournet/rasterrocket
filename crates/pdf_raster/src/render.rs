@@ -80,7 +80,9 @@ pub fn render_page_rgb_with_diagnostics(
 /// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
 ///
 /// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
-/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel).
+/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel);
+/// [`transparent_background`](RasterOptions::transparent_background) is
+/// [`render_page_rgba`]'s.
 /// The page selection fields are the caller's, and the fields mirrored on
 /// [`SessionConfig`](crate::SessionConfig) were fixed when `session` was
 /// opened.
@@ -108,6 +110,45 @@ pub fn render_page_gray(
 
     Ok(crate::page::gray8_into_rendered_page(
         gray,
+        page_num,
+        dpi,
+        diagnostics,
+    ))
+}
+
+/// Render page `page_num` (1-based) of `session` over a transparent
+/// backdrop to an RGBA [`RenderedPage`].
+///
+/// The page is the one [`raster_pdf`](crate::raster_pdf) yields when
+/// [`RasterOptions::transparent_background`] is set:
+/// [`PixelFormat::Rgba8`](crate::PixelFormat::Rgba8), alpha not
+/// premultiplied.
+///
+/// Of `opts`, only [`dpi`](RasterOptions::dpi) and
+/// [`cancel`](RasterOptions::cancel) apply.
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`], plus [`RasterError::InvalidOptions`] when
+/// [`deskew`](RasterOptions::deskew) is set: deskew operates on gray pages.
+pub fn render_page_rgba(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError> {
+    if opts.deskew {
+        return Err(RasterError::InvalidOptions(
+            "deskew applies to gray pages, not to a transparent background".to_owned(),
+        ));
+    }
+    let dpi = opts.dpi;
+    let page_id = session.resolve_page(page_num)?;
+    let geom = pdf_interp::page_size_pts_by_id(&session.doc, page_id, session.page_box)?;
+    let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_transparent_background();
+    params.cancel.clone_from(&opts.cancel);
+    let (rgb, diagnostics) = render_page_rgb_with_geom(session, page_num, page_id, geom, &params)?;
+    Ok(crate::page::rgb8_to_rgba_rendered_page(
+        &rgb,
         page_num,
         dpi,
         diagnostics,
@@ -160,6 +201,20 @@ fn page_view(
     }
     crate::page::validate_dimensions(r.width, r.height)?;
     Ok(whole.window(r.x, r.y, r.width, r.height))
+}
+
+/// The group page `page_id` is painted as: always one over a
+/// `transparent` backdrop, so that the page's alpha is kept.
+fn page_group(
+    doc: &pdf::Document,
+    page_id: pdf::ObjectId,
+    transparent: bool,
+) -> Option<pdf_interp::resources::TransparencyGroupParams> {
+    if transparent {
+        Some(pdf_interp::transparent_page_group(doc, page_id))
+    } else {
+        pdf_interp::page_group(doc, page_id)
+    }
 }
 
 /// The error of a page bitmap the allocator refused.
@@ -228,14 +283,10 @@ fn render_page_rgb_with_geom(
     // some graphics state that is drawn sets it.
     let ink =
         session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
-    let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group(
-        &view,
-        doc,
-        page_id,
-        pdf_interp::page_group(doc, page_id),
-        ink,
-    )
-    .map_err(allocation_failed)?;
+    let group = page_group(doc, page_id, params.transparent_background);
+    let mut renderer =
+        pdf_interp::renderer::PageRenderer::try_with_page_group(&view, doc, page_id, group, ink)
+            .map_err(allocation_failed)?;
     if let Some(cancel) = &params.cancel {
         renderer.set_cancel(cancel.flag());
     }
@@ -311,7 +362,12 @@ fn render_page_rgb_with_geom(
         }
     }
 
-    let (bitmap, mut diag) = renderer.try_finish().map_err(allocation_failed)?;
+    let (bitmap, mut diag) = if params.transparent_background {
+        renderer.try_finish_transparent()
+    } else {
+        renderer.try_finish()
+    }
+    .map_err(allocation_failed)?;
     diag.form_type = session.form_type;
     Ok((bitmap, diag))
 }

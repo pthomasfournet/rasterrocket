@@ -4,10 +4,10 @@
 //! grayscale `RenderedPage`; this module is the single definition of how one is
 //! born from a `Bitmap<Gray8>` and of the pixel-dimension safety limits.
 
-use color::Gray8;
+use color::{Gray8, Rgb8};
 use raster::Bitmap;
 
-use crate::{PageDiagnostics, RasterError, RenderedPage};
+use crate::{PageDiagnostics, PixelFormat, RasterError, RenderedPage};
 
 // ── Safety limits ───────────────────────────────────────────────────────────
 
@@ -83,6 +83,7 @@ pub fn gray8_to_rendered_page(
         width: bmp.width,
         height: bmp.height,
         pixels,
+        format: PixelFormat::Gray8,
         dpi,
         diagnostics,
     }
@@ -112,6 +113,47 @@ pub fn gray8_into_rendered_page(
         width,
         height,
         pixels,
+        format: PixelFormat::Gray8,
+        dpi,
+        diagnostics,
+    }
+}
+
+/// Interleave an RGB bitmap and its alpha plane into a tight
+/// `width * height * 4` RGBA buffer, alpha not premultiplied, and assemble
+/// a [`PixelFormat::Rgba8`] [`RenderedPage`].  A bitmap without an alpha
+/// plane is opaque: every alpha byte is 255.
+pub(crate) fn rgb8_to_rgba_rendered_page(
+    bmp: &Bitmap<Rgb8>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let w = bmp.width as usize;
+    let mut pixels = Vec::with_capacity(w * bmp.height as usize * 4);
+    for y in 0..bmp.height {
+        let rgb = bmp.row_bytes(y)[..w * 3].as_chunks::<3>().0;
+        match bmp.alpha_row(y) {
+            Some(alpha) => {
+                for (px, &a) in rgb.iter().zip(&alpha[..w]) {
+                    pixels.extend_from_slice(px);
+                    pixels.push(a);
+                }
+            }
+            None => {
+                for px in rgb {
+                    pixels.extend_from_slice(px);
+                    pixels.push(u8::MAX);
+                }
+            }
+        }
+    }
+    RenderedPage {
+        page_num,
+        width: bmp.width,
+        height: bmp.height,
+        pixels,
+        format: PixelFormat::Rgba8,
         dpi,
         diagnostics,
     }
@@ -159,6 +201,20 @@ mod tests {
             "must be tight, padding stripped"
         );
         assert_eq!(page.pixels.len(), 4);
+        assert_eq!(page.format, PixelFormat::Gray8);
+    }
+
+    #[test]
+    fn rgba_page_interleaves_the_alpha_plane() {
+        let mut bmp = Bitmap::<Rgb8>::new(2, 1, 4, true);
+        bmp.row_bytes_mut(0)[..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        bmp.alpha_plane_mut().unwrap().copy_from_slice(&[0, 200]);
+        let page = rgb8_to_rgba_rendered_page(&bmp, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(page.format, PixelFormat::Rgba8);
+        assert_eq!(page.pixels, vec![1, 2, 3, 0, 4, 5, 6, 200]);
+        let opaque = Bitmap::<Rgb8>::new(1, 1, 1, false);
+        let page = rgb8_to_rgba_rendered_page(&opaque, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(page.pixels[3], u8::MAX);
     }
 
     #[test]
