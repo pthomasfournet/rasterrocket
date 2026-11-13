@@ -15,11 +15,11 @@ use std::cell::RefCell;
 
 use color::cmyk::{SpotLut, ink_to_rgb_row, rgb_to_ink};
 use color::{DeviceN8, Pixel, PixelMode, Rgb8};
-use raster::Bitmap;
 use raster::clip::Clip;
 use raster::pipe::{Pattern, PipeSrc, PipeState, RowPattern, TransferSet, render_bitmap_span};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
 use raster::transparency::{Backdrop, GroupBitmap, GroupParams, begin_group, paint_group};
+use raster::{Bitmap, BitmapBuffers};
 
 use super::PageRenderer;
 use super::pixel_rect::PixelRect;
@@ -120,10 +120,26 @@ impl PageCanvas {
         height: u32,
         alpha: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
+        Self::try_new_in(kind, width, height, alpha, BitmapBuffers::default())
+    }
+
+    /// [`Self::try_new`] built in `buffers`
+    /// ([`Bitmap::try_new_filled_in`]).
+    pub(super) fn try_new_in(
+        kind: CanvasKind,
+        width: u32,
+        height: u32,
+        alpha: bool,
+        buffers: BitmapBuffers,
+    ) -> Result<Self, raster::BitmapAllocError> {
         let fill = initial_fill(kind, alpha);
         Ok(match kind {
-            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled(width, height, 1, alpha, fill)?),
-            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled(width, height, 1, alpha, fill)?),
+            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled_in(
+                buffers, width, height, 1, alpha, fill,
+            )?),
+            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled_in(
+                buffers, width, height, 1, alpha, fill,
+            )?),
         })
     }
 
@@ -160,15 +176,26 @@ impl PageCanvas {
 
     /// [`Self::into_rgb`] that reports an RGB bitmap the allocator refuses
     /// as an error.
-    pub(super) fn try_into_rgb(
+    ///
+    /// The RGB bitmap of an ink canvas is built in `buffers`
+    /// ([`Bitmap::try_new_filled_in`]); an RGB canvas is returned as it is
+    /// and `buffers` are dropped.
+    pub(super) fn try_into_rgb_in(
         self,
         spots: &[Option<&SpotLut>; 4],
+        buffers: BitmapBuffers,
     ) -> Result<Bitmap<Rgb8>, raster::BitmapAllocError> {
         match self {
             Self::Rgb(bitmap) => Ok(bitmap),
             Self::Ink(ink) => {
-                let mut rgb =
-                    Bitmap::<Rgb8>::try_new_filled(ink.width, ink.height, 1, ink.has_alpha(), 0)?;
+                let mut rgb = Bitmap::<Rgb8>::try_new_filled_in(
+                    buffers,
+                    ink.width,
+                    ink.height,
+                    1,
+                    ink.has_alpha(),
+                    0,
+                )?;
                 ink_into_rgb(&ink, spots, &mut rgb);
                 Ok(rgb)
             }
