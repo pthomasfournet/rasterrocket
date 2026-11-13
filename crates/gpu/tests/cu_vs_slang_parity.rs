@@ -1,9 +1,9 @@
 //! Parity tests: same kernel via CUDA (`.cu`-via-`nvcc`) and Vulkan
-//! (`.slang`-via-`slangc`) must agree to ≤ 1 LSB per channel.
+//! (`.slang`-via-`slangc`).
 //!
 //! Each test composes a small representative input, runs it through
-//! both backends, and asserts byte-equal output (or ≤ 1 LSB delta for
-//! floating-point kernels).
+//! the Vulkan kernel and a reference (the CUDA kernel or its CPU twin),
+//! and asserts byte-equal output.
 //!
 //! Gated on the `vulkan` feature.  CUDA-side tests are additionally
 //! gated on `gpu-validation` so machines without a CUDA device still
@@ -31,7 +31,7 @@
 )]
 
 use rasterrocket_gpu::backend::GpuBackend;
-use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams, IccClutParams};
+use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams};
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
 // ── icc_cmyk_clut ───────────────────────────────────────────────────
@@ -67,35 +67,23 @@ fn build_identity_clut(grid_n: u32) -> Vec<u8> {
 }
 
 fn run_icc_clut_vulkan(cmyk: &[u8], clut: &[u8]) -> Vec<u8> {
-    assert!(cmyk.len().is_multiple_of(4));
-    let n_pixels = u32::try_from(cmyk.len() / 4).expect("n_pixels fits u32");
-
     let backend = VulkanBackend::new().expect("VulkanBackend::new");
-    let d_cmyk = backend.alloc_device(cmyk.len()).expect("alloc cmyk");
-    let d_rgb = backend.alloc_device(cmyk.len() / 4 * 3).expect("alloc rgb");
-    let d_clut = backend.alloc_device(clut.len()).expect("alloc clut");
-    backend.upload(&d_cmyk, cmyk).expect("upload cmyk");
-    backend.upload(&d_clut, clut).expect("upload clut");
-
-    backend.begin_page().expect("begin_page");
-    backend
-        .record_icc_clut(IccClutParams {
-            cmyk: &d_cmyk,
-            rgb: &d_rgb,
-            clut: &d_clut,
-            n_pixels,
-        })
-        .expect("record_icc_clut");
-    let fence = backend.submit_page().expect("submit_page");
-    backend.wait_page(fence).expect("wait_page");
-
-    let mut out = vec![0u8; cmyk.len() / 4 * 3];
-    backend.download(&d_rgb, &mut out).expect("download");
-    out
+    rasterrocket_gpu::backend::icc_clut(&backend, cmyk, clut).expect("icc_clut")
 }
 
 fn run_icc_clut_cpu(cmyk: &[u8], clut: &[u8], grid_n: u32) -> Vec<u8> {
     rasterrocket_gpu::icc_cmyk_to_rgb_cpu(cmyk, Some((clut, grid_n)))
+}
+
+/// `n` pseudo-random bytes from `seed`.
+fn pseudo_random(n: usize, seed: u32) -> Vec<u8> {
+    let mut rng = seed;
+    (0..n)
+        .map(|_| {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            (rng >> 24) as u8
+        })
+        .collect()
 }
 
 #[test]
@@ -115,24 +103,39 @@ fn icc_clut_corners_only() {
     }
     let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
     let vk = run_icc_clut_vulkan(&cmyk, &clut);
-    // Floating-point lerp: allow ≤ 1 LSB per channel.
-    assert_within_1_lsb(&cpu, &vk, "icc_clut corners");
+    assert_eq!(cpu, vk, "icc_clut corners");
 }
 
+/// Pseudo-random pixels through a pseudo-random table, whose nodes differ
+/// arbitrarily from their neighbours: every interpolation step carries a
+/// fractional weight and a non-trivial difference, where rounding the
+/// product and the sum separately would move some output byte.
+///
+/// A device that passes the backend's exactness check must match the CPU
+/// byte for byte.  One that fails it is never used for the conversion; its
+/// outputs must still lie within one level of the CPU's.
 #[test]
 fn icc_clut_random_inputs() {
     let grid_n = 17u32;
-    let clut = build_identity_clut(grid_n);
-    let n = 2048;
-    let mut cmyk = vec![0u8; n * 4];
-    let mut rng = 0x1234_5678_u32;
-    for b in &mut cmyk {
-        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-        *b = (rng >> 24) as u8;
-    }
+    let clut = pseudo_random((grid_n as usize).pow(4) * 3, 0x0dd_ba11);
+    let cmyk = pseudo_random(65_536 * 4, 0x1234_5678);
+    let backend = VulkanBackend::new().expect("VulkanBackend::new");
     let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
-    let vk = run_icc_clut_vulkan(&cmyk, &clut);
-    assert_within_1_lsb(&cpu, &vk, "icc_clut random");
+    let vk = rasterrocket_gpu::backend::icc_clut(&backend, &cmyk, &clut).expect("icc_clut");
+    let differing = cpu.iter().zip(&vk).filter(|(a, b)| a != b).count();
+    let max_delta = cpu.iter().zip(&vk).map(|(a, b)| a.abs_diff(*b)).max();
+    if backend.icc_clut_is_exact() {
+        assert_eq!(differing, 0, "icc_clut random: {differing} bytes differ");
+    } else {
+        eprintln!(
+            "device fails the exactness check: {differing} bytes differ (max {max_delta:?}); \
+             the renderer converts on the CPU"
+        );
+        assert!(
+            max_delta <= Some(1),
+            "icc_clut random: max delta {max_delta:?}"
+        );
+    }
 }
 
 // ── blit_image ──────────────────────────────────────────────────────
@@ -407,27 +410,4 @@ fn blit_gray_layout() {
         |py| (0.0, py),
         "blit gray-layout",
     );
-}
-
-fn assert_within_1_lsb(a: &[u8], b: &[u8], what: &str) {
-    assert_eq!(a.len(), b.len(), "{what}: length mismatch");
-    let mut max_delta = 0u8;
-    let mut delta_sites = 0;
-    for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
-        let delta = x.abs_diff(y);
-        assert!(
-            delta <= 1,
-            "{what}: byte {i} differs by {delta} ({x} vs {y}); requires ≤ 1 LSB"
-        );
-        if delta != 0 {
-            delta_sites += 1;
-            max_delta = max_delta.max(delta);
-        }
-    }
-    if delta_sites != 0 {
-        eprintln!(
-            "{what}: {delta_sites}/{} bytes differ by ≤ 1 LSB (max {max_delta})",
-            a.len()
-        );
-    }
 }

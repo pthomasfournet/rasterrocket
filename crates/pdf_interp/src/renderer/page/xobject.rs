@@ -192,10 +192,16 @@ impl PageRenderer<'_> {
     /// remaining tint-transform work curtailed its colours (see
     /// [`TintBudget::curtailments`](crate::resources::image::colorspace::TintBudget::curtailments)).
     #[cfg_attr(
-        not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
+        not(any(
+            feature = "nvjpeg",
+            feature = "nvjpeg2k",
+            feature = "gpu-jpeg-huffman",
+            feature = "gpu-icc"
+        )),
         expect(
             clippy::needless_pass_by_ref_mut,
-            reason = "the GPU decoders, each behind its feature, are borrowed mutably"
+            reason = "the GPU decoders are borrowed mutably and the device ICC counts \
+                      recorded, each behind its feature"
         )
     )]
     fn decode_image_xobject(
@@ -205,6 +211,8 @@ impl PageRenderer<'_> {
     ) -> (ImageResolution, bool) {
         let curtailed = self.tint_budget.curtailments();
         let request = crate::resources::ImageRequest { name, draw_size };
+        #[cfg(feature = "gpu-icc")]
+        let icc_counts = crate::resources::image::DeviceIccCounts::default();
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
             color_spaces: self.resources.color_space_dict(),
@@ -217,7 +225,10 @@ impl PageRenderer<'_> {
             nvjpeg2k: self.nvjpeg2k.as_mut(),
             #[cfg(feature = "gpu-icc")]
             icc: crate::resources::image::IccHandles {
-                gpu_ctx: self.gpu_ctx.as_deref(),
+                gpu_ctx: self.gpu_ctx.as_ref(),
+                #[cfg(feature = "vulkan")]
+                vk_backend: self.vk_backend.as_deref(),
+                counts: Some(&icc_counts),
             },
             #[cfg(feature = "cache")]
             image_cache: self.cache_state.as_ref().map(|cs| &cs.cache),
@@ -241,6 +252,8 @@ impl PageRenderer<'_> {
             #[cfg(feature = "gpu-jpeg-huffman")]
             self.jpeg_gpu.as_mut(),
         );
+        #[cfg(feature = "gpu-icc")]
+        self.diag.add_device_icc(&icc_counts);
         (resolution, self.tint_budget.curtailments() == curtailed)
     }
 

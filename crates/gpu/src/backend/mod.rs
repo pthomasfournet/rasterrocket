@@ -14,6 +14,8 @@
 
 mod aa_fill;
 pub use aa_fill::{AaFillScratch, AaFillScratchPool, aa_fill, aa_fill_page};
+mod icc_clut;
+pub use icc_clut::{icc_clut, icc_clut_matches_cpu};
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]

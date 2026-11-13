@@ -148,9 +148,9 @@ impl PageRenderer<'_> {
 
     /// Attach a Vulkan compute backend for kernel dispatch.
     ///
-    /// When set, GPU-eligible AA fills run on it, ahead of any CUDA
-    /// context. Image blits, the device image cache and the ICC CMYK→RGB
-    /// CLUT are CUDA-only and stay on the CPU under Vulkan.
+    /// When set, GPU-eligible AA fills and ICC CMYK→RGB conversions run
+    /// on it, ahead of any CUDA context. Image blits and the device image
+    /// cache are CUDA-only and stay on the CPU under Vulkan.
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {
         self.vk_backend = backend;

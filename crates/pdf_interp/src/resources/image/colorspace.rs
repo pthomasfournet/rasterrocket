@@ -860,19 +860,10 @@ impl<'a> Decoded<'a> {
             return None;
         }
         #[cfg(feature = "gpu-icc")]
-        if let Some(ctx) = icc.gpu_ctx {
-            let clut = match &convert {
-                CmykConvert::Icc(conv) => conv.cmyk_clut(),
-                CmykConvert::Device | CmykConvert::Memo => None,
-            };
-            match ctx.icc_cmyk_to_rgb(
-                &bytes,
-                clut.as_deref()
-                    .map(|t| (t, crate::resources::colorspace::icc::clut::DEFAULT_GRID_N)),
-            ) {
-                Ok(rgb) => return Some((ImageColorSpace::Rgb, rgb)),
-                Err(e) => log::warn!("image: GPU CMYK→RGB failed, falling back to CPU: {e}"),
-            }
+        if let CmykConvert::Icc(conv) = &convert
+            && let Some(rgb) = super::icc_device::cmyk_clut_to_rgb(icc, &bytes, conv)
+        {
+            return Some((ImageColorSpace::Rgb, rgb));
         }
         let mut rgb = super::try_filled(bytes.len() / 4 * 3, 0)?;
         let converted = match &convert {

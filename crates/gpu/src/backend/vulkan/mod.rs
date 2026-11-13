@@ -44,6 +44,9 @@ pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
     aa_scratch: crate::backend::AaFillScratchPool<Self>,
+    /// Whether the CLUT kernel reproduces the CPU evaluator on this
+    /// device; measured on first use ([`Self::icc_clut_is_exact`]).
+    icc_clut_exact: std::sync::OnceLock<bool>,
     transfer: transfer::TransferContext,
     recorder: recorder::PageRecorder,
     /// Held for the whole of a [`GpuBackend::run_page`]: the recorder has
@@ -87,6 +90,7 @@ impl VulkanBackend {
         let transfer = transfer::TransferContext::new(device.clone())?;
         Ok(Self {
             aa_scratch: crate::backend::AaFillScratchPool::new(),
+            icc_clut_exact: std::sync::OnceLock::new(),
             transfer,
             recorder,
             page: std::sync::Mutex::new(()),
@@ -114,6 +118,38 @@ impl VulkanBackend {
     #[must_use]
     pub fn is_integrated(&self) -> bool {
         self.device.integrated
+    }
+
+    /// Whether the ICC CLUT kernel reproduces
+    /// [`crate::icc_cmyk_to_rgb_cpu`] byte for byte on this device.
+    ///
+    /// The kernel interpolates with `fma`, which the Vulkan specification
+    /// does not require to round once; a device that splits it into a
+    /// rounded product and a rounded sum moves some output byte by one.
+    /// The first call runs [`crate::backend::icc_clut_matches_cpu`] and
+    /// logs a mismatch or a device error at `warn`; later calls return the
+    /// same answer.
+    #[must_use]
+    pub fn icc_clut_is_exact(&self) -> bool {
+        *self
+            .icc_clut_exact
+            .get_or_init(|| match crate::backend::icc_clut_matches_cpu(self) {
+                Ok(true) => true,
+                Ok(false) => {
+                    log::warn!(
+                        "vulkan: the ICC CLUT kernel does not reproduce the CPU evaluator on \
+                         this device; ICC CMYK images convert on the CPU"
+                    );
+                    false
+                }
+                Err(e) => {
+                    log::warn!(
+                        "vulkan: the ICC CLUT kernel check failed: {e}; ICC CMYK images \
+                         convert on the CPU"
+                    );
+                    false
+                }
+            })
     }
 
     /// Queue submissions this backend has made so far: one per page, one

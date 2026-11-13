@@ -378,6 +378,8 @@ impl PageRenderer<'_> {
                     return;
                 }
                 let color_spaces = self.resources.color_space_dict();
+                #[cfg(feature = "gpu-icc")]
+                let icc_counts = crate::resources::image::DeviceIccCounts::default();
                 let mut ctx = crate::resources::image::ImageDecodeCtx {
                     doc: self.resources.doc(),
                     color_spaces,
@@ -390,7 +392,10 @@ impl PageRenderer<'_> {
                     nvjpeg2k: self.nvjpeg2k.as_mut(),
                     #[cfg(feature = "gpu-icc")]
                     icc: crate::resources::image::IccHandles {
-                        gpu_ctx: self.gpu_ctx.as_deref(),
+                        gpu_ctx: self.gpu_ctx.as_ref(),
+                        #[cfg(feature = "vulkan")]
+                        vk_backend: self.vk_backend.as_deref(),
+                        counts: Some(&icc_counts),
                     },
                     #[cfg(feature = "cache")]
                     image_cache: None,
@@ -422,6 +427,8 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "gpu-jpeg-huffman")]
                     self.jpeg_gpu.as_mut(),
                 );
+                #[cfg(feature = "gpu-icc")]
+                self.diag.add_device_icc(&icc_counts);
                 match decoded {
                     crate::resources::ImageResolution::Ok(decoded) => {
                         if let Some(reason) = &decoded.partial {

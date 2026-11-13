@@ -71,7 +71,8 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 /// image's PDF dictionary `Width` entry (see module doc for caveats),
 /// `content_failures` and `form_type`.  The fields only rendering measures
 /// (`image_failures`, `missing_fonts`, `unslotted_spots`, `device_fills`,
-/// `device_fill_failures`) are empty or zero.
+/// `device_fill_failures`, `device_icc_conversions`, `device_icc_failures`)
+/// are empty or zero.
 ///
 /// # Errors
 ///

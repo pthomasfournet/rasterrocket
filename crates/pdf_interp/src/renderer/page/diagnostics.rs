@@ -87,6 +87,16 @@ pub struct PageDiagnostics {
     /// broken on this host; the first failure of the process is also
     /// logged at `warn`.
     pub device_fill_failures: u32,
+    /// Images in an ICC-based CMYK space converted to RGB on a GPU
+    /// backend.  Zero when the session holds no backend, and for images
+    /// below the device's size threshold, which convert on the CPU with
+    /// the same bytes.
+    pub device_icc_conversions: u32,
+    /// ICC CMYK conversions a GPU backend took and failed, each then
+    /// performed on the CPU with the same bytes.  Non-zero means the
+    /// device path is broken on this host; the first failure of the
+    /// process is also logged at `warn`.
+    pub device_icc_failures: u32,
 }
 
 /// An image the renderer skipped because it could not be decoded or drawn,
@@ -117,6 +127,18 @@ impl std::fmt::Display for ImageFailure {
 }
 
 impl PageDiagnostics {
+    /// Add the device ICC conversions `counts` recorded to the page's.
+    #[cfg(feature = "gpu-icc")]
+    pub(crate) const fn add_device_icc(
+        &mut self,
+        counts: &crate::resources::image::DeviceIccCounts,
+    ) {
+        self.device_icc_conversions = self
+            .device_icc_conversions
+            .saturating_add(counts.converted());
+        self.device_icc_failures = self.device_icc_failures.saturating_add(counts.failed());
+    }
+
     /// Suggest a render DPI based on the source image resolution embedded in the PDF.
     ///
     /// Returns the source PPI rounded up to the nearest standard DPI step

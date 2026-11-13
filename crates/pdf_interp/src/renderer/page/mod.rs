@@ -335,10 +335,10 @@ pub struct PageRenderer<'doc> {
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     gpu_ctx: Option<Arc<GpuCtx>>,
     /// Vulkan compute backend, attached when the session was opened with
-    /// [`BackendPolicy::ForceVulkan`]; the AA fill dispatch then runs on it.
-    /// Such a session initialises no CUDA context, so `gpu_ctx` is `None`
-    /// and every `gpu_ctx` consumer (image blits, the device image cache,
-    /// the ICC CMYK→RGB CLUT) takes its CPU path.
+    /// [`BackendPolicy::ForceVulkan`]; the AA fill and the ICC CMYK→RGB
+    /// CLUT then run on it.  Such a session initialises no CUDA context, so
+    /// `gpu_ctx` is `None` and its other consumers (image blits, the device
+    /// image cache) take their CPU path.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
     /// Device-image-cache state.  `Some` only when the `cache` feature is
@@ -822,6 +822,12 @@ impl<'doc> PageRenderer<'doc> {
         diag.device_fill_failures = diag
             .device_fill_failures
             .saturating_add(self.diag.device_fill_failures);
+        diag.device_icc_conversions = diag
+            .device_icc_conversions
+            .saturating_add(self.diag.device_icc_conversions);
+        diag.device_icc_failures = diag
+            .device_icc_failures
+            .saturating_add(self.diag.device_icc_failures);
     }
 
     /// Override the operator-count budget.  Test-only — used to trigger the

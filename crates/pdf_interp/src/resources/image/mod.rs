@@ -64,11 +64,6 @@ use gpu::JpegQueueHandle;
 #[cfg(feature = "gpu-jpeg-huffman")]
 use gpu::jpeg_decoder::JpegGpuDecoder;
 
-// ── GPU ICC CMYK→RGB acceleration ─────────────────────────────────────────────
-
-#[cfg(feature = "gpu-icc")]
-use gpu::GpuCtx;
-
 /// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`
 /// (nvJPEG or VA-API).
 ///
@@ -134,10 +129,14 @@ pub(crate) mod bitpack;
 pub(crate) mod codecs;
 pub(crate) mod colorspace;
 pub(crate) mod dispatch;
+#[cfg(feature = "gpu-icc")]
+pub(crate) mod icc_device;
 pub(crate) mod inline;
 pub(crate) mod raw;
 pub(crate) mod smask;
 
+#[cfg(feature = "gpu-icc")]
+pub(crate) use icc_device::{DeviceIccCounts, IccHandles};
 pub(crate) use inline::decode_inline_image;
 pub use smask::SoftMask;
 
@@ -720,24 +719,6 @@ pub(super) fn try_with_capacity(len: usize) -> Option<Vec<u8>> {
         .map_err(|e| log::warn!("image: cannot allocate {len} bytes: {e}"))
         .ok()?;
     Some(v)
-}
-
-/// GPU handles for ICC-based CMYK → RGB conversion.
-#[cfg(feature = "gpu-icc")]
-pub struct IccHandles<'a> {
-    /// GPU context the CLUT conversion runs on; `None` converts on the CPU.
-    /// The table itself is baked once per profile and document, with the
-    /// profile's conversion.
-    pub gpu_ctx: Option<&'a GpuCtx>,
-}
-
-#[cfg(feature = "gpu-icc")]
-impl IccHandles<'_> {
-    /// No GPU context: conversion runs on the CPU.
-    #[must_use]
-    pub const fn none() -> Self {
-        Self { gpu_ctx: None }
-    }
 }
 
 /// Everything an image decode reads besides the image's own bytes, apart

@@ -129,7 +129,7 @@ impl IccConversion {
             bake_cmyk_clut_with(&**xform, DEFAULT_GRID_N)
                 .map_err(|e| {
                     log::warn!(
-                        "colorspace: ICC CLUT bake failed, using the profile-free CMYK model: {e}"
+                        "colorspace: ICC CLUT bake failed, converting through the transform: {e}"
                     );
                 })
                 .ok()

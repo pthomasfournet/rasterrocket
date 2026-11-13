@@ -8,12 +8,12 @@
 // The profile-free conversion (the CUDA `icc_cmyk_matrix` entry) always runs
 // on the CPU and has no Slang counterpart.
 //
-// Each lerp is `w * (b - a) + a` on `precise` values: SPIR-V NoContraction
-// forbids reassociation and fusion, so the product and the sum round
-// separately.  The CUDA kernel and the CPU fallback fuse them (`__fmaf_rn`,
-// `f32::mul_add`) with a single rounding, so results agree to within one
-// output level rather than bit for bit; Vulkan does not guarantee a
-// correctly rounded `fma`, which would be needed to close that gap.
+// Each lerp is `fma(w, b - a, a)`, the CUDA kernel's `__fmaf_rn` and the
+// CPU fallback's `f32::mul_add`: the product and the sum round once.  The
+// lattice coordinates and weights are `precise`, so no contraction changes
+// them.  Vulkan does not require `fma` to round once, so the host checks
+// the kernel against the CPU fallback on each device before using it
+// (`VulkanBackend::icc_clut_is_exact`).
 // CLUT access uses StructuredBuffer<uint8_t> (flat buffer), the layout of
 // the CUDA path.
 
@@ -57,6 +57,12 @@ uint8_t round_half_up_byte(float v) {
     return uint8_t(int(fl + ((c - fl) >= 0.5f ? 1.0f : 0.0f)));
 }
 
+// `a + w·(b − a)` with the product and the sum rounded once.
+float lerp_once(float a, float b, float w) {
+    precise float d = b - a;
+    return fma(w, d, a);
+}
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void icc_cmyk_clut(
@@ -74,10 +80,10 @@ void icc_cmyk_clut(
     uint ri_base = i * 3;
 
     float G1 = float(grid_n - 1u);
-    float fc = float(uint(cmyk[ci_base + 0])) * (G1 / 255.0f);
-    float fm = float(uint(cmyk[ci_base + 1])) * (G1 / 255.0f);
-    float fy = float(uint(cmyk[ci_base + 2])) * (G1 / 255.0f);
-    float fk = float(uint(cmyk[ci_base + 3])) * (G1 / 255.0f);
+    precise float fc = float(uint(cmyk[ci_base + 0])) * (G1 / 255.0f);
+    precise float fm = float(uint(cmyk[ci_base + 1])) * (G1 / 255.0f);
+    precise float fy = float(uint(cmyk[ci_base + 2])) * (G1 / 255.0f);
+    precise float fk = float(uint(cmyk[ci_base + 3])) * (G1 / 255.0f);
 
     int G = int(grid_n);
 
@@ -91,10 +97,10 @@ void icc_cmyk_clut(
     int iy1 = min(iy0 + 1, G - 1);
     int ik1 = min(ik0 + 1, G - 1);
 
-    float wc = fc - float(ic0);
-    float wm = fm - float(im0);
-    float wy = fy - float(iy0);
-    float wk = fk - float(ik0);
+    precise float wc = fc - float(ic0);
+    precise float wm = fm - float(im0);
+    precise float wy = fy - float(iy0);
+    precise float wk = fk - float(ik0);
 
     // Quadrilinear: 16 corner lookups, lerp along Y → M → C → K.
 
@@ -108,29 +114,29 @@ void icc_cmyk_clut(
     float rc110, gc110, bc110;  clut_node(clut, ic1, im1, iy0, ik0, G, rc110, gc110, bc110);
     float rc111, gc111, bc111;  clut_node(clut, ic1, im1, iy1, ik0, G, rc111, gc111, bc111);
 
-    precise float r_c0m0 = wy * (rc001 - rc000) + rc000;
-    precise float r_c0m1 = wy * (rc011 - rc010) + rc010;
-    precise float r_c1m0 = wy * (rc101 - rc100) + rc100;
-    precise float r_c1m1 = wy * (rc111 - rc110) + rc110;
-    precise float g_c0m0 = wy * (gc001 - gc000) + gc000;
-    precise float g_c0m1 = wy * (gc011 - gc010) + gc010;
-    precise float g_c1m0 = wy * (gc101 - gc100) + gc100;
-    precise float g_c1m1 = wy * (gc111 - gc110) + gc110;
-    precise float b_c0m0 = wy * (bc001 - bc000) + bc000;
-    precise float b_c0m1 = wy * (bc011 - bc010) + bc010;
-    precise float b_c1m0 = wy * (bc101 - bc100) + bc100;
-    precise float b_c1m1 = wy * (bc111 - bc110) + bc110;
+    float r_c0m0 = lerp_once(rc000, rc001, wy);
+    float r_c0m1 = lerp_once(rc010, rc011, wy);
+    float r_c1m0 = lerp_once(rc100, rc101, wy);
+    float r_c1m1 = lerp_once(rc110, rc111, wy);
+    float g_c0m0 = lerp_once(gc000, gc001, wy);
+    float g_c0m1 = lerp_once(gc010, gc011, wy);
+    float g_c1m0 = lerp_once(gc100, gc101, wy);
+    float g_c1m1 = lerp_once(gc110, gc111, wy);
+    float b_c0m0 = lerp_once(bc000, bc001, wy);
+    float b_c0m1 = lerp_once(bc010, bc011, wy);
+    float b_c1m0 = lerp_once(bc100, bc101, wy);
+    float b_c1m1 = lerp_once(bc110, bc111, wy);
 
-    precise float r00 = wm * (r_c0m1 - r_c0m0) + r_c0m0;
-    precise float r10 = wm * (r_c1m1 - r_c1m0) + r_c1m0;
-    precise float g00 = wm * (g_c0m1 - g_c0m0) + g_c0m0;
-    precise float g10 = wm * (g_c1m1 - g_c1m0) + g_c1m0;
-    precise float b00 = wm * (b_c0m1 - b_c0m0) + b_c0m0;
-    precise float b10 = wm * (b_c1m1 - b_c1m0) + b_c1m0;
+    float r00 = lerp_once(r_c0m0, r_c0m1, wm);
+    float r10 = lerp_once(r_c1m0, r_c1m1, wm);
+    float g00 = lerp_once(g_c0m0, g_c0m1, wm);
+    float g10 = lerp_once(g_c1m0, g_c1m1, wm);
+    float b00 = lerp_once(b_c0m0, b_c0m1, wm);
+    float b10 = lerp_once(b_c1m0, b_c1m1, wm);
 
-    precise float rk0 = wc * (r10 - r00) + r00;
-    precise float gk0 = wc * (g10 - g00) + g00;
-    precise float bk0 = wc * (b10 - b00) + b00;
+    float rk0 = lerp_once(r00, r10, wc);
+    float gk0 = lerp_once(g00, g10, wc);
+    float bk0 = lerp_once(b00, b10, wc);
 
     // K = 1 plane
     float rc000k1, gc000k1, bc000k1;  clut_node(clut, ic0, im0, iy0, ik1, G, rc000k1, gc000k1, bc000k1);
@@ -142,34 +148,34 @@ void icc_cmyk_clut(
     float rc110k1, gc110k1, bc110k1;  clut_node(clut, ic1, im1, iy0, ik1, G, rc110k1, gc110k1, bc110k1);
     float rc111k1, gc111k1, bc111k1;  clut_node(clut, ic1, im1, iy1, ik1, G, rc111k1, gc111k1, bc111k1);
 
-    precise float r_c0m0k1 = wy * (rc001k1 - rc000k1) + rc000k1;
-    precise float r_c0m1k1 = wy * (rc011k1 - rc010k1) + rc010k1;
-    precise float r_c1m0k1 = wy * (rc101k1 - rc100k1) + rc100k1;
-    precise float r_c1m1k1 = wy * (rc111k1 - rc110k1) + rc110k1;
-    precise float g_c0m0k1 = wy * (gc001k1 - gc000k1) + gc000k1;
-    precise float g_c0m1k1 = wy * (gc011k1 - gc010k1) + gc010k1;
-    precise float g_c1m0k1 = wy * (gc101k1 - gc100k1) + gc100k1;
-    precise float g_c1m1k1 = wy * (gc111k1 - gc110k1) + gc110k1;
-    precise float b_c0m0k1 = wy * (bc001k1 - bc000k1) + bc000k1;
-    precise float b_c0m1k1 = wy * (bc011k1 - bc010k1) + bc010k1;
-    precise float b_c1m0k1 = wy * (bc101k1 - bc100k1) + bc100k1;
-    precise float b_c1m1k1 = wy * (bc111k1 - bc110k1) + bc110k1;
+    float r_c0m0k1 = lerp_once(rc000k1, rc001k1, wy);
+    float r_c0m1k1 = lerp_once(rc010k1, rc011k1, wy);
+    float r_c1m0k1 = lerp_once(rc100k1, rc101k1, wy);
+    float r_c1m1k1 = lerp_once(rc110k1, rc111k1, wy);
+    float g_c0m0k1 = lerp_once(gc000k1, gc001k1, wy);
+    float g_c0m1k1 = lerp_once(gc010k1, gc011k1, wy);
+    float g_c1m0k1 = lerp_once(gc100k1, gc101k1, wy);
+    float g_c1m1k1 = lerp_once(gc110k1, gc111k1, wy);
+    float b_c0m0k1 = lerp_once(bc000k1, bc001k1, wy);
+    float b_c0m1k1 = lerp_once(bc010k1, bc011k1, wy);
+    float b_c1m0k1 = lerp_once(bc100k1, bc101k1, wy);
+    float b_c1m1k1 = lerp_once(bc110k1, bc111k1, wy);
 
-    precise float r01 = wm * (r_c0m1k1 - r_c0m0k1) + r_c0m0k1;
-    precise float r11 = wm * (r_c1m1k1 - r_c1m0k1) + r_c1m0k1;
-    precise float g01 = wm * (g_c0m1k1 - g_c0m0k1) + g_c0m0k1;
-    precise float g11 = wm * (g_c1m1k1 - g_c1m0k1) + g_c1m0k1;
-    precise float b01 = wm * (b_c0m1k1 - b_c0m0k1) + b_c0m0k1;
-    precise float b11 = wm * (b_c1m1k1 - b_c1m0k1) + b_c1m0k1;
+    float r01 = lerp_once(r_c0m0k1, r_c0m1k1, wm);
+    float r11 = lerp_once(r_c1m0k1, r_c1m1k1, wm);
+    float g01 = lerp_once(g_c0m0k1, g_c0m1k1, wm);
+    float g11 = lerp_once(g_c1m0k1, g_c1m1k1, wm);
+    float b01 = lerp_once(b_c0m0k1, b_c0m1k1, wm);
+    float b11 = lerp_once(b_c1m0k1, b_c1m1k1, wm);
 
-    precise float rk1 = wc * (r11 - r01) + r01;
-    precise float gk1 = wc * (g11 - g01) + g01;
-    precise float bk1 = wc * (b11 - b01) + b01;
+    float rk1 = lerp_once(r01, r11, wc);
+    float gk1 = lerp_once(g01, g11, wc);
+    float bk1 = lerp_once(b01, b11, wc);
 
     // Final lerp along K.
-    precise float out_r = wk * (rk1 - rk0) + rk0;
-    precise float out_g = wk * (gk1 - gk0) + gk0;
-    precise float out_b = wk * (bk1 - bk0) + bk0;
+    float out_r = lerp_once(rk0, rk1, wk);
+    float out_g = lerp_once(gk0, gk1, wk);
+    float out_b = lerp_once(bk0, bk1, wk);
 
     rgb[ri_base + 0] = round_half_up_byte(out_r);
     rgb[ri_base + 1] = round_half_up_byte(out_g);

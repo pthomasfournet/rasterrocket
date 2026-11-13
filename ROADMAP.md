@@ -2505,6 +2505,13 @@ twins (`composite_rgba8_cpu`, `apply_soft_mask_cpu`) from
 rendered, the MediaBox among them; the default stays the CropBox.  Public
 API: `PageBox` and `SessionConfig::page_box` (additive); `page_size_pts`,
 `page_size_pts_by_id` and `prescan_page` in `rasterrocket-interp` take the box.
+With `gpu-icc`, a Vulkan session converts ICC-based CMYK images on the
+Vulkan device as a CUDA session does on CUDA (`--backend vulkan` previously
+converted them on the CPU through the profile transform); the Slang kernel
+now interpolates with `fma`, byte-identical to the CUDA kernel and the CPU
+evaluator on the RTX 5070 and RADV, and a device failing a one-time
+exactness check converts on the CPU. `PageDiagnostics::device_icc_conversions`
+and `device_icc_failures` (public, additive) count the device's conversions.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
