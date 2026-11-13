@@ -38,6 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The classification logic of the reference-comparison harnesses; the
+      # harnesses themselves need reference renderers the runner lacks.
+      - name: Test the comparison harnesses' expectations registry
+        run: python3 -I tests/compare/test_expectations.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

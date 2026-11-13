@@ -29,6 +29,10 @@ ignore = [
     "T201",    # the scripts report on stdout and stderr
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Plain unittest suites, runnable without pytest.
+"test_*.py" = ["PT009", "PT027"]
+
 [tool.pylint.main]
 py-version = "3.11"
 # The scripts import the shared helpers in scripts/ by path; resolve them the same way.
@@ -54,7 +58,7 @@ files = [
     "scripts",
     "tests",
 ]
-mypy_path = "scripts"
+mypy_path = ["scripts", "tests/compare"]
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
