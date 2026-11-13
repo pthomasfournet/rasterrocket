@@ -11,7 +11,7 @@
 //! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
 //! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8` |
 //! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
-//! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8`, `Gray8`, bilevel from `Gray8` |
+//! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8` (RGBA with an alpha plane), `Gray8`, bilevel from `Gray8` |
 //! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8` |
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in

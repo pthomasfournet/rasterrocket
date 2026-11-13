@@ -1,5 +1,5 @@
-//! Baseline TIFF 6.0 writer: one or more pages of RGB, gray or bilevel
-//! pixels, each in strips, uncompressed or compressed with `PackBits`, LZW
+//! Baseline TIFF 6.0 writer: one or more pages of RGB (with unassociated
+//! alpha when the bitmap has an alpha plane), gray or bilevel pixels, each in strips, uncompressed or compressed with `PackBits`, LZW
 //! or Deflate, and bilevel pages also with CCITT Group 3 or Group 4 fax
 //! coding.
 //!
@@ -74,7 +74,8 @@ impl TiffCompression {
 /// The pixels of a page.
 #[derive(Clone, Copy)]
 pub enum TiffImage<'a> {
-    /// 8-bit RGB.
+    /// 8-bit RGB; RGBA, the alpha unassociated (`ExtraSamples` 2), when
+    /// the bitmap has an alpha plane.
     Rgb(&'a Bitmap<Rgb8>),
     /// 8-bit gray, 0 black.
     Gray(&'a Bitmap<Gray8>),
@@ -95,6 +96,7 @@ impl TiffImage<'_> {
     /// Samples per pixel, bits per sample and photometric interpretation.
     const fn layout(&self) -> (u16, u16, u16) {
         match self {
+            Self::Rgb(b) if b.has_alpha() => (4, 8, PHOTOMETRIC_RGB),
             Self::Rgb(_) => (3, 8, PHOTOMETRIC_RGB),
             Self::Gray(_) => (1, 8, PHOTOMETRIC_BLACK_IS_ZERO),
             Self::Bilevel(_) => (1, 1, PHOTOMETRIC_WHITE_IS_ZERO),
@@ -111,7 +113,18 @@ impl TiffImage<'_> {
     /// rows packed most significant bit first and padded to a byte.
     fn row(&self, y: u32, out: &mut Vec<u8>) {
         match self {
-            Self::Rgb(b) => out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 3]),
+            Self::Rgb(b) => {
+                let rgb = &b.row_bytes(y)[..b.width as usize * 3];
+                match b.alpha_row(y) {
+                    Some(alpha) => {
+                        for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha) {
+                            out.extend_from_slice(px);
+                            out.push(a);
+                        }
+                    }
+                    None => out.extend_from_slice(rgb),
+                }
+            }
             Self::Gray(b) => out.extend_from_slice(&b.row_bytes(y)[..b.width as usize]),
             Self::Bilevel(b) => {
                 let start = out.len();
@@ -529,6 +542,10 @@ fn entries(
     if bits == 1 {
         entries.push(shorts(266, &[1]));
     }
+    // ExtraSamples: the fourth sample of an RGB page is unassociated alpha.
+    if photometric == PHOTOMETRIC_RGB && samples == 4 {
+        entries.push(shorts(338, &[2]));
+    }
     if let Some((tag, options)) = page.compression.options_tag() {
         entries.push(longs(tag, &[options]));
     }
@@ -680,6 +697,51 @@ mod tests {
                 .flat_map(|y| c.row_bytes(y)[..63].to_vec())
                 .collect();
             assert_eq!(pixels, want, "rgb, {compression:?}");
+        }
+    }
+
+    #[test]
+    fn an_rgb_page_with_alpha_reads_back_as_rgba_under_every_compression() {
+        let c = rgb(9, 20);
+        let alpha: Vec<u8> = (0..180u32).map(|i| (i * 13).to_le_bytes()[0]).collect();
+        let mut with_alpha = Bitmap::<Rgb8>::new(9, 20, 4, true);
+        for y in 0..20 {
+            with_alpha.row_bytes_mut(y)[..27].copy_from_slice(&c.row_bytes(y)[..27]);
+        }
+        with_alpha
+            .alpha_plane_mut()
+            .unwrap()
+            .copy_from_slice(&alpha);
+        let want: Vec<u8> = (0..20u32)
+            .flat_map(|y| {
+                let rgb = with_alpha.row_bytes(y)[..27].to_vec();
+                let a = with_alpha.alpha_row(y).unwrap().to_vec();
+                rgb.chunks(3)
+                    .zip(a)
+                    .flat_map(|(px, a)| [px[0], px[1], px[2], a])
+                    .collect::<Vec<u8>>()
+            })
+            .collect();
+        for compression in ALL {
+            let mut out = Vec::new();
+            write_tiff(
+                TiffImage::Rgb(&with_alpha),
+                (72.0, 72.0),
+                compression,
+                &mut out,
+            )
+            .unwrap();
+            let mut decoder = decode(&out);
+            assert_eq!(
+                decoder.colortype().unwrap(),
+                ::tiff::ColorType::RGBA(8),
+                "{compression:?}"
+            );
+            assert_eq!(
+                bytes(decoder.read_image().unwrap()),
+                want,
+                "{compression:?}"
+            );
         }
     }
 
