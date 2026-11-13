@@ -2234,13 +2234,13 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
         - **Criterion 3** (Vulkan ≤ 1.15× CUDA timing): **PASS** on all 5 corpora — Vulkan is *faster* than CUDA on every one (V/D ratios 0.27–0.82×).  Note: not strictly apples-to-apples either way because CUDA mode D pays nvjpeg / ICC-CLUT init even on vector-heavy corpora that don't decode JPEGs; the Vulkan binary skips those.  The *intent* of criterion 3 — Vulkan within striking distance of CUDA on the kernel paths Phase 10 actually migrated — is satisfied.
         - **Criterion 4** (cross-vendor proof of life on AMD or Intel): blocked on hardware at the time; since v1.5.0 the backend renders on an AMD Raphael iGPU (RADV), and it renders byte-identically to the CPU path (see the Task 3 list above); Intel ANV is untested.
 
-    - [x] **Step 5 — Device image cache on Vulkan** (2026-11-13, unreleased).  `DeviceImageCache`, `CachedDeviceImage` and the host tier are generic over `CacheBackend: GpuBackend` (CUDA, Vulkan); slabs are the backend's `DeviceBuffer`.  CUDA keeps its own stream, stream-ordered uploads, write-combined pinned host tier and `DevicePageBuffer` unchanged.  Vulkan uploads and downloads through the backend's synchronous transfers, keeps its host tier in ordinary memory (its transfers stage through mapped buffers of their own) and sizes its VRAM budget from `detect_vram_budget`; the disk tier is shared.  A Vulkan image blit (`gpu::backend::blit_image_box`) records the table uploads, the zero-fill of a target the size of the blit's bounding box, the kernel and the readback as one page, rather than a page-sized buffer read back and cleared by separate submissions; the box composites through the same `composite_rgba_rows` as CUDA.  `gpu::cache::ImageCache` / `CachedImage` carry either backend through the interpreter.  The session builds the cache on the backend it resolved to, so under `Auto` the cache follows Vulkan exactly when Vulkan wins (a Vulkan kernel enabled), as it follows CUDA otherwise.  Verified: the cache parity tests on CUDA and on Vulkan (RTX 5070, RADV, llvmpipe) and an archive A/B (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi, none with an ICC-based CMYK image: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA; a page with an ICC-based CMYK image differs between a GPU session and a CPU-only one by design, the GPU session converting it through the 17-node lookup table and the CPU-only session through the profile transform).
+    - [x] **Step 5 — Device image cache on Vulkan** (2026-11-13, unreleased).  `DeviceImageCache`, `CachedDeviceImage` and the host tier are generic over `CacheBackend: GpuBackend` (CUDA, Vulkan); slabs are the backend's `DeviceBuffer`.  CUDA keeps its own stream, stream-ordered uploads, write-combined pinned host tier and `DevicePageBuffer` unchanged.  Vulkan uploads and downloads through the backend's synchronous transfers, keeps its host tier in ordinary memory (its transfers stage through mapped buffers of their own) and sizes its VRAM budget from `detect_vram_budget`; the disk tier is shared.  A Vulkan image blit (`gpu::backend::blit_image_box`) records the table uploads, the zero-fill of a target the size of the blit's bounding box, the kernel and the readback as one page, rather than a page-sized buffer read back and cleared by separate submissions; the box composites through the same `composite_rgba_rows` as CUDA.  `gpu::cache::ImageCache` / `CachedImage` carry either backend through the interpreter.  The session builds the cache on the backend it resolved to; under `Auto` a session has a GPU backend, and so a cache, only while a device kernel is enabled (Vulkan preferred), and a JPEG drawn below its resolution is not cached.  Verified: the cache parity tests on CUDA and on Vulkan (RTX 5070, RADV, llvmpipe) and an archive A/B (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi, none with an ICC-based CMYK image: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA; a page with an ICC-based CMYK image differs between a GPU session and a CPU-only one by design, the GPU session converting it through the 17-node lookup table and the CPU-only session through the profile transform).
 
 **Bench gate:** Phase 10 ships if (1) CUDA path performance unchanged within ±5%; (2) Vulkan path functional on RTX 5070 with pixel-diff ≤ 1 LSB vs CUDA; (3) Vulkan timing within 15% of CUDA on RTX 5070; (4) cross-vendor proof of life on AMD or Intel.
 
 **Status of bench gate:** criteria 1, 2, and 3 all PASS on RTX 5070 (commit `1783d66` + bench/v10/results.md, vector-heavy corpora 01-05).  Criterion 4 (cross-vendor proof of life) was blocked on hardware when the gate was measured. It no longer is: `--vulkan-device radv` renders on the dev box's AMD Raphael iGPU (v1.5.0). It renders byte-identically to the CPU path on RADV and llvmpipe (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe); Phase 10 has no open item but Intel ANV, untested for want of hardware.
 
-**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto`. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, implied by `vulkan`) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
+**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto` when a device kernel is enabled; otherwise `auto` renders on the CPU. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, implied by `vulkan`) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
 
 **Total scope:** ~3100 LoC new Rust + ~1000 LoC Slang + ~400 LoC modified. Estimated ~6-8 weeks elapsed (3-4 weeks tasks 1+2; 3-4 weeks task 3).
 
@@ -2559,6 +2559,41 @@ premultiplied. The page is painted as an isolated page group and its alpha
 kept (`PageRenderer::try_finish_transparent` and `transparent_page_group`
 in `rasterrocket-interp`); `encode_for_gcv` refuses an RGBA page with
 `GcvError::NotGray`. Gray and RGB output is byte-identical.
+`Auto` renders on the CPU unless a device kernel (the AA fill, the
+parallel-Huffman decoder) is enabled by its threshold: it no longer
+initialises a CUDA context, image cache or nvJPEG decoder.  Start-up
+(`startup_bench`, warm): CUDA cuInit 7 ms, primary context 60 ms, PTX
+modules 0.2 ms (61 ms with a cold JIT cache), first launch 6 ms, nvJPEG
+decoder 17 ms per thread, nvJPEG2000 decoder 0.25 ms (62 ms cold); Vulkan
+device 95–106 ms on the RTX 5070 (drop 27–31 ms), 48–50 ms on RADV (drop
+10–12 ms), 11–15 ms on the A18 Pro under MoltenVK (drop 1 ms).  Whole
+process, 15 documents × 1, 5, 40 pages × 150 and 300 dpi: `Auto` cost
+110–270 ms more than `--backend cpu` on every one but the JPEG 2000 scans,
+and now matches it (corpus-02, one page: 283 → 11 ms; qsj-1889, 40 pages
+at 150 dpi: 356 → 73 ms, and 845 → 72 ms in a build with `nvjpeg`).
+nvJPEG2000 earns its start-up on large JPEG 2000 scans drawn near their
+resolution (corpus-10, 40 pages at 300 dpi: CPU 2.29 s, `Auto` 1.09 s), so
+`Auto` builds a thread's decoder on demand, for a `JPXDecode` image of at
+least 262 144 px not drawn at half its size or less on both axes (such a
+draw decodes a lower resolution level on the CPU; corpus-10 at 150 dpi:
+1089 → 745 ms).  **This changes `Auto` pixels** on pages with an
+ICC-based CMYK image (now the profile transform, as `--backend cpu`) and on
+JPEG 2000 images drawn at half their size or less (now the CPU decoder);
+`--backend cpu`, `cuda` and `vulkan` are byte-identical to before (177
+pages of fixtures, scanned books, ICC CMYK documents and an archive
+sample, on each backend).  On the Mac, where `Auto` already ran on the
+CPU, `--backend vulkan` is 13–16 ms slower on short jobs and level on long
+ones.  A JPEG drawn below its resolution is no longer put in the device
+image cache, from which a reduced draw read it straight back (corpus-07,
+40 pages at 150 dpi, `--backend cuda` / `vulkan` / RADV: 474 → 361,
+651 → 538, 595 → 461 ms).  `GPU_ICC_CLUT_THRESHOLD` is 128 000 px (was
+500 000; `PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it): a GPU session
+converts every ICC CMYK image through the lookup table, and the device
+beats the single-threaded CPU evaluator from 4 000 px per call on CUDA,
+Vulkan NVIDIA and RADV and from 16 000 px under MoltenVK, end to end from
+128 000 px on one thread (500 000 px: CUDA 315 vs 447 ms for eight
+images).  `threshold_bench --only clut` and `startup_bench` (gpu crate)
+measure both.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
