@@ -414,7 +414,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | Crate | What you get |
 |---|---|
 | `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
-| `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt` comic-archive input |
+| `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt`/`.cbr` comic-archive input |
 | `rasterrocket-camera` | Library — camera-capture page cleanup on 8-bit grayscale: crop, rectify, spread split, dewarp; no dependencies |
 | `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with `pdftoppm`-style flags; also reads comic archives |
 
@@ -530,12 +530,13 @@ tests/compare/compare.sh -r 150 tests/fixtures/corpus-01-native-text-small.pdf
 
 rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture:
 
-- **Comic-archive input.** The `.cbz`/`.cb7`/`.cbt` reader and the loose-image
+- **Comic-archive input.** The `.cbz`/`.cb7`/`.cbt`/`.cbr` reader and the loose-image
   decoders (`rasterrocket-comic`) are pure Rust and hold the same bar as the PDF
   path: a per-entry decompressed-size cap defuses decompression bombs, image
   dimensions are validated *before* a codec allocates its pixel buffer (defusing
   decode bombs), and a malformed entry is a bounded skip or a clear `Err`, never
-  an OOM, hang, or panic. `.cbr` (RAR) is refused outright (no decoder linked).
+  an OOM, hang, or panic. 7-Zip and RAR decoders are bounded to 1 GiB of
+  dictionary and model memory.
 - **Memory-safe core.** The PDF parser, content interpreter, font-program
   parsing (TrueType, OpenType, CFF, Type 1) and glyph rasterisation, and the
   JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a

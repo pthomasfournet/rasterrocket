@@ -59,7 +59,7 @@ fn parse_positive_dpi(s: &str) -> Result<f64, String> {
     reason = "each bool maps to a distinct CLI flag"
 )]
 pub(crate) struct Args {
-    /// Input file: a PDF, or a `.cbz`, `.cb7` or `.cbt` comic archive; "-"
+    /// Input file: a PDF, or a `.cbz`, `.cb7`, `.cbt` or `.cbr` comic archive; "-"
     /// reads a PDF from standard input. A path that begins with '-' must be
     /// passed after a literal `--` (or as `./-name.pdf`) so it is not parsed
     /// as an option.

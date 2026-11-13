@@ -1,5 +1,6 @@
 //! Archive containers behind a common trait.
 
+mod rar;
 mod sevenz;
 mod tar;
 mod zip;
@@ -122,8 +123,8 @@ impl DecodedEntries {
 /// Choose an impl by file extension, taking the already-read archive `bytes`.
 ///
 /// # Errors
-/// [`ComicError::RarUnsupported`] for `.cbr`; [`ComicError::BadArchive`] for an
-/// unknown extension or a container that fails to parse.
+/// [`ComicError::BadArchive`] for an unknown extension or a container that
+/// fails to parse.
 pub(crate) fn open_archive_from_ext(
     name: &str,
     bytes: Vec<u8>,
@@ -137,9 +138,9 @@ pub(crate) fn open_archive_from_ext(
         "cbz" => Ok(Box::new(zip::ZipArchive::open(bytes)?)),
         "cb7" => Ok(Box::new(sevenz::SevenzArchive::open(bytes)?)),
         "cbt" => Ok(Box::new(tar::TarArchive::open(bytes)?)),
-        "cbr" => Err(ComicError::RarUnsupported),
+        "cbr" => Ok(Box::new(rar::RarArchive::open(bytes)?)),
         other => Err(ComicError::BadArchive(format!(
-            "unrecognised comic extension {other:?} (expected cbz/cb7/cbt; cbr is unsupported)"
+            "unrecognised comic extension {other:?} (expected cbz, cb7, cbt or cbr)"
         ))),
     }
 }
@@ -150,9 +151,9 @@ mod tests {
     use crate::test_helpers::make_cbz;
 
     #[test]
-    fn cbr_path_is_rar_unsupported() {
-        let res = open_archive_from_ext("foo.cbr", Vec::new());
-        assert!(matches!(res, Err(crate::ComicError::RarUnsupported)));
+    fn an_unknown_extension_is_a_bad_archive() {
+        let res = open_archive_from_ext("foo.cbx", Vec::new());
+        assert!(matches!(res, Err(crate::ComicError::BadArchive(_))));
     }
 
     #[test]

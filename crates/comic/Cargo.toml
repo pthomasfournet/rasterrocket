@@ -23,6 +23,8 @@ zip          = { workspace = true }
 # Decoders only (LZMA/LZMA2 are always built in); archives are opened
 # with an empty password, so AES support would never decrypt anything.
 sevenz-rust2 = { workspace = true, features = ["bzip2", "ppmd"] }
+# RAR 1.3 to 7, decode only (no writer, recovery or crypto).
+rars         = { version = "0.12.4", default-features = false }
 tar          = { workspace = true }
 
 # Image decode — pure-Rust, no system libs.
@@ -35,6 +37,8 @@ tiff       = { workspace = true }
 tempfile = { workspace = true }
 # `ArchiveWriter` builds the 7z fixtures.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
+# `Builder` writes the RAR fixtures.
+rars         = { version = "0.12.4", default-features = false, features = ["write"] }
 encode   = { package = "rasterrocket-encode", path = "../encode", version = "2.1" }
 
 [lints]

@@ -16,10 +16,9 @@ not implemented, and the CropBox is always rendered).
 **Arguments:**
 
 - `<INPUT>` — path to the input file. A PDF, or a comic/scan archive whose
-  extension is `.cbz` (ZIP), `.cb7` (7-Zip), or `.cbt` (TAR). The format is
-  chosen by extension: comic archives take the comic path, everything else is
-  treated as a PDF. `.cbr` (RAR) is unsupported and exits with a
-  convert-to-`.cbz` message. `-` reads a PDF from standard input
+  extension is `.cbz` (ZIP), `.cb7` (7-Zip), `.cbt` (TAR) or `.cbr` (RAR, from
+  RAR 1.3 to RAR 7). The format is chosen by extension: comic archives take the
+  comic path, everything else is treated as a PDF. `-` reads a PDF from standard input
   (`rrocket - out < doc.pdf`); an encrypted one is decrypted only under
   `--decrypt-owned`, since no terminal is left to prompt on. A path that
   begins with `-` must follow a literal `--` (or be written `./-name.pdf`) so

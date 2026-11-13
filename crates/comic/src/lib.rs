@@ -1,14 +1,9 @@
 //! Comic-archive image input for the rasterrocket OCR pipeline.
 //!
 //! Turns an archive of loose raster images (`.cbz` ZIP, `.cb7` 7-Zip,
-//! `.cbt` TAR) into a stream of grayscale [`pdf_raster::RenderedPage`]s — the
+//! `.cbt` TAR, `.cbr` RAR) into a stream of grayscale [`pdf_raster::RenderedPage`]s — the
 //! same OCR-ready artifact `rasterrocket` produces for PDF pages — so comic and
 //! scan archives flow into Tesseract / Google Cloud Vision unchanged.
-//!
-//! `.cbr` (RAR) is intentionally unsupported: RAR is proprietary with no
-//! permissively-licensed Rust decoder. Such inputs return an error carrying
-//! conversion guidance (`ComicError::RarUnsupported`, defined alongside the
-//! public API).
 
 mod archive;
 mod decode;
@@ -162,8 +157,6 @@ pub enum ComicError {
     Open(std::io::Error),
     /// The container exists but could not be parsed as its claimed format.
     BadArchive(String),
-    /// `.cbr` (RAR) input — intentionally unsupported.
-    RarUnsupported,
     /// The archive opened but contained zero decodable images.
     NoImages,
     /// A single entry failed to decode. Yielded per-page; never aborts the run.
@@ -196,13 +189,6 @@ impl std::fmt::Display for ComicError {
             Self::InvalidOptions(m) => write!(f, "invalid comic options: {m}"),
             Self::Open(e) => write!(f, "cannot open comic archive: {e}"),
             Self::BadArchive(m) => write!(f, "malformed comic archive: {m}"),
-            Self::RarUnsupported => write!(
-                f,
-                ".cbr (RAR) archives are not supported: RAR is a proprietary \
-                 format with no permissively-licensed Rust decoder. Convert it \
-                 to .cbz first (unzip the RAR and re-zip the images, or use a \
-                 comic-archive converter). .cbz, .cb7, and .cbt work directly."
-            ),
             Self::NoImages => write!(f, "comic archive contains no decodable images"),
             Self::Decode { entry, reason } => {
                 write!(f, "failed to decode {entry}: {reason}")
@@ -250,8 +236,8 @@ impl std::error::Error for ComicError {
 /// # Errors
 ///
 /// Returns `Err` *before* iteration for whole-archive failures: options that
-/// violate their constraints ([`ComicError::InvalidOptions`]), a `.cbr` input
-/// ([`ComicError::RarUnsupported`]), an unreadable/malformed container, an
+/// violate their constraints ([`ComicError::InvalidOptions`]), an
+/// unreadable/malformed container, an
 /// ambiguous PDF-only archive ([`ComicError::AmbiguousArchive`]), an embedded
 /// PDF that cannot be opened ([`ComicError::Pdf`]), or an archive with no
 /// decodable content in the page window ([`ComicError::NoImages`]).
@@ -429,14 +415,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rar_message_is_actionable() {
-        let msg = ComicError::RarUnsupported.to_string();
-        assert!(msg.contains(".cbr"), "names the format");
-        assert!(msg.to_lowercase().contains(".cbz"), "suggests the fix");
-        assert!(msg.to_lowercase().contains("rar"), "explains why");
-    }
-
-    #[test]
     fn options_default_matches_raster_defaults() {
         let o = ComicOptions::default();
         assert!((o.dpi - 300.0).abs() < f32::EPSILON);
@@ -509,6 +487,24 @@ startxref\n180\n%%EOF"
     }
 
     #[test]
+    fn a_solid_cbr_renders_its_pages_in_order() {
+        let mut builder = rars::Builder::new(rars::ArchiveVersion::Rar50).solid(true);
+        for (name, value) in [("p10.jpg", 200), ("p2.jpg", 100)] {
+            builder
+                .add_bytes(name.as_bytes().to_vec(), jpeg_page(4, 4, value), None, None)
+                .expect("entry");
+        }
+        let (_dir, path) = write_temp_cbz("book.cbr", &builder.to_bytes().expect("archive"));
+        let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
+            .expect("open")
+            .map(|(n, page)| (n, page.expect("page").pixels[0]))
+            .collect();
+        assert_eq!(pages.len(), 2);
+        assert_eq!((pages[0].0, pages[1].0), (1, 2));
+        assert!(pages[0].1 < pages[1].1, "p2 comes before p10: {pages:?}");
+    }
+
+    #[test]
     fn invalid_options_are_refused_before_the_archive_is_read() {
         let (_dir, path) = write_temp_cbz("book.cbz", &make_cbz(&[("1.jpg", &jpeg_page(4, 4, 9))]));
         let mut nan = ComicOptions::new(f32::NAN);
@@ -556,11 +552,11 @@ startxref\n180\n%%EOF"
     }
 
     #[test]
-    fn cbr_returns_rar_unsupported() {
+    fn a_damaged_cbr_is_a_bad_archive() {
         let (_dir, path) = write_temp_cbz("x.cbr", b"Rar!\x1a\x07\x00");
         assert!(matches!(
             open_comic(&path, &ComicOptions::default()),
-            Err(ComicError::RarUnsupported)
+            Err(ComicError::BadArchive(_))
         ));
     }
 

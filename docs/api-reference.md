@@ -657,7 +657,7 @@ Baseline 8-bit grayscale JPEG (`Gray8`/`Mono8` only; `quality` clamped 1–100).
 
 ## `rasterrocket-comic` crate — comic-archive input
 
-Turns a comic/scan archive (`.cbz` ZIP, `.cb7` 7-Zip, `.cbt` TAR) of page
+Turns a comic/scan archive (`.cbz` ZIP, `.cb7` 7-Zip, `.cbt` TAR, `.cbr` RAR) of page
 images into the same grayscale `RenderedPage` stream the PDF path produces. Use
 it when your input is an image archive rather than a PDF.
 
@@ -693,8 +693,8 @@ rest, matching `raster_pdf`. `len()` is the number of pages still to come, and
 - **No images, no PDF** → `ComicError::NoImages`.
 
 **Whole-archive errors (outer `Err`):** `InvalidOptions` (a non-finite or
-non-positive `dpi`, `first_page` 0 or after `last_page`), `RarUnsupported` (a
-`.cbr` input), `Open`/`BadArchive` (unreadable or malformed container),
+non-positive `dpi`, `first_page` 0 or after `last_page`), `Open`/`BadArchive`
+(unreadable or malformed container, an encrypted RAR member included),
 `AmbiguousArchive`, `Pdf` (an embedded PDF that cannot be opened or has no
 page in the window), `NoImages`. **Per-page errors (inner `Err`):** `Decode`, `TooLarge`, `Deskew`,
 `Pdf`.
@@ -711,8 +711,9 @@ to change, and give a `match` on `ComicError` a wildcard arm.
 
 **Hardening:** entries are read under a 512 MiB per-entry decompressed-size cap
 (decompression-bomb defence), and image dimensions are validated before a codec
-allocates its pixel buffer (decode-bomb defence). `.cbr` (RAR) is refused — no
-permissively-licensed Rust RAR decoder is linked.
+allocates its pixel buffer (decode-bomb defence). `.cb7` and `.cbr` archives
+are decoded whole when opened, with decoder allocations (LZMA and RAR
+dictionaries, the PPMd model) bounded by 1 GiB.
 
 ---
 

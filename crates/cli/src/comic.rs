@@ -1,4 +1,4 @@
-//! Comic-archive (.cbz/.cb7/.cbt) rendering entry for the CLI.
+//! Comic-archive (.cbz/.cb7/.cbt/.cbr) rendering entry for the CLI.
 //!
 //! Bridges the comic crate's `open_comic` into the same per-page output sink the
 //! PDF path uses, so output format, colour mode, naming, and page-range behave
@@ -22,7 +22,7 @@ use crate::render::{self, RenderError};
 /// errors are reported to stderr as they occur and skipped (one bad page never
 /// aborts the rest); the caller maps a non-zero `failed` to a non-zero exit code
 /// so a partial failure is observable via `$?`, matching the PDF path.
-/// Whole-archive failures (including a `.cbr` input) surface as the outer `Err`, whose `Display` carries the user-facing
+/// Whole-archive failures surface as the outer `Err`, whose `Display` carries the user-facing
 /// message.
 pub(crate) fn run(
     args: &Args,
