@@ -1631,6 +1631,7 @@ name = "rasterrocket-color"
 version = "2.1.0"
 dependencies = [
  "bytemuck",
+ "proptest",
 ]
 
 [[package]]

@@ -15,5 +15,8 @@ categories           = ["multimedia::images", "rendering"]
 [dependencies]
 bytemuck = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true
