@@ -112,16 +112,24 @@ pub const GPU_AA_FILL_THRESHOLD: usize = usize::MAX;
 /// it; gating it behind the `cache` feature was an accident of where it
 /// was first defined.  `cache::RGBA_BPP` is re-exported for back-compat.
 pub const RGBA_BPP: usize = 4;
-/// Minimum pixel count for GPU ICC CMYK→RGB CLUT transform to beat CPU + `PCIe` overhead.
+/// Minimum pixel count for the device ICC CMYK→RGB CLUT conversion.
+///
+/// A session with a GPU backend converts a smaller ICC CMYK image with
+/// [`icc_cmyk_to_rgb_cpu`] on the CPU; both produce the same bytes.
 ///
 /// Applies only when a full ICC CLUT is available (clut=Some).  The matrix path
 /// (clut=None) always uses the CPU AVX-512 fallback — `threshold_bench` showed the GPU
 /// matrix kernel never beats AVX-512 across 256–4M pixels on this machine (`PCIe`
 /// round-trip cost exceeds the cheap per-pixel computation at all measured sizes).
 ///
-/// The CLUT path is not yet benchmarked; 500 000 px is a conservative placeholder.
-/// Run `threshold_bench` with a CLUT workload to calibrate once baking is in the hot path.
-pub const GPU_ICC_CLUT_THRESHOLD: usize = 500_000;
+/// Measured with `threshold_bench --only clut` (one call against the
+/// single-threaded evaluator: the device is faster from 4 000 px on CUDA,
+/// Vulkan NVIDIA and RADV, from 16 000 px under `MoltenVK`) and end to end
+/// (8-page documents, one thread: the device is faster from 128 000 px on
+/// CUDA and RADV and level with Vulkan NVIDIA; on every core, level below
+/// 1 Mpx).  The renderer reads an override from
+/// `PDF_RASTER_ICC_CLUT_THRESHOLD`.
+pub const GPU_ICC_CLUT_THRESHOLD: usize = 128_000;
 
 pub(crate) struct GpuKernels {
     pub(crate) aa_fill: CudaFunction,

@@ -124,7 +124,7 @@ pub(super) fn cmyk_clut_to_rgb(
     let clut = conv.cmyk_clut()?;
     let clut = &*clut;
     let cpu = || gpu::icc_cmyk_to_rgb_cpu(cmyk, Some((clut, DEFAULT_GRID_N)));
-    if cmyk.len() / 4 < gpu::GPU_ICC_CLUT_THRESHOLD {
+    if cmyk.len() / 4 < icc_clut_threshold() {
         return Some(cpu());
     }
     let outcome = 'device: {
@@ -155,6 +155,27 @@ pub(super) fn cmyk_clut_to_rgb(
         }
         DeviceIcc::Declined => Some(cpu()),
     }
+}
+
+/// Effective device ICC CLUT threshold: [`gpu::GPU_ICC_CLUT_THRESHOLD`]
+/// unless `PDF_RASTER_ICC_CLUT_THRESHOLD` holds a decimal pixel count (`0` =
+/// every conversion on the device, `usize::MAX` = none).  Read once, on
+/// first use.
+fn icc_clut_threshold() -> usize {
+    use std::sync::OnceLock;
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        let Ok(value) = std::env::var("PDF_RASTER_ICC_CLUT_THRESHOLD") else {
+            return gpu::GPU_ICC_CLUT_THRESHOLD;
+        };
+        value.trim().parse().unwrap_or_else(|_| {
+            log::warn!(
+                "PDF_RASTER_ICC_CLUT_THRESHOLD={value:?} is not a pixel count \
+                 (a non-negative integer); using the default"
+            );
+            gpu::GPU_ICC_CLUT_THRESHOLD
+        })
+    })
 }
 
 /// Convert on `backend`; a failure is logged.

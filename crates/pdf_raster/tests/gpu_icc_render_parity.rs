@@ -4,7 +4,7 @@
 //! evaluation of the same lookup table.
 //!
 //! Page 1 draws one 1000 × 600 image (600 000 pixels, converted on the
-//! device); page 2 draws the same samples as two 1000 × 300 images, each
+//! device); page 2 draws the same samples as six 1000 × 100 images, each
 //! below the threshold and so converted on the CPU by the evaluator the
 //! device kernels reproduce.  Both pages are rendered at one pixel per
 //! sample, so the two bitmaps must be byte-identical.
@@ -29,6 +29,8 @@
 )]
 mod common;
 
+use std::fmt::Write as _;
+
 use common::{assemble_pdf, assert_identical, stream_object};
 use rasterrocket::{
     BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig,
@@ -52,10 +54,14 @@ fn samples() -> Vec<u8> {
         .collect()
 }
 
+/// Strips page 2 draws the samples in, each below the threshold.
+const STRIPS: usize = 6;
+
 /// The two-page document described in the module documentation.
 fn fixture_pdf() -> Vec<u8> {
     let data = samples();
-    let half = data.len() / 2;
+    let rows = HEIGHT / STRIPS;
+    let strip_len = data.len() / STRIPS;
     let image = |height: usize, bytes: &[u8]| {
         stream_object(
             &format!(
@@ -65,16 +71,25 @@ fn fixture_pdf() -> Vec<u8> {
             bytes,
         )
     };
+    let strips = (0..STRIPS).fold(String::new(), |mut acc, i| {
+        let _ = write!(acc, " /S{i} {} 0 R", 9 + i);
+        acc
+    });
     let page = |contents: u32| {
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] \
-             /Resources << /XObject << /Im 8 0 R /Top 9 0 R /Bottom 10 0 R >> >> \
+             /Resources << /XObject << /Im 8 0 R{strips} >> >> \
              /Contents {contents} 0 R >>"
         )
         .into_bytes()
     };
-    let rows = HEIGHT / 2;
-    assemble_pdf(&[
+    // Strip `i` holds sample rows `i * rows ..`, drawn from the top.
+    let strip_draws = (0..STRIPS).fold(String::new(), |mut acc, i| {
+        let y = HEIGHT - (i + 1) * rows;
+        let _ = write!(acc, "q {WIDTH} 0 0 {rows} 0 {y} cm /S{i} Do Q ");
+        acc
+    });
+    let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
         page(5),
@@ -83,19 +98,12 @@ fn fixture_pdf() -> Vec<u8> {
             "",
             format!("q {WIDTH} 0 0 {HEIGHT} 0 0 cm /Im Do Q").as_bytes(),
         ),
-        stream_object(
-            "",
-            format!(
-                "q {WIDTH} 0 0 {rows} 0 {rows} cm /Top Do Q \
-                 q {WIDTH} 0 0 {rows} 0 0 cm /Bottom Do Q"
-            )
-            .as_bytes(),
-        ),
+        stream_object("", strip_draws.as_bytes()),
         stream_object("/N 4", CMYK_PROFILE),
         image(HEIGHT, &data),
-        image(rows, &data[..half]),
-        image(rows, &data[half..]),
-    ])
+    ];
+    objects.extend(data.chunks_exact(strip_len).map(|strip| image(rows, strip)));
+    assemble_pdf(&objects)
 }
 
 /// Page `page` of `session` at one pixel per sample.
