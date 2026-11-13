@@ -190,16 +190,32 @@ jobs:
   # only there, so each platform is linted on its own runner; test targets
   # are linted one crate per invocation, since a combined `--all-targets`
   # run exceeds runner memory.  The arm64 Linux leg also executes the NEON
-  # tiers, which the cross-check above only compiles, and the macOS leg the
-  # tests whose behaviour depends on the OS.
+  # tiers, which the cross-check above only compiles; the macOS and Windows
+  # legs run the renderer, interpreter and library suites, whose file,
+  # font and memory handling depends on the OS, and Windows the CLI's.
   platforms:
     name: Clippy and platform tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Line tables keep panic backtraces readable at half the size of full
+      # debug info (on Windows, of the PDB files the linker writes).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    defaults:
+      run:
+        # Git Bash on Windows: a multi-line step fails at its first failing
+        # command, which PowerShell does not guarantee for native programs.
+        shell: bash
     steps:
+      # Git for Windows checks text files out with CRLF line ends; the
+      # sources and the fixtures the tests embed are read byte for byte.
+      - name: Keep LF line ends (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
@@ -222,6 +238,13 @@ jobs:
       - name: Install nasm (x86-64 Linux)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nasm
+
+      # Chocolatey installs nasm outside PATH.
+      - name: Install nasm (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install nasm --no-progress -y
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
 
       - name: Clippy (no GPU features)
         run: cargo clippy -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic -p rasterrocket-parser -p rasterrocket-font -p rasterrocket-interp -p rasterrocket-render -p rasterrocket-gpu -p rasterrocket -- -D warnings
@@ -271,8 +294,8 @@ jobs:
           cargo clippy -p skrifa -- -D warnings
           cargo clippy -p rav1d -- -D warnings
 
-      - name: Test rasterrocket-render (NEON tiers)
-        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      - name: Test rasterrocket-render (NEON tiers on arm64, SIMD dispatch)
+        if: runner.os != 'Linux' || runner.arch == 'ARM64'
         run: cargo test -p rasterrocket-render --lib
 
       - name: Test rasterrocket-gpu (NEON CMYK path)
@@ -284,20 +307,44 @@ jobs:
         run: cargo test -p rasterrocket --lib
 
       - name: Test rasterrocket-font (system font discovery)
-        if: runner.os == 'macOS'
+        if: runner.os != 'Linux'
         run: cargo test -p rasterrocket-font --lib
 
-      - name: Test rasterrocket-interp (system fonts, predefined CMaps)
-        if: runner.os == 'macOS'
-        run: cargo test -p rasterrocket-interp --lib -- cmap_predefined system_fonts
+      # As on Linux: the integration suites assemble their PDFs in memory,
+      # and the ones that need the gitignored corpus skip.
+      - name: Test rasterrocket-interp (unit suite, system fonts, predefined CMaps)
+        if: runner.os != 'Linux'
+        run: cargo test -p rasterrocket-interp --tests
+
+      - name: Test rasterrocket (unit suite + in-memory rendering suites)
+        if: runner.os != 'Linux'
+        run: cargo test -p rasterrocket --tests
 
       - name: Test rasterrocket-cli (memory probe, RAM output)
         if: runner.os == 'macOS'
         run: cargo test -p rasterrocket-cli --bin rrocket -- ram
 
+      - name: Test rasterrocket-cli (argument handling, end-to-end runs of the binary)
+        if: runner.os == 'Windows'
+        run: cargo test -p rasterrocket-cli
+
+      - name: Test rasterrocket-parser
+        if: runner.os == 'Windows'
+        run: cargo test -p rasterrocket-parser --lib
+
+      - name: Test rasterrocket-color, -encode, -comic (AV1 assembly kernels)
+        if: runner.os == 'Windows'
+        run: cargo test -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic
+
       # As in the CPU-only job: test executables stay out of the cache.
+      # Windows names them `.exe`, beside their `.pdb` debug information.
       - name: Drop test executables from the build cache
+        if: runner.os != 'Windows'
         run: find target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
+
+      - name: Drop test executables from the build cache (Windows)
+        if: runner.os == 'Windows'
+        run: find target/debug -path '*/build/*/out/*' -type f \( -name '*.exe' -o -name '*.pdb' \) ! -name 'build_script_build*' -delete
 
   # ── Fuzz target build ─────────────────────────────────────────────────────
   #
