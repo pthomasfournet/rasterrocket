@@ -386,16 +386,6 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// # Errors
     /// Returns `BackendError` if the operation cannot be recorded.
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()>;
-    /// Record a Porter-Duff source-over composite into the current page's command list.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded.
-    fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()>;
-    /// Record a soft-mask application into the current page's command list.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded.
-    fn record_apply_soft_mask(&self, params: params::SoftMaskParams<'_, Self>) -> Result<()>;
 
     /// Record one phase of the Blelloch exclusive scan kernel.
     ///

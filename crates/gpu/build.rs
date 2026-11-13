@@ -40,8 +40,6 @@ fn link_lib_in_dir(dirs: &[&str], lib: &str, warn_context: &str) {
 /// and the slangc-compile loop stay in sync — adding a new kernel only requires
 /// updating this list.
 const KERNELS: &[&str] = &[
-    "composite_rgba8",
-    "apply_soft_mask",
     "aa_fill",
     "icc_clut",
     "blit_image",
@@ -73,8 +71,6 @@ fn slang_entry(kernel: &str) -> Option<&'static str> {
         "blelloch_scan" | "parallel_huffman" => None,
         "idct_color" => Some("idct_dequant_colour"),
         // Default: single entry point named after the file.
-        "composite_rgba8" => Some("composite_rgba8"),
-        "apply_soft_mask" => Some("apply_soft_mask"),
         "aa_fill" => Some("aa_fill"),
         "blit_image" => Some("blit_image"),
         _ => panic!("unknown kernel name: {kernel}"),

@@ -358,37 +358,6 @@ impl PageRecorder {
 
     // ── record_* ─────────────────────────────────────────────────────
 
-    pub(super) fn record_composite(
-        &self,
-        p: params::CompositeParams<'_, super::VulkanBackend>,
-    ) -> Result<()> {
-        // Push: u32 n_pixels (4 bytes).  Workgroup size: 256.
-        let n = p.n_pixels;
-        let push: [u8; 4] = n.to_ne_bytes();
-        self.dispatch_kernel(
-            KernelId::Composite,
-            &[p.src.handle(), p.dst.handle()],
-            &[p.src.size(), p.dst.size()],
-            &push,
-            (n.div_ceil(256), 1, 1),
-        )
-    }
-
-    pub(super) fn record_apply_soft_mask(
-        &self,
-        p: params::SoftMaskParams<'_, super::VulkanBackend>,
-    ) -> Result<()> {
-        let n = p.n_pixels;
-        let push = n.to_ne_bytes();
-        self.dispatch_kernel(
-            KernelId::ApplySoftMask,
-            &[p.pixels.handle(), p.mask.handle()],
-            &[p.pixels.size(), p.mask.size()],
-            &push,
-            (n.div_ceil(256), 1, 1),
-        )
-    }
-
     pub(super) fn record_aa_fill(
         &self,
         p: params::AaFillParams<'_, super::VulkanBackend>,

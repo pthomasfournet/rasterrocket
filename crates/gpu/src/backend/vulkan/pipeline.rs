@@ -1,8 +1,9 @@
 //! Pipeline cache: SPIR-V → `VkPipeline` per kernel.
 //!
-//! Each of the five kernels (`composite_rgba8`, `apply_soft_mask`, `aa_fill`,
-//! `icc_clut`, `blit_image`) gets its own descriptor set layout +
-//! pipeline layout + compute pipeline, lazy-created on first dispatch.
+//! Each kernel (`aa_fill`, `icc_clut`, `blit_image`, and under the
+//! `gpu-jpeg-huffman` feature the scan, Huffman and IDCT entry points) gets
+//! its own descriptor set layout + pipeline layout + compute pipeline,
+//! lazy-created on first dispatch.
 //! The SPIR-V blobs are baked into the binary via `include_bytes!` of the
 //! build-script outputs.
 //!
@@ -26,8 +27,6 @@ use super::error::vk_err;
 /// Identifier for one of the compute kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum KernelId {
-    Composite,
-    ApplySoftMask,
     AaFill,
     IccClut,
     BlitImage,
@@ -80,9 +79,9 @@ pub(super) enum KernelId {
 /// at build time: if `slot_index()` ever returns a value
 /// `>= NUM_KERNELS` for any variant, the build fails.
 #[cfg(feature = "gpu-jpeg-huffman")]
-const NUM_KERNELS: usize = 15;
+const NUM_KERNELS: usize = 13;
 #[cfg(not(feature = "gpu-jpeg-huffman"))]
-const NUM_KERNELS: usize = 5;
+const NUM_KERNELS: usize = 3;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
 /// here would surface as a runtime panic when `self.slots[idx]` is
@@ -90,8 +89,6 @@ const NUM_KERNELS: usize = 5;
 /// build time. Each line evaluates a `const` expression that panics
 /// via `assert!` if the invariant is violated.
 const _: () = {
-    assert!(KernelId::Composite.slot_index() < NUM_KERNELS);
-    assert!(KernelId::ApplySoftMask.slot_index() < NUM_KERNELS);
     assert!(KernelId::AaFill.slot_index() < NUM_KERNELS);
     assert!(KernelId::IccClut.slot_index() < NUM_KERNELS);
     assert!(KernelId::BlitImage.slot_index() < NUM_KERNELS);
@@ -150,10 +147,6 @@ impl KernelId {
     /// SPIR-V blob for this kernel, baked into the binary at build time.
     const fn spirv(self) -> &'static [u8] {
         match self {
-            Self::Composite => include_bytes!(concat!(env!("OUT_DIR"), "/composite_rgba8.spv")),
-            Self::ApplySoftMask => {
-                include_bytes!(concat!(env!("OUT_DIR"), "/apply_soft_mask.spv"))
-            }
             Self::AaFill => include_bytes!(concat!(env!("OUT_DIR"), "/aa_fill.spv")),
             Self::IccClut => include_bytes!(concat!(env!("OUT_DIR"), "/icc_clut.spv")),
             Self::BlitImage => include_bytes!(concat!(env!("OUT_DIR"), "/blit_image.spv")),
@@ -213,31 +206,29 @@ impl KernelId {
     /// `< NUM_KERNELS`.
     const fn slot_index(self) -> usize {
         match self {
-            Self::Composite => 0,
-            Self::ApplySoftMask => 1,
-            Self::AaFill => 2,
-            Self::IccClut => 3,
-            Self::BlitImage => 4,
+            Self::AaFill => 0,
+            Self::IccClut => 1,
+            Self::BlitImage => 2,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => 5,
+            Self::ScanPerWorkgroup => 3,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => 6,
+            Self::ScanBlockSums => 4,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => 7,
+            Self::ScanScatter => 5,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => 8,
+            Self::Phase1IntraSync => 6,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 9,
+            Self::Phase2InterSync => 7,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => 10,
+            Self::Phase4Redecode => 8,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 11,
+            Self::JpegPhase1IntraSync => 9,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 12,
+            Self::JpegPhase2InterSync => 10,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => 13,
+            Self::JpegPhase4Redecode => 11,
             #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => 14,
+            Self::IdctColor => 12,
         }
     }
 
@@ -245,8 +236,6 @@ impl KernelId {
     /// filename (and the function name in the .cu / .slang).
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Composite => "composite_rgba8",
-            Self::ApplySoftMask => "apply_soft_mask",
             Self::AaFill => "aa_fill",
             Self::IccClut => "icc_cmyk_clut",
             Self::BlitImage => "blit_image",
@@ -322,7 +311,6 @@ impl KernelId {
             #[cfg(feature = "gpu-jpeg-huffman")]
             Self::IdctColor => &[0, 1, 2, 3],
             // Everyone else: sequential 0..n.
-            Self::Composite | Self::ApplySoftMask => &[0, 1],
             Self::BlitImage => &[0, 1, 2, 3],
             Self::AaFill | Self::IccClut => &[0, 1, 2],
             #[cfg(feature = "gpu-jpeg-huffman")]
@@ -345,10 +333,6 @@ impl KernelId {
     /// relevant kernel name.
     const fn n_storage_buffers(self) -> u32 {
         match self {
-            // (src, dst)
-            Self::Composite => 2,
-            // (pixels, mask)
-            Self::ApplySoftMask => 2,
             // (intersects, row_starts, coverage)
             Self::AaFill => 3,
             // (cmyk, rgb, clut)
@@ -700,7 +684,7 @@ mod tests {
             spirv_declares_capability(&spirv_words(id.spirv(), id.label()).unwrap(), capability)
         };
         assert!(!declares(KernelId::AaFill, CAPABILITY_INT64));
-        assert!(!declares(KernelId::Composite, CAPABILITY_INT64));
+        assert!(!declares(KernelId::IccClut, CAPABILITY_INT64));
         #[cfg(feature = "gpu-jpeg-huffman")]
         {
             assert!(declares(KernelId::IdctColor, CAPABILITY_INT64));
@@ -737,8 +721,6 @@ mod tests {
     #[test]
     fn binding_slots_len_matches_n_storage_buffers_for_every_kernel() {
         let kernels = [
-            KernelId::Composite,
-            KernelId::ApplySoftMask,
             KernelId::AaFill,
             KernelId::IccClut,
             KernelId::BlitImage,
@@ -783,8 +765,6 @@ mod tests {
     #[test]
     fn slot_indices_are_unique_across_kernels() {
         let kernels = [
-            KernelId::Composite,
-            KernelId::ApplySoftMask,
             KernelId::AaFill,
             KernelId::IccClut,
             KernelId::BlitImage,

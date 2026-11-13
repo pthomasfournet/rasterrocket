@@ -8,7 +8,7 @@
 //! ```no_run
 //! use rasterrocket_gpu::GpuCtx;
 //! let ctx = GpuCtx::init().expect("no CUDA device");
-//! // … call ctx.composite_rgba8(src, dst) etc.
+//! // … call ctx.icc_cmyk_to_rgb(cmyk, clut) etc.
 //! ```
 //!
 //! # Feature flags
@@ -25,7 +25,6 @@
 //!   at link time.
 
 mod cmyk;
-mod composite;
 pub(crate) mod cuda;
 
 pub mod backend;
@@ -50,7 +49,6 @@ mod staging;
 pub(crate) mod traits;
 
 pub use cmyk::icc_cmyk_to_rgb_cpu;
-pub use composite::{apply_soft_mask_cpu, composite_rgba8_cpu};
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub use decode_queue::{DecodeQueue, JpegQueueHandle};
 pub use fill::{AA_SIZE, AaFillRect, AaScanTable, ScanIntersect, aa_fill_cpu, pixel_coverage};
@@ -84,10 +82,6 @@ use cudarc::driver::CudaModule;
 use cudarc::nvrtc::Ptx;
 
 #[cfg(not(ptx_placeholder))]
-const PTX_COMPOSITE: &str = include_str!(concat!(env!("OUT_DIR"), "/composite_rgba8.ptx"));
-#[cfg(not(ptx_placeholder))]
-const PTX_SOFT_MASK: &str = include_str!(concat!(env!("OUT_DIR"), "/apply_soft_mask.ptx"));
-#[cfg(not(ptx_placeholder))]
 const PTX_AA_FILL: &str = include_str!(concat!(env!("OUT_DIR"), "/aa_fill.ptx"));
 #[cfg(not(ptx_placeholder))]
 const PTX_ICC_CLUT: &str = include_str!(concat!(env!("OUT_DIR"), "/icc_clut.ptx"));
@@ -100,10 +94,6 @@ const PTX_PARALLEL_HUFFMAN: &str = include_str!(concat!(env!("OUT_DIR"), "/paral
 #[cfg(all(not(ptx_placeholder), feature = "gpu-jpeg-huffman"))]
 const PTX_IDCT_COLOR: &str = include_str!(concat!(env!("OUT_DIR"), "/idct_color.ptx"));
 
-/// Threshold in pixels below which CPU is faster than GPU dispatch overhead.
-pub const GPU_COMPOSITE_THRESHOLD: usize = 500_000;
-/// Threshold for soft-mask application.
-pub const GPU_SOFTMASK_THRESHOLD: usize = 500_000;
 /// Minimum fill bounding-box area (pixels) for a fill to be dispatched to the
 /// GPU scanline-AA kernel rather than composited from the CPU's own
 /// coverage walk.
@@ -134,8 +124,6 @@ pub const RGBA_BPP: usize = 4;
 pub const GPU_ICC_CLUT_THRESHOLD: usize = 500_000;
 
 pub(crate) struct GpuKernels {
-    pub(crate) composite_rgba8: CudaFunction,
-    pub(crate) apply_soft_mask: CudaFunction,
     pub(crate) aa_fill: CudaFunction,
     pub(crate) icc_cmyk_matrix: CudaFunction,
     pub(crate) icc_cmyk_clut: CudaFunction,
@@ -267,8 +255,6 @@ impl GpuCtx {
             cuda: Arc::clone(&ctx),
             aa_scratch: backend::AaFillScratchPool::new(),
             kernels: GpuKernels {
-                composite_rgba8: load(PTX_COMPOSITE, "composite_rgba8")?,
-                apply_soft_mask: load(PTX_SOFT_MASK, "apply_soft_mask")?,
                 aa_fill: load(PTX_AA_FILL, "aa_fill")?,
                 icc_cmyk_matrix: load(PTX_ICC_CLUT, "icc_cmyk_matrix")?,
                 icc_cmyk_clut: load(PTX_ICC_CLUT, "icc_cmyk_clut")?,

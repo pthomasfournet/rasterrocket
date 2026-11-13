@@ -13,7 +13,7 @@
 //!
 //! All buffer references in `params::*Params` are `&CudaSlice<u8>`
 //! (immutable), even for read-modify-write operands like the
-//! composite destination.  At the cudarc layer the kernel receives a
+//! blit destination page buffer.  At the cudarc layer the kernel receives a
 //! raw `CUdeviceptr`, so the &-vs-&mut distinction has no effect on
 //! the launch.  In-place writes are race-free because launches queued
 //! by one thread execute in order on its stream, and cudarc orders a
@@ -209,24 +209,6 @@ impl PageRecorder {
     ) -> Result<()> {
         self.ctx
             .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, grid_n, p.n_pixels)
-            .map_err(be)
-    }
-
-    pub(super) fn record_composite(
-        &self,
-        p: params::CompositeParams<'_, super::CudaBackend>,
-    ) -> Result<()> {
-        self.ctx
-            .launch_composite_async(p.src, p.dst, p.n_pixels)
-            .map_err(be)
-    }
-
-    pub(super) fn record_apply_soft_mask(
-        &self,
-        p: params::SoftMaskParams<'_, super::CudaBackend>,
-    ) -> Result<()> {
-        self.ctx
-            .launch_soft_mask_async(p.pixels, p.mask, p.n_pixels)
             .map_err(be)
     }
 

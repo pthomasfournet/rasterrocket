@@ -733,29 +733,22 @@ across runs.  Shared via `Arc<VulkanBackend>`.  The renderer dispatches AA fill
 through this; ICC CMYK→RGB and the `cache` feature stay CUDA-only,
 so `--backend vulkan` runs uncached and the CMYK matrix path falls to CPU AVX-512.
 
-**Kernel inventory.**  Eight kernels exist in **both** `.cu` (CUDA, compiled to
+**Kernel inventory.**  Six kernels exist in **both** `.cu` (CUDA, compiled to
 PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature.  The table below lists the five render-path
+time, gated on the `vulkan` feature.  The table below lists the three render-path
 kernels; the remaining three — `blelloch_scan`, `idct_color`, and
 `parallel_huffman` — belong to the GPU JPEG pipeline and are dormant by default
 (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`).
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
-| `composite_rgba8` | composite_rgba8.cu | composite_rgba8.slang | Porter-Duff source-over | no production caller † |
-| `apply_soft_mask` | apply_soft_mask.cu | apply_soft_mask.slang | Per-pixel alpha multiply | no production caller † |
 | `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | dormant (`usize::MAX`) |
 | `icc_clut` | icc_clut.cu | icc_clut.slang | CMYK→RGB via 4D quadrilinear CLUT | 500K px |
 | `icc_clut` matrix | icc_clut.cu | icc_clut.slang | CMYK→RGB via matrix (always CPU) | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image source-over composite (`cache` feature) | always |
 
-† The GPU `composite_rgba8` / `apply_soft_mask` kernels are built and reachable
-through the backend `record_*` surface, but the renderer composites on the CPU
-(`composite_rgba8_cpu` in `crates/gpu/src/composite.rs`). They carry no dispatch
-threshold because nothing in the render path dispatches them.
-
-16 kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` confirm
-SPIR-V vs CUDA outputs within ≤ 1 LSB per channel on the dev box.
+Five kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (ICC
+CLUT and blit) confirm SPIR-V vs CUDA outputs within ≤ 1 LSB per channel on the dev box.
 
 **Build-script model.**  `crates/gpu/build.rs` probes `nvcc --version` directly:
 when nvcc works, real PTX is compiled regardless of features.  When nvcc fails

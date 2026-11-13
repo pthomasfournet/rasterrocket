@@ -175,11 +175,11 @@ fn vulkan_backend_alloc_device_zeroed_concurrent() {
 #[test]
 fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
     // Recorder caps descriptor sets per page at MAX_DESC_SETS_PER_PAGE (64).
-    // Verify the boundary: 64 record_composite calls succeed, the 65th
+    // Verify the boundary: 64 record_icc_clut calls succeed, the 65th
     // returns Err with DescriptorPoolExhausted.  Pre-existing guard
     // had zero coverage; a refactor that reordered guard / allocate /
     // increment could silently regress.
-    use rasterrocket_gpu::backend::params::CompositeParams;
+    use rasterrocket_gpu::backend::params::IccClutParams;
 
     // Keep in sync with `MAX_DESC_SETS_PER_PAGE` in
     // crates/gpu/src/backend/vulkan/recorder.rs (private constant).
@@ -189,29 +189,30 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
     // passing through the loop.
     const PER_PAGE_MAX: u32 = 64;
     const N_PIXELS: u32 = 4;
-    const BUF_BYTES: usize = (N_PIXELS as usize) * rasterrocket_gpu::RGBA_BPP;
+    const BUF_BYTES: usize = (N_PIXELS as usize) * 4;
+    // A 2-node grid: 2⁴ nodes × 3 bytes.
+    const CLUT_BYTES: usize = 16 * 3;
 
     let (backend, _serial) = shared_backend();
-    let src = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc src");
-    let dst = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc dst");
+    let cmyk = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc cmyk");
+    let rgb = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc rgb");
+    let clut = backend.alloc_device_zeroed(CLUT_BYTES).expect("alloc clut");
+    let params = || IccClutParams {
+        cmyk: &cmyk,
+        rgb: &rgb,
+        clut: &clut,
+        n_pixels: N_PIXELS,
+    };
 
     backend.begin_page().expect("begin_page");
     for i in 0..PER_PAGE_MAX {
         backend
-            .record_composite(CompositeParams {
-                src: &src,
-                dst: &dst,
-                n_pixels: N_PIXELS,
-            })
-            .unwrap_or_else(|e| panic!("record_composite #{i} of {PER_PAGE_MAX} failed: {e}"));
+            .record_icc_clut(params())
+            .unwrap_or_else(|e| panic!("record_icc_clut #{i} of {PER_PAGE_MAX} failed: {e}"));
     }
     let err = backend
-        .record_composite(CompositeParams {
-            src: &src,
-            dst: &dst,
-            n_pixels: N_PIXELS,
-        })
-        .expect_err("record_composite past the cap must be rejected");
+        .record_icc_clut(params())
+        .expect_err("record_icc_clut past the cap must be rejected");
     let BackendError::DescriptorPoolExhausted { allocated, max } = err else {
         panic!("expected DescriptorPoolExhausted, got: {err:?}");
     };
@@ -230,8 +231,9 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
     let fence = backend.submit_page().expect("submit_page");
     backend.wait_page(fence).expect("wait_page");
 
-    backend.free_device(src);
-    backend.free_device(dst);
+    backend.free_device(cmyk);
+    backend.free_device(rgb);
+    backend.free_device(clut);
 }
 
 #[test]

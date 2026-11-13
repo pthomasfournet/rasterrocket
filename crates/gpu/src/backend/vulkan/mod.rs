@@ -227,16 +227,6 @@ impl GpuBackend for VulkanBackend {
         self.recorder.record_icc_clut(params, grid_n)
     }
 
-    fn record_composite(&self, params: params::CompositeParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_composite(params)
-    }
-
-    fn record_apply_soft_mask(&self, params: params::SoftMaskParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_apply_soft_mask(params)
-    }
-
     #[cfg(feature = "gpu-jpeg-huffman")]
     fn record_scan(&self, params: params::ScanParams<'_, Self>) -> Result<()> {
         params.validate(self)?;

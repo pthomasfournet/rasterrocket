@@ -2482,6 +2482,11 @@ decodes and reported partial.  A `--fax` page longer than the B4 length
 text-matrix translations use fused multiply-adds: **this changes pixels**,
 glyphs on a rounding boundary moving by a device pixel (corpus-05 at
 150 dpi: 169 of 601 pages, a median of 69 pixels a page).
+The GPU composite and soft-mask kernels, which nothing in the render path
+dispatched, are deleted with their `GpuBackend::record_composite` /
+`record_apply_soft_mask` methods, parameter structs, thresholds and CPU
+twins (`composite_rgba8_cpu`, `apply_soft_mask_cpu`) from
+`rasterrocket-gpu`; renders unchanged.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
@@ -2695,9 +2700,8 @@ the first pass of the day:
 
 Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
 released (see the release history); master carries the work since. The CUDA performance
-inventory is closed (2026-11-01): fills run on the backend recorder, transfers
-are blocking by design, and the composite and soft-mask kernels use one
-32-bit access per pixel.
+inventory is closed (2026-11-01): fills run on the backend recorder and
+transfers are blocking by design.
 
 Deferred/blocked items, in full:
 

@@ -348,68 +348,6 @@ mod clut_helpers_tests {
     }
 }
 
-/// Parameters for a GPU Porter-Duff source-over composite.
-pub struct CompositeParams<'a, B: GpuBackend + ?Sized> {
-    /// Source RGBA pixels in device memory.
-    pub src: &'a B::DeviceBuffer,
-    /// Destination RGBA pixels in device memory (read-modify-write).
-    pub dst: &'a B::DeviceBuffer,
-    /// Number of pixels to composite.
-    pub n_pixels: u32,
-}
-
-impl<B: GpuBackend + ?Sized> CompositeParams<'_, B> {
-    /// Check that `n_pixels` ≤ [`MAX_KERNEL_PIXELS`] and that `src` and
-    /// `dst` each hold `n_pixels × 4` bytes.
-    ///
-    /// # Errors
-    /// Returns a `BackendError` if either invariant is violated.
-    pub fn validate(&self, backend: &B) -> super::Result<()> {
-        validate_per_pixel(
-            backend,
-            "CompositeInvariantViolation",
-            self.n_pixels,
-            &[
-                (self.src, 4, "src buffer shorter than n_pixels × 4 bytes"),
-                (self.dst, 4, "dst buffer shorter than n_pixels × 4 bytes"),
-            ],
-        )
-    }
-}
-
-/// Parameters for a GPU soft-mask application.
-pub struct SoftMaskParams<'a, B: GpuBackend + ?Sized> {
-    /// RGBA pixel buffer to mask in device memory (read-modify-write).
-    pub pixels: &'a B::DeviceBuffer,
-    /// Greyscale mask buffer in device memory.
-    pub mask: &'a B::DeviceBuffer,
-    /// Number of pixels to process.
-    pub n_pixels: u32,
-}
-
-impl<B: GpuBackend + ?Sized> SoftMaskParams<'_, B> {
-    /// Check that `n_pixels` ≤ [`MAX_KERNEL_PIXELS`], that `pixels` holds
-    /// `n_pixels × 4` bytes and `mask` `n_pixels` bytes.
-    ///
-    /// # Errors
-    /// Returns a `BackendError` if either invariant is violated.
-    pub fn validate(&self, backend: &B) -> super::Result<()> {
-        validate_per_pixel(
-            backend,
-            "SoftMaskInvariantViolation",
-            self.n_pixels,
-            &[
-                (
-                    self.pixels,
-                    4,
-                    "pixels buffer shorter than n_pixels × 4 bytes",
-                ),
-                (self.mask, 1, "mask buffer shorter than n_pixels bytes"),
-            ],
-        )
-    }
-}
-
 /// Workgroup size used by every phase of the Blelloch scan kernel.
 ///
 /// Public so dispatchers can size `block_sums` correctly:
@@ -1307,12 +1245,6 @@ mod tests {
         fn record_icc_clut(&self, _p: IccClutParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
         }
-        fn record_composite(&self, _p: CompositeParams<'_, Self>) -> super::super::Result<()> {
-            unreachable!()
-        }
-        fn record_apply_soft_mask(&self, _p: SoftMaskParams<'_, Self>) -> super::super::Result<()> {
-            unreachable!()
-        }
         fn record_scan(&self, _p: ScanParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
         }
@@ -1618,27 +1550,6 @@ mod tests {
             ..ok()
         });
         assert!(e.contains("MAX_KERNEL_PIXELS"), "{e}");
-    }
-
-    #[test]
-    fn composite_and_soft_mask_validate_buffer_lengths() {
-        static FOUR_PX: usize = 16;
-        let composite = |n_pixels| CompositeParams::<FakeBackend> {
-            src: &FOUR_PX,
-            dst: &FOUR_PX,
-            n_pixels,
-        };
-        composite(4).validate(&FakeBackend).expect("exact fit");
-        let e = composite(5).validate(&FakeBackend).unwrap_err().to_string();
-        assert!(e.contains("src buffer"), "{e}");
-        let mask = |n_pixels| SoftMaskParams::<FakeBackend> {
-            pixels: &FOUR_PX,
-            mask: &FOUR_PX,
-            n_pixels,
-        };
-        mask(4).validate(&FakeBackend).expect("exact fit");
-        let e = mask(5).validate(&FakeBackend).unwrap_err().to_string();
-        assert!(e.contains("pixels buffer"), "{e}");
     }
 
     // --- ScanParams ---

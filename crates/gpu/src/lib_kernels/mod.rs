@@ -5,7 +5,6 @@
 //! same `pub fn` entry points directly.
 
 pub(crate) mod aa;
-pub(crate) mod composite;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) mod huffman;
 pub(crate) mod icc;
@@ -13,4 +12,3 @@ pub(crate) mod icc;
 pub(crate) mod idct;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) mod scan;
-pub(crate) mod soft_mask;
