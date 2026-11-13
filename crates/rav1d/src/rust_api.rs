@@ -441,6 +441,28 @@ impl Picture {
         self.inner.seq_hdr.as_ref().unwrap().color_range.into()
     }
 
+    /// Colour primaries as the ITU-T H.273 code point of the sequence header.
+    pub fn color_primaries_code(&self) -> u8 {
+        self.inner.seq_hdr.as_ref().unwrap().pri as u8
+    }
+
+    /// Transfer characteristics as the ITU-T H.273 code point of the
+    /// sequence header.
+    pub fn transfer_code(&self) -> u8 {
+        self.inner.seq_hdr.as_ref().unwrap().trc as u8
+    }
+
+    /// Matrix coefficients as the ITU-T H.273 code point of the sequence
+    /// header.
+    pub fn matrix_code(&self) -> u8 {
+        self.inner.seq_hdr.as_ref().unwrap().mtrx as u8
+    }
+
+    /// Whether the samples span the full range of the bit depth.
+    pub fn full_range(&self) -> bool {
+        self.inner.seq_hdr.as_ref().unwrap().color_range.is_full()
+    }
+
     /// Sample position for subsampled chroma.
     pub fn chroma_location(&self) -> Option<pixel::ChromaLocation> {
         self.inner.seq_hdr.as_ref().unwrap().chr.try_into().ok()

@@ -62,3 +62,22 @@ unless the entry says otherwise.
   lints that clippy 1.100 adds findings for in unchanged upstream code are
   allowed in the manifest: `chunks_exact_to_as_chunks` and
   `manual_is_multiple_of`.
+
+## Single-picture decode
+
+- `src/still.rs` (new), re-exported at the crate root: `decode_still(obu,
+  StillLimits) -> Result<StillPicture, StillError>` decodes the first
+  picture of a run of OBUs on the calling thread (one worker, no frame
+  delay), with film grain applied, the highest spatial layer of operating
+  point 0 alone, the frame size limit from `StillLimits::max_pixels`, and
+  no logger (failures are the returned error, nothing is written to
+  stderr).  `StillPicture` owns tight copies of the planes (`u8` samples
+  for 8-bit pictures, `u16` for 10 and 12 bits) and carries the size, bit
+  depth, chroma layout and the sequence header's colour description as
+  ITU-T H.273 code points with the range flag.  The module has no `unsafe`
+  code: it is built on the `Decoder` and `Picture` types of `rust_api`.
+
+- `src/rust_api.rs`: `Picture::color_primaries_code`, `transfer_code`,
+  `matrix_code` and `full_range`, the sequence header's colour description
+  as code points, beside the existing accessors that return `av-data`
+  enums.

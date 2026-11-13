@@ -141,6 +141,8 @@ mod refmvs;
 /// This API copies that of `dav1d-rs`, and should function as a drop-in replacement, aside from `dav1d::Error` being renamed to `Rav1dError`
 pub mod rust_api;
 mod scan;
+/// Single-picture decode; not part of upstream (see `CHANGES.md`).
+pub mod still;
 /// The `rav1d::src::*` paths from 1.1.0, before these items moved to the crate root.
 ///
 /// `#[deprecated]` doesn't warn at use sites of a module or re-export,
@@ -173,6 +175,10 @@ use std::{cmp, mem, ptr, slice, thread};
 
 use parking_lot::Mutex;
 pub use rust_api::*;
+pub use still::{
+    decode_still, StillColor, StillError, StillLayout, StillLimits, StillPicture, StillPlane,
+    StillSamples,
+};
 use to_method::To as _;
 
 use crate::c_arc::RawArc;
