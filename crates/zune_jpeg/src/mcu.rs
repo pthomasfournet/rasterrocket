@@ -29,10 +29,16 @@ use crate::JpegDecoder;
 pub const DCT_BLOCK: usize = 64;
 
 impl<T: ZByteReaderTrait> JpegDecoder<T> {
-    /// Check for existence of DC and AC Huffman Tables
+    /// Check that the entropy tables of the current scan's components exist.
     pub(crate) fn check_tables<B: BitStream>(&mut self) -> Result<(), DecodeErrors> {
         // check that dc and AC tables exist outside the hot path
-        for component in &self.components {
+        let z_order = self.z_order;
+        for &component_index in &z_order[..usize::from(self.num_scans)] {
+            let Some(component) = self.components.get(component_index) else {
+                return Err(DecodeErrors::Format(format!(
+                    "Invalid component index {component_index} in scan"
+                )));
+            };
             let _ = B::get_dc_ac_tables(
                 &mut self.entropy_tables,
                 component.dc_huff_table,
@@ -107,8 +113,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         let padded_width = calculate_padded_width(width, self.info.sample_ratio);
 
         let mut stream = B::new();
-
-        self.check_tables::<B>()?;
+        stream.set_strict(self.options.strict_mode());
 
         let mut tmp = [0_i32; DCT_BLOCK];
 
@@ -168,7 +173,36 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             * 8;
         let mut upsampler_scratch_space = vec![0; upsampler_scratch_size];
 
+        let mut first_scan = true;
+
         'sos: loop {
+            // A scan may use tables defined by a marker segment that follows an
+            // earlier scan.  A decode that is not strict draws the scans before
+            // one whose tables are missing.
+            if let Err(e) = self.check_tables::<B>() {
+                if first_scan || self.options.strict_mode() {
+                    return Err(e);
+                }
+                error!("{e}");
+                self.note_incomplete(0);
+                break;
+            }
+            first_scan = false;
+            // A sequential frame codes each component in one scan, which
+            // bounds its scans by its components.  A scan of a component
+            // that is already coded is not part of the image: decoding it
+            // would replace the component, and walk every row of blocks
+            // however little data the scan has.
+            if self.scan_repeats_component() {
+                if self.options.strict_mode() {
+                    return Err(DecodeErrors::FormatStatic(
+                        "Scan of a component that an earlier scan coded",
+                    ));
+                }
+                warn!("Scan of a component that an earlier scan coded, ignored");
+                break;
+            }
+
             trace!(
                 "Baseline decoding of components: {:?}",
                 &self.z_order[..usize::from(self.num_scans)]
@@ -419,17 +453,15 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     continue 'component;
                 }
 
-                // step is the number of pixels this iteration wil be handling
-                // Given by the number of mcu's height and the length of the component block
-                // Since the component block contains the whole channel as raw pixels
-                // we this evenly divides the pixels into MCU blocks
-                //
-                // For interleaved images, this gives us the exact pixels comprising a whole MCU
-                // block
-                let step = block[position].len() / mcu_height;
+                // The samples of one row of MCUs of this component, the size of its
+                // `raw_coeff`.  The plane holds twice as many rows of MCUs as are drawn
+                // here when a vertically sampled frame is decoded to gray (`coeff` is 2).
+                let step = component.width_stride * component.vertical_sample * 8;
 
                 // where we will be reading our pixels from.
-                let slice = &block[position][i * step..][..step];
+                let slice = block[position]
+                    .get(i * step..(i + 1) * step)
+                    .ok_or(DecodeErrors::FormatStatic("Component buffer too small"))?;
                 let temp_channel = &mut component.raw_coeff;
                 temp_channel[..step].copy_from_slice(slice);
             }
@@ -1041,9 +1073,14 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 // E.g the Y sample is not sampled but we haven't finished upsampling the last row of
                 // the previous mcu, since we don't have the down row, so save it
                 for component in comps.iter_mut() {
-                    if component.sample_ratio != SampleRatios::H {
-                        // We don't care about H sampling factors, since it's copied in the workers function
-
+                    // A component that is not decoded has no rows; one sampled
+                    // horizontally or by other factors keeps its up-sampled rows in
+                    // `upsample`.
+                    if !matches!(
+                        component.sample_ratio,
+                        SampleRatios::H | SampleRatios::Generic(_, _)
+                    ) && component.needed
+                    {
                         // copy last row to be used for the  next color conversion
                         let size = component.vertical_sample
                             * component.width_stride

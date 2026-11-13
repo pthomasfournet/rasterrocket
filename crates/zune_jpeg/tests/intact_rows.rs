@@ -190,3 +190,39 @@ fn a_cut_stream_reports_the_rows_before_the_cut() {
         }
     }
 }
+
+/// A scan whose last byte is a data byte of 0xFF, cut before the stuffed zero
+/// that follows it: the input does not say whether that 0xFF is data or the
+/// start of a marker, so a row decoded from its bits is not reported whole.
+#[test]
+fn a_cut_after_a_data_byte_of_ff_is_not_whole() {
+    // One 8×8 gray block.  DC table: one 1-bit code, a difference of zero.
+    // AC table: one 1-bit code, a coefficient of eight bits after eight
+    // zeros.  The block is the DC code and seven such coefficients of +255,
+    // the last at position 63: 64 bits, of which the last eight are ones.
+    let mut head = vec![0xFF, 0xD8, 0xFF, 0xDB, 0, 67, 0];
+    head.extend_from_slice(&[1; 64]);
+    head.extend_from_slice(&[0xFF, 0xC0, 0, 11, 8, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+    head.extend_from_slice(&[0xFF, 0xC4, 0, 20, 0x00, 1]);
+    head.extend_from_slice(&[0; 15]);
+    head.push(0x00);
+    head.extend_from_slice(&[0xFF, 0xC4, 0, 20, 0x10, 1]);
+    head.extend_from_slice(&[0; 15]);
+    head.push(0x88);
+    head.extend_from_slice(&[0xFF, 0xDA, 0, 8, 1, 1, 0x00, 0, 63, 0]);
+
+    let mut whole = head.clone();
+    whole.extend_from_slice(&[0x3F, 0xDF, 0xEF, 0xF7, 0xFB, 0xFD, 0xFE, 0xFF, 0x00]);
+    let without_eoi = whole.clone();
+    whole.extend_from_slice(&[0xFF, 0xD9]);
+    let mut cut = without_eoi.clone();
+    assert_eq!(cut.pop(), Some(0x00));
+
+    let reference = decode(&whole, false).expect("the whole stream");
+    assert_eq!(reference.intact_rows, 8);
+    let got = decode(&without_eoi, false).expect("the stream without EOI");
+    assert_eq!(got.intact_rows, 8);
+    assert_eq!(got.pixels, reference.pixels);
+    let got = decode(&cut, false).expect("the cut stream");
+    assert_eq!(got.intact_rows, 0);
+}

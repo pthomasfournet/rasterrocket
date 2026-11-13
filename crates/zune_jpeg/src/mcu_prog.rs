@@ -105,6 +105,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         }
 
         let mut stream = B::new_progressive(self.succ_low, self.spec_start, self.spec_end);
+        stream.set_strict(self.options.strict_mode());
 
         // there are multiple scans in the stream, this should resolve the first scan
         let result = self.parse_entropy_coded_data(&mut stream, &mut block);
@@ -583,11 +584,17 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 //
                 // For interleaved images, this gives us the exact pixels comprising a whole MCU
                 // block
-                let step = block[position].len() / mcu_height;
+                //
+                // Not the buffer's length over the rows of MCUs: the buffer holds twice
+                // as many when a vertically sampled frame is decoded to gray (`coeff`
+                // is 2).
+                let step = component.width_stride * component.vertical_sample * 8;
                 // where we will be reading our pixels from.
                 let start = i * step;
 
-                let slice = &block[position][start..start + step];
+                let slice = block[position]
+                    .get(start..start + step)
+                    .ok_or(DecodeErrors::FormatStatic("Component buffer too small"))?;
 
                 let temp_channel = &mut component.raw_coeff;
 

@@ -16,8 +16,7 @@ use alloc::vec::Vec;
 use core::cmp::max;
 
 use zune_core::bytestream::ZByteReaderTrait;
-use zune_core::colorspace::ColorSpace;
-use zune_core::log::{debug, trace, warn};
+use zune_core::log::{trace, warn};
 
 use crate::components::{Components, SampleRatios};
 use crate::decoder::{ExtendedXmpSegment, GainMapInfo, ICCChunk, JpegDecoder, MAX_COMPONENTS};
@@ -318,20 +317,6 @@ pub(crate) fn parse_start_of_frame<T: ZByteReaderTrait>(
 
     trace!("Image components : {num_components}");
 
-    if num_components == 1 {
-        // SOF sets the number of image components
-        // and that to us translates to setting input and output
-        // colorspaces to zero
-        img.input_colorspace = ColorSpace::Luma;
-        //img.options = img.options.jpeg_set_out_colorspace(ColorSpace::Luma);
-        debug!("Overriding default colorspace set to Luma");
-    }
-    if num_components == 4 && img.input_colorspace == ColorSpace::YCbCr {
-        trace!("Input image has 4 components, defaulting to CMYK colorspace");
-        // https://entropymine.wordpress.com/2018/10/22/how-is-a-jpeg-images-color-type-determined/
-        img.input_colorspace = ColorSpace::CMYK;
-    }
-
     // set number of components
     img.info.components = num_components;
 
@@ -570,9 +555,7 @@ pub(crate) fn parse_app14<T: ZByteReaderTrait>(
         let transform = decoder.stream.read_u8();
         // https://exiftool.org/TagNames/JPEG.html#Adobe
         match transform {
-            0 => decoder.input_colorspace = ColorSpace::CMYK,
-            1 => decoder.input_colorspace = ColorSpace::YCbCr,
-            2 => decoder.input_colorspace = ColorSpace::YCCK,
+            0..=2 => decoder.adobe_transform = Some(transform),
             _ => {
                 return Err(DecodeErrors::Format(format!(
                     "Unknown Adobe colorspace {transform}"

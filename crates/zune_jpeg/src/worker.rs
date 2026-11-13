@@ -277,7 +277,7 @@ fn color_convert_ycck_to_rgb<const NUM_COMPONENTS: usize>(
         output,
     );
     for (pix_w, m_w) in output
-        .chunks_exact_mut(width * 3)
+        .chunks_exact_mut(width * NUM_COMPONENTS)
         .zip(mcu_block[3].chunks_exact(padded_width))
     {
         for (pix, m) in pix_w
@@ -309,7 +309,7 @@ fn color_convert_cymk_to_rgb<const NUM_COMPONENTS: usize>(
         .zip(mcu_block[3].chunks_exact(padded_width))
     {
         for ((((pix, c), m), y), k) in pix_w
-            .as_chunks_mut::<3>()
+            .as_chunks_mut::<NUM_COMPONENTS>()
             .0
             .iter_mut()
             .zip(c_w)
@@ -325,6 +325,9 @@ fn color_convert_cymk_to_rgb<const NUM_COMPONENTS: usize>(
             pix[0] = blinn_8x8(c, k);
             pix[1] = blinn_8x8(m, k);
             pix[2] = blinn_8x8(y, k);
+            if NUM_COMPONENTS == 4 {
+                pix[3] = 255;
+            }
         }
     }
 }
@@ -420,6 +423,11 @@ pub(crate) fn upsample(
     upsampler_scratch_space: &mut [i16],
     has_vertical_sample: bool,
 ) -> Result<(), DecodeErrors> {
+    // A component the output colour space does not use is not decoded: its
+    // buffers are empty.
+    if !component.needed {
+        return Ok(());
+    }
     match component.sample_ratio {
         SampleRatios::V | SampleRatios::HV => {
             /*
@@ -596,6 +604,22 @@ pub(crate) fn upsample(
         SampleRatios::Generic(h, v) => {
             let raw_coeff = &component.raw_coeff;
             let dest_coeff = &mut component.upsample_dest;
+
+            // The rows drawn once the next row of MCUs is decoded are this
+            // component's up-sampled ones, kept before they are overwritten.
+            if has_vertical_sample {
+                let length = component.first_row_upsample_dest.len();
+                let start =
+                    dest_coeff
+                        .len()
+                        .checked_sub(length)
+                        .ok_or(DecodeErrors::FormatStatic(
+                            "Generic upsample destination is too small",
+                        ))?;
+                component
+                    .first_row_upsample_dest
+                    .copy_from_slice(&dest_coeff[start..]);
+            }
 
             //let size =  component.width_stride.div_ceil(v);
 

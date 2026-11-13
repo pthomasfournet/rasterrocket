@@ -125,6 +125,10 @@ pub struct JpegDecoder<T> {
     /// Image input colorspace, should be YCbCr for a sane image, might be
     /// grayscale too
     pub(crate) input_colorspace: ColorSpace,
+    /// The transform of an Adobe APP14 segment, wherever it stands among
+    /// the headers; with the frame's component count it gives the input
+    /// colour space once the headers are read.
+    pub(crate) adobe_transform: Option<u8>,
     // Is the image using arithmetic coding?
     pub(crate) is_arithmetic: bool,
     // Progressive image details
@@ -240,6 +244,7 @@ where
             idct_1x1_func: choose_idct_1x1_func(&options),
             color_convert_16: color_convert,
             input_colorspace: ColorSpace::YCbCr,
+            adobe_transform: None,
             z_order: [0; MAX_COMPONENTS],
             restart_interval: 0,
             todo: 0x7fff_ffff,
@@ -368,6 +373,60 @@ where
             None
         };
     }
+    /// Decides the input colour space from the frame's component count,
+    /// the Adobe APP14 transform and the component identifiers, in that
+    /// order, whatever the order of the marker segments.
+    fn resolve_input_colorspace(&mut self) -> Result<(), DecodeErrors> {
+        let components = self.components.len();
+        self.input_colorspace = match (components, self.adobe_transform) {
+            // One component is gray whatever an APP14 segment says.
+            (1, _) => ColorSpace::Luma,
+            (3, Some(0)) => ColorSpace::RGB,
+            (4, Some(2)) => ColorSpace::YCCK,
+            (4, _) => ColorSpace::CMYK,
+            (_, Some(0)) => ColorSpace::CMYK,
+            (_, Some(2)) => ColorSpace::YCCK,
+            (_, Some(_)) => ColorSpace::YCbCr,
+            // Component identifiers 'R', 'G', 'B' with no APP14 segment.
+            (3, None)
+                if self
+                    .components
+                    .iter()
+                    .zip(b"RGB")
+                    .all(|(component, id)| component.id == *id) =>
+            {
+                ColorSpace::RGB
+            }
+            (_, None) => ColorSpace::YCbCr,
+        };
+
+        if self.input_colorspace.num_components() > components {
+            if self.options.strict_mode() {
+                return Err(DecodeErrors::Format(format!(
+                    "Expected {} number of components but found {components}",
+                    self.input_colorspace.num_components(),
+                )));
+            }
+            if self.input_colorspace == ColorSpace::YCCK && components == 3 {
+                // A YCCK transform on three components is decoded as YCbCr.
+                warn!("Treating YCCK colorspace as YCbCr because component count is 3");
+                self.input_colorspace = ColorSpace::YCbCr;
+            } else if let Some(count) = u32::try_from(components)
+                .ok()
+                .and_then(core::num::NonZeroU32::new)
+            {
+                // Fewer components than the colour space has are decoded
+                // as so many bands, with no colour conversion.
+                warn!(
+                    "Expected {} number of components but found {components}; decoding as multiband",
+                    self.input_colorspace.num_components(),
+                );
+                self.input_colorspace = ColorSpace::MultiBand(count);
+            }
+        }
+        Ok(())
+    }
+
     /// Set decoder options
     ///
     /// This can be used to set new options even after initialization
@@ -547,31 +606,9 @@ where
                     // break after reading the start of scan.
                     // what follows is the image data
                     if n == Marker::SOS {
-                        self.headers_decoded = true;
+                        self.resolve_input_colorspace()?;
                         trace!("Input colorspace {:?}", self.input_colorspace);
-
-                        // Check if image is RGB
-                        // The check is weird, we need to check if ID
-                        // represents R, G and B in ascii,
-                        //
-                        // I am not sure if this is even specified in any standard,
-                        // but jpegli https://github.com/google/jpegli does encode
-                        // its images that way, so this will check for that. and handle it appropriately
-                        // It is spefified here so that on a successful header decode,we can at least
-                        // try to attribute image colorspace  correctly.
-                        //
-                        // It was first the issue in https://github.com/etemesi254/zune-image/issues/291
-                        // that brought it to light
-                        //
-                        let mut is_rgb = self.components.len() == 3;
-                        let chars = ['R', 'G', 'B'];
-                        for (comp, single_char) in self.components.iter().zip(chars.iter()) {
-                            is_rgb &= comp.id == (*single_char) as u8;
-                        }
-                        // Image is RGB, change colorspace
-                        if is_rgb {
-                            self.input_colorspace = ColorSpace::RGB;
-                        }
+                        self.headers_decoded = true;
 
                         return Ok(());
                     }
@@ -1002,6 +1039,14 @@ where
             usize::from(self.info.height) / rows.max(1)
         }
         .max(1);
+    }
+
+    /// Whether the current scan has a component that an earlier scan of
+    /// the frame coded.
+    pub(crate) fn scan_repeats_component(&self) -> bool {
+        self.z_order[..usize::from(self.num_scans).min(MAX_COMPONENTS)]
+            .iter()
+            .any(|&k| k < 8 && self.components_coded & (1 << k) != 0)
     }
 
     /// Records the coefficients of the progressive scan about to be

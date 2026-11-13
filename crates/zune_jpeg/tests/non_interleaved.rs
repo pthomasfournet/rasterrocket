@@ -15,6 +15,7 @@
 //! These images are created with tools like libjpeg's cjpeg -scans option.
 
 use zune_core::bytestream::ZCursor;
+use zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
 /// Test decoding a non-interleaved 4:4:4 baseline JPEG (64x64).
@@ -177,4 +178,71 @@ fn decode_non_interleaved_422_65x65() {
         (r - 96).abs() <= 20 && (g - 96).abs() <= 20 && (b - 128).abs() <= 20,
         "Center pixel wrong: expected ~(96,96,128), got ({r},{g},{b})"
     );
+}
+
+/// The scan of the first component comes last, and its Huffman tables are
+/// defined after the scans of the other two.
+#[test]
+fn decode_non_interleaved_with_luma_last() {
+    let test_data = include_bytes!("images/non_interleaved_luma_last_88x88.jpg");
+    let mut decoder = JpegDecoder::new(ZCursor::new(test_data));
+    let pixels = decoder
+        .decode()
+        .expect("Failed to decode non-interleaved JPEG with luma in the final scan");
+
+    assert_eq!(pixels.len(), 88 * 88 * 3);
+    assert_eq!(decoder.intact_rows(), 88);
+}
+
+/// The third scan selects Huffman tables the stream never defines: a strict
+/// decode fails, any other draws the first two scans and reports no row whole.
+#[test]
+fn scan_with_undefined_tables() {
+    let mut data = include_bytes!("images/tiny_non_interleaved_444.jpg").to_vec();
+    // SOS of the third scan: marker, length, one component, its id, its tables.
+    assert_eq!(data[661..668], [0xff, 0xda, 0x00, 0x08, 0x01, 0x03, 0x11]);
+    data[667] = 0x33;
+
+    let options = DecoderOptions::default().set_strict_mode(false);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&data), options);
+    let pixels = decoder.decode().expect("the scans before the bad one");
+    assert_eq!(pixels.len(), 16 * 16 * 3);
+    assert_eq!(decoder.intact_rows(), 0);
+
+    let options = DecoderOptions::default().set_strict_mode(true);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&data), options);
+    decoder.decode().unwrap_err();
+}
+
+/// A frame coded one scan per component, complete, then followed by more:
+/// a comment and an SOS marker with nothing after it, or a comment and the
+/// header of a scan of the first component with no data.  The image is the
+/// three scans', all its rows whole; a strict decode rejects the second.
+#[test]
+fn scan_after_the_last_component_is_not_part_of_the_image() {
+    let whole = include_bytes!("images/tiny_non_interleaved_444.jpg");
+    let expected = JpegDecoder::new(ZCursor::new(whole)).decode().unwrap();
+    let body = &whole[..whole.len() - 2];
+    let comment = [0xFF, 0xFE, 0x00, 0x03, b'x'];
+
+    let mut bare_marker = body.to_vec();
+    bare_marker.extend_from_slice(&comment);
+    bare_marker.extend_from_slice(&[0xFF, 0xDA]);
+
+    let mut extra_scan = body.to_vec();
+    extra_scan.extend_from_slice(&comment);
+    extra_scan.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+    extra_scan.extend_from_slice(&[0xFF, 0xD9]);
+
+    for (name, data) in [("bare marker", &bare_marker), ("extra scan", &extra_scan)] {
+        let options = DecoderOptions::default().set_strict_mode(false);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
+        let pixels = decoder.decode().unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(pixels, expected, "{name}");
+        assert_eq!(decoder.intact_rows(), 16, "{name}");
+    }
+
+    let options = DecoderOptions::default().set_strict_mode(true);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&extra_scan), options);
+    decoder.decode().unwrap_err();
 }

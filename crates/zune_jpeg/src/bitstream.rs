@@ -48,7 +48,6 @@
 //! Knock yourself out.
 use alloc::format;
 use alloc::string::ToString;
-use core::cmp::min;
 
 use zune_core::bytestream::{ZByteReaderTrait, ZReader};
 use zune_core::log::warn;
@@ -116,6 +115,10 @@ pub(crate) trait BitStream {
 
     /// Create a new Bitstream for progressive decoding
     fn new_progressive(al: u8, spec_start: u8, spec_end: u8) -> Self;
+
+    /// Whether malformed entropy-coded data that a decode otherwise carries
+    /// on from is an error.
+    fn set_strict(&mut self, _strict: bool) {}
 
     fn get_dc_table(
         tables: &mut EntropyTables,
@@ -257,11 +260,37 @@ pub(crate) struct BitStreamHuffman {
     /// the buffer's lowest bits, so one of them has been consumed exactly
     /// when `bits_left` is smaller.
     fill_bits:           u32,
-    /// A fill bit was consumed before a reset.
+    /// A fill bit was consumed before a reset, or malformed data was
+    /// carried on from.
     data_short:          bool,
+    /// See [`BitStream::set_strict`].
+    strict:              bool,
 }
 
 impl BitStreamHuffman {
+    /// The zig-zag position of an AC coefficient whose run ends at `pos`.
+    /// A run that ends past the last coefficient of the block is malformed:
+    /// a strict decode fails, any other puts the coefficient on the last
+    /// position and counts the data as damaged.
+    #[inline(always)]
+    fn ac_position(&mut self, pos: usize) -> Result<usize, DecodeErrors> {
+        if pos <= 63 {
+            return Ok(pos);
+        }
+        self.ac_run_past_block()
+    }
+
+    #[cold]
+    fn ac_run_past_block(&mut self) -> Result<usize, DecodeErrors> {
+        if self.strict {
+            return Err(DecodeErrors::FormatStatic(
+                "AC coefficient run past the end of the block",
+            ));
+        }
+        self.data_short = true;
+        Ok(63)
+    }
+
     /// [`BitStream::refill`] within eight bytes of the end of the input:
     /// the same bytes into the buffer, with those read past the end (zeros
     /// the input does not hold) counted in `overread_by` and `fill_bits`.
@@ -285,11 +314,20 @@ impl BitStreamHuffman {
             }
             // A stuffed zero follows a data byte of 0xFF; anything else is
             // a marker, after any number of 0xFF fill bytes.
+            let mut made_up = reader.eof()?;
             let mut next_byte = reader.read_u8();
             while next_byte == 0xFF {
+                made_up = reader.eof()?;
                 next_byte = reader.read_u8();
             }
             if next_byte == 0x00 {
+                // A zero read past the end is no stuffed byte: the input
+                // does not say whether the 0xFF is data or begins a marker,
+                // so its bits count as made up.
+                if made_up {
+                    self.overread_by += 1;
+                    self.fill_bits += 8;
+                }
                 continue;
             }
             // The 0xFF belongs to the marker, not to the data.
@@ -526,6 +564,7 @@ impl BitStream for BitStreamHuffman {
             seen_eoi:            false,
             fill_bits:           0,
             data_short:          false,
+            strict:              false,
         }
     }
 
@@ -547,7 +586,12 @@ impl BitStream for BitStreamHuffman {
             seen_eoi:            false,
             fill_bits:           0,
             data_short:          false,
+            strict:              false,
         }
+    }
+
+    fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
     }
 
     #[inline(always)]
@@ -768,7 +812,7 @@ impl BitStream for BitStreamHuffman {
             if fast_ac != 0 {
                 //  FAST AC path
                 pos += ((fast_ac >> 4) & 15) as usize; // run
-                let t_pos = UN_ZIGZAG[min(pos, 63)] & 63;
+                let t_pos = UN_ZIGZAG[self.ac_position(pos)?] & 63;
 
                 block[t_pos] = i32::from(fast_ac >> 8).wrapping_mul(qt_table[t_pos]); // Value
                 self.drop_bits((fast_ac & 15) as u8);
@@ -783,7 +827,7 @@ impl BitStream for BitStreamHuffman {
                     pos += r as usize;
                     r = self.get_bits(symbol as u8);
                     symbol = huff_extend(r, symbol);
-                    let t_pos = UN_ZIGZAG[pos & 63] & 63;
+                    let t_pos = UN_ZIGZAG[self.ac_position(pos)?] & 63;
 
                     block[t_pos] = symbol.wrapping_mul(qt_table[t_pos]);
 
@@ -833,6 +877,8 @@ impl BitStream for BitStreamHuffman {
                 //  FAST AC path
                 pos += ((fast_ac >> 4) & 15) as usize; // run
 
+                // Nothing is stored, but the same streams are malformed.
+                self.ac_position(pos)?;
                 self.drop_bits((fast_ac & 15) as u8);
                 pos += 1;
             } else {
@@ -843,6 +889,7 @@ impl BitStream for BitStreamHuffman {
 
                 if symbol != 0 {
                     pos += r as usize;
+                    self.ac_position(pos)?;
                     // Advance over bits but ignore.
                     let _ = self.get_bits(symbol as u8);
 
@@ -931,7 +978,7 @@ impl BitStream for BitStreamHuffman {
             if fac != 0 {
                 // fast ac path
                 k += ((fac >> 4) & 15) as usize; // run
-                block[UN_ZIGZAG[min(k, 63)] & 63] = (fac >> 8).wrapping_mul(bit); // value
+                block[UN_ZIGZAG[self.ac_position(k)?] & 63] = (fac >> 8).wrapping_mul(bit); // value
                 self.drop_bits((fac & 15) as u8);
                 k += 1;
             } else {
@@ -944,7 +991,7 @@ impl BitStream for BitStreamHuffman {
                     k += r as usize;
                     r = self.get_bits(symbol as u8);
                     symbol = huff_extend(r, symbol);
-                    block[UN_ZIGZAG[k & 63] & 63] = (symbol as i16).wrapping_mul(bit);
+                    block[UN_ZIGZAG[self.ac_position(k)?] & 63] = (symbol as i16).wrapping_mul(bit);
                     k += 1;
                 } else {
                     if r != 15 {
