@@ -22,11 +22,16 @@ pub mod renderer;
 pub mod resources;
 #[cfg(test)]
 mod test_helpers;
+pub mod unsupported;
 
 pub use form_type::{FormType, form_type};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
+pub use unsupported::{
+    MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
+    page_has_javascript, page_unsupported_features,
+};
 
 /// The effective device AA-fill dispatch threshold in pixels:
 /// `gpu::GPU_AA_FILL_THRESHOLD` unless `PDF_RASTER_AA_FILL_THRESHOLD`
@@ -172,23 +177,20 @@ impl From<pdf::PdfError> for InterpError {
 
 /// Open a PDF document from a file path.
 ///
-/// If the document contains any JavaScript entry point, a loud `WARN` is
-/// emitted for each location found and the document still opens: rasterrocket
-/// is a rasterizer with no JavaScript engine, so it never executes `/JS` —
-/// the structural presence of a script has no effect on the static rendered
-/// page, and refusing valid documents would be a false-negative total loss.
+/// The document still opens when it uses features the renderer ignores;
+/// each one that changes what renders, or carries a script, is warned
+/// about once (see [`document_unsupported_features`]):
+/// - JavaScript at the catalog's `/OpenAction` or `/AA`, in the
+///   `/Names /JavaScript` tree, or in `/AcroForm /AA`.  Scripts are never
+///   executed, and an action counts only when it runs a script, never on
+///   bare key presence;
+/// - a dynamic XFA form, whose rendered pages are the placeholder content
+///   stored in the file;
+/// - a portable collection, whose embedded documents are not rendered.
 ///
-/// Checked locations (PDF 2.0 §12.6), each flagged only when the construct
-/// is genuinely JavaScript (a `/S /JavaScript` action), never on bare key
-/// presence — a spurious warning would erode the security signal:
-/// - `/Catalog/OpenAction` whose action has `/S /JavaScript`
-/// - `/Catalog/AA` with a `/S /JavaScript` sub-action (vs. a transition/GoTo)
-/// - `/Catalog/Names/JavaScript` (the JS-specific name subtree)
-/// - `/Catalog/AcroForm/AA` with a `/S /JavaScript` sub-action
-///
-/// Page-level and annotation JavaScript is not checked here: opening a
-/// document reads no page objects.  [`page_has_javascript`] checks one page
-/// when it is rendered.
+/// Page-level and annotation features are not checked here: opening a
+/// document reads no page objects.  [`page_unsupported_features`] lists a
+/// page's.
 ///
 /// An encrypted document is refused; see [`open_with`].
 ///
@@ -217,8 +219,7 @@ pub fn open(path: impl AsRef<Path>) -> Result<Document, InterpError> {
 ///   given.
 pub fn open_with(path: impl AsRef<Path>, options: &OpenOptions) -> Result<Document, InterpError> {
     let doc = Document::open_with(path.as_ref(), options)?;
-    warn_if_javascript(&doc);
-    form_type::warn_if_dynamic_xfa(&doc);
+    unsupported::warn_document_features(&doc);
     Ok(doc)
 }
 
@@ -242,8 +243,7 @@ pub fn open_bytes(bytes: Vec<u8>) -> Result<Document, InterpError> {
 /// The errors of [`open_with`] other than file I/O.
 pub fn open_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Document, InterpError> {
     let doc = Document::from_bytes_with(bytes, options)?;
-    warn_if_javascript(&doc);
-    form_type::warn_if_dynamic_xfa(&doc);
+    unsupported::warn_document_features(&doc);
     Ok(doc)
 }
 
@@ -257,153 +257,8 @@ pub fn open_shared_with(
     options: &OpenOptions,
 ) -> Result<Document, InterpError> {
     let doc = Document::from_shared_with(bytes, options)?;
-    warn_if_javascript(&doc);
-    form_type::warn_if_dynamic_xfa(&doc);
+    unsupported::warn_document_features(&doc);
     Ok(doc)
-}
-
-/// Scan the document catalog for JavaScript entry points and emit a loud
-/// `WARN` for every location present.  Never fails: rasterrocket has no
-/// JavaScript engine and never executes `/JS`, so a script's structural
-/// presence cannot change the static rendered page — the correct behaviour
-/// is to render the document and tell the operator the JS was ignored.
-///
-/// No JS content is read, parsed, or evaluated — the check is purely
-/// structural (dict key presence / subtype name).
-fn warn_if_javascript(doc: &Document) {
-    for location in javascript_locations(doc) {
-        log::warn!(
-            "document contains JavaScript ({location}); JavaScript is ignored — \
-             rasterrocket does not execute scripts, rendering static content only"
-        );
-    }
-}
-
-/// Return every JavaScript entry point present in the document catalog, in
-/// scan order.  Empty when the catalog is unreadable or carries no JS.
-///
-/// Split out from [`warn_if_javascript`] so the four detection branches are
-/// unit-testable without capturing log output.
-fn javascript_locations(doc: &Document) -> Vec<&'static str> {
-    let mut found = Vec::new();
-    let Ok(catalog) = doc.catalog() else {
-        return found;
-    };
-
-    // 1. OpenAction with /S /JavaScript
-    if let Some(action) = catalog.get(b"OpenAction")
-        && action_is_js(doc, action)
-    {
-        found.push("/OpenAction");
-    }
-
-    // 2. Catalog-level additional actions (/AA).  An /AA dictionary holds
-    //    named sub-entries that are themselves action dictionaries
-    //    (PDF 2.0 §12.6.3, Table 197/198).  Only flag it when at least one
-    //    sub-action is /S /JavaScript: a /WC document-close transition or a
-    //    /S /GoTo additional action is NOT JavaScript, and warning on bare
-    //    /AA presence would cry wolf and erode the security signal.
-    if let Some(aa_obj) = catalog.get(b"AA")
-        && aa_dict_has_js_action(doc, aa_obj)
-    {
-        found.push("/AA (catalog additional actions)");
-    }
-
-    // 3. Document JS name tree (/Names/JavaScript).  /Names also carries
-    //    non-JS trees (/Dests, /EmbeddedFiles, …); the /JavaScript subtree
-    //    is the JS-specific one, so this discriminates correctly and does
-    //    not fire on a /Names <</Dests …>> document.
-    if let Some(names_obj) = catalog.get(b"Names")
-        && let Some(names_dict) = resources::resolve_dict(doc, names_obj)
-        && names_dict.get(b"JavaScript").is_some()
-    {
-        found.push("/Names/JavaScript");
-    }
-
-    // 4. AcroForm additional actions.  Same discrimination as branch 2: an
-    //    AcroForm /AA whose only action is /S /SubmitForm (a plain HTTP/FDF
-    //    form submit, extremely common on fillable forms) is NOT JavaScript.
-    if let Some(acroform_obj) = catalog.get(b"AcroForm")
-        && let Some(acroform) = resources::resolve_dict(doc, acroform_obj)
-        && let Some(aa_obj) = acroform.get(b"AA")
-        && aa_dict_has_js_action(doc, aa_obj)
-    {
-        found.push("/AcroForm/AA");
-    }
-
-    found
-}
-
-/// Upper bound on the annotations [`page_has_javascript`] inspects on one
-/// page.
-const MAX_JS_SCAN_ANNOTS: usize = 8192;
-
-/// True when page `page_id` carries a JavaScript action.
-///
-/// The actions inspected are the page-level `/AA` entry and each
-/// annotation's `/A` and `/AA` entries; one whose `/S` is `/JavaScript`
-/// (ISO 32000-2 §12.6.3–§12.6.4.17) counts.  The calculate, format and
-/// validate scripts of a fillable form are annotation `/AA` entries.
-///
-/// Only `/S` names are read; no script is decoded.  An unreadable page or
-/// annotation counts as carrying none, and at most 8 192
-/// annotations are inspected.
-#[must_use]
-pub fn page_has_javascript(doc: &Document, page_id: pdf::ObjectId) -> bool {
-    let Ok(page) = doc.get_dict_arc(page_id) else {
-        return false;
-    };
-    let Some(page) = page.as_dict() else {
-        return false;
-    };
-    if page
-        .get(b"AA")
-        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
-    {
-        return true;
-    }
-    resources::resolve_array(doc, page.get(b"Annots"))
-        .iter()
-        .take(MAX_JS_SCAN_ANNOTS)
-        .any(|annot| {
-            resources::resolve_dict(doc, annot).is_some_and(|annot| {
-                annot.get(b"A").is_some_and(|a| action_is_js(doc, a))
-                    || annot
-                        .get(b"AA")
-                        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
-            })
-        })
-}
-
-/// Return `true` if `obj` (or the dict it resolves to) has `/S /JavaScript`.
-fn action_is_js(doc: &Document, obj: &pdf::Object) -> bool {
-    let Some(d) = resources::resolve_dict(doc, obj) else {
-        return false;
-    };
-    d.get(b"S")
-        .and_then(pdf::Object::as_name)
-        .is_some_and(|name| name == b"JavaScript")
-}
-
-/// Return `true` if `aa_obj` resolves to an additional-actions (`/AA`)
-/// dictionary in which **any** named sub-entry is a `/S /JavaScript` action.
-///
-/// An `/AA` dictionary's values are themselves action dictionaries keyed by
-/// trigger name (`/O`, `/C`, `/WC`, `/K`, …); the action's `/S` subtype is
-/// what makes it JavaScript versus a `/S /Transition`, `/S /GoTo`,
-/// `/S /SubmitForm` or `/S /Named` action.  Flagging bare `/AA` presence
-/// would be a false positive on the many non-JS additional-action documents
-/// in the wild, which dilutes the "this document contains JavaScript" signal
-/// an operator relies on.
-///
-/// Detection stays purely structural: only `/S` subtype names are read; no
-/// `/JS` script string is decoded, parsed, or evaluated.
-fn aa_dict_has_js_action(doc: &Document, aa_obj: &pdf::Object) -> bool {
-    let Some(aa) = resources::resolve_dict(doc, aa_obj) else {
-        return false;
-    };
-    aa.iter()
-        .any(|(_trigger, action)| action_is_js(doc, action))
 }
 
 /// Return the number of pages in `doc`.
@@ -876,191 +731,6 @@ pub fn parse_page_content<'a>(
     let resources = resources::PageResources::new(doc, page_id);
     let components = |name: &[u8]| resources.inline_image_components(name);
     content::parse_with(bytes, Some(&components))
-}
-
-#[cfg(test)]
-mod js_guard_tests {
-    use super::test_helpers::make_doc;
-    use super::{javascript_locations, page_has_javascript, warn_if_javascript};
-
-    #[test]
-    fn open_action_javascript_is_warned_not_rejected() {
-        let doc = make_doc(" /OpenAction <</S /JavaScript>>");
-        // Detected, but the document is renderable: warn, never fail.
-        assert_eq!(javascript_locations(&doc), vec!["/OpenAction"]);
-        warn_if_javascript(&doc); // must not panic
-    }
-
-    #[test]
-    fn open_action_goto_is_not_javascript() {
-        let doc = make_doc(" /OpenAction <</S /GoTo>>");
-        assert_eq!(javascript_locations(&doc).len(), 0);
-    }
-
-    #[test]
-    fn names_javascript_is_warned_not_rejected() {
-        let doc = make_doc(" /Names <</JavaScript <</Names []>>>>");
-        assert_eq!(javascript_locations(&doc), vec!["/Names/JavaScript"]);
-        warn_if_javascript(&doc); // must not panic
-    }
-
-    #[test]
-    fn aa_and_acroform_aa_are_detected() {
-        let doc =
-            make_doc(" /AA <</WC <</S /JavaScript>>>> /AcroForm <</AA <</K <</S /JavaScript>>>>>>");
-        assert_eq!(
-            javascript_locations(&doc),
-            vec!["/AA (catalog additional actions)", "/AcroForm/AA"]
-        );
-    }
-
-    #[test]
-    fn all_four_javascript_locations_detected() {
-        let doc = make_doc(
-            " /OpenAction <</S /JavaScript>> /AA <</WC <</S /JavaScript>>>> \
-             /Names <</JavaScript <</Names []>>>> /AcroForm <</AA <</K <</S /JavaScript>>>>>>",
-        );
-        assert_eq!(
-            javascript_locations(&doc),
-            vec![
-                "/OpenAction",
-                "/AA (catalog additional actions)",
-                "/Names/JavaScript",
-                "/AcroForm/AA"
-            ]
-        );
-        warn_if_javascript(&doc); // must not panic
-    }
-
-    #[test]
-    fn clean_document_has_no_javascript() {
-        let doc = make_doc("");
-        assert_eq!(javascript_locations(&doc).len(), 0);
-        warn_if_javascript(&doc); // no-op, must not panic
-    }
-
-    #[test]
-    fn catalog_aa_without_js_action_does_not_cry_wolf() {
-        // /WC document-close additional action that is a /S /GoTo, not JS.
-        // Bare /AA presence must NOT be reported as JavaScript.
-        let doc = make_doc(" /AA <</WC <</S /GoTo /D [0 /Fit]>>>>");
-        assert!(
-            javascript_locations(&doc).is_empty(),
-            "non-JS catalog /AA must not be flagged as JavaScript"
-        );
-    }
-
-    #[test]
-    fn acroform_aa_submitform_is_not_javascript() {
-        // A fillable form whose AcroForm /AA only submits via HTTP/FDF
-        // (/S /SubmitForm) — extremely common, and NOT JavaScript.
-        let doc = make_doc(" /AcroForm <</AA <</C <</S /SubmitForm /F (https://example/x) >>>>>>");
-        assert!(
-            javascript_locations(&doc).is_empty(),
-            "AcroForm /AA with only /S /SubmitForm must not be flagged as JavaScript"
-        );
-    }
-
-    #[test]
-    fn open_action_goto_dest_array_is_not_javascript() {
-        // /OpenAction may be a destination array (go-to-page-on-open), which
-        // is not even an action dictionary — must not be flagged.
-        let doc = make_doc(" /OpenAction [0 /Fit]");
-        assert_eq!(javascript_locations(&doc).len(), 0);
-    }
-
-    #[test]
-    fn aa_with_mixed_actions_flags_when_any_is_js() {
-        // A non-JS /WC transition next to a JS /O open action: the presence
-        // of the JS action must still be detected (no false negative).
-        let doc = make_doc(" /AA <</WC <</S /GoTo /D [0 /Fit]>> /O <</S /JavaScript>>>>");
-        assert_eq!(
-            javascript_locations(&doc),
-            vec!["/AA (catalog additional actions)"]
-        );
-    }
-
-    use pdf::{Document, ObjectId};
-
-    /// The page leaf of [`make_page_annot_doc`].
-    const PAGE: ObjectId = (3, 0);
-
-    /// Build a one-page PDF whose Page leaf (object 3) carries the verbatim
-    /// `page_extra` dict text, with an annotation (object 4) carrying the
-    /// verbatim `annot_body`.  The page always declares `/Annots [4 0 R]`
-    /// so the annotation is reachable; pass `annot_body` `"<<>>"` for a
-    /// no-op annotation when the test only exercises the page `/AA`.
-    ///
-    /// Object layout:
-    ///   1 0 — Catalog (/Pages 2 0 R)
-    ///   2 0 — Pages root (/Kids [3 0 R] /Count 1)
-    ///   3 0 — Page leaf (/Type /Page /Parent 2 0 R /Annots [4 0 R] + `page_extra`)
-    ///   4 0 — Annotation (`annot_body`)
-    fn make_page_annot_doc(page_extra: &str, annot_body: &str) -> Document {
-        let header = "%PDF-1.4\n";
-        let obj1 = "1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n";
-        let obj2 = "2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n";
-        let obj3 =
-            format!("3 0 obj\n<</Type /Page /Parent 2 0 R /Annots [4 0 R]{page_extra}>>\nendobj\n");
-        let obj4 = format!("4 0 obj\n{annot_body}\nendobj\n");
-
-        let off1 = header.len();
-        let off2 = off1 + obj1.len();
-        let off3 = off2 + obj2.len();
-        let off4 = off3 + obj3.len();
-        let xref_start = off4 + obj4.len();
-        let xref = format!(
-            "xref\n0 5\n\
-             0000000000 65535 f\r\n\
-             {off1:010} 00000 n\r\n\
-             {off2:010} 00000 n\r\n\
-             {off3:010} 00000 n\r\n\
-             {off4:010} 00000 n\r\n"
-        );
-        let trailer = format!("trailer\n<</Size 5 /Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF");
-        let bytes = format!("{header}{obj1}{obj2}{obj3}{obj4}{xref}{trailer}").into_bytes();
-        Document::from_bytes_owned(bytes).expect("page-annot test PDF parse")
-    }
-
-    #[test]
-    fn page_aa_javascript_is_detected() {
-        // JS only on a page-level /AA/O open action — nothing in the catalog.
-        let doc = make_page_annot_doc(" /AA <</O <</S /JavaScript>>>>", "<<>>");
-        assert!(page_has_javascript(&doc, PAGE));
-        assert!(javascript_locations(&doc).is_empty(), "open reads no page");
-    }
-
-    #[test]
-    fn widget_annotation_aa_k_javascript_is_detected() {
-        // JS only on a widget annotation's /AA/K (calculate) action — the
-        // single most common real-world placement in fillable forms.
-        let doc = make_page_annot_doc(
-            "",
-            "<</Type /Annot /Subtype /Widget /AA <</K <</S /JavaScript>>>>>>",
-        );
-        assert!(page_has_javascript(&doc, PAGE));
-    }
-
-    #[test]
-    fn annotation_a_javascript_is_detected() {
-        // JS only on an annotation's /A activation action.
-        let doc = make_page_annot_doc("", "<</Type /Annot /Subtype /Link /A <</S /JavaScript>>>>");
-        assert!(page_has_javascript(&doc, PAGE));
-    }
-
-    #[test]
-    fn non_js_page_aa_and_annot_a_do_not_cry_wolf() {
-        // A /S /GoTo page /AA and a /S /URI annotation /A are NOT JavaScript;
-        // bare /AA or /A presence must not be flagged.
-        let doc = make_page_annot_doc(
-            " /AA <</O <</S /GoTo /D [0 /Fit]>>>>",
-            "<</Type /Annot /Subtype /Link /A <</S /URI /URI (https://example/x)>>>>",
-        );
-        assert!(
-            !page_has_javascript(&doc, PAGE),
-            "non-JS page /AA and annotation /A must not be flagged as JavaScript"
-        );
-    }
 }
 
 // ── §7.7.3.4 inheritance + §14.11.2 clamp tests ──────────────────────────────

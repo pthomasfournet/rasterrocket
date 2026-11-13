@@ -50,17 +50,6 @@ pub fn form_type(doc: &Document) -> FormType {
     }
 }
 
-/// Warn when `doc` is a dynamic XFA form: what renders is its placeholder
-/// page content.
-pub(crate) fn warn_if_dynamic_xfa(doc: &Document) {
-    if form_type(doc) == FormType::XfaFull {
-        log::warn!(
-            "document is a dynamic XFA form (/NeedsRendering true); XFA is not processed — \
-             the rendered pages are the placeholder content stored in the file"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{FormType, form_type};

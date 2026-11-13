@@ -69,7 +69,7 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 /// Returns a [`PageDiagnostics`] with `has_images`, `has_vector_text`,
 /// `dominant_filter`, a conservative `source_ppi_hint` derived from the
 /// image's PDF dictionary `Width` entry (see module doc for caveats),
-/// `content_failures` and `form_type`.  The fields only rendering measures
+/// `content_failures`, `form_type` and `unsupported_features`.  The fields only rendering measures
 /// (`image_failures`, `missing_fonts`, `unslotted_spots`, `device_fills`,
 /// `device_fill_failures`, `device_icc_conversions`, `device_icc_failures`)
 /// are empty or zero.
@@ -120,6 +120,7 @@ pub fn prescan_page(
         source_ppi_hint: (scan.max_ppi > 0.0).then_some(scan.max_ppi),
         content_failures: content.failures,
         form_type: crate::form_type(doc),
+        unsupported_features: crate::page_unsupported_features(doc, page_id),
         ..PageDiagnostics::default()
     })
 }

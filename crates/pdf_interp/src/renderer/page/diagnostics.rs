@@ -77,6 +77,14 @@ pub struct PageDiagnostics {
     ///
     /// [`FormType::XfaFull`]: crate::FormType::XfaFull
     pub form_type: crate::FormType,
+    /// Features on this page that the renderer ignores: JavaScript in the
+    /// page's or an annotation's actions, and 3D and multimedia
+    /// annotations, in the order of
+    /// [`page_unsupported_features`](crate::page_unsupported_features).
+    /// The document-level ones are listed once per document, by
+    /// [`document_unsupported_features`](crate::document_unsupported_features).
+    /// Empty when the page uses none.
+    pub unsupported_features: Vec<crate::UnsupportedFeature>,
     /// Fills painted from coverage counts computed on a GPU backend.  Zero
     /// when every fill ran on the CPU: the default, the device fill being
     /// dormant unless its size threshold is lowered.  Type 3 glyphs and
