@@ -23,19 +23,22 @@
 //!
 //! # div255
 //!
-//! `(v + (v >> 8) + 0x80) >> 8` computes `v / 255` exactly for the operand
-//! range here (`v ≤ 255²`), matching `color::convert::div255` in the general
-//! path bit for bit, so output does not depend on which tier a span takes.
-//! It stays pure u16 lane arithmetic (max intermediate 65 407).
+//! `(t + (t >> 8)) >> 8` with `t = v + 0x80` computes `v / 255` rounded to
+//! nearest for the operand range here (`v ≤ 255²`), matching
+//! `color::convert::div255` in the general path bit for bit, so output does
+//! not depend on which tier a span takes.  It stays pure u16 lane
+//! arithmetic (max intermediate 65 407).
 
 /// Exact `v / 255` (rounded to nearest) for `v` in `[0, 255²]`.
 ///
 /// Same formula as `color::convert::div255`; the intermediate
-/// `v + (v >> 8) + 0x80` peaks at 65 407 for `v = 65 025`, so u16 cannot
-/// overflow and no clamp is needed (the result is ≤ 255 on this range).
+/// `t + (t >> 8)`, `t = v + 0x80`, peaks at 65 407 for `v = 65 025`, so u16
+/// cannot overflow and no clamp is needed (the result is ≤ 255 on this
+/// range).
 #[inline]
 const fn div255_u16(v: u16) -> u16 {
-    (v + (v >> 8) + 0x80) >> 8
+    let t = v + 0x80;
+    (t + (t >> 8)) >> 8
 }
 
 /// Composite a solid RGB source over an opaque destination (no alpha plane).
@@ -162,12 +165,10 @@ unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u
     let a_in = _mm512_set1_epi16(i16::from(a_input));
     let v255 = _mm512_set1_epi16(255);
     let v128 = _mm512_set1_epi16(0x80);
-    // Exact v / 255 on u16 lanes: (v + (v >> 8) + 0x80) >> 8.
+    // v / 255 rounded to nearest on u16 lanes: (t + (t >> 8)) >> 8, t = v + 0x80.
     let div255 = |v: __m512i| {
-        _mm512_srli_epi16::<8>(_mm512_add_epi16(
-            _mm512_add_epi16(v, _mm512_srli_epi16::<8>(v)),
-            v128,
-        ))
+        let t = _mm512_add_epi16(v, v128);
+        _mm512_srli_epi16::<8>(_mm512_add_epi16(t, _mm512_srli_epi16::<8>(t)))
     };
     // The RGB triple in u16 lanes 0..=2 of every qword; LANE_CHANNEL selects
     // from those three lanes per byte position.

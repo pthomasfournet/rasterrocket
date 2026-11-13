@@ -5,7 +5,7 @@
 //! # Functions
 //!
 //! **Integer blend math**
-//! - [`div255`] — fast approximate division by 255
+//! - [`div255`] — division by 255, rounded to nearest
 //! - [`lerp_u8`] — linear interpolation between two bytes
 //!
 //! **Color-space conversion (f64 → u8, normalised PDF values)**
@@ -20,35 +20,28 @@
 
 // ── Integer blend math ────────────────────────────────────────────────────────
 
-/// Fast approximate division by 255.
+/// Division by 255, rounded to nearest, clamped to a byte.
 ///
-/// Uses the identity `(x + (x >> 8) + 0x80) >> 8` which gives the nearest
-/// integer to `x / 255.0` for all `x` in the valid input range.
+/// Computes `(t + (t >> 8)) >> 8` with `t = x + 0x80`, which equals
+/// `x / 255` rounded to nearest for every `x` in \[0, 65535\] (an exact
+/// half never occurs, 255 being odd).
 ///
 /// # Valid input range
 ///
-/// `x` must be in \[0, 65535\]. Inputs larger than 65535 are not meaningful
-/// (the maximum product of two u8 values is 255 × 255 = 65025), and values
-/// above 65279 saturate: the formula yields 256 which is clamped to 255.
+/// `x` must be in \[0, 65535\]. In practice `x` is a product `a * b` of two
+/// bytes, at most 255 × 255 = 65025.
 ///
 /// # Output range
 ///
-/// Always \[0, 255\].
-///
-/// # Saturation note
-///
-/// For `x` in \[65280, 65535\] the unmasked result would be 256; the `.min(255)`
-/// clamp makes those values return 255. In practice `x` is always a product
-/// `a * b` with `a, b ∈ [0, 255]`, so the maximum is 65025 and the clamp is
-/// never reached.
+/// Always \[0, 255\]: from `x` = 65153 the nearest integer is 256, which is
+/// clamped to 255; no product of two bytes reaches it.
 #[inline]
 #[must_use]
 pub fn div255(x: u32) -> u8 {
-    // The intermediate value (x + (x>>8) + 0x80) can reach at most
-    // 65535 + 255 + 128 = 65918, which fits in u32. The right-shift by 8
-    // gives at most 257; clamping to 255 makes the cast to u8 always safe.
-    let shifted = (x + (x >> 8) + 0x80) >> 8;
-    // `shifted ≤ 257` before clamping; `.min(255)` makes the `as u8` cast lossless.
+    // At most 65535 + 128 + 256 = 65919 before the shift, 257 after it.
+    let t = x + 0x80;
+    let shifted = (t + (t >> 8)) >> 8;
+    // `.min(255)` makes the `as u8` cast lossless.
     shifted.min(255) as u8
 }
 
@@ -277,32 +270,15 @@ mod tests {
         }
     }
 
+    /// `div255` is `x / 255` rounded to nearest, clamped to 255, over its
+    /// whole input range; 173 × 241 / 255 = 163.502 rounds up.
     #[test]
-    fn div255_exhaustive() {
+    fn div255_rounds_to_nearest() {
         for x in 0u32..=65535 {
-            let got = f64::from(div255(x));
-            // div255 returns u8, so saturate the expected value at 255.
-            let expected = (f64::from(x) / 255.0).round().min(255.0);
-            assert!(
-                (got - expected).abs() <= 1.0,
-                "div255({x}) = {got}, expected ≈ {expected}"
-            );
+            let nearest = ((2 * x + 255) / 510).min(255);
+            assert_eq!(u32::from(div255(x)), nearest, "div255({x})");
         }
-    }
-
-    #[test]
-    fn div255_boundary_products() {
-        // all a*b products where a,b ∈ [0,255]
-        for a in 0u32..=255 {
-            for b in 0u32..=255 {
-                let got = f64::from(div255(a * b));
-                let expected = (f64::from(a) * f64::from(b) / 255.0).round();
-                assert!(
-                    (got - expected).abs() <= 1.0,
-                    "div255({a}*{b}) = {got}, expected ≈ {expected}"
-                );
-            }
-        }
+        assert_eq!(div255(173 * 241), 164);
     }
 
     /// Endpoints are exact and every interpolant lies between them.

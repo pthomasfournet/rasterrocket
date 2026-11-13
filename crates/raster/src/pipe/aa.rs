@@ -369,10 +369,10 @@ mod tests {
         render_span_aa::<Rgb8>(&pipe, &src, &mut dst_fast, None, &shape, 0, 16, 0);
 
         // Compute the reference via the fast path's formula, with
-        // div255(v) = (v + (v >> 8) + 0x80) >> 8 applied at both stages:
+        // div255(v) = v / 255 rounded to nearest applied at both stages:
         //   a_src   = div255(a_input * shape[i])
         //   c_out_j = div255((255 - a_src) * c_dst[j] + a_src * src[j])
-        let div255 = |v: u16| (v + (v >> 8) + 0x80) >> 8;
+        let div255 = |v: u16| u16::from(color::convert::div255(u32::from(v)));
         let a_in = 255u16;
         let mut expected = initial;
         for (i, &sh) in shape.iter().enumerate() {
