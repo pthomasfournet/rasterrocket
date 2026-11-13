@@ -4,7 +4,7 @@
 
 The `rasterrocket` crate is the integration entry point. It wraps `rasterrocket-interp` and `rasterrocket-render` behind a simple, stable API.
 
-**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `ImageFilter`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle and stays exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
+**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `ImageFilter`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle and stays exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
 
 ---
 
@@ -286,6 +286,7 @@ impl RasterSession {
     pub const fn total_pages(&self) -> u32
     pub const fn policy(&self) -> BackendPolicy
     pub const fn form_type(&self) -> FormType
+    pub fn unsupported_features(&self) -> &[UnsupportedFeature]
     pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
     pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError>
     #[cfg(feature = "cache")]
@@ -295,6 +296,8 @@ impl RasterSession {
 ```
 
 An opened, read-only document. `Sync + Send` — safe to share across Rayon threads.
+
+`unsupported_features` lists the document-level features the renderer ignores, found when the session opens: JavaScript attached to the catalog (`OpenAction`, `DocumentActions`), the `/Names /JavaScript` tree (`NameTree`) or `/AcroForm /AA` (`FormActions`), an XFA form, and a portable collection, in that order; see [`UnsupportedFeature`](#unsupportedfeature). A page's own are in `PageDiagnostics::unsupported_features`.
 
 `page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering. `page_size_px(page_num, dpi)` is that size for a whole-page render at `dpi` (scale `dpi / 72` on both axes, rounded to nearest as the renderer rounds it; deskew keeps it), and it fails with the `InvalidOptions`, `PageDegenerate`, `PageTooLarge` or `PageAreaTooLarge` that render would.
 
@@ -458,6 +461,7 @@ Collected at zero extra cost during rendering.
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams), each skipped while the page is drawn from the others, and elements that decoded only in part (`partial`), executed up to where their data was lost. Either way whatever the lost data held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
 | `unslotted_spots` | `Vec<String>` | Spot colorants that found no spot ink on a page rendered with overprint simulation (the four spot inks being held by the page's first four spots). Each printed its alternate colour in process ink, so it overprints as that process colour rather than as a separate ink. Empty on every other page. |
+| `unsupported_features` | `Vec<UnsupportedFeature>` | Features on this page the renderer ignores: JavaScript in the page's `/AA` or an annotation's `/A` or `/AA`, and 3D and multimedia annotations (`/3D`, `/RichMedia`, `/Movie`, `/Sound`, `/Screen`); see [`UnsupportedFeature`](#unsupportedfeature). Empty when there are none. The document-level ones are on the session. |
 | `form_type` | `FormType` | The document's interactive form type (the same on every page). `XfaFull` means a dynamic XFA form: XFA is not processed, so the page is the placeholder content stored in the file, often a notice asking for an XFA-capable viewer, and its text is not the form's. |
 
 ```rust
@@ -471,6 +475,41 @@ pub enum FormType {
 ```
 
 Opening a dynamic XFA document (`XfaFull`) also logs one `warn`.
+
+#### `UnsupportedFeature`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnsupportedFeature {
+    JavaScript(ScriptLocation),          // a JavaScript action; never executed
+    MediaAnnotation {                    // interactive content not rendered
+        kind: MediaKind,
+        index: usize,                    // position in the page's /Annots
+        has_appearance: bool,            // has /AP /N, drawn in its place when annotations render
+    },
+    Xfa { dynamic: bool },               // /AcroForm /XFA; dynamic = /NeedsRendering true
+    Portfolio,                           // catalog /Collection; embedded documents not rendered
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ScriptLocation {
+    OpenAction,                          // catalog /OpenAction            (document)
+    DocumentActions,                     // catalog /AA                    (document)
+    NameTree,                            // catalog /Names /JavaScript     (document)
+    FormActions,                         // /AcroForm /AA                  (document)
+    PageActions,                         // page /AA                       (page)
+    AnnotationAction { index: usize },   // annotation /A                  (page)
+    AnnotationActions { index: usize },  // annotation /AA, e.g. a field's calculate script (page)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MediaKind { ThreeD, RichMedia, Movie, Sound, Screen }  // subtype() -> "3D", "RichMedia", …
+```
+
+Features a document uses that the renderer ignores, as typed data. The page renders without them; what is missing is what a script would have drawn, hidden or filled in, the 3D model or media clip (its poster appearance, when it has one, is drawn), the XFA layout of a dynamic form, or the documents a portfolio carries. `RasterSession::unsupported_features()` returns the document-level ones (`JavaScript` at a document location, `Xfa`, `Portfolio`); `PageDiagnostics::unsupported_features` lists a page's (`JavaScript` at a page location, `MediaAnnotation`), from a render and from `prescan_session` alike, page `/AA` first and then per annotation in `/Annots` order its `MediaAnnotation`, its `/A` script and its `/AA` scripts. Detection is structural: no script, model or media stream is decoded; an action counts as JavaScript only when it runs a script (`/S /JavaScript`, or `/S /Rendition` with `/JS`, also along its `/Next` chain), never on bare `/A` or `/AA` presence; at most 8 192 annotations per page are inspected. All three types implement `Display` (`JavaScript (annotation 3 /AA)`, `/3D annotation 0 (normal appearance only)`, `dynamic XFA form`, …), and `UnsupportedFeature::is_javascript()` tests for a script. The warn logs stay: opening a document warns about catalog JavaScript, a dynamic XFA form and a portfolio, and rendering warns about the first page with JavaScript and the first with a 3D or multimedia annotation, once per session each. The CLI prints nothing beyond these logs.
 
 ```rust
 #[non_exhaustive]
@@ -708,7 +747,9 @@ pub use rasterrocket_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, ImageFailure, PageDiagnostics,
 };
 pub use rasterrocket_interp::resources::ImageFilter;
-pub use rasterrocket_interp::{FormType, PageGeometry, RenderPurpose};
+pub use rasterrocket_interp::{
+    FormType, MediaKind, PageBox, PageGeometry, RenderPurpose, ScriptLocation, UnsupportedFeature,
+};
 pub use rasterrocket_parser::Password;
 ```
 
@@ -967,7 +1008,7 @@ pub fn open_bytes_with(bytes: Vec<u8>, options: &pdf::OpenOptions) -> Result<pdf
 
 Opens and validates a PDF, from a path or from bytes. `open` and `open_bytes` refuse an encrypted document; the `_with` forms take a `pdf::OpenOptions` (`OpenOptions::new(decrypt_authorized: bool, password: Option<Password>)`, or `default()` to refuse encrypted input), with the same meaning as the `SessionConfig` fields of those names: an authorised encrypted document is decrypted in process as its objects are read (the `pdf` crate's Standard security handler), and `Document::is_encrypted()` then reports `true`. `pdf::is_encrypted(path) -> Result<bool, PdfError>` probes the trailer for `/Encrypt` without opening the document, and `pdf::is_encrypted_bytes(&[u8])` does so for a document in memory.
 
- If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a `/S /JavaScript` action), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`, which the render path calls before each page and warns on once per session.
+ If a catalog JavaScript entry point is detected (checked locations: `/OpenAction`, catalog `/AA`, `/Names/JavaScript`, `/AcroForm/AA`, each flagged only when genuinely a JavaScript action: `/S /JavaScript`, or `/S /Rendition` with a `/JS` script, also along an action's `/Next` chain), a loud `WARN` is emitted per location and the document still opens — rasterrocket has no JavaScript engine and never executes `/JS`, so a script's structural presence cannot change the static rendered page. No JS is parsed or evaluated. A dynamic XFA form and a portable collection are warned about the same way. No page object is read at open; page-level `/AA` and annotation `/A`/`/AA` are checked per page by `page_has_javascript(doc, page_id) -> bool`. The same checks return typed data: `document_unsupported_features(doc) -> Vec<UnsupportedFeature>` and `page_unsupported_features(doc, page_id) -> Vec<UnsupportedFeature>`; see [`UnsupportedFeature`](#unsupportedfeature).
 
 The returned `pdf::Document` comes from the in-tree parser crate (`rasterrocket-parser`, imported as `pdf`). It is a lazy, mmap-backed reader: opening the file parses only the xref table and trailer; individual objects resolve on demand via byte-offset seek with a per-object `Arc` cache shared safely across worker threads. Each object stream (`ObjStm`) is decompressed once and its directory reused. `Document::linearization_hints()` returns `Option<LinearizationHints>`: the `/Linearized` dictionary of a Fast Web View file, found as the file's first object, or `None`, also for a file updated after it was linearized (its `/L` no longer the file's length). The page count is always the page tree's.
 

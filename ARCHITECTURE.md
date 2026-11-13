@@ -688,8 +688,13 @@ the rayon pool drops — this avoids the CUDA driver teardown race at process ex
   Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
   entry point; the document opens and renders normally. The catalog entry
   points are checked at open; page `/AA` and annotation `/A`/`/AA` are checked
-  per rendered page (`pdf_interp::page_has_javascript`), warned once per
-  session. `InterpError` (`#[non_exhaustive]`) has no
+  per rendered page, warned once per session.  `unsupported.rs` reports
+  every ignored feature as a typed `UnsupportedFeature`: per document
+  (`document_unsupported_features`: catalog JavaScript, XFA, portable
+  collection), returned by `RasterSession::unsupported_features`, and per
+  page (`page_unsupported_features`: page and annotation JavaScript, 3D and
+  multimedia annotations), in `PageDiagnostics::unsupported_features` from
+  a render and from a prescan. `InterpError` (`#[non_exhaustive]`) has no
   `JavaScript` variant — its variants are `Pdf`, `PageOutOfRange` and
   `InvalidPageGeometry`.
 - XFA — not processed. `form_type.rs` classifies the catalog's form

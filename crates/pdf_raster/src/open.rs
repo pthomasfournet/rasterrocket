@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 #[cfg(feature = "vulkan")]
 use crate::vk_init::init_vk_backend;
-use crate::{BackendPolicy, FormType, RasterError, SessionConfig};
+use crate::{BackendPolicy, FormType, RasterError, SessionConfig, UnsupportedFeature};
 
 /// An opened PDF document ready for per-page rendering.
 ///
@@ -54,6 +54,11 @@ pub struct RasterSession {
     /// Set once a rendered page has been found to carry JavaScript, so the
     /// warning is emitted once per document.
     pub(crate) javascript_warned: AtomicBool,
+    /// Set once a rendered page has been found to carry a 3D or multimedia
+    /// annotation, so the warning is emitted once per document.
+    pub(crate) media_warned: AtomicBool,
+    /// The document-level features the renderer ignores.
+    pub(crate) unsupported_features: Vec<pdf_interp::UnsupportedFeature>,
     #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
     pub(crate) gpu_ctx: Option<Arc<gpu::GpuCtx>>,
     /// Vulkan compute backend.  `Some` when the `vulkan` feature is
@@ -159,6 +164,17 @@ impl RasterSession {
     #[must_use]
     pub const fn form_type(&self) -> FormType {
         self.form_type
+    }
+
+    /// The document-level features the renderer ignores: JavaScript
+    /// attached to the catalog, the name tree or the interactive form, an
+    /// XFA form and a portable collection, in that order.  The features of
+    /// one page are in
+    /// [`PageDiagnostics::unsupported_features`](crate::PageDiagnostics::unsupported_features).
+    /// Empty when the document uses none.
+    #[must_use]
+    pub fn unsupported_features(&self) -> &[UnsupportedFeature] {
+        &self.unsupported_features
     }
 
     /// The backend policy this session was opened with.
@@ -477,6 +493,7 @@ fn open_session_with_doc(
 
     let optional_content = Arc::new(pdf_interp::OptionalContent::new(&doc, config.purpose));
     let form_type = pdf_interp::form_type(&doc);
+    let unsupported_features = pdf_interp::document_unsupported_features(&doc);
     Ok(RasterSession {
         doc,
         fonts: Arc::new(pdf_interp::renderer::DocumentFonts::new(
@@ -497,6 +514,8 @@ fn open_session_with_doc(
         page_box: config.page_box,
         form_type,
         javascript_warned: AtomicBool::new(false),
+        media_warned: AtomicBool::new(false),
+        unsupported_features,
         #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
         gpu_ctx,
         #[cfg(feature = "vulkan")]

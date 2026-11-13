@@ -286,16 +286,8 @@ pub(crate) fn render_page_rgb_with_geom(
 
     let view = page_view(&geom, (params.scale_x, params.scale_y), params.region)?;
 
-    if !session.javascript_warned.load(Ordering::Relaxed)
-        && pdf_interp::page_has_javascript(doc, page_id)
-        && !session.javascript_warned.swap(true, Ordering::Relaxed)
-    {
-        log::warn!(
-            "page {page_num}: document contains JavaScript (page or annotation actions); \
-             JavaScript is ignored — rasterrocket does not execute scripts, \
-             rendering static content only"
-        );
-    }
+    let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);
+    warn_unsupported(session, page_num, &unsupported_features);
 
     let content = doc.page_content(page_id)?;
     let ops = pdf_interp::parse_page_content(doc, page_id, &content.bytes);
@@ -399,5 +391,36 @@ pub(crate) fn render_page_rgb_with_geom(
     }
     .map_err(allocation_failed)?;
     diag.form_type = session.form_type;
+    diag.unsupported_features = unsupported_features;
     Ok((bitmap, diag))
+}
+
+/// Warn about the first page found to carry JavaScript and the first
+/// carrying a 3D or multimedia annotation, each once per session.
+fn warn_unsupported(
+    session: &RasterSession,
+    page_num: u32,
+    features: &[pdf_interp::UnsupportedFeature],
+) {
+    if features
+        .iter()
+        .any(pdf_interp::UnsupportedFeature::is_javascript)
+        && !session.javascript_warned.swap(true, Ordering::Relaxed)
+    {
+        log::warn!(
+            "page {page_num}: document contains JavaScript (page or annotation actions); \
+             JavaScript is ignored — rasterrocket does not execute scripts, \
+             rendering static content only"
+        );
+    }
+    if let Some(media) = features
+        .iter()
+        .find(|f| matches!(f, pdf_interp::UnsupportedFeature::MediaAnnotation { .. }))
+        && !session.media_warned.swap(true, Ordering::Relaxed)
+    {
+        log::warn!(
+            "page {page_num}: document contains 3D or multimedia annotations ({media}); \
+             their interactive content is not rendered"
+        );
+    }
 }

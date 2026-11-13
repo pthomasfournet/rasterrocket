@@ -143,7 +143,9 @@ pub use pdf_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, ImageFailure, PageDiagnostics,
 };
 pub use pdf_interp::resources::ImageFilter;
-pub use pdf_interp::{FormType, PageBox, PageGeometry, RenderPurpose};
+pub use pdf_interp::{
+    FormType, MediaKind, PageBox, PageGeometry, RenderPurpose, ScriptLocation, UnsupportedFeature,
+};
 pub use render::{
     render_page_gray, render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics,
     render_page_rgba,

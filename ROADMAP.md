@@ -2492,6 +2492,18 @@ parameter (defaulting to CUDA), `ContentHash::of` replaces
 `rasterrocket_interp::cache::spawn_prefetch` and
 `PageRenderer::set_image_cache` take or return the backend-erased
 `gpu::cache::ImageCache`.
+Features a document uses that the renderer ignores are reported as typed
+data, not only as log lines: `RasterSession::unsupported_features()` lists
+the document-level ones (catalog, name-tree and form JavaScript, an XFA
+form, a portable collection) and `PageDiagnostics::unsupported_features` a
+page's (page and annotation JavaScript, `/3D`, `/RichMedia`, `/Movie`,
+`/Sound` and `/Screen` annotations), as `UnsupportedFeature` values with
+their location (public, additive; `UnsupportedFeature`, `ScriptLocation`
+and `MediaKind` are re-exported, and `rasterrocket-interp` adds
+`document_unsupported_features` and `page_unsupported_features`).
+JavaScript detection now also follows an action's `/Next` chain and counts
+a `/Rendition` action's `/JS`; opening a portable collection and rendering
+the first page with a 3D or multimedia annotation each log a `warn`.
 A function-based (Type 1) shading is evaluated at every device pixel of its
 Domain instead of on a 64 × 64 grid, so detail finer than 1/64 of the Domain
 is drawn (above 4 Mi pixels it samples every k-th pixel and interpolates).
