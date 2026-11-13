@@ -24,6 +24,7 @@ members = [
     "crates/skrifa",
     "crates/harfrust",
     "crates/rav1d",
+    "crates/zune_jpeg",
     "crates/font_test_data",
 ]
 # Every member but `pdf_bridge`, whose build script needs a poppler source
@@ -49,6 +50,7 @@ default-members = [
     "crates/skrifa",
     "crates/harfrust",
     "crates/rav1d",
+    "crates/zune_jpeg",
     "crates/font_test_data",
 ]
 
@@ -81,8 +83,9 @@ tiff         = { version = "0.11" }
 # Zlib and LZW streams: decoded by the parser, encoded by the TIFF writer.
 flate2       = { version = "1", features = ["zlib-rs"] }
 weezl        = { version = "0.2" }
-# JPEG decoding: images in documents and archives, and encoder tests.
-zune-jpeg    = { version = "0.5.15" }
+# JPEG decoding: images in documents and archives, and encoder tests.  The
+# local fork; the patch below gives it to registry dependents as well.
+zune-jpeg    = { path = "crates/zune_jpeg", version = "0.5.15" }
 # Property tests.  Without the default `fork` and `timeout` features, which
 # run each case in a subprocess and pull in tempfile and rusty-fork.
 proptest     = { version = "1.12", default-features = false, features = ["std"] }
@@ -93,6 +96,8 @@ proptest     = { version = "1.12", default-features = false, features = ["std"] 
 [patch.crates-io]
 read-fonts = { path = "crates/read_fonts" }
 skrifa     = { path = "crates/skrifa" }
+# The local zune-jpeg fork also decodes the JPEG strips the tiff crate reads.
+zune-jpeg  = { path = "crates/zune_jpeg" }
 
 [workspace.lints.rust]
 unsafe_code          = "deny"

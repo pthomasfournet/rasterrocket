@@ -1,0 +1,35 @@
+# Local fork of zune-jpeg (https://github.com/etemesi254/zune-image), vendored
+# from upstream commit 31d81fed7551c8ccea456d9d8e2b1fd8bebb6995 (2026-03-26,
+# crate version 0.5.15).  Licence: MIT OR Apache-2.0 OR Zlib (see LICENSE-MIT,
+# LICENSE-APACHE, LICENSE-ZLIB).  Changes made here are ours; see CHANGES.md.
+[package]
+name = "zune-jpeg"
+version = "0.5.15"
+authors = ["caleb <etemesicaleb@gmail.com>"]
+edition = "2021"
+rust-version.workspace = true
+description = "A fast, correct and safe jpeg decoder (local fork)."
+license = "MIT OR Apache-2.0 OR Zlib"
+repository = "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg"
+readme = "README.md"
+publish = false
+
+[features]
+x86 = []
+neon = []
+std = ["zune-core/std"]
+# NOTE: portable_simd requires a nightly toolchain.
+portable_simd = []
+log = ["zune-core/log"]
+default = ["x86", "neon", "std"]
+
+[dependencies]
+zune-core = { version = "0.5.1" }
+
+# Not part of rasterrocket's releases: the version stays that of the
+# vendored upstream base.
+[package.metadata.release]
+release = false
+
+# Upstream code is linted with clippy's defaults.
+[lints]

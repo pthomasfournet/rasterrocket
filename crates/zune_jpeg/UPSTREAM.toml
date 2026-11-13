@@ -1,0 +1,13 @@
+# Where this local fork came from.  Read by scripts/check_vendored.py, which
+# reports upstream commits, crates.io releases and RustSec advisories that
+# appeared after this base, or after the last review when `reviewed` is set.
+# Update `commit`, `date` and `version` when the fork is rebased; set the
+# `reviewed*` fields when upstream history up to a later commit has been
+# examined and every change in it brought over or deliberately left out
+# (CHANGES.md records which).
+crate = "zune-jpeg"
+version = "0.5.15"
+repository = "etemesi254/zune-image"
+path = "crates/zune-jpeg"
+commit = "31d81fed7551c8ccea456d9d8e2b1fd8bebb6995"
+date = "2026-03-26T21:57:41Z"

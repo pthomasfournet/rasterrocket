@@ -1,0 +1,73 @@
+use std::io::Cursor;
+
+use zune_jpeg::JpegDecoder;
+
+#[test]
+fn iptc_metadata() {
+    const EXPECTED_DATA: &[u8] = &[
+        56, 66, 73, 77, 4, 4, 0, 0, 0, 0, 0, 99, 28, 2, 90, 0, 8, 66, 117, 100, 97, 112, 101, 115,
+        116, 28, 2, 101, 0, 7, 72, 117, 110, 103, 97, 114, 121, 28, 2, 25, 0, 3, 72, 118, 75, 28,
+        2, 25, 0, 4, 50, 48, 48, 54, 28, 2, 25, 0, 6, 115, 117, 109, 109, 101, 114, 28, 2, 25, 0,
+        4, 74, 117, 108, 121, 28, 2, 25, 0, 7, 104, 111, 108, 105, 100, 97, 121, 28, 2, 25, 0, 7,
+        72, 117, 110, 103, 97, 114, 121, 28, 2, 25, 0, 8, 66, 117, 100, 97, 112, 101, 115, 116, 0,
+    ];
+    let image: &[u8] = include_bytes!("images/iptc.jpeg");
+
+    let mut decoder = JpegDecoder::new(Cursor::new(image));
+    decoder.decode_headers().unwrap();
+    assert_eq!(decoder.iptc(), Some(&EXPECTED_DATA.to_vec()))
+}
+
+#[test]
+fn extended_xmp() {
+    const EXPECTED_GUID: &[u8] = &[
+        50, 67, 69, 57, 54, 51, 49, 68, 57, 48, 69, 52, 57, 67, 52, 50, 67, 70, 48, 54, 49, 52, 52,
+        51, 48, 49, 68, 52, 53, 56, 48, 57,
+    ];
+
+    let image: &[u8] = include_bytes!("images/2029_extended_xmp.jpg").as_slice();
+    let mut decoder = JpegDecoder::new(Cursor::new(image));
+    decoder.decode_headers().unwrap();
+
+    assert_eq!(
+        decoder.info().unwrap().extended_xmp_guid,
+        Some(EXPECTED_GUID.to_vec())
+    );
+    assert_eq!(decoder.info().unwrap().extended_xmp.unwrap().len(), 75718);
+}
+
+#[test]
+fn test_sample_ratios() {
+    use zune_jpeg::SampleRatios;
+
+    let images = [
+        (
+            include_bytes!("images/non_interleaved_444_64x64.jpg").as_slice(),
+            SampleRatios::None,
+        ),
+        (
+            include_bytes!("images/non_interleaved_420_64x64.jpg").as_slice(),
+            SampleRatios::HV,
+        ),
+        (
+            include_bytes!("images/non_interleaved_422_64x64.jpg").as_slice(),
+            SampleRatios::H,
+        ),
+        (
+            include_bytes!("images/non_interleaved_440_64x64.jpg").as_slice(),
+            SampleRatios::V,
+        ),
+    ];
+
+    for (data, expected) in images {
+        let mut decoder = JpegDecoder::new(Cursor::new(data));
+        decoder.decode_headers().unwrap();
+
+        let info = decoder.info().unwrap();
+        assert_eq!(
+            info.sample_ratio, expected,
+            "Expected sample ratio {:?} for image",
+            expected
+        );
+    }
+}

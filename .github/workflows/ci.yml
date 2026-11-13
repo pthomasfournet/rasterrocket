@@ -96,6 +96,9 @@ jobs:
       - name: Test vendored JBIG2 and CCITT decoders
         run: cargo test -p hayro-jbig2 -p hayro-ccitt --release
 
+      - name: Test vendored JPEG decoder (upstream suite + fork tests)
+        run: cargo test -p zune-jpeg --release
+
       # The fork's own tests; its use by the comic crate is tested there.
       # The second command keeps the build without assembly, which needs no
       # nasm, compiling.
@@ -290,6 +293,7 @@ jobs:
           cargo clippy -p hayro-jbig2 --features image --tests -- -D warnings
           cargo clippy -p hayro-ccitt --tests -- -D warnings
           cargo clippy -p harfrust --tests -- -D warnings
+          cargo clippy -p zune-jpeg --tests -- -D warnings
           cargo clippy -p read-fonts -- -D warnings
           cargo clippy -p skrifa -- -D warnings
           cargo clippy -p rav1d -- -D warnings
