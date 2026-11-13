@@ -93,6 +93,7 @@ fn fixture_pdf() -> Vec<u8> {
         })
         .collect();
     let content = b"\
+q 200.5 0 0 131.2 40.25 50.5 cm /ImA Do Q\n\
 q 143.37 0 0 90.61 20.123 130.77 cm /ImA Do Q\n\
 q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q\n\
 q -120 0 0 60 290 20 cm /ImA Do Q\n\
@@ -235,7 +236,9 @@ fn synthetic_page_renders_identically(backend: Backend) {
     // Cold pass: every eligible JPEG misses, decodes, and is inserted.
     let cold = render(&session, 1);
     assert_identical(&cpu, &cold, "cold cache");
-    // /ImA and /ImB are cached; /ImC carries an /SMask and must not be.
+    // /ImA is first drawn at its resolution, so it is cached and its later
+    // reduced draws read it back; /ImB is cached; /ImC carries an /SMask
+    // and must not be.
     assert_eq!(
         cache.len(),
         2,
@@ -310,16 +313,21 @@ fn assert_cached_draw_identical(backend: Backend, draw: &str) {
     );
 }
 
-/// Render `pages` of a corpus fixture on the CPU and on `backend` and
-/// assert each is byte-identical, checking that the cache grows by exactly
-/// `cached_per_page[i]` entries after page `pages[i]`.  Skipped when the
-/// fixture is absent.
+/// Render `pages` of a corpus fixture at `dpi` on the CPU and on `backend`
+/// and assert each is byte-identical, checking that the cache grows by
+/// exactly `cached_per_page[i]` entries after page `pages[i]`.  Skipped
+/// when the fixture is absent.
 fn assert_corpus_pages_identical(
     backend: Backend,
     fixture: &str,
+    dpi: f64,
     pages: &[u32],
     cached_per_page: &[usize],
 ) {
+    let render = |session: &RasterSession, page: u32| {
+        let bmp = rasterrocket::render_page_rgb(session, page, dpi / 72.0).expect("render page");
+        (bmp.width, bmp.height, bmp.data().to_vec())
+    };
     let Some(path) = corpus_fixture(fixture) else {
         return;
     };
@@ -344,9 +352,13 @@ fn assert_corpus_pages_identical(
 }
 
 /// The corpus pages the divergence was first measured on: full-page
-/// `DeviceRGB` JPEG scans at a fractional offset, one cached entry each.
+/// `DeviceRGB` JPEG scans (337 and 257 ppi) at a fractional offset, one
+/// cached entry each at 360 dpi.  At 150 dpi they are drawn below their
+/// resolution and bypass the cache.
 fn corpus_scan_pages_render_identically(backend: Backend) {
-    assert_corpus_pages_identical(backend, "corpus-07-journal-dct-heavy.pdf", &[1, 2], &[1, 1]);
+    let fixture = "corpus-07-journal-dct-heavy.pdf";
+    assert_corpus_pages_identical(backend, fixture, 360.0, &[1, 2], &[1, 1]);
+    assert_corpus_pages_identical(backend, fixture, 150.0, &[1, 2], &[0, 0]);
 }
 
 on_each_backend!(
@@ -364,6 +376,7 @@ fn corpus_masked_flate_pages_bypass_the_cache(backend: Backend) {
     assert_corpus_pages_identical(
         backend,
         "corpus-08-scan-dct-1927.pdf",
+        150.0,
         &[1, 2, 3],
         &[0, 0, 1],
     );

@@ -546,9 +546,16 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // or any colour conversion (a non-device space, or a `/Decode` remap)
     // stays host-resident: neither looked up (a content-hash hit from
     // another document would drop the mask or the conversion) nor
-    // inserted.
+    // inserted.  An image drawn below its resolution is resampled on the
+    // host from host-resident samples, so it is not cached either.
     #[cfg(feature = "cache")]
-    let dct_cache = if smask_entry.is_some() || mask_entry.is_some() || !src.colour.identity() {
+    let dct_cache = if smask_entry.is_some()
+        || mask_entry.is_some()
+        || !src.colour.identity()
+        || request
+            .draw_size
+            .is_some_and(|draw| crate::renderer::page::draw_reduces(w, h, draw))
+    {
         None
     } else {
         codecs::DctCacheCtx::from_resources(ctx.image_cache, ctx.doc_id, stream_id)

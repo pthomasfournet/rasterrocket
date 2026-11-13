@@ -90,6 +90,8 @@ use canvas::{CanvasKind, PageCanvas};
 use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
 pub use diagnostics::{ImageFailure, PageDiagnostics, RenderAbort};
+#[cfg(feature = "cache")]
+pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;
 pub use view::PageView;
 use view::initial_gstate;

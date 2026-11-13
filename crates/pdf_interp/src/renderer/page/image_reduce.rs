@@ -339,6 +339,16 @@ impl AxisPlan {
     }
 }
 
+/// Whether a `width × height` image drawn over `draw` device pixels
+/// (`image_draw_size`: the extents of its columns and of its rows) reduces
+/// along either axis.  A draw this holds for is resampled by [`Plan`]
+/// whenever its axes map onto the device axes; on a rotated or skewed draw
+/// the converse also holds.
+#[cfg(feature = "cache")]
+pub(crate) fn draw_reduces(width: u32, height: u32, (dw, dh): (u32, u32)) -> bool {
+    reduces(width, f64::from(dw)) || reduces(height, f64::from(dh))
+}
+
 /// `true` when `n` samples drawn over `pixels` device pixels reduce.
 fn reduces(n: u32, pixels: f64) -> bool {
     f64::from(n) > pixels * (1.0 + REDUCTION_MARGIN)
