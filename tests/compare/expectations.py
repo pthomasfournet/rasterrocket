@@ -331,25 +331,30 @@ def _sort_key(test: TestId) -> tuple[str, int]:
     return (file, 0 if page is None else page)
 
 
+def _entry_json(e: Entry) -> str:
+    """Return the one-line JSON object of entry `e`."""
+    row: dict[str, object] = {"file": e.file}
+    if e.page is not None:
+        row["page"] = e.page
+    row["outcome"] = e.outcome
+    row.update(sorted(e.limits.items()))
+    row["reason"] = e.reason
+    return json.dumps(row, ensure_ascii=False)
+
+
 def dump(suites: Mapping[str, Mapping[TestId, Entry]]) -> str:
-    """Return the registry JSON of `suites`; empty suites are dropped."""
-    out: dict[str, list[dict[str, object]]] = {}
+    """Return the registry JSON of `suites`, one entry a line; empty suites are dropped."""
+    blocks = []
     for suite in sorted(suites):
         entries = suites[suite]
         if not entries:
             continue
-        rows = []
-        for test in sorted(entries, key=_sort_key):
-            e = entries[test]
-            row: dict[str, object] = {"file": e.file}
-            if e.page is not None:
-                row["page"] = e.page
-            row["outcome"] = e.outcome
-            row.update(sorted(e.limits.items()))
-            row["reason"] = e.reason
-            rows.append(row)
-        out[suite] = rows
-    return json.dumps({"format": FORMAT, "suites": out}, indent=2, ensure_ascii=False) + "\n"
+        lines = ",\n".join(
+            f"      {_entry_json(entries[t])}" for t in sorted(entries, key=_sort_key)
+        )
+        blocks.append(f"    {json.dumps(suite, ensure_ascii=False)}: [\n{lines}\n    ]")
+    body = "{\n" + ",\n".join(blocks) + "\n  }" if blocks else "{}"
+    return f'{{\n  "format": {FORMAT},\n  "suites": {body}\n}}\n'
 
 
 def load(path: pathlib.Path) -> dict[str, dict[TestId, Entry]]:
