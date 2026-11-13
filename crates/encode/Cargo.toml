@@ -33,6 +33,7 @@ hayro-ccitt = { path = "../ccitt" }
 zune-jpeg = { workspace = true }
 # Reads the TIFF output back in tests: an independent decoder.
 tiff = { workspace = true }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

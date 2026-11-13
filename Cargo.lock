@@ -1664,6 +1664,7 @@ dependencies = [
  "hayro-ccitt",
  "jpeg-encoder",
  "png",
+ "proptest",
  "rasterrocket-color",
  "rasterrocket-render",
  "tiff",
