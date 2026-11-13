@@ -2670,6 +2670,11 @@ RMSE and tile limits): `PASS`, `XFAIL`, `FAIL` (new, or worse than
 registered) and `XPASS` (registered but passing).  They exit non-zero on
 `FAIL` only, on `XPASS` too with `--strict`, and `--update-expectations`
 seeds the registry from a run (see docs/cli-reference.md).
+A Coverage workflow measures the line coverage of the workspace's own
+crates (vendored forks, `pdf_bridge` and the bench crate left out) under
+CI's CPU-only test sets with `cargo-llvm-cov`, uploads the lcov and HTML
+reports as an artifact and writes a per-package table to the job summary;
+it reports only and gates nothing.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per

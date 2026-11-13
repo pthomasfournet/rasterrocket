@@ -1,0 +1,127 @@
+name: Coverage
+
+# Line coverage of the workspace's own crates under the CPU-only test sets
+# CI runs, measured with cargo-llvm-cov.  Report only: no threshold, and the
+# result gates nothing.  The lcov file and the HTML report are uploaded as
+# an artifact and a per-package table is written to the job summary.
+#
+# The instrumented build is a second full build of the workspace with its
+# own target directory (`target/llvm-cov-target`), so it runs as its own
+# workflow, with its own cache, beside CI rather than inside its jobs.
+#
+# Out of the report: the vendored forks (hayro-jpeg2000, hayro-jbig2,
+# hayro-ccitt, read-fonts, skrifa, harfrust, rav1d, font_test_data), whose
+# tests are upstream's; pdf_bridge, which is not built; and the bench crate,
+# which has no tests.  Code behind the GPU features is not compiled, so it
+# is not in the report either.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # As in CI: hosted runners vary in CPU and share the cache; SIMD selection
+  # is runtime-dispatched.  cargo-llvm-cov appends its instrumentation flags.
+  RUSTFLAGS: "-C target-cpu=generic"
+  # Line tables keep panic backtraces readable; coverage mapping does not
+  # use debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # Paths dropped from every report.
+  COVERAGE_IGNORE: "crates/(ccitt|jbig2|jpeg2000|read_fonts|skrifa|harfrust|rav1d|font_test_data|pdf_bridge|bench)/"
+
+jobs:
+  coverage:
+    name: Line coverage (CPU-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # qpdf builds the encrypted fixtures of crates/pdf_raster/tests/
+      # encryption.rs; nasm assembles the AV1 decoder's x86 kernels.
+      - name: Install qpdf and nasm
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qpdf nasm
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+
+      # Profiles restored from the cache would be merged into this run's;
+      # build artifacts are kept.
+      - name: Remove stale profiles
+        run: cargo llvm-cov clean --profraw-only
+
+      # Each invocation adds its profiles to the same set; the report steps
+      # merge them.  The test sets are CI's CPU-only ones.
+      - name: Run the test suites under instrumentation
+        run: |
+          cargo llvm-cov --no-report -p rasterrocket-interp --tests
+          cargo llvm-cov --no-report -p rasterrocket-render --lib
+          cargo llvm-cov --no-report -p rasterrocket-gpu --lib -- cmyk
+          cargo llvm-cov --no-report -p rasterrocket --tests
+          cargo llvm-cov --no-report -p rasterrocket-parser --lib
+          cargo llvm-cov --no-report -p rasterrocket-cli
+          cargo llvm-cov --no-report -p rasterrocket-font
+          cargo llvm-cov --no-report -p rasterrocket-camera
+          cargo llvm-cov --no-report -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic
+
+      - name: Write the reports
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" \
+            --lcov --output-path coverage/lcov.info
+          cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" \
+            --html --output-dir coverage
+          cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" \
+            --json --summary-only --output-path coverage/summary.json
+
+      - name: Per-package summary
+        run: |
+          {
+            echo "### Line coverage, \`$(git rev-parse --short HEAD)\`"
+            echo
+            python3 -I scripts/coverage_summary.py coverage/summary.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage/lcov.info
+            coverage/summary.json
+            coverage/html
+
+      # As in CI: test executables relink in seconds and stay out of the
+      # cache, as do this run's profiles; build-script executables are kept.
+      - name: Drop test executables and profiles from the build cache
+        run: |
+          cargo llvm-cov clean --profraw-only
+          find target/llvm-cov-target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
