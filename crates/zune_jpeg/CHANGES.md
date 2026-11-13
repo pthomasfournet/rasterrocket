@@ -93,3 +93,36 @@ unless the entry says otherwise.
   progressive AC scan in which the decoder finds no end of band keeps the
   coefficients decoded so far and skips the scan's remaining blocks
   instead of failing the image (`8cccb0b0`).
+
+- **`JpegDecoder::intact_rows` (new API): how much of an image was decoded
+  from data that was present.** The number of leading image rows the last
+  decode produced from entropy-coded data that was all there and well
+  formed: the height for a complete stream, with or without its EOI; fewer
+  when a scan's data stops (at the end of the input or at a marker)
+  before the scan's last block, when the entropy decoder met an error a
+  decode that is not strict carries on from, or when the scans decoded
+  leave a component uncoded or a coefficient of a progressive frame short
+  of its full precision. The Huffman bit reader counts the bits it makes
+  up (`fill_bits`: zeros past a marker, an EOI or the end of the input),
+  which are the lowest of its buffer, so one has been consumed exactly
+  when fewer bits are left; the row loops ask after every row. Within
+  eight bytes of the end of the input the buffer is filled by a separate
+  cold routine that counts the bytes it reads past the end, so the hot
+  refill is unchanged. An arithmetic-coded scan that stops at a marker
+  short of its blocks is not detected (the arithmetic decoder reads zeros
+  past a marker as a matter of course). `tests/intact_rows.rs` cuts noise
+  images at every byte of their scan data.
+
+- **Streams that stop short: a decode that is not strict draws more of
+  them (output changes for such streams only).** Past the end of the input
+  the bit reader supplies zeros, as it does past a marker, instead of
+  failing once its buffer is empty: the row in progress is completed and
+  the row loop stops at the next. `overread_by` counts bytes read past the
+  end only (it counted the last byte of the input too, which stopped a
+  complete single-scan stream without EOI one row early when its last
+  rows were a few bytes long). A marker segment between scans that cannot
+  be read, and a row that fails in a frame of several scans, end the image
+  with the scans decoded so far drawn, where they failed the decode or
+  left the image blank. The marker after the first scan of a progressive
+  frame is read from the stream when the entropy decoder has not run into
+  it (it was an error).

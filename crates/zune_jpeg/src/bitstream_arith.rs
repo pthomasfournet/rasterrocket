@@ -714,6 +714,15 @@ impl BitStream for BitStreamArithmetic {
         false
     }
 
+    /// Never: the decoder reads zero bytes past a marker as a matter of
+    /// course (an encoder drops the zero bytes that end a scan), so a scan
+    /// that stops short of its blocks at a marker cannot be told from a
+    /// complete one.  Data that ends without a marker is an error.
+    #[inline(always)]
+    fn take_data_short(&mut self) -> bool {
+        false
+    }
+
     /// Refill the bit buffer by (a maximum of) 32 bits
     ///
     /// # Arguments

@@ -185,10 +185,15 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 self.todo = self.restart_interval;
                 self.buffered_scan_rows()
             };
+            self.note_scan(scan_rows);
+            // Set once a row has consumed bits past the end of the input.
+            let mut data_ended = false;
 
             for i in 0..scan_rows {
                 let is_last_row = i + 1 == scan_rows;
-                if stream.overread_by() > 0 {
+                self.scan_row = i;
+                if data_ended {
+                    self.note_incomplete(i);
                     if let Some(v) = pixels.get_mut(pixels_written..) {
                         v.fill(128);
                     }
@@ -202,7 +207,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
                 // decode a whole MCU width,
                 // this takes into account interleaved components.
-                let terminate = if all_components_in_first_scan {
+                let decoded = if all_components_in_first_scan {
                     self.decode_mcu_width::<false, B>(
                         mcu_width,
                         i,
@@ -210,7 +215,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         &mut tmp,
                         &mut stream,
                         &mut progressive_mcus,
-                    )?
+                    )
                 } else {
                     /* NB: (cae). This code was added due to the issue at https://github.com/etemesi254/zune-image/issues/277
                     *
@@ -236,8 +241,23 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         &mut tmp,
                         &mut stream,
                         &mut progressive_mcus,
-                    )?
+                    )
                 };
+                // A decode that is not strict draws what it has when a row
+                // fails.
+                let terminate = match decoded {
+                    Ok(continuation) => continuation,
+                    Err(e) if self.options.strict_mode() => return Err(e),
+                    Err(e) => {
+                        error!("{e}");
+                        McuContinuation::Terminate
+                    }
+                };
+
+                if stream.take_data_short() {
+                    self.note_incomplete(i);
+                    data_ended = stream.overread_by() > 0;
+                }
 
                 // process that width up until it's impossible. This is faster than allocation the
                 // full components, which we skipped earlier.
@@ -266,14 +286,8 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                 *stream.seen_eoi() = true;
                                 break;
                             }
-                            Ok(Marker::SOS) => {
-                                self.parse_marker_inner(Marker::SOS)?;
-                                stream.reset();
-                                B::reset_arith_tables(&mut self.entropy_tables);
-                                continue 'sos;
-                            }
                             Ok(marker) => {
-                                if self.advance_to_next_sos(marker, &mut stream)? {
+                                if self.next_scan(marker, &mut stream)? {
                                     continue 'sos;
                                 }
                                 break;
@@ -285,13 +299,24 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     McuContinuation::Ok => {}
                     McuContinuation::AnotherSos if all_components_in_first_scan => {
                         warn!("More than one SOS despite already having all components");
+                        if !is_last_row {
+                            self.note_incomplete(i + 1);
+                        }
                         return Ok(());
                     }
-                    McuContinuation::AnotherSos => continue 'sos,
+                    McuContinuation::AnotherSos => {
+                        if !is_last_row {
+                            self.note_incomplete(i + 1);
+                        }
+                        continue 'sos;
+                    }
                     McuContinuation::InterScanMarker(marker) => {
+                        if !is_last_row {
+                            self.note_incomplete(i + 1);
+                        }
                         // Handle inter-scan markers (DHT/DQT/etc) uniformly here.
                         // This keeps all marker handling in the outer loop.
-                        if self.advance_to_next_sos(marker, &mut stream)? {
+                        if self.next_scan(marker, &mut stream)? {
                             continue 'sos;
                         }
                         // Hit EOI
@@ -299,6 +324,11 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     }
                     McuContinuation::Terminate => {
                         warn!("Got terminate signal, will not process further");
+                        self.note_incomplete(i);
+                        if !all_components_in_first_scan {
+                            // The scans decoded so far are drawn below.
+                            break;
+                        }
                         if let Some(v) = pixels.get_mut(pixels_written..) {
                             v.fill(128);
                         }
@@ -313,6 +343,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         }
 
         if !all_components_in_first_scan {
+            self.note_uncoded_components();
             self.finish_baseline_decoding(&progressive_mcus, mcu_width, pixels)?;
         }
 
@@ -416,6 +447,33 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         }
 
         return Ok(());
+    }
+
+    /// Moves on from `marker`, which follows a scan, to the next scan:
+    /// `Ok(true)` once its header is read, `Ok(false)` at the end of the
+    /// image.  A decode that is not strict ends the image at a marker
+    /// segment it cannot read.
+    fn next_scan<B: BitStream>(
+        &mut self,
+        marker: Marker,
+        stream: &mut B,
+    ) -> Result<bool, DecodeErrors> {
+        let result = if marker == Marker::SOS {
+            self.parse_marker_inner(Marker::SOS).map(|()| {
+                stream.reset();
+                B::reset_arith_tables(&mut self.entropy_tables);
+                true
+            })
+        } else {
+            self.advance_to_next_sos(marker, stream)
+        };
+        match result {
+            Err(e) if !self.options.strict_mode() => {
+                error!("{e}");
+                Ok(false)
+            }
+            result => result,
+        }
     }
 
     /// The number of block rows in the current scan of a frame whose scans
@@ -660,6 +718,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             }
 
             if B::marker_ends_data() && stream.marker().is_some() && stream.bits_left() == 0 {
+                if j + 1 < scan_du_width {
+                    // The scan's data ends inside this row.
+                    self.note_incomplete(mcu_height);
+                }
                 break;
             }
         }
@@ -866,6 +928,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         )));
                     }
                     warn!("Unexpected marker {marker:?} at restart boundary");
+                    self.note_incomplete(self.scan_row);
                 }
             }
         }

@@ -53,10 +53,48 @@ fn a_complete_stream_without_eoi_decodes_whole() {
             pixels(&reference),
             "progressive {progressive}"
         );
-        // A baseline decode reaches the last row without the marker; a
-        // progressive one cannot tell the end of its last scan from a cut,
-        // so the missing marker is reported.
-        assert_eq!(img.partial.is_some(), progressive, "{:?}", img.partial);
+        assert!(img.partial.is_none(), "{:?}", img.partial);
+    }
+}
+
+/// A stream that ends at a marker short of its data (a scan cut at a
+/// restart marker, the scans after the first few missing) has no error for
+/// the decoder to meet; the rows or coefficients it lacks are reported.
+#[test]
+fn a_stream_cut_at_a_marker_is_reported_partial() {
+    for progressive in [false, true] {
+        let mut full = Vec::new();
+        let mut enc = Encoder::new(&mut full, 85);
+        enc.set_progressive(progressive);
+        enc.set_restart_interval(1);
+        let pixels: Vec<u8> = (0..64_u32 * 48 * 3)
+            .map(|i| i.wrapping_mul(2_654_435_761).to_be_bytes()[0])
+            .collect();
+        enc.encode(&pixels, 64, 48, ColorType::Rgb).expect("encode");
+        let reference = decode(&full, 64, 48).expect("reference decode");
+        assert!(reference.partial.is_none(), "{:?}", reference.partial);
+
+        // Every marker after the first scan header: restart markers
+        // inside a scan, and the headers of later scans.
+        let first_scan = full
+            .windows(2)
+            .position(|m| m == [0xFF, 0xDA])
+            .expect("SOS");
+        let cuts: Vec<usize> = (first_scan + 2..full.len() - 2)
+            .filter(|&at| full[at] == 0xFF && !matches!(full[at + 1], 0x00 | 0xFF))
+            .collect();
+        assert!(cuts.len() > 4, "{} markers to cut at", cuts.len());
+        for at in cuts {
+            for eoi in [false, true] {
+                let mut cut = full[..at].to_vec();
+                if eoi {
+                    cut.extend_from_slice(&[0xFF, 0xD9]);
+                }
+                let what = format!("progressive {progressive}, cut at {at}, EOI {eoi}");
+                let img = decode(&cut, 64, 48).unwrap_or_else(|| panic!("{what}: no image"));
+                assert!(img.partial.is_some(), "{what}: reported whole");
+            }
+        }
     }
 }
 

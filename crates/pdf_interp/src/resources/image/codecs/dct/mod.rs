@@ -246,14 +246,14 @@ pub(in crate::resources::image) fn decode_dct<
         _ => ZColorSpace::CMYK,
     };
 
-    // The decode is strict, so scan data that ends short of the frame's
-    // rows, or is damaged, is detected rather than silently filled; the
-    // lenient decode below then draws such a stream and reports it partial.
+    // The decode is not strict: scan data that ends short of the frame's
+    // rows, or is damaged, is drawn as far as it decodes, and the decoder
+    // reports how many rows it decoded from data that was present.
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(out_cs)
         .set_max_width(usize::from(u16::MAX))
         .set_max_height(usize::from(u16::MAX))
-        .set_strict_mode(true);
+        .set_strict_mode(false);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
 
     // An Adobe APP14 transform of 2 marks a four-component stream as YCCK.
@@ -270,22 +270,18 @@ pub(in crate::resources::image) fn decode_dct<
         decoder.set_options(options.jpeg_set_out_colorspace(ZColorSpace::YCCK));
     }
 
-    let (mut pixels, partial) = match decoder.decode() {
-        Ok(pixels) => (pixels, None),
-        Err(e) => {
-            let lenient = decoder.options().set_strict_mode(false);
-            decoder = JpegDecoder::new_with_options(ZCursor::new(data), lenient);
-            let pixels = decoder
-                .decode()
-                .map_err(|e| log::warn!("image: DCTDecode decode error: {e}"))
-                .ok()?;
-            let partial = format!(
-                "DCTDecode: the scan data is incomplete or damaged ({e}); \
-                 the image is drawn as far as it decodes"
-            );
-            (pixels, Some(partial))
-        }
-    };
+    let mut pixels = decoder
+        .decode()
+        .map_err(|e| log::warn!("image: DCTDecode decode error: {e}"))
+        .ok()?;
+    let intact_rows = decoder.intact_rows();
+    let partial = (intact_rows < usize::from(sof.height)).then(|| {
+        format!(
+            "DCTDecode: the scan data is incomplete or damaged ({intact_rows} of {} rows \
+             are whole); the image is drawn as far as it decodes",
+            sof.height
+        )
+    });
     if ycck {
         ycck_to_adobe_cmyk(&mut pixels);
     }

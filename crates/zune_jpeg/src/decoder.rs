@@ -173,6 +173,19 @@ pub struct JpegDecoder<T> {
     pub(crate) icc_data: Vec<ICCChunk>,
     pub(crate) is_mjpeg: bool,
     pub(crate) coeff: usize, // Solves some weird bug :)
+    /// The leading image rows decoded from entropy-coded data that was all
+    /// present and well formed; see [`Self::intact_rows`].
+    pub(crate) intact_rows: usize,
+    /// Image rows that one block row of the scan being decoded spans, and
+    /// the block row in progress.
+    pub(crate) scan_row_height: usize,
+    pub(crate) scan_row: usize,
+    /// Bit `i` is set once a scan has coded component `i`.
+    pub(crate) components_coded: u8,
+    /// For a progressive frame: the lowest point transform (`Al`) at which
+    /// a scan has coded each coefficient of each component, `u8::MAX` for
+    /// a coefficient no scan has coded.
+    pub(crate) coefficient_precision: [[u8; 64]; MAX_COMPONENTS],
     /// Extended XMP segments
     pub(crate) extended_xmp_segments: Vec<ExtendedXmpSegment>,
 }
@@ -237,6 +250,11 @@ where
             icc_data: vec![],
             is_mjpeg: false,
             coeff: 1,
+            intact_rows: 0,
+            scan_row_height: 8,
+            scan_row: 0,
+            components_coded: 0,
+            coefficient_precision: [[u8::MAX; 64]; MAX_COMPONENTS],
             extended_xmp_segments: vec![],
         }
     }
@@ -900,6 +918,10 @@ where
         let out_len = core::cmp::min(out.len(), expected_size);
         let out = &mut out[0..out_len];
 
+        self.intact_rows = usize::from(self.info.height);
+        self.components_coded = 0;
+        self.coefficient_precision = [[u8::MAX; 64]; MAX_COMPONENTS];
+
         if self.is_arithmetic {
             #[cfg(feature = "arith")]
             {
@@ -915,6 +937,101 @@ where
             self.decode_mcu_ycbcr_progressive::<BitStreamHuffman>(out)
         } else {
             self.decode_mcu_ycbcr_baseline::<BitStreamHuffman>(out)
+        }
+    }
+
+    /// The number of leading image rows the last decode produced from
+    /// entropy-coded data that was all present and well formed.
+    ///
+    /// It is the image height after a decode of a complete stream, with or
+    /// without its EOI marker.  It is smaller when a scan's data ended
+    /// (at the end of the input, or at a marker) before the scan's last
+    /// block, when the entropy decoder met an error that a decode that is
+    /// not [strict](DecoderOptions::strict_mode) carries on from, or when a
+    /// component was never coded: the rows from this one on were then
+    /// decoded from made-up bits or left as they were.  For a frame in
+    /// several scans it is the smallest count over the scans, and zero
+    /// when the scans stop before every coefficient of a progressive frame
+    /// has been coded to its full precision.
+    ///
+    /// An arithmetic-coded scan that stops at a marker short of its blocks
+    /// is not detected (an arithmetic decoder reads zeros past a marker as
+    /// a matter of course).
+    ///
+    /// Zero before a decode, and meaningless after one that returned an
+    /// error.
+    #[must_use]
+    pub const fn intact_rows(&self) -> usize {
+        self.intact_rows
+    }
+
+    /// Records that the scan in progress is incomplete or damaged from its
+    /// block row `row` on.
+    pub(crate) fn note_incomplete(&mut self, row: usize) {
+        self.intact_rows = self
+            .intact_rows
+            .min(row.saturating_mul(self.scan_row_height));
+    }
+
+    /// Starts the status of a scan of `rows` block rows: records its
+    /// components as coded and the image rows a block row spans.
+    pub(crate) fn note_scan(&mut self, rows: usize) {
+        let scan = &self.z_order[..usize::from(self.num_scans).min(MAX_COMPONENTS)];
+        for &k in scan {
+            if k < 8 {
+                self.components_coded |= 1 << k;
+            }
+        }
+        // A scan of one component has block rows of that component, which
+        // span `8 * v_max / vertical_sample` image rows (rounded down, so
+        // that no row is counted intact that is not); any other scan has
+        // rows of MCUs.  A count of rows that is neither (a frame decoded
+        // to gray with its rows regrouped) divides the height evenly.
+        let mcu_rows = 8 * self.v_max.max(1);
+        let component = match scan {
+            [k] => self.components.get(*k),
+            _ => None,
+        };
+        let component_rows = component
+            .map(|c| (usize::from(self.info.height) * c.vertical_sample).div_ceil(mcu_rows));
+        self.scan_row_height = if component_rows == Some(rows) {
+            mcu_rows / component.map_or(1, |c| c.vertical_sample.max(1))
+        } else if rows == self.mcu_y {
+            mcu_rows
+        } else {
+            usize::from(self.info.height) / rows.max(1)
+        }
+        .max(1);
+    }
+
+    /// Records the coefficients of the progressive scan about to be
+    /// decoded as coded down to its point transform.
+    pub(crate) fn note_scan_precision(&mut self) {
+        let (first, last) = (usize::from(self.spec_start), usize::from(self.spec_end));
+        for &k in &self.z_order[..usize::from(self.num_scans).min(MAX_COMPONENTS)] {
+            let Some(precision) = self.coefficient_precision.get_mut(k) else {
+                continue;
+            };
+            for p in precision.iter_mut().take(last + 1).skip(first) {
+                *p = (*p).min(self.succ_low);
+            }
+        }
+    }
+
+    /// Counts no row as intact when the scans decoded leave a component
+    /// uncoded or, in a progressive frame, a coefficient short of its
+    /// full precision.
+    pub(crate) fn note_uncoded_components(&mut self) {
+        let components = self.components.len().min(MAX_COMPONENTS);
+        let complete = if self.is_progressive {
+            self.coefficient_precision[..components]
+                .iter()
+                .all(|precision| precision.iter().all(|&p| p == 0))
+        } else {
+            u16::from(self.components_coded) == (1_u16 << components) - 1
+        };
+        if !complete {
+            self.intact_rows = 0;
         }
     }
 

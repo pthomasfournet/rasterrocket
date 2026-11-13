@@ -221,6 +221,11 @@ pub(crate) trait BitStream {
     /// bytes after a marker until the scan is complete, and its
     /// `bits_left()` is a shift counter that is zero between any two bytes.
     fn marker_ends_data() -> bool;
+
+    /// Whether decoding has consumed bits that are not in the stream since
+    /// the last call: the stream ended, or a marker came, before the
+    /// entropy-coded data that was decoded.  Clears the record.
+    fn take_data_short(&mut self) -> bool;
 }
 
 /// A `BitStream` struct, a bit by bit reader with super powers
@@ -247,9 +252,72 @@ pub(crate) struct BitStreamHuffman {
     /// True if we have seen end of image marker.
     /// Don't read anything after that.
     seen_eoi:            bool,
+    /// Bits appended to the buffer that are not in the stream (zeros past
+    /// a marker or the end of the data) since the last reset.  They are
+    /// the buffer's lowest bits, so one of them has been consumed exactly
+    /// when `bits_left` is smaller.
+    fill_bits:           u32,
+    /// A fill bit was consumed before a reset.
+    data_short:          bool,
 }
 
 impl BitStreamHuffman {
+    /// [`BitStream::refill`] within eight bytes of the end of the input:
+    /// the same bytes into the buffer, with those read past the end (zeros
+    /// the input does not hold) counted in `overread_by` and `fill_bits`.
+    #[cold]
+    #[inline(never)]
+    fn refill_tail<T>(&mut self, reader: &mut ZReader<T>) -> Result<bool, DecodeErrors>
+    where
+        T: ZByteReaderTrait,
+    {
+        for _ in 0..4 {
+            let past_end = reader.eof()?;
+            let byte = u64::from(reader.read_u8());
+            if past_end {
+                self.overread_by += 1;
+                self.fill_bits += 8;
+            }
+            self.buffer = (self.buffer << 8) | byte;
+            self.bits_left += 8;
+            if byte != 0xFF {
+                continue;
+            }
+            // A stuffed zero follows a data byte of 0xFF; anything else is
+            // a marker, after any number of 0xFF fill bytes.
+            let mut next_byte = reader.read_u8();
+            while next_byte == 0xFF {
+                next_byte = reader.read_u8();
+            }
+            if next_byte == 0x00 {
+                continue;
+            }
+            // The 0xFF belongs to the marker, not to the data.
+            self.buffer >>= 8;
+            self.bits_left -= 8;
+            if self.bits_left != 0 {
+                self.aligned_buffer = self.buffer << (64 - self.bits_left);
+            }
+            let marker = Marker::from_u8(next_byte);
+            self.marker = marker;
+            if let Some(Marker::UNKNOWN(_)) = marker {
+                return Err(DecodeErrors::Format(
+                    "Unknown marker in bit stream".to_string(),
+                ));
+            }
+            if next_byte == 0xD9 {
+                // As in `refill`: a byte of zeros after an EOI.
+                self.buffer <<= 8;
+                self.bits_left += 8;
+                self.fill_bits += 8;
+                self.aligned_buffer = self.buffer << (64 - self.bits_left);
+            }
+            return Ok(false);
+        }
+        self.aligned_buffer = self.buffer << (64 - self.bits_left);
+        Ok(true)
+    }
+
     /// Get a single bit from the bitstream
     fn get_bit(&mut self) -> u8 {
         let k = (self.aligned_buffer >> 63) as u8;
@@ -456,6 +524,8 @@ impl BitStream for BitStreamHuffman {
             eob_run:             0,
             overread_by:         0,
             seen_eoi:            false,
+            fill_bits:           0,
+            data_short:          false,
         }
     }
 
@@ -475,6 +545,8 @@ impl BitStream for BitStreamHuffman {
             eob_run:             0,
             overread_by:         0,
             seen_eoi:            false,
+            fill_bits:           0,
+            data_short:          false,
         }
     }
 
@@ -565,6 +637,7 @@ impl BitStream for BitStreamHuffman {
                                 // removes some panics
                                 self.buffer <<= 8;
                                 self.bits_left += 8;
+                                self.fill_bits += 8;
                                 self.aligned_buffer = self.buffer << (64 - self.bits_left);
                             }
 
@@ -577,23 +650,20 @@ impl BitStream for BitStreamHuffman {
 
         // 32 bits is enough for a decode(16 bits) and receive_extend(max 16 bits)
         if self.bits_left < 32 {
-            if self.marker.is_some() || self.seen_eoi {
-                // found a marker, or we are in EOI
-                // also we are in over-reading mode, where we fill it with zeroes
-
-                // fill with zeroes
+            if self.marker.is_some() || self.seen_eoi || self.overread_by > 0 {
+                // Past a marker, an EOI or the end of the input the data
+                // is over: zeros from here on, counted, so that a symbol
+                // always finds the bits it reads.
+                //
+                // The end of the input is reached by the tail refill,
+                // which counts the bytes it makes up, or inside a run of
+                // 0xFF fill bytes, which leaves no telling what the buffer
+                // holds.
+                self.data_short |= self.overread_by > 0 && self.fill_bits == 0;
                 self.buffer <<= 32;
                 self.bits_left += 32;
+                self.fill_bits += 32;
                 self.aligned_buffer = self.buffer << (64 - self.bits_left);
-                return Ok(true);
-            }
-
-            if self.overread_by > 0 {
-                if self.bits_left == 0 {
-                    return Err(DecodeErrors::ExhaustedData);
-                }
-                // We already hit EOF while refilling. Continue consuming the buffered bits
-                // but don't synthesize additional bytes from zero-fill.
                 return Ok(true);
             }
 
@@ -620,6 +690,14 @@ impl BitStream for BitStreamHuffman {
 
                 reader.rewind(4)?;
             }
+            // A byte at a time from here on, for stuffed bytes and markers:
+            // four bytes of data, each of which may be followed by a stuffed
+            // zero.  With fewer than eight bytes left the reads could pass
+            // the end of the input, and the tail refill counts those that do.
+            if reader.read_fixed_bytes_or_error::<8>().is_err() {
+                return self.refill_tail(reader);
+            }
+            reader.rewind(8)?;
             // This serves two reasons,
             // 1: Make clippy shut up
             // 2: Favour register reuse
@@ -1036,11 +1114,18 @@ impl BitStream for BitStreamHuffman {
     /// everything
     #[cold]
     fn reset(&mut self) {
+        self.data_short |= self.fill_bits > u32::from(self.bits_left);
+        self.fill_bits = 0;
         self.bits_left = 0;
         self.marker = None;
         self.buffer = 0;
         self.aligned_buffer = 0;
         self.eob_run = 0;
+    }
+
+    #[inline]
+    fn take_data_short(&mut self) -> bool {
+        core::mem::take(&mut self.data_short) || self.fill_bits > u32::from(self.bits_left)
     }
 }
 

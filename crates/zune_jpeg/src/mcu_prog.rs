@@ -114,16 +114,25 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 Err(result.err().unwrap())
             } else {
                 error!("{}", result.err().unwrap());
+                self.note_incomplete(self.scan_row);
+                self.note_uncoded_components();
                 // Go process it and return as much as we can, exiting here
                 return self.finish_progressive_decoding(&block, pixels);
             };
         }
 
-        // extract marker
-        let mut marker = stream
-            .marker()
-            .take()
-            .ok_or(DecodeErrors::FormatStatic("Marker missing where expected"))?;
+        // The marker that follows the first scan: the one the entropy
+        // decoder ran into, or the next in the stream when the scan's last
+        // symbols left none in its lookahead.
+        let mut marker = match get_marker(&mut self.stream, &mut stream) {
+            Ok(marker) => marker,
+            Err(e) if self.options.strict_mode() => return Err(e),
+            Err(e) => {
+                error!("{e}");
+                self.note_uncoded_components();
+                return self.finish_progressive_decoding(&block, pixels);
+            }
+        };
 
         // if marker is EOI, we are done, otherwise continue scanning.
         //
@@ -133,7 +142,13 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         'eoi: while marker != Marker::EOI {
             match marker {
                 Marker::SOS => {
-                    parse_sos(self)?;
+                    if let Err(e) = parse_sos(self) {
+                        if self.options.strict_mode() {
+                            return Err(e);
+                        }
+                        error!("{e}");
+                        break 'eoi;
+                    }
 
                     stream.update_progressive_params(
                         self.succ_high,
@@ -151,6 +166,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             Err(result.err().unwrap())
                         } else {
                             error!("{}", result.err().unwrap());
+                            self.note_incomplete(self.scan_row);
                             break 'eoi;
                         };
                     }
@@ -181,10 +197,22 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     }
                 }
                 Marker::RST(_n) => {
-                    self.handle_rst(&mut stream)?;
+                    if let Err(e) = self.handle_rst(&mut stream) {
+                        if self.options.strict_mode() {
+                            return Err(e);
+                        }
+                        error!("{e}");
+                        break 'eoi;
+                    }
                 }
                 _ => {
-                    self.parse_marker_inner(marker)?;
+                    if let Err(e) = self.parse_marker_inner(marker) {
+                        if self.options.strict_mode() {
+                            return Err(e);
+                        }
+                        error!("{e}");
+                        break 'eoi;
+                    }
                 }
             }
 
@@ -205,6 +233,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             }
         }
 
+        self.note_uncoded_components();
         self.finish_progressive_decoding(&block, pixels)
     }
 
@@ -263,8 +292,11 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 (self.info.width as usize * component.horizontal_sample).div_ceil(self.h_max * 8);
             let mcu_height =
                 (self.info.height as usize * component.vertical_sample).div_ceil(self.v_max * 8);
+            self.note_scan(mcu_height);
+            self.note_scan_precision();
 
             for i in 0..mcu_height {
+                self.scan_row = i;
                 for j in 0..mcu_width {
                     if self.spec_start != 0 && self.succ_high == 0 && *stream.eob_run() > 0 {
                         // handle EOB runs here.
@@ -332,6 +364,9 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
                     self.handle_rst_main(stream)?;
                 }
+                if stream.take_data_short() {
+                    self.note_incomplete(i);
+                }
             }
         } else {
             if self.spec_end != 0 {
@@ -359,7 +394,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
             // Components shall not be interleaved in progressive mode, except for
             // the DC coefficients in the first scan for each component of a progressive frame.
+            self.note_scan(self.mcu_y);
+            self.note_scan_precision();
             for i in 0..self.mcu_y {
+                self.scan_row = i;
                 for j in 0..self.mcu_x {
                     // process scan n elements in order
                     for k in 0..self.num_scans {
@@ -400,6 +438,9 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     self.todo -= 1;
                     // after every scan that's a mcu, count down restart markers.
                     self.handle_rst_main(stream)?;
+                }
+                if stream.take_data_short() {
+                    self.note_incomplete(i);
                 }
             }
         }
