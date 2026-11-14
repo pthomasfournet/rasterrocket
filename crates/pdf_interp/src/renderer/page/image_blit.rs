@@ -155,44 +155,20 @@ impl PageRenderer<'_> {
             }
         }
 
-        // On an ink canvas an image in a `Separation` or `DeviceN` space
-        // draws the ink of its tints, resampled as its colours are.  One
-        // whose spot colorants found no slot draws its sRGB samples as
-        // process ink in the process channels, as a colour of its space
-        // does.
-        let ink = match &colorants {
-            Some(colorants @ ColorantPlan::Channels(_)) => {
-                let samples = img.width as usize * img.height as usize;
-                let ink = ink_samples(decoded, colorants, plan.as_ref())
-                    .filter(|(ink, _)| ink.len() == samples * 8);
-                if ink.is_none() {
-                    log::debug!(
-                        "rasterrocket-interp: blit_image: the tints of image {:?} give no ink \
-                         for its {}×{} samples; it draws as its sRGB samples",
-                        name.map(String::from_utf8_lossy),
-                        img.width,
-                        img.height,
-                    );
-                }
-                ink
-            }
-            _ => None,
-        };
-        let overprint = match colorants {
-            Some(ColorantPlan::Process) => self.overprint_channels(false, PROCESS_CHANNELS),
-            _ => None,
-        };
+        let source = self.image_source(decoded, colorants.as_ref(), plan.as_ref(), img, name);
 
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
         let paint = |r: &mut Self| {
             let mask = mask_src.map(|m| (m, mask_ctm));
-            let drawn = match &ink {
-                Some((samples, paints)) => {
-                    r.composite_ink_image(samples, *paints, img, &ctm, mask, &grid, &mut grid_clip);
+            let drawn = match &source {
+                ImageSource::Ink(ink) => {
+                    r.composite_ink_image(ink, img, &ctm, mask, &grid, &mut grid_clip);
                     Ok(())
                 }
-                None => r.composite_image(img, &ctm, mask, &grid, &mut grid_clip, overprint),
+                ImageSource::Samples(overprint) => {
+                    r.composite_image(img, &ctm, mask, &grid, &mut grid_clip, *overprint)
+                }
             };
             if let Err(reason) = drawn {
                 r.record_image_failure(name, reason);
@@ -204,6 +180,45 @@ impl PageRenderer<'_> {
             self.paint_knocking_out(region, alpha, paint);
         } else {
             self.paint_object(region, alpha, paint);
+        }
+    }
+
+    /// How `img`, the samples of `decoded` drawn under the resampling
+    /// `plan`, draws under `colorants`, the plan of its tints.  On an ink
+    /// canvas an image in a `Separation` or `DeviceN` space draws the ink
+    /// of its tints, resampled as its colours are.  One whose spot
+    /// colorants found no slot draws its sRGB samples as process ink in
+    /// the process channels, as a colour of its space does; any other
+    /// image draws its sRGB samples in every channel.
+    fn image_source(
+        &self,
+        decoded: &crate::resources::DecodedImage,
+        colorants: Option<&ColorantPlan>,
+        plan: Option<&image_reduce::Plan>,
+        img: &ImageDescriptor,
+        name: Option<&[u8]>,
+    ) -> ImageSource {
+        match colorants {
+            Some(colorants @ ColorantPlan::Channels(_)) => {
+                let samples = img.width as usize * img.height as usize;
+                if let Some(ink) = ink_samples(decoded, colorants, plan)
+                    .filter(|ink| ink.data.len() == samples * 8)
+                {
+                    return ImageSource::Ink(ink);
+                }
+                log::debug!(
+                    "rasterrocket-interp: blit_image: the tints of image {:?} give no ink \
+                     for its {}×{} samples; it draws as its sRGB samples",
+                    name.map(String::from_utf8_lossy),
+                    img.width,
+                    img.height,
+                );
+                ImageSource::Samples(None)
+            }
+            Some(ColorantPlan::Process) => {
+                ImageSource::Samples(self.overprint_channels(false, PROCESS_CHANNELS))
+            }
+            None => ImageSource::Samples(None),
         }
     }
 
@@ -222,19 +237,14 @@ impl PageRenderer<'_> {
         )
     }
 
-    /// Composite the ink samples `ink`, eight bytes per sample on the grid
-    /// of `img`, which it was resampled with, sampled through `grid` under
-    /// `ctm`, onto the ink canvas within `grid_clip`, writing the channels
-    /// `paints` under overprint; `mask` is the image's soft mask with the
-    /// matrix that draws it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the samples, their channels and the draw state composite_image takes"
-    )]
+    /// Composite the ink samples `ink`, on the grid of `img`, which they
+    /// were resampled with, sampled through `grid` under `ctm`, onto the
+    /// ink canvas within `grid_clip`, writing their channels under
+    /// overprint; `mask` is the image's soft mask with the matrix that
+    /// draws it.
     fn composite_ink_image(
         &mut self,
-        ink: &[u8],
-        paints: ChannelMask,
+        ink: &InkSamples,
         img: &crate::resources::ImageDescriptor,
         ctm: &Ctm,
         mask: Option<(&SoftMask, Ctm)>,
@@ -263,13 +273,13 @@ impl PageRenderer<'_> {
             let gs = self.gstate.current();
             (gs.fill_alpha, gs.blend_mode, gs.transfer.clone())
         };
-        let overprint = self.overprint_channels(false, paints);
-        let paint = self.paint_params(fill_alpha, blend_mode, overprint, paints);
+        let overprint = self.overprint_channels(false, ink.paints);
+        let paint = self.paint_params(fill_alpha, blend_mode, overprint, ink.paints);
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         compositor.transfer = transfer.as_deref();
-        compositor.ink_samples = Some(paints);
+        compositor.ink_samples = Some(ink.paints);
         let img_w = img.width as usize;
-        let at = |x, y| sample_bytes::<8>(ink, img_w, 8, x, y);
+        let at = |x, y| sample_bytes::<8>(&ink.data, img_w, 8, x, y);
         let span = (grid.x1 - grid.x0) as usize;
         let mut colours = vec![0u8; span * 8];
         let mut shape = vec![0u8; span];
@@ -567,16 +577,33 @@ enum RowSamples<'a> {
     PerPixel,
 }
 
+/// How an image draws (see [`PageRenderer::image_source`]).
+enum ImageSource {
+    /// The ink of its tints.
+    Ink(InkSamples),
+    /// Its sRGB samples, writing the channels given, every channel for
+    /// `None`.
+    Samples(Option<ChannelMask>),
+}
+
+/// The ink of an image's samples on the ink canvas.
+struct InkSamples {
+    /// Eight bytes per sample.
+    data: Vec<u8>,
+    /// The channels the image paints.
+    paints: ChannelMask,
+}
+
 /// The ink of each sample of the colorant tints of `decoded` under
 /// `colorants`, their plan, resampled through `plan` when the draw reduces
-/// the image, eight bytes per sample, with the channels the image paints.
-/// `None` for an image without tints, under [`ColorantPlan::Process`],
-/// and when the samples cannot be resampled or held.
+/// the image.  `None` for an image without tints, under
+/// [`ColorantPlan::Process`], and when the samples cannot be resampled or
+/// held.
 fn ink_samples(
     decoded: &crate::resources::DecodedImage,
     colorants: &ColorantPlan,
     plan: Option<&image_reduce::Plan>,
-) -> Option<(Vec<u8>, ChannelMask)> {
+) -> Option<InkSamples> {
     let tints = decoded.tints.as_ref()?;
     let n = tints.space.ncomponents();
     let resampled;
@@ -592,7 +619,10 @@ fn ink_samples(
     for px in data.chunks_exact(n) {
         ink.extend_from_slice(&colorants.ink_of_tints(px)?);
     }
-    Some((ink, colorants.paints()))
+    Some(InkSamples {
+        data: ink,
+        paints: colorants.paints(),
+    })
 }
 
 /// Checks the decoder contract that `len` bytes hold `img`'s samples, so

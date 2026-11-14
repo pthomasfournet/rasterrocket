@@ -724,15 +724,10 @@ fn spot_images_paint_their_colorant_alone() {
 /// overprint both leave the spot slots beneath them.
 #[test]
 fn an_unslotted_spot_image_paints_the_process_channels() {
-    let spaces: String = ["A", "B", "C", "D", "E"]
-        .iter()
-        .map(|name| {
-            format!(
-                "/{name} [/Separation /{name} /DeviceCMYK {}] ",
-                tint_to_cmyk("0 0.91 0.76 0")
-            )
-        })
-        .collect();
+    let tint = tint_to_cmyk("0 0.91 0.76 0");
+    let spaces = ["A", "B", "C", "D", "E"]
+        .map(|name| format!("/{name} [/Separation /{name} /DeviceCMYK {tint}]"))
+        .join(" ");
     let doc = overprint_doc("/GS << /OP true /op true >>", &spaces);
     let slots = "/GS gs /A cs 1 scn 0 0 10 10 re f /B cs 1 scn 0 0 10 10 re f \
                  /C cs 1 scn 0 0 10 10 re f /D cs 1 scn 0 0 10 10 re f";
