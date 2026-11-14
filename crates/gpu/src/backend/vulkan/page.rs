@@ -189,7 +189,7 @@ impl VulkanBackend {
                 out.len()
             )));
         }
-        let bins = page.bin();
+        let bins = page.bin().map_err(BackendError::new)?;
         let push = push_constants(page, &bins)?;
         let inputs: [&[u8]; 5] = [
             bytemuck::cast_slice(page.cmds()),
@@ -389,7 +389,8 @@ mod tests {
                 .collect();
             let mut page = PageCommands::new(width, height, paper);
             for c in &cmds {
-                page.push_coverage(c.table(), c.eo, c.bounds, c.rgb, c.a_input);
+                page.push_coverage(c.table(), c.eo, c.bounds, c.rgb, c.a_input)
+                    .expect("push");
             }
             let row = width as usize * 3;
             let stride = row + 5;
@@ -425,7 +426,8 @@ mod tests {
         page.push_opaque_runs(
             &mut [(1, 2, 4), (1, 3, 6), (3, 0, 0), (9, 0, 7)],
             [10, 20, 30],
-        );
+        )
+        .expect("push");
         let mut out = vec![0; 8 * 4 * 3];
         backend
             .render_page(&page, &mut out, 24)

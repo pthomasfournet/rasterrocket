@@ -18,7 +18,7 @@
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
-use gpu::page::{PageCommands, PixelBounds};
+use gpu::page::{PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds};
 use gpu::{AaScanTable, ScanIntersect};
 use raster::clip::Clip;
 use raster::types::{AA_SIZE, BlendMode};
@@ -80,6 +80,14 @@ pub fn device_page_operators(ops: &[Operator<'_>]) -> Result<(), &'static str> {
         .map_or(Ok(()), Err)
 }
 
+/// The refusal reason of a command the page cannot take.
+const fn command_refusal(e: &PageCommandsError) -> &'static str {
+    match e {
+        PageCommandsError::TooLarge => "command list size",
+        PageCommandsError::Alloc(_) => "command list allocation",
+    }
+}
+
 /// The pixels of `scanner`'s fill under the rectangular `clip`: rows the
 /// scanner covers, columns from its leftmost intersection to its rightmost
 /// (to the right edge when a row ends inside the shape under `even_odd`),
@@ -117,7 +125,7 @@ impl Recording {
         clip: &Clip,
         rgb: [u8; 3],
         alpha: u8,
-    ) {
+    ) -> Result<(), PageCommandsError> {
         self.intersects.clear();
         self.intersects
             .extend(scanner.intersects().iter().map(|i| ScanIntersect {
@@ -132,7 +140,23 @@ impl Recording {
         };
         let bounds = fill_bounds(scanner, even_odd, clip);
         self.commands
-            .push_coverage(table, even_odd, bounds, rgb, alpha);
+            .push_coverage(table, even_odd, bounds, rgb, alpha)
+    }
+
+    /// Stop the recording with the refusal of `result`'s error, if any,
+    /// unless it has already stopped.
+    fn refuse_on(&mut self, result: Result<(), PageCommandsError>) {
+        if let Err(e) = result {
+            self.refuse(command_refusal(&e));
+        }
+    }
+
+    /// Stop the recording with `reason`, unless it has already stopped.
+    fn refuse(&mut self, reason: &'static str) {
+        if self.refused.is_none() {
+            log::debug!("rasterrocket-interp: page not recordable for the device: {reason}");
+            self.refused = Some(reason);
+        }
     }
 }
 
@@ -222,11 +246,8 @@ impl PageRenderer<'_> {
 
     /// Stop the recording with `reason`, unless it has already stopped.
     pub(super) fn refuse_device(&mut self, reason: &'static str) {
-        if let Some(recording) = self.device_page.as_mut()
-            && recording.refused.is_none()
-        {
-            log::debug!("rasterrocket-interp: page not recordable for the device: {reason}");
-            recording.refused = Some(reason);
+        if let Some(recording) = self.device_page.as_mut() {
+            recording.refuse(reason);
         }
     }
 
@@ -288,7 +309,9 @@ impl PageRenderer<'_> {
         let scanner =
             raster::fill::aa_scanner(path, &DEVICE_MATRIX, flatness, &paint.clip, even_odd);
         if let (Some(scanner), Some(recording)) = (scanner, self.device_page.as_mut()) {
-            recording.push_fill(&scanner, even_odd, &paint.clip, paint.rgb, paint.alpha);
+            let pushed =
+                recording.push_fill(&scanner, even_odd, &paint.clip, paint.rgb, paint.alpha);
+            recording.refuse_on(pushed);
         }
     }
 
@@ -317,12 +340,19 @@ impl PageRenderer<'_> {
             if let Some(scanner) =
                 stroke_aa_scanner(&shape.path, &shape.matrix, &params, &paint.clip)
             {
-                recording.push_fill(&scanner, false, &paint.clip, paint.rgb, paint.alpha);
+                let pushed =
+                    recording.push_fill(&scanner, false, &paint.clip, paint.rgb, paint.alpha);
+                recording.refuse_on(pushed);
             }
             return;
         }
+        // The runs are held until the hairline is appended; they are kept
+        // within the bytes the page may still take.
+        let room = PAGE_COMMANDS_MAX_BYTES.saturating_sub(recording.commands.bytes())
+            / size_of::<(i32, i32, i32)>();
         let mut runs = std::mem::take(&mut recording.runs);
         runs.clear();
+        let mut overflow = false;
         hairline_runs(
             &shape.path,
             &shape.matrix,
@@ -330,9 +360,20 @@ impl PageRenderer<'_> {
             &paint.clip,
             width,
             height,
-            |x0, x1, y| runs.push((y, x0, x1)),
+            |x0, x1, y| {
+                if runs.len() < room {
+                    runs.push((y, x0, x1));
+                } else {
+                    overflow = true;
+                }
+            },
         );
-        recording.commands.push_opaque_runs(&mut runs, paint.rgb);
+        if overflow {
+            recording.refuse(command_refusal(&PageCommandsError::TooLarge));
+        } else {
+            let pushed = recording.commands.push_opaque_runs(&mut runs, paint.rgb);
+            recording.refuse_on(pushed);
+        }
         recording.runs = runs;
     }
 }
@@ -584,5 +625,25 @@ mod tests {
         assert_eq!(device_page_operators(&ops), Err("text"));
         let ops = crate::content::parse(b"q 0 0 10 10 re f Q");
         assert_eq!(device_page_operators(&ops), Ok(()));
+    }
+
+    /// A page of full-page fills past the byte limit of a command list is
+    /// refused when the limit is reached, and renders on the CPU in bounded
+    /// memory.
+    #[test]
+    fn a_command_list_past_its_byte_limit_refuses_the_recording() {
+        let doc = doc();
+        let fill = b"0 0 2000 2000 re f ".repeat(600);
+        assert!(matches!(
+            record(&doc, 2000, 2000, &fill),
+            DeviceRecording::Refused("command list size")
+        ));
+        let mut hairline = b"0 w 0 0 m ".to_vec();
+        hairline.extend(b"2000 2000 l 0 0 l ".repeat(4_000));
+        hairline.extend(b"S");
+        assert!(matches!(
+            record(&doc, 2000, 2000, &hairline),
+            DeviceRecording::Refused("command list size")
+        ));
     }
 }
