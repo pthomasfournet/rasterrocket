@@ -5,9 +5,9 @@ Apple silicon it uses the NEON instructions of the M-series and A-series
 cores. It needs no Homebrew packages and no extra fonts.
 
 - **Tested on:** macOS 27.2 on Apple silicon (A18 Pro, 8 GB).
-- **CI:** every push is linted with clippy on `macos-latest`. The tests that
-  behave differently on macOS also run there: system font discovery, the
-  predefined CJK character maps and the memory probe.
+- **CI:** every push is linted with clippy on `macos-latest`, which also
+  runs the renderer, interpreter and library test suites, the font crate's
+  (system font discovery) and the memory probe.
 - **Intel Macs:** the x86-64 code paths (AVX2, with a scalar fallback) are
   the ones every Linux PC uses, but they are not tested on macOS. An Intel
   build also needs the `nasm` assembler (`brew install nasm`) for the AV1
@@ -149,8 +149,13 @@ colour, rectangular clip), and it is off by default:
 `PDF_RASTER_AA_FILL_THRESHOLD=0` sends every eligible fill to the device. A
 `vulkan,gpu-jpeg-huffman` build also runs the parallel-Huffman JPEG
 decoder, off by default as well (`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables
-it). Under the default `--backend auto`, no
-Vulkan device is opened while every Vulkan kernel is off.
+it); a `vulkan,gpu-icc` build converts ICC-based CMYK images of at least
+128 000 px through the profile's lookup table on the device, and a
+`vulkan,cache` build keeps decoded images in the device image cache.
+`--gpu-pages` renders pages made only of solid fills and strokes whole on
+the device, beside the CPU workers. Under the default `--backend auto`, no
+Vulkan device is opened while every Vulkan kernel is off and `--gpu-pages`
+is not given.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
 byte-identically on the GPU and the CPU. A page of 300 large solid polygons

@@ -1,15 +1,18 @@
 # rasterrocket on the BSDs and Windows
 
-These platforms are not tested, and no CI job covers them. The code has no
-Linux-only dependency in its render path: it is Rust, plus two C libraries
-that `cargo` builds, libdeflate for compression and mimalloc, the
-command-line tool's allocator. It is expected to build anywhere Rust and a C
-compiler are available, but expected is not tested. Please report what you
-find.
+Windows is built and tested in CI; the BSDs are not tested, and no CI job
+covers them. The code has no Linux-only dependency in its render path: it is
+Rust, plus two C libraries that `cargo` builds, libdeflate for compression
+and mimalloc, the command-line tool's allocator, and, on x86, the AV1
+decoder's assembly kernels, which need `nasm`. It is expected to build on
+the BSDs wherever Rust and a C compiler are available, but expected is not
+tested. Please report what you find.
 
 ## FreeBSD, OpenBSD, NetBSD
 
-- **Build:** as on [Linux](linux.md), with the system C compiler.
+- **Build:** as on [Linux](linux.md), with the system C compiler and, on
+  x86, `nasm` (or `--no-default-features --features bundled-fonts`, which
+  drops the assembly kernels).
 - **Fonts:** searched in `/usr/local/share/fonts`, where the ports and
   packages install them, as well as `~/.fonts`, `~/.local/share/fonts`, and
   any directory named by `RROCKET_FONT_DIR`.
@@ -24,8 +27,15 @@ find.
 
 ## Windows
 
-- **Build:** with the MSVC toolchain from `rustup` and the Visual Studio
-  Build Tools.
+- **CI:** each push runs clippy on `windows-latest`, then the test suites
+  of the renderer, interpreter, library, font, parser, colour, encoder,
+  comic and command-line crates (the last including end-to-end runs of the
+  binary). GPU code is not tested on Windows.
+- **Build:** with the MSVC toolchain from `rustup`, the Visual Studio
+  Build Tools and, on x86-64, `nasm` on `PATH` (`choco install nasm`; the
+  installer leaves it in `C:\Program Files\NASM`) for the AV1 decoder's
+  kernels; `--no-default-features --features bundled-fonts` builds without
+  them.
 - **Fonts:** searched in `C:/Windows/Fonts`. Fonts installed for one user
   only (`%LOCALAPPDATA%\Microsoft\Windows\Fonts`) are not searched yet; name
   that directory with `RROCKET_FONT_DIR`.

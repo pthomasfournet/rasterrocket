@@ -20,7 +20,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
 - SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
-- CI runs clippy and the NEON tests on arm64 Linux, and clippy and the macOS-specific tests on macOS (Apple silicon); no Apple Metal GPU backend.
+- CI runs clippy and the NEON tests on arm64 Linux, and clippy with the renderer, interpreter and library suites on macOS (Apple silicon); no Apple Metal GPU backend.
 
 ### GPU (optional)
 
@@ -45,7 +45,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`; there is no `nvjpeg` support.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
+Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages made only of solid fills and strokes under rectangular clips whole on the Vulkan device, beside the CPU workers and with the same bytes; it is off by default.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -63,10 +63,10 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 |---|---|---|---|---|
 | Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; CI runs the test suite | [Linux](platforms/linux.md) |
 | Linux aarch64 | NEON (+ SVE2 on nightly) | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests | [Linux](platforms/linux.md) |
-| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU); no Metal backend | **Supported**; CI runs clippy and the macOS-specific tests | [macOS](platforms/macos.md) |
+| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU); no Metal backend | **Supported**; CI runs clippy and the renderer, interpreter and library suites | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
-| Windows | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
+| Windows x86-64 | AVX-512 / AVX2 | untested | CI builds and runs clippy and the CPU test suites | [BSD and Windows](platforms/other.md) |
 
 AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
 Radeon GPUs.  SVE2 requires the `rasterrocket-render` feature `nightly-sve2`

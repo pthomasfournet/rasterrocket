@@ -5,7 +5,10 @@ is developed and tested on it.
 
 - **CI:** each push runs the test suite on x86-64 (`ubuntu-latest`),
   except the GPU tests, which need a device. On arm64 (`ubuntu-24.04-arm`)
-  it runs clippy and the tests of the NEON code paths.
+  it runs clippy and the tests of the NEON code paths. A separate workflow
+  reports line coverage of the CPU-only suites, and each release tag builds
+  a PGO + BOLT x86-64 binary (`scripts/release_pgo_build.sh`), uploaded as
+  a workflow artifact.
 - **CPU:** x86-64 uses AVX2, or AVX-512 when built with
   `-C target-cpu=native` on a CPU that has it, with a scalar fallback.
   aarch64 uses NEON, plus SVE2 behind the nightly-only `nightly-sve2`
