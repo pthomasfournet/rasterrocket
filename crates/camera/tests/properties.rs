@@ -65,6 +65,7 @@ fn coordinate() -> impl Strategy<Value = f64> {
         1 => any::<f64>(),
         1 => Just(f64::NAN),
         1 => Just(f64::INFINITY),
+        1 => Just(f64::NEG_INFINITY),
     ]
 }
 
