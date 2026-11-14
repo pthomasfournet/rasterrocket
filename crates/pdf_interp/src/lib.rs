@@ -62,6 +62,8 @@ pub enum DeviceKernel {
     /// The parallel-Huffman JPEG decoder (`huffman_threshold`, feature
     /// `gpu-jpeg-huffman`).
     HuffmanJpeg,
+    /// The nvJPEG decoder (`GPU_JPEG_THRESHOLD_PX`, feature `nvjpeg`).
+    NvJpeg,
 }
 
 /// Whether `kernel` can dispatch at all.  A threshold equal to its type's
@@ -93,6 +95,16 @@ pub fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
                 huffman_threshold() != u32::MAX
             }
             #[cfg(not(feature = "gpu-jpeg-huffman"))]
+            {
+                false
+            }
+        }
+        DeviceKernel::NvJpeg => {
+            #[cfg(feature = "nvjpeg")]
+            {
+                resources::image::GPU_JPEG_THRESHOLD_PX != u32::MAX
+            }
+            #[cfg(not(feature = "nvjpeg"))]
             {
                 false
             }
@@ -1307,5 +1319,10 @@ startxref\n180\n%%EOF"
         let huffman = false;
         assert_eq!(device_kernel_enabled(DeviceKernel::AaFill), aa);
         assert_eq!(device_kernel_enabled(DeviceKernel::HuffmanJpeg), huffman);
+        #[cfg(feature = "nvjpeg")]
+        let nvjpeg = crate::resources::image::GPU_JPEG_THRESHOLD_PX != u32::MAX;
+        #[cfg(not(feature = "nvjpeg"))]
+        let nvjpeg = false;
+        assert_eq!(device_kernel_enabled(DeviceKernel::NvJpeg), nvjpeg);
     }
 }

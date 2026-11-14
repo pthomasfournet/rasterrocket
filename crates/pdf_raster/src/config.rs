@@ -37,7 +37,8 @@ pub enum BackendPolicy {
     Auto,
     /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.
     CpuOnly,
-    /// Require CUDA (nvJPEG, nvJPEG2000, GPU AA fill, ICC CLUT).
+    /// Require CUDA (nvJPEG2000, GPU AA fill, ICC CLUT, and nvJPEG while its
+    /// threshold enables it).
     /// Returns [`RasterError::BackendUnavailable`] if CUDA initialisation fails
     /// rather than falling back to CPU.
     ForceCuda,

@@ -11,11 +11,12 @@ use crate::{BackendPolicy, RasterError, RasterSession};
 /// [`BackendPolicy::CpuOnly`] to skip GPU decoder init for this page regardless
 /// of the session-level policy — used by affinity dispatch for `CpuOnly` pages.
 ///
-/// On `CpuOnly` this is a no-op.  On `Auto` the nvJPEG decoder is built
-/// only when [`crate::open::auto_uses_device`], and the nvJPEG2000 decoder
-/// only when the page draws an image it takes.  On
-/// `ForceCuda`/`ForceVaapi` init failure is
-/// returned as `RasterError::BackendUnavailable` rather than silently falling back.
+/// On `CpuOnly` this is a no-op.  The nvJPEG decoder is built only where
+/// `wants_nvjpeg_decoder` says so, and the nvJPEG2000 decoder as
+/// `nvjpeg2k_supply` says: on `Auto` only when the page draws an image it
+/// takes, never under `ForceVulkan`.  On `ForceCuda`/`ForceVaapi` init
+/// failure is returned as `RasterError::BackendUnavailable` rather than
+/// silently falling back.
 #[cfg_attr(
     not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
     expect(
@@ -57,41 +58,21 @@ pub(crate) fn lend_decoders(
     lend_huffman_decoder(session, renderer, effective_policy)?;
 
     #[cfg(feature = "nvjpeg")]
-    {
-        let dispatch_nvjpeg = {
-            #[cfg(feature = "vaapi")]
-            {
-                !matches!(effective_policy, BackendPolicy::ForceVaapi)
+    if wants_nvjpeg_decoder(
+        effective_policy,
+        pdf_interp::device_kernel_enabled(pdf_interp::DeviceKernel::NvJpeg),
+    ) {
+        gpu_init::ensure_nvjpeg(effective_policy).map_err(RasterError::BackendUnavailable)?;
+        gpu_init::NVJPEG_DEC.with(|cell| {
+            if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
+                renderer.set_nvjpeg(slot.take());
             }
-            #[cfg(not(feature = "vaapi"))]
-            {
-                true
-            }
-        } && (!matches!(effective_policy, BackendPolicy::Auto)
-            || crate::open::auto_uses_device());
-        if dispatch_nvjpeg {
-            gpu_init::ensure_nvjpeg(effective_policy).map_err(RasterError::BackendUnavailable)?;
-            gpu_init::NVJPEG_DEC.with(|cell| {
-                if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
-                    renderer.set_nvjpeg(slot.take());
-                }
-            });
-        }
+        });
     }
 
     #[cfg(feature = "nvjpeg2k")]
-    {
-        let dispatch_nvjpeg2k = {
-            #[cfg(feature = "vaapi")]
-            {
-                !matches!(effective_policy, BackendPolicy::ForceVaapi)
-            }
-            #[cfg(not(feature = "vaapi"))]
-            {
-                true
-            }
-        };
-        if matches!(effective_policy, BackendPolicy::Auto) {
+    match nvjpeg2k_supply(effective_policy) {
+        Nvjpeg2kSupply::OnDemand => {
             // A decoder this thread already built is lent; otherwise the
             // renderer builds one when it first meets an image it takes.
             gpu_init::NVJPEG2K_DEC.with(|cell| {
@@ -100,7 +81,8 @@ pub(crate) fn lend_decoders(
                 }
             });
             renderer.set_nvjpeg2k_source(Some(gpu_init::take_nvjpeg2k_for_auto));
-        } else if dispatch_nvjpeg2k {
+        }
+        Nvjpeg2kSupply::Eager => {
             gpu_init::ensure_nvjpeg2k(effective_policy).map_err(RasterError::BackendUnavailable)?;
             gpu_init::NVJPEG2K_DEC.with(|cell| {
                 if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
@@ -108,6 +90,7 @@ pub(crate) fn lend_decoders(
                 }
             });
         }
+        Nvjpeg2kSupply::None => {}
     }
 
     #[cfg(feature = "vaapi")]
@@ -116,6 +99,45 @@ pub(crate) fn lend_decoders(
     }
 
     Ok(())
+}
+
+/// Whether `policy` builds this thread's nvJPEG decoder, `kernel_enabled`
+/// being [`pdf_interp::device_kernel_enabled`] for it.  Only `Auto` and
+/// `ForceCuda` decode on CUDA, and only while the decoder can dispatch: a
+/// disabled threshold sends no JPEG to it.
+#[cfg(feature = "nvjpeg")]
+const fn wants_nvjpeg_decoder(policy: BackendPolicy, kernel_enabled: bool) -> bool {
+    match policy {
+        BackendPolicy::Auto | BackendPolicy::ForceCuda => kernel_enabled,
+        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => false,
+        #[cfg(feature = "vaapi")]
+        BackendPolicy::ForceVaapi => false,
+    }
+}
+
+/// How a rendering thread obtains its nvJPEG2000 decoder.
+#[cfg(feature = "nvjpeg2k")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nvjpeg2kSupply {
+    /// Built when the renderer first draws a `JPXDecode` image it takes.
+    OnDemand,
+    /// Built before the page renders; a failure fails the policy.
+    Eager,
+    /// Never built.
+    None,
+}
+
+/// The nvJPEG2000 supply of `policy`: on demand under `Auto`, eager under
+/// `ForceCuda`, none under the policies that initialise no CUDA context.
+#[cfg(feature = "nvjpeg2k")]
+const fn nvjpeg2k_supply(policy: BackendPolicy) -> Nvjpeg2kSupply {
+    match policy {
+        BackendPolicy::Auto => Nvjpeg2kSupply::OnDemand,
+        BackendPolicy::ForceCuda => Nvjpeg2kSupply::Eager,
+        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => Nvjpeg2kSupply::None,
+        #[cfg(feature = "vaapi")]
+        BackendPolicy::ForceVaapi => Nvjpeg2kSupply::None,
+    }
 }
 
 /// Whether `policy` builds this thread's parallel-Huffman JPEG decoder,
@@ -259,5 +281,50 @@ mod tests {
         assert!(!wants_huffman_decoder(BackendPolicy::CpuOnly, true));
         #[cfg(feature = "vaapi")]
         assert!(!wants_huffman_decoder(BackendPolicy::ForceVaapi, true));
+    }
+}
+
+#[cfg(all(test, any(feature = "nvjpeg", feature = "nvjpeg2k")))]
+mod cuda_decoder_tests {
+    use crate::BackendPolicy;
+
+    /// No nvJPEG decoder is built while its threshold disables it, nor
+    /// under a policy that initialises no CUDA context.
+    #[cfg(feature = "nvjpeg")]
+    #[test]
+    fn nvjpeg_decoders_are_built_only_where_they_can_dispatch() {
+        use super::wants_nvjpeg_decoder;
+        for policy in [BackendPolicy::Auto, BackendPolicy::ForceCuda] {
+            assert!(!wants_nvjpeg_decoder(policy, false), "{policy:?}");
+            assert!(wants_nvjpeg_decoder(policy, true), "{policy:?}");
+        }
+        for policy in [BackendPolicy::CpuOnly, BackendPolicy::ForceVulkan] {
+            assert!(!wants_nvjpeg_decoder(policy, true), "{policy:?}");
+        }
+        #[cfg(feature = "vaapi")]
+        assert!(!wants_nvjpeg_decoder(BackendPolicy::ForceVaapi, true));
+    }
+
+    /// A Vulkan session starts no CUDA nvJPEG2000 decoder.
+    #[cfg(feature = "nvjpeg2k")]
+    #[test]
+    fn nvjpeg2k_is_supplied_only_to_cuda_capable_policies() {
+        use super::{Nvjpeg2kSupply, nvjpeg2k_supply};
+        assert_eq!(
+            nvjpeg2k_supply(BackendPolicy::Auto),
+            Nvjpeg2kSupply::OnDemand
+        );
+        assert_eq!(
+            nvjpeg2k_supply(BackendPolicy::ForceCuda),
+            Nvjpeg2kSupply::Eager
+        );
+        assert_eq!(
+            nvjpeg2k_supply(BackendPolicy::ForceVulkan),
+            Nvjpeg2kSupply::None
+        );
+        assert_eq!(
+            nvjpeg2k_supply(BackendPolicy::CpuOnly),
+            Nvjpeg2kSupply::None
+        );
     }
 }

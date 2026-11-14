@@ -410,9 +410,10 @@ pub struct PageRenderer<'doc> {
     gpu_ctx: Option<Arc<GpuCtx>>,
     /// Vulkan compute backend, attached when the session was opened with
     /// [`BackendPolicy::ForceVulkan`]; the AA fill and the ICC CMYK→RGB
-    /// CLUT then run on it.  Such a session initialises no CUDA context, so
-    /// `gpu_ctx` is `None` and its other consumers (image blits, the device
-    /// image cache) take their CPU path.
+    /// CLUT then run on it, and the image cache, when attached, keeps its
+    /// slabs and runs its blits on the same device.  Such a session
+    /// initialises no CUDA context: `gpu_ctx` is `None` and no nvJPEG or
+    /// nvJPEG2000 decoder is built.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
     /// Device-image-cache state.  `Some` only when the `cache` feature is
