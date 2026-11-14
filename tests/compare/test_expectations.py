@@ -198,7 +198,7 @@ class FileFormat(unittest.TestCase):
         self.assertEqual(ex.dump(ex.parse(text)), text)
 
     def test_rejects_malformed_entries(self) -> None:
-        """Missing reasons, bad pages, passing outcomes and stray limits are errors."""
+        """Missing reasons, bad pages, passing outcomes, stray and non-finite limits are errors."""
         bad = [
             '{"file": "a.pdf", "outcome": "error"}',
             '{"file": "a.pdf", "outcome": "error", "reason": " "}',
@@ -206,6 +206,8 @@ class FileFormat(unittest.TestCase):
             '{"file": "a.pdf", "outcome": "ok", "reason": "r"}',
             '{"file": "a.pdf", "outcome": "size", "tile": 3, "reason": "r"}',
             '{"file": "a.pdf", "outcome": "differs", "tile": -1, "reason": "r"}',
+            '{"file": "a.pdf", "outcome": "differs", "tile": NaN, "reason": "r"}',
+            '{"file": "a.pdf", "outcome": "differs", "rmse": Infinity, "reason": "r"}',
             '{"file": "a.pdf", "outcome": "error", "reason": "r", "note": "x"}',
         ]
         for entry in bad:

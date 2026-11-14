@@ -308,8 +308,10 @@ def _limits_from_json(where: str, outcome: str, raw: Mapping[str, object]) -> di
         if outcome != DIFFERS:
             msg = f"{where}: {m} limit on a {outcome} entry"
             raise RegistryError(msg)
-        if not isinstance(v, int | float) or isinstance(v, bool) or v < 0:
-            msg = f"{where}: {m} is not a non-negative number: {v!r}"
+        # `json.loads` admits the bare tokens NaN and Infinity; a NaN limit
+        # compares false both ways and accepts every value.
+        if not isinstance(v, int | float) or isinstance(v, bool) or not math.isfinite(v) or v < 0:
+            msg = f"{where}: {m} is not a finite non-negative number: {v!r}"
             raise RegistryError(msg)
         limits[m] = float(v)
     return limits
