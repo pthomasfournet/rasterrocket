@@ -157,8 +157,8 @@ static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 /// A lazily-parsed PDF document backed by a memory-mapped file, an owned
 /// buffer or bytes shared with the caller.
 pub struct Document {
-    /// The file bytes.  `Arc` so callers can hold byte slices.
-    data: Arc<MmapOrVec>,
+    /// The document bytes.
+    data: MmapOrVec,
     /// Position in `data` that the cross-reference offsets are relative to:
     /// 0, or the `%PDF-` header's position when bytes precede the header
     /// and the offsets were written without them.
@@ -362,10 +362,7 @@ impl Document {
     /// uses a security handler other than `/Standard`, or needs a password
     /// other than the one given.
     pub fn open_with(path: &Path, options: &OpenOptions) -> Result<Self, PdfError> {
-        Self::from_source(
-            Arc::new(load_file(path, options.read_into_memory)?),
-            options,
-        )
+        Self::from_source(load_file(path, options.read_into_memory)?, options)
     }
 
     /// Construct from PDF bytes already in memory.
@@ -385,7 +382,7 @@ impl Document {
     /// # Errors
     /// The errors of [`Self::open_with`] other than I/O.
     pub fn from_bytes_with(bytes: Vec<u8>, options: &OpenOptions) -> Result<Self, PdfError> {
-        Self::from_source(Arc::new(MmapOrVec::Owned(bytes)), options)
+        Self::from_source(MmapOrVec::Owned(bytes), options)
     }
 
     /// Construct from PDF bytes the caller keeps shared, without copying
@@ -413,10 +410,10 @@ impl Document {
         bytes: impl AsRef<[u8]> + Send + Sync + 'static,
         options: &OpenOptions,
     ) -> Result<Self, PdfError> {
-        Self::from_source(Arc::new(MmapOrVec::Shared(Box::new(bytes))), options)
+        Self::from_source(MmapOrVec::Shared(Box::new(bytes)), options)
     }
 
-    fn from_source(data: Arc<MmapOrVec>, options: &OpenOptions) -> Result<Self, PdfError> {
+    fn from_source(data: MmapOrVec, options: &OpenOptions) -> Result<Self, PdfError> {
         let (xref, base) = parse_structure(data.as_bytes())?;
         let mut doc = Self {
             data,
@@ -1948,7 +1945,7 @@ mod tests {
         assert!((bytes.len() as u64) < MMAP_MIN_LEN);
         let file = temp_pdf(&bytes);
         let doc = Document::open(file.path()).expect("opens");
-        assert!(matches!(*doc.data, MmapOrVec::Owned(_)));
+        assert!(matches!(doc.data, MmapOrVec::Owned(_)));
         file.as_file().set_len(0).expect("truncate");
         let obj = doc.get_object((2, 0)).expect("object 2");
         assert_eq!(obj.as_str(), Some(&b"small"[..]));
@@ -1962,7 +1959,7 @@ mod tests {
         let bytes = pdf_with_objects(&[(2, "(shared)".to_owned())]);
         let shared: Arc<[u8]> = Arc::from(bytes.as_slice());
         let doc = Document::from_shared(Arc::clone(&shared)).expect("opens");
-        assert!(matches!(*doc.data, MmapOrVec::Shared(_)));
+        assert!(matches!(doc.data, MmapOrVec::Shared(_)));
         assert_eq!(doc.bytes().as_ptr(), shared.as_ptr(), "no copy");
         let obj = doc.get_object((2, 0)).expect("object 2");
         assert_eq!(obj.as_str(), Some(&b"shared"[..]));
@@ -1986,7 +1983,7 @@ mod tests {
             ..OpenOptions::default()
         };
         let doc = Document::open_with(file.path(), &options).expect("opens");
-        assert!(matches!(*doc.data, MmapOrVec::Owned(_)));
+        assert!(matches!(doc.data, MmapOrVec::Owned(_)));
         file.as_file().set_len(0).expect("truncate");
         let obj = doc.get_object((3, 0)).expect("object 3");
         assert_eq!(obj.as_str(), Some(&b"after"[..]));
@@ -2000,7 +1997,7 @@ mod tests {
         let bytes = pdf_with_objects(&[(2, format!("({padding})"))]);
         let file = temp_pdf(&bytes);
         let doc = Document::open(file.path()).expect("opens");
-        assert!(matches!(*doc.data, MmapOrVec::Mapped(_)));
+        assert!(matches!(doc.data, MmapOrVec::Mapped(_)));
         assert_eq!(doc.bytes(), &bytes[..]);
     }
 
