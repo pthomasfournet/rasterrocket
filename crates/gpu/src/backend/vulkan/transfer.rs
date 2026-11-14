@@ -242,24 +242,22 @@ impl TransferContext {
 }
 
 /// The staging buffer in `slot`, replaced first by one from `alloc` when it
-/// holds fewer than `min_size` bytes.
+/// holds fewer than `min_size` bytes, at the size
+/// [`crate::backend::staged::grown_size`] gives.
 fn ensure_staging(
     slot: &mut Option<HostBuffer>,
     min_size: usize,
     alloc: impl FnOnce(usize) -> Result<HostBuffer>,
 ) -> Result<&mut HostBuffer> {
-    let current_capacity = slot.as_ref().map_or(0, HostBuffer::size);
-    let needed = u64::try_from(min_size).expect("min_size fits u64");
-    if needed > current_capacity {
-        // Grow geometrically so a sequence of slowly-increasing sizes
-        // doesn't reallocate every call.
-        let grown = std::cmp::max(needed, current_capacity.saturating_mul(2));
-        let grown_usize = usize::try_from(grown)
-            .map_err(|_| BackendError::msg("staging grow size exceeds usize"))?;
+    let current_capacity = slot.as_ref().map_or(Ok(0), |b| {
+        usize::try_from(b.size()).map_err(|_| BackendError::msg("staging size exceeds usize"))
+    })?;
+    if min_size > current_capacity {
+        let grown = crate::backend::staged::grown_size(current_capacity, min_size);
         // Drop the old buffer first so its VkBuffer + allocation are
         // released before we ask for the new one.
         *slot = None;
-        return Ok(slot.insert(alloc(grown_usize)?));
+        return Ok(slot.insert(alloc(grown)?));
     }
     slot.as_mut()
         .ok_or_else(|| BackendError::msg("staging buffer requested for an empty transfer"))

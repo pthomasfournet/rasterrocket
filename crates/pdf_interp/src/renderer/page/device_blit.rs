@@ -233,17 +233,16 @@ fn blit_on_cuda(
 /// [`PageRenderer::try_gpu_blit_image`] of a Vulkan image: the table
 /// uploads, the zero-fill of a target the size of the bounding box, the
 /// kernel and the target's download run as one page on the cache's
-/// backend ([`gpu::backend::blit_image_box`]), and the box is passed to
-/// `composite` whole.
+/// backend ([`gpu::backend::blit_image`], with buffers pooled on the
+/// backend), and the box is passed to `composite` whole.
 #[cfg(feature = "vulkan")]
 fn blit_on_vulkan(
-    state: &mut CacheState,
+    state: &CacheState,
     image: &CachedDeviceImage<gpu::backend::vulkan::VulkanBackend>,
     job: &BlitJob<'_>,
     mut composite: impl FnMut(RgbaRows<'_>),
 ) -> BlitOutcome {
-    let CacheState { cache, vk_blit, .. } = state;
-    let gpu::cache::ImageCache::Vulkan(cache) = cache else {
+    let gpu::cache::ImageCache::Vulkan(cache) = &state.cache else {
         log::warn!("blit_image: a Vulkan image reached a cache of another backend");
         return BlitOutcome::NotStarted;
     };
@@ -257,24 +256,24 @@ fn blit_on_vulkan(
         layout,
     };
     let BlitBbox { x0, y0, x1, y1 } = job.bbox;
-    match gpu::backend::blit_image_box(
+    let drawn = gpu::backend::blit_image(
         &**cache.device(),
-        vk_blit,
         &src,
         [x0, y0, x1, y1],
         job.cols,
         job.rows,
         job.filter,
-    ) {
-        Ok(bytes) => {
+        |bytes| {
             composite(RgbaRows {
                 bytes,
                 x0: x0.unsigned_abs(),
                 y0: y0.unsigned_abs(),
                 width: job.bbox.width(),
             });
-            BlitOutcome::Drawn
-        }
+        },
+    );
+    match drawn {
+        Ok(()) => BlitOutcome::Drawn,
         Err(e) => {
             log::warn!("blit_image: Vulkan image blit failed: {e}");
             BlitOutcome::NotStarted

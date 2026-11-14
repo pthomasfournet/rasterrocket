@@ -2,37 +2,30 @@
 //! backend.
 
 use super::params::{IccClutParams, MAX_KERNEL_PIXELS, grid_n_from_clut_len};
+use super::staged::{
+    Direction, Staged, ensure, host_view, record_download, record_upload, stage, stage_exact,
+};
 use super::{BackendError, GpuBackend, Result};
 
-/// A device buffer freed on drop.
+/// Reusable host and device buffers for [`icc_clut`].
 ///
-/// Every page that references the buffer has completed before the guard
-/// drops: [`GpuBackend::run_page`] returns only once its page has
-/// completed or been abandoned, and the transfers are synchronous.
-struct Owned<'a, B: GpuBackend> {
-    backend: &'a B,
-    buf: Option<B::DeviceBuffer>,
+/// The CMYK input and the RGB output are grown to the largest conversion
+/// seen; the table is held at exactly its length, which the kernel reads
+/// its grid size from.  Lent by the backend's pool
+/// ([`GpuBackend::scratch`]).
+pub struct IccClutScratch<B: GpuBackend> {
+    cmyk: Option<Staged<B>>,
+    clut: Option<Staged<B>>,
+    rgb: Option<Staged<B>>,
 }
 
-impl<'a, B: GpuBackend> Owned<'a, B> {
-    const fn new(backend: &'a B, buf: B::DeviceBuffer) -> Self {
+/// An empty scratch; the first conversion allocates.
+impl<B: GpuBackend> Default for IccClutScratch<B> {
+    fn default() -> Self {
         Self {
-            backend,
-            buf: Some(buf),
-        }
-    }
-
-    fn get(&self) -> Result<&B::DeviceBuffer> {
-        self.buf
-            .as_ref()
-            .ok_or_else(|| BackendError::msg("icc_clut: device buffer already freed"))
-    }
-}
-
-impl<B: GpuBackend> Drop for Owned<'_, B> {
-    fn drop(&mut self) {
-        if let Some(buf) = self.buf.take() {
-            self.backend.free_device(buf);
+            cmyk: None,
+            clut: None,
+            rgb: None,
         }
     }
 }
@@ -42,10 +35,12 @@ impl<B: GpuBackend> Drop for Owned<'_, B> {
 ///
 /// `table` holds `grid_n⁴` RGB nodes indexed `(k·G³ + c·G² + m·G + y) · 3`
 /// for some `grid_n` in `[2, 255]`; the result holds three bytes per pixel.
-/// The pixels and the table are uploaded, the kernel runs as one page
-/// ([`GpuBackend::run_page`]) and the result is downloaded.  Zero pixels
-/// yield an empty result without a device round trip.  The caller decides
-/// whether the conversion is worth one (see
+/// The pixels and the table are written into the host buffers of a scratch
+/// lent by `backend`'s pool, and their uploads, the kernel and the download
+/// of the result are recorded into one page ([`GpuBackend::run_page`]).  On
+/// a device whose buffers the host reaches in place there are no copies.
+/// Zero pixels yield an empty result without a device round trip.  The
+/// caller decides whether the conversion is worth one (see
 /// [`crate::GPU_ICC_CLUT_THRESHOLD`]).
 ///
 /// # Errors
@@ -73,23 +68,33 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], table: &[u8]) -> Result
             "clut length is not grid_n^4 × 3 for grid_n in [2, 255] within i32::MAX bytes",
         ));
     }
-
-    let d_cmyk = Owned::new(backend, backend.alloc_device(cmyk.len())?);
-    let d_clut = Owned::new(backend, backend.alloc_device(table.len())?);
-    let d_rgb = Owned::new(backend, backend.alloc_device_readback(n * 3)?);
-    backend.upload(d_cmyk.get()?, cmyk)?;
-    backend.upload(d_clut.get()?, table)?;
-    backend.run_page(|backend| {
-        backend.record_icc_clut(IccClutParams {
-            cmyk: d_cmyk.get()?,
-            rgb: d_rgb.get()?,
-            clut: d_clut.get()?,
-            n_pixels,
-        })
-    })?;
-    let mut rgb = vec![0; n * 3];
-    backend.download(d_rgb.get()?, &mut rgb)?;
-    Ok(rgb)
+    let rgb_len = n * 3;
+    backend.scratch().icc_clut.with(|scratch| {
+        let IccClutScratch {
+            cmyk: cmyk_slot,
+            clut: clut_slot,
+            rgb: rgb_slot,
+        } = scratch;
+        let d_cmyk = stage(backend, cmyk_slot, cmyk)?;
+        let d_clut = stage_exact(backend, clut_slot, table)?;
+        let d_rgb = ensure(backend, rgb_slot, rgb_len, Direction::ToHost)?;
+        // SAFETY (the recorded copies and the read below): the scratch is
+        // borrowed mutably for this whole call and `run_page` returns only
+        // once its page has completed or, on failure, been waited on.
+        backend.run_page(|backend| {
+            unsafe { record_upload(backend, d_cmyk, cmyk.len()) }?;
+            unsafe { record_upload(backend, d_clut, table.len()) }?;
+            backend.record_icc_clut(IccClutParams {
+                cmyk: &d_cmyk.device,
+                rgb: &d_rgb.device,
+                clut: &d_clut.device,
+                n_pixels,
+            })?;
+            unsafe { record_download(backend, d_rgb, rgb_len) }
+        })?;
+        let rgb = unsafe { host_view(backend, d_rgb) }?;
+        Ok(rgb[..rgb_len].to_vec())
+    })
 }
 
 /// Nodes per axis of the [`probe_table`].
@@ -245,6 +250,34 @@ fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &[u8], u32) ->
     }
 }
 
+/// Conversions reuse one pooled scratch, whose table buffer follows the
+/// table's length down as well as up.
+#[cfg(test)]
+fn check_scratch_is_pooled<B: GpuBackend>(backend: &B) {
+    let cmyk: Vec<u8> = (0..=u8::MAX)
+        .flat_map(|v| [v, 255 - v, v / 2, v / 3])
+        .collect();
+    for grid_n in [33, 17, 2] {
+        let table: Vec<u8> = (0..(grid_n as usize).pow(4) * 3)
+            .map(|i| u8::try_from(i % 241).expect("below 241"))
+            .collect();
+        let device = icc_clut(backend, &cmyk, &table).expect("icc_clut");
+        assert_eq!(
+            device,
+            crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, grid_n)))
+        );
+        assert_eq!(
+            backend.scratch().icc_clut.idle_len(),
+            1,
+            "the scratch is returned"
+        );
+        let scratch = backend.scratch().icc_clut.take_idle();
+        let clut = scratch.clut.as_ref().expect("the table slot is kept");
+        assert_eq!(backend.device_buffer_len(&clut.device), table.len());
+        backend.scratch().icc_clut.with(|s| *s = scratch);
+    }
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod vulkan_tests {
     use super::*;
@@ -263,6 +296,16 @@ mod vulkan_tests {
         assert_exact_across_grids("vulkan", |cmyk, table, _| {
             icc_clut(&backend, cmyk, table).expect("icc_clut")
         });
+    }
+
+    #[test]
+    fn vulkan_icc_clut_scratch_is_pooled() {
+        let Some(backend) = crate::backend::vulkan::test_backend() else {
+            return;
+        };
+        if backend.icc_clut_is_exact() {
+            check_scratch_is_pooled(&backend);
+        }
     }
 }
 
@@ -296,6 +339,15 @@ mod tests {
             gpu.icc_cmyk_to_rgb_gpu(cmyk, Some((table, grid_n)))
                 .expect("icc_cmyk_to_rgb_gpu")
         });
+    }
+
+    #[test]
+    fn cuda_icc_clut_scratch_is_pooled() {
+        let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        check_scratch_is_pooled(&backend);
     }
 
     /// Malformed input is an invariant error, and zero pixels are no work.

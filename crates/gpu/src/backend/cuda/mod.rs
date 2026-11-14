@@ -280,8 +280,8 @@ impl GpuBackend for CudaBackend {
     }
 
     /// The pool of the context, shared by every backend over it.
-    fn aa_fill_scratch(&self) -> &crate::backend::AaFillScratchPool<Self> {
-        &self.ctx.aa_scratch
+    fn scratch(&self) -> &crate::backend::DeviceScratch<Self> {
+        &self.ctx.scratch
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {

@@ -33,7 +33,8 @@ pub struct BlitSource<'a, B: GpuBackend> {
 /// The two sampling tables and the RGBA8 target are each grown to the
 /// largest blit seen and reused by later blits.  The buffers are freed when
 /// the scratch is dropped; [`blit_image_box`] returns only after its page has
-/// completed, so no device work references them then.
+/// completed, so no device work references them then.  [`blit_image`] lends
+/// one from the backend's pool ([`GpuBackend::scratch`]).
 pub struct BlitScratch<B: GpuBackend> {
     cols: Option<Staged<B>>,
     rows: Option<Staged<B>>,
@@ -49,6 +50,26 @@ impl<B: GpuBackend> Default for BlitScratch<B> {
             target: None,
         }
     }
+}
+
+/// [`blit_image_box`] with a scratch lent by `backend`'s pool
+/// ([`GpuBackend::scratch`]): `consume` receives the box's RGBA8 rows and
+/// its result is returned.
+///
+/// # Errors
+/// As [`blit_image_box`].
+pub fn blit_image<B: GpuBackend, R>(
+    backend: &B,
+    src: &BlitSource<'_, B>,
+    bbox: [i32; 4],
+    cols: &[u32],
+    rows: &[u32],
+    filter: u32,
+    consume: impl FnOnce(&[u8]) -> R,
+) -> Result<R> {
+    backend.scratch().blit.with(|scratch| {
+        blit_image_box(backend, scratch, src, bbox, cols, rows, filter).map(consume)
+    })
 }
 
 /// The pixels of the bounding box `bbox` blitted from `src`, as RGBA8 rows.
@@ -207,11 +228,41 @@ mod tests {
         assert_eq!(empty, &[0_u8; 0][..]);
     }
 
+    /// [`blit_image`] hands the box to its consumer and returns its scratch
+    /// to the backend's pool, buffers kept.
+    fn check_pooled_blit<B: GpuBackend>(backend: &B) {
+        let image = [7_u8, 8, 9];
+        let src_buf = backend.alloc_device(image.len()).expect("alloc");
+        backend.upload(&src_buf, &image).expect("upload");
+        let src = BlitSource::<B> {
+            pixels: &src_buf,
+            width: 1,
+            height: 1,
+            layout: 0,
+        };
+        for _ in 0..2 {
+            let px = blit_image(
+                backend,
+                &src,
+                [0, 0, 1, 1],
+                &entry(0, true),
+                &entry(0, false),
+                0,
+                <[u8]>::to_vec,
+            )
+            .expect("blit");
+            assert_eq!(px, [7, 8, 9, 255]);
+            assert_eq!(backend.scratch().blit.idle_len(), 1);
+        }
+        assert!(backend.scratch().blit.take_idle().target.is_some());
+    }
+
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn cuda_box_blit_writes_the_box() {
         let backend = crate::backend::cuda::CudaBackend::new().expect("CUDA device 0");
         check_box_blit(&backend);
+        check_pooled_blit(&backend);
     }
 
     #[cfg(feature = "vulkan")]
@@ -219,6 +270,7 @@ mod tests {
     fn vulkan_box_blit_writes_the_box() {
         if let Some(backend) = crate::backend::vulkan::test_backend() {
             check_box_blit(&backend);
+            check_pooled_blit(&backend);
         }
     }
 }

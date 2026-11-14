@@ -1,8 +1,6 @@
 //! The scanline-AA fill as one backend page: the one sequence every caller
 //! of the fill kernel runs, on either backend.
 
-use std::sync::{Mutex, PoisonError};
-
 use super::params::{AaFillParams, aa_fill_invariant};
 use super::staged::{Direction, Staged, ensure, host_view, record_download, record_upload, stage};
 use super::{GpuBackend, Result};
@@ -41,51 +39,8 @@ impl<B: GpuBackend> Default for AaFillScratch<B> {
     }
 }
 
-/// Scratches lent to the fills a backend runs ([`aa_fill`]), one per
-/// concurrent fill.
-///
-/// Owned by the backend ([`GpuBackend::aa_fill_scratch`]), so its buffers
-/// belong to the device they were allocated on and live as long as the
-/// backend: a fill takes an idle scratch, or a new one when every scratch
-/// is lent, and returns it when done.  The pool holds as many scratches as
-/// fills have run at once, each at the size of the largest fill it served.
-pub struct AaFillScratchPool<B: GpuBackend> {
-    idle: Mutex<Vec<AaFillScratch<B>>>,
-}
-
-impl<B: GpuBackend> AaFillScratchPool<B> {
-    /// An empty pool.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            idle: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn take(&self) -> AaFillScratch<B> {
-        self.idle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop()
-            .unwrap_or_default()
-    }
-
-    fn put(&self, scratch: AaFillScratch<B>) {
-        self.idle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(scratch);
-    }
-}
-
-impl<B: GpuBackend> Default for AaFillScratchPool<B> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// [`aa_fill_page`] with a scratch lent by `backend`'s pool
-/// ([`GpuBackend::aa_fill_scratch`]).
+/// ([`GpuBackend::scratch`]).
 ///
 /// # Errors
 /// As [`aa_fill_page`].
@@ -96,11 +51,10 @@ pub fn aa_fill<B: GpuBackend>(
     aa_width: u32,
     even_odd: bool,
 ) -> Result<Vec<u8>> {
-    let pool = backend.aa_fill_scratch();
-    let mut scratch = pool.take();
-    let counts = aa_fill_page(backend, &mut scratch, table, rect, aa_width, even_odd);
-    pool.put(scratch);
-    counts
+    backend
+        .scratch()
+        .aa_fill
+        .with(|scratch| aa_fill_page(backend, scratch, table, rect, aa_width, even_odd))
 }
 
 /// The per-pixel AA sub-sample counts of `rect` from `table`, computed on
@@ -208,13 +162,13 @@ mod tests {
             width: 2,
             height: 1,
         };
-        let idle = || backend.aa_fill_scratch().idle.lock().expect("pool").len();
+        let idle = || backend.scratch().aa_fill.idle_len();
         for _ in 0..3 {
             let counts = aa_fill(&backend, &table, rect, 8, false).expect("aa_fill");
             assert_eq!(counts.len(), 2);
             assert_eq!(idle(), 1, "the fill did not return its scratch");
         }
-        let pooled = backend.aa_fill_scratch().take();
+        let pooled = backend.scratch().aa_fill.take_idle();
         assert!(
             pooled.coverage.is_some(),
             "the pooled scratch kept no buffers"

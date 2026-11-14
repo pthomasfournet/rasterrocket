@@ -45,7 +45,7 @@ use crate::backend::{
 pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
-    aa_scratch: crate::backend::AaFillScratchPool<Self>,
+    scratch: crate::backend::DeviceScratch<Self>,
     /// Buffers of [`Self::render_page`], kept between pages.
     page_scratch: std::sync::Mutex<page::PageScratch>,
     /// Whether the CLUT kernel reproduces the CPU evaluator on this
@@ -93,7 +93,7 @@ impl VulkanBackend {
         let recorder = recorder::PageRecorder::new(device.clone(), pipelines.clone())?;
         let transfer = transfer::TransferContext::new(device.clone())?;
         Ok(Self {
-            aa_scratch: crate::backend::AaFillScratchPool::new(),
+            scratch: crate::backend::DeviceScratch::new(),
             page_scratch: std::sync::Mutex::default(),
             icc_clut_exact: std::sync::OnceLock::new(),
             transfer,
@@ -434,8 +434,8 @@ impl GpuBackend for VulkanBackend {
         })?
     }
 
-    fn aa_fill_scratch(&self) -> &crate::backend::AaFillScratchPool<Self> {
-        &self.aa_scratch
+    fn scratch(&self) -> &crate::backend::DeviceScratch<Self> {
+        &self.scratch
     }
 
     fn detect_vram_budget(&self) -> Result<VramBudget> {

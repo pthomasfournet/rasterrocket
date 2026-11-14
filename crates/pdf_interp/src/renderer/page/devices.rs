@@ -7,8 +7,6 @@ use std::sync::Arc;
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
-#[cfg(all(feature = "cache", feature = "vulkan"))]
-use gpu::backend::BlitScratch;
 #[cfg(feature = "gpu-jpeg-huffman")]
 use gpu::backend::cuda::CudaBackend;
 #[cfg(feature = "vulkan")]
@@ -45,10 +43,6 @@ pub(super) struct CacheState {
     /// blits every pixel is zero (alpha 0): each blit composites its rows
     /// onto `bitmap` and clears them before returning.
     pub(super) page_buffer: Option<DevicePageBuffer>,
-    /// Buffers of a Vulkan image blit, grown to the largest blit of the
-    /// page and freed with the renderer.
-    #[cfg(feature = "vulkan")]
-    pub(super) vk_blit: BlitScratch<VulkanBackend>,
 }
 
 impl PageRenderer<'_> {
@@ -229,8 +223,6 @@ impl PageRenderer<'_> {
             cache,
             doc_id,
             page_buffer: None,
-            #[cfg(feature = "vulkan")]
-            vk_blit: BlitScratch::default(),
         });
     }
 }

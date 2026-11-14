@@ -193,8 +193,8 @@ pub(crate) struct GpuKernels {
 pub struct GpuCtx {
     pub(crate) cuda: Arc<CudaContext>,
     pub(crate) kernels: GpuKernels,
-    /// Scratch buffers of the AA fills run on this context.
-    pub(crate) aa_scratch: backend::AaFillScratchPool<backend::cuda::CudaBackend>,
+    /// Scratch buffers of the backend operations run on this context.
+    pub(crate) scratch: backend::DeviceScratch<backend::cuda::CudaBackend>,
 }
 
 thread_local! {
@@ -263,7 +263,7 @@ impl GpuCtx {
 
         Ok(Self {
             cuda: Arc::clone(&ctx),
-            aa_scratch: backend::AaFillScratchPool::new(),
+            scratch: backend::DeviceScratch::new(),
             kernels: GpuKernels {
                 aa_fill: load(PTX_AA_FILL, "aa_fill")?,
                 icc_cmyk_matrix: load(PTX_ICC_CLUT, "icc_cmyk_matrix")?,

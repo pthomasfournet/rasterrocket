@@ -37,7 +37,7 @@ const GROWTH_CAP: usize = 64 << 20;
 /// transfer of `len > capacity` bytes: doubled, but by at most
 /// [`GROWTH_CAP`] beyond `len`, so `len <= size <= len + GROWTH_CAP`.
 /// When `capacity` and `len` are multiples of 4, so is the result.
-fn grown_size(capacity: usize, len: usize) -> usize {
+pub(crate) fn grown_size(capacity: usize, len: usize) -> usize {
     len.max(
         capacity
             .saturating_mul(2)
@@ -59,37 +59,53 @@ pub(crate) fn ensure<'a, B: GpuBackend>(
     direction: Direction,
 ) -> Result<&'a mut Staged<B>> {
     reject_zero_size(len, "staged transfer")?;
-    let capacity = slot.as_ref().map_or(0, |s| {
-        let device = backend.device_buffer_len(&s.device);
-        s.host
-            .as_ref()
-            .map_or(device, |host| device.min(backend.host_buffer_len(host)))
-    });
+    let capacity = slot.as_ref().map_or(0, |s| capacity(backend, s));
     if capacity < len {
-        let size = grown_size(capacity, len);
-        if let Some(old) = slot.take() {
-            if let Some(host) = old.host {
-                backend.free_host_pinned(host);
-            }
-            backend.free_device(old.device);
-        }
-        let device = match direction {
-            Direction::ToDevice => backend.alloc_device(size)?,
-            Direction::ToHost => backend.alloc_device_readback(size)?,
-        };
-        let host = if backend.device_memory_is_host_mapped() {
-            None
-        } else {
-            Some(match direction {
-                Direction::ToDevice => backend.alloc_host_pinned(size)?,
-                Direction::ToHost => backend.alloc_host_readback(size)?,
-            })
-        };
-        return Ok(slot.insert(Staged { host, device }));
+        return replace(backend, slot, grown_size(capacity, len), direction);
     }
     // `capacity >= len > 0` holds only for a populated slot.
     slot.as_mut()
         .ok_or_else(|| BackendError::msg("staged transfer: slot is empty"))
+}
+
+/// The bytes both of `staged`'s buffers hold.
+fn capacity<B: GpuBackend>(backend: &B, staged: &Staged<B>) -> usize {
+    let device = backend.device_buffer_len(&staged.device);
+    staged
+        .host
+        .as_ref()
+        .map_or(device, |host| device.min(backend.host_buffer_len(host)))
+}
+
+/// `slot` with its buffers freed and reallocated at `size > 0` bytes.
+///
+/// # Errors
+/// The backend's error when an allocation fails, the slot then being empty.
+fn replace<'a, B: GpuBackend>(
+    backend: &B,
+    slot: &'a mut Option<Staged<B>>,
+    size: usize,
+    direction: Direction,
+) -> Result<&'a mut Staged<B>> {
+    if let Some(old) = slot.take() {
+        if let Some(host) = old.host {
+            backend.free_host_pinned(host);
+        }
+        backend.free_device(old.device);
+    }
+    let device = match direction {
+        Direction::ToDevice => backend.alloc_device(size)?,
+        Direction::ToHost => backend.alloc_device_readback(size)?,
+    };
+    let host = if backend.device_memory_is_host_mapped() {
+        None
+    } else {
+        Some(match direction {
+            Direction::ToDevice => backend.alloc_host_pinned(size)?,
+            Direction::ToHost => backend.alloc_host_readback(size)?,
+        })
+    };
+    Ok(slot.insert(Staged { host, device }))
 }
 
 /// The error of a staged transfer without a host buffer on a device whose
@@ -150,6 +166,27 @@ pub(crate) fn stage<'a, B: GpuBackend>(
     let target = unsafe { host_view_mut(backend, staged) }?;
     target[..bytes.len()].copy_from_slice(bytes);
     Ok(staged)
+}
+
+/// [`stage`] into a slot whose device buffer holds exactly `bytes.len()`
+/// bytes, for a kernel that reads its input's size from the buffer: the
+/// slot is reallocated whenever its device length differs.
+///
+/// # Errors
+/// As [`stage`].
+pub(crate) fn stage_exact<'a, B: GpuBackend>(
+    backend: &B,
+    slot: &'a mut Option<Staged<B>>,
+    bytes: &[u8],
+) -> Result<&'a mut Staged<B>> {
+    reject_zero_size(bytes.len(), "staged transfer")?;
+    if slot
+        .as_ref()
+        .is_none_or(|s| backend.device_buffer_len(&s.device) != bytes.len())
+    {
+        replace(backend, slot, bytes.len(), Direction::ToDevice).map(drop)?;
+    }
+    stage(backend, slot, bytes)
 }
 
 /// Record the copy of `staged`'s first `len` bytes from host to device, if

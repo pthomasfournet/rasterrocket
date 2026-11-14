@@ -15,12 +15,14 @@
 mod aa_fill;
 #[cfg(feature = "cache")]
 mod blit_page;
+mod scratch;
 mod staged;
-pub use aa_fill::{AaFillScratch, AaFillScratchPool, aa_fill, aa_fill_page};
+pub use aa_fill::{AaFillScratch, aa_fill, aa_fill_page};
 #[cfg(feature = "cache")]
-pub use blit_page::{BlitScratch, BlitSource, blit_image_box};
+pub use blit_page::{BlitScratch, BlitSource, blit_image, blit_image_box};
+pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
-pub use icc_clut::{icc_clut, icc_clut_matches_cpu};
+pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu};
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]
@@ -636,8 +638,9 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// exceeds `src`'s device length.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()>;
 
-    /// The scratch buffers of the fills [`aa_fill`] runs on this backend.
-    fn aa_fill_scratch(&self) -> &AaFillScratchPool<Self>
+    /// The scratch buffers of the operations this backend runs ([`aa_fill`],
+    /// [`icc_clut`] and, with the `cache` feature, `blit_image`).
+    fn scratch(&self) -> &DeviceScratch<Self>
     where
         Self: Sized;
 
