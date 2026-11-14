@@ -81,6 +81,7 @@ mod shading_paint;
 mod soft_mask;
 mod text;
 mod text_context;
+mod text_glyphs;
 mod text_ops;
 mod text_shaping;
 mod text_stroke;

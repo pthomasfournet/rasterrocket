@@ -1,48 +1,25 @@
-//! Text rendering — `show_text` and `show_text_type3`.
+//! Text rendering: the layout of a shown string's glyphs, by code or by
+//! shaped run, and `show_text`.
+
+use std::sync::Arc;
 
 use super::PageRenderer;
-use super::canvas::with_canvas;
-use super::pixel_rect::PixelRect;
 use super::text_context::{Following, TextTail, neighbours as neighbours_at};
+use super::text_glyphs::{GlyphSink, TextModeOps};
 use super::text_ops::{
-    GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, is_singular,
-    text_rendering_matrix, text_to_device, translate_text_x, translate_text_y,
+    fit_to_advance, glyph_advance, is_singular, text_rendering_matrix, text_to_device,
+    translate_text_x, translate_text_y,
 };
 use super::text_shaping::{
-    CONTEXT_CODES, CodeText, Drawn, Neighbours, shaped_runs, shapes, takes_context,
+    CONTEXT_CODES, CodeText, Drawn, Neighbours, ShapedRun, shaped_runs, shapes, takes_context,
 };
 use super::text_stroke::GlyphStroke;
 use super::view::page_to_window;
-use crate::renderer::font_cache::PageFace;
+use crate::renderer::font_cache::{ActiveFont, PageFace};
+use crate::renderer::text::TextMatrix;
+use crate::resources::ResourceKey;
 use crate::resources::cmap::DecodedCode;
-use crate::resources::font::CidEncoding;
-use font::face::FontFace;
-use font::key::FaceId;
-use raster::Clip;
-use raster::pipe::PipeState;
-use raster::types::BlendMode;
-use raster::{
-    glyph::{GlyphBitmap, fill_glyph},
-    pipe::PipeSrc,
-};
-use std::sync::Arc;
-
-/// The top-left and bottom-right corners of the bitmaps of `records`, as
-/// [`fill_glyph`] places them: a bitmap's left edge lies `x_off` pixels left
-/// of the pen and its top edge `y_off` pixels above it.
-fn glyph_corners(records: &[GlyphRecord]) -> impl Iterator<Item = (f64, f64)> + '_ {
-    records.iter().flat_map(|rec| {
-        let x = f64::from(rec.pen_x) - f64::from(rec.bitmap.x_off);
-        let y = f64::from(rec.pen_y) - f64::from(rec.bitmap.y_off);
-        [
-            (x, y),
-            (
-                x + f64::from(rec.bitmap.width),
-                y + f64::from(rec.bitmap.height),
-            ),
-        ]
-    })
-}
+use crate::resources::font::{CidEncoding, FontDescriptor, Type3Data};
 
 /// The drawing glyph of each of the codes `decoded` shown with `face`, of a
 /// composite font when `cid_enc` is its encoding (see
@@ -58,31 +35,297 @@ fn drawn_by<'f>(
         .collect()
 }
 
-/// The painting operations of a text rendering mode (PDF §9.3.6, Table 106).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TextModeOps {
-    /// Fill the glyphs with the non-stroking colour.
-    fill: bool,
-    /// Stroke the glyph outlines with the stroking colour and parameters.
-    stroke: bool,
-    /// Add the glyph outlines to the clipping path.
-    clip: bool,
+/// The advance of the drawn glyph `(face, selector, by_gid)` in its face,
+/// in em.
+fn drawn_advance((face, selector, by_gid): Drawn<'_>) -> Option<f64> {
+    if by_gid {
+        face.glyph_advance_by_gid(selector)
+    } else {
+        face.glyph_advance(selector)
+    }
 }
 
-impl TextModeOps {
-    /// The operations of `Tr` operand `mode`; a value outside `0..=7` fills.
-    const fn of(mode: i32) -> Self {
-        let (fill, stroke, clip) = match mode {
-            1 => (false, true, false),
-            2 => (true, true, false),
-            3 => (false, false, false),
-            4 => (true, false, true),
-            5 => (false, true, true),
-            6 => (true, true, true),
-            7 => (false, false, true),
-            _ => (true, false, false),
+/// `advance` in thousandths of the em, zero when unknown.
+fn thousandths(advance: Option<f64>) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "advances are a few em at most; thousandths fit i32"
+    )]
+    let width = advance.map_or(0.0, |w| (w * 1000.0).round()) as i32;
+    width
+}
+
+/// The document's advance of the shown code `d` in thousandths of the em,
+/// `None` for a simple font without a width for it.
+fn document_width(descriptor: &FontDescriptor, d: &DecodedCode) -> Option<i32> {
+    descriptor.cid_encoding.as_ref().map_or_else(
+        || descriptor.width_for_code(d.code),
+        |enc| Some(enc.width_for_cid(d.value)),
+    )
+}
+
+/// What maps a text-space position of a string's glyphs to the window:
+/// the CTM, the window's origin on the page and the page height, and the
+/// text state's font size, horizontal scaling (a fraction) and rise.
+#[derive(Clone, Copy)]
+struct TextFrame {
+    ctm: [f64; 6],
+    origin: (u32, u32),
+    page_h: u32,
+    font_size: f64,
+    horiz_scaling: f64,
+    rise: f64,
+}
+
+impl TextFrame {
+    /// The em of the horizontal advances, `Tfs × Th`, in text space.
+    fn em(&self) -> f64 {
+        self.font_size * self.horiz_scaling
+    }
+
+    /// The window position of the text-space point `(tx, ty)` of text
+    /// matrix `tm`.
+    fn window(&self, tm: &TextMatrix, tx: f64, ty: f64) -> (f64, f64) {
+        page_to_window(
+            self.origin,
+            text_to_device(&self.ctm, tm, tx, ty, self.page_h),
+        )
+    }
+}
+
+/// The advance of each of the codes `decoded`, drawn as `drawn` by `face`
+/// of the font `descriptor`, under `frame` and the character and word
+/// spacing `spacing` (PDF §9.4.4): horizontally `(w0 × Tfs + Tc + Tw) ×
+/// Th`; vertically `w1 × Tfs + Tc + Tw`, along the text matrix's y axis.
+/// Word spacing applies to the byte 32 when it is a one-byte code, never
+/// to a multi-byte code (PDF §9.3.3).  A simple font's code without a
+/// width advances by its drawn glyph's (PDF §9.2.4), and the pen advances
+/// for a glyph that draws nothing.
+fn code_advances(
+    descriptor: &FontDescriptor,
+    face: Option<&PageFace>,
+    decoded: &[DecodedCode],
+    drawn: &[Option<Drawn<'_>>],
+    frame: &TextFrame,
+    (char_spacing, word_spacing): (f64, f64),
+) -> Vec<f64> {
+    let vertical_enc = descriptor.cid_encoding.as_ref().filter(|enc| enc.vertical);
+    decoded
+        .iter()
+        .zip(drawn)
+        .map(|(d, &drawn)| {
+            let extra = if d.code == 32 && d.len == 1 {
+                word_spacing
+            } else {
+                0.0
+            };
+            if let Some(enc) = vertical_enc {
+                let w1 = f64::from(enc.vertical_metrics_for_cid(d.value).w1y) / 1000.0;
+                return glyph_advance(w1, frame.font_size, char_spacing, extra, 1.0);
+            }
+            let advance_glyph = document_width(descriptor, d).map_or_else(
+                || {
+                    drawn
+                        .map_or_else(
+                            || face.and_then(|face| face.glyph_advance(d.code)),
+                            drawn_advance,
+                        )
+                        .unwrap_or(0.0)
+                },
+                |w| f64::from(w) / 1000.0,
+            );
+            glyph_advance(
+                advance_glyph,
+                frame.font_size,
+                char_spacing,
+                extra,
+                frame.horiz_scaling,
+            )
+        })
+        .collect()
+}
+
+/// The characters of the strings shown next to a string, and where the
+/// glyphs of the runs continuing into them lie.
+struct ShapingContext {
+    neighbours: Neighbours,
+    /// The index of the code a run continuing the run before starts at,
+    /// and how far past that code's pen position the glyphs of the run
+    /// before end: from the string before at the start.
+    drift: (usize, f64),
+    /// How far past the string's end the string after starts.
+    next_start: f64,
+}
+
+impl Default for ShapingContext {
+    fn default() -> Self {
+        Self {
+            neighbours: Neighbours::default(),
+            drift: (usize::MAX, 0.0),
+            next_start: 0.0,
+        }
+    }
+}
+
+/// A shown string laid out from its codes: their drawing glyphs and
+/// advances, and the frame that maps their glyphs to the window.
+struct Layout<'a, 'f> {
+    descriptor: &'a FontDescriptor,
+    /// The encoding of a composite font that writes vertically
+    /// (PDF §9.7.4.3).
+    vertical: Option<&'a CidEncoding>,
+    decoded: &'a [DecodedCode],
+    drawn: &'a [Option<Drawn<'f>>],
+    advances: &'a [f64],
+    frame: TextFrame,
+    /// A substitute's glyphs are fitted to the advances the document
+    /// specifies: condensed when wider, centred when narrower.  An
+    /// embedded program's glyphs are the document's own, and a standard
+    /// family's substitute already has its advances.
+    fit: bool,
+}
+
+impl Layout<'_, '_> {
+    /// Add the glyphs of the string to `sink`, each code's at its pen
+    /// position from the text matrix `tm` and each of `runs` from its first
+    /// code's, in `context`.  Returns the text matrix after the last
+    /// advance and the drift of a run continuing into the string after
+    /// (see [`ShapingContext::drift`]).
+    fn place(
+        &self,
+        mut tm: TextMatrix,
+        runs: &[ShapedRun<'_>],
+        context: &ShapingContext,
+        sink: &mut GlyphSink,
+    ) -> (TextMatrix, (usize, f64)) {
+        let mut drift = context.drift;
+        let mut runs = runs.iter().peekable();
+        // The text matrix at the start of the run being shown, and the
+        // run's advance so far in text space.
+        let mut run_origin = tm;
+        let mut run_width = 0.0;
+        for (i, (d, &drawn)) in self.decoded.iter().zip(self.drawn).enumerate() {
+            while runs.next_if(|run| run.end <= i).is_some() {}
+            let run = runs.peek().filter(|run| run.start <= i);
+            if run.is_some_and(|run| run.start == i) {
+                run_origin = tm;
+                run_width = 0.0;
+            }
+            if run.is_none()
+                && let Some(drawn) = drawn
+            {
+                self.place_code(d, drawn, &tm, sink);
+            }
+            let advance = self.advances[i];
+            if self.vertical.is_some() {
+                debug_assert!(run.is_none(), "vertical text is not shaped");
+                tm = translate_text_y(tm, advance);
+                continue;
+            }
+            tm = translate_text_x(tm, advance);
+            let Some(run) = run else { continue };
+            run_width += advance;
+            if i + 1 == run.end {
+                self.place_run(
+                    run,
+                    &run_origin,
+                    run_width,
+                    context.next_start,
+                    &mut drift,
+                    sink,
+                );
+            }
+        }
+        (tm, drift)
+    }
+
+    /// Add the glyph `drawn` of the code `d`, drawn on its own at the text
+    /// matrix `tm`, to `sink`.
+    fn place_code(&self, d: &DecodedCode, drawn: Drawn<'_>, tm: &TextMatrix, sink: &mut GlyphSink) {
+        let f = &self.frame;
+        let (x_scale, centre) = match document_width(self.descriptor, d) {
+            Some(width) if self.fit => fit_to_advance(width, thousandths(drawn_advance(drawn))),
+            _ => (1.0, 0.0),
         };
-        Self { fill, stroke, clip }
+        // In vertical writing mode the glyph's vertical origin sits at the
+        // pen: its horizontal origin is displaced by the position vector
+        // −v, in glyph units scaled by the font size (PDF §9.7.4.3).
+        let (tx, ty) = self.vertical.map_or_else(
+            || (centre / 1000.0 * f.font_size * f.horiz_scaling, f.rise),
+            |enc| {
+                let v = enc.vertical_metrics_for_cid(d.value);
+                let tx = -f64::from(v.vx) / 1000.0 * f.font_size * f.horiz_scaling;
+                (tx, (-f64::from(v.vy) / 1000.0).mul_add(f.font_size, f.rise))
+            },
+        );
+        sink.push(drawn, d.code, f.window(tm, tx, ty), x_scale);
+    }
+
+    /// Add the glyphs of `run`, whose codes start at the text matrix
+    /// `origin` and advance `width` in text space, to `sink`.  A run's
+    /// glyphs are fitted to the advance of its codes as one glyph is to its
+    /// code's: condensed when wider and centred when narrower, under `fit`;
+    /// else at their own advances from the run's start.  `drift` is the
+    /// drift of a run continuing from the run before, replaced by this
+    /// run's when it continues into the code after; `next_start` is how far
+    /// past the string's end the string after starts.
+    fn place_run(
+        &self,
+        run: &ShapedRun<'_>,
+        origin: &TextMatrix,
+        width: f64,
+        next_start: f64,
+        drift: &mut (usize, f64),
+        sink: &mut GlyphSink,
+    ) {
+        let f = &self.frame;
+        let em = f.em();
+        // Marks drawn over the first letter of the string after, at their
+        // displacements from its origin.
+        if run.over_next {
+            for g in &run.glyphs {
+                let tx = g.offset.0.mul_add(em, width + next_start);
+                let ty = g.offset.1.mul_add(f.font_size, f.rise);
+                sink.push(
+                    (run.face, g.selector, true),
+                    g.selector,
+                    f.window(origin, tx, ty),
+                    1.0,
+                );
+            }
+            return;
+        }
+        let natural: f64 = run.glyphs.iter().map(|g| g.advance).sum::<f64>() * em;
+        let fitted = self.fit && width > 0.0 && natural > 0.0;
+        let scale = if fitted {
+            (width / natural).min(1.0)
+        } else {
+            1.0
+        };
+        // A run that continues the run before it starts where that run's
+        // glyphs end, offset from its own start as they are from that run's
+        // end; one that continues into the code after it starts at its own
+        // start.
+        let mut pen = match run.joins {
+            (true, _) if drift.0 == run.start => drift.1,
+            (true, _) | (false, true) => 0.0,
+            _ if fitted => natural.mul_add(-scale, width) / 2.0,
+            _ => 0.0,
+        };
+        for g in &run.glyphs {
+            let tx = (g.offset.0 * em).mul_add(scale, pen);
+            let ty = g.offset.1.mul_add(f.font_size, f.rise);
+            sink.push(
+                (run.face, g.selector, true),
+                g.selector,
+                f.window(origin, tx, ty),
+                scale,
+            );
+            pen = (g.advance * em).mul_add(scale, pen);
+        }
+        if run.joins.1 {
+            *drift = (run.end, pen - width);
+        }
     }
 }
 
@@ -91,13 +334,8 @@ impl PageRenderer<'_> {
     /// `following` is what follows it in its content stream, from which the
     /// string shown next is read for shaping context.
     ///
-    /// Two-phase design to satisfy the borrow checker:
-    /// 1. Rasterize all glyphs while holding the `font_cache` borrow (no bitmap access).
-    /// 2. Blit the pre-rasterized bitmaps, using `bitmap` mutably (no `font_cache` access).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "two-phase glyph render (rasterize then blit) inherently interleaves font, matrix, and clip logic that cannot be cleanly split without adding costly intermediate allocations"
-    )]
+    /// The glyphs are laid out while the font cache is borrowed and painted
+    /// from the [`GlyphSink`] afterwards.
     pub(super) fn show_text(&mut self, bytes: &[u8], following: Following<'_, '_>) {
         if bytes.is_empty() {
             return;
@@ -106,30 +344,10 @@ impl PageRenderer<'_> {
         // The end of the string shown before, replaced by this string's when
         // it is shaped and dropped otherwise.
         let tail = self.text_tail.take();
-        let mut new_tail = None;
-
-        let TextModeOps {
-            fill: do_fill,
-            stroke: do_stroke,
-            clip: do_clip,
-        } = TextModeOps::of(self.gstate.current().text.render_mode);
         // Mode 3 paints nothing and clips nothing, but the pen still
-        // advances by every glyph's width (PDF §9.4.4): the run goes through
-        // the glyph loop below, which rasterises nothing it will not use.
-        let do_paint = do_fill || do_stroke;
-
-        // The text state, read before `font_cache` is borrowed mutably.
-        let font_size = self.gstate.current().text.font_size;
-        let char_spacing = self.gstate.current().text.char_spacing;
-        let word_spacing = self.gstate.current().text.word_spacing;
-        // `Tz` is a percentage; `Tz 0` collapses the glyphs and the
-        // horizontal advances to zero width.
-        let horiz_scaling = self.gstate.current().text.horiz_scaling / 100.0;
-        let ctm = self.gstate.current().ctm;
-        let (origin, page_h) = (self.window_origin, self.page_height);
-        let rise = self.gstate.current().text.rise;
-        let mut tm = self.gstate.current().text.text_matrix;
-
+        // advances by every glyph's width (PDF §9.4.4): the run is laid out,
+        // rasterising nothing it will not use.
+        let mode = TextModeOps::of(self.gstate.current().text.render_mode);
         let Some(font) = self.gstate.current().text.font.clone() else {
             log::debug!(
                 "rasterrocket-interp: no font dict for /{}",
@@ -137,58 +355,11 @@ impl PageRenderer<'_> {
             );
             return;
         };
-        let descriptor = &*font.descriptor;
-
-        // ── Type 3 fast path ──────────────────────────────────────────────────
-        // Type 3 glyphs are PDF content streams executed at the current pen
-        // position.  They paint directly into the page bitmap, so there is no
-        // two-phase rasterise-then-blit loop — each CharProc runs inline.
-        // A glyph description paints with its own operators and has no
-        // outline to fill, stroke or clip with (PDF §9.6.5): every mode but
-        // the invisible one executes the CharProc unchanged, and none adds
-        // to the clip.
-        // The glyphs are one object under the soft mask in effect.
-        if let Some(t3) = &descriptor.type3 {
-            let region = self.clip_rect();
-            let alpha = self.gstate.current().fill_alpha;
-            self.paint_object(region, alpha, |r| {
-                r.show_text_type3(
-                    bytes,
-                    t3,
-                    &font.key,
-                    font_size,
-                    ctm,
-                    tm,
-                    char_spacing,
-                    word_spacing,
-                    horiz_scaling,
-                    rise,
-                    do_paint || do_clip,
-                );
-            });
+        if let Some(t3) = &font.descriptor.type3 {
+            self.show_type3_string(bytes, t3, &font.key, mode.fill || mode.stroke || mode.clip);
             return;
         }
-
-        // Phase 1: rasterize glyphs and collect the outlines the mode needs.
-        //
-        // Two-phase design: borrow `font_cache` here (read-only after load), then
-        // release it before touching `self.canvas` or `self.gstate` in phase 2.
-        let mut records: Vec<GlyphRecord> = Vec::with_capacity(bytes.len());
-        // Union of the device-space glyph outlines, built when `do_clip`.
-        let mut clip_outline = raster::path::Path::new();
-        // Union of the device-space glyph outlines, built when `do_stroke`.
-        let mut stroke_outline = raster::path::Path::new();
-        // Device-space outlines of glyphs painted as filled paths instead of
-        // cached bitmaps: every glyph when the fill colour is a pattern, else
-        // the glyphs of faces too large for glyph bitmaps.
-        let mut fill_paths: Vec<raster::path::Path> = Vec::new();
-        // A pattern fill colour paints through the path fill, which resolves
-        // the pattern once over the union of the glyph outlines.
-        let pattern_fill = do_fill && self.gstate.current().fill_pattern.is_some();
-        // The stroke as per-glyph cached coverage, when the graphics state
-        // admits it; the glyph strokes drawn from that coverage; and the
-        // cache identifier of each stroked face of the run.
-        let glyph_stroke = if do_stroke {
+        let glyph_stroke = if mode.stroke {
             GlyphStroke::new(
                 self.gstate.current(),
                 &self.device_matrix(),
@@ -197,505 +368,174 @@ impl PageRenderer<'_> {
         } else {
             None
         };
-        let stroke_key = glyph_stroke.as_ref().map(GlyphStroke::key);
-        let mut stroke_records: Vec<GlyphRecord> = Vec::new();
-        let mut stroked_ids: Vec<((FaceId, bool), FaceId)> = Vec::new();
-        let document_fonts = Arc::clone(self.font_cache.document_fonts());
-
-        {
-            // Trm[2×2] = [Tfs×Th 0 0 Tfs] × Tm[2×2] × CTM[2×2] — the text
-            // rendering matrix in device pixels (PDF §9.4.4), encoding
-            // actual size, horizontal scaling and skew/rotation.  The 2×2
-            // submatrix (indices 0–3) is stable across the glyph loop
-            // because only the translation components (indices 4–5) change as
-            // the pen advances — the orientation and size don't change mid-string.
-            let trm = text_rendering_matrix(&tm, &ctm, font_size, horiz_scaling);
-
-            // Clone the glyph-cache handle before borrowing `font_cache` mutably:
-            // it is an `Arc` internally, so this shares one cache rather than
-            // copying it, and it sidesteps holding two borrows of `font_cache`.
-            let glyph_cache = self.font_cache.glyph_cache().clone();
-            let glyph_cache = &glyph_cache;
-
-            // The face that draws the run — a mutable borrow of font_cache.
-            // A singular text rendering matrix (`Tz 0`, a degenerate `Tm`)
-            // maps every glyph to zero area, and a face that cannot load
-            // (below one device pixel, an unreadable program) draws nothing;
-            // either way the run draws no glyph and the pen still advances
-            // by the document's widths (PDF §9.4.4).
-            let mut face = if is_singular(&trm) {
-                None
-            } else {
-                let font_name = &self.gstate.current().text.font_name;
-                self.font_cache
-                    .get_or_load_showing(&font, font_name, trm, bytes)
-            };
-            let fill_as_path =
-                do_fill && face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
-            let fill_as_bitmap = do_fill && !fill_as_path;
-
-            let cid_enc = descriptor.cid_encoding.as_ref();
-            // Vertical writing mode (PDF §9.7.4.3): a composite font whose
-            // CMap writes top to bottom.
-            let vertical_enc = cid_enc.filter(|enc| enc.vertical);
-
-            // A substitute's glyphs are fitted to the advances the document
-            // specifies: condensed when wider, centred when narrower.  An
-            // embedded program's glyphs are the document's own, and a
-            // standard family's substitute already has its advances.
-            let fit = face.is_some_and(|f| f.substitute)
-                && !descriptor.substitute.standard
-                && vertical_enc.is_none();
-            let face_width = |advance: Option<f64>| -> i32 {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "advances are a few em at most; thousandths fit i32"
-                )]
-                let width = advance.map_or(0.0, |w| (w * 1000.0).round()) as i32;
-                width
-            };
-            // The advance of a drawn glyph `(face, selector, by_gid)`.
-            let advance_of = |(face, selector, by_gid): (&FontFace, u32, bool)| {
-                if by_gid {
-                    face.glyph_advance_by_gid(selector)
-                } else {
-                    face.glyph_advance(selector)
-                }
-            };
-
-            // Shared helper: push a rasterized glyph into `records` (when
-            // filling) and append its outline to `stroke_outline` (when
-            // stroking) and `clip_outline` (when clipping); a face too large
-            // for glyph bitmaps fills through `fill_paths`.  `(dx, dy)` is
-            // the exact device pen position; `x_scale` condenses the glyph
-            // to the document's advance.
-            //
-            // `gid` is the resolved glyph index.  `char_code_for_path` is the
-            // raw character code.  `by_gid` selects which one the face is
-            // indexed by:
-            //
-            // * Simple fonts (`by_gid == false`): the char code is resolved
-            //   through the face's `code_to_gid` table / Unicode charmap by
-            //   `make_glyph` / `glyph_path` (handles `Differences`, the
-            //   standard 14, etc.).
-            // * Type 0 / CIDFonts (`by_gid == true`): the interpreter has
-            //   already mapped the code through the Encoding CMap and
-            //   `CIDToGIDMap` to a final glyph selector.  It must be
-            //   used directly — re-resolving it through the Unicode charmap
-            //   mis-maps every glyph to `.notdef` for a CID-keyed CFF subset
-            //   (whose charmap is absent/unrelated), rendering a blank page.
-            //
-            // `face` is the face that draws the glyph: the font's own, or the
-            // fallback face of a code its substitute lacks, whose glyph is
-            // always selected by index.
-            let mut push_glyph = |face: &FontFace,
-                                  char_code_for_path: u32,
-                                  gid: u32,
-                                  by_gid: bool,
-                                  dx: f64,
-                                  dy: f64,
-                                  x_scale: f64| {
-                let (pen_x, x_frac, pen_y) = glyph_placement(dx, dy);
-                let bmp = if fill_as_bitmap {
-                    if by_gid {
-                        face.make_glyph_by_gid_cached_fitted(glyph_cache, gid, x_frac, x_scale)
-                    } else {
-                        face.make_glyph_cached_fitted(glyph_cache, gid, x_frac, x_scale)
-                    }
-                } else {
-                    None
-                };
-                if let Some(bitmap) = bmp {
-                    records.push(GlyphRecord {
-                        pen_x,
-                        pen_y,
-                        bitmap,
-                    });
-                }
-                // The glyph outline relative to the pen, in device pixels
-                // with Trm applied, y up, condensed by `scale`.
-                let outline_at = |scale: f64| {
-                    if by_gid {
-                        face.glyph_path_by_gid_fitted(gid, scale)
-                    } else {
-                        face.glyph_path_fitted(char_code_for_path, scale)
-                    }
-                };
-                let stroked = glyph_stroke
-                    .as_ref()
-                    .zip(stroke_key)
-                    .and_then(|(stroke, key)| {
-                        let id = if let Some(&(_, id)) =
-                            stroked_ids.iter().find(|(k, _)| *k == (face.id, by_gid))
-                        {
-                            id
-                        } else {
-                            let id = document_fonts.stroked_face_id(face.id, by_gid, key);
-                            stroked_ids.push(((face.id, by_gid), id));
-                            id
-                        };
-                        let selector = if by_gid { gid } else { char_code_for_path };
-                        face.cached_condensed(
-                            glyph_cache,
-                            id,
-                            selector,
-                            true,
-                            x_frac,
-                            x_scale,
-                            |scale| stroke.coverage(&outline_at(scale)?, x_frac),
-                        )
-                    });
-                // A glyph whose stroke has no cached coverage strokes with
-                // the outline of the run.
-                let stroke_path = do_stroke && stroked.is_none();
-                if let Some(bitmap) = stroked {
-                    stroke_records.push(GlyphRecord {
-                        pen_x,
-                        pen_y,
-                        bitmap,
-                    });
-                }
-                if !(do_clip || stroke_path || fill_as_path) {
-                    return;
-                }
-                // The glyph outline in device space: translated by the
-                // exact x and the bitmap's row, y flipped (device y is
-                // positive-down).
-                let Some(mut path) = outline_at(x_scale) else {
-                    return;
-                };
-                let py = f64::from(pen_y);
-                for pt in &mut path.pts {
-                    pt.x += dx;
-                    pt.y = py - pt.y;
-                }
-                if do_clip {
-                    clip_outline.append(&path);
-                }
-                if stroke_path {
-                    stroke_outline.append(&path);
-                }
-                if fill_as_path {
-                    fill_paths.push(path);
-                }
-            };
-
-            let decoded: Vec<DecodedCode> = CidEncoding::shown_codes(cid_enc, bytes).collect();
-            let mut drawn = drawn_by(face, cid_enc, &decoded);
-
-            // The advance of each code (PDF §9.4.4): horizontally
-            // `(w0 × Tfs + Tc + Tw) × Th`; vertically `w1 × Tfs + Tc + Tw`,
-            // along the text matrix's y axis.  Word spacing applies to the
-            // byte 32 when it is a one-byte code, never to a multi-byte code
-            // (PDF §9.3.3).  A simple font's code without a width advances
-            // by its drawn glyph's (PDF §9.2.4), and the pen advances for a
-            // glyph that draws nothing.
-            let advances: Vec<f64> = decoded
-                .iter()
-                .zip(&drawn)
-                .map(|(d, &drawn)| {
-                    let (code, cid) = (d.code, d.value);
-                    let extra = if code == 32 && d.len == 1 {
-                        word_spacing
-                    } else {
-                        0.0
-                    };
-                    if let Some(enc) = vertical_enc {
-                        let w1 = f64::from(enc.vertical_metrics_for_cid(cid).w1y) / 1000.0;
-                        return glyph_advance(w1, font_size, char_spacing, extra, 1.0);
-                    }
-                    let advance_glyph = cid_enc
-                        .map_or_else(
-                            || descriptor.width_for_code(code),
-                            |enc| Some(enc.width_for_cid(cid)),
-                        )
-                        .map_or_else(
-                            || {
-                                drawn
-                                    .map_or_else(
-                                        || face.and_then(|face| face.glyph_advance(code)),
-                                        advance_of,
-                                    )
-                                    .unwrap_or(0.0)
-                            },
-                            |w| f64::from(w) / 1000.0,
-                        );
-                    glyph_advance(advance_glyph, font_size, char_spacing, extra, horiz_scaling)
-                })
-                .collect();
-
-            // Runs are shaped in horizontal writing only, between the
-            // strings shown next to them on their baseline.
-            let shaped = face.is_some_and(|f| shapes(descriptor, f));
-            let texts: Vec<CodeText> = match face {
-                Some(face) if shaped => {
-                    decoded.iter().map(|d| face.text(d.code, d.value)).collect()
-                }
-                _ => Vec::new(),
-            };
-            let em = font_size * horiz_scaling;
-            let mut neighbours = Neighbours::default();
-            // The index of the code a run continuing the run before starts
-            // at, and how far past that code's pen position the glyphs of
-            // the run before end: from the string before at the start.
-            let mut drift = (usize::MAX, 0.0);
-            // How far past the string's end the string after starts.
-            let mut next_start = 0.0;
-            if shaped {
-                if let Some(tail) = tail.filter(|tail| neighbours_at(&tail.end, &tm, tail.em)) {
-                    neighbours.before = tail.texts;
-                    drift = (0, tail.drift);
-                }
-                if texts.last().is_some_and(|&text| takes_context(text)) {
-                    let end = advances
-                        .iter()
-                        .fold(tm, |tm, &advance| translate_text_x(tm, advance));
-                    if let Some(next) = self.next_string(end, em, following) {
-                        neighbours.after = next.texts;
-                        next_start = next.start;
-                    }
-                    // Reading ahead may load faces: the face is borrowed
-                    // anew.
-                    let font_name = &self.gstate.current().text.font_name;
-                    face = self.font_cache.get_or_load(&font, font_name, trm);
-                    drawn = drawn_by(face, cid_enc, &decoded);
-                }
-            }
-            let runs = match face {
-                Some(face) if shaped => shaped_runs(face, &texts, &drawn, &neighbours),
-                _ => Vec::new(),
-            };
-            let mut runs = runs.iter().peekable();
-            // The text matrix at the start of the run being shown, and the
-            // run's advance so far in text space.
-            let mut run_origin = tm;
-            let mut run_width = 0.0;
-
-            for (i, (d, &drawn)) in decoded.iter().zip(&drawn).enumerate() {
-                let (code, cid) = (d.code, d.value);
-                while runs.next_if(|run| run.end <= i).is_some() {}
-                let run = runs.peek().filter(|run| run.start <= i);
-                if run.is_some_and(|run| run.start == i) {
-                    run_origin = tm;
-                    run_width = 0.0;
-                }
-                // The document's advance of the code in glyph space, `None`
-                // for a simple font without a width for it.
-                let pdf_width = cid_enc.map_or_else(
-                    || descriptor.width_for_code(code),
-                    |enc| Some(enc.width_for_cid(cid)),
-                );
-
-                if run.is_none() {
-                    let (x_scale, centre) = match (pdf_width, drawn) {
-                        (Some(width), Some(drawn)) if fit => {
-                            fit_to_advance(width, face_width(advance_of(drawn)))
-                        }
-                        _ => (1.0, 0.0),
-                    };
-                    // In vertical writing mode the glyph's vertical origin
-                    // sits at the pen: its horizontal origin is displaced
-                    // by the position vector −v, in glyph units scaled by
-                    // the font size (PDF §9.7.4.3).
-                    let (tx, ty) = vertical_enc.map_or_else(
-                        || (centre / 1000.0 * font_size * horiz_scaling, rise),
-                        |enc| {
-                            let v = enc.vertical_metrics_for_cid(cid);
-                            let tx = -f64::from(v.vx) / 1000.0 * font_size * horiz_scaling;
-                            (tx, (-f64::from(v.vy) / 1000.0).mul_add(font_size, rise))
-                        },
-                    );
-                    let (dx, dy) =
-                        page_to_window(origin, text_to_device(&ctm, &tm, tx, ty, page_h));
-                    if let Some((drawn, selector, by_gid)) = drawn {
-                        push_glyph(drawn, code, selector, by_gid, dx, dy, x_scale);
-                    }
-                }
-
-                let advance = advances[i];
-                if vertical_enc.is_some() {
-                    debug_assert!(run.is_none(), "vertical text is not shaped");
-                    tm = translate_text_y(tm, advance);
-                    continue;
-                }
-                tm = translate_text_x(tm, advance);
-
-                // A run's glyphs are fitted to the advance of its codes as
-                // one glyph is to its code's: condensed when wider and
-                // centred when narrower, under `fit`; else at their own
-                // advances from the run's start.
-                let Some(run) = run else { continue };
-                run_width += advance;
-                if i + 1 != run.end {
-                    continue;
-                }
-                // Marks drawn over the first letter of the string after,
-                // at their displacements from its origin.
-                if run.over_next {
-                    for g in &run.glyphs {
-                        let tx = g.offset.0.mul_add(em, run_width + next_start);
-                        let ty = g.offset.1.mul_add(font_size, rise);
-                        let (dx, dy) = page_to_window(
-                            origin,
-                            text_to_device(&ctm, &run_origin, tx, ty, page_h),
-                        );
-                        push_glyph(run.face, g.selector, g.selector, true, dx, dy, 1.0);
-                    }
-                    continue;
-                }
-                let natural: f64 = run.glyphs.iter().map(|g| g.advance).sum::<f64>() * em;
-                let fitted = fit && run_width > 0.0 && natural > 0.0;
-                let scale = if fitted {
-                    (run_width / natural).min(1.0)
-                } else {
-                    1.0
-                };
-                // A run that continues the run before it starts where that
-                // run's glyphs end, offset from its own start as they are
-                // from that run's end; one that continues into the code
-                // after it starts at its own start.
-                let mut pen = match run.joins {
-                    (true, _) if drift.0 == run.start => drift.1,
-                    (true, _) | (false, true) => 0.0,
-                    _ if fitted => natural.mul_add(-scale, run_width) / 2.0,
-                    _ => 0.0,
-                };
-                for g in &run.glyphs {
-                    let tx = (g.offset.0 * em).mul_add(scale, pen);
-                    let ty = g.offset.1.mul_add(font_size, rise);
-                    let (dx, dy) =
-                        page_to_window(origin, text_to_device(&ctm, &run_origin, tx, ty, page_h));
-                    push_glyph(run.face, g.selector, g.selector, true, dx, dy, scale);
-                    pen = (g.advance * em).mul_add(scale, pen);
-                }
-                if run.joins.1 {
-                    drift = (run.end, pen - run_width);
-                }
-            }
-            if shaped {
-                let end_drift = if drift.0 == decoded.len() {
-                    drift.1
-                } else {
-                    0.0
-                };
-                let mut texts: Vec<CodeText> = neighbours.before.into_iter().chain(texts).collect();
-                let _ = texts.drain(..texts.len().saturating_sub(CONTEXT_CODES));
-                new_tail = Some(TextTail {
-                    texts,
-                    end: tm,
-                    em,
-                    drift: end_drift,
-                });
-            }
-        } // font_cache borrow released here
-
-        // Phase 2: fill the glyphs, then stroke their outlines.
-        let painted_glyphs = !(records.is_empty() && fill_paths.is_empty());
-        if painted_glyphs && !self.gstate.current().fill_paints_nothing() {
-            let fill_color = self.gstate.current().painted_fill_color();
-            let fill_bytes = fill_color.bytes_for(self.canvas.kind().mode());
-            let clip = self.gstate.current().clip.clone_shared();
-            let gs = self.gstate.current();
-            let paint = self.solid_paint(false, &fill_color, gs.fill_alpha, gs.blend_mode);
-            let pipe = paint.pipe();
-            let src = PipeSrc::Solid(fill_bytes);
-
-            // The glyphs, as bitmaps or filled outlines, are one object under
-            // the soft mask in effect; the outline fills lie within one pixel
-            // of their points.
-            let outline_points = fill_paths
-                .iter()
-                .flat_map(|path| path.pts.iter().map(|p| (p.x, p.y)));
-            let region = PixelRect::around(
-                glyph_corners(&records).chain(outline_points),
-                1.0,
-                self.width,
-                self.height,
-            );
-            let alpha = self.gstate.current().fill_alpha;
-            self.paint_object(region, alpha, |r| {
-                r.blit_glyph_records(&records, &clip, &pipe, &src);
-                if pattern_fill {
-                    let mut union = raster::path::Path::new();
-                    for path in &fill_paths {
-                        union.append(path);
-                    }
-                    if !union.pts.is_empty() {
-                        r.fill_path(&union, false);
-                    }
-                } else {
-                    for path in &fill_paths {
-                        r.fill_path(path, false);
-                    }
-                }
-            });
-        }
-        // The cached strokes are one opaque object in the normal blend mode
-        // under the soft mask in effect.
-        if !stroke_records.is_empty() && !self.gstate.current().stroke_paints_nothing() {
-            let stroke_color = self.gstate.current().painted_stroke_color();
-            let stroke_bytes = stroke_color.bytes_for(self.canvas.kind().mode());
-            let clip = self.gstate.current().clip.clone_shared();
-            let paint = self.solid_paint(true, &stroke_color, u8::MAX, BlendMode::Normal);
-            let pipe = paint.pipe();
-            let src = PipeSrc::Solid(stroke_bytes);
-            let region =
-                PixelRect::around(glyph_corners(&stroke_records), 1.0, self.width, self.height);
-            self.paint_object(region, u8::MAX, |r| {
-                r.blit_glyph_records(&stroke_records, &clip, &pipe, &src);
-            });
-        }
-        // The stroke parameters are user-space quantities under the CTM, as
-        // for any stroked path (PDF §8.4.3.2); the text matrix and font size
-        // scale the outline but not the line width.
-        if do_stroke && !stroke_outline.pts.is_empty() {
-            self.stroke_text_outline(&stroke_outline);
-        }
-
-        // Phase 3: add the glyph outlines to the text object's clip (modes
-        // 4–7), which `ET` applies.
-        if do_clip {
-            self.text_clip
-                .get_or_insert_with(raster::path::Path::new)
-                .append(&clip_outline);
-        }
-
-        // Write updated text matrix back.
+        let (sink, tm, new_tail) = self.lay_out(&font, bytes, following, tail, mode, glyph_stroke);
+        self.paint_glyphs(&sink);
         self.gstate.current_mut().text.text_matrix = tm;
         self.text_tail = new_tail;
     }
-}
 
-impl PageRenderer<'_> {
-    /// Composite the glyph bitmaps of `records` through `clip` with `pipe`
-    /// and `src`.
-    fn blit_glyph_records(
+    /// Show `bytes` with the Type 3 font of glyph descriptions `t3` and
+    /// resource key `font_key`, painting when `paints`.
+    ///
+    /// Type 3 glyphs are content streams executed at the current pen
+    /// position, painting directly into the page.  A glyph description
+    /// paints with its own operators and has no outline to fill, stroke or
+    /// clip with (PDF §9.6.5): every mode but the invisible one executes the
+    /// glyph description unchanged, and none adds to the clip.  The glyphs
+    /// are one object under the soft mask in effect.
+    fn show_type3_string(
         &mut self,
-        records: &[GlyphRecord],
-        clip: &Clip,
-        pipe: &PipeState<'_>,
-        src: &PipeSrc<'_>,
+        bytes: &[u8],
+        t3: &Type3Data,
+        font_key: &ResourceKey,
+        paints: bool,
     ) {
-        for rec in records {
-            #[expect(
-                clippy::cast_possible_wrap,
-                reason = "bitmap sides are bounded by the glyph rasteriser and, for a \
-                          cached stroke, by its 2^18-pixel area, far below i32::MAX"
-            )]
-            let glyph = GlyphBitmap {
-                data: &rec.bitmap.data,
-                x: rec.bitmap.x_off,
-                y: rec.bitmap.y_off,
-                w: rec.bitmap.width as i32,
-                h: rec.bitmap.height as i32,
-                aa: rec.bitmap.aa,
-            };
-            // Whether the glyph lay inside the clip matters only to a
-            // clipping render mode, whose clip is built from the outlines.
-            let _ = with_canvas!(&mut self.canvas, |b| fill_glyph(
-                b, clip, pipe, src, rec.pen_x, rec.pen_y, &glyph
-            ));
+        let gs = self.gstate.current();
+        let ts = &gs.text;
+        let (ctm, tm) = (gs.ctm, ts.text_matrix);
+        let (font_size, char_spacing, word_spacing) =
+            (ts.font_size, ts.char_spacing, ts.word_spacing);
+        let (horiz_scaling, rise) = (ts.horiz_scaling / 100.0, ts.rise);
+        let region = self.clip_rect();
+        let alpha = gs.fill_alpha;
+        self.paint_object(region, alpha, |r| {
+            r.show_text_type3(
+                bytes,
+                t3,
+                font_key,
+                font_size,
+                ctm,
+                tm,
+                char_spacing,
+                word_spacing,
+                horiz_scaling,
+                rise,
+                paints,
+            );
+        });
+    }
+
+    /// Lay out the glyphs of `bytes`, shown with `font` in the current text
+    /// state, after the string whose end is `tail` and before `following`,
+    /// into a sink for `mode` and the cached stroke `glyph_stroke`.  Returns
+    /// the sink, the text matrix after the string and, when the string is
+    /// shaped, its end.
+    fn lay_out(
+        &mut self,
+        font: &ActiveFont,
+        bytes: &[u8],
+        following: Following<'_, '_>,
+        tail: Option<TextTail>,
+        mode: TextModeOps,
+        glyph_stroke: Option<GlyphStroke>,
+    ) -> (GlyphSink, TextMatrix, Option<TextTail>) {
+        let gs = self.gstate.current();
+        let ts = &gs.text;
+        // `Tz` is a percentage; `Tz 0` collapses the glyphs and the
+        // horizontal advances to zero width.
+        let frame = TextFrame {
+            ctm: gs.ctm,
+            origin: self.window_origin,
+            page_h: self.page_height,
+            font_size: ts.font_size,
+            horiz_scaling: ts.horiz_scaling / 100.0,
+            rise: ts.rise,
+        };
+        let (spacing, tm) = ((ts.char_spacing, ts.word_spacing), ts.text_matrix);
+        let pattern_fill = mode.fill && gs.fill_pattern.is_some();
+        let descriptor = &*font.descriptor;
+        let cid_enc = descriptor.cid_encoding.as_ref();
+        let document_fonts = Arc::clone(self.font_cache.document_fonts());
+        // The glyph cache is shared, not copied, by the clone.
+        let glyph_cache = self.font_cache.glyph_cache().clone();
+        // The 2×2 text rendering matrix in device pixels (PDF §9.4.4) is
+        // the same for every glyph of the string.  A singular one maps
+        // every glyph to zero area, and a face that cannot load (below one
+        // device pixel, an unreadable program) draws nothing; either way
+        // the string draws no glyph and the pen still advances by the
+        // document's widths.
+        let trm = text_rendering_matrix(&tm, &frame.ctm, frame.font_size, frame.horiz_scaling);
+        let mut face = if is_singular(&trm) {
+            None
+        } else {
+            let font_name = &self.gstate.current().text.font_name;
+            self.font_cache
+                .get_or_load_showing(font, font_name, trm, bytes)
+        };
+        let fill_as_path = face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
+        let mut sink = GlyphSink::new(
+            mode,
+            glyph_cache,
+            document_fonts,
+            (fill_as_path, pattern_fill),
+            glyph_stroke,
+            bytes.len(),
+        );
+        let decoded: Vec<DecodedCode> = CidEncoding::shown_codes(cid_enc, bytes).collect();
+        let mut drawn = drawn_by(face, cid_enc, &decoded);
+        let advances = code_advances(descriptor, face, &decoded, &drawn, &frame, spacing);
+
+        // Runs are shaped in horizontal writing only, between the strings
+        // shown next to them on their baseline.
+        let shaped = face.is_some_and(|f| shapes(descriptor, f));
+        let texts: Vec<CodeText> = match face {
+            Some(face) if shaped => decoded.iter().map(|d| face.text(d.code, d.value)).collect(),
+            _ => Vec::new(),
+        };
+        let em = frame.em();
+        let mut context = ShapingContext::default();
+        if shaped {
+            if let Some(tail) = tail.filter(|tail| neighbours_at(&tail.end, &tm, tail.em)) {
+                context.neighbours.before = tail.texts;
+                context.drift = (0, tail.drift);
+            }
+            if texts.last().is_some_and(|&text| takes_context(text)) {
+                let end = advances
+                    .iter()
+                    .fold(tm, |tm, &advance| translate_text_x(tm, advance));
+                if let Some(next) = self.next_string(end, em, following) {
+                    context.neighbours.after = next.texts;
+                    context.next_start = next.start;
+                }
+                // Reading ahead may load faces: the face is borrowed anew.
+                let font_name = &self.gstate.current().text.font_name;
+                face = self.font_cache.get_or_load(font, font_name, trm);
+                drawn = drawn_by(face, cid_enc, &decoded);
+            }
         }
+        let runs = match face {
+            Some(face) if shaped => shaped_runs(face, &texts, &drawn, &context.neighbours),
+            _ => Vec::new(),
+        };
+        let vertical = cid_enc.filter(|enc| enc.vertical);
+        let layout = Layout {
+            descriptor,
+            vertical,
+            decoded: &decoded,
+            drawn: &drawn,
+            advances: &advances,
+            frame,
+            fit: face.is_some_and(|f| f.substitute)
+                && !descriptor.substitute.standard
+                && vertical.is_none(),
+        };
+        let (end, drift) = layout.place(tm, &runs, &context, &mut sink);
+        let tail = shaped.then(|| {
+            let mut texts: Vec<CodeText> =
+                context.neighbours.before.into_iter().chain(texts).collect();
+            let _ = texts.drain(..texts.len().saturating_sub(CONTEXT_CODES));
+            TextTail {
+                texts,
+                end,
+                em,
+                drift: if drift.0 == decoded.len() {
+                    drift.1
+                } else {
+                    0.0
+                },
+            }
+        });
+        (sink, end, tail)
     }
 
     /// End a text object (`ET`): intersect the clip with the union of the
@@ -713,7 +553,6 @@ impl PageRenderer<'_> {
 #[cfg(test)]
 mod tests {
     use super::PageRenderer;
-    use super::TextModeOps;
 
     /// Run `content` on a 64 × 32 px page whose `/F1` is Helvetica and
     /// return the number of pixels darker than mid-grey.  The graphics
@@ -842,23 +681,5 @@ mod tests {
             0
         );
         assert_eq!(dark_pixels(b"0 0 64 32 re f").min(1), 1);
-    }
-
-    #[test]
-    fn text_mode_ops_follow_the_mode_table() {
-        let ops = |m| {
-            let o = TextModeOps::of(m);
-            (o.fill, o.stroke, o.clip)
-        };
-        assert_eq!(ops(0), (true, false, false));
-        assert_eq!(ops(1), (false, true, false));
-        assert_eq!(ops(2), (true, true, false));
-        assert_eq!(ops(3), (false, false, false));
-        assert_eq!(ops(4), (true, false, true));
-        assert_eq!(ops(5), (false, true, true));
-        assert_eq!(ops(6), (true, true, true));
-        assert_eq!(ops(7), (false, false, true));
-        assert_eq!(ops(8), ops(0), "out of range fills");
-        assert_eq!(ops(-1), ops(0), "out of range fills");
     }
 }
