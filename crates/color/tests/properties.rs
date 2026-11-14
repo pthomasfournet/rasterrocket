@@ -132,9 +132,10 @@ proptest! {
         let spots: [Option<&SpotLut>; 4] = std::array::from_fn(|i| tables[i].as_ref());
         let mut out = vec![0u8; ink.len() / 8 * 3];
         ink_to_rgb_row(&ink, &spots, &mut out);
+        // The probabilistic union `a + b - a·b/255`, rounded to nearest.
         let union = |a: u8, b: u8| {
-            let paper = (u32::from(255 - a) * u32::from(255 - b) + 127) / 255;
-            255 - u8::try_from(paper).expect("at most 255")
+            let (a, b) = (u32::from(a), u32::from(b));
+            u8::try_from((255 * (a + b) - a * b + 127) / 255).expect("at most 255")
         };
         for (px, rgb) in ink.as_chunks::<8>().0.iter().zip(out.as_chunks::<3>().0) {
             let mut cmyk = [px[0], px[1], px[2], px[3]];
