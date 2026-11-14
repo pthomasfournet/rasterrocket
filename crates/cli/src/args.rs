@@ -286,7 +286,8 @@ pub(crate) struct Args {
 
     /// Print the pages through the system's print service: CUPS's `lp`
     /// takes them as one PDF of page images at the resolution flags
-    /// (default 600 dpi), colour, or gray with --gray and --mono, and fits
+    /// (default 600 dpi, 360 dpi for a page larger than A0), colour, or
+    /// gray with --gray and --mono, and fits
     /// them to the printer.  Pages render for printing unless --purpose
     /// says otherwise.  No `OUTPUT_PREFIX` is given.
     #[arg(long)]
@@ -434,6 +435,11 @@ pub(crate) struct Args {
     /// bitmap of the largest page the renderer accepts at any budget.
     #[arg(long = "max-page-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_PAGE_MIB))]
     pub max_page_mib: Option<u64>,
+
+    /// Set by [`Self::apply_print_preset`] when the print resolution is
+    /// chosen per page.
+    #[arg(skip)]
+    pub print_resolution_per_page: bool,
 
     /// The most memory a band of a page holds while it renders, in MiB
     /// (default 64; 1 to 65536).  A page larger than one band renders in
@@ -733,7 +739,10 @@ impl Args {
             (Some(x), Some(y)) => (x, y),
             (Some(x), None) => (x, x),
             (None, Some(y)) => (y, y),
-            (None, None) => (self.x_dpi() / 72.0, self.y_dpi() / 72.0),
+            (None, None) => {
+                let (x, y) = self.page_dpi((width_pts, height_pts));
+                (x / 72.0, y / 72.0)
+            }
         }
     }
 
@@ -947,9 +956,11 @@ impl Args {
         Ok(())
     }
 
-    /// Expand `--print`: implied by `--printer`, at [`crate::print::PRINT_DPI`]
-    /// unless a resolution flag is given.  Call after
-    /// [`Self::validate_format_flags`].
+    /// Expand `--print`: implied by `--printer`, at the resolution
+    /// [`crate::print::default_dpi`] picks for each page unless a
+    /// resolution flag is given ([`crate::print::PRINT_DPI`] as the
+    /// resolution of the run, for what does not depend on the page).  Call
+    /// after [`Self::validate_format_flags`].
     pub(crate) const fn apply_print_preset(&mut self) {
         if !self.printing() {
             return;
@@ -957,6 +968,19 @@ impl Args {
         self.print = true;
         if self.resolution.is_none() && self.resolution_x.is_none() && self.resolution_y.is_none() {
             self.resolution = Some(crate::print::PRINT_DPI);
+            self.print_resolution_per_page = true;
+        }
+    }
+
+    /// The resolution `(x, y)` of a page of `width_pts × height_pts`: the
+    /// print default for its size under `--print` without a resolution
+    /// flag, else the run's ([`Self::dpi`]).
+    pub(crate) fn page_dpi(&self, page_pts: (f64, f64)) -> (f64, f64) {
+        if self.print_resolution_per_page {
+            let dpi = crate::print::default_dpi(page_pts);
+            (dpi, dpi)
+        } else {
+            self.dpi()
         }
     }
 
@@ -1867,9 +1891,19 @@ mod page_list_tests {
         let args = print_args(&["--print"]).unwrap();
         assert_eq!(args.dpi(), (600.0, 600.0));
         assert_eq!(args.session_config().unwrap().purpose, RenderPurpose::Print);
+        // The resolution follows the page: 360 dpi for a 44 × 120 in roll.
+        let (letter, roll) = ((612.0, 792.0), (3168.0, 8640.0));
+        assert_eq!(args.page_dpi(letter), (600.0, 600.0));
+        assert_eq!(args.page_dpi(roll), (360.0, 360.0));
+        assert_eq!(args.scales(roll), (5.0, 5.0));
         let args = print_args(&["--printer", "Office", "--rx", "300", "--ry", "600"]).unwrap();
         assert!(args.print);
         assert_eq!(args.dpi(), (300.0, 600.0));
+        assert_eq!(
+            args.page_dpi(roll),
+            (300.0, 600.0),
+            "a resolution flag wins"
+        );
         let args = print_args(&["--print", "--purpose", "view", "-r", "1200"]).unwrap();
         assert_eq!(args.dpi(), (1200.0, 1200.0));
         assert_eq!(args.session_config().unwrap().purpose, RenderPurpose::View);

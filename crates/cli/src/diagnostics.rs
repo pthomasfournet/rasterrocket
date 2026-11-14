@@ -151,8 +151,8 @@ pub(crate) fn report_errors(
     }
     if (over_budget || unallocated) && args.printing() {
         eprintln!(
-            "  hint: lower the resolution with -r (--print renders at 600 dpi by default), \
-             or raise the page budget with --max-page-mib"
+            "  hint: lower the resolution with -r (--print renders at 600 dpi by default, \
+             360 dpi for pages larger than A0), or raise the page budget with --max-page-mib"
         );
     } else if over_budget {
         eprintln!(

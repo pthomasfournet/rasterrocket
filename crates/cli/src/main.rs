@@ -221,7 +221,7 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    let print_pages = print::PageSink::new(args.dpi());
+    let print_pages = print::PageSink::new();
     let document = match (&fax, &spool) {
         (Some(fax), _) => render::Document::Fax(fax),
         (_, Some(_)) => render::Document::Print(&print_pages),

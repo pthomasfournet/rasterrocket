@@ -25,8 +25,30 @@ use crate::cleanup::{Page, SpreadHalf};
 use crate::deliver;
 use crate::render::{OUTPUT_BUFFER_BYTES, PageCollector, RenderError, lock};
 
-/// The resolution of a printed page when no resolution flag is given.
+/// The resolution of a printed page when no resolution flag is given, up
+/// to [`LARGE_FORMAT_PX`].
 pub(crate) const PRINT_DPI: f64 = 600.0;
+
+/// The resolution of a printed page past [`LARGE_FORMAT_PX`] when no
+/// resolution flag is given: the native input resolution of large-format
+/// photo printers' drivers.
+pub(crate) const LARGE_FORMAT_DPI: f64 = 360.0;
+
+/// The pixels at [`PRINT_DPI`] past which a printed page takes
+/// [`LARGE_FORMAT_DPI`]: 600 Mpx, about 1 667 square inches, larger than
+/// A0 (1 550) and than 36 × 44 in.
+pub(crate) const LARGE_FORMAT_PX: f64 = 600e6;
+
+/// The resolution of a printed page of `width_pts × height_pts` when no
+/// resolution flag is given.
+pub(crate) fn default_dpi((width_pts, height_pts): (f64, f64)) -> f64 {
+    let px_per_pt = PRINT_DPI / 72.0;
+    if width_pts * px_per_pt * height_pts * px_per_pt > LARGE_FORMAT_PX {
+        LARGE_FORMAT_DPI
+    } else {
+        PRINT_DPI
+    }
+}
 
 /// Longest job name in bytes: IPP's `name(MAX)`.
 const MAX_TITLE_BYTES: usize = 255;
@@ -106,65 +128,36 @@ type PageKey = (i32, u8);
 
 /// The encoded pages not yet appended to the spool, shared by the workers.
 pub(crate) struct PageSink {
-    dpi: (f64, f64),
     pages: PageCollector<PageKey, PdfPage>,
 }
 
 impl PageSink {
-    /// An empty sink for pages rendered at `dpi`.
-    pub(crate) const fn new(dpi: (f64, f64)) -> Self {
+    /// An empty sink.
+    pub(crate) const fn new() -> Self {
         Self {
-            dpi,
             pages: PageCollector::new(),
         }
     }
 
-    /// Compress `page` and hold it as document page `page_num`, half
-    /// `half` of a split spread: colour, or gray for a luma page.
+    /// Compress `page`, rendered at `dpi`, and hold it as document page
+    /// `page_num`, half `half` of a split spread: colour, or gray for a
+    /// luma page.
     ///
     /// # Errors
     ///
     /// The encoder refused the page.
     pub(crate) fn add(
         &self,
-        page_num: i32,
-        half: Option<SpreadHalf>,
+        (page_num, half): (i32, Option<SpreadHalf>),
         page: &Page,
+        dpi: (f64, f64),
     ) -> Result<(), RenderError> {
         let coded = match page {
-            Page::Rgb(rgb) => PdfPage::encode(RowImage::Rgb(rgb), self.dpi),
-            Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(RowImage::Gray(luma), self.dpi),
+            Page::Rgb(rgb) => PdfPage::encode(RowImage::Rgb(rgb), dpi),
+            Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(RowImage::Gray(luma), dpi),
         }?;
         self.push(page_num, half, coded);
         Ok(())
-    }
-
-    /// An encoder of a page of `size` pixels, colour when `rgb` and gray
-    /// otherwise, its compressed image held in a file of its own in the
-    /// spool's directory when `spill`.
-    ///
-    /// # Errors
-    ///
-    /// The file could not be created, or the encoder refused the page.
-    pub(crate) fn encoder(
-        &self,
-        size: (u32, u32),
-        rgb: bool,
-        spill: bool,
-    ) -> Result<PdfPageEncoder, RenderError> {
-        let file = if spill {
-            let dir = spool_dir();
-            Some(tempfile::tempfile_in(&dir).map_err(|e| {
-                std::io::Error::new(
-                    e.kind(),
-                    format!("cannot create a page spill file in {}: {e}", dir.display()),
-                )
-            })?)
-        } else {
-            None
-        };
-        let layout = if rgb { RowLayout::Rgb } else { RowLayout::Gray };
-        Ok(PdfPageEncoder::new(size, layout, self.dpi, file)?)
     }
 
     /// Hold `coded` as document page `page_num`, half `half` of a split
@@ -176,6 +169,33 @@ impl PageSink {
         };
         self.pages.push((page_num, half), coded);
     }
+}
+
+/// An encoder of a page of `size` pixels at `dpi`, colour when `rgb`
+/// and gray otherwise, its compressed image held in a file of its own
+/// in the spool's directory when `spill`.
+///
+/// # Errors
+///
+/// The file could not be created, or the encoder refused the page.
+pub(crate) fn page_encoder(
+    (size, dpi): ((u32, u32), (f64, f64)),
+    rgb: bool,
+    spill: bool,
+) -> Result<PdfPageEncoder, RenderError> {
+    let file = if spill {
+        let dir = spool_dir();
+        Some(tempfile::tempfile_in(&dir).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("cannot create a page spill file in {}: {e}", dir.display()),
+            )
+        })?)
+    } else {
+        None
+    };
+    let layout = if rgb { RowLayout::Rgb } else { RowLayout::Gray };
+    Ok(PdfPageEncoder::new(size, layout, dpi, file)?)
 }
 
 /// The directory of the spool: `$TMPDIR` when set, else `/var/tmp` where it
@@ -648,12 +668,14 @@ mod tests {
 
     #[test]
     fn pages_spool_in_page_order() {
-        let sink = PageSink::new((72.0, 72.0));
+        let sink = PageSink::new();
         let mut spool = Spool::create().unwrap();
-        sink.add(2, None, &gray(4, 6)).unwrap();
-        sink.add(1, Some(SpreadHalf::Right), &gray(3, 5)).unwrap();
-        sink.add(1, Some(SpreadHalf::Left), &gray(2, 5)).unwrap();
-        sink.add(3, None, &gray(8, 5)).unwrap();
+        sink.add((2, None), &gray(4, 6), (72.0, 72.0)).unwrap();
+        sink.add((1, Some(SpreadHalf::Right)), &gray(3, 5), (72.0, 72.0))
+            .unwrap();
+        sink.add((1, Some(SpreadHalf::Left)), &gray(2, 5), (72.0, 72.0))
+            .unwrap();
+        sink.add((3, None), &gray(8, 5), (72.0, 72.0)).unwrap();
         spool.write_through(&sink, 2).unwrap();
         spool.write_through(&sink, 3).unwrap();
         let mut pdf = Vec::new();
@@ -684,7 +706,7 @@ mod tests {
             .num_threads(2)
             .build()
             .unwrap();
-        let sink = PageSink::new((72.0, 72.0));
+        let sink = PageSink::new();
         let mut spool = Spool::create().unwrap();
         let pages: Vec<i32> = (1..=n).collect();
         let (peak, renders) = (AtomicUsize::new(0), AtomicUsize::new(0));
@@ -697,7 +719,8 @@ mod tests {
                 u64::try_from(n - page).unwrap() * 3,
             ));
             assert_ne!(Some(page), panic, "page {page} panics");
-            sink.add(page, None, &gray(page.unsigned_abs(), 1)).unwrap();
+            sink.add((page, None), &gray(page.unsigned_abs(), 1), (72.0, 72.0))
+                .unwrap();
             let _ = peak.fetch_max(sink.pages.len(), Ordering::Relaxed);
             None
         };
@@ -755,5 +778,25 @@ mod tests {
     #[test]
     fn an_empty_document_is_refused() {
         assert!(Spool::create().unwrap().finish().is_err());
+    }
+
+    /// A page larger than A0 prints at 360 dpi without a resolution flag;
+    /// A0 and smaller at 600.
+    #[test]
+    fn large_pages_print_at_the_large_format_resolution() {
+        let inch = 72.0;
+        for ((w, h), dpi) in [
+            ((8.5, 11.0), 600.0),
+            ((33.11, 46.81), 600.0),
+            ((36.0, 44.0), 600.0),
+            ((36.0, 48.0), 360.0),
+            ((44.0, 120.0), 360.0),
+        ] {
+            assert_eq!(
+                super::default_dpi((w * inch, h * inch)),
+                dpi,
+                "{w} × {h} in"
+            );
+        }
     }
 }

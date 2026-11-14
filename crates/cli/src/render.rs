@@ -155,7 +155,8 @@ pub(crate) fn render_page(
             );
         }
         (Some(BandOutput::Print), Document::Print(sink)) => {
-            return bands::print_page_banded(session, page_num, args, sink, &params, size);
+            let dpi = args.page_dpi(dims);
+            return bands::print_page_banded(session, page_num, args, sink, &params, (size, dpi));
         }
         _ => {}
     }
@@ -165,7 +166,10 @@ pub(crate) fn render_page(
             document,
             turn: layout.turn,
         },
-        (Document::Print(pages), _) => Sink::Print { pages },
+        (Document::Print(pages), _) => Sink::Print {
+            pages,
+            dpi: args.page_dpi(dims),
+        },
         _ => Sink::Files {
             spill,
             format: args.output_format(),
@@ -199,8 +203,11 @@ pub(crate) enum Sink<'a> {
         document: &'a FaxDocument,
         turn: bool,
     },
-    /// A page of the print job.
-    Print { pages: &'a PageSink },
+    /// A page of the print job, rendered at `dpi`.
+    Print {
+        pages: &'a PageSink,
+        dpi: (f64, f64),
+    },
 }
 
 /// Run the camera stages selected on the command line on `page` (see
@@ -226,8 +233,8 @@ pub(crate) fn write_cleaned(
                 document.add(page_num, page, turn)?;
                 continue;
             }
-            Sink::Print { pages } => {
-                pages.add(page_num, half, &page)?;
+            Sink::Print { pages, dpi } => {
+                pages.add((page_num, half), &page, dpi)?;
                 continue;
             }
         };

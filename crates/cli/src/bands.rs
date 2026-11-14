@@ -17,7 +17,7 @@ use raster::Bitmap;
 use crate::args::{Args, InvertWhen, OutputFormat};
 use crate::cleanup::Page;
 use crate::naming::output_path_with_prefix;
-use crate::print::PageSink;
+use crate::print::{PageSink, page_encoder};
 use crate::ram::SpillPolicy;
 use crate::render::{RenderError, write_output};
 use crate::tone;
@@ -227,8 +227,9 @@ pub(crate) fn write_page_banded(
     })
 }
 
-/// Render page `page_num` under `params`, a page of `size` pixels, in
-/// bands, each compressed as it completes into the print job `sink`'s page.
+/// Render page `page_num` under `params`, a page of `size` pixels at
+/// `dpi`, in bands, each compressed as it completes into the print job
+/// `sink`'s page.
 /// A page of more than one band holds its compressed image in a file of
 /// its own until the spool takes it.
 ///
@@ -242,13 +243,13 @@ pub(crate) fn print_page_banded(
     args: &Args,
     sink: &PageSink,
     params: &RenderParams,
-    size: (u32, u32),
+    (size, dpi): ((u32, u32), (f64, f64)),
 ) -> Result<(), RenderError> {
     let model = Model::of(args);
     let bytes_per_px = if args.transparent { 4 } else { 3 };
     let page_bytes = u64::from(size.0) * u64::from(size.1) * bytes_per_px;
     let rgb = matches!(model, Model::Rgb { .. });
-    let mut encoder = sink.encoder(size, rgb, page_bytes > args.band_bytes())?;
+    let mut encoder = page_encoder((size, dpi), rgb, page_bytes > args.band_bytes())?;
     render_into(session, page_num, params, args, |band| {
         Ok(encoder.push(band)?)
     })?;
