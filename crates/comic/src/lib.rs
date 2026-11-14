@@ -16,15 +16,18 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
+pub use archive::DEFAULT_MAX_ARCHIVE_BYTES;
 pub use pdf_raster::RenderedPage;
 
 /// The pages of an opened comic archive, rendered one at a time as the
 /// iterator advances.
 ///
 /// Each item is a 1-based page number paired with the page or the per-page
-/// error that replaced it; one corrupt page never ends the iteration.  Only
-/// the archive's compressed entries (or the embedded PDF) are held between
-/// pages, so memory does not grow with the page count.  [`len`](ExactSizeIterator::len)
+/// error that replaced it; one corrupt page never ends the iteration.  The
+/// page-image entries are decompressed when the archive is opened and each
+/// is held until its last page is rendered, so memory falls as the pages are
+/// yielded; their sum is bounded by [`ComicOptions::max_archive_bytes`].  An
+/// embedded PDF is held whole and its pages rendered from it.  [`len`](ExactSizeIterator::len)
 /// is the number of pages still to be yielded, and [`retain`](Self::retain)
 /// drops pages before any of them is rendered.
 pub struct ComicPages {
@@ -39,7 +42,7 @@ struct ImagePage {
     /// The entry's name, with the page within it for a multi-page image.
     name: String,
     /// The entry's bytes, shared by its pages, or the error reading them.
-    bytes: Result<Arc<[u8]>, ComicError>,
+    bytes: Result<Arc<Vec<u8>>, ComicError>,
     /// The page within the entry, as [`decode::image_pages`] lists it.
     index: usize,
 }
@@ -139,6 +142,11 @@ pub struct ComicOptions {
     /// every page image, before deskew.
     /// Default [`SessionConfig::default`](pdf_raster::SessionConfig::default).
     pub session: pdf_raster::SessionConfig,
+    /// The most bytes the archive's entries may decompress to in total.  An
+    /// archive that inflates past it is refused with
+    /// [`ComicError::ArchiveTooLarge`] before the first page is rendered.
+    /// Must be positive.  Default [`DEFAULT_MAX_ARCHIVE_BYTES`].
+    pub max_archive_bytes: u64,
 }
 
 impl ComicOptions {
@@ -164,6 +172,7 @@ impl Default for ComicOptions {
             last_page: u32::MAX,
             deskew: false,
             session: pdf_raster::SessionConfig::default(),
+            max_archive_bytes: DEFAULT_MAX_ARCHIVE_BYTES,
         }
     }
 }
@@ -178,6 +187,12 @@ pub enum ComicError {
     Open(std::io::Error),
     /// The container exists but could not be parsed as its claimed format.
     BadArchive(String),
+    /// The archive's entries decompress to more than
+    /// [`ComicOptions::max_archive_bytes`] in total.
+    ArchiveTooLarge {
+        /// The decompressed-size budget the archive exceeded, in bytes.
+        limit: u64,
+    },
     /// The archive opened but contained zero decodable images.
     NoImages,
     /// A single entry failed to decode. Yielded per-page; never aborts the run.
@@ -210,6 +225,12 @@ impl std::fmt::Display for ComicError {
             Self::InvalidOptions(m) => write!(f, "invalid comic options: {m}"),
             Self::Open(e) => write!(f, "cannot open comic archive: {e}"),
             Self::BadArchive(m) => write!(f, "malformed comic archive: {m}"),
+            Self::ArchiveTooLarge { limit } => write!(
+                f,
+                "comic archive decompresses to more than its {limit}-byte budget \
+                 (possible decompression bomb); raise ComicOptions::max_archive_bytes \
+                 if the archive is genuine"
+            ),
             Self::NoImages => write!(f, "comic archive contains no decodable images"),
             Self::Decode { entry, reason } => {
                 write!(f, "failed to decode {entry}: {reason}")
@@ -258,7 +279,8 @@ impl std::error::Error for ComicError {
 ///
 /// Returns `Err` *before* iteration for whole-archive failures: options that
 /// violate their constraints ([`ComicError::InvalidOptions`]), an
-/// unreadable/malformed container, an
+/// unreadable/malformed container, an archive that decompresses past
+/// [`ComicOptions::max_archive_bytes`] ([`ComicError::ArchiveTooLarge`]), an
 /// ambiguous PDF-only archive ([`ComicError::AmbiguousArchive`]), an embedded
 /// PDF that cannot be opened ([`ComicError::Pdf`]), or an archive with no
 /// decodable content in the page window ([`ComicError::NoImages`]).
@@ -270,7 +292,8 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
         .ok_or_else(|| ComicError::BadArchive("input path has no file name".to_owned()))?;
     let bytes = std::fs::read(path).map_err(ComicError::Open)?;
 
-    let mut archive = archive::open_archive_from_ext(file_name, bytes)?;
+    let budget = archive::ArchiveBudget::new(opts.max_archive_bytes);
+    let mut archive = archive::open_archive_from_ext(file_name, bytes, budget)?;
 
     // Partition entries by content kind. Images win; a lone PDF is the fallback.
     let all_names = archive.entry_names();
@@ -326,7 +349,7 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
         match archive.take_entry(&name) {
             Ok(raw) if decode::sniff(&raw).is_some() => {
                 let indices = decode::image_pages(&raw).unwrap_or_else(|_| vec![0]);
-                let bytes: Arc<[u8]> = raw.into();
+                let bytes = Arc::new(raw);
                 let several = indices.len() > 1;
                 for (n, index) in (1..).zip(indices) {
                     let label = if several {
@@ -340,6 +363,9 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
             Ok(_) => log::warn!(
                 "comic: skipping {name}: unrecognised image format; convert it to PNG or JPG"
             ),
+            // The budget bounds the whole archive, so exceeding it is not
+            // the failure of one page.
+            Err(e @ ComicError::ArchiveTooLarge { .. }) => return Err(e),
             Err(e) => decodable.push(image(name, Err(e), 0)),
         }
     }
@@ -375,6 +401,12 @@ fn validate_options(opts: &ComicOptions) -> Result<(), ComicError> {
     if opts.first_page == 0 {
         return Err(ComicError::InvalidOptions(
             "first_page must be ≥ 1 (pages are 1-based)".to_owned(),
+        ));
+    }
+    if opts.max_archive_bytes == 0 {
+        return Err(ComicError::InvalidOptions(
+            "max_archive_bytes must be positive (it bounds the archive's decompressed size)"
+                .to_owned(),
         ));
     }
     if opts.first_page > opts.last_page {
@@ -614,7 +646,9 @@ startxref\n180\n%%EOF"
         inverted.last_page = 3;
         let mut zero = ComicOptions::new(300.0);
         zero.first_page = 0;
-        for opts in [&mut nan, &mut inverted, &mut zero] {
+        let mut no_budget = ComicOptions::new(300.0);
+        no_budget.max_archive_bytes = 0;
+        for opts in [&mut nan, &mut inverted, &mut zero, &mut no_budget] {
             assert!(
                 matches!(open_comic(&path, opts), Err(ComicError::InvalidOptions(_))),
                 "{opts:?}"
@@ -640,6 +674,24 @@ startxref\n180\n%%EOF"
             [(1, true), (3, true)],
             "the corrupt page was never decoded"
         );
+    }
+
+    #[test]
+    fn an_archive_over_its_budget_is_refused_whole() {
+        let page = jpeg_page(64, 64, 9);
+        let cbz = make_cbz(&[("1.jpg", &page), ("2.jpg", &page)]);
+        let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
+        let mut opts = ComicOptions {
+            max_archive_bytes: u64::try_from(page.len() * 2 - 1).unwrap(),
+            ..ComicOptions::default()
+        };
+        let limit = opts.max_archive_bytes;
+        assert!(matches!(
+            open_comic(&path, &opts),
+            Err(ComicError::ArchiveTooLarge { limit: l }) if l == limit
+        ));
+        opts.max_archive_bytes += 1;
+        assert_eq!(open_comic(&path, &opts).unwrap().len(), 2);
     }
 
     #[test]

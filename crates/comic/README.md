@@ -27,7 +27,9 @@ fn ocr_archive(path: &Path) -> Result<(), ComicError> {
 `open_comic` returns an iterator that decodes each page when it is reached;
 its `len()` is the number of pages still to come and `retain` drops pages
 before any is decoded. Entries are read under a
-512 MiB decompressed-size cap and image dimensions are checked before
+512 MiB decompressed-size cap per entry and a total cap for the archive
+(`ComicOptions::max_archive_bytes`, default 4 GiB; an archive over it fails
+with `ComicError::ArchiveTooLarge`), and image dimensions are checked before
 decoding. An embedded PDF opens with `ComicOptions::session`, a
 `SessionConfig` (overprint, antialiasing, annotations, fonts, decryption,
 backend); `rrocket` fills it from the same flags as for PDF input and uses

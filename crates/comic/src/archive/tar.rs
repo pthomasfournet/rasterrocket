@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use super::{Archive, DecodedEntries};
+use super::{Archive, ArchiveBudget, DecodedEntries};
 use crate::ComicError;
 
 /// A TAR archive held in memory. Entries are indexed eagerly on open because
@@ -12,11 +12,13 @@ pub(super) struct TarArchive {
 }
 
 impl TarArchive {
-    /// Parse TAR bytes into an in-memory name→bytes table.
+    /// Parse TAR bytes into an in-memory name→bytes table, every entry
+    /// charged to `budget`.
     ///
     /// # Errors
-    /// [`ComicError::BadArchive`] if the stream is not a valid tar.
-    pub(super) fn open(bytes: Vec<u8>) -> Result<Self, ComicError> {
+    /// [`ComicError::BadArchive`] if the stream is not a valid tar;
+    /// [`ComicError::ArchiveTooLarge`] if its entries exceed `budget`.
+    pub(super) fn open(bytes: Vec<u8>, mut budget: ArchiveBudget) -> Result<Self, ComicError> {
         let mut ar = tar::Archive::new(Cursor::new(bytes));
         let mut entries = Vec::new();
         let iter = ar
@@ -37,8 +39,8 @@ impl TarArchive {
             // tar is uncompressed (no inflation ratio), but a physically huge
             // entry still reads unbounded into memory without a cap.
             let size_hint = e.header().size().unwrap_or(0);
-            let data = super::read_entry_capped(&mut e, &path, size_hint)?;
-            entries.push((path, data));
+            let data = super::read_entry_capped(&mut e, &path, size_hint, &mut budget)?;
+            entries.push((path, Ok(data)));
         }
         Ok(Self {
             entries: DecodedEntries::new("tar", entries),
@@ -61,6 +63,11 @@ mod tests {
     use super::*;
     use crate::archive::Archive;
 
+    /// A budget no test reaches.
+    fn ample() -> ArchiveBudget {
+        ArchiveBudget::new(u64::MAX)
+    }
+
     /// Build a real .cbt (tar) container in memory with the given entries.
     fn make_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
@@ -76,7 +83,7 @@ mod tests {
     #[test]
     fn tar_round_trip() {
         let bytes = make_tar(&[("002.png", b"two"), ("001.png", b"one")]);
-        let mut ar = TarArchive::open(bytes).unwrap();
+        let mut ar = TarArchive::open(bytes, ample()).unwrap();
         let mut names = ar.entry_names();
         names.sort();
         assert_eq!(names, vec!["001.png", "002.png"]);
@@ -86,7 +93,7 @@ mod tests {
 
     #[test]
     fn an_entry_is_taken_once() {
-        let mut ar = TarArchive::open(make_tar(&[("001.png", b"one")])).unwrap();
+        let mut ar = TarArchive::open(make_tar(&[("001.png", b"one")]), ample()).unwrap();
         assert_eq!(ar.take_entry("001.png").unwrap(), b"one");
         assert!(matches!(
             ar.take_entry("001.png"),
@@ -111,7 +118,7 @@ mod tests {
             .unwrap();
         let bytes = builder.into_inner().unwrap();
 
-        let mut ar = TarArchive::open(bytes).unwrap();
+        let mut ar = TarArchive::open(bytes, ample()).unwrap();
         assert_eq!(
             ar.entry_names(),
             vec!["pages/01.png"],
@@ -122,10 +129,20 @@ mod tests {
     #[test]
     fn tar_missing_entry_is_bad_archive() {
         let bytes = make_tar(&[("a.png", b"a")]);
-        let mut ar = TarArchive::open(bytes).unwrap();
+        let mut ar = TarArchive::open(bytes, ample()).unwrap();
         assert!(matches!(
             ar.take_entry("nope.png"),
             Err(ComicError::BadArchive(_))
         ));
+    }
+
+    #[test]
+    fn entries_share_the_archive_budget() {
+        let bytes = make_tar(&[("1.png", &[0; 600]), ("2.png", &[0; 600])]);
+        assert!(matches!(
+            TarArchive::open(bytes.clone(), ArchiveBudget::new(1000)),
+            Err(ComicError::ArchiveTooLarge { limit: 1000 })
+        ));
+        assert!(TarArchive::open(bytes, ArchiveBudget::new(1200)).is_ok());
     }
 }

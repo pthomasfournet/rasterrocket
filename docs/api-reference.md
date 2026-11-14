@@ -853,8 +853,10 @@ impl ComicPages {
 ```
 
 Opens an archive. `ComicPages` yields `(page_num, result)` in reading order and
-decodes each page only when it is reached, so memory does not grow with the
-page count; a per-page decode failure is an inner `Err` and does not abort the
+decodes each page only when it is reached. The page-image entries are
+decompressed when the archive is opened and each is held until its last page
+is yielded, so memory is bounded by `max_archive_bytes` and falls as pages are
+yielded; a per-page decode failure is an inner `Err` and does not abort the
 rest, matching `raster_pdf`. `len()` is the number of pages still to come, and
 `retain` drops pages before any is decoded.
 
@@ -873,14 +875,18 @@ rest, matching `raster_pdf`. `len()` is the number of pages still to come, and
 - **No images, no PDF** → `ComicError::NoImages`.
 
 **Whole-archive errors (outer `Err`):** `InvalidOptions` (a non-finite or
-non-positive `dpi`, `first_page` 0 or after `last_page`), `Open`/`BadArchive`
-(unreadable or malformed container, an encrypted RAR member included),
-`AmbiguousArchive`, `Pdf` (an embedded PDF that cannot be opened or has no
+non-positive `dpi`, `first_page` 0 or after `last_page`, `max_archive_bytes`
+0), `Open`/`BadArchive` (unreadable or malformed container; a damaged or
+encrypted member of a solid RAR), `ArchiveTooLarge { limit }` (the entries
+decompress to more than `max_archive_bytes` in total), `AmbiguousArchive`, `Pdf` (an embedded PDF that cannot be opened or has no
 page in the window), `NoImages`. **Per-page errors (inner `Err`):** `Decode`, `TooLarge`, `Deskew`,
-`Pdf`.
+`Pdf`, and `BadArchive` for an entry that cannot be read on its own (a damaged
+ZIP entry, a damaged or encrypted member of a non-solid RAR).
 
 **`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,
-`first_page: u32`, `last_page: u32`, `deskew: bool`, and `session:
+`first_page: u32`, `last_page: u32`, `deskew: bool`, `max_archive_bytes: u64`
+(default `DEFAULT_MAX_ARCHIVE_BYTES`, 4 GiB: the most bytes all entries
+together may decompress to), and `session:
 SessionConfig` (default `SessionConfig::default()`), the session an embedded
 PDF is opened with: its overprint, antialiasing, annotation, purpose, font,
 decryption and backend settings. The DPI rides along on each
@@ -890,10 +896,11 @@ with `ComicOptions::new(dpi)` or `ComicOptions::default()` and assign the fields
 to change, and give a `match` on `ComicError` a wildcard arm.
 
 **Hardening:** entries are read under a 512 MiB per-entry decompressed-size cap
-(decompression-bomb defence), and image dimensions are validated before a codec
+and the archive-wide `max_archive_bytes` (decompression-bomb defence), and image dimensions are validated before a codec
 allocates its pixel buffer (decode-bomb defence). `.cb7` and `.cbr` archives
 are decoded whole when opened, with decoder allocations (LZMA and RAR
-dictionaries, the PPMd model) bounded by 1 GiB.
+dictionaries, the PPMd model) bounded by 1 GiB and the RAR reader's whole
+workspace by 2 GiB.
 
 ---
 
