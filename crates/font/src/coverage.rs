@@ -2,15 +2,14 @@
 //!
 //! [`rasterize`] turns a glyph [`Path`] (device pixels, y up, origin at the
 //! pen position) into a [`GlyphBitmap`].  Curves are flattened to line
-//! segments; every segment then deposits, into an accumulation row per pixel
-//! row, the signed area it sweeps to its right within each pixel.  A running
-//! sum along a row yields the winding-weighted area of each pixel inside the
-//! outline; its magnitude, clamped to 1, is the coverage.  This is the
-//! non-zero winding rule with exact area anti-aliasing.  Mono bitmaps set a
-//! pixel when its coverage reaches one half.
+//! segments, which the exact-area rasteriser of path fills
+//! ([`raster::coverage::AreaRaster`]) converts into each pixel's area inside
+//! the outline under the non-zero winding rule.  Mono bitmaps set a pixel
+//! when its coverage reaches one half.
 //!
 //! Every subpath is treated as closed.
 
+use raster::coverage::AreaRaster;
 use raster::path::{Path, PathPoint};
 
 use crate::bitmap::GlyphBitmap;
@@ -18,8 +17,8 @@ use crate::bitmap::GlyphBitmap;
 /// Largest glyph bitmap width or height, in pixels.
 pub(crate) const MAX_GLYPH_DIM: u32 = 8_192;
 
-/// Largest glyph bitmap area, in pixels.  The accumulation buffer holds one
-/// `f32` per pixel, so this bounds the transient allocation at 64 MiB.
+/// Largest glyph bitmap area, in pixels; it bounds the coverage bitmap at
+/// 16 MiB.
 pub(crate) const MAX_GLYPH_AREA: u64 = 1 << 24;
 
 /// Maximum distance, in pixels, between a flattened curve and the curve.
@@ -47,19 +46,35 @@ pub(crate) fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
         return None;
     }
 
-    let mut acc = Accumulator::new(width as usize, height as usize);
-    let (left, top) = (bounds.left, bounds.top);
-    // Coordinates relative to the bitmap's top-left corner are bounded by
-    // MAX_GLYPH_DIM, well inside f32's exact-integer range.
+    // Both bounds lie within MAX_GLYPH_DIM, checked above.
     #[expect(
-        clippy::cast_possible_truncation,
-        reason = "bitmap-relative coordinates are bounded by MAX_GLYPH_DIM"
+        clippy::cast_possible_wrap,
+        reason = "width and height are at most MAX_GLYPH_DIM"
     )]
-    let to_bitmap = |p: PathPoint| ((p.x - left) as f32, (top - p.y) as f32);
+    let mut raster = AreaRaster::new(0, 0, width as i32 - 1, height as i32 - 1);
+    let (left, top) = (bounds.left, bounds.top);
+    // Bitmap coordinates: x from the left side, y down from the top.
+    let to_bitmap = |p: PathPoint| (p.x - left, top - p.y);
     for &(from, to) in &segments {
-        acc.add_segment(to_bitmap(from), to_bitmap(to));
+        let ((x0, y0), (x1, y1)) = (to_bitmap(from), to_bitmap(to));
+        raster.add_line(x0, y0, x1, y1);
     }
-    let data = if aa { acc.coverage() } else { acc.mask() };
+    let (w, h) = (width as usize, height as usize);
+    let row_bytes = if aa { w } else { w.div_ceil(8) };
+    let mut data = vec![0u8; row_bytes * h];
+    raster.rows(false, |y, x, coverage| {
+        let (Ok(y), Ok(x)) = (usize::try_from(y), usize::try_from(x)) else {
+            return;
+        };
+        let out = &mut data[y * row_bytes..(y + 1) * row_bytes];
+        for (px, &c) in (x..w).zip(coverage) {
+            if aa {
+                out[px] = c;
+            } else if c >= 128 {
+                out[px / 8] |= 0x80 >> (px % 8);
+            }
+        }
+    });
 
     // `left` and `top` are integral and bounded by the finite path extent
     // checked in `Bounds::of`.
@@ -76,20 +91,6 @@ pub(crate) fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
         aa,
         data,
     })
-}
-
-/// Map an accumulated winding-weighted area to an 8-bit coverage value.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "value is clamped to [0, 255.5) before the cast"
-)]
-#[expect(
-    clippy::missing_const_for_fn,
-    reason = "f32::mul_add is not const-callable on the stable toolchain"
-)]
-fn coverage_byte(area: f32) -> u8 {
-    area.abs().min(1.0).mul_add(255.0, 0.5) as u8
 }
 
 /// Integer pixel bounds of a flattened outline: left/bottom rounded down,
@@ -226,140 +227,6 @@ fn cubic_point(p0: PathPoint, p1: PathPoint, p2: PathPoint, p3: PathPoint, t: f6
         b0.mul_add(p0.x, b1.mul_add(p1.x, b2.mul_add(p2.x, b3 * p3.x))),
         b0.mul_add(p0.y, b1.mul_add(p1.y, b2.mul_add(p2.y, b3 * p3.y))),
     )
-}
-
-/// Signed-area accumulation buffer for a `width × height` bitmap.
-///
-/// Each row holds two cells beyond the last pixel: a segment touching the
-/// right edge deposits its remainder one or two cells past it.
-struct Accumulator {
-    cells: Vec<f32>,
-    stride: usize,
-    width: usize,
-    height: usize,
-}
-
-impl Accumulator {
-    fn new(width: usize, height: usize) -> Self {
-        let stride = width + 2;
-        Self {
-            cells: vec![0.0; stride * height],
-            stride,
-            width,
-            height,
-        }
-    }
-
-    /// Deposit the signed area contribution of the segment `from → to`
-    /// (bitmap coordinates, y down).
-    ///
-    /// Within each pixel row the segment spans a vertical extent `dy`,
-    /// signed by its direction.  The cells it crosses receive the part of
-    /// `dy` lying to the left of the segment within them and the cell after
-    /// the last crossed one the remainder, so a row's deposits sum to the
-    /// signed `dy` and the running sum to the right of the segment equals
-    /// it.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "coordinates are clamped to [0, width] × [0, height] before becoming cell indices"
-    )]
-    fn add_segment(&mut self, from: (f32, f32), to: (f32, f32)) {
-        let finite = [from.0, from.1, to.0, to.1].iter().all(|v| v.is_finite());
-        if !finite || (to.1 - from.1).abs() <= f32::EPSILON {
-            return;
-        }
-        let (dir, (x_top, y_top), (x_bottom, y_bottom)) = if from.1 < to.1 {
-            (1.0f32, from, to)
-        } else {
-            (-1.0f32, to, from)
-        };
-        let max_x = self.width as f32;
-        let dxdy = (x_bottom - x_top) / (y_bottom - y_top);
-        let y_start = y_top.max(0.0);
-        let y_end = y_bottom.min(self.height as f32);
-        if y_start >= y_end {
-            return;
-        }
-        let mut x = dxdy.mul_add(y_start - y_top, x_top);
-        let first_row = y_start.floor() as usize;
-        let last_row = (y_end.ceil() as usize).min(self.height);
-        for row in first_row..last_row {
-            let dy = ((row + 1) as f32).min(y_end) - (row as f32).max(y_start);
-            if dy <= 0.0 {
-                continue;
-            }
-            let x_next = dxdy.mul_add(dy, x);
-            let d = dy * dir;
-            let line = &mut self.cells[row * self.stride..(row + 1) * self.stride];
-            let lo = x.min(x_next).clamp(0.0, max_x);
-            let hi = x.max(x_next).clamp(0.0, max_x);
-            let lo_floor = lo.floor();
-            let first = lo_floor as usize;
-            let hi_ceil = hi.ceil();
-            let end = hi_ceil as usize;
-            if end <= first + 1 {
-                // The segment stays within one cell column.
-                let mid = 0.5f32.mul_add(lo + hi, -lo_floor);
-                line[first] += d.mul_add(-mid, d);
-                line[first + 1] = d.mul_add(mid, line[first + 1]);
-            } else {
-                let inv = (hi - lo).recip();
-                let lo_frac = lo - lo_floor;
-                let head = 0.5 * inv * (1.0 - lo_frac) * (1.0 - lo_frac);
-                let hi_frac = hi - hi_ceil + 1.0;
-                let tail = 0.5 * inv * hi_frac * hi_frac;
-                line[first] = d.mul_add(head, line[first]);
-                if end == first + 2 {
-                    line[first + 1] = d.mul_add(1.0 - head - tail, line[first + 1]);
-                } else {
-                    let second = inv * (1.5 - lo_frac);
-                    line[first + 1] = d.mul_add(second - head, line[first + 1]);
-                    for cell in &mut line[first + 2..end - 1] {
-                        *cell = d.mul_add(inv, *cell);
-                    }
-                    let before_last = ((end - first - 3) as f32).mul_add(inv, second);
-                    line[end - 1] = d.mul_add(1.0 - before_last - tail, line[end - 1]);
-                }
-                line[end] = d.mul_add(tail, line[end]);
-            }
-            x = x_next;
-        }
-    }
-
-    /// Running sums along each row: the winding-weighted area per pixel.
-    fn areas(&self) -> impl Iterator<Item = impl Iterator<Item = f32> + '_> + '_ {
-        self.cells.chunks_exact(self.stride).map(|row| {
-            row[..self.width].iter().scan(0.0f32, |sum, &cell| {
-                *sum += cell;
-                Some(*sum)
-            })
-        })
-    }
-
-    /// 8-bit coverage, one byte per pixel.
-    fn coverage(&self) -> Vec<u8> {
-        let mut data = Vec::with_capacity(self.width * self.height);
-        for row in self.areas() {
-            data.extend(row.map(coverage_byte));
-        }
-        data
-    }
-
-    /// 1-bit MSB-first mask: a pixel is set at coverage ≥ ½.
-    fn mask(&self) -> Vec<u8> {
-        let row_bytes = self.width.div_ceil(8);
-        let mut data = vec![0u8; row_bytes * self.height];
-        for (row, out) in self.areas().zip(data.chunks_exact_mut(row_bytes)) {
-            for (x, area) in row.enumerate() {
-                if area.abs() >= 0.5 {
-                    out[x / 8] |= 0x80 >> (x % 8);
-                }
-            }
-        }
-        data
-    }
 }
 
 #[cfg(test)]
