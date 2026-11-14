@@ -26,13 +26,11 @@ use rav1d::{StillLimits, StillPicture, StillSamples};
 
 use self::color::{ColorSpec, Frame, Pixels, Plane, Sample, chroma_size, to_pixels};
 use self::container::{Container, Grid, ItemInfo, Nclx};
-use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_from_tight};
+use super::{
+    CodecPixels, DecodeError, MAX_SAMPLES, gray_from_tight, guard_dimensions, rgb_from_tight,
+};
 
 pub(in crate::decode) use self::container::is_avif;
-
-/// The most samples (pixels × channels) the planes of a page may hold: 1 Gi,
-/// the image decode budget of the PDF path.
-const MAX_SAMPLES: u64 = 1 << 30;
 
 /// The most tiles a grid may have.
 const MAX_TILES: u32 = 1024;
@@ -57,8 +55,9 @@ enum Transform<'a> {
 struct ItemProps<'a> {
     size: Option<(u32, u32)>,
     nclx: Option<Nclx>,
-    /// Set by an `av1C` property: whether it declares a monochrome stream.
-    monochrome: Option<bool>,
+    /// Whether the item has an `av1C` codec configuration.
+    configured: bool,
+    /// At most one of each kind, in association order.
     transforms: Vec<Transform<'a>>,
 }
 
@@ -68,28 +67,48 @@ impl<'a> ItemProps<'a> {
     /// # Errors
     ///
     /// [`DecodeError::Codec`] for a malformed property, an essential
-    /// property this decoder does not implement, or a selection of an
-    /// operating point or layer other than the default.
+    /// property this decoder does not implement, a selection of an
+    /// operating point or layer other than the default, or a transformative
+    /// property (`clap`, `irot`, `imir`) associated twice, which HEIF
+    /// forbids.
     fn read(container: &Container<'a>, id: u32) -> Result<Self, DecodeError> {
         let mut out = Self::default();
         for property in container.properties(id)? {
             let payload = property.payload;
+            let transform = match &property.kind {
+                b"clap" => Some(Transform::Crop(payload)),
+                b"irot" => Some(Transform::Turn(container::parse_irot(payload)?)),
+                b"imir" => Some(Transform::Mirror(container::parse_imir(payload)?)),
+                _ => None,
+            };
+            if let Some(transform) = transform {
+                let same = std::mem::discriminant(&transform);
+                if out
+                    .transforms
+                    .iter()
+                    .any(|t| std::mem::discriminant(t) == same)
+                {
+                    return Err(codec(format_args!(
+                        "the transformative property '{}' associated twice with one item",
+                        property.kind.escape_ascii()
+                    )));
+                }
+                out.transforms.push(transform);
+                continue;
+            }
             match &property.kind {
                 b"ispe" => out.size = Some(container::parse_ispe(payload)?),
                 b"colr" => {
-                    // The first colour description of the item stands.
+                    // The first `nclx` colour description of the item
+                    // stands; an ICC profile is not applied.
                     if out.nclx.is_none() {
                         out.nclx = container::parse_colr(payload)?;
                     }
                 }
-                b"av1C" => out.monochrome = Some(container::parse_av1c(payload)?),
-                b"clap" => out.transforms.push(Transform::Crop(payload)),
-                b"irot" => out
-                    .transforms
-                    .push(Transform::Turn(container::parse_irot(payload)?)),
-                b"imir" => out
-                    .transforms
-                    .push(Transform::Mirror(container::parse_imir(payload)?)),
+                b"av1C" => {
+                    container::parse_av1c(payload)?;
+                    out.configured = true;
+                }
                 b"a1op" => {
                     if container::parse_a1op(payload)? != 0 {
                         return Err(codec("operating point selection is not supported"));
@@ -178,8 +197,9 @@ fn frame_view(picture: &StillPicture) -> Result<AnyFrame<'_>, DecodeError> {
 /// Decode the coded picture item `item`, whose properties are `props`.
 ///
 /// The item's `ispe` size passes the page limits before the decoder runs
-/// and bounds what the decoder may allocate; the picture must then have
-/// exactly that size.
+/// and bounds what the decoder may allocate, with the chroma layout of the
+/// stream's own sequence headers; the picture must then have exactly that
+/// size.
 fn decode_coded(
     container: &Container<'_>,
     item: ItemInfo,
@@ -192,9 +212,9 @@ fn decode_coded(
             item.kind.escape_ascii()
         )));
     }
-    let monochrome = props
-        .monochrome
-        .ok_or_else(|| codec("a coded item without its codec configuration"))?;
+    if !props.configured {
+        return Err(codec("a coded item without its codec configuration"));
+    }
     let (w, h) = props
         .size
         .ok_or_else(|| codec("a coded item without its image size"))?;
@@ -209,11 +229,16 @@ fn decode_coded(
     let Some(max_pixels) = w.checked_mul(h) else {
         return Err(too_large);
     };
-    let channels = if monochrome { 1 } else { 3 };
-    if u64::from(max_pixels) * channels > MAX_SAMPLES {
+    let data = container.data(item.id, file_len)?;
+    let layout = rav1d::still_layout(&data).map_err(codec)?;
+    let (cw, ch) = chroma_size(layout, w as usize, h as usize);
+    let samples = (cw as u64)
+        .checked_mul(ch as u64)
+        .and_then(|chroma| chroma.checked_mul(2))
+        .and_then(|chroma| chroma.checked_add(u64::from(max_pixels)));
+    if samples.is_none_or(|n| n > MAX_SAMPLES as u64) {
         return Err(too_large);
     }
-    let data = container.data(item.id, file_len)?;
     let picture = rav1d::decode_still(&data, StillLimits { max_pixels }).map_err(codec)?;
     if (picture.width, picture.height) != (w, h) {
         return Err(codec(format_args!(
@@ -312,7 +337,7 @@ fn decode_grid(
                 return Err(codec("odd-sized grid tiles"));
             }
             let samples = u64::from(tw) * u64::from(columns) * u64::from(th) * u64::from(rows);
-            if samples.saturating_mul(3) > MAX_SAMPLES {
+            if samples.saturating_mul(3) > MAX_SAMPLES as u64 {
                 return Err(DecodeError::TooLarge { width, height });
             }
             tile_size = (tw, th);

@@ -17,6 +17,11 @@ mod webp;
 use color::{Gray8, Pixel, Rgb8};
 use raster::Bitmap;
 
+/// The most samples (pixels × channels, every plane and frame counted) a
+/// codec may allocate for one image: 1 Gi.  At 2 bytes per sample, the width
+/// of the deep formats, the planes of an image stay within 2 GiB.
+const MAX_SAMPLES: usize = 1 << 30;
+
 /// A codec's output in the colour model the stream carries.
 enum CodecPixels {
     /// Single-channel luma.

@@ -1,6 +1,7 @@
 //! Decoder tests over the fixtures `tests/data/avif-fixtures.py` writes.
 
-use super::decode;
+use super::container::Container;
+use super::{ItemProps, decode};
 use crate::decode::{CodecPixels, DecodeError, ImageFormat, sniff};
 
 /// 8 × 4 lossless 4:4:4 with the identity matrix, pixel `(30x, 60y, 255 − 30x)`.
@@ -288,6 +289,120 @@ fn absurd_or_wrong_sizes_are_refused() {
     assert!(decode(&grid(&[0, 0, 1, 1, 0, 0, 0, 100])).is_err());
     // 32-bit sizes need four more bytes than the item has.
     assert!(decode(&grid(&[0, 1, 1, 1, 0, 120, 0, 100])).is_err());
+}
+
+/// A box of type `kind` around `payload`.
+fn boxed(kind: &[u8], payload: &[u8]) -> Vec<u8> {
+    let size = u32::try_from(payload.len() + 8).unwrap();
+    [&size.to_be_bytes()[..], kind, payload].concat()
+}
+
+/// A full box: `version` and zero flags, then `body`.
+fn full_box(kind: &[u8], version: u8, body: &[u8]) -> Vec<u8> {
+    boxed(kind, &[&[version, 0, 0, 0][..], body].concat())
+}
+
+/// A file of an `ftyp` box and a `meta` box of a picture handler followed
+/// by `boxes`.
+fn file_of(boxes: &[Vec<u8>]) -> Vec<u8> {
+    let handler = full_box(b"hdlr", 0, &[&[0; 4][..], b"pict", &[0; 13]].concat());
+    let meta = full_box(b"meta", 0, &[handler, boxes.concat()].concat());
+    [boxed(b"ftyp", b"avif\0\0\0\0avifmif1"), meta].concat()
+}
+
+/// An `iloc` box of version 1 with zero-byte offset, length, base and
+/// index fields, of `count` items with `extents` extents each.
+fn zero_width_iloc(count: u16, extents: u16) -> Vec<u8> {
+    let mut body = vec![0, 0];
+    body.extend_from_slice(&count.to_be_bytes());
+    for item in 1..=count {
+        body.extend_from_slice(&item.to_be_bytes());
+        // Construction method, data reference index, extent count.
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        body.extend_from_slice(&extents.to_be_bytes());
+    }
+    full_box(b"iloc", 1, &body)
+}
+
+#[test]
+fn zero_width_extents_cannot_amplify_the_location_table() {
+    // 4096 items of 4096 zero-byte extents: 32 KiB of input for 2^24
+    // extents.  The parser refuses before building the table.
+    let file = file_of(&[zero_width_iloc(4096, 4096)]);
+    assert!(file.len() < 40_000);
+    let err = Container::parse(&file).unwrap_err();
+    assert!(err.to_string().contains("extents"), "{err}");
+    // One extent without a length is the whole source, and stands.
+    assert!(Container::parse(&file_of(&[zero_width_iloc(16, 1)])).is_ok());
+}
+
+#[test]
+fn extents_are_capped_across_items() {
+    // Two items of 4096 four-byte-length extents: each within the cap
+    // alone, the second over it in total.
+    // Offset and length fields of 4 bytes, no base or index.
+    let mut body = vec![0x44, 0x00, 0, 2];
+    for item in 1..=2u16 {
+        body.extend_from_slice(&item.to_be_bytes());
+        body.extend_from_slice(&[0, 0, 0, 0, 0x10, 0x00]);
+        body.extend_from_slice(&vec![0; 4096 * 8]);
+    }
+    let err = Container::parse(&file_of(&[full_box(b"iloc", 1, &body)])).unwrap_err();
+    assert!(err.to_string().contains("too many extents"), "{err}");
+}
+
+#[test]
+fn a_meta_box_repeated_inside_meta_is_refused() {
+    // Each table box repeated would let its per-box cap be multiplied.
+    let iinf = full_box(b"iinf", 0, &[0, 0]);
+    let iloc = zero_width_iloc(1, 1);
+    for repeated in [iinf, iloc] {
+        assert!(Container::parse(&file_of(std::slice::from_ref(&repeated))).is_ok());
+        let err = Container::parse(&file_of(&[repeated.clone(), repeated])).unwrap_err();
+        assert!(err.to_string().contains("a second"), "{err}");
+    }
+}
+
+#[test]
+fn a_transformative_property_associated_twice_is_refused() {
+    // One `irot` property, associated with item 1 255 times: each
+    // association would be a full remap of the page.
+    let ipco = boxed(b"ipco", &boxed(b"irot", &[1]));
+    let mut associations = vec![0, 0, 0, 1, 0, 1, 255];
+    associations.extend_from_slice(&[1; 255]);
+    let ipma = full_box(b"ipma", 0, &associations);
+    let file = file_of(&[boxed(b"iprp", &[ipco, ipma].concat())]);
+    let container = Container::parse(&file).unwrap();
+    let err = ItemProps::read(&container, 1).unwrap_err();
+    assert!(err.to_string().contains("'irot' associated twice"), "{err}");
+}
+
+#[test]
+fn the_sample_budget_follows_the_stream_not_the_codec_configuration() {
+    // 20 000 × 20 000 passes the page limits.  As 4:4:4 it is 1.2·10^9
+    // samples, over the budget; the av1C box claiming monochrome (4·10^8
+    // samples) must not let it through to the decoder.
+    let ispe = |bytes: &[u8]| {
+        let file = with_box_bytes(bytes, b"ispe", 4, &20_000u32.to_be_bytes());
+        with_box_bytes(&file, b"ispe", 8, &20_000u32.to_be_bytes())
+    };
+    let at = RGB.windows(4).position(|w| w == b"av1C").unwrap() + 6;
+    let lying = with_box_bytes(RGB, b"av1C", 2, &[RGB[at] | 0x10]);
+    for file in [ispe(RGB), ispe(&lying)] {
+        assert!(
+            matches!(
+                decode(&file),
+                Err(DecodeError::TooLarge {
+                    width: 20_000,
+                    height: 20_000
+                })
+            ),
+            "{:?}",
+            decode(&file).err()
+        );
+    }
+    // The monochrome stream of the same size is within it.
+    assert!(matches!(decode(&ispe(GRAY)), Err(DecodeError::Codec(_))));
 }
 
 #[test]

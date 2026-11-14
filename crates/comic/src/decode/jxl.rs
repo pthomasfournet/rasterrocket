@@ -11,11 +11,9 @@ use jxl::api::{
     JxlPixelFormat,
 };
 
-use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_from_tight};
-
-/// The most samples (pixels × channels) the decoder may allocate for the
-/// image or any of its frames: 1 Gi, the image decode budget of the PDF path.
-const MAX_SAMPLES: usize = 1 << 30;
+use super::{
+    CodecPixels, DecodeError, MAX_SAMPLES, gray_from_tight, guard_dimensions, rgb_from_tight,
+};
 
 /// Decode a JPEG XL codestream or container to a `Gray8` or `Rgb8` bitmap.
 ///

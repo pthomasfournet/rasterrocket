@@ -4,7 +4,9 @@
 //!
 //! Parsing borrows from the file and copies nothing but small tables.  Every
 //! offset and length is checked against the buffer it indexes, every table
-//! is capped, and box nesting is bounded by construction: the parser
+//! is capped across the whole file, each box of `meta` appears at most once,
+//! every table entry costs input bytes, and box nesting is bounded by
+//! construction: the parser
 //! descends a fixed set of containers (`meta`, `iprp`, `ipco`, `iinf`,
 //! `iref`) and never recurses on input.
 
@@ -12,14 +14,20 @@ use std::borrow::Cow;
 
 use super::DecodeError;
 
-/// The most items, properties, property associations of one item,
-/// references and extents of one item a file may declare.
+/// The most items, item locations, properties, references and extents a
+/// file may declare, each counted over the whole file; property
+/// associations are capped at 16 times as many.
 const MAX_ENTRIES: usize = 4096;
 
 /// A four-character box or item type.
 pub(super) type FourCc = [u8; 4];
 
-fn malformed(what: &str) -> DecodeError {
+/// The boxes of `meta` that ISO/IEC 23008-12 allows at most once.
+const SINGLE: [&FourCc; 7] = [
+    b"hdlr", b"pitm", b"iinf", b"iloc", b"iprp", b"iref", b"idat",
+];
+
+fn malformed(what: impl std::fmt::Display) -> DecodeError {
     DecodeError::Codec(format!("avif: {what}"))
 }
 
@@ -186,6 +194,8 @@ pub(super) struct Container<'a> {
     primary: Option<u32>,
     items: Vec<ItemInfo>,
     locations: Vec<Location>,
+    /// The extents of all `locations`.
+    extents: usize,
     properties: Vec<(FourCc, &'a [u8])>,
     /// (item, 1-based property index, essential), in association order.
     associations: Vec<(u32, u16, bool)>,
@@ -240,13 +250,23 @@ impl<'a> Container<'a> {
             primary: None,
             items: Vec::new(),
             locations: Vec::new(),
+            extents: 0,
             properties: Vec::new(),
             associations: Vec::new(),
             references: Vec::new(),
         };
         let mut pict = false;
+        let mut seen = [false; SINGLE.len()];
         while !meta.is_empty() {
             let (kind, payload) = meta.next_box(false)?;
+            if let Some(at) = SINGLE.iter().position(|&single| *single == kind)
+                && std::mem::replace(&mut seen[at], true)
+            {
+                return Err(malformed(format_args!(
+                    "a second '{}' box in meta",
+                    kind.escape_ascii()
+                )));
+            }
             let mut body = Reader::new(payload);
             match &kind {
                 b"hdlr" => {
@@ -275,7 +295,7 @@ impl<'a> Container<'a> {
     fn parse_iinf(&mut self, mut body: Reader<'a>) -> Result<(), DecodeError> {
         let (version, _) = body.full_header()?;
         let count = body.id(version > 0)? as usize;
-        if count > MAX_ENTRIES {
+        if count > MAX_ENTRIES - self.items.len() {
             return Err(malformed("too many items"));
         }
         for _ in 0..count {
@@ -308,7 +328,7 @@ impl<'a> Container<'a> {
         let (offset_size, length_size, base_size) = (nibble(12), nibble(8), nibble(4));
         let index_size = if version > 0 { nibble(0) } else { 0 };
         let count = body.id(version == 2)? as usize;
-        if count > MAX_ENTRIES {
+        if count > MAX_ENTRIES - self.locations.len() {
             return Err(malformed("too many item locations"));
         }
         for _ in 0..count {
@@ -324,9 +344,16 @@ impl<'a> Container<'a> {
             }
             let base = body.sized(base_size)?;
             let extent_count = usize::from(body.u16()?);
-            if extent_count > MAX_ENTRIES {
+            if extent_count > MAX_ENTRIES - self.extents {
                 return Err(malformed("too many extents"));
             }
+            // Without a length field every extent runs to the end of its
+            // source, so only a single extent is meaningful; refusing more
+            // also makes every extent cost input bytes.
+            if extent_count > 1 && length_size == 0 {
+                return Err(malformed("several extents without lengths"));
+            }
+            self.extents += extent_count;
             let mut extents = Vec::with_capacity(extent_count);
             for _ in 0..extent_count {
                 let _index = body.sized(index_size)?;
@@ -546,12 +573,11 @@ pub(super) fn parse_colr(payload: &[u8]) -> Result<Option<Nclx>, DecodeError> {
     }))
 }
 
-/// `av1C`: whether the codec configuration declares a monochrome stream.
-pub(super) fn parse_av1c(payload: &[u8]) -> Result<bool, DecodeError> {
-    let mut body = Reader::new(payload);
-    // Marker and version, then profile and level.
-    body.skip(2)?;
-    Ok(body.u8()? & 0x10 != 0)
+/// `av1C`: check the codec configuration holds its fixed fields (marker
+/// and version, profile and level, then the format flags).  The format it
+/// declares is not used: the stream's sequence header is authoritative.
+pub(super) fn parse_av1c(payload: &[u8]) -> Result<(), DecodeError> {
+    Reader::new(payload).skip(3)
 }
 
 /// `irot`: the number of anticlockwise quarter turns.
