@@ -38,7 +38,7 @@ rendering flags (`--aa`, `--aaVector`, `--overprint`, `--hide-annotations`,
 invalid backend combination is refused for comic input as for a PDF. The
 crop, scale-to and password flags, `--threads`, `--progress` and
 `--timings` apply to PDF input only and have no effect on comic input. An archive's entries are decompressed into memory when it opens;
-`--max-archive-mib MIB` (default 4096) bounds their total, and an archive over it is refused
+`--max-archive-mib MIB` (default 4096, at least 1) bounds their total, and an archive over it is refused
 whole as a possible decompression bomb, exit status 1.
 
 ---
@@ -66,9 +66,9 @@ If `--first-page` < 1, it is clamped to 1 with a warning. If `--last-page` excee
 | `-r DPI` / `--resolution DPI` | `150` | Render resolution for both axes. |
 | `--rx DPI` | same as `-r` | Horizontal resolution only (overrides `-r` for X). |
 | `--ry DPI` | same as `-r` | Vertical resolution only (overrides `-r` for Y). Unequal `--rx`/`--ry` give non-square pixels: the page is `width × rx / 72` by `height × ry / 72` pixels. |
-| `--scale-to N` | — | Fit each page in an N × N box: the longer edge is N pixels, aspect ratio kept. Overrides the resolution flags and `--scale-to-x`/`--scale-to-y`. |
-| `--scale-to-x N` | — | Scale each page to N pixels wide; without `--scale-to-y` the height keeps the aspect ratio. Overrides `-r`/`--rx`. |
-| `--scale-to-y N` | — | Scale each page to N pixels high; without `--scale-to-x` the width keeps the aspect ratio. Overrides `-r`/`--ry`. Both together give exactly N × M pixels (non-square pixels). |
+| `--scale-to PIXELS` | — | Fit each page in a PIXELS × PIXELS box: the longer edge is PIXELS pixels, aspect ratio kept. Overrides the resolution flags and `--scale-to-x`/`--scale-to-y`. |
+| `--scale-to-x PIXELS` | — | Scale each page to PIXELS pixels wide; without `--scale-to-y` the height keeps the aspect ratio. Overrides `-r`/`--rx`. |
+| `--scale-to-y PIXELS` | — | Scale each page to PIXELS pixels high; without `--scale-to-x` the width keeps the aspect ratio. Overrides `-r`/`--ry`. Both together give exactly the two sizes (non-square pixels). |
 
 DPI values must be positive finite numbers and scale-to sizes positive integers; other values are rejected at startup.
 
@@ -78,10 +78,10 @@ DPI values must be positive finite numbers and scale-to sizes positive integers;
 
 | Flag | Short | Description |
 |---|---|---|
-| `--crop-x N` | `-x N` | Left edge of the written area, pixels from the page's left edge (default 0). |
-| `--crop-y N` | `-y N` | Top edge of the written area, pixels from the page's top edge (default 0). |
-| `--crop-width N` | `-W N` | Width of the written area (default: to the right edge; clipped to it). |
-| `--crop-height N` | `-H N` | Height of the written area (default: to the bottom edge; clipped to it). |
+| `--crop-x PIXELS` | `-x PIXELS` | Left edge of the written area, pixels from the page's left edge (default 0). |
+| `--crop-y PIXELS` | `-y PIXELS` | Top edge of the written area, pixels from the page's top edge (default 0). |
+| `--crop-width PIXELS` | `-W PIXELS` | Width of the written area (default: to the right edge; clipped to it). |
+| `--crop-height PIXELS` | `-H PIXELS` | Height of the written area (default: to the bottom edge; clipped to it). |
 
 Coordinates are pixels of the page as rendered at the chosen resolution or
 scale. Only the selected area is rendered, so a crop of a page too large to
@@ -206,7 +206,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages render a window of `--threads` pages at a time and are spooled as each window completes, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
+| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages are begun in page order and appended to the spool in page order as they finish, a page once it and every page before it are done; no page is begun more than two per render thread past the first page not yet appended, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
 | `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`; `--list-printers` lists them. Implies `--print`. When `lp` refuses the job, the message points at `--list-printers`. |
 | `--list-printers` | | List the CUPS destinations `--printer` can name (`lpstat -e`), one per line, the default destination (`lpstat -d`) followed by a tab and `default`, then exit. Takes no input, output prefix or other flag. With no queues, writes nothing to standard output and says so on standard error. Refused on Windows. |
 | `--copies N` | the queue's setting | Copies (1–9999), `lp -n N`. Needs `--print`. |
@@ -309,7 +309,7 @@ that says so.
 |---|---|---|
 | `--threads N` | `0` (auto) | Number of render threads. `0` = one thread per logical CPU. |
 | `--sep CHAR` | `-` | Separator between prefix and page number (`out-1.ppm`, `out_1.ppm`, etc.). |
-| `--forcenum N` | — | Zero-pad page numbers to at least N digits (`001`, `002`, …). |
+| `--forcenum DIGITS` | — | Zero-pad page numbers to at least DIGITS digits (`001`, `002`, …). |
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
 | `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn, or decodes only in part. Without it the image or stream is skipped (or drawn from the data that decoded), the page is written, and a warning naming the page and object goes to stderr. |
@@ -342,6 +342,7 @@ A built-in spill policy reads the kernel's available-memory estimate before each
 | `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and GPU fills. |
 | `--vaapi-device PATH\|auto` | `auto` | VA-API DRM render node; `auto` probes for one (only used with `auto` or `vaapi`). |
 | `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
+| `--gpu-pages` | off | Render qualifying pages whole on a Vulkan GPU beside the CPU workers. Needs a build with the `vulkan` feature, `--backend auto` or `vulkan`, and `--aaVector yes`; see below. |
 | `--prefetch` | off | Prefetch image XObjects into the device-resident image cache when the document is opened. Present only in a binary built with the `cache` feature; worth it for long or repeated renders of one document. |
 
 When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
@@ -380,6 +381,8 @@ available Vulkan devices:
 ```
 
 That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU with a Vulkan kernel enabled, pass `--vulkan-device` to choose the device, or `--backend cuda` to run on CUDA. With every GPU kernel dormant, `auto` leaves Vulkan idle and renders on the CPU. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
+
+**`--gpu-pages`** opens a Vulkan device beside the CPU workers (the backend's own device under `--backend vulkan`, else the one `--vulkan-device` or `PDF_RASTER_VULKAN_DEVICE` names, else the automatically ranked one). The device opens in the background, and until it is open every page renders on the CPU. Once it is open, a page made only of solid fills and strokes (rectangle clips, Normal blend, constant alpha) renders on it while no other page holds it; every other page, and a qualifying page that finds it busy, renders on the CPU, with identical output. A build without `vulkan` refuses the flag when the document opens ("GPU page rendering needs a build with the `vulkan` feature"), as do `--backend cpu`, `cuda` and `vaapi` ("GPU page rendering runs on Vulkan, which backend policy cpu does not use; use auto or vulkan", naming the backend) and `--aaVector no` ("GPU page rendering paints antialiased vector paths only; turn vector antialiasing on or GPU page rendering off"), exit status 1. A device that does not open is logged at `error` and every page renders on the CPU. A page beyond the device's limits renders on the CPU with a warning and leaves the device in service; any other device error retires the device for the session with one warning, and that page and every later one render on the CPU. `RUST_LOG=rasterrocket=debug` logs each page the device renders, with its command count, and why each page it declines renders on the CPU.
 
 ```bash
 # Confirm CUDA is active (fails loudly if no NVIDIA GPU)
@@ -461,15 +464,15 @@ tests/compare/compare.sh -r 150 -f 1 -l 5 document.pdf
 
 ## Pixel-diff comparison
 
-`tests/compare/compare.sh` compares rrocket output page by page against a reference renderer (pdftoppm, run with `-cropbox`, by default; pdfium through a `pypdfium2` virtualenv with `-R pdfium`). A page fails when its RMSE exceeds `-t`, when the largest difference in mean luminance over 32 × 32 px tiles exceeds `-k` (this catches missing content that barely moves the page-wide RMSE), or when the two renders differ in size by more than 1 px.
+`tests/compare/compare.sh` compares rrocket output page by page against a reference renderer (pdftoppm, run with `-cropbox`, by default; pdfium through a `pypdfium2` virtualenv with `-R pdfium`). A page fails when its RMSE exceeds `-t`, when the largest difference in mean luminance over 32 × 32 px tiles exceeds `-k` (this catches missing content that barely moves the page-wide RMSE), or when the two renders differ in size by more than 1 px in either dimension; renders within 1 px of each other are cropped to their common size before scoring. A document fails as a whole when rrocket exits non-zero.
 
-**Requirements:** the reference renderer, `rrocket` built in release mode at `target/release/rrocket`, ImageMagick (`compare`, `identify`, `convert`), `bc`.
+**Requirements:** the reference renderer, `rrocket` built in release mode at `target/release/rrocket` (`RROCKET_BIN` names another binary), ImageMagick (`compare`, `identify`, `convert`), `bc`, `python3`. The pdfium virtualenv is `tests/compare/.venv` unless `PDFIUM_VENV` names another; `PDF_OXIDE_BIN` locates the `oxide` reference.
 
 ```bash
 tests/compare/compare.sh [OPTIONS] <PDF>
 tests/compare/compare.sh [OPTIONS] <DIR>   # every *.pdf under DIR, one summary row each
 
-  -r DPI          Render resolution (default: 150)
+  -r DPI          Render resolution, a positive integer (default: 150)
   -f PAGE         First page (default: 1)
   -l PAGE         Last page (default: all)
   -t THRESHOLD    Max RMSE per page, 0–255 scale (default: 2.0)
@@ -482,9 +485,12 @@ tests/compare/compare.sh [OPTIONS] <DIR>   # every *.pdf under DIR, one summary 
   -E FILE         Expectations registry (default tests/compare/expectations.json; '' for none)
   -U              Rewrite the registry from this run (--update-expectations)
   -S              Fail on surprise passes too (--strict)
+  -h              Print the usage and exit
 ```
 
-Exit code 0 when no page fails unexpectedly (see below); 1 on unexpected failures or errors.
+Exit code 0 when no page fails unexpectedly (see below); 1 on unexpected failures or errors. With `-U` and a registry the exit code is 0 unless an error stopped the run; `-U` with `-E ''` records nothing, and a failing run stays fatal. A dry run (`-n`) always exits 0. Before rendering, the registry is loaded once (`python3 -I tests/compare/expectations.py check`); a malformed one stops the run with a single error rather than failing every document.
+
+The `-s` row, and each row of directory mode, holds the tab-separated columns `status pages failed size avg_rmse max_rmse tile stderr pdf`: `status` is the worst verdict (`ERROR` in directory mode when the run stopped before scoring), `failed` counts the pages over the limits, expected or not, and the average RMSE is over the pages scored, size mismatches and missing pages excluded. Directory mode prints a tally of the rows by status on standard error.
 
 ```bash
 # Example output
@@ -492,7 +498,7 @@ Exit code 0 when no page fails unexpectedly (see below); 1 on unexpected failure
   PDF:        document.pdf
   Reference:  pdftoppm
   DPI:        150
-  Pages:      5 total, 5 passed, 0 failed (0 size mismatches)
+  Pages:      5 total, 5 within the limits, 0 over (0 size mismatches)
   Avg RMSE:   0.8432 / 255
   Max RMSE:   1.2100 / 255  (page-3)
   Max tile:   5.1200 / 255  (page-3)
@@ -506,14 +512,14 @@ PASSED
 
 ### Expected results
 
-`compare.sh` and `tests/compare/pdfium_corpus.py` (rrocket on pdfium's own test corpus, scored against its expected images) share an expectations registry, `tests/compare/expectations.json`, so that known, accepted differences do not hide a new one. The registry holds one list of entries per suite: the harness with the settings that decide what passes (reference renderer, resolution, RMSE and tile limits). An entry names a document, or one of its pages, the failure expected (`differs`, `size`, `missing`, `unreadable` for a page; `error`, `strict`, `panic`, … for a document), a mandatory `reason`, and for `differs` optional `rmse` / `tile` limits that replace the suite's for that page:
+`compare.sh` and `tests/compare/pdfium_corpus.py` (rrocket on pdfium's own test corpus, scored against its expected images) share an expectations registry, `tests/compare/expectations.json`, so that known, accepted differences do not hide a new one. The registry holds one list of entries per suite: the harness with the settings that decide what passes (reference renderer, resolution, RMSE and tile limits). An entry names a document, or one of its pages, the failure expected (`differs`, `size`, `missing`, `unreadable` for a page; `error`, `strict`, `panic`, … for a document), a mandatory `reason`, and for `differs` optional `rmse` / `tile` limits that replace the suite's for that page; a limit is a finite, non-negative number, and a registry with any other value is malformed:
 
 ```json
 {"file": "tests/fixtures/corpus-01-native-text-small.pdf", "page": 3,
  "outcome": "differs", "rmse": 15.32, "reason": "unclassified (seeded 2026-11-13)"}
 ```
 
-Each document and page is classified:
+Each document and page is classified; a document that renders is an observed pass, so a document entry for a failure that no longer occurs is a surprise pass:
 
 | Verdict | Meaning |
 |---|---|
@@ -524,7 +530,7 @@ Each document and page is classified:
 
 Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
 
-`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL` becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values; a `FAIL` worse than registered gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause once it is known.
+`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL`, or one with an outcome other than the registered one, becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values over the suite's limits, rounded up to 0.01; a `FAIL` worse than registered, of the registered outcome, gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` `differs` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in, and a registered limit at or above the suite's own is dropped once its metric is within the suite's limit; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause once it is known.
 
 ```bash
 # Seed or refresh the entries for the corpus fixtures
