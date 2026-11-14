@@ -4,7 +4,7 @@
 
 The `rasterrocket` crate is the integration entry point. It wraps `rasterrocket-interp` and `rasterrocket-render` behind a simple, stable API.
 
-**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `ImageFilter`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle and `Rotation` a closed set of quarter turns; both stay exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
+**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `ImageFilter`, `PixelFormat`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageInfo`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle and `Rotation` a closed set of quarter turns; both stay exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
 
 ---
 
@@ -92,7 +92,7 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ### Session API
 
-Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `rgb_to_gray` and `rgb_into_gray`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `render_page_rgb_with_diagnostics`, `render_page_rgba`, `rgb_to_gray` and `rgb_into_gray`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
