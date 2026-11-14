@@ -20,6 +20,7 @@
 //! - [`xpath`] — [`XPath`] edge table (flattened, matrix-transformed segments)
 //! - `scanner` — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
 //! - [`clip`] — [`Clip`] (rect + arbitrary path clip stack)
+//! - [`coverage`] — exact-area coverage ([`coverage::AreaRaster`], [`coverage::CoverageTable`])
 //! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and 4× antialiased
 //! - [`stroke`](mod@stroke) — stroke-to-path conversion and stroking
 //! - [`glyph`] — glyph bitmap blitting and fill
@@ -33,6 +34,7 @@
 
 pub mod bitmap;
 pub mod clip;
+pub mod coverage;
 pub mod fill;
 pub mod glyph;
 pub mod path;
