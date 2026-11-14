@@ -213,7 +213,8 @@ fn a_region_past_the_page_or_empty_is_rejected() {
 
 #[test]
 fn the_size_limit_applies_to_the_region_not_the_page() {
-    // At this scale the page is 40 000 px wide, past the per-side limit.
+    // At this scale the page is 40 000 × 20 000 px, 2.4 GB of RGB, past the
+    // default page budget.
     let scale = 200.0;
     let s = session(page_pdf(""), BackendPolicy::CpuOnly);
     assert!(matches!(

@@ -119,7 +119,7 @@ fn refine(img: &Bitmap<Gray8>, mut centre: f32, mut delta: f32) -> f32 {
 ///
 /// Higher score = text baselines better aligned with horizontal scanlines.
 fn score_angle(img: &Bitmap<Gray8>, deg: f32) -> f64 {
-    // img.width/height are u32 (≤ MAX_PX_DIMENSION = 32768); safe to cast to usize.
+    // img.width/height are u32 (≤ DESKEW_MAX_SIDE = 32768); safe to cast to usize.
     let w = img.width as usize;
     let h = img.height as usize;
     let tan = deg.to_radians().tan();
@@ -142,7 +142,7 @@ fn score_angle(img: &Bitmap<Gray8>, deg: f32) -> f64 {
         // y < h ≤ 8192 after downsample; safe to cast to u32.
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "y < h ≤ img.height ≤ MAX_PX_DIMENSION; fits in u32"
+            reason = "y < h ≤ img.height ≤ DESKEW_MAX_SIDE; fits in u32"
         )]
         let row = &img.row_bytes(y as u32)[..w];
         // Shear offset for this row: pixels shift vertically by x·tan(θ).
@@ -212,10 +212,10 @@ fn downsample(src: &Bitmap<Gray8>, factor: u32) -> Bitmap<Gray8> {
 
     let mut dst = Bitmap::<Gray8>::new(ow, oh, 1, false);
     let factor_u = factor as usize;
-    // factor ≤ src dimension ≤ MAX_PX_DIMENSION = 32768; factor_u² ≤ 32768² fits in u32.
+    // factor ≤ src dimension ≤ DESKEW_MAX_SIDE = 32768; factor_u² ≤ 32768² fits in u32.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "factor ≤ MAX_PX_DIMENSION = 32768; factor_u² ≤ 32768² < u32::MAX"
+        reason = "factor ≤ DESKEW_MAX_SIDE = 32768; factor_u² ≤ 32768² < u32::MAX"
     )]
     let area = (factor_u * factor_u) as u32;
 
@@ -228,10 +228,10 @@ fn downsample(src: &Bitmap<Gray8>, factor: u32) -> Bitmap<Gray8> {
             let sx0 = ox * factor_u;
             let mut sum = 0u32;
             for dy in 0..factor_u {
-                // sy0 + dy ≤ src.height ≤ MAX_PX_DIMENSION = 32768; fits in u32.
+                // sy0 + dy ≤ src.height ≤ DESKEW_MAX_SIDE = 32768; fits in u32.
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "sy0 + dy ≤ src.height ≤ MAX_PX_DIMENSION; fits in u32"
+                    reason = "sy0 + dy ≤ src.height ≤ DESKEW_MAX_SIDE; fits in u32"
                 )]
                 let src_row = &src.row_bytes((sy0 + dy) as u32);
                 for dx in 0..factor_u {

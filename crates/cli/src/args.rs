@@ -426,6 +426,15 @@ pub(crate) struct Args {
     #[arg(long = "max-archive-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=(u64::MAX >> 20)))]
     pub max_archive_mib: Option<u64>,
 
+    /// The most a page's bitmap may hold, in MiB of 8-bit RGB (3 bytes a
+    /// pixel; default 1716, i.e. 1.8 GB, a 600 Mpx page).  A larger page is
+    /// refused before anything is allocated; raise it for a genuinely large
+    /// page (a poster or a roll banner), or lower the resolution.  Comic
+    /// pages are held to it as decoded.  At most 2^30 MiB (1 PiB), the RGBA
+    /// bitmap of the largest page the renderer accepts at any budget.
+    #[arg(long = "max-page-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_PAGE_MIB))]
+    pub max_page_mib: Option<u64>,
+
     // ── Backend selection ─────────────────────────────────────────────────────
     /// Compute backend for image decoding and GPU kernels.
     ///
@@ -1040,6 +1049,10 @@ impl Args {
 
 /// The ITU-T T.4 period of two-dimensional Group 3 coding at fine
 /// resolution (at least 150 lines per inch) and at standard resolution.
+/// Largest `--max-page-mib`: the RGBA bitmap of a page whose sides are both
+/// [`pdf_raster::MAX_PX_SIDE`].
+const MAX_PAGE_MIB: u64 = 1 << 30;
+
 const K_FINE: NonZeroU32 = NonZeroU32::new(4).expect("4 is not zero");
 const K_STANDARD: NonZeroU32 = NonZeroU32::new(2).expect("2 is not zero");
 
@@ -1233,6 +1246,9 @@ impl Args {
         config.overprint = self.overprint;
         config.page_box = self.page_box.into();
         config.rotation = self.rotate.unwrap_or_default();
+        if let Some(mib) = self.max_page_mib {
+            config.max_page_bytes = mib << 20;
+        }
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -1474,6 +1490,27 @@ mod page_list_tests {
         assert!(
             Args::try_parse_from(["rrocket", "--max-archive-mib", "0", "in.cbz", "out"]).is_err()
         );
+    }
+
+    #[test]
+    fn max_page_mib_sets_the_page_budget_and_rejects_zero_and_absurd_values() {
+        let config = |argv: &[&str]| args_with(argv).session_config().unwrap();
+        assert_eq!(
+            config(&[]).max_page_bytes,
+            pdf_raster::DEFAULT_MAX_PAGE_BYTES
+        );
+        assert_eq!(
+            config(&["--max-page-mib", "2100"]).max_page_bytes,
+            2100 << 20
+        );
+        let refused = |mib: &str| {
+            Args::try_parse_from(["rrocket", "--max-page-mib", mib, "in.pdf", "out"]).is_err()
+        };
+        let side = u64::from(pdf_raster::MAX_PX_SIDE);
+        assert_eq!(MAX_PAGE_MIB, (side * side * 4) >> 20);
+        assert!(refused("0"));
+        assert!(refused(&(MAX_PAGE_MIB + 1).to_string()));
+        assert!(!refused(&MAX_PAGE_MIB.to_string()));
     }
 
     #[test]

@@ -44,8 +44,16 @@ const MIN_CORRECT_DEG: f32 = 0.05;
 /// level, not here.
 pub(crate) const MAX_SEARCH_DEG: f32 = 7.0;
 
-/// Error type for deskew operations: a rotation that failed.  Not
-/// returned in this release (see [`apply`]).
+/// Largest width or height of an image deskew accepts.
+///
+/// The rotation's source coordinates are `f32`, whose resolution at
+/// 2^15 px is 2^-9 px, finer than its 8-bit interpolation weights; the
+/// AVX-512 rotation gathers bytes at `i32` offsets, which an image of
+/// 2^15 × 2^15 bytes (2^30) leaves inside `i32`.
+pub const DESKEW_MAX_SIDE: u32 = 32_768;
+
+/// Error type for deskew operations: an image larger than
+/// [`DESKEW_MAX_SIDE`], or a rotation that failed (see [`apply`]).
 #[derive(Debug)]
 pub struct DeskewError(pub(crate) String);
 
@@ -64,10 +72,11 @@ impl std::error::Error for DeskewError {}
 ///
 /// # Errors
 ///
-/// None in this release: a GPU rotation that fails falls back to the CPU
-/// rotation, which cannot fail.  [`DeskewError`] is reserved for a
-/// rotation without a fallback.
+/// [`DeskewError`] when a side of `img` exceeds [`DESKEW_MAX_SIDE`]; `img`
+/// is then left as it is.  A GPU rotation that fails falls back to the CPU
+/// rotation, which cannot fail.
 pub fn apply(img: &mut Bitmap<Gray8>) -> Result<(), DeskewError> {
+    check_size(img)?;
     let angle_deg = detect::find_skew_deg(img);
     if angle_deg.abs() >= MIN_CORRECT_DEG {
         rotate::rotate_inplace(img, angle_deg);
@@ -81,16 +90,38 @@ pub fn apply(img: &mut Bitmap<Gray8>) -> Result<(), DeskewError> {
 ///
 /// `out` must hold `(img.height - 1) * stride + img.width` bytes and
 /// `stride ≥ img.width`.
-pub(crate) fn apply_into(img: &Bitmap<Gray8>, out: &mut [u8], stride: usize) {
+///
+/// # Errors
+///
+/// As [`apply`]; `out` is then untouched.
+pub(crate) fn apply_into(
+    img: &Bitmap<Gray8>,
+    out: &mut [u8],
+    stride: usize,
+) -> Result<(), DeskewError> {
+    check_size(img)?;
     let angle_deg = detect::find_skew_deg(img);
     if angle_deg.abs() < MIN_CORRECT_DEG {
         copy_rows(img, out, stride);
-        return;
+        return Ok(());
     }
     match rotate::rotated_on_gpu(img, angle_deg) {
         Some(rotated) => copy_rows(&rotated, out, stride),
         None => rotate::rotate_cpu_into(img, angle_deg, out, stride),
     }
+    Ok(())
+}
+
+/// [`DeskewError`] unless both sides of `img` are within [`DESKEW_MAX_SIDE`].
+fn check_size(img: &Bitmap<Gray8>) -> Result<(), DeskewError> {
+    if img.width > DESKEW_MAX_SIDE || img.height > DESKEW_MAX_SIDE {
+        return Err(DeskewError(format!(
+            "deskew applies to pages up to {DESKEW_MAX_SIDE} px a side, and this one is \
+             {}×{}; lower the resolution or turn deskew off",
+            img.width, img.height
+        )));
+    }
+    Ok(())
 }
 
 /// Copy the rows of `img` to `out`, row `y` at `out[y * stride..]`.
@@ -98,5 +129,25 @@ fn copy_rows(img: &Bitmap<Gray8>, out: &mut [u8], stride: usize) {
     let w = img.width as usize;
     for y in 0..img.height {
         out[y as usize * stride..][..w].copy_from_slice(&img.row_bytes(y)[..w]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_past_the_deskew_bound_is_refused_and_left_as_it_is() {
+        for (w, h) in [(DESKEW_MAX_SIDE + 1, 2), (2, DESKEW_MAX_SIDE + 1)] {
+            let mut img = Bitmap::<Gray8>::new_filled(w, h, 1, false, 7);
+            let err = apply(&mut img).expect_err("over the bound");
+            assert!(err.to_string().contains("32768 px a side"), "{err}");
+            assert!(img.data().iter().all(|&v| v == 7));
+            let mut out = vec![1u8; img.data().len()];
+            assert!(apply_into(&img, &mut out, w as usize).is_err());
+            assert!(out.iter().all(|&v| v == 1), "out is untouched");
+        }
+        let mut img = Bitmap::<Gray8>::new_filled(DESKEW_MAX_SIDE, 2, 1, false, 255);
+        assert!(apply(&mut img).is_ok());
     }
 }

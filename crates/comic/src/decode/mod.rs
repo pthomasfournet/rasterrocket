@@ -127,14 +127,18 @@ pub(crate) fn image_pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 ///
 /// [`DecodeError::Unsupported`] if no codec matches the magic bytes;
 /// [`DecodeError::Codec`] if the matched codec rejects the stream.
-pub(crate) fn decode_image(bytes: &[u8], page: usize) -> Result<Bitmap<Gray8>, DecodeError> {
+pub(crate) fn decode_image(
+    bytes: &[u8],
+    page: usize,
+    max_bytes: u64,
+) -> Result<Bitmap<Gray8>, DecodeError> {
     let pixels = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
-        ImageFormat::Jpeg => jpeg::decode(bytes)?,
-        ImageFormat::Png => png::decode(bytes)?,
-        ImageFormat::WebP => webp::decode(bytes)?,
-        ImageFormat::Tiff => tiff::decode(bytes, page)?,
-        ImageFormat::Jxl => jxl::decode(bytes)?,
-        ImageFormat::Avif => avif::decode(bytes)?,
+        ImageFormat::Jpeg => jpeg::decode(bytes, max_bytes)?,
+        ImageFormat::Png => png::decode(bytes, max_bytes)?,
+        ImageFormat::WebP => webp::decode(bytes, max_bytes)?,
+        ImageFormat::Tiff => tiff::decode(bytes, page, max_bytes)?,
+        ImageFormat::Jxl => jxl::decode(bytes, max_bytes)?,
+        ImageFormat::Avif => avif::decode(bytes, max_bytes)?,
     };
     Ok(match pixels {
         CodecPixels::Gray(gray) => gray,
@@ -142,11 +146,12 @@ pub(crate) fn decode_image(bytes: &[u8], page: usize) -> Result<Bitmap<Gray8>, D
     })
 }
 
-/// Reject an image whose header dimensions exceed the rendered-page size
-/// limits (the per-side and total-area caps of the PDF render path) before
-/// the codec allocates its pixel buffer.
-fn guard_dimensions(w: u32, h: u32) -> Result<(), DecodeError> {
-    pdf_raster::validate_dimensions(w, h).map_err(|_| DecodeError::TooLarge {
+/// Reject an image whose header dimensions exceed the page byte budget
+/// `max_bytes` at 3 bytes per pixel (the RGB buffer a colour decode
+/// allocates), or the side ceiling, before the codec allocates its pixel
+/// buffer.
+fn guard_dimensions(w: u32, h: u32, max_bytes: u64) -> Result<(), DecodeError> {
+    pdf_raster::validate_page_bytes(w, h, 3, max_bytes).map_err(|_| DecodeError::TooLarge {
         width: w,
         height: h,
     })
@@ -297,8 +302,18 @@ pub(crate) mod tests {
         let tif = multi_tiff_gray(2, 2, &[(10, 0), (99, 1), (77, 4), (30, 2)]);
         let pages = image_pages(&tif).unwrap();
         assert_eq!(pages.len(), 2);
-        assert_eq!(decode_image(&tif, pages[0]).unwrap().data()[0], 10);
-        assert_eq!(decode_image(&tif, pages[1]).unwrap().data()[0], 30);
+        assert_eq!(
+            decode_image(&tif, pages[0], pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+                .unwrap()
+                .data()[0],
+            10
+        );
+        assert_eq!(
+            decode_image(&tif, pages[1], pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+                .unwrap()
+                .data()[0],
+            30
+        );
         // A file of nothing but thumbnails still shows its first image.
         assert_eq!(image_pages(&multi_tiff_gray(2, 2, &[(5, 1)])).unwrap(), [0]);
         assert_eq!(image_pages(&solid_jpeg_gray(2, 2, 9)).unwrap(), [0]);
@@ -377,7 +392,8 @@ pub(crate) mod tests {
     fn low_bit_gray_tiffs_unpack_to_luma() {
         // 1 bit, 10 px wide: rows of two bytes, the second padded.
         let tif = raw_tiff(10, 2, 1, 1, false, &[0b1010_0000, 0b1100_0000, 0xFF, 0x00]);
-        let img = decode_image(&tif, 0).expect("1-bit tiff decodes");
+        let img =
+            decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("1-bit tiff decodes");
         assert_eq!(
             img.data(),
             [
@@ -387,19 +403,26 @@ pub(crate) mod tests {
         );
         // 4 bits: samples 0, 5 and 15 scale to 0, 85 and 255.
         let tif = raw_tiff(3, 1, 4, 1, false, &[0x05, 0xF0]);
-        assert_eq!(decode_image(&tif, 0).unwrap().data(), [0, 85, 255]);
+        assert_eq!(
+            decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+                .unwrap()
+                .data(),
+            [0, 85, 255]
+        );
     }
 
     #[test]
     fn gray_alpha_and_planar_rgb_tiffs_decode() {
         let tif = raw_tiff(2, 1, 8, 2, false, &[10, 255, 200, 0]);
-        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif, 0) else {
+        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+        else {
             panic!("a gray+alpha TIFF must decode to Gray8");
         };
         assert_eq!(bmp.data(), [10, 200]);
         // Planes R, G, B of two pixels.
         let tif = raw_tiff(2, 1, 8, 3, true, &[1, 2, 10, 20, 100, 200]);
-        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0) else {
+        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+        else {
             panic!("a planar RGB TIFF must decode to Rgb8");
         };
         assert_eq!(bmp.data(), [1, 10, 100, 2, 20, 200]);
@@ -429,7 +452,9 @@ pub(crate) mod tests {
         let chunky = unspecified(raw_tiff(2, 1, 8, 4, false, &[1, 2, 3, 99, 4, 5, 6, 99]));
         let planar = unspecified(raw_tiff(2, 1, 8, 4, true, &[1, 4, 2, 5, 3, 6, 99, 99]));
         for tif in [chunky, planar] {
-            let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0) else {
+            let Ok(CodecPixels::Rgb(bmp)) =
+                tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+            else {
                 panic!("an RGB TIFF with an extra sample must decode to Rgb8");
             };
             assert_eq!(bmp.data(), [1, 2, 3, 4, 5, 6]);
@@ -439,7 +464,10 @@ pub(crate) mod tests {
     #[test]
     fn a_gray_jpeg_decodes_to_gray() {
         let jpg = solid_jpeg_gray(8, 8, 90);
-        assert!(matches!(jpeg::decode(&jpg), Ok(CodecPixels::Gray(_))));
+        assert!(matches!(
+            jpeg::decode(&jpg, pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+            Ok(CodecPixels::Gray(_))
+        ));
     }
 
     #[test]
@@ -458,7 +486,7 @@ pub(crate) mod tests {
     #[test]
     fn decode_png_to_expected_pixels() {
         let png = solid_png(2, 2, [10, 200, 30]);
-        let img = decode_image(&png, 0).expect("png decodes");
+        let img = decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("png decodes");
         assert_eq!((img.width, img.height), (2, 2));
         assert_eq!(img.data().len(), 4);
         assert!(
@@ -471,7 +499,7 @@ pub(crate) mod tests {
     #[test]
     fn decode_jpeg_to_gray() {
         let jpg = solid_jpeg_gray(4, 4, 137);
-        let img = decode_image(&jpg, 0).expect("jpeg decodes");
+        let img = decode_image(&jpg, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("jpeg decodes");
         assert_eq!((img.width, img.height), (4, 4));
         assert!(img.data().iter().all(|&p| (i16::from(p) - 137).abs() <= 4));
     }
@@ -481,7 +509,7 @@ pub(crate) mod tests {
         // Exercises the TIFF wrapper's DecodingResult::U8 + ColorType::Gray
         // path end-to-end (the most logic-heavy codec match).
         let tif = solid_tiff_gray(3, 2, 90);
-        let img = decode_image(&tif, 0).expect("tiff decodes");
+        let img = decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("tiff decodes");
         assert_eq!((img.width, img.height), (3, 2));
         assert_eq!(img.data().len(), 6);
         assert!(
@@ -507,19 +535,26 @@ pub(crate) mod tests {
     fn png_gray_decodes_straight_to_gray() {
         let luma = [0u8, 7, 128, 255, 33, 90];
         let png = raw_png(3, 2, ::png::ColorType::Grayscale, &luma);
-        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png) else {
+        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+        else {
             panic!("a grayscale PNG must decode to a Gray8 bitmap");
         };
         assert_eq!((bmp.width, bmp.height), (3, 2));
         assert_eq!(bmp.data(), luma);
-        assert_eq!(decode_image(&png, 0).unwrap().data(), luma);
+        assert_eq!(
+            decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+                .unwrap()
+                .data(),
+            luma
+        );
     }
 
     #[test]
     fn png_gray_alpha_keeps_luma_drops_alpha() {
         let samples = [10u8, 255, 20, 0, 30, 128, 40, 1];
         let png = raw_png(2, 2, ::png::ColorType::GrayscaleAlpha, &samples);
-        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png) else {
+        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
+        else {
             panic!("a gray+alpha PNG must decode to a Gray8 bitmap");
         };
         assert_eq!(bmp.data(), [10, 20, 30, 40]);
@@ -539,13 +574,20 @@ pub(crate) mod tests {
     fn truncated_bytes_error_not_panic() {
         let mut png = solid_png(8, 8, [1, 2, 3]);
         png.truncate(png.len() / 2);
-        assert!(decode_image(&png, 0).is_err(), "must return Err, not panic");
+        assert!(
+            decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
+            "must return Err, not panic"
+        );
     }
 
     #[test]
     fn unknown_format_is_unsupported() {
         assert!(matches!(
-            decode_image(b"xxxx not an image xxxx", 0),
+            decode_image(
+                b"xxxx not an image xxxx",
+                0,
+                pdf_raster::DEFAULT_MAX_PAGE_BYTES
+            ),
             Err(DecodeError::Unsupported)
         ));
     }
@@ -598,7 +640,10 @@ pub(crate) mod tests {
     fn jpeg_decode_bomb_rejected_before_allocation() {
         // 30000×30000 = 9e8 px exceeds the area cap; at 3 B/px the decode would
         // allocate ~2.7 GB.  The guard fires on the SOF dims first.
-        match jpeg::decode(&jpeg_bomb(30_000, 30_000)) {
+        match jpeg::decode(
+            &jpeg_bomb(30_000, 30_000),
+            pdf_raster::DEFAULT_MAX_PAGE_BYTES,
+        ) {
             Err(DecodeError::TooLarge { width, height }) => {
                 assert_eq!((width, height), (30_000, 30_000));
             }
@@ -610,12 +655,17 @@ pub(crate) mod tests {
     #[test]
     fn guard_dimensions_rejects_huge_accepts_small() {
         assert!(
-            guard_dimensions(100_000, 100_000).is_err(),
+            guard_dimensions(100_000, 100_000, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
             "100000x100000 must be rejected"
         );
         assert!(
-            guard_dimensions(1024, 768).is_ok(),
+            guard_dimensions(1024, 768, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_ok(),
             "ordinary page size must pass"
+        );
+        assert!(guard_dimensions(1000, 1000, 3_000_000).is_ok());
+        assert!(
+            guard_dimensions(1000, 1000, 2_999_999).is_err(),
+            "the budget is the caller's, at 3 bytes per pixel"
         );
     }
 
@@ -630,7 +680,7 @@ pub(crate) mod tests {
             "bomb file stays tiny: {} bytes",
             bomb.len()
         );
-        match png::decode(&bomb) {
+        match png::decode(&bomb, pdf_raster::DEFAULT_MAX_PAGE_BYTES) {
             Err(DecodeError::TooLarge { width, height }) => {
                 assert_eq!((width, height), (100_000, 100_000));
             }

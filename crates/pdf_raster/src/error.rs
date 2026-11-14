@@ -1,6 +1,6 @@
 //! The error type of every rendering entry point.
 
-use crate::page::{MAX_PX_AREA, MAX_PX_DIMENSION};
+use crate::page::MAX_PX_SIDE;
 
 /// Errors returned by [`crate::raster_pdf`].
 #[derive(Debug)]
@@ -25,22 +25,24 @@ pub enum RasterError {
         /// Height in pixels (0 when degenerate).
         height: u32,
     },
-    /// The computed pixel dimensions exceed the per-side safety limit.
+    /// The picture to be produced (the page, or the region drawn) holds more
+    /// bytes than [`SessionConfig::max_page_bytes`](crate::SessionConfig::max_page_bytes).
     PageTooLarge {
         /// Width in pixels.
         width: u32,
         /// Height in pixels.
         height: u32,
+        /// `width × height × bytes per pixel` of the render's bitmap.
+        bytes: u64,
+        /// The budget it exceeds.
+        limit: u64,
     },
-    /// The computed pixel area (width × height) exceeds the safety limit even
-    /// though each side is within [`MAX_PX_DIMENSION`].
-    PageAreaTooLarge {
+    /// A side of the page exceeds [`MAX_PX_SIDE`], which no budget raises.
+    PageExceedsCeiling {
         /// Width in pixels.
         width: u32,
         /// Height in pixels.
         height: u32,
-        /// Total area in pixels (`width as u64 * height as u64`).
-        area: u64,
     },
     /// A bitmap the render of the drawn region needs could not be
     /// allocated: the region is within the size limits, but the allocator
@@ -53,9 +55,9 @@ pub enum RasterError {
         /// Height of the refused bitmap in pixels.
         height: u32,
     },
-    /// Deskew rotation failed.  Not returned in this release: a GPU
-    /// rotation that fails falls back to the CPU rotation, which cannot
-    /// fail.
+    /// Deskew was refused: the page exceeds
+    /// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE).  A GPU rotation
+    /// that fails falls back to the CPU rotation, which cannot fail.
     Deskew(String),
     /// The row stride given for a caller-owned output buffer is shorter
     /// than one row of the page.
@@ -133,21 +135,21 @@ impl std::fmt::Display for RasterError {
                 "page has degenerate pixel dimensions {width}×{height} — \
                  PDF MediaBox may be malformed"
             ),
-            Self::PageTooLarge { width, height } => write!(
-                f,
-                "page pixel dimensions {width}×{height} exceed the per-side limit of \
-                 {MAX_PX_DIMENSION} px; lower the resolution, or render the page in \
-                 regions within the limit"
-            ),
-            Self::PageAreaTooLarge {
+            Self::PageTooLarge {
                 width,
                 height,
-                area,
+                bytes,
+                limit,
             } => write!(
                 f,
-                "page pixel area {width}×{height} = {area} px exceeds the limit of \
-                 {MAX_PX_AREA} px; lower the resolution, or render the page in regions \
-                 within the limit"
+                "a {width}×{height} page is {bytes} bytes, over the page budget of {limit} \
+                 bytes; lower the resolution, raise the budget (`max_page_bytes`, \
+                 rrocket --max-page-mib), or render the page in regions within it"
+            ),
+            Self::PageExceedsCeiling { width, height } => write!(
+                f,
+                "page pixel dimensions {width}×{height} exceed the per-side ceiling of \
+                 {MAX_PX_SIDE} px; lower the resolution"
             ),
             Self::PageAllocationFailed { width, height } => write!(
                 f,
@@ -232,17 +234,19 @@ impl From<pdf::PdfError> for RasterError {
 
 #[cfg(test)]
 mod tests {
-    use crate::validate_dimensions;
+    use crate::{DEFAULT_MAX_PAGE_BYTES, MAX_PX_SIDE, validate_page_bytes};
 
     #[test]
-    fn size_limit_messages_name_the_limit_and_region_rendering() {
-        for err in [
-            validate_dimensions(super::MAX_PX_DIMENSION + 1, 1),
-            validate_dimensions(30_000, 30_000),
-        ] {
-            let msg = err.expect_err("over the limit").to_string();
-            assert!(msg.contains("limit of"), "{msg}");
-            assert!(msg.contains("render the page in regions"), "{msg}");
-        }
+    fn the_budget_message_names_the_budget_and_how_to_raise_it() {
+        let msg = validate_page_bytes(30_000, 30_000, 3, DEFAULT_MAX_PAGE_BYTES)
+            .expect_err("over the budget")
+            .to_string();
+        assert!(msg.contains("2700000000 bytes"), "{msg}");
+        assert!(msg.contains("--max-page-mib"), "{msg}");
+        assert!(msg.contains("render the page in regions"), "{msg}");
+        let msg = validate_page_bytes(MAX_PX_SIDE + 1, 1, 3, u64::MAX)
+            .expect_err("over the ceiling")
+            .to_string();
+        assert!(msg.contains("per-side ceiling of 16777216 px"), "{msg}");
     }
 }

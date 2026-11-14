@@ -222,10 +222,10 @@ unsafe fn rotate_row_neon(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams
 
     // Output pixels for columns `ox .. ox + 4`, white where out of bounds.
     let quad = |ox: usize| -> uint32x4_t {
-        // ox ≤ MAX_PX_DIMENSION = 32768; exact in f32.
+        // ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32.
         #[expect(
             clippy::cast_precision_loss,
-            reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+            reason = "ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
         )]
         let dx = vaddq_f32(vdupq_n_f32(ox as f32), lane);
         let sx = vfmaq_f32(v_sx_base, v_cos, dx);
@@ -346,11 +346,11 @@ unsafe fn rotate_row_avx512(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowPara
     let v_white = _mm512_set1_epi32(255);
     let v_half = _mm512_set1_ps(0.5);
     let v_one_f = _mm512_set1_ps(1.0);
-    // stride ≤ MAX_PX_DIMENSION rounded up to the row pad; len ≤ 2^30: both fit in i32.
+    // stride ≤ DESKEW_MAX_SIDE rounded up to the row pad; len ≤ 2^30: both fit in i32.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
-        reason = "stride and len are bounded by MAX_PX_DIMENSION² ≤ 2^30"
+        reason = "stride and len are bounded by DESKEW_MAX_SIDE² ≤ 2^30"
     )]
     let (v_stride, v_len_m4) = (
         _mm512_set1_epi32(src.stride as i32),
@@ -367,10 +367,10 @@ unsafe fn rotate_row_avx512(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowPara
         let k: __mmask16 = ((1u32 << take) - 1) as __mmask16;
 
         // sx = cos·dx + sx_base, sy = sin·dx + sy_base, dx = ox + lane.
-        // ox ≤ MAX_PX_DIMENSION = 32768; exact in f32.
+        // ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32.
         #[expect(
             clippy::cast_precision_loss,
-            reason = "ox ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+            reason = "ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
         )]
         let dx = _mm512_add_ps(_mm512_set1_ps(ox as f32), lane);
         let sx = _mm512_fmadd_ps(v_cos, dx, v_sx_base);
@@ -481,7 +481,7 @@ fn rotate_span_scalar(span: &mut [u8], first: usize, src: &Bitmap<Gray8>, p: &Ro
     for (i, dst_px) in span.iter_mut().enumerate() {
         #[expect(
             clippy::cast_precision_loss,
-            reason = "column ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+            reason = "column ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
         )]
         {
             *dst_px = rotate_pixel_scalar(src, (first + i) as f32, p);
@@ -585,15 +585,15 @@ fn rotate_rows(
     let sin_a = rad.sin();
 
     // Rotation centre: image centre (may be fractional).
-    // w, h ≤ MAX_PX_DIMENSION = 32768; exact in f32 (24-bit mantissa covers integers to 16 M).
+    // w, h ≤ DESKEW_MAX_SIDE = 32768; exact in f32 (24-bit mantissa covers integers to 16 M).
     #[expect(
         clippy::cast_precision_loss,
-        reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
     )]
     let cx = (w as f32 - 1.0) * 0.5;
     #[expect(
         clippy::cast_precision_loss,
-        reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
     )]
     let cy = (h as f32 - 1.0) * 0.5;
 
@@ -604,13 +604,13 @@ fn rotate_rows(
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
-        reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; fits in i32"
+        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; fits in i32"
     )]
     let sx_max = (w as i32) - 1;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
-        reason = "image dimensions ≤ MAX_PX_DIMENSION = 32768; fits in i32"
+        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; fits in i32"
     )]
     let sy_max = (h as i32) - 1;
 
@@ -622,7 +622,7 @@ fn rotate_rows(
         // oy ≤ 32768; exact in f32.
         #[expect(
             clippy::cast_precision_loss,
-            reason = "oy ≤ MAX_PX_DIMENSION = 32768; exact in f32"
+            reason = "oy ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
         )]
         let dy = oy as f32 - cy;
         let sx_base = cos_a.mul_add(-cx, -(sin_a * dy)) + cx;

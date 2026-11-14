@@ -110,6 +110,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
             .collect(),
         system_fonts: opts.system_fonts,
         image_budget: opts.image_budget,
+        max_page_bytes: opts.max_page_bytes,
         page_box: opts.page_box,
         rotation: opts.rotation,
         ..defaults
@@ -795,6 +796,22 @@ mod from_bytes_tests {
             SessionConfig::with_policy(BackendPolicy::CpuOnly).image_budget,
             DOCUMENT_IMAGE_BUDGET_BYTES
         );
+    }
+
+    /// The page byte budget reaches the session from `RasterOptions`: a
+    /// 100 × 100 px RGB page is 30 000 bytes.
+    #[test]
+    fn the_page_budget_reaches_the_session() {
+        for (budget, fits) in [(30_000, true), (29_999, false)] {
+            let opts = RasterOptions {
+                max_page_bytes: budget,
+                ..RasterOptions::default()
+            };
+            let session =
+                open_session_from_bytes(two_page_pdf(), &session_config_for(&opts)).unwrap();
+            let size = session.page_size_px(1, 72.0);
+            assert_eq!(size.is_ok(), fits, "budget {budget}: {size:?}");
+        }
     }
 
     /// A minimal valid single-page PDF (one empty 612×792-pt page).

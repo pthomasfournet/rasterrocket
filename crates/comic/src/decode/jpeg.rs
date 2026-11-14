@@ -28,8 +28,8 @@ use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_fro
 /// [`DecodeError::TooLarge`] when the frame exceeds the rendered-page
 /// limits; [`DecodeError::Codec`] if the stream is not decodable or reports
 /// zero dimensions.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
-    let (pixels, intact_rows, height) = decode_counting_rows(bytes)?;
+pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
+    let (pixels, intact_rows, height) = decode_counting_rows(bytes, max_bytes)?;
     if intact_rows < height {
         log::warn!(
             "jpeg: the scan data is incomplete or damaged ({intact_rows} of {height} rows are \
@@ -41,8 +41,11 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
 
 /// [`decode`], with the number of leading rows decoded from scan data that
 /// was present and well formed, and the frame height.
-fn decode_counting_rows(bytes: &[u8]) -> Result<(CodecPixels, u32, u32), DecodeError> {
-    let side_cap = pdf_raster::MAX_PX_DIMENSION as usize;
+fn decode_counting_rows(
+    bytes: &[u8],
+    max_bytes: u64,
+) -> Result<(CodecPixels, u32, u32), DecodeError> {
+    let side_cap = pdf_raster::MAX_PX_SIDE as usize;
     // Not strict: the rows a damaged stream still holds are drawn, and the
     // decoder counts them.
     let opts = DecoderOptions::default()
@@ -60,7 +63,7 @@ fn decode_counting_rows(bytes: &[u8]) -> Result<(CodecPixels, u32, u32), DecodeE
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("jpeg: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     let gray = dec.input_colorspace() == Some(ColorSpace::Luma);
     if gray {
         dec.set_options(dec.options().jpeg_set_out_colorspace(ColorSpace::Luma));
@@ -94,19 +97,25 @@ mod tests {
 
     #[test]
     fn a_complete_stream_is_whole() {
-        let (pixels, intact_rows, height) = decode_counting_rows(NOISE).expect("decodes");
+        let (pixels, intact_rows, height) =
+            decode_counting_rows(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
         assert_eq!(intact_rows, height);
-        assert_eq!(rgb(pixels), rgb(decode(NOISE).expect("decodes")));
+        assert_eq!(
+            rgb(pixels),
+            rgb(decode(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes"))
+        );
     }
 
     #[test]
     fn a_stream_cut_short_is_drawn_and_counted() {
-        let (whole, _, height) = decode_counting_rows(NOISE).expect("decodes");
+        let (whole, _, height) =
+            decode_counting_rows(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
         let whole = rgb(whole);
         let width = whole.len() / 3 / height as usize;
 
         let cut = &NOISE[..NOISE.len() * 2 / 3];
-        let (pixels, intact_rows, cut_height) = decode_counting_rows(cut).expect("decodes");
+        let (pixels, intact_rows, cut_height) =
+            decode_counting_rows(cut, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
         assert_eq!(cut_height, height);
         assert!(
             0 < intact_rows && intact_rows < height,

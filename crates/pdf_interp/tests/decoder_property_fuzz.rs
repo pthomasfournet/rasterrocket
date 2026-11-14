@@ -394,7 +394,7 @@ fn mutate(seed: &[u8], rng: &mut SplitMix64) -> Vec<u8> {
             m[at..at + 4].copy_from_slice(&corrupt.to_be_bytes());
         }
         // Splice an oversized declared dimension into the byte stream — the
-        // unbounded-allocation trigger the MAX_PX_AREA cap defends.
+        // unbounded-allocation trigger the image decode budget defends.
         5 => {
             let needle = b"/Width 8";
             if let Some(pos) = m.windows(needle.len()).position(|w| w == needle) {

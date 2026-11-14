@@ -202,7 +202,9 @@ pub enum ComicError {
         /// Human-readable reason.
         reason: String,
     },
-    /// A decoded image exceeded the per-page pixel-size safety limit.
+    /// An image's header dimensions exceed the page byte budget
+    /// ([`SessionConfig::max_page_bytes`](pdf_raster::SessionConfig::max_page_bytes)
+    /// at 3 bytes per pixel) or the side ceiling.
     TooLarge {
         /// The archive entry name.
         entry: String,
@@ -211,8 +213,8 @@ pub enum ComicError {
         /// Decoded height in pixels.
         height: u32,
     },
-    /// Deskew failed on a page.  Not returned in this release: deskew
-    /// falls back to the CPU rotation, which cannot fail.
+    /// Deskew was refused for a page larger than
+    /// [`DESKEW_MAX_SIDE`](pdf_raster::deskew::DESKEW_MAX_SIDE).
     Deskew(String),
     /// No images and two or more PDFs — the archive is ambiguous.
     AmbiguousArchive(String),
@@ -242,7 +244,10 @@ impl std::fmt::Display for ComicError {
                 height,
             } => write!(
                 f,
-                "image {entry} is {width}×{height}px, exceeding the per-page size limit"
+                "image {entry} is {width}×{height}px, over the page budget \
+                 (SessionConfig::max_page_bytes, rrocket --max-page-mib) or the \
+                 per-side ceiling of {} px",
+                pdf_raster::MAX_PX_SIDE
             ),
             Self::Deskew(m) => write!(f, "deskew failed: {m}"),
             Self::AmbiguousArchive(m) => write!(f, "ambiguous comic archive: {m}"),
@@ -429,17 +434,18 @@ fn render_one(
     page_num: u32,
     opts: &ComicOptions,
 ) -> Result<RenderedPage, ComicError> {
-    let mut bmp = decode::decode_image(raw, index).map_err(|e| match e {
-        decode::DecodeError::TooLarge { width, height } => ComicError::TooLarge {
-            entry: name.to_owned(),
-            width,
-            height,
-        },
-        other => ComicError::Decode {
-            entry: name.to_owned(),
-            reason: other.to_string(),
-        },
-    })?;
+    let mut bmp =
+        decode::decode_image(raw, index, opts.session.max_page_bytes).map_err(|e| match e {
+            decode::DecodeError::TooLarge { width, height } => ComicError::TooLarge {
+                entry: name.to_owned(),
+                width,
+                height,
+            },
+            other => ComicError::Decode {
+                entry: name.to_owned(),
+                reason: other.to_string(),
+            },
+        })?;
     bmp = turn::turn(bmp, opts.session.rotation);
 
     if opts.deskew {

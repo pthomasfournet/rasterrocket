@@ -7,7 +7,7 @@ use raster::Bitmap;
 
 use crate::gray::{rgb_into_gray, rgb_rows_to_gray};
 use crate::page::{rgb_rows_copy, rgb_rows_to_rgba};
-use crate::render::{check_scale, page_view, render_page_rgb_with_geom};
+use crate::render::{canvas_bytes_per_px, check_scale, page_view, render_page_rgb_with_geom};
 use crate::{
     PageDiagnostics, PixelFormat, RasterError, RasterOptions, RasterSession, RenderParams,
 };
@@ -108,8 +108,9 @@ impl PageBuffer {
         let (width, height) = (rgb.width, rgb.height);
         if opts.deskew {
             let gray = rgb_into_gray(rgb);
-            crate::deskew::apply_into(&gray, out, stride);
+            let deskewed = crate::deskew::apply_into(&gray, out, stride);
             self.canvas.rgb.reclaim(gray);
+            deskewed.map_err(|e| RasterError::Deskew(e.to_string()))?;
         } else {
             rgb_rows_to_gray(&rgb, out, stride);
             self.canvas.rgb.reclaim(rgb);
@@ -235,7 +236,13 @@ impl PageBuffer {
         check_scale(scale)?;
         let page_id = session.resolve_page(page_num)?;
         let geom = session.geometry_by_id(page_id)?;
-        let view = page_view(&geom, (scale, scale), None)?;
+        let view = page_view(
+            &geom,
+            (scale, scale),
+            None,
+            canvas_bytes_per_px(transparent),
+            session.max_page_bytes,
+        )?;
         check_output(view.width, view.height, format, out_len, stride)?;
         let mut params = RenderParams::new(scale);
         if transparent {

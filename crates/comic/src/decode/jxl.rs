@@ -22,7 +22,7 @@ use super::{
 /// [`DecodeError::TooLarge`] when the header dimensions exceed the page
 /// limits; [`DecodeError::Codec`] on malformed, truncated or unsupported
 /// streams.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
     let codec = |e: jxl::error::Error| DecodeError::Codec(format!("jxl: {e}"));
     let truncated = || DecodeError::Codec("jxl: the stream ends before the image".to_owned());
     let mut options = JxlDecoderOptions::default();
@@ -47,7 +47,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("jxl: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     let gray = dec
         .current_pixel_format()
         .is_some_and(|format| format.color_type.is_grayscale());
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn a_lossless_gray_image_decodes_exactly() {
-        let Ok(CodecPixels::Gray(bmp)) = decode(GRAY) else {
+        let Ok(CodecPixels::Gray(bmp)) = decode(GRAY, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
             panic!("a gray image decodes to gray")
         };
         assert_eq!((bmp.width, bmp.height), (16, 8));
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn a_lossless_rgb_image_decodes_exactly() {
-        let Ok(CodecPixels::Rgb(bmp)) = decode(RGB) else {
+        let Ok(CodecPixels::Rgb(bmp)) = decode(RGB, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
             panic!("an RGB image decodes to RGB")
         };
         assert_eq!((bmp.width, bmp.height), (8, 4));
@@ -129,7 +129,7 @@ mod tests {
         // 1.1 levels, where reading the output as linear light would put the
         // constant blue channel near 56 instead of 128.
         let lossy: &[u8] = include_bytes!("../../tests/data/lossy-32x16.jxl");
-        let Ok(CodecPixels::Rgb(bmp)) = decode(lossy) else {
+        let Ok(CodecPixels::Rgb(bmp)) = decode(lossy, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
             panic!("a colour image decodes to RGB")
         };
         assert_eq!((bmp.width, bmp.height), (32, 16));
@@ -152,8 +152,17 @@ mod tests {
     #[test]
     fn truncated_or_foreign_bytes_are_codec_errors() {
         for cut in [2, GRAY.len() / 2, GRAY.len() - 1] {
-            assert!(decode(&GRAY[..cut]).is_err(), "cut at {cut}");
+            assert!(
+                decode(&GRAY[..cut], pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
+                "cut at {cut}"
+            );
         }
-        assert!(decode(b"\xFF\x0Anot a codestream").is_err());
+        assert!(
+            decode(
+                b"\xFF\x0Anot a codestream",
+                pdf_raster::DEFAULT_MAX_PAGE_BYTES
+            )
+            .is_err()
+        );
     }
 }

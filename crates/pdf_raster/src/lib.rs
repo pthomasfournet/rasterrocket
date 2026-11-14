@@ -138,8 +138,8 @@ pub use open::{
     open_session_from_shared, prescan_session,
 };
 pub use page::{
-    MAX_PX_AREA, MAX_PX_DIMENSION, gray8_into_rendered_page, gray8_to_rendered_page,
-    validate_dimensions,
+    DEFAULT_MAX_PAGE_BYTES, MAX_PX_SIDE, gray8_into_rendered_page, gray8_to_rendered_page,
+    validate_page_bytes,
 };
 pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;
@@ -441,6 +441,10 @@ pub struct RasterOptions {
     /// [`DOCUMENT_IMAGE_BUDGET_BYTES`]; 0 keeps nothing.
     pub image_budget: usize,
 
+    /// The most bytes one page bitmap may hold; see
+    /// [`SessionConfig::max_page_bytes`].  Default [`DEFAULT_MAX_PAGE_BYTES`].
+    pub max_page_bytes: u64,
+
     /// The page boundary box each page is measured and rendered on; see
     /// [`SessionConfig::page_box`].  Default [`PageBox::Crop`].
     pub page_box: PageBox,
@@ -499,6 +503,7 @@ impl Default for RasterOptions {
             font_dirs: Vec::new(),
             system_fonts: true,
             image_budget: DOCUMENT_IMAGE_BUDGET_BYTES,
+            max_page_bytes: DEFAULT_MAX_PAGE_BYTES,
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             transparent_background: false,
@@ -587,8 +592,8 @@ pub struct RenderedPage {
 /// - [`RasterError::Pdf`] — document cannot be opened or parsed.
 /// - [`RasterError::PageOutOfRange`] — requested page exceeds the document.
 /// - [`RasterError::PageDegenerate`] / [`RasterError::PageTooLarge`] /
-///   [`RasterError::PageAreaTooLarge`] — malformed geometry, or a page
-///   beyond the size limits at the requested scale.
+///   [`RasterError::PageExceedsCeiling`] — malformed geometry, or a page
+///   beyond the byte budget or the side ceiling at the requested scale.
 /// - [`RasterError::PageAllocationFailed`] — the allocator refused a bitmap
 ///   the page's render needs, within the limits: its page bitmap, or a
 ///   transparency group, soft mask, knockout coverage, tiling-pattern or
@@ -596,8 +601,9 @@ pub struct RenderedPage {
 ///   Linux's default overcommit a large allocation is seldom refused; the
 ///   process can instead be stopped by the out-of-memory killer when the
 ///   memory is touched.
-/// - [`RasterError::Deskew`] — deskew rotation failed; not returned in
-///   this release, a failed GPU rotation falling back to the CPU.
+/// - [`RasterError::Deskew`] — deskew was asked of a page larger than
+///   [`deskew::DESKEW_MAX_SIDE`]; a failed GPU rotation falls back to the
+///   CPU.
 /// - [`RasterError::BackendUnavailable`] — `PDF_RASTER_BACKEND` requested a
 ///   forced backend (e.g. `cuda`, `vulkan`) and that backend's runtime
 ///   is unavailable.  Cannot occur if the env var is unset or `auto`.

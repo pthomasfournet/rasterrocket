@@ -2,8 +2,8 @@
 //!
 //! Usage: `cargo run -p rasterrocket-interp --example render_page -- <pdf> [page] [dpi] [out.ppm]`
 
-/// Maximum pixel dimension per axis.  Matches `rasterrocket::MAX_PX_DIMENSION`;
-/// the example doesn't depend on that crate so the value is duplicated here.
+/// Largest pixel dimension per axis the example renders: the page is drawn
+/// into one bitmap, which this bounds to 32 768² RGB pixels (3 GiB).
 const MAX_PX: u32 = 32_768;
 
 fn main() {

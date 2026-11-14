@@ -135,23 +135,29 @@ pub(crate) fn report_errors(
         return std::process::ExitCode::SUCCESS;
     }
     errors.sort_by_key(|(p, _)| *p);
-    let (mut over_limit, mut unallocated) = (false, false);
+    let (mut over_budget, mut over_ceiling, mut unallocated) = (false, false, false);
     for (page, err) in &errors {
         eprintln!("rrocket: page {page}: {err}");
         print_error_chain(err);
         match err {
-            RenderError::Raster(
-                RasterError::PageTooLarge { .. } | RasterError::PageAreaTooLarge { .. },
-            ) => over_limit = true,
+            RenderError::Raster(RasterError::PageTooLarge { .. }) => over_budget = true,
+            RenderError::Raster(RasterError::PageExceedsCeiling { .. }) => over_ceiling = true,
             RenderError::Raster(RasterError::PageAllocationFailed { .. }) => unallocated = true,
             _ => {}
         }
     }
-    if (over_limit || unallocated) && args.printing() {
-        eprintln!("  hint: lower the resolution with -r (--print renders at 600 dpi by default)");
-    } else if over_limit {
+    if over_ceiling {
+        eprintln!("  hint: lower the resolution with -r; no budget raises the per-side ceiling");
+    }
+    if (over_budget || unallocated) && args.printing() {
         eprintln!(
-            "  hint: render such a page in tiles with -x/-y/-W/-H, each tile within the limit"
+            "  hint: lower the resolution with -r (--print renders at 600 dpi by default), \
+             or raise the page budget with --max-page-mib"
+        );
+    } else if over_budget {
+        eprintln!(
+            "  hint: raise the page budget with --max-page-mib, lower the resolution with -r, \
+             or render the page in tiles with -x/-y/-W/-H, each tile within the budget"
         );
     } else if unallocated {
         eprintln!(
@@ -168,14 +174,14 @@ mod tests {
 
     #[test]
     fn chain_omits_a_cause_its_wrapper_already_printed() {
-        let err = RenderError::Raster(RasterError::PageTooLarge {
-            width: 40_000,
+        let err = RenderError::Raster(RasterError::PageExceedsCeiling {
+            width: 40_000_000,
             height: 10,
         });
         assert!(
             err.to_string().contains(
-                &RasterError::PageTooLarge {
-                    width: 40_000,
+                &RasterError::PageExceedsCeiling {
+                    width: 40_000_000,
                     height: 10
                 }
                 .to_string()

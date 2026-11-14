@@ -11,52 +11,58 @@ use crate::{PageDiagnostics, PixelFormat, RasterError, RenderedPage};
 
 // ── Safety limits ───────────────────────────────────────────────────────────
 
-/// Maximum pixel dimension (width or height) accepted for a rendered page.
+/// Largest pixel width or height of a page accepted at any byte budget.
 ///
-/// Prevents absurdly large allocations from malformed or adversarial inputs.
-/// 32 768 px at 150 DPI corresponds to roughly 366 inches (~9.3 metres).
-pub const MAX_PX_DIMENSION: u32 = 32_768;
+/// Every integer pixel coordinate up to 2^24 is exact in `f32`, the sum or
+/// difference of two page coordinates and a small margin stays inside `i32`,
+/// and the tiling-pattern lattice, enumerated within 2^30 px of its origin,
+/// covers the whole page.  A page box of 14 400 units at the largest
+/// `UserUnit` (10) is 2 000 in, 4.8 M px at 2 400 dpi.
+pub const MAX_PX_SIDE: u32 = 1 << 24;
 
-/// Maximum total pixel area (width × height) accepted for a rendered page.
+/// Default of [`SessionConfig::max_page_bytes`](crate::SessionConfig::max_page_bytes):
+/// 1.8 GB, a 600 Mpx page of 8-bit RGB.
 ///
-/// [`MAX_PX_DIMENSION`] bounds each side independently but says nothing about
-/// their product: a page whose width and height are *both* just under the
-/// per-side limit (e.g. 30 000 × 30 000) passes the per-side check yet forces a
-/// single ~2.7 GB RGB allocation — an unbounded-allocation soft-DoS that lives
-/// *inside* the per-side limit. The total raster size is bounded here, not just
-/// each side.
-///
-/// 600 000 000 px ≈ 600 MP ≈ 1.8 GiB at 3 bytes/px (RGB8). The headroom is
-/// deliberate: the largest legitimate page expected is roughly A0
-/// (841 × 1189 mm ≈ 33.1 × 46.8 in) at 600 DPI ≈ 19 860 × 28 080 ≈ 5.6e8 px,
-/// which still fits with margin, while the absurd 30 000 × 30 000 = 9e8 px
-/// case is rejected before any buffer is allocated. The product is computed in
-/// `u64`: `MAX_PX_DIMENSION² = 32_768² ≈ 1.07e9` already overflows `u32`, so a
-/// `u32` area computation would itself be a latent overflow bug — the wrap
-/// could make a hostile page *pass*. `u64` cannot overflow for any
-/// `u32 × u32` product and never panics.
-pub const MAX_PX_AREA: u64 = 600_000_000;
+/// A0 at 600 dpi (19 860 × 28 080 ≈ 5.6e8 px) fits; a 30 000 × 30 000 RGB
+/// page (2.7 GB) is refused before anything is allocated.
+pub const DEFAULT_MAX_PAGE_BYTES: u64 = 1_800_000_000;
 
-/// Reject pixel dimensions that exceed the per-side or total-area safety limits.
+/// Reject a `width × height` picture of `bytes_per_px` bytes per pixel
+/// whose side exceeds [`MAX_PX_SIDE`] or whose size exceeds `max_bytes`.
 ///
-/// Shared by the PDF render path and the comic-archive decode path so both
-/// enforce the identical soft-DoS bound. `width`/`height` are pixel counts.
+/// Shared by the PDF render path and the comic-archive decode path.  The
+/// size is computed in `u64`, which no `u32 × u32 × u32` product of these
+/// operands overflows (`2^24 · 2^24 · bytes_per_px` once the side check has
+/// passed).
 ///
 /// # Errors
 ///
-/// [`RasterError::PageTooLarge`] if either side exceeds [`MAX_PX_DIMENSION`];
-/// [`RasterError::PageAreaTooLarge`] if the area exceeds [`MAX_PX_AREA`].
-pub fn validate_dimensions(width: u32, height: u32) -> Result<(), RasterError> {
-    if width > MAX_PX_DIMENSION || height > MAX_PX_DIMENSION {
-        return Err(RasterError::PageTooLarge { width, height });
-    }
-    let area = u64::from(width) * u64::from(height);
-    if area > MAX_PX_AREA {
-        return Err(RasterError::PageAreaTooLarge {
+/// [`RasterError::PageExceedsCeiling`] if either side exceeds
+/// [`MAX_PX_SIDE`]; [`RasterError::PageTooLarge`] if
+/// `width · height · bytes_per_px > max_bytes`.
+pub fn validate_page_bytes(
+    width: u32,
+    height: u32,
+    bytes_per_px: u32,
+    max_bytes: u64,
+) -> Result<(), RasterError> {
+    check_sides(width, height)?;
+    let bytes = u64::from(width) * u64::from(height) * u64::from(bytes_per_px);
+    if bytes > max_bytes {
+        return Err(RasterError::PageTooLarge {
             width,
             height,
-            area,
+            bytes,
+            limit: max_bytes,
         });
+    }
+    Ok(())
+}
+
+/// [`RasterError::PageExceedsCeiling`] if either side exceeds [`MAX_PX_SIDE`].
+pub(crate) const fn check_sides(width: u32, height: u32) -> Result<(), RasterError> {
+    if width > MAX_PX_SIDE || height > MAX_PX_SIDE {
+        return Err(RasterError::PageExceedsCeiling { width, height });
     }
     Ok(())
 }
@@ -177,27 +183,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_accepts_in_bounds() {
-        assert!(validate_dimensions(1024, 768).is_ok());
-        assert!(validate_dimensions(MAX_PX_DIMENSION, 1).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_oversized_side() {
+    fn the_budget_bounds_the_bytes_of_the_page() {
+        let limit = 3 * 1000 * 1000;
+        assert!(validate_page_bytes(1000, 1000, 3, limit).is_ok());
         assert!(matches!(
-            validate_dimensions(MAX_PX_DIMENSION + 1, 1),
+            validate_page_bytes(1000, 1000, 4, limit),
+            Err(RasterError::PageTooLarge {
+                bytes: 4_000_000,
+                limit: 3_000_000,
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_page_bytes(1001, 1000, 3, limit),
             Err(RasterError::PageTooLarge { .. })
         ));
     }
 
     #[test]
-    fn validate_rejects_oversized_area_within_sides() {
-        let side = 30_000u32; // 30k <= MAX_PX_DIMENSION (32_768); 30k^2 = 9e8 > 6e8
-        assert!(side <= MAX_PX_DIMENSION);
+    fn the_default_budget_keeps_the_rgb_page_bound() {
+        assert!(validate_page_bytes(20_000, 30_000, 3, DEFAULT_MAX_PAGE_BYTES).is_ok());
         assert!(matches!(
-            validate_dimensions(side, side),
-            Err(RasterError::PageAreaTooLarge { .. })
+            validate_page_bytes(30_000, 30_000, 3, DEFAULT_MAX_PAGE_BYTES),
+            Err(RasterError::PageTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn the_side_ceiling_holds_at_any_budget() {
+        assert!(validate_page_bytes(MAX_PX_SIDE, 1, 3, u64::MAX).is_ok());
+        for (w, h) in [
+            (MAX_PX_SIDE + 1, 1),
+            (1, MAX_PX_SIDE + 1),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(matches!(
+                validate_page_bytes(w, h, 8, u64::MAX),
+                Err(RasterError::PageExceedsCeiling { .. })
+            ));
+        }
     }
 
     #[test]

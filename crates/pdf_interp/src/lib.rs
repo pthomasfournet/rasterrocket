@@ -714,8 +714,8 @@ fn page_rotate_cw(doc: &Document, page_id: pdf::ObjectId) -> u16 {
 /// [`InterpError::InvalidPageGeometry`] when the value is not a number or
 /// lies outside `[0.1, 10.0]`.  The range excludes NaN and infinities;
 /// below it a page is too small to render at any practical resolution,
-/// and above it the pixel dimensions exceed the 32 768 px per-side limit
-/// at modest ones.
+/// and above it a page box of the largest size in use (14 400 units) would
+/// exceed 2 000 in.
 fn page_user_unit(
     doc: &Document,
     page_id: pdf::ObjectId,

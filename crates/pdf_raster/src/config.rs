@@ -355,6 +355,19 @@ pub struct SessionConfig {
     /// Default [`DOCUMENT_IMAGE_BUDGET_BYTES`](crate::DOCUMENT_IMAGE_BUDGET_BYTES)
     /// (256 MiB).  0 keeps nothing: every page decodes the images it draws.
     pub image_budget: usize,
+    /// The most bytes the bitmap of one render may hold: the page, or the
+    /// region drawn, at its width × height × bytes per pixel (3 for 8-bit
+    /// RGB, 4 over a transparent backdrop).
+    ///
+    /// Default [`DEFAULT_MAX_PAGE_BYTES`](crate::DEFAULT_MAX_PAGE_BYTES)
+    /// (1.8 GB).  A larger bitmap is refused with
+    /// [`RasterError::PageTooLarge`] before it is allocated; the sides of a
+    /// page are held to [`MAX_PX_SIDE`](crate::MAX_PX_SIDE) whatever the
+    /// budget.  Under Linux's default overcommit an allocation past the
+    /// machine's memory is not refused but stopped by the out-of-memory
+    /// killer when it is filled, so the budget is the bound a hostile page
+    /// size meets.
+    pub max_page_bytes: u64,
     /// The page boundary box (ISO 32000-2 §14.11.2) every page of the
     /// session is measured and rendered on.
     ///
@@ -423,6 +436,7 @@ impl SessionConfig {
             font_dirs: Vec::new(),
             system_fonts: true,
             image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
+            max_page_bytes: crate::DEFAULT_MAX_PAGE_BYTES,
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             gpu_pages: false,

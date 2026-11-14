@@ -12,7 +12,7 @@ use super::{
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on any malformed-stream or unsupported-config error.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
     // `png` 0.18 requires `Read + Seek`; `&[u8]` is only `Read`, so wrap it.
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -26,7 +26,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("png: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| DecodeError::Codec("png: output buffer size overflows".to_owned()))?;

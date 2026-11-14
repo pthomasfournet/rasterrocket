@@ -112,21 +112,34 @@ pub(super) fn pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 ///
 /// [`DecodeError::TooLarge`] when the header dimensions exceed the page
 /// limits; [`DecodeError::Codec`] on malformed or unsupported streams.
-pub(super) fn decode(bytes: &[u8], page: usize) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(
+    bytes: &[u8],
+    page: usize,
+    max_bytes: u64,
+) -> Result<CodecPixels, DecodeError> {
     if page == FIRST_DIRECTORY {
-        decode_first(Decoder::new(std::io::Cursor::new(bytes)).map_err(codec)?)
+        decode_first(
+            Decoder::new(std::io::Cursor::new(bytes)).map_err(codec)?,
+            max_bytes,
+        )
     } else {
-        decode_first(Decoder::new(Rebased::new(bytes, page as u64)?).map_err(codec)?)
+        decode_first(
+            Decoder::new(Rebased::new(bytes, page as u64)?).map_err(codec)?,
+            max_bytes,
+        )
     }
 }
 
 /// Decode the current (first) image of `dec`.
-fn decode_first<R: Read + Seek>(mut dec: Decoder<R>) -> Result<CodecPixels, DecodeError> {
+fn decode_first<R: Read + Seek>(
+    mut dec: Decoder<R>,
+    max_bytes: u64,
+) -> Result<CodecPixels, DecodeError> {
     let (w, h) = dec.dimensions().map_err(codec)?;
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("tiff: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     let color = dec.colortype().map_err(codec)?;
     let planar = dec.get_tag_u32(Tag::PlanarConfiguration).ok() == Some(PLANAR);
 
@@ -341,7 +354,7 @@ mod tests {
 
     /// The sample of the 1 × 1 gray page `page` of `file`.
     fn sample(file: &[u8], page: usize) -> u8 {
-        match decode(file, page) {
+        match decode(file, page, pdf_raster::DEFAULT_MAX_PAGE_BYTES) {
             Ok(CodecPixels::Gray(bmp)) => bmp.data()[0],
             Ok(CodecPixels::Rgb(_)) => panic!("a gray page decodes to gray"),
             Err(e) => panic!("page {page}: {e}"),

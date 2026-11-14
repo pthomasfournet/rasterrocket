@@ -30,6 +30,9 @@ pub struct RasterSession {
     pub(crate) images: Arc<pdf_interp::renderer::DocumentImages>,
     pub(crate) total_pages: u32,
     pub(crate) policy: BackendPolicy,
+    /// The byte budget of a page or region bitmap
+    /// ([`crate::SessionConfig::max_page_bytes`]).
+    pub(crate) max_page_bytes: u64,
     /// Fail a page on an image failure instead of skipping the image
     /// ([`crate::SessionConfig::strict`]).
     pub(crate) strict: bool,
@@ -159,13 +162,19 @@ impl RasterSession {
     /// The errors of [`Self::page_geometry`];
     /// [`RasterError::InvalidOptions`] when `dpi` is not a positive finite
     /// number; [`RasterError::PageDegenerate`],
-    /// [`RasterError::PageTooLarge`] or [`RasterError::PageAreaTooLarge`]
+    /// [`RasterError::PageTooLarge`] or [`RasterError::PageExceedsCeiling`]
     /// when a render at `dpi` would fail with them.
     pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError> {
         let scale = f64::from(dpi) / 72.0;
         crate::render::check_scale(scale)?;
         let geom = self.page_geometry(page_num)?;
-        let view = crate::render::page_view(&geom, (scale, scale), None)?;
+        let view = crate::render::page_view(
+            &geom,
+            (scale, scale),
+            None,
+            crate::render::canvas_bytes_per_px(false),
+            self.max_page_bytes,
+        )?;
         Ok((view.width, view.height))
     }
 
@@ -544,6 +553,7 @@ fn open_session_with_doc(
         )),
         total_pages,
         policy: config.policy,
+        max_page_bytes: config.max_page_bytes,
         strict: config.strict,
         optional_content,
         annotations: config.annotations,

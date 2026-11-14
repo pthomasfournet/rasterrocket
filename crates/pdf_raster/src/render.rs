@@ -47,7 +47,7 @@ pub fn render_page_rgb(
 /// - [`RasterError::BackendUnavailable`] if a forced backend fails to init on
 ///   this thread.
 /// - [`RasterError::InvalidPageGeometry`] / [`RasterError::PageDegenerate`] /
-///   [`RasterError::PageTooLarge`] / [`RasterError::PageAreaTooLarge`] /
+///   [`RasterError::PageTooLarge`] / [`RasterError::PageExceedsCeiling`] /
 ///   [`RasterError::PageAllocationFailed`] / [`RasterError::PageOutOfRange`] /
 ///   [`RasterError::Pdf`] as documented on the error variants; the size
 ///   limits apply to the drawn region.
@@ -98,7 +98,8 @@ pub fn render_page_rgb_with_diagnostics(
 /// # Errors
 ///
 /// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
-/// rotation fails, which this release never reports (see
+/// is asked of a page larger than
+/// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE) (see
 /// [`deskew::apply`](crate::deskew::apply)).
 pub fn render_page_gray(
     session: &RasterSession,
@@ -176,13 +177,22 @@ pub fn render_page_rgba(
     ))
 }
 
+/// Bytes per pixel of the page bitmap a render allocates: 8-bit RGB, and an
+/// alpha plane over a transparent backdrop.
+pub(crate) const fn canvas_bytes_per_px(transparent: bool) -> u32 {
+    if transparent { 4 } else { 3 }
+}
+
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
-/// whole page, or `region` of it.  Enforces the pixel-size limits on what is
-/// drawn.
+/// whole page, or `region` of it.  The page's sides are held to
+/// [`MAX_PX_SIDE`](crate::MAX_PX_SIDE), and the bitmap drawn, of
+/// `bytes_per_px` bytes per pixel, to `max_bytes`.
 pub(crate) fn page_view(
     geom: &pdf_interp::PageGeometry,
     scales: (f64, f64),
     region: Option<RenderRegion>,
+    bytes_per_px: u32,
+    max_bytes: u64,
 ) -> Result<pdf_interp::renderer::PageView, RasterError> {
     let whole = pdf_interp::renderer::PageView::whole(geom, scales);
     let (w_px, h_px) = (whole.page_width, whole.page_height);
@@ -192,20 +202,14 @@ pub(crate) fn page_view(
             height: h_px,
         });
     }
+    // The side ceiling applies to the page whatever is drawn of it: a
+    // region's coordinates are page coordinates.  Checked before the
+    // bitmap is allocated, never after.
+    crate::page::check_sides(w_px, h_px)?;
     let Some(r) = region else {
-        // Reject oversized pages before the bitmap is allocated, never after,
-        // via the shared guard (per-side limit, then total-area limit in u64).
-        crate::page::validate_dimensions(w_px, h_px)?;
+        crate::page::validate_page_bytes(w_px, h_px, bytes_per_px, max_bytes)?;
         return Ok(whole);
     };
-    // A saturated side is not the page's true extent, so no window of it
-    // can be placed.
-    if w_px == u32::MAX || h_px == u32::MAX {
-        return Err(RasterError::PageTooLarge {
-            width: w_px,
-            height: h_px,
-        });
-    }
     if r.width == 0 || r.height == 0 {
         return Err(RasterError::InvalidOptions(format!(
             "render region {}×{} is empty",
@@ -220,7 +224,7 @@ pub(crate) fn page_view(
             r.width, r.height, r.x, r.y
         )));
     }
-    crate::page::validate_dimensions(r.width, r.height)?;
+    crate::page::validate_page_bytes(r.width, r.height, bytes_per_px, max_bytes)?;
     Ok(whole.window(r.x, r.y, r.width, r.height))
 }
 
@@ -288,7 +292,13 @@ pub(crate) fn render_page_rgb_with_geom(
 
     let doc = &session.doc;
 
-    let view = page_view(&geom, (params.scale_x, params.scale_y), params.region)?;
+    let view = page_view(
+        &geom,
+        (params.scale_x, params.scale_y),
+        params.region,
+        canvas_bytes_per_px(params.transparent_background),
+        session.max_page_bytes,
+    )?;
 
     let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);
     warn_unsupported(session, page_num, &unsupported_features);

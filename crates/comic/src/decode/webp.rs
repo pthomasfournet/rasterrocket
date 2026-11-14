@@ -7,14 +7,14 @@ use super::{CodecPixels, DecodeError, guard_dimensions, keep_leading_samples, rg
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on malformed/unsupported streams.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
     let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Codec(format!("webp: {e}")))?;
     let (w, h) = dec.dimensions();
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("webp: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     // Size the buffer with the decoder's own contract (w*h*channels, where
     // channels follows has_alpha) rather than recomputing the channel rule here.
     let buf_len = dec

@@ -205,6 +205,7 @@ fn decode_coded(
     item: ItemInfo,
     props: &ItemProps<'_>,
     file_len: usize,
+    max_bytes: u64,
 ) -> Result<StillPicture, DecodeError> {
     if item.kind != *b"av01" {
         return Err(codec(format_args!(
@@ -221,7 +222,7 @@ fn decode_coded(
     if w == 0 || h == 0 {
         return Err(codec(format_args!("zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h)?;
+    guard_dimensions(w, h, max_bytes)?;
     let too_large = DecodeError::TooLarge {
         width: w,
         height: h,
@@ -294,6 +295,7 @@ fn decode_grid(
     container: &Container<'_>,
     id: u32,
     file_len: usize,
+    max_bytes: u64,
 ) -> Result<(AnyFrame<'static>, ColorSpec, Option<Nclx>), DecodeError> {
     let Grid {
         rows,
@@ -304,7 +306,7 @@ fn decode_grid(
     if width == 0 || height == 0 {
         return Err(codec(format_args!("zero dimensions {width}x{height}")));
     }
-    guard_dimensions(width, height)?;
+    guard_dimensions(width, height, max_bytes)?;
     let tiles = container.references(id, *b"dimg");
     if rows * columns > MAX_TILES || tiles.len() != (rows * columns) as usize {
         return Err(codec(format_args!(
@@ -344,7 +346,13 @@ fn decode_grid(
         } else if (tw, th) != tile_size {
             return Err(codec("grid tiles of different sizes"));
         }
-        let picture = decode_coded(container, container.item(tile_id)?, &props, file_len)?;
+        let picture = decode_coded(
+            container,
+            container.item(tile_id)?,
+            &props,
+            file_len,
+            max_bytes,
+        )?;
         let color = stream_color(&picture);
         let tile = frame_view(&picture)?;
         let (canvas, ..) = canvas.get_or_insert_with(|| {
@@ -425,16 +433,16 @@ impl Packed {
 /// [`DecodeError::TooLarge`] when the declared size of the page or of a
 /// tile exceeds the page limits; [`DecodeError::Codec`] on a malformed,
 /// truncated or unsupported container or AV1 stream.
-pub(super) fn decode(bytes: &[u8]) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
     let container = Container::parse(bytes)?;
     let primary = container.primary()?;
     let props = ItemProps::read(&container, primary.id)?;
     // The frame of a coded picture borrows the decoder's planes.
     let picture;
     let (frame, stream, tile_nclx) = if primary.kind == *b"grid" {
-        decode_grid(&container, primary.id, bytes.len())?
+        decode_grid(&container, primary.id, bytes.len(), max_bytes)?
     } else {
-        picture = decode_coded(&container, primary, &props, bytes.len())?;
+        picture = decode_coded(&container, primary, &props, bytes.len(), max_bytes)?;
         (frame_view(&picture)?, stream_color(&picture), None)
     };
     let spec = props.nclx.or(tile_nclx).map_or(stream, |nclx| ColorSpec {

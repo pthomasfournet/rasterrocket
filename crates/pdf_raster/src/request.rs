@@ -89,9 +89,10 @@ pub struct RenderParams {
     pub scale_y: f64,
     /// The window of the page to draw; `None` draws the whole page.
     ///
-    /// The size limits ([`MAX_PX_DIMENSION`](crate::MAX_PX_DIMENSION),
-    /// [`MAX_PX_AREA`](crate::MAX_PX_AREA)) apply to the region, not to the
-    /// page, so a page too large to render whole can be rendered in regions.
+    /// The byte budget ([`SessionConfig::max_page_bytes`](crate::SessionConfig::max_page_bytes))
+    /// applies to the region, not to the page, so a page too large to
+    /// render whole can be rendered in regions; the side ceiling
+    /// ([`MAX_PX_SIDE`](crate::MAX_PX_SIDE)) applies to the page.
     pub region: Option<RenderRegion>,
     /// Backend policy for this page's image decoders; `None` uses the
     /// session's.  [`BackendPolicy::CpuOnly`] skips GPU decoder setup for a
