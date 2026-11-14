@@ -15,7 +15,7 @@
 //!
 //! ## Module layout
 //! - [`types`] — raster-local enums and constants (re-exports [`color`] types)
-//! - [`bitmap`] — [`Bitmap<P>`] and [`AaBuf`]
+//! - [`bitmap`] — [`Bitmap<P>`]
 //! - [`path`] — [`Path`], [`PathBuilder`], Bezier flattening, stroke adjustment
 //! - [`xpath`] — [`XPath`] edge table (flattened, matrix-transformed segments)
 //! - `scanner` — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
@@ -55,7 +55,7 @@ pub mod xpath;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use bitmap::{AaBuf, Bitmap, BitmapAllocError, BitmapBuffers, interleave_rgba};
+pub use bitmap::{Bitmap, BitmapAllocError, BitmapBuffers, interleave_rgba};
 pub use clip::{Clip, ClipResult, ClipRows, RowClip};
 pub use fill::{eo_fill, fill, fill_area};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
@@ -71,9 +71,7 @@ pub use shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangl
 pub use shading::radial::RadialPattern;
 pub use shading::shaded_fill;
 pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, unpack_mono_row};
-pub use stroke::{
-    StrokeParams, aa_stroke_coverage, hairline_runs, stroke, stroke_aa_scanner, stroke_outline,
-};
+pub use stroke::{StrokeParams, aa_stroke_coverage, hairline_runs, stroke, stroke_outline};
 pub use tiling::{CELL_PHASES, CellPhase, Lattice, TiledPattern};
 pub use types::*;
 pub use xpath::{PixelModel, XPath, XPathFlags, XPathSeg};

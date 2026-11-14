@@ -21,7 +21,7 @@ use color::convert::div255;
 
 use crate::coverage::{AreaRaster, CoverageTable};
 use crate::scanner::XPathScanner;
-use crate::types::{AA_SIZE, ceil_i32, floor_i32};
+use crate::types::{ceil_i32, floor_i32};
 use crate::xpath::XPath;
 
 /// Path clips a [`Clip`] holds at most: intersecting the one that reaches
@@ -294,30 +294,6 @@ impl Clip {
             }));
         }
         self.scanners = folded;
-    }
-
-    /// The clip's rows in the supersampled AA grid, inclusive:
-    /// `[y_min_i × AA_SIZE, (y_max_i + 1) × AA_SIZE − 1]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the range overflows `i32`; the clip rows are bounded by the
-    /// bitmap height, far below `i32::MAX / AA_SIZE`.
-    #[must_use]
-    pub fn aa_row_range(&self) -> (i32, i32) {
-        aa_range(self.y_min_i, self.y_max_i)
-    }
-
-    /// The clip's columns in the supersampled AA grid, inclusive:
-    /// `[x_min_i × AA_SIZE, (x_max_i + 1) × AA_SIZE − 1]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the range overflows `i32`; the clip columns are bounded by
-    /// the bitmap width, far below `i32::MAX / AA_SIZE`.
-    #[must_use]
-    pub fn aa_column_range(&self) -> (i32, i32) {
-        aa_range(self.x_min_i, self.x_max_i)
     }
 
     /// The maximal runs `(a, b)`, inclusive and left to right, of the pixels
@@ -650,20 +626,6 @@ fn detect_rect(xpath: &XPath) -> Option<(f64, f64, f64, f64)> {
     });
 
     Some((x0, y0, x1, y1))
-}
-
-/// The supersampled AA cells `[lo × AA_SIZE, (hi + 1) × AA_SIZE − 1]` of the
-/// pixels `lo..=hi`.
-fn aa_range(lo: i32, hi: i32) -> (i32, i32) {
-    let lo = lo
-        .checked_mul(AA_SIZE)
-        .expect("AA range: lower bound × AA_SIZE overflows i32");
-    let hi = hi
-        .checked_add(1)
-        .and_then(|v| v.checked_mul(AA_SIZE))
-        .map(|v| v - 1)
-        .expect("AA range: (upper bound + 1) × AA_SIZE overflows i32");
-    (lo, hi)
 }
 
 #[cfg(test)]

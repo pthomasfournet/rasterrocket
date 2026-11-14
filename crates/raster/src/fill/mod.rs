@@ -23,7 +23,6 @@ use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
 use crate::scanner::iter::ScanIterator;
-use crate::simd;
 use crate::stroke::{StrokeParams, stroke_outline};
 use crate::types::{LineCap, LineJoin, floor_i32};
 use crate::xpath::{PixelModel, XPath, XPathFlags};
@@ -531,40 +530,6 @@ fn draw_coverage_row<P: Pixel>(
     draw(bitmap, shaped_from, coverage.len(), false);
 }
 
-/// Build the AA-space scanner for `path`: the geometry stage of an
-/// antialiased fill.
-///
-/// The path is transformed by `matrix`, flattened with `flatness`, scaled by
-/// [`AA_SIZE`], and scan-converted over the clip's AA row range
-/// `[clip.y_min_i × AA_SIZE, (clip.y_max_i + 1) × AA_SIZE)`.  The scanner's
-/// bounds are AA coordinates; dividing them by [`AA_SIZE`] gives the pixel
-/// bounding box.
-///
-/// Returns `None` when the path has no points or the scanner covers no rows.
-///
-/// # Panics
-///
-/// Panics if the clip's AA row range overflows `i32`.
-#[must_use]
-pub fn aa_scanner(
-    path: &Path,
-    matrix: &[f64; 6],
-    flatness: f64,
-    clip: &Clip,
-    eo: bool,
-) -> Option<XPathScanner> {
-    if path.pts.is_empty() {
-        return None;
-    }
-    let mut xpath = XPath::new(path, matrix, flatness, true);
-    xpath.aa_scale();
-    let (y_min, y_max) = clip.aa_row_range();
-    let (x_min, x_max) = clip.aa_column_range();
-    xpath.cull_subpaths_outside(x_min, x_max, y_min, y_max);
-    let scanner = XPathScanner::new(&xpath, eo, y_min, y_max);
-    (!scanner.is_empty()).then_some(scanner)
-}
-
 /// Antialiased coverage of the device-space `xpath` over the pixels
 /// `[0, width) × [0, height)` under the non-zero winding rule.
 ///
@@ -589,51 +554,6 @@ pub fn aa_coverage(xpath: &XPath, width: u32, height: u32) -> Vec<u8> {
         }
     });
     coverage
-}
-
-// ── Span drawing helpers ──────────────────────────────────────────────────────
-
-/// Composite one output row from per-pixel AA coverage counts.
-///
-/// `counts[i]` is the number of set AA sub-samples (`0..=AA_SIZE²`) of pixel
-/// `x0 + i`; `counts.len()` must equal `x1 - x0 + 1`.  The counts are mapped
-/// through `AA_GAMMA` in place and composited via `pipe::render_span` as one
-/// span; a row whose counts are all zero leaves the bitmap untouched.
-///
-/// This is the compositing half of `draw_aa_line`; the GPU fill path
-/// supplies counts computed on the device and joins the CPU pipeline here.
-///
-/// # Panics
-///
-/// Panics if `counts.len() != x1 - x0 + 1` or if any count exceeds
-/// `AA_SIZE²`.
-pub fn draw_aa_counts<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    counts: &mut [u8],
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    debug_assert!(x0 >= 0, "draw_aa_counts: x0={x0} is negative");
-    debug_assert!(x0 <= x1, "draw_aa_counts: x0={x0} > x1={x1}");
-    debug_assert!(y >= 0, "draw_aa_counts: y={y} is negative");
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0 asserted above")]
-    let expected = (x1 - x0 + 1) as usize;
-    assert_eq!(
-        counts.len(),
-        expected,
-        "draw_aa_counts: {} counts for a {expected}-pixel span",
-        counts.len()
-    );
-
-    let shape = counts;
-    if !simd::apply_aa_gamma(shape) {
-        return;
-    }
-
-    pipe::render_bitmap_span::<P>(bitmap, pipe, src, Some(&*shape), x0, x1, y);
 }
 
 #[cfg(test)]
@@ -847,9 +767,8 @@ mod tests {
         );
     }
 
-    /// An AA fill covers the whole first sub-row of an edge that lies on a
-    /// pixel boundary: the horizontal top edge and the vertical edges'
-    /// starting sub-row carry winding count 0 but still bound the shape.
+    /// An AA fill of a rectangle on pixel boundaries covers its first and
+    /// last rows fully and nothing outside them.
     #[test]
     fn aa_fill_covers_integer_top_edge_row() {
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(8, 8, 1, false);
@@ -963,8 +882,7 @@ mod tests {
         assert_eq!(coverage, filled);
     }
 
-    /// An AA fill lands where its geometry is: `render_aa_line` takes a
-    /// device-pixel row and expands it to the four AA sub-rows itself.
+    /// An AA fill lands where its geometry is, in rows and columns.
     #[test]
     fn aa_fill_rect_lands_on_its_own_geometry() {
         const W: u32 = 64;
@@ -1008,11 +926,7 @@ mod tests {
         );
     }
 
-    /// A fill sitting below a quarter of the page height must still render.
-    ///
-    /// With an AA-space row index the scanner row lookup ran off the end of the
-    /// table for any geometry below `height / AA_SIZE`, so the fill silently
-    /// produced nothing.
+    /// A fill sitting below a quarter of the page height renders.
     #[test]
     fn aa_fill_low_on_the_page_is_not_dropped() {
         const W: u32 = 32;
@@ -1023,7 +937,7 @@ mod tests {
         let pipe = simple_pipe();
         let color = [255u8, 255, 255];
         let src = PipeSrc::Solid(&color);
-        // Entirely below H/AA_SIZE = 32.
+        // Entirely below H / 4 = 32.
         let path = rect_path(8.0, 96.0, 24.0, 120.0);
 
         fill::<Rgb8>(
@@ -1208,32 +1122,6 @@ mod tests {
         assert_eq!(bmp.row(4)[4].r, 0, "interior should be clear with EO rule");
         // Band (2, 2) should be painted.
         assert_eq!(bmp.row(2)[2].r, 255, "outer band should be painted");
-    }
-
-    #[test]
-    fn aa_gamma_table_correct() {
-        use crate::types::AA_GAMMA;
-        // Validate every entry against the defining formula:
-        // round((i / (AA_SIZE² )) ^ 1.5 * 255).  Derive the divisor from the
-        // table's own length so the test stays correct if AA_SIZE changes.
-        let max_idx = AA_GAMMA.len() - 1; // == AA_SIZE * AA_SIZE
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "AA_GAMMA.len() ≤ 65 in practice; f64 represents it exactly"
-        )]
-        let divisor = max_idx as f64;
-        for (i, &actual) in AA_GAMMA.iter().enumerate() {
-            // i ∈ [0, max_idx]; (i/max_idx)^1.5 ∈ [0,1]; ×255 ∈ [0,255]; round
-            // to non-negative integer in [0,255] — the `as u8` is provably in range.
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss,
-                reason = "value is f64::round() of a [0,255]-bounded expression"
-            )]
-            let expected = ((i as f64 / divisor).powf(1.5) * 255.0).round() as u8;
-            assert_eq!(actual, expected, "AA_GAMMA[{i}]: expected {expected}");
-        }
     }
 
     #[test]

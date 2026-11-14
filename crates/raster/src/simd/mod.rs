@@ -6,7 +6,6 @@
 //!
 //! # Sub-modules
 //!
-//! - [`aa_gamma`]      — coverage → gamma-corrected shape map (`apply_aa_gamma`)
 //! - [`blend`]         — solid-colour fill (`blend_solid_rgb8`, `blend_solid_gray8`)
 //! - [`composite`]     — AA per-pixel blend (`composite_aa_rgb8_opaque`)
 //! - [`glyph_unpack`]  — 1-bit-per-pixel mono glyph expansion (`unpack_mono_row`)
@@ -17,12 +16,10 @@
     reason = "SIMD intrinsics require unsafe throughout this module tree"
 )]
 
-pub(crate) mod aa_gamma;
 pub(crate) mod blend;
 pub(crate) mod composite;
 pub(crate) mod glyph_unpack;
 
-pub(crate) use aa_gamma::apply_aa_gamma;
 pub use blend::{blend_solid_gray8, blend_solid_rgb8};
 pub use composite::composite_aa_rgb8_opaque;
 pub use glyph_unpack::unpack_mono_row;

@@ -1,7 +1,9 @@
 //! Flattened, matrix-transformed path edge table.
 //!
 //! [`XPath`] converts a [`Path`] (in user space) into a sorted sequence of line segments
-//! in device space, ready for scan conversion by [`crate::XPathScanner`].
+//! in device space, ready for scan conversion by [`crate::XPathScanner`]
+//! (aliased fills and clips) or exact-area rasterisation by
+//! [`crate::coverage::AreaRaster`] (antialiased fills, clips and strokes).
 //!
 //! ## Typical usage pipeline
 //!
@@ -10,12 +12,9 @@
 //!     │  internally calls add_segment for every flattened edge
 //!     ▼
 //! XPath                                                 ← device-space edge table
-//!     │  optionally:
+//!     │
 //!     ▼
-//! xpath.aa_scale()                                      ← scale coords × AA_SIZE
-//!     │  must be called AT MOST ONCE, before handing to XPathScanner
-//!     ▼
-//! XPathScanner                                          ← scan conversion
+//! XPathScanner / AreaRaster                             ← aliased spans / exact-area coverage
 //! ```
 //!
 //! ## Key invariants (established by `XPath::add_segment` — internal)
@@ -39,7 +38,7 @@
 use crate::path::adjust::{XPathAdjust, stroke_adjust_point};
 use crate::path::flatten::{CurveData, flatten_curve};
 use crate::path::{Path, PathFlags, PathPoint, StrokeAdjustHint};
-use crate::types::{AA_SIZE, floor_i32};
+use crate::types::floor_i32;
 use bitflags::bitflags;
 
 // ── XPathFlags ────────────────────────────────────────────────────────────────
@@ -152,12 +151,8 @@ impl PixelModel {
 /// # Construction pipeline
 ///
 /// 1. Call [`XPath::new`] to build the edge table from a [`Path`].
-/// 2. Optionally call [`XPath::aa_scale`] **once** to scale coordinates by
-///    [`AA_SIZE`] for supersampled anti-aliasing.
-/// 3. Hand the resulting `XPath` to `XPathScanner` for scan conversion.
-///
-/// Calling `aa_scale` more than once will multiply coordinates by `AA_SIZE`
-/// again, producing incorrect results. This is not checked at runtime.
+/// 2. Hand the resulting `XPath` to `XPathScanner` for aliased scan
+///    conversion, or to the exact-area rasteriser for antialiased coverage.
 pub struct XPath {
     /// The flattened, transformed edge segments making up this path, in insertion order.
     pub segs: Vec<XPathSeg>,
@@ -198,9 +193,6 @@ impl XPath {
     /// After this call, `segs` is in insertion order (one entry per flattened
     /// edge). No further sorting is performed here; callers that need a sorted
     /// edge table must sort `segs` themselves or use `XPathScanner`.
-    ///
-    /// Calling [`XPath::aa_scale`] after this method scales all coordinates by
-    /// [`AA_SIZE`]. It must be called at most once.
     #[must_use]
     pub fn new(path: &Path, matrix: &[f64; 6], flatness: f64, close_subpaths: bool) -> Self {
         Self::for_model(path, matrix, flatness, close_subpaths, PixelModel::Aliased)
@@ -333,30 +325,6 @@ impl XPath {
         }
 
         xpath
-    }
-
-    /// Scale all segment coordinates by [`AA_SIZE`] for supersampled anti-aliasing.
-    ///
-    /// `dxdy` (the slope) is invariant under uniform scaling and is **not** modified —
-    /// a uniform scale cancels out in `(x1-x0)/(y1-y0)`.
-    ///
-    /// # Ordering constraint
-    ///
-    /// This method must be called **after** [`XPath::new`] and **at most once**.
-    /// Calling it a second time multiplies coordinates by [`AA_SIZE`] again,
-    /// which will produce incorrect scan-conversion results. There is no runtime
-    /// guard against double-scaling.
-    ///
-    /// Non-finite coordinates (from an overflowing or degenerate transform)
-    /// stay non-finite; the scanner skips segments with a NaN coordinate.
-    pub fn aa_scale(&mut self) {
-        let s = f64::from(AA_SIZE);
-        for seg in &mut self.segs {
-            seg.x0 *= s;
-            seg.y0 *= s;
-            seg.x1 *= s;
-            seg.y1 *= s;
-        }
     }
 
     /// Remove the subpaths whose segments all lie in the columns left of
@@ -752,23 +720,6 @@ mod tests {
         let s = &xpath.segs[0];
         assert!(s.flags.contains(XPathFlags::FLIPPED));
         assert!(s.y0 <= s.y1, "y0={} y1={}", s.y0, s.y1);
-    }
-
-    #[test]
-    fn aa_scale_multiplies_coords() {
-        let mut xpath = XPath::empty();
-        xpath.add_segment(1.0, 0.0, 3.0, 2.0);
-        let orig_dxdy = xpath.segs[0].dxdy;
-        xpath.aa_scale();
-        let s = &xpath.segs[0];
-        assert!((s.x0 - 4.0).abs() < 1e-10);
-        assert!((s.y0 - 0.0).abs() < 1e-10);
-        assert!((s.x1 - 12.0).abs() < 1e-10);
-        assert!((s.y1 - 8.0).abs() < 1e-10);
-        assert!(
-            (s.dxdy - orig_dxdy).abs() < 1e-10,
-            "dxdy should be unchanged"
-        );
     }
 
     #[test]

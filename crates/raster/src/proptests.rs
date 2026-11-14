@@ -176,9 +176,8 @@ fn hairline(path: &Path, clip: &Clip, w: u32, h: u32) -> Vec<bool> {
 
 /// A triangle with one vertex thousands of rows above the bitmap, placed so
 /// that a re-anchor row of its two long edges (every [`REANCHOR_ROWS`]
-/// scanner rows from the vertex's row, in pixel rows aliased and in
-/// sub-sample rows antialiased) falls on a bitmap row, and possibly far to
-/// either side of it.  Its other two vertices lie near the bitmap.
+/// scanner rows from the vertex's row) falls on a bitmap row, and possibly
+/// far to either side of it.  Its other two vertices lie near the bitmap.
 fn tall_triangle(w: u32, h: u32) -> impl Strategy<Value = Subpath> {
     let rows = i32::try_from(h).expect("small");
     let far_x = prop_oneof![

@@ -1,7 +1,7 @@
 //! Stroke rasterization.
 //!
 //! Public entry points are [`stroke`] and [`stroke_outline`], and the
-//! geometry stages of a stroke, [`stroke_aa_scanner`] and [`hairline_runs`];
+//! geometry stages of a stroke, [`aa_stroke_coverage`] and [`hairline_runs`];
 //! the helpers (`stroke_narrow`, `stroke_wide`, and the path-shaping
 //! functions in the private `path` submodule) are crate-internal
 //! implementation details.
@@ -15,10 +15,9 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::coverage::CoverageTable;
-use crate::fill::{aa_fill_coverage, aa_scanner, fill_area};
+use crate::fill::{aa_fill_coverage, fill_area};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
-use crate::scanner::XPathScanner;
 use crate::types::{LineCap, LineJoin, floor_i32};
 use crate::xpath::XPath;
 use color::Pixel;
@@ -232,22 +231,6 @@ pub fn hairline_runs(
         return;
     };
     narrow_runs(clip, &path, matrix, params.flatness, width, height, emit);
-}
-
-/// The AA-space scanner of a stroke of `path` with a positive line width.
-///
-/// It is the geometry stage ([`crate::fill::aa_scanner`]) of the non-zero
-/// antialiased fill of the outline [`stroke`] paints.  `None` for a
-/// hairline (`line_width == 0`) and for a stroke that covers no row.
-#[must_use]
-pub fn stroke_aa_scanner(
-    path: &Path,
-    matrix: &[f64; 6],
-    params: &StrokeParams<'_>,
-    clip: &Clip,
-) -> Option<XPathScanner> {
-    let outline = stroke_outline_path(path, matrix, params)?;
-    aa_scanner(&outline, matrix, params.flatness, clip, false)
 }
 
 /// The coverage table an antialiased [`stroke`] of `path` composites.

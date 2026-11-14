@@ -36,8 +36,7 @@
 /// The coalescing span iterator for a scanner row.
 pub(crate) mod iter;
 
-use crate::bitmap::{AA_SIZE_USIZE, AaBuf};
-use crate::types::{AA_SIZE, floor_i32};
+use crate::types::floor_i32;
 use crate::xpath::{XPath, XPathFlags};
 
 // ── Fixed-point helpers ───────────────────────────────────────────────────────
@@ -428,86 +427,10 @@ impl XPathScanner {
         true
     }
 
-    /// Render the AA supersampled row to `aa_buf` and update `[x0, x1]` output range.
-    ///
-    /// `y` is in device-pixel space;
-    /// the scanner must have been built from an `aa_scale()`'d `XPath`.
-    ///
-    /// `x0` and `x1` are updated to the tightest bounding range of pixels
-    /// written into `aa_buf`. If no pixels are written, `*x0` is set to `0`
-    /// and `*x1` to `-1` (so `*x0 > *x1` reliably indicates an empty range).
-    pub fn render_aa_line(&self, aa_buf: &mut AaBuf, x0: &mut i32, x1: &mut i32, y: i32) {
-        aa_buf.clear();
-        let mut xx_min = usize::MAX;
-        let mut xx_max = 0usize;
-
-        for (sub_row, scan_y) in aa_sub_rows(y) {
-            self.for_each_covered_span(scan_y, aa_buf.width, |bx0, bx1| {
-                aa_buf.set_span(sub_row, bx0, bx1);
-                xx_min = xx_min.min(bx0);
-                xx_max = xx_max.max(bx1);
-            });
-        }
-
-        if xx_min >= xx_max {
-            // Empty range signal: x0 > x1.
-            *x0 = 0;
-            *x1 = -1;
-            return;
-        }
-        let aa = AA_SIZE_USIZE;
-        *x0 = i32::try_from(xx_min / aa).unwrap_or(i32::MAX);
-        *x1 = i32::try_from((xx_max - 1) / aa).unwrap_or(i32::MAX);
-    }
-
-    /// Intersect the AA supersampled row already in `aa_buf` with this
-    /// scanner's coverage over device pixels `[x0, x1]`.
-    ///
-    /// Every sub-sample in the range
-    /// that [`render_aa_line`](Self::render_aa_line) would leave unset for this
-    /// scanner is cleared; sub-samples it would set keep their current value.
-    /// `y` is in device-pixel space; the scanner must have been built from an
-    /// `aa_scale()`'d `XPath`.
-    pub fn clip_aa_line(&self, aa_buf: &mut AaBuf, x0: i32, x1: i32, y: i32) {
-        if x0 > x1 {
-            return;
-        }
-        let aa = AA_SIZE_USIZE;
-        let lo = usize::try_from(x0.max(0)).unwrap_or(0) * aa;
-        let hi = (usize::try_from(x1.max(-1) + 1).unwrap_or(0) * aa).min(aa_buf.width);
-
-        for (sub_row, scan_y) in aa_sub_rows(y) {
-            let mut cursor = lo;
-            self.for_each_covered_span(scan_y, aa_buf.width, |bx0, bx1| {
-                if bx0 > cursor {
-                    aa_buf.clear_span(sub_row, cursor, bx0.min(hi));
-                }
-                cursor = cursor.max(bx1);
-            });
-            aa_buf.clear_span(sub_row, cursor, hi);
-        }
-    }
-
-    /// Call `emit(bx0, bx1)` for each covered half-open span `[bx0, bx1)` of
-    /// AA scanline `scan_y`, clamped to `[0, width)`, in increasing `bx0`.
-    /// The spans are those of [`ScanIterator`], which an aliased fill
-    /// paints, so both fills cover the same cells of a scanline.
-    fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
-        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
-        for (x0, x1) in iter::ScanIterator::new(self, scan_y) {
-            let bx0 = usize::try_from(x0.max(0)).unwrap_or(0);
-            let bx1 = usize::try_from(x1.saturating_add(1).min(width_i32)).unwrap_or(0);
-            if bx0 < bx1 {
-                emit(bx0, bx1);
-            }
-        }
-    }
-
     /// The region every one of `scanners` covers, as one table: on each
     /// scanline it holds the intersection of their covered spans, each as a
-    /// winding-count-0 intersection, so [`test`](Self::test),
-    /// [`test_span`](Self::test_span) and [`clip_aa_line`](Self::clip_aa_line)
-    /// answer for it exactly as the conjunction of theirs over the scanners.
+    /// winding-count-0 intersection, so [`test`](Self::test) and
+    /// [`test_span`](Self::test_span) answer for it exactly as the conjunction of theirs over the scanners.
     /// The scanners share one coordinate space; none gives an empty table.
     ///
     /// # Panics
@@ -581,13 +504,6 @@ impl XPathScanner {
             intersects,
         }
     }
-}
-
-/// `(sub_row, scan_y)` for each of the `AA_SIZE` sub-rows of device row `y`.
-fn aa_sub_rows(y: i32) -> impl Iterator<Item = (usize, i32)> {
-    (0..AA_SIZE)
-        .zip(0usize..)
-        .map(move |(yy, sub_row)| (sub_row, y * AA_SIZE + yy))
 }
 
 // ── Two-pass intersection construction ───────────────────────────────────────
@@ -1026,34 +942,5 @@ mod tests {
         let (count, on_span) = XPathScanner::count_crossings(&row, 6);
         assert!(!on_span);
         assert_eq!(count, -1);
-    }
-
-    #[test]
-    fn row_ending_inside_extends_to_width_and_terminates() {
-        // Every AA sub-row of pixel row 0 holds one entering intersection at
-        // AA column 6 and nothing that leaves, so the winding never returns
-        // to zero.
-        let entry = Intersect {
-            x0: 6,
-            x1: 6,
-            count: 1,
-        };
-        let scanner = XPathScanner {
-            eo: false,
-            x_min: 6,
-            x_max: 6,
-            y_min: 0,
-            y_max: 3,
-            row_start: vec![0, 1, 2, 3, 4],
-            intersects: vec![entry; 4],
-        };
-        let mut aa_buf = AaBuf::new(4);
-        let (mut x0, mut x1) = (0, 3);
-        scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, 0);
-        assert_eq!(
-            (x0, x1),
-            (1, 3),
-            "span opens at AA column 6 (pixel 1) and runs to the buffer width"
-        );
     }
 }
