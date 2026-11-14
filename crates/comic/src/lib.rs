@@ -229,7 +229,7 @@ impl std::fmt::Display for ComicError {
                 f,
                 "comic archive decompresses to more than its {limit}-byte budget \
                  (possible decompression bomb); raise ComicOptions::max_archive_bytes \
-                 if the archive is genuine"
+                 (rrocket --max-archive-mib) if the archive is genuine"
             ),
             Self::NoImages => write!(f, "comic archive contains no decodable images"),
             Self::Decode { entry, reason } => {

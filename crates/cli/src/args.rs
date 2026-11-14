@@ -418,6 +418,14 @@ pub(crate) struct Args {
     #[arg(long = "ram-path", value_name = "PATH", conflicts_with = "no_ram")]
     pub ram_path: Option<String>,
 
+    /// Comic input: the most an archive's entries may decompress to in
+    /// total, in MiB (default 4096).  An archive over it is refused whole as
+    /// a possible decompression bomb; raise it for a genuine archive that
+    /// large.  Decompressed entries are held in memory while the pages
+    /// render.
+    #[arg(long = "max-archive-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=(u64::MAX >> 20)))]
+    pub max_archive_mib: Option<u64>,
+
     // ── Backend selection ─────────────────────────────────────────────────────
     /// Compute backend for image decoding and GPU fills.
     ///
@@ -1408,6 +1416,18 @@ mod page_list_tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn max_archive_mib_parses_and_rejects_zero() {
+        assert_eq!(args_with(&[]).max_archive_mib, None);
+        assert_eq!(
+            args_with(&["--max-archive-mib", "8192"]).max_archive_mib,
+            Some(8192)
+        );
+        assert!(
+            Args::try_parse_from(["rrocket", "--max-archive-mib", "0", "in.cbz", "out"]).is_err()
+        );
     }
 
     #[test]

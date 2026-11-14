@@ -37,7 +37,9 @@ rendering flags (`--aa`, `--aaVector`, `--overprint`, `--hide-annotations`,
 `--no-system-fonts`), `--box`, `--rotate`, `--strict`, `--purpose` and the backend flags; an
 invalid backend combination is refused for comic input as for a PDF. The
 crop, scale-to and password flags, `--threads`, `--progress` and
-`--timings` apply to PDF input only and have no effect on comic input.
+`--timings` apply to PDF input only and have no effect on comic input. An archive's entries are decompressed into memory when it opens;
+`--max-archive-mib MIB` (default 4096) bounds their total, and an archive over it is refused
+whole as a possible decompression bomb, exit status 1.
 
 ---
 

@@ -45,6 +45,9 @@ pub(crate) fn run(
     // shrunken total.
     let mut opts = ComicOptions::new(dpi);
     opts.session = session;
+    if let Some(mib) = args.max_archive_mib {
+        opts.max_archive_bytes = mib << 20;
+    }
 
     let mut pages = open_comic(Path::new(args.input()), &opts)?;
 
