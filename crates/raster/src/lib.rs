@@ -38,6 +38,8 @@ pub mod coverage;
 pub mod fill;
 pub mod glyph;
 pub mod path;
+#[cfg(test)]
+mod pinned;
 pub mod pipe;
 #[cfg(test)]
 mod proptests;
