@@ -364,6 +364,11 @@ pub fn open_session_from_shared(
 /// [`Read`](std::io::Read) one.  A file on disk opens without the copy
 /// through [`open_session`].
 ///
+/// The read is unbounded: the session holds the whole document, however
+/// long the source runs.  Bound an untrusted reader with
+/// [`Read::take`](std::io::Read::take); a source longer than the bound is
+/// then opened as a truncated document.
+///
 /// # Errors
 ///
 /// [`RasterError::Pdf`] wrapping an I/O error when `reader` fails;
