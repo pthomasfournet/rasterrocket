@@ -97,9 +97,10 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-/// The pages of an image file, each named by the index [`decode_image`]
-/// takes: the image file directories that are pages of a TIFF, and the
-/// single image of any other format.
+/// The pages of an image file, each named by the key [`decode_image`]
+/// takes: for a TIFF, the directories that are pages (see [`tiff::pages`]);
+/// for any other format, its single image as key 0.  Key 0 always names the
+/// first image.
 ///
 /// # Errors
 ///
@@ -112,7 +113,7 @@ pub(crate) fn image_pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
     }
 }
 
-/// Decode page `page` (an index [`image_pages`] lists) of arbitrary image
+/// Decode page `page` (a key [`image_pages`] lists) of arbitrary image
 /// bytes to a packed grayscale bitmap, sniffing the format first. Gray
 /// streams are returned as decoded; RGB streams are converted in their own
 /// allocation by [`pdf_raster::rgb_into_gray`].
@@ -289,9 +290,10 @@ pub(crate) mod tests {
     #[test]
     fn tiff_pages_skip_thumbnails_and_masks_and_decode_by_directory() {
         let tif = multi_tiff_gray(2, 2, &[(10, 0), (99, 1), (77, 4), (30, 2)]);
-        assert_eq!(image_pages(&tif).unwrap(), [0, 3]);
-        assert_eq!(decode_image(&tif, 0).unwrap().data()[0], 10);
-        assert_eq!(decode_image(&tif, 3).unwrap().data()[0], 30);
+        let pages = image_pages(&tif).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(decode_image(&tif, pages[0]).unwrap().data()[0], 10);
+        assert_eq!(decode_image(&tif, pages[1]).unwrap().data()[0], 30);
         // A file of nothing but thumbnails still shows its first image.
         assert_eq!(image_pages(&multi_tiff_gray(2, 2, &[(5, 1)])).unwrap(), [0]);
         assert_eq!(image_pages(&solid_jpeg_gray(2, 2, 9)).unwrap(), [0]);
@@ -396,6 +398,37 @@ pub(crate) mod tests {
             panic!("a planar RGB TIFF must decode to Rgb8");
         };
         assert_eq!(bmp.data(), [1, 10, 100, 2, 20, 200]);
+    }
+
+    #[test]
+    fn rgb_tiffs_with_a_non_alpha_extra_sample_decode() {
+        // RGB plus one extra sample of unspecified meaning (ExtraSamples 0):
+        // the tiff decoder drops samples past the colour type's own, in
+        // chunky and planar images alike.
+        let unspecified = |tif: Vec<u8>| {
+            let alpha = [
+                &338u16.to_le_bytes()[..],
+                &3u16.to_le_bytes(),
+                &1u32.to_le_bytes(),
+                &2u32.to_le_bytes(),
+            ]
+            .concat();
+            let at = tif
+                .windows(alpha.len())
+                .position(|w| w == alpha)
+                .expect("ExtraSamples entry");
+            let mut tif = tif;
+            tif[at + 8] = 0;
+            tif
+        };
+        let chunky = unspecified(raw_tiff(2, 1, 8, 4, false, &[1, 2, 3, 99, 4, 5, 6, 99]));
+        let planar = unspecified(raw_tiff(2, 1, 8, 4, true, &[1, 4, 2, 5, 3, 6, 99, 99]));
+        for tif in [chunky, planar] {
+            let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0) else {
+                panic!("an RGB TIFF with an extra sample must decode to Rgb8");
+            };
+            assert_eq!(bmp.data(), [1, 2, 3, 4, 5, 6]);
+        }
     }
 
     #[test]
