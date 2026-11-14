@@ -495,7 +495,7 @@ impl PageRenderer<'_> {
         })?;
         let (colour, coverage, channels) =
             P::as_mean(&raster).expect("a mean of the canvas's pixel type is kept under its key");
-        Some((TiledPattern::uniform(colour, coverage), channels))
+        Some((TiledPattern::uniform(colour, coverage)?, channels))
     }
 
     /// The cell rasterised once per quarter-pixel phase and composited at

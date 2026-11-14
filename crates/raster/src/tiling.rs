@@ -225,22 +225,26 @@ enum Source<P: Pixel> {
 
 impl<P: Pixel> TiledPattern<P> {
     /// A pattern painting `colour`, the bytes of one pixel, at `coverage`
-    /// everywhere.
-    ///
-    /// # Panics
-    ///
-    /// When `colour` is not `P::BYTES` long.
+    /// everywhere; `None` when `colour` is not `P::BYTES` long.
     #[must_use]
-    pub fn uniform(colour: &[u8], coverage: u8) -> Self {
-        assert_eq!(colour.len(), P::BYTES, "a uniform pattern takes one pixel");
+    pub fn uniform(colour: &[u8], coverage: u8) -> Option<Self> {
+        const {
+            assert!(
+                P::BYTES <= MAX_PIXEL_BYTES,
+                "a uniform pattern holds a pixel of at most MAX_PIXEL_BYTES"
+            );
+        }
+        if colour.len() != P::BYTES {
+            return None;
+        }
         let mut bytes = [0; MAX_PIXEL_BYTES];
-        bytes[..colour.len()].copy_from_slice(colour);
-        Self {
+        bytes[..P::BYTES].copy_from_slice(colour);
+        Some(Self {
             source: Source::Uniform {
                 colour: bytes,
                 coverage,
             },
-        }
+        })
     }
 
     /// The pattern painted on `bitmap`, whose top-left pixel is device
@@ -566,13 +570,18 @@ mod tests {
 
     #[test]
     fn uniform_serves_one_colour_and_coverage() {
-        let p = TiledPattern::<color::Rgb8>::uniform(&[1, 2, 3], 100);
+        let p = TiledPattern::<color::Rgb8>::uniform(&[1, 2, 3], 100).expect("one RGB pixel");
         assert!(p.is_static_color() && p.may_leave_unpainted());
         let mut out = [0u8; 2 * 3];
         let mut cov = [0u8; 2];
         p.fill_span_coverage(-5, 7, 8, &mut out, &mut cov);
         assert_eq!(out, [1, 2, 3, 1, 2, 3]);
         assert_eq!(cov, [100, 100]);
-        assert!(!TiledPattern::<color::Rgb8>::uniform(&[0; 3], 255).may_leave_unpainted());
+        assert!(
+            !TiledPattern::<color::Rgb8>::uniform(&[0; 3], 255)
+                .expect("one RGB pixel")
+                .may_leave_unpainted()
+        );
+        assert!(TiledPattern::<color::DeviceN8>::uniform(&[0; 3], 255).is_none());
     }
 }
