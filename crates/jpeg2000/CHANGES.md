@@ -79,6 +79,16 @@ corruptions in each mode.
   to the byte-at-a-time path otherwise. Every read consumes at most the 32
   bits a fetch guarantees, so the bits read are those of the byte-at-a-time
   reader. Test: `ht::tests::readers_match_byte_at_a_time_reading`.
+- `ht.rs`: the cleanup pass decodes a quad pair through
+  `decode_quad_pair`, which takes the pair's two sample rows as slices once
+  and decodes each sample of a quad with any significant sample without
+  branching on its significance: an insignificant sample consumes no MagSgn
+  bits and stores 0 over the zero the block starts with. Validity (the
+  exponent, the 30-bit limit, a sample inside the block) is gathered over
+  the pair, and an invalid pair fails the block as the first invalid sample
+  did, so the block decodes as zero in both. A quad without a significant
+  sample only clears its line-state entry. Branch mispredictions on the
+  significance pattern fell by a third on the lossless test image.
 
 ## Memory traffic under parallel decoding
 

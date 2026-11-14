@@ -522,6 +522,53 @@ const fn horizontal_spread(prev: u32, sig: u32, next: u32) -> u32 {
     sig | (prev >> 28) | (sig << 4) | (sig >> 4) | (next << 28)
 }
 
+/// Decode sample `bit` of a quad (0 top left, 1 bottom left, 2 top right,
+/// 3 bottom right) without branching on its significance.  Returns the
+/// sample, its `v_n` (twice the magnitude less one, with the bin centre)
+/// and whether it is valid.  An insignificant sample is 0 and valid, and
+/// consumes no MagSgn bits.
+#[inline(always)]
+fn mag_sgn_sample(
+    mag_sgn: &mut Forward<'_>,
+    p: u32,
+    qinf: u32,
+    u_q: u32,
+    bit: u32,
+) -> (u32, u32, bool) {
+    let significant = (qinf >> (4 + bit)) & 1 != 0;
+    let ms_val = mag_sgn.fetch();
+    let (m_n, underflow) = u_q.overflowing_sub((qinf >> (12 + bit)) & 1);
+    let m_n_valid = !underflow && m_n <= 30;
+    let m_n = if significant && m_n_valid { m_n } else { 0 };
+    mag_sgn.advance(m_n);
+    let mut v_n = ms_val & ((1 << m_n) - 1);
+    v_n |= ((qinf >> (8 + bit)) & 1) << m_n;
+    v_n |= 1;
+    // In 64 bits, so that no bit shifted past 31 goes unseen.
+    let value = u64::from(v_n + 2) << (p - 1);
+    let valid = m_n_valid && value >> 31 == 0;
+    let sample = if significant {
+        (ms_val << 31) | value as u32
+    } else {
+        0
+    };
+    (sample, v_n, valid || !significant)
+}
+
+/// Store `s` at `col` of `row`.  `false` when `col` is outside the row and
+/// the sample is significant; an insignificant sample (0) outside it is
+/// dropped.
+#[inline(always)]
+fn put(row: &mut [u32], col: usize, s: u32, significant: bool) -> bool {
+    match row.get_mut(col) {
+        Some(slot) => {
+            *slot = s;
+            true
+        }
+        None => !significant,
+    }
+}
+
 // ── The block decoder ──────────────────────────────────────────────────────
 
 struct BlockDecoder<'a, 'b> {
@@ -604,55 +651,54 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
             .get_mut(row as usize * self.stride + col as usize)
     }
 
-    /// Decode one significant sample of a quad: `bit` is its index (0 top
-    /// left, 1 bottom left, 2 top right, 3 bottom right).  Returns the
-    /// sample and its `v_n` (twice the magnitude less one, with the bin
-    /// centre).
-    fn mag_sgn_sample(&mut self, qinf: u32, u_q: u32, bit: u32) -> Option<(u32, u32)> {
-        let ms_val = self.mag_sgn.fetch();
-        let m_n = u_q.checked_sub((qinf >> (12 + bit)) & 1)?;
-        if m_n > 30 {
-            return None;
+    /// Decode the two quads of a pair at row `row`, columns `x` to `x + 3`,
+    /// and update the line state at `ls` and `ls + 1` as the next row
+    /// pair's context.  `None` when a significant sample is invalid or lies
+    /// outside the block.
+    fn decode_quad_pair(
+        &mut self,
+        qinf: [u32; 2],
+        u_q: [u32; 2],
+        row: u32,
+        x: u32,
+        ls: usize,
+    ) -> Option<()> {
+        let stride = self.stride;
+        let rows = self.samples.get_mut(row as usize * stride..)?;
+        let (top, rest) = rows.split_at_mut(stride.min(rows.len()));
+        let bottom = rest.get_mut(..stride).unwrap_or_default();
+        let mut valid = true;
+        for q in 0..2 {
+            let (qinf, u_q) = (qinf[q], u_q[q]);
+            let col = x as usize + 2 * q;
+            let ls = ls + q;
+            if qinf & 0xF0 == 0 {
+                self.line_state[ls + 1] = 0;
+                continue;
+            }
+            let significant = |bit: u32| (qinf >> (4 + bit)) & 1 != 0;
+            // The left column: top, then bottom.
+            let (s, _, ok) = mag_sgn_sample(&mut self.mag_sgn, self.p, qinf, u_q, 0);
+            valid &= ok && put(top, col, s, significant(0));
+            let (s, v_n, ok) = mag_sgn_sample(&mut self.mag_sgn, self.p, qinf, u_q, 1);
+            valid &= ok && put(bottom, col, s, significant(1));
+            if significant(1) {
+                let t = u32::from(self.line_state[ls] & 0x7F);
+                let e = 32 - v_n.leading_zeros();
+                self.line_state[ls] = (0x80 | t.max(e)) as u8;
+            }
+            // The right column, whose lower sample is the next quad's NW.
+            let (s, _, ok) = mag_sgn_sample(&mut self.mag_sgn, self.p, qinf, u_q, 2);
+            valid &= ok && put(top, col + 1, s, significant(2));
+            let (s, v_n, ok) = mag_sgn_sample(&mut self.mag_sgn, self.p, qinf, u_q, 3);
+            valid &= ok && put(bottom, col + 1, s, significant(3));
+            self.line_state[ls + 1] = if significant(3) {
+                (0x80 | (32 - v_n.leading_zeros())) as u8
+            } else {
+                0
+            };
         }
-        self.mag_sgn.advance(m_n);
-        let sign = ms_val << 31;
-        let mut v_n = ms_val & ((1 << m_n) - 1);
-        v_n |= ((qinf >> (8 + bit)) & 1) << m_n;
-        v_n |= 1;
-        // In 64 bits, so that no bit shifted past 31 goes unseen.
-        let value = u32::try_from(u64::from(v_n + 2) << (self.p - 1))
-            .ok()
-            .filter(|value| value >> 31 == 0)?;
-        Some((sign | value, v_n))
-    }
-
-    /// Decode the samples of one quad at `(row, col)` and update the line
-    /// state at `ls` (this quad) as the next row's context.
-    fn decode_quad(&mut self, qinf: u32, u_q: u32, row: u32, col: u32, ls: usize) -> Option<()> {
-        // The left column: top, then bottom.
-        if qinf & 0x10 != 0 {
-            let (s, _) = self.mag_sgn_sample(qinf, u_q, 0)?;
-            *self.sample_mut(row, col)? = s;
-        }
-        if qinf & 0x20 != 0 {
-            let (s, v_n) = self.mag_sgn_sample(qinf, u_q, 1)?;
-            *self.sample_mut(row + 1, col)? = s;
-            let t = u32::from(self.line_state[ls] & 0x7F);
-            let e = 32 - v_n.leading_zeros();
-            self.line_state[ls] = (0x80 | t.max(e)) as u8;
-        }
-        // The right column, whose lower sample is the next quad's NW.
-        if qinf & 0x40 != 0 {
-            let (s, _) = self.mag_sgn_sample(qinf, u_q, 2)?;
-            *self.sample_mut(row, col + 1)? = s;
-        }
-        self.line_state[ls + 1] = 0;
-        if qinf & 0x80 != 0 {
-            let (s, v_n) = self.mag_sgn_sample(qinf, u_q, 3)?;
-            *self.sample_mut(row + 1, col + 1)? = s;
-            self.line_state[ls + 1] = (0x80 | (32 - v_n.leading_zeros())) as u8;
-        }
-        Some(())
+        valid.then_some(())
     }
 
     /// The sample-location mask of the quad pair at column `x` of a row
@@ -730,8 +776,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
             self.vlc.advance(consumed);
 
             self.check_locs(x, height > 1, qinf)?;
-            self.decode_quad(qinf[0], u_q[0], 0, x, ls)?;
-            self.decode_quad(qinf[1], u_q[1], 0, x + 2, ls + 1)?;
+            self.decode_quad_pair(qinf, u_q, 0, x, ls)?;
             ls += 2;
             x += 4;
         }
@@ -802,8 +847,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
                 self.line_state[ls + 2] = 0;
 
                 self.check_locs(x, y + 2 <= height, qinf)?;
-                self.decode_quad(qinf[0], u_q[0], y, x, ls)?;
-                self.decode_quad(qinf[1], u_q[1], y, x + 2, ls + 1)?;
+                self.decode_quad_pair(qinf, u_q, y, x, ls)?;
                 ls += 2;
                 x += 4;
             }
