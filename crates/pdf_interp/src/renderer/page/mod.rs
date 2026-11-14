@@ -111,6 +111,7 @@ use pdf::{Document, ObjectId};
 use raster::pipe::ChannelMask;
 use raster::{Bitmap, path::PathBuilder, transparency::Backdrop};
 
+use super::color::InkChannels;
 use super::font_cache::{DocumentFonts, FontCache};
 use super::gstate::{Ctm, GStateStack};
 use crate::PageGeometry;
@@ -303,10 +304,10 @@ pub struct PageRenderer<'doc> {
     group_pool: Vec<PageCanvas>,
     /// The spot colorants of the page and their channels on an ink canvas.
     ink_map: Rc<RefCell<ink_map::InkMap>>,
-    /// The channels the renderer's paints wrote, bit `i` for channel `i`:
-    /// the union over each paint of the channels its overprint leaves it,
-    /// every channel for a paint without overprint.
-    painted: Cell<u8>,
+    /// The channels the renderer's paints wrote — the union over each
+    /// paint of the channels its overprint leaves it, every channel for a
+    /// paint without overprint — and those their colours carry.
+    painted: Cell<InkChannels>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Image `XObjects` already decoded on this page, shared with the
@@ -608,7 +609,7 @@ impl<'doc> PageRenderer<'doc> {
             page_group: group,
             group_pool: Vec::new(),
             ink_map: Rc::default(),
-            painted: Cell::new(0),
+            painted: Cell::new(InkChannels::NONE),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             tint_budget: std::rc::Rc::new(crate::resources::image::colorspace::TintBudget::page()),
@@ -864,15 +865,18 @@ impl<'doc> PageRenderer<'doc> {
     }
 
     /// The channels the renderer's paints wrote (see the `painted` field).
-    pub(super) const fn painted_channels(&self) -> ChannelMask {
-        ChannelMask::new(self.painted.get())
+    pub(super) const fn painted_channels(&self) -> InkChannels {
+        self.painted.get()
     }
 
     /// Record a paint writing the channels `overprint`, every channel when
-    /// `None`.
-    pub(super) fn record_painted(&self, overprint: Option<ChannelMask>) {
-        let bits = overprint.map_or(ChannelMask::ALL.bits(), ChannelMask::bits);
-        self.painted.set(self.painted.get() | bits);
+    /// `None`, of a colour carried in the channels `carries`.
+    pub(super) fn record_painted(&self, overprint: Option<ChannelMask>, carries: ChannelMask) {
+        let paint = InkChannels {
+            paints: overprint.unwrap_or(ChannelMask::ALL),
+            carries,
+        };
+        self.painted.set(self.painted.get().union(paint));
     }
 
     /// Consume a child renderer and return its canvas as painted, in its

@@ -21,10 +21,9 @@ use std::rc::Rc;
 
 use color::{DeviceN8, Rgb8};
 use pdf::ObjectId;
-use raster::pipe::ChannelMask;
 use raster::{Bitmap, CellPhase};
 
-use super::super::color::RasterColor;
+use super::super::color::{InkChannels, RasterColor};
 use super::PageRenderer;
 use super::canvas::CanvasKind;
 use crate::content::Operator;
@@ -129,10 +128,11 @@ pub(super) enum CellRaster {
     /// The cell bitmap, composited at every lattice point.
     Cell(Rc<Bitmap<Rgb8>>),
     /// The mean ink and coverage of a cell below one pixel in area, with
-    /// the channels the cell's content painted.
-    InkMean([u8; 8], u8, ChannelMask),
-    /// The cell bitmap of ink, with the channels its content painted.
-    InkCell(Rc<Bitmap<DeviceN8>>, ChannelMask),
+    /// the channels the cell's content painted and carried.
+    InkMean([u8; 8], u8, InkChannels),
+    /// The cell bitmap of ink, with the channels its content painted and
+    /// carried.
+    InkCell(Rc<Bitmap<DeviceN8>>, InkChannels),
 }
 
 /// Resolved shadings and tiling cells keyed by object.  A `None` value

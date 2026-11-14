@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use raster::pipe::ChannelMask;
 use raster::{transparency::GroupParams, types::BlendMode};
 
 use super::super::document_images::{self, ImageKey, Lookup, Outcome};
@@ -456,7 +457,13 @@ impl PageRenderer<'_> {
         if let (Some(mut g), Some(parent_group)) = (group, parent_group) {
             self.canvas.swap_group(&mut g);
             self.group = parent_group;
-            let paint = self.paint_params(parent_fill_alpha, parent_blend_mode, None);
+            // The group's paints recorded the channels their colours carry.
+            let paint = self.paint_params(
+                parent_fill_alpha,
+                parent_blend_mode,
+                None,
+                ChannelMask::new(0),
+            );
             let pipe = paint.pipe();
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);

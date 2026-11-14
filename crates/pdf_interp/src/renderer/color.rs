@@ -19,6 +19,43 @@ use crate::resources::transfer::Transfer;
 /// The process channels C, M, Y and K of an ink canvas.
 pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
 
+/// The channels of an ink canvas that a set of paints wrote (`paints`),
+/// and those in which their colours carry ink (`carries`): a colour's
+/// components occupy the channels of [`RasterColor::carries`], and a paint
+/// that knocks out writes its other channels as no ink.  A transfer
+/// function maps the channels a colour carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InkChannels {
+    /// The channels written.
+    pub(crate) paints: ChannelMask,
+    /// The channels carrying the colours' components.
+    pub(crate) carries: ChannelMask,
+}
+
+impl InkChannels {
+    /// No channel, the channels of no paint.
+    pub(crate) const NONE: Self = Self {
+        paints: ChannelMask::new(0),
+        carries: ChannelMask::new(0),
+    };
+
+    /// Every channel, the channels of a paint of sRGB samples, whose
+    /// channels are not known.
+    pub(crate) const ALL: Self = Self {
+        paints: ChannelMask::ALL,
+        carries: ChannelMask::ALL,
+    };
+
+    /// The channels of the paints of `self` and of `other`.
+    #[must_use]
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self {
+            paints: ChannelMask::new(self.paints.bits() | other.paints.bits()),
+            carries: ChannelMask::new(self.carries.bits() | other.carries.bits()),
+        }
+    }
+}
+
 /// The ink a `Separation` or `DeviceN` colour of a given space paints on an
 /// ink canvas, fixed for a page once the page's spot slots hold the
 /// space's spot colorants.
@@ -272,7 +309,9 @@ impl RasterColor {
         self.ink.get_or_init(|| {
             let [c, m, y, k] = color::cmyk::rgb_to_ink(self.source);
             let ink = [c, m, y, k, 0, 0, 0, 0];
-            self.ink_transfer.as_ref().map_or(ink, |t| t.apply_ink(ink))
+            self.ink_transfer
+                .as_ref()
+                .map_or(ink, |t| t.apply_ink(ink, PROCESS_CHANNELS))
         })
     }
 
@@ -280,6 +319,18 @@ impl RasterColor {
     #[must_use]
     pub(crate) const fn paints(&self) -> ChannelMask {
         self.paints
+    }
+
+    /// The channels that carry the colour's components on an ink canvas:
+    /// those it paints for a colour given as ink, the process channels for
+    /// a derived ink, which holds no spot ink.
+    #[must_use]
+    pub(crate) const fn carries(&self) -> ChannelMask {
+        if self.given.is_some() {
+            self.paints
+        } else {
+            PROCESS_CHANNELS
+        }
     }
 
     /// Whether nonzero overprint mode applies to the colour.
@@ -334,7 +385,7 @@ impl RasterColor {
                 ..*self
             };
         };
-        let ink = t.apply_ink(given);
+        let ink = t.apply_ink(given, self.carries());
         Self {
             bytes,
             given: Some(ink),
@@ -495,7 +546,7 @@ mod tests {
         let mapped = spot.transferred(Some(&transfer));
         assert_eq!(mapped.bytes(), [55, 225, 195]);
         assert_eq!(mapped.paints(), ChannelMask::new(0b1_0000));
-        assert_eq!(mapped.ink(), &[255, 255, 255, 255, 102, 255, 255, 255]);
+        assert_eq!(mapped.ink(), &[0, 0, 0, 0, 102, 0, 0, 0]);
         assert_eq!(spot.transferred(None), spot);
         // A process colour keeps its eligibility and its zero components.
         let black = RasterColor::cmyk(0.0, 0.0, 0.0, 1.0).transferred(Some(&transfer));
@@ -508,7 +559,11 @@ mod tests {
         let grey = RasterColor::gray(0.4);
         let mapped = grey.transferred(Some(&transfer));
         assert_eq!(mapped.paints(), ChannelMask::ALL);
-        assert_eq!(mapped.ink(), &transfer.apply_ink(*grey.ink()));
+        assert_eq!(
+            mapped.ink(),
+            &transfer.apply_ink(*grey.ink(), PROCESS_CHANNELS)
+        );
+        assert_eq!(mapped.ink()[4..], [0; 4], "a derived ink holds no spot ink");
     }
 
     #[test]

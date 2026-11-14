@@ -569,6 +569,38 @@ fn transfer_maps_derived_ink_after_conversion() {
     }
 }
 
+/// `/GS_i`: overprint with the inverting transfer function `f(x) = 1 − x`,
+/// for which `f(1) ≠ 1`: an absent ink maps to full ink; `/GS_k`: the same
+/// function without overprint.
+const INVERTING: &str = "/GS_i << /OP true /op true \
+     /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> >> \
+     /GS_k << /OP false /op false \
+     /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> >>";
+
+/// A transfer function maps only the channels that carry a component of
+/// the colour.  A grey, an RGB colour and a grey image sample, whose ink
+/// holds no spot, leave every spot channel empty, the free ones included,
+/// so a spot that takes a slot later shows only where it was painted.  A
+/// spot colour that knocks out leaves the process channels empty.
+#[test]
+fn transfer_maps_only_the_colours_own_channels() {
+    let doc = overprint_doc(INVERTING, &spot_space());
+    for content in [
+        "1 g 0 0 10 10 re f",
+        "0.2 0.4 0.6 rg 0 0 10 10 re f",
+        "10 0 0 10 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x40 EI",
+    ] {
+        let content = format!("q /GS_i gs {content} Q /Spot cs 1 scn 8 0 2 10 re f");
+        let ink = render_ink(&doc, content.as_bytes());
+        let px = ink_at(&ink, 2, 5);
+        assert!(px[..4].iter().any(|&v| v != 0), "{content}: {px:?}");
+        assert_eq!(px[4..], [0; 4], "{content}: {px:?}");
+        assert_eq!(ink_at(&ink, 9, 5)[4], 255, "{content}");
+    }
+    let ink = render_ink(&doc, b"/GS_k gs /Spot cs 1 scn 0 0 10 10 re f");
+    assert_eq!(ink_at(&ink, 5, 5), [0; 8]);
+}
+
 /// A shading in a `Separation` space paints its spot channel alone, so
 /// under overprint the cyan under it stays: through `sh` for an axial, a
 /// function-based and a mesh shading, and through a shading pattern with a

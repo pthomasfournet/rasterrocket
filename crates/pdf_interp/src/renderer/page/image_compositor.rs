@@ -4,7 +4,7 @@
 use color::{Pixel, PixelMode};
 use raster::{
     Bitmap,
-    pipe::{Pattern, PipeSrc, PipeState, RowPattern},
+    pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern},
     types::BlendMode,
 };
 
@@ -90,9 +90,10 @@ pub(super) struct ImageCompositor<'a> {
     /// The transfer function the samples' ink maps through on an ink
     /// bitmap; on an RGB bitmap the samples are mapped beforehand.
     pub(super) transfer: Option<&'a Transfer>,
-    /// Whether the samples are ink, eight bytes each, for an ink bitmap;
-    /// otherwise they are RGB, three bytes each.  Set only with a pipe.
-    pub(super) ink_samples: bool,
+    /// The channels that carry the samples' colorants when the samples
+    /// are ink, eight bytes each, for an ink bitmap; `None` when they are
+    /// RGB, three bytes each.  Set only with a pipe.
+    pub(super) ink_samples: Option<ChannelMask>,
 }
 
 impl<'a> ImageCompositor<'a> {
@@ -107,7 +108,7 @@ impl<'a> ImageCompositor<'a> {
             pipe: (!direct).then(|| paint.pipe()),
             solid: None,
             transfer: None,
-            ink_samples: false,
+            ink_samples: None,
         }
     }
 
@@ -129,7 +130,7 @@ impl<'a> ImageCompositor<'a> {
         shape: &[u8],
     ) {
         let bpp = P::BYTES;
-        let sample_bytes = if self.ink_samples { 8 } else { 3 };
+        let sample_bytes = if self.ink_samples.is_some() { 8 } else { 3 };
         let (row, mut alpha_row) = bitmap.row_and_alpha_mut(y);
         let x0 = x0 as usize;
         let columns = (row.len() / bpp).saturating_sub(x0).min(shape.len());
@@ -162,12 +163,14 @@ impl<'a> ImageCompositor<'a> {
                 data: &colours[a * sample_bytes..b * sample_bytes],
             };
             let ink = InkPattern::new(&samples, self.transfer);
-            let native = TransferredInk::new(&samples, self.transfer);
-            let src = match self.solid {
-                Some(solid) => PipeSrc::Solid(solid),
-                None if self.ink_samples => PipeSrc::Pattern(&native),
-                None if P::MODE == PixelMode::DeviceN8 => PipeSrc::Pattern(&ink),
-                None => PipeSrc::Pattern(&samples as &dyn Pattern),
+            let native = self
+                .ink_samples
+                .map(|channels| TransferredInk::new(&samples, self.transfer, channels));
+            let src = match (self.solid, &native) {
+                (Some(solid), _) => PipeSrc::Solid(solid),
+                (None, Some(native)) => PipeSrc::Pattern(native),
+                (None, None) if P::MODE == PixelMode::DeviceN8 => PipeSrc::Pattern(&ink),
+                (None, None) => PipeSrc::Pattern(&samples as &dyn Pattern),
             };
             #[expect(
                 clippy::cast_possible_wrap,

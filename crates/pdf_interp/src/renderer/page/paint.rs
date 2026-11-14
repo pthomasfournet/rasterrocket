@@ -278,14 +278,16 @@ impl PageRenderer<'_> {
 
     /// The parameters of a paint at constant alpha `alpha` under
     /// `blend_mode` that writes the channels `overprint` (`None` for
-    /// all), with the backdrop it consults.
+    /// all) of a colour carried in the channels `carries`, with the
+    /// backdrop it consults.
     pub(super) fn paint_params(
         &self,
         alpha: u8,
         blend_mode: BlendMode,
         overprint: Option<ChannelMask>,
+        carries: ChannelMask,
     ) -> PaintParams {
-        self.record_painted(overprint);
+        self.record_painted(overprint, carries);
         PaintParams {
             alpha,
             blend_mode,
@@ -305,7 +307,12 @@ impl PageRenderer<'_> {
         alpha: u8,
         blend_mode: BlendMode,
     ) -> PaintParams {
-        self.paint_params(alpha, blend_mode, self.overprint_mask(stroke, colour))
+        self.paint_params(
+            alpha,
+            blend_mode,
+            self.overprint_mask(stroke, colour),
+            colour.carries(),
+        )
     }
 
     /// The channels a paint of the stroking (`stroke`) or non-stroking
@@ -438,7 +445,14 @@ impl PageRenderer<'_> {
         // state in effect.
         let paint = tiled.as_ref().map_or_else(
             || self.solid_paint(false, &solid_color, fill_alpha, blend_mode),
-            |tile| self.paint_params(fill_alpha, blend_mode, self.tile_overprint(tile)),
+            |tile| {
+                self.paint_params(
+                    fill_alpha,
+                    blend_mode,
+                    self.tile_overprint(tile),
+                    tile.carries(),
+                )
+            },
         );
         let mut pipe = paint.pipe();
         let source = PaintSource::new(
@@ -644,7 +658,14 @@ impl PageRenderer<'_> {
         };
         let paint = tiled.as_ref().map_or_else(
             || self.solid_paint(true, &solid_color, stroke_alpha, blend_mode),
-            |tile| self.paint_params(stroke_alpha, blend_mode, self.tile_overprint(tile)),
+            |tile| {
+                self.paint_params(
+                    stroke_alpha,
+                    blend_mode,
+                    self.tile_overprint(tile),
+                    tile.carries(),
+                )
+            },
         );
         let mut pipe = paint.pipe();
         let source = PaintSource::new(
@@ -727,7 +748,9 @@ impl<'a> PaintSource<'a> {
         Self {
             pattern: tiled.map(|tile| match tile {
                 Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, transfer),
-                Tile::Ink { pattern, .. } => CanvasPattern::ink(pattern, transfer),
+                Tile::Ink { pattern, channels } => {
+                    CanvasPattern::ink(pattern, transfer, channels.carries)
+                }
             }),
             solid: solid.bytes_for(kind.mode()),
         }

@@ -8,6 +8,7 @@ use gpu::GpuCtx;
 use gpu::blit::BlitBbox;
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
 
+use super::super::color::PROCESS_CHANNELS;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, with_canvas};
 use super::devices::CacheState;
@@ -110,7 +111,7 @@ impl PageRenderer<'_> {
         let (paint, transfer) = {
             let gs = self.gstate.current();
             (
-                self.paint_params(gs.fill_alpha, gs.blend_mode, None),
+                self.paint_params(gs.fill_alpha, gs.blend_mode, None, PROCESS_CHANNELS),
                 gs.transfer.clone(),
             )
         };

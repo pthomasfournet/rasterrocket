@@ -1,6 +1,6 @@
 //! Tiling pattern resolution and tile rendering.
 
-use super::super::color::RasterColor;
+use super::super::color::{InkChannels, RasterColor};
 use super::super::gstate::ctm_multiply;
 use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey};
@@ -106,11 +106,11 @@ pub(super) enum Tile {
     /// A tile of sRGB, for an RGB canvas.
     Rgb(TiledPattern),
     /// A tile of ink, for an ink canvas, with the channels the cell's
-    /// content painted: the union over its paints of the channels each
-    /// wrote.
+    /// content painted and carried: the union over its paints of the
+    /// channels each wrote and those its colour carried.
     Ink {
         pattern: TiledPattern<DeviceN8>,
-        paints: ChannelMask,
+        channels: InkChannels,
     },
 }
 
@@ -120,7 +120,17 @@ impl Tile {
     pub(super) const fn paints(&self) -> ChannelMask {
         match self {
             Self::Rgb(_) => ChannelMask::ALL,
-            Self::Ink { paints, .. } => *paints,
+            Self::Ink { channels, .. } => channels.paints,
+        }
+    }
+
+    /// The channels that carry the tile's colours on an ink canvas: those
+    /// its cell's content carried for a tile of ink, every channel for one
+    /// of sRGB.
+    pub(super) const fn carries(&self) -> ChannelMask {
+        match self {
+            Self::Rgb(_) => ChannelMask::ALL,
+            Self::Ink { channels, .. } => channels.carries,
         }
     }
 }
@@ -135,21 +145,20 @@ trait CellPixel: Pixel {
     /// The bitmap of `canvas`, when it is of this pixel type.
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>>;
 
-    /// A cell bitmap and the channels its content painted, as the pattern
+    /// A cell bitmap and the channels its content painted and carried, as
+    /// the pattern memo keeps them.
+    fn cell(bitmap: Rc<Bitmap<Self>>, channels: InkChannels) -> CellRaster;
+
+    /// The mean colour, coverage and channels of a cell, as the pattern
     /// memo keeps them.
-    fn cell(bitmap: Rc<Bitmap<Self>>, paints: ChannelMask) -> CellRaster;
+    fn mean(colour: &[u8], coverage: u8, channels: InkChannels) -> CellRaster;
 
-    /// The mean colour, coverage and painted channels of a cell, as the
-    /// pattern memo keeps them.
-    fn mean(colour: &[u8], coverage: u8, paints: ChannelMask) -> CellRaster;
+    /// The cell bitmap and channels of a kept raster of this pixel type.
+    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)>;
 
-    /// The cell bitmap and painted channels of a kept raster of this pixel
-    /// type.
-    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, ChannelMask)>;
-
-    /// The mean colour, coverage and painted channels of a kept raster of
-    /// this pixel type.
-    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, ChannelMask)>;
+    /// The mean colour, coverage and channels of a kept raster of this
+    /// pixel type.
+    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, InkChannels)>;
 }
 
 impl CellPixel for Rgb8 {
@@ -162,26 +171,26 @@ impl CellPixel for Rgb8 {
         }
     }
 
-    fn cell(bitmap: Rc<Bitmap<Self>>, _paints: ChannelMask) -> CellRaster {
+    fn cell(bitmap: Rc<Bitmap<Self>>, _channels: InkChannels) -> CellRaster {
         CellRaster::Cell(bitmap)
     }
 
-    fn mean(colour: &[u8], coverage: u8, _paints: ChannelMask) -> CellRaster {
+    fn mean(colour: &[u8], coverage: u8, _channels: InkChannels) -> CellRaster {
         let mut rgb = [0; 3];
         rgb.copy_from_slice(colour);
         CellRaster::Mean(rgb, coverage)
     }
 
-    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, ChannelMask)> {
+    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)> {
         match raster {
-            CellRaster::Cell(bitmap) => Some((bitmap, ChannelMask::ALL)),
+            CellRaster::Cell(bitmap) => Some((bitmap, InkChannels::ALL)),
             _ => None,
         }
     }
 
-    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, ChannelMask)> {
+    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, InkChannels)> {
         match raster {
-            CellRaster::Mean(colour, coverage) => Some((colour, *coverage, ChannelMask::ALL)),
+            CellRaster::Mean(colour, coverage) => Some((colour, *coverage, InkChannels::ALL)),
             _ => None,
         }
     }
@@ -197,26 +206,26 @@ impl CellPixel for DeviceN8 {
         }
     }
 
-    fn cell(bitmap: Rc<Bitmap<Self>>, paints: ChannelMask) -> CellRaster {
-        CellRaster::InkCell(bitmap, paints)
+    fn cell(bitmap: Rc<Bitmap<Self>>, channels: InkChannels) -> CellRaster {
+        CellRaster::InkCell(bitmap, channels)
     }
 
-    fn mean(colour: &[u8], coverage: u8, paints: ChannelMask) -> CellRaster {
+    fn mean(colour: &[u8], coverage: u8, channels: InkChannels) -> CellRaster {
         let mut ink = [0; 8];
         ink.copy_from_slice(colour);
-        CellRaster::InkMean(ink, coverage, paints)
+        CellRaster::InkMean(ink, coverage, channels)
     }
 
-    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, ChannelMask)> {
+    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)> {
         match raster {
-            CellRaster::InkCell(bitmap, paints) => Some((bitmap, paints)),
+            CellRaster::InkCell(bitmap, channels) => Some((bitmap, channels)),
             _ => None,
         }
     }
 
-    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, ChannelMask)> {
+    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, InkChannels)> {
         match raster {
-            CellRaster::InkMean(colour, coverage, paints) => Some((colour, *coverage, *paints)),
+            CellRaster::InkMean(colour, coverage, channels) => Some((colour, *coverage, *channels)),
             _ => None,
         }
     }
@@ -416,7 +425,7 @@ impl PageRenderer<'_> {
                 .map(|(pattern, _)| Tile::Rgb(pattern)),
             CanvasKind::Ink => self
                 .tile::<DeviceN8>(name, &cell, &geometry, region, key)
-                .map(|(pattern, paints)| Tile::Ink { pattern, paints }),
+                .map(|(pattern, channels)| Tile::Ink { pattern, channels }),
         }
     }
 
@@ -435,7 +444,7 @@ impl PageRenderer<'_> {
         geometry: &CellGeometry,
         region: PixelRect,
         key: RasterKey,
-    ) -> Option<(TiledPattern<P>, ChannelMask)> {
+    ) -> Option<(TiledPattern<P>, InkChannels)> {
         // A lattice cell below one pixel in area repeats more than once per
         // pixel; box-filtered over a pixel, the pattern is its mean.
         if geometry.area < 1.0 {
@@ -477,19 +486,19 @@ impl PageRenderer<'_> {
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
         key: RasterKey,
-    ) -> Option<(TiledPattern<P>, ChannelMask)> {
+    ) -> Option<(TiledPattern<P>, InkChannels)> {
         let raster = self.memo_raster(key, |r| {
             let (w, h) = (geometry.bounds.width, geometry.bounds.height);
             let k = (MEAN_SAMPLE_PX / w.min(h)).min(MAX_TILE_PX / w.max(h));
             let size = (pixel_ceil(w * k) as u32, pixel_ceil(h * k) as u32);
-            let (sample, paints) =
+            let (sample, channels) =
                 r.render_cells::<P>(cell, size, &[geometry.placement(k, 0.0, 0.0)])?;
             let (colour, coverage) = mean_over_period(&sample, geometry.area * k * k);
-            Some(P::mean(&colour, coverage, paints))
+            Some(P::mean(&colour, coverage, channels))
         })?;
-        let (colour, coverage, paints) =
+        let (colour, coverage, channels) =
             P::as_mean(&raster).expect("a mean of the canvas's pixel type is kept under its key");
-        Some((TiledPattern::uniform(colour, coverage), paints))
+        Some((TiledPattern::uniform(colour, coverage), channels))
     }
 
     /// The cell rasterised once per quarter-pixel phase and composited at
@@ -506,7 +515,7 @@ impl PageRenderer<'_> {
         geometry: &CellGeometry,
         region: PixelRect,
         key: &RasterKey,
-    ) -> Option<(TiledPattern<P>, ChannelMask)> {
+    ) -> Option<(TiledPattern<P>, InkChannels)> {
         // Every phase's bitmap has room for the cell offset by up to one
         // pixel.
         let size = (
@@ -517,9 +526,9 @@ impl PageRenderer<'_> {
         let raster_at = |r: &mut Self, phase: CellPhase| {
             let raster = r.memo_raster(key.at_phase(phase), |r| {
                 let (x, y) = (f64::from(phase.0) * scale, f64::from(phase.1) * scale);
-                let (bitmap, paints) =
+                let (bitmap, channels) =
                     r.render_cells::<P>(cell, size, &[geometry.placement(1.0, x, y)])?;
-                Some(P::cell(Rc::new(bitmap), paints))
+                Some(P::cell(Rc::new(bitmap), channels))
             })?;
             Some(
                 P::as_cell(raster)
@@ -530,11 +539,11 @@ impl PageRenderer<'_> {
         if self.refuses_test_canvas(region.width(), region.height()) {
             return None;
         }
-        let mut paints = 0u8;
+        let mut channels = InkChannels::NONE;
         TiledPattern::compose(
             |phase| {
                 raster_at(self, phase).map(|(bitmap, painted)| {
-                    paints |= painted.bits();
+                    channels = channels.union(painted);
                     bitmap
                 })
             },
@@ -549,7 +558,7 @@ impl PageRenderer<'_> {
             self.abort_allocation(e);
             None
         })
-        .map(|pattern| (pattern, ChannelMask::new(paints)))
+        .map(|pattern| (pattern, channels))
     }
 
     /// The cells meeting `region` rendered in place on a region-sized
@@ -566,7 +575,7 @@ impl PageRenderer<'_> {
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
         region: PixelRect,
-    ) -> Option<(TiledPattern<P>, ChannelMask)> {
+    ) -> Option<(TiledPattern<P>, InkChannels)> {
         let (cell_w, cell_h) = geometry.cell_size();
         let (rx0, ry0) = (region.x0 as i32, region.y0 as i32);
         let rect = (rx0, ry0, region.x1 as i32, region.y1 as i32);
@@ -591,8 +600,8 @@ impl PageRenderer<'_> {
             return None;
         }
         let size = (region.width(), region.height());
-        let (screen, paints) = self.render_cells::<P>(cell, size, &placements)?;
-        Some((TiledPattern::screen(screen, rx0, ry0), paints))
+        let (screen, channels) = self.render_cells::<P>(cell, size, &placements)?;
+        Some((TiledPattern::screen(screen, rx0, ry0), channels))
     }
 
     /// Render the pattern cell once per matrix of `placements` onto one
@@ -612,7 +621,7 @@ impl PageRenderer<'_> {
         cell: &CellContent<'_>,
         (width, height): (u32, u32),
         placements: &[[f64; 6]],
-    ) -> Option<(Bitmap<P>, ChannelMask)> {
+    ) -> Option<(Bitmap<P>, InkChannels)> {
         let desc = cell.desc;
         // The cell's operators count against the page's operation budget
         // and deadline, which the parent cannot check while the cell runs.
@@ -646,8 +655,8 @@ impl PageRenderer<'_> {
         // The cells' operations and any budget breach pass to the parent,
         // whose execution stops on a breach.
         child.fold_child_into(self);
-        let paints = child.painted_channels();
-        P::bitmap(child.finish_canvas()).map(|bitmap| (bitmap, paints))
+        let channels = child.painted_channels();
+        P::bitmap(child.finish_canvas()).map(|bitmap| (bitmap, channels))
     }
 
     /// Intersect the clip with `bbox`, a rectangle `[x0, y0, x1, y1]` in

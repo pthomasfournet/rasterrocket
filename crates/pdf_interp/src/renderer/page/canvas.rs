@@ -16,11 +16,14 @@ use std::cell::RefCell;
 use color::cmyk::{SpotLut, ink_to_rgb_row, rgb_to_ink};
 use color::{DeviceN8, Pixel, PixelMode, Rgb8};
 use raster::clip::Clip;
-use raster::pipe::{Pattern, PipeSrc, PipeState, RowPattern, TransferSet, render_bitmap_span};
+use raster::pipe::{
+    ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, TransferSet, render_bitmap_span,
+};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
 use raster::transparency::{Backdrop, GroupBitmap, GroupParams, begin_group, paint_group};
 use raster::{Bitmap, BitmapBuffers};
 
+use super::super::color::PROCESS_CHANNELS;
 use super::pixel_rect::PixelRect;
 use super::{CanvasBuffers, PageRenderer};
 use crate::resources::transfer::Transfer;
@@ -248,13 +251,15 @@ impl PageCanvas {
     }
 
     /// Fill one Gouraud-shaded triangle of ink vertices through `pipe`,
-    /// clipped to `clip`, its ink mapped through `transfer`.  Nothing is
-    /// painted on an RGB canvas, which takes no ink.
+    /// clipped to `clip`, the ink of the channels `channels` mapped through
+    /// `transfer`.  Nothing is painted on an RGB canvas, which takes no
+    /// ink.
     pub(super) fn gouraud_ink_triangle(
         &mut self,
         clip: &Clip,
         pipe: &PipeState<'_>,
         transfer: Option<&Transfer>,
+        channels: ChannelMask,
         tri: [GouraudVertex<8>; 3],
     ) {
         let Self::Ink(b) = self else {
@@ -267,7 +272,7 @@ impl PageCanvas {
             render_bitmap_span::<DeviceN8>(
                 b,
                 pipe,
-                &PipeSrc::Pattern(&TransferredInk::new(&row, transfer)),
+                &PipeSrc::Pattern(&TransferredInk::new(&row, transfer, channels)),
                 None,
                 x0,
                 x1,
@@ -557,8 +562,9 @@ thread_local! {
 }
 
 /// A [`Pattern`] of sRGB bytes served as ink: each pixel the inner pattern
-/// yields becomes the ink [`rgb_to_ink`] gives it, with no spot ink, mapped
-/// through the ink tables of the transfer function, if any.  The pattern
+/// yields becomes the ink [`rgb_to_ink`] gives it, with no spot ink, its
+/// process ink mapped through the ink tables of the transfer function, if
+/// any.  The pattern
 /// only converts; coverage and the static-colour hint are the inner
 /// pattern's.
 pub(super) struct InkPattern<'a> {
@@ -590,7 +596,9 @@ impl<'a> InkPattern<'a> {
                     _ => {
                         let [c, m, y, k] = rgb_to_ink(*src);
                         let ink = [c, m, y, k, 0, 0, 0, 0];
-                        let ink = self.transfer.map_or(ink, |t| t.apply_ink(ink));
+                        let ink = self
+                            .transfer
+                            .map_or(ink, |t| t.apply_ink(ink, PROCESS_CHANNELS));
                         last = Some((*src, ink));
                         ink
                     }
@@ -620,25 +628,35 @@ impl Pattern for InkPattern<'_> {
     }
 }
 
-/// A [`Pattern`] of ink whose pixels map through the ink tables of a
-/// transfer function, if any.  Coverage and the static-colour hint are the
-/// inner pattern's.
+/// A [`Pattern`] of ink whose pixels map, in the channels that carry the
+/// pattern's colorants, through the ink tables of a transfer function, if
+/// any.  Coverage and the static-colour hint are the inner pattern's.
 pub(super) struct TransferredInk<'a> {
     pattern: &'a dyn Pattern,
     transfer: Option<&'a Transfer>,
+    channels: ChannelMask,
 }
 
 impl<'a> TransferredInk<'a> {
-    /// `pattern`, of ink, mapped through `transfer`.
-    pub(super) fn new(pattern: &'a dyn Pattern, transfer: Option<&'a Transfer>) -> Self {
-        Self { pattern, transfer }
+    /// `pattern`, of ink in the channels `channels`, mapped through
+    /// `transfer`.
+    pub(super) const fn new(
+        pattern: &'a dyn Pattern,
+        transfer: Option<&'a Transfer>,
+        channels: ChannelMask,
+    ) -> Self {
+        Self {
+            pattern,
+            transfer,
+            channels,
+        }
     }
 
     /// Map the ink pixels of `out` through the transfer function.
     fn map(&self, out: &mut [u8]) {
         if let Some(t) = self.transfer {
             for px in out.as_chunks_mut::<8>().0 {
-                *px = t.apply_ink(*px);
+                *px = t.apply_ink(*px, self.channels);
             }
         }
     }
@@ -692,10 +710,14 @@ impl<'a> CanvasPattern<'a> {
         }
     }
 
-    /// `pattern`, of ink, for an ink canvas, its ink mapped through
-    /// `transfer`.
-    pub(super) fn ink(pattern: &'a dyn Pattern, transfer: Option<&'a Transfer>) -> Self {
-        Self::Native(TransferredInk::new(pattern, transfer))
+    /// `pattern`, of ink in the channels `channels`, for an ink canvas,
+    /// its ink mapped through `transfer`.
+    pub(super) const fn ink(
+        pattern: &'a dyn Pattern,
+        transfer: Option<&'a Transfer>,
+        channels: ChannelMask,
+    ) -> Self {
+        Self::Native(TransferredInk::new(pattern, transfer, channels))
     }
 
     /// The transfer set `pipe` applies for a pattern on a canvas of `kind`:

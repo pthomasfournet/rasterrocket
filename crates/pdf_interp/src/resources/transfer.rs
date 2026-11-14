@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
+use raster::pipe::ChannelMask;
 
 use super::shading::function::Function;
 
@@ -77,10 +78,20 @@ impl Transfer {
         }
     }
 
-    /// Map the ink `[C, M, Y, K, S0, S1, S2, S3]` through the ink tables.
+    /// Map the channels `channels` of the ink `[C, M, Y, K, S0, S1, S2,
+    /// S3]` through the ink tables.  The other channels carry no component
+    /// of the colour and pass unchanged: a function with `f(1) ≠ 1` maps
+    /// an absent ink to some ink, which only the colour's own components
+    /// receive.
     #[must_use]
-    pub fn apply_ink(&self, ink: [u8; 8]) -> [u8; 8] {
-        std::array::from_fn(|i| self.ink[i][usize::from(ink[i])])
+    pub fn apply_ink(&self, ink: [u8; 8], channels: ChannelMask) -> [u8; 8] {
+        std::array::from_fn(|i| {
+            if channels.paints(i) {
+                self.ink[i][usize::from(ink[i])]
+            } else {
+                ink[i]
+            }
+        })
     }
 
     /// The red, green and blue tables.
@@ -242,8 +253,13 @@ mod tests {
             panic!("expected functions");
         };
         assert_eq!(
-            t.apply_ink([0, 51, 255, 0, 0, 0, 0, 10]),
+            t.apply_ink([0, 51, 255, 0, 0, 0, 0, 10], ChannelMask::ALL),
             [255, 204, 0, 255, 255, 255, 255, 245]
+        );
+        assert_eq!(
+            t.apply_ink([0, 51, 255, 0, 0, 0, 0, 10], ChannelMask::new(0b1000_1111)),
+            [255, 204, 0, 255, 0, 0, 0, 245],
+            "channels outside the mask pass unchanged"
         );
         let Some(TransferSetting::Functions(t)) =
             ext_gstate_transfer(&doc, &gs("<< /TR [/Identity /Identity /Identity 4 0 R] >>"))
@@ -252,7 +268,7 @@ mod tests {
         };
         assert_eq!(t.apply([0, 51, 255]), [0, 51, 255]);
         assert_eq!(
-            t.apply_ink([10, 20, 30, 40, 50, 0, 0, 0]),
+            t.apply_ink([10, 20, 30, 40, 50, 0, 0, 0], ChannelMask::ALL),
             [10, 20, 30, 215, 205, 255, 255, 255]
         );
         let Some(TransferSetting::Functions(t)) =
@@ -261,7 +277,7 @@ mod tests {
             panic!("expected functions");
         };
         assert_eq!(
-            t.apply_ink([10, 20, 30, 40, 0, 0, 0, 0]),
+            t.apply_ink([10, 20, 30, 40, 0, 0, 0, 0], ChannelMask::ALL),
             [245, 20, 30, 40, 0, 0, 0, 0]
         );
     }

@@ -128,6 +128,19 @@ pub struct ResolvedShading {
     pub held_bytes: usize,
 }
 
+impl ResolvedShading {
+    /// The channels that carry the shading's colours on an ink canvas:
+    /// those it paints for colours of ink, the process channels for sRGB
+    /// colours, which reach the canvas as process ink.
+    #[must_use]
+    pub(crate) const fn carries(&self) -> ChannelMask {
+        match self.result {
+            ShadingResult::InkPattern(_) | ShadingResult::InkMesh(_) => self.paints,
+            ShadingResult::Pattern(_) | ShadingResult::Mesh(_) => PROCESS_CHANNELS,
+        }
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// The plan by which the colours of a `Separation` or `DeviceN` space

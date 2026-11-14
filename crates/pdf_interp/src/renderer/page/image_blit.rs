@@ -5,6 +5,7 @@ use color::convert::div255;
 use raster::ClipResult;
 use raster::pipe::ChannelMask;
 
+use super::super::color::PROCESS_CHANNELS;
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend_u8, with_canvas};
@@ -258,10 +259,10 @@ impl PageRenderer<'_> {
             (gs.fill_alpha, gs.blend_mode, gs.transfer.clone())
         };
         let overprint = self.overprint_channels(false, paints);
-        let paint = self.paint_params(fill_alpha, blend_mode, overprint);
+        let paint = self.paint_params(fill_alpha, blend_mode, overprint, paints);
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         compositor.transfer = transfer.as_deref();
-        compositor.ink_samples = true;
+        compositor.ink_samples = Some(paints);
         let img_w = img.width as usize;
         let at = |x, y| sample_bytes::<8>(ink, img_w, 8, x, y);
         let span = (grid.x1 - grid.x0) as usize;
@@ -432,7 +433,7 @@ impl PageRenderer<'_> {
         let paint = if stencil {
             self.solid_paint(false, &painted_fill, fill_alpha, blend_mode)
         } else {
-            self.paint_params(fill_alpha, blend_mode, None)
+            self.paint_params(fill_alpha, blend_mode, None, PROCESS_CHANNELS)
         };
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
