@@ -23,7 +23,7 @@ use raster::clip::Clip;
 use raster::pipe::{PipeSrc, PipeState};
 use raster::types::AA_SIZE;
 
-use super::canvas::PageCanvas;
+use super::canvas::with_canvas;
 use super::{DEVICE_MATRIX, PageRenderer};
 
 /// A fill prepared for device evaluation: the CPU scanner's intersection
@@ -148,8 +148,8 @@ fn prepare_aa_fill(
     })
 }
 
-/// Composite device-computed coverage counts into the renderer's RGB
-/// canvas; an ink canvas is left as it is.
+/// Composite device-computed coverage counts into the renderer's canvas,
+/// of either pixel type.
 ///
 /// `counts` must be exactly `rect.width × rect.height` bytes of sub-sample
 /// counts (`0..=AA_SIZE²`); the slice is consumed as scratch.
@@ -161,9 +161,9 @@ fn gpu_coverage_to_bitmap(
     src: &PipeSrc<'_>,
 ) {
     let clip = renderer.gstate.current().clip.clone_shared();
-    if let PageCanvas::Rgb(bitmap) = &mut renderer.canvas {
-        paint_coverage(bitmap, &clip, counts, rect, pipe, src);
-    }
+    with_canvas!(&mut renderer.canvas, |bitmap| paint_coverage(
+        bitmap, &clip, counts, rect, pipe, src
+    ));
 }
 
 /// Composite one rectangle of coverage counts, row by row, exactly as the
@@ -173,8 +173,8 @@ fn gpu_coverage_to_bitmap(
 ///
 /// `rect` must lie within `bitmap` and the clip must be a rectangle within
 /// the bitmap (both guaranteed by [`prepare_aa_fill`]).
-fn paint_coverage(
-    bitmap: &mut raster::Bitmap<color::Rgb8>,
+fn paint_coverage<P: color::Pixel>(
+    bitmap: &mut raster::Bitmap<P>,
     clip: &Clip,
     counts: &mut [u8],
     rect: AaFillRect,
@@ -208,7 +208,7 @@ fn paint_coverage(
             reason = "x0 >= rect.x and x1 >= x0 by construction above"
         )]
         let span = &mut row_counts[(x0 - rect.x) as usize..=(x1 - rect.x) as usize];
-        raster::fill::draw_aa_counts::<color::Rgb8>(bitmap, pipe, src, span, x0, x1, y);
+        raster::fill::draw_aa_counts::<P>(bitmap, pipe, src, span, x0, x1, y);
     }
 }
 
@@ -246,9 +246,8 @@ pub(super) enum DeviceFill {
 /// [`gpu_coverage_to_bitmap`].
 ///
 /// [`DeviceFill::Painted`] means the caller skips the CPU fill.  The fill
-/// is [`DeviceFill::Declined`] on a canvas of ink (the counts composite
-/// onto RGB pixels only), when the device fill is disabled (the threshold
-/// is `usize::MAX`, checked before the path is scan-converted), when
+/// is [`DeviceFill::Declined`] when the device fill is disabled (the
+/// threshold is `usize::MAX`, checked before the path is scan-converted), when
 /// [`prepare_aa_fill`] declines it, or when the table has no
 /// intersections (it paints nothing).  A device error is
 /// [`DeviceFill::Failed`], logged (see [`report_failure`]); either way the
@@ -262,17 +261,15 @@ pub(super) fn try_backend_aa_fill<B: GpuBackend>(
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
 ) -> DeviceFill {
-    let PageCanvas::Rgb(bitmap) = &renderer.canvas else {
-        return DeviceFill::Declined;
-    };
     let threshold = aa_fill_threshold();
     if threshold == usize::MAX {
         return DeviceFill::Declined;
     }
+    let (width, height) = renderer.canvas.dims();
     let Some(fill) = prepare_aa_fill(
         &renderer.gstate.current().clip,
-        bitmap.width,
-        bitmap.height,
+        width,
+        height,
         path,
         flatness,
         even_odd,

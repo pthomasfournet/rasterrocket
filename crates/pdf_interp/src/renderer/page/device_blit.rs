@@ -9,7 +9,7 @@ use gpu::blit::BlitBbox;
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
 
 use super::PageRenderer;
-use super::canvas::CanvasKind;
+use super::canvas::{CanvasKind, with_canvas};
 use super::devices::CacheState;
 use super::image_compositor::{ImageCompositor, RgbaRows, composite_rgba_rows};
 use super::image_sampler::{GridClip, SampleGrid};
@@ -105,10 +105,6 @@ impl PageRenderer<'_> {
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
     ) -> bool {
-        // The kernel's samples are sRGB, composited onto an RGB canvas only.
-        if self.canvas.kind() != CanvasKind::Rgb {
-            return false;
-        }
         // Grid edges are clamped to the page, so they fit i32 whenever the
         // page does; a page wider than i32::MAX pixels cannot exist.
         let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
@@ -141,32 +137,28 @@ impl PageRenderer<'_> {
             // wired-in cache.  Defensive check; cheap.
             return false;
         };
-        let super::canvas::PageCanvas::Rgb(bitmap) = &mut self.canvas else {
-            return false;
-        };
-        let compositor = ImageCompositor::new(bitmap, &paint);
-        let composite = |rows: RgbaRows<'_>| {
-            composite_rgba_rows(
-                bitmap,
-                rows,
-                grid,
-                grid_clip,
-                compositor,
-                transfer.as_deref(),
-            );
-        };
-        match cached {
-            CachedImage::Cuda(image) => blit_on_cuda(
-                self.gpu_ctx.as_deref(),
-                cache_state,
-                image,
-                page,
-                &job,
-                composite,
-            ),
-            #[cfg(feature = "vulkan")]
-            CachedImage::Vulkan(image) => blit_on_vulkan(cache_state, image, &job, composite),
-        }
+        // The kernel's samples are sRGB: on an RGB canvas they map through
+        // the transfer function here, on an ink canvas the compositor
+        // converts them to ink and maps that, as the CPU blit does.
+        let kind = self.canvas.kind();
+        let rgb_transfer = transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
+        let gpu_ctx = self.gpu_ctx.as_deref();
+        with_canvas!(&mut self.canvas, |bitmap| {
+            let mut compositor = ImageCompositor::new(bitmap, &paint);
+            if kind == CanvasKind::Ink {
+                compositor.transfer = transfer.as_deref();
+            }
+            let composite = |rows: RgbaRows<'_>| {
+                composite_rgba_rows(bitmap, rows, grid, grid_clip, compositor, rgb_transfer);
+            };
+            match cached {
+                CachedImage::Cuda(image) => {
+                    blit_on_cuda(gpu_ctx, cache_state, image, page, &job, composite)
+                }
+                #[cfg(feature = "vulkan")]
+                CachedImage::Vulkan(image) => blit_on_vulkan(cache_state, image, &job, composite),
+            }
+        })
     }
 }
 

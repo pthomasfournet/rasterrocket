@@ -28,7 +28,7 @@ mod common;
 use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
 use rasterrocket::{
     BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig, open_session,
-    render_page_rgb_with_diagnostics,
+    open_session_from_bytes, render_page_rgb_with_diagnostics,
 };
 
 /// A 400×400 pt page whose fills cover every dispatch decision:
@@ -66,6 +66,55 @@ q 200 150 m 260 200 l 200 250 l 140 200 l h W n 0.5 0 0.5 rg 120 140 160 120 re 
     ];
     with_page_tree(&objects)
 }
+
+/// A 400×400 pt page painted on the overprint canvas: a cyan backdrop, a
+/// black fill overprinting it under nonzero overprint mode, a spot-colour
+/// triangle and an RGB rule with fractional edges.
+fn overprint_pdf() -> Vec<u8> {
+    let content = b"\
+1 0 0 0 k 50.3 50.3 300 300 re f\n\
+/GS2 gs 0 0 0 1 k 100.4 100.6 120.3 60.7 re f\n\
+/Spot cs 0.7 scn 30.3 300.7 m 190.9 330.2 l 60.1 380.4 l h f\n\
+0.47843 0.45882 0.44706 rg 100.31 50.27 4.76 76.8 re f\n"
+        .to_vec();
+    let objects = vec![
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] \
+           /Resources << /ExtGState << /GS2 << /OP true /op true /OPM 1 >> >> \
+           /ColorSpace << /Spot [/Separation /Spot /DeviceCMYK \
+           << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.91 0.76 0] /N 1 >>] >> >> \
+           /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", &content),
+    ];
+    with_page_tree(&objects)
+}
+
+/// Render the overprint page with overprint simulation on, under `policy`
+/// and against the CPU.  Every fill reaches the device and none fails.
+fn assert_overprint_page_identical(policy: BackendPolicy) {
+    require_device_fills();
+    let open = |policy| {
+        let mut config = SessionConfig::with_policy(policy);
+        config.overprint = true;
+        open_session_from_bytes(overprint_pdf(), &config)
+            .unwrap_or_else(|e| panic!("{policy:?} session: {e}"))
+    };
+    let cpu = render(&open(BackendPolicy::CpuOnly), 1);
+    assert!(
+        cpu.2.iter().any(|&b| b != 0xff),
+        "overprint fixture rendered blank on the CPU path"
+    );
+    let (gpu, diag) = render_diagnosed(&open(policy), 1);
+    assert_eq!(
+        (diag.device_fills, diag.device_fill_failures),
+        (OVERPRINT_DEVICE_FILLS, 0),
+        "device fills painted and failed under {policy:?}"
+    );
+    assert_identical(&cpu, &gpu, &format!("overprint fills under {policy:?}"));
+}
+
+/// Fills of the overprint page: all four reach the device.
+const OVERPRINT_DEVICE_FILLS: u32 = 4;
 
 /// Panic unless the device fill path is enabled for this process.
 fn require_device_fills() {
@@ -162,7 +211,15 @@ fn assert_corpus_identical(policy: BackendPolicy) {
 
 #[cfg(all(feature = "gpu-aa", feature = "gpu-validation"))]
 mod cuda {
-    use super::{BackendPolicy, assert_corpus_identical, assert_synthetic_page_identical};
+    use super::{
+        BackendPolicy, assert_corpus_identical, assert_overprint_page_identical,
+        assert_synthetic_page_identical,
+    };
+
+    #[test]
+    fn overprint_fills_render_identically_on_cuda() {
+        assert_overprint_page_identical(BackendPolicy::ForceCuda);
+    }
 
     #[test]
     fn synthetic_fills_render_identically_on_cuda() {
@@ -177,7 +234,15 @@ mod cuda {
 
 #[cfg(feature = "vulkan")]
 mod vulkan {
-    use super::{BackendPolicy, assert_corpus_identical, assert_synthetic_page_identical};
+    use super::{
+        BackendPolicy, assert_corpus_identical, assert_overprint_page_identical,
+        assert_synthetic_page_identical,
+    };
+
+    #[test]
+    fn overprint_fills_render_identically_on_vulkan() {
+        assert_overprint_page_identical(BackendPolicy::ForceVulkan);
+    }
 
     #[test]
     fn synthetic_fills_render_identically_on_vulkan() {

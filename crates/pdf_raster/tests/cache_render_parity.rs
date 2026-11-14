@@ -78,6 +78,12 @@ fn jpeg(width: u16, height: u16, gray: bool) -> Vec<u8> {
 /// - a filled rectangle and text painted *after* the images, overlapping
 ///   `/ImA`, so an out-of-order composite would show.
 fn fixture_pdf() -> Vec<u8> {
+    fixture_pdf_with("", "")
+}
+
+/// [`fixture_pdf`] with `resources` added to the page's resource dictionary
+/// and `prefix` run before its content.
+fn fixture_pdf_with(resources: &str, prefix: &str) -> Vec<u8> {
     let rgb = jpeg(397, 261, false);
     let gray = jpeg(50, 80, true);
     // Soft mask for /ImC: opaque on the left half, a vertical ramp on the right.
@@ -92,7 +98,9 @@ fn fixture_pdf() -> Vec<u8> {
             })
         })
         .collect();
-    let content = b"\
+    let mut content = prefix.as_bytes().to_vec();
+    content.extend_from_slice(
+        b"\
 q 200.5 0 0 131.2 40.25 50.5 cm /ImA Do Q\n\
 q 143.37 0 0 90.61 20.123 130.77 cm /ImA Do Q\n\
 q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q\n\
@@ -100,15 +108,16 @@ q -120 0 0 60 290 20 cm /ImA Do Q\n\
 q 100 0 0 63 30 30 cm /ImC Do Q\n\
 0 0 1 rg 60 150 80 50 re f\n\
 0.9 0.1 0.1 RG 4 w 10 120 m 290 230 l S\n\
-BT /F1 18 Tf 30 200 Td (Parity) Tj ET\n"
-        .to_vec();
+BT /F1 18 Tf 30 200 Td (Parity) Tj ET\n",
+    );
 
     let objects = vec![
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
-           /Resources << /XObject << /ImA 5 0 R /ImB 6 0 R /ImC 7 0 R >> \
-                         /Font << /F1 9 0 R >> >> \
-           /Contents 4 0 R >>"
-            .to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
+             /Resources << /XObject << /ImA 5 0 R /ImB 6 0 R /ImC 7 0 R >> \
+             /Font << /F1 9 0 R >> {resources} >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
         stream_object("", &content),
         stream_object(
             "/Type /XObject /Subtype /Image /Width 397 /Height 261 \
@@ -255,6 +264,40 @@ on_each_backend!(
     synthetic_page_renders_identically,
     synthetic_page_renders_identically_through_the_cuda_cache,
     synthetic_page_renders_identically_through_the_vulkan_cache
+);
+
+/// A page painted on the overprint canvas composites its cached images
+/// through the ink conversion, byte-identically to the CPU.
+fn overprint_page_renders_identically(backend: Backend) {
+    let pdf = fixture_pdf_with("/ExtGState << /GSo << /OP true /OPM 1 >> >>", "/GSo gs\n");
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = true;
+    let cpu = render(
+        &open_session_from_bytes(pdf.clone(), &config).expect("CPU session"),
+        1,
+    );
+    assert!(
+        cpu.2.iter().any(|&b| b != 0xff),
+        "fixture rendered blank on the CPU path"
+    );
+    let mut config = backend.config();
+    config.overprint = true;
+    let Some(session) = backend.session(open_session_from_bytes(pdf, &config)) else {
+        return;
+    };
+    let gpu = render(&session, 1);
+    assert_identical(&cpu, &gpu, "overprint page");
+    assert_eq!(
+        session.image_cache().expect("image cache").len(),
+        2,
+        "the two unmasked JPEGs are drawn from the cache"
+    );
+}
+
+on_each_backend!(
+    overprint_page_renders_identically,
+    overprint_page_renders_identically_through_the_cuda_cache,
+    overprint_page_renders_identically_through_the_vulkan_cache
 );
 
 /// Magnified draws, which the sampler interpolates: a gray JPEG drawn

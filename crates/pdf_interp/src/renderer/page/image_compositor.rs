@@ -27,15 +27,15 @@ pub(super) struct RgbaRows<'a> {
     pub(super) width: u32,
 }
 
-/// Source-over `rows` onto `bitmap`, restricted to the grid's columns,
+/// Composite `rows` onto `bitmap`, restricted to the grid's columns,
 /// which the rows span, and to the pixels `grid_clip` covers.  Alpha is
 /// `255` where the blit kernel wrote a sample and `0` elsewhere, so the
 /// composite copies each written sample, blended by the clip coverage on
-/// rows the clip edge crosses.  Samples map through `transfer` when one is
-/// in effect.
+/// rows the clip edge crosses.  Samples map through the RGB tables of
+/// `transfer`, if any, before `compositor` paints them.
 #[cfg(feature = "cache")]
-pub(super) fn composite_rgba_rows(
-    bitmap: &mut Bitmap<color::Rgb8>,
+pub(super) fn composite_rgba_rows<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
     rows: RgbaRows<'_>,
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
