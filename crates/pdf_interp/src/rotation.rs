@@ -82,7 +82,7 @@ impl PageGeometry {
     /// `UserUnit` and the boxes are unchanged.
     #[must_use]
     pub const fn rotated(self, extra: Rotation) -> Self {
-        let rotate_cw = (self.rotate_cw + extra.degrees()) % 360;
+        let rotate_cw = (self.rotate_cw % 360 + extra.degrees()) % 360;
         let (width_pts, height_pts) = if extra.is_quarter() {
             (self.height_pts, self.width_pts)
         } else {
@@ -155,5 +155,26 @@ mod tests {
             assert_eq!((r.width_pts, r.height_pts), size, "{extra:?}");
             assert_eq!((r.origin_x, r.origin_y), (5.0, 7.0));
         }
+    }
+
+    /// A rotation outside `0..360`, as a caller may write into the public
+    /// field, is reduced before the sum, which then cannot overflow.
+    #[test]
+    fn rotation_of_an_out_of_range_page_rotation_does_not_overflow() {
+        let geom = PageGeometry {
+            width_pts: 200.0,
+            height_pts: 100.0,
+            rotate_cw: u16::MAX,
+            user_unit: 1.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            media_box: None,
+            crop_box: None,
+        };
+        assert_eq!(
+            geom.rotated(Rotation::Cw270).rotate_cw,
+            285,
+            "65 535 is 15 mod 360"
+        );
     }
 }
