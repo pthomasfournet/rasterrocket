@@ -490,24 +490,16 @@ impl XPathScanner {
 
     /// Call `emit(bx0, bx1)` for each covered half-open span `[bx0, bx1)` of
     /// AA scanline `scan_y`, clamped to `[0, width)`, in increasing `bx0`.
+    /// The spans are those of [`ScanIterator`], which an aliased fill
+    /// paints, so both fills cover the same cells of a scanline.
     fn for_each_covered_span(&self, scan_y: i32, width: usize, mut emit: impl FnMut(usize, usize)) {
         let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
-        self.covered_spans(scan_y, |x0, x1| {
+        for (x0, x1) in iter::ScanIterator::new(self, scan_y) {
             let bx0 = usize::try_from(x0.max(0)).unwrap_or(0);
             let bx1 = usize::try_from(x1.saturating_add(1).min(width_i32)).unwrap_or(0);
             if bx0 < bx1 {
                 emit(bx0, bx1);
             }
-        });
-    }
-
-    /// Call `emit(x0, x1)` for each covered span `[x0, x1]` (inclusive,
-    /// unclamped) of scanline `scan_y`, in increasing `x0`; the spans are
-    /// disjoint: the spans of [`ScanIterator`], which an aliased fill
-    /// paints, so both fills cover the same cells of a scanline.
-    fn covered_spans(&self, scan_y: i32, mut emit: impl FnMut(i32, i32)) {
-        for (x0, x1) in iter::ScanIterator::new(self, scan_y) {
-            emit(x0, x1);
         }
     }
 
@@ -545,13 +537,13 @@ impl XPathScanner {
                 u32::try_from(intersects.len()).expect("intersection count exceeds u32::MAX"),
             );
             acc.clear();
-            scanners[0].covered_spans(y, |a, b| acc.push((a, b)));
+            acc.extend(iter::ScanIterator::new(scanners[0], y));
             for scanner in &scanners[1..] {
                 if acc.is_empty() {
                     break;
                 }
                 spans.clear();
-                scanner.covered_spans(y, |a, b| spans.push((a, b)));
+                spans.extend(iter::ScanIterator::new(scanner, y));
                 next.clear();
                 let (mut i, mut j) = (0, 0);
                 while i < acc.len() && j < spans.len() {
