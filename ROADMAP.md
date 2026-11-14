@@ -31,16 +31,16 @@ Phase 5 is complete. The API exists and is integrated.
 
 **CMYK JPEG output is not implemented.** `--jpegcmyk` is refused at
 startup, before the document is opened; PPM, PGM, PBM, PNG, JPEG (`--jpeg`)
-and TIFF (`--tiff`) work, the last also fax-coded (on master).
+and TIFF (`--tiff`) work, the last also fax-coded.
 
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
-**Overprint simulation has a gap (on master).** Under `--overprint`,
-transparency groups as a whole knock out instead of overprinting; see
-[Current status](#current-status-2026-11-13).
+**Overprint simulation has one gap.** Under `--overprint`, transparency
+groups as a whole knock out instead of overprinting; see
+[Current status](#current-status-2026-11-14).
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -2179,11 +2179,11 @@ Re-bench result: cold-render regression collapsed from 14× to 1.1–1.9× on lo
 
 **Total scope:** ~1850 LoC new Rust + ~150 LoC new CUDA + ~400 LoC modified existing. Tasks 1+2 ship in ~5-7 days; full pipeline ~3 weeks elapsed.
 
-**Shipped:** all six tasks landed; the `cache` feature is in `rasterrocket`, `rasterrocket-interp`, and the CLI as of v1.0.0. Since 2026-11-13 (unreleased) the cache also runs on the Vulkan backend: `DeviceImageCache<B>` is generic over a `CacheBackend` (CUDA, Vulkan), the session builds it on the backend it resolved to, and a Vulkan image is blitted into a bounding-box target in one backend page (see Phase 10, Task 4 step 5). In-memory VRAM/host tiers run unconditionally when the feature is built; the disk tier is opt-in via `PDF_RASTER_CACHE_DIR`. The bench-gate reframe above (cross-pass / cross-session speedup, not cold-render) is the final answer, not an open item — criterion 5 as originally worded tested the wrong property and is closed as such.
+**Shipped:** all six tasks landed; the `cache` feature is in `rasterrocket`, `rasterrocket-interp`, and the CLI as of v1.0.0. Since v2.2.0 the cache also runs on the Vulkan backend: `DeviceImageCache<B>` is generic over a `CacheBackend` (CUDA, Vulkan), the session builds it on the backend it resolved to, and a Vulkan image is blitted into a bounding-box target in one backend page (see Phase 10, Task 4 step 5). In-memory VRAM/host tiers run unconditionally when the feature is built; the disk tier is opt-in via `PDF_RASTER_CACHE_DIR`. The bench-gate reframe above (cross-pass / cross-session speedup, not cold-render) is the final answer, not an open item — criterion 5 as originally worded tested the wrong property and is closed as such.
 
 ---
 
-## Phase 10 — Vulkan compute backend (✓ SHIPPED v0.8.0/v1.0.0 — runs on AMD RADV since v1.5.0; formal cross-vendor parity run pending)
+## Phase 10 — Vulkan compute backend (✓ SHIPPED v0.8.0/v1.0.0 — runs on AMD RADV since v1.5.0; RADV and llvmpipe byte parity verified 2026-11-12)
 
 **Goal:** replace the CUDA-specific kernel launch and device-memory layer with a backend-abstracted layer that has both CUDA and Vulkan compute implementations, so the same algorithmic kernels run on NVIDIA, AMD, Intel, and Apple GPUs from one source tree.
 
@@ -2233,13 +2233,13 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
         - **Criterion 3** (Vulkan ≤ 1.15× CUDA timing): **PASS** on all 5 corpora — Vulkan is *faster* than CUDA on every one (V/D ratios 0.27–0.82×).  Note: not strictly apples-to-apples either way because CUDA mode D pays nvjpeg / ICC-CLUT init even on vector-heavy corpora that don't decode JPEGs; the Vulkan binary skips those.  The *intent* of criterion 3 — Vulkan within striking distance of CUDA on the kernel paths Phase 10 actually migrated — is satisfied.
         - **Criterion 4** (cross-vendor proof of life on AMD or Intel): blocked on hardware at the time; since v1.5.0 the backend renders on an AMD Raphael iGPU (RADV), and it renders byte-identically to the CPU path (see the Task 3 list above); Intel ANV is untested.
 
-    - [x] **Step 5 — Device image cache on Vulkan** (2026-11-13, unreleased).  `DeviceImageCache`, `CachedDeviceImage` and the host tier are generic over `CacheBackend: GpuBackend` (CUDA, Vulkan); slabs are the backend's `DeviceBuffer`.  CUDA keeps its own stream, stream-ordered uploads, write-combined pinned host tier and `DevicePageBuffer` unchanged.  Vulkan uploads and downloads through the backend's synchronous transfers, keeps its host tier in ordinary memory (its transfers stage through mapped buffers of their own) and sizes its VRAM budget from `detect_vram_budget`; the disk tier is shared.  A Vulkan image blit (`gpu::backend::blit_image_box`) records the table uploads, the zero-fill of a target the size of the blit's bounding box, the kernel and the readback as one page, rather than a page-sized buffer read back and cleared by separate submissions; the box composites through the same `composite_rgba_rows` as CUDA.  `gpu::cache::ImageCache` / `CachedImage` carry either backend through the interpreter.  The session builds the cache on the backend it resolved to; under `Auto` a session has a GPU backend, and so a cache, only while a device kernel is enabled (Vulkan preferred), and a JPEG drawn below its resolution is not cached.  Verified: the cache parity tests on CUDA and on Vulkan (RTX 5070, RADV, llvmpipe) and an archive A/B (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi, none with an ICC-based CMYK image: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA; a page with an ICC-based CMYK image differs between a GPU session and a CPU-only one by design, the GPU session converting it through the 17-node lookup table and the CPU-only session through the profile transform).
+    - [x] **Step 5 — Device image cache on Vulkan** (2026-11-13, v2.2.0).  `DeviceImageCache`, `CachedDeviceImage` and the host tier are generic over `CacheBackend: GpuBackend` (CUDA, Vulkan); slabs are the backend's `DeviceBuffer`.  CUDA keeps its own stream, stream-ordered uploads, write-combined pinned host tier and `DevicePageBuffer` unchanged.  Vulkan uploads and downloads through the backend's synchronous transfers, keeps its host tier in ordinary memory (its transfers stage through mapped buffers of their own) and sizes its VRAM budget from `detect_vram_budget`; the disk tier is shared.  A Vulkan image blit (`gpu::backend::blit_image_box`) records the table uploads, the zero-fill of a target the size of the blit's bounding box, the kernel and the readback as one page, rather than a page-sized buffer read back and cleared by separate submissions; the box composites through the same `composite_rgba_rows` as CUDA.  `gpu::cache::ImageCache` / `CachedImage` carry either backend through the interpreter.  The session builds the cache on the backend it resolved to; under `Auto` a session has a GPU backend, and so a cache, only while a device kernel is enabled (Vulkan preferred), and a JPEG drawn below its resolution is not cached.  Verified: the cache parity tests on CUDA and on Vulkan (RTX 5070, RADV, llvmpipe) and an archive A/B (22 image-heavy archive PDFs, 229 pages at 300 and 150 dpi, none with an ICC-based CMYK image: 0 byte differences from the CPU render on Vulkan RTX 5070, on RADV and on CUDA; a page with an ICC-based CMYK image differs between a GPU session and a CPU-only one by design, the GPU session converting it through the 17-node lookup table and the CPU-only session through the profile transform).
 
 **Bench gate:** Phase 10 ships if (1) CUDA path performance unchanged within ±5%; (2) Vulkan path functional on RTX 5070 with pixel-diff ≤ 1 LSB vs CUDA; (3) Vulkan timing within 15% of CUDA on RTX 5070; (4) cross-vendor proof of life on AMD or Intel.
 
 **Status of bench gate:** criteria 1, 2, and 3 all PASS on RTX 5070 (commit `1783d66` + bench/v10/results.md, vector-heavy corpora 01-05).  Criterion 4 (cross-vendor proof of life) was blocked on hardware when the gate was measured. It no longer is: `--vulkan-device radv` renders on the dev box's AMD Raphael iGPU (v1.5.0). It renders byte-identically to the CPU path on RADV and llvmpipe (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe); Phase 10 has no open item but Intel ANV, untested for want of hardware.
 
-**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto` when a device kernel is enabled; otherwise `auto` renders on the CPU. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, implied by `vulkan`) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
+**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto` when a device kernel is enabled; otherwise `auto` renders on the CPU. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, a feature of its own that `vulkan` does not imply) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
 
 **Total scope:** ~3100 LoC new Rust + ~1000 LoC Slang + ~400 LoC modified. Estimated ~6-8 weeks elapsed (3-4 weeks tasks 1+2; 3-4 weeks task 3).
 
@@ -2421,7 +2421,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-13)
+## Current status (2026-11-14)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
@@ -2456,7 +2456,7 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
-**Unreleased on master.** A reduced image draw builds its resampling plan
+**Unreleased on master, the content of v2.2.0.** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
 barrier windows: each page is appended to the spool once the pages before
@@ -2708,6 +2708,142 @@ is reported, where it was drawn zero-filled as if complete; a stream cut
 inside a marker segment or inside the first scan of a progressive frame is
 drawn as far as it decodes, where it failed.  Decode time is within noise
 of zune-jpeg 0.5.15.
+The 139 upstream zune-jpeg commits past the fork's base are reviewed (up
+to `ab211bb1`; `UPSTREAM.toml` records the review, `CHANGES.md` what was
+taken and what was left out).  Brought over, each with a test that failed
+before: an AC run past the end of a block is written at position 63 on
+every path and counts its row as damaged; Huffman tables are checked scan
+by scan; a scan of a component an earlier scan coded is skipped; gray
+output of a vertically subsampled multi-scan frame, unused components,
+mixed sampling factors and CMYK / YCCK to RGBA are fixed; the input colour
+space is decided when the headers are read; a sequential stream without
+DHT segments uses the tables of ITU-T T.81 §K.3.  The fork's own further
+fixes: an arithmetic-coded progressive AC band without an end of band is
+reported incomplete; the count of fill bits is a `u64`; a progressive frame
+past the scan limit draws the scans decoded; a DNL segment after the first
+scan is read and skipped (the interpreter writes `/Height` into a frame
+header of height 0, as for 0xFFFF); and `set_max_coefficient_bytes` bounds
+the coefficient planes a progressive or multi-scan frame holds whole, which
+the interpreter sets to what the output samples leave of the 1 GiB decode
+budget.  The decision to keep a reduced JPEG draw out of the device cache
+reads the frame header's size, not the dictionary's.  A comic page whose
+JPEG scan data is incomplete is logged at `warn`, its pixels unchanged.
+The parallel-Huffman IDCT kernels (CUDA and Slang) no longer race between
+their row and column passes: on MoltenVK some 4:4:4 blocks came out with
+chroma up to 124 levels off; `idct_parity` compares the Vulkan kernel with
+a CPU twin, byte-identical on MoltenVK, the RTX 5070 and RADV.  An IDCT
+block count the kernels' 32-bit offsets cannot address is refused.
+
+**Whole pages on a Vulkan GPU.** `SessionConfig::gpu_pages` (`rrocket
+--gpu-pages`, default off) opens the Vulkan device on a thread of its own
+when the session opens.  Once it is open, a worker whose page paints only
+solid-colour fills and strokes (rectangular clips, `Normal` blend, constant
+alpha) claims the idle device, records the page as paint commands
+(`PageRenderer::record_for_device`; each fill and stroke scan-converted by
+the CPU's own geometry stages, `aa_scanner`, `stroke_aa_scanner` and
+`hairline_runs`) and has it rasterised in one submission by a tiled kernel
+running the CPU's span walk and compositing (`gpu::page::PageCommands`,
+`VulkanBackend::render_page`).  A busy device, an ineligible page or a
+refused or failed recording renders on the CPU, the CPU pass keeping the
+recording's deadline and cancellation flag and running on its own operator
+budget; output is byte-identical either way (random content streams and the
+first pages of every corpus fixture, on the RTX 5070 and RADV).
+`PageDiagnostics::device_page` (`DevicePage`) reports each page's outcome,
+and `RUST_LOG=rasterrocket=debug` logs it.  A command list is bounded to
+2^27 bytes and every storage binding is checked against the device's
+`maxStorageBufferRange` (`BackendError::DeviceLimit`); a page past either
+renders on the CPU, and any other device error retires the device for the
+session with one warning.  `open_session` refuses the option without the
+`vulkan` feature, under a policy other than `Auto` or `ForceVulkan`, or
+with vector antialiasing off.
+
+**Overprint simulation completed except for transparency groups.** On the
+ink canvas, shadings and sampled images in `Separation` and `DeviceN`
+spaces paint their colorants' channels (a per-page `ColorantPlan` shared
+with solid colours; a decode keeps the tints beside the sRGB samples);
+coloured tiling cells render on a child ink canvas sharing the page's spot
+slots and paint exactly the channels their content wrote; an `ICCBased`
+CMYK colour prints as the process ink reproducing its profile's colour
+(`color::cmyk::ink_reproducing`, budgeted and memoised per page), the
+components given as 0 staying 0; transfer functions apply in ink space to
+the channels a colour carries, red, green and blue to C, M and Y, gray to K
+and the spot inks; and the GPU AA fill and image blit, device-resident
+cached images included, run on the ink canvas, byte-identical to the CPU.
+A neutral darker than solid K prints as a balanced rich black (C : M : Y =
+1 : 0.725 : 0.75 under solid K), so antialiased edges of black stay within
+five counts of neutral at every coverage and solid black prints as
+(0, 2, 2).  Transparency-group canvases are pooled per canvas kind.  Pages
+rendered without `--overprint` are unchanged.
+
+**Text shaping across show strings.** A word of a substitute-drawn run
+split between show strings (a `TJ` adjustment, a `Tf` mid-word,
+consecutive `Tj`) is shaped as one word: each string is shaped with the
+neighbouring strings on its baseline as pre- and post-context
+(`FontProgram::shape_in_context`), neighbours being strings separated only
+by text-state, positioning, colour and marked-content operators, at most
+0.1 em past the first's end and 0.5 em before it, at the same text rise.
+Combining marks ending a right-to-left string are drawn over the first
+letter of the next string when it is of the run's script.  A nested
+content stream ends the context.  Synthesised appearances set their
+fallback characters in shared fonts of 256 characters each (at most 64),
+so a word using several Unicode blocks or a ZWJ / ZWNJ is one show
+string; characters set as `?` are logged.  A program the shaper cannot
+read is reported once, and logged runs are cut to 32 characters.  The
+fixtures and the archive's Hebrew and Arabic documents (4 581 pages) are
+byte-identical.
+
+**Hardening of the work above.**
+- *Comic archives.* The decompressed total of an archive is bounded
+  (`ComicOptions::max_archive_bytes`, `DEFAULT_MAX_ARCHIVE_BYTES` = 4 GiB,
+  `rrocket --max-archive-mib`); past it the archive is refused with
+  `ComicError::ArchiveTooLarge` before the first page.  Entry names are
+  indexed once; a damaged member of a non-solid RAR fails that entry only.
+  A TIFF's directory chain is walked once, at most twice the page cap.
+  The AVIF reader bounds the container's item, location and extent tables
+  over the whole file, refuses duplicate boxes and transforms HEIF allows
+  once, and budgets samples by the chroma layout of the stream's own
+  sequence headers (`rav1d::still_layout`); `decode_still` refuses empty
+  data.
+- *Interpreter.* The unsupported-feature scan has a budget of 2^20 steps
+  and inspects a shared action once; an empty `/Names /JavaScript` tree is
+  not reported.  The prescan's PPI hint divides by the unrotated page width
+  (a 2480 px A4 scan under `/Rotate 90` gave 212 ppi instead of 300).  A
+  page object that is not a readable dictionary is warned about.  A page
+  rotation outside 0–359 is reduced before a session rotation is added.
+- *Library.* `PageBuffer` keeps the ink canvas and the page group's alpha
+  plane between renders.  A file too large to read into memory under
+  `read_into_memory` is an `io::ErrorKind::OutOfMemory` error, not an
+  abort.  A GPU deskew failure, including an NPP output of the wrong size,
+  falls back to the CPU rotation, so `deskew::apply` and
+  `RasterError::Deskew` are never returned; deskew of a non-gray render is
+  one refusal naming the gray entry points.
+- *Rasteriser.* A sloped hairline under a clip whose top or bottom edge
+  falls inside a pixel row draws its kept rows as the unclipped hairline
+  does (**this changes pixels** on such rows).
+- *GPU.* A disk-tier cache entry whose header disagrees with its length is
+  removed; the CLUT coordinate scale is computed once on the host, correctly
+  rounded (device division moved output bytes for grid sizes such as 4, 8,
+  13, 16 and 25); a device blit that fails before compositing draws through
+  the host copy; `--backend vulkan` on an `nvjpeg` / `nvjpeg2k` build
+  creates no CUDA JPEG decoder, and nvJPEG decoders are built only where
+  `GPU_JPEG_THRESHOLD_PX` lets them dispatch; a grown blit target zeroes
+  only the blit box; blit and CLUT scratch buffers are pooled on the
+  backend and a CLUT conversion is one page; a Vulkan transfer waits on its
+  own fence instead of the queue; nvJPEG2000 is offered to a masked JPX
+  drawn small, which the CPU decodes in full; the VRAM budget is reserved
+  before an upload, so concurrent inserts cannot exceed it; the benchmarks
+  reject unknown flags and print the device's name.
+- *Property suites.* The parser suite writes objects without separators
+  where delimiters allow and reaches the filter decoders' defaults; the
+  render suite reaches the scanner's re-anchor rows; the colour, camera and
+  encode oracles are tightened; `PROPTEST_CASES` that is not an unsigned
+  integer fails the suite.
+- *Comparison scripts.* A document that renders is recorded as an observed
+  pass; `-U` without a registry keeps a failing run fatal; NaN and infinite
+  limits are rejected; a malformed registry is reported once, before
+  rendering; `-U` keeps reviewed reasons and lowers improved limits;
+  registry updates are serialised by a lock file; the over-limit page count
+  comes from `expectations.py`.
 
 **Document-wide image decodes, in v2.1.0.** An image `XObject`
 drawn on two pages or more is decoded once per session rather than once per
@@ -2919,8 +3055,8 @@ the first pass of the day:
   locale, fails when no page was compared, and counts a render failure
   once.
 
-Phase 7's last item, the mode E re-bench, is closed as moot. v2.0.0 is
-released (see the release history); master carries the work since. The CUDA performance
+Phase 7's last item, the mode E re-bench, is closed as moot. v2.1.0 is
+released (see the release history); master carries the v2.2.0 work above. The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder and
 transfers are blocking by design.
 
@@ -2948,7 +3084,9 @@ specification, a transformed copy of the input), not against a restatement
 of the implementation.
 
 Each suite runs a fixed case count in CI (well under 10 s a crate in a debug
-build); `PROPTEST_CASES=N` overrides it for a longer local run.  Seeds of
+build); `PROPTEST_CASES=N` overrides it for a longer local run, and a
+value that is not an unsigned integer fails the suite (the runner
+configuration is shared, `tests/support/proptest_config.rs`).  Seeds of
 failures found are kept in each crate's `proptest-regressions/` and replayed
 first.  Generated sizes stay small: bitmaps up to a few hundred pixels a
 side, byte inputs up to a few KiB.
@@ -2956,14 +3094,14 @@ side, byte inputs up to a few KiB.
 | Crate | Suite | Properties |
 |---|---|---|
 | parser | `src/proptests/` (in-crate, CI runs `--lib`) | objects written in every spelling ISO 32000-2 §7.3 allows (separators and comments, name and string escapes, octal escapes and line continuations, hex digit case, number forms) parse back and end where written; a stream with an indirect `/Length` finds its body; chains of up to three filters (Flate, LZW with either `EarlyChange`, ASCIIHex, ASCII85, RunLength) with PNG and TIFF predictors invert reference encoders with no truncation reported; TIFF predictor 2 keeps a partial last row; `RunLengthDecode` under an output bound returns a prefix within the bound |
-| render | `src/proptests.rs` (in-crate) | random polygons and curves, aliased and antialiased, both winding rules: fills stay inside the clip rectangle and, aliased, the clip paths; a clip rectangle masks the unclipped fill exactly; reversing every subpath changes nothing; whole-pixel moves of outline and clip move the render; simple polygons fill alike under both rules; integer rectangles cover exactly their closed cells; flattening stays finite and within the control points' box |
+| render | `src/proptests.rs` (in-crate) | random polygons and curves, aliased and antialiased, both winding rules: fills stay inside the clip rectangle and, aliased, the clip paths; a clip rectangle masks the unclipped fill exactly; reversing every subpath changes nothing; whole-pixel moves of outline and clip move the render, also for edges spanning the scanner's 4096-row re-anchor period; a hairline under a clip with fractional top and bottom edges is the unclipped hairline masked to the clip; simple polygons fill alike under both rules; integer rectangles cover exactly their closed cells; flattening stays finite and within the control points' box |
 | color | `tests/properties.rs` | the CMYK row converter (every SIMD tier) matches the per-pixel conversion at any length and alignment; more ink is not lighter; ink rows match the per-pixel spot union; `floor_i32` / `ceil_i32` / `round_half_up_i32` near integers and half-integers; `div255`, `lerp_u8`, `luminosity` |
 | encode | `tests/properties.rs` | PGM, PBM, PPM, PNG (alpha included), TIFF (every compression, bilevel with Group 4) read back by independent decoders hold the live pixels of padded bitmaps, CMYK and `DeviceN` as their process-ink conversion; the fax coder round-trips under Group 3 MH and MR (any `k`, aligned EOLs or not) and Group 4; JPEG decodes to its size |
 | camera | `tests/properties.rs` | `crop` and `split_at` return exactly the named pixels and refuse out-of-image requests; `Quad::bounding_rect` holds exactly the centres in the corners' extent; `rectify` on any quad returns a bounded page or declines |
 
 The suites found five bugs (aliased span walk, scanner translation
 rounding, `div255`, `round_half_up_i32`, the rectified-area bound); see the
-unreleased notes under Current status.
+v2.2.0 notes under Current status.
 
 **Where fuzzing beats proptest** (covered by `fuzz/`): crashes and hangs on
 arbitrary bytes in the parser, the content stream, fonts, functions, images,
