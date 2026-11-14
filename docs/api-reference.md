@@ -33,7 +33,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 - `RasterError::BackendUnavailable` — `PDF_RASTER_BACKEND` names a backend (`cuda`, `vaapi`, `vulkan`) that cannot be initialised. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::PageOutOfRange` — page number exceeds document length.
 - `RasterError::PageDegenerate` — page has zero pixel dimensions.
-- `RasterError::PageTooLarge` / `RasterError::PageAreaTooLarge` — pixel dimensions exceed `MAX_PX_DIMENSION` (32 768) or the area exceeds `MAX_PX_AREA`.
+- `RasterError::PageTooLarge` / `RasterError::PageExceedsCeiling` — the bitmap exceeds the byte budget (`SessionConfig::max_page_bytes`, default 1.8 GB), or a side exceeds `MAX_PX_SIDE` (2²⁴).
 - `RasterError::PageAllocationFailed` — the page is within those limits, but the allocator refused its bitmap, or a bitmap drawn on it: a transparency group, soft mask, knockout coverage, tiling-pattern cell or screen, or Type 3 glyph bitmap, or a snapshot of the canvas.
 - `RasterError::InvalidPageGeometry` — `UserUnit` outside `[0.1, 10.0]`.
 - `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
@@ -188,7 +188,7 @@ impl CancelToken {
 Renders page `page_num` as `params` describes:
 
 - **`scale_x` / `scale_y`** are device pixels per point along the bitmap's axes, applied after `/Rotate`. Unequal scales give non-square pixels (300 × 150 dpi is `new_xy(300.0 / 72.0, 150.0 / 72.0)`); the page is `PageGeometry::size_px(scale_x, scale_y)` pixels.
-- **`region`** draws only a window of the page, in device pixels counted from the page's top-left corner at those scales. The bitmap is the region's size, and it holds exactly the pixels the whole-page render places there, so regions that tile a page stitch into the whole-page bitmap byte for byte. `MAX_PX_DIMENSION` and `MAX_PX_AREA` apply to the region, so a page too large to render whole (a map or poster at high DPI) can be rendered in tiles. An empty region, or one extending past the page, is `RasterError::InvalidOptions`.
+- **`region`** draws only a window of the page, in device pixels counted from the page's top-left corner at those scales. The bitmap is the region's size, and it holds exactly the pixels the whole-page render places there, so regions that tile a page stitch into the whole-page bitmap byte for byte. The byte budget (`SessionConfig::max_page_bytes`) applies to the region, so a page too large to render whole (a map or poster at high DPI) can be rendered in tiles; see also `render_page_bands`. An empty region, or one extending past the page, is `RasterError::InvalidOptions`.
 - **`policy`** overrides the session's backend policy for this page's image decoders; pass `BackendPolicy::CpuOnly` for a page `prescan_session` reports without images to skip GPU decoder setup.
 - **`cancel`**: after `CancelToken::cancel()` on any clone, the render stops before its next content-stream operator (form, Type 3 glyph and pattern-cell content included) and returns `RasterError::Cancelled`; a render started after cancellation returns it without drawing. An operator already running (one image decode, one fill) completes first.
 
@@ -201,6 +201,20 @@ pub fn render_page_rgb_with_diagnostics(
 ```
 
 `render_page_rgb_with`, also returning the [`PageDiagnostics`](#pagediagnostics) the render collected; same errors.
+
+```rust
+pub fn render_page_bands<E>(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+    sink: impl FnMut(Band<'_>) -> Result<(), E>,
+) -> Result<PageDiagnostics, BandError<E>>
+
+pub struct Band<'a> { pub y: u32, pub bitmap: &'a Bitmap<Rgb8> }
+pub enum BandError<E> { Raster(RasterError), Sink(E) }
+```
+
+Renders the page (or `params.region`) as horizontal bands of whole rows from the top, handing each to `sink` in order, so a page larger than memory is drawn a band at a time. Stacked, the bands are the bitmap `render_page_rgb_with` returns for the same `params`, byte for byte. A band holds `params.band_rows` rows (`RenderParams::with_band_rows`), else as many as `SessionConfig::band_bytes` hold. The content is parsed once and executed per band; the bands share the page's decoded images, forms, shadings and tiling cells, its tint budget, its spot-ink slots and its diagnostics, and each has its own operator budget and deadline. A page of one band renders as `render_page_rgb_with` does (on the GPU page device when the session has one); several bands render on the CPU. The byte budget bounds the page the bands make up. Errors are `render_page_rgb_with`'s as `BandError::Raster` (under `strict`, an image failure fails the band where it is met), or the sink's as `BandError::Sink`, after which no band is rendered.
 
 ```rust
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
@@ -311,7 +325,7 @@ An opened, read-only document. `Sync + Send` — safe to share across Rayon thre
 
 `unsupported_features` lists the document-level features the renderer ignores, found when the session opens: JavaScript attached to the catalog (`OpenAction`, `DocumentActions`), the `/Names /JavaScript` tree (`NameTree`) or `/AcroForm /AA` (`FormActions`), an XFA form, and a portable collection, in that order; see [`UnsupportedFeature`](#unsupportedfeature). A page's own are in `PageDiagnostics::unsupported_features`.
 
-`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering. `page_size_px(page_num, dpi)` is that size for a whole-page render at `dpi` (scale `dpi / 72` on both axes, rounded to nearest as the renderer rounds it; deskew keeps it), and it fails with the `InvalidOptions`, `PageDegenerate`, `PageTooLarge` or `PageAreaTooLarge` that render would.
+`page_geometry` reads a page's size, rotation, `UserUnit` and boxes without parsing its content; see [`PageGeometry`](#pagegeometry). `geometry.size_px(scale_x, scale_y)` is the bitmap size a render at those scales produces, so an embedder can size buffers or plan tiles before rendering. `page_size_px(page_num, dpi)` is that size for a whole-page render at `dpi` (scale `dpi / 72` on both axes, rounded to nearest as the renderer rounds it; deskew keeps it), and it fails with the `InvalidOptions`, `PageDegenerate`, `PageTooLarge` or `PageExceedsCeiling` that render would.
 
 ---
 
@@ -338,6 +352,7 @@ pub struct RasterOptions {
     pub font_dirs: Vec<PathBuf>,
     pub system_fonts: bool,
     pub image_budget: usize,
+    pub max_page_bytes: u64,
     pub page_box: PageBox,
     pub rotation: Rotation,
     pub transparent_background: bool,
@@ -365,6 +380,7 @@ pub struct RasterOptions {
 | `font_dirs` | — | Extra directories of installed fonts, searched before those `RROCKET_FONT_DIR` names and the standard ones; see [`SessionConfig`](#sessionconfig). |
 | `system_fonts` | — | When `false`, the standard font directories are not searched; see [`SessionConfig`](#sessionconfig). |
 | `image_budget` | — | Host bytes of decoded images kept for reuse by later pages; 0 keeps none. See [`SessionConfig`](#sessionconfig). |
+| `max_page_bytes` | — | The most bytes one page bitmap may hold; see [`SessionConfig`](#sessionconfig). |
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
 | `rotation` | — | A clockwise quarter-turn rotation added to each page's `/Rotate`; see [`Rotation`](#rotation). |
 | `transparent_background` | not with `deskew` | When `true`, pages are rendered over a transparent backdrop instead of white paper and yielded as `PixelFormat::Rgba8`: `[R, G, B, A]`, alpha the page's coverage × opacity, colour not premultiplied, `[0, 0, 0, 0]` where nothing paints. The page is painted as an isolated transparency group (knockout when its `/Group` says so). With `deskew` the options are `RasterError::InvalidOptions`. |
@@ -376,7 +392,7 @@ let mut opts = RasterOptions::new(150.0);
 opts.deskew = true;
 ```
 
-Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `read_into_memory = false`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `page_box = PageBox::Crop`, `rotation = Rotation::None`, `transparent_background = false`, `cancel = None`.
+Defaults: `dpi = 300.0`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`, `strict = false`, `purpose = RenderPurpose::View`, `annotations = true`, `text_antialias = true`, `vector_antialias = true`, `overprint = false`, `decrypt_authorized = false`, `password = None`, `read_into_memory = false`, `font_dirs` empty, `system_fonts = true`, `image_budget = DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB), `max_page_bytes = DEFAULT_MAX_PAGE_BYTES` (1.8 GB), `page_box = PageBox::Crop`, `rotation = Rotation::None`, `transparent_background = false`, `cancel = None`.
 
 ---
 
@@ -649,6 +665,8 @@ pub struct SessionConfig {
     pub font_dirs: Vec<PathBuf>,   // default: RROCKET_FONT_DIR (Default), empty (with_policy)
     pub system_fonts: bool,        // default: true
     pub image_budget: usize,       // default: DOCUMENT_IMAGE_BUDGET_BYTES (256 MiB)
+    pub max_page_bytes: u64,       // default: DEFAULT_MAX_PAGE_BYTES (1.8 GB)
+    pub band_bytes: u64,           // default: DEFAULT_BAND_BYTES (64 MiB)
     pub page_box: PageBox,         // default: PageBox::Crop
     pub rotation: Rotation,        // default: Rotation::None
     pub gpu_pages: bool,           // default: false
@@ -663,7 +681,7 @@ impl SessionConfig {
 }
 ```
 
-Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`; with the Huffman decoder dormant, `Auto` checks the value against the enumerated devices without opening one. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `overprint` (default `false`, mirrored by `RasterOptions::overprint`) simulates overprint (ISO 32000-1 §8.6.7): a page on which some `ExtGState` reachable from its resources, or from the appearance streams of annotations that are drawn, sets `OP` or `op` is painted on a canvas of four process and four spot inks, where an overprinting object leaves the inks it does not paint (under `OPM 1`, also the zero components of a process CMYK colour), and is converted to RGB when finished. The first four distinct spot colorants of a page take the spot inks; a colour with spots that do not fit prints its alternate colour in process ink and is listed in `PageDiagnostics::unslotted_spots`. Other pages render byte-identically to `overprint = false`. The RGB-to-ink table is built once per process on first use (about 0.75 s; concurrent renders wait for it). Sampled images and shadings in `Separation` / `DeviceN` spaces and tiling-pattern cells paint the inks of their own colorants; `ICCBased` CMYK colours print as the process ink that reproduces their profile's colour; a transfer function (`TR`, `TR2`) is applied in ink space, its red, green, blue and gray functions to cyan, magenta, yellow, and to black and the spot inks, and a transferred colour keeps its inks and overprint fields. A black or near-black gray or RGB colour prints as a rich black balanced so that its antialiased edges stay neutral. The device image blit, when enabled, draws on the ink canvas with the bytes of the CPU. Not simulated: a transparency group as a whole paints every ink. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it. `font_dirs` lists extra directories of installed fonts, searched in order before the standard font directories: a font the document does not embed draws with an installed substitute (the metric-compatible Liberation family, or a face of the font's script) and, for a character the substitute lacks, with an installed face that covers it, and both are looked up there first. `SessionConfig::default()` reads them from `RROCKET_FONT_DIR` (`PATH` syntax), `with_policy` sets none; sessions naming the same directories share one index of the installed fonts, built from one walk of the directories and their subdirectories (a directory reached through several paths or a symbolic link is read once; the walk stops after 10 000 directories with a warning) and rebuilt when a directory changes. `RasterOptions::font_dirs` is searched before the `RROCKET_FONT_DIR` directories by `raster_pdf`, `raster_pdf_from_bytes` and `render_channel`. The standard font directories are those of the build target (the Windows and macOS ones only on those targets). `system_fonts = false` (mirrored by `RasterOptions::system_fonts`) stops the search of the standard font directories and of the fixed locations of the Liberation, Arial, Times New Roman and Courier New faces: non-embedded fonts then draw from `font_dirs` and the faces compiled into the library only, the base-14 substitutes and, with the default `bundled-fonts` feature, the bundled Noto fallback faces. Lookup order for a non-embedded font: an installed substitute of its class and script, then for a character it lacks an installed face that covers it, then a bundled face, then nothing. `image_budget` (mirrored by `RasterOptions::image_budget`) bounds the host bytes of decoded images the session keeps so that an image `XObject` drawn on several pages (a letterhead, a background scan) is decoded once: an image is kept from the second page that draws it, while it fits, and what is kept stays resident until the session is dropped. The default is `DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB, re-exported at the crate root); 0 keeps nothing, so every page decodes the images it draws, for small-memory hosts and embedders that hold many sessions. Images a page draws several times are still decoded once per page, within a per-page budget. `page_box` selects the page boundary box every page of the session is measured (`page_geometry`, `prescan_session`) and rendered on; see [`PageBox`](#pagebox). `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions::page_box`. `rotation` turns every page of the session clockwise by a whole number of quarter turns on top of its own `/Rotate`; see [`Rotation`](#rotation). `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions::rotation`. `gpu_pages` (default `false`; no `RasterOptions` counterpart) renders pages whole on a Vulkan GPU beside the CPU workers: the device of `vulkan_device` is opened on a thread of its own when the session opens (or the session's Vulkan backend is used when it holds one), and until it is open every page renders on the CPU. A page is offered to the device while it is idle; it is interpreted into paint commands, and rendered on the device when every paint is a fill or stroke of a solid colour under a rectangular clip, `Normal` blend and constant alpha. A page on the ink canvas, painted as a page group, using another paint, or which the device fails on, renders on the CPU, with the same bytes either way; the CPU re-render shares the recording's deadline and has its own operator budget. A device error other than exceeding the device's limits retires the device for the session, with one warning. `PageDiagnostics::device_page` reports where each page rendered. `open_session` refuses `gpu_pages` with `RasterError::InvalidOptions` in a build without the `vulkan` feature, under a policy other than `Auto` or `ForceVulkan`, or with `vector_antialias` off, and `SessionConfig::check_gpu_pages()` applies the same check before any document is opened (the message names the fields and their `rrocket` flags); a device that does not open is logged at `error` and leaves every page on the CPU.
+Passed to `open_session`. `SessionConfig` is `#[non_exhaustive]` — construct it via `SessionConfig::default()` or `SessionConfig::with_policy(policy)`, not a struct literal. This is required because the `prefetch` field only exists when the `cache` Cargo feature is enabled. `vaapi_device` defaults to `"auto"` (`DEFAULT_VAAPI_DEVICE`): the first `/dev/dri/renderD*` node, in ascending number, whose driver supports VA-API baseline JPEG decode. Set it to a render-node path to use that node instead. Under `ForceVaapi` a failure is `RasterError::BackendUnavailable` naming the render nodes present; under `Auto` JPEG falls back to the CPU. `CpuOnly`, `ForceCuda` and `ForceVulkan` never open a render node. Set `vulkan_device` to choose the Vulkan device: an index in Vulkan enumeration order (from 0) or a case-insensitive device-name substring; a number that is not a valid index is matched as a name. A value that matches no device, more than one, or a device without Vulkan 1.3 and a compute queue makes `open_session` return `RasterError::InvalidOptions` listing the devices, under `Auto` as well as `ForceVulkan`; with the Huffman decoder dormant, `Auto` checks the value against the enumerated devices without opening one. `None` picks automatically. `strict` has the same meaning as `RasterOptions::strict`, for renders through a session (`render_page_rgb` and friends); `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions`. `purpose` works the same way and mirrors `RasterOptions::purpose`; see [`RenderPurpose`](#renderpurpose). `annotations = false` renders page content without annotations and mirrors `RasterOptions::annotations`. `text_antialias` and `vector_antialias` (both default `true`) switch antialiasing of glyph bitmaps and of path fills, strokes and clips, and mirror the `RasterOptions` fields of the same names. `overprint` (default `false`, mirrored by `RasterOptions::overprint`) simulates overprint (ISO 32000-1 §8.6.7): a page on which some `ExtGState` reachable from its resources, or from the appearance streams of annotations that are drawn, sets `OP` or `op` is painted on a canvas of four process and four spot inks, where an overprinting object leaves the inks it does not paint (under `OPM 1`, also the zero components of a process CMYK colour), and is converted to RGB when finished. The first four distinct spot colorants of a page take the spot inks; a colour with spots that do not fit prints its alternate colour in process ink and is listed in `PageDiagnostics::unslotted_spots`. Other pages render byte-identically to `overprint = false`. The RGB-to-ink table is built once per process on first use (about 0.75 s; concurrent renders wait for it). Sampled images and shadings in `Separation` / `DeviceN` spaces and tiling-pattern cells paint the inks of their own colorants; `ICCBased` CMYK colours print as the process ink that reproduces their profile's colour; a transfer function (`TR`, `TR2`) is applied in ink space, its red, green, blue and gray functions to cyan, magenta, yellow, and to black and the spot inks, and a transferred colour keeps its inks and overprint fields. A black or near-black gray or RGB colour prints as a rich black balanced so that its antialiased edges stay neutral. The device image blit, when enabled, draws on the ink canvas with the bytes of the CPU. Not simulated: a transparency group as a whole paints every ink. `decrypt_authorized` permits decrypting an encrypted document (default `false`: such a document is an error, whatever `password` holds); `password` is tried as the user and then the owner password after the empty user password. Both mirror the `RasterOptions` fields of the same names. `Password` (re-exported from the `pdf` crate) converts from `&str` and `String` (`Some("secret".into())`) and prints as `Password(<redacted>)` under `Debug`, so a logged `SessionConfig` does not disclose it. `font_dirs` lists extra directories of installed fonts, searched in order before the standard font directories: a font the document does not embed draws with an installed substitute (the metric-compatible Liberation family, or a face of the font's script) and, for a character the substitute lacks, with an installed face that covers it, and both are looked up there first. `SessionConfig::default()` reads them from `RROCKET_FONT_DIR` (`PATH` syntax), `with_policy` sets none; sessions naming the same directories share one index of the installed fonts, built from one walk of the directories and their subdirectories (a directory reached through several paths or a symbolic link is read once; the walk stops after 10 000 directories with a warning) and rebuilt when a directory changes. `RasterOptions::font_dirs` is searched before the `RROCKET_FONT_DIR` directories by `raster_pdf`, `raster_pdf_from_bytes` and `render_channel`. The standard font directories are those of the build target (the Windows and macOS ones only on those targets). `system_fonts = false` (mirrored by `RasterOptions::system_fonts`) stops the search of the standard font directories and of the fixed locations of the Liberation, Arial, Times New Roman and Courier New faces: non-embedded fonts then draw from `font_dirs` and the faces compiled into the library only, the base-14 substitutes and, with the default `bundled-fonts` feature, the bundled Noto fallback faces. Lookup order for a non-embedded font: an installed substitute of its class and script, then for a character it lacks an installed face that covers it, then a bundled face, then nothing. `image_budget` (mirrored by `RasterOptions::image_budget`) bounds the host bytes of decoded images the session keeps so that an image `XObject` drawn on several pages (a letterhead, a background scan) is decoded once: an image is kept from the second page that draws it, while it fits, and what is kept stays resident until the session is dropped. The default is `DOCUMENT_IMAGE_BUDGET_BYTES` (256 MiB, re-exported at the crate root); 0 keeps nothing, so every page decodes the images it draws, for small-memory hosts and embedders that hold many sessions. Images a page draws several times are still decoded once per page, within a per-page budget. `max_page_bytes` (mirrored by `RasterOptions::max_page_bytes`) bounds the bitmap of one render, see [`MAX_PX_SIDE`](#max_px_side--default_max_page_bytes--default_band_bytes); `band_bytes` sizes the bands of `render_page_bands` (no `RasterOptions` counterpart: its entry points return pages whole). `page_box` selects the page boundary box every page of the session is measured (`page_geometry`, `prescan_session`) and rendered on; see [`PageBox`](#pagebox). `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions::page_box`. `rotation` turns every page of the session clockwise by a whole number of quarter turns on top of its own `/Rotate`; see [`Rotation`](#rotation). `raster_pdf`, `raster_pdf_from_bytes` and `render_channel` take it from `RasterOptions::rotation`. `gpu_pages` (default `false`; no `RasterOptions` counterpart) renders pages whole on a Vulkan GPU beside the CPU workers: the device of `vulkan_device` is opened on a thread of its own when the session opens (or the session's Vulkan backend is used when it holds one), and until it is open every page renders on the CPU. A page is offered to the device while it is idle; it is interpreted into paint commands, and rendered on the device when every paint is a fill or stroke of a solid colour under a rectangular clip, `Normal` blend and constant alpha. A page on the ink canvas, painted as a page group, using another paint, or which the device fails on, renders on the CPU, with the same bytes either way; the CPU re-render shares the recording's deadline and has its own operator budget. A device error other than exceeding the device's limits retires the device for the session, with one warning. `PageDiagnostics::device_page` reports where each page rendered. `open_session` refuses `gpu_pages` with `RasterError::InvalidOptions` in a build without the `vulkan` feature, under a policy other than `Auto` or `ForceVulkan`, or with `vector_antialias` off, and `SessionConfig::check_gpu_pages()` applies the same check before any document is opened (the message names the fields and their `rrocket` flags); a device that does not open is logged at `error` and leaves every page on the CPU.
 
 ### `PageBox`
 
@@ -734,8 +752,8 @@ pub enum RasterError {
     Pdf(rasterrocket_interp::InterpError),
     PageOutOfRange { page: u32, total: u32 },
     PageDegenerate { width: u32, height: u32 },
-    PageTooLarge { width: u32, height: u32 },
-    PageAreaTooLarge { width: u32, height: u32, area: u64 },
+    PageTooLarge { width: u32, height: u32, bytes: u64, limit: u64 },
+    PageExceedsCeiling { width: u32, height: u32 },
     PageAllocationFailed { width: u32, height: u32 },
     Deskew(String),
     OutputStrideTooSmall { stride: usize, row_bytes: usize },  // PageBuffer output
@@ -750,8 +768,9 @@ pub enum RasterError {
 }
 ```
 
-`PageAreaTooLarge` is distinct from `PageTooLarge`: each side can be within
-`MAX_PX_DIMENSION` while the product still exceeds `MAX_PX_AREA`.
+`PageTooLarge` is a bitmap over the session's byte budget
+(`SessionConfig::max_page_bytes`); `PageExceedsCeiling` a page side over
+`MAX_PX_SIDE`, which no budget raises.
 `PageAllocationFailed` is a page within both limits for which the allocator
 refused a bitmap: the page's own, or a transparency group, soft mask,
 knockout coverage, tiling-pattern cell or screen, or Type 3 glyph bitmap drawn
@@ -761,30 +780,33 @@ carries a per-page panic caught by `render_channel`, which happens only under
 `panic = "unwind"`; with the `panic = "abort"` release profile a panic aborts
 the process.
 
-`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream. `Deskew` is not returned in this release. `deskew` on a render whose output is not gray (`render_page_rgba`, `PageBuffer::render_rgb_into` and `render_rgba_into`, `transparent_background` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
+`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream. `Deskew` is returned when deskew is asked of a page larger than `deskew::DESKEW_MAX_SIDE` (32 768 px a side). `deskew` on a render whose output is not gray (`render_page_rgba`, `PageBuffer::render_rgb_into` and `render_rgba_into`, `transparent_background` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
 
 Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when the policy is `ForceCuda`, `ForceVaapi` or `ForceVulkan`.
 
 ---
 
-### `MAX_PX_DIMENSION` / `MAX_PX_AREA`
+### `MAX_PX_SIDE` / `DEFAULT_MAX_PAGE_BYTES` / `DEFAULT_BAND_BYTES`
 
 ```rust
-pub const MAX_PX_DIMENSION: u32 = 32_768;
-pub const MAX_PX_AREA: u64 = 600_000_000;
+pub const MAX_PX_SIDE: u32 = 1 << 24;
+pub const DEFAULT_MAX_PAGE_BYTES: u64 = 1_800_000_000;
+pub const DEFAULT_BAND_BYTES: u64 = 64 << 20;
+pub fn validate_page_bytes(width: u32, height: u32, bytes_per_px: u32, max_bytes: u64) -> Result<(), RasterError>;
 ```
 
-`MAX_PX_DIMENSION` is the maximum accepted pixel dimension (width or height);
-`PageTooLarge` is returned if either exceeds it. At 150 DPI this corresponds to
-~366 inches (~9.3 metres).
-
-`MAX_PX_AREA` caps total raster area and is computed in `u64` (closing a latent
-overflow). A page whose sides are each legal but whose product exceeds this
-returns `PageAreaTooLarge`.
+A render's bitmap holds at most `SessionConfig::max_page_bytes` (default
+`DEFAULT_MAX_PAGE_BYTES`, 1.8 GB: a 600 MP page of 8-bit RGB): width × height
+× 3, or × 4 over a transparent backdrop, computed in `u64`. Over it the render
+is `PageTooLarge`. No page is more than `MAX_PX_SIDE` pixels on a side
+(`PageExceedsCeiling`), whatever the budget: every pixel coordinate is then
+exact in `f32` and coordinate sums stay inside `i32`.
 
 Both are checked before the bitmap is allocated, and they bound what one call
-draws: with a `RenderParams::region` they apply to the region, so a page larger
-than either can be rendered as tiles.
+draws: with a `RenderParams::region` the budget applies to the region, so a
+page larger than it can be rendered as tiles, and `render_page_bands` bounds
+the page by it while holding a band in memory. `validate_page_bytes` is the
+check, shared with the comic decoders.
 
 Images inside a page have their own budget, fixed in `rasterrocket-interp`
 (not configurable): at most 131 071 px per declared side and 1 GiB of decoded
@@ -813,7 +835,7 @@ pub use rasterrocket_parser::Password;
 
 `ImageFilter` identifies which decode filter was used for an embedded image (`Dct`, `Jpx`, `CcittFax`, `Jbig2`, `Flate`, `Raw`). Available through `PageDiagnostics` for routing decisions.
 
-The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `is_encrypted_bytes(&[u8]) -> bool` (the same probe of a document in memory) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `gray8_into_rendered_page` / `validate_dimensions`, the helpers every `RenderedPage` producer shares. `gray8_into_rendered_page(bmp, page_num, dpi, diagnostics)` takes the bitmap by value and hands a packed buffer (as `rgb_into_gray` returns) to the page without a copy; a padded one is copied row by row as by `gray8_to_rendered_page`.
+The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `is_encrypted_bytes(&[u8]) -> bool` (the same probe of a document in memory) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `gray8_into_rendered_page` / `validate_page_bytes`, the helpers every `RenderedPage` producer shares. `gray8_into_rendered_page(bmp, page_num, dpi, diagnostics)` takes the bitmap by value and hands a packed buffer (as `rgb_into_gray` returns) to the page without a copy; a padded one is copied row by row as by `gray8_to_rendered_page`.
 
 ---
 

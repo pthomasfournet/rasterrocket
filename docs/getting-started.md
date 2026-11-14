@@ -221,7 +221,7 @@ fn render_all(path: &Path, opts: &RasterOptions, mut process: impl FnMut(Rendere
     for (page_num, result) in raster_pdf(path, opts) {
         match result {
             Ok(page) => process(page),
-            Err(RasterError::PageTooLarge { width, height }) => {
+            Err(RasterError::PageTooLarge { width, height, .. }) => {
                 eprintln!("page {page_num}: {width}×{height} exceeds limit — skipping");
             }
             Err(e) => return Err(e),
@@ -235,9 +235,10 @@ fn render_all(path: &Path, opts: &RasterOptions, mut process: impl FnMut(Rendere
 
 Document-open errors (bad path, corrupt PDF, an encrypted document without authorisation) are yielded as `(1, Err(...))` and the iterator ends immediately after.
 
-A page is rendered at most 32 768 pixels on a side and 600 MP in area
-(`MAX_PX_DIMENSION`, `MAX_PX_AREA`); a larger one is `PageTooLarge` or
-`PageAreaTooLarge`, and can be rendered in tiles through the session API below.
+A page's bitmap holds at most `RasterOptions::max_page_bytes` (default 1.8 GB,
+a 600 MP RGB page) and at most `MAX_PX_SIDE` pixels on a side; a larger one is
+`PageTooLarge` or `PageExceedsCeiling`, and can be rendered in tiles or bands
+through the session API below.
 A page within those limits whose bitmap cannot be allocated is
 `PageAllocationFailed`.
 Images have their own decode budget. See

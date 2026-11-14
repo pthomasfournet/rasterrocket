@@ -2685,6 +2685,35 @@ The dormant device AA fill (CUDA and Vulkan kernels, `GPU_AA_FILL_THRESHOLD`,
 `PDF_RASTER_AA_FILL_THRESHOLD`) and the `gpu-aa` feature are removed. Glyph
 edges may move by one level, since glyphs use the same rasteriser.
 
+**Unreleased on master: large-format pages.** The pixel caps
+(`MAX_PX_DIMENSION` 32 768, `MAX_PX_AREA` 600 Mpx) are replaced by a byte
+budget, `SessionConfig::max_page_bytes` / `RasterOptions::max_page_bytes` /
+`--max-page-mib` (default 1.8 GB, the old bound at 8-bit RGB; transparent
+renders count their alpha), and a hard side ceiling `MAX_PX_SIDE` = 2²⁴;
+deskew keeps its own 32 768 px bound. `render_page_bands` renders a page as
+horizontal bands over shared page state (images, forms, shadings and cells
+decoded once; spot slots and diagnostics carried), stacking byte for byte into
+the whole page; the CLI writes PPM, PNG, TIFF and `--print` pages band by band
+(`--band-mib`, default 64) through new row-streamed writers (`PnmWriter`,
+`PngWriter`, `TiffStream`, `PdfPageEncoder`; `RowImage` replaces `TiffImage` /
+`PdfImage`), TIFF switching to BigTIFF past 4 GiB, a banded `--print` page
+spilling its compressed image to a file. A 44 × 120 in roll at 360 dpi
+(15 840 × 43 200, 2.05 GB) renders to TIFF in 28 s with 428 MiB peak RSS under a
+768 MiB cgroup ceiling that kills the one-band render. `--print` without a
+resolution flag prints pages larger than A0 at 360 dpi. Making bands exact
+fixed region renders that differed from the page: shadings, tiling lattices,
+image sample grids and group bounds now work on the page's grid; a Gouraud
+triangle reaching a clip by rounding was dropped; glyph rows rounded half away
+from zero; curve flattening was not shift-exact (points now on a 2⁻²⁰ px local
+grid); the tiling compose/direct choice depended on the window. Also fixed: a
+scanner table past `u32` intersections aborted (now `ScannerTooLarge`, the fill
+dropped with a warning), and a Type 3 glyph box far off the page overflowed
+`i32`. API changes: `RasterError::PageTooLarge { bytes, limit }`,
+`PageExceedsCeiling` (no `PageAreaTooLarge`), `validate_page_bytes`,
+`XPathScanner::new` returns `Result`, `gouraud_triangle_spans` and
+`Mesh::meeting` take the window origin, PNG files are written through the
+stream writer (different IDAT chunking, same pixels).
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in

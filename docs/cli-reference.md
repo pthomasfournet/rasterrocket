@@ -39,7 +39,8 @@ invalid backend combination is refused for comic input as for a PDF. The
 crop, scale-to and password flags, `--threads`, `--progress` and
 `--timings` apply to PDF input only and have no effect on comic input. An archive's entries are decompressed into memory when it opens;
 `--max-archive-mib MIB` (default 4096, at least 1) bounds their total, and an archive over it is refused
-whole as a possible decompression bomb, exit status 1.
+whole as a possible decompression bomb, exit status 1. A page image is held to `--max-page-mib`
+as decoded, at 3 bytes a pixel.
 
 ---
 
@@ -125,21 +126,28 @@ comic archive holding a PDF turns that PDF's pages.
 
 ## Size limits
 
-**Page raster.** One render is at most 32 768 pixels on a side and
-600 000 000 pixels (600 MP) in area. Both limits are checked from the page
-geometry before any pixel buffer is allocated. A page over either is refused:
-rrocket prints `rrocket: page N: render error: page pixel dimensions W×H exceed the
-per-side limit of 32768 px; …` (or `page pixel area W×H = A px exceeds the limit of
-600000000 px; …`) followed by a hint naming the tile flags, the other pages still
-render, and the run exits with status 1.
+**Page raster.** One page (or the area `-x`/`-y`/`-W`/`-H` select) is at
+most `--max-page-mib` of 8-bit RGB, 4 bytes a pixel under `--transparent`:
+by default 1 716 MiB (1.8 GB, a 600 MP page; A0 at 600 dpi fits). No page is
+more than 16 777 216 pixels on a side, whatever the budget. Both are checked
+from the page geometry before any pixel buffer is allocated. A page over
+either is refused: rrocket prints `rrocket: page N: render error: a W×H page
+is B bytes, over the page budget of L bytes; …` (or `page pixel dimensions
+W×H exceed the per-side ceiling of 16777216 px; …`) followed by a hint naming
+`--max-page-mib`, `-r` and the tile flags, the other pages still render, and
+the run exits with status 1. Raise `--max-page-mib` for a genuinely large page
+(a poster, a roll banner).
 
-The limits apply to what one render draws, not to the page: with the crop
-flags only the selected area is rendered, so output larger than the limits
-(a poster or map at high resolution, a 64K-class frame) is produced as tiles,
-one run per tile with `-x`/`-y`/`-W`/`-H`. In the library the same is done
-with `RenderParams::with_region` and `RenderRegion`; see the
-[API reference](api-reference.md#session-api). A page whose pixel size
-at the chosen resolution does not fit in 32 bits cannot be tiled either.
+**Bands.** A page larger than `--band-mib` (default 64 MiB) renders in
+horizontal bands of whole rows, each written to the output as it completes,
+so memory holds a band per render thread rather than the page: a 44 × 120 in
+roll at 360 dpi (15 840 × 43 200 px, 2 GB of RGB) prints or writes in well
+under 1 GB. PPM, PNG, TIFF and `--print` output stream this way, and the file
+is byte for byte the one a single band writes. JPEG output, `--fax`,
+`--invert=auto` and the camera stages need the whole page and render it in
+one band, under the page budget. A TIFF whose data would pass 4 GiB is written
+as BigTIFF. Every band executes the page's content, so a page of many bands
+takes longer to interpret than one of few.
 
 **Images.** An image may declare at most 131 071 pixels on a side and decode
 to at most 1 GiB of samples (width × height × components). An image over
@@ -181,7 +189,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB (RGBA with `--transparent`), gray with `--gray`, or 1 bit per pixel with `--mono` (`WhiteIsZero`, the fax interpretation). The resolution tags carry `-r` / `--rx` / `--ry`. |
 | `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, as `pdftocairo -transp`: RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2). Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--gray`, `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
 | `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
-| `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the 32 768-pixel render limit at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
+| `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the page budget at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
 | `--fax-resolution fine\|standard` | `fine` | Fax lines per inch: 196 (`fine`) or 98 (`standard`). Needs `--fax`. |
 | `--fax-to NUMBER` | | Send the fax document once written, through the operating system's fax service: the CUPS fax queue `--fax-queue` names (`lp -d NAME -o phone=DIAL`), else HylaFAX (`sendfax -n -d DIAL`). Implies `--fax`. The number is dial characters — digits, `+`, `*`, `#`, the pause `,` — and the separators space, `-`, `.`, `(`, `)`, beginning with a digit, `+`, `*` or `#`; the dial string handed to the service drops the separators (`"+1 (555) 010-9999"` dials `+15550109999`). rrocket waits for the service to accept the job, the service's output going to standard error; a refusal or a missing service exits with status 1, naming where the document is. No modem code: dialling is the service's. Refused on Windows, where neither service exists: write the document with `--fax` and send it with Windows Fax and Scan. |
 | `--fax-queue NAME` | | The CUPS fax queue `--fax-to` submits to: a name without white space or control characters, not beginning with `-`. Needs `--fax-to`. |
@@ -206,7 +214,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages are begun in page order and appended to the spool in page order as they finish, a page once it and every page before it are done; no page is begun more than two per render thread past the first page not yet appended, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
+| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi, or 360 dpi for a page whose 600 dpi raster would pass 600 MP, about 1 667 sq in: larger than A0 or 36 × 44 in), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages are begun in page order and appended to the spool in page order as they finish, a page once it and every page before it are done; no page is begun more than two per render thread past the first page not yet appended, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
 | `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`; `--list-printers` lists them. Implies `--print`. When `lp` refuses the job, the message points at `--list-printers`. |
 | `--list-printers` | | List the CUPS destinations `--printer` can name (`lpstat -e`), one per line, the default destination (`lpstat -d`) followed by a tab and `default`, then exit. Takes no input, output prefix or other flag. With no queues, writes nothing to standard output and says so on standard error. Refused on Windows. |
 | `--copies N` | the queue's setting | Copies (1–9999), `lp -n N`. Needs `--print`. |
@@ -308,6 +316,8 @@ that says so.
 | Flag | Default | Description |
 |---|---|---|
 | `--threads N` | `0` (auto) | Number of render threads. `0` = one thread per logical CPU. |
+| `--max-page-mib MIB` | `1716` (1.8 GB) | The most a page's bitmap may hold, in MiB of 8-bit RGB (4 bytes a pixel under `--transparent`), 1 to 2³⁰. A larger page is refused before anything is allocated; see [Size limits](#size-limits). Comic pages are held to it as decoded. |
+| `--band-mib MIB` | `64` | The memory of a band of a page while it renders, 1 to 65 536. A page larger than one band renders in bands written as each completes; see [Size limits](#size-limits). |
 | `--sep CHAR` | `-` | Separator between prefix and page number (`out-1.ppm`, `out_1.ppm`, etc.). |
 | `--forcenum DIGITS` | — | Zero-pad page numbers to at least DIGITS digits (`001`, `002`, …). |
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |

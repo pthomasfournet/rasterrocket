@@ -20,6 +20,11 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF), `rrocket` prints
 through the system's print service (`--print`, CUPS) and writes or sends fax
 documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#printing).
+Pages larger than memory, such as large-format posters and roll banners,
+render in horizontal bands written as they complete (`--band-mib`,
+`render_page_bands`), byte-identical to a whole-page render; the page budget
+is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
+[CLI reference](docs/cli-reference.md#size-limits).
 
 > **This project is distributed via GitHub, not crates.io.** Two crates were
 > published there once (`rasterrocket` and `rasterrocket-cli`, both at 1.0.1)

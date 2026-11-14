@@ -1364,7 +1364,7 @@ holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
 - `InterpError::PageOutOfRange`
 - `InterpError::InvalidPageGeometry`
 - `RasterError::PageDegenerate` / `RasterError::PageTooLarge` /
-  `RasterError::PageAreaTooLarge`
+  `RasterError::PageExceedsCeiling`
 - `RasterError::PageAllocationFailed` — the page bitmap could not be allocated
 - `RasterError::OutputBufferTooSmall` / `RasterError::OutputStrideTooSmall` —
   a `PageBuffer` render's output buffer cannot hold the page; it is left
