@@ -438,6 +438,8 @@ impl PageRenderer<'_> {
             // at, and how far past that code's pen position the glyphs of
             // the run before end: from the string before at the start.
             let mut drift = (usize::MAX, 0.0);
+            // How far past the string's end the string after starts.
+            let mut next_start = 0.0;
             if shaped {
                 if let Some(tail) = tail.filter(|tail| neighbours_at(&tail.end, &tm, tail.em)) {
                     neighbours.before = tail.texts;
@@ -447,7 +449,10 @@ impl PageRenderer<'_> {
                     let end = advances
                         .iter()
                         .fold(tm, |tm, &advance| translate_text_x(tm, advance));
-                    neighbours.after = self.following_texts(end, em, following);
+                    if let Some(next) = self.next_string(end, em, following) {
+                        neighbours.after = next.texts;
+                        next_start = next.start;
+                    }
                     // Reading ahead may load faces: the face is borrowed
                     // anew.
                     let font_name = &self.gstate.current().text.font_name;
@@ -521,6 +526,20 @@ impl PageRenderer<'_> {
                 let Some(run) = run else { continue };
                 run_width += advance;
                 if i + 1 != run.end {
+                    continue;
+                }
+                // Marks drawn over the first letter of the string after,
+                // at their displacements from its origin.
+                if run.over_next {
+                    for g in &run.glyphs {
+                        let tx = g.offset.0.mul_add(em, run_width + next_start);
+                        let ty = g.offset.1.mul_add(font_size, rise);
+                        let (dx, dy) = page_to_window(
+                            origin,
+                            text_to_device(&ctm, &run_origin, tx, ty, page_h),
+                        );
+                        push_glyph(run.face, g.selector, g.selector, true, dx, dy, 1.0);
+                    }
                     continue;
                 }
                 let natural: f64 = run.glyphs.iter().map(|g| g.advance).sum::<f64>() * em;

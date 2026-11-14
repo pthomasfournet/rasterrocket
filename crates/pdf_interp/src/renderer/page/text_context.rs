@@ -87,42 +87,57 @@ pub(super) const fn keeps_text_context(op: &Operator) -> bool {
 }
 
 /// Whether a string whose text matrix is `start` neighbours a string that
-/// ends at `end` with em `em`: the two matrices share their 2×2 part and
-/// `start`'s origin lies on the baseline of `end`, from [`MAX_OVERLAP`] em
-/// before it to [`MAX_GAP`] em after it.
-#[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
+/// ends at `end` with em `em` (see [`offset`]).
 pub(super) fn neighbours(end: &TextMatrix, start: &TextMatrix, em: f64) -> bool {
+    offset(end, start, em).is_some()
+}
+
+/// How far along x in text space past `end` a string whose text matrix is
+/// `start` starts, when it neighbours a string that ends at `end` with em
+/// `em`: the two matrices share their 2×2 part and `start`'s origin lies
+/// on the baseline of `end`, from [`MAX_OVERLAP`] em before it to
+/// [`MAX_GAP`] em after it.
+#[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
+fn offset(end: &TextMatrix, start: &TextMatrix, em: f64) -> Option<f64> {
     let [a, b, c, d, e, f] = *end;
     let scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
     let det = a.mul_add(d, -(b * c));
     if !(em > 0.0 && det != 0.0 && det.is_finite()) {
-        return false;
+        return None;
     }
     if (0..4).any(|i| (end[i] - start[i]).abs() > scale * 1e-9) {
-        return false;
+        return None;
     }
     // The displacement in text space: (dx, dy) = tx × (a, b) + ty × (c, d).
     let (dx, dy) = (start[4] - e, start[5] - f);
     let tx = dx.mul_add(d, -(dy * c)) / det;
     let ty = dy.mul_add(a, -(dx * b)) / det;
-    (-MAX_OVERLAP * em..=MAX_GAP * em).contains(&tx) && ty.abs() <= em * 1e-3
+    ((-MAX_OVERLAP * em..=MAX_GAP * em).contains(&tx) && ty.abs() <= em * 1e-3).then_some(tx)
+}
+
+/// The start of the string shown after a string on its baseline: the
+/// texts of its first codes, at most [`CONTEXT_CODES`], and how far along
+/// x in text space past the end of the string before it starts.
+#[derive(Clone, Debug, Default)]
+pub(super) struct NextString {
+    pub texts: Vec<CodeText>,
+    pub start: f64,
 }
 
 impl PageRenderer<'_> {
-    /// The texts of the first codes, at most [`CONTEXT_CODES`], of the
-    /// string shown after a string that ends at `end` with em `em`, when
-    /// it is a neighbour (see the module documentation) drawn by a
-    /// substitute face in horizontal writing; empty otherwise.
-    pub(super) fn following_texts(
+    /// The start of the string shown after a string that ends at `end`
+    /// with em `em`, when it is a neighbour (see the module documentation)
+    /// drawn by a substitute face in horizontal writing.
+    pub(super) fn next_string(
         &mut self,
         end: TextMatrix,
         em: f64,
         following: Following<'_, '_>,
-    ) -> Vec<CodeText> {
+    ) -> Option<NextString> {
         let mut ts = self.gstate.current().text.clone();
         ts.text_matrix = end;
         if let Some(bytes) = first_string(&mut ts, following.elements) {
-            return self.leading_texts(&ts, bytes, end, em);
+            return self.next_string_at(&ts, bytes, end, em);
         }
         for op in following.ops {
             let bytes = match op {
@@ -180,36 +195,32 @@ impl PageRenderer<'_> {
                     text
                 }
                 op if keeps_text_context(op) => continue,
-                _ => return Vec::new(),
+                _ => return None,
             };
             if !bytes.is_empty() {
-                return self.leading_texts(&ts, bytes, end, em);
+                return self.next_string_at(&ts, bytes, end, em);
             }
         }
-        Vec::new()
+        None
     }
 
-    /// The texts of the first codes, at most [`CONTEXT_CODES`], of `bytes`
-    /// shown in the text state `ts` after a string that ends at `end` with
-    /// em `em`; empty unless the two strings are neighbours and `bytes` is
-    /// drawn by a substitute face in horizontal writing.
-    fn leading_texts(
+    /// The start of `bytes` shown in the text state `ts` after a string
+    /// that ends at `end` with em `em`; `None` unless the two strings are
+    /// neighbours and `bytes` is drawn by a substitute face in horizontal
+    /// writing.
+    fn next_string_at(
         &mut self,
         ts: &TextState,
         bytes: &[u8],
         end: TextMatrix,
         em: f64,
-    ) -> Vec<CodeText> {
-        let Some(font) = &ts.font else {
-            return Vec::new();
-        };
+    ) -> Option<NextString> {
+        let font = ts.font.as_ref()?;
         let cid_enc = font.descriptor.cid_encoding.as_ref();
-        if font.descriptor.type3.is_some()
-            || cid_enc.is_some_and(|enc| enc.vertical)
-            || !neighbours(&end, &ts.text_matrix, em)
-        {
-            return Vec::new();
+        if font.descriptor.type3.is_some() || cid_enc.is_some_and(|enc| enc.vertical) {
+            return None;
         }
+        let start = offset(&end, &ts.text_matrix, em)?;
         let ctm = self.gstate.current().ctm;
         let trm = text_rendering_matrix(
             &ts.text_matrix,
@@ -218,18 +229,19 @@ impl PageRenderer<'_> {
             ts.horiz_scaling / 100.0,
         );
         if trm[0].mul_add(trm[3], -(trm[1] * trm[2])) == 0.0 {
-            return Vec::new();
+            return None;
         }
-        let Some(face) = self.font_cache.get_or_load(font, &ts.font_name, trm) else {
-            return Vec::new();
-        };
+        let face = self.font_cache.get_or_load(font, &ts.font_name, trm)?;
         if !face.substitute {
-            return Vec::new();
+            return None;
         }
-        CidEncoding::shown_codes(cid_enc, bytes)
-            .take(CONTEXT_CODES)
-            .map(|d| face.text(d.code, d.value))
-            .collect()
+        Some(NextString {
+            texts: CidEncoding::shown_codes(cid_enc, bytes)
+                .take(CONTEXT_CODES)
+                .map(|d| face.text(d.code, d.value))
+                .collect(),
+            start,
+        })
     }
 }
 

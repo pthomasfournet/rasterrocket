@@ -254,6 +254,47 @@ fn devanagari_vowel_sign_i_is_drawn_before_its_consonant() {
     );
 }
 
+/// Lamed, qamats, shin ("שָׁל" without the shin dot) in visual order, right
+/// to left: the qamats, stored before shin, is shin's mark.  Drawn at the
+/// end of a string or as a string of its own, it lies where the word shaped
+/// as one string puts it, under shin at the right of the word.
+#[test]
+fn a_hebrew_mark_lies_under_its_letter_across_strings() {
+    let names = ["uni05DC", "uni05B8", "uni05E9"];
+    // The centre of the ink more than a pixel below the baseline, 15
+    // units above the bottom edge: the qamats alone; and the middle of
+    // the word's inked columns.
+    let qamats = |show: &str| {
+        let page = render(&names, show);
+        let inked = |x: usize, rows: &[Vec<bool>]| rows.iter().any(|row| row[x]);
+        let columns: Vec<usize> = (0..page[0].len()).filter(|&x| inked(x, &page)).collect();
+        let below = &page[page.len() - 13..];
+        let mark: Vec<usize> = columns
+            .iter()
+            .copied()
+            .filter(|&x| inked(x, below))
+            .collect();
+        assert!(!mark.is_empty(), "{show}: the qamats is drawn");
+        (
+            usize::midpoint(mark[0], mark[mark.len() - 1]),
+            usize::midpoint(columns[0], columns[columns.len() - 1]),
+        )
+    };
+    let (shaped, middle) = qamats("<414243> Tj");
+    assert!(shaped > middle, "the shaped qamats lies under shin");
+    for show in [
+        "[<4142> 0 <43>] TJ",
+        "<4142> Tj <43> Tj",
+        "<41> Tj <42> Tj <43> Tj",
+    ] {
+        let (centre, _) = qamats(show);
+        assert!(
+            centre.abs_diff(shaped) <= 1,
+            "{show}: the qamats lies under shin ({centre}, shaped {shaped})"
+        );
+    }
+}
+
 /// Latin text shows glyph by glyph whether or not it is split.
 #[test]
 fn latin_text_is_not_shaped() {

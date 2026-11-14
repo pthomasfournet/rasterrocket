@@ -22,9 +22,16 @@
 //! at the string's ends, those of the strings shown next to it on its
 //! baseline (see [`Neighbours`]).  A word split between two strings is
 //! thereby joined across the split, each part keeping its own positions.
+//!
+//! Right-to-left visual order stores a combining mark before its letter.
+//! The marks that end a right-to-left string whose neighbour after starts
+//! with a right-to-left letter belong to that letter: they are shaped with
+//! it as a run of their own, drawn over the letter where the string after
+//! draws it.
 
 use font::face::FontFace;
 use font::program::{ShapeError, ShapedGlyph};
+use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::renderer::font_cache::PageFace;
 
@@ -54,12 +61,17 @@ pub(super) type Drawn<'f> = (&'f FontFace, u32, bool);
 /// continues the code before it when `joins.0` and the code after it when
 /// `joins.1`: codes of its string drawn by another face, or of the strings
 /// shown next to it, that can be part of a run.
+///
+/// When `over_next`, the codes are the marks that end their string and
+/// `glyphs` the marks alone, each displaced from the origin of the first
+/// letter of the string after, which they belong to, and without advance.
 pub(super) struct ShapedRun<'f> {
     pub start: usize,
     pub end: usize,
     pub face: &'f FontFace,
     pub glyphs: Vec<ShapedGlyph>,
     pub joins: (bool, bool),
+    pub over_next: bool,
 }
 
 /// How a character takes part in a shaped run.
@@ -139,6 +151,18 @@ pub(super) fn takes_context(text: CodeText) -> bool {
     text.is_some_and(|(first, _)| class(first).is_some())
 }
 
+/// Whether a code of text `text` is a combining mark: its first character
+/// is a nonspacing mark (bidirectional class NSM).
+fn is_mark(text: CodeText) -> bool {
+    text.is_some_and(|(first, _)| bidi_class(first) == BidiClass::NSM)
+}
+
+/// Whether a code of text `text` is a right-to-left letter: its first
+/// character has bidirectional class R or AL.
+fn is_rtl_letter(text: CodeText) -> bool {
+    text.is_some_and(|(first, _)| matches!(bidi_class(first), BidiClass::R | BidiClass::AL))
+}
+
 /// The shaped runs of a shown string whose codes have the texts `texts`
 /// and the drawing glyphs `drawn`, for a string shown with `face` between
 /// `neighbours`.  Empty unless `face` is a substitute that knows its
@@ -190,6 +214,22 @@ pub(super) fn shaped_runs<'f>(
         let known = |codes: &mut dyn Iterator<Item = &CodeText>| -> Vec<(char, Option<char>)> {
             codes.take(CONTEXT_CODES).map_while(|&text| text).collect()
         };
+        // The marks that end a right-to-left string belong to the letter
+        // the neighbour after starts with; the run ends before them.
+        let next_letter = neighbours
+            .after
+            .first()
+            .copied()
+            .flatten()
+            .filter(|&letter| rtl && end == texts.len() && is_rtl_letter(Some(letter)));
+        let marks = next_letter.map_or(0, |_| {
+            texts[start..end]
+                .iter()
+                .rev()
+                .take_while(|&&text| is_mark(text))
+                .count()
+        });
+        let (end, all) = (end - marks, end);
         let before = known(
             &mut texts[..start]
                 .iter()
@@ -205,7 +245,8 @@ pub(super) fn shaped_runs<'f>(
             in_context(texts[..start].last().or_else(|| neighbours.before.last())),
             in_context(texts.get(end).or_else(|| neighbours.after.first())),
         );
-        if (end - start >= 2 || joins.0 || joins.1)
+        if end > start
+            && (end - start >= 2 || joins.0 || joins.1)
             && let Some(glyphs) = shape(run_face, &texts[start..end], &before, &after, rtl)
         {
             runs.push(ShapedRun {
@@ -214,11 +255,74 @@ pub(super) fn shaped_runs<'f>(
                 face: run_face,
                 glyphs,
                 joins,
+                over_next: false,
             });
         }
-        start = end;
+        if let Some(letter) = next_letter.filter(|_| marks > 0) {
+            let before = known(
+                &mut texts[..end]
+                    .iter()
+                    .rev()
+                    .chain(neighbours.before.iter().rev()),
+            );
+            let after = known(&mut neighbours.after.iter().skip(1));
+            if let Some(glyphs) = marks_over(run_face, &texts[end..all], letter, &before, &after) {
+                runs.push(ShapedRun {
+                    start: end,
+                    end: all,
+                    face: run_face,
+                    glyphs,
+                    joins: (false, false),
+                    over_next: true,
+                });
+            }
+        }
+        start = all;
     }
     runs
+}
+
+/// The glyphs of the marks whose texts are `marks`, stored before the
+/// letter of text `letter` that the string after starts with, shaped with
+/// that letter by `face` between codes of the texts `before` and `after`,
+/// each listed nearest first: the marks alone, each displaced from the
+/// letter's origin, without advance.  `None` when the marks and the letter
+/// are not shaped or the letter is not the one glyph with an advance.
+fn marks_over(
+    face: &FontFace,
+    marks: &[CodeText],
+    letter: (char, Option<char>),
+    before: &[(char, Option<char>)],
+    after: &[(char, Option<char>)],
+) -> Option<Vec<ShapedGlyph>> {
+    let mut texts = marks.to_vec();
+    texts.push(Some(letter));
+    let glyphs = shape(face, &texts, before, after, true)?;
+    let mut pen = 0.0;
+    let placed: Vec<(f64, &ShapedGlyph)> = glyphs
+        .iter()
+        .map(|g| {
+            let x = pen + g.offset.0;
+            pen += g.advance;
+            (x, g)
+        })
+        .collect();
+    let mut letters = placed.iter().filter(|(_, g)| g.advance.abs() > 1e-6);
+    let &(origin, _) = letters.next()?;
+    if letters.next().is_some() {
+        return None;
+    }
+    Some(
+        placed
+            .iter()
+            .filter(|(_, g)| g.advance.abs() <= 1e-6)
+            .map(|&(x, g)| ShapedGlyph {
+                selector: g.selector,
+                advance: 0.0,
+                offset: (x - origin, g.offset.1),
+            })
+            .collect(),
+    )
 }
 
 /// The glyphs of the codes whose texts are `texts`, stored between codes
