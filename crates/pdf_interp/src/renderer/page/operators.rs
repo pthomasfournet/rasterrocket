@@ -295,40 +295,26 @@ impl PageRenderer<'_> {
             Operator::BeginText => self.gstate.current_mut().text.begin_text(),
             Operator::EndText => self.end_text(),
 
-            // ── Text state ────────────────────────────────────────────────────
-            Operator::SetFont { name, size } => {
-                if self.resources.font_entry(name).is_none() {
-                    self.record_missing_font(name);
-                }
-                let font = self.font_cache.select(&self.resources, name);
-                let ts = &mut self.gstate.current_mut().text;
-                ts.font_name = Arc::from(&**name);
-                ts.font = Some(font);
-                ts.font_size = *size;
-            }
-            Operator::SetCharSpacing(v) => self.gstate.current_mut().text.char_spacing = *v,
-            Operator::SetWordSpacing(v) => self.gstate.current_mut().text.word_spacing = *v,
-            Operator::SetHorizScaling(v) => self.gstate.current_mut().text.horiz_scaling = *v,
-            Operator::SetLeading(v) => self.gstate.current_mut().text.leading = *v,
-            Operator::SetTextRise(v) => self.gstate.current_mut().text.rise = *v,
-            Operator::SetTextRenderMode(v) => self.gstate.current_mut().text.render_mode = *v,
-
-            // ── Text positioning ──────────────────────────────────────────────
-            Operator::TextMove(tx, ty) => {
-                self.gstate.current_mut().text.move_by(*tx, *ty);
-            }
-            Operator::TextMoveSetLeading(tx, ty) => {
-                self.gstate
-                    .current_mut()
-                    .text
-                    .move_by_and_set_leading(*tx, *ty);
-            }
-            Operator::SetTextMatrix(m) => self.gstate.current_mut().text.set_matrix(*m),
-            Operator::NextLine => self.gstate.current_mut().text.next_line(),
+            // ── Text state and positioning ────────────────────────────────────
+            Operator::SetFont { .. }
+            | Operator::SetCharSpacing(_)
+            | Operator::SetWordSpacing(_)
+            | Operator::SetHorizScaling(_)
+            | Operator::SetLeading(_)
+            | Operator::SetTextRise(_)
+            | Operator::SetTextRenderMode(_)
+            | Operator::TextMove(..)
+            | Operator::TextMoveSetLeading(..)
+            | Operator::SetTextMatrix(_)
+            | Operator::NextLine => self.set_text_state(op),
 
             // ── Text showing ──────────────────────────────────────────────────
-            Operator::ShowText(bytes) => {
-                self.show_text(bytes, Following::ops(rest));
+            Operator::ShowText(_)
+            | Operator::MoveNextLineShow(_)
+            | Operator::MoveNextLineShowSpaced { .. } => {
+                if let Some(bytes) = self.gstate.current_mut().text.begin_show(op) {
+                    self.show_text(bytes, Following::ops(rest));
+                }
             }
             Operator::ShowTextArray(elems) => {
                 for (i, elem) in elems.iter().enumerate() {
@@ -345,17 +331,6 @@ impl PageRenderer<'_> {
                         }
                     }
                 }
-            }
-            Operator::MoveNextLineShow(bytes) => {
-                self.gstate.current_mut().text.next_line();
-                self.show_text(bytes, Following::ops(rest));
-            }
-            Operator::MoveNextLineShowSpaced { aw, ac, text } => {
-                let gs = self.gstate.current_mut();
-                gs.text.word_spacing = *aw;
-                gs.text.char_spacing = *ac;
-                gs.text.next_line();
-                self.show_text(text, Following::ops(rest));
             }
 
             // ── XObjects / images / shading ────────────────────────────────────
@@ -481,6 +456,24 @@ impl PageRenderer<'_> {
             | Operator::BeginMarkedContent
             | Operator::EndMarkedContent => {}
         }
+    }
+
+    /// Apply the text-state or text-positioning operator `op` to the
+    /// current text state.  A `Tf` naming no font of the resources is
+    /// recorded as missing.
+    fn set_text_state(&mut self, op: &Operator) {
+        if let Operator::SetFont { name, .. } = op
+            && self.resources.font_entry(name).is_none()
+        {
+            self.record_missing_font(name);
+        }
+        let (font_cache, resources) = (&mut self.font_cache, &self.resources);
+        let applied = self
+            .gstate
+            .current_mut()
+            .text
+            .apply_state_op(op, |name| font_cache.select(resources, name));
+        debug_assert!(applied, "{op:?} is a text-state operator");
     }
 
     /// Put the parameters of an `ExtGState` dictionary into effect in the

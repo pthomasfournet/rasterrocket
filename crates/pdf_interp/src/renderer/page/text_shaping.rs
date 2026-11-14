@@ -34,6 +34,7 @@ use font::program::{ShapeError, ShapedGlyph};
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::renderer::font_cache::PageFace;
+use crate::resources::font::FontDescriptor;
 
 /// The text of a shown code: the one or two characters its font maps it
 /// to, `None` when unknown.
@@ -143,6 +144,22 @@ const fn class(c: char) -> Option<Class> {
         0xABC0..=0xABFF => ltr(0xABC0),
         _ => return None,
     })
+}
+
+/// Whether text shown with the font `descriptor` can be shaped: the font
+/// is no Type 3 font and writes horizontally.
+pub(super) fn font_shapes(descriptor: &FontDescriptor) -> bool {
+    descriptor.type3.is_none()
+        && !descriptor
+            .cid_encoding
+            .as_ref()
+            .is_some_and(|enc| enc.vertical)
+}
+
+/// Whether text shown with the font `descriptor` and drawn by `face` is
+/// shaped: the font can be shaped and `face` is a substitute.
+pub(super) fn shapes(descriptor: &FontDescriptor, face: &PageFace) -> bool {
+    font_shapes(descriptor) && face.substitute
 }
 
 /// Whether a code of text `text` can be part of a run: a letter of a

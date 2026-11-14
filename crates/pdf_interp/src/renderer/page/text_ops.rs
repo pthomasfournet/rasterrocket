@@ -104,6 +104,12 @@ pub(super) fn text_rendering_matrix(
     ]
 }
 
+/// Whether the 2×2 text rendering matrix `trm` is singular, mapping every
+/// glyph to zero area (`Tz 0`, a degenerate `Tm` or CTM).
+pub(super) fn is_singular(trm: &[f64; 4]) -> bool {
+    trm[0].mul_add(trm[3], -(trm[1] * trm[2])) == 0.0
+}
+
 /// Map a text-space point through the text matrix and CTM to device-pixel
 /// coordinates with y-flip (PDF origin = bottom-left; device origin = top-left).
 ///

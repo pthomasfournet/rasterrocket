@@ -14,11 +14,9 @@
 //! is read ahead from the operators that follow ([`Following`]), with the
 //! text state they set.
 
-use std::sync::Arc;
-
 use super::PageRenderer;
-use super::text_ops::{apply_kern, text_rendering_matrix};
-use super::text_shaping::{CONTEXT_CODES, CodeText};
+use super::text_ops::{apply_kern, is_singular, text_rendering_matrix};
+use super::text_shaping::{CONTEXT_CODES, CodeText, font_shapes, shapes};
 use crate::content::{Operator, TextArrayElement};
 use crate::renderer::text::{TextMatrix, TextState};
 use crate::resources::font::CidEncoding;
@@ -140,62 +138,20 @@ impl PageRenderer<'_> {
             return self.next_string_at(&ts, bytes, end, em);
         }
         for op in following.ops {
-            let bytes = match op {
-                Operator::SetFont { name, size } => {
-                    ts.font = Some(self.font_cache.select(&self.resources, name));
-                    ts.font_name = Arc::from(&**name);
-                    ts.font_size = *size;
-                    continue;
-                }
-                Operator::SetCharSpacing(v) => {
-                    ts.char_spacing = *v;
-                    continue;
-                }
-                Operator::SetWordSpacing(v) => {
-                    ts.word_spacing = *v;
-                    continue;
-                }
-                Operator::SetHorizScaling(v) => {
-                    ts.horiz_scaling = *v;
-                    continue;
-                }
-                Operator::SetLeading(v) => {
-                    ts.leading = *v;
-                    continue;
-                }
-                Operator::TextMove(tx, ty) => {
-                    ts.move_by(*tx, *ty);
-                    continue;
-                }
-                Operator::TextMoveSetLeading(tx, ty) => {
-                    ts.move_by_and_set_leading(*tx, *ty);
-                    continue;
-                }
-                Operator::SetTextMatrix(m) => {
-                    ts.set_matrix(*m);
-                    continue;
-                }
-                Operator::NextLine => {
-                    ts.next_line();
-                    continue;
-                }
-                Operator::ShowText(bytes) => bytes,
-                Operator::ShowTextArray(elements) => match first_string(&mut ts, elements) {
+            if ts.apply_state_op(op, |name| self.font_cache.select(&self.resources, name)) {
+                continue;
+            }
+            let bytes = if let Some(bytes) = ts.begin_show(op) {
+                bytes
+            } else if let Operator::ShowTextArray(elements) = op {
+                match first_string(&mut ts, elements) {
                     Some(bytes) => bytes,
                     None => continue,
-                },
-                Operator::MoveNextLineShow(bytes) => {
-                    ts.next_line();
-                    bytes
                 }
-                Operator::MoveNextLineShowSpaced { aw, ac, text } => {
-                    ts.word_spacing = *aw;
-                    ts.char_spacing = *ac;
-                    ts.next_line();
-                    text
-                }
-                op if keeps_text_context(op) => continue,
-                _ => return None,
+            } else if keeps_text_context(op) {
+                continue;
+            } else {
+                return None;
             };
             if !bytes.is_empty() {
                 return self.next_string_at(&ts, bytes, end, em);
@@ -216,8 +172,7 @@ impl PageRenderer<'_> {
         em: f64,
     ) -> Option<NextString> {
         let font = ts.font.as_ref()?;
-        let cid_enc = font.descriptor.cid_encoding.as_ref();
-        if font.descriptor.type3.is_some() || cid_enc.is_some_and(|enc| enc.vertical) {
+        if !font_shapes(&font.descriptor) {
             return None;
         }
         let start = offset(&end, &ts.text_matrix, em)?;
@@ -228,15 +183,15 @@ impl PageRenderer<'_> {
             ts.font_size,
             ts.horiz_scaling / 100.0,
         );
-        if trm[0].mul_add(trm[3], -(trm[1] * trm[2])) == 0.0 {
+        if is_singular(&trm) {
             return None;
         }
         let face = self.font_cache.get_or_load(font, &ts.font_name, trm)?;
-        if !face.substitute {
+        if !shapes(&font.descriptor, face) {
             return None;
         }
         Some(NextString {
-            texts: CidEncoding::shown_codes(cid_enc, bytes)
+            texts: CidEncoding::shown_codes(font.descriptor.cid_encoding.as_ref(), bytes)
                 .take(CONTEXT_CODES)
                 .map(|d| face.text(d.code, d.value))
                 .collect(),

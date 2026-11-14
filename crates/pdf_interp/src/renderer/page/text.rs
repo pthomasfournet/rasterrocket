@@ -5,10 +5,12 @@ use super::canvas::with_canvas;
 use super::pixel_rect::PixelRect;
 use super::text_context::{Following, TextTail, neighbours as neighbours_at};
 use super::text_ops::{
-    GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, text_rendering_matrix,
-    text_to_device, translate_text_x, translate_text_y,
+    GlyphRecord, fit_to_advance, glyph_advance, glyph_placement, is_singular,
+    text_rendering_matrix, text_to_device, translate_text_x, translate_text_y,
 };
-use super::text_shaping::{CONTEXT_CODES, CodeText, Drawn, Neighbours, shaped_runs, takes_context};
+use super::text_shaping::{
+    CONTEXT_CODES, CodeText, Drawn, Neighbours, shaped_runs, shapes, takes_context,
+};
 use super::text_stroke::GlyphStroke;
 use super::view::page_to_window;
 use crate::renderer::font_cache::PageFace;
@@ -221,8 +223,7 @@ impl PageRenderer<'_> {
             // (below one device pixel, an unreadable program) draws nothing;
             // either way the run draws no glyph and the pen still advances
             // by the document's widths (PDF §9.4.4).
-            let singular = trm[0].mul_add(trm[3], -(trm[1] * trm[2])) == 0.0;
-            let mut face = if singular {
+            let mut face = if is_singular(&trm) {
                 None
             } else {
                 let font_name = &self.gstate.current().text.font_name;
@@ -425,7 +426,7 @@ impl PageRenderer<'_> {
 
             // Runs are shaped in horizontal writing only, between the
             // strings shown next to them on their baseline.
-            let shaped = vertical_enc.is_none() && face.is_some_and(|f| f.substitute);
+            let shaped = face.is_some_and(|f| shapes(descriptor, f));
             let texts: Vec<CodeText> = match face {
                 Some(face) if shaped => {
                     decoded.iter().map(|d| face.text(d.code, d.value)).collect()

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use super::font_cache::ActiveFont;
+use crate::content::Operator;
 
 /// PDF text matrix `[a b c d e f]` (§8.3.3): it maps `(x, y)` to
 /// `(a·x + c·y + e, b·x + d·y + f)`.
@@ -101,6 +102,56 @@ impl TextState {
     pub(crate) const fn set_matrix(&mut self, m: TextMatrix) {
         self.text_matrix = m;
         self.line_matrix = m;
+    }
+
+    /// Apply the text-state or text-positioning operator `op` (PDF §9.3,
+    /// §9.4.2), with `select` resolving the font a `Tf` names.  Returns
+    /// `false`, the state unchanged, for any other operator.
+    pub(crate) fn apply_state_op(
+        &mut self,
+        op: &Operator,
+        select: impl FnOnce(&[u8]) -> ActiveFont,
+    ) -> bool {
+        match op {
+            Operator::SetFont { name, size } => {
+                self.font = Some(select(name));
+                self.font_name = Arc::from(&**name);
+                self.font_size = *size;
+            }
+            Operator::SetCharSpacing(v) => self.char_spacing = *v,
+            Operator::SetWordSpacing(v) => self.word_spacing = *v,
+            Operator::SetHorizScaling(v) => self.horiz_scaling = *v,
+            Operator::SetLeading(v) => self.leading = *v,
+            Operator::SetTextRise(v) => self.rise = *v,
+            Operator::SetTextRenderMode(v) => self.render_mode = *v,
+            Operator::TextMove(tx, ty) => self.move_by(*tx, *ty),
+            Operator::TextMoveSetLeading(tx, ty) => self.move_by_and_set_leading(*tx, *ty),
+            Operator::SetTextMatrix(m) => self.set_matrix(*m),
+            Operator::NextLine => self.next_line(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// The string the `Tj`, `'` or `"` operator `op` shows, with the state
+    /// changes that precede the showing applied: `'` moves to the next
+    /// line, `"` sets the word and character spacing and then moves.
+    /// `None`, the state unchanged, for any other operator.
+    pub(crate) fn begin_show<'o>(&mut self, op: &'o Operator<'_>) -> Option<&'o [u8]> {
+        match op {
+            Operator::ShowText(bytes) => Some(bytes),
+            Operator::MoveNextLineShow(bytes) => {
+                self.next_line();
+                Some(bytes)
+            }
+            Operator::MoveNextLineShowSpaced { aw, ac, text } => {
+                self.word_spacing = *aw;
+                self.char_spacing = *ac;
+                self.next_line();
+                Some(text)
+            }
+            _ => None,
+        }
     }
 
     /// The current text origin in user space: the translation (`e`, `f`)
