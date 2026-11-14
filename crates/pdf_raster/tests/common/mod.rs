@@ -22,8 +22,10 @@ use rasterrocket::{
     render_page_rgb, render_page_rgb_with_diagnostics,
 };
 
-/// A font directory named `name` under the test target's scratch space,
-/// holding exactly `files` (name, bytes).  The directory is this process's
+/// A font directory named `name` under the test target's scratch space
+/// (the system temporary directory when the including crate is not an
+/// integration-test target, as for the fuzz crate), holding exactly `files`
+/// (name, bytes).  The directory is this process's
 /// own and is emptied first, so a file left by an earlier run, or written
 /// by a concurrent one, is never indexed.
 ///
@@ -31,8 +33,8 @@ use rasterrocket::{
 ///
 /// When the directory cannot be emptied, created or written.
 pub fn font_dir(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
-    let dir =
-        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    let scratch = option_env!("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = scratch.join(format!("{name}-{}", std::process::id()));
     if let Err(e) = std::fs::remove_dir_all(&dir)
         && e.kind() != std::io::ErrorKind::NotFound
     {
