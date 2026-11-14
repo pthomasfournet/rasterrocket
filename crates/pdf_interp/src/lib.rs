@@ -371,11 +371,19 @@ impl PageGeometry {
     /// scaled by `UserUnit`: the extent along which an upright image's
     /// `/Width` runs.
     pub(crate) const fn unrotated_width_pts(&self) -> f64 {
-        if self.rotate_cw.is_multiple_of(180) {
-            self.width_pts
-        } else {
-            self.height_pts
-        }
+        unrotated_width(self.width_pts, self.height_pts, self.rotate_cw)
+    }
+}
+
+/// The width before a clockwise rotation of `rotate_cw` degrees of a box
+/// that measures `width × height` after it: `height` under a quarter turn,
+/// `width` otherwise.  The extent along which an upright image's `/Width`
+/// runs, and so the basis of the source-resolution hint.
+pub(crate) const fn unrotated_width(width: f64, height: f64, rotate_cw: u16) -> f64 {
+    if rotate_cw.is_multiple_of(180) {
+        width
+    } else {
+        height
     }
 }
 

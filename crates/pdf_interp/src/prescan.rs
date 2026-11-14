@@ -18,10 +18,9 @@
 //!
 //! # PPI estimate
 //!
-//! Unlike the full renderer (which projects image pixels through the live CTM
-//! stack), the prescan uses the raw PDF `Width` dict entry and the width in
-//! points of the page box before the page's `/Rotate` (via the crate-internal
-//! `page_size_pts_by_id` helper):
+//! The prescan uses the raw PDF `Width` dict entry, where the renderer uses
+//! the decoded stream's sample width, and both divide by the width in points
+//! of the page box before its rotation (`crate::unrotated_width`):
 //!
 //! ```text
 //! ppi ≈ (image_width_px / unrotated_page_width_pts) × 72
@@ -297,6 +296,49 @@ mod tests {
             let diag = prescan_page(&doc, page_num, PageBox::Crop).expect("prescan");
             let ppi = diag.source_ppi_hint.expect("an inline image gives a hint");
             assert!((ppi - 144.0).abs() < 1e-3, "/Rotate {rotate}: got {ppi}");
+        }
+    }
+
+    /// A render measures the hint against the same unrotated width as the
+    /// prescan, under the page's `/Rotate` and under a session rotation
+    /// alike.
+    #[test]
+    fn render_and_prescan_agree_on_the_ppi_hint_of_a_rotated_page() {
+        use crate::Rotation;
+        use crate::renderer::{PageRenderer, PageView};
+
+        let mut ops = b"q 612 0 0 792 0 0 cm BI /W 1224 /H 1 /BPC 8 /CS /G ID ".to_vec();
+        ops.extend(std::iter::repeat_n(0x80, 1224));
+        ops.extend_from_slice(b" EI Q");
+        for extra in ["", " /Rotate 90", " /Rotate 270"] {
+            let (doc, page_num) = doc_with_page(&ops, extra);
+            let scanned = prescan_page(&doc, page_num, PageBox::Crop)
+                .expect("prescan")
+                .source_ppi_hint
+                .expect("an inline image gives a hint");
+            let page_id = crate::resolve_page_id(&doc, page_num).expect("page id");
+            let geom = page_size_pts_by_id(&doc, page_id, PageBox::Crop).expect("geometry");
+            let content = doc.page_content(page_id).expect("content");
+            let parsed = parse_page_content(&doc, page_id, &content.bytes);
+            for turn in [
+                Rotation::None,
+                Rotation::Cw90,
+                Rotation::Cw180,
+                Rotation::Cw270,
+            ] {
+                let view = PageView::whole(&geom.rotated(turn), (0.5, 0.25));
+                let mut renderer = PageRenderer::with_view(&view, &doc, page_id);
+                renderer.execute(&parsed);
+                let drawn = renderer
+                    .finish()
+                    .1
+                    .source_ppi_hint
+                    .expect("the image was drawn");
+                assert!(
+                    (drawn - scanned).abs() < 1e-3,
+                    "page{extra}, {turn:?}: render {drawn}, prescan {scanned}"
+                );
+            }
         }
     }
 

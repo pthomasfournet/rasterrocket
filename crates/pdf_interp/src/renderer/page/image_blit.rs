@@ -32,7 +32,7 @@ impl PageRenderer<'_> {
         self.diag.has_images = true;
         let filter_idx = img.filter as usize;
         self.filter_counts[filter_idx] = self.filter_counts[filter_idx].saturating_add(1);
-        if let Some(ppi) = super::diagnostics::source_ppi(source_width, self.page_width_pts) {
+        if let Some(ppi) = super::diagnostics::source_ppi(source_width, self.unrotated_width_pts) {
             self.diag.source_ppi_hint =
                 Some(self.diag.source_ppi_hint.map_or(ppi, |prev| prev.max(ppi)));
         }

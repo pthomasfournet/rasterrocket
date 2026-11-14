@@ -182,6 +182,16 @@ impl PageView {
         }
     }
 
+    /// The page box's width before its rotation, in points scaled by
+    /// `UserUnit` (see [`crate::unrotated_width`]).
+    pub(super) const fn unrotated_width_pts(&self) -> f64 {
+        crate::unrotated_width(
+            self.extent.0 / self.scale_x,
+            self.extent.1 / self.scale_y,
+            self.rotate_cw,
+        )
+    }
+
     /// The initial CTM: user space to the whole page's device space.
     ///
     /// One user-space unit is `user_unit` points, so the CTM's scale is

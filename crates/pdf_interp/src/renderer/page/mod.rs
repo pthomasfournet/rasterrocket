@@ -252,8 +252,9 @@ pub struct PageRenderer<'doc> {
     width: u32,
     /// Height of the drawn window (the bitmap) in device pixels.
     height: u32,
-    /// Width of the page box in points, after rotation.
-    page_width_pts: f64,
+    /// Width of the page box in points, before rotation: the basis of the
+    /// source-resolution hint.
+    unrotated_width_pts: f64,
     /// Height of the whole page in device pixels; equals `height` unless the
     /// renderer draws a window of the page.
     page_height: u32,
@@ -615,7 +616,7 @@ impl<'doc> PageRenderer<'doc> {
             buffers: CanvasBuffers::default(),
             width,
             height,
-            page_width_pts: view.extent.0 / view.scale_x,
+            unrotated_width_pts: view.unrotated_width_pts(),
             page_height: view.page_height,
             window_origin: (view.x, view.y),
             gstate,

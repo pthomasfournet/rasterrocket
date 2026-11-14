@@ -7,7 +7,8 @@ use super::{MAX_FORM_DEPTH, PAGE_RENDER_DEADLINE_SECS, PageRenderer};
 use crate::resources::ImageFilter;
 
 /// The source-resolution estimate of an image `image_width_px` samples
-/// across on a page `page_width_pts` points wide, as
+/// across on a page `page_width_pts` points wide before its rotation
+/// (see [`crate::unrotated_width`]), as
 /// [`PageDiagnostics::source_ppi_hint`] defines it:
 /// `image_width_px / page_width_pts × 72`, the resolution of the image
 /// were it to span the page's width.  `None` unless finite and positive.
@@ -45,9 +46,12 @@ pub struct PageDiagnostics {
     ///
     /// Computed as `(image_width_px / page_width_pts) × 72` for the widest
     /// image on the page, its width in source samples whatever resolution
-    /// it was decoded at, and the page width in points.  Useful as a hint
-    /// for DPI auto-selection: rendering at the source PPI avoids upsampling a
-    /// 67-PPI scan at 300 DPI (4.5× upscale with no information gain).
+    /// it was decoded at, and the page box's width in points before the
+    /// page's `/Rotate` and any session rotation: the extent along which an
+    /// upright image's samples run.  Prescan and render measure against the
+    /// same width.  Useful as a hint for DPI auto-selection: rendering at
+    /// the source PPI avoids upsampling a 67-PPI scan at 300 DPI (4.5×
+    /// upscale with no information gain).
     ///
     /// `None` when no images were blitted or page geometry is unavailable.
     pub source_ppi_hint: Option<f32>,
