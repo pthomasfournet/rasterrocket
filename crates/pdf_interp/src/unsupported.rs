@@ -5,9 +5,10 @@
 //! Detection is structural.  Only dictionary keys and `/S` and `/Subtype`
 //! names are read; no script, model or media stream is decoded.
 
+use std::collections::HashMap;
 use std::fmt;
 
-use pdf::{Document, Object, ObjectId};
+use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::form_type::{FormType, form_type};
 use crate::resources::{self, dict_ext::DictExt};
@@ -178,6 +179,11 @@ const MAX_SCAN_ANNOTS: usize = 8192;
 /// its `/Next` chain.
 const MAX_ACTION_CHAIN: usize = 64;
 
+/// Upper bound on the steps of one scan: one per annotation, per action
+/// inspected (a reuse of a shared action's verdict included) and per
+/// additional-actions dictionary.
+const MAX_SCAN_STEPS: usize = 1 << 20;
+
 /// The document-level features of `doc` that the renderer ignores.
 ///
 /// They come in the order: JavaScript at [`ScriptLocation::OpenAction`],
@@ -185,24 +191,27 @@ const MAX_ACTION_CHAIN: usize = 64;
 /// [`NameTree`](ScriptLocation::NameTree) and
 /// [`FormActions`](ScriptLocation::FormActions); an XFA form; a portable
 /// collection.  Only the catalog and the objects it names are read; empty
-/// when the catalog is unreadable.
+/// when the catalog is unreadable.  The action scan performs at most
+/// 2^20 steps; past that bound it stops with a warning and the scripts
+/// it has not reached are not reported.
 #[must_use]
 pub fn document_unsupported_features(doc: &Document) -> Vec<UnsupportedFeature> {
     let mut found = Vec::new();
     let Ok(catalog) = doc.catalog() else {
         return found;
     };
+    let mut scan = ActionScan::new(doc, None, MAX_SCAN_STEPS);
     let mut script = |location| found.push(UnsupportedFeature::JavaScript(location));
 
     if catalog
         .get(b"OpenAction")
-        .is_some_and(|a| action_has_js(doc, a))
+        .is_some_and(|a| scan.action_has_js(a))
     {
         script(ScriptLocation::OpenAction);
     }
     if catalog
         .get(b"AA")
-        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
+        .is_some_and(|aa| scan.additional_actions_have_js(aa))
     {
         script(ScriptLocation::DocumentActions);
     }
@@ -215,12 +224,13 @@ pub fn document_unsupported_features(doc: &Document) -> Vec<UnsupportedFeature> 
     {
         script(ScriptLocation::NameTree);
     }
-    if catalog
-        .get(b"AcroForm")
-        .and_then(|a| resources::resolve_dict(doc, a))
-        .and_then(|form| form.get(b"AA").cloned())
-        .is_some_and(|aa| aa_dict_has_js_action(doc, &aa))
-    {
+    if catalog.get(b"AcroForm").is_some_and(|form| {
+        with_dict(doc, form, |form| {
+            form.get(b"AA")
+                .is_some_and(|aa| scan.additional_actions_have_js(aa))
+        })
+        .unwrap_or(false)
+    }) {
         script(ScriptLocation::FormActions);
     }
 
@@ -245,9 +255,20 @@ pub fn document_unsupported_features(doc: &Document) -> Vec<UnsupportedFeature> 
 /// in its `/A` and in its `/AA`.
 ///
 /// An unreadable page or annotation contributes nothing, and at most
-/// 8 192 annotations are inspected.
+/// 8 192 annotations are inspected.  The scan performs at most 2^20
+/// steps; past that bound it stops with a warning and returns the
+/// features found so far.
 #[must_use]
 pub fn page_unsupported_features(doc: &Document, page_id: ObjectId) -> Vec<UnsupportedFeature> {
+    page_features_within(doc, page_id, MAX_SCAN_STEPS)
+}
+
+/// [`page_unsupported_features`] with a budget of `steps` scan steps.
+fn page_features_within(
+    doc: &Document,
+    page_id: ObjectId,
+    steps: usize,
+) -> Vec<UnsupportedFeature> {
     let mut found = Vec::new();
     let Ok(page) = doc.get_dict_arc(page_id) else {
         return found;
@@ -255,36 +276,44 @@ pub fn page_unsupported_features(doc: &Document, page_id: ObjectId) -> Vec<Unsup
     let Some(page) = page.as_dict() else {
         return found;
     };
+    let mut scan = ActionScan::new(doc, Some(page_id), steps);
     if page
         .get(b"AA")
-        .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
+        .is_some_and(|aa| scan.additional_actions_have_js(aa))
     {
         found.push(UnsupportedFeature::JavaScript(ScriptLocation::PageActions));
     }
-    let annots = resources::resolve_array(doc, page.get(b"Annots"));
+    let Some(annots) = page.get(b"Annots").and_then(|a| doc.resolve(a).ok()) else {
+        return found;
+    };
+    let annots = annots.as_array().unwrap_or_default();
     for (index, annot) in annots.iter().enumerate().take(MAX_SCAN_ANNOTS) {
-        let Some(annot) = resources::resolve_dict(doc, annot) else {
+        if !scan.step() {
+            break;
+        }
+        let resolved = doc.resolve(annot).ok();
+        let Some(annot) = resolved.as_deref().and_then(Object::as_dict) else {
             continue;
         };
         if let Some(kind) = annot.get_name(b"Subtype").and_then(MediaKind::of) {
             let has_appearance = annot
                 .get(b"AP")
-                .and_then(|ap| resources::resolve_dict(doc, ap))
-                .is_some_and(|ap| ap.get(b"N").is_some());
+                .and_then(|ap| with_dict(doc, ap, |ap| ap.get(b"N").is_some()))
+                .unwrap_or(false);
             found.push(UnsupportedFeature::MediaAnnotation {
                 kind,
                 index,
                 has_appearance,
             });
         }
-        if annot.get(b"A").is_some_and(|a| action_has_js(doc, a)) {
+        if annot.get(b"A").is_some_and(|a| scan.action_has_js(a)) {
             found.push(UnsupportedFeature::JavaScript(
                 ScriptLocation::AnnotationAction { index },
             ));
         }
         if annot
             .get(b"AA")
-            .is_some_and(|aa| aa_dict_has_js_action(doc, aa))
+            .is_some_and(|aa| scan.additional_actions_have_js(aa))
         {
             found.push(UnsupportedFeature::JavaScript(
                 ScriptLocation::AnnotationActions { index },
@@ -329,45 +358,226 @@ pub(crate) fn warn_document_features(doc: &Document) {
     }
 }
 
-/// Whether the action `obj`, or an action of its `/Next` chain, runs
-/// JavaScript: a `/S /JavaScript` action, or a `/S /Rendition` action with
-/// a `/JS` script (ISO 32000-2 §12.6.4.14, §12.6.4.17).  At most 64
-/// actions are inspected.
-fn action_has_js(doc: &Document, obj: &Object) -> bool {
-    let mut pending = vec![obj.clone()];
-    let mut inspected = 0;
-    while let Some(obj) = pending.pop() {
-        if inspected == MAX_ACTION_CHAIN {
-            break;
-        }
-        inspected += 1;
-        let Some(action) = resources::resolve_dict(doc, &obj) else {
-            continue;
-        };
-        match action.get_name(b"S") {
-            Some(b"JavaScript") => return true,
-            Some(b"Rendition") if action.get(b"JS").is_some() => return true,
-            _ => {}
-        }
-        match action.get(b"Next") {
-            Some(Object::Array(next)) => pending.extend(next.iter().rev().cloned()),
-            Some(next) => pending.push(next.clone()),
-            None => {}
-        }
-    }
-    false
+/// `f` applied to the dictionary `obj` resolves to, borrowed from the
+/// document's object cache; `None` when `obj` resolves to no dictionary.
+fn with_dict<R>(doc: &Document, obj: &Object, f: impl FnOnce(&Dictionary) -> R) -> Option<R> {
+    let resolved = doc.resolve(obj).ok()?;
+    resolved.as_dict().map(f)
 }
 
-/// Whether `aa_obj` resolves to an additional-actions dictionary in which
-/// any trigger (`/O`, `/C`, `/WC`, `/K`, …) holds a JavaScript action.
-/// Bare `/AA` presence is not JavaScript: its actions are as often
-/// `/GoTo`, `/SubmitForm` or `/Named` actions.
-fn aa_dict_has_js_action(doc: &Document, aa_obj: &Object) -> bool {
-    let Some(aa) = resources::resolve_dict(doc, aa_obj) else {
-        return false;
-    };
-    aa.iter()
-        .any(|(_trigger, action)| action_has_js(doc, action))
+/// The result of inspecting an action or an additional-actions dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// A JavaScript action was found.
+    Script,
+    /// Every action reachable from the object was inspected; none runs a
+    /// script.
+    NoScript,
+    /// No script was found, but part of the object was not inspected: a
+    /// bound was reached, or a reference led back to an object whose
+    /// inspection was still in progress.
+    Incomplete,
+}
+
+impl Verdict {
+    /// The verdict on two parts of one object taken together.
+    const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Script, _) | (_, Self::Script) => Self::Script,
+            (Self::Incomplete, _) | (_, Self::Incomplete) => Self::Incomplete,
+            (Self::NoScript, Self::NoScript) => Self::NoScript,
+        }
+    }
+}
+
+/// What a referenced object is inspected as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Role {
+    /// An action dictionary.
+    Action,
+    /// An additional-actions dictionary.
+    AdditionalActions,
+}
+
+/// The state of one scan for JavaScript actions: a step budget shared by
+/// every action entry of the scan, and the verdicts on the referenced
+/// objects already inspected.
+///
+/// A referenced object is inspected once per scan in each [`Role`]; later
+/// references reuse its verdict.  Only a complete verdict is kept, so a
+/// reference whose inspection was cut short is inspected again where it
+/// recurs.  Every lookup costs one step, which bounds the scan's total
+/// work by [`MAX_SCAN_STEPS`] whatever the document's sharing.
+struct ActionScan<'d> {
+    doc: &'d Document,
+    /// The page scanned, `None` for the document catalog.
+    page: Option<ObjectId>,
+    /// Steps left before the scan stops.
+    remaining: usize,
+    /// Complete verdicts (`Some(has_script)`), and `None` for an object
+    /// whose inspection is in progress.
+    verdicts: HashMap<(Role, ObjectId), Option<bool>>,
+    /// The exhaustion warning has been logged.
+    warned: bool,
+}
+
+impl<'d> ActionScan<'d> {
+    fn new(doc: &'d Document, page: Option<ObjectId>, steps: usize) -> Self {
+        Self {
+            doc,
+            page,
+            remaining: steps,
+            verdicts: HashMap::new(),
+            warned: false,
+        }
+    }
+
+    /// The steps spent so far out of a budget of `steps`.
+    #[cfg(test)]
+    const fn spent(&self, steps: usize) -> usize {
+        steps - self.remaining
+    }
+
+    /// Spend one step; `false` once the budget is spent.
+    fn step(&mut self) -> bool {
+        if self.exhausted() {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+
+    /// Whether the step budget is spent, warning the first time it is
+    /// found spent.
+    fn exhausted(&mut self) -> bool {
+        if self.remaining > 0 {
+            return false;
+        }
+        if !self.warned {
+            self.warned = true;
+            match self.page {
+                Some((num, generation)) => log::warn!(
+                    "page {num} {generation} R: the unsupported-feature scan stopped after \
+                     {MAX_SCAN_STEPS} steps; scripts and media annotations past that point \
+                     are not reported (rendering is unaffected)"
+                ),
+                None => log::warn!(
+                    "document catalog: the unsupported-feature scan stopped after \
+                     {MAX_SCAN_STEPS} steps; scripts past that point are not reported \
+                     (rendering is unaffected)"
+                ),
+            }
+        }
+        true
+    }
+
+    /// Whether the action `obj`, or an action of its `/Next` chain, runs
+    /// JavaScript: a `/S /JavaScript` action, or a `/S /Rendition` action
+    /// with a `/JS` script (ISO 32000-2 §12.6.4.14, §12.6.4.17).  At most
+    /// [`MAX_ACTION_CHAIN`] actions are inspected.
+    fn action_has_js(&mut self, obj: &Object) -> bool {
+        let mut chain = MAX_ACTION_CHAIN;
+        self.action(obj, &mut chain) == Verdict::Script
+    }
+
+    /// Whether `aa_obj` resolves to an additional-actions dictionary in
+    /// which any trigger (`/O`, `/C`, `/WC`, `/K`, …) holds a JavaScript
+    /// action.  Bare `/AA` presence is not JavaScript: its actions are as
+    /// often `/GoTo`, `/SubmitForm` or `/Named` actions.
+    fn additional_actions_have_js(&mut self, aa_obj: &Object) -> bool {
+        if !self.step() {
+            return false;
+        }
+        let verdict = self.memoised(Role::AdditionalActions, aa_obj, |scan, aa| {
+            let Some(aa) = aa.as_dict() else {
+                return Verdict::NoScript;
+            };
+            let mut verdict = Verdict::NoScript;
+            for (_trigger, action) in aa {
+                if scan.exhausted() {
+                    return Verdict::Incomplete;
+                }
+                let mut chain = MAX_ACTION_CHAIN;
+                verdict = verdict.and(scan.action(action, &mut chain));
+                if verdict == Verdict::Script {
+                    break;
+                }
+            }
+            verdict
+        });
+        verdict == Verdict::Script
+    }
+
+    /// The verdict on the action `obj` and its `/Next` chain, `chain`
+    /// being the number of actions the chain may still inspect.  The
+    /// recursion depth is at most [`MAX_ACTION_CHAIN`], since each level
+    /// spends one unit of `chain`.
+    fn action(&mut self, obj: &Object, chain: &mut usize) -> Verdict {
+        if *chain == 0 || !self.step() {
+            return Verdict::Incomplete;
+        }
+        *chain -= 1;
+        self.memoised(Role::Action, obj, |scan, action| {
+            let Some(action) = action.as_dict() else {
+                return Verdict::NoScript;
+            };
+            match action.get_name(b"S") {
+                Some(b"JavaScript") => return Verdict::Script,
+                Some(b"Rendition") if action.get(b"JS").is_some() => return Verdict::Script,
+                _ => {}
+            }
+            match action.get(b"Next") {
+                Some(Object::Array(next)) => {
+                    let mut verdict = Verdict::NoScript;
+                    for next in next {
+                        if *chain == 0 || scan.exhausted() {
+                            return Verdict::Incomplete;
+                        }
+                        verdict = verdict.and(scan.action(next, chain));
+                        if verdict == Verdict::Script {
+                            break;
+                        }
+                    }
+                    verdict
+                }
+                Some(next) => scan.action(next, chain),
+                None => Verdict::NoScript,
+            }
+        })
+    }
+
+    /// The verdict `inspect` gives on the object `obj` resolves to.  For a
+    /// reference the verdict is looked up first and recorded after, when
+    /// complete; a reference to an object under inspection is
+    /// [`Verdict::Incomplete`].  An unreadable reference holds no script.
+    fn memoised(
+        &mut self,
+        role: Role,
+        obj: &Object,
+        inspect: impl FnOnce(&mut Self, &Object) -> Verdict,
+    ) -> Verdict {
+        let Object::Reference(id) = *obj else {
+            return inspect(self, obj);
+        };
+        match self.verdicts.get(&(role, id)) {
+            Some(Some(true)) => return Verdict::Script,
+            Some(Some(false)) => return Verdict::NoScript,
+            Some(None) => return Verdict::Incomplete,
+            None => {}
+        }
+        let Ok(target) = self.doc.resolve(obj) else {
+            let _ = self.verdicts.insert((role, id), Some(false));
+            return Verdict::NoScript;
+        };
+        let _ = self.verdicts.insert((role, id), None);
+        let verdict = inspect(self, &target);
+        let _ = match verdict {
+            Verdict::Script => self.verdicts.insert((role, id), Some(true)),
+            Verdict::NoScript => self.verdicts.insert((role, id), Some(false)),
+            Verdict::Incomplete => self.verdicts.remove(&(role, id)),
+        };
+        verdict
+    }
 }
 
 #[cfg(test)]
@@ -375,7 +585,8 @@ mod tests {
     use pdf::{Document, ObjectId};
 
     use super::{
-        MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
+        ActionScan, MAX_ACTION_CHAIN, MAX_SCAN_STEPS, MediaKind, ScriptLocation,
+        UnsupportedFeature, document_unsupported_features, page_features_within,
         page_has_javascript, page_unsupported_features, warn_document_features,
     };
     use crate::test_helpers::{make_doc, make_doc_with_objects};
@@ -571,6 +782,71 @@ mod tests {
                 media(MediaKind::Sound, 4, false),
             ]
         );
+    }
+
+    /// The reference `n 0 R`.
+    const fn reference(n: u32) -> pdf::Object {
+        pdf::Object::Reference((n, 0))
+    }
+
+    #[test]
+    fn a_shared_action_is_inspected_once_per_scan() {
+        let next = vec!["<</S /Named /N /NextPage>>"; 50].join(" ");
+        let doc = page_doc("", &[&format!("<</S /GoTo /Next [{next}]>>")]);
+        let mut scan = ActionScan::new(&doc, None, MAX_SCAN_STEPS);
+        assert!(!scan.action_has_js(&reference(5)));
+        assert_eq!(scan.spent(MAX_SCAN_STEPS), 51);
+        assert!(!scan.action_has_js(&reference(5)));
+        assert_eq!(scan.spent(MAX_SCAN_STEPS), 52);
+    }
+
+    #[test]
+    fn a_shared_script_is_reported_at_every_reference() {
+        let doc = page_doc(
+            "",
+            &[
+                "<</Type /Annot /Subtype /Link /A 7 0 R>>",
+                "<</Type /Annot /Subtype /Link /A 7 0 R>>",
+                "<</S /GoTo /Next [<</S /Named>> <</S /JavaScript>>]>>",
+            ],
+        );
+        assert_eq!(
+            page_unsupported_features(&doc, PAGE),
+            [
+                JavaScript(AnnotationAction { index: 0 }),
+                JavaScript(AnnotationAction { index: 1 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_action_with_a_huge_next_array_costs_one_chain_per_reference() {
+        const ANNOTS: u32 = 256;
+        const ACTION: u32 = 5 + ANNOTS;
+        let next = vec!["<<>>"; 200_000].join(" ");
+        let action = format!("<</S /GoTo /Next [{next} <</S /JavaScript>>]>>");
+        let annot = format!("<</Type /Annot /Subtype /Link /A {ACTION} 0 R>>");
+        let mut objects: Vec<&str> = (0..ANNOTS).map(|_| annot.as_str()).collect();
+        objects.push(&action);
+        let doc = page_doc("", &objects);
+        let mut scan = ActionScan::new(&doc, None, MAX_SCAN_STEPS);
+        assert!(!scan.action_has_js(&reference(ACTION)));
+        assert_eq!(scan.spent(MAX_SCAN_STEPS), MAX_ACTION_CHAIN);
+        assert_eq!(page_unsupported_features(&doc, PAGE), NONE);
+    }
+
+    #[test]
+    fn an_exhausted_budget_stops_the_scan_and_keeps_what_it_found() {
+        let script = "<</Type /Annot /Subtype /Link /A <</S /JavaScript>>>>";
+        let doc = page_doc("", &[script, script, script]);
+        assert_eq!(
+            page_features_within(&doc, PAGE, 4),
+            [
+                JavaScript(AnnotationAction { index: 0 }),
+                JavaScript(AnnotationAction { index: 1 }),
+            ]
+        );
+        assert_eq!(page_features_within(&doc, PAGE, 0), NONE);
     }
 
     #[test]
