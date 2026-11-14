@@ -187,6 +187,13 @@ impl Backend {
     /// `opened`, or `None` (the test is skipped) for a Vulkan session that
     /// failed to open; a CUDA session must open.  An opened session must
     /// carry an image cache of this backend.
+    #[cfg_attr(
+        not(feature = "vulkan"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only a Vulkan session is skipped; without `vulkan` every backend must open"
+        )
+    )]
     fn session(self, opened: Result<RasterSession, RasterError>) -> Option<RasterSession> {
         match opened {
             Ok(session) => {

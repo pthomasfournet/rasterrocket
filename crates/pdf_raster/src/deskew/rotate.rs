@@ -1077,8 +1077,8 @@ mod tests {
         let mut src = Bitmap::<Gray8>::new(128, 128, 1, false);
         for y in 0..128u32 {
             let row = src.row_bytes_mut(y);
-            for x in 0..128usize {
-                row[x] = ((x * 2 + y as usize * 3) % 256) as u8;
+            for (x, px) in (0usize..).zip(row.iter_mut()) {
+                *px = u8::try_from((x * 2 + y as usize * 3) % 256).expect("below 256");
             }
         }
 
@@ -1086,13 +1086,13 @@ mod tests {
         let cpu = rotate_cpu(&src, angle);
         let gpu = rotate_gpu(&src, angle).expect("GPU rotate failed");
 
-        let mut max_diff = 0i32;
+        let mut max_diff = 0u8;
         // Skip a 4-pixel border where bilinear vs NPP edge treatment may differ.
         for y in 4..124u32 {
             let cr = &cpu.row_bytes(y)[4..124];
             let gr = &gpu.row_bytes(y)[4..124];
             for (&a, &b) in cr.iter().zip(gr.iter()) {
-                max_diff = max_diff.max((a as i32 - b as i32).abs());
+                max_diff = max_diff.max(a.abs_diff(b));
             }
         }
         assert!(
@@ -1107,17 +1107,17 @@ mod tests {
         let mut src = Bitmap::<Gray8>::new(64, 64, 1, false);
         for y in 0..64u32 {
             let row = src.row_bytes_mut(y);
-            for x in 0..64usize {
-                row[x] = ((x * 4 + y as usize * 2) % 256) as u8;
+            for (x, px) in (0usize..).zip(row.iter_mut()) {
+                *px = u8::try_from((x * 4 + y as usize * 2) % 256).expect("below 256");
             }
         }
         let gpu = rotate_gpu(&src, 0.0).expect("GPU rotate 0° failed");
-        let mut max_diff = 0i32;
+        let mut max_diff = 0u8;
         for y in 4..60u32 {
             let sr = &src.row_bytes(y)[4..60];
             let gr = &gpu.row_bytes(y)[4..60];
             for (&a, &b) in sr.iter().zip(gr.iter()) {
-                max_diff = max_diff.max((a as i32 - b as i32).abs());
+                max_diff = max_diff.max(a.abs_diff(b));
             }
         }
         assert!(max_diff <= 2, "GPU 0° rotation max diff {max_diff} > 2");
