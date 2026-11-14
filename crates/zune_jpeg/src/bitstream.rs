@@ -258,8 +258,10 @@ pub(crate) struct BitStreamHuffman {
     /// Bits appended to the buffer that are not in the stream (zeros past
     /// a marker or the end of the data) since the last reset.  They are
     /// the buffer's lowest bits, so one of them has been consumed exactly
-    /// when `bits_left` is smaller.
-    fill_bits:           u32,
+    /// when `bits_left` is smaller.  The count is 64 bits wide: a scan of
+    /// a frame of the largest dimensions decoded wholly from fill bits
+    /// stays below 2^40 of them.
+    fill_bits:           u64,
     /// A fill bit was consumed before a reset, or malformed data was
     /// carried on from.
     data_short:          bool,
@@ -1161,7 +1163,7 @@ impl BitStream for BitStreamHuffman {
     /// everything
     #[cold]
     fn reset(&mut self) {
-        self.data_short |= self.fill_bits > u32::from(self.bits_left);
+        self.data_short |= self.fill_bits > u64::from(self.bits_left);
         self.fill_bits = 0;
         self.bits_left = 0;
         self.marker = None;
@@ -1172,7 +1174,7 @@ impl BitStream for BitStreamHuffman {
 
     #[inline]
     fn take_data_short(&mut self) -> bool {
-        core::mem::take(&mut self.data_short) || self.fill_bits > u32::from(self.bits_left)
+        core::mem::take(&mut self.data_short) || self.fill_bits > u64::from(self.bits_left)
     }
 }
 

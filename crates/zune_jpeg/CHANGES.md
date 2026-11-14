@@ -121,8 +121,8 @@ unless the entry says otherwise.
   decode that is not strict carries on from, or when the scans decoded
   leave a component uncoded or a coefficient of a progressive frame short
   of its full precision. The Huffman bit reader counts the bits it makes
-  up (`fill_bits`: zeros past a marker, an EOI or the end of the input),
-  which are the lowest of its buffer, so one has been consumed exactly
+  up (`fill_bits`, a `u64`: zeros past a marker, an EOI or the end of the
+  input), which are the lowest of its buffer, so one has been consumed exactly
   when fewer bits are left; the row loops ask after every row. Within
   eight bytes of the end of the input the buffer is filled by a separate
   cold routine that counts the bytes it reads past the end, so the hot
