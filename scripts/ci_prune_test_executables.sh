@@ -19,6 +19,8 @@
 # Exit code: 0 = pruned; 1 = usage error or a PROFILE_DIR that does not exist.
 
 set -euo pipefail
+# `${keep[@]+"${keep[@]}"}` expands an empty array under `set -u` in bash
+# 3.2 (macOS), where a bare "${keep[@]}" is an unbound-variable error.
 
 die() { echo "ci_prune_test_executables: $*" >&2; exit 1; }
 
@@ -38,12 +40,12 @@ done
 
 if [[ "${RUNNER_OS:-}" == Windows ]]; then
     predicate=(\( -name '*.exe' -o -name '*.pdb' \))
-    for name in "${keep[@]}"; do
+    for name in ${keep[@]+"${keep[@]}"}; do
         predicate+=(! -name "${name}.exe" ! -name "${name}.pdb")
     done
 else
     predicate=(-perm -u+x ! -name '*.*')
-    for name in "${keep[@]}"; do
+    for name in ${keep[@]+"${keep[@]}"}; do
         predicate+=(! -name "$name")
     done
 fi
