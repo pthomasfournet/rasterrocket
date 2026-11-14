@@ -57,7 +57,7 @@ pub(crate) mod testutil;
 
 pub use bitmap::{AaBuf, Bitmap, BitmapAllocError, BitmapBuffers, interleave_rgba};
 pub use clip::{Clip, ClipResult, ClipRows, RowClip};
-pub use fill::{eo_fill, fill};
+pub use fill::{eo_fill, fill, fill_area};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
 pub use path::{Path, PathBuilder, PathFlags, PathPoint, StrokeAdjustHint};
 pub use pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet};

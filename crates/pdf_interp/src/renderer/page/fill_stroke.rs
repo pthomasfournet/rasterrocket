@@ -34,7 +34,7 @@ impl PageRenderer<'_> {
             .filter(|_| knockout)
             .and_then(|r| self.within_clip(r));
         let Some(rect) = rect else {
-            self.fill_path(path, even_odd);
+            self.fill_path_area(path, even_odd);
             self.stroke_path(path);
             return;
         };
@@ -54,7 +54,7 @@ impl PageRenderer<'_> {
         self.paint_knocked_out(
             rect,
             &coverage,
-            |r| r.fill_path(path, even_odd),
+            |r| r.fill_path_area(path, even_odd),
             |r| r.fill_with_stroke_paint(&area),
         );
     }

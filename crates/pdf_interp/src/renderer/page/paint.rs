@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use color::TransferLut;
 use raster::{
-    eo_fill, fill,
+    eo_fill, fill, fill_area,
     path::PathBuilder,
     pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
@@ -384,9 +384,27 @@ impl PageRenderer<'_> {
         self.fill_and_stroke(&path, even_odd);
     }
 
-    /// Fill `path` using the current fill colour or pattern.  Shared by `do_fill`
-    /// and `do_fill_then_stroke`.
+    /// Fill `path` using the current fill colour or pattern, as the fill
+    /// operators do: an antialiased fill draws a subpath enclosing no area
+    /// as a line (see `raster::fill`).
     pub(super) fn fill_path(&mut self, path: &raster::path::Path, even_odd: bool) {
+        self.fill_path_with(path, even_odd, true);
+    }
+
+    /// Fill the area `path` encloses alone: a subpath enclosing no area
+    /// paints nothing.  The fill of a path that is also stroked, or of a
+    /// glyph outline.
+    pub(super) fn fill_path_area(&mut self, path: &raster::path::Path, even_odd: bool) {
+        self.fill_path_with(path, even_odd, false);
+    }
+
+    /// [`Self::fill_path`] when `zero_area_lines`, else
+    /// [`Self::fill_path_area`].
+    fn fill_path_with(&mut self, path: &raster::path::Path, even_odd: bool, zero_area_lines: bool) {
+        let rule = FillRule {
+            even_odd,
+            zero_area_lines,
+        };
         // Stroke adjustment is always on: a lone axis-aligned quadrilateral
         // fills whole device pixels.
         if self.gstate.current().fill_paints_nothing() {
@@ -396,19 +414,21 @@ impl PageRenderer<'_> {
         let path = hinted.as_ref().unwrap_or(path);
         let region = self.paint_region(path.pts.iter().map(|p| (p.x, p.y)), 1.0);
         let alpha = self.gstate.current().fill_alpha;
-        self.paint_object(region, alpha, |r| r.fill_within(path, even_odd, region));
+        self.paint_object(region, alpha, |r| {
+            r.fill_within(path, rule, region);
+        });
     }
 
     /// Fill `path`, whose pixels lie within `region`.
     pub(super) fn fill_within(
         &mut self,
         path: &raster::path::Path,
-        even_odd: bool,
+        rule: FillRule,
         region: Option<PixelRect>,
     ) {
         #[cfg(feature = "vulkan")]
         if self.device_recording() {
-            self.record_device_fill(path, even_odd);
+            self.record_device_fill(path, rule.even_odd);
             return;
         }
         let gs = self.gstate.current();
@@ -432,7 +452,7 @@ impl PageRenderer<'_> {
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(&pattern, false, region, |r, pipe, shading| {
-                    r.fill_with_shading(path, even_odd, clip, pipe, flatness, shading);
+                    r.fill_with_shading(path, rule, clip, pipe, flatness, shading);
                 });
                 return;
             }
@@ -471,24 +491,14 @@ impl PageRenderer<'_> {
         #[cfg(feature = "gpu-aa")]
         if source.pattern.is_none()
             && self.vector_antialias
-            && self.try_device_aa_fill(path, even_odd, flatness, &pipe, &src)
+            && self.try_device_aa_fill(path, rule.even_odd, flatness, &pipe, &src)
         {
             return;
         }
 
         let antialias = self.vector_antialias;
         with_canvas!(&mut self.canvas, |b| {
-            let fill_fn = if even_odd { eo_fill } else { fill };
-            fill_fn(
-                b,
-                &clip,
-                path,
-                &pipe,
-                &src,
-                &DEVICE_MATRIX,
-                flatness,
-                antialias,
-            );
+            fill_device_path(b, &clip, path, &pipe, &src, flatness, antialias, rule);
         });
     }
 
@@ -680,6 +690,39 @@ impl PageRenderer<'_> {
         with_canvas!(&mut self.canvas, |b| stroke(
             b, &clip, path, &pipe, &src, matrix, &params
         ));
+    }
+}
+
+/// Which points of a path a fill paints.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FillRule {
+    /// The even-odd rule, else non-zero winding.
+    pub(super) even_odd: bool,
+    /// Whether a subpath enclosing no area is drawn as a line
+    /// (`raster::fill`), else left empty (`raster::fill_area`).
+    pub(super) zero_area_lines: bool,
+}
+
+/// Fill the device-space `path` on `bitmap` under `rule`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
+)]
+pub(super) fn fill_device_path<P: color::Pixel>(
+    bitmap: &mut raster::Bitmap<P>,
+    clip: &raster::Clip,
+    path: &raster::path::Path,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    flatness: f64,
+    antialias: bool,
+    rule: FillRule,
+) {
+    let m = &DEVICE_MATRIX;
+    match (rule.zero_area_lines, rule.even_odd) {
+        (true, false) => fill(bitmap, clip, path, pipe, src, m, flatness, antialias),
+        (true, true) => eo_fill(bitmap, clip, path, pipe, src, m, flatness, antialias),
+        (false, eo) => fill_area(bitmap, clip, path, pipe, src, m, flatness, antialias, eo),
     }
 }
 

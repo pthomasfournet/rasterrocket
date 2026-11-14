@@ -19,14 +19,16 @@
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::coverage::AreaRaster;
-use crate::path::Path;
+use crate::path::{Path, PathBuilder};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
 use crate::scanner::iter::ScanIterator;
 use crate::simd;
-use crate::types::floor_i32;
-use crate::xpath::{PixelModel, XPath};
+use crate::stroke::{StrokeParams, stroke_outline};
+use crate::types::{LineCap, LineJoin, floor_i32};
+use crate::xpath::{PixelModel, XPath, XPathFlags};
 use color::Pixel;
+use color::convert::div255;
 
 /// Non-zero winding fill.
 #[expect(
@@ -52,7 +54,7 @@ pub fn fill<P: Pixel>(
         matrix,
         flatness,
         vector_antialias,
-        false,
+        FillRule::NonZero,
     );
 }
 
@@ -80,8 +82,61 @@ pub fn eo_fill<P: Pixel>(
         matrix,
         flatness,
         vector_antialias,
-        true,
+        FillRule::EvenOdd,
     );
+}
+
+/// Fill the area `path` encloses, by the even-odd rule when `eo`, else
+/// non-zero.
+///
+/// Unlike under [`fill`] and [`eo_fill`], a subpath that encloses no area
+/// paints nothing.  It fills the outline of a stroke and the path a fill
+/// and stroke of the same path paints.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
+)]
+pub fn fill_area<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    clip: &Clip,
+    path: &Path,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    matrix: &[f64; 6],
+    flatness: f64,
+    vector_antialias: bool,
+    eo: bool,
+) {
+    let rule = if eo {
+        FillRule::EvenOddArea
+    } else {
+        FillRule::NonZeroArea
+    };
+    fill_impl::<P>(
+        bitmap,
+        clip,
+        path,
+        pipe,
+        src,
+        matrix,
+        flatness,
+        vector_antialias,
+        rule,
+    );
+}
+
+/// How [`fill_impl`] decides which points an outline paints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FillRule {
+    /// Non-zero winding; an antialiased fill also draws each subpath that
+    /// encloses no area as a line ([`zero_area_lines`]).
+    NonZero,
+    /// Even-odd; zero-area subpaths as under `NonZero`.
+    EvenOdd,
+    /// Non-zero winding alone.
+    NonZeroArea,
+    /// Even-odd alone.
+    EvenOddArea,
 }
 
 #[expect(
@@ -97,14 +152,25 @@ fn fill_impl<P: Pixel>(
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
-    eo: bool,
+    rule: FillRule,
 ) {
     if path.pts.is_empty() || bitmap.width == 0 {
         return;
     }
+    let eo = matches!(rule, FillRule::EvenOdd | FillRule::EvenOddArea);
 
     if vector_antialias {
-        area_fill::<P>(bitmap, clip, path, pipe, src, matrix, flatness, eo);
+        let mut xpath = XPath::for_model(path, matrix, flatness, true, PixelModel::Area);
+        // A line reaches half a pixel past its subpath, which culling would
+        // drop when it lies just outside the clip.
+        let lines = matches!(rule, FillRule::NonZero | FillRule::EvenOdd)
+            .then(|| zero_area_lines(&xpath, flatness))
+            .flatten();
+        xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
+        area_fill::<P>(bitmap, clip, &xpath, pipe, src, eo, u8::MAX);
+        if let Some(lines) = lines {
+            area_fill::<P>(bitmap, clip, &lines, pipe, src, false, ZERO_AREA_WEIGHT);
+        }
         return;
     }
 
@@ -177,39 +243,138 @@ fn area_raster(xpath: &XPath, clip: &Clip, width: u32, height: u32) -> Option<Ar
     Some(raster)
 }
 
-/// Antialiased fill: exact-area coverage, scaled by the clip's, composited
-/// row by row.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
-)]
+/// The weight, out of 255, of the coverage of the line a zero-area
+/// subpath draws: a quarter.
+const ZERO_AREA_WEIGHT: u8 = u8::MAX / 4;
+
+/// Antialiased fill of the device-space `xpath`: exact-area coverage,
+/// scaled by `weight / 255` and by the clip's, composited row by row.
 fn area_fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
-    path: &Path,
+    xpath: &XPath,
     pipe: &PipeState<'_>,
     src: &PipeSrc<'_>,
-    matrix: &[f64; 6],
-    flatness: f64,
     eo: bool,
+    weight: u8,
 ) {
-    let mut xpath = XPath::for_model(path, matrix, flatness, true, PixelModel::Area);
-    xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
-    let Some(mut raster) = area_raster(&xpath, clip, bitmap.width, bitmap.height) else {
+    let Some(mut raster) = area_raster(xpath, clip, bitmap.width, bitmap.height) else {
         return;
     };
     let clipped = !clip.is_rect();
     let mut scratch = Vec::new();
     raster.rows(eo, |y, x, coverage| {
-        if clipped {
-            scratch.clear();
-            scratch.extend_from_slice(coverage);
-            clip.mul_row(y, x, &mut scratch);
-            draw_coverage_row::<P>(bitmap, pipe, src, &scratch, x, y);
-        } else {
+        if !clipped && weight == u8::MAX {
             draw_coverage_row::<P>(bitmap, pipe, src, coverage, x, y);
+            return;
         }
+        scratch.clear();
+        scratch.extend_from_slice(coverage);
+        if weight != u8::MAX {
+            for c in &mut scratch {
+                *c = div255(u32::from(*c) * u32::from(weight));
+            }
+        }
+        if clipped {
+            clip.mul_row(y, x, &mut scratch);
+        }
+        draw_coverage_row::<P>(bitmap, pipe, src, &scratch, x, y);
     });
+}
+
+/// The outline, in device space, of a stroke one pixel wide with butt caps
+/// along every closed subpath of `xpath` that encloses no area but has an
+/// extent (its points collinear); `None` when there is none.
+///
+/// A subpath's segments lie on one line, and the stroke follows the
+/// disjoint intervals of the line they cover, each once, from the end with
+/// the smaller coordinates: the outline does not depend on the subpath's
+/// direction or starting point, and overlapping segments add no coverage.
+/// A subpath of a single line (one segment and its closing one) has its
+/// ends moved to the centres of the pixels holding them, so a line on a
+/// pixel boundary covers the pixels after it rather than half of each
+/// side.
+fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
+    let mut lines = PathBuilder::new();
+    let mut any = false;
+    // `(t, point)` of each end, `t` the position along the line.
+    let mut intervals: Vec<[(f64, (f64, f64)); 2]> = Vec::new();
+    for subpath in xpath
+        .segs
+        .chunk_by(|_, next| !next.flags.contains(XPathFlags::SUBPATH))
+    {
+        let points = || subpath.iter().flat_map(|s| [(s.x0, s.y0), (s.x1, s.y1)]);
+        let by_coords =
+            |a: &(f64, f64), b: &(f64, f64)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1));
+        let (Some(lo), Some(hi)) = (points().min_by(by_coords), points().max_by(by_coords)) else {
+            continue;
+        };
+        let (dx, dy) = (hi.0 - lo.0, hi.1 - lo.1);
+        let extent = dx.hypot(dy);
+        if !(extent > 0.0 && extent.is_finite()) {
+            continue;
+        }
+        // Every point lies on the line through `lo` and `hi`.
+        let off_line = |p: (f64, f64)| dx.mul_add(p.1 - lo.1, -(dy * (p.0 - lo.0))).abs();
+        if points().any(|p| off_line(p) > 1e-9 * extent * extent) {
+            continue;
+        }
+        let along = |p: (f64, f64)| dx.mul_add(p.0 - lo.0, dy * (p.1 - lo.1));
+        intervals.clear();
+        intervals.extend(subpath.iter().map(|s| {
+            let (a, b) = ((s.x0, s.y0), (s.x1, s.y1));
+            let (ta, tb) = (along(a), along(b));
+            if ta <= tb {
+                [(ta, a), (tb, b)]
+            } else {
+                [(tb, b), (ta, a)]
+            }
+        }));
+        intervals.sort_by(|a, b| a[0].0.total_cmp(&b[0].0));
+        let single = subpath.len() <= 2;
+        let mut merged = intervals[0];
+        for &next in &intervals[1..] {
+            if next[0].0 <= merged[1].0 {
+                if next[1].0 > merged[1].0 {
+                    merged[1] = next[1];
+                }
+                continue;
+            }
+            any |= add_line(&mut lines, merged[0].1, merged[1].1, single);
+            merged = next;
+        }
+        any |= add_line(&mut lines, merged[0].1, merged[1].1, single);
+    }
+    if !any {
+        return None;
+    }
+    let params = StrokeParams {
+        line_width: 1.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        miter_limit: 10.0,
+        flatness,
+        stroke_adjust: false,
+        line_dash: &[],
+        line_dash_phase: 0.0,
+        vector_antialias: true,
+    };
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    stroke_outline(&lines.build(), &identity, &params)
+}
+
+/// Append the open subpath `from → to` to `lines`, its ends moved to the
+/// centres of their pixels when `centre`; whether it was added.
+fn add_line(lines: &mut PathBuilder, from: (f64, f64), to: (f64, f64), centre: bool) -> bool {
+    let place = |p: (f64, f64)| {
+        if centre {
+            (p.0.floor() + 0.5, p.1.floor() + 0.5)
+        } else {
+            p
+        }
+    };
+    let (from, to) = (place(from), place(to));
+    lines.move_to(from.0, from.1).is_ok() && lines.line_to(to.0, to.1).is_ok()
 }
 
 /// Pixels per block in which [`draw_coverage_row`] looks for solid runs.
@@ -502,6 +667,46 @@ mod tests {
             nz.iter().all(|&v| v == 255),
             "non-zero covers the whole square"
         );
+    }
+
+    /// A subpath that encloses no area fills a line one pixel wide at a
+    /// quarter of the coverage, a single line through the centres of the
+    /// pixels holding its ends; a stroke's outline with such a subpath
+    /// fills nothing there.
+    #[test]
+    fn aa_fill_of_a_zero_area_subpath_draws_a_line() {
+        let mut b = PathBuilder::new();
+        b.move_to(2.0, 5.0).unwrap();
+        b.line_to(14.0, 5.0).unwrap();
+        b.move_to(3.0, 9.0).unwrap();
+        b.line_to(13.0, 12.0).unwrap();
+        b.line_to(8.0, 10.5).unwrap();
+        let path = b.build();
+        let out = aa_render(std::slice::from_ref(&path), 16, 16, false);
+        let at = |x: usize, y: usize| out[y * 16 + x];
+        assert_eq!(
+            at(8, 5),
+            ZERO_AREA_WEIGHT,
+            "the horizontal line covers its row"
+        );
+        assert_eq!(at(8, 4) | at(8, 6), 0);
+        let ink: f64 = out.iter().map(|&v| f64::from(v) / 255.0).sum();
+        let diagonal = 10.0f64.hypot(3.0);
+        assert!((4.0f64.mul_add(ink, -12.0) - diagonal).abs() < 1.0, "ink {ink}");
+
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 16, 1, false);
+        fill_area::<Rgb8>(
+            &mut bmp,
+            &Clip::new(0.0, 0.0, 16.0, 16.0, true),
+            &path,
+            &simple_pipe(),
+            &PipeSrc::Solid(&[255; 3]),
+            &identity_matrix(),
+            0.1,
+            true,
+            false,
+        );
+        assert!((0..16).all(|y| bmp.row(y).iter().all(|p| p.r == 0)));
     }
 
     /// The ink an AA fill lays down equals the area of its outline.

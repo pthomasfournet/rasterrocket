@@ -301,11 +301,11 @@ impl PageRenderer<'_> {
                     union.append(path);
                 }
                 if !union.pts.is_empty() {
-                    r.fill_path(&union, false);
+                    r.fill_path_area(&union, false);
                 }
             } else {
                 for path in &sink.fill_paths {
-                    r.fill_path(path, false);
+                    r.fill_path_area(path, false);
                 }
             }
         });

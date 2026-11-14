@@ -14,7 +14,7 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::fill::{aa_scanner, fill};
+use crate::fill::{aa_scanner, fill_area};
 use crate::path::Path;
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
 use crate::scanner::XPathScanner;
@@ -269,7 +269,7 @@ fn stroke_wide<P: Pixel>(
     params: &StrokeParams<'_>,
 ) {
     let outline = make_stroke_path(path, params.line_width, params);
-    fill::<P>(
+    fill_area::<P>(
         bitmap,
         clip,
         &outline,
@@ -278,6 +278,7 @@ fn stroke_wide<P: Pixel>(
         matrix,
         params.flatness,
         params.vector_antialias,
+        false,
     );
 }
 

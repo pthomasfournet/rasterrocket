@@ -486,7 +486,8 @@ proptest! {
         );
     }
 
-    /// A rectangle with integer corners covers exactly its pixels: aliased,
+    /// A rectangle with integer corners and an area covers exactly its
+    /// pixels: aliased,
     /// the cells its closed outline touches, `x0..=x1 × y0..=y1`;
     /// antialiased, its area, the pixels `x0..x1 × y0..y1` fully and no
     /// other.
@@ -494,7 +495,7 @@ proptest! {
     fn a_pixel_aligned_rectangle_covers_its_pixels(
         (w, h) in (SIDE, SIDE),
         (x0, y0) in (-4i32..40, -4i32..40),
-        (dw, dh) in (0i32..24, 0i32..24),
+        (dw, dh) in (1i32..24, 1i32..24),
         aa in any::<bool>(),
         eo in any::<bool>(),
         clockwise in any::<bool>(),

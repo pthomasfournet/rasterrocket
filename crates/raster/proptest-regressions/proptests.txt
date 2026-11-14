@@ -7,3 +7,6 @@
 cc caec295a1845fb2715ce45f919277c92038f021ab2014d151bb54f795c9f965a # orientation_does_not_matter: aliased fill of a curved outline and its reverse
 cc f0555630117bf5a1e3b4786f0526bb0bc70cd8d2e0ff7ebfd6921a87ea00432b # a_clip_rectangle_masks_the_unclipped_fill: aliased even-odd fill of two curved subpaths
 cc c5540fa95c7f05a75395cdbec215af55abc4ac761e1f8448cf8173ca566ae227 # integer_translation_moves_the_render: antialiased triangle moved by (4, 5)
+cc 9e5913796f006161ae412c53e84b307dd6fc860e9d50a81095edb9dfc29422e1 # shrinks to (w, h) = (28, 6), (x0, y0) = (0, 0), (dw, dh) = (0, 1), aa = true, eo = false, clockwise = false
+cc 49efa59cc180e23e3a9c92e2b419ad0c87af3b8f7aeb348836cfbbeeef781e70 # shrinks to s = Scene { w: 2, h: 20, path: [Subpath { start: (-0.0625, 0.0), segs: [Line((-0.0625, 0.0625))] }], clip_rect: [0.0625, 0.0625, -0.0625, 0.0], clip_path: None, aa: true, eo: false }
+cc e667a3f4866b2743751a2cea994c8e9ef49fc1bbfb12069f3c722649b56de23b # shrinks to s = Scene { w: 1, h: 30, path: [Subpath { start: (0.4375, 21.3125), segs: [Line((-1.1875, 17.5))] }], clip_rect: [0.0625, 21.0625, 0.0, 0.0], clip_path: None, aa: true, eo: false }

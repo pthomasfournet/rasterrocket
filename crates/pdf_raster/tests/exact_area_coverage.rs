@@ -25,9 +25,14 @@ const LINES: &[u8] = b"0 G 1 w 0 30 m 40 30 l S 0 19.5 m 40 19.5 l S \
 /// The grey level (red channel) of rows 0..40 of column 20 of the page
 /// rendered at one pixel per point.
 fn column() -> Vec<u8> {
+    column_of(LINES)
+}
+
+/// [`column`] for a 40 × 40 pt page running `content`.
+fn column_of(content: &[u8]) -> Vec<u8> {
     let pdf = one_page(
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Contents 4 0 R >>",
-        vec![stream_object("", LINES)],
+        vec![stream_object("", content)],
     );
     let bmp = render_page_rgb(&session(pdf, BackendPolicy::CpuOnly), 1, 1.0).expect("render");
     assert_eq!((bmp.width, bmp.height), (40, 40));
@@ -64,4 +69,22 @@ fn an_adjusted_fill_covers_whole_rows() {
     let col = column();
     assert_eq!(col[35], 0, "{col:?}");
     assert_eq!((col[34], col[36]), (255, 255), "{col:?}");
+}
+
+/// A filled subpath that encloses no area draws a faint line one pixel
+/// wide through the centres of the pixels holding its ends; filled and
+/// stroked, only its stroke paints.
+#[test]
+fn a_zero_area_fill_draws_a_faint_line() {
+    let filled = column_of(b"0 g 5 15 m 35 15 l f");
+    // Row 25 at a quarter of full coverage: 255 - 63.
+    assert_eq!(filled[25], 192, "{filled:?}");
+    assert!(
+        filled.iter().enumerate().all(|(y, &v)| y == 25 || v == 255),
+        "{filled:?}"
+    );
+
+    let stroked = column_of(b"0 g 1 0 0 RG 0 w 5 15 m 35 15 l B");
+    let red = column_of(b"1 0 0 RG 0 w 5 15 m 35 15 l S");
+    assert_eq!(stroked, red, "the fill adds nothing to the stroke");
 }

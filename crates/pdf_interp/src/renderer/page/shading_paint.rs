@@ -16,10 +16,9 @@ use raster::pipe::{PipeSrc, PipeState};
 use raster::shading::shaded_fill;
 use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
-use raster::{eo_fill, fill};
 
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
-use super::paint::PaintParams;
+use super::paint::{FillRule, PaintParams, fill_device_path};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::renderer::color::RasterColor;
@@ -238,7 +237,7 @@ impl PageRenderer<'_> {
     pub(super) fn fill_with_shading(
         &mut self,
         path: &Path,
-        even_odd: bool,
+        rule: FillRule,
         clip: Clip,
         pipe: &PipeState<'_>,
         flatness: f64,
@@ -249,17 +248,7 @@ impl PageRenderer<'_> {
         let transfer = self.gstate.current().transfer.clone();
         let paint = |r: &mut Self, clip: &Clip, src: &PipeSrc<'_>| {
             with_canvas!(&mut r.canvas, |b| {
-                let fill_fn = if even_odd { eo_fill } else { fill };
-                fill_fn(
-                    b,
-                    clip,
-                    path,
-                    pipe,
-                    src,
-                    &DEVICE_MATRIX,
-                    flatness,
-                    antialias,
-                );
+                fill_device_path(b, clip, path, pipe, src, flatness, antialias, rule);
             });
         };
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
@@ -271,7 +260,7 @@ impl PageRenderer<'_> {
             return;
         }
         let mut clip = clip;
-        clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
+        clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), rule.even_odd);
         self.paint_mesh(shading, &clip, pipe, transfer.as_deref());
     }
 
