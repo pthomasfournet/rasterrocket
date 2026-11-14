@@ -2669,6 +2669,22 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
+**Unreleased on master.** Antialiased paths, clips and glyphs take exact-area
+coverage from one integer rasteriser (`raster::coverage`) in place of the 4×4
+supersampled scanner and its gamma-1.5 table. The scanner's inclusive bottom row
+made fills about 0.25 px heavy on +y, and its coverage was nonlinear and banded
+in 16 levels: a `1 w` stroke on a row boundary drew 165/89 where the area is
+127/127. Every antialiased path pixel changes. Against pdfium's corpus (260
+scored pages) the median RMSE falls from 4.39 to 1.45, with 82 pages closer and
+7 slightly further, and the fill bench runs 6.34 → 4.70 ms (vello_cpu gap
+3.9× → 2.85×). Stroke pieces meet without overlap at joints and on retraced
+lines. Zero-area subpaths and outline spikes in a fill draw as faint lines.
+The stroke-adjust snap depends on the coverage model. The `--gpu-pages`
+raster composites the CPU's coverage and stays byte-identical on RTX and RADV.
+The dormant device AA fill (CUDA and Vulkan kernels, `GPU_AA_FILL_THRESHOLD`,
+`PDF_RASTER_AA_FILL_THRESHOLD`) and the `gpu-aa` feature are removed. Glyph
+edges may move by one level, since glyphs use the same rasteriser.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
