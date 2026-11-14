@@ -112,7 +112,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
                 // bytes are stable on host.
                 self.demote_to_host(key, &removed);
             }
-            // Invite the OS scheduler if budget hasn't moved.  Cheap on x86.
+            // CPU pause hint between scans.
             std::hint::spin_loop();
         }
         // Hit the safety bound — almost certainly because of churn.

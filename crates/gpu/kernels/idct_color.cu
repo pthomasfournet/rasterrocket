@@ -1,4 +1,5 @@
-// Phase 5: zigzag inverse + dequant + 8×8 IDCT (LLM fixed-point) + JFIF YCbCr→RGB.
+// IDCT stage of the GPU JPEG decoder: zigzag inverse + dequant + 8×8 IDCT
+// (LLM fixed-point) + JFIF YCbCr→RGB.
 //
 // The 1-D IDCT is the integer Loeffler/Ligtenberg/Moschytz (1989) 8-point
 // structure with 13-bit fixed-point constants and 64-bit intermediates.

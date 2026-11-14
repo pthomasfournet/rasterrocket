@@ -13,7 +13,7 @@
 //! Run:
 //! ```text
 //! cargo build --release -p rasterrocket-gpu --features vulkan,cache --bin vulkan_phase_bench
-//! target/release/vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] [--only icc|aa|blit|lock]
+//! target/release/vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] [--only icc|aa|blit|lock|readback]
 //! ```
 #![expect(
     clippy::cast_precision_loss,

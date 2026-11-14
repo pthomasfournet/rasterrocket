@@ -1092,7 +1092,8 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
     }
 }
 
-/// Parameters for the IDCT + dequant + colour-conversion kernel (Phase 5).
+/// Parameters for the IDCT + dequant + colour-conversion kernel, the IDCT
+/// stage of the GPU JPEG decoder.
 ///
 /// The kernel runs one 8×8×3-thread workgroup per 8×8 block (one 8×8 layer
 /// per component) and writes packed RGBA8 pixels to `pixels_rgba`.  The
@@ -1109,7 +1110,8 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
 /// - `dc_values` capacity ≥ `num_components × blocks_wide × blocks_high × 4` bytes
 /// - `pixels_rgba` capacity ≥ `width × height × 4` bytes
 pub struct IdctParams<'a, B: GpuBackend + ?Sized> {
-    /// Zigzag-ordered DCT coefficients from Phase 4 (one i32 per slot).
+    /// Zigzag-ordered DCT coefficients of the Huffman decode (one i32 per
+    /// slot).
     /// Layout: `[comp][block_y][block_x][64]`.
     pub coefficients: &'a B::DeviceBuffer,
     /// Quantisation tables in zigzag order (as stored in DQT).

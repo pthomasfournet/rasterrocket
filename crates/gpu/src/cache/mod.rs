@@ -68,10 +68,9 @@ use dashmap::mapref::entry::Entry;
 
 /// Stable identifier for a PDF document.
 ///
-/// Used as part of the secondary cache key.  Today this is just the
-/// SHA-256 of the original PDF bytes (or any other 32-byte
-/// content-addressable identifier the caller chooses); the cache
-/// treats it as opaque.
+/// Used as part of the secondary cache key.  The cache treats it as an
+/// opaque 32-byte content-addressable identifier; sessions use the
+/// BLAKE3 hash of the PDF's bytes ([`ContentHash::of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DocId(pub [u8; 32]);
 
@@ -266,7 +265,7 @@ impl std::fmt::Display for CacheError {
                 budget,
             } => write!(
                 f,
-                "cache over budget (transient): needed {needed} B, {used} B held by entries pinned by in-flight kernels, budget {budget} B — retry once outstanding Arcs drop",
+                "cache over budget (transient): needed {needed} B, {used} B held by the cache, budget {budget} B; no entry could be evicted, because each is pinned by an outstanding image handle or eviction lost repeated races — retry once outstanding handles drop",
             ),
             Self::EntryExceedsBudget { needed, budget } => write!(
                 f,
@@ -312,9 +311,10 @@ impl ContentHash {
     }
 }
 
-/// Two-tier in-process image cache.
+/// Three-tier image cache.
 ///
-/// VRAM is the hot tier; host RAM is the demotion target.
+/// VRAM is the hot tier; host RAM is the demotion target; an optional disk
+/// tier ([`Self::with_disk`]) persists decoded images across sessions.
 ///
 /// The VRAM tier is indexed by content hash (primary, for cross-
 /// document dedup) and by `(DocId, ObjId)` (secondary, fast same-
@@ -361,8 +361,7 @@ pub struct DeviceImageCache<B: CacheBackend = CudaBackend> {
 /// Passed by struct rather than by parameter list because the call site
 /// is a hot but readable construction; eight-positional `insert(doc,
 /// obj, hash, w, h, layout, pixels)` would be easy to misread (which
-/// dimension is which?), and adding a tier later (host RAM, disk) is a
-/// non-breaking field addition rather than another parameter.
+/// dimension is which?).
 #[derive(Debug)]
 pub struct InsertRequest<'a> {
     /// Document this image belongs to (for the secondary alias index).
@@ -405,13 +404,10 @@ impl<B: CacheBackend> DeviceImageCache<B> {
 
     /// Attach a disk tier for cross-process persistence.
     ///
-    /// On a VRAM + host-RAM miss, a disk hit avoids the CPU re-decode
-    /// pass: `NVMe` at roughly 1 GB/s sustained beats `zune-jpeg`'s
-    /// per-image throughput because disk reads run in parallel with
-    /// the CPU-busy decode workers.  Editing the source PDF
-    /// invalidates the disk cache automatically because the doc-id
-    /// is content-hashed (callers should derive `DocId` from PDF
-    /// bytes, not the file path).
+    /// On a VRAM and host-RAM miss, a disk hit replaces the decode with a
+    /// read of the decoded samples.  Entries are keyed by `DocId`, which
+    /// callers derive from the PDF's bytes, not its path, so editing the
+    /// source PDF leaves its old entries unreachable.
     #[must_use]
     pub fn with_disk(mut self, disk: DiskTier) -> Self {
         self.disk = Some(disk);

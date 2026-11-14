@@ -1,4 +1,5 @@
-// Phase 5: zigzag inverse + dequant + 8×8 IDCT (LLM fixed-point) + JFIF YCbCr→RGB.
+// IDCT stage of the GPU JPEG decoder: zigzag inverse + dequant + 8×8 IDCT
+// (LLM fixed-point) + JFIF YCbCr→RGB.
 //
 // The 1-D IDCT is the integer Loeffler/Ligtenberg/Moschytz (1989) 8-point
 // structure with 13-bit fixed-point constants and 64-bit intermediates.
@@ -10,7 +11,7 @@
 // Pixels are written to `pixels_rgba` as packed RGBA8 (one u32 per pixel),
 // using 0xFF for the A channel.
 
-[[vk::binding(0, 0)]] StructuredBuffer<int>    coefficients;  // Phase 4 output, zigzag order
+[[vk::binding(0, 0)]] StructuredBuffer<int>    coefficients;  // the Huffman decode's coefficients, zigzag order
 [[vk::binding(1, 0)]] StructuredBuffer<int>    qtables;       // 64 × num_qtables, zigzag order (verbatim DQT)
 [[vk::binding(2, 0)]] StructuredBuffer<int>    dc_values;     // absolute DC per block, one entry/block
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint> pixels_rgba;   // RGBA8 output, row-major
@@ -169,10 +170,8 @@ void idct_dequant_colour(
     }
 
     // Block coordinate in the component plane.
-    // For simplicity this kernel assumes 4:4:4 sampling (no subsampling):
-    // all components have the same block grid. Subsampling upscaling
-    // is deferred to a follow-on kernel or done by duplicating chroma blocks
-    // before invoking this kernel.
+    // The kernel assumes 4:4:4 sampling: every component has the same block
+    // grid, so subsampled chroma is upsampled to that grid before dispatch.
     uint bx = gid.x;  // block column
     uint by = gid.y;  // block row
 
@@ -205,7 +204,7 @@ void idct_dequant_colour(
         uint zz_pos = row * 8u + col;
         int  coef   = coefficients[coef_base + zz_pos];
         int  qval   = qtables[qt_base + zz_pos];
-        // DC absolute value override: Phase 4 symbols encode DC deltas;
+        // DC absolute value override: the Huffman decode's DC symbols are deltas;
         // `dc_values[block_idx]` is the running absolute DC reconstructed by
         // the host dispatcher. Overwrite slot 0 (zigzag DC position).
         if (zz_pos == 0u) {

@@ -17,10 +17,13 @@ use crate::backend::cuda::CudaBackend;
 /// A backend the device image cache keeps its slabs on.
 ///
 /// Implemented by the in-tree backends only ([`GpuBackend`] is sealed).
-/// Every transfer completes before the method returns, so a slab returned
-/// by [`Self::upload_slab`] or [`Self::promote`] holds its bytes for every
-/// device read issued afterwards, and a host copy returned by
-/// [`Self::demote`] holds them once the source slab is dropped.
+/// Every transfer is ordered before any device read issued after the
+/// method returns: it has completed (Vulkan, and every CUDA download), or
+/// it is a CUDA upload whose write event every cudarc launch that reads the
+/// slab waits on.  A slab returned by [`Self::upload_slab`] or
+/// [`Self::promote`] therefore holds its bytes for every such read, and a
+/// host copy returned by [`Self::demote`] holds them once the source slab
+/// is dropped.
 pub trait CacheBackend: GpuBackend {
     /// The handle the cache issues its transfers through.
     type Device: Send + Sync;

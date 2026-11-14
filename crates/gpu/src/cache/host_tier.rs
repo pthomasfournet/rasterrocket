@@ -45,9 +45,9 @@ pub struct HostBudget {
 }
 
 impl HostBudget {
-    /// Conservative default: 2 GiB, matching the Phase 9 spec.  Pinned
-    /// memory is a finite system resource (kernel-mode locked pages);
-    /// over-allocating starves the rest of the process.
+    /// Default: 2 GiB.  On CUDA the tier holds page-locked memory, which
+    /// the kernel cannot page out, so the budget bounds how much of the
+    /// system's RAM the tier locks.
     pub const DEFAULT: Self = Self {
         host_bytes: 2 * 1024 * 1024 * 1024,
     };
@@ -247,15 +247,12 @@ impl<B: CacheBackend> HostTier<B> {
                 })
                 .min_by_key(|&(_, ts)| ts);
             let Some((key, _)) = oldest else {
-                // Nothing reclaimable — every entry is being uploaded
-                // right now.  Returning silently here would cause us to
-                // overshoot the budget; that's acceptable for the host
-                // tier because pinned host RAM is the cheap tier and
-                // the overshoot is bounded by the number of in-flight
-                // promotions, but we log a diagnostic so an operator
-                // can see the pressure.
+                // Nothing reclaimable: the tier is empty, or every entry
+                // is held by an in-flight promotion.  The insert then
+                // overshoots the budget, by at most the in-flight
+                // promotions plus this entry.
                 log::warn!(
-                    "host tier: cannot evict to fit {needed} B; all entries are being promoted (used {used} B, budget {} B)",
+                    "host tier: cannot evict to fit {needed} B; no entry is reclaimable (the tier is empty or every entry is being promoted; used {used} B, budget {} B)",
                     self.budget.host_bytes,
                 );
                 return;

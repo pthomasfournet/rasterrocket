@@ -95,8 +95,7 @@ pub struct RasterSession {
     #[cfg(feature = "cache")]
     pub(crate) image_cache: Option<gpu::cache::ImageCache>,
     /// Stable document identifier used as the cache's secondary alias
-    /// key.  Today derived from the file path or a per-session UUID;
-    /// any 32-byte content-addressable identifier works.
+    /// key: the BLAKE3 hash of the document's bytes.
     #[cfg(feature = "cache")]
     pub(crate) doc_id: gpu::cache::DocId,
     /// Image-cache prefetcher handle — kept alive for the session's
@@ -609,9 +608,9 @@ fn open_session_with_doc(
 /// `open_session_with_doc`), so the cache follows the backend every other
 /// kernel of the session runs on, under `Auto` as under `Force*`.
 ///
-/// The disk tier is attached when its root resolves (`HOME`,
-/// `XDG_CACHE_HOME` or `PDF_RASTER_CACHE_DIR` set); otherwise the cache
-/// is in-process only.  The host tier's budget is the default.
+/// The disk tier is attached when `PDF_RASTER_CACHE_DIR` names its root
+/// ([`gpu::cache::DiskTier::try_new`]); otherwise the cache is in-process
+/// only.  The host tier's budget is the default.
 #[cfg(feature = "cache")]
 fn new_image_cache(
     ctx: Option<&gpu::GpuCtx>,

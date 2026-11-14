@@ -1,9 +1,9 @@
-//! Phase 9 task 5 — disk tier.
+//! Disk tier of the image cache.
 //!
-//! Sidecar cache directory: `<root>/<doc-sha256-hex>/<content-hash-hex>.bin`.
+//! Sidecar cache directory: `<root>/<doc-id-hex>/<content-hash-hex>.bin`.
 //! Cross-process persistence; survives process restart.  Editing the
-//! source PDF naturally invalidates the cache because the doc-sha256
-//! changes (`open_session` derives `DocId` from the PDF bytes).
+//! source PDF invalidates its entries because the document id, a hash of
+//! the PDF bytes (`open_session` derives `DocId` from them), changes.
 //!
 //! # Probe order
 //!
@@ -450,7 +450,7 @@ impl Drop for DiskTier {
 }
 
 /// Drop oldest documents (by directory mtime) until total disk
-/// usage is under budget.  Eviction unit is the doc-sha256
+/// usage is under budget.  Eviction unit is the doc-id
 /// directory, not individual files — partial-document caches
 /// are wasteful.
 ///
