@@ -8,7 +8,7 @@ authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
 readme               = "README.md"
-description          = "Comic-archive (.cbz/.cb7/.cbt) image input for the rasterrocket OCR pipeline"
+description          = "Comic-archive (.cbz/.cb7/.cbt/.cbr) image input for the rasterrocket OCR pipeline"
 keywords             = ["cbz", "comic", "ocr", "image", "archive"]
 categories           = ["multimedia::images"]
 
