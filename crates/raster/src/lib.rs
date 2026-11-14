@@ -35,6 +35,8 @@
 pub mod bitmap;
 pub mod clip;
 pub mod coverage;
+#[cfg(test)]
+mod depth16;
 pub mod fill;
 pub mod glyph;
 pub mod path;
