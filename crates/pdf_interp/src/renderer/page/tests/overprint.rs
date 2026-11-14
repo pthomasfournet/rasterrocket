@@ -719,6 +719,35 @@ fn spot_images_paint_their_colorant_alone() {
     }
 }
 
+/// An image in the space of a fifth spot, which finds no slot, prints its
+/// alternate colour in process ink as a fill of that space does: under
+/// overprint both leave the spot slots beneath them.
+#[test]
+fn an_unslotted_spot_image_paints_the_process_channels() {
+    let spaces: String = ["A", "B", "C", "D", "E"]
+        .iter()
+        .map(|name| {
+            format!(
+                "/{name} [/Separation /{name} /DeviceCMYK {}] ",
+                tint_to_cmyk("0 0.91 0.76 0")
+            )
+        })
+        .collect();
+    let doc = overprint_doc("/GS << /OP true /op true >>", &spaces);
+    let slots = "/GS gs /A cs 1 scn 0 0 10 10 re f /B cs 1 scn 0 0 10 10 re f \
+                 /C cs 1 scn 0 0 10 10 re f /D cs 1 scn 0 0 10 10 re f";
+    for paint in [
+        "q 5 0 0 10 0 0 cm BI /W 1 /H 1 /CS /E /BPC 8 ID \x7f EI Q",
+        "/E cs 0.5 scn 0 0 5 10 re f",
+    ] {
+        let content = format!("{slots} {paint}");
+        let ink = render_ink(&doc, content.as_bytes());
+        let px = ink_at(&ink, 2, 5);
+        assert_eq!(px[4..], [255; 4], "{paint}: {px:?}");
+        assert!(px[1] > 0 && px[2] > 0, "{paint}: {px:?}");
+    }
+}
+
 /// A coloured tiling pattern's cell renders in ink with the page's spot
 /// slots: a spot colour in the cell paints its slot, and a cell whose
 /// content overprints leaves the cyan under the pattern.  Overprint set

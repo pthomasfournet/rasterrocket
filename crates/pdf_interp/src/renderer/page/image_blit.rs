@@ -5,7 +5,7 @@ use color::convert::div255;
 use raster::ClipResult;
 use raster::pipe::ChannelMask;
 
-use super::super::color::PROCESS_CHANNELS;
+use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend_u8, with_canvas};
@@ -117,11 +117,9 @@ impl PageRenderer<'_> {
             Some((i, c)) => (i, *c),
             None => (img, page_ctm),
         };
-        // On an ink canvas an image in a `Separation` or `DeviceN` space
-        // draws the ink of its tints, resampled as its colours are.
-        let ink = self
-            .ink_samples(decoded, plan.as_ref())
-            .filter(|(ink, _)| ink.len() == img.width as usize * img.height as usize * 8);
+        // The spot colorants of an image's tints take their slots when it
+        // is drawn, whether or not it reaches a pixel.
+        let colorants = self.tint_plan(decoded);
         let filter = Filter::for_draw(&ctm, img.width, img.height, decoded.interpolate);
         let Some(grid) =
             SampleGrid::new(&ctm, self.width, self.height, img.width, img.height, filter)
@@ -157,6 +155,34 @@ impl PageRenderer<'_> {
             }
         }
 
+        // On an ink canvas an image in a `Separation` or `DeviceN` space
+        // draws the ink of its tints, resampled as its colours are.  One
+        // whose spot colorants found no slot draws its sRGB samples as
+        // process ink in the process channels, as a colour of its space
+        // does.
+        let ink = match &colorants {
+            Some(colorants @ ColorantPlan::Channels(_)) => {
+                let samples = img.width as usize * img.height as usize;
+                let ink = ink_samples(decoded, colorants, plan.as_ref())
+                    .filter(|(ink, _)| ink.len() == samples * 8);
+                if ink.is_none() {
+                    log::debug!(
+                        "rasterrocket-interp: blit_image: the tints of image {:?} give no ink \
+                         for its {}×{} samples; it draws as its sRGB samples",
+                        name.map(String::from_utf8_lossy),
+                        img.width,
+                        img.height,
+                    );
+                }
+                ink
+            }
+            _ => None,
+        };
+        let overprint = match colorants {
+            Some(ColorantPlan::Process) => self.overprint_channels(false, PROCESS_CHANNELS),
+            _ => None,
+        };
+
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
         let paint = |r: &mut Self| {
@@ -166,7 +192,7 @@ impl PageRenderer<'_> {
                     r.composite_ink_image(samples, *paints, img, &ctm, mask, &grid, &mut grid_clip);
                     Ok(())
                 }
-                None => r.composite_image(img, &ctm, mask, &grid, &mut grid_clip),
+                None => r.composite_image(img, &ctm, mask, &grid, &mut grid_clip, overprint),
             };
             if let Err(reason) = drawn {
                 r.record_image_failure(name, reason);
@@ -181,40 +207,19 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// The ink of each sample of the colorant tints of `decoded` on the ink
-    /// canvas, resampled through `plan` when the draw reduces the image,
-    /// eight bytes per sample, with the channels the image paints.  `None`
-    /// on an RGB canvas, for an image without tints, and for one whose
-    /// spot colorants find no slot: such an image draws as its sRGB
-    /// samples.
-    fn ink_samples(
-        &self,
-        decoded: &crate::resources::DecodedImage,
-        plan: Option<&image_reduce::Plan>,
-    ) -> Option<(Vec<u8>, ChannelMask)> {
+    /// The plan by which the colorant tints of `decoded` paint on the ink
+    /// canvas, assigning their spot colorants slots.  `None` on an RGB
+    /// canvas, for an image without tints, and in a shape-only glyph.
+    fn tint_plan(&self, decoded: &crate::resources::DecodedImage) -> Option<ColorantPlan> {
         if self.canvas.kind() != CanvasKind::Ink || self.gstate.current().colour_locked {
             return None;
         }
         let tints = decoded.tints.as_ref()?;
-        let colorants = self
-            .ink_map
-            .borrow_mut()
-            .plan(self.resources.doc(), &tints.space);
-        let n = tints.space.ncomponents();
-        let resampled;
-        let data = match plan {
-            Some(plan) => {
-                resampled = plan.resample(&tints.data, n)?;
-                &resampled
-            }
-            None => &tints.data,
-        };
-        let mut ink = Vec::new();
-        ink.try_reserve_exact(data.len() / n * 8).ok()?;
-        for px in data.chunks_exact(n) {
-            ink.extend_from_slice(&colorants.ink_of_tints(px)?);
-        }
-        Some((ink, colorants.paints()))
+        Some(
+            self.ink_map
+                .borrow_mut()
+                .plan(self.resources.doc(), &tints.space),
+        )
     }
 
     /// Composite the ink samples `ink`, eight bytes per sample on the grid
@@ -355,8 +360,10 @@ impl PageRenderer<'_> {
 
     /// Composite `img`, sampled through `grid` under `ctm`, onto the bitmap
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
-    /// draws it.  `Err` carries the reason a decoded image cannot be drawn,
-    /// for the caller to record against the image's name.
+    /// draws it.  An image's samples write the channels `overprint`, every
+    /// channel for `None`; a stencil writes those of the fill colour.
+    /// `Err` carries the reason a decoded image cannot be drawn, for the
+    /// caller to record against the image's name.
     #[expect(
         clippy::too_many_lines,
         reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
@@ -368,6 +375,7 @@ impl PageRenderer<'_> {
         mask: Option<(&SoftMask, Ctm)>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
+        overprint: Option<ChannelMask>,
     ) -> Result<(), String> {
         // GPU image-blit path: device-resident pixels sampled by the blit
         // kernel of the cache's backend through the same grid, composited onto `bitmap` before
@@ -380,7 +388,7 @@ impl PageRenderer<'_> {
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            if self.try_gpu_blit_image(cached, grid, grid_clip) {
+            if self.try_gpu_blit_image(cached, grid, grid_clip, overprint) {
                 self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
                 return Ok(());
             }
@@ -424,7 +432,7 @@ impl PageRenderer<'_> {
         };
         let img_w = img.width as usize;
         // A stencil paints the fill colour under the fill's overprint; an
-        // image's samples write every channel.
+        // image's samples write the channels `overprint`.
         let stencil = img.color_space == ImageColorSpace::Mask;
         let (fill_alpha, blend_mode) = {
             let gs = self.gstate.current();
@@ -433,7 +441,7 @@ impl PageRenderer<'_> {
         let paint = if stencil {
             self.solid_paint(false, &painted_fill, fill_alpha, blend_mode)
         } else {
-            self.paint_params(fill_alpha, blend_mode, None, PROCESS_CHANNELS)
+            self.paint_params(fill_alpha, blend_mode, overprint, PROCESS_CHANNELS)
         };
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
@@ -557,6 +565,34 @@ enum RowSamples<'a> {
     Rgb(&'a [[u8; 3]]),
     Gray(&'a [[u8; 1]]),
     PerPixel,
+}
+
+/// The ink of each sample of the colorant tints of `decoded` under
+/// `colorants`, their plan, resampled through `plan` when the draw reduces
+/// the image, eight bytes per sample, with the channels the image paints.
+/// `None` for an image without tints, under [`ColorantPlan::Process`],
+/// and when the samples cannot be resampled or held.
+fn ink_samples(
+    decoded: &crate::resources::DecodedImage,
+    colorants: &ColorantPlan,
+    plan: Option<&image_reduce::Plan>,
+) -> Option<(Vec<u8>, ChannelMask)> {
+    let tints = decoded.tints.as_ref()?;
+    let n = tints.space.ncomponents();
+    let resampled;
+    let data = match plan {
+        Some(plan) => {
+            resampled = plan.resample(&tints.data, n)?;
+            &resampled
+        }
+        None => &tints.data,
+    };
+    let mut ink = Vec::new();
+    ink.try_reserve_exact(data.len() / n * 8).ok()?;
+    for px in data.chunks_exact(n) {
+        ink.extend_from_slice(&colorants.ink_of_tints(px)?);
+    }
+    Some((ink, colorants.paints()))
 }
 
 /// Checks the decoder contract that `len` bytes hold `img`'s samples, so

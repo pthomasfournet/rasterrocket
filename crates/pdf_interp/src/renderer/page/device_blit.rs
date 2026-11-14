@@ -7,6 +7,7 @@
 use gpu::GpuCtx;
 use gpu::blit::BlitBbox;
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
+use raster::pipe::ChannelMask;
 
 use super::super::color::PROCESS_CHANNELS;
 use super::PageRenderer;
@@ -73,7 +74,8 @@ impl PageRenderer<'_> {
 
     /// GPU image blit: sample `cached` through `grid` on the device of the
     /// image cache's backend, then download the pixels the kernel wrote
-    /// and composite them onto `bitmap`.  Returns `true` once the pixels
+    /// and composite them onto `bitmap`, writing the channels `overprint`
+    /// (every channel for `None`).  Returns `true` once the pixels
     /// are on the host bitmap; `false` if any prerequisite is missing (no
     /// CUDA context for a CUDA image, a target allocation fails, kernel
     /// dispatch or download errors), in which case the bitmap holds none of
@@ -88,6 +90,7 @@ impl PageRenderer<'_> {
         cached: &CachedImage,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
+        overprint: Option<ChannelMask>,
     ) -> bool {
         // Grid edges are clamped to the page, so they fit i32 whenever the
         // page does; a page wider than i32::MAX pixels cannot exist.
@@ -111,7 +114,7 @@ impl PageRenderer<'_> {
         let (paint, transfer) = {
             let gs = self.gstate.current();
             (
-                self.paint_params(gs.fill_alpha, gs.blend_mode, None, PROCESS_CHANNELS),
+                self.paint_params(gs.fill_alpha, gs.blend_mode, overprint, PROCESS_CHANNELS),
                 gs.transfer.clone(),
             )
         };
