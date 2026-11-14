@@ -41,7 +41,8 @@ its reason, followed by `(worsened YYYY-MM-DD)`; an XFAIL `differs` entry
 has each limit lowered to the seeded limit of its observed value where
 that is lower, and drops a limit the suite's own already enforces; an
 XPASS entry is removed; and every entry for a test the run did not
-observe is kept as it is.
+observe is kept as it is.  Concurrent updates of one registry take turns
+on an exclusive lock of `.<name>.lock` beside it.
 
 The `compare` command serves compare.sh: ROWS is a tab-separated file of
 `label page outcome rmse tile detail` rows, `page` being `-` for the
@@ -56,9 +57,11 @@ registry, printing the error to stderr.
 
 import argparse
 import collections
+import contextlib
 import dataclasses
 import datetime as dt
 import enum
+import fcntl
 import json
 import math
 import os
@@ -66,7 +69,7 @@ import pathlib
 import re
 import sys
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -464,6 +467,19 @@ def save(path: pathlib.Path, suites: Mapping[str, Mapping[TestId, Entry]]) -> No
         raise
 
 
+@contextlib.contextmanager
+def locked(path: pathlib.Path) -> Iterator[None]:
+    """Hold an exclusive lock on the registry at `path` for the block.
+
+    The lock is `flock` on `.<name>.lock` beside the registry, not on the
+    registry itself, which `save` replaces by renaming another file over it.
+    """
+    lock = path.with_name(f".{path.name}.lock")
+    with lock.open("a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def run_suite(
     registry: pathlib.Path | None,
     suite: str,
@@ -474,13 +490,19 @@ def run_suite(
 ) -> list[Result]:
     """Classify `observations` against `suite` in `registry`; rewrite it with `update`.
 
-    A `None` registry has no entries and is never written.  Seeded entries
-    carry today's local date.
+    A `None` registry has no entries and is never written.  With `update`,
+    the load, classification and save run under `locked`, so concurrent
+    updates of one registry are serialised and none is lost.  Seeded
+    entries carry today's local date.
     """
-    suites = {} if registry is None else load(registry)
-    entries = suites.get(suite, {})
-    results = classify_all(observations, entries, limits)
-    if update and registry is not None:
+    if registry is None:
+        return classify_all(observations, {}, limits)
+    if not update:
+        return classify_all(observations, load(registry).get(suite, {}), limits)
+    with locked(registry):
+        suites = load(registry)
+        entries = suites.get(suite, {})
+        results = classify_all(observations, entries, limits)
         today = dt.date.today()  # noqa: DTZ011 -- a calendar date for a human reader
         suites[suite] = updated(entries, results, limits, today)
         save(registry, suites)

@@ -4,6 +4,7 @@
 Run with `python3 -I tests/compare/test_expectations.py`.
 """
 
+import contextlib
 import dataclasses
 import datetime as dt
 import os
@@ -330,6 +331,37 @@ class CompareCommand(unittest.TestCase):
             surprise = self.run_compare(registry, fixed, "--strict")
             self.assertEqual(surprise[-1], "STATUS XPASS 1 0 1 1")
             self.assertTrue(surprise[1].startswith("XPASS    page-3"))
+
+    def test_update_waits_for_the_registry_lock(self) -> None:
+        """--update does not touch the registry while another update holds its lock."""
+        rows = "page-1\t1\tscored\t3.0\t20.0\tbad\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = pathlib.Path(tmp) / "e.json"
+            rows_file = registry.parent / "rows.tsv"
+            rows_file.write_text(rows, encoding="utf-8")
+            cmd = [
+                sys.executable,
+                "-I",
+                str(pathlib.Path(ex.__file__)),
+                "compare",
+                "--registry",
+                str(registry),
+                *("--reference", "pdftoppm", "--dpi", "150"),
+                *("--rmse-limit", "2.0", "--tile-limit", "12", "--file", "x.pdf"),
+                "--update",
+                str(rows_file),
+            ]
+            # The process is waited for after the lock is released.
+            with contextlib.ExitStack() as reap:
+                with ex.locked(registry):
+                    proc = reap.enter_context(
+                        subprocess.Popen(cmd, stdout=subprocess.DEVNULL)  # noqa: S603
+                    )
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        proc.wait(timeout=1)
+                    self.assertFalse(registry.exists())
+                self.assertEqual(proc.wait(timeout=30), 0)
+            self.assertTrue(registry.exists())
 
     def test_update_without_registry_is_fatal(self) -> None:
         """--update with the registry disabled records nothing and keeps the FAIL fatal."""

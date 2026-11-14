@@ -80,6 +80,8 @@ tests/fixtures/*.pdf
 # ── Temp / scratch files ──────────────────────────────────────────────────────
 *.tmp
 *.bak
+# The lock of an expectations-registry update (tests/compare/expectations.py)
+.*.json.lock
 *.orig
 *.log
 ROADMAP_INTEL.md
