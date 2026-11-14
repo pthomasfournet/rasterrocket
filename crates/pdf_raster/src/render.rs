@@ -98,7 +98,8 @@ pub fn render_page_rgb_with_diagnostics(
 /// # Errors
 ///
 /// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
-/// rotation fails.
+/// rotation fails, which this release never reports (see
+/// [`deskew::apply`](crate::deskew::apply)).
 pub fn render_page_gray(
     session: &RasterSession,
     page_num: u32,

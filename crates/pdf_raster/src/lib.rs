@@ -596,7 +596,8 @@ pub struct RenderedPage {
 ///   Linux's default overcommit a large allocation is seldom refused; the
 ///   process can instead be stopped by the out-of-memory killer when the
 ///   memory is touched.
-/// - [`RasterError::Deskew`] — deskew rotation failed.
+/// - [`RasterError::Deskew`] — deskew rotation failed; not returned in
+///   this release, a failed GPU rotation falling back to the CPU.
 /// - [`RasterError::BackendUnavailable`] — `PDF_RASTER_BACKEND` requested a
 ///   forced backend (e.g. `cuda`, `vulkan`) and that backend's runtime
 ///   is unavailable.  Cannot occur if the env var is unset or `auto`.

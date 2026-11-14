@@ -38,7 +38,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 - `RasterError::InvalidPageGeometry` — `UserUnit` outside `[0.1, 10.0]`.
 - `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
 - `RasterError::PageBudgetExceeded` — the page exceeded the per-page operator budget or wall-clock deadline.
-- `RasterError::Deskew` — deskew rotation failed (rare; graceful fallback applied when possible).
+- `RasterError::Deskew` — deskew rotation failed. Not returned in this release: a failed GPU rotation falls back to the CPU rotation, which cannot fail.
 
 A panic while rendering a page propagates out of `Iterator::next`; this iterator does not catch panics.
 
@@ -672,7 +672,7 @@ An extra clockwise rotation (`SessionConfig::rotation`, `RasterOptions::rotation
 The `deskew` module exposes a limited public API:
 
 - `deskew::apply(&mut Bitmap<Gray8>) -> Result<(), DeskewError>` — detects the skew of a grayscale bitmap and rotates it in place to correct it; angles too small to matter are left alone, and a failed detection counts as no skew.
-- `deskew::DeskewError` — error type returned by `apply` (a failed rotation).
+- `deskew::DeskewError` — error type of `apply` (a failed rotation); not returned in this release, for the same reason.
 
 The `deskew::detect` and `deskew::rotate` submodules are `pub(crate)` and are not part of the public API.
 

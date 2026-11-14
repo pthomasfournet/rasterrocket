@@ -53,7 +53,9 @@ pub enum RasterError {
         /// Height of the refused bitmap in pixels.
         height: u32,
     },
-    /// Deskew rotation failed.
+    /// Deskew rotation failed.  Not returned in this release: a GPU
+    /// rotation that fails falls back to the CPU rotation, which cannot
+    /// fail.
     Deskew(String),
     /// The row stride given for a caller-owned output buffer is shorter
     /// than one row of the page.

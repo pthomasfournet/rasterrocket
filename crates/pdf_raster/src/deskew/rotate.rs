@@ -25,44 +25,39 @@
 //!
 //! **GPU path** (`gpu-deskew` feature, optional): CUDA NPP `nppiRotate_8u_C1R_Ctx`
 //! with hardware bilinear via texture units.  ~0.3–0.5 ms for a 2550×3300 image
-//! on RTX 5070.  Falls back to CPU silently when no CUDA device is available.
+//! on RTX 5070.  Falls back to the CPU, with a warning, when the GPU rotation
+//! fails, as it does without a CUDA device.
 
 use color::Gray8;
 use raster::Bitmap;
 
+#[cfg(feature = "gpu-deskew")]
 use super::DeskewError;
 
-/// Rotate `img` in-place by `angle_deg` degrees (clockwise positive).
+/// Rotate `img` in place by `angle_deg` degrees (clockwise positive).
 ///
-/// The image is replaced with a new bitmap of the same dimensions containing
-/// the rotated content.  Out-of-bounds source pixels are filled with 255 (white).
-///
-/// When the `gpu-deskew` feature is enabled, attempts GPU rotation first and
-/// falls back to the CPU bilinear path on any GPU error.
-///
-/// # Errors
-///
-/// Currently always returns `Ok(())` — the CPU path cannot fail beyond OOM
-/// (which panics).  The return type is `Result` to accommodate future GPU-only
-/// configurations where CPU fallback may not be available.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "Result kept for future GPU-only configurations where CPU fallback may not be available"
-)]
-pub(crate) fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32) -> Result<(), DeskewError> {
-    #[cfg(feature = "gpu-deskew")]
-    match rotate_gpu(img, angle_deg) {
-        Ok(rotated) => {
-            *img = rotated;
-            return Ok(());
-        }
-        Err(e) => {
-            log::warn!("rotate_inplace: GPU rotation failed ({e}); falling back to CPU");
-        }
-    }
+/// The image is replaced with a new bitmap of the same dimensions holding
+/// the rotated content; out-of-bounds source pixels are filled with 255
+/// (white).  The rotation runs on the GPU when [`rotated_on_gpu`] gives a
+/// result, and on the CPU otherwise.
+pub(crate) fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32) {
+    *img = rotated_on_gpu(img, angle_deg).unwrap_or_else(|| rotate_cpu(img, angle_deg));
+}
 
-    *img = rotate_cpu(img, angle_deg);
-    Ok(())
+/// `img` rotated by `angle_deg` degrees clockwise on the GPU, or `None`,
+/// with a warning, when the GPU rotation fails; the caller then rotates on
+/// the CPU.
+#[cfg(feature = "gpu-deskew")]
+pub(crate) fn rotated_on_gpu(img: &Bitmap<Gray8>, angle_deg: f32) -> Option<Bitmap<Gray8>> {
+    rotate_gpu(img, angle_deg)
+        .inspect_err(|e| log::warn!("deskew: GPU rotation failed ({e}); rotating on the CPU"))
+        .ok()
+}
+
+/// No GPU rotation without the `gpu-deskew` feature: always `None`.
+#[cfg(not(feature = "gpu-deskew"))]
+pub(crate) const fn rotated_on_gpu(_img: &Bitmap<Gray8>, _angle_deg: f32) -> Option<Bitmap<Gray8>> {
+    None
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -655,9 +650,18 @@ pub(crate) fn rotate_gpu(
         gpu::npp_rotate::rotate_gray8(src.data(), src.stride, src.width, src.height, angle_deg)
             .map_err(|e| DeskewError(e.to_string()))?;
 
-    // Reconstruct a tightly-packed Bitmap from the returned pixel Vec.
-    // rotate_gray8 returns width*height bytes with no stride padding.
+    // `rotate_gray8` returns `width × height` bytes with no row padding,
+    // the layout of a bitmap with a row pad of 1.
     let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
+    if pixels.len() != dst.data().len() {
+        return Err(DeskewError(format!(
+            "GPU rotation returned {} bytes for a {}×{} image ({} expected)",
+            pixels.len(),
+            src.width,
+            src.height,
+            dst.data().len()
+        )));
+    }
     dst.data_mut().copy_from_slice(&pixels);
     Ok(dst)
 }
@@ -870,12 +874,11 @@ mod tests {
     #[test]
     fn rotate_inplace_zero_no_panic() {
         let mut img = Bitmap::<Gray8>::new(32, 32, 1, false);
-        rotate_inplace(&mut img, 0.0).unwrap();
+        rotate_inplace(&mut img, 0.0);
     }
 
-    /// `rotate_inplace` must actually mutate `*img`, not return Ok and leave
-    /// the input untouched.  Pins the `rotate_inplace → Ok(())` mutant by
-    /// asserting visible pixel content changes after a non-trivial rotation.
+    /// `rotate_inplace` replaces `*img` with the rotated image: the pixel
+    /// content changes after a non-trivial rotation.
     #[test]
     fn rotate_inplace_modifies_pixels() {
         // 32×32 image with a single white-stripe column on the left half so
@@ -887,7 +890,7 @@ mod tests {
         }
         let before_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         // 45° rotation breaks the vertical line into diagonal pieces.
-        rotate_inplace(&mut img, 45.0).unwrap();
+        rotate_inplace(&mut img, 45.0);
         let after_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         assert_ne!(
             before_col5, after_col5,

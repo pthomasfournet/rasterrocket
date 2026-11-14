@@ -44,7 +44,8 @@ const MIN_CORRECT_DEG: f32 = 0.05;
 /// level, not here.
 pub(crate) const MAX_SEARCH_DEG: f32 = 7.0;
 
-/// Error type for deskew operations.
+/// Error type for deskew operations: a rotation that failed.  Not
+/// returned in this release (see [`apply`]).
 #[derive(Debug)]
 pub struct DeskewError(pub(crate) String);
 
@@ -58,21 +59,20 @@ impl std::error::Error for DeskewError {}
 
 /// Detect the skew angle of `img` and rotate it in-place to correct it.
 ///
-/// Does nothing if the detected angle is below `MIN_CORRECT_DEG`.
+/// Does nothing if the detected angle is below `MIN_CORRECT_DEG`.  A
+/// failed detection counts as zero skew, and leaves the image as it is.
 ///
 /// # Errors
 ///
-/// Returns [`DeskewError`] if rotation fails (e.g. GPU allocation error).
-/// Detection failure is treated as zero skew (no rotation applied) rather
-/// than an error, since a missing correction is less harmful than a crash.
+/// None in this release: a GPU rotation that fails falls back to the CPU
+/// rotation, which cannot fail.  [`DeskewError`] is reserved for a
+/// rotation without a fallback.
 pub fn apply(img: &mut Bitmap<Gray8>) -> Result<(), DeskewError> {
     let angle_deg = detect::find_skew_deg(img);
-
-    if angle_deg.abs() < MIN_CORRECT_DEG {
-        return Ok(());
+    if angle_deg.abs() >= MIN_CORRECT_DEG {
+        rotate::rotate_inplace(img, angle_deg);
     }
-
-    rotate::rotate_inplace(img, angle_deg)
+    Ok(())
 }
 
 /// [`apply`] writing the corrected image to `out`, row `y` at
@@ -87,17 +87,10 @@ pub(crate) fn apply_into(img: &Bitmap<Gray8>, out: &mut [u8], stride: usize) {
         copy_rows(img, out, stride);
         return;
     }
-    #[cfg(feature = "gpu-deskew")]
-    match rotate::rotate_gpu(img, angle_deg) {
-        Ok(rotated) => {
-            copy_rows(&rotated, out, stride);
-            return;
-        }
-        Err(e) => {
-            log::warn!("rotate_inplace: GPU rotation failed ({e}); falling back to CPU");
-        }
+    match rotate::rotated_on_gpu(img, angle_deg) {
+        Some(rotated) => copy_rows(&rotated, out, stride),
+        None => rotate::rotate_cpu_into(img, angle_deg, out, stride),
     }
-    rotate::rotate_cpu_into(img, angle_deg, out, stride);
 }
 
 /// Copy the rows of `img` to `out`, row `y` at `out[y * stride..]`.
