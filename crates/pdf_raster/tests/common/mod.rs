@@ -25,16 +25,20 @@ use rasterrocket::{
 /// A font directory named `name` under the test target's scratch space
 /// (the system temporary directory when the including crate is not an
 /// integration-test target, as for the fuzz crate), holding exactly `files`
-/// (name, bytes).  The directory is this process's
-/// own and is emptied first, so a file left by an earlier run, or written
-/// by a concurrent one, is never indexed.
+/// (name, bytes).  Every call gets a directory of its own, keyed by the
+/// process id and a per-process call count, and emptied first: a file left
+/// by an earlier run, or written by a concurrent test, is never indexed,
+/// and no call deletes a directory whose fonts another test holds open
+/// (which Windows refuses).
 ///
 /// # Panics
 ///
 /// When the directory cannot be emptied, created or written.
 pub fn font_dir(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let scratch = option_env!("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let dir = scratch.join(format!("{name}-{}", std::process::id()));
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = scratch.join(format!("{name}-{}-{call}", std::process::id()));
     if let Err(e) = std::fs::remove_dir_all(&dir)
         && e.kind() != std::io::ErrorKind::NotFound
     {
