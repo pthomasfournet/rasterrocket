@@ -478,11 +478,12 @@ fn rich_black(t: u8) -> [u8; 4] {
 /// the band of its neighbours: a neutral at or above [`BLACK_FLOOR`] is
 /// black ink alone; a darker neutral is solid black under C, M and Y in
 /// proportions whose coverage ramps stay neutral; a solid process colour
-/// has at most a trace of black (two counts), from table interpolation.  The result maps back through
-/// [`cmyk_to_rgb`] to within two counts per channel for every colour the
-/// four-ink model prints, except for about one in two thousand dark
-/// colours (channel mean below 64), within four; and to the nearest
-/// printable colour otherwise, up to table interpolation.
+/// has at most a trace of black (two counts), from table interpolation.
+/// The result maps back through [`cmyk_to_rgb`] to within two counts per
+/// channel for every colour the four-ink model prints, except for about
+/// one in two thousand dark colours (channel mean below 64), within four;
+/// and to the nearest printable colour otherwise, up to table
+/// interpolation.
 #[must_use]
 pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
     let table = &*INVERSE;
