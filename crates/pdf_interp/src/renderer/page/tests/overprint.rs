@@ -4,6 +4,7 @@ use pdf::Document;
 use raster::pipe::ChannelMask;
 
 use super::*;
+use crate::renderer::page::CanvasKind;
 
 /// Page `(4, 0)` whose `/ExtGState` resources are the entries `states` and
 /// whose `/ColorSpace` resources are the entries `spaces`.
@@ -457,4 +458,42 @@ fn a_transparent_finish_keeps_the_page_alpha() {
         );
         assert_eq!(rgb_at(bitmap.data(), 7, 0), [0; 3], "ink {ink}: no colour");
     }
+}
+
+/// On an ink page the soft-mask groups are RGB and the transparency groups
+/// ink; alternating between them reuses one pooled canvas of each kind.
+#[test]
+fn group_pool_keeps_one_canvas_per_kind() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /XObject << /F 5 0 R >> \
+             /ExtGState << /M << /SMask << /S /Luminosity /G 6 0 R >> >> \
+             /N << /SMask /None >> >> >> >>"
+                .to_owned(),
+        ),
+        (
+            5,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency >>",
+                "0 0 0 1 k 0 0 5 10 re f",
+            ),
+        ),
+        (
+            6,
+            stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /CS /DeviceGray >>",
+                "0.5 g 0 0 10 10 re f",
+            ),
+        ),
+    ]);
+    let mut renderer = ink_renderer(&doc);
+    renderer.execute(&crate::content::parse(
+        b"/M gs /N gs /F Do /M gs /N gs /F Do /M gs /N gs /F Do",
+    ));
+    let kinds: Vec<_> = renderer.group_pool.iter().map(PageCanvas::kind).collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert!(kinds.contains(&CanvasKind::Rgb) && kinds.contains(&CanvasKind::Ink));
 }

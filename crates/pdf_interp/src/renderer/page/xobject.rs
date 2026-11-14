@@ -508,13 +508,16 @@ impl PageRenderer<'_> {
     }
 
     /// A transparent canvas of the current canvas's kind and size for a
-    /// transparency group: one from the pool, or a fresh one; `None`, with
-    /// the render stopped, when the allocator refuses a fresh one.
+    /// transparency group: one of that kind and size from the pool, or a
+    /// fresh one; `None`, with the render stopped, when the allocator
+    /// refuses a fresh one.  Pooled canvases of another kind or size stay
+    /// in the pool.
     pub(super) fn group_bitmap(&mut self) -> Option<PageCanvas> {
         let (kind, (width, height)) = (self.canvas.kind(), self.canvas.dims());
         self.group_pool
-            .pop()
-            .filter(|b| b.kind() == kind && b.dims() == (width, height))
+            .iter()
+            .rposition(|b| b.kind() == kind && b.dims() == (width, height))
+            .map(|i| self.group_pool.swap_remove(i))
             .or_else(|| self.try_canvas(kind, width, height))
     }
 

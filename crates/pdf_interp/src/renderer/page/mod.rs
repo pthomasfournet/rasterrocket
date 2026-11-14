@@ -273,7 +273,7 @@ pub struct PageRenderer<'doc> {
     page_group: Option<crate::resources::TransparencyGroupParams>,
     /// Transparent page-sized canvases for transparency groups, each
     /// returned cleared when its group is composited; one per nesting level
-    /// is allocated over the page's life.
+    /// and canvas kind is allocated over the page's life.
     group_pool: Vec<PageCanvas>,
     /// The spot colorants of the page and their channels on an ink canvas.
     ink_map: ink_map::InkMap,
