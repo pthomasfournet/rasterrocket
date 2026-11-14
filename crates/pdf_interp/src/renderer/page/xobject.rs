@@ -219,6 +219,7 @@ impl PageRenderer<'_> {
         let request = crate::resources::ImageRequest { name, draw_size };
         #[cfg(feature = "gpu-icc")]
         let icc_counts = crate::resources::image::DeviceIccCounts::default();
+        let keep_tints = self.keeps_tints();
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
             color_spaces: self.resources.color_space_dict(),
@@ -240,7 +241,7 @@ impl PageRenderer<'_> {
             image_cache: self.cache_state.as_ref().map(|cs| &cs.cache),
             #[cfg(feature = "cache")]
             doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
-            keep_tints: self.keeps_tints(),
+            keep_tints,
         };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).
         // Each branch is a separately monomorphised call; no decoder is wasted.

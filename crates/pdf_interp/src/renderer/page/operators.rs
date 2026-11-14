@@ -356,6 +356,7 @@ impl PageRenderer<'_> {
                 let color_spaces = self.resources.color_space_dict();
                 #[cfg(feature = "gpu-icc")]
                 let icc_counts = crate::resources::image::DeviceIccCounts::default();
+                let keep_tints = self.keeps_tints();
                 let mut ctx = crate::resources::image::ImageDecodeCtx {
                     doc: self.resources.doc(),
                     color_spaces,
@@ -377,7 +378,7 @@ impl PageRenderer<'_> {
                     image_cache: None,
                     #[cfg(feature = "cache")]
                     doc_id: None,
-                    keep_tints: self.keeps_tints(),
+                    keep_tints,
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).
                 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
