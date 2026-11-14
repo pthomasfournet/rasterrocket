@@ -188,8 +188,9 @@ fn is_rtl_letter(text: CodeText) -> bool {
 /// A run is left glyph by glyph when its face is not an sfnt, when a
 /// shaped glyph has no selector, when shaping yields `.notdef`, which a
 /// per-code fallback may still draw, or when the shaper reads no font from
-/// the program, refuses the run or exceeds its limits.  The middle two are
-/// logged at `debug`, the last three at `warn`.
+/// the program, refuses the run or exceeds its limits.  The last two are
+/// logged at `warn`, the others but the first at `debug`; a program the
+/// shaper reads no font from is reported at `warn` once by the font crate.
 pub(super) fn shaped_runs<'f>(
     face: &PageFace,
     texts: &[CodeText],
@@ -382,24 +383,66 @@ fn shape(
     match run_face.program().shape_in_context(&text, &pre, &post, rtl) {
         Ok(glyphs) if glyphs.iter().all(|g| g.selector != 0) => Some(glyphs),
         Ok(_) => {
-            log::debug!("shaping {text:?} yields .notdef; drawn glyph by glyph");
+            log::debug!(
+                "shaping {} yields .notdef; drawn glyph by glyph",
+                Excerpt(&text)
+            );
             None
         }
         Err(ShapeError::NotSfnt) => None,
-        Err(e @ ShapeError::NoSelector(_)) => {
-            log::debug!("shaping {text:?}: {e}; drawn glyph by glyph");
+        Err(e @ (ShapeError::NoSelector(_) | ShapeError::NoShaperFont)) => {
+            log::debug!("shaping {}: {e}; drawn glyph by glyph", Excerpt(&text));
             None
         }
-        Err(e @ (ShapeError::NoShaperFont | ShapeError::Refused(_) | ShapeError::Exhausted)) => {
-            log::warn!("shaping {text:?}: {e}; drawn glyph by glyph");
+        Err(e @ (ShapeError::Refused(_) | ShapeError::Exhausted)) => {
+            log::warn!("shaping {}: {e}; drawn glyph by glyph", Excerpt(&text));
             None
+        }
+    }
+}
+
+/// A run's text as a log message shows it: its first [`Excerpt::CHARS`]
+/// characters, quoted, then the number of characters when there are more.
+struct Excerpt<'a>(&'a str);
+
+impl Excerpt<'_> {
+    /// The characters shown.
+    const CHARS: usize = 32;
+}
+
+impl std::fmt::Display for Excerpt<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.char_indices().nth(Self::CHARS) {
+            None => write!(f, "{:?}", self.0),
+            Some((cut, _)) => write!(
+                f,
+                "{:?}… ({} characters)",
+                &self.0[..cut],
+                self.0.chars().count()
+            ),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, class};
+    use super::{Class, Excerpt, class};
+
+    #[test]
+    fn an_excerpt_cuts_a_long_run() {
+        assert_eq!(
+            Excerpt("\u{0628}\u{064A}").to_string(),
+            "\"\u{0628}\u{064A}\""
+        );
+        let exact = "a".repeat(Excerpt::CHARS);
+        assert_eq!(Excerpt(&exact).to_string(), format!("{exact:?}"));
+        let long = "\u{0628}".repeat(Excerpt::CHARS + 8);
+        let shown = "\u{0628}".repeat(Excerpt::CHARS);
+        assert_eq!(
+            Excerpt(&long).to_string(),
+            format!("{shown:?}… ({} characters)", Excerpt::CHARS + 8)
+        );
+    }
 
     #[test]
     fn scripts_take_their_direction_and_marks_inherit() {

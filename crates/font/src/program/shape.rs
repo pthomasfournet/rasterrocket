@@ -31,7 +31,8 @@ pub enum ShapeError {
     /// a CID-keyed program whose charset omits it.
     NoSelector(u32),
     /// The shaper read no font from the program.  The condition is a
-    /// property of the program, so every run of it fails the same way.
+    /// property of the program, so every run of it fails the same way; it
+    /// is logged at `warn` once per program.
     NoShaperFont,
     /// The shaper refused the run, for the reason held.
     Refused(harfrust::ShapeError),
@@ -121,10 +122,19 @@ impl FontProgram {
         rtl: bool,
     ) -> Result<Vec<ShapedGlyph>, ShapeError> {
         let face_index = self.sfnt_face_index().ok_or(ShapeError::NotSfnt)?;
+        // A program the shaper reads no font from fails every run alike: it
+        // is reported once, when the state is built.
         let shaping = self.shaper.get_or_init(|| {
             let data: Arc<dyn AsRef<[u8]> + Send + Sync> = self.shared_data();
+            let font = Font::new(harfrust::font::Blob::from(data), face_index);
+            if font.is_none() {
+                log::warn!(
+                    "font: the shaper read no font from {self:?} (face {face_index}); \
+                     its text is drawn glyph by glyph"
+                );
+            }
             Shaping {
-                font: Font::new(harfrust::font::Blob::from(data), face_index),
+                font,
                 plans: Mutex::new(HashMap::new()),
             }
         });
