@@ -328,6 +328,9 @@ pub(super) struct FontTypesetter<'r, 'p> {
     characters: &'r CharacterFonts,
     /// The characters set in a character font that `characters` lacks.
     missing: BTreeSet<char>,
+    /// The characters set as `?`: those no font shows, and those beyond
+    /// the [`MAX_CHARACTERS`] of the character fonts.
+    unset: Unset,
     /// The state of inverting each font's embedded program.
     inversions: HashMap<Vec<u8>, Inversion>,
 }
@@ -353,6 +356,7 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
             encoders: HashMap::new(),
             characters,
             missing: BTreeSet::new(),
+            unset: Unset::default(),
             inversions: HashMap::new(),
         }
     }
@@ -360,8 +364,12 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
     /// The characters set in a character font that the typesetter's
     /// [`CharacterFonts`] lack, each set as `?`; text set with any must be
     /// set again with them added to the set and its fonts to the
-    /// resources.
+    /// resources.  When none are missing, the text is set as drawn, and
+    /// the characters it sets as `?` are logged (see [`Unset::report`]).
     pub(super) fn missing_characters(self) -> BTreeSet<char> {
+        if self.missing.is_empty() {
+            self.unset.report();
+        }
         self.missing
     }
 
@@ -454,6 +462,7 @@ impl Typesetter for FontTypesetter<'_, '_> {
         let fallbacks = Fallbacks::for_text(text);
         let characters = self.characters;
         let mut missing = std::mem::take(&mut self.missing);
+        let mut unset = std::mem::take(&mut self.unset);
         let encoder = self.encoder(font, text);
         let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
@@ -479,11 +488,16 @@ impl Typesetter for FontTypesetter<'_, '_> {
                         } else {
                             if characters.chars.len() + missing.len() < MAX_CHARACTERS {
                                 let _ = missing.insert(c);
+                            } else {
+                                let _ = unset.capped.insert(c);
                             }
                             (font, question)
                         }
                     }
-                    None => (font, question),
+                    None => {
+                        let _ = unset.uncovered.insert(c);
+                        (font, question)
+                    }
                 }
             };
             match runs.last_mut() {
@@ -495,6 +509,7 @@ impl Typesetter for FontTypesetter<'_, '_> {
             }
         }
         self.missing = missing;
+        self.unset = unset;
         runs
     }
 
@@ -527,6 +542,40 @@ impl Typesetter for FontTypesetter<'_, '_> {
             };
         }
         total
+    }
+}
+
+/// The characters an appearance's text sets as its font's `?`.
+#[derive(Debug, Default)]
+struct Unset {
+    /// Characters no font shows: controls, private-use characters and
+    /// noncharacters, and those the collection fonts omit.
+    uncovered: BTreeSet<char>,
+    /// Characters a character font would show, beyond the
+    /// [`MAX_CHARACTERS`] the character fonts hold.
+    capped: BTreeSet<char>,
+}
+
+impl Unset {
+    /// Log the characters: at `warn` those beyond the cap, which is valid
+    /// text dropped, at `debug` those no font shows.
+    fn report(&self) {
+        if let Some(&first) = self.capped.first() {
+            log::warn!(
+                "rasterrocket-interp: an appearance needs more than {MAX_CHARACTERS} characters \
+                 its fonts lack; {} more (U+{:04X} first) are set as `?`",
+                self.capped.len(),
+                u32::from(first)
+            );
+        }
+        if let Some(&first) = self.uncovered.first() {
+            log::debug!(
+                "rasterrocket-interp: no font shows {} characters of an appearance \
+                 (U+{:04X} first); they are set as `?`",
+                self.uncovered.len(),
+                u32::from(first)
+            );
+        }
     }
 }
 
@@ -564,7 +613,12 @@ fn code_bytes(cmap: &CMap, code: u32) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CharacterFonts, Fallback, Fallbacks, UnicodeEncoder, code_bytes, single_scalar};
+    use super::super::typeset::Typesetter;
+    use super::{
+        CharacterFonts, Fallback, Fallbacks, FontTypesetter, MAX_CHARACTERS, UnicodeEncoder,
+        code_bytes, single_scalar,
+    };
+    use crate::renderer::PageRenderer;
     use crate::resources::cmap::CMap;
     use crate::resources::cmap_predefined::predefined_cmap;
     use crate::resources::font::resolve_font;
@@ -576,6 +630,35 @@ mod tests {
         let doc = make_doc_with_object(font);
         let dict = doc.get_dictionary((2, 0)).expect("a dictionary");
         UnicodeEncoder::of(&resolve_font(&doc, &dict, Some((2, 0))))
+    }
+
+    /// The characters a typesetter over a page whose `/F1` is Helvetica,
+    /// with the character fonts `characters`, sets as `?` for want of a
+    /// font and beyond the character fonts' cap, setting `text`.
+    fn unset(characters: &CharacterFonts, text: &str) -> (Vec<char>, Vec<char>) {
+        let doc = make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> >>",
+            ),
+            (5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+        ]);
+        let mut renderer = PageRenderer::new(64, 32, &doc, (4, 0));
+        let mut ts = FontTypesetter::new(&mut renderer, characters);
+        let _ = ts.runs(b"F1", text);
+        (
+            ts.unset.uncovered.iter().copied().collect(),
+            ts.unset.capped.iter().copied().collect(),
+        )
+    }
+
+    #[test]
+    fn characters_set_as_question_marks_are_kept_for_the_report() {
+        let none = CharacterFonts::default();
+        assert_eq!(unset(&none, "A\u{E000}B"), (vec!['\u{E000}'], vec![]));
+        let mut full = CharacterFonts::default();
+        full.extend((0x1000..).filter_map(char::from_u32).take(MAX_CHARACTERS));
+        assert_eq!(unset(&full, "A\u{0628}"), (vec![], vec!['\u{0628}']));
     }
 
     #[test]
