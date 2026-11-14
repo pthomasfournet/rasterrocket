@@ -111,9 +111,16 @@ fn system_fallback_font_loads_from_file() {
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
-        "C:/Windows/Fonts/arial.ttf",
     ];
-    let Some(path) = CANDIDATES.iter().find(|p| std::path::Path::new(p).exists()) else {
+    let windows = std::env::var_os("WINDIR")
+        .or_else(|| std::env::var_os("SystemRoot"))
+        .map(|root| std::path::Path::new(&root).join("Fonts").join("arial.ttf"));
+    let Some(path) = CANDIDATES
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(windows)
+        .find(|p| p.exists())
+    else {
         eprintln!("no system font available; skipping");
         return;
     };
@@ -123,13 +130,13 @@ fn system_fallback_font_loads_from_file() {
         mat: [24.0, 0.0, 0.0, 24.0],
     };
     let face = engine
-        .load_file_face(path, 0, params())
+        .load_file_face(&path, 0, params())
         .expect("system font loads");
     assert!(face.has_unicode_cmap());
     for ch in ['H', 'e', 'g', '1'] {
         assert!(face.make_glyph(u32::from(ch), 0).is_some(), "{ch}");
     }
-    let again = engine.load_file_face(path, 0, params()).unwrap();
+    let again = engine.load_file_face(&path, 0, params()).unwrap();
     assert!(
         std::ptr::eq(face.program(), again.program()),
         "file program is cached"
