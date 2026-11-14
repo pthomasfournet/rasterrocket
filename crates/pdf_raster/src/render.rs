@@ -177,12 +177,6 @@ pub fn render_page_rgba(
     ))
 }
 
-/// Bytes per pixel of the page bitmap a render allocates: 8-bit RGB, and an
-/// alpha plane over a transparent backdrop.
-pub(crate) const fn canvas_bytes_per_px(transparent: bool) -> u32 {
-    if transparent { 4 } else { 3 }
-}
-
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
 /// whole page, or `region` of it.  The page's sides are held to
 /// [`MAX_PX_SIDE`](crate::MAX_PX_SIDE), and the bitmap drawn, of
@@ -285,7 +279,7 @@ pub(crate) fn render_page_rgb_with_geom(
         &geom,
         (params.scale_x, params.scale_y),
         params.region,
-        canvas_bytes_per_px(params.transparent_background),
+        params.canvas_layout().bytes_per_px(),
         session.max_page_bytes,
     )?;
     let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);

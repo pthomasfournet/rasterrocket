@@ -5,9 +5,10 @@ use color::Rgb8;
 use pdf_interp::renderer::CanvasBuffers;
 use raster::Bitmap;
 
+use crate::CanvasLayout;
 use crate::gray::{rgb_into_gray, rgb_rows_to_gray};
 use crate::page::{rgb_rows_copy, rgb_rows_to_rgba};
-use crate::render::{canvas_bytes_per_px, check_scale, page_view, render_page_rgb_with_geom};
+use crate::render::{check_scale, page_view, render_page_rgb_with_geom};
 use crate::{
     PageDiagnostics, PixelFormat, RasterError, RasterOptions, RasterSession, RenderParams,
 };
@@ -240,7 +241,7 @@ impl PageBuffer {
             &geom,
             (scale, scale),
             None,
-            canvas_bytes_per_px(transparent),
+            CanvasLayout::new(color::SampleDepth::Eight, transparent).bytes_per_px(),
             session.max_page_bytes,
         )?;
         check_output(view.width, view.height, format, out_len, stride)?;

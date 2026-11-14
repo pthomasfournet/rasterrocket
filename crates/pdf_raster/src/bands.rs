@@ -16,8 +16,8 @@ use pdf_interp::renderer::{CanvasBuffers, PageDiagnostics, PageState};
 use raster::Bitmap;
 
 use crate::render::{
-    PageJob, allocation_failed, begin, canvas_bytes_per_px, check_aborted, check_strict_images,
-    log_failures, page_content, page_view, render_page_rgb_with_geom, warn_unsupported,
+    PageJob, allocation_failed, begin, check_aborted, check_strict_images, log_failures,
+    page_content, page_view, render_page_rgb_with_geom, warn_unsupported,
 };
 use crate::{RasterError, RasterSession, RenderParams};
 
@@ -115,7 +115,7 @@ pub fn render_page_bands<E>(
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
     let policy = begin(session, params)?;
-    let bytes_per_px = canvas_bytes_per_px(params.transparent_background);
+    let bytes_per_px = params.canvas_layout().bytes_per_px();
     let view = page_view(
         &geom,
         (params.scale_x, params.scale_y),

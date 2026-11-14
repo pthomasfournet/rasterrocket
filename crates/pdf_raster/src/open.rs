@@ -174,7 +174,7 @@ impl RasterSession {
             &geom,
             (scale, scale),
             None,
-            crate::render::canvas_bytes_per_px(false),
+            crate::CanvasLayout::new(color::SampleDepth::Eight, false).bytes_per_px(),
             self.max_page_bytes,
         )?;
         Ok((view.width, view.height))

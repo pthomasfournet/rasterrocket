@@ -246,8 +246,8 @@ pub(crate) fn print_page_banded(
     (size, dpi): ((u32, u32), (f64, f64)),
 ) -> Result<(), RenderError> {
     let model = Model::of(args);
-    let bytes_per_px = if args.transparent { 4 } else { 3 };
-    let page_bytes = u64::from(size.0) * u64::from(size.1) * bytes_per_px;
+    let page_bytes =
+        u64::from(size.0) * u64::from(size.1) * u64::from(params.canvas_layout().bytes_per_px());
     let rgb = matches!(model, Model::Rgb { .. });
     let mut encoder = page_encoder((size, dpi), rgb, page_bytes > args.band_bytes())?;
     render_into(session, page_num, params, args, |band| {

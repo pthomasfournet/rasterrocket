@@ -160,6 +160,12 @@ impl RenderParams {
         self
     }
 
+    /// The layout of the canvas the render allocates.
+    #[must_use]
+    pub const fn canvas_layout(&self) -> crate::CanvasLayout {
+        crate::CanvasLayout::new(color::SampleDepth::Eight, self.transparent_background)
+    }
+
     /// Render bands of `rows` rows (see [`band_rows`](Self::band_rows)).
     #[must_use]
     pub const fn with_band_rows(mut self, rows: NonZeroU32) -> Self {

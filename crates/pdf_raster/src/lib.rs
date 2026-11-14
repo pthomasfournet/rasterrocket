@@ -131,6 +131,7 @@ mod vk_init;
 use std::path::Path;
 
 pub use bands::{Band, BandError, render_page_bands};
+pub use color::SampleDepth;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
@@ -140,8 +141,8 @@ pub use open::{
     open_session_from_shared, prescan_session,
 };
 pub use page::{
-    DEFAULT_BAND_BYTES, DEFAULT_MAX_PAGE_BYTES, MAX_PX_SIDE, gray8_into_rendered_page,
-    gray8_to_rendered_page, validate_page_bytes,
+    CanvasLayout, DEFAULT_BAND_BYTES, DEFAULT_MAX_PAGE_BYTES, MAX_PX_SIDE,
+    gray8_into_rendered_page, gray8_to_rendered_page, validate_page_bytes,
 };
 pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;

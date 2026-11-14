@@ -4,7 +4,7 @@
 //! grayscale `RenderedPage`; this module is the single definition of how one is
 //! born from a `Bitmap<Gray8>` and of the pixel-dimension safety limits.
 
-use color::{Gray8, Rgb8};
+use color::{Gray8, Rgb8, SampleDepth};
 use raster::Bitmap;
 
 use crate::{PageDiagnostics, PixelFormat, RasterError, RenderedPage};
@@ -30,6 +30,31 @@ pub const DEFAULT_MAX_PAGE_BYTES: u64 = 1_800_000_000;
 /// Default of [`SessionConfig::band_bytes`](crate::SessionConfig::band_bytes):
 /// 64 MiB, 1 412 rows of a 44-inch-wide page at 360 dpi in 8-bit RGB.
 pub const DEFAULT_BAND_BYTES: u64 = 64 << 20;
+
+/// The pixel layout of a page canvas: RGB samples of `depth`, and an alpha
+/// plane of the same depth over a transparent backdrop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CanvasLayout {
+    /// Bits per sample.
+    pub depth: SampleDepth,
+    /// Whether the canvas has an alpha plane.
+    pub alpha: bool,
+}
+
+impl CanvasLayout {
+    /// The canvas of `depth`, with an alpha plane when `alpha`.
+    #[must_use]
+    pub const fn new(depth: SampleDepth, alpha: bool) -> Self {
+        Self { depth, alpha }
+    }
+
+    /// Bytes a pixel of the canvas holds: 3 for 8-bit RGB, 4 with alpha;
+    /// 6 and 8 at 16 bits.
+    #[must_use]
+    pub const fn bytes_per_px(self) -> u32 {
+        (3 + self.alpha as u32) * self.depth.bytes()
+    }
+}
 
 /// Reject a `width × height` picture of `bytes_per_px` bytes per pixel
 /// whose side exceeds [`MAX_PX_SIDE`] or whose size exceeds `max_bytes`.
@@ -185,6 +210,15 @@ pub(crate) fn rgb_rows_copy(bmp: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_canvas_pixel_holds_three_or_four_samples_of_its_depth() {
+        let bytes = |depth, alpha| CanvasLayout::new(depth, alpha).bytes_per_px();
+        assert_eq!(bytes(SampleDepth::Eight, false), 3);
+        assert_eq!(bytes(SampleDepth::Eight, true), 4);
+        assert_eq!(bytes(SampleDepth::Sixteen, false), 6);
+        assert_eq!(bytes(SampleDepth::Sixteen, true), 8);
+    }
 
     #[test]
     fn the_budget_bounds_the_bytes_of_the_page() {
