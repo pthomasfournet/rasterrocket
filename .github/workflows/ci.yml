@@ -129,9 +129,11 @@ jobs:
       # The cache is saved after a successful run.  Test executables relink
       # in seconds; leaving them out keeps it within the repository's quota.
       # The script keeps the build-script executables, so a cache hit runs
-      # none.
+      # none, and the release rrocket, which a cache hit then does not relink.
       - name: Drop test executables from the build cache
-        run: bash scripts/ci_prune_test_executables.sh target/debug
+        run: |
+          bash scripts/ci_prune_test_executables.sh target/debug
+          bash scripts/ci_prune_test_executables.sh --keep rrocket target/release
 
   # ── aarch64 cross-check ───────────────────────────────────────────────────
   #
