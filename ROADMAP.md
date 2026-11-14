@@ -41,7 +41,7 @@ dispatches to it.
 **Overprint simulation has gaps (on master).** Under `--overprint`,
 `Separation` / `DeviceN` images and shadings, tiling-pattern cells and
 transparency groups as a whole knock out instead of overprinting; see
-[Current status](#current-status-2026-11-04).
+[Current status](#current-status-2026-11-13).
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -2422,7 +2422,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-04)
+## Current status (2026-11-13)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
