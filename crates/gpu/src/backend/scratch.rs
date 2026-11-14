@@ -55,7 +55,7 @@ impl<T> ScratchPool<T> {
     }
 
     /// Scratches currently idle in the pool.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
     pub(crate) fn idle_len(&self) -> usize {
         self.idle
             .lock()
@@ -64,7 +64,7 @@ impl<T> ScratchPool<T> {
     }
 
     /// An idle scratch taken out of the pool, or a new one.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
     pub(crate) fn take_idle(&self) -> T
     where
         T: Default,

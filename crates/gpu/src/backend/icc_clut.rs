@@ -218,14 +218,14 @@ mod probe_tests {
 /// Grid sizes the device evaluators are checked on.  For several of them
 /// (`grid_n` 4, 8, 13, 16, 25) a reciprocal-based device division moves
 /// `(grid_n − 1) / 255` by one ULP away from the correctly rounded value.
-#[cfg(test)]
+#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
 const EXACTNESS_GRIDS: [u32; 9] = [2, 3, 4, 8, 13, 16, 17, 25, 33];
 
 /// Converts, on each of the [`EXACTNESS_GRIDS`], every grey level and
 /// 65 536 pseudo-random pixels through a pseudo-random table with
 /// `convert(cmyk, table, grid_n)`, and asserts byte equality with
 /// [`crate::icc_cmyk_to_rgb_cpu`].
-#[cfg(test)]
+#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
 fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &[u8], u32) -> Vec<u8>) {
     let lcg = |seed: u32, n: usize| {
         let mut state = seed;
@@ -252,7 +252,7 @@ fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &[u8], u32) ->
 
 /// Conversions reuse one pooled scratch, whose table buffer follows the
 /// table's length down as well as up.
-#[cfg(test)]
+#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
 fn check_scratch_is_pooled<B: GpuBackend>(backend: &B) {
     let cmyk: Vec<u8> = (0..=u8::MAX)
         .flat_map(|v| [v, 255 - v, v / 2, v / 3])
