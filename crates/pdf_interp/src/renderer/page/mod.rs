@@ -253,6 +253,9 @@ pub struct PageRenderer<'doc> {
     /// Width of the page box in points, before rotation: the basis of the
     /// source-resolution hint.
     unrotated_width_pts: f64,
+    /// Width of the whole page in device pixels; equals `width` unless the
+    /// renderer draws a window of the page.
+    page_width: u32,
     /// Height of the whole page in device pixels; equals `height` unless the
     /// renderer draws a window of the page.
     page_height: u32,
@@ -615,6 +618,7 @@ impl<'doc> PageRenderer<'doc> {
             width,
             height,
             unrotated_width_pts: view.unrotated_width_pts(),
+            page_width: view.page_width,
             page_height: view.page_height,
             window_origin: (view.x, view.y),
             gstate,

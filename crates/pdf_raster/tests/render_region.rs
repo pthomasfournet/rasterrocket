@@ -127,6 +127,25 @@ fn tiles_compose_into_the_whole_page() {
     }
 }
 
+/// One-row, seven-row and gridded tiles of the seam page, on each of its
+/// geometries, stitch into the whole-page render: every object of it
+/// crosses tile edges at many sub-pixel phases.
+#[test]
+fn tiles_of_the_seam_page_compose_into_the_whole_page() {
+    for extra in common::seams::GEOMETRIES {
+        let s = session(common::seams::seam_page(extra), BackendPolicy::CpuOnly);
+        let full = whole(&s, SCALE);
+        for (cols, rows) in [(1, full.1), (1, full.1.div_ceil(7)), (4, 9)] {
+            let tiles = stitched(&s, SCALE, cols, rows);
+            common::assert_identical(
+                &full,
+                &tiles,
+                &format!("{cols}×{rows} tiles of the seam page with `{extra}`"),
+            );
+        }
+    }
+}
+
 #[test]
 fn corpus_pages_tile_exactly() {
     let Some(path) = corpus_fixture("corpus-04-ebook-mixed.pdf") else {

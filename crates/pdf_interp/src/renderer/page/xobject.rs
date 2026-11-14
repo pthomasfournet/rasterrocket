@@ -547,8 +547,14 @@ impl PageRenderer<'_> {
                 isolated: tg.isolated,
             });
         };
-        let ctm = self.window_ctm(&self.gstate.current().ctm);
-        let page_h = f64::from(self.height);
+        // The box is bounded on the whole page's device grid and moved into
+        // the window by whole pixels, so a window bounds it as the page does.
+        let ctm = self.gstate.current().ctm;
+        let page_h = f64::from(self.page_height);
+        let (ox, oy) = (
+            f64::from(self.window_origin.0),
+            f64::from(self.window_origin.1),
+        );
         let [bx0, by0, bx1, by1] = bbox;
         let corners = [
             ctm_transform(&ctm, bx0, by0),
@@ -569,22 +575,26 @@ impl PageRenderer<'_> {
             .iter()
             .map(|(x, _)| *x)
             .fold(f64::INFINITY, f64::min)
-            .floor();
+            .floor()
+            - ox;
         let top = corners
             .iter()
             .map(|(_, y)| page_h - y)
             .fold(f64::INFINITY, f64::min)
-            .floor();
+            .floor()
+            - oy;
         let right = corners
             .iter()
             .map(|(x, _)| *x)
             .fold(f64::NEG_INFINITY, f64::max)
-            .ceil();
+            .ceil()
+            - ox;
         let bottom = corners
             .iter()
             .map(|(_, y)| page_h - y)
             .fold(f64::NEG_INFINITY, f64::max)
-            .ceil();
+            .ceil()
+            - oy;
 
         #[expect(
             clippy::cast_possible_truncation,

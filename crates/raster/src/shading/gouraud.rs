@@ -136,12 +136,13 @@ fn emit_run(
 /// Pixels are clipped to `clip` and composited via `pipe`.
 pub fn gouraud_triangle_fill(
     bitmap: &mut Bitmap<Rgb8>,
+    origin: (i32, i32),
     clip: &Clip,
     pipe: &PipeState<'_>,
     v: [GouraudVertex; 3],
 ) {
     let (width, height) = (bitmap.width, bitmap.height);
-    gouraud_triangle_spans(width, height, clip, v, |colour, x0, x1, y| {
+    gouraud_triangle_spans(width, height, origin, clip, v, |colour, x0, x1, y| {
         render_bitmap_span::<Rgb8>(
             bitmap,
             pipe,
@@ -156,13 +157,18 @@ pub fn gouraud_triangle_fill(
 
 /// The spans of a single Gouraud-shaded triangle, clipped to `clip`.
 ///
-/// On a `width × height` bitmap, `emit(colour, x0, x1, y)` receives the
-/// colour bytes of the pixels `x0..=x1` of row `y`, `N` per pixel, in
+/// The vertices lie on a pixel grid of which the `width × height` bitmap
+/// is the window whose pixel `(0, 0)` is the grid's pixel `origin`; the
+/// spans are computed on that grid and moved onto the bitmap last, so a
+/// window receives the spans of the whole grid it covers.  `clip` is in
+/// the bitmap's pixels.  `emit(colour, x0, x1, y)` receives the colour
+/// bytes of the bitmap pixels `x0..=x1` of row `y`, `N` per pixel, in
 /// scanline order.  [`gouraud_triangle_fill`] composites exactly these
 /// spans.
 pub fn gouraud_triangle_spans<const N: usize>(
     width: u32,
     height: u32,
+    origin: (i32, i32),
     clip: &Clip,
     mut v: [GouraudVertex<N>; 3],
     mut emit: impl FnMut(&[u8], i32, i32, i32),
@@ -196,8 +202,14 @@ pub fn gouraud_triangle_spans<const N: usize>(
     let vx = v.map(|vert| round_half_up_i32(vert.x));
     let x_min = vx[0].min(vx[1]).min(vx[2]);
     let x_max = vx[0].max(vx[1]).max(vx[2]);
+    let (ox, oy) = origin;
     // Single test_rect call; result used for both early-exit and per-scanline clip decisions.
-    let clip_bbox = clip.test_rect(x_min, y0, x_max, y2);
+    let clip_bbox = clip.test_rect(
+        x_min.saturating_sub(ox),
+        y0.saturating_sub(oy),
+        x_max.saturating_sub(ox),
+        y2.saturating_sub(oy),
+    );
     if clip_bbox == ClipResult::AllOutside {
         return;
     }
@@ -223,19 +235,19 @@ pub fn gouraud_triangle_spans<const N: usize>(
         xl <= xs
     };
 
-    // Columns and rows beyond `i32::MAX` lie outside the `i32` scan range,
-    // so clamping the dimensions leaves the painted pixels unchanged.
+    // The rows and columns, on the vertices' grid, inside both the clip
+    // rectangle and the bitmap.  Columns and rows beyond `i32::MAX` lie
+    // outside the `i32` scan range, so clamping the dimensions leaves the
+    // painted pixels unchanged.
     let bmp_h = i32::try_from(height).unwrap_or(i32::MAX);
     let bmp_w = i32::try_from(width).unwrap_or(i32::MAX);
-    let scan_y0 = y0.max(clip.y_min_i).max(0);
-    let scan_y2 = y2.min(clip.y_max_i).min(bmp_h - 1);
+    let col_min = clip.x_min_i.max(0).saturating_add(ox);
+    let col_max = clip.x_max_i.min(bmp_w - 1).saturating_add(ox);
+    let scan_y0 = y0.max(clip.y_min_i.max(0).saturating_add(oy));
+    let scan_y2 = y2.min(clip.y_max_i.min(bmp_h - 1).saturating_add(oy));
 
-    // Span colour buffer, sized to the widest span the loop can emit: the
-    // columns inside both the clip rectangle and the bitmap.
-    let max_span = usize::try_from(
-        i64::from(clip.x_max_i.min(bmp_w - 1)) - i64::from(clip.x_min_i.max(0)) + 1,
-    )
-    .unwrap_or(0);
+    // Span colour buffer, sized to the widest span the loop can emit.
+    let max_span = usize::try_from(i64::from(col_max) - i64::from(col_min) + 1).unwrap_or(0);
     let mut span_color = vec![0u8; max_span * N];
 
     for y in scan_y0..=scan_y2 {
@@ -251,15 +263,14 @@ pub fn gouraud_triangle_spans<const N: usize>(
             (xs, cs, xl, cl)
         };
 
-        let sx0 = x_left.max(clip.x_min_i).max(0);
-        let sx1 = x_right.min(clip.x_max_i).min(bmp_w - 1);
+        let sx0 = x_left.max(col_min);
+        let sx1 = x_right.min(col_max);
         if sx0 > sx1 {
             continue;
         }
 
         #[expect(clippy::cast_sign_loss, reason = "sx1 >= sx0 (guarded above)")]
         let span_len = (sx1 - sx0 + 1) as usize;
-        // sx0 ≥ max(clip.x_min_i, 0) and sx1 ≤ min(clip.x_max_i, bmp_w − 1).
         debug_assert!(
             span_len <= max_span,
             "span_len {span_len} exceeds pre-allocated max_span {max_span}"
@@ -277,17 +288,19 @@ pub fn gouraud_triangle_spans<const N: usize>(
             }
         }
 
+        // The span on the bitmap: within it, as the scan range is.
+        let (bx0, bx1, by) = (sx0 - ox, sx1 - ox, y - oy);
         // Use per-pixel clip test only when the bbox test was inconclusive AND
         // the current span is not fully inside the clip.
         let needs_per_pixel_clip = clip_bbox != ClipResult::AllInside
-            && clip.test_span(sx0, sx1, y) != ClipResult::AllInside;
+            && clip.test_span(bx0, bx1, by) != ClipResult::AllInside;
 
         if needs_per_pixel_clip {
-            for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
-                emit_run(N, &mut emit, &span_color, sx0, rx0, rx1, y);
+            for (rx0, rx1) in clip.inside_runs(bx0, bx1, by) {
+                emit_run(N, &mut emit, &span_color, bx0, rx0, rx1, by);
             }
         } else {
-            emit_run(N, &mut emit, &span_color, sx0, sx0, sx1, y);
+            emit_run(N, &mut emit, &span_color, bx0, bx0, bx1, by);
         }
     }
 }
@@ -327,7 +340,7 @@ mod tests {
             v.color = [255; 3];
         }
         tri[2].x = f64::INFINITY;
-        gouraud_triangle_fill(&mut bmp, &make_clip(8, 8), &simple_pipe(), tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &make_clip(8, 8), &simple_pipe(), tri);
         assert!(bmp.data().iter().all(|&b| b == 0), "nothing painted");
     }
 
@@ -355,7 +368,7 @@ mod tests {
                 color: [255, 255, 255],
             },
         ];
-        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
 
         let row = bmp.row(3);
         assert_eq!(row[5].r, 255, "centroid R");
@@ -387,7 +400,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
 
         let px = bmp.row(3)[5];
         assert!(px.r > 50 && px.r < 150, "centroid R={} expected ~85", px.r);
@@ -419,7 +432,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
 
         for y in 0..8u32 {
             for x in 0..8usize {
@@ -452,7 +465,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
 
         for y in 0..8u32 {
             for x in 0..8usize {
@@ -488,8 +501,8 @@ mod tests {
         let clip = make_clip(12, 10);
         let pipe = simple_pipe();
 
-        gouraud_triangle_fill(&mut bmp1, &clip, &pipe, tri_abc);
-        gouraud_triangle_fill(&mut bmp2, &clip, &pipe, tri_cba);
+        gouraud_triangle_fill(&mut bmp1, (0, 0), &clip, &pipe, tri_abc);
+        gouraud_triangle_fill(&mut bmp2, (0, 0), &clip, &pipe, tri_cba);
 
         let interior_painted = |bmp: &Bitmap<Rgb8>| {
             (3..7u32).any(|y| {
@@ -528,7 +541,7 @@ mod tests {
                 color: [0, 0, 255],
             },
         ];
-        gouraud_triangle_fill(&mut bmp, &clip, &pipe, tri);
+        gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
 
         // Midpoint row should be painted.
         let mid = bmp.row(4);
@@ -537,5 +550,53 @@ mod tests {
             any_painted,
             "mid-row of flat-bottom triangle should be painted"
         );
+    }
+
+    /// A window of the vertices' grid receives the spans the whole grid
+    /// places there: the vertices stay on the grid, and the window is given
+    /// by its origin.
+    #[test]
+    fn a_window_receives_the_whole_grids_spans() {
+        let tri = [
+            GouraudVertex {
+                x: 1.3,
+                y: 0.7,
+                color: [250, 10, 30],
+            },
+            GouraudVertex {
+                x: 37.9,
+                y: 11.2,
+                color: [5, 240, 60],
+            },
+            GouraudVertex {
+                x: 14.6,
+                y: 28.4,
+                color: [40, 70, 255],
+            },
+        ];
+        let spans = |w: i32, h: i32, origin: (i32, i32)| {
+            let (w, h) = (w.cast_unsigned(), h.cast_unsigned());
+            let mut out = Vec::new();
+            gouraud_triangle_spans(w, h, origin, &make_clip(w, h), tri, |c, x0, x1, y| {
+                out.push((x0 + origin.0, x1 + origin.0, y + origin.1, c.to_vec()));
+            });
+            out
+        };
+        let whole = spans(40, 30, (0, 0));
+        for (origin, w, h) in [((0, 9), 40, 1), ((5, 7), 20, 10), ((0, 13), 40, 17)] {
+            let window = spans(w, h, origin);
+            let (x_end, y_end) = (origin.0 + w, origin.1 + h);
+            let expected: Vec<_> = whole
+                .iter()
+                .filter(|s| (origin.1..y_end).contains(&s.2))
+                .filter_map(|(x0, x1, y, c)| {
+                    let (a, b) = ((*x0).max(origin.0), (*x1).min(x_end - 1));
+                    let skip = usize::try_from(a - x0).ok()? * 3;
+                    let len = usize::try_from(b - a + 1).ok()? * 3;
+                    Some((a, b, *y, c[skip..skip + len].to_vec()))
+                })
+                .collect();
+            assert_eq!(window, expected, "window at {origin:?}");
+        }
     }
 }

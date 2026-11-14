@@ -92,11 +92,26 @@ impl<const N: usize> Mesh<N> {
         &self.triangles
     }
 
-    /// The triangles whose bounds meet the rectangle of `clip`, and every
-    /// triangle without bounds, each once, in mesh order.
-    pub fn meeting(&self, clip: &Clip) -> impl Iterator<Item = [GouraudVertex<N>; 3]> + '_ {
-        let (x0, y0) = (f64::from(clip.x_min_i), f64::from(clip.y_min_i));
-        let (x1, y1) = (f64::from(clip.x_max_i) + 1.0, f64::from(clip.y_max_i) + 1.0);
+    /// The triangles that can paint a pixel of the rectangle of `clip`, and
+    /// every triangle without bounds, each once, in mesh order.  `clip` is in the
+    /// pixels of a window whose pixel `(0, 0)` is the mesh's pixel `origin`.
+    pub fn meeting(
+        &self,
+        clip: &Clip,
+        origin: (i32, i32),
+    ) -> impl Iterator<Item = [GouraudVertex<N>; 3]> + '_ {
+        // A triangle paints the rows and columns its vertices round to, half
+        // a pixel past its bounds at most: the rectangle is widened by one
+        // pixel on each side.
+        let (ox, oy) = (f64::from(origin.0), f64::from(origin.1));
+        let (x0, y0) = (
+            f64::from(clip.x_min_i) + ox - 1.0,
+            f64::from(clip.y_min_i) + oy - 1.0,
+        );
+        let (x1, y1) = (
+            f64::from(clip.x_max_i) + 2.0 + ox,
+            f64::from(clip.y_max_i) + 2.0 + oy,
+        );
         let range = band_range(y0, y1 - 1.0)
             .map(|(first, last)| (first, last.min(self.bands.len().saturating_sub(1))))
             .filter(|(first, _)| *first < self.bands.len());
@@ -154,7 +169,7 @@ mod tests {
     }
 
     fn ids(mesh: &Mesh, c: &Clip) -> Vec<f64> {
-        let mut v: Vec<f64> = mesh.meeting(c).map(|t| t[0].x).collect();
+        let mut v: Vec<f64> = mesh.meeting(c, (0, 0)).map(|t| t[0].x).collect();
         v.sort_by(f64::total_cmp);
         v
     }
@@ -176,6 +191,22 @@ mod tests {
             ids(&mesh, &clip(0.0, 0.0, 1000.0, 1000.0)),
             [1.0, 2.0, 500.0]
         );
+    }
+
+    /// A vertex at y = 9.6 rounds to row 10, which the triangle paints: a
+    /// query of rows from 10 on yields it, as does one of a window whose
+    /// row 0 is row 10.
+    #[test]
+    fn a_query_yields_a_triangle_reaching_it_by_rounding() {
+        let mesh = Mesh::new(vec![tri(1.0, 2.0, 30.4, 9.6)]);
+        assert_eq!(ids(&mesh, &clip(0.0, 10.0, 100.0, 11.0)), [1.0]);
+        assert_eq!(ids(&mesh, &clip(30.6, 0.0, 100.0, 11.0)), [1.0]);
+        let window: Vec<f64> = mesh
+            .meeting(&clip(0.0, 0.0, 100.0, 1.0), (0, 10))
+            .map(|t| t[0].x)
+            .collect();
+        assert_eq!(window, [1.0]);
+        assert_eq!(ids(&mesh, &clip(0.0, 12.0, 100.0, 20.0)), []);
     }
 
     #[test]

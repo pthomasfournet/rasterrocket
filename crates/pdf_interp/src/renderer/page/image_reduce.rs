@@ -256,8 +256,8 @@ impl AxisPlan {
     /// A reduced axis of `n` samples spanning device `origin ..
     /// origin + extent` along a device axis whose pixel edges are integers:
     /// one output sample per device pixel whose centre the axis covers and
-    /// whose index lies in `window`.  Unreduced when the axis has no more
-    /// samples than device pixels, or when no such pixel exists.
+    /// whose index lies in `window`, none when no such pixel lies in it.
+    /// Unreduced when the axis has no more samples than device pixels.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -287,8 +287,15 @@ impl AxisPlan {
         let (k0, k1) = (k0.max(window.0), k1.min(window.1));
         let count = k1 - k0;
         if count < 1.0 {
-            // No pixel centre within the window.
-            return None;
+            // No pixel centre within the window: the axis reduces to no
+            // sample there, as the whole draw would paint none of its
+            // pixels.
+            return Some(Self {
+                n: 0,
+                origin: k0,
+                extent: 0.0,
+                filter: Some(AxisFilter::new(n, std::iter::empty())),
+            });
         }
         let count_u = count as u32;
         let to_source = f64::from(n) / extent;
@@ -448,6 +455,9 @@ impl Plan {
             return None;
         }
         let (out_w, out_h) = (self.out_w as usize, self.out_h as usize);
+        if out_w == 0 || out_h == 0 {
+            return Some(Vec::new());
+        }
         let out_row_len = out_w * bpp;
         let mut out = vec![0u8; out_row_len.checked_mul(out_h)?];
         // `acc` holds the vertical pass's row carrying `frac` fraction bits;
@@ -938,16 +948,27 @@ mod tests {
         }
     }
 
-    /// A window that holds none of the drawn pixels leaves the draw as it
-    /// was: unreduced, for the clip to discard.
+    /// A window that holds none of the reduced draw's pixels draws none:
+    /// the draw reduces to no sample there.  Drawn unreduced instead, a
+    /// window holding a pixel whose centre lies on the draw's edge would
+    /// paint it, where the whole draw, reduced, does not.
     #[test]
-    fn window_missing_the_draw_does_not_reduce() {
+    fn window_missing_the_draw_reduces_to_nothing() {
         let img = gray(40, 40, vec![0; 1600]);
-        let window = DeviceWindow {
-            x: (100.0, 120.0),
-            y: (0.0, 10.0),
-        };
-        assert!(reduce(&img, &[10.0, 0.0, 0.0, 10.0, 0.0, 0.0], &window).is_none());
+        let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
+        for window in [
+            DeviceWindow {
+                x: (100.0, 120.0),
+                y: (0.0, 10.0),
+            },
+            DeviceWindow {
+                x: (0.0, 10.0),
+                y: (10.0, 11.0),
+            },
+        ] {
+            let (reduced, _) = reduce(&img, &ctm, &window).expect("the draw reduces");
+            assert_eq!(reduced.width * reduced.height, 0, "{window:?}");
+        }
     }
 
     /// Bitmap rows count down from the top edge; window rows count up.

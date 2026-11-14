@@ -83,6 +83,40 @@ pub trait Pattern: Send + Sync {
     }
 }
 
+/// A [`Pattern`] of another pixel grid, read on a window of it.
+///
+/// The window's pixel `(0, 0)` is the grid's pixel `origin`: its pixel
+/// `(x, y)` takes `inner`'s colour and coverage at `(x + origin.0, y +
+/// origin.1)`.  The offset is an integer, so `inner` sees the coordinates
+/// it would see on its own grid.
+pub struct Shifted<'a> {
+    /// The pattern over the other grid.
+    pub inner: &'a dyn Pattern,
+    /// The other grid's pixel at the bitmap's pixel `(0, 0)`.
+    pub origin: (i32, i32),
+}
+
+impl Pattern for Shifted<'_> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+        let (dx, dy) = self.origin;
+        self.inner.fill_span(y + dy, x0 + dx, x1 + dx, out);
+    }
+
+    fn is_static_color(&self) -> bool {
+        self.inner.is_static_color()
+    }
+
+    fn may_leave_unpainted(&self) -> bool {
+        self.inner.may_leave_unpainted()
+    }
+
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+        let (dx, dy) = self.origin;
+        self.inner
+            .fill_span_coverage(y + dy, x0 + dx, x1 + dx, out, coverage);
+    }
+}
+
 /// A [`Pattern`] serving one precomputed span of colour bytes.
 ///
 /// `fill_span` copies `data` into `out`, whose length must equal

@@ -2,6 +2,7 @@
 //! bitmaps and outlines while the string is laid out, then filled, stroked
 //! and added to the text object's clip as its rendering mode requires.
 
+use super::view::page_to_window;
 use std::sync::Arc;
 
 use super::PageRenderer;
@@ -69,6 +70,8 @@ fn glyph_corners(records: &[GlyphRecord]) -> impl Iterator<Item = (f64, f64)> + 
 /// device-space outlines of the glyphs that are clipped to, stroked as a
 /// path or filled as a path.
 pub(super) struct GlyphSink {
+    /// The page's device pixel at the window's pixel `(0, 0)`.
+    window_origin: (u32, u32),
     mode: TextModeOps,
     glyph_cache: GlyphCache,
     document_fonts: Arc<DocumentFonts>,
@@ -96,6 +99,7 @@ impl GlyphSink {
     /// `pattern_fill` as the fields, `stroke` the cached stroke when the
     /// mode strokes.
     pub(super) fn new(
+        window_origin: (u32, u32),
         mode: TextModeOps,
         glyph_cache: GlyphCache,
         document_fonts: Arc<DocumentFonts>,
@@ -104,6 +108,7 @@ impl GlyphSink {
         capacity: usize,
     ) -> Self {
         Self {
+            window_origin,
             mode,
             glyph_cache,
             document_fonts,
@@ -122,7 +127,8 @@ impl GlyphSink {
         }
     }
 
-    /// Add the glyph `drawn` at the exact device pen position `(dx, dy)`,
+    /// Add the glyph `drawn` at the exact pen position `pen` in the page's
+    /// device space,
     /// condensed by `x_scale` to the document's advance: its bitmap when
     /// filling with bitmaps, its cached stroke coverage when stroking, and
     /// its outline when clipping, stroking without cached coverage or
@@ -140,9 +146,10 @@ impl GlyphSink {
         &mut self,
         (face, gid, by_gid): Drawn<'_>,
         code: u32,
-        (dx, dy): (f64, f64),
+        pen: (f64, f64),
         x_scale: f64,
     ) {
+        let (dx, dy) = page_to_window(self.window_origin, pen);
         let (pen_x, x_frac, pen_y) = glyph_placement(dx, dy);
         let fill_as_bitmap = self.mode.fill && !self.fill_as_path;
         let bmp = if fill_as_bitmap {
@@ -206,15 +213,15 @@ impl GlyphSink {
         if !(self.mode.clip || stroke_path || self.fill_as_path) {
             return;
         }
-        // The glyph outline in device space: translated by the exact x and
-        // the bitmap's row, y flipped (device y is positive-down).
+        // The glyph outline in the page's device space, translated by the
+        // exact x and the bitmap's row, y flipped (device y is
+        // positive-down), then moved into the window.
         let Some(mut path) = outline_at(x_scale) else {
             return;
         };
-        let py = f64::from(pen_y);
+        let row = f64::from(pen_y) + f64::from(self.window_origin.1);
         for pt in &mut path.pts {
-            pt.x += dx;
-            pt.y = py - pt.y;
+            (pt.x, pt.y) = page_to_window(self.window_origin, (pt.x + pen.0, row - pt.y));
         }
         if self.mode.clip {
             self.clip_outline.append(&path);

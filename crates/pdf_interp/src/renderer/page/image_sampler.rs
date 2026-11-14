@@ -358,6 +358,32 @@ fn axis_taps(i: i32, frac: u32, n: u32, blend: bool) -> AxisTaps {
     ([lo, hi], if lo == hi { 0 } else { weight })
 }
 
+/// The bitmap an image is sampled onto: a `width × height` window whose
+/// pixel `(0, 0)` is pixel `origin` of a page `page_height` pixels tall,
+/// whose device space the draw matrices map to.  Source coordinates are
+/// computed for the page's pixels and the window takes them, so a window
+/// samples the pixels the whole page samples there.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GridView {
+    pub origin: (u32, u32),
+    pub width: u32,
+    pub height: u32,
+    pub page_height: u32,
+}
+
+#[cfg(test)]
+impl GridView {
+    /// A whole `width × height` page.
+    pub(super) const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            origin: (0, 0),
+            width,
+            height,
+            page_height: height,
+        }
+    }
+}
+
 /// Per-image sampling grid: the device-space bounding box plus the column
 /// and row tables that map every pixel inside it to a source coordinate.
 pub(super) struct SampleGrid {
@@ -423,19 +449,21 @@ struct InverseMap {
     origin: (f64, f64),
     /// Page height in pixels, for the bitmap's downward y axis.
     page_h: f64,
+    /// The page pixel of the window's pixel `(0, 0)`.
+    window: (f64, f64),
     /// Image height in samples.
     img_h: f64,
 }
 
 impl InverseMap {
-    /// The inverse of `ctm` for an `img_w × img_h` image on a bitmap
-    /// `page_h` pixels tall.  `None` when `ctm` is singular; every
+    /// The inverse of `ctm` for an `img_w × img_h` image sampled onto
+    /// `view`.  `None` when `ctm` is singular; every
     /// component of `ctm` is finite.
     #[expect(
         clippy::many_single_char_names,
         reason = "PDF CTM components a-f are spec terminology"
     )]
-    fn new(ctm: &Ctm, page_h: f64, img_w: u32, img_h: u32) -> Option<Self> {
+    fn new(ctm: &Ctm, view: GridView, img_w: u32, img_h: u32) -> Option<Self> {
         let [a, b, c, d, e, f] = *ctm;
         let det = a.mul_add(d, -(b * c));
         if det.abs() < 1e-12 {
@@ -450,20 +478,21 @@ impl InverseMap {
             kx_row: -c * inv_det * w,
             ky_row: -a * inv_det * h,
             origin: (e, f),
-            page_h,
+            page_h: f64::from(view.page_height),
+            window: (f64::from(view.origin.0), f64::from(view.origin.1)),
             img_h: h,
         })
     }
 
-    /// The column term `(X, Y)` of device column `dx`.
+    /// The column term `(X, Y)` of the window's column `dx`.
     fn col_term(&self, dx: u32) -> (f64, f64) {
-        let dx_rel = (f64::from(dx) + 0.5) - self.origin.0;
+        let dx_rel = (f64::from(dx) + self.window.0 + 0.5) - self.origin.0;
         (self.kx_col * dx_rel, self.ky_col * dx_rel)
     }
 
-    /// The row term `(X, Y)` of device row `dy`.
+    /// The row term `(X, Y)` of the window's row `dy`.
     fn row_term(&self, dy: u32) -> (f64, f64) {
-        let dy_rel = (self.page_h - (f64::from(dy) + 0.5)) - self.origin.1;
+        let dy_rel = (self.page_h - (f64::from(dy) + self.window.1 + 0.5)) - self.origin.1;
         (
             self.kx_row * dy_rel,
             self.ky_row.mul_add(dy_rel, self.img_h),
@@ -480,8 +509,8 @@ impl InverseMap {
 
 impl SampleGrid {
     /// Build the grid for an image of `img_w × img_h` pixels drawn through
-    /// `ctm` onto a `page_w × page_h` bitmap whose y axis points down,
-    /// interpolating the axes `filter` selects.
+    /// `ctm`, a matrix into the page's device space (y up), onto `view`,
+    /// whose y axis points down, interpolating the axes `filter` selects.
     ///
     /// Returns `None` when nothing can be drawn: a non-finite or singular
     /// CTM, or a bounding box that misses the page entirely.
@@ -492,8 +521,7 @@ impl SampleGrid {
     )]
     pub(super) fn new(
         ctm: &Ctm,
-        page_w: u32,
-        page_h: u32,
+        view: GridView,
         img_w: u32,
         img_h: u32,
         filter: Filter,
@@ -501,7 +529,7 @@ impl SampleGrid {
         if img_w == 0 || img_h == 0 {
             return None;
         }
-        let page_h_f = f64::from(page_h);
+        let page_h_f = f64::from(view.page_height);
 
         // Bounding box of the unit square's image, y-flipped into bitmap
         // space and clamped to the page.  `floor`/`ceil` of the corner
@@ -528,17 +556,21 @@ impl SampleGrid {
             min_y = min_y.min(y_dev);
             max_y = max_y.max(y_dev);
         }
-        let clamp = |v: f64, dim: u32| (v as i64).clamp(0, i64::from(dim)) as u32;
-        let x0 = clamp(min_x.floor(), page_w);
-        let x1 = clamp(max_x.ceil(), page_w);
-        let y0 = clamp(min_y.floor(), page_h);
-        let y1 = clamp(max_y.ceil(), page_h);
+        // The bounding box on the page, moved into the window and clamped
+        // to it.
+        let clamp = |v: f64, at: u32, dim: u32| {
+            ((v as i64).saturating_sub(i64::from(at))).clamp(0, i64::from(dim)) as u32
+        };
+        let x0 = clamp(min_x.floor(), view.origin.0, view.width);
+        let x1 = clamp(max_x.ceil(), view.origin.0, view.width);
+        let y0 = clamp(min_y.floor(), view.origin.1, view.height);
+        let y1 = clamp(max_y.ceil(), view.origin.1, view.height);
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
 
         // Every corner is finite, so every CTM component is.
-        let inverse = InverseMap::new(ctm, page_h_f, img_w, img_h)?;
+        let inverse = InverseMap::new(ctm, view, img_w, img_h)?;
 
         // Each term is affine in `dx_rel` or `dy_rel`, so its extremes over
         // the bounding box lie at the box's first and last pixel centres.
@@ -718,7 +750,7 @@ pub(super) struct MaskSampler<'a> {
 impl<'a> MaskSampler<'a> {
     /// Sampler for `mask` drawn through `mask_ctm`, over an image of
     /// `img_w × img_h` pixels drawn through `img_ctm` with `img_filter`
-    /// onto a `page_w × page_h` bitmap.  The mask is interpolated as its
+    /// onto `view`.  The mask is interpolated as its
     /// own `/Interpolate` asks; it takes the image's taps when it is placed
     /// as the image and filtered alike.
     ///
@@ -728,17 +760,12 @@ impl<'a> MaskSampler<'a> {
         clippy::float_cmp,
         reason = "the mask shares the image grid only when both are drawn through the identical matrix"
     )]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the mask and image placements are each a matrix plus dimensions"
-    )]
     pub(super) fn new(
         mask: &'a SoftMask,
         mask_ctm: &Ctm,
         img_ctm: &Ctm,
         img_filter: Filter,
-        page_w: u32,
-        page_h: u32,
+        view: GridView,
         img_w: u32,
         img_h: u32,
     ) -> Option<Self> {
@@ -748,7 +775,7 @@ impl<'a> MaskSampler<'a> {
         let grid = if placed_as_image && filter == img_filter {
             None
         } else {
-            Some(SampleGrid::new(mask_ctm, page_w, page_h, w, h, filter)?)
+            Some(SampleGrid::new(mask_ctm, view, w, h, filter)?)
         };
         Some(Self {
             alpha: mask.alpha(),
@@ -916,8 +943,14 @@ mod tests {
     }
 
     fn assert_matches_reference(ctm: &Ctm, page: (u32, u32), img: (u32, u32)) {
-        let grid =
-            SampleGrid::new(ctm, page.0, page.1, img.0, img.1, Filter::NEAREST).expect("grid");
+        let grid = SampleGrid::new(
+            ctm,
+            GridView::whole(page.0, page.1),
+            img.0,
+            img.1,
+            Filter::NEAREST,
+        )
+        .expect("grid");
         let mut inside = 0;
         for dy in grid.y0..grid.y1 {
             for dx in grid.x0..grid.x1 {
@@ -942,7 +975,8 @@ mod tests {
     #[test]
     fn rotated_placement_matches_reference_and_rejects_outside_unit_square() {
         let ctm = [120.5, 30.25, -20.75, 150.5, 50.33, 40.17];
-        let grid = SampleGrid::new(&ctm, 300, 300, 50, 80, Filter::NEAREST).expect("grid");
+        let grid = SampleGrid::new(&ctm, GridView::whole(300, 300), 50, 80, Filter::NEAREST)
+            .expect("grid");
         let outside = (grid.y0..grid.y1)
             .flat_map(|dy| (grid.x0..grid.x1).map(move |dx| (dx, dy)))
             .filter(|&(dx, dy)| grid.sample(dx, dy).is_none())
@@ -968,7 +1002,8 @@ mod tests {
         // user-space x 10..50, y 20..50, i.e. device rows 50..80 on a
         // 100 px page, and device pixel (10+k, 50+j) reads source (k, j).
         let ctm = [40.0, 0.0, 0.0, 30.0, 10.0, 20.0];
-        let grid = SampleGrid::new(&ctm, 100, 100, 40, 30, Filter::NEAREST).expect("grid");
+        let grid = SampleGrid::new(&ctm, GridView::whole(100, 100), 40, 30, Filter::NEAREST)
+            .expect("grid");
         assert_eq!((grid.x0, grid.y0, grid.x1, grid.y1), (10, 50, 50, 80));
         for dy in 50..80 {
             for dx in 10..50 {
@@ -980,7 +1015,8 @@ mod tests {
     #[test]
     fn partially_off_page_bbox_is_clamped() {
         let ctm = [100.0, 0.0, 0.0, -100.0, -30.0, 120.0];
-        let grid = SampleGrid::new(&ctm, 50, 50, 10, 10, Filter::NEAREST).expect("grid");
+        let grid =
+            SampleGrid::new(&ctm, GridView::whole(50, 50), 10, 10, Filter::NEAREST).expect("grid");
         assert_eq!((grid.x0, grid.x1), (0, 50));
         assert_eq!((grid.y0, grid.y1), (0, 30));
         let (cols, rows) = grid.tables().expect("tables");
@@ -991,13 +1027,21 @@ mod tests {
     #[test]
     fn degenerate_inputs_yield_no_grid() {
         let singular = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0];
-        assert!(SampleGrid::new(&singular, 10, 10, 4, 4, Filter::NEAREST).is_none());
+        assert!(
+            SampleGrid::new(&singular, GridView::whole(10, 10), 4, 4, Filter::NEAREST).is_none()
+        );
         let non_finite = [f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0];
-        assert!(SampleGrid::new(&non_finite, 10, 10, 4, 4, Filter::NEAREST).is_none());
+        assert!(
+            SampleGrid::new(&non_finite, GridView::whole(10, 10), 4, 4, Filter::NEAREST).is_none()
+        );
         let off_page = [10.0, 0.0, 0.0, -10.0, 500.0, 500.0];
-        assert!(SampleGrid::new(&off_page, 10, 10, 4, 4, Filter::NEAREST).is_none());
+        assert!(
+            SampleGrid::new(&off_page, GridView::whole(10, 10), 4, 4, Filter::NEAREST).is_none()
+        );
         let empty_image = [10.0, 0.0, 0.0, -10.0, 0.0, 10.0];
-        assert!(SampleGrid::new(&empty_image, 10, 10, 0, 4, Filter::NEAREST).is_none());
+        assert!(
+            SampleGrid::new(&empty_image, GridView::whole(10, 10), 0, 4, Filter::NEAREST).is_none()
+        );
     }
 
     /// A clip rectangle covering the left half of a 1:1 grid: the bbox is
@@ -1006,7 +1050,8 @@ mod tests {
     #[test]
     fn grid_clip_rect_coverage_is_binary() {
         let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
-        let grid = SampleGrid::new(&ctm, 10, 10, 10, 10, Filter::NEAREST).expect("grid");
+        let grid =
+            SampleGrid::new(&ctm, GridView::whole(10, 10), 10, 10, Filter::NEAREST).expect("grid");
         let clip = Clip::new(0.0, 0.0, 5.0, 10.0, true);
         let mut gc = GridClip::new(&clip, &grid);
         assert_eq!(gc.bbox(), ClipResult::Partial);
@@ -1022,7 +1067,8 @@ mod tests {
     #[test]
     fn grid_clip_bbox_extremes() {
         let ctm = [10.0, 0.0, 0.0, 10.0, 0.0, 0.0];
-        let grid = SampleGrid::new(&ctm, 10, 20, 10, 10, Filter::NEAREST).expect("grid");
+        let grid =
+            SampleGrid::new(&ctm, GridView::whole(10, 20), 10, 10, Filter::NEAREST).expect("grid");
         assert_eq!((grid.y0, grid.y1), (10, 20));
 
         let above = Clip::new(0.0, 0.0, 10.0, 10.0, true);
@@ -1046,9 +1092,18 @@ mod tests {
         let (img_w, img_h) = (2, 2);
         let alpha: Vec<u8> = (0..64).collect();
         let mask = SoftMask::new(8, 8, alpha).expect("8×8 mask");
-        let grid = SampleGrid::new(&ctm, 8, 8, img_w, img_h, Filter::NEAREST).expect("grid");
-        let sampler = MaskSampler::new(&mask, &ctm, &ctm, Filter::NEAREST, 8, 8, img_w, img_h)
-            .expect("sampler");
+        let grid = SampleGrid::new(&ctm, GridView::whole(8, 8), img_w, img_h, Filter::NEAREST)
+            .expect("grid");
+        let sampler = MaskSampler::new(
+            &mask,
+            &ctm,
+            &ctm,
+            Filter::NEAREST,
+            GridView::whole(8, 8),
+            img_w,
+            img_h,
+        )
+        .expect("sampler");
         for dy in grid.y0..grid.y1 {
             for dx in grid.x0..grid.x1 {
                 let px = grid.sample(dx, dy).expect("inside");
@@ -1073,7 +1128,8 @@ mod tests {
         .expect("40×30 mask");
         let filter = Filter::for_draw(&ctm, 40, 30, false);
         let sampler =
-            MaskSampler::new(&mask, &ctm, &ctm, filter, 100, 100, 40, 30).expect("sampler");
+            MaskSampler::new(&mask, &ctm, &ctm, filter, GridView::whole(100, 100), 40, 30)
+                .expect("sampler");
         assert!(sampler.grid.is_none());
         assert_eq!(
             sampler.alpha(0, 0, &Taps::point(3, 2)),
@@ -1085,7 +1141,8 @@ mod tests {
     #[test]
     fn sample_clamped_stays_on_the_image() {
         let ctm = [-200.0, 0.0, 0.0, -100.0, 250.0, 150.0];
-        let grid = SampleGrid::new(&ctm, 300, 200, 3, 3, Filter::NEAREST).expect("grid");
+        let grid =
+            SampleGrid::new(&ctm, GridView::whole(300, 200), 3, 3, Filter::NEAREST).expect("grid");
         for dy in grid.y0..grid.y1 {
             for dx in grid.x0..grid.x1 {
                 let taps = grid.sample_clamped(dx, dy);
@@ -1125,7 +1182,14 @@ mod tests {
             20.0,
         ];
         let img = (1 << 20, 1);
-        let grid = SampleGrid::new(&ctm, 1000, 1000, img.0, img.1, Filter::NEAREST).expect("grid");
+        let grid = SampleGrid::new(
+            &ctm,
+            GridView::whole(1000, 1000),
+            img.0,
+            img.1,
+            Filter::NEAREST,
+        )
+        .expect("grid");
         assert!(grid.tables().is_none(), "terms must exceed the table range");
         assert_matches_reference(&ctm, (1000, 1000), img);
     }
@@ -1134,7 +1198,8 @@ mod tests {
     #[test]
     fn ordinary_draw_builds_tables() {
         let ctm = [120.5, 30.25, -20.75, 150.5, 50.33, 40.17];
-        let grid = SampleGrid::new(&ctm, 300, 300, 50, 80, Filter::NEAREST).expect("grid");
+        let grid = SampleGrid::new(&ctm, GridView::whole(300, 300), 50, 80, Filter::NEAREST)
+            .expect("grid");
         assert!(grid.tables().is_some());
     }
 
@@ -1211,7 +1276,7 @@ mod tests {
         // Two samples over 100 px: centres at device x 25 and 75.
         let ctm = [100.0, 0.0, 0.0, 10.0, 0.0, 0.0];
         let filter = Filter { x: true, y: false };
-        let grid = SampleGrid::new(&ctm, 100, 10, 2, 1, filter).expect("grid");
+        let grid = SampleGrid::new(&ctm, GridView::whole(100, 10), 2, 1, filter).expect("grid");
         let taps = |dx| grid.sample(dx, 5).expect("inside");
         assert_eq!(taps(10), Taps::point(0, 0));
         assert_eq!(taps(90), Taps::point(1, 0));
@@ -1231,7 +1296,7 @@ mod tests {
     fn bilinear_at_one_to_one_is_a_pure_copy() {
         let ctm = [40.0, 0.0, 0.0, 30.0, 10.0, 20.0];
         let filter = Filter { x: true, y: true };
-        let grid = SampleGrid::new(&ctm, 100, 100, 40, 30, filter).expect("grid");
+        let grid = SampleGrid::new(&ctm, GridView::whole(100, 100), 40, 30, filter).expect("grid");
         for dy in 50..80 {
             for dx in 10..50 {
                 let taps = grid.sample(dx, dy).expect("inside");
@@ -1280,7 +1345,9 @@ mod tests {
                     Filter { x: true, y: true },
                     Filter { x: true, y: false },
                 ] {
-                    let grid = SampleGrid::new(ctm, 200, 160, img_w, img_h, filter).unwrap();
+                    let grid =
+                        SampleGrid::new(ctm, GridView::whole(200, 160), img_w, img_h, filter)
+                            .unwrap();
                     let cols = grid.separable().expect("an unrotated draw is separable");
                     for dy in grid.y0..grid.y1 {
                         let row = grid.row_taps(dy);
@@ -1324,7 +1391,8 @@ mod tests {
             ([40.0, 0.0, 0.0, 30.0, 10.0, 10.0], both, 1, 1),
         ];
         for (ctm, filter, img_w, img_h) in &cases {
-            let grid = SampleGrid::new(ctm, 120, 100, *img_w, *img_h, *filter).unwrap();
+            let grid =
+                SampleGrid::new(ctm, GridView::whole(120, 100), *img_w, *img_h, *filter).unwrap();
             let cols = grid.separable().unwrap();
             for step in [1, 3] {
                 let mut rgb_rows = BlendedRows::<3>::new(&cols);
@@ -1350,8 +1418,7 @@ mod tests {
     fn rotated_draw_is_not_separable() {
         let grid = SampleGrid::new(
             &[60.0, 25.0, -25.0, 60.0, 50.0, 40.0],
-            200,
-            160,
+            GridView::whole(200, 160),
             40,
             40,
             Filter { x: true, y: true },

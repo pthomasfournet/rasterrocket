@@ -86,6 +86,16 @@ impl CurveData {
 
 // ── flatten_curve ─────────────────────────────────────────────────────────────
 
+/// The grid, `2^-20` px, to which [`flatten_curve`] rounds a point relative
+/// to its curve's first whole pixel.  A coordinate of that grid plus a
+/// whole pixel below `2^32` is exact in `f64`.
+const LOCAL_GRID: f64 = 1.0 / (1u32 << 20) as f64;
+
+/// `v` rounded to the nearest multiple of [`LOCAL_GRID`].
+fn on_local_grid(v: f64) -> f64 {
+    (v / LOCAL_GRID).round() * LOCAL_GRID
+}
+
 /// Flatten a cubic Bezier curve into a sequence of line endpoints.
 ///
 /// Appends one `PathPoint` per emitted line segment endpoint to `out`. The
@@ -103,6 +113,14 @@ impl CurveData {
 ///
 /// Midpoints are computed with `f64::midpoint` / `usize::midpoint`, which are
 /// correctly rounded and cannot overflow.
+///
+/// The subdivision runs on the control points less `p0`'s whole pixel,
+/// and each point it emits is rounded to [`LOCAL_GRID`] before that pixel
+/// is added back, which leaves the sum exact; the last point is `p3`
+/// itself.  The points emitted for a curve moved by whole pixels are
+/// therefore those of the curve, moved by as many, whatever the magnitude
+/// of its coordinates: a window of a page flattens the page's curves as
+/// the page does.
 pub(crate) fn flatten_curve(
     p0: PathPoint,
     p1: PathPoint,
@@ -122,6 +140,10 @@ pub(crate) fn flatten_curve(
         return;
     }
     let data = curve_data.get_or_insert_with(CurveData::new);
+    let (bx, by) = (p0.x.floor(), p0.y.floor());
+    let local = |p: PathPoint| (p.x - bx, p.y - by);
+    let ((x0, y0), (x1, y1), (x2, y2), (x3, y3)) = (local(p0), local(p1), local(p2), local(p3));
+    let placed = |x: f64, y: f64| PathPoint::new(bx + on_local_grid(x), by + on_local_grid(y));
 
     let max = MAX_CURVE_SPLITS;
 
@@ -129,15 +151,15 @@ pub(crate) fn flatten_curve(
     let i0 = 0usize;
     let i2 = max;
     // Slot 0: control points (x0/y0, x1/y1, x2/y2).
-    data.cx[0] = p0.x;
-    data.cy[0] = p0.y;
-    data.cx[1] = p1.x;
-    data.cy[1] = p1.y;
-    data.cx[2] = p2.x;
-    data.cy[2] = p2.y;
+    data.cx[0] = x0;
+    data.cy[0] = y0;
+    data.cx[1] = x1;
+    data.cy[1] = y1;
+    data.cx[2] = x2;
+    data.cy[2] = y2;
     // Slot max: just the endpoint (x3/y3).
-    data.cx[i2 * 3] = p3.x;
-    data.cy[i2 * 3] = p3.y;
+    data.cx[i2 * 3] = x3;
+    data.cy[i2 * 3] = y3;
     data.c_next[i0] = max;
 
     // Invariant: `pp1 <= pp2` for the segment `[pp1, pp2]`, since `pp2` is a
@@ -163,7 +185,7 @@ pub(crate) fn flatten_curve(
 
         if pp2 - pp1 == 1 || (d1 <= flatness_sq && d2 <= flatness_sq) {
             // Emit this segment as a straight line.
-            out.push(PathPoint::new(xr3, yr3));
+            out.push(if pp2 == max { p3 } else { placed(xr3, yr3) });
             pp1 = pp2;
         } else {
             // De Casteljau midpoint subdivision.

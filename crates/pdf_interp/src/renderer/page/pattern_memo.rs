@@ -15,7 +15,7 @@
 //! work budget ran out is not kept.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
@@ -144,8 +144,6 @@ pub(super) struct PatternMemo {
     /// own, by the resource context the content was parsed in.
     cells: HashMap<(ObjectId, Option<ResourceIdentity>), Option<Rc<TilingCell>>>,
     rasters: HashMap<RasterKey, CellRaster>,
-    /// Rasters asked for once without being rendered whole.
-    deferred: HashSet<RasterKey>,
     budget: Budget,
 }
 
@@ -163,11 +161,6 @@ impl Budget {
             self.used += bytes;
         }
         fits
-    }
-
-    /// Whether `bytes` fit what is left.
-    const fn fits(&self, bytes: usize) -> bool {
-        bytes <= self.limit - self.used
     }
 }
 
@@ -203,7 +196,6 @@ impl PatternMemo {
             shadings: HashMap::new(),
             cells: HashMap::new(),
             rasters: HashMap::new(),
-            deferred: HashSet::new(),
             budget: Budget {
                 used: 0,
                 limit: budget,
@@ -270,20 +262,6 @@ impl PatternMemo {
         self.rasters.get(key).cloned()
     }
 
-    /// Whether the cell raster at `key`, of at most `bytes`, is kept, or
-    /// has been asked for before and fits the budget left.  A first request
-    /// is recorded and answered `false`.
-    pub(super) fn repeated(&mut self, key: &RasterKey, bytes: usize) -> bool {
-        if self.rasters.contains_key(key) {
-            return true;
-        }
-        if self.deferred.contains(key) {
-            return self.budget.fits(bytes);
-        }
-        let _ = self.deferred.insert(key.clone());
-        false
-    }
-
     /// Keep `raster` at `key` when it fits the budget.  An entry already
     /// kept stays.
     pub(super) fn insert_raster(&mut self, key: RasterKey, raster: CellRaster) {
@@ -324,7 +302,7 @@ impl PageRenderer<'_> {
     pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
-        let pattern_ctm = self.window_ctm(&self.pattern_ctm);
+        let pattern_ctm = self.pattern_ctm;
         let key = PlacedKey::new(
             self.resources.pattern_key(name)?,
             &pattern_ctm,
@@ -348,7 +326,6 @@ impl PageRenderer<'_> {
     pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
-        let ctm = &self.window_ctm(ctm);
         let key = PlacedKey::new(
             self.resources.shading_key(name)?,
             ctm,
@@ -365,11 +342,14 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// The canvas shadings are resolved for: this renderer's bitmap.
+    /// The canvas shadings are resolved for: the whole page, whose device
+    /// space every CTM maps to.  A window paints a shading resolved there,
+    /// moved by the window's origin last (see `Self::page_origin`), so it
+    /// receives the colours the whole page computes for its pixels.
     fn shading_canvas(&self) -> Canvas {
         Canvas {
-            width: f64::from(self.width),
-            height: f64::from(self.height),
+            width: f64::from(self.page_width),
+            height: f64::from(self.page_height),
         }
     }
 
@@ -615,17 +595,5 @@ mod tests {
             .is_none()
         );
         assert!(memo.raster(&key.at_phase((1, 0))).is_none());
-    }
-
-    #[test]
-    fn a_raster_is_repeated_from_its_second_request_within_the_budget() {
-        let mut memo = PatternMemo::with_budget(100);
-        let key = RasterKey::new(ID, &IDENTITY, None, None, CanvasKind::Rgb);
-        assert!(!memo.repeated(&key, 50));
-        assert!(memo.repeated(&key, 50));
-        assert!(!memo.repeated(&key, 101), "over the budget left");
-        let other = RasterKey::new((6, 0), &IDENTITY, None, None, CanvasKind::Rgb);
-        memo.insert_raster(other.clone(), CellRaster::Mean([0; 3], 0));
-        assert!(memo.repeated(&other, 1000), "a kept raster is repeated");
     }
 }

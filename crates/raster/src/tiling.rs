@@ -247,6 +247,28 @@ impl<P: Pixel> TiledPattern<P> {
         })
     }
 
+    /// This pattern moved by `dx` columns and `dy` rows: the pixel it served
+    /// at `(x, y)` it serves at `(x + dx, y + dy)`.
+    #[must_use]
+    pub fn moved(self, dx: i32, dy: i32) -> Self {
+        match self.source {
+            Source::Screen {
+                bitmap,
+                x0,
+                y0,
+                fully_covered,
+            } => Self {
+                source: Source::Screen {
+                    bitmap,
+                    x0: x0.saturating_add(dx),
+                    y0: y0.saturating_add(dy),
+                    fully_covered,
+                },
+            },
+            uniform @ Source::Uniform { .. } => Self { source: uniform },
+        }
+    }
+
     /// The pattern painted on `bitmap`, whose top-left pixel is device
     /// pixel `(x0, y0)` and whose alpha plane, when present, is the
     /// coverage of each pixel; a bitmap without one is fully covered.

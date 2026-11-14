@@ -138,7 +138,8 @@ pub(super) fn text_to_device(
 /// Where a glyph bitmap goes for the exact device pen position `(dx, dy)`:
 /// the pixel column at or left of `dx`, the quarter-pixel fraction in
 /// `[0, FRACTION)` the bitmap is rendered shifted right by, and the pixel
-/// row nearest `dy`.  Glyphs are placed to a quarter pixel horizontally
+/// row nearest `dy`, a half to the greater row, a rounding that moving
+/// `dy` by whole pixels commutes with.  Glyphs are placed to a quarter pixel horizontally
 /// and to whole pixels vertically, so a run keeps its spacing on the
 /// baseline it shares.
 pub(super) fn glyph_placement(dx: f64, dy: f64) -> (i32, u8, i32) {
@@ -151,7 +152,7 @@ pub(super) fn glyph_placement(dx: f64, dy: f64) -> (i32, u8, i32) {
     let placement = (
         column as i32,
         ((dx - column) * f64::from(FRACTION)) as u8,
-        dy.round() as i32,
+        color::convert::round_half_up_i32(dy),
     );
     placement
 }

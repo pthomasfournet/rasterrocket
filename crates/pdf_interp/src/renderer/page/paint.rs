@@ -440,13 +440,14 @@ impl PageRenderer<'_> {
         // pattern's colours map in the pipe.
         let pat_name = gs.fill_pattern.clone();
         let solid_color = gs.painted_fill_color();
+        let extent = self.page_extent(path.pts.iter().map(|p| (p.x, p.y)), 1.0);
 
         // A pattern colour that does not resolve, or whose object lies
         // outside the clip, paints nothing: the fill colour is not a
         // fallback for it.
         let tiled = match pat_name
             .as_deref()
-            .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
+            .map(|name| region.and_then(|region| self.resolve_pattern(name, region, extent)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(&pattern, false, region, |r, pipe, shading| {
@@ -592,6 +593,8 @@ impl PageRenderer<'_> {
         let transfer = gs.transfer.clone();
         let pat_name = gs.stroke_pattern.clone();
         let solid_color = gs.painted_stroke_color();
+        let reach = stroke_reach(&self.device_matrix(), line_width, gs.miter_limit);
+        let extent = self.page_extent(path.pts.iter().map(|p| (p.x, p.y)), reach + 1.0);
         let shape = self.stroke_shape(path, line_width);
         let (path, matrix, device_flatness) = (&shape.path, &shape.matrix, shape.device_flatness);
         let params = shape.params();
@@ -600,7 +603,7 @@ impl PageRenderer<'_> {
         // colour that does not resolve paints nothing.
         let tiled = match pat_name
             .as_deref()
-            .map(|name| region.and_then(|region| self.resolve_pattern(name, region)))
+            .map(|name| region.and_then(|region| self.resolve_pattern(name, region, extent)))
         {
             Some(Some(PatternPaint::Shading(pattern))) => {
                 self.paint_shading_pattern(&pattern, true, region, |r, pipe, shading| {

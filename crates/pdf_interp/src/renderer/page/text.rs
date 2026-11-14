@@ -14,7 +14,6 @@ use super::text_shaping::{
     CONTEXT_CODES, CodeText, Drawn, Neighbours, ShapedRun, shaped_runs, shapes, takes_context,
 };
 use super::text_stroke::GlyphStroke;
-use super::view::page_to_window;
 use crate::renderer::font_cache::{ActiveFont, PageFace};
 use crate::renderer::text::TextMatrix;
 use crate::resources::ResourceKey;
@@ -64,13 +63,12 @@ fn document_width(descriptor: &FontDescriptor, d: &DecodedCode) -> Option<i32> {
     )
 }
 
-/// What maps a text-space position of a string's glyphs to the window:
-/// the CTM, the window's origin on the page and the page height, and the
-/// text state's font size, horizontal scaling (a fraction) and rise.
+/// What maps a text-space position of a string's glyphs to the page's
+/// device space: the CTM and the page height, and the text state's font
+/// size, horizontal scaling (a fraction) and rise.
 #[derive(Clone, Copy)]
 struct TextFrame {
     ctm: [f64; 6],
-    origin: (u32, u32),
     page_h: u32,
     font_size: f64,
     horiz_scaling: f64,
@@ -83,13 +81,10 @@ impl TextFrame {
         self.font_size * self.horiz_scaling
     }
 
-    /// The window position of the text-space point `(tx, ty)` of text
-    /// matrix `tm`.
-    fn window(&self, tm: &TextMatrix, tx: f64, ty: f64) -> (f64, f64) {
-        page_to_window(
-            self.origin,
-            text_to_device(&self.ctm, tm, tx, ty, self.page_h),
-        )
+    /// The page's device position of the text-space point `(tx, ty)` of
+    /// text matrix `tm`.
+    fn page(&self, tm: &TextMatrix, tx: f64, ty: f64) -> (f64, f64) {
+        text_to_device(&self.ctm, tm, tx, ty, self.page_h)
     }
 }
 
@@ -258,7 +253,7 @@ impl Layout<'_, '_> {
                 (tx, (-f64::from(v.vy) / 1000.0).mul_add(f.font_size, f.rise))
             },
         );
-        sink.push(drawn, d.code, f.window(tm, tx, ty), x_scale);
+        sink.push(drawn, d.code, f.page(tm, tx, ty), x_scale);
     }
 
     /// Add the glyphs of `run`, whose codes start at the text matrix
@@ -289,7 +284,7 @@ impl Layout<'_, '_> {
                 sink.push(
                     (run.face, g.selector, true),
                     g.selector,
-                    f.window(origin, tx, ty),
+                    f.page(origin, tx, ty),
                     1.0,
                 );
             }
@@ -318,7 +313,7 @@ impl Layout<'_, '_> {
             sink.push(
                 (run.face, g.selector, true),
                 g.selector,
-                f.window(origin, tx, ty),
+                f.page(origin, tx, ty),
                 scale,
             );
             pen = (g.advance * em).mul_add(scale, pen);
@@ -435,7 +430,6 @@ impl PageRenderer<'_> {
         // horizontal advances to zero width.
         let frame = TextFrame {
             ctm: gs.ctm,
-            origin: self.window_origin,
             page_h: self.page_height,
             font_size: ts.font_size,
             horiz_scaling: ts.horiz_scaling / 100.0,
@@ -464,6 +458,7 @@ impl PageRenderer<'_> {
         };
         let fill_as_path = face.is_some_and(|f| pattern_fill || f.prefers_path_fill());
         let mut sink = GlyphSink::new(
+            self.window_origin,
             mode,
             glyph_cache,
             document_fonts,

@@ -47,6 +47,10 @@ const MAX_CELL_OVERDRAW: f64 = 256.0;
 /// painted region.
 const MAX_DIRECT_CELLS: usize = 4096;
 
+/// Largest raster, in bytes, of a cell composited at lattice points; a
+/// larger cell is rendered in place.
+const MAX_COMPOSED_CELL_BYTES: usize = 64 << 20;
+
 /// The number of whole pixels spanning a length of `v` pixels: its ceiling,
 /// taken below a tolerance that absorbs the rounding of the products that
 /// produce it (`100 × 0.1` is `10.000000000000002`), and at least 1.
@@ -338,16 +342,18 @@ impl CellGeometry {
 impl PageRenderer<'_> {
     /// Resolve the named `Pattern` resource as a shading or tiling pattern.
     /// A tiling pattern is composited over `region`, the device pixels the
-    /// painting operator can touch.
+    /// painting operator can touch; `extent` is the pixel area of the
+    /// operator's object on the whole page (see [`Self::page_extent`]).
     pub(super) fn resolve_pattern(
         &mut self,
         name: &[u8],
         region: PixelRect,
+        extent: u64,
     ) -> Option<PatternPaint> {
         if let Some(shading) = self.memo_shading_pattern(name) {
             return Some(PatternPaint::Shading(shading));
         }
-        self.resolve_fill_pattern(name, region)
+        self.resolve_fill_pattern(name, region, extent)
             .map(PatternPaint::Tiled)
     }
 
@@ -356,11 +362,17 @@ impl PageRenderer<'_> {
     ///
     /// The cell is rasterised once per quarter-pixel phase and composited
     /// at every lattice point whose cell meets the region when the cell is
-    /// no larger than the region, or when the same raster was asked for
-    /// before and fits the page's pattern memo; otherwise each such cell's
-    /// content is rendered directly onto a region-sized bitmap at its exact
-    /// position.  A lattice finer than a pixel is reduced to its mean.
-    pub(super) fn resolve_fill_pattern(&mut self, name: &[u8], region: PixelRect) -> Option<Tile> {
+    /// no larger than `extent`, the object's area on the whole page, and
+    /// its raster within [`MAX_COMPOSED_CELL_BYTES`]; otherwise each such
+    /// cell's content is rendered directly onto a region-sized bitmap at
+    /// its exact position.  A lattice finer than a pixel is reduced to its
+    /// mean.
+    pub(super) fn resolve_fill_pattern(
+        &mut self,
+        name: &[u8],
+        region: PixelRect,
+        extent: u64,
+    ) -> Option<Tile> {
         // Each cell renders in a child renderer whose `pattern_depth` is one
         // above its parent's (see `render_cells`), so the cap bounds the
         // recursion of a pattern whose content paints with a pattern,
@@ -393,9 +405,12 @@ impl PageRenderer<'_> {
         };
         // PDF §8.7.3.1: the pattern matrix maps pattern space to the default
         // coordinate space of the parent content stream, not to the CTM in
-        // effect at the fill.  `device` carries on to device pixels.
+        // effect at the fill.  `device` carries on to the whole page's
+        // device pixels: the lattice is placed there, and moved onto the
+        // window by whole pixels last, so a window stamps the cells where
+        // the page does.
         let pat_ctm = ctm_multiply(&desc.matrix, &self.pattern_ctm);
-        let device = flip_y(&self.window_ctm(&pat_ctm), f64::from(self.height));
+        let device = flip_y(&pat_ctm, f64::from(self.page_height));
         let geometry = match CellGeometry::new(&device, desc) {
             Ok(geometry) => geometry,
             Err(why) => {
@@ -421,26 +436,27 @@ impl PageRenderer<'_> {
         );
         match kind {
             CanvasKind::Rgb => self
-                .tile::<Rgb8>(name, &cell, &geometry, region, key)
+                .tile::<Rgb8>(name, &cell, &geometry, (region, extent), key)
                 .map(|(pattern, _)| Tile::Rgb(pattern)),
             CanvasKind::Ink => self
-                .tile::<DeviceN8>(name, &cell, &geometry, region, key)
+                .tile::<DeviceN8>(name, &cell, &geometry, (region, extent), key)
                 .map(|(pattern, channels)| Tile::Ink { pattern, channels }),
         }
     }
 
     /// The tile of `cell` over `region` in pixels of type `P`, with the
-    /// channels its content painted (see [`Self::resolve_fill_pattern`]).
+    /// channels its content painted (see [`Self::resolve_fill_pattern`]),
+    /// for an object of `extent` pixels on the whole page.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "the region's area is page-bounded, far below 2^52"
+        reason = "the extent is page-bounded, far below 2^52"
     )]
     fn tile<P: CellPixel>(
         &mut self,
         name: &[u8],
         cell: &CellContent<'_>,
         geometry: &CellGeometry,
-        region: PixelRect,
+        (region, extent): (PixelRect, u64),
         key: RasterKey,
     ) -> Option<(TiledPattern<P>, InkChannels)> {
         // A lattice cell below one pixel in area repeats more than once per
@@ -457,13 +473,11 @@ impl PageRenderer<'_> {
             );
             return None;
         }
-        // A cell larger than the region is rendered in place, unless the
-        // same cell raster serves repeated fills.
-        if cell_w * cell_h <= region.area() as f64
-            || self
-                .pattern_memo
-                .borrow_mut()
-                .repeated(&key, cell_raster_bytes::<P>(cell_w, cell_h))
+        // A cell larger than the object, or whose raster is larger than
+        // MAX_COMPOSED_CELL_BYTES, is rendered in place.  Both are measured
+        // on the whole page, so every window of it chooses as the page does.
+        if cell_w * cell_h <= extent as f64
+            && cell_raster_bytes::<P>(cell_w, cell_h) <= MAX_COMPOSED_CELL_BYTES
         {
             self.composed_pattern::<P>(cell, geometry, region, &key)
         } else {
@@ -537,6 +551,7 @@ impl PageRenderer<'_> {
             return None;
         }
         let mut channels = InkChannels::NONE;
+        let (ox, oy) = self.page_origin();
         TiledPattern::compose(
             |phase| {
                 raster_at(self, phase).map(|(bitmap, painted)| {
@@ -546,8 +561,8 @@ impl PageRenderer<'_> {
             },
             size,
             &geometry.lattice,
-            region.x0 as i32,
-            region.y0 as i32,
+            region.x0 as i32 + ox,
+            region.y0 as i32 + oy,
             region.width(),
             region.height(),
         )
@@ -555,7 +570,7 @@ impl PageRenderer<'_> {
             self.abort_allocation(e);
             None
         })
-        .map(|pattern| (pattern, channels))
+        .map(|pattern| (pattern.moved(-ox, -oy), channels))
     }
 
     /// The cells meeting `region` rendered in place on a region-sized
@@ -574,8 +589,9 @@ impl PageRenderer<'_> {
         region: PixelRect,
     ) -> Option<(TiledPattern<P>, InkChannels)> {
         let (cell_w, cell_h) = geometry.cell_size();
-        let (rx0, ry0) = (region.x0 as i32, region.y0 as i32);
-        let rect = (rx0, ry0, region.x1 as i32, region.y1 as i32);
+        let (ox, oy) = self.page_origin();
+        let (rx0, ry0) = (region.x0 as i32 + ox, region.y0 as i32 + oy);
+        let rect = (rx0, ry0, region.x1 as i32 + ox, region.y1 as i32 + oy);
         let (cols, rows) = geometry
             .lattice
             .cells_meeting(rect, cell_w as u32, cell_h as u32)?;
@@ -598,7 +614,7 @@ impl PageRenderer<'_> {
         }
         let size = (region.width(), region.height());
         let (screen, channels) = self.render_cells::<P>(cell, size, &placements)?;
-        Some((TiledPattern::screen(screen, rx0, ry0), channels))
+        Some((TiledPattern::screen(screen, rx0 - ox, ry0 - oy), channels))
     }
 
     /// Render the pattern cell once per matrix of `placements` onto one

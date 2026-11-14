@@ -225,16 +225,17 @@ impl PageCanvas {
     /// transfer function.
     pub(super) fn gouraud_triangle(
         &mut self,
+        origin: (i32, i32),
         clip: &Clip,
         pipe: &PipeState<'_>,
         transfer: Option<&Transfer>,
         tri: [GouraudVertex; 3],
     ) {
         match self {
-            Self::Rgb(b) => gouraud_triangle_fill(b, clip, pipe, tri),
+            Self::Rgb(b) => gouraud_triangle_fill(b, origin, clip, pipe, tri),
             Self::Ink(b) => {
                 let (width, height) = (b.width, b.height);
-                gouraud_triangle_spans(width, height, clip, tri, |rgb, x0, x1, y| {
+                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
                     let row = RowPattern { data: rgb };
                     render_bitmap_span::<DeviceN8>(
                         b,
@@ -256,6 +257,7 @@ impl PageCanvas {
     /// ink.
     pub(super) fn gouraud_ink_triangle(
         &mut self,
+        origin: (i32, i32),
         clip: &Clip,
         pipe: &PipeState<'_>,
         transfer: Option<&Transfer>,
@@ -267,7 +269,7 @@ impl PageCanvas {
             return;
         };
         let (width, height) = (b.width, b.height);
-        gouraud_triangle_spans(width, height, clip, tri, |ink, x0, x1, y| {
+        gouraud_triangle_spans(width, height, origin, clip, tri, |ink, x0, x1, y| {
             let row = RowPattern { data: ink };
             render_bitmap_span::<DeviceN8>(
                 b,

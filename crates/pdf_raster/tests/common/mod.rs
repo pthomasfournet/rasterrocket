@@ -12,6 +12,7 @@
 )]
 
 pub mod icc;
+pub mod seams;
 
 use std::fmt::Write as _;
 use std::path::PathBuf;

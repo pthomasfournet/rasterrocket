@@ -106,6 +106,29 @@ impl PageRenderer<'_> {
         self.within_clip(PixelRect::around(points, margin, self.width, self.height)?)
     }
 
+    /// The page's device pixel at the window's pixel `(0, 0)`.
+    pub(super) fn page_origin(&self) -> (i32, i32) {
+        let at = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        (at(self.window_origin.0), at(self.window_origin.1))
+    }
+
+    /// The pixel area, on the whole page, within `margin` of the bounding
+    /// box of the finite window-space `points`: what a painting operator's
+    /// object covers, whatever window draws it; 0 when there are none.
+    pub(super) fn page_extent(
+        &self,
+        points: impl IntoIterator<Item = (f64, f64)>,
+        margin: f64,
+    ) -> u64 {
+        let (ox, oy) = (
+            f64::from(self.window_origin.0),
+            f64::from(self.window_origin.1),
+        );
+        let page = points.into_iter().map(|(x, y)| (x + ox, y + oy));
+        PixelRect::around(page, margin, self.page_width, self.page_height)
+            .map_or(0, PixelRect::area)
+    }
+
     /// The current clip's rectangle within the bitmap.
     pub(super) fn clip_rect(&self) -> Option<PixelRect> {
         PixelRect::of_clip(&self.gstate.current().clip, self.width, self.height)

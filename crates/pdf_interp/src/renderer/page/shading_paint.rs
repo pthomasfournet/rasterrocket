@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use raster::clip::Clip;
 use raster::path::{Path, PathBuilder};
-use raster::pipe::{PipeSrc, PipeState};
+use raster::pipe::{Pattern, PipeSrc, PipeState, Shifted};
 use raster::shading::shaded_fill;
 use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
@@ -70,18 +70,32 @@ fn background(
     })
 }
 
-/// The pattern of a smooth shading's colours for a canvas of `kind`, its
-/// colours mapped through `transfer` on an ink canvas; `None` for a mesh,
-/// and for colours of ink on an RGB canvas, which takes none.
+/// The pattern of a smooth shading's colours, resolved on the page's
+/// pixel grid, read on the window whose pixel `(0, 0)` is the page's pixel
+/// `origin`; `None` for a mesh.
+fn window_pattern(shading: &ResolvedShading, origin: (i32, i32)) -> Option<Shifted<'_>> {
+    match &shading.result {
+        ShadingResult::Pattern(p) | ShadingResult::InkPattern(p) => {
+            let inner: &dyn Pattern = p.as_ref();
+            Some(Shifted { inner, origin })
+        }
+        ShadingResult::Mesh(_) | ShadingResult::InkMesh(_) => None,
+    }
+}
+
+/// `window`, the [`window_pattern`] of `shading`, for a canvas of `kind`,
+/// its colours mapped through `transfer` on an ink canvas; `None` for
+/// colours of ink on an RGB canvas, which takes none.
 fn smooth_pattern<'a>(
     kind: CanvasKind,
-    shading: &'a ResolvedShading,
+    shading: &ResolvedShading,
+    window: &'a Shifted<'a>,
     transfer: Option<&'a Transfer>,
 ) -> Option<CanvasPattern<'a>> {
     match (&shading.result, kind) {
-        (ShadingResult::Pattern(p), _) => Some(CanvasPattern::new(kind, p.as_ref(), transfer)),
-        (ShadingResult::InkPattern(p), CanvasKind::Ink) => {
-            Some(CanvasPattern::ink(p.as_ref(), transfer, shading.carries()))
+        (ShadingResult::Pattern(_), _) => Some(CanvasPattern::new(kind, window, transfer)),
+        (ShadingResult::InkPattern(_), CanvasKind::Ink) => {
+            Some(CanvasPattern::ink(window, transfer, shading.carries()))
         }
         _ => None,
     }
@@ -111,6 +125,12 @@ impl ShadingPaint {
 }
 
 impl PageRenderer<'_> {
+    /// The window's image of `corners`, a shading's `BBox` corners in the
+    /// page's device space.
+    fn window_corners(&self, corners: [(f64, f64); 4]) -> [(f64, f64); 4] {
+        corners.map(|p| self.page_to_window(p))
+    }
+
     /// The compositing parameters of a paint of `shading` by the stroking
     /// (`stroke`) or non-stroking operation under the graphics state in
     /// effect.  Under overprint the shading writes the channels of its
@@ -188,9 +208,10 @@ impl PageRenderer<'_> {
 
         let clip = clip_to_bbox(
             self.gstate.current().clip.clone_shared(),
-            shading.bbox,
+            shading.bbox.map(|c| self.window_corners(c)),
             flatness,
         );
+        let origin = self.page_origin();
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
@@ -203,7 +224,10 @@ impl PageRenderer<'_> {
                     (clip.x_max, clip.y_max),
                     (clip.x_min, clip.y_max),
                 ]);
-                let Some(pattern) = smooth_pattern(kind, &shading, transfer) else {
+                let Some(window) = window_pattern(&shading, origin) else {
+                    return;
+                };
+                let Some(pattern) = smooth_pattern(kind, &shading, &window, transfer) else {
                     return;
                 };
                 with_canvas!(&mut r.canvas, |b| shaded_fill(
@@ -218,16 +242,8 @@ impl PageRenderer<'_> {
                     false,
                 ));
             }
-            ShadingResult::Mesh(mesh) => {
-                for tri in mesh.meeting(&clip) {
-                    r.canvas.gouraud_triangle(&clip, &pipe, transfer, tri);
-                }
-            }
-            ShadingResult::InkMesh(mesh) => {
-                for tri in mesh.meeting(&clip) {
-                    r.canvas
-                        .gouraud_ink_triangle(&clip, &pipe, transfer, shading.carries(), tri);
-                }
+            ShadingResult::Mesh(_) | ShadingResult::InkMesh(_) => {
+                r.paint_mesh(&shading, &clip, &pipe, transfer);
             }
         });
     }
@@ -254,9 +270,11 @@ impl PageRenderer<'_> {
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
             paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
         }
-        let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        if let Some(pattern) = smooth_pattern(kind, shading, transfer.as_deref()) {
-            paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
+        let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
+        if let Some(window) = window_pattern(shading, self.page_origin()) {
+            if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
+                paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
+            }
             return;
         }
         let mut clip = clip;
@@ -277,16 +295,24 @@ impl PageRenderer<'_> {
         pipe: &PipeState<'_>,
         transfer: Option<&Transfer>,
     ) {
+        let origin = self.page_origin();
         match &shading.result {
             ShadingResult::Mesh(mesh) => {
-                for tri in mesh.meeting(clip) {
-                    self.canvas.gouraud_triangle(clip, pipe, transfer, tri);
+                for tri in mesh.meeting(clip, origin) {
+                    self.canvas
+                        .gouraud_triangle(origin, clip, pipe, transfer, tri);
                 }
             }
             ShadingResult::InkMesh(mesh) => {
-                for tri in mesh.meeting(clip) {
-                    self.canvas
-                        .gouraud_ink_triangle(clip, pipe, transfer, shading.carries(), tri);
+                for tri in mesh.meeting(clip, origin) {
+                    self.canvas.gouraud_ink_triangle(
+                        origin,
+                        clip,
+                        pipe,
+                        transfer,
+                        shading.carries(),
+                        tri,
+                    );
                 }
             }
             ShadingResult::Pattern(_) | ShadingResult::InkPattern(_) => {}
@@ -320,12 +346,14 @@ impl PageRenderer<'_> {
                 b, &clip, path, pipe, &src, matrix, params
             ));
         }
-        let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        if let Some(pattern) = smooth_pattern(kind, shading, transfer.as_deref()) {
-            let src = PipeSrc::Pattern(pattern.as_dyn());
-            with_canvas!(&mut self.canvas, |b| stroke(
-                b, &clip, path, pipe, &src, matrix, params
-            ));
+        let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
+        if let Some(window) = window_pattern(shading, self.page_origin()) {
+            if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
+                let src = PipeSrc::Pattern(pattern.as_dyn());
+                with_canvas!(&mut self.canvas, |b| stroke(
+                    b, &clip, path, pipe, &src, matrix, params
+                ));
+            }
             return;
         }
         let device_scale = matrix[0]

@@ -13,7 +13,9 @@ use super::canvas::{CanvasKind, blend_u8, with_canvas};
 use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
 use super::image_reduce::{self, DeviceWindow};
-use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
+use super::image_sampler::{
+    BlendedRows, Filter, GridClip, GridView, MaskSampler, SampleGrid, sample_bytes,
+};
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask};
 
@@ -92,7 +94,12 @@ impl PageRenderer<'_> {
         // turns them into whole pixels.  The image and its mask resample
         // separately, each on its own grid, and each comes with the matrix
         // that draws the resampled samples.
-        let page_ctm = self.window_ctm(&self.gstate.current().ctm);
+        //
+        // The resampling and the sampling are computed on the whole page's
+        // device grid, from the CTM and the paintable pixels there, and the
+        // window takes the pixels it covers, so a window draws as the page
+        // does.
+        let page_ctm = self.gstate.current().ctm;
         let window = self.paintable_window();
         let reduced_mask = img
             .smask
@@ -123,8 +130,7 @@ impl PageRenderer<'_> {
         // is drawn, whether or not it reaches a pixel.
         let colorants = self.tint_plan(decoded);
         let filter = Filter::for_draw(&ctm, img.width, img.height, decoded.interpolate);
-        let Some(grid) =
-            SampleGrid::new(&ctm, self.width, self.height, img.width, img.height, filter)
+        let Some(grid) = SampleGrid::new(&ctm, self.grid_view(), img.width, img.height, filter)
         else {
             log::debug!(
                 "rasterrocket-interp: blit_image: image maps to no page pixels (CTM {ctm:?}) — skipping"
@@ -260,8 +266,7 @@ impl PageRenderer<'_> {
                     &mask_ctm,
                     ctm,
                     grid.filter(),
-                    self.width,
-                    self.height,
+                    self.grid_view(),
                     img.width,
                     img.height,
                 ) else {
@@ -316,18 +321,36 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// The device pixels an image draw can paint: the bitmap within the
-    /// clip rectangle, which bounds every path clip.
+    /// The bitmap images are sampled onto: this renderer's window of the
+    /// page.
+    pub(super) const fn grid_view(&self) -> GridView {
+        GridView {
+            origin: self.window_origin,
+            width: self.width,
+            height: self.height,
+            page_height: self.page_height,
+        }
+    }
+
+    /// The device pixels an image draw can paint, on the whole page's
+    /// device grid: the bitmap within the clip rectangle, which bounds
+    /// every path clip.
     fn paintable_window(&self) -> DeviceWindow {
         let clip = &self.gstate.current().clip;
+        let (ox, oy) = (
+            i64::from(self.window_origin.0),
+            i64::from(self.window_origin.1),
+        );
+        let x = |v: i32| i64::from(v).clamp(0, i64::from(self.width)) + ox;
+        let y = |v: i32| i64::from(v).clamp(0, i64::from(self.height)) + oy;
         DeviceWindow::of_bitmap_rect(
-            self.width,
-            self.height,
+            self.page_width,
+            self.page_height,
             [
-                i64::from(clip.x_min_i),
-                i64::from(clip.y_min_i),
-                i64::from(clip.x_max_i) + 1,
-                i64::from(clip.y_max_i) + 1,
+                x(clip.x_min_i),
+                y(clip.y_min_i),
+                x(clip.x_max_i.saturating_add(1)),
+                y(clip.y_max_i.saturating_add(1)),
             ],
         )
     }
@@ -439,8 +462,7 @@ impl PageRenderer<'_> {
                     &mask_ctm,
                     ctm,
                     grid.filter(),
-                    self.width,
-                    self.height,
+                    self.grid_view(),
                     img.width,
                     img.height,
                 ) else {
