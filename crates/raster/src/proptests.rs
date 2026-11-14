@@ -9,7 +9,6 @@
 //! `PROPTEST_CASES` sets another.
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
 
 use crate::bitmap::Bitmap;
 use crate::clip::Clip;
@@ -23,17 +22,9 @@ use crate::types::{AA_GAMMA, AA_SIZE, LineCap, LineJoin};
 use crate::xpath::XPath;
 use color::Rgb8;
 
-/// The runner configuration: `cases` cases, or `PROPTEST_CASES` when set.
-fn config(cases: u32) -> Config {
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(cases);
-    Config {
-        cases,
-        ..Config::default()
-    }
-}
+#[path = "../../../tests/support/proptest_config.rs"]
+mod proptest_config;
+use proptest_config::config;
 
 /// Bitmap sides, in pixels.
 const SIDE: std::ops::RangeInclusive<u32> = 1..=40;

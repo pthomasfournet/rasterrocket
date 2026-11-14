@@ -7,16 +7,6 @@
 mod filters;
 mod objects;
 
-use proptest::test_runner::Config;
-
-/// The runner configuration: `cases` cases, or `PROPTEST_CASES` when set.
-fn config(cases: u32) -> Config {
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(cases);
-    Config {
-        cases,
-        ..Config::default()
-    }
-}
+#[path = "../../../../tests/support/proptest_config.rs"]
+mod proptest_config;
+use proptest_config::config;

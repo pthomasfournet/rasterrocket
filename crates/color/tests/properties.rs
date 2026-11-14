@@ -4,23 +4,14 @@
 //! `PROPTEST_CASES` sets another.
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
 use rasterrocket_color::cmyk::{SpotLut, cmyk_to_rgb, cmyk_to_rgb_row, ink_to_rgb_row};
 use rasterrocket_color::convert::{
     ceil_i32, div255, floor_i32, lerp_u8, luminosity, round_half_up_i32,
 };
 
-/// The runner configuration: `cases` cases, or `PROPTEST_CASES` when set.
-fn config(cases: u32) -> Config {
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(cases);
-    Config {
-        cases,
-        ..Config::default()
-    }
-}
+#[path = "../../../tests/support/proptest_config.rs"]
+mod proptest_config;
+use proptest_config::config;
 
 /// Rec. 601 luma of an sRGB triple, unrounded.
 fn luma(rgb: [u8; 3]) -> f64 {

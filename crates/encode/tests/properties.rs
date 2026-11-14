@@ -13,24 +13,15 @@ use color::cmyk::cmyk_to_rgb;
 use color::{Cmyk8, DeviceN8, Gray8, Pixel, Rgb8};
 use hayro_ccitt::{DecodeSettings, DecoderContext, EncodeScheme, Encoder, EncodingMode};
 use proptest::prelude::*;
-use proptest::test_runner::Config;
 use raster::Bitmap;
 use rasterrocket_encode::{
     BLACK_BELOW, JpegOptions, TiffCompression, TiffImage, write_jpeg, write_pbm, write_pgm,
     write_png, write_ppm, write_tiff,
 };
 
-/// The runner configuration: `cases` cases, or `PROPTEST_CASES` when set.
-fn config(cases: u32) -> Config {
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(cases);
-    Config {
-        cases,
-        ..Config::default()
-    }
-}
+#[path = "../../../tests/support/proptest_config.rs"]
+mod proptest_config;
+use proptest_config::config;
 
 /// A bitmap's construction: size, row padding, padding fill, contents and
 /// alpha plane.
