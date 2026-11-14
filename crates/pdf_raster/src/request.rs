@@ -1,6 +1,7 @@
 //! Per-call parameters of a session render: scales, device-pixel window,
 //! backend override and cancellation.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -107,6 +108,11 @@ pub struct RenderParams {
     /// and alpha 0.  `false` (the default) composites the page onto white
     /// and returns an opaque bitmap without an alpha plane.
     pub transparent_background: bool,
+    /// Rows of each band of [`render_page_bands`](crate::render_page_bands);
+    /// `None` sizes the bands by the session's
+    /// [`band_bytes`](crate::SessionConfig::band_bytes).  Other entry
+    /// points render the page whole and ignore it.
+    pub band_rows: Option<NonZeroU32>,
 }
 
 impl RenderParams {
@@ -128,6 +134,7 @@ impl RenderParams {
             policy: None,
             cancel: None,
             transparent_background: false,
+            band_rows: None,
         }
     }
 
@@ -150,6 +157,13 @@ impl RenderParams {
     #[must_use]
     pub const fn with_transparent_background(mut self) -> Self {
         self.transparent_background = true;
+        self
+    }
+
+    /// Render bands of `rows` rows (see [`band_rows`](Self::band_rows)).
+    #[must_use]
+    pub const fn with_band_rows(mut self, rows: NonZeroU32) -> Self {
+        self.band_rows = Some(rows);
         self
     }
 
@@ -182,7 +196,9 @@ mod tests {
             .with_region(RenderRegion::new(1, 2, 3, 4))
             .with_policy(BackendPolicy::CpuOnly)
             .with_cancel(token)
-            .with_transparent_background();
+            .with_transparent_background()
+            .with_band_rows(NonZeroU32::new(7).unwrap());
+        assert_eq!(params.band_rows.map(NonZeroU32::get), Some(7));
         assert!((params.scale_x - 2.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 2.0).abs() < f64::EPSILON);
         assert_eq!(params.region, Some(RenderRegion::new(1, 2, 3, 4)));
@@ -191,6 +207,7 @@ mod tests {
         assert!(params.transparent_background);
         let params = RenderParams::new_xy(3.0, 1.5);
         assert!(!params.transparent_background);
+        assert_eq!(params.band_rows, None);
         assert!((params.scale_x - 3.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 1.5).abs() < f64::EPSILON);
     }

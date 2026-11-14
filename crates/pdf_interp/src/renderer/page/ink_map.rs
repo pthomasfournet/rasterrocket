@@ -148,6 +148,11 @@ impl InkMap {
 
     /// The spot colorants that found no slot and painted their alternate
     /// colour in process ink, in order of first sight.
+    pub(super) fn unslotted(&self) -> &[String] {
+        &self.unslotted
+    }
+
+    /// [`Self::unslotted`], taken.
     pub(super) fn into_unslotted(self) -> Vec<String> {
         self.unslotted
     }

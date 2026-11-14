@@ -33,6 +33,8 @@ pub struct RasterSession {
     /// The byte budget of a page or region bitmap
     /// ([`crate::SessionConfig::max_page_bytes`]).
     pub(crate) max_page_bytes: u64,
+    /// The bytes of a band ([`crate::SessionConfig::band_bytes`]).
+    pub(crate) band_bytes: u64,
     /// Fail a page on an image failure instead of skipping the image
     /// ([`crate::SessionConfig::strict`]).
     pub(crate) strict: bool,
@@ -554,6 +556,7 @@ fn open_session_with_doc(
         total_pages,
         policy: config.policy,
         max_page_bytes: config.max_page_bytes,
+        band_bytes: config.band_bytes,
         strict: config.strict,
         optional_content,
         annotations: config.annotations,

@@ -368,6 +368,13 @@ pub struct SessionConfig {
     /// killer when it is filled, so the budget is the bound a hostile page
     /// size meets.
     pub max_page_bytes: u64,
+    /// The bytes each band of [`render_page_bands`](crate::render_page_bands)
+    /// holds at most: its rows are this over the bytes of one row, and at
+    /// least one.
+    ///
+    /// Default [`DEFAULT_BAND_BYTES`](crate::DEFAULT_BAND_BYTES) (64 MiB).
+    /// The other entry points render pages whole and do not read it.
+    pub band_bytes: u64,
     /// The page boundary box (ISO 32000-2 §14.11.2) every page of the
     /// session is measured and rendered on.
     ///
@@ -437,6 +444,7 @@ impl SessionConfig {
             system_fonts: true,
             image_budget: crate::DOCUMENT_IMAGE_BUDGET_BYTES,
             max_page_bytes: crate::DEFAULT_MAX_PAGE_BYTES,
+            band_bytes: crate::DEFAULT_BAND_BYTES,
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             gpu_pages: false,

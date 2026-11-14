@@ -55,6 +55,7 @@
 //!   `raster::transparency` and composited back (PDF §11.6.6)
 
 mod annotations;
+mod band;
 mod canvas;
 mod device_blit;
 #[cfg(feature = "vulkan")]
@@ -87,6 +88,7 @@ mod type3;
 mod view;
 mod xobject;
 
+pub use band::PageState;
 use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "vulkan")]
 pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};

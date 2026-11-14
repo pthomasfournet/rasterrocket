@@ -255,7 +255,7 @@ fn page_group(
 }
 
 /// The error of a page bitmap the allocator refused.
-const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
+pub(crate) const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
     RasterError::PageAllocationFailed {
         width: e.width,
         height: e.height,
@@ -279,19 +279,8 @@ pub(crate) fn render_page_rgb_with_geom(
     params: &RenderParams,
     buffers: &mut CanvasBuffers,
 ) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
-    check_scale(params.scale_x)?;
-    check_scale(params.scale_y)?;
-    let effective_policy = params.policy.unwrap_or(session.policy);
-    if params
-        .cancel
-        .as_ref()
-        .is_some_and(crate::CancelToken::is_cancelled)
-    {
-        return Err(RasterError::Cancelled);
-    }
-
+    let effective_policy = begin(session, params)?;
     let doc = &session.doc;
-
     let view = page_view(
         &geom,
         (params.scale_x, params.scale_y),
@@ -299,36 +288,23 @@ pub(crate) fn render_page_rgb_with_geom(
         canvas_bytes_per_px(params.transparent_background),
         session.max_page_bytes,
     )?;
-
     let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);
     warn_unsupported(session, page_num, &unsupported_features);
-
-    let content = doc.page_content(page_id)?;
+    let content = page_content(session, page_id)?;
     let ops = pdf_interp::parse_page_content(doc, page_id, &content.bytes);
     let content_failures = content.failures;
-    if session.strict && !content_failures.is_empty() {
-        return Err(RasterError::ContentDecodeFailed(
-            content_failures.iter().map(ToString::to_string).collect(),
-        ));
-    }
 
     // The view carries the full-precision scales that also sized the page,
     // so the CTM's translation terms are consistent with the bitmap extent.
-    // Overprint is simulated on an ink canvas, chosen for a page on which
-    // some graphics state that is drawn sets it.
-    let ink =
-        session.overprint && pdf_interp::page_uses_overprint(doc, page_id, session.annotations);
-    let job = PageJob {
+    let job = PageJob::new(
         session,
         page_num,
         page_id,
-        view: &view,
-        ops: &ops,
-        group: page_group(doc, page_id, params.transparent_background),
-        ink,
+        &view,
+        &ops,
         params,
-        policy: effective_policy,
-    };
+        effective_policy,
+    );
     #[cfg(feature = "vulkan")]
     let (mut renderer, device_page) = crate::device_pages::render(&job, std::mem::take(buffers))?;
     #[cfg(not(feature = "vulkan"))]
@@ -336,39 +312,11 @@ pub(crate) fn render_page_rgb_with_geom(
 
     // A budget breach takes precedence over image failures: the page may not
     // have finished rendering at all.
-    match renderer.budget_status() {
-        None => {}
-        Some(pdf_interp::renderer::RenderAbort::Cancelled { .. }) => {
-            return Err(RasterError::Cancelled);
-        }
-        Some(&pdf_interp::renderer::RenderAbort::AllocationFailed { width, height }) => {
-            return Err(RasterError::PageAllocationFailed { width, height });
-        }
-        Some(reason) => return Err(RasterError::PageBudgetExceeded(reason.to_string())),
-    }
-
-    for failure in &content_failures {
-        if failure.partial {
-            log::warn!("page {page_num}: {failure}");
-        } else {
-            log::warn!("page {page_num}: skipped {failure}");
-        }
-    }
+    check_aborted(&renderer)?;
+    log_failures(page_num, &content_failures);
     renderer.record_content_failures(content_failures);
-
-    let failures = renderer.image_failures();
-    if session.strict && !failures.is_empty() {
-        return Err(RasterError::ImageDecodeFailed(
-            failures.iter().map(ToString::to_string).collect(),
-        ));
-    }
-    for failure in failures {
-        if failure.partial {
-            log::warn!("page {page_num}: {failure}");
-        } else {
-            log::warn!("page {page_num}: skipped {failure}");
-        }
-    }
+    check_strict_images(session, renderer.image_failures())?;
+    log_failures(page_num, renderer.image_failures());
 
     let (bitmap, mut diag, spare) = renderer
         .try_finish_keeping(params.transparent_background)
@@ -381,6 +329,99 @@ pub(crate) fn render_page_rgb_with_geom(
         diag.device_page = device_page;
     }
     Ok((bitmap, diag))
+}
+
+/// The error of a render that `renderer` stopped early: cancelled, out of
+/// memory, or over its operator budget or deadline.
+pub(crate) fn check_aborted(
+    renderer: &pdf_interp::renderer::PageRenderer<'_>,
+) -> Result<(), RasterError> {
+    match renderer.budget_status() {
+        None => Ok(()),
+        Some(pdf_interp::renderer::RenderAbort::Cancelled { .. }) => Err(RasterError::Cancelled),
+        Some(&pdf_interp::renderer::RenderAbort::AllocationFailed { width, height }) => {
+            Err(RasterError::PageAllocationFailed { width, height })
+        }
+        Some(reason) => Err(RasterError::PageBudgetExceeded(reason.to_string())),
+    }
+}
+
+/// [`RasterError::ImageDecodeFailed`] when the session is strict and any
+/// image of the page failed.
+pub(crate) fn check_strict_images(
+    session: &RasterSession,
+    failures: &[pdf_interp::renderer::ImageFailure],
+) -> Result<(), RasterError> {
+    if session.strict && !failures.is_empty() {
+        return Err(RasterError::ImageDecodeFailed(
+            failures.iter().map(ToString::to_string).collect(),
+        ));
+    }
+    Ok(())
+}
+
+/// Log each image or content stream of page `page_num` that was skipped or
+/// drawn in part.
+pub(crate) fn log_failures<F: PartialFailure>(page_num: u32, failures: &[F]) {
+    for failure in failures {
+        if failure.partial() {
+            log::warn!("page {page_num}: {failure}");
+        } else {
+            log::warn!("page {page_num}: skipped {failure}");
+        }
+    }
+}
+
+/// A failure that may have left part of its object drawn.
+pub(crate) trait PartialFailure: std::fmt::Display {
+    /// Whether the object was drawn from what decoded.
+    fn partial(&self) -> bool;
+}
+
+impl PartialFailure for pdf_interp::renderer::ImageFailure {
+    fn partial(&self) -> bool {
+        self.partial
+    }
+}
+
+impl PartialFailure for pdf_interp::renderer::ContentFailure {
+    fn partial(&self) -> bool {
+        self.partial
+    }
+}
+
+/// The checks every render makes before it parses the page: the scales
+/// and the cancellation token; returns the backend policy of its image
+/// decoders.
+pub(crate) fn begin(
+    session: &RasterSession,
+    params: &RenderParams,
+) -> Result<crate::BackendPolicy, RasterError> {
+    check_scale(params.scale_x)?;
+    check_scale(params.scale_y)?;
+    if params
+        .cancel
+        .as_ref()
+        .is_some_and(crate::CancelToken::is_cancelled)
+    {
+        return Err(RasterError::Cancelled);
+    }
+    Ok(params.policy.unwrap_or(session.policy))
+}
+
+/// The decoded content streams of page `page_id`, refused under a strict
+/// session when any failed to decode.
+pub(crate) fn page_content(
+    session: &RasterSession,
+    page_id: pdf::ObjectId,
+) -> Result<pdf::PageContent, RasterError> {
+    let content = session.doc.page_content(page_id)?;
+    if session.strict && !content.failures.is_empty() {
+        return Err(RasterError::ContentDecodeFailed(
+            content.failures.iter().map(ToString::to_string).collect(),
+        ));
+    }
+    Ok(content)
 }
 
 /// A page to render: its content, the view it is drawn in and how.
@@ -404,6 +445,34 @@ pub(crate) struct PageJob<'a> {
 }
 
 impl<'a> PageJob<'a> {
+    /// The job of drawing `ops`, the content of page `page_id`, in `view`
+    /// as `params` asks.  The page is painted on an ink canvas, which
+    /// simulates overprint, when the session simulates it and some
+    /// graphics state the page draws with sets it.
+    pub(crate) fn new(
+        session: &'a RasterSession,
+        page_num: u32,
+        page_id: pdf::ObjectId,
+        view: &'a pdf_interp::renderer::PageView,
+        ops: &'a [pdf_interp::content::Operator<'a>],
+        params: &'a RenderParams,
+        policy: crate::BackendPolicy,
+    ) -> Self {
+        let doc = &session.doc;
+        Self {
+            session,
+            page_num,
+            page_id,
+            view,
+            ops,
+            group: page_group(doc, page_id, params.transparent_background),
+            ink: session.overprint
+                && pdf_interp::page_uses_overprint(doc, page_id, session.annotations),
+            params,
+            policy,
+        }
+    }
+
     /// A renderer of the page, configured from the session, its bitmap
     /// built in `buffers`.
     pub(crate) fn renderer(
@@ -478,7 +547,7 @@ impl<'a> PageJob<'a> {
 
 /// Warn about the first page found to carry JavaScript and the first
 /// carrying a 3D or multimedia annotation, each once per session.
-fn warn_unsupported(
+pub(crate) fn warn_unsupported(
     session: &RasterSession,
     page_num: u32,
     features: &[pdf_interp::UnsupportedFeature],

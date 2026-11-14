@@ -27,6 +27,10 @@ pub const MAX_PX_SIDE: u32 = 1 << 24;
 /// page (2.7 GB) is refused before anything is allocated.
 pub const DEFAULT_MAX_PAGE_BYTES: u64 = 1_800_000_000;
 
+/// Default of [`SessionConfig::band_bytes`](crate::SessionConfig::band_bytes):
+/// 64 MiB, 1 412 rows of a 44-inch-wide page at 360 dpi in 8-bit RGB.
+pub const DEFAULT_BAND_BYTES: u64 = 64 << 20;
+
 /// Reject a `width × height` picture of `bytes_per_px` bytes per pixel
 /// whose side exceeds [`MAX_PX_SIDE`] or whose size exceeds `max_bytes`.
 ///
