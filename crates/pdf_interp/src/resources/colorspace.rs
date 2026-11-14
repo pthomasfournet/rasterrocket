@@ -235,6 +235,32 @@ impl ColorSpace {
         }
     }
 
+    /// A bound on the work of [`process_ink`](Self::process_ink) of one
+    /// colour of the space, in the units of
+    /// [`conversion_cost`](Self::conversion_cost): for a four-component
+    /// ICC space, the conversion and the solve for the reproducing inks
+    /// ([`color::cmyk::INK_REPRODUCING_COST`]); for a `Separation` or
+    /// `DeviceN` space, the tint transform's cost plus the process-ink cost
+    /// of the alternate space; the conversion cost for any other.
+    #[must_use]
+    pub(crate) fn process_ink_cost(&self) -> u64 {
+        match self {
+            Self::IccBased { n: 4, .. } => {
+                color::cmyk::INK_REPRODUCING_COST.saturating_add(self.conversion_cost())
+            }
+            Self::Separation {
+                tint, alternate, ..
+            }
+            | Self::DeviceN {
+                tint, alternate, ..
+            } => tint
+                .as_ref()
+                .map_or(0, TintTransform::cost)
+                .saturating_add(alternate.process_ink_cost()),
+            _ => self.conversion_cost(),
+        }
+    }
+
     /// Whether the space is a process CMYK space — `DeviceCMYK` or a
     /// four-component ICC space — whose components are the inks of a CMYK
     /// device.
@@ -296,6 +322,19 @@ impl ColorSpace {
     /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.
     #[must_use]
     pub(crate) fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
+        self.process_ink_with(doc, comps, &mut color::cmyk::ink_reproducing)
+    }
+
+    /// [`process_ink`](Self::process_ink) with the inks reproducing the
+    /// sRGB colour of a four-component ICC colour from its components
+    /// found by `reproduce`, which returns what
+    /// [`color::cmyk::ink_reproducing`] does for the same arguments.
+    pub(crate) fn process_ink_with(
+        &self,
+        doc: &Document,
+        comps: &[f64],
+        reproduce: &mut dyn FnMut([u8; 3], [f64; 4]) -> [u8; 4],
+    ) -> [u8; 4] {
         match self {
             Self::DeviceCmyk => {
                 if let &[c, m, y, k] = comps {
@@ -304,10 +343,7 @@ impl ColorSpace {
             }
             Self::IccBased { n: 4, .. } => {
                 if let &[c, m, y, k] = comps {
-                    return color::cmyk::ink_reproducing(
-                        self.convert_to_rgb(doc, comps),
-                        [c, m, y, k],
-                    );
+                    return reproduce(self.convert_to_rgb(doc, comps), [c, m, y, k]);
                 }
             }
             Self::Separation {
@@ -321,7 +357,7 @@ impl ColorSpace {
                 ..
             } if comps.len() == self.ncomponents() => {
                 if let Some(alt) = tint.alternate_components(alternate, comps) {
-                    return alternate.process_ink(doc, &alt);
+                    return alternate.process_ink_with(doc, &alt, reproduce);
                 }
             }
             _ => {}
@@ -1399,6 +1435,29 @@ mod tests {
             lookup: None,
         };
         assert_eq!(indexed.conversion_cost(), 2 * teal.cost() + 1);
+    }
+
+    /// The process ink of a four-component ICC colour solves for the inks
+    /// reproducing it, which its process-ink cost counts, through a tint
+    /// space's alternate as well; a device space's is its conversion's.
+    #[test]
+    fn process_ink_cost_counts_the_reproducing_solve() {
+        let doc = devicen_teal_doc();
+        let teal = TintTransform::load(&doc, &Object::Reference((4, 0)));
+        let icc = ColorSpace::IccBased {
+            n: 4,
+            stream_id: None,
+        };
+        let solve = color::cmyk::INK_REPRODUCING_COST + icc.conversion_cost();
+        assert_eq!(icc.process_ink_cost(), solve);
+        let dn = ColorSpace::DeviceN {
+            colorants: spots(2),
+            alternate: Box::new(icc),
+            tint: Some(teal.clone()),
+        };
+        assert_eq!(dn.conversion_cost(), teal.cost() + 1);
+        assert_eq!(dn.process_ink_cost(), teal.cost() + solve);
+        assert_eq!(ColorSpace::DeviceCmyk.process_ink_cost(), 1);
     }
 
     #[test]

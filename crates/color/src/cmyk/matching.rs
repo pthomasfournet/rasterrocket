@@ -22,6 +22,14 @@ const MAX_STEPS: usize = 40;
 /// Halvings of a step in the line search.
 const HALVINGS: usize = 10;
 
+/// A bound on the evaluations of the process-ink model one
+/// [`ink_reproducing`] performs.
+///
+/// Each evaluation is about the work of one colour conversion: the test of
+/// the given inks and their cost, then per step the model, the two ends of
+/// each ink's Jacobian column and every candidate of the line search.
+pub const INK_REPRODUCING_COST: u64 = (2 + MAX_STEPS * (1 + 2 * 4 + HALVINGS)) as u64;
+
 /// Weight of the pull of each ink toward its given amount, in squared
 /// colour counts per squared unit of ink: a change of one byte of ink
 /// weighs as 1/255 of a squared count, so the colour decides and the pull

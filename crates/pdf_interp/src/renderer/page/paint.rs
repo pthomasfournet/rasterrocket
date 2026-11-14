@@ -153,7 +153,7 @@ impl PageRenderer<'_> {
                     let rgb = cs.convert_to_rgb(doc, comps);
                     let cmyk = [c, m, y, k];
                     if self.canvas.kind() == CanvasKind::Ink {
-                        let ink = color::cmyk::ink_reproducing(rgb, cmyk);
+                        let ink = self.ink_map.borrow_mut().ink_reproducing(rgb, cmyk);
                         RasterColor::with_process_ink_of(rgb, cmyk, ink)
                     } else {
                         RasterColor::with_process_inks(rgb, cmyk)

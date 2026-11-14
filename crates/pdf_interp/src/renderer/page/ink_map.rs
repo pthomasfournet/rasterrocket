@@ -12,6 +12,7 @@
 //! carries a [`SpotLut`], the process equivalent of every tint of its spot,
 //! through which the finished canvas converts to sRGB.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use color::cmyk::SpotLut;
@@ -29,6 +30,10 @@ const SLOTS: usize = 4;
 /// The channel of spot slot 0; slot `s` is channel `SPOT_CHANNEL + s`.
 const SPOT_CHANNEL: usize = 4;
 
+/// The reproducing inks a page keeps at most; further colours are solved
+/// each time they are met.
+const REPRODUCED_MAX: usize = 4096;
+
 /// The spot colorants of a page, each with its slot and its process
 /// equivalent.
 #[derive(Default)]
@@ -38,6 +43,31 @@ pub(super) struct InkMap {
     /// The distinct spot colorants that found no slot, in order of first
     /// sight.
     unslotted: Vec<String>,
+    /// The inks reproducing each sRGB colour from the given inks already
+    /// solved on the page (see [`Self::ink_reproducing`]).
+    reproduced: Reproduced,
+}
+
+/// The results of [`color::cmyk::ink_reproducing`], keyed by its arguments:
+/// the sRGB colour and the bits of the given inks.  At most
+/// [`REPRODUCED_MAX`] entries.
+#[derive(Default)]
+struct Reproduced(HashMap<([u8; 3], [u64; 4]), [u8; 4]>);
+
+impl Reproduced {
+    /// [`color::cmyk::ink_reproducing`] of `rgb` from `given`, solved once
+    /// per distinct pair while the table has room.
+    fn get(&mut self, rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
+        let key = (rgb, given.map(f64::to_bits));
+        if let Some(&ink) = self.0.get(&key) {
+            return ink;
+        }
+        let ink = color::cmyk::ink_reproducing(rgb, given);
+        if self.0.len() < REPRODUCED_MAX {
+            let _ = self.0.insert(key, ink);
+        }
+        ink
+    }
 }
 
 /// A spot colorant holding a slot.
@@ -61,9 +91,10 @@ impl InkMap {
         if self.slots.len() == SLOTS {
             return None;
         }
+        let lut = Box::new(spot_lut(doc, name, space, &mut self.reproduced));
         self.slots.push(Slot {
             name: Arc::from(name),
-            lut: Box::new(spot_lut(doc, name, space)),
+            lut,
         });
         Some(self.slots.len() - 1)
     }
@@ -121,6 +152,14 @@ impl InkMap {
         self.unslotted
     }
 
+    /// The process inks printing the sRGB colour `rgb` of the
+    /// four-component ICC colour `given` (see
+    /// [`color::cmyk::ink_reproducing`]), solved once per page for each
+    /// distinct colour.
+    pub(super) fn ink_reproducing(&mut self, rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
+        self.reproduced.get(rgb, given)
+    }
+
     /// The process-equivalent table of each slot, `None` for a free slot.
     pub(super) fn luts(&self) -> [Option<&SpotLut>; SLOTS] {
         std::array::from_fn(|s| self.slots.get(s).map(|slot| &*slot.lut))
@@ -141,7 +180,8 @@ impl InkMap {
     ) -> ([u8; 8], ChannelMask) {
         let process_fallback = |map: &mut Self| {
             map.report_overflow(space);
-            let [c, m, y, k] = space.process_ink(doc, comps);
+            let [c, m, y, k] = space
+                .process_ink_with(doc, comps, &mut |rgb, given| map.reproduced.get(rgb, given));
             ([c, m, y, k, 0, 0, 0, 0], PROCESS_CHANNELS)
         };
         if !self.fits(space) {
@@ -201,10 +241,15 @@ impl InkMap {
 
 /// The process ink of each tint of the spot colorant `name` of `space`,
 /// alone — every other component of `space` at 0 — through the space's
-/// tint transform and alternate space ([`ColorSpace::process_ink`]).
-/// `name` is a spot colorant of `space`; the first component converts
-/// otherwise.
-fn spot_lut(doc: &Document, name: &[u8], space: &ColorSpace) -> SpotLut {
+/// tint transform and alternate space ([`ColorSpace::process_ink`]), the
+/// inks reproducing an ICC colour taken from `reproduced`.  `name` is a
+/// spot colorant of `space`; the first component converts otherwise.
+fn spot_lut(
+    doc: &Document,
+    name: &[u8],
+    space: &ColorSpace,
+    reproduced: &mut Reproduced,
+) -> SpotLut {
     let component = space
         .colorants()
         .iter()
@@ -221,7 +266,7 @@ fn spot_lut(doc: &Document, name: &[u8], space: &ColorSpace) -> SpotLut {
         if let Some(c) = comps.get_mut(component) {
             *c = f64::from(tint) / 255.0;
         }
-        *entry = space.process_ink(doc, &comps);
+        *entry = space.process_ink_with(doc, &comps, &mut |rgb, given| reproduced.get(rgb, given));
     }
     lut
 }
@@ -248,6 +293,20 @@ mod tests {
                  << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>]"
             ),
         )
+    }
+
+    /// The page's reproducing inks are those the solver gives, kept once
+    /// per distinct colour and given inks.
+    #[test]
+    fn ink_reproducing_is_solved_once_per_colour() {
+        let mut map = InkMap::default();
+        let given = [0.2, 0.0, 0.7, 0.1];
+        let want = color::cmyk::ink_reproducing([90, 140, 60], given);
+        assert_eq!(map.ink_reproducing([90, 140, 60], given), want);
+        assert_eq!(map.ink_reproducing([90, 140, 60], given), want);
+        assert_eq!(map.reproduced.0.len(), 1);
+        let _ = map.ink_reproducing([90, 140, 61], given);
+        assert_eq!(map.reproduced.0.len(), 2);
     }
 
     #[test]
@@ -289,7 +348,12 @@ mod tests {
     #[test]
     fn spot_lut_is_the_process_ink_of_each_tint() {
         let doc = empty_doc();
-        let lut = spot_lut(&doc, b"Teal", &separation(&doc, "Teal", "1 0 0.5 0"));
+        let lut = spot_lut(
+            &doc,
+            b"Teal",
+            &separation(&doc, "Teal", "1 0 0.5 0"),
+            &mut Reproduced::default(),
+        );
         assert_eq!(lut[0], [0, 0, 0, 0]);
         assert_eq!(lut[255], [255, 0, 128, 0]);
         assert_eq!(lut[51], [51, 0, 26, 0]);
@@ -305,7 +369,7 @@ mod tests {
             ),
         )]);
         let dn = space(&doc, "[/DeviceN [/Black /Teal] /DeviceCMYK 4 0 R]");
-        let lut = spot_lut(&doc, b"Teal", &dn);
+        let lut = spot_lut(&doc, b"Teal", &dn, &mut Reproduced::default());
         assert_eq!(lut[255], [0, 255, 255, 0]);
         assert_eq!(lut[0], [0, 0, 0, 0]);
         assert_eq!(lut[102], [0, 102, 102, 0]);
@@ -408,7 +472,7 @@ mod tests {
     fn spot_lut_degrades_when_the_tint_transform_fails() {
         let doc = empty_doc();
         let broken = space(&doc, "[/Separation /Spot /DeviceCMYK 999 0 R]");
-        let lut = spot_lut(&doc, b"Spot", &broken);
+        let lut = spot_lut(&doc, b"Spot", &broken, &mut Reproduced::default());
         assert_eq!(lut[0], [0; 4]);
         assert_eq!(lut[255][3], 255);
         assert!(
