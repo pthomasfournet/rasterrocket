@@ -6,7 +6,7 @@
 
 use std::f64::consts::PI;
 
-use crate::path::{Path, PathBuilder};
+use crate::path::{Path, PathBuilder, PathPoint};
 use crate::types::{BEZIER_CIRCLE, LineCap, LineJoin};
 
 // ── Local constants ───────────────────────────────────────────────────────────
@@ -322,6 +322,9 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
     let mut left_first: usize = 0;
     let mut right_first: usize = 0;
     let mut first_pt: usize = 0;
+    // The inner corner the current segment starts at, when its joint with
+    // the previous segment is trimmed (see `inner_corner`).
+    let mut start_corner: Option<PathPoint> = None;
 
     // i0: start of this logical segment (may skip degenerate coincident points).
     // i1: actual start point (last of the run of coincident points starting at i0).
@@ -335,6 +338,11 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
             subpath_start1 = i1;
             seg = 0;
             closed = path.flags[i0].is_closed();
+            start_corner = if closed && !params.stroke_adjust {
+                closing_corner(path, i0, w)
+            } else {
+                None
+            };
         }
 
         // j0: the next point after i1 (the far end of the current segment).
@@ -385,6 +393,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
             i0 = j0;
             i1 = j1;
             seg += 1;
+            start_corner = None;
             continue;
         }
         let d = 1.0 / seg_dist;
@@ -392,13 +401,38 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
         let dy = d * (path.pts[j0].y - path.pts[i1].y);
         let wdx = 0.5 * w * dx;
         let wdy = 0.5 * w * dy;
+        let vertex = path.pts[j0];
+        // The inner corner of the joint at the segment's end, when trimmed.
+        let end_corner = if (last && !closed) || params.stroke_adjust {
+            None
+        } else {
+            let next = path.pts[k0];
+            let next_dist = distance(path.pts[j1].x, path.pts[j1].y, next.x, next.y);
+            (next_dist > 0.0)
+                .then(|| {
+                    let dn = 1.0 / next_dist;
+                    let d_next = (
+                        dn * (next.x - path.pts[j1].x),
+                        dn * (next.y - path.pts[j1].y),
+                    );
+                    inner_corner(vertex, (dx, dy), seg_dist, d_next, next_dist, w)
+                })
+                .flatten()
+        };
+        // Whether a corner lies on the side `+n = (−wdy, wdx)` of the segment.
+        let on_plus = |corner: PathPoint, at: PathPoint| {
+            (corner.y - at.y).mul_add(wdx, -((corner.x - at.x) * wdy)) > 0.0
+        };
 
         // ── Draw the start cap ────────────────────────────────────────────────
-        // moveTo left side of segment start.
-        if out
-            .move_to(path.pts[i0].x - wdy, path.pts[i0].y + wdx)
-            .is_err()
-        {
+        // moveTo left side of segment start, or the trimmed inner corner.
+        let origin = path.pts[i0];
+        let trimmed_start = start_corner.filter(|_| !first || closed);
+        let start = match trimmed_start {
+            Some(corner) if on_plus(corner, origin) => corner,
+            _ => PathPoint::new(origin.x - wdy, origin.y + wdx),
+        };
+        if out.move_to(start.x, start.y).is_err() {
             break;
         }
         if i0 == subpath_start0 {
@@ -435,6 +469,14 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                     let _ = out.line_to(path.pts[i0].x + wdy, path.pts[i0].y - wdx);
                 }
             }
+        } else if let Some(corner) = trimmed_start {
+            // A trimmed joint: through the vertex to the inner corner.
+            let _ = out.line_to(origin.x, origin.y);
+            if on_plus(corner, origin) {
+                let _ = out.line_to(origin.x + wdy, origin.y - wdx);
+            } else {
+                let _ = out.line_to(corner.x, corner.y);
+            }
         } else {
             // Continuation: just close off the left side.
             let _ = out.line_to(path.pts[i0].x + wdy, path.pts[i0].y - wdx);
@@ -442,7 +484,14 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
 
         // ── Draw the left side of the stroke rectangle ────────────────────────
         let left2 = out.pts_len() - 1;
-        let _ = out.line_to(path.pts[j0].x + wdy, path.pts[j0].y - wdx);
+        match end_corner {
+            Some(corner) if !on_plus(corner, vertex) => {
+                let _ = out.line_to(corner.x, corner.y);
+            }
+            _ => {
+                let _ = out.line_to(path.pts[j0].x + wdy, path.pts[j0].y - wdx);
+            }
+        }
 
         // ── Draw the end cap ──────────────────────────────────────────────────
         if last && !closed {
@@ -474,9 +523,18 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                     let _ = out.line_to(path.pts[j0].x - wdy, path.pts[j0].y + wdx);
                 }
             }
+        } else if let Some(corner) = end_corner {
+            // A trimmed joint: through the vertex from the inner corner.
+            let _ = out.line_to(vertex.x, vertex.y);
+            if on_plus(corner, vertex) {
+                let _ = out.line_to(corner.x, corner.y);
+            } else {
+                let _ = out.line_to(vertex.x - wdy, vertex.y + wdx);
+            }
         } else {
             let _ = out.line_to(path.pts[j0].x - wdy, path.pts[j0].y + wdx);
         }
+        start_corner = end_corner;
 
         // ── Close the segment rectangle ───────────────────────────────────────
         let right2 = out.pts_len() - 1;
@@ -760,6 +818,85 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// The inner corner of the joint at `vertex` of a segment of direction
+/// `dir` and length `len` with the next, of direction `dir_next` and length
+/// `len_next`, for a stroke `width` wide: where the two inner sides meet.
+///
+/// The two segments' pieces then end at the corner and the vertex instead
+/// of overlapping on the inner side, and share the edge between them in
+/// opposite directions, so no pixel's coverage counts the overlap twice.
+/// `None` when the segments are parallel or the corner lies further from
+/// `vertex` than half of either segment, where trimming both ends of a segment
+/// could make its sides cross.
+fn inner_corner(
+    vertex: PathPoint,
+    dir: (f64, f64),
+    len: f64,
+    dir_next: (f64, f64),
+    len_next: f64,
+    width: f64,
+) -> Option<PathPoint> {
+    let cross = dir.0.mul_add(dir_next.1, -(dir.1 * dir_next.0));
+    if cross == 0.0 || !cross.is_finite() {
+        return None;
+    }
+    // The inner side is `+n` when the path turns towards it.
+    let half = 0.5 * width;
+    let side = if cross < 0.0 { -half } else { half };
+    let inner = (-dir.1 * side, dir.0 * side);
+    let inner_next = (-dir_next.1 * side, dir_next.0 * side);
+    let denom = inner
+        .1
+        .mul_add(inner_next.1, inner.0.mul_add(inner_next.0, half * half));
+    if denom <= 1e-9 * half * half {
+        return None;
+    }
+    let scale = half * half / denom;
+    let offset = (
+        (inner.0 + inner_next.0) * scale,
+        (inner.1 + inner_next.1) * scale,
+    );
+    let along = offset.0.mul_add(dir.0, offset.1 * dir.1).abs();
+    let along_next = offset.0.mul_add(dir_next.0, offset.1 * dir_next.1).abs();
+    (along <= 0.5 * len && along_next <= 0.5 * len_next)
+        .then(|| PathPoint::new(vertex.x + offset.0, vertex.y + offset.1))
+}
+
+/// The inner corner (`inner_corner`) of the joint a closed subpath starting
+/// at point `start` makes there: between its last segment, which ends
+/// there, and its first.
+fn closing_corner(path: &Path, start: usize, width: f64) -> Option<PathPoint> {
+    let mut last = start;
+    while last + 1 < path.pts.len() && !path.flags[last].is_last() {
+        last += 1;
+    }
+    let first_end = advance_past_coincident(path, start) + 1;
+    let (origin, end) = (path.pts[start], path.pts[last]);
+    if last < 1
+        || first_end >= path.pts.len()
+        || first_end > last
+        || (origin.x, origin.y) != (end.x, end.y)
+    {
+        return None;
+    }
+    let before = path.pts[last - 1];
+    let (from, to) = (path.pts[first_end - 1], path.pts[first_end]);
+    let len = distance(before.x, before.y, end.x, end.y);
+    let len_next = distance(from.x, from.y, to.x, to.y);
+    if len <= 0.0 || len_next <= 0.0 {
+        return None;
+    }
+    let (inv, inv_next) = (1.0 / len, 1.0 / len_next);
+    inner_corner(
+        end,
+        (inv * (end.x - before.x), inv * (end.y - before.y)),
+        len,
+        (inv_next * (to.x - from.x), inv_next * (to.y - from.y)),
+        len_next,
+        width,
+    )
+}
 
 /// Advance `start` past any run of coincident points that share the same
 /// coordinates as `path.pts[start]`, up to (but not including) the first

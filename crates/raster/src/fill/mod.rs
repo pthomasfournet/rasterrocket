@@ -19,7 +19,7 @@
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::coverage::AreaRaster;
-use crate::path::{Path, PathBuilder};
+use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
 use crate::scanner::iter::ScanIterator;
@@ -297,53 +297,20 @@ fn area_fill<P: Pixel>(
 fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
     let mut lines = PathBuilder::new();
     let mut any = false;
-    // `(t, point)` of each end, `t` the position along the line.
-    let mut intervals: Vec<[(f64, (f64, f64)); 2]> = Vec::new();
+    let mut segs = Vec::new();
     for subpath in xpath
         .segs
         .chunk_by(|_, next| !next.flags.contains(XPathFlags::SUBPATH))
     {
-        let points = || subpath.iter().flat_map(|s| [(s.x0, s.y0), (s.x1, s.y1)]);
-        let by_coords =
-            |a: &(f64, f64), b: &(f64, f64)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1));
-        let (Some(lo), Some(hi)) = (points().min_by(by_coords), points().max_by(by_coords)) else {
+        segs.clear();
+        segs.extend(subpath.iter().map(|s| ((s.x0, s.y0), (s.x1, s.y1))));
+        let Some(intervals) = collinear::intervals(&segs) else {
             continue;
         };
-        let (dx, dy) = (hi.0 - lo.0, hi.1 - lo.1);
-        let extent = dx.hypot(dy);
-        if !(extent > 0.0 && extent.is_finite()) {
-            continue;
-        }
-        // Every point lies on the line through `lo` and `hi`.
-        let off_line = |p: (f64, f64)| dx.mul_add(p.1 - lo.1, -(dy * (p.0 - lo.0))).abs();
-        if points().any(|p| off_line(p) > 1e-9 * extent * extent) {
-            continue;
-        }
-        let along = |p: (f64, f64)| dx.mul_add(p.0 - lo.0, dy * (p.1 - lo.1));
-        intervals.clear();
-        intervals.extend(subpath.iter().map(|s| {
-            let (a, b) = ((s.x0, s.y0), (s.x1, s.y1));
-            let (ta, tb) = (along(a), along(b));
-            if ta <= tb {
-                [(ta, a), (tb, b)]
-            } else {
-                [(tb, b), (ta, a)]
-            }
-        }));
-        intervals.sort_by(|a, b| a[0].0.total_cmp(&b[0].0));
         let single = subpath.len() <= 2;
-        let mut merged = intervals[0];
-        for &next in &intervals[1..] {
-            if next[0].0 <= merged[1].0 {
-                if next[1].0 > merged[1].0 {
-                    merged[1] = next[1];
-                }
-                continue;
-            }
-            any |= add_line(&mut lines, merged[0].1, merged[1].1, single);
-            merged = next;
+        for [from, to] in intervals {
+            any |= add_line(&mut lines, from, to, single);
         }
-        any |= add_line(&mut lines, merged[0].1, merged[1].1, single);
     }
     if !any {
         return None;
@@ -692,7 +659,10 @@ mod tests {
         assert_eq!(at(8, 4) | at(8, 6), 0);
         let ink: f64 = out.iter().map(|&v| f64::from(v) / 255.0).sum();
         let diagonal = 10.0f64.hypot(3.0);
-        assert!((4.0f64.mul_add(ink, -12.0) - diagonal).abs() < 1.0, "ink {ink}");
+        assert!(
+            (4.0f64.mul_add(ink, -12.0) - diagonal).abs() < 1.0,
+            "ink {ink}"
+        );
 
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 16, 1, false);
         fill_area::<Rgb8>(

@@ -15,7 +15,7 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::fill::{aa_scanner, fill_area};
-use crate::path::Path;
+use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
 use crate::scanner::XPathScanner;
 use crate::types::{LineCap, LineJoin, floor_i32};
@@ -93,7 +93,77 @@ fn stroke_outline_path(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>
         return None;
     }
     let path = flattened_dashed(path, matrix, params)?;
-    Some(make_stroke_path(&path, params.line_width, params))
+    Some(outline_of(&path, params))
+}
+
+/// The outline of a stroke of the flattened `path`.
+///
+/// A subpath whose points lie on one line, such as one that runs out and
+/// back along itself, is stroked as the disjoint intervals of the line it
+/// covers, each an open line: its pieces would otherwise lie on top of one
+/// another, and the coverage of a pixel holding two coincident edges of
+/// one direction adds up twice.  An open subpath takes the line cap at the
+/// ends of its intervals, a closed one, which has no ends, a round cap
+/// under round joins and a butt cap otherwise.
+fn outline_of(path: &Path, params: &StrokeParams<'_>) -> Path {
+    let mut regular = Path::new();
+    let (mut open_lines, mut closed_lines) = (PathBuilder::new(), PathBuilder::new());
+    let mut segs = Vec::new();
+    let mut start = 0;
+    while start < path.pts.len() {
+        let mut end = start + 1;
+        while end < path.pts.len() && !path.flags[end].is_first() {
+            end += 1;
+        }
+        let closed = path.flags[start].is_closed();
+        segs.clear();
+        segs.extend(
+            path.pts[start..end]
+                .windows(2)
+                .map(|w| ((w[0].x, w[0].y), (w[1].x, w[1].y))),
+        );
+        if closed && let (Some(first), Some(last)) = (path.pts.get(start), path.pts.get(end - 1)) {
+            segs.push(((last.x, last.y), (first.x, first.y)));
+        }
+        match collinear::intervals(&segs) {
+            Some(intervals) => {
+                let lines = if closed {
+                    &mut closed_lines
+                } else {
+                    &mut open_lines
+                };
+                for [(x0, y0), (x1, y1)] in intervals {
+                    if lines.move_to(x0, y0).is_ok() {
+                        let _ = lines.line_to(x1, y1);
+                    }
+                }
+            }
+            None => regular.append(&path.subpath(start..end)),
+        }
+        start = end;
+    }
+    let mut outline = make_stroke_path(&regular, params.line_width, params);
+    outline.append(&make_stroke_path(
+        &open_lines.build(),
+        params.line_width,
+        params,
+    ));
+    let closed_cap = if params.line_join == LineJoin::Round {
+        LineCap::Round
+    } else {
+        LineCap::Butt
+    };
+    let closed_params = StrokeParams {
+        line_cap: closed_cap,
+        line_dash: params.line_dash,
+        ..*params
+    };
+    outline.append(&make_stroke_path(
+        &closed_lines.build(),
+        params.line_width,
+        &closed_params,
+    ));
+    outline
 }
 
 /// `path` flattened and dashed per `params`; `None` when nothing remains.
@@ -268,7 +338,7 @@ fn stroke_wide<P: Pixel>(
     matrix: &[f64; 6],
     params: &StrokeParams<'_>,
 ) {
-    let outline = make_stroke_path(path, params.line_width, params);
+    let outline = outline_of(path, params);
     fill_area::<P>(
         bitmap,
         clip,
@@ -699,5 +769,97 @@ mod tests {
             flat.pts.len() >= 2,
             "flattened curve should have at least 2 points"
         );
+    }
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::*;
+    use crate::bitmap::Bitmap;
+    use crate::path::PathBuilder;
+    use crate::pipe::PipeSrc;
+    use crate::testutil::simple_pipe;
+    use color::Rgb8;
+
+    /// The ink, in device pixels at scale 1, of an antialiased butt-capped
+    /// stroke `w` wide along `pts` (closed when `close`) drawn `scale`
+    /// times larger.
+    fn ink(pts: &[(f64, f64)], close: bool, w: f64, scale: u32, join: LineJoin) -> f64 {
+        let n = 64 * scale;
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(n, n, 4, false);
+        let mut b = PathBuilder::new();
+        b.move_to(pts[0].0, pts[0].1).unwrap();
+        for p in &pts[1..] {
+            b.line_to(p.0, p.1).unwrap();
+        }
+        if close {
+            b.close(false).unwrap();
+        }
+        let params = StrokeParams {
+            line_width: w,
+            line_cap: LineCap::Butt,
+            line_join: join,
+            miter_limit: 10.0,
+            flatness: 0.1,
+            stroke_adjust: false,
+            line_dash: &[],
+            line_dash_phase: 0.0,
+            vector_antialias: true,
+        };
+        let s = f64::from(scale);
+        let clip = Clip::new(0.0, 0.0, f64::from(n), f64::from(n), true);
+        let white = [255u8; 3];
+        stroke::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &b.build(),
+            &simple_pipe(),
+            &PipeSrc::Solid(&white),
+            &[s, 0.0, 0.0, s, 0.0, 0.0],
+            &params,
+        );
+        let total: f64 = (0..n)
+            .map(|y| {
+                bmp.row(y)
+                    .iter()
+                    .map(|p| f64::from(p.r) / 255.0)
+                    .sum::<f64>()
+            })
+            .sum();
+        total / (s * s)
+    }
+
+    /// A stroke to measure: name, points, closed, width.
+    type Case<'a> = (&'a str, &'a [(f64, f64)], bool, f64);
+
+    /// Joints and retraced lines cover the stroke's area once: the ink of
+    /// a stroke matches that of the same stroke drawn 16 times larger,
+    /// where a pixel holding two edges is 256 times smaller.
+    #[test]
+    fn strokes_cover_overlaps_once() {
+        let zigzag: Vec<(f64, f64)> = (0..12)
+            .map(|i| {
+                (
+                    4.7f64.mul_add(f64::from(i), 4.3),
+                    if i % 2 == 0 { 20.4 } else { 27.9 },
+                )
+            })
+            .collect();
+        let cases: [Case<'_>; 3] = [
+            (
+                "bend",
+                &[(5.3, 30.2), (30.1, 20.7), (55.4, 31.9)],
+                false,
+                1.5,
+            ),
+            ("zigzag", &zigzag, false, 1.0),
+            ("retraced", &[(5.0, 30.2), (58.0, 40.6)], true, 1.0),
+        ];
+        for (name, pts, close, w) in cases {
+            for join in [LineJoin::Miter, LineJoin::Bevel] {
+                let (one, fine) = (ink(pts, close, w, 1, join), ink(pts, close, w, 16, join));
+                assert!((one - fine).abs() < 0.1, "{name} {join:?}: {one} vs {fine}");
+            }
+        }
     }
 }

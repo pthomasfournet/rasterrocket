@@ -22,6 +22,7 @@
 //! underflow on an empty vector.
 
 pub(crate) mod adjust;
+pub(crate) mod collinear;
 pub(crate) mod flatten;
 
 use bitflags::bitflags;
@@ -285,6 +286,32 @@ impl Path {
         for p in &mut self.pts {
             p.x += dx;
             p.y += dy;
+        }
+    }
+
+    /// The points `range` of this path, which start a subpath and end one,
+    /// as a path of their own, with the stroke-adjust hints that lie
+    /// within them.
+    pub(crate) fn subpath(&self, range: std::ops::Range<usize>) -> Self {
+        let base = range.start;
+        let within = |i: usize| range.contains(&i);
+        Self {
+            pts: self.pts[range.clone()].to_vec(),
+            flags: self.flags[range.clone()].to_vec(),
+            hints: self
+                .hints
+                .iter()
+                .filter(|h| {
+                    within(h.ctrl0) && within(h.ctrl1) && within(h.first_pt) && within(h.last_pt)
+                })
+                .map(|h| StrokeAdjustHint {
+                    ctrl0: h.ctrl0 - base,
+                    ctrl1: h.ctrl1 - base,
+                    first_pt: h.first_pt - base,
+                    last_pt: h.last_pt - base,
+                })
+                .collect(),
+            cur_subpath: 0,
         }
     }
 
