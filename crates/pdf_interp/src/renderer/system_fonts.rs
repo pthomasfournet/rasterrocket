@@ -913,7 +913,8 @@ mod tests {
     }
 
     /// With a Japanese face installed, both serif and sans requests
-    /// resolve, and a serif request prefers a serif design.
+    /// resolve; a serif request prefers a serif design whenever one of the
+    /// installed Japanese faces is serif, and otherwise takes a sans one.
     #[test]
     fn installed_japanese_face_resolves_by_serif_class() {
         let sans = SubstituteStyle {
@@ -933,8 +934,20 @@ mod tests {
             return;
         };
         let (sans_face, serif_face) = (&library.faces()[sans_face], &library.faces()[serif_face]);
-        assert_ne!(sans_face.serif, Some(true), "{}", sans_face.family);
-        assert_ne!(serif_face.serif, Some(false), "{}", serif_face.family);
+        let serif_installed = library
+            .faces()
+            .iter()
+            .any(|f| f.covers(Script::Japanese) && f.serif == Some(true));
+        let sans_installed = library
+            .faces()
+            .iter()
+            .any(|f| f.covers(Script::Japanese) && f.serif == Some(false));
+        if sans_installed {
+            assert_ne!(sans_face.serif, Some(true), "{}", sans_face.family);
+        }
+        if serif_installed {
+            assert_ne!(serif_face.serif, Some(false), "{}", serif_face.family);
+        }
         let program = library.system_program(serif).expect("loads");
         assert_ne!(
             program.char_index(0x65E5),
