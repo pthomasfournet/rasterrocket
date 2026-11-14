@@ -11,8 +11,13 @@
 //! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
 //! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8` |
 //! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
-//! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8` (RGBA with an alpha plane), `Gray8`, bilevel from `Gray8` |
-//! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8` |
+//! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8` and `Rgb16` (RGBA with an alpha plane), `Gray8`, `Gray16`, bilevel from `Gray8` |
+//! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8`, `Rgb16`, `Gray16` |
+//!
+//! [`PnmWriter`] and [`PngWriter`] also write 16-bit images (`Rgb16`,
+//! `Gray16`): Netpbm of maxval 65535 and PNG of bit depth 16, samples
+//! most significant byte first; a TIFF stores them least significant
+//! byte first, as its `II` byte order declares.
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.

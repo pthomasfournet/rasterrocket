@@ -27,5 +27,5 @@ pub(crate) mod transfer;
 
 pub use mode::{NCOMPS, PixelMode};
 pub use pixel::{AnyColor, Cmyk8, DeviceN8, Gray8, Gray16, Pixel, Rgb8, Rgb16};
-pub use sample::{Sample, Wide};
+pub use sample::{Sample, SampleDepth, Wide};
 pub use transfer::TransferLut;

@@ -1,5 +1,7 @@
-//! Raster pages as a PDF: each page one 8-bit image, Flate-compressed,
-//! spanning a media box of the image's size at its resolution.
+//! Raster pages as a PDF: each page one 8- or 16-bit image,
+//! Flate-compressed, spanning a media box of the image's size at its
+//! resolution.  A file of 16-bit pages is PDF 1.5, the first version
+//! whose images take 16 bits per component.
 //!
 //! The file is written as it goes: a page's image, content stream and page
 //! object when the page is added, the page tree, catalogue and
@@ -14,7 +16,8 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::EncodeError;
-use crate::rows::{RowCount, RowImage, RowLayout};
+use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
+use color::SampleDepth;
 
 /// The largest byte offset a cross-reference entry's ten digits hold.
 const MAX_XREF_OFFSET: u64 = 9_999_999_999;
@@ -27,6 +30,7 @@ pub struct PdfPage {
     width: u32,
     height: u32,
     rgb: bool,
+    depth: SampleDepth,
     /// The page's width and height in points.
     size_pts: (f64, f64),
     data: PageData,
@@ -74,7 +78,8 @@ impl PageData {
 impl PdfPage {
     /// Compress `image`, a page at `dpi` (horizontal, vertical) pixels per
     /// inch: `DeviceRGB` for an RGB image, `DeviceGray` (0 black) for a
-    /// gray or bilevel one.
+    /// gray or bilevel one, of the image's depth (a bilevel image is 8-bit
+    /// gray).
     ///
     /// # Errors
     ///
@@ -83,6 +88,8 @@ impl PdfPage {
         let layout = match image {
             RowImage::Rgb(_) => RowLayout::Rgb,
             RowImage::Gray(_) | RowImage::Bilevel(_) => RowLayout::Gray,
+            RowImage::Rgb16(_) => RowLayout::Rgb16,
+            RowImage::Gray16(_) => RowLayout::Gray16,
         };
         let mut encoder = PdfPageEncoder::new(image.size(), layout, dpi, None)?;
         encoder.push(image)?;
@@ -111,7 +118,8 @@ pub struct PdfPageEncoder {
 
 impl PdfPageEncoder {
     /// An encoder of a `width × height` page image stored as `layout` (RGB
-    /// or gray) at `dpi` (horizontal, vertical) pixels per inch, compressed
+    /// or gray, of 8 or 16 bits) at `dpi` (horizontal, vertical) pixels per
+    /// inch, compressed
     /// into `spill` from its start when given (an empty file of the
     /// caller's) and into memory otherwise.
     ///
@@ -119,7 +127,7 @@ impl PdfPageEncoder {
     ///
     /// [`EncodeError::InvalidInput`] for an empty image, a resolution that
     /// is not positive and finite, a page side under 0.001 point, or a
-    /// layout other than RGB and gray.
+    /// layout other than RGB and gray (alpha and bilevel layouts).
     pub fn new(
         (width, height): (u32, u32),
         layout: RowLayout,
@@ -131,9 +139,12 @@ impl PdfPageEncoder {
                 "zero-width or zero-height bitmap: a PDF page cannot hold an empty image",
             )
         })?;
-        if !matches!(layout, RowLayout::Rgb | RowLayout::Gray) {
+        if !matches!(
+            layout,
+            RowLayout::Rgb | RowLayout::Gray | RowLayout::Rgb16 | RowLayout::Gray16
+        ) {
             return Err(EncodeError::InvalidInput(
-                "a PDF page image is 8-bit RGB or gray",
+                "a PDF page image is RGB or gray, of 8 or 16 bits",
             ));
         }
         if !(dpi.0.is_finite() && dpi.1.is_finite() && dpi.0 > 0.0 && dpi.1 > 0.0) {
@@ -184,7 +195,7 @@ impl PdfPageEncoder {
         self.rows.take(&band, self.layout)?;
         for y in 0..band.size().1 {
             self.row.clear();
-            band.row(y, self.layout, &mut self.row);
+            band.row(y, self.layout, ByteOrder::Big, &mut self.row);
             match &mut self.sink {
                 Compressing::Memory(z) => z.write_all(&self.row)?,
                 Compressing::Spill(z) => z.write_all(&self.row)?,
@@ -216,7 +227,12 @@ impl PdfPageEncoder {
         Ok(PdfPage {
             width: self.width,
             height: self.height,
-            rgb: self.layout == RowLayout::Rgb,
+            rgb: matches!(self.layout, RowLayout::Rgb | RowLayout::Rgb16),
+            depth: if self.layout.bits_per_sample() == 16 {
+                SampleDepth::Sixteen
+            } else {
+                SampleDepth::Eight
+            },
             size_pts: self.size_pts,
             data,
         })
@@ -231,22 +247,32 @@ pub struct PdfWriter<W: Write> {
     offsets: Vec<u64>,
     /// The page objects.
     pages: Vec<usize>,
+    /// The deepest page image the file's version admits.
+    depth: SampleDepth,
 }
 
 impl<W: Write> PdfWriter<W> {
-    /// Begin a PDF on `out`: write its header.
+    /// Begin a PDF on `out` whose page images are at most `depth` deep:
+    /// write its header, of PDF 1.4 for 8-bit pages and of PDF 1.5 for
+    /// 16-bit ones.
     ///
     /// # Errors
     ///
     /// [`EncodeError::Io`] on a write failure.
-    pub fn new(out: W) -> Result<Self, EncodeError> {
+    pub fn new(out: W, depth: SampleDepth) -> Result<Self, EncodeError> {
         let mut out = Counting { out, written: 0 };
-        out.write_all(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")?;
+        let version: &[u8] = match depth {
+            SampleDepth::Eight => b"%PDF-1.4",
+            SampleDepth::Sixteen => b"%PDF-1.5",
+        };
+        out.write_all(version)?;
+        out.write_all(b"\n%\xE2\xE3\xCF\xD3\n")?;
         Ok(Self {
             out,
             // The catalogue and the page tree, placed when written.
             offsets: vec![0, 0],
             pages: Vec::new(),
+            depth,
         })
     }
 
@@ -254,8 +280,14 @@ impl<W: Write> PdfWriter<W> {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::Io`] on a write failure.
+    /// [`EncodeError::InvalidInput`] for a 16-bit page in a writer made for
+    /// 8-bit pages; [`EncodeError::Io`] on a write failure.
     pub fn write_page(&mut self, page: &PdfPage) -> Result<(), EncodeError> {
+        if page.depth == SampleDepth::Sixteen && self.depth == SampleDepth::Eight {
+            return Err(EncodeError::InvalidInput(
+                "a 16-bit page image needs a PDF 1.5 file: make the writer for 16-bit pages",
+            ));
+        }
         let image = self.offsets.len() + 1;
         let (w, h) = (fmt_num(page.size_pts.0), fmt_num(page.size_pts.1));
 
@@ -263,10 +295,11 @@ impl<W: Write> PdfWriter<W> {
         write!(
             self.out,
             "<</Type/XObject/Subtype/Image/Width {}/Height {}/ColorSpace/{}\
-             /BitsPerComponent 8/Filter/FlateDecode/Length {}>>\nstream\n",
+             /BitsPerComponent {}/Filter/FlateDecode/Length {}>>\nstream\n",
             page.width,
             page.height,
             if page.rgb { "DeviceRGB" } else { "DeviceGray" },
+            page.depth.bits(),
             page.data.len()
         )?;
         page.data.copy_to(&mut self.out)?;
@@ -355,6 +388,7 @@ impl std::fmt::Debug for PdfPage {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("rgb", &self.rgb)
+            .field("depth", &self.depth)
             .field("size_pts", &self.size_pts)
             .field("data_bytes", &self.data.len())
             .finish()
@@ -391,7 +425,7 @@ impl<W: Write> Write for Counting<W> {
 mod tests {
     use std::io::Read;
 
-    use color::{Gray8, Rgb8};
+    use color::{Gray8, Rgb8, SampleDepth};
     use flate2::read::ZlibDecoder;
     use raster::Bitmap;
 
@@ -423,7 +457,7 @@ mod tests {
         // Letter at 100 dpi.
         let bmp = gray(850, 1100, |x, y| u8::try_from((x + y) % 256).unwrap());
         let page = PdfPage::encode(RowImage::Gray(&bmp), (100.0, 100.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new()).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
         writer.write_page(&page).unwrap();
         let pdf = writer.finish().unwrap();
         let text = String::from_utf8_lossy(&pdf);
@@ -446,7 +480,7 @@ mod tests {
         let mut rgb: Bitmap<Rgb8> = Bitmap::new(3, 2, 4, false);
         rgb.row_bytes_mut(1)[..9].copy_from_slice(&[9; 9]);
         let page = PdfPage::encode(RowImage::Rgb(&rgb), (72.0, 144.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new()).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
         writer.write_page(&page).unwrap();
         writer.write_page(&page).unwrap();
         let pdf = writer.finish().unwrap();
@@ -484,14 +518,19 @@ mod tests {
     #[test]
     fn offsets_past_ten_digits_are_refused() {
         let page = PdfPage::encode(RowImage::Gray(&gray(1, 1, |_, _| 0)), (72.0, 72.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new()).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
         writer.out.written = super::MAX_XREF_OFFSET + 1;
         assert!(writer.write_page(&page).is_err());
     }
 
     #[test]
     fn empty_documents_images_and_resolutions_are_refused() {
-        assert!(PdfWriter::new(Vec::new()).unwrap().finish().is_err());
+        assert!(
+            PdfWriter::new(Vec::new(), SampleDepth::Eight)
+                .unwrap()
+                .finish()
+                .is_err()
+        );
         let empty: Bitmap<Gray8> = Bitmap::new(0, 4, 4, false);
         assert!(PdfPage::encode(RowImage::Gray(&empty), (300.0, 300.0)).is_err());
         let bmp = gray(2, 2, |_, _| 0);

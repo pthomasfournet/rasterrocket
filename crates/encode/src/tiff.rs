@@ -16,7 +16,7 @@ use std::num::NonZeroU32;
 use hayro_ccitt::{EncodeScheme, Encoder};
 
 use crate::EncodeError;
-use crate::rows::{RowCount, RowImage, RowLayout};
+use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 
 /// The compression of a TIFF's strips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +84,9 @@ const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
         RowLayout::Rgb => (3, 8, PHOTOMETRIC_RGB),
         RowLayout::Gray => (1, 8, PHOTOMETRIC_BLACK_IS_ZERO),
         RowLayout::Bilevel => (1, 1, PHOTOMETRIC_WHITE_IS_ZERO),
+        RowLayout::Rgba16 => (4, 16, PHOTOMETRIC_RGB),
+        RowLayout::Rgb16 => (3, 16, PHOTOMETRIC_RGB),
+        RowLayout::Gray16 => (1, 16, PHOTOMETRIC_BLACK_IS_ZERO),
     }
 }
 
@@ -351,7 +354,7 @@ impl TiffPageEncoder {
     pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
         self.rows.take(&band, self.layout)?;
         for y in 0..band.size().1 {
-            band.row(y, self.layout, &mut self.raw);
+            band.row(y, self.layout, ByteOrder::Little, &mut self.raw);
             if let Some(fax) = &mut self.fax {
                 fax.encode_packed_row(&self.raw);
                 self.raw.clear();
@@ -950,7 +953,8 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::{
-        RowImage, RowLayout, TiffCompression, TiffPage, TiffWriter, pack_bits, write_tiff,
+        ByteOrder, RowImage, RowLayout, TiffCompression, TiffPage, TiffWriter, pack_bits,
+        write_tiff,
     };
     use crate::EncodeError;
 
@@ -1114,7 +1118,7 @@ mod tests {
     fn packed(g: &Bitmap<Gray8>) -> Vec<u8> {
         let mut rows = Vec::new();
         for y in 0..g.height {
-            RowImage::Bilevel(g).row(y, RowLayout::Bilevel, &mut rows);
+            RowImage::Bilevel(g).row(y, RowLayout::Bilevel, ByteOrder::Little, &mut rows);
         }
         rows
     }

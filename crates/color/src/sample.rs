@@ -16,6 +16,36 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::convert::{div255, gray_to_u8, lerp_u8};
 
+/// The bits of a sample: the depth of a pixel type or of a render.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SampleDepth {
+    /// 8 bits, [`u8`] samples.
+    #[default]
+    Eight,
+    /// 16 bits, [`u16`] samples.
+    Sixteen,
+}
+
+impl SampleDepth {
+    /// Bits per sample.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        match self {
+            Self::Eight => 8,
+            Self::Sixteen => 16,
+        }
+    }
+
+    /// Bytes per sample.
+    #[must_use]
+    pub const fn bytes(self) -> u32 {
+        match self {
+            Self::Eight => 1,
+            Self::Sixteen => 2,
+        }
+    }
+}
+
 /// The unsigned integer type products of samples are formed in.
 pub trait Wide:
     Copy
@@ -77,6 +107,8 @@ pub trait Sample:
     const MAX: Self;
     /// Bits per sample.
     const BITS: u32;
+    /// The depth of this sample type.
+    const DEPTH: SampleDepth;
     /// The scale of the interpolation weight of [`Self::lerp`]:
     /// `2^BITS`.
     const LERP_ONE: u32;
@@ -165,6 +197,7 @@ static IDENTITY_U16: [u16; 65_536] = {
 impl Sample for u8 {
     const MAX: Self = Self::MAX;
     const BITS: u32 = 8;
+    const DEPTH: SampleDepth = SampleDepth::Eight;
     const LERP_ONE: u32 = 256;
     type Wide = u32;
     type Table = [Self; 256];
@@ -249,6 +282,7 @@ impl Sample for u8 {
 impl Sample for u16 {
     const MAX: Self = Self::MAX;
     const BITS: u32 = 16;
+    const DEPTH: SampleDepth = SampleDepth::Sixteen;
     const LERP_ONE: u32 = 1 << 16;
     type Wide = u64;
     type Table = [Self; 65_536];

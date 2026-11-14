@@ -270,7 +270,10 @@ impl Spool {
                 format!("cannot create a spool file in {}: {e}", dir.display()),
             )
         })?;
-        let writer = PdfWriter::new(BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file))?;
+        let writer = PdfWriter::new(
+            BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file),
+            color::SampleDepth::Eight,
+        )?;
         Ok(Self { writer })
     }
 

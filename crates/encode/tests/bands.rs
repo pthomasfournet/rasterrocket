@@ -4,7 +4,7 @@
 
 use std::io::Cursor;
 
-use color::{Gray8, Rgb8};
+use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 use rasterrocket_encode::{
     PdfPage, PdfPageEncoder, PdfWriter, PngColor, PngWriter, PnmKind, PnmWriter, RowImage,
@@ -224,7 +224,12 @@ fn streamed_tiff_is_the_whole_page() {
 
 /// The document holding `page` alone.
 fn document(page: &PdfPage) -> Vec<u8> {
-    let mut writer = PdfWriter::new(Vec::new()).unwrap();
+    document_of(page, SampleDepth::Eight)
+}
+
+/// The document of pages up to `depth` deep holding `page` alone.
+fn document_of(page: &PdfPage, depth: SampleDepth) -> Vec<u8> {
+    let mut writer = PdfWriter::new(Vec::new(), depth).unwrap();
     writer.write_page(page).unwrap();
     writer.finish().unwrap()
 }
@@ -274,5 +279,240 @@ fn bands_that_do_not_continue_the_image_are_refused() {
     assert!(
         PngWriter::new(Vec::new(), (0, H), PngColor::Gray).is_err(),
         "an empty image"
+    );
+}
+
+// ── 16-bit images ─────────────────────────────────────────────────────────────
+
+/// A 16-bit RGB image whose samples use all 16 bits, with a varied alpha
+/// plane when `alpha`.
+fn rgb16(alpha: bool) -> Bitmap<Rgb16> {
+    let mut bmp = Bitmap::new(W, H, 4, alpha);
+    for y in 0..H {
+        for (i, v) in bmp.row_samples_mut(y)[..W as usize * 3]
+            .iter_mut()
+            .enumerate()
+        {
+            *v = u16::try_from((i * 1_009 + y as usize * 7_919) % 65_536).unwrap();
+        }
+    }
+    if let Some(a) = bmp.alpha_plane_mut() {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = u16::try_from((i * 4_099) % 65_536).unwrap();
+        }
+    }
+    bmp
+}
+
+fn gray16() -> Bitmap<Gray16> {
+    let mut bmp = Bitmap::new(W, H, 4, false);
+    for y in 0..H {
+        for (x, v) in bmp.row_samples_mut(y)[..W as usize].iter_mut().enumerate() {
+            *v = u16::try_from((x * 1_741 + y as usize * 613) % 65_536).unwrap();
+        }
+    }
+    bmp
+}
+
+/// The live samples of `bmp`, row by row, big-endian; RGBA with its alpha
+/// plane when `alpha` (opaque without one).
+fn be_samples<P: color::Pixel<Sample = u16>>(bmp: &Bitmap<P>, alpha: bool) -> Vec<u8> {
+    let n = P::NCOMPS;
+    let mut out = Vec::new();
+    for y in 0..bmp.height {
+        let row = &bmp.row_samples(y)[..bmp.width as usize * n];
+        for (x, px) in row.chunks(n).enumerate() {
+            for &v in px {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            if alpha {
+                let a = bmp.alpha_row(y).map_or(u16::MAX, |a| a[x]);
+                out.extend_from_slice(&a.to_be_bytes());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_16_bit_netpbm_image_has_maxval_65535_and_big_endian_samples() {
+    let (c, g) = (rgb16(true), gray16());
+    let pnm = |kind, images: &[RowImage<'_>]| {
+        let mut w = PnmWriter::new(Vec::new(), (W, H), kind).unwrap();
+        for &image in images {
+            w.push(image).unwrap();
+        }
+        w.finish().unwrap()
+    };
+    let want = [
+        format!("P6\n{W} {H}\n65535\n").into_bytes(),
+        be_samples(&c, false),
+    ]
+    .concat();
+    same_for_every_band_height(&c, &want, "16-bit PPM", |b| {
+        pnm(
+            PnmKind::Ppm16,
+            &b.iter().map(RowImage::Rgb16).collect::<Vec<_>>(),
+        )
+    });
+    let want = [
+        format!("P5\n{W} {H}\n65535\n").into_bytes(),
+        be_samples(&g, false),
+    ]
+    .concat();
+    same_for_every_band_height(&g, &want, "16-bit PGM", |b| {
+        pnm(
+            PnmKind::Pgm16,
+            &b.iter().map(RowImage::Gray16).collect::<Vec<_>>(),
+        )
+    });
+}
+
+#[test]
+fn a_16_bit_png_decodes_to_its_samples() {
+    let png = |color, images: &[RowImage<'_>]| {
+        let mut w = PngWriter::new(Vec::new(), (W, H), color).unwrap();
+        for &image in images {
+            w.push(image).unwrap();
+        }
+        w.finish().unwrap()
+    };
+    let decode = |bytes: &[u8]| {
+        let mut reader = ::png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
+        assert_eq!(reader.info().bit_depth, ::png::BitDepth::Sixteen);
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let n = reader.next_frame(&mut pixels).unwrap().buffer_size();
+        pixels.truncate(n);
+        pixels
+    };
+    let g = gray16();
+    let whole = png(PngColor::Gray16, &[RowImage::Gray16(&g)]);
+    assert_eq!(decode(&whole), be_samples(&g, false), "gray");
+    same_for_every_band_height(&g, &whole, "16-bit gray PNG", |b| {
+        png(
+            PngColor::Gray16,
+            &b.iter().map(RowImage::Gray16).collect::<Vec<_>>(),
+        )
+    });
+    for (alpha, color) in [(false, PngColor::Rgb16), (true, PngColor::Rgba16)] {
+        let c = rgb16(true);
+        let whole = png(color, &[RowImage::Rgb16(&c)]);
+        assert_eq!(decode(&whole), be_samples(&c, alpha), "{color:?}");
+        same_for_every_band_height(&c, &whole, &format!("{color:?} PNG"), |b| {
+            png(color, &b.iter().map(RowImage::Rgb16).collect::<Vec<_>>())
+        });
+    }
+}
+
+#[test]
+fn a_16_bit_tiff_reads_back_as_its_samples() {
+    let stream = |layout, compression, images: &[RowImage<'_>]| {
+        let mut w = TiffStream::new(
+            Cursor::new(Vec::new()),
+            (W, H),
+            layout,
+            (300.0, 300.0),
+            compression,
+        )
+        .unwrap();
+        for &image in images {
+            w.push(image).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    };
+    let read = |bytes: Vec<u8>| {
+        let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes)).unwrap();
+        match decoder.read_image().unwrap() {
+            tiff::decoder::DecodingResult::U16(v) => v,
+            other => panic!("not 16-bit samples: {other:?}"),
+        }
+    };
+    let native = |bmp_rows: Vec<u8>| -> Vec<u16> {
+        bmp_rows
+            .chunks(2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            .collect()
+    };
+    let (c, g) = (rgb16(true), gray16());
+    for compression in [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ] {
+        let whole = stream(RowLayout::Gray16, compression, &[RowImage::Gray16(&g)]);
+        assert_eq!(
+            read(whole.clone()),
+            native(be_samples(&g, false)),
+            "gray {compression:?}"
+        );
+        same_for_every_band_height(&g, &whole, &format!("16-bit gray {compression:?}"), |b| {
+            stream(
+                RowLayout::Gray16,
+                compression,
+                &b.iter().map(RowImage::Gray16).collect::<Vec<_>>(),
+            )
+        });
+        for (alpha, layout) in [(false, RowLayout::Rgb16), (true, RowLayout::Rgba16)] {
+            let whole = stream(layout, compression, &[RowImage::Rgb16(&c)]);
+            assert_eq!(
+                read(whole),
+                native(be_samples(&c, alpha)),
+                "{layout:?} {compression:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_16_bit_pdf_page_is_pdf_1_5_of_16_bits_per_component() {
+    let c = rgb16(false);
+    let page = PdfPage::encode(RowImage::Rgb16(&c), (150.0, 150.0)).unwrap();
+    let doc = document_of(&page, SampleDepth::Sixteen);
+    assert!(doc.starts_with(b"%PDF-1.5\n"));
+    let text = String::from_utf8_lossy(&doc);
+    assert!(
+        text.contains("/ColorSpace/DeviceRGB/BitsPerComponent 16/"),
+        "{text:.300}"
+    );
+    let start = doc.windows(7).position(|w| w == b"stream\n").unwrap() + 7;
+    let mut data = Vec::new();
+    let _: usize = std::io::Read::read_to_end(
+        &mut flate2::read::ZlibDecoder::new(&doc[start..]),
+        &mut data,
+    )
+    .unwrap();
+    assert_eq!(data, be_samples(&c, false));
+    let mut eight = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
+    assert!(
+        eight.write_page(&page).is_err(),
+        "a 16-bit page in a PDF 1.4 file"
+    );
+    let g = gray16();
+    let want = document_of(
+        &PdfPage::encode(RowImage::Gray16(&g), (150.0, 150.0)).unwrap(),
+        SampleDepth::Sixteen,
+    );
+    same_for_every_band_height(&g, &want, "16-bit gray PDF page", |b| {
+        let mut e = PdfPageEncoder::new((W, H), RowLayout::Gray16, (150.0, 150.0), None).unwrap();
+        for band in b {
+            e.push(RowImage::Gray16(band)).unwrap();
+        }
+        document_of(&e.finish().unwrap(), SampleDepth::Sixteen)
+    });
+}
+
+#[test]
+fn bands_of_the_other_depth_are_refused() {
+    let (c8, c16) = (rgb(false), rgb16(false));
+    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb16).unwrap();
+    assert!(
+        w.push(RowImage::Rgb(&c8)).is_err(),
+        "8-bit rows into a 16-bit image"
+    );
+    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb).unwrap();
+    assert!(
+        w.push(RowImage::Rgb16(&c16)).is_err(),
+        "16-bit rows into an 8-bit image"
     );
 }

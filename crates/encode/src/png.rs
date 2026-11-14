@@ -17,7 +17,7 @@ use raster::Bitmap;
 
 use crate::EncodeError;
 use crate::ppm::RgbSource;
-use crate::rows::{RowCount, RowImage, RowLayout};
+use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 
 /// Write `bitmap` to `out` as a PNG image.
 ///
@@ -134,7 +134,7 @@ fn write_png_gray<P: Pixel<Sample = u8>, W: Write>(
     Ok(())
 }
 
-/// The colour type of a PNG written by [`PngWriter`].
+/// The colour type and bit depth of a PNG written by [`PngWriter`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PngColor {
     /// 8-bit gray, from gray bands.
@@ -143,6 +143,13 @@ pub enum PngColor {
     Rgb,
     /// 8-bit RGBA, from RGB bands, the alpha plane's (opaque without one).
     Rgba,
+    /// 16-bit gray, from 16-bit gray bands.
+    Gray16,
+    /// 16-bit RGB, from 16-bit RGB bands; an alpha plane is dropped.
+    Rgb16,
+    /// 16-bit RGBA, from 16-bit RGB bands, the alpha plane's (opaque
+    /// without one).
+    Rgba16,
 }
 
 impl PngColor {
@@ -151,14 +158,24 @@ impl PngColor {
             Self::Gray => RowLayout::Gray,
             Self::Rgb => RowLayout::Rgb,
             Self::Rgba => RowLayout::Rgba,
+            Self::Gray16 => RowLayout::Gray16,
+            Self::Rgb16 => RowLayout::Rgb16,
+            Self::Rgba16 => RowLayout::Rgba16,
         }
     }
 
     const fn color_type(self) -> ::png::ColorType {
         match self {
-            Self::Gray => ::png::ColorType::Grayscale,
-            Self::Rgb => ::png::ColorType::Rgb,
-            Self::Rgba => ::png::ColorType::Rgba,
+            Self::Gray | Self::Gray16 => ::png::ColorType::Grayscale,
+            Self::Rgb | Self::Rgb16 => ::png::ColorType::Rgb,
+            Self::Rgba | Self::Rgba16 => ::png::ColorType::Rgba,
+        }
+    }
+
+    const fn bit_depth(self) -> ::png::BitDepth {
+        match self {
+            Self::Gray | Self::Rgb | Self::Rgba => ::png::BitDepth::Eight,
+            Self::Gray16 | Self::Rgb16 | Self::Rgba16 => ::png::BitDepth::Sixteen,
         }
     }
 }
@@ -223,7 +240,7 @@ impl<W: Write + 'static> PngWriter<W> {
             width,
             height,
             color.color_type(),
-            ::png::BitDepth::Eight,
+            color.bit_depth(),
         )?;
         Ok(Self {
             stream: writer.into_stream_writer()?,
@@ -246,7 +263,7 @@ impl<W: Write + 'static> PngWriter<W> {
         self.rows.take(&band, layout)?;
         for y in 0..band.size().1 {
             self.row.clear();
-            band.row(y, layout, &mut self.row);
+            band.row(y, layout, ByteOrder::Big, &mut self.row);
             self.stream.write_all(&self.row)?;
         }
         Ok(())

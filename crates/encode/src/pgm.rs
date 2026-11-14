@@ -42,18 +42,23 @@ pub fn write_pgm<P: Pixel<Sample = u8>, W: Write>(
         }
     }
 
-    write_pgm_header(&mut out, bitmap.width, bitmap.height)?;
+    write_pgm_header(&mut out, bitmap.width, bitmap.height, u8::MAX.into())?;
 
     write_live_rows(bitmap, &mut out)?;
     out.flush()?;
     Ok(())
 }
 
-/// Write the P5 header.
-pub(crate) fn write_pgm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
+/// Write the P5 header of an image of `maxval`.
+pub(crate) fn write_pgm_header<W: Write>(
+    out: &mut W,
+    width: u32,
+    height: u32,
+    maxval: u16,
+) -> io::Result<()> {
     writeln!(out, "P5")?;
     writeln!(out, "{width} {height}")?;
-    writeln!(out, "255")?;
+    writeln!(out, "{maxval}")?;
     Ok(())
 }
 

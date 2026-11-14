@@ -6,7 +6,7 @@
 //! is written.  A whole image is a single band, so writing an image whole
 //! and writing it band by band produce the same bytes.
 
-use color::{Gray8, Rgb8};
+use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
 use crate::{EncodeError, pack_bilevel_row, push_rgba};
@@ -22,6 +22,33 @@ pub enum RowImage<'a> {
     /// One bit per pixel from gray luma, 1 for black (below
     /// [`crate::BLACK_BELOW`]), rows packed most significant bit first.
     Bilevel(&'a Bitmap<Gray8>),
+    /// 16-bit RGB; RGBA, the alpha unassociated, when the bitmap has an
+    /// alpha plane and the writer stores alpha.
+    Rgb16(&'a Bitmap<Rgb16>),
+    /// 16-bit gray, 0 black.
+    Gray16(&'a Bitmap<Gray16>),
+}
+
+/// The byte order a writer stores 16-bit samples in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ByteOrder {
+    /// Most significant byte first: PNG, Netpbm and PDF.
+    Big,
+    /// Least significant byte first: a little-endian (`II`) TIFF.
+    Little,
+}
+
+impl ByteOrder {
+    /// Append the samples `v` to `out` in this order.
+    fn push(self, v: &[u16], out: &mut Vec<u8>) {
+        out.reserve(v.len() * 2);
+        for &s in v {
+            out.extend_from_slice(&match self {
+                Self::Big => s.to_be_bytes(),
+                Self::Little => s.to_le_bytes(),
+            });
+        }
+    }
 }
 
 /// The stored layout of an image's rows.
@@ -35,6 +62,12 @@ pub enum RowLayout {
     Gray,
     /// One bit a pixel, rows padded to a byte.
     Bilevel,
+    /// Three 16-bit samples a pixel.
+    Rgb16,
+    /// Four 16-bit samples a pixel, the fourth the alpha plane's.
+    Rgba16,
+    /// One 16-bit sample a pixel.
+    Gray16,
 }
 
 impl RowLayout {
@@ -47,6 +80,34 @@ impl RowLayout {
             Self::Rgba => w * 4,
             Self::Gray => w,
             Self::Bilevel => w.div_ceil(8),
+            Self::Rgb16 => w * 6,
+            Self::Rgba16 => w * 8,
+            Self::Gray16 => w * 2,
+        }
+    }
+
+    /// Bits per stored sample: 1, 8 or 16.
+    #[must_use]
+    pub const fn bits_per_sample(self) -> u8 {
+        match self {
+            Self::Bilevel => 1,
+            Self::Rgb | Self::Rgba | Self::Gray => 8,
+            Self::Rgb16 | Self::Rgba16 | Self::Gray16 => 16,
+        }
+    }
+
+    /// The layout of samples of `depth` with the colour model of `self`:
+    /// RGB, RGBA or gray; a bilevel layout is itself at either depth.
+    #[must_use]
+    pub const fn at_depth(self, depth: SampleDepth) -> Self {
+        match (self, depth) {
+            (Self::Rgb | Self::Rgb16, SampleDepth::Eight) => Self::Rgb,
+            (Self::Rgba | Self::Rgba16, SampleDepth::Eight) => Self::Rgba,
+            (Self::Gray | Self::Gray16, SampleDepth::Eight) => Self::Gray,
+            (Self::Rgb | Self::Rgb16, SampleDepth::Sixteen) => Self::Rgb16,
+            (Self::Rgba | Self::Rgba16, SampleDepth::Sixteen) => Self::Rgba16,
+            (Self::Gray | Self::Gray16, SampleDepth::Sixteen) => Self::Gray16,
+            (Self::Bilevel, _) => Self::Bilevel,
         }
     }
 }
@@ -58,6 +119,8 @@ impl RowImage<'_> {
         match self {
             Self::Rgb(b) => (b.width, b.height),
             Self::Gray(b) | Self::Bilevel(b) => (b.width, b.height),
+            Self::Rgb16(b) => (b.width, b.height),
+            Self::Gray16(b) => (b.width, b.height),
         }
     }
 
@@ -70,20 +133,23 @@ impl RowImage<'_> {
             Self::Rgb(_) => RowLayout::Rgb,
             Self::Gray(_) => RowLayout::Gray,
             Self::Bilevel(_) => RowLayout::Bilevel,
+            Self::Rgb16(b) if b.has_alpha() => RowLayout::Rgba16,
+            Self::Rgb16(_) => RowLayout::Rgb16,
+            Self::Gray16(_) => RowLayout::Gray16,
         }
     }
 
     /// Append the bytes of row `y` stored as `layout` to `out`: live
-    /// pixels only.  An RGB band stored as [`RowLayout::Rgb`] drops its
-    /// alpha plane; one stored as [`RowLayout::Rgba`] without one is
-    /// opaque.
+    /// pixels only, 16-bit samples in `order`.  An RGB band stored as
+    /// [`RowLayout::Rgb`] drops its alpha plane; one stored as
+    /// [`RowLayout::Rgba`] without one is opaque; likewise at 16 bits.
     ///
     /// # Panics
     ///
     /// When `layout` is not one of the band's: an RGB layout for a gray
-    /// band or the reverse.  Writers check the band with [`Self::check`]
-    /// first.
-    pub(crate) fn row(&self, y: u32, layout: RowLayout, out: &mut Vec<u8>) {
+    /// band or the reverse, or one of the other depth.  Writers check the
+    /// band with [`Self::check`] first.
+    pub(crate) fn row(&self, y: u32, layout: RowLayout, order: ByteOrder, out: &mut Vec<u8>) {
         match (self, layout) {
             (Self::Rgb(b), RowLayout::Rgb) => {
                 out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 3]);
@@ -107,6 +173,20 @@ impl RowImage<'_> {
                 let start = out.len();
                 out.resize(start + (b.width as usize).div_ceil(8), 0);
                 pack_bilevel_row(&b.row_bytes(y)[..b.width as usize], &mut out[start..]);
+            }
+            (Self::Rgb16(b), RowLayout::Rgb16) => {
+                order.push(&b.row_samples(y)[..b.width as usize * 3], out);
+            }
+            (Self::Rgb16(b), RowLayout::Rgba16) => {
+                let rgb = b.row_samples(y)[..b.width as usize * 3].as_chunks::<3>().0;
+                let alpha = b.alpha_row(y);
+                for (i, px) in rgb.iter().enumerate() {
+                    let a = alpha.map_or(u16::MAX, |a| a[i]);
+                    order.push(&[px[0], px[1], px[2], a], out);
+                }
+            }
+            (Self::Gray16(b), RowLayout::Gray16) => {
+                order.push(&b.row_samples(y)[..b.width as usize], out);
             }
             _ => panic!("RowImage::row: layout {layout:?} does not store this band"),
         }
@@ -143,10 +223,12 @@ impl RowImage<'_> {
                     Self::Gray(_) | Self::Bilevel(_),
                     RowLayout::Gray | RowLayout::Bilevel
                 )
+                | (Self::Rgb16(_), RowLayout::Rgb16 | RowLayout::Rgba16)
+                | (Self::Gray16(_), RowLayout::Gray16)
         );
         if !fits {
             return Err(EncodeError::InvalidInput(
-                "a band's pixels are not the colour model of the image it continues",
+                "a band's pixels are not the colour model and depth of the image it continues",
             ));
         }
         Ok(())

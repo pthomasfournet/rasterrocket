@@ -38,7 +38,7 @@ pub fn write_ppm<P: Pixel<Sample = u8>, W: Write>(
     let source = RgbSource::of(P::MODE).ok_or(EncodeError::UnsupportedMode(
         "grayscale/mono bitmap: use write_pgm instead",
     ))?;
-    write_ppm_header(&mut out, bitmap.width, bitmap.height)?;
+    write_ppm_header(&mut out, bitmap.width, bitmap.height, u8::MAX.into())?;
     if source == RgbSource::Rgb {
         write_live_rows(bitmap, &mut out)?;
     } else {
@@ -52,11 +52,16 @@ pub fn write_ppm<P: Pixel<Sample = u8>, W: Write>(
     Ok(())
 }
 
-/// Write the P6 header.
-pub(crate) fn write_ppm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
+/// Write the P6 header of an image of `maxval`.
+pub(crate) fn write_ppm_header<W: Write>(
+    out: &mut W,
+    width: u32,
+    height: u32,
+    maxval: u16,
+) -> io::Result<()> {
     writeln!(out, "P6")?;
     writeln!(out, "{width} {height}")?;
-    writeln!(out, "255")?;
+    writeln!(out, "{maxval}")?;
     Ok(())
 }
 
