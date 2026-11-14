@@ -90,6 +90,29 @@ pub struct Intersect {
 
 // ── XPathScanner ──────────────────────────────────────────────────────────────
 
+/// A path whose intersection table would hold more than `u32::MAX`
+/// entries (12 bytes each), or whose table the allocator refuses.
+///
+/// The table holds about one entry per segment per row it spans, so a path
+/// of 2^17 segments each crossing 2^15 rows reaches the bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScannerTooLarge {
+    /// The entries the table would hold, saturated at `u64::MAX`.
+    pub intersections: u64,
+}
+
+impl std::fmt::Display for ScannerTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a path crosses its scanlines {} times, more than an intersection table holds",
+            self.intersections
+        )
+    }
+}
+
+impl std::error::Error for ScannerTooLarge {}
+
 /// Per-scanline intersection table built from an [`XPath`].
 ///
 /// After construction the scanner is read-only; it is cheaply shareable via
@@ -129,15 +152,25 @@ impl XPathScanner {
     /// If the xpath is empty or the y-ranges don't overlap, returns an empty
     /// scanner (`is_empty()` returns true).
     ///
+    /// # Errors
+    ///
+    /// [`ScannerTooLarge`] when the table would hold more than `u32::MAX`
+    /// intersections or cannot be allocated; nothing large is allocated
+    /// first.
+    ///
     /// # Panics
     ///
     /// Panics if the number of rows after clamping overflows `usize` (cannot
     /// happen for valid PDF coordinate ranges, as `y_max - y_min + 1` is at
     /// most `i32::MAX`).
-    #[must_use]
-    pub fn new(xpath: &XPath, eo: bool, clip_y_min: i32, clip_y_max: i32) -> Self {
+    pub fn new(
+        xpath: &XPath,
+        eo: bool,
+        clip_y_min: i32,
+        clip_y_max: i32,
+    ) -> Result<Self, ScannerTooLarge> {
         if xpath.segs.is_empty() || clip_y_min > clip_y_max {
-            return Self::empty(eo);
+            return Ok(Self::empty(eo));
         }
 
         // Compute floating-point bounding box over segments that intersect the
@@ -163,7 +196,7 @@ impl XPathScanner {
         }
 
         if x_min_fp > x_max_fp {
-            return Self::empty(eo);
+            return Ok(Self::empty(eo));
         }
 
         let x_min = floor_i32(x_min_fp);
@@ -172,7 +205,7 @@ impl XPathScanner {
         let y_max = floor_i32(y_max_fp).min(clip_y_max);
 
         if y_min > y_max {
-            return Self::empty(eo);
+            return Ok(Self::empty(eo));
         }
 
         let n_rows = usize::try_from(i64::from(y_max) - i64::from(y_min) + 1)
@@ -183,27 +216,34 @@ impl XPathScanner {
         // Pass 1: count the maximum number of Intersect slots needed per row.
         // Adjacent-span merging may reduce the final count, so this is an upper bound.
         let mut counts = vec![0u32; n_rows];
-        count_intersections(xpath, y_min, y_max, &mut counts);
+        let total = count_intersections(xpath, y_min, y_max, &mut counts);
 
         // Pass 2: prefix-sum to produce base offsets; allocate the flat buffer.
+        let too_large = ScannerTooLarge {
+            intersections: total,
+        };
+        let total = u32::try_from(total).map_err(|_| too_large)?;
         let mut alloc_start = Vec::with_capacity(n_rows + 1);
-        let mut total = 0u32;
+        let mut offset = 0u32;
         for &c in &counts {
-            alloc_start.push(total);
-            total = total
-                .checked_add(c)
-                .expect("intersection count exceeds u32::MAX; path has too many segments");
+            alloc_start.push(offset);
+            // Every partial sum is at most `total`, which fits.
+            offset += c;
         }
-        alloc_start.push(total);
+        alloc_start.push(offset);
         let total_n = total as usize;
-        let mut intersects = vec![
+        let mut intersects = Vec::new();
+        intersects
+            .try_reserve_exact(total_n)
+            .map_err(|_| too_large)?;
+        intersects.resize(
+            total_n,
             Intersect {
                 x0: 0,
                 x1: 0,
-                count: 0
-            };
-            total_n
-        ];
+                count: 0,
+            },
+        );
 
         // Pass 3: fill the flat buffer.  `cursors[i]` counts the actual number of
         // entries written into row i (≤ counts[i] after merging).  Reset counts
@@ -228,9 +268,7 @@ impl XPathScanner {
         let mut row_start = Vec::with_capacity(n_rows + 1);
         let mut write_pos = 0usize;
         for i in 0..n_rows {
-            row_start.push(
-                u32::try_from(write_pos).expect("compacted intersection count exceeds u32::MAX"),
-            );
+            row_start.push(u32::try_from(write_pos).expect("at most `total` intersections"));
             let read_base = alloc_start[i] as usize;
             let n_written = counts[i] as usize;
             // Sort the actual written slice before copying.
@@ -239,11 +277,10 @@ impl XPathScanner {
             intersects.copy_within(read_base..read_base + n_written, write_pos);
             write_pos += n_written;
         }
-        row_start
-            .push(u32::try_from(write_pos).expect("compacted intersection count exceeds u32::MAX"));
+        row_start.push(u32::try_from(write_pos).expect("at most `total` intersections"));
         intersects.truncate(write_pos);
 
-        Self {
+        Ok(Self {
             eo,
             x_min,
             x_max,
@@ -251,7 +288,7 @@ impl XPathScanner {
             y_max,
             row_start,
             intersects,
-        }
+        })
     }
 
     /// This table moved by `dx` columns and `dy` rows, in the scanner's own
@@ -508,33 +545,46 @@ impl XPathScanner {
 
 // ── Two-pass intersection construction ───────────────────────────────────────
 
-/// Pass 1: count how many `Intersect` entries each row will receive.
+/// Pass 1: count how many `Intersect` entries each row will receive, and
+/// return their total, which a row's `u32` count (saturated) may not hold.
 ///
-/// Walks the same segment logic as [`fill_intersections`] without writing
+/// Applies the same row ranges as [`fill_intersections`] without writing
 /// anything, so the two passes must stay in sync.
-fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]) {
+fn count_intersections(xpath: &XPath, y_min: i32, y_max: i32, counts: &mut [u32]) -> u64 {
+    // A sloped or vertical segment adds one to every row it spans: the
+    // spans are accumulated as a difference array, so the pass costs one
+    // step per segment and per row rather than per segment-row.
+    let mut delta = vec![0i64; counts.len() + 1];
+    let index = |row: i32| usize::try_from(row - y_min).expect("row >= y_min");
     for seg in &xpath.segs {
         if seg.has_nan() {
             continue;
         }
         let seg_y_min = seg.y0.min(seg.y1);
         let seg_y_max = seg.y0.max(seg.y1);
-        let row_y0 = floor_i32(seg_y_min).max(y_min);
-        let row_y1 = floor_i32(seg_y_max).min(y_max);
-
         if seg.flags.contains(XPathFlags::HORIZ) {
             let row = floor_i32(seg_y_min);
             if row >= y_min && row <= y_max {
-                let idx = usize::try_from(row - y_min).expect("row >= y_min");
-                counts[idx] = counts[idx].saturating_add(1);
+                delta[index(row)] += 1;
+                delta[index(row) + 1] -= 1;
             }
         } else {
-            for row in row_y0..=row_y1 {
-                let idx = usize::try_from(row - y_min).expect("row >= y_min");
-                counts[idx] = counts[idx].saturating_add(1);
+            let row_y0 = floor_i32(seg_y_min).max(y_min);
+            let row_y1 = floor_i32(seg_y_max).min(y_max);
+            if row_y0 <= row_y1 {
+                delta[index(row_y0)] += 1;
+                delta[index(row_y1) + 1] -= 1;
             }
         }
     }
+    let (mut running, mut total) = (0i64, 0u64);
+    for (count, d) in counts.iter_mut().zip(&delta) {
+        running += d;
+        let n = u64::try_from(running).expect("a row's count is not negative");
+        total = total.saturating_add(n);
+        *count = u32::try_from(n).unwrap_or(u32::MAX);
+    }
+    total
 }
 
 /// Pass 3: write `Intersect` entries into the pre-allocated flat buffer.
@@ -773,8 +823,8 @@ mod tests {
             b.close(false).unwrap();
             XPath::new(&b.build(), &identity(), 1.0, true)
         };
-        let here = XPathScanner::new(&triangle(0.0, 0.0), false, 0, 60);
-        let moved = XPathScanner::new(&triangle(16.0, 20.0), false, 20, 80);
+        let here = XPathScanner::new(&triangle(0.0, 0.0), false, 0, 60).unwrap();
+        let moved = XPathScanner::new(&triangle(16.0, 20.0), false, 20, 80).unwrap();
         for y in 0..=60 {
             let shifted: Vec<_> = spans(&moved, y + 20)
                 .into_iter()
@@ -804,9 +854,9 @@ mod tests {
         }
         let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
         // Edges span up to 14 000 rows, so several re-anchor along the way.
-        let full = XPathScanner::new(&xpath, false, -5000, 9000);
+        let full = XPathScanner::new(&xpath, false, -5000, 9000).unwrap();
         for first in (-4999..9000).step_by(293) {
-            let part = XPathScanner::new(&xpath, false, first, 9000);
+            let part = XPathScanner::new(&xpath, false, first, 9000).unwrap();
             for y in first..=9000 {
                 assert_eq!(
                     spans(&part, y),
@@ -833,7 +883,7 @@ mod tests {
         b.line_to(500.0, top).unwrap();
         b.close(false).unwrap();
         let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
-        let scanner = XPathScanner::new(&xpath, false, 0, 999);
+        let scanner = XPathScanner::new(&xpath, false, 0, 999).unwrap();
         for y in 0..1000 {
             // The span's left column is the edge's x at the row's top.
             let exact = (f64::from(y) - top) * dxdy;
@@ -848,14 +898,14 @@ mod tests {
     #[test]
     fn empty_on_no_segs() {
         let xpath = XPath::empty();
-        let scanner = XPathScanner::new(&xpath, false, 0, 10);
+        let scanner = XPathScanner::new(&xpath, false, 0, 10).unwrap();
         assert!(scanner.is_empty());
     }
 
     #[test]
     fn triangle_has_rows() {
         let xpath = triangle_xpath();
-        let scanner = XPathScanner::new(&xpath, false, 0, 4);
+        let scanner = XPathScanner::new(&xpath, false, 0, 4).unwrap();
         assert!(!scanner.is_empty());
         assert!(scanner.y_min <= scanner.y_max);
     }
@@ -871,7 +921,7 @@ mod tests {
     #[test]
     fn test_inside_triangle() {
         let xpath = triangle_xpath();
-        let scanner = XPathScanner::new(&xpath, false, 0, 4);
+        let scanner = XPathScanner::new(&xpath, false, 0, 4).unwrap();
         // Centroid of the triangle is roughly (2, 1.33)
         assert!(scanner.test(2, 1));
     }
@@ -879,7 +929,7 @@ mod tests {
     #[test]
     fn test_outside_triangle() {
         let xpath = triangle_xpath();
-        let scanner = XPathScanner::new(&xpath, false, 0, 4);
+        let scanner = XPathScanner::new(&xpath, false, 0, 4).unwrap();
         assert!(!scanner.test(10, 2));
         assert!(!scanner.test(2, 5));
     }
@@ -887,7 +937,7 @@ mod tests {
     #[test]
     fn row_out_of_range_returns_empty() {
         let xpath = triangle_xpath();
-        let scanner = XPathScanner::new(&xpath, false, 0, 4);
+        let scanner = XPathScanner::new(&xpath, false, 0, 4).unwrap();
         // y below y_min
         assert!(scanner.row(scanner.y_min - 1).is_empty());
         // y above y_max
@@ -942,5 +992,30 @@ mod tests {
         let (count, on_span) = XPathScanner::count_crossings(&row, 6);
         assert!(!on_span);
         assert_eq!(count, -1);
+    }
+
+    /// A path whose table would pass `u32::MAX` intersections is refused
+    /// before the table is allocated: 2^17 + 2 sloped segments each cross
+    /// all 2^15 rows.  Without the bound the count pass panics on the
+    /// overflow, which a release build turns into an abort.
+    #[test]
+    fn a_table_past_u32_intersections_is_refused() {
+        let rows = 1 << 15;
+        let mut b = PathBuilder::new();
+        for i in 0..=(1 << 16) {
+            let x = f64::from(i) * 2.0;
+            b.move_to(x, 0.0).unwrap();
+            b.line_to(x + 0.5, f64::from(rows)).unwrap();
+            b.line_to(x + 1.0, 0.0).unwrap();
+            b.close(false).unwrap();
+        }
+        let xpath = XPath::new(&b.build(), &identity(), 1.0, true);
+        let Err(err) = XPathScanner::new(&xpath, false, 0, rows - 1) else {
+            panic!("a table over u32::MAX intersections was built");
+        };
+        // Each subpath's closing edge lies on row 0 and adds one more.
+        let subpaths = (1u64 << 16) + 1;
+        assert_eq!(err.intersections, 2 * subpaths * (1 << 15) + subpaths);
+        assert!(XPathScanner::new(&xpath, false, 0, 15).is_ok());
     }
 }

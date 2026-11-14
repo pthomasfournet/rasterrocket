@@ -62,7 +62,7 @@ pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
 pub use path::{Path, PathBuilder, PathFlags, PathPoint, StrokeAdjustHint};
 pub use pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet};
 pub use scanner::iter::ScanIterator;
-pub use scanner::{Intersect, XPathScanner};
+pub use scanner::{Intersect, ScannerTooLarge, XPathScanner};
 pub use screen::HalftoneScreen;
 pub use shading::ColorRamp;
 pub use shading::axial::AxialPattern;

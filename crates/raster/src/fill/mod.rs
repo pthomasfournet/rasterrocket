@@ -175,7 +175,13 @@ fn fill_impl<P: Pixel>(
 
     let mut xpath = XPath::new(path, matrix, flatness, true);
     xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
-    let scanner = XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i);
+    let scanner = match XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i) {
+        Ok(scanner) => scanner,
+        Err(e) => {
+            log::warn!("fill dropped: {e}");
+            return;
+        }
+    };
     if scanner.is_empty() {
         return;
     }
@@ -1132,7 +1138,7 @@ mod tests {
 
         let path = rect_path(1.0, 1.0, 5.0, 5.0);
         let xpath = XPath::new(&path, &identity_matrix(), 1.0, true);
-        let scanner = XPathScanner::new(&xpath, false, 0, 7);
+        let scanner = XPathScanner::new(&xpath, false, 0, 7).expect("small path");
         // Interior rows 2,3,4 should have spans; boundary rows 1,5 have horizontal
         // edges (count=0) and produce no interior spans.
         assert!(

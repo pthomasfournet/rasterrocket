@@ -863,8 +863,8 @@ mod tests {
         assert_eq!(full.segs.len(), 6 * 4 + 3);
         assert_eq!(culled.segs.len(), 2 * 4 + 3);
         for eo in [false, true] {
-            let a = crate::XPathScanner::new(&full, eo, 0, 15);
-            let b = crate::XPathScanner::new(&culled, eo, 0, 15);
+            let a = crate::XPathScanner::new(&full, eo, 0, 15).expect("small path");
+            let b = crate::XPathScanner::new(&culled, eo, 0, 15).expect("small path");
             for y in 0..=15 {
                 for x in 0..=15 {
                     assert_eq!(a.test(x, y), b.test(x, y), "eo={eo} ({x}, {y})");

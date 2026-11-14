@@ -237,7 +237,16 @@ impl Clip {
         let region = if antialias {
             Region::Area(self.coverage_of(xpath, eo))
         } else {
-            Region::Aliased(XPathScanner::new(xpath, eo, self.y_min_i, self.y_max_i))
+            match XPathScanner::new(xpath, eo, self.y_min_i, self.y_max_i) {
+                Ok(scanner) => Region::Aliased(scanner),
+                Err(e) => {
+                    log::warn!("clip path dropped, and the clip made empty: {e}");
+                    self.x_max = self.x_min - 1.0;
+                    self.y_max = self.y_min - 1.0;
+                    self.recompute_int_bounds();
+                    return;
+                }
+            }
         };
         self.scanners = Some(Arc::new(ClipNode {
             region,

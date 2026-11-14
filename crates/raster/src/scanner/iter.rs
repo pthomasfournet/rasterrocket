@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn rect_span_single_row() {
         let xpath = rect_xpath(2.0, 1.0, 6.0, 3.0);
-        let scanner = XPathScanner::new(&xpath, false, 0, 10);
+        let scanner = XPathScanner::new(&xpath, false, 0, 10).expect("small path");
         let spans: Vec<_> = ScanIterator::new(&scanner, 2).collect();
         assert!(!spans.is_empty(), "expected at least one span on y=2");
         // The span should cover roughly [2, 5] (inclusive).
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn out_of_range_y_empty() {
         let xpath = rect_xpath(0.0, 0.0, 4.0, 4.0);
-        let scanner = XPathScanner::new(&xpath, false, 0, 10);
+        let scanner = XPathScanner::new(&xpath, false, 0, 10).expect("small path");
         assert!(ScanIterator::new(&scanner, 100).next().is_none());
     }
 
