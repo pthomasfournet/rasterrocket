@@ -58,8 +58,8 @@ pub fn stroke<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     params: &StrokeParams<'_>,
 ) {
@@ -197,8 +197,8 @@ fn stroke_narrow<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
 ) {
@@ -345,8 +345,8 @@ fn stroke_wide<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     params: &StrokeParams<'_>,
 ) {

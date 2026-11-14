@@ -62,7 +62,7 @@ fn pixel_ceil(v: f64) -> f64 {
 /// alpha-weighted mean colour, one pixel's bytes, and its coverage,
 /// `Σ alpha / period_px` clamped to 255.  The colour is all zeros where
 /// nothing is painted.
-fn mean_over_period<P: Pixel>(sample: &Bitmap<P>, period_px: f64) -> (Vec<u8>, u8) {
+fn mean_over_period<P: Pixel<Sample = u8>>(sample: &Bitmap<P>, period_px: f64) -> (Vec<u8>, u8) {
     let mut sum_a = 0u64;
     let mut sum_c = vec![0u64; P::BYTES];
     for y in 0..sample.height {
@@ -142,7 +142,7 @@ impl Tile {
 /// The pixel type a tiling cell is rasterised in: the pixel type of the
 /// canvas the pattern paints, so that a cell on an ink canvas keeps its
 /// spot colorants and the channels its content wrote.
-trait CellPixel: Pixel {
+trait CellPixel: Pixel<Sample = u8> {
     /// The canvas of this pixel type.
     const KIND: CanvasKind;
 

@@ -21,19 +21,20 @@
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
 use crate::pipe::{PipeSrc, PipeState, RowPattern, render_bitmap_span};
-use color::Rgb8;
-use color::convert::{lerp_u8, round_half_up_i32};
+use color::convert::round_half_up_i32;
+use color::{Pixel, Sample};
 
-/// One vertex of a Gouraud-shaded triangle, of an `N`-byte colour.
+/// One vertex of a Gouraud-shaded triangle, of a colour of `N` samples of
+/// type `S`.
 #[derive(Copy, Clone, Debug)]
-pub struct GouraudVertex<const N: usize = 3> {
+pub struct GouraudVertex<const N: usize = 3, S: Sample = u8> {
     /// Device-space X coordinate (sub-pixel; rounded to nearest pixel).
     pub x: f64,
     /// Device-space Y coordinate.
     pub y: f64,
-    /// The colour: sRGB bytes for `N = 3`, or the bytes of another pixel
+    /// The colour: sRGB for `N = 3`, or the channels of another pixel
     /// type.
-    pub color: [u8; N],
+    pub color: [S; N],
 }
 
 /// Linear interpolation of a triangle edge as a function of scanline Y.
@@ -46,8 +47,17 @@ struct EdgeMap<const N: usize> {
     c_off: [f64; N],
 }
 
+/// The sample as an `f64`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a sample is at most 16 bits, exact in f64"
+)]
+fn to_f64<S: Sample>(v: S) -> f64 {
+    v.signed() as f64
+}
+
 impl<const N: usize> EdgeMap<N> {
-    fn from_vertices(va: &GouraudVertex<N>, vb: &GouraudVertex<N>) -> Self {
+    fn from_vertices<S: Sample>(va: &GouraudVertex<N, S>, vb: &GouraudVertex<N, S>) -> Self {
         let ya = f64::from(round_half_up_i32(va.y));
         let yb = f64::from(round_half_up_i32(vb.y));
         let dy = yb - ya;
@@ -57,15 +67,15 @@ impl<const N: usize> EdgeMap<N> {
                 x_slope: 0.0,
                 x_off: va.x,
                 c_slope: [0.0; N],
-                c_off: va.color.map(f64::from),
+                c_off: va.color.map(to_f64),
             };
         }
         let x_slope = (vb.x - va.x) / dy;
         let x_off = ya.mul_add(-x_slope, va.x);
         let c_slope: [f64; N] =
-            std::array::from_fn(|ch| (f64::from(vb.color[ch]) - f64::from(va.color[ch])) / dy);
+            std::array::from_fn(|ch| (to_f64(vb.color[ch]) - to_f64(va.color[ch])) / dy);
         let c_off: [f64; N] =
-            std::array::from_fn(|ch| ya.mul_add(-c_slope[ch], f64::from(va.color[ch])));
+            std::array::from_fn(|ch| ya.mul_add(-c_slope[ch], to_f64(va.color[ch])));
         Self {
             x_slope,
             x_off,
@@ -74,31 +84,32 @@ impl<const N: usize> EdgeMap<N> {
         }
     }
 
-    /// Evaluate the edge at scanline `y` → (pixel x, interpolated colour).
-    fn eval(&self, y: f64) -> (i32, [u8; N]) {
+    /// Evaluate the edge at scanline `y` → (pixel x, interpolated colour),
+    /// each channel clamped to `[0, M]` and truncated.
+    fn eval<S: Sample>(&self, y: f64) -> (i32, [S; N]) {
         let x = round_half_up_i32(self.x_slope.mul_add(y, self.x_off));
-        let c: [u8; N] = std::array::from_fn(|ch| {
-            #[expect(clippy::cast_possible_truncation, reason = "value clamped to 0..=255")]
-            #[expect(clippy::cast_sign_loss, reason = "value clamped to 0.0..=255.0")]
-            {
-                self.c_slope[ch]
-                    .mul_add(y, self.c_off[ch])
-                    .clamp(0.0, 255.0) as u8
-            }
+        let max = to_f64(S::MAX);
+        let c: [S; N] = std::array::from_fn(|ch| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to [0, M]; truncation toward zero is the rounding; NaN saturates to 0"
+            )]
+            let v = self.c_slope[ch].mul_add(y, self.c_off[ch]).clamp(0.0, max) as i64;
+            S::from_signed(v)
         });
         (x, c)
     }
 }
 
-/// Pass the run `[run_x0, run_x1]` of `span_color`, of `n`-byte colours,
+/// Pass the run `[run_x0, run_x1]` of `span_color`, of `n`-sample colours,
 /// to `emit`.
 ///
 /// `buf_x0` is the leftmost x whose colour is stored at `span_color[0]`.
 /// `run_x0 >= buf_x0` must hold; violated only by a logic error in the caller.
-fn emit_run(
+fn emit_run<S: Sample>(
     n: usize,
-    emit: &mut impl FnMut(&[u8], i32, i32, i32),
-    span_color: &[u8],
+    emit: &mut impl FnMut(&[S], i32, i32, i32),
+    span_color: &[S],
     buf_x0: i32,
     run_x0: i32,
     run_x1: i32,
@@ -131,19 +142,25 @@ fn emit_run(
     emit(&span_color[buf_off..buf_end], run_x0, run_x1, y);
 }
 
-/// Fill a single Gouraud-shaded triangle into `bitmap`.
+/// Fill a single Gouraud-shaded triangle into `bitmap`, whose pixel type
+/// `P` is RGB: three channels, the vertices' colours.
 ///
 /// Pixels are clipped to `clip` and composited via `pipe`.
-pub fn gouraud_triangle_fill(
-    bitmap: &mut Bitmap<Rgb8>,
+///
+/// # Panics
+///
+/// When `P` has other than three channels.
+pub fn gouraud_triangle_fill<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
     origin: (i32, i32),
     clip: &Clip,
-    pipe: &PipeState<'_>,
-    v: [GouraudVertex; 3],
+    pipe: &PipeState<'_, P::Sample>,
+    v: [GouraudVertex<3, P::Sample>; 3],
 ) {
+    assert_eq!(P::NCOMPS, 3, "gouraud_triangle_fill: an RGB pixel type");
     let (width, height) = (bitmap.width, bitmap.height);
     gouraud_triangle_spans(width, height, origin, clip, v, |colour, x0, x1, y| {
-        render_bitmap_span::<Rgb8>(
+        render_bitmap_span::<P>(
             bitmap,
             pipe,
             &PipeSrc::Pattern(&RowPattern { data: colour }),
@@ -162,16 +179,16 @@ pub fn gouraud_triangle_fill(
 /// spans are computed on that grid and moved onto the bitmap last, so a
 /// window receives the spans of the whole grid it covers.  `clip` is in
 /// the bitmap's pixels.  `emit(colour, x0, x1, y)` receives the colour
-/// bytes of the bitmap pixels `x0..=x1` of row `y`, `N` per pixel, in
+/// samples of the bitmap pixels `x0..=x1` of row `y`, `N` per pixel, in
 /// scanline order.  [`gouraud_triangle_fill`] composites exactly these
 /// spans.
-pub fn gouraud_triangle_spans<const N: usize>(
+pub fn gouraud_triangle_spans<const N: usize, S: Sample>(
     width: u32,
     height: u32,
     origin: (i32, i32),
     clip: &Clip,
-    mut v: [GouraudVertex<N>; 3],
-    mut emit: impl FnMut(&[u8], i32, i32, i32),
+    mut v: [GouraudVertex<N, S>; 3],
+    mut emit: impl FnMut(&[S], i32, i32, i32),
 ) {
     // A non-finite coordinate has no pixel position: the triangle is empty.
     if !v
@@ -226,12 +243,12 @@ pub fn gouraud_triangle_spans<const N: usize>(
     // assignment never affects any painted pixel.
     let long_is_left = if y0 == y1 {
         let sample_y = y1.saturating_add(1);
-        let (xl, _) = long_edge.eval(f64::from(sample_y));
-        let (xs, _) = lower_edge.eval(f64::from(sample_y));
+        let (xl, _) = long_edge.eval::<S>(f64::from(sample_y));
+        let (xs, _) = lower_edge.eval::<S>(f64::from(sample_y));
         xl <= xs
     } else {
-        let (xl, _) = long_edge.eval(f64::from(y1));
-        let (xs, _) = upper_edge.eval(f64::from(y1));
+        let (xl, _) = long_edge.eval::<S>(f64::from(y1));
+        let (xs, _) = upper_edge.eval::<S>(f64::from(y1));
         xl <= xs
     };
 
@@ -248,14 +265,14 @@ pub fn gouraud_triangle_spans<const N: usize>(
 
     // Span colour buffer, sized to the widest span the loop can emit.
     let max_span = usize::try_from(i64::from(col_max) - i64::from(col_min) + 1).unwrap_or(0);
-    let mut span_color = vec![0u8; max_span * N];
+    let mut span_color = vec![S::default(); max_span * N];
 
     for y in scan_y0..=scan_y2 {
         let yf = f64::from(y);
 
         let short_edge = if y <= y1 { &upper_edge } else { &lower_edge };
-        let (xl, cl) = long_edge.eval(yf);
-        let (xs, cs) = short_edge.eval(yf);
+        let (xl, cl) = long_edge.eval::<S>(yf);
+        let (xs, cs) = short_edge.eval::<S>(yf);
 
         let (x_left, c_left, x_right, c_right) = if long_is_left {
             (xl, cl, xs, cs)
@@ -281,10 +298,10 @@ pub fn gouraud_triangle_spans<const N: usize>(
         for (px, out) in (sx0..=sx1).zip(buf.as_chunks_mut::<N>().0) {
             let t = ((f64::from(px) - f64::from(x_left)) / span_width).clamp(0.0, 1.0);
             #[expect(clippy::cast_sign_loss, reason = "t ∈ [0,1]")]
-            #[expect(clippy::cast_possible_truncation, reason = "t * 256 ≤ 256")]
-            let frac = (t * 256.0) as u32;
+            #[expect(clippy::cast_possible_truncation, reason = "t · LERP_ONE ≤ LERP_ONE")]
+            let frac = (t * f64::from(S::LERP_ONE)) as u32;
             for ((o, l), r) in out.iter_mut().zip(c_left).zip(c_right) {
-                *o = lerp_u8(l, r, frac);
+                *o = S::lerp(l, r, frac);
             }
         }
 
@@ -310,6 +327,7 @@ mod tests {
     use super::*;
     use crate::bitmap::Bitmap;
     use crate::testutil::{make_clip, simple_pipe};
+    use color::Rgb8;
 
     fn vertex(x: f64, y: f64) -> GouraudVertex {
         GouraudVertex {
@@ -324,11 +342,11 @@ mod tests {
     #[test]
     fn negative_coordinates_round_toward_negative_infinity() {
         let vertical = EdgeMap::from_vertices(&vertex(-0.7, 0.0), &vertex(-0.7, 10.0));
-        assert_eq!(vertical.eval(5.0).0, -1, "x = -0.7 rounds to -1");
+        assert_eq!(vertical.eval::<u8>(5.0).0, -1, "x = -0.7 rounds to -1");
         // The edge starts at row round(-0.7) = -1, so it spans 11 rows and
         // advances one pixel per row.
         let sloped = EdgeMap::from_vertices(&vertex(0.0, -0.7), &vertex(11.0, 10.0));
-        assert_eq!(sloped.eval(4.0).0, 5, "five rows below the start row");
+        assert_eq!(sloped.eval::<u8>(4.0).0, 5, "five rows below the start row");
     }
 
     /// A vertex with a non-finite coordinate paints nothing.
@@ -355,17 +373,17 @@ mod tests {
             GouraudVertex {
                 x: 2.0,
                 y: 2.0,
-                color: [255, 255, 255],
+                color: [255u8, 255, 255],
             },
             GouraudVertex {
                 x: 8.0,
                 y: 2.0,
-                color: [255, 255, 255],
+                color: [255u8, 255, 255],
             },
             GouraudVertex {
                 x: 5.0,
                 y: 7.0,
-                color: [255, 255, 255],
+                color: [255u8, 255, 255],
             },
         ];
         gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
@@ -387,17 +405,17 @@ mod tests {
             GouraudVertex {
                 x: 1.0,
                 y: 1.0,
-                color: [255, 0, 0],
+                color: [255u8, 0, 0],
             },
             GouraudVertex {
                 x: 10.0,
                 y: 1.0,
-                color: [0, 255, 0],
+                color: [0u8, 255, 0],
             },
             GouraudVertex {
                 x: 5.5,
                 y: 9.0,
-                color: [0, 0, 255],
+                color: [0u8, 0, 255],
             },
         ];
         gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
@@ -419,17 +437,17 @@ mod tests {
             GouraudVertex {
                 x: 1.0,
                 y: 4.0,
-                color: [255, 0, 0],
+                color: [255u8, 0, 0],
             },
             GouraudVertex {
                 x: 5.0,
                 y: 4.0,
-                color: [0, 255, 0],
+                color: [0u8, 255, 0],
             },
             GouraudVertex {
                 x: 3.0,
                 y: 4.0,
-                color: [0, 0, 255],
+                color: [0u8, 0, 255],
             },
         ];
         gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
@@ -452,17 +470,17 @@ mod tests {
             GouraudVertex {
                 x: 5.0,
                 y: 5.0,
-                color: [255, 0, 0],
+                color: [255u8, 0, 0],
             },
             GouraudVertex {
                 x: 7.0,
                 y: 5.0,
-                color: [0, 255, 0],
+                color: [0u8, 255, 0],
             },
             GouraudVertex {
                 x: 6.0,
                 y: 7.0,
-                color: [0, 0, 255],
+                color: [0u8, 0, 255],
             },
         ];
         gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
@@ -481,17 +499,17 @@ mod tests {
             GouraudVertex {
                 x: 2.0,
                 y: 2.0,
-                color: [255, 0, 0],
+                color: [255u8, 0, 0],
             },
             GouraudVertex {
                 x: 8.0,
                 y: 2.0,
-                color: [0, 255, 0],
+                color: [0u8, 255, 0],
             },
             GouraudVertex {
                 x: 5.0,
                 y: 7.0,
-                color: [0, 0, 255],
+                color: [0u8, 0, 255],
             },
         ];
         let tri_cba = [tri_abc[2], tri_abc[1], tri_abc[0]];
@@ -528,17 +546,17 @@ mod tests {
             GouraudVertex {
                 x: 5.0,
                 y: 1.0,
-                color: [255, 0, 0],
+                color: [255u8, 0, 0],
             },
             GouraudVertex {
                 x: 2.0,
                 y: 7.0,
-                color: [0, 255, 0],
+                color: [0u8, 255, 0],
             },
             GouraudVertex {
                 x: 8.0,
                 y: 7.0,
-                color: [0, 0, 255],
+                color: [0u8, 0, 255],
             },
         ];
         gouraud_triangle_fill(&mut bmp, (0, 0), &clip, &pipe, tri);
@@ -561,17 +579,17 @@ mod tests {
             GouraudVertex {
                 x: 1.3,
                 y: 0.7,
-                color: [250, 10, 30],
+                color: [250u8, 10, 30],
             },
             GouraudVertex {
                 x: 37.9,
                 y: 11.2,
-                color: [5, 240, 60],
+                color: [5u8, 240, 60],
             },
             GouraudVertex {
                 x: 14.6,
                 y: 28.4,
-                color: [40, 70, 255],
+                color: [40u8, 70, 255],
             },
         ];
         let spans = |w: i32, h: i32, origin: (i32, i32)| {

@@ -38,8 +38,8 @@ pub fn fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
@@ -66,8 +66,8 @@ pub fn eo_fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
@@ -99,8 +99,8 @@ pub fn fill_area<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
@@ -146,8 +146,8 @@ fn fill_impl<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
@@ -258,8 +258,8 @@ fn area_fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     xpath: &XPath,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     eo: bool,
     weight: u8,
 ) {
@@ -492,8 +492,8 @@ fn uniform(block: &[u8], value: u8) -> bool {
 /// composited with their coverage as the shape.
 fn draw_coverage_row<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     coverage: &[u8],
     x0: i32,
     row: i32,
@@ -502,7 +502,7 @@ fn draw_coverage_row<P: Pixel>(
     let draw = |bitmap: &mut Bitmap<P>, from: usize, to: usize, solid: bool| {
         if from < to {
             let shape = (!solid).then(|| &coverage[from..to]);
-            pipe::render_bitmap_span::<P>(
+            pipe::render_bitmap_span_coverage::<P>(
                 bitmap,
                 pipe,
                 src,

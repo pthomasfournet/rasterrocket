@@ -278,7 +278,8 @@ impl PatternMemo {
 
 /// The bytes `bitmap` holds: its pixels and its alpha plane, if any.
 fn bitmap_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> usize {
-    bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
+    let samples = bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[P::Sample]>::len);
+    samples * size_of::<P::Sample>()
 }
 
 /// A bound on the bytes of the raster of a cell spanning `cell_w × cell_h`

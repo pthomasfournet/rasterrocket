@@ -56,7 +56,7 @@ impl Snapshot {
     /// `alpha`, under the object as painted onto the cleared region: each
     /// pixel becomes `painted + (1 − f)·prior` on premultiplied colour and
     /// alpha, `f` being the painted alpha over `alpha`.
-    fn merge_under<P: Pixel>(self, bitmap: &mut Bitmap<P>, alpha: u8) {
+    fn merge_under<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>, alpha: u8) {
         debug_assert_eq!(self.bpp, P::BYTES, "a snapshot merges onto its own canvas");
         let Some(prior_a) = self.alpha.as_ref() else {
             return;

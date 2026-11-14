@@ -34,7 +34,7 @@ pub(super) struct RgbaRows<'a> {
 /// rows the clip edge crosses.  Samples map through the RGB tables of
 /// `transfer`, if any, before `compositor` paints them.
 #[cfg(feature = "cache")]
-pub(super) fn composite_rgba_rows<P: Pixel>(
+pub(super) fn composite_rgba_rows<P: Pixel<Sample = u8>>(
     bitmap: &mut Bitmap<P>,
     rows: RgbaRows<'_>,
     grid: &SampleGrid,
@@ -99,7 +99,7 @@ pub(super) struct ImageCompositor<'a> {
 impl<'a> ImageCompositor<'a> {
     /// The compositor of samples painted onto `bitmap` with the
     /// parameters `paint`.
-    pub(super) fn new<P: Pixel>(bitmap: &Bitmap<P>, paint: &'a PaintParams) -> Self {
+    pub(super) fn new<P: Pixel<Sample = u8>>(bitmap: &Bitmap<P>, paint: &'a PaintParams) -> Self {
         let direct = P::MODE == PixelMode::Rgb8
             && bitmap.alpha_plane().is_none()
             && paint.alpha == u8::MAX
@@ -121,7 +121,7 @@ impl<'a> ImageCompositor<'a> {
     /// whose shape is the coverage: the pipe takes the source alpha as
     /// `div255(a_input × shape)`, the alpha a sample painted alone with
     /// that constant alpha would have.
-    pub(super) fn paint_row<P: Pixel>(
+    pub(super) fn paint_row<P: Pixel<Sample = u8>>(
         &self,
         bitmap: &mut Bitmap<P>,
         x0: u32,

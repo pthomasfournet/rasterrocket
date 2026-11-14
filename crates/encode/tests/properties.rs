@@ -37,7 +37,7 @@ struct Image {
 }
 
 impl Image {
-    fn bitmap<P: Pixel>(&self) -> Bitmap<P> {
+    fn bitmap<P: Pixel<Sample = u8>>(&self) -> Bitmap<P> {
         let mut bmp: Bitmap<P> = Bitmap::new_filled(
             self.w,
             self.h,

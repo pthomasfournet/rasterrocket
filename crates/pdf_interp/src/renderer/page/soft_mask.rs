@@ -292,7 +292,7 @@ impl Snapshot {
     /// Replace each pixel of the rectangle by its interpolation between the
     /// snapshot and its current value, weighted by the mask.
     /// The snapshot lies within the mask's rectangle.
-    fn blend_back<P: Pixel>(self, bitmap: &mut Bitmap<P>, mask: &MaskView<'_>) {
+    fn blend_back<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>, mask: &MaskView<'_>) {
         debug_assert_eq!(self.bpp, P::BYTES, "a snapshot blends onto its own canvas");
         let (span, n) = (self.span(), P::BYTES);
         let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);

@@ -254,9 +254,8 @@ impl PageRenderer<'_> {
     /// (see `InterpGState::painted_fill_color`) and paints through the
     /// identity.
     pub(super) fn transfer_set(transfer: &Transfer) -> TransferSet<'_> {
-        static DN: [[u8; 256]; 8] = [TransferLut::IDENTITY.0; 8];
         let id = TransferLut::IDENTITY.as_array();
-        TransferSet::new(transfer.tables(), id, [id; 4], &DN)
+        TransferSet::new(transfer.tables(), id, [id; 4], [id; 8])
     }
 
     /// The backdrop a paint under `blend_mode` writing the channels
@@ -665,7 +664,7 @@ pub(super) struct FillRule {
     clippy::too_many_arguments,
     reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
 )]
-pub(super) fn fill_device_path<P: color::Pixel>(
+pub(super) fn fill_device_path<P: color::Pixel<Sample = u8>>(
     bitmap: &mut raster::Bitmap<P>,
     clip: &raster::Clip,
     path: &raster::path::Path,

@@ -72,8 +72,8 @@ pub fn blit_glyph<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     clip_all_inside: bool,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     pen_x: i32,
     pen_y: i32,
     glyph: &GlyphBitmap<'_>,
@@ -171,8 +171,8 @@ pub fn blit_glyph<P: Pixel>(
 fn blit_aa<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     mut clip_rows: Option<&mut ClipRows<'_>>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     glyph: &GlyphBitmap<'_>,
     x_start: i32,
     y_start: i32,
@@ -247,8 +247,8 @@ fn blit_aa<P: Pixel>(
 fn blit_mono<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     mut clip_rows: Option<&mut ClipRows<'_>>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     glyph: &GlyphBitmap<'_>,
     x_start: i32,
     y_start: i32,
@@ -427,8 +427,8 @@ fn clipped(alpha: u8, row_clip: RowClip<'_>, x: i32) -> u8 {
 )]
 fn blit_mono_row_clipped<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     data: &[u8],
     row_start: usize,
     x_bit_skip: usize,
@@ -470,8 +470,8 @@ fn blit_mono_row_clipped<P: Pixel>(
 /// Emit one AA-shaped span starting at `x0`.
 fn emit_aa_run<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     x0: i32,
     y: i32,
     shape: &[u8],
@@ -483,7 +483,7 @@ fn emit_aa_run<P: Pixel>(
         reason = "shape.len() ≤ bitmap.width ≤ i32::MAX"
     )]
     let x1 = x0 + shape.len() as i32 - 1;
-    pipe::render_bitmap_span::<P>(bitmap, pipe, src, Some(shape), x0, x1, y);
+    pipe::render_bitmap_span_coverage::<P>(bitmap, pipe, src, Some(shape), x0, x1, y);
 }
 
 /// Clip-test a glyph bbox and blit it.
@@ -493,8 +493,8 @@ fn emit_aa_run<P: Pixel>(
 pub fn fill_glyph<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     pen_x: i32,
     pen_y: i32,
     glyph: &GlyphBitmap<'_>,

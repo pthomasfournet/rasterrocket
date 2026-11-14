@@ -31,6 +31,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::mode::PixelMode;
+use crate::sample::Sample;
 
 // ── Compile-time size assertions ──────────────────────────────────────────────
 //
@@ -42,19 +43,27 @@ const _: () = assert!(std::mem::size_of::<Rgb8>() == Rgb8::BYTES);
 const _: () = assert!(std::mem::size_of::<Gray8>() == Gray8::BYTES);
 const _: () = assert!(std::mem::size_of::<Cmyk8>() == Cmyk8::BYTES);
 const _: () = assert!(std::mem::size_of::<DeviceN8>() == DeviceN8::BYTES);
+const _: () = assert!(std::mem::size_of::<Rgb16>() == Rgb16::BYTES);
+const _: () = assert!(std::mem::size_of::<Gray16>() == Gray16::BYTES);
 
 // ── Pixel trait ───────────────────────────────────────────────────────────────
 
 /// A typed pixel value that can be stored in a `Bitmap<P>` row buffer.
 ///
 /// All implementations are `Copy + Pod`, enabling zero-copy row access via
-/// `bytemuck::cast_slice`. `BYTES` must match `std::mem::size_of::<Self>()`;
-/// compile-time assertions in this module enforce the invariant.
+/// `bytemuck::cast_slice`.  A pixel is [`Self::NCOMPS`] channels of type
+/// [`Self::Sample`], with no padding: `BYTES` equals `NCOMPS` times the
+/// sample's size and `std::mem::size_of::<Self>()`; compile-time
+/// assertions in this module enforce the invariant.
 pub trait Pixel: Copy + Pod + Zeroable + Send + Sync + 'static {
     /// The [`PixelMode`] variant that identifies this pixel format at runtime.
     const MODE: PixelMode;
+    /// The channel type.
+    type Sample: Sample;
+    /// Channels per pixel.
+    const NCOMPS: usize;
     /// Byte width of one pixel. Must equal `std::mem::size_of::<Self>()`.
-    const BYTES: usize;
+    const BYTES: usize = Self::NCOMPS * std::mem::size_of::<Self::Sample>();
 }
 
 // ── Concrete pixel types ──────────────────────────────────────────────────────
@@ -75,7 +84,8 @@ pub struct Rgb8 {
 
 impl Pixel for Rgb8 {
     const MODE: PixelMode = PixelMode::Rgb8;
-    const BYTES: usize = 3;
+    type Sample = u8;
+    const NCOMPS: usize = 3;
 }
 
 /// 8-bit grayscale, 1 byte/pixel, wire layout `[Y]`.
@@ -90,7 +100,8 @@ pub struct Gray8 {
 
 impl Pixel for Gray8 {
     const MODE: PixelMode = PixelMode::Mono8;
-    const BYTES: usize = 1;
+    type Sample = u8;
+    const NCOMPS: usize = 1;
 }
 
 /// 8-bit CMYK, 4 bytes/pixel, wire layout `[C, M, Y, K]`.
@@ -111,7 +122,8 @@ pub struct Cmyk8 {
 
 impl Pixel for Cmyk8 {
     const MODE: PixelMode = PixelMode::Cmyk8;
-    const BYTES: usize = 4;
+    type Sample = u8;
+    const NCOMPS: usize = 4;
 }
 
 /// CMYK + 4 spot channels, 8 bytes/pixel, wire layout `[C, M, Y, K, S0, S1, S2, S3]`.
@@ -128,7 +140,41 @@ pub struct DeviceN8 {
 
 impl Pixel for DeviceN8 {
     const MODE: PixelMode = PixelMode::DeviceN8;
-    const BYTES: usize = 8;
+    type Sample = u8;
+    const NCOMPS: usize = 8;
+}
+
+/// 16-bit RGB, 6 bytes/pixel, wire layout `[R, G, B]` of native-endian
+/// `u16`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
+pub struct Rgb16 {
+    /// Red channel, `0` = minimum, `65535` = full intensity.
+    pub r: u16,
+    /// Green channel, `0` = minimum, `65535` = full intensity.
+    pub g: u16,
+    /// Blue channel, `0` = minimum, `65535` = full intensity.
+    pub b: u16,
+}
+
+impl Pixel for Rgb16 {
+    const MODE: PixelMode = PixelMode::Rgb16;
+    type Sample = u16;
+    const NCOMPS: usize = 3;
+}
+
+/// 16-bit grayscale, 2 bytes/pixel, one native-endian `u16`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
+pub struct Gray16 {
+    /// Luminance, `0` = black, `65535` = white.
+    pub v: u16,
+}
+
+impl Pixel for Gray16 {
+    const MODE: PixelMode = PixelMode::Mono16;
+    type Sample = u16;
+    const NCOMPS: usize = 1;
 }
 
 // ── Erased pixel buffer ───────────────────────────────────────────────────────
@@ -170,6 +216,7 @@ impl AnyColor {
     /// | `Mono8` | `bytes[0] = 255` |
     /// | `Rgb8`, `Bgr8` | `bytes[0..3] = [255, 255, 255]` |
     /// | `Xbgr8` | `bytes[0..4] = [255, 255, 255, 255]` — `byte[3]` is the ignored X/padding byte, set to 255 for consistency so the full 4-byte value reads as opaque white in any RGBA interpretation |
+    /// | `Mono16`, `Rgb16` | every byte of every sample `0xFF` |
     /// | `Cmyk8`, `DeviceN8` | all bytes zero — CMYK white is zero ink on all channels |
     #[must_use]
     pub const fn white(mode: PixelMode) -> Self {
@@ -178,6 +225,17 @@ impl AnyColor {
             // Mono1: 0xFF means all 8 packed bits = 1 = white (MSB-first format).
             // Mono8: 255 = maximum luminance = white.
             PixelMode::Mono1 | PixelMode::Mono8 => bytes[0] = 255,
+            PixelMode::Mono16 => {
+                bytes[0] = 255;
+                bytes[1] = 255;
+            }
+            PixelMode::Rgb16 => {
+                let mut i = 0;
+                while i < 6 {
+                    bytes[i] = 255;
+                    i += 1;
+                }
+            }
             PixelMode::Rgb8 | PixelMode::Bgr8 => {
                 bytes[0] = 255;
                 bytes[1] = 255;
@@ -213,6 +271,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<Gray8>(), Gray8::BYTES);
         assert_eq!(std::mem::size_of::<Cmyk8>(), Cmyk8::BYTES);
         assert_eq!(std::mem::size_of::<DeviceN8>(), DeviceN8::BYTES);
+        assert_eq!(std::mem::size_of::<Rgb16>(), Rgb16::BYTES);
+        assert_eq!(std::mem::size_of::<Gray16>(), Gray16::BYTES);
     }
 
     #[test]

@@ -22,7 +22,10 @@ use crate::{EncodeError, pack_bilevel_row};
 ///
 /// Returns [`EncodeError::UnsupportedMode`] for non-grayscale modes.
 /// Returns [`EncodeError::Io`] on any I/O failure.
-pub fn write_pbm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(), EncodeError> {
+pub fn write_pbm<P: Pixel<Sample = u8>, W: Write>(
+    bitmap: &Bitmap<P>,
+    mut out: W,
+) -> Result<(), EncodeError> {
     match P::MODE {
         PixelMode::Mono8 => {}
         PixelMode::Mono1
@@ -30,7 +33,9 @@ pub fn write_pbm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
         | PixelMode::Bgr8
         | PixelMode::Xbgr8
         | PixelMode::Cmyk8
-        | PixelMode::DeviceN8 => {
+        | PixelMode::DeviceN8
+        | PixelMode::Mono16
+        | PixelMode::Rgb16 => {
             return Err(EncodeError::UnsupportedMode(
                 "write_pbm accepts only Gray8 (Mono8) bitmaps",
             ));

@@ -15,6 +15,7 @@
 
 use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
+use color::Sample;
 
 /// Linear gradient between two points.
 ///
@@ -22,8 +23,8 @@ use crate::pipe::Pattern;
 /// as `p` is an affine function of the device pixel, so is `s`, held here as
 /// `s = gx·x + gy·y + s0`.  Pixels outside `s ∈ [0, 1]` are painted with the
 /// nearer endpoint colour only when that end is extended.
-pub struct AxialPattern<const N: usize = 3> {
-    ramp: ColorRamp<N>,
+pub struct AxialPattern<const N: usize = 3, S: Sample = u8> {
+    ramp: ColorRamp<N, S>,
     /// Device-space gradient of `s`.
     gx: f64,
     gy: f64,
@@ -35,7 +36,7 @@ pub struct AxialPattern<const N: usize = 3> {
     extend_end: bool,
 }
 
-impl<const N: usize> AxialPattern<N> {
+impl<const N: usize, S: Sample> AxialPattern<N, S> {
     /// Create an axial gradient.
     ///
     /// - `ramp`: colours over the normalised parameter, start point → 0 and
@@ -45,7 +46,7 @@ impl<const N: usize> AxialPattern<N> {
     /// - `extend_start` / `extend_end`: paint beyond the start / end point.
     #[must_use]
     pub fn new(
-        ramp: ColorRamp<N>,
+        ramp: ColorRamp<N, S>,
         p0x: f64,
         p0y: f64,
         p1x: f64,
@@ -102,8 +103,8 @@ impl<const N: usize> AxialPattern<N> {
     }
 }
 
-impl<const N: usize> Pattern for AxialPattern<N> {
-    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+impl<const N: usize, S: Sample> Pattern<S> for AxialPattern<N, S> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]) {
         fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }
 
@@ -111,13 +112,13 @@ impl<const N: usize> Pattern for AxialPattern<N> {
         !(self.extend_start && self.extend_end) || self.degenerate
     }
 
-    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
         fill_ramp_span(
             &self.ramp,
             x0,
             x1,
             out,
-            |i, p| coverage[i] = u8::from(p) * 255,
+            |i, p| coverage[i] = if p { S::MAX } else { S::default() },
             |x| self.position(x, y),
         );
     }

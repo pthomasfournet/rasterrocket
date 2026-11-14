@@ -368,7 +368,9 @@ impl CanvasGroup {
 /// in place: each channel becomes `c·α + w·(1 − α)`, `w` being paper white,
 /// and the alpha plane is removed and returned.  A bitmap without an alpha
 /// plane is left as it is, and the result is `None`.
-pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) -> Option<Vec<u8>> {
+pub(super) fn composite_onto_white<P: Pixel<Sample = u8>>(
+    bitmap: &mut Bitmap<P>,
+) -> Option<Vec<u8>> {
     let white = paper::<P>();
     let n = bitmap.width as usize * P::BYTES;
     for y in 0..bitmap.height {
@@ -389,7 +391,7 @@ pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) -> Option<V
 
 /// Set the colour of every pixel of `bitmap` whose alpha is 0 to 0.  A
 /// bitmap without an alpha plane is left as it is.
-pub(super) fn zero_transparent_colour<P: Pixel>(bitmap: &mut Bitmap<P>) {
+pub(super) fn zero_transparent_colour<P: Pixel<Sample = u8>>(bitmap: &mut Bitmap<P>) {
     let n = bitmap.width as usize * P::BYTES;
     for y in 0..bitmap.height {
         let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
@@ -418,7 +420,7 @@ pub(super) fn blend_u8(src: u8, dst: u8, alpha: u8) -> u8 {
 }
 
 /// Make the pixels of `region` transparent: colour and alpha zero.
-pub(super) fn clear<P: Pixel>(bitmap: &mut Bitmap<P>, region: PixelRect) {
+pub(super) fn clear<P: Pixel<Sample = u8>>(bitmap: &mut Bitmap<P>, region: PixelRect) {
     let PixelRect { x0, y0, x1, y1 } = region;
     let n = P::BYTES;
     for y in y0..y1 {
@@ -448,7 +450,7 @@ pub(super) struct Snapshot {
 impl Snapshot {
     /// Capture `region` of `bitmap`, or the error for a buffer of the
     /// region's size when the allocator refuses one.
-    pub(super) fn try_take<P: Pixel>(
+    pub(super) fn try_take<P: Pixel<Sample = u8>>(
         bitmap: &Bitmap<P>,
         region: PixelRect,
     ) -> Result<Self, raster::BitmapAllocError> {
@@ -494,7 +496,7 @@ impl Snapshot {
     }
 
     /// Write the snapshot back over its rectangle of `bitmap`.
-    fn restore<P: Pixel>(self, bitmap: &mut Bitmap<P>) {
+    fn restore<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>) {
         debug_assert_eq!(
             self.bpp,
             P::BYTES,

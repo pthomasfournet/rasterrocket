@@ -139,8 +139,7 @@ const ALL_MODES: [BlendMode; 16] = [
 /// [`render_span`] and hash every result: every blend mode, constant
 /// alpha, with and without an alpha plane, shape, backdrop, overprint
 /// mask, a pattern source and a non-identity transfer.
-fn span_digest<P: Pixel>(spans: usize, seed: u64) -> u64 {
-    static DN: [[u8; 256]; 8] = [TransferLut::INVERTED.0; 8];
+fn span_digest<P: Pixel<Sample = u8>>(spans: usize, seed: u64) -> u64 {
     let id = TransferLut::IDENTITY.as_array();
     let inv = TransferLut::INVERTED.as_array();
     let n = P::BYTES;
@@ -159,7 +158,7 @@ fn span_digest<P: Pixel>(spans: usize, seed: u64) -> u64 {
         let bd_colour: Vec<u8> = (0..48 * n).map(|_| rng.level()).collect();
         let bd_alpha: Vec<u8> = (0..48).map(|_| rng.level()).collect();
         let transfer = if rng.one_in(4) {
-            TransferSet::new([inv, id, inv], inv, [id, inv, id, inv], &DN)
+            TransferSet::new([inv, id, inv], inv, [id, inv, id, inv], [inv; 8])
         } else {
             TransferSet::identity_rgb()
         };

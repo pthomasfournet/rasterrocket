@@ -22,25 +22,24 @@ use crate::clip::Clip;
 use crate::fill;
 use crate::path::Path;
 use crate::pipe::{Pattern, PipeSrc, PipeState};
-use color::Pixel;
-use color::convert::lerp_u8;
+use color::{Pixel, Sample};
 
 /// The colours of a gradient at uniformly spaced positions of its
 /// normalised parameter `s ∈ [0, 1]`.
 ///
 /// Sample `k` of `n` is the colour at `s = k / (n − 1)`; between samples the
 /// colour is the linear interpolation of its two neighbours, channel by
-/// channel.  A colour is `N` bytes: sRGB by default, or the bytes of any
-/// other pixel type.  Shared by [`axial`] and [`radial`].
+/// channel.  A colour is `N` samples of type `S`: sRGB by default, or the
+/// channels of any other pixel type.  Shared by [`axial`] and [`radial`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColorRamp<const N: usize = 3> {
-    samples: Box<[[u8; N]]>,
+pub struct ColorRamp<const N: usize = 3, S: Sample = u8> {
+    samples: Box<[[S; N]]>,
 }
 
-impl<const N: usize> ColorRamp<N> {
+impl<const N: usize, S: Sample> ColorRamp<N, S> {
     /// The linear ramp from `c0` at `s = 0` to `c1` at `s = 1`.
     #[must_use]
-    pub fn two(c0: [u8; N], c1: [u8; N]) -> Self {
+    pub fn two(c0: [S; N], c1: [S; N]) -> Self {
         Self {
             samples: Box::new([c0, c1]),
         }
@@ -53,7 +52,7 @@ impl<const N: usize> ColorRamp<N> {
     /// every position identically to [`Self::two`].  `None` when fewer than
     /// two samples are given.
     #[must_use]
-    pub fn from_samples(samples: Vec<[u8; N]>) -> Option<Self> {
+    pub fn from_samples(samples: Vec<[S; N]>) -> Option<Self> {
         if samples.len() < 2 {
             return None;
         }
@@ -66,9 +65,11 @@ impl<const N: usize> ColorRamp<N> {
                 reason = "sample counts are far below 2^52"
             )]
             let pos = k as f64 / segments as f64;
-            let mut lin = [0u8; N];
+            let mut lin = [S::default(); N];
             linear.write(pos, &mut lin);
-            s.iter().zip(lin).all(|(&a, b)| a.abs_diff(b) <= 1)
+            s.iter()
+                .zip(lin)
+                .all(|(&a, b)| (a.signed() - b.signed()).abs() <= 1)
         });
         Some(if is_linear {
             linear
@@ -82,32 +83,34 @@ impl<const N: usize> ColorRamp<N> {
     /// Write the colour at normalised position `s` (clamped to `[0, 1]`;
     /// `NaN` reads as `0`) into `out[0..N]`.
     ///
-    /// The position is quantised to 1/256 of a segment and the two
-    /// neighbouring samples are blended with [`lerp_u8`].
+    /// The position is quantised to `1 / S::LERP_ONE` of a segment (1/256
+    /// for 8-bit samples, 1/65 536 for 16-bit ones) and the two neighbouring
+    /// samples are blended with [`Sample::lerp`].
     #[inline]
-    pub fn write(&self, s: f64, out: &mut [u8]) {
-        debug_assert_eq!(out.len(), N, "ColorRamp::write: out must be N bytes");
+    pub fn write(&self, s: f64, out: &mut [S]) {
+        debug_assert_eq!(out.len(), N, "ColorRamp::write: out must be N samples");
+        let one = S::LERP_ONE as usize;
         let segments = self.samples.len() - 1;
         #[expect(
             clippy::cast_precision_loss,
             reason = "sample counts are far below 2^52"
         )]
-        let scaled = s.clamp(0.0, 1.0) * (256 * segments) as f64;
+        let scaled = s.clamp(0.0, 1.0) * (one * segments) as f64;
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "scaled ∈ [0, 256·segments]; NaN saturates to 0"
+            reason = "scaled ∈ [0, LERP_ONE·segments]; NaN saturates to 0"
         )]
         let fixed = scaled as usize;
-        let idx = (fixed / 256).min(segments - 1);
+        let idx = (fixed / one).min(segments - 1);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "fixed − 256·idx ∈ [0, 256]"
+            reason = "fixed − LERP_ONE·idx ≤ LERP_ONE ≤ 2^16"
         )]
-        let frac = (fixed - idx * 256) as u32;
+        let frac = (fixed - idx * one) as u32;
         let (a, b) = (self.samples[idx], self.samples[idx + 1]);
         for ((o, a), b) in out.iter_mut().zip(a).zip(b) {
-            *o = lerp_u8(a, b, frac);
+            *o = S::lerp(a, b, frac);
         }
     }
 }
@@ -119,11 +122,11 @@ impl<const N: usize> ColorRamp<N> {
 /// called once per pixel with its index in the span.  `out.len()` must be
 /// `(x1 - x0 + 1) * N`.
 #[inline]
-fn fill_ramp_span<const N: usize>(
-    ramp: &ColorRamp<N>,
+fn fill_ramp_span<const N: usize, S: Sample>(
+    ramp: &ColorRamp<N, S>,
     x0: i32,
     x1: i32,
-    out: &mut [u8],
+    out: &mut [S],
     mut mark: impl FnMut(usize, bool),
     position: impl Fn(i32) -> Option<f64>,
 ) {
@@ -132,7 +135,7 @@ fn fill_ramp_span<const N: usize>(
             ramp.write(s, px);
             mark(i, true);
         } else {
-            px.fill(0);
+            px.fill(S::default());
             mark(i, false);
         }
     }
@@ -153,8 +156,8 @@ pub fn shaded_fill<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     clip: &Clip,
     path: &Path,
-    pipe: &PipeState<'_>,
-    pattern: &dyn Pattern,
+    pipe: &PipeState<'_, P::Sample>,
+    pattern: &dyn Pattern<P::Sample>,
     matrix: &[f64; 6],
     flatness: f64,
     vector_antialias: bool,
@@ -368,7 +371,7 @@ mod tests {
     #[test]
     fn ramp_needs_two_samples() {
         assert_eq!(ColorRamp::<3>::from_samples(vec![]), None);
-        assert_eq!(ColorRamp::from_samples(vec![[1, 2, 3]]), None);
+        assert_eq!(ColorRamp::from_samples(vec![[1u8, 2, 3]]), None);
     }
 
     #[test]

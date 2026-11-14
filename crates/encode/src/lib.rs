@@ -70,7 +70,7 @@ pub const PACKED_WRITE_BYTES: usize = 64 * 1024;
 /// row, stride padding excluded) to `out`, top to bottom. A packed bitmap is
 /// written straight from its buffer in [`PACKED_WRITE_BYTES`] slices, a
 /// padded one row by row.
-pub(crate) fn write_live_rows<P: Pixel, W: Write>(
+pub(crate) fn write_live_rows<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     out: &mut W,
 ) -> io::Result<()> {
@@ -89,7 +89,7 @@ pub(crate) fn write_live_rows<P: Pixel, W: Write>(
 
 /// The live bytes of every row of `bitmap`, top to bottom: its buffer when
 /// packed, else a copy without the stride padding.
-pub(crate) fn live_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> Cow<'_, [u8]> {
+pub(crate) fn live_bytes<P: Pixel<Sample = u8>>(bitmap: &Bitmap<P>) -> Cow<'_, [u8]> {
     let live = bitmap.width as usize * P::BYTES;
     if bitmap.stride == live {
         Cow::Borrowed(&bitmap.data()[..live * bitmap.height as usize])

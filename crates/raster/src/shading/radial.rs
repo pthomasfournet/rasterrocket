@@ -18,10 +18,11 @@
 
 use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
+use color::Sample;
 
 /// Gradient between two circles (centre `c0`, radius `r0`) and (`c1`, `r1`).
-pub struct RadialPattern<const N: usize = 3> {
-    ramp: ColorRamp<N>,
+pub struct RadialPattern<const N: usize = 3, S: Sample = u8> {
+    ramp: ColorRamp<N, S>,
     c0x: f64,
     c0y: f64,
     /// Δc = c1 − c0.
@@ -40,7 +41,7 @@ pub struct RadialPattern<const N: usize = 3> {
     device_to_shading: [f64; 6],
 }
 
-impl<const N: usize> RadialPattern<N> {
+impl<const N: usize, S: Sample> RadialPattern<N, S> {
     /// Create a radial gradient.
     ///
     /// - `ramp`: colours over the normalised parameter, start circle → 0 and
@@ -55,7 +56,7 @@ impl<const N: usize> RadialPattern<N> {
         reason = "mirrors the PDF shading dictionary: ramp, two circles (cx, cy, r each), two extend flags"
     )]
     pub fn new(
-        ramp: ColorRamp<N>,
+        ramp: ColorRamp<N, S>,
         c0x: f64,
         c0y: f64,
         r0: f64,
@@ -150,8 +151,8 @@ impl<const N: usize> RadialPattern<N> {
     }
 }
 
-impl<const N: usize> Pattern for RadialPattern<N> {
-    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+impl<const N: usize, S: Sample> Pattern<S> for RadialPattern<N, S> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]) {
         fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }
 
@@ -159,13 +160,13 @@ impl<const N: usize> Pattern for RadialPattern<N> {
         true
     }
 
-    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
         fill_ramp_span(
             &self.ramp,
             x0,
             x1,
             out,
-            |i, p| coverage[i] = u8::from(p) * 255,
+            |i, p| coverage[i] = if p { S::MAX } else { S::default() },
             |x| self.position(x, y),
         );
     }

@@ -1,64 +1,70 @@
 //! PDF blend modes (PDF spec §11.3.5).
 //!
-//! All separable modes operate per-channel with `src` and `dst` in `[0, 255]` and
-//! return a blended value in `[0, 255]`.  For CMYK/DeviceN the caller inverts the
-//! channel values before calling (`255 - v`) and inverts again after, blending
-//! the subtractive complement in additive space.
+//! All separable modes operate per-channel with `src` and `dst` in
+//! `[0, M]`, `M = S::MAX`, and return a blended value in `[0, M]`.  For
+//! CMYK/DeviceN the caller inverts the channel values before calling
+//! (`M - v`) and inverts again after, blending the subtractive complement in
+//! additive space.
 //!
 //! Non-separable modes (`Hue`, `Saturation`, `Color`, `Luminosity`) operate on
 //! full RGB triples (always in additive space); CMYK callers convert first.
+//!
+//! The arithmetic is integer, in `i64`, with `M` in place of the 8-bit
+//! constant 255 and every threshold a fixed fraction of `M + 1`; no
+//! intermediate overflows at 16 bits.
 
 use crate::types::BlendMode;
-use color::convert::div255;
+use color::{Sample, Wide};
+
+/// `M`, the largest sample value, as an `i64`.
+fn max<S: Sample>() -> i64 {
+    S::MAX.signed()
+}
 
 // ── Separable blend primitives ────────────────────────────────────────────────
 
 /// Normal: result is the source (Porter-Duff over handled in the pipe, not here).
 #[must_use]
-pub(crate) const fn blend_normal(src: u8, _dst: u8) -> u8 {
+pub(crate) const fn blend_normal<S: Sample>(src: S, _dst: S) -> S {
     src
 }
 
-/// Multiply: `div255(src * dst)`.
+/// Multiply: `div_max(src * dst)`.
 #[must_use]
-pub(crate) fn blend_multiply(src: u8, dst: u8) -> u8 {
-    div255(u32::from(src) * u32::from(dst))
+pub(crate) fn blend_multiply<S: Sample>(src: S, dst: S) -> S {
+    S::div_max(src.wide() * dst.wide())
 }
 
-/// Screen: `src + dst - div255(src * dst)`.
+/// Screen: `src + dst - div_max(src * dst)`, which lies in `[0, M]`.
 #[must_use]
-pub(crate) fn blend_screen(src: u8, dst: u8) -> u8 {
-    let s = u32::from(src);
-    let d = u32::from(dst);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "s + d - div255(s*d) ≤ 255: Screen result is always in [0,255]"
-    )]
-    let v = (s + d - u32::from(div255(s * d))) as u8;
-    v
+pub(crate) fn blend_screen<S: Sample>(src: S, dst: S) -> S {
+    let (s, d) = (src.wide(), dst.wide());
+    S::from_wide(s + d - S::div_max(s * d).wide())
 }
 
 /// Overlay: hard-light of dst over src.
 #[must_use]
-pub(crate) fn blend_overlay(src: u8, dst: u8) -> u8 {
-    if dst < 0x80 {
-        div255(u32::from(src) * 2 * u32::from(dst))
+pub(crate) fn blend_overlay<S: Sample>(src: S, dst: S) -> S {
+    let m = max::<S>();
+    let (s, d) = (src.signed(), dst.signed());
+    if d < (m + 1) / 2 {
+        S::div_max(src.wide() * dst.wide() * S::Wide::of(2))
     } else {
-        let s = u32::from(255 - src);
-        let d = u32::from(255 - dst);
-        255 - div255(2 * s * d)
+        let (s, d) = (m - s, m - d);
+        let prod = u64::try_from(2 * s * d).expect("a product of non-negative samples");
+        S::from_signed(m - S::div_max(S::Wide::of_u64(prod)).signed())
     }
 }
 
 /// Darken: `min(src, dst)`.
 #[must_use]
-pub(crate) fn blend_darken(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_darken<S: Sample>(src: S, dst: S) -> S {
     src.min(dst)
 }
 
 /// Lighten: `max(src, dst)`.
 #[must_use]
-pub(crate) fn blend_lighten(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_lighten<S: Sample>(src: S, dst: S) -> S {
     src.max(dst)
 }
 
@@ -66,16 +72,17 @@ pub(crate) fn blend_lighten(src: u8, dst: u8) -> u8 {
 ///
 /// ISO 32000-2 §11.3.5.2: `0` when `cb == 0`, `1` when `cb ≥ 1 − cs`, and
 /// `cb / (1 − cs)` otherwise.  A black backdrop is preserved for every source
-/// value, including `src == 255`, mirroring the white backdrop of
+/// value, including `src == M`, mirroring the white backdrop of
 /// [`blend_color_burn`].
 #[must_use]
-pub(crate) fn blend_color_dodge(src: u8, dst: u8) -> u8 {
-    if dst == 0 {
-        0
-    } else if src == 255 {
-        255
+pub(crate) fn blend_color_dodge<S: Sample>(src: S, dst: S) -> S {
+    let m = max::<S>();
+    if dst == S::default() {
+        S::default()
+    } else if src == S::MAX {
+        S::MAX
     } else {
-        ((u32::from(dst) * 255) / u32::from(255 - src)).min(255) as u8
+        S::from_signed((dst.signed() * m) / (m - src.signed()))
     }
 }
 
@@ -86,206 +93,181 @@ pub(crate) fn blend_color_dodge(src: u8, dst: u8) -> u8 {
 /// numerator is 0 whatever the source. Returning 0 there would turn a white
 /// backdrop black under a zero source.
 #[must_use]
-pub(crate) fn blend_color_burn(src: u8, dst: u8) -> u8 {
-    if dst == 255 {
-        255
-    } else if src == 0 {
-        0
+pub(crate) fn blend_color_burn<S: Sample>(src: S, dst: S) -> S {
+    let m = max::<S>();
+    if dst == S::MAX {
+        S::MAX
+    } else if src == S::default() {
+        S::default()
     } else {
-        let x = u32::from(255 - dst) * 255 / u32::from(src);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "x < 255 is checked above, so 255 - x ≤ 254 which fits u8"
-        )]
-        if x >= 255 { 0 } else { (255 - x) as u8 }
+        let x = (m - dst.signed()) * m / src.signed();
+        if x >= m {
+            S::default()
+        } else {
+            S::from_signed(m - x)
+        }
     }
 }
 
 /// Hard light: `Overlay(dst, src)` — the src/dst roles are swapped vs Overlay.
 #[must_use]
-pub(crate) fn blend_hard_light(src: u8, dst: u8) -> u8 {
+pub(crate) fn blend_hard_light<S: Sample>(src: S, dst: S) -> S {
     // hard_light(s, d) == overlay(d, s)
     blend_overlay(dst, src)
 }
 
 /// Soft light (PDF spec §11.3.5.3).
 #[must_use]
-pub(crate) fn blend_soft_light(src: u8, dst: u8) -> u8 {
-    let s = i32::from(src);
-    let d = i32::from(dst);
-    let result = if s < 0x80 {
-        d - (255 - 2 * s) * d * (255 - d) / (255 * 255)
+pub(crate) fn blend_soft_light<S: Sample>(src: S, dst: S) -> S {
+    let m = max::<S>();
+    let s = src.signed();
+    let d = dst.signed();
+    let result = if s < (m + 1) / 2 {
+        d - (m - 2 * s) * d * (m - d) / (m * m)
     } else {
-        let x = if d < 0x40 {
-            (((16 * d - 12 * 255) * d / 255 + 4 * 255) * d) / 255
+        let x = if d < (m + 1) / 4 {
+            (((16 * d - 12 * m) * d / m + 4 * m) * d) / m
         } else {
-            // Integer sqrt: sqrt(255 * d), scaled to [0,255].
+            // sqrt(M · d): the square root of d / M, scaled to [0, M].
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "sqrt of non-negative f64; result is in [0,255] before clamp"
+                clippy::cast_precision_loss,
+                reason = "M · d < 2^32 is exact in f64; its square root is at most M"
             )]
             {
-                (f64::from(d) * 255.0).sqrt() as i32
+                (d as f64 * m as f64).sqrt() as i64
             }
         };
-        d + (2 * s - 255) * (x - d) / 255
+        d + (2 * s - m) * (x - d) / m
     };
-    #[expect(clippy::cast_sign_loss, reason = "value is clamped to [0, 255] above")]
-    {
-        result.clamp(0, 255) as u8
-    }
+    S::from_signed(result)
 }
 
 /// Difference: `|src - dst|`.
 #[must_use]
-pub(crate) const fn blend_difference(src: u8, dst: u8) -> u8 {
-    src.abs_diff(dst)
+pub(crate) fn blend_difference<S: Sample>(src: S, dst: S) -> S {
+    S::from_signed((src.signed() - dst.signed()).abs())
 }
 
-/// Exclusion: `src + dst - 2 × src × dst / 255`.
+/// Exclusion: `src + dst - 2 × src × dst / M`.
 ///
-/// The subtrahend reaches 510 at `src = dst = 255`, so it cannot be routed
-/// through [`div255`], which saturates at 255. Saturating there would leave
-/// `blend_exclusion(255, 255)` at 255 (white) where the spec requires 0 (black).
+/// The subtrahend reaches `2M` at `src = dst = M`, so it cannot be routed
+/// through [`Sample::div_max`], which saturates at `M`. Saturating there would
+/// leave `blend_exclusion(M, M)` at `M` (white) where the spec requires 0 (black).
 #[must_use]
-pub(crate) fn blend_exclusion(src: u8, dst: u8) -> u8 {
-    let s = u32::from(src);
-    let d = u32::from(dst);
-    // 2·s·d ≤ 130 050; the rounded quotient is exact in u32 and ≤ 510.
-    let prod = (2 * s * d + 127) / 255;
-    (s + d).saturating_sub(prod).min(255) as u8
+pub(crate) fn blend_exclusion<S: Sample>(src: S, dst: S) -> S {
+    let m = max::<S>();
+    let (s, d) = (src.signed(), dst.signed());
+    // The rounded quotient of 2·s·d by M, at most 2M.
+    let prod = (2 * s * d + m / 2) / m;
+    S::from_signed((s + d - prod).max(0))
 }
 
 // ── Non-separable helpers (RGB additive space) ────────────────────────────────
 
 /// Luminance of an RGB triple using the PDF weights 0.30/0.59/0.11 (integer rounding).
 #[must_use]
-const fn get_lum(r: i32, g: i32, b: i32) -> i32 {
+const fn get_lum(r: i64, g: i64, b: i64) -> i64 {
     (r * 77 + g * 151 + b * 28 + 0x80) >> 8
 }
 
 /// Saturation: max channel − min channel.
 #[must_use]
-fn get_sat(r: i32, g: i32, b: i32) -> i32 {
+fn get_sat(r: i64, g: i64, b: i64) -> i64 {
     r.max(g).max(b) - r.min(g).min(b)
 }
 
-/// Clip an out-of-range (r, g, b) triple back into [0, 255] while preserving luminance.
-fn clip_color(r_in: i32, g_in: i32, b_in: i32) -> (i32, i32, i32) {
-    let lum = get_lum(r_in, g_in, b_in);
-    let rgb_min = r_in.min(g_in).min(b_in);
-    let rgb_max = r_in.max(g_in).max(b_in);
+/// Clip an out-of-range RGB triple back into `[0, m]` while preserving luminance.
+fn clip_color(m: i64, c: [i64; 3]) -> [i64; 3] {
+    let lum = get_lum(c[0], c[1], c[2]);
+    let rgb_min = c[0].min(c[1]).min(c[2]);
+    let rgb_max = c[0].max(c[1]).max(c[2]);
     if rgb_min < 0 {
         let d = lum - rgb_min;
-        (
-            (lum + (r_in - lum) * lum / d).clamp(0, 255),
-            (lum + (g_in - lum) * lum / d).clamp(0, 255),
-            (lum + (b_in - lum) * lum / d).clamp(0, 255),
-        )
-    } else if rgb_max > 255 {
+        c.map(|v| (lum + (v - lum) * lum / d).clamp(0, m))
+    } else if rgb_max > m {
         let d = rgb_max - lum;
-        (
-            (lum + (r_in - lum) * (255 - lum) / d).clamp(0, 255),
-            (lum + (g_in - lum) * (255 - lum) / d).clamp(0, 255),
-            (lum + (b_in - lum) * (255 - lum) / d).clamp(0, 255),
-        )
+        c.map(|v| (lum + (v - lum) * (m - lum) / d).clamp(0, m))
     } else {
-        (r_in, g_in, b_in)
+        c
     }
 }
 
-/// Shift the luminance of (r, g, b) to `lum` while preserving hue/saturation.
-fn set_lum(r: i32, g: i32, b: i32, lum: i32) -> (i32, i32, i32) {
-    let d = lum - get_lum(r, g, b);
-    clip_color(r + d, g + d, b + d)
+/// Shift the luminance of an RGB triple to `lum` while preserving hue/saturation.
+fn set_lum(m: i64, c: [i64; 3], lum: i64) -> [i64; 3] {
+    let d = lum - get_lum(c[0], c[1], c[2]);
+    clip_color(m, c.map(|v| v + d))
 }
 
-/// Scale (r, g, b) so its saturation equals `sat`, while preserving hue.
-fn set_sat(r_in: i32, g_in: i32, b_in: i32, sat: i32) -> (i32, i32, i32) {
+/// Scale an RGB triple so its saturation equals `sat`, while preserving hue.
+fn set_sat(m: i64, c: [i64; 3], sat: i64) -> [i64; 3] {
     // Sort channels into (min, mid, max) keeping track of which index is which.
-    let mut channels = [(r_in, 0usize), (g_in, 1), (b_in, 2)];
+    let mut channels = [(c[0], 0usize), (c[1], 1), (c[2], 2)];
     channels.sort_unstable_by_key(|&(v, _)| v);
-    let (ch_lo, slot_lo) = channels[0];
-    let (ch_md, slot_md) = channels[1];
-    let (ch_hi, slot_hi) = channels[2];
+    let [(lo, slot_lo), (mid, slot_mid), (hi, slot_hi)] = channels;
 
-    let mut out = [0i32; 3];
-    if ch_hi > ch_lo {
-        out[slot_md] = ((ch_md - ch_lo) * sat / (ch_hi - ch_lo)).clamp(0, 255);
-        out[slot_hi] = sat.clamp(0, 255);
+    let mut out = [0i64; 3];
+    if hi > lo {
+        out[slot_mid] = ((mid - lo) * sat / (hi - lo)).clamp(0, m);
+        out[slot_hi] = sat.clamp(0, m);
     }
     out[slot_lo] = 0;
-    #[expect(
-        clippy::tuple_array_conversions,
-        reason = "caller API returns a triple; no Into impl for non-Copy i32"
-    )]
-    {
-        let [a, b, c] = out;
-        (a, b, c)
-    }
+    out
+}
+
+/// The luminance of an RGB triple.
+const fn lum_of(c: [i64; 3]) -> i64 {
+    get_lum(c[0], c[1], c[2])
+}
+
+/// The saturation of an RGB triple.
+fn sat_of(c: [i64; 3]) -> i64 {
+    get_sat(c[0], c[1], c[2])
+}
+
+/// The triple of samples as `i64`.
+fn signed3<S: Sample>(v: [S; 3]) -> [i64; 3] {
+    v.map(Sample::signed)
+}
+
+/// The triple, clamped by [`clip_color`] to `[0, M]`, as samples.
+fn samples3<S: Sample>(v: [i64; 3]) -> [S; 3] {
+    v.map(S::from_signed)
 }
 
 /// Non-separable Hue blend: hue of src, saturation and luminosity of dst.
 #[must_use]
-pub(crate) fn blend_hue_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
-    let [sr, sg, sb] = src.map(i32::from);
-    let [dr, dg, db] = dst.map(i32::from);
-    let (r0, g0, b0) = set_sat(sr, sg, sb, get_sat(dr, dg, db));
-    let (r1, g1, b1) = set_lum(r0, g0, b0, get_lum(dr, dg, db));
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clip_color clamps all channels to [0, 255]"
-    )]
-    [r1 as u8, g1 as u8, b1 as u8]
+pub(crate) fn blend_hue_rgb<S: Sample>(src: [S; 3], dst: [S; 3]) -> [S; 3] {
+    let m = max::<S>();
+    let d = signed3(dst);
+    samples3(set_lum(m, set_sat(m, signed3(src), sat_of(d)), lum_of(d)))
 }
 
 /// Non-separable Saturation blend: saturation of src, hue and luminosity of dst.
 #[must_use]
-pub(crate) fn blend_saturation_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
-    let [sr, sg, sb] = src.map(i32::from);
-    let [dr, dg, db] = dst.map(i32::from);
-    let (r0, g0, b0) = set_sat(dr, dg, db, get_sat(sr, sg, sb));
-    let (r1, g1, b1) = set_lum(r0, g0, b0, get_lum(dr, dg, db));
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clip_color clamps all channels to [0, 255]"
-    )]
-    [r1 as u8, g1 as u8, b1 as u8]
+pub(crate) fn blend_saturation_rgb<S: Sample>(src: [S; 3], dst: [S; 3]) -> [S; 3] {
+    let m = max::<S>();
+    let d = signed3(dst);
+    samples3(set_lum(m, set_sat(m, d, sat_of(signed3(src))), lum_of(d)))
 }
 
 /// Non-separable Color blend: hue and saturation of src, luminosity of dst.
 #[must_use]
-pub(crate) fn blend_color_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
-    let [sr, sg, sb] = src.map(i32::from);
-    let [dr, dg, db] = dst.map(i32::from);
-    let (r, g, b) = set_lum(sr, sg, sb, get_lum(dr, dg, db));
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clip_color clamps all channels to [0, 255]"
-    )]
-    [r as u8, g as u8, b as u8]
+pub(crate) fn blend_color_rgb<S: Sample>(src: [S; 3], dst: [S; 3]) -> [S; 3] {
+    let m = max::<S>();
+    samples3(set_lum(m, signed3(src), lum_of(signed3(dst))))
 }
 
 /// Non-separable Luminosity blend: luminosity of src, hue and saturation of dst.
 #[must_use]
-pub(crate) fn blend_luminosity_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
-    let [sr, sg, sb] = src.map(i32::from);
-    let [dr, dg, db] = dst.map(i32::from);
-    let (r, g, b) = set_lum(dr, dg, db, get_lum(sr, sg, sb));
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clip_color clamps all channels to [0, 255]"
-    )]
-    [r as u8, g as u8, b as u8]
+pub(crate) fn blend_luminosity_rgb<S: Sample>(src: [S; 3], dst: [S; 3]) -> [S; 3] {
+    let m = max::<S>();
+    samples3(set_lum(m, signed3(dst), lum_of(signed3(src))))
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-/// Apply a separable blend mode to each corresponding byte pair from `src` and `dst`.
+/// Apply a separable blend mode to each corresponding sample pair from `src` and `dst`.
 ///
 /// For CMYK/DeviceN modes the caller must invert before and after (subtractive complement).
 /// `src.len()`, `dst.len()`, and `out.len()` must all be equal.
@@ -294,10 +276,10 @@ pub(crate) fn blend_luminosity_rgb(src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
 ///
 /// Panics if `mode` is a non-separable variant (`Hue`, `Saturation`, `Color`,
 /// `Luminosity`).  Use [`apply_nonseparable_rgb`] for those.
-pub(crate) fn apply_separable(mode: BlendMode, src: &[u8], dst: &[u8], out: &mut [u8]) {
+pub(crate) fn apply_separable<S: Sample>(mode: BlendMode, src: &[S], dst: &[S], out: &mut [S]) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len(), out.len());
-    let f: fn(u8, u8) -> u8 = match mode {
+    let f: fn(S, S) -> S = match mode {
         BlendMode::Normal => blend_normal,
         BlendMode::Multiply => blend_multiply,
         BlendMode::Screen => blend_screen,
@@ -322,14 +304,18 @@ pub(crate) fn apply_separable(mode: BlendMode, src: &[u8], dst: &[u8], out: &mut
 /// Apply a non-separable blend mode (`Hue`/`Saturation`/`Color`/`Luminosity`) to an RGB triple.
 ///
 /// `src` and `dst` are in additive space — CMYK callers convert first
-/// (`255 - channel`).  Only the three components are blended; the caller
+/// (`M - channel`).  Only the three components are blended; the caller
 /// handles channel `[3]` (K/alpha) separately.
 ///
 /// # Panics
 ///
 /// Panics if `mode` is a separable variant.  Use [`apply_separable`] for those.
 #[must_use]
-pub(crate) fn apply_nonseparable_rgb(mode: BlendMode, src: [u8; 3], dst: [u8; 3]) -> [u8; 3] {
+pub(crate) fn apply_nonseparable_rgb<S: Sample>(
+    mode: BlendMode,
+    src: [S; 3],
+    dst: [S; 3],
+) -> [S; 3] {
     match mode {
         BlendMode::Hue => blend_hue_rgb(src, dst),
         BlendMode::Saturation => blend_saturation_rgb(src, dst),
@@ -381,13 +367,17 @@ mod tests {
     /// space — white over white came out white instead of black.
     #[test]
     fn exclusion_matches_spec_over_the_full_domain() {
-        assert_eq!(blend_exclusion(255, 255), 0, "white over white is black");
-        assert_eq!(blend_exclusion(0, 0), 0);
-        assert_eq!(blend_exclusion(255, 0), 255);
-        assert_eq!(blend_exclusion(0, 255), 255);
+        assert_eq!(
+            blend_exclusion::<u8>(255, 255),
+            0,
+            "white over white is black"
+        );
+        assert_eq!(blend_exclusion::<u8>(0, 0), 0);
+        assert_eq!(blend_exclusion::<u8>(255, 0), 255);
+        assert_eq!(blend_exclusion::<u8>(0, 255), 255);
         for s in 0..=255u8 {
             for d in 0..=255u8 {
-                let got = blend_exclusion(s, d);
+                let got = blend_exclusion::<u8>(s, d);
                 let want = spec_exclusion(s, d);
                 assert!(
                     got.abs_diff(want) <= 1,
@@ -402,14 +392,14 @@ mod tests {
     fn color_burn_preserves_a_white_backdrop() {
         for s in 0..=255u8 {
             assert_eq!(
-                blend_color_burn(s, 255),
+                blend_color_burn::<u8>(s, 255),
                 255,
                 "color_burn({s},255) must leave a white backdrop white"
             );
         }
         for s in 0..=255u8 {
             for d in 0..=255u8 {
-                let got = blend_color_burn(s, d);
+                let got = blend_color_burn::<u8>(s, d);
                 let want = spec_color_burn(s, d);
                 assert!(
                     got.abs_diff(want) <= 1,
@@ -421,31 +411,31 @@ mod tests {
 
     #[test]
     fn multiply_identity() {
-        assert_eq!(blend_multiply(255, 200), 200);
-        assert_eq!(blend_multiply(200, 255), 200);
-        assert_eq!(blend_multiply(0, 200), 0);
-        assert_eq!(blend_multiply(200, 0), 0);
+        assert_eq!(blend_multiply::<u8>(255, 200), 200);
+        assert_eq!(blend_multiply::<u8>(200, 255), 200);
+        assert_eq!(blend_multiply::<u8>(0, 200), 0);
+        assert_eq!(blend_multiply::<u8>(200, 0), 0);
     }
 
     #[test]
     fn screen_identity() {
-        assert_eq!(blend_screen(0, 200), 200);
-        assert_eq!(blend_screen(200, 0), 200);
-        assert_eq!(blend_screen(255, 100), 255);
+        assert_eq!(blend_screen::<u8>(0, 200), 200);
+        assert_eq!(blend_screen::<u8>(200, 0), 200);
+        assert_eq!(blend_screen::<u8>(255, 100), 255);
     }
 
     #[test]
     fn difference_is_abs_diff() {
         for a in (0u8..=255).step_by(13) {
             for b in (0u8..=255).step_by(7) {
-                assert_eq!(blend_difference(a, b), a.abs_diff(b));
+                assert_eq!(blend_difference::<u8>(a, b), a.abs_diff(b));
             }
         }
     }
 
     #[test]
     fn color_dodge_saturates_at_src_255() {
-        assert_eq!(blend_color_dodge(255, 100), 255);
+        assert_eq!(blend_color_dodge::<u8>(255, 100), 255);
     }
 
     /// A black backdrop survives colour dodge at every source value.
@@ -453,7 +443,7 @@ mod tests {
     fn color_dodge_preserves_a_black_backdrop() {
         for s in 0..=255u8 {
             assert_eq!(
-                blend_color_dodge(s, 0),
+                blend_color_dodge::<u8>(s, 0),
                 0,
                 "color_dodge({s},0) must leave a black backdrop black"
             );
@@ -462,7 +452,7 @@ mod tests {
 
     #[test]
     fn color_burn_zeroes_at_src_0() {
-        assert_eq!(blend_color_burn(0, 100), 0);
+        assert_eq!(blend_color_burn::<u8>(0, 100), 0);
     }
 
     #[test]
@@ -470,8 +460,8 @@ mod tests {
         for s in (0u8..=255).step_by(17) {
             for d in (0u8..=255).step_by(11) {
                 assert_eq!(
-                    blend_hard_light(s, d),
-                    blend_overlay(d, s),
+                    blend_hard_light::<u8>(s, d),
+                    blend_overlay::<u8>(d, s),
                     "hard_light({s},{d}) should equal overlay({d},{s})"
                 );
             }
@@ -498,7 +488,7 @@ mod tests {
         // Luminosity of red over grey: result should be grey (all channels equal).
         let src = [200u8, 50, 50];
         let dst = [128u8, 128, 128];
-        let out = blend_luminosity_rgb(src, dst);
+        let out = blend_luminosity_rgb::<u8>(src, dst);
         assert_eq!(out[0], out[1]);
         assert_eq!(out[1], out[2]);
     }
@@ -508,23 +498,23 @@ mod tests {
         let src = [100u8, 200, 50];
         let dst = [255u8, 128, 0];
         let mut out = [0u8; 3];
-        apply_separable(BlendMode::Multiply, &src, &dst, &mut out);
-        assert_eq!(out[0], blend_multiply(100, 255));
-        assert_eq!(out[1], blend_multiply(200, 128));
-        assert_eq!(out[2], blend_multiply(50, 0));
+        apply_separable::<u8>(BlendMode::Multiply, &src, &dst, &mut out);
+        assert_eq!(out[0], blend_multiply::<u8>(100, 255));
+        assert_eq!(out[1], blend_multiply::<u8>(200, 128));
+        assert_eq!(out[2], blend_multiply::<u8>(50, 0));
     }
 
     #[test]
     #[should_panic(expected = "apply_separable called with non-separable mode")]
     fn apply_separable_panics_on_nonseparable() {
         let mut out = [0u8; 3];
-        apply_separable(BlendMode::Hue, &[0; 3], &[0; 3], &mut out);
+        apply_separable::<u8>(BlendMode::Hue, &[0; 3], &[0; 3], &mut out);
     }
 
     #[test]
     fn soft_light_midpoint() {
         // For src=128, dst=128: result should be close to 128.
-        let r = blend_soft_light(128, 128);
+        let r = blend_soft_light::<u8>(128, 128);
         assert!(
             (i32::from(r) - 128).abs() <= 2,
             "soft_light(128,128)={r}, expected ~128"
@@ -538,8 +528,8 @@ mod tests {
         // So exclusion ≤ screen for all inputs.
         for s in (0u8..=255).step_by(23) {
             for d in (0u8..=255).step_by(19) {
-                let ex = blend_exclusion(s, d);
-                let sc = blend_screen(s, d);
+                let ex = blend_exclusion::<u8>(s, d);
+                let sc = blend_screen::<u8>(s, d);
                 assert!(ex <= sc, "exclusion({s},{d})={ex} > screen({s},{d})={sc}");
             }
         }
@@ -550,7 +540,7 @@ mod tests {
         // Screen(s,d) = s + d - div255(s*d). Mathematically ≤ 255; verify exhaustively.
         for s in 0u8..=255 {
             for d in 0u8..=255 {
-                let result = blend_screen(s, d);
+                let result = blend_screen::<u8>(s, d);
                 // result is u8 so it's always ≤ 255; check it's ≥ max(s,d) isn't true,
                 // but it should be ≥ both (Screen is always ≥ each input).
                 assert!(

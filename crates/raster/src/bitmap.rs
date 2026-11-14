@@ -3,9 +3,14 @@
 //! [`Bitmap<P>`] is a top-down pixel buffer, generic over the pixel type:
 //! - Rows are stored top to bottom with a positive stride.
 //! - Typed row access via [`bytemuck::cast_slice`] — zero-copy, no mode switch.
-//! - Alpha is an optional separate plane, one byte per pixel.
+//! - Colour and alpha are held as samples of the pixel type's
+//!   [`Sample`](color::Sample): bytes for the 8-bit types, `u16` for the
+//!   16-bit ones.
+//! - Alpha is an optional separate plane, one sample per pixel.
 
 use std::marker::PhantomData;
+
+use color::Sample;
 
 use crate::types::Pixel;
 
@@ -54,14 +59,14 @@ impl std::error::Error for BitmapAllocError {}
 /// [`Bitmap::try_new_filled_in`] and [`Bitmap::into_buffers`].  The
 /// contents are unspecified; only the capacities carry over.
 #[derive(Debug, Default)]
-pub struct BitmapBuffers {
+pub struct BitmapBuffers<S: Sample = u8> {
     /// Colour buffer.
-    pub data: Vec<u8>,
+    pub data: Vec<S>,
     /// Alpha plane buffer.
-    pub alpha: Vec<u8>,
+    pub alpha: Vec<S>,
 }
 
-impl BitmapBuffers {
+impl<S: Sample> BitmapBuffers<S> {
     /// The buffers a bitmap built by [`Bitmap::try_new_filled_in`] uses:
     /// the colour buffer, and the alpha buffer when `with_alpha`.  An alpha
     /// buffer the bitmap does not use stays in `self`.
@@ -81,7 +86,7 @@ impl BitmapBuffers {
     /// when it has one.  The alpha buffer held is kept when `bitmap` has
     /// no alpha plane, so a plane removed during a render
     /// ([`Bitmap::take_alpha_plane`]) and stored here survives.
-    pub fn reclaim<P: Pixel>(&mut self, bitmap: Bitmap<P>) {
+    pub fn reclaim<P: Pixel<Sample = S>>(&mut self, bitmap: Bitmap<P>) {
         self.data = bitmap.data;
         if let Some(alpha) = bitmap.alpha {
             self.alpha = alpha;
@@ -91,7 +96,7 @@ impl BitmapBuffers {
 
 /// `buf` holding `len` copies of `value`, in its own allocation when its
 /// capacity is at least `len` and in a new one otherwise.
-fn refill(mut buf: Vec<u8>, len: usize, value: u8) -> Option<Vec<u8>> {
+fn refill<S: Sample>(mut buf: Vec<S>, len: usize, value: S) -> Option<Vec<S>> {
     buf.clear();
     if buf.capacity() < len {
         buf = Vec::new();
@@ -105,28 +110,29 @@ fn refill(mut buf: Vec<u8>, len: usize, value: u8) -> Option<Vec<u8>> {
 
 /// A typed, top-down pixel buffer.
 ///
-/// `P` determines the in-memory layout. The row stride is `width * P::BYTES`
-/// rounded up to the next multiple of `row_pad` (default 4).
+/// `P` determines the in-memory layout. The row stride is `width * P::NCOMPS`
+/// samples rounded up to the next multiple of `row_pad` (default 4).
 ///
-/// The optional alpha plane is always `width * height` bytes, one byte per pixel,
-/// top-down. It is stored separately from the colour data.
+/// The optional alpha plane is always `width * height` samples, one per
+/// pixel, top-down. It is stored separately from the colour data.
 pub struct Bitmap<P: Pixel> {
     /// Width of the bitmap in pixels.
     pub width: u32,
     /// Height of the bitmap in pixels.
     pub height: u32,
-    /// Byte distance between the start of consecutive rows; always `≥ width * P::BYTES`
-    /// and a multiple of `row_pad`.
+    /// Distance in samples between the start of consecutive rows (bytes for
+    /// an 8-bit pixel type); always `≥ width * P::NCOMPS` and a multiple of
+    /// `row_pad`.
     pub stride: usize,
-    data: Vec<u8>,
-    alpha: Option<Vec<u8>>,
+    data: Vec<P::Sample>,
+    alpha: Option<Vec<P::Sample>>,
     _marker: PhantomData<P>,
 }
 
 impl<P: Pixel> Bitmap<P> {
     /// Allocate a new zeroed bitmap.
     ///
-    /// `row_pad` pads each row to a multiple of that many bytes (pass 1 for no padding).
+    /// `row_pad` pads each row to a multiple of that many samples (pass 1 for no padding).
     /// `with_alpha` allocates a separate alpha plane initialised to 0.
     ///
     /// # Panics
@@ -134,10 +140,10 @@ impl<P: Pixel> Bitmap<P> {
     /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
     #[must_use]
     pub fn new(width: u32, height: u32, row_pad: usize, with_alpha: bool) -> Self {
-        Self::new_filled(width, height, row_pad, with_alpha, 0)
+        Self::new_filled(width, height, row_pad, with_alpha, P::Sample::default())
     }
 
-    /// Allocate a new bitmap whose colour bytes are all `fill` (row padding
+    /// Allocate a new bitmap whose colour samples are all `fill` (row padding
     /// included), written once as the buffer is allocated.
     ///
     /// `row_pad` and `with_alpha` are as for [`Bitmap::new`]; the alpha
@@ -147,7 +153,13 @@ impl<P: Pixel> Bitmap<P> {
     ///
     /// Panics if `row_pad` is 0 or the buffer size overflows `usize`.
     #[must_use]
-    pub fn new_filled(width: u32, height: u32, row_pad: usize, with_alpha: bool, fill: u8) -> Self {
+    pub fn new_filled(
+        width: u32,
+        height: u32,
+        row_pad: usize,
+        with_alpha: bool,
+        fill: P::Sample,
+    ) -> Self {
         let (stride, data_len, alpha_len) = Self::layout(width, height, row_pad, with_alpha)
             .expect("Bitmap::new: buffer size overflows usize");
         Self {
@@ -155,7 +167,7 @@ impl<P: Pixel> Bitmap<P> {
             height,
             stride,
             data: vec![fill; data_len],
-            alpha: alpha_len.map(|len| vec![0u8; len]),
+            alpha: alpha_len.map(|len| vec![P::Sample::default(); len]),
             _marker: PhantomData,
         }
     }
@@ -178,7 +190,7 @@ impl<P: Pixel> Bitmap<P> {
         height: u32,
         row_pad: usize,
         with_alpha: bool,
-        fill: u8,
+        fill: P::Sample,
     ) -> Result<Self, BitmapAllocError> {
         Self::try_new_filled_in(
             BitmapBuffers::default(),
@@ -202,19 +214,19 @@ impl<P: Pixel> Bitmap<P> {
     ///
     /// Panics if `row_pad` is 0.
     pub fn try_new_filled_in(
-        buffers: BitmapBuffers,
+        buffers: BitmapBuffers<P::Sample>,
         width: u32,
         height: u32,
         row_pad: usize,
         with_alpha: bool,
-        fill: u8,
+        fill: P::Sample,
     ) -> Result<Self, BitmapAllocError> {
         let error = BitmapAllocError { width, height };
         let (stride, data_len, alpha_len) =
             Self::layout(width, height, row_pad, with_alpha).ok_or(error)?;
         let data = refill(buffers.data, data_len, fill).ok_or(error)?;
         let alpha = match alpha_len {
-            Some(len) => Some(refill(buffers.alpha, len, 0).ok_or(error)?),
+            Some(len) => Some(refill(buffers.alpha, len, P::Sample::default()).ok_or(error)?),
             None => None,
         };
         Ok(Self {
@@ -229,7 +241,7 @@ impl<P: Pixel> Bitmap<P> {
 
     /// Row stride, colour buffer length and, when `with_alpha`, alpha
     /// plane length of a `width` × `height` bitmap with rows padded to
-    /// `row_pad` bytes; `None` when a length overflows `usize`.
+    /// `row_pad` samples; `None` when a length overflows `usize`.
     fn layout(
         width: u32,
         height: u32,
@@ -237,7 +249,7 @@ impl<P: Pixel> Bitmap<P> {
         with_alpha: bool,
     ) -> Option<(usize, usize, Option<usize>)> {
         assert!(row_pad >= 1, "row_pad must be ≥ 1");
-        let raw_stride = u32_to_usize(width).checked_mul(P::BYTES)?;
+        let raw_stride = u32_to_usize(width).checked_mul(P::NCOMPS)?;
         let stride = if row_pad <= 1 {
             raw_stride
         } else {
@@ -263,8 +275,8 @@ impl<P: Pixel> Bitmap<P> {
     /// Panics if `y >= height`.
     #[must_use]
     pub fn row(&self, y: u32) -> &[P] {
-        let bytes = self.row_bytes(y);
-        bytemuck::cast_slice(&bytes[..u32_to_usize(self.width) * P::BYTES])
+        let samples = self.row_samples(y);
+        bytemuck::cast_slice(&samples[..u32_to_usize(self.width) * P::NCOMPS])
     }
 
     /// Typed mutable access to row `y`.
@@ -273,9 +285,9 @@ impl<P: Pixel> Bitmap<P> {
     ///
     /// Panics if `y >= height`.
     pub fn row_mut(&mut self, y: u32) -> &mut [P] {
-        let w = u32_to_usize(self.width) * P::BYTES;
-        let bytes = self.row_bytes_mut(y);
-        bytemuck::cast_slice_mut(&mut bytes[..w])
+        let w = u32_to_usize(self.width) * P::NCOMPS;
+        let samples = self.row_samples_mut(y);
+        bytemuck::cast_slice_mut(&mut samples[..w])
     }
 
     /// Shared bounds check used by every row accessor.
@@ -288,27 +300,47 @@ impl<P: Pixel> Bitmap<P> {
         );
     }
 
-    /// Raw byte read-only access to the full stride of row `y` (including padding).
+    /// The samples of the full stride of row `y` (including padding).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    #[must_use]
+    pub fn row_samples(&self, y: u32) -> &[P::Sample] {
+        self.assert_row_in_bounds(y);
+        let off = u32_to_usize(y) * self.stride;
+        &self.data[off..off + self.stride]
+    }
+
+    /// Mutable access to the samples of the full stride of row `y`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    pub fn row_samples_mut(&mut self, y: u32) -> &mut [P::Sample] {
+        self.assert_row_in_bounds(y);
+        let off = u32_to_usize(y) * self.stride;
+        &mut self.data[off..off + self.stride]
+    }
+
+    /// The bytes of the full stride of row `y` (including padding): its
+    /// samples in native byte order.
     ///
     /// # Panics
     ///
     /// Panics if `y >= height`.
     #[must_use]
     pub fn row_bytes(&self, y: u32) -> &[u8] {
-        self.assert_row_in_bounds(y);
-        let off = u32_to_usize(y) * self.stride;
-        &self.data[off..off + self.stride]
+        bytemuck::cast_slice(self.row_samples(y))
     }
 
-    /// Raw byte mutable access to the full stride of row `y`.
+    /// Mutable access to the bytes of the full stride of row `y`.
     ///
     /// # Panics
     ///
     /// Panics if `y >= height`.
     pub fn row_bytes_mut(&mut self, y: u32) -> &mut [u8] {
-        self.assert_row_in_bounds(y);
-        let off = u32_to_usize(y) * self.stride;
-        &mut self.data[off..off + self.stride]
+        bytemuck::cast_slice_mut(self.row_samples_mut(y))
     }
 
     // ── Alpha access ──────────────────────────────────────────────────────────
@@ -321,7 +353,7 @@ impl<P: Pixel> Bitmap<P> {
     ///
     /// Panics if `y >= height`.
     #[must_use]
-    pub fn alpha_row(&self, y: u32) -> Option<&[u8]> {
+    pub fn alpha_row(&self, y: u32) -> Option<&[P::Sample]> {
         self.assert_row_in_bounds(y);
         self.alpha.as_ref().map(|a| {
             let w = u32_to_usize(self.width);
@@ -336,31 +368,31 @@ impl<P: Pixel> Bitmap<P> {
         self.alpha.is_some()
     }
 
-    /// Read-only access to the full alpha plane (`width × height` bytes).
+    /// Read-only access to the full alpha plane (`width × height` samples).
     ///
     /// Returns `None` if this bitmap was created without an alpha plane.
     #[must_use]
-    pub fn alpha_plane(&self) -> Option<&[u8]> {
+    pub fn alpha_plane(&self) -> Option<&[P::Sample]> {
         self.alpha.as_deref()
     }
 
-    /// Mutable access to the full alpha plane (`width × height` bytes).
+    /// Mutable access to the full alpha plane (`width × height` samples).
     ///
     /// Returns `None` if this bitmap was created without an alpha plane.
-    pub fn alpha_plane_mut(&mut self) -> Option<&mut [u8]> {
+    pub fn alpha_plane_mut(&mut self) -> Option<&mut [P::Sample]> {
         self.alpha.as_deref_mut()
     }
 
     /// Remove and return the alpha plane, leaving the colour data: the
     /// bitmap is opaque from here on.  `None`, the bitmap unchanged, for a
     /// bitmap without one.
-    pub const fn take_alpha_plane(&mut self) -> Option<Vec<u8>> {
+    pub const fn take_alpha_plane(&mut self) -> Option<Vec<P::Sample>> {
         self.alpha.take()
     }
 
     /// Simultaneous mutable access to the pixel row and the alpha row.
     ///
-    /// Returns `(pixel_row_bytes, Some(alpha_row))` or `(pixel_row_bytes, None)`.
+    /// Returns `(pixel_row_samples, Some(alpha_row))` or `(pixel_row_samples, None)`.
     /// Provided because the borrow checker rejects holding two mutable
     /// references into the same `&mut self` (pixel data and alpha plane) via
     /// separate accessor calls.
@@ -368,7 +400,7 @@ impl<P: Pixel> Bitmap<P> {
     /// # Panics
     ///
     /// Panics if `y >= height`.
-    pub fn row_and_alpha_mut(&mut self, y: u32) -> (&mut [u8], Option<&mut [u8]>) {
+    pub fn row_and_alpha_mut(&mut self, y: u32) -> (&mut [P::Sample], Option<&mut [P::Sample]>) {
         self.assert_row_in_bounds(y);
         let stride = self.stride;
         let w = u32_to_usize(self.width);
@@ -386,29 +418,29 @@ impl<P: Pixel> Bitmap<P> {
     /// Fill the entire bitmap with a solid colour and an alpha value.
     ///
     /// `alpha` is ignored if the bitmap has no alpha plane.
-    pub fn clear(&mut self, color: P, alpha: u8) {
-        let pixel_bytes: &[u8] = bytemuck::bytes_of(&color);
-        if P::BYTES == 1 {
-            // Optimise single-byte pixels: memset the entire data buffer.
-            self.data.fill(pixel_bytes[0]);
+    pub fn clear(&mut self, color: P, alpha: P::Sample) {
+        let pixel: &[P::Sample] = bytemuck::cast_slice(std::slice::from_ref(&color));
+        if P::NCOMPS == 1 {
+            // Single-sample pixels: fill the entire data buffer.
+            self.data.fill(pixel[0]);
         } else {
             debug_assert!(
-                P::BYTES > 0,
-                "clear: P::BYTES must be non-zero for chunked fill"
+                P::NCOMPS > 0,
+                "clear: P::NCOMPS must be non-zero for chunked fill"
             );
             // Write one pixel-sized chunk per pixel in each row, then zero the
             // stride padding. Using `chunks_exact_mut` avoids manual index arithmetic.
             let w = u32_to_usize(self.width);
-            let n = w * P::BYTES;
+            let n = w * P::NCOMPS;
             let stride = self.stride;
             // A zero-width bitmap has no pixels and a zero stride.
             for row in self.data.chunks_exact_mut(stride.max(1)) {
-                // `as_chunks_mut::<P::BYTES>()` would need an associated const as a
+                // `as_chunks_mut::<P::NCOMPS>()` would need an associated const as a
                 // const-generic argument, which stable Rust does not accept.
-                for dst in row[..n].chunks_exact_mut(P::BYTES) {
-                    dst.copy_from_slice(pixel_bytes);
+                for dst in row[..n].chunks_exact_mut(P::NCOMPS) {
+                    dst.copy_from_slice(pixel);
                 }
-                row[n..].fill(0);
+                row[n..].fill(P::Sample::default());
             }
         }
         if let Some(ref mut a) = self.alpha {
@@ -416,27 +448,28 @@ impl<P: Pixel> Bitmap<P> {
         }
     }
 
-    /// Total byte size of the colour data buffer.
+    /// Total sample count of the colour data buffer (its byte size for an
+    /// 8-bit pixel type).
     #[must_use]
     pub const fn data_len(&self) -> usize {
         self.data.len()
     }
 
-    /// Access the full colour data buffer as a flat byte slice.
+    /// Access the full colour data buffer as a flat sample slice.
     #[must_use]
-    pub fn data(&self) -> &[u8] {
+    pub fn data(&self) -> &[P::Sample] {
         &self.data
     }
 
-    /// Mutable access to the full colour data buffer as a flat byte slice.
-    pub fn data_mut(&mut self) -> &mut [u8] {
+    /// Mutable access to the full colour data buffer as a flat sample slice.
+    pub fn data_mut(&mut self) -> &mut [P::Sample] {
         &mut self.data
     }
 
     /// Consume the bitmap and return its colour buffer (`stride * height`
-    /// bytes); the alpha plane, if any, is dropped.
+    /// samples); the alpha plane, if any, is dropped.
     #[must_use]
-    pub fn into_data(self) -> Vec<u8> {
+    pub fn into_data(self) -> Vec<P::Sample> {
         self.data
     }
 
@@ -444,7 +477,7 @@ impl<P: Pixel> Bitmap<P> {
     /// reuse by [`Bitmap::try_new_filled_in`]; the alpha buffer is empty
     /// when the bitmap has no alpha plane.
     #[must_use]
-    pub fn into_buffers(self) -> BitmapBuffers {
+    pub fn into_buffers(self) -> BitmapBuffers<P::Sample> {
         BitmapBuffers {
             data: self.data,
             alpha: self.alpha.unwrap_or_default(),
@@ -452,14 +485,14 @@ impl<P: Pixel> Bitmap<P> {
     }
 
     /// A bitmap without an alpha plane over `data`, rows packed with no
-    /// padding (`stride == width * P::BYTES`).
+    /// padding (`stride == width * P::NCOMPS`).
     ///
     /// # Panics
     ///
-    /// Panics if `data.len() != width * height * P::BYTES`.
+    /// Panics if `data.len() != width * height * P::NCOMPS`.
     #[must_use]
-    pub fn from_packed(width: u32, height: u32, data: Vec<u8>) -> Self {
-        let stride = u32_to_usize(width) * P::BYTES;
+    pub fn from_packed(width: u32, height: u32, data: Vec<P::Sample>) -> Self {
+        let stride = u32_to_usize(width) * P::NCOMPS;
         assert_eq!(
             Some(data.len()),
             stride.checked_mul(u32_to_usize(height)),

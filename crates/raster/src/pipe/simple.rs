@@ -1,65 +1,61 @@
-//! Simple pipe: `a_input == 255`, `BlendMode::Normal`, no soft mask, no shape.
+//! Simple pipe: opaque `a_input`, `BlendMode::Normal`, no soft mask, no shape.
 //!
 //! Mono1 is excluded: 1-bit packed bitmaps require bit-level addressing that
 //! belongs in the fill/stroke caller, not a generic span function.
 
-use std::cell::RefCell;
-
-use crate::pipe::{self, PipeSrc, PipeState};
+use crate::pipe::{self, PipeSrc, PipeState, Scratch};
 use crate::simd;
 use crate::types::BlendMode;
-use color::Pixel;
+use color::{Pixel, Sample};
 
 // Per-thread scratch buffer for pattern spans — grow-never-shrink.
 thread_local! {
-    static PAT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static PAT_BUF: Scratch = const { Scratch::new() };
 }
 
 /// Write `x1 - x0 + 1` pixels of solid source colour directly into the
 /// destination row, applying the transfer function.  Destination alpha is
-/// set to 255 (fully opaque).
+/// set to opaque.
 ///
 /// # Preconditions (checked via `debug_assert!` in `render_span`)
 ///
 /// - `pipe.no_transparency(false) && pipe.blend_mode == BlendMode::Normal`
-/// - `dst_pixels.len() == count * P::BYTES`
-/// - `P::BYTES > 0` (Mono1 handled by caller)
+/// - `dst_pixels.len() == count * P::NCOMPS`
+/// - `P::NCOMPS > 0` (Mono1 handled by caller)
 pub(crate) fn render_span_simple<P: Pixel>(
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    dst_pixels: &mut [u8],
-    dst_alpha: Option<&mut [u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    dst_pixels: &mut [P::Sample],
+    dst_alpha: Option<&mut [P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
 ) {
     debug_assert_eq!(pipe.blend_mode, BlendMode::Normal);
-    debug_assert_eq!(pipe.a_input, 255);
+    debug_assert_eq!(pipe.a_input, P::Sample::MAX);
 
     #[expect(
         clippy::cast_sign_loss,
         reason = "x1 >= x0 is a precondition, so x1 - x0 + 1 >= 1 > 0"
     )]
     let count = (x1 - x0 + 1) as usize;
-    let ncomps = P::BYTES;
+    let ncomps = P::NCOMPS;
 
     match src {
         PipeSrc::Solid(color) => {
             debug_assert_eq!(color.len(), ncomps, "solid color length must match ncomps");
             // Apply transfer to the source colour once, then fill.
-            let mut applied = [0u8; 8]; // DeviceN8 is the largest: 8 bytes.
+            let mut applied = [P::Sample::default(); 8]; // DeviceN is the widest: 8 channels.
             debug_assert!(
                 ncomps <= 8,
-                "ncomps {ncomps} > 8; only modes up to DeviceN8 supported"
+                "ncomps {ncomps} > 8; only modes up to DeviceN supported"
             );
             pipe::apply_transfer_pixel(pipe, color, &mut applied[..ncomps]);
             let applied = &applied[..ncomps];
 
-            match ncomps {
-                1 => simd::blend_solid_gray8(dst_pixels, applied[0], count),
-                3 => {
-                    simd::blend_solid_rgb8(dst_pixels, [applied[0], applied[1], applied[2]], count);
-                }
+            match (P::Sample::as_u8_mut(dst_pixels), P::Sample::as_u8(applied)) {
+                (Some(dst), Some(&[v])) => simd::blend_solid_gray8(dst, v, count),
+                (Some(dst), Some(&[r, g, b])) => simd::blend_solid_rgb8(dst, [r, g, b], count),
                 _ => {
                     for chunk in dst_pixels.chunks_exact_mut(ncomps) {
                         chunk.copy_from_slice(applied);
@@ -68,14 +64,14 @@ pub(crate) fn render_span_simple<P: Pixel>(
             }
         }
         PipeSrc::Pattern(pat) => {
-            PAT_BUF.with(|cell| {
-                let mut buf = cell.borrow_mut();
-                buf.resize(count * ncomps, 0);
-                pat.fill_span(y, x0, x1, &mut buf);
-                for chunk in buf.chunks_exact_mut(ncomps) {
-                    pipe::apply_transfer_in_place(pipe, chunk);
-                }
-                dst_pixels.copy_from_slice(&buf);
+            PAT_BUF.with(|scratch| {
+                scratch.with::<P::Sample, ()>(count * ncomps, |buf| {
+                    pat.fill_span(y, x0, x1, buf);
+                    for chunk in buf.chunks_exact_mut(ncomps) {
+                        pipe::apply_transfer_in_place(pipe, chunk);
+                    }
+                    dst_pixels.copy_from_slice(buf);
+                });
             });
         }
     }
@@ -83,7 +79,7 @@ pub(crate) fn render_span_simple<P: Pixel>(
     // Set destination alpha to fully opaque.
     if let Some(alpha) = dst_alpha {
         debug_assert_eq!(alpha.len(), count);
-        alpha.fill(255);
+        alpha.fill(P::Sample::MAX);
     }
 }
 
@@ -125,11 +121,10 @@ mod tests {
         // Inverting transfer (T[v] = 255 − v) used for all RGB channels; the
         // identity tables are used for the gray / CMYK / device_n slots that
         // aren't exercised here.
-        static DN: [[u8; 256]; 8] = [TransferLut::IDENTITY.0; 8];
         let id = TransferLut::IDENTITY.as_array();
         let inv = TransferLut::INVERTED.as_array();
 
-        let transfer = TransferSet::new([inv; 3], id, [id; 4], &DN);
+        let transfer = TransferSet::new([inv; 3], id, [id; 4], [id; 8]);
 
         let pipe = PipeState {
             blend_mode: BlendMode::Normal,

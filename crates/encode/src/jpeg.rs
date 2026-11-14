@@ -46,7 +46,7 @@ impl Default for JpegOptions {
 ///   `u16::MAX` (the JPEG format ceiling, 65535 px/side).
 /// - [`EncodeError::Io`] when writing or flushing `out` fails.
 /// - [`EncodeError::Jpeg`] on another encoder failure.
-pub fn write_jpeg<P: Pixel, W: Write>(
+pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     options: JpegOptions,
     mut out: W,
@@ -55,7 +55,12 @@ pub fn write_jpeg<P: Pixel, W: Write>(
         PixelMode::Mono8 => ColorType::Luma,
         PixelMode::Rgb8 => ColorType::Rgb,
         PixelMode::Bgr8 => ColorType::Bgr,
-        PixelMode::Mono1 | PixelMode::Xbgr8 | PixelMode::Cmyk8 | PixelMode::DeviceN8 => {
+        PixelMode::Mono1
+        | PixelMode::Xbgr8
+        | PixelMode::Cmyk8
+        | PixelMode::DeviceN8
+        | PixelMode::Mono16
+        | PixelMode::Rgb16 => {
             return Err(EncodeError::UnsupportedMode(
                 "JPEG accepts Gray8, Rgb8 and Bgr8: convert other modes to Rgb8 first",
             ));
@@ -85,7 +90,10 @@ pub fn write_jpeg<P: Pixel, W: Write>(
 /// # Errors
 ///
 /// As [`write_jpeg`]; a colour bitmap is [`EncodeError::UnsupportedMode`].
-pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8) -> Result<Vec<u8>, EncodeError> {
+pub fn jpeg_gray<P: Pixel<Sample = u8>>(
+    bitmap: &Bitmap<P>,
+    quality: u8,
+) -> Result<Vec<u8>, EncodeError> {
     if P::MODE != PixelMode::Mono8 {
         return Err(EncodeError::UnsupportedMode(
             "non-grayscale bitmap: jpeg_gray accepts Gray8/Mono8 only",

@@ -17,7 +17,7 @@ use crate::bitmap::{Bitmap, BitmapAllocError};
 use crate::pipe::TransferSet;
 use crate::pipe::{self, Pattern, PipeSrc, PipeState, RowPattern};
 use crate::types::BlendMode;
-use color::{Pixel, Rgb8};
+use color::{Pixel, Rgb8, Sample};
 
 /// Upper bound on the lattice points enumerated for one pattern: cells
 /// outside the rectangle cost an iteration each, and a strongly skewed
@@ -136,10 +136,10 @@ impl Lattice {
 
 /// Source-over compositing at full opacity: the pipe that stamps a cell
 /// onto the screen.
-fn source_over() -> PipeState<'static> {
+fn source_over<S: Sample>() -> PipeState<'static, S> {
     PipeState {
         blend_mode: BlendMode::Normal,
-        a_input: 255,
+        a_input: S::MAX,
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
         overprint: None,
@@ -158,9 +158,9 @@ fn stamp<P: Pixel>(
     cell: &Bitmap<P>,
     sx: i64,
     sy: i64,
-    pipe: &PipeState<'_>,
+    pipe: &PipeState<'_, P::Sample>,
 ) {
-    let n = P::BYTES;
+    let n = P::NCOMPS;
     let (sw, sh) = (i64::from(screen.width), i64::from(screen.height));
     let (cw, ch) = (i64::from(cell.width), i64::from(cell.height));
     let (x_a, x_b) = (sx.max(0), (sx + cw).min(sw));
@@ -172,11 +172,11 @@ fn stamp<P: Pixel>(
     for y in y_a..y_b {
         let cy = (y - sy) as u32;
         let shape = cell.alpha_row(cy).map(|a| &a[cx_a..cx_b]);
-        if shape.is_some_and(|s| s.iter().all(|&a| a == 0)) {
+        if shape.is_some_and(|s| s.iter().all(|&a| a == P::Sample::default())) {
             continue;
         }
         let src = RowPattern {
-            data: &cell.row_bytes(cy)[cx_a * n..cx_b * n],
+            data: &cell.row_samples(cy)[cx_a * n..cx_b * n],
         };
         let (row, alpha) = screen.row_and_alpha_mut(y as u32);
         let dst = &mut row[x_a as usize * n..x_b as usize * n];
@@ -202,8 +202,8 @@ pub struct TiledPattern<P: Pixel = Rgb8> {
     source: Source<P>,
 }
 
-/// The most bytes of a pixel of any type.
-const MAX_PIXEL_BYTES: usize = 8;
+/// The most channels of a pixel of any type.
+const MAX_PIXEL_COMPS: usize = 8;
 
 enum Source<P: Pixel> {
     /// The pattern composited over its rectangle, whose top-left pixel is
@@ -215,33 +215,33 @@ enum Source<P: Pixel> {
         /// Every pixel of the rectangle has coverage 255.
         fully_covered: bool,
     },
-    /// The same colour, the first `P::BYTES` bytes of `colour`, and
+    /// The same colour, the first `P::NCOMPS` samples of `colour`, and
     /// coverage at every pixel.
     Uniform {
-        colour: [u8; MAX_PIXEL_BYTES],
-        coverage: u8,
+        colour: [P::Sample; MAX_PIXEL_COMPS],
+        coverage: P::Sample,
     },
 }
 
 impl<P: Pixel> TiledPattern<P> {
-    /// A pattern painting `colour`, the bytes of one pixel, at `coverage`
-    /// everywhere; `None` when `colour` is not `P::BYTES` long.
+    /// A pattern painting `colour`, the samples of one pixel, at
+    /// `coverage` everywhere; `None` when `colour` is not `P::NCOMPS` long.
     #[must_use]
-    pub fn uniform(colour: &[u8], coverage: u8) -> Option<Self> {
+    pub fn uniform(colour: &[P::Sample], coverage: P::Sample) -> Option<Self> {
         const {
             assert!(
-                P::BYTES <= MAX_PIXEL_BYTES,
-                "a uniform pattern holds a pixel of at most MAX_PIXEL_BYTES"
+                P::NCOMPS <= MAX_PIXEL_COMPS,
+                "a uniform pattern holds a pixel of at most MAX_PIXEL_COMPS channels"
             );
         }
-        if colour.len() != P::BYTES {
+        if colour.len() != P::NCOMPS {
             return None;
         }
-        let mut bytes = [0; MAX_PIXEL_BYTES];
-        bytes[..P::BYTES].copy_from_slice(colour);
+        let mut samples = [P::Sample::default(); MAX_PIXEL_COMPS];
+        samples[..P::NCOMPS].copy_from_slice(colour);
         Some(Self {
             source: Source::Uniform {
-                colour: bytes,
+                colour: samples,
                 coverage,
             },
         })
@@ -276,7 +276,7 @@ impl<P: Pixel> TiledPattern<P> {
     pub fn screen(bitmap: Bitmap<P>, x0: i32, y0: i32) -> Self {
         let fully_covered = bitmap
             .alpha_plane()
-            .is_none_or(|a| a.iter().all(|&c| c == 255));
+            .is_none_or(|a| a.iter().all(|&c| c == P::Sample::MAX));
         Self {
             source: Source::Screen {
                 bitmap,
@@ -321,7 +321,7 @@ impl<P: Pixel> TiledPattern<P> {
         let Some((cols, rows)) = lattice_points() else {
             return Ok(None);
         };
-        let mut screen = Bitmap::try_new_filled(width, height, 1, true, 0)?;
+        let mut screen = Bitmap::try_new_filled(width, height, 1, true, P::Sample::default())?;
         let pipe = source_over();
         let mut phases: [Option<Rc<Bitmap<P>>>; (CELL_PHASES * CELL_PHASES) as usize] =
             Default::default();
@@ -382,9 +382,9 @@ fn screen_run<P: Pixel>(
     })
 }
 
-impl<P: Pixel> Pattern for TiledPattern<P> {
-    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        let n = P::BYTES;
+impl<P: Pixel> Pattern<P::Sample> for TiledPattern<P> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [P::Sample]) {
+        let n = P::NCOMPS;
         match &self.source {
             Source::Uniform { colour, .. } => {
                 for px in out.chunks_exact_mut(n) {
@@ -397,10 +397,10 @@ impl<P: Pixel> Pattern for TiledPattern<P> {
                 y0: sy0,
                 ..
             } => {
-                out.fill(0);
+                out.fill(P::Sample::default());
                 if let Some((row, lx, off, count)) = screen_run(bitmap, *sx0, *sy0, y, x0, x1) {
                     out[off * n..(off + count) * n]
-                        .copy_from_slice(&bitmap.row_bytes(row)[lx * n..(lx + count) * n]);
+                        .copy_from_slice(&bitmap.row_samples(row)[lx * n..(lx + count) * n]);
                 }
             }
         }
@@ -412,12 +412,19 @@ impl<P: Pixel> Pattern for TiledPattern<P> {
 
     fn may_leave_unpainted(&self) -> bool {
         match &self.source {
-            Source::Uniform { coverage, .. } => *coverage != 255,
+            Source::Uniform { coverage, .. } => *coverage != P::Sample::MAX,
             Source::Screen { fully_covered, .. } => !fully_covered,
         }
     }
 
-    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+    fn fill_span_coverage(
+        &self,
+        y: i32,
+        x0: i32,
+        x1: i32,
+        out: &mut [P::Sample],
+        coverage: &mut [P::Sample],
+    ) {
         self.fill_span(y, x0, x1, out);
         match &self.source {
             Source::Uniform { coverage: c, .. } => coverage.fill(*c),
@@ -427,11 +434,11 @@ impl<P: Pixel> Pattern for TiledPattern<P> {
                 y0: sy0,
                 ..
             } => {
-                coverage.fill(0);
+                coverage.fill(P::Sample::default());
                 if let Some((row, lx, off, n)) = screen_run(bitmap, *sx0, *sy0, y, x0, x1) {
                     match bitmap.alpha_row(row) {
                         Some(alpha) => coverage[off..off + n].copy_from_slice(&alpha[lx..lx + n]),
-                        None => coverage[off..off + n].fill(255),
+                        None => coverage[off..off + n].fill(P::Sample::MAX),
                     }
                 }
             }

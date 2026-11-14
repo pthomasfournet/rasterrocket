@@ -14,43 +14,43 @@
 pub(crate) mod aa;
 pub(crate) mod blend;
 pub(crate) mod general;
+mod scratch;
 pub(crate) mod simple;
 pub(crate) mod transfer;
 
-use std::cell::RefCell;
 use std::ops::RangeInclusive;
 
 use crate::bitmap::Bitmap;
 use crate::types::BlendMode;
-use color::Pixel;
-use color::convert::div255;
+use color::{Pixel, Sample};
 
+pub(crate) use scratch::Scratch;
 pub use transfer::TransferSet;
 
-/// Source colour for a single paint operation.
+/// Source colour for a single paint operation, of samples of type `S`.
 ///
 /// The source is resolved once per span and may be a flat colour (most common) or
 /// a dynamic [`Pattern`] queried per-pixel.
-pub enum PipeSrc<'a> {
-    /// Flat colour: `ncomps` bytes, already in device space.
-    Solid(&'a [u8]),
+pub enum PipeSrc<'a, S: Sample = u8> {
+    /// Flat colour: `ncomps` samples, already in device space.
+    Solid(&'a [S]),
     /// Dynamic pattern source — `fill_span` is called per output row.
-    Pattern(&'a dyn Pattern),
+    Pattern(&'a dyn Pattern<S>),
 }
 
 /// A source of per-pixel colour for use with the compositing pipeline.
 ///
-/// Implementors return raw device-space byte sequences into the provided buffer.
-/// The buffer length is `(x1 - x0 + 1) * ncomps` where `ncomps` is the pixel size
-/// for the target bitmap mode.
-pub trait Pattern: Send + Sync {
-    /// Fill `out` with colour bytes for pixels `x0..=x1` on scanline `y`.
+/// Implementors write device-space samples of type `S` into the provided
+/// buffer.  The buffer length is `(x1 - x0 + 1) * ncomps` where `ncomps` is
+/// the channel count of the target bitmap's pixel type.
+pub trait Pattern<S: Sample = u8>: Send + Sync {
+    /// Fill `out` with colour samples for pixels `x0..=x1` on scanline `y`.
     ///
     /// `out.len()` is guaranteed to be `(x1 - x0 + 1) * ncomps`.
     ///
     /// Must not composite: `fill_span` runs while the pipe holds its
     /// thread-local span buffers, so a nested composite would re-enter them.
-    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]);
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]);
 
     /// Return `true` if this pattern yields the same colour at every coordinate.
     /// When `true`, `fill_span` will be called once and the result reused across
@@ -63,7 +63,7 @@ pub trait Pattern: Send + Sync {
     /// partially covered.
     ///
     /// A pixel of coverage `c` composites the pattern colour with its source
-    /// alpha scaled by `c / 255`; an unpainted pixel (coverage 0) keeps its
+    /// alpha scaled by `c / S::MAX`; an unpainted pixel (coverage 0) keeps its
     /// destination colour and alpha, exactly as a pixel outside the filled
     /// area does.  [`render_span`] evaluates such a pattern through
     /// [`Self::fill_span_coverage`] and composites only its covered runs; a
@@ -73,13 +73,14 @@ pub trait Pattern: Send + Sync {
     }
 
     /// Fill `out` as [`Self::fill_span`] does and set `coverage[i]` to the
-    /// coverage of pixel `x0 + i`, from 0 (unpainted) to 255 (fully painted).
+    /// coverage of pixel `x0 + i`, from 0 (unpainted) to `S::MAX` (fully
+    /// painted).
     ///
     /// `coverage.len()` is `x1 - x0 + 1`.  The colour bytes of an unpainted
     /// pixel are unspecified.  The default covers every pixel fully.
-    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
         self.fill_span(y, x0, x1, out);
-        coverage.fill(255);
+        coverage.fill(S::MAX);
     }
 }
 
@@ -89,15 +90,15 @@ pub trait Pattern: Send + Sync {
 /// `(x, y)` takes `inner`'s colour and coverage at `(x + origin.0, y +
 /// origin.1)`.  The offset is an integer, so `inner` sees the coordinates
 /// it would see on its own grid.
-pub struct Shifted<'a> {
+pub struct Shifted<'a, S: Sample = u8> {
     /// The pattern over the other grid.
-    pub inner: &'a dyn Pattern,
+    pub inner: &'a dyn Pattern<S>,
     /// The other grid's pixel at the bitmap's pixel `(0, 0)`.
     pub origin: (i32, i32),
 }
 
-impl Pattern for Shifted<'_> {
-    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+impl<S: Sample> Pattern<S> for Shifted<'_, S> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]) {
         let (dx, dy) = self.origin;
         self.inner.fill_span(y + dy, x0 + dx, x1 + dx, out);
     }
@@ -110,24 +111,24 @@ impl Pattern for Shifted<'_> {
         self.inner.may_leave_unpainted()
     }
 
-    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
         let (dx, dy) = self.origin;
         self.inner
             .fill_span_coverage(y + dy, x0 + dx, x1 + dx, out, coverage);
     }
 }
 
-/// A [`Pattern`] serving one precomputed span of colour bytes.
+/// A [`Pattern`] serving one precomputed span of colour samples.
 ///
 /// `fill_span` copies `data` into `out`, whose length must equal
 /// `data.len()`: a `RowPattern` is valid only for the span it holds.
-pub struct RowPattern<'a> {
-    /// Colour bytes of the span, `P::BYTES` per pixel.
-    pub data: &'a [u8],
+pub struct RowPattern<'a, S: Sample = u8> {
+    /// Colour samples of the span, `P::NCOMPS` per pixel.
+    pub data: &'a [S],
 }
 
-impl Pattern for RowPattern<'_> {
-    fn fill_span(&self, _y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+impl<S: Sample> Pattern<S> for RowPattern<'_, S> {
+    fn fill_span(&self, _y: i32, x0: i32, x1: i32, out: &mut [S]) {
         assert_eq!(
             out.len(),
             self.data.len(),
@@ -139,46 +140,36 @@ impl Pattern for RowPattern<'_> {
     }
 }
 
-/// Per-thread scratch for the spans of a pattern that may leave pixels
-/// unpainted: colour, coverage, and coverage combined with the span's shape.
-/// Grow-never-shrink.
-struct CoverageScratch {
-    colour: Vec<u8>,
-    coverage: Vec<u8>,
-    shape: Vec<u8>,
-}
-
 thread_local! {
-    /// Destination colour bytes saved across a masked composite.  Separate from
-    /// `COVERAGE_SPAN` because the masked composite encloses the use of that
-    /// scratch.  Grow-never-shrink.
-    static MASKED_SPAN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-
-    static COVERAGE_SPAN: RefCell<CoverageScratch> = const {
-        RefCell::new(CoverageScratch {
-            colour: Vec::new(),
-            coverage: Vec::new(),
-            shape: Vec::new(),
-        })
-    };
+    /// Destination colour and alpha saved across a masked composite.
+    /// Separate from the coverage scratch because the masked composite
+    /// encloses its use.
+    static MASKED_SPAN: Scratch = const { Scratch::new() };
+    /// Colour of the span of a pattern that may leave pixels unpainted.
+    static COVERAGE_COLOUR: Scratch = const { Scratch::new() };
+    /// Coverage of that span.
+    static COVERAGE_VALUES: Scratch = const { Scratch::new() };
+    /// Coverage of that span combined with the span's shape.
+    static COVERAGE_SHAPE: Scratch = const { Scratch::new() };
 }
 
 /// Immutable parameters for one paint operation, built once per fill/stroke/glyph call.
 ///
 /// `'bmp` borrows slices out of the destination bitmap's alpha plane and the
-/// current graphics state's transfer tables.
+/// current graphics state's transfer tables.  `S` is the sample type of the
+/// destination's pixels.
 #[derive(Copy, Clone, Debug)]
-pub struct PipeState<'bmp> {
+pub struct PipeState<'bmp, S: Sample = u8> {
     /// Compositing blend mode.
     pub blend_mode: BlendMode,
 
-    /// Source opacity, pre-scaled: `state.fill_alpha * 255.0` rounded to `u8`.
-    /// For stroke operations the caller passes `stroke_alpha * 255.0`.
-    pub a_input: u8,
+    /// Source opacity, pre-scaled: `state.fill_alpha · S::MAX` rounded.
+    /// For stroke operations the caller passes the stroke alpha.
+    pub a_input: S,
 
     /// Transfer function tables for the current pixel mode.  Applied to the
     /// composited result before writing.
-    pub transfer: TransferSet<'bmp>,
+    pub transfer: TransferSet<'bmp, S>,
 
     /// The backdrop of the non-isolated group being painted into, consulted
     /// by the blend function; `None` outside such a group, and for
@@ -186,7 +177,7 @@ pub struct PipeState<'bmp> {
     /// with an [`overprint`](Self::overprint) mask inside such a group must
     /// supply it whatever the blend mode, since the unpainted channels are
     /// kept relative to it.
-    pub backdrop: Option<GroupBackdrop<'bmp>>,
+    pub backdrop: Option<GroupBackdrop<'bmp, S>>,
 
     /// The colour channels this paint writes; `None` writes all of them.
     /// A mask covering every channel of the pixel is equivalent to `None`.
@@ -200,7 +191,7 @@ pub struct PipeState<'bmp> {
 
 /// The set of colour channels a paint operation writes.
 ///
-/// Bit `i` is set when channel `i` (the `i`-th byte of a pixel) is painted.
+/// Bit `i` is set when channel `i` (the `i`-th sample of a pixel) is painted.
 /// The destination alpha is composited regardless, since the object's shape
 /// is painted.  A channel outside the mask receives no ink from the source
 /// and keeps its premultiplied value: over an opaque destination it keeps
@@ -242,11 +233,11 @@ impl ChannelMask {
 /// the blend but never enters the stored pixels; compositing the group onto
 /// its parent then needs no removal of the backdrop.
 #[derive(Copy, Clone, Debug)]
-pub struct GroupBackdrop<'a> {
-    /// Colour bytes of the copied rectangle, `ncomps` per pixel, row-major.
-    pub colour: &'a [u8],
+pub struct GroupBackdrop<'a, S: Sample = u8> {
+    /// Colour samples of the copied rectangle, `ncomps` per pixel, row-major.
+    pub colour: &'a [S],
     /// Alpha of each copied pixel; `None` for an opaque backdrop.
-    pub alpha: Option<&'a [u8]>,
+    pub alpha: Option<&'a [S]>,
     /// Device column of the copied rectangle's top-left pixel.
     pub x0: i32,
     /// Device row of the copied rectangle's top-left pixel.
@@ -257,30 +248,30 @@ pub struct GroupBackdrop<'a> {
     pub height: usize,
 }
 
-impl GroupBackdrop<'_> {
-    /// The colour bytes and alpha of the backdrop at device pixel `(x, y)`;
-    /// `None` outside the copied rectangle, where the backdrop is
+impl<S: Sample> GroupBackdrop<'_, S> {
+    /// The colour samples and alpha of the backdrop at device pixel
+    /// `(x, y)`; `None` outside the copied rectangle, where the backdrop is
     /// transparent.
     #[must_use]
-    pub fn pixel(&self, x: i32, y: i32, ncomps: usize) -> Option<(&[u8], u8)> {
+    pub fn pixel(&self, x: i32, y: i32, ncomps: usize) -> Option<(&[S], S)> {
         let col = usize::try_from(x.checked_sub(self.x0)?).ok()?;
         let row = usize::try_from(y.checked_sub(self.y0)?).ok()?;
         if col >= self.width || row >= self.height {
             return None;
         }
         let i = row * self.width + col;
-        let alpha = self.alpha.map_or(255, |a| a[i]);
+        let alpha = self.alpha.map_or(S::MAX, |a| a[i]);
         Some((&self.colour[i * ncomps..(i + 1) * ncomps], alpha))
     }
 }
 
-impl PipeState<'_> {
+impl<S: Sample> PipeState<'_, S> {
     /// Returns `true` when the simple (no-transparency) fast path is applicable.
     ///
-    /// Applicable when `a_input == 255`, there is no shape and no backdrop.
+    /// Applicable when `a_input` is opaque, there is no shape and no backdrop.
     #[must_use]
-    pub const fn no_transparency(&self, uses_shape: bool) -> bool {
-        self.a_input == 255 && !uses_shape && self.backdrop.is_none()
+    pub fn no_transparency(&self, uses_shape: bool) -> bool {
+        self.a_input == S::MAX && !uses_shape && self.backdrop.is_none()
     }
 
     /// Returns `true` when the AA (shape-only) fast path is applicable.
@@ -293,14 +284,38 @@ impl PipeState<'_> {
     }
 }
 
+/// Run `f` on the shape of the 8-bit `coverage` at the sample depth `S`:
+/// `coverage` itself for 8-bit samples, each value widened exactly
+/// ([`Sample::from_u8`]) for wider ones.
+///
+/// Coverage (antialiasing, glyph and hairline masks) is 8-bit at every
+/// sample depth; a shape is a sample, since a group's alpha plane is the
+/// shape of its composite.
+pub fn with_shape<S: Sample, R>(coverage: &[u8], f: impl FnOnce(&[S]) -> R) -> R {
+    thread_local! {
+        static WIDENED: Scratch = const { Scratch::new() };
+    }
+    if let Some(shape) = S::from_u8_slice(coverage) {
+        return f(shape);
+    }
+    WIDENED.with(|scratch| {
+        scratch.with::<S, R>(coverage.len(), |shape| {
+            for (s, &c) in shape.iter_mut().zip(coverage) {
+                *s = S::from_u8(c);
+            }
+            f(shape)
+        })
+    })
+}
+
 /// Select and run the appropriate pipeline variant for a horizontal span.
 ///
 /// - `pipe`: compositing parameters for this paint operation.
 /// - `src`: source colour (solid or pattern).
-/// - `dst_pixels`: the destination row's pixel bytes for `x0..=x1`.
-/// - `dst_alpha`: the destination row's alpha bytes for `x0..=x1`, or `None`
+/// - `dst_pixels`: the destination row's samples for `x0..=x1`.
+/// - `dst_alpha`: the destination row's alpha for `x0..=x1`, or `None`
 ///   for a bitmap without an alpha plane, which is opaque.
-/// - `shape`: per-pixel coverage of `x0..=x1`, or `None` for full coverage.
+/// - `shape`: per-pixel shape of `x0..=x1`, or `None` for full coverage.
 /// - `x0`, `x1`: inclusive device column range of the span.
 /// - `y`: device row, at which a pattern source is evaluated.
 ///
@@ -313,34 +328,34 @@ impl PipeState<'_> {
 ///
 /// # Panics
 ///
-/// Panics if `x0 > x1`, if `P::BYTES == 0` (`Mono1` is not composited by the
-/// pipe), or if `dst_pixels`, `dst_alpha` or `shape` does not hold exactly
-/// the span's `x1 − x0 + 1` pixels.
+/// Panics if `x0 > x1`, if `P::NCOMPS == 0` (`Mono1` is not composited by
+/// the pipe), or if `dst_pixels`, `dst_alpha` or `shape` does not hold
+/// exactly the span's `x1 − x0 + 1` pixels.
 #[expect(
     clippy::too_many_arguments,
     reason = "the destination row, its alpha, the shape and the span position are independent inputs"
 )]
 pub fn render_span<P: Pixel>(
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    dst_pixels: &mut [u8],
-    mut dst_alpha: Option<&mut [u8]>,
-    shape: Option<&[u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    dst_pixels: &mut [P::Sample],
+    mut dst_alpha: Option<&mut [P::Sample]>,
+    shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
 ) {
     assert!(x0 <= x1, "render_span: x0={x0} > x1={x1}");
     assert!(
-        P::BYTES > 0,
+        P::NCOMPS > 0,
         "render_span: Mono1 is not composited by the pipe"
     );
     let count = usize::try_from(i64::from(x1) - i64::from(x0) + 1)
         .expect("render_span: span length fits usize");
     assert_eq!(
         dst_pixels.len(),
-        count * P::BYTES,
-        "render_span: dst_pixels holds {} bytes for a {count}-pixel span",
+        count * P::NCOMPS,
+        "render_span: dst_pixels holds {} samples for a {count}-pixel span",
         dst_pixels.len()
     );
     assert!(
@@ -354,46 +369,50 @@ pub fn render_span<P: Pixel>(
         "render_span: a masked paint inside a non-isolated group needs the group's alpha plane"
     );
     // A mask covering every channel of `P` writes the whole pixel.
-    let full = u8::MAX >> (8 - P::BYTES);
+    let full = u8::MAX >> (8 - P::NCOMPS);
     match pipe.overprint {
-        Some(mask) if mask.bits() & full != full => MASKED_SPAN.with_borrow_mut(|saved| {
-            saved.clear();
-            saved.extend_from_slice(dst_pixels);
-            if let Some(a) = dst_alpha.as_deref() {
-                saved.extend_from_slice(a);
-            }
-            render_unmasked::<P>(
-                pipe,
-                src,
-                dst_pixels,
-                dst_alpha.as_deref_mut(),
-                shape,
-                x0,
-                x1,
-                y,
-            );
-            let (old_colour, old_alpha) = saved.split_at(dst_pixels.len());
-            restore_unpainted::<P>(
-                pipe,
-                mask,
-                &SpanBefore {
-                    colour: old_colour,
-                    alpha: dst_alpha.as_deref().map(|new| (old_alpha, new)),
-                },
-                dst_pixels,
-                (x0..=x1, y),
-            );
-        }),
+        Some(mask) if mask.bits() & full != full => {
+            let saved_len = dst_pixels.len() + dst_alpha.as_ref().map_or(0, |a| a.len());
+            MASKED_SPAN.with(|scratch| {
+                scratch.with::<P::Sample, ()>(saved_len, |saved| {
+                    let (old_colour, old_alpha) = saved.split_at_mut(dst_pixels.len());
+                    old_colour.copy_from_slice(dst_pixels);
+                    if let Some(a) = dst_alpha.as_deref() {
+                        old_alpha.copy_from_slice(a);
+                    }
+                    render_unmasked::<P>(
+                        pipe,
+                        src,
+                        dst_pixels,
+                        dst_alpha.as_deref_mut(),
+                        shape,
+                        x0,
+                        x1,
+                        y,
+                    );
+                    restore_unpainted::<P>(
+                        pipe,
+                        mask,
+                        &SpanBefore {
+                            colour: old_colour,
+                            alpha: dst_alpha.as_deref().map(|new| (&*old_alpha, new)),
+                        },
+                        dst_pixels,
+                        (x0..=x1, y),
+                    );
+                });
+            });
+        }
         _ => render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y),
     }
 }
 
 /// A span's state before a masked paint.
-struct SpanBefore<'a> {
-    /// Colour bytes before the paint.
-    colour: &'a [u8],
-    /// With an alpha plane: its bytes before and after the paint.
-    alpha: Option<(&'a [u8], &'a [u8])>,
+struct SpanBefore<'a, S> {
+    /// Colour samples before the paint.
+    colour: &'a [S],
+    /// With an alpha plane: its samples before and after the paint.
+    alpha: Option<(&'a [S], &'a [S])>,
 }
 
 /// Write the channels `mask` does not paint as the `CompatibleOverprint`
@@ -412,17 +431,17 @@ struct SpanBefore<'a> {
 /// outside a non-isolated group and outside the backdrop's rectangle.
 ///
 /// `old` is the span's state before the paint and `xs` its device columns.
-/// The old bytes stand where the paint leaves the alpha unchanged, which
+/// The old samples stand where the paint leaves the alpha unchanged, which
 /// includes every pixel of a bitmap without an alpha plane (opaque before
 /// and after).
 fn restore_unpainted<P: Pixel>(
-    pipe: &PipeState<'_>,
+    pipe: &PipeState<'_, P::Sample>,
     mask: ChannelMask,
-    old: &SpanBefore<'_>,
-    dst_pixels: &mut [u8],
+    old: &SpanBefore<'_, P::Sample>,
+    dst_pixels: &mut [P::Sample],
     (xs, y): (RangeInclusive<i32>, i32),
 ) {
-    let ncomps = P::BYTES;
+    let ncomps = P::NCOMPS;
     for (i, (x, (px, old_px))) in xs
         .zip(
             dst_pixels
@@ -450,31 +469,32 @@ fn restore_unpainted<P: Pixel>(
 /// The premultiplied colour of the group over its backdrop is unchanged by
 /// the paint (see [`restore_unpainted`]):
 /// `a'·c' + (1 − a')·a_bd·c_bd = a·c + (1 − a)·a_bd·c_bd`, so, with alphas
-/// in `0..=255`, `c' = (255·a·c + (a' − a)·a_bd·c_bd) / (255·a')`, rounded
-/// to nearest once.  Compositing never lowers alpha (`a' ≥ a`), so `c'` is
-/// a weighted mean of `c` and `c_bd` and lies in `0..=255`; the clamp
+/// in `0..=M` (`M = S::MAX`), `c' = (M·a·c + (a' − a)·a_bd·c_bd) / (M·a')`,
+/// rounded to nearest once.  Compositing never lowers alpha (`a' ≥ a`), so
+/// `c'` is a weighted mean of `c` and `c_bd` and lies in `0..=M`; the clamp
 /// enforces that range for any input.  Outside a group (`a_bd = 0`) the
 /// formula is `c' = a·c / a'`.
 ///
 /// `None` where `a' = a`, for which `c' = c` exactly, and where `a' = 0`,
 /// for which the pixel is transparent and its colour has no effect: the old
-/// bytes stand.
-fn solve_own_colour(
-    old: &[u8],
-    (a_old, a_new): (u8, u8),
-    backdrop: Option<(&[u8], u8)>,
-) -> Option<[u8; 8]> {
-    if a_new == a_old || a_new == 0 {
+/// samples stand.
+fn solve_own_colour<S: Sample>(
+    old: &[S],
+    (a_old, a_new): (S, S),
+    backdrop: Option<(&[S], S)>,
+) -> Option<[S; 8]> {
+    if a_new == a_old || a_new == S::default() {
         return None;
     }
-    let (c_bd, a_bd) = backdrop.unwrap_or((&[0; 8], 0));
-    let (a_old, a_new, a_bd) = (i32::from(a_old), i32::from(a_new), i32::from(a_bd));
-    let den = 255 * a_new;
-    let mut out = [0u8; 8];
+    let transparent = [S::default(); 8];
+    let (c_bd, a_bd) = backdrop.unwrap_or_else(|| (&transparent, S::default()));
+    let max = S::MAX.signed();
+    let (a_old, a_new, a_bd) = (a_old.signed(), a_new.signed(), a_bd.signed());
+    let den = max * a_new;
+    let mut out = [S::default(); 8];
     for ((o, &c), &c_b) in out.iter_mut().zip(old).zip(c_bd) {
-        let num = 255 * a_old * i32::from(c) + (a_new - a_old) * a_bd * i32::from(c_b);
-        let c = (num + den / 2).div_euclid(den).clamp(0, 255);
-        *o = u8::try_from(c).expect("clamped to 0..=255");
+        let num = max * a_old * c.signed() + (a_new - a_old) * a_bd * c_b.signed();
+        *o = S::from_signed((num + den / 2).div_euclid(den));
     }
     Some(out)
 }
@@ -485,11 +505,11 @@ fn solve_own_colour(
     reason = "forwards the render_span arguments"
 )]
 fn render_unmasked<P: Pixel>(
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    dst_pixels: &mut [u8],
-    dst_alpha: Option<&mut [u8]>,
-    shape: Option<&[u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    dst_pixels: &mut [P::Sample],
+    dst_alpha: Option<&mut [P::Sample]>,
+    shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
@@ -512,9 +532,9 @@ fn render_unmasked<P: Pixel>(
 /// the bitmap.
 pub fn render_bitmap_span<P: Pixel>(
     bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    shape: Option<&[u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
@@ -533,13 +553,36 @@ pub fn render_bitmap_span<P: Pixel>(
     render_span::<P>(
         pipe,
         src,
-        &mut pixels[col0 * P::BYTES..(col1 + 1) * P::BYTES],
+        &mut pixels[col0 * P::NCOMPS..(col1 + 1) * P::NCOMPS],
         alpha.map(|a| &mut a[col0..=col1]),
         shape,
         x0,
         x1,
         y,
     );
+}
+
+/// [`render_bitmap_span`] with the shape given as 8-bit coverage (see
+/// [`with_shape`]).
+///
+/// # Panics
+///
+/// As [`render_bitmap_span`].
+pub fn render_bitmap_span_coverage<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    coverage: Option<&[u8]>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+) {
+    match coverage {
+        Some(c) => with_shape::<P::Sample, ()>(c, |shape| {
+            render_bitmap_span::<P>(bitmap, pipe, src, Some(shape), x0, x1, y);
+        }),
+        None => render_bitmap_span::<P>(bitmap, pipe, src, None, x0, x1, y),
+    }
 }
 
 /// Composite the covered runs of a span whose pattern may leave pixels
@@ -555,74 +598,121 @@ pub fn render_bitmap_span<P: Pixel>(
     reason = "forwards the render_span arguments"
 )]
 fn render_painted_runs<P: Pixel>(
-    pipe: &PipeState<'_>,
-    pat: &dyn Pattern,
-    dst_pixels: &mut [u8],
-    mut dst_alpha: Option<&mut [u8]>,
-    shape: Option<&[u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    pat: &dyn Pattern<P::Sample>,
+    dst_pixels: &mut [P::Sample],
+    dst_alpha: Option<&mut [P::Sample]>,
+    shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
 ) {
-    let ncomps = P::BYTES;
+    let ncomps = P::NCOMPS;
     let count = dst_pixels.len() / ncomps;
-    COVERAGE_SPAN.with(|cell| {
-        let CoverageScratch {
-            colour,
-            coverage,
-            shape: combined,
-        } = &mut *cell.borrow_mut();
-        colour.resize(count * ncomps, 0);
-        coverage.resize(count, 0);
-        pat.fill_span_coverage(y, x0, x1, colour, coverage);
-
-        let mut start = 0;
-        while let Some(a) = coverage[start..]
-            .iter()
-            .position(|&c| c != 0)
-            .map(|i| start + i)
-        {
-            let b = coverage[a..]
-                .iter()
-                .position(|&c| c == 0)
-                .map_or(count, |i| a + i);
-            let cov = &coverage[a..b];
-            let run_shape = if cov.iter().all(|&c| c == 255) {
-                shape.map(|s| &s[a..b])
-            } else {
-                combined.clear();
-                match shape {
-                    Some(s) => combined.extend(
-                        s[a..b]
-                            .iter()
-                            .zip(cov)
-                            .map(|(&s, &c)| div255(u32::from(s) * u32::from(c))),
-                    ),
-                    None => combined.extend_from_slice(cov),
-                }
-                Some(combined.as_slice())
-            };
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_possible_wrap,
-                reason = "a < b ≤ count = x1 − x0 + 1, which fits in i32"
-            )]
-            let (run_x0, run_x1) = (x0 + a as i32, x0 + b as i32 - 1);
-            dispatch_span::<P>(
-                pipe,
-                &PipeSrc::Pattern(&RowPattern {
-                    data: &colour[a * ncomps..b * ncomps],
-                }),
-                &mut dst_pixels[a * ncomps..b * ncomps],
-                dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
-                run_shape,
-                run_x0,
-                run_x1,
-                y,
-            );
-            start = b;
-        }
+    COVERAGE_COLOUR.with(|colour| {
+        colour.with::<P::Sample, ()>(count * ncomps, |colour| {
+            COVERAGE_VALUES.with(|coverage| {
+                coverage.with::<P::Sample, ()>(count, |coverage| {
+                    COVERAGE_SHAPE.with(|combined| {
+                        combined.with::<P::Sample, ()>(count, |combined| {
+                            pat.fill_span_coverage(y, x0, x1, colour, coverage);
+                            composite_painted_runs::<P>(
+                                pipe,
+                                &EvaluatedSpan { colour, coverage },
+                                combined,
+                                Span {
+                                    dst: dst_pixels,
+                                    alpha: dst_alpha,
+                                    shape,
+                                },
+                                (x0, y),
+                            );
+                        });
+                    });
+                });
+            });
+        });
     });
+}
+
+/// A pattern's colour and coverage over a span.
+struct EvaluatedSpan<'a, S> {
+    colour: &'a [S],
+    coverage: &'a [S],
+}
+
+/// The destination of a span: its colour, its alpha when the bitmap has an
+/// alpha plane, and the shape painted on it.
+struct Span<'a, S> {
+    dst: &'a mut [S],
+    alpha: Option<&'a mut [S]>,
+    shape: Option<&'a [S]>,
+}
+
+/// The run loop of [`render_painted_runs`] over the evaluated span `src`
+/// starting at device pixel `(x0, y)`, `combined` its scratch for a
+/// partially covered run's shape.
+fn composite_painted_runs<P: Pixel>(
+    pipe: &PipeState<'_, P::Sample>,
+    src: &EvaluatedSpan<'_, P::Sample>,
+    combined: &mut [P::Sample],
+    span: Span<'_, P::Sample>,
+    (x0, y): (i32, i32),
+) {
+    let EvaluatedSpan { colour, coverage } = *src;
+    let Span {
+        dst: dst_pixels,
+        alpha: mut dst_alpha,
+        shape,
+    } = span;
+    let ncomps = P::NCOMPS;
+    let count = coverage.len();
+    let mut start = 0;
+    let zero = P::Sample::default();
+    while let Some(a) = coverage[start..]
+        .iter()
+        .position(|&c| c != zero)
+        .map(|i| start + i)
+    {
+        let b = coverage[a..]
+            .iter()
+            .position(|&c| c == zero)
+            .map_or(count, |i| a + i);
+        let cov = &coverage[a..b];
+        let run_shape = if cov.iter().all(|&c| c == P::Sample::MAX) {
+            shape.map(|s| &s[a..b])
+        } else {
+            let run = &mut combined[a..b];
+            match shape {
+                Some(s) => {
+                    for ((o, &s), &c) in run.iter_mut().zip(&s[a..b]).zip(cov) {
+                        *o = P::Sample::div_max(s.wide() * c.wide());
+                    }
+                }
+                None => run.copy_from_slice(cov),
+            }
+            Some(&*run)
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "a < b ≤ count = x1 − x0 + 1, which fits in i32"
+        )]
+        let (run_x0, run_x1) = (x0 + a as i32, x0 + b as i32 - 1);
+        dispatch_span::<P>(
+            pipe,
+            &PipeSrc::Pattern(&RowPattern {
+                data: &colour[a * ncomps..b * ncomps],
+            }),
+            &mut dst_pixels[a * ncomps..b * ncomps],
+            dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
+            run_shape,
+            run_x0,
+            run_x1,
+            y,
+        );
+        start = b;
+    }
 }
 
 /// Run the pipeline variant that `pipe` and `shape` select for a span whose
@@ -632,11 +722,11 @@ fn render_painted_runs<P: Pixel>(
     reason = "forwards the render_span arguments"
 )]
 fn dispatch_span<P: Pixel>(
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    dst_pixels: &mut [u8],
-    dst_alpha: Option<&mut [u8]>,
-    shape: Option<&[u8]>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    dst_pixels: &mut [P::Sample],
+    dst_alpha: Option<&mut [P::Sample]>,
+    shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
@@ -662,20 +752,17 @@ fn dispatch_span<P: Pixel>(
 }
 
 // ── Shared transfer helpers ───────────────────────────────────────────────────
-//
-// Identical transfer logic was duplicated across `aa`, `simple`, and `general`.
-// These `pub(crate)` functions are the single canonical implementations.
 
-/// Apply the per-channel transfer LUTs to `src` and write the result into `dst`.
+/// Apply the per-channel transfer tables to `src` and write the result into `dst`.
 ///
 /// Both slices must have the same length and match the pixel mode:
-/// 1 byte → gray, 3 → RGB, 4 → CMYK/XBGR, 8 → `DeviceN`.
+/// 1 sample → gray, 3 → RGB, 4 → CMYK/XBGR, 8 → `DeviceN`.
 #[expect(
     clippy::inline_always,
     reason = "called per-pixel in the innermost compositing loop; 10-15 instructions, must inline across crate boundary"
 )]
 #[inline(always)]
-pub(crate) fn apply_transfer_pixel(pipe: &PipeState<'_>, src: &[u8], dst: &mut [u8]) {
+pub(crate) fn apply_transfer_pixel<S: Sample>(pipe: &PipeState<'_, S>, src: &[S], dst: &mut [S]) {
     debug_assert_eq!(
         src.len(),
         dst.len(),
@@ -683,21 +770,21 @@ pub(crate) fn apply_transfer_pixel(pipe: &PipeState<'_>, src: &[u8], dst: &mut [
     );
     let t = &pipe.transfer;
     match src.len() {
-        1 => dst[0] = t.gray[src[0] as usize],
+        1 => dst[0] = S::lookup(t.gray, src[0]),
         3 => {
-            dst[0] = t.rgb[0][src[0] as usize];
-            dst[1] = t.rgb[1][src[1] as usize];
-            dst[2] = t.rgb[2][src[2] as usize];
+            dst[0] = S::lookup(t.rgb[0], src[0]);
+            dst[1] = S::lookup(t.rgb[1], src[1]);
+            dst[2] = S::lookup(t.rgb[2], src[2]);
         }
         4 => {
-            dst[0] = t.cmyk[0][src[0] as usize];
-            dst[1] = t.cmyk[1][src[1] as usize];
-            dst[2] = t.cmyk[2][src[2] as usize];
-            dst[3] = t.cmyk[3][src[3] as usize];
+            dst[0] = S::lookup(t.cmyk[0], src[0]);
+            dst[1] = S::lookup(t.cmyk[1], src[1]);
+            dst[2] = S::lookup(t.cmyk[2], src[2]);
+            dst[3] = S::lookup(t.cmyk[3], src[3]);
         }
         8 => {
-            for (i, (&s, d)) in src.iter().zip(dst.iter_mut()).enumerate() {
-                *d = t.device_n[i][s as usize];
+            for ((&s, d), table) in src.iter().zip(dst.iter_mut()).zip(t.device_n) {
+                *d = S::lookup(table, s);
             }
         }
         n => {
@@ -707,17 +794,17 @@ pub(crate) fn apply_transfer_pixel(pipe: &PipeState<'_>, src: &[u8], dst: &mut [
     }
 }
 
-/// Apply transfer LUTs in-place to a single pixel slice.
+/// Apply transfer tables in-place to a single pixel slice.
 #[expect(
     clippy::inline_always,
     reason = "called per-pixel in the innermost compositing loop; delegates to apply_transfer_pixel, must inline"
 )]
 #[inline(always)]
-pub(crate) fn apply_transfer_in_place(pipe: &PipeState<'_>, px: &mut [u8]) {
+pub(crate) fn apply_transfer_in_place<S: Sample>(pipe: &PipeState<'_, S>, px: &mut [S]) {
     // Avoid allocating: for ncomps ≤ 8 copy into a stack buffer, apply, copy back.
     let n = px.len();
     debug_assert!(n <= 8, "apply_transfer_in_place: ncomps={n} > 8");
-    let mut tmp = [0u8; 8];
+    let mut tmp = [S::default(); 8];
     tmp[..n].copy_from_slice(px);
     apply_transfer_pixel(pipe, &tmp[..n], px);
 }

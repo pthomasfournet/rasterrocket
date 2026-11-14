@@ -29,7 +29,7 @@ use crate::bitmap::Bitmap;
 use crate::clip::Clip;
 use crate::pipe::general::{MAX_COMPS, union_colour};
 use crate::pipe::{self, GroupBackdrop, PipeSrc, PipeState, RowPattern};
-use color::Pixel;
+use color::{Pixel, Sample};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 /// Parameters for one transparency group, collected before [`begin_group`].
@@ -68,15 +68,15 @@ pub struct GroupBitmap<P: Pixel> {
     pub params: GroupParams,
     /// For a non-isolated group: the parent's pixels under the region when
     /// the group was opened, composited over the parent's own backdrop.
-    pub backdrop: Option<Backdrop>,
+    pub backdrop: Option<Backdrop<P::Sample>>,
 }
 
 /// The pixels of a parent bitmap under a non-isolated group's region.
-pub struct Backdrop {
-    /// Colour bytes, `P::BYTES` per pixel, row-major over the region.
-    colour: Vec<u8>,
+pub struct Backdrop<S: Sample = u8> {
+    /// Colour samples, `P::NCOMPS` per pixel, row-major over the region.
+    colour: Vec<S>,
     /// Alpha per pixel, or `None` for a parent without an alpha plane.
-    alpha: Option<Vec<u8>>,
+    alpha: Option<Vec<S>>,
     /// Device column and row of the region's top-left pixel.
     x0: i32,
     y0: i32,
@@ -86,7 +86,7 @@ pub struct Backdrop {
     height: usize,
 }
 
-impl Backdrop {
+impl<S: Sample> Backdrop<S> {
     /// Copy the region `x0..x1 × y0..y1` (half-open) of `parent`, each
     /// pixel composited over `under`, the parent's own backdrop, where that
     /// covers it.
@@ -94,12 +94,12 @@ impl Backdrop {
         clippy::cast_possible_wrap,
         reason = "the region lies within the parent, whose dimensions are below 2^31"
     )]
-    fn copy<P: Pixel>(
+    fn copy<P: Pixel<Sample = S>>(
         parent: &Bitmap<P>,
         under: Option<&Self>,
         (x0, y0, x1, y1): (u32, u32, u32, u32),
     ) -> Self {
-        let ncomps = P::BYTES;
+        let ncomps = P::NCOMPS;
         let (width, height) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let mut colour = Vec::with_capacity(width * height * ncomps);
         let mut alpha = parent
@@ -109,7 +109,7 @@ impl Backdrop {
         for y in y0..y1 {
             let (cx0, cx1) = (x0 as usize * ncomps, x1 as usize * ncomps);
             let row_start = colour.len();
-            colour.extend_from_slice(&parent.row_bytes(y)[cx0..cx1]);
+            colour.extend_from_slice(&parent.row_samples(y)[cx0..cx1]);
             let (Some(a), Some(row)) = (alpha.as_mut(), parent.alpha_row(y)) else {
                 continue;
             };
@@ -123,17 +123,12 @@ impl Backdrop {
                 let Some((c_0, a_0)) = under.pixel(x as i32, y as i32, ncomps) else {
                     continue;
                 };
-                let mut out = [0u8; MAX_COMPS];
+                let mut out = [S::default(); MAX_COMPS];
                 let out = &mut out[..ncomps];
-                let a_union = union_colour(c, u32::from(*a), c_0, u32::from(a_0), out);
+                let a_union = union_colour(c, a.wide(), c_0, a_0.wide(), out);
                 c.copy_from_slice(out);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "union_colour returns an alpha of at most 255"
-                )]
-                {
-                    *a = a_union as u8;
-                }
+                // union_colour returns an alpha of at most S::MAX.
+                *a = S::from_wide(a_union);
             }
         }
         let (x0, y0) = (x0 as i32, y0 as i32);
@@ -149,7 +144,7 @@ impl Backdrop {
 
     /// The backdrop as the pipe consults it.
     #[must_use]
-    pub fn as_pipe_backdrop(&self) -> GroupBackdrop<'_> {
+    pub fn as_pipe_backdrop(&self) -> GroupBackdrop<'_, S> {
         GroupBackdrop {
             colour: &self.colour,
             alpha: self.alpha.as_deref(),
@@ -211,7 +206,7 @@ impl<P: Pixel> GroupBitmap<P> {
 #[must_use]
 pub fn begin_group<P: Pixel>(
     parent: &Bitmap<P>,
-    parent_backdrop: Option<&Backdrop>,
+    parent_backdrop: Option<&Backdrop<P::Sample>>,
     clip: &Clip,
     mut params: GroupParams,
     bitmap: Bitmap<P>,
@@ -256,7 +251,7 @@ pub fn begin_group<P: Pixel>(
 ///
 /// `pipe` controls blend mode, opacity, and transfer for the compositing step.
 /// The group's own alpha plane is folded into the effective source alpha as
-/// `div255(group_alpha × pipe.a_input)`; pixels with `group_alpha == 0` leave
+/// `div_max(group_alpha × pipe.a_input)`; pixels with `group_alpha == 0` leave
 /// the parent unchanged.
 ///
 /// # Panics
@@ -266,10 +261,10 @@ pub fn begin_group<P: Pixel>(
 pub fn paint_group<P: Pixel>(
     parent: &mut Bitmap<P>,
     group: GroupBitmap<P>,
-    pipe: &PipeState<'_>,
+    pipe: &PipeState<'_, P::Sample>,
 ) -> (Clip, Bitmap<P>) {
     let (x0, y0, x1, y1) = group.region();
-    let ncomps = P::BYTES;
+    let ncomps = P::NCOMPS;
     let width = group.bitmap.width as usize;
     let alpha = group
         .bitmap
@@ -278,17 +273,18 @@ pub fn paint_group<P: Pixel>(
     let (x0, x_end) = (x0 as usize, (x1 as usize).min(parent.width as usize));
 
     for y in y0..y1.min(parent.height) {
-        let g_row = group.bitmap.row_bytes(y);
+        let g_row = group.bitmap.row_samples(y);
         let row_alpha = &alpha[y as usize * width..(y as usize + 1) * width];
         // Each run of painted group pixels composites as one span whose
         // shape is the group alpha: the pipe scales the source alpha by it,
-        // `div255(a_input × shape)`.  Unpainted pixels leave the parent as it is.
+        // `div_max(a_input × shape)`.  Unpainted pixels leave the parent as it is.
+        let zero = P::Sample::default();
         let mut start = x0;
-        while let Some(a) = row_alpha[start..x_end].iter().position(|&g| g != 0) {
+        while let Some(a) = row_alpha[start..x_end].iter().position(|&g| g != zero) {
             let a = start + a;
             let b = row_alpha[a..x_end]
                 .iter()
-                .position(|&g| g == 0)
+                .position(|&g| g == zero)
                 .map_or(x_end, |n| a + n);
             #[expect(
                 clippy::cast_possible_wrap,
@@ -326,12 +322,12 @@ pub fn discard_group<P: Pixel>(group: GroupBitmap<P>) -> (Clip, Bitmap<P>) {
         saved_clip,
         ..
     } = group;
-    let ncomps = P::BYTES;
+    let ncomps = P::NCOMPS;
     for y in y0..y1.min(bitmap.height) {
         let (row, alpha) = bitmap.row_and_alpha_mut(y);
-        row[x0 as usize * ncomps..x1 as usize * ncomps].fill(0);
+        row[x0 as usize * ncomps..x1 as usize * ncomps].fill(P::Sample::default());
         if let Some(alpha) = alpha {
-            alpha[x0 as usize..x1 as usize].fill(0);
+            alpha[x0 as usize..x1 as usize].fill(P::Sample::default());
         }
     }
     (saved_clip, bitmap)

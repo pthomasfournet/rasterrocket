@@ -34,7 +34,10 @@ use crate::rows::{RowCount, RowImage, RowLayout};
 /// Returns [`EncodeError::UnsupportedMode`] for `Mono1` bitmaps, or when the
 /// pixel buffer size overflows `usize`.
 /// Returns [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure.
-pub fn write_png<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
+pub fn write_png<P: Pixel<Sample = u8>, W: Write>(
+    bitmap: &Bitmap<P>,
+    out: W,
+) -> Result<(), EncodeError> {
     if P::MODE == PixelMode::Mono8 {
         return write_png_gray(bitmap, out);
     }
@@ -71,7 +74,10 @@ fn png_encoder<W: Write>(
 }
 
 /// `width × height × channels` bytes, or an error when that overflows `usize`.
-fn image_len<P: Pixel>(bitmap: &Bitmap<P>, channels: usize) -> Result<usize, EncodeError> {
+fn image_len<P: Pixel<Sample = u8>>(
+    bitmap: &Bitmap<P>,
+    channels: usize,
+) -> Result<usize, EncodeError> {
     (bitmap.width as usize)
         .checked_mul(bitmap.height as usize)
         .and_then(|px| px.checked_mul(channels))
@@ -81,7 +87,7 @@ fn image_len<P: Pixel>(bitmap: &Bitmap<P>, channels: usize) -> Result<usize, Enc
 }
 
 /// Write a colour bitmap as PNG RGB, or RGBA when it has an alpha plane.
-fn write_png_rgb<P: Pixel, W: Write>(
+fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     source: RgbSource,
     out: W,
@@ -113,7 +119,10 @@ fn write_png_rgb<P: Pixel, W: Write>(
 }
 
 /// Write a `Gray8` bitmap as PNG.
-fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), EncodeError> {
+fn write_png_gray<P: Pixel<Sample = u8>, W: Write>(
+    bitmap: &Bitmap<P>,
+    out: W,
+) -> Result<(), EncodeError> {
     let mut writer = png_encoder(
         out,
         bitmap.width,

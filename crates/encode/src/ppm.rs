@@ -31,7 +31,10 @@ use crate::{EncodeError, write_live_rows};
 /// Returns [`EncodeError::UnsupportedMode`] for grayscale or 1-bit modes —
 /// use [`write_pgm`][crate::write_pgm] for those.
 /// Returns [`EncodeError::Io`] on any I/O failure.
-pub fn write_ppm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(), EncodeError> {
+pub fn write_ppm<P: Pixel<Sample = u8>, W: Write>(
+    bitmap: &Bitmap<P>,
+    mut out: W,
+) -> Result<(), EncodeError> {
     let source = RgbSource::of(P::MODE).ok_or(EncodeError::UnsupportedMode(
         "grayscale/mono bitmap: use write_pgm instead",
     ))?;
@@ -85,7 +88,7 @@ impl RgbSource {
             PixelMode::Xbgr8 => Some(Self::Xbgr),
             PixelMode::Cmyk8 => Some(Self::Cmyk),
             PixelMode::DeviceN8 => Some(Self::DeviceN),
-            PixelMode::Mono1 | PixelMode::Mono8 => None,
+            PixelMode::Mono1 | PixelMode::Mono8 | PixelMode::Mono16 | PixelMode::Rgb16 => None,
         }
     }
 

@@ -202,7 +202,11 @@ fn gray_from_tight(w: u32, h: u32, gray: Vec<u8>) -> Result<CodecPixels, DecodeE
 
 /// Take over a tight `w·h·P::BYTES` buffer as a packed bitmap, rejecting a
 /// buffer whose length disagrees with the dimensions.
-fn packed_from_tight<P: Pixel>(w: u32, h: u32, data: Vec<u8>) -> Result<Bitmap<P>, DecodeError> {
+fn packed_from_tight<P: Pixel<Sample = u8>>(
+    w: u32,
+    h: u32,
+    data: Vec<u8>,
+) -> Result<Bitmap<P>, DecodeError> {
     let expected = (w as usize)
         .checked_mul(h as usize)
         .and_then(|n| n.checked_mul(P::BYTES));
