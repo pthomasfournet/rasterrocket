@@ -230,14 +230,16 @@ pub(in crate::resources::image) fn decode_dct<
     // The frame header's dimensions, not the dictionary's, size the decode,
     // so the budget is applied to them; the decoder's own per-side cap is
     // lifted to the format's maximum so the budget is the one size policy.
-    if let Err(e) = crate::resources::image::decode_budget(
-        u32::from(sof.width),
-        u32::from(sof.height),
-        usize::from(components),
-    ) {
+    // The coefficients a decoder holds whole (a progressive frame, a
+    // sequential one coded in several scans) get what the samples leave.
+    let (sof_w, sof_h) = (u32::from(sof.width), u32::from(sof.height));
+    if let Err(e) = crate::resources::image::decode_budget(sof_w, sof_h, usize::from(components)) {
         log::warn!("image: DCTDecode: {e}");
         return None;
     }
+    let coefficient_budget = crate::resources::image::MAX_DECODED_BYTES.saturating_sub(
+        crate::resources::image::decoded_bytes(sof_w, sof_h, usize::from(components)),
+    );
 
     // Choose the output colorspace to request from the decoder.
     let out_cs = match components {
@@ -256,6 +258,7 @@ pub(in crate::resources::image) fn decode_dct<
         .set_max_height(usize::from(u16::MAX))
         .set_strict_mode(false);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
+    decoder.set_max_coefficient_bytes(usize::try_from(coefficient_budget).unwrap_or(usize::MAX));
 
     // An Adobe APP14 transform of 2 marks a four-component stream as YCCK.
     // The decoder has no YCCK → CMYK mapping, so request YCCK unchanged and

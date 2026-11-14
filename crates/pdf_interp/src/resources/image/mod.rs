@@ -693,7 +693,9 @@ pub(crate) const MAX_IMAGE_SIDE: i64 = 131_071;
 
 /// Largest number of 8-bit samples (`width × height × components`) an
 /// image is stored or converted to: 1 GiB.  A larger image is refused before any
-/// allocation and reported as a decode failure.
+/// allocation and reported as a decode failure.  A JPEG decode whose
+/// decoder holds the frame's coefficients whole fits them in what the
+/// samples leave of it.
 pub(crate) const MAX_DECODED_BYTES: u64 = 1 << 30;
 
 /// Validate raw `i64` image dimensions and cast them to `u32`.
@@ -720,7 +722,7 @@ pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)>
 /// Whether a `width × height` image of `components` samples per pixel fits
 /// [`MAX_DECODED_BYTES`]; the message names the excess otherwise.
 pub(super) fn decode_budget(width: u32, height: u32, components: usize) -> Result<(), String> {
-    let bytes = u64::from(width) * u64::from(height) * components as u64;
+    let bytes = decoded_bytes(width, height, components);
     if bytes <= MAX_DECODED_BYTES {
         return Ok(());
     }
@@ -729,6 +731,12 @@ pub(super) fn decode_budget(width: u32, height: u32, components: usize) -> Resul
         bytes >> 20,
         MAX_DECODED_BYTES >> 20
     ))
+}
+
+/// The 8-bit samples of a `width × height` image of `components` samples
+/// per pixel.
+pub(super) fn decoded_bytes(width: u32, height: u32, components: usize) -> u64 {
+    u64::from(width) * u64::from(height) * components as u64
 }
 
 /// A vector of `len` copies of `fill`, or `None` when the allocation

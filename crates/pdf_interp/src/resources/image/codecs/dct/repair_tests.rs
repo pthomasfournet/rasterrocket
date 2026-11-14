@@ -202,3 +202,19 @@ fn a_frame_over_the_decode_budget_is_refused_before_decoding() {
     data[at..at + 4].copy_from_slice(&[0xFF, 0xFE, 0xFF, 0xFE]);
     assert!(decode(&data, 16, 16).is_none());
 }
+
+/// A progressive frame whose samples fit the decode budget, but not with
+/// the coefficients its decoder holds besides them, is refused before
+/// either is allocated.
+#[test]
+fn a_progressive_frame_whose_coefficients_exceed_the_budget_is_refused() {
+    let mut data = Vec::new();
+    let mut enc = Encoder::new(&mut data, 85);
+    enc.set_progressive(true);
+    enc.encode(&[128; 16 * 16], 16, 16, ColorType::Luma)
+        .expect("encode");
+    let at = jpeg_sof(&data).expect("SOF").height_at;
+    // 30 000 × 30 000 gray samples: 0.84 GiB, and twice that in coefficients.
+    data[at..at + 4].copy_from_slice(&[0x75, 0x30, 0x75, 0x30]);
+    assert!(decode(&data, 30_000, 30_000).is_none());
+}
