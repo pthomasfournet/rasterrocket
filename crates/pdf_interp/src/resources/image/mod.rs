@@ -528,21 +528,14 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         Err(msg) => return unresolved(&msg),
     };
 
-    let (smask_entry, mask_entry) = mask_entries(doc, &stream.dict, is_mask);
-    let colour_key = smask_entry.is_none() && matches!(mask_entry, Some(Object::Array(_)));
-
-    // The matte colour of a soft mask the image's samples are pre-blended
-    // with (§11.6.5.3).
-    let matte = match smask_entry {
-        Some(Object::Reference(id)) => smask::matte(doc, *id),
-        _ => None,
-    };
-
-    // A colour-key mask compares exact samples, which a reduced decode
-    // averages, and a matte is removed pixel by pixel on the mask's grid,
-    // so such an image decodes in full.  A mask stream otherwise keeps its
-    // own resolution and needs no such exclusion.
-    let draw_size = request.draw_size.filter(|_| matte.is_none() && !colour_key);
+    let masks = ImageMasks::of(doc, &stream.dict, is_mask);
+    let draw_size = masks.reduced_draw_size(request.draw_size);
+    let ImageMasks {
+        smask: smask_entry,
+        mask: mask_entry,
+        matte,
+        ..
+    } = masks;
 
     // The GPU blit composites cached images fully opaque and reads their
     // samples verbatim, so an image carrying a soft mask, an explicit mask,
@@ -664,6 +657,68 @@ fn image_xobject(
 /// stencil (`is_mask`) has none (§8.9.6.2), and an entry that is null or
 /// refers to an object the file does not define is absent (§7.3.10).  An
 /// `/SMask` replaces a `/Mask` (§11.6.5.3).
+/// The mask entries of an image dictionary that decide how its samples
+/// decode.
+struct ImageMasks<'d> {
+    /// The defined `/SMask` entry.
+    smask: Option<&'d Object>,
+    /// The defined `/Mask` entry.
+    mask: Option<&'d Object>,
+    /// `/Mask` is a colour-key array that no `/SMask` replaces.
+    colour_key: bool,
+    /// The matte colour of a soft mask the image's samples are pre-blended
+    /// with (§11.6.5.3).
+    matte: Option<Vec<f64>>,
+}
+
+impl<'d> ImageMasks<'d> {
+    /// The masks of the image dictionary `dict`; none for an image mask.
+    fn of(doc: &Document, dict: &'d Dictionary, is_mask: bool) -> Self {
+        let (smask, mask) = mask_entries(doc, dict, is_mask);
+        let colour_key = smask.is_none() && matches!(mask, Some(Object::Array(_)));
+        let matte = match smask {
+            Some(Object::Reference(id)) => smask::matte(doc, *id),
+            _ => None,
+        };
+        Self {
+            smask,
+            mask,
+            colour_key,
+            matte,
+        }
+    }
+
+    /// The size a decode drawn at `draw_size` may reduce to.  A colour-key
+    /// mask compares exact samples, which a reduced decode averages, and a
+    /// matte is removed pixel by pixel on the mask's grid, so such an image
+    /// decodes in full.  A mask stream otherwise keeps its own resolution
+    /// and needs no such exclusion.
+    fn reduced_draw_size(&self, draw_size: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        draw_size.filter(|_| self.matte.is_none() && !self.colour_key)
+    }
+}
+
+/// The size the decode of the image dictionary `dict` drawn at `draw_size`
+/// may reduce to: `draw_size`, unless the image's masks require a full
+/// decode (see `ImageMasks::reduced_draw_size`).
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) fn reduced_draw_size(
+    doc: &Document,
+    dict: &Dictionary,
+    draw_size: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    let is_mask = dict.get_bool(b"ImageMask").unwrap_or(false);
+    ImageMasks::of(doc, dict, is_mask).reduced_draw_size(draw_size)
+}
+
+/// Whether the CPU decode of a JPEG 2000 image of `full` pixels drawn at
+/// `draw` skips a resolution level: each level halves both axes, and the
+/// decoder keeps every level that leaves the image at least `draw` on both.
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) const fn jpx_draw_reduces((w, h): (u32, u32), (dw, dh): (u32, u32)) -> bool {
+    dw.saturating_mul(2) <= w && dh.saturating_mul(2) <= h
+}
+
 fn mask_entries<'d>(
     doc: &Document,
     dict: &'d Dictionary,

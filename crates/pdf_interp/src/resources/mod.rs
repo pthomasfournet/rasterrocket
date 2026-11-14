@@ -708,21 +708,33 @@ impl<'doc> PageResources<'doc> {
         Some(ExtGStateParams::from_dict(self.doc, &gs))
     }
 
-    /// The dimensions of the `XObject` resource `name` when it is an image
-    /// the GPU JPEG 2000 decoder takes: terminal filter `JPXDecode` and at
-    /// least [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels by its dictionary.
+    /// Whether the GPU JPEG 2000 decoder is worth offering the `XObject`
+    /// resource `name` drawn at `draw_size`: an image with terminal filter
+    /// `JPXDecode` and at least [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels by
+    /// its dictionary, whose CPU decode would not skip a resolution level
+    /// (see `jpx_draw_reduces`) at the size its masks let it reduce to
+    /// (see `reduced_draw_size`).
     #[cfg(feature = "nvjpeg2k")]
     #[must_use]
-    pub(crate) fn xobject_device_jpx_size(&self, name: &[u8]) -> Option<(u32, u32)> {
-        let obj = self.doc.get_object(self.xobject_id(name)?).ok()?;
-        let dict = &obj.as_ref().as_stream()?.dict;
-        let chain = image::image_filter_chain(dict.get(b"Filter")?);
-        if chain.last().is_none_or(|f| f != "JPXDecode") {
-            return None;
-        }
-        let dim = |key: &[u8]| dict.get_i64(key).and_then(|v| u32::try_from(v).ok());
-        let (w, h) = (dim(b"Width")?, dim(b"Height")?);
-        (w.saturating_mul(h) >= image::GPU_JPEG2K_THRESHOLD_PX).then_some((w, h))
+    pub(crate) fn xobject_takes_device_jpx(
+        &self,
+        name: &[u8],
+        draw_size: Option<(u32, u32)>,
+    ) -> bool {
+        let Some(obj) = self
+            .xobject_id(name)
+            .and_then(|id| self.doc.get_object(id).ok())
+        else {
+            return false;
+        };
+        let Some(dict) = obj.as_ref().as_stream().map(|s| &s.dict) else {
+            return false;
+        };
+        let Some(full) = device_jpx_size(dict) else {
+            return false;
+        };
+        !image::reduced_draw_size(self.doc, dict, draw_size)
+            .is_some_and(|draw| image::jpx_draw_reduces(full, draw))
     }
 
     /// The object the `XObject` resource `name` refers to, when the entry is
@@ -910,6 +922,20 @@ impl<'doc> PageResources<'doc> {
         let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
         stream.as_stream()?.dict.get(b"OC").cloned()
     }
+}
+
+/// The dimensions of the image dictionary `dict` when the GPU JPEG 2000
+/// decoder takes it: terminal filter `JPXDecode` and at least
+/// [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels.
+#[cfg(feature = "nvjpeg2k")]
+fn device_jpx_size(dict: &Dictionary) -> Option<(u32, u32)> {
+    let chain = image::image_filter_chain(dict.get(b"Filter")?);
+    if chain.last().is_none_or(|f| f != "JPXDecode") {
+        return None;
+    }
+    let dim = |key: &[u8]| dict.get_i64(key).and_then(|v| u32::try_from(v).ok());
+    let (w, h) = (dim(b"Width")?, dim(b"Height")?);
+    (w.saturating_mul(h) >= image::GPU_JPEG2K_THRESHOLD_PX).then_some((w, h))
 }
 
 /// Convert a [`pdf::Object`] (Real or Integer) to `f64`.
@@ -1187,5 +1213,41 @@ mod tests {
         let resources = PageResources::new(&doc, (1, 0));
         assert_eq!(resources.color_space(b"CS0"), ColorSpace::DeviceGray);
         assert_eq!(resources.color_space(b""), ColorSpace::DeviceGray);
+    }
+
+    /// The GPU JPEG 2000 decoder is declined for a draw at half size or
+    /// less only when the CPU decode reduces: a matte soft mask or a
+    /// colour-key mask decodes in full, so the device decoder is offered.
+    #[cfg(feature = "nvjpeg2k")]
+    #[test]
+    fn device_jpx_is_offered_where_the_cpu_decode_cannot_reduce() {
+        let jpx = "/Type /XObject /Subtype /Image /Width 1000 /Height 1000 \
+                   /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode";
+        let stream = |extra: &str| format!("<< {jpx} {extra} /Length 0 >>\nstream\n\nendstream");
+        let doc = crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /XObject << /Plain 5 0 R /Matted 6 0 R \
+                 /Keyed 8 0 R >> >> >>"
+                    .to_owned(),
+            ),
+            (5, stream("")),
+            (6, stream("/SMask 7 0 R")),
+            (
+                7,
+                "<< /Type /XObject /Subtype /Image /Width 1000 /Height 1000 /ColorSpace \
+                 /DeviceGray /BitsPerComponent 8 /Matte [0 0 0] /Length 0 >>\nstream\n\nendstream"
+                    .to_owned(),
+            ),
+            (8, stream("/Mask [0 0 0 0 0 0]")),
+        ]);
+        let resources = PageResources::new(&doc, (4, 0));
+        let half = Some((500, 500));
+        assert!(!resources.xobject_takes_device_jpx(b"Plain", half));
+        assert!(resources.xobject_takes_device_jpx(b"Plain", Some((501, 500))));
+        assert!(resources.xobject_takes_device_jpx(b"Plain", None));
+        assert!(resources.xobject_takes_device_jpx(b"Matted", half));
+        assert!(resources.xobject_takes_device_jpx(b"Keyed", half));
+        assert!(!resources.xobject_takes_device_jpx(b"Missing", None));
     }
 }

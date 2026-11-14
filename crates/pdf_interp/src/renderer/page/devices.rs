@@ -135,11 +135,7 @@ impl PageRenderer<'_> {
         let super::Nvjpeg2kSupply::OnDemand(source) = self.nvjpeg2k_supply else {
             return true;
         };
-        let Some((w, h)) = self.resources.xobject_device_jpx_size(name) else {
-            return false;
-        };
-        if draw_size.is_some_and(|(dw, dh)| dw.saturating_mul(2) <= w && dh.saturating_mul(2) <= h)
-        {
+        if !self.resources.xobject_takes_device_jpx(name, draw_size) {
             return false;
         }
         if self.nvjpeg2k.is_none()
