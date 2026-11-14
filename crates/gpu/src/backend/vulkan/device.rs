@@ -41,7 +41,7 @@ pub(super) struct DeviceCtx {
     /// The mutex *is* the access path — there is no way to reach the
     /// raw `vk::Queue` without holding the lock.  Both submitters (the
     /// per-page recorder and the transfer context) go through
-    /// [`Self::submit`] or [`Self::submit_and_wait_idle`].
+    /// [`Self::submit`].
     compute_queue: Mutex<vk::Queue>,
     /// Successful `vkQueueSubmit` calls on `compute_queue`.
     submits: AtomicU64,
@@ -183,51 +183,33 @@ impl DeviceCtx {
         Ok(())
     }
 
-    /// Submit `submit` to the compute queue with no fence.
+    /// Submit `submit` to the compute queue, signalling `fence` (which may
+    /// be null) on completion.
     ///
-    /// The queue lock is held for the `vkQueueSubmit` call only.  `what`
+    /// The queue lock is held for the `vkQueueSubmit` call only: a waiter
+    /// waits on its own fence or semaphore, never on the queue, so neither
+    /// blocks other threads' submissions nor waits for their work.  `what`
     /// names the submitter in the error.
     ///
     /// # Safety
     /// Every handle `submit` references is live and its command buffers are
-    /// in the Executable state.
+    /// in the Executable state; `fence` is null or unsignalled and not in
+    /// use by another submission.
     pub(super) unsafe fn submit(
         &self,
         submit: &vk::SubmitInfo<'_>,
+        fence: vk::Fence,
         what: &'static str,
     ) -> Result<()> {
         let queue = self.compute_queue.lock().expect("compute_queue poisoned");
         // Safety: the queue is held exclusively; the caller guarantees `submit`.
         unsafe {
             self.device
-                .queue_submit(*queue, std::slice::from_ref(submit), vk::Fence::null())
+                .queue_submit(*queue, std::slice::from_ref(submit), fence)
         }
         .map_err(vk_err(what))?;
         let _ = self.submits.fetch_add(1, Ordering::Relaxed);
         Ok(())
-    }
-
-    /// [`Self::submit`], then `vkQueueWaitIdle` under the same lock hold, so
-    /// that the queue is idle when the call returns.
-    ///
-    /// # Safety
-    /// As [`Self::submit`].
-    pub(super) unsafe fn submit_and_wait_idle(
-        &self,
-        submit: &vk::SubmitInfo<'_>,
-        what: &'static str,
-    ) -> Result<()> {
-        let queue = self.compute_queue.lock().expect("compute_queue poisoned");
-        // Safety: the queue is held exclusively; the caller guarantees `submit`.
-        unsafe {
-            self.device
-                .queue_submit(*queue, std::slice::from_ref(submit), vk::Fence::null())
-                .map_err(vk_err(what))?;
-            let _ = self.submits.fetch_add(1, Ordering::Relaxed);
-            self.device
-                .queue_wait_idle(*queue)
-                .map_err(vk_err("vkQueueWaitIdle"))
-        }
     }
 
     /// Successful submissions to the compute queue so far.

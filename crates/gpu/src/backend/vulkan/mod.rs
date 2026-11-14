@@ -228,8 +228,8 @@ impl GpuBackend for VulkanBackend {
         // one fails rather than being zeroed through a host staging copy.
         //
         // The fill is a one-shot submission (`TransferContext::run_one_shot`),
-        // which holds the transfer command pool and the compute queue until
-        // `vkQueueWaitIdle` returns: concurrent callers serialise.
+        // which holds the transfer command pool until its fence signals:
+        // concurrent transfers serialise.
         // [`GpuBackend::record_zero_buffer`] folds the fill into a page's
         // own command buffer instead, with no extra submission.
         self.transfer.fill_zero(&buf)?;

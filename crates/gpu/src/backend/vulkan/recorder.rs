@@ -274,7 +274,10 @@ impl PageRecorder {
 
         // Safety: the command buffer was ended above; the timeline
         // semaphore lives as long as the recorder.
-        unsafe { self.device.submit(&submit, "vkQueueSubmit") }?;
+        unsafe {
+            self.device
+                .submit(&submit, vk::Fence::null(), "vkQueueSubmit")
+        }?;
         Ok(value)
     }
 

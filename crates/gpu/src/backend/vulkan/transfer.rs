@@ -2,8 +2,8 @@
 //!
 //! Synchronous upload/download via reusable `HOST_VISIBLE` staging
 //! buffers, one per direction (each grown to the largest transfer seen so
-//! far), and a one-time-submit command buffer on the compute queue, with
-//! `vkQueueWaitIdle` for completion.
+//! far), and a one-time-submit command buffer on the compute queue whose
+//! completion is waited for on the context's own fence.
 
 #![expect(
     clippy::significant_drop_tightening,
@@ -48,10 +48,12 @@ pub(super) struct TransferContext {
     download_staging: Mutex<Option<HostBuffer>>,
 }
 
-/// Pool + cached cmd buffer pair guarded together by `cmd_pool`'s mutex.
+/// Pool, cached cmd buffer and the fence its submissions signal, guarded
+/// together by `cmd_pool`'s mutex.
 struct TransferPool {
     pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
+    fence: vk::Fence,
 }
 
 impl TransferContext {
@@ -72,10 +74,18 @@ impl TransferContext {
             .map_err(vk_err("vkAllocateCommandBuffers (transfer init)"))
             .inspect_err(|_| unsafe { device.device.destroy_command_pool(pool, None) })?;
         let cmd = buffers[0];
+        // Safety: device is live; create_fence returns Result on failure.
+        let fence = unsafe {
+            device
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .map_err(vk_err("vkCreateFence (transfer)"))
+        .inspect_err(|_| unsafe { device.device.destroy_command_pool(pool, None) })?;
 
         Ok(Self {
             device,
-            cmd_pool: Mutex::new(TransferPool { pool, cmd }),
+            cmd_pool: Mutex::new(TransferPool { pool, cmd, fence }),
             upload_staging: Mutex::new(None),
             download_staging: Mutex::new(None),
         })
@@ -130,7 +140,7 @@ impl TransferContext {
         let staging_handle = staging.handle();
         let src_handle = src.handle();
         self.copy_via_staging(src_handle, staging_handle, len)?;
-        // The copy has completed (`vkQueueWaitIdle`) and its writes are
+        // The copy has completed (the transfer fence) and its writes are
         // visible to the host (`run_one_shot`'s closing barrier); the
         // memory is HOST_COHERENT, so no invalidate is needed.
         dst.copy_from_slice(&staging.as_slice()[..dst.len()]);
@@ -177,9 +187,11 @@ impl TransferContext {
     }
 
     /// Reset the pool, record `f` and a closing barrier into the cached
-    /// cmd buffer, submit, wait idle.  Holds the `cmd_pool` mutex for the whole body so
-    /// the buffer can't be reused before `vkQueueWaitIdle` returns
-    /// (cmd buffers in Pending state must not be reset).
+    /// cmd buffer, submit it signalling the transfer fence, and wait on the
+    /// fence.  Holds the `cmd_pool` mutex for the whole body so the buffer
+    /// and the fence can't be reused before the wait returns (cmd buffers in
+    /// Pending state must not be reset).  The queue itself is locked only
+    /// for the submit.
     fn run_one_shot<F: FnOnce(vk::CommandBuffer)>(&self, f: F) -> Result<()> {
         let pool = self.cmd_pool.lock().expect("transfer cmd_pool poisoned");
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -219,11 +231,21 @@ impl TransferContext {
 
         let submit_buffers = [pool.cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&submit_buffers);
-        // Safety: the command buffer was ended above and the pool mutex
-        // keeps it from being reset until the queue is idle.
+        let fences = [pool.fence];
+        // Safety: the command buffer was ended above; the fence is used by
+        // this context's submissions only, each waited for under the pool
+        // mutex before the next resets it, so it is not in use here.
         unsafe {
             self.device
-                .submit_and_wait_idle(&submit, "vkQueueSubmit (transfer)")
+                .device
+                .reset_fences(&fences)
+                .map_err(vk_err("vkResetFences (transfer)"))?;
+            self.device
+                .submit(&submit, pool.fence, "vkQueueSubmit (transfer)")?;
+            self.device
+                .device
+                .wait_for_fences(&fences, true, u64::MAX)
+                .map_err(vk_err("vkWaitForFences (transfer)"))
         }
     }
 }
@@ -271,6 +293,7 @@ impl Drop for TransferContext {
         let pool = self.cmd_pool.lock().expect("transfer cmd_pool poisoned");
         // Safety: pool is owned by us; no in-flight references.
         unsafe {
+            self.device.device.destroy_fence(pool.fence, None);
             self.device.device.destroy_command_pool(pool.pool, None);
         }
     }

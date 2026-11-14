@@ -462,8 +462,8 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     ///
     /// Folds what [`Self::alloc_device_zeroed`] does as a separate one-shot
     /// submission into the page's own command buffer / stream: zero extra
-    /// submits, no transfer-queue lock acquisition, no `vkQueueWaitIdle`
-    /// in the alloc path.  Callers that have an active `begin_page` (e.g.
+    /// submits, no transfer-pool lock acquisition, no host wait in the
+    /// alloc path.  Callers that have an active `begin_page` (e.g.
     /// the per-page composite buffer) should prefer this over
     /// `alloc_device_zeroed` to avoid serialising concurrent renderer
     /// threads on the Vulkan transfer pool.
