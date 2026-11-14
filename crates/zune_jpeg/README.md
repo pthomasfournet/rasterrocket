@@ -1,5 +1,26 @@
 # Zune-JPEG
 
+> **Local fork.** This directory is the rasterrocket workspace's local fork
+> of [`zune-jpeg`](https://github.com/etemesi254/zune-image),
+> based on an upstream commit that carries crate version 0.5.15, with
+> upstream history reviewed to a later commit. Both commits are recorded in
+> [`UPSTREAM.toml`](UPSTREAM.toml); every change made here, and every
+> upstream fix brought over since the base, is listed in
+> [`CHANGES.md`](CHANGES.md). The crate is not published (`publish = false`)
+> and changes are not sent upstream.
+>
+> `rasterrocket-interp` uses it to decode `DCTDecode` images,
+> `rasterrocket-comic` to decode JPEG pages, and a `[patch.crates-io]`
+> entry gives it to the `tiff` crate. Beyond upstream it decodes correctly baseline
+> frames coded in several scans and arithmetic-coded frames (SOF9, SOF10;
+> the `arith` feature, which this fork turns on by default, where the
+> feature table below gives upstream's default),
+> counts the rows decoded from data present (`JpegDecoder::intact_rows`)
+> and bounds the coefficient planes a frame holds
+> (`set_max_coefficient_bytes`).
+>
+> Everything below is upstream's README, kept as written.
+
 A fast, correct and safe jpeg decoder in pure Rust.
 
 ## Usage
