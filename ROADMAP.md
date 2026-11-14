@@ -2669,7 +2669,7 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
-**Unreleased on master, the content of v2.2.0.** A reduced image draw builds its resampling plan
+**Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
 barrier windows: each page is appended to the spool once the pages before
@@ -3268,8 +3268,8 @@ the first pass of the day:
   locale, fails when no page was compared, and counts a render failure
   once.
 
-Phase 7's last item, the mode E re-bench, is closed as moot. v2.1.0 is
-released (see the release history); master carries the v2.2.0 work above. The CUDA performance
+Phase 7's last item, the mode E re-bench, is closed as moot. v2.2.0 is
+released (see the release history). The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder and
 transfers are blocking by design.
 

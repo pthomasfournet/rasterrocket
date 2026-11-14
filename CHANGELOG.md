@@ -2,6 +2,277 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-11-14
+
+### Bug Fixes
+
+- A function-based shading is evaluated at every device pixel
+- A failed print job stops its queued pages; review fixes
+- Bound a function-based shading's work, memory and area
+- Count failed device fills; parity tests read the renders they compare
+- Depend on rustix only where the fadvise hint is compiled
+- Repair JPEG producer faults and report a partial decode
+- A hairline cut by the clip's bottom ends its last row as unclipped
+- Cover count-0 intersections in the aliased span walk
+- Move a sloped edge's spans exactly with whole-pixel moves
+- Round_half_up_i32 rounds a value just below one half down
+- Div255 rounds to nearest
+- Bound a rectified page's area after rounding its size
+- A rewritten expectations registry keeps its permissions
+- Build and test cleanly on Windows
+- Decode sequential frames coded in several scans
+- Race-free row and column passes in the IDCT kernel
+- Bring over upstream's fixes up to ab211bb1
+- Keep antialiased edges of black neutral on the ink canvas
+- Apply transfer functions in ink space under overprint
+- Shape a word split between show strings as one word
+- Set an appearance's fallback characters in shared fonts
+- Draw marks that end a right-to-left string over the next letter
+- Record a document that renders as an observed pass
+- Keep a failing run fatal when -U has no registry to write
+- Reject NaN and infinite limits in the registry
+- Report a malformed registry once, before rendering
+- Keep reviewed reasons and tighten improved entries on -U
+- Serialise registry updates with a lock file
+- Resolve relative PGO training PDFs against the caller's directory
+- Drop release-profile test executables from the CPU-only cache
+- Bound an archive's total decompressed size
+- Walk a TIFF's directory chain once
+- Refuse empty data in decode_still before the decoder
+- Bound the AVIF container's tables and the work they drive
+- Bound the unsupported-feature scan by a per-scan step budget
+- Report a file too large to read into memory as an I/O error
+- Measure the prescan PPI hint against the unrotated page width
+- Keep the ink canvas and the page group's alpha plane across PageBuffer renders
+- One GPU-then-CPU rotation, an NPP size mismatch as an error
+- Reduce the page rotation before adding a session rotation
+- Warn when a page object is not a readable dictionary
+- Count the script name tree only when it holds an entry
+- Clip hairline rows without changing their pixels
+- Report an arithmetic AC band without an end of band
+- Count fill bits in a u64
+- Draw a progressive frame past the scan limit
+- Read and skip a DNL segment after the first scan
+- Take a DNL-coded JPEG's height from /Height
+- Count a JPEG's coefficient planes in the decode budget
+- Decide the JPEG cache bypass from the frame header
+- Draw device-resident images through the blit kernel on the ink canvas
+- Map only the channels a colour carries through a transfer function
+- Size a tiling cell raster by the canvas's bytes per pixel
+- Convert image tints after the visibility checks; overprint an unslotted spot image in process ink
+- Budget and memoise the ICC CMYK ink solve on the ink canvas
+- Follow a band of reproducing blacks down to the thickness probe
+- Finish a page with its own ink map, never an empty one
+- Bound a device page's command list and refuse the page past it
+- Check storage bindings against the device and stage page buffers
+- Share the page budget with the CPU re-render; retire a failed device
+- Refuse GPU pages without vector antialiasing at open
+- Give the CPU re-render of a GPU page its own operator budget
+- End shaping context with a nested content stream
+- Compare the text rise of neighbouring strings
+- Draw a string's trailing marks over the next letter only in its script
+- Report a program the shaper cannot read once, and cut logged runs
+- Log the characters an appearance sets as question marks
+- Reject a disk-tier entry whose header disagrees with its length
+- Pass the CLUT coordinate scale to the kernels from the host
+- Draw a device image through its host copy when the blit never starts
+- Compile the image decode context with the nvJPEG features
+- Build CUDA JPEG decoders only where they can dispatch
+- Zero only the blit box in a grown blit target
+- Wait for a Vulkan transfer on its own fence, not the queue
+- Offer nvJPEG2000 to masked draws the CPU decodes in full
+- Reject IDCT block counts the kernels cannot address
+- Reserve cache budget before the upload; touch a lost promotion race
+- Measure the render-time PPI hint before rotation
+- Refuse a conflicting --gpu-pages at argument validation
+- The shared test helpers build outside an integration-test target
+- The prune script expands an empty --keep list under bash 3.2
+
+### Chores
+
+- True suppression reasons, a default-members drift check, doc fixes
+- Require Rust 1.100; state the forks' empty lint tables
+- Vendor zune-jpeg 0.5.15 as a local fork
+- Move the fork's base to upstream 9706202c
+
+### Documentation
+
+- Mark the v2.1.0 work as released
+- Note the unreleased image-reduction port on master
+- The Phase 12 FFI trust boundary names libraries since removed
+- Record the backlog decisions; note the unreleased changes
+- State why the object cache is keyed by number alone
+- The RADV and llvmpipe archive byte-parity run is done
+- The device image cache runs on the Vulkan backend
+- Vulkan perf follow-ups measured; uncached read-back fixed
+- Document rendering over a transparent background
+- The cache A/B's zero differences exclude ICC-based CMYK pages
+- Auto on the CPU, ICC CLUT threshold, reduced draws bypass the cache
+- Auto on the CPU, start-up costs, ICC CLUT threshold measured
+- Caller-owned page buffers and shared or streamed document bytes
+- The extra page rotation; the clipped-hairline fix
+- The property suites and the bugs they found
+- The JPEG decoder fork and what it fixes
+- Note that parallel pages wait for the overprint colour table
+- Tell the reader to remove an XPASS entry, not tighten it
+- Date "Current status" by the last entry it covers
+- Name .cbr in the crate description
+- Tell callers to bound an untrusted reader
+- Rewrap the TIFF module doc
+- List every non-exhaustive type and root render function
+- State the AA composite tests' division exactly
+- State the errors the HT block decoder returns
+- Rewrap the rgb_to_ink documentation
+- State the lint changes as required since the 1.99 toolchain
+- State what the image cache and the GPU JPEG stages do
+- Bring Current status up to the v2.2.0 content
+- Document --gpu-pages and the in-order --print spool
+- Document GPU pages, device diagnostics and the completed overprint
+- Draft the v2.2.0 release notes
+- Name the one changed signature in the v2.2.0 lead
+- Describe the v2.2.0 content
+- CI on macOS and Windows, nasm, Vulkan ICC and GPU pages
+- Crate READMEs and descriptions follow the v2.2.0 code
+- Head the README with the local-fork note
+- Describe the v2.2.0 structure
+- Correct help text and doc comments that disagree with the code
+
+### Features
+
+- Send a fax page longer than B4 as A4-length pieces
+- Read .cbr (RAR) comic archives
+- Every page of a multi-page TIFF entry
+- Decode JPEG XL page images
+- Select the page boundary box to render (--box)
+- RasterOptions::page_box for the one-call entry points
+- Run the ICC CLUT transform on the Vulkan backend
+- Run the device image cache on the Vulkan backend
+- Decode_still, a safe single-picture entry point
+- Decode AVIF page images
+- Per-phase timing bench for the Vulkan backend's kernel pages
+- Finish a page group without the composite onto paper
+- Render pages over a transparent background
+- Write an RGB bitmap's alpha plane to TIFF
+- --transparent renders pages over a transparent background
+- ICC CLUT sweep in threshold_bench, per-step backend start-up bench
+- Build a bitmap in the buffers of an earlier one
+- PageRenderer::try_with_page_group_in renders into given buffers
+- Render pages into caller-owned buffers through a PageBuffer
+- Open a document from shared bytes without a copy
+- Open sessions from shared bytes or a reader
+- Report ignored features as typed UnsupportedFeature values
+- Expose unsupported-feature diagnostics on the session and pages
+- Rotation, a quarter-turn rotation added to a page's /Rotate
+- SessionConfig::rotation and RasterOptions::rotation
+- The session rotation turns page images
+- --rotate DEG turns every page on top of its /Rotate
+- Open a file by reading it into memory instead of mapping it
+- Page-level GPU raster benchmark over Vulkan
+- Report a JPEG as partial exactly when its stream lacks data
+- Decode arithmetic-coded JPEG (SOF9, SOF10)
+- Warn when a JPEG page's scan data is incomplete
+- Render a whole page from a command list on Vulkan
+- Record a page's solid fills and strokes for the GPU page raster
+- Render qualifying pages whole on a Vulkan GPU beside the CPU workers
+- Log each page the GPU page raster renders at debug
+- GPU AA fill and image blit on the ink canvas
+- Paint Separation and DeviceN shadings and images in their colorants' channels
+- Render tiling cells on the ink canvas with the page's spot slots
+- Print ICC CMYK colours as the ink reproducing the profile on the ink canvas
+- Still_layout, a stream's chroma layout without decoding
+- --max-archive-mib bounds a comic archive's decompressed total
+- Limit the coefficients a frame holds whole
+
+### Other
+
+- Clear the clippy lints new in Rust 1.100
+- Pdf_bridge is left out of the default members
+- Rasterrocket-encode is a dev-dependency
+- Moxcms 0.9.2, sevenz-rust2 0.25, vello_cpu 0.4; cargo update
+- Prune test executables from Cargo 1.100's build directory layout
+- Vendor rav1d as a local fork (crates/rav1d)
+- Add a line-coverage report workflow
+- Build a PGO + BOLT rrocket in a workflow
+- Run the full CPU suites on macOS and add a Windows leg
+- Leave the JPEG decoder fork out of the report
+- Rewrap the coverage workflow's exclusion comment
+- Drop the CUDA 12 nvJPEG2000 fallback and its comments
+- Leave the zune-jpeg fork's upstream spelling alone
+
+### Performance
+
+- Plan an image reduction once and resample only the columns read
+- --print appends pages in order as they finish, without barrier windows
+- Chroma interpolation of AVIF pages without per-sample edge tests
+- Convert AVIF planes straight from the decoder's buffer
+- Read uncached mapped Vulkan buffers back through a device copy
+- Keep JPEGs drawn below their resolution out of the image cache
+- Auto renders on the CPU unless a device kernel is enabled
+- Device ICC CLUT from 128 000 px, PDF_RASTER_ICC_CLUT_THRESHOLD
+- Check spot-slot fit without allocating
+- Pool transparency-group canvases per canvas kind
+- Reconstruct HT samples without a coefficient pass
+- Load HT bitstreams four bytes at a time
+- Decode HT quad pairs without per-sample branches
+- Read the transparent page group without the blend-mode walk
+
+### Refactor
+
+- Fuse the glyph advance and text-matrix translations
+- Delete the dormant composite and soft-mask kernels
+- Move the staged-transfer slots out of the AA fill
+- Expose the geometry stages of a stroke
+- Share the cache prune of test executables in one script
+- Take the over-limit page count from expectations.py
+- Saturate an AVIF sample without a cast suppression
+- Share the RGB and alpha interleave of RGBA rows
+- One refusal for deskew on a render that is not gray
+- Hold the document bytes without an Arc
+- Split /Rotate and UserUnit out of page_size_pts_by_id
+- Bitmap::turned_cw, one quarter-turn for comic pages and fax
+- Iterate scanner spans directly
+- Name the row index of decode_mcu_width row
+- An image's draw source and ink samples as types
+- Share the multilinear corner weight and ink bytes of the CMYK solvers
+- Paint a colorant's tint through the plan's shared helper
+- Resolve the image XObject stream outside resolve_image
+- Check a uniform tiling pattern's pixel size at compile time
+- Share the stroke outline stage; check hairline rows and width
+- Share the text-state updates and shaping checks with the look-ahead
+- Split show_text into layout and glyph painting
+- Pool blit and CLUT scratch on the backend, staged in one page
+- Share the benchmark fixtures and reject bad bench arguments
+
+### Testing
+
+- GPU fill parity fails when the device fill falls back to the CPU
+- The non-embedded CJK test observes the CID → Unicode route
+- Shared isolated font-directory helpers; reproducible CJK test face
+- Run the cache render parity tests on Vulkan too
+- Property suites for the object parser and stream filters
+- Property suites for path fills and clips
+- Property suite for the conversions and rounding helpers
+- Property suite reading every encoder's output back
+- Property suite for crop, split, bounding rectangle and rectify
+- Keep the proptest seeds of the failures found
+- The ICC CLUT grid nodes span the byte range at every size
+- An expected-results registry for the reference harnesses
+- Classify both reference harnesses against the registry
+- Write the expectations registry one entry a line
+- Seed the expectations registry for the corpus fixtures
+- Seed the registry for pdfium's test corpus
+- Reach the scanner's re-anchor rows under translation
+- Check the ink union against its defining formula
+- Give the bounding-rect property negative infinity
+- Draw bilevel pages at the black threshold
+- Write objects without separators where delimiters allow
+- Reach the filter decoders' defaults and end forms
+- Share the property suites' runner configuration
+- Find the Windows fallback font under the system root
+- Build the device-test helpers only with a device feature
+- Honour the Vulkan device selector in the device tests
+- The Japanese serif preference is asserted only when a serif face is installed
+
 ## [2.1.0] - 2026-11-04
 
 ### Bug Fixes
@@ -134,6 +405,7 @@ All notable changes to this project will be documented in this file.
 - Lockfile lists the harfrust fork
 - Lockfile lists log for the render crate
 - Lockfile lists log for the render crate
+- Release v2.1.0
 
 ### Documentation
 
@@ -166,6 +438,7 @@ All notable changes to this project will be documented in this file.
 - --printer names a queue --list-printers lists
 - Current status to 2026-11-04, the second review pass of the day
 - Phase 14 names the harfrust rebase
+- Prep v2.1.0 release notes
 
 ### Features
 
