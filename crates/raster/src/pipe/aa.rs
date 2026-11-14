@@ -342,14 +342,13 @@ mod tests {
     }
 
     /// `TransferSet::is_identity_rgb()` gates the fast path; when it returns
-    /// `true`, `composite_aa_rgb8_opaque` runs. If the predicate mis-reports
-    /// `false` for a genuinely-identity LUT (cargo-mutants whole-body
-    /// → `false` survives without this test), the general path runs and
-    /// uses a higher-precision `div255` than the fast path, producing
-    /// different output bytes on some inputs.
+    /// `true`, `composite_aa_rgb8_opaque` runs.  The prerequisite assertion
+    /// catches a predicate that reports `false` for the identity LUT.  The
+    /// two paths produce identical bytes (see the cross-path fixture below),
+    /// so the pinned bytes constrain the composite, not the path taken.
     ///
-    /// Pin the byte values that the fast path produces on a representative
-    /// large span against an inline copy of its exact-div255 algebra.
+    /// The bytes of a span crossing the lane boundary are pinned against an
+    /// inline copy of the fast path's algebra.
     #[test]
     fn identity_transfer_takes_fast_path_with_pinned_bytes() {
         let pipe = aa_pipe();
@@ -394,10 +393,10 @@ mod tests {
     // ── Cross-path byte-equality fixture ─────────────────────────────────────
     //
     // The fast path (`composite_aa_rgb8_opaque`) and the general no-alpha
-    // path (`render_span_aa_inner` via `color::convert::div255`) apply the
-    // same exact `(v + (v>>8) + 0x80) >> 8` division twice each, so their
-    // output must be byte-identical on every gate-eligible input. Output
-    // bytes must not depend on which path the transfer-identity gate picks:
+    // path (`render_span_aa_inner`) both apply `v / 255` rounded to nearest
+    // (`color::convert::div255`) twice each, so their output must be
+    // byte-identical on every gate-eligible input. Output bytes must not
+    // depend on which path the transfer-identity gate picks:
     // an approximate div255 in either tier composes to a 2-LSB divergence
     // (e.g. coverage 187, a_input 3, c_dst 0, c_src 171), making rendered
     // pixels depend on an unrelated graphics-state entry.
