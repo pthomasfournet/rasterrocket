@@ -182,6 +182,13 @@ case "$REFERENCE" in
     *) die "-R must be pdftoppm, pdfium or oxide, got: $REFERENCE" ;;
 esac
 
+# A malformed registry fails every classification; it is reported once,
+# before any rendering, and not as one ERROR row per document.
+if ! $DRY_RUN; then
+    python3 -I "${SCRIPT_DIR}/expectations.py" check --registry "$EXPECTATIONS" \
+        || die "the expectations registry is unusable; fix it or pass -E '' to disable it"
+fi
+
 # ── directory mode: one summary row per PDF ───────────────────────────────────
 if [[ -d "$PDF" ]]; then
     file_opts=(-s -r "$DPI" -f "$FIRST" -t "$THRESHOLD" -k "$TILE_LIMIT" -R "$REFERENCE"

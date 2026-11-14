@@ -4,6 +4,7 @@
     python3 -I tests/compare/expectations.py compare --reference REF --dpi DPI
         --rmse-limit T --tile-limit K --file PDF [--registry PATH]
         [--update] [--strict] [--verbose] ROWS
+    python3 -I tests/compare/expectations.py check [--registry PATH]
 
 The registry (tests/compare/expectations.json by default) lists the known
 failing outcomes of compare.sh and pdfium_corpus.py.  It holds one list of
@@ -43,6 +44,10 @@ The `compare` command serves compare.sh: ROWS is a tab-separated file of
 document.  It prints a line per non-passing test (every test with
 --verbose), then `STATUS <word> <fatal> <fail> <xfail> <xpass>`, where
 <word> is PASS, XFAIL, XPASS or FAIL and <fatal> is 1 when the run fails.
+
+The `check` command loads the registry and exits 0, or 2 with the error
+when the file is malformed.  Either command exits 2 on a malformed
+registry, printing the error to stderr.
 """
 
 import argparse
@@ -507,10 +512,21 @@ def compare_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_main(args: argparse.Namespace) -> int:
+    """Load the registry, raising `RegistryError` when it is malformed."""
+    registry = registry_path(args.registry)
+    if registry is not None:
+        load(registry)
+    return 0
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Return the command-line arguments."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
+    k = sub.add_parser("check", help="exit 2 with the error when the registry is malformed")
+    k.add_argument("--registry", default=str(DEFAULT_REGISTRY), help="'' for none")
+    k.set_defaults(run=check_main)
     c = sub.add_parser("compare", help="classify the pages of one compare.sh run")
     c.add_argument("--registry", default=str(DEFAULT_REGISTRY), help="'' for none")
     c.add_argument("--reference", required=True)
@@ -522,6 +538,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     c.add_argument("--strict", action="store_true")
     c.add_argument("--verbose", action="store_true")
     c.add_argument("rows", type=pathlib.Path)
+    c.set_defaults(run=compare_main)
     return ap.parse_args(argv)
 
 
@@ -529,7 +546,7 @@ def main(argv: Sequence[str]) -> int:
     """Run the command named on the command line."""
     args = parse_args(argv)
     try:
-        return compare_main(args)
+        return int(args.run(args))
     except RegistryError as e:
         print(f"expectations: {e}", file=sys.stderr)
         return 2

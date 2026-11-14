@@ -344,10 +344,15 @@ class CompareScript(unittest.TestCase):
         self.pdf.write_bytes(b"%PDF-1.4\n")
         self.registry = self.dir / "e.json"
 
-    def run_script(self, *args: str, status: int = 0) -> subprocess.CompletedProcess[str]:
-        """Run compare.sh on the PDF with `args`, the rrocket stub exiting `status`."""
+    def run_script(
+        self, *args: str, status: int = 0, target: pathlib.Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run compare.sh with `args` on `target` (default the PDF).
+
+        The rrocket stub exits with `status`.
+        """
         script = pathlib.Path(ex.__file__).with_name("compare.sh")
-        cmd = [str(script), "-E", str(self.registry), *args, str(self.pdf)]
+        cmd = [str(script), "-E", str(self.registry), *args, str(target or self.pdf)]
         env = {**self.env, "STUB_STATUS": str(status)}
         return subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)  # noqa: S603
 
@@ -362,6 +367,18 @@ class CompareScript(unittest.TestCase):
         self.assertIn("XPASS    document", fixed.stdout)
         self.run_script("-U")
         self.assertNotIn(self.SUITE, ex.load(self.registry))
+
+    def test_malformed_registry_is_reported_once(self) -> None:
+        """Directory mode names a malformed registry instead of an ERROR row per PDF."""
+        self.registry.write_text("{", encoding="utf-8")
+        docs = self.dir / "docs"
+        docs.mkdir()
+        self.pdf.rename(docs / "x.pdf")
+        r = self.run_script(target=docs)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("not JSON", r.stderr)
+        self.assertIn("expectations registry is unusable", r.stderr)
 
 
 if __name__ == "__main__":
