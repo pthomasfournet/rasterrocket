@@ -73,6 +73,9 @@ pub(in crate::resources::image) fn decode_dct<
     #[cfg(feature = "vaapi")]
     let vaapi = ctx.vaapi;
 
+    #[cfg(feature = "cache")]
+    let cache_ctx = cache_ctx.filter(|ctx| !ctx.draw_reduces(data));
+
     // Device-image-cache fast path: if a cache is wired in and the encoded
     // bytes are already cached (cross-document content-hash dedup),
     // return the device-resident handle with zero CPU decode work.
@@ -355,6 +358,8 @@ pub(in crate::resources::image) struct DctCacheCtx<'a> {
     pub doc_id: DocId,
     /// Per-image PDF object id (the `XObject`'s stream object number).
     pub obj_id: ObjId,
+    /// The device-pixel extent of the draw (`image_draw_size`), when known.
+    pub draw_size: Option<(u32, u32)>,
 }
 
 #[cfg(feature = "cache")]
@@ -373,6 +378,7 @@ impl<'a> DctCacheCtx<'a> {
         cache: Option<&'a ImageCache>,
         doc_id: Option<DocId>,
         stream_id: pdf::ObjectId,
+        draw_size: Option<(u32, u32)>,
     ) -> Option<Self> {
         let cache = cache?;
         let doc_id = doc_id?;
@@ -380,8 +386,27 @@ impl<'a> DctCacheCtx<'a> {
             cache,
             doc_id,
             obj_id: ObjId(stream_id.0),
+            draw_size,
         })
     }
+
+    /// Whether the draw reduces the JPEG `data`, by its frame header's
+    /// dimensions (see [`frame_draw_reduces`]).
+    fn draw_reduces(&self, data: &[u8]) -> bool {
+        frame_draw_reduces(data, self.draw_size)
+    }
+}
+
+/// Whether the JPEG `data`, at the dimensions of its frame header, reduces
+/// when drawn over `draw` device pixels.  Such a draw is resampled on the
+/// host from host-resident samples, so the image is neither looked up in
+/// the device image cache nor inserted.  A stream without a frame header
+/// does not reduce; its decode fails.
+#[cfg(feature = "cache")]
+fn frame_draw_reduces(data: &[u8], draw: Option<(u32, u32)>) -> bool {
+    draw.zip(jpeg_sof(data)).is_some_and(|(draw, sof)| {
+        crate::renderer::page::draw_reduces(u32::from(sof.width), u32::from(sof.height), draw)
+    })
 }
 
 /// Probe the cache.  On a hit returns the device-resident
@@ -562,6 +587,26 @@ fn ycck_to_adobe_cmyk(pixels: &mut [u8]) {
         px[0] = 255 - r;
         px[1] = 255 - g;
         px[2] = 255 - b;
+    }
+}
+
+#[cfg(all(test, feature = "cache"))]
+mod cache_tests {
+    use super::frame_draw_reduces;
+
+    /// SOI and a baseline frame header of 64 × 48 samples.
+    const FRAME: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x30, 0x00, 0x40, 0x01, 0x01, 0x11, 0x00,
+    ];
+
+    #[test]
+    fn the_cache_bypass_follows_the_frame_header() {
+        assert!(frame_draw_reduces(FRAME, Some((32, 48))));
+        assert!(frame_draw_reduces(FRAME, Some((64, 24))));
+        assert!(!frame_draw_reduces(FRAME, Some((64, 48))));
+        assert!(!frame_draw_reduces(FRAME, Some((640, 480))));
+        assert!(!frame_draw_reduces(FRAME, None));
+        assert!(!frame_draw_reduces(b"not a jpeg", Some((1, 1))));
     }
 }
 
