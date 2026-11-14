@@ -144,7 +144,8 @@ fn tiff_difference(row: &mut [u8], colors: usize, bits: usize, columns: usize) {
 enum Filter {
     Flate(Option<Predictor>),
     Lzw {
-        early_change: bool,
+        /// `None` leaves `/EarlyChange` out, for its default of 1.
+        early_change: Option<bool>,
         predictor: Option<Predictor>,
     },
     AsciiHex,
@@ -170,15 +171,16 @@ impl Filter {
                 early_change,
                 predictor,
             } => {
-                let early = i64::from(*early_change);
-                predictor.map_or_else(
-                    || {
+                let early = early_change.map(i64::from);
+                match (predictor, early) {
+                    (Some(p), _) => p.parms(early),
+                    (None, Some(e)) => {
                         let mut d = Dictionary::new();
-                        d.set("EarlyChange", Object::Integer(early));
+                        d.set("EarlyChange", Object::Integer(e));
                         Object::Dictionary(d)
-                    },
-                    |p| p.parms(Some(early)),
-                )
+                    }
+                    (None, None) => Object::Null,
+                }
             }
             _ => Object::Null,
         }
@@ -204,7 +206,7 @@ impl Filter {
                 z.finish().expect("writing to a Vec")
             }
             Self::Lzw { early_change, .. } => {
-                let mut encoder = if *early_change {
+                let mut encoder = if early_change.unwrap_or(true) {
                     weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
                 } else {
                     weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
@@ -227,8 +229,9 @@ fn pick(style: &[u8], i: usize) -> u8 {
     }
 }
 
-/// `ASCIIHexDecode` input: digits of either case, whitespace between them,
-/// and a `>` that is optional at the end of the data.
+/// `ASCIIHexDecode` input (§7.4.2): digits of either case, whitespace
+/// between them, a final `0` digit left for the decoder to supply, and a
+/// `>` that is optional at the end of the data.
 fn ascii_hex(data: &[u8], style: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() * 3 + 1);
     for (i, &b) in data.iter().enumerate() {
@@ -242,6 +245,9 @@ fn ascii_hex(data: &[u8], style: &[u8]) -> Vec<u8> {
         if s & 0b110 == 0 {
             out.push(b' ');
         }
+        if i + 1 == data.len() && b.trailing_zeros() >= 4 && s & 0b10_0000 == 0 {
+            break;
+        }
         out.push(digits[usize::from(b & 15)]);
         if s & 0b1_1000 == 0 {
             out.push(b'\n');
@@ -254,9 +260,11 @@ fn ascii_hex(data: &[u8], style: &[u8]) -> Vec<u8> {
 }
 
 /// `ASCII85Decode` input (§7.4.3): `z` for a zero group where the style
-/// allows it, line breaks between characters, a final partial group, and
-/// the `~>` end marker.
+/// allows it, whitespace between any two characters of a group and between
+/// groups, a final partial group, and the `~>` end marker, whole, split by
+/// whitespace, or absent.
 fn ascii85(data: &[u8], style: &[u8]) -> Vec<u8> {
+    const WHITESPACE: [&[u8]; 6] = [b" ", b"\r\n", b"\n", b"\t", b"\0", b"\x0c"];
     let mut out = Vec::with_capacity(data.len() * 5 / 4 + 8);
     for (i, chunk) in data.chunks(4).enumerate() {
         let s = pick(style, i);
@@ -272,12 +280,21 @@ fn ascii85(data: &[u8], style: &[u8]) -> Vec<u8> {
             *d = u8::try_from(v % 85).expect("below 85") + b'!';
             v /= 85;
         }
-        out.extend_from_slice(&digits[..=chunk.len()]);
-        if s & 0b110 == 0 {
-            out.extend_from_slice(b"\r\n");
+        let digits = &digits[..=chunk.len()];
+        // Whitespace after the first `split` digits, none when `split` is 0;
+        // at `digits.len()` it falls between this group and the next.
+        let split = usize::from(s >> 1) % (digits.len() + 1);
+        out.extend_from_slice(&digits[..split]);
+        if split > 0 {
+            out.extend_from_slice(WHITESPACE[usize::from(s >> 4) % WHITESPACE.len()]);
         }
+        out.extend_from_slice(&digits[split..]);
     }
-    out.extend_from_slice(b"~>");
+    match pick(style, data.len()) % 4 {
+        0 => {}
+        1 => out.extend_from_slice(b"~ >"),
+        _ => out.extend_from_slice(b"~>"),
+    }
     out
 }
 
@@ -334,9 +351,11 @@ fn predictor() -> impl Strategy<Value = Option<Predictor>> {
 fn filter() -> impl Strategy<Value = Filter> {
     prop_oneof![
         predictor().prop_map(Filter::Flate),
-        (any::<bool>(), predictor()).prop_map(|(early_change, predictor)| Filter::Lzw {
-            early_change,
-            predictor,
+        (prop::option::of(any::<bool>()), predictor()).prop_map(|(early_change, predictor)| {
+            Filter::Lzw {
+                early_change,
+                predictor,
+            }
         }),
         Just(Filter::AsciiHex),
         Just(Filter::Ascii85),
