@@ -15,6 +15,7 @@
 //! ink solid and absent.
 
 use super::CORNERS;
+use super::model::{self, ink_bytes};
 
 /// Gauss-Newton iterations at most.
 const MAX_STEPS: usize = 40;
@@ -46,15 +47,7 @@ const SHIFT: [usize; 4] = [2, 1, 0, 3];
 
 /// The quadrilinear weight of corner `corner` at inks `t`.
 fn weight(corner: usize, t: [f64; 4]) -> f64 {
-    (0..4)
-        .map(|a| {
-            if (corner >> SHIFT[a]) & 1 == 1 {
-                t[a]
-            } else {
-                1.0 - t[a]
-            }
-        })
-        .product()
+    model::corner_weight(SHIFT.map(|shift| (corner >> shift) & 1), t)
 }
 
 /// The model at inks `t`, unrounded.
@@ -104,16 +97,6 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
         x[row] = (b[row] - tail) / a[row][row];
     }
     Some(x)
-}
-
-/// `[0, 1]` ink amounts as bytes.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is clamped to [0, 255] and rounded first"
-)]
-fn ink_bytes(inks: [f64; 4]) -> [u8; 4] {
-    inks.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
 /// The CMYK ink bytes printing `rgb` in the process-ink model, from the

@@ -40,6 +40,7 @@
 
 use std::sync::LazyLock;
 
+use super::model::{self, ink_bytes};
 use super::{CORNERS, cmyk_to_rgb, cmyk_to_rgb_row};
 
 /// Nodes per axis of the inverse table.
@@ -97,11 +98,7 @@ const fn corner_bits(corner: usize) -> [usize; 3] {
 
 /// The trilinear weight of corner `corner` at fractional position `t`.
 fn corner_weight(corner: usize, t: [f64; 3]) -> f64 {
-    corner_bits(corner)
-        .iter()
-        .zip(t)
-        .map(|(&bit, t)| if bit == 1 { t } else { 1.0 - t })
-        .product()
+    model::corner_weight(corner_bits(corner), t)
 }
 
 /// Forward model on a black slice, unrounded: trilinear over `corners`.
@@ -373,16 +370,6 @@ struct Inverse {
     /// printing the nearest grey; below it, solid black under the
     /// fraction of [`GREY_BALANCE`] printing the nearest grey.
     neutral: [[u8; 4]; 256],
-}
-
-/// `[0, 1]` ink amounts as bytes.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is clamped to [0, 255] and rounded first"
-)]
-fn ink_bytes<const N: usize>(inks: [f64; N]) -> [u8; N] {
-    inks.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
 /// Re-solve the nodes whose inks lie far from the mean of their six axis

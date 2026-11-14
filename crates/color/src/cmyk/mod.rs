@@ -36,6 +36,7 @@ mod simd;
 
 mod inverse;
 mod matching;
+mod model;
 
 #[cfg(test)]
 mod tests;
