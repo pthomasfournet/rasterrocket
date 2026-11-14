@@ -37,7 +37,7 @@ read-fonts 0.46), and the two are rebased together.
   to `tests/fonts/benches` and `tests/fonts/fuzz`, with the
   `include_bytes!` paths changed to match.
 
-## Lints under the 1.99 minimum toolchain
+## Lints required since the 1.99 minimum toolchain
 
 Behaviour is unchanged by each of these.
 
