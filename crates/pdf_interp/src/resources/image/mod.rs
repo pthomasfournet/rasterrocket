@@ -483,10 +483,6 @@ pub struct ImageDescriptor {
 ///   codec fails on the image or on its `/SMask` or stencil `/Mask`
 ///   (content is lost — surface to the caller).
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the masks, the base decode and the drawing entries of one image dictionary"
-)]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
     xobjects: &Dictionary,
@@ -495,38 +491,22 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
 ) -> ImageResolution {
     let doc = ctx.doc;
     let name = request.name;
-    let unresolved = |what: &str| {
-        log::warn!("image: /{}: {what}", String::from_utf8_lossy(name));
-        ImageResolution::DecodeFailed(what.to_owned())
-    };
-    let Some(entry) = xobjects.get(name) else {
-        return unresolved("not found in the /XObject resources");
-    };
-    let &Object::Reference(stream_id) = entry else {
-        return unresolved("resource entry is not an indirect reference");
-    };
-    // Bind the Arc to a local so the borrow into the stream below stays alive.
-    let obj_arc = match doc.get_object(stream_id) {
-        Ok(obj) => obj,
-        Err(_) if doc.is_undefined(stream_id.0) => {
-            return unresolved(&format!(
-                "object {} {} is not defined in the file",
-                stream_id.0, stream_id.1
-            ));
-        }
-        Err(e) => return unresolved(&format!("object unreadable: {e}")),
+    let unresolved = |what: &str| unresolved_image(name, what);
+    #[cfg_attr(
+        not(feature = "cache"),
+        expect(
+            unused_variables,
+            reason = "the object id keys the device image cache only"
+        )
+    )]
+    let (stream_id, obj_arc) = match image_xobject(doc, xobjects, name) {
+        Ok(found) => found,
+        Err(Some(reason)) => return ImageResolution::DecodeFailed(reason),
+        Err(None) => return ImageResolution::Absent,
     };
     let Some(stream) = obj_arc.as_ref().as_stream() else {
         return unresolved("object is not a stream");
     };
-
-    match stream.dict.get_name(b"Subtype") {
-        Some(b"Image") => {}
-        // A form reaches this path only when its stream could not be loaded.
-        Some(b"Form") => return unresolved("form stream could not be loaded"),
-        Some(_) => return ImageResolution::Absent,
-        None => return unresolved("no /Subtype"),
-    }
 
     let Some(w_raw) = stream.dict.get_i64(b"Width") else {
         return unresolved("image has no /Width");
@@ -624,6 +604,60 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         tints,
         kept_tints: ctx.keep_tints,
     })
+}
+
+/// [`ImageResolution::DecodeFailed`] for the image `XObject` `name`, with
+/// the reason `what`, logged at warn.
+fn unresolved_image(name: &[u8], what: &str) -> ImageResolution {
+    ImageResolution::DecodeFailed(unresolved_reason(name, what))
+}
+
+/// The reason `what` an image `XObject` `name` cannot be drawn, logged at
+/// warn.
+fn unresolved_reason(name: &[u8], what: &str) -> String {
+    log::warn!("image: /{}: {what}", String::from_utf8_lossy(name));
+    what.to_owned()
+}
+
+/// The object id and the object of the image `XObject` stream `name` in
+/// `xobjects`, the `/XObject` resource sub-dictionary in effect.
+///
+/// # Errors
+/// `None` for an `XObject` of another subtype, which draws nothing; the
+/// reason, logged, when `name` does not resolve to a readable image
+/// stream.
+fn image_xobject(
+    doc: &Document,
+    xobjects: &Dictionary,
+    name: &[u8],
+) -> Result<(ObjectId, std::sync::Arc<Object>), Option<String>> {
+    let unresolved = |what: &str| Some(unresolved_reason(name, what));
+    let Some(entry) = xobjects.get(name) else {
+        return Err(unresolved("not found in the /XObject resources"));
+    };
+    let &Object::Reference(stream_id) = entry else {
+        return Err(unresolved("resource entry is not an indirect reference"));
+    };
+    let obj = match doc.get_object(stream_id) {
+        Ok(obj) => obj,
+        Err(_) if doc.is_undefined(stream_id.0) => {
+            return Err(unresolved(&format!(
+                "object {} {} is not defined in the file",
+                stream_id.0, stream_id.1
+            )));
+        }
+        Err(e) => return Err(unresolved(&format!("object unreadable: {e}"))),
+    };
+    let Some(stream) = obj.as_ref().as_stream() else {
+        return Err(unresolved("object is not a stream"));
+    };
+    match stream.dict.get_name(b"Subtype") {
+        Some(b"Image") => Ok((stream_id, obj)),
+        // A form reaches this path only when its stream could not be loaded.
+        Some(b"Form") => Err(unresolved("form stream could not be loaded")),
+        Some(_) => Err(None),
+        None => Err(unresolved("no /Subtype")),
+    }
 }
 
 /// The `/SMask` and `/Mask` entries of an image dictionary `dict`.  A
