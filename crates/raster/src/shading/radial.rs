@@ -20,8 +20,8 @@ use super::{ColorRamp, fill_ramp_span};
 use crate::pipe::Pattern;
 
 /// Gradient between two circles (centre `c0`, radius `r0`) and (`c1`, `r1`).
-pub struct RadialPattern {
-    ramp: ColorRamp,
+pub struct RadialPattern<const N: usize = 3> {
+    ramp: ColorRamp<N>,
     c0x: f64,
     c0y: f64,
     /// Δc = c1 − c0.
@@ -40,7 +40,7 @@ pub struct RadialPattern {
     device_to_shading: [f64; 6],
 }
 
-impl RadialPattern {
+impl<const N: usize> RadialPattern<N> {
     /// Create a radial gradient.
     ///
     /// - `ramp`: colours over the normalised parameter, start circle → 0 and
@@ -55,7 +55,7 @@ impl RadialPattern {
         reason = "mirrors the PDF shading dictionary: ramp, two circles (cx, cy, r each), two extend flags"
     )]
     pub fn new(
-        ramp: ColorRamp,
+        ramp: ColorRamp<N>,
         c0x: f64,
         c0y: f64,
         r0: f64,
@@ -150,7 +150,7 @@ impl RadialPattern {
     }
 }
 
-impl Pattern for RadialPattern {
+impl<const N: usize> Pattern for RadialPattern<N> {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
         fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }

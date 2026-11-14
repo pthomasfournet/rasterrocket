@@ -27,9 +27,9 @@ const MAX_BANDS: u32 = 1 << 14;
 /// triangles costs up to [`MAX_BANDS`] entries per triangle.
 const MAX_TRIANGLE_BANDS: usize = 64;
 
-/// A triangle list with a row index.
-pub struct Mesh {
-    triangles: Vec<[GouraudVertex; 3]>,
+/// A triangle list of `N`-byte vertex colours with a row index.
+pub struct Mesh<const N: usize = 3> {
+    triangles: Vec<[GouraudVertex<N>; 3]>,
     /// `(x_min, y_min, x_max, y_max)` of each triangle.
     bounds: Vec<[f64; 4]>,
     /// For each band, the triangles meeting it, in mesh order.
@@ -39,10 +39,10 @@ pub struct Mesh {
     unbanded: Vec<u32>,
 }
 
-impl Mesh {
+impl<const N: usize> Mesh<N> {
     /// Index `triangles`.
     #[must_use]
-    pub fn new(triangles: Vec<[GouraudVertex; 3]>) -> Self {
+    pub fn new(triangles: Vec<[GouraudVertex<N>; 3]>) -> Self {
         let bounds: Vec<[f64; 4]> = triangles
             .iter()
             .map(|t| {
@@ -88,13 +88,13 @@ impl Mesh {
 
     /// Every triangle, in mesh order.
     #[must_use]
-    pub fn triangles(&self) -> &[[GouraudVertex; 3]] {
+    pub fn triangles(&self) -> &[[GouraudVertex<N>; 3]] {
         &self.triangles
     }
 
     /// The triangles whose bounds meet the rectangle of `clip`, and every
     /// triangle without bounds, each once, in mesh order.
-    pub fn meeting(&self, clip: &Clip) -> impl Iterator<Item = [GouraudVertex; 3]> + '_ {
+    pub fn meeting(&self, clip: &Clip) -> impl Iterator<Item = [GouraudVertex<N>; 3]> + '_ {
         let (x0, y0) = (f64::from(clip.x_min_i), f64::from(clip.y_min_i));
         let (x1, y1) = (f64::from(clip.x_max_i) + 1.0, f64::from(clip.y_max_i) + 1.0);
         let range = band_range(y0, y1 - 1.0)

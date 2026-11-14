@@ -69,14 +69,17 @@ pub(crate) enum Outcome {
 }
 
 /// Whether `image`, decoded for a request at `kept`, is what decoding its
-/// stream for a request at `draw_size` returns: the requested size selects
-/// the resolution level of a JPEG 2000 decode alone.
+/// stream for a request at `draw_size` returns, keeping colorant tints
+/// when `tints`: the requested size selects the resolution level of a
+/// JPEG 2000 decode alone, and a decode asked to keep tints serves a
+/// request that does not ask.
 pub(crate) fn serves(
     image: &DecodedImage,
     kept: Option<(u32, u32)>,
     draw_size: Option<(u32, u32)>,
+    tints: bool,
 ) -> bool {
-    image.image.filter != ImageFilter::Jpx || kept == draw_size
+    (image.image.filter != ImageFilter::Jpx || kept == draw_size) && (!tints || image.kept_tints)
 }
 
 /// A decode some pages wait for while one page makes it.
@@ -299,7 +302,8 @@ impl State {
 pub(crate) fn host_bytes(image: &DecodedImage) -> usize {
     let pixels = image.image.data.as_cpu().map_or(0, <[u8]>::len);
     let mask = image.image.smask.as_ref().map_or(0, |m| m.alpha().len());
-    pixels + mask
+    let tints = image.tints.as_ref().map_or(0, |t| t.data.len());
+    pixels + mask + tints
 }
 
 #[cfg(test)]
@@ -324,6 +328,8 @@ pub(crate) mod tests {
             interpolate: false,
             own_soft_mask: false,
             partial: None,
+            tints: None,
+            kept_tints: false,
         }
     }
 
@@ -511,9 +517,18 @@ pub(crate) mod tests {
     #[test]
     fn jpx_decode_serves_only_its_draw_size() {
         let jpx = decoded(ImageFilter::Jpx, 4);
-        assert!(serves(&jpx, Some((4, 4)), Some((4, 4))));
-        assert!(!serves(&jpx, Some((4, 4)), Some((8, 8))));
+        assert!(serves(&jpx, Some((4, 4)), Some((4, 4)), false));
+        assert!(!serves(&jpx, Some((4, 4)), Some((8, 8)), false));
         let raw = decoded(ImageFilter::Raw, 4);
-        assert!(serves(&raw, Some((4, 4)), None));
+        assert!(serves(&raw, Some((4, 4)), None, false));
+    }
+
+    #[test]
+    fn a_decode_keeping_tints_serves_both_requests() {
+        let mut raw = decoded(ImageFilter::Raw, 4);
+        assert!(!serves(&raw, None, None, true));
+        raw.kept_tints = true;
+        assert!(serves(&raw, None, None, true));
+        assert!(serves(&raw, None, None, false));
     }
 }

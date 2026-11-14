@@ -376,7 +376,10 @@ impl PageRenderer<'_> {
                     params,
                     data,
                 );
-                let memoized = self.image_memo.borrow().get_inline(&key);
+                let memoized = self
+                    .image_memo
+                    .borrow()
+                    .get_inline(&key, self.keeps_tints());
                 if let Some(decoded) = memoized {
                     self.blit_image(&decoded, None);
                     return;
@@ -405,6 +408,7 @@ impl PageRenderer<'_> {
                     image_cache: None,
                     #[cfg(feature = "cache")]
                     doc_id: None,
+                    keep_tints: self.keeps_tints(),
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).
                 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]

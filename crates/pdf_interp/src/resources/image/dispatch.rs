@@ -17,7 +17,7 @@ use super::colorspace::{ImageColour, Samples};
 use super::raw::{apply_stencil_decode, decode_raw};
 use super::smask::{colour_key_mask, colour_key_mask_with};
 use super::{
-    ImageDecodeCtx, ImageDescriptor, ImageFilter, decode_budget, image_filter_chain,
+    ImageDecodeCtx, ImageDescriptor, ImageFilter, ImageTints, decode_budget, image_filter_chain,
     is_transport_filter, terminal_decode_parms,
 };
 
@@ -85,6 +85,9 @@ impl<'a> ImageStream<'a> {
 pub(super) struct DecodedStream {
     pub image: ImageDescriptor,
     pub partial: Option<String>,
+    /// The samples' colorant tints, when the context keeps them and the
+    /// image has them (see [`ImageColour::tints`]).
+    pub tints: Option<ImageTints>,
 }
 
 /// Decode `src` through its whole `/Filter` chain and convert its samples
@@ -201,6 +204,11 @@ pub(super) fn decode_image_stream<
     }
 
     let partial = samples.partial.take();
+    let tints = if ctx.keep_tints {
+        src.colour.tints(&samples)
+    } else {
+        None
+    };
     let mut image = src
         .colour
         .convert(
@@ -212,7 +220,11 @@ pub(super) fn decode_image_stream<
         )
         .ok_or_else(|| "colour conversion failed".to_owned())?;
     image.filter = image_filter;
-    Ok(DecodedStream { image, partial })
+    Ok(DecodedStream {
+        image,
+        partial,
+        tints,
+    })
 }
 
 /// The colour-key mask (§8.9.6.4) of a codec's host-resident samples.

@@ -40,7 +40,7 @@ pub use font::{BaseEncoding, FontDescriptor, PdfFontKind, resolve_font};
 pub use gpu::nvjpeg::NvJpegDecoder;
 pub use image::{
     DecodedImage, IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
-    ImageResolution, SoftMask, resolve_image,
+    ImageResolution, ImageTints, SoftMask, resolve_image,
 };
 
 /// Selected parameters extracted from a PDF `ExtGState` resource dictionary.
@@ -831,19 +831,21 @@ impl<'doc> PageResources<'doc> {
         tiling::resolve_tiling(self.doc, patterns, name)
     }
 
-    /// Resolve the named `Shading` resource.
+    /// Resolve the named `Shading` resource, for an ink canvas when `ink`
+    /// plans its colorants (see [`shading::resolve_shading_object`]).
     ///
     /// Returns `None` if the name is absent, the type is unsupported, or any
     /// required key is missing.
     #[must_use]
-    pub fn shading(
+    pub(crate) fn shading(
         &self,
         name: &[u8],
         ctm: &[f64; 6],
         canvas: shading::Canvas,
+        ink: Option<shading::PlanColorants<'_>>,
     ) -> Option<shading::ResolvedShading> {
         let shadings = self.resource_subdict(Category::Shading)?;
-        shading::resolve_shading(self, shadings, name, ctm, canvas)
+        shading::resolve_shading(self, shadings, name, ctm, canvas, ink)
     }
 
     /// Resolve the named `Pattern` resource as a shading pattern
@@ -851,14 +853,17 @@ impl<'doc> PageResources<'doc> {
     ///
     /// `pattern_ctm` maps the default coordinate space of the pattern's
     /// parent content stream to the device; the pattern's `Matrix` is
-    /// concatenated onto it.  Returns `None` if the name is absent, the
-    /// pattern is not a shading pattern, or its shading does not resolve.
+    /// concatenated onto it.  The shading is resolved for an ink canvas
+    /// when `ink` plans its colorants.  Returns `None` if the name is
+    /// absent, the pattern is not a shading pattern, or its shading does
+    /// not resolve.
     #[must_use]
-    pub fn shading_pattern(
+    pub(crate) fn shading_pattern(
         &self,
         name: &[u8],
         pattern_ctm: &[f64; 6],
         canvas: shading::Canvas,
+        ink: Option<shading::PlanColorants<'_>>,
     ) -> Option<ShadingPattern> {
         let patterns = self.resource_subdict(Category::Pattern)?;
         let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
@@ -869,7 +874,7 @@ impl<'doc> PageResources<'doc> {
             crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
         });
         let Some(shading) =
-            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, canvas)
+            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, canvas, ink)
         else {
             log::warn!(
                 "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",

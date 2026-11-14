@@ -3,6 +3,7 @@
 
 use color::convert::div255;
 use raster::ClipResult;
+use raster::pipe::ChannelMask;
 
 use super::super::gstate::Ctm;
 use super::PageRenderer;
@@ -14,6 +15,13 @@ use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask};
 
 impl PageRenderer<'_> {
+    /// Whether image decodes keep their colorant tints: on an ink canvas,
+    /// which draws an image in a `Separation` or `DeviceN` space as the
+    /// ink of its tints.
+    pub(super) fn keeps_tints(&self) -> bool {
+        self.canvas.kind() == CanvasKind::Ink
+    }
+
     /// Count the drawn image in the page diagnostics (presence, filter) and
     /// raise the source-resolution hint to that of its `source_width`
     /// samples across the page (see [`super::diagnostics::source_ppi`]).
@@ -108,6 +116,11 @@ impl PageRenderer<'_> {
             Some((i, c)) => (i, *c),
             None => (img, page_ctm),
         };
+        // On an ink canvas an image in a `Separation` or `DeviceN` space
+        // draws the ink of its tints, resampled as its colours are.
+        let ink = self
+            .ink_samples(decoded, plan.as_ref())
+            .filter(|(ink, _)| ink.len() == img.width as usize * img.height as usize * 8);
         let filter = Filter::for_draw(&ctm, img.width, img.height, decoded.interpolate);
         let Some(grid) =
             SampleGrid::new(&ctm, self.width, self.height, img.width, img.height, filter)
@@ -146,13 +159,15 @@ impl PageRenderer<'_> {
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
         let paint = |r: &mut Self| {
-            if let Err(reason) = r.composite_image(
-                img,
-                &ctm,
-                mask_src.map(|m| (m, mask_ctm)),
-                &grid,
-                &mut grid_clip,
-            ) {
+            let mask = mask_src.map(|m| (m, mask_ctm));
+            let drawn = match &ink {
+                Some((samples, paints)) => {
+                    r.composite_ink_image(samples, *paints, img, &ctm, mask, &grid, &mut grid_clip);
+                    Ok(())
+                }
+                None => r.composite_image(img, &ctm, mask, &grid, &mut grid_clip),
+            };
+            if let Err(reason) = drawn {
                 r.record_image_failure(name, reason);
             }
         };
@@ -162,6 +177,121 @@ impl PageRenderer<'_> {
             self.paint_knocking_out(region, alpha, paint);
         } else {
             self.paint_object(region, alpha, paint);
+        }
+    }
+
+    /// The ink of each sample of the colorant tints of `decoded` on the ink
+    /// canvas, resampled through `plan` when the draw reduces the image,
+    /// eight bytes per sample, with the channels the image paints.  `None`
+    /// on an RGB canvas, for an image without tints, and for one whose
+    /// spot colorants find no slot: such an image draws as its sRGB
+    /// samples.
+    fn ink_samples(
+        &mut self,
+        decoded: &crate::resources::DecodedImage,
+        plan: Option<&image_reduce::Plan>,
+    ) -> Option<(Vec<u8>, ChannelMask)> {
+        if self.canvas.kind() != CanvasKind::Ink || self.gstate.current().colour_locked {
+            return None;
+        }
+        let tints = decoded.tints.as_ref()?;
+        let colorants = self.ink_map.plan(self.resources.doc(), &tints.space);
+        let n = tints.space.ncomponents();
+        let resampled;
+        let data = match plan {
+            Some(plan) => {
+                resampled = plan.resample(&tints.data, n)?;
+                &resampled
+            }
+            None => &tints.data,
+        };
+        let mut ink = Vec::new();
+        ink.try_reserve_exact(data.len() / n * 8).ok()?;
+        for px in data.chunks_exact(n) {
+            ink.extend_from_slice(&colorants.ink_of_tints(px)?);
+        }
+        Some((ink, colorants.paints()))
+    }
+
+    /// Composite the ink samples `ink`, eight bytes per sample on the grid
+    /// of `img`, which it was resampled with, sampled through `grid` under
+    /// `ctm`, onto the ink canvas within `grid_clip`, writing the channels
+    /// `paints` under overprint; `mask` is the image's soft mask with the
+    /// matrix that draws it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the samples, their channels and the draw state composite_image takes"
+    )]
+    fn composite_ink_image(
+        &mut self,
+        ink: &[u8],
+        paints: ChannelMask,
+        img: &crate::resources::ImageDescriptor,
+        ctm: &Ctm,
+        mask: Option<(&SoftMask, Ctm)>,
+        grid: &SampleGrid,
+        grid_clip: &mut GridClip<'_>,
+    ) {
+        let mask = match mask {
+            Some((m, mask_ctm)) => {
+                let Some(sampler) = MaskSampler::new(
+                    m,
+                    &mask_ctm,
+                    ctm,
+                    grid.filter(),
+                    self.width,
+                    self.height,
+                    img.width,
+                    img.height,
+                ) else {
+                    return;
+                };
+                Some(sampler)
+            }
+            None => None,
+        };
+        let (fill_alpha, blend_mode, transfer) = {
+            let gs = self.gstate.current();
+            (gs.fill_alpha, gs.blend_mode, gs.transfer.clone())
+        };
+        let overprint = self.overprint_channels(false, paints);
+        let paint = self.paint_params(fill_alpha, blend_mode, overprint);
+        let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
+        compositor.transfer = transfer.as_deref();
+        compositor.ink_samples = true;
+        let img_w = img.width as usize;
+        let at = |x, y| sample_bytes::<8>(ink, img_w, 8, x, y);
+        let span = (grid.x1 - grid.x0) as usize;
+        let mut colours = vec![0u8; span * 8];
+        let mut shape = vec![0u8; span];
+        for dy in grid.y0..grid.y1 {
+            let Some(row_clip) = grid_clip.row(dy) else {
+                continue;
+            };
+            shape.fill(0);
+            for ((dx, out), shape) in (grid.x0..grid.x1)
+                .zip(colours.as_chunks_mut::<8>().0)
+                .zip(shape.iter_mut())
+            {
+                let coverage = row_clip.coverage(dx);
+                if coverage == 0 {
+                    continue;
+                }
+                let Some(taps) = grid.sample(dx, dy) else {
+                    continue;
+                };
+                let alpha = div255(
+                    u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, &taps)))
+                        * u32::from(coverage),
+                );
+                if alpha == 0 {
+                    continue;
+                }
+                *out = taps.blend_px(at);
+                *shape = alpha;
+            }
+            with_canvas!(&mut self.canvas, |b| compositor
+                .paint_row(b, grid.x0, dy, &colours, &shape));
         }
     }
 

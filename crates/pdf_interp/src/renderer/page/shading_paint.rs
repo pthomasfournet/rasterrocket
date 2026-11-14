@@ -52,14 +52,39 @@ pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
     pb.build()
 }
 
-/// A shading's `Background` `bg` as painted on a canvas of `kind`: on an
-/// ink canvas mapped through `transfer`, which the pipe applies on an RGB
-/// canvas (see `ShadingPaint::pipe`).
-fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Arc<Transfer>>) -> RasterColor {
-    let bg = RasterColor::from_bytes(bg);
-    match kind {
-        CanvasKind::Rgb => bg,
-        CanvasKind::Ink => bg.transferred(transfer),
+/// The `Background` of `shading` as painted on a canvas of `kind`, if it
+/// has one: on an ink canvas its ink, given for a shading of ink, mapped
+/// through `transfer`, which the pipe applies on an RGB canvas (see
+/// `ShadingPaint::pipe`).
+fn background(
+    kind: CanvasKind,
+    shading: &ResolvedShading,
+    transfer: Option<&Arc<Transfer>>,
+) -> Option<RasterColor> {
+    let bg = shading.background?;
+    Some(match (kind, shading.background_ink) {
+        (CanvasKind::Rgb, _) => RasterColor::from_bytes(bg),
+        (CanvasKind::Ink, None) => RasterColor::from_bytes(bg).transferred(transfer),
+        (CanvasKind::Ink, Some(ink)) => {
+            RasterColor::with_ink(bg, ink, shading.paints).transferred(transfer)
+        }
+    })
+}
+
+/// The pattern of a smooth shading's colours `result` for a canvas of
+/// `kind`, its colours mapped through `transfer` on an ink canvas; `None`
+/// for a mesh, and for colours of ink on an RGB canvas, which takes none.
+fn smooth_pattern<'a>(
+    kind: CanvasKind,
+    result: &'a ShadingResult,
+    transfer: Option<&'a Transfer>,
+) -> Option<CanvasPattern<'a>> {
+    match (result, kind) {
+        (ShadingResult::Pattern(p), _) => Some(CanvasPattern::new(kind, p.as_ref(), transfer)),
+        (ShadingResult::InkPattern(p), CanvasKind::Ink) => {
+            Some(CanvasPattern::ink(p.as_ref(), transfer))
+        }
+        _ => None,
     }
 }
 
@@ -170,15 +195,18 @@ impl PageRenderer<'_> {
         // The shading is one object under the soft mask in effect; it can
         // paint the whole clip.
         let region = PixelRect::of_clip(&clip, self.width, self.height);
+        let kind = self.canvas.kind();
         self.paint_object(region, state.paint.alpha, |r| match &shading.result {
-            ShadingResult::Pattern(pattern) => {
+            ShadingResult::Pattern(_) | ShadingResult::InkPattern(_) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),
                     (clip.x_max, clip.y_min),
                     (clip.x_max, clip.y_max),
                     (clip.x_min, clip.y_max),
                 ]);
-                let pattern = CanvasPattern::new(r.canvas.kind(), pattern.as_ref(), transfer);
+                let Some(pattern) = smooth_pattern(kind, &shading.result, transfer) else {
+                    return;
+                };
                 with_canvas!(&mut r.canvas, |b| shaded_fill(
                     b,
                     &clip,
@@ -194,6 +222,11 @@ impl PageRenderer<'_> {
             ShadingResult::Mesh(mesh) => {
                 for tri in mesh.meeting(&clip) {
                     r.canvas.gouraud_triangle(&clip, &pipe, transfer, tri);
+                }
+            }
+            ShadingResult::InkMesh(mesh) => {
+                for tri in mesh.meeting(&clip) {
+                    r.canvas.gouraud_ink_triangle(&clip, &pipe, transfer, tri);
                 }
             }
         });
@@ -228,24 +261,41 @@ impl PageRenderer<'_> {
                 );
             });
         };
-        if let Some(bg) = shading.background {
-            let bg = background(kind, bg, transfer.as_ref());
+        if let Some(bg) = background(kind, shading, transfer.as_ref()) {
             paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        match &shading.result {
-            ShadingResult::Pattern(pattern) => {
-                let pattern = CanvasPattern::new(kind, pattern.as_ref(), transfer.as_deref());
-                paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
-            }
+        if let Some(pattern) = smooth_pattern(kind, &shading.result, transfer.as_deref()) {
+            paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
+            return;
+        }
+        let mut clip = clip;
+        clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
+        self.paint_mesh(&shading.result, &clip, pipe, transfer.as_deref());
+    }
+
+    /// Paint the triangles of the mesh `result` that meet `clip` through
+    /// `pipe`, mapped through `transfer` on an ink canvas; a smooth shading
+    /// paints nothing here.
+    fn paint_mesh(
+        &mut self,
+        result: &ShadingResult,
+        clip: &Clip,
+        pipe: &PipeState<'_>,
+        transfer: Option<&Transfer>,
+    ) {
+        match result {
             ShadingResult::Mesh(mesh) => {
-                let mut clip = clip;
-                clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), even_odd);
-                for tri in mesh.meeting(&clip) {
-                    self.canvas
-                        .gouraud_triangle(&clip, pipe, transfer.as_deref(), tri);
+                for tri in mesh.meeting(clip) {
+                    self.canvas.gouraud_triangle(clip, pipe, transfer, tri);
                 }
             }
+            ShadingResult::InkMesh(mesh) => {
+                for tri in mesh.meeting(clip) {
+                    self.canvas.gouraud_ink_triangle(clip, pipe, transfer, tri);
+                }
+            }
+            ShadingResult::Pattern(_) | ShadingResult::InkPattern(_) => {}
         }
     }
 
@@ -270,46 +320,38 @@ impl PageRenderer<'_> {
     ) {
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
-        if let Some(bg) = shading.background {
-            let bg = background(kind, bg, transfer.as_ref());
+        if let Some(bg) = background(kind, shading, transfer.as_ref()) {
             let src = PipeSrc::Solid(bg.bytes_for(kind.mode()));
             with_canvas!(&mut self.canvas, |b| stroke(
                 b, &clip, path, pipe, &src, matrix, params
             ));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
-        match &shading.result {
-            ShadingResult::Pattern(pattern) => {
-                let pattern = CanvasPattern::new(kind, pattern.as_ref(), transfer.as_deref());
-                let src = PipeSrc::Pattern(pattern.as_dyn());
-                with_canvas!(&mut self.canvas, |b| stroke(
-                    b, &clip, path, pipe, &src, matrix, params
-                ));
-            }
-            ShadingResult::Mesh(mesh) => {
-                let device_scale = matrix[0]
-                    .mul_add(matrix[3], -(matrix[1] * matrix[2]))
-                    .abs()
-                    .sqrt();
-                let hairline = StrokeParams {
-                    line_width: 1.0 / device_scale,
-                    ..*params
-                };
-                let params = if params.line_width == 0.0 && device_scale > 0.0 {
-                    &hairline
-                } else {
-                    params
-                };
-                let Some(outline) = stroke_outline(path, matrix, params) else {
-                    return;
-                };
-                let mut clip = clip;
-                clip.clip_to_path(&outline, false);
-                for tri in mesh.meeting(&clip) {
-                    self.canvas
-                        .gouraud_triangle(&clip, pipe, transfer.as_deref(), tri);
-                }
-            }
+        if let Some(pattern) = smooth_pattern(kind, &shading.result, transfer.as_deref()) {
+            let src = PipeSrc::Pattern(pattern.as_dyn());
+            with_canvas!(&mut self.canvas, |b| stroke(
+                b, &clip, path, pipe, &src, matrix, params
+            ));
+            return;
         }
+        let device_scale = matrix[0]
+            .mul_add(matrix[3], -(matrix[1] * matrix[2]))
+            .abs()
+            .sqrt();
+        let hairline = StrokeParams {
+            line_width: 1.0 / device_scale,
+            ..*params
+        };
+        let params = if params.line_width == 0.0 && device_scale > 0.0 {
+            &hairline
+        } else {
+            params
+        };
+        let Some(outline) = stroke_outline(path, matrix, params) else {
+            return;
+        };
+        let mut clip = clip;
+        clip.clip_to_path(&outline, false);
+        self.paint_mesh(&shading.result, &clip, pipe, transfer.as_deref());
     }
 }

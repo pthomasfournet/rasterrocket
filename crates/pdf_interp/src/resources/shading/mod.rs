@@ -27,6 +27,10 @@
 //! without a `Function`.  A shading in a space whose colorants are all
 //! `/None` paints nothing: it resolves to an empty mesh with no background.
 //!
+//! A shading in a `Separation` or `DeviceN` space resolved for an ink
+//! canvas converts each colour instead to the ink of a [`ColorantPlan`], so
+//! that it paints its colorants' channels alone.
+//!
 //! # PDF Function objects
 //!
 //! The `Function` key maps the shading parameter to colour components
@@ -56,7 +60,7 @@ use super::colorspace::{self, ColorSpace, EXACT_WORK_BUDGET};
 use super::dict_ext::DictExt;
 use super::lattice::{Axis, for_each_corner};
 use super::{PageResources, read_matrix, resolve_dict};
-use crate::renderer::color::PROCESS_CHANNELS;
+use crate::renderer::color::{ColorantPlan, PROCESS_CHANNELS};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, ParamColors, TriangleSink};
@@ -69,7 +73,7 @@ pub(crate) use triangles::Mesh;
 /// The device canvas a shading is resolved for, in pixels.  Device y runs
 /// down from the top edge, so `height` places the page's origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Canvas {
+pub(crate) struct Canvas {
     pub width: f64,
     pub height: f64,
 }
@@ -81,11 +85,24 @@ pub struct Canvas {
 /// - `Mesh`: pre-decoded Gouraud triangles, indexed by device row — call
 ///   [`raster::shading::gouraud::gouraud_triangle_fill`] for each triangle
 ///   [`Mesh::meeting`] the fill's clip.
+///
+/// The colours are sRGB, or for `InkPattern` and `InkMesh` the eight ink
+/// amounts of an ink pixel.
 pub enum ShadingResult {
     /// Smooth gradient — use with [`raster::shading::shaded_fill`].
     Pattern(Box<dyn Pattern + Send + Sync>),
     /// Pre-decoded Gouraud triangles, indexed by device row.
     Mesh(Mesh),
+    /// Smooth gradient of ink.
+    InkPattern(Box<dyn Pattern + Send + Sync>),
+    /// Gouraud triangles of ink, indexed by device row.
+    InkMesh(Mesh<8>),
+}
+
+/// A shading's colours of `N` bytes: a pattern or a mesh.
+enum Colours<const N: usize> {
+    Pattern(Box<dyn Pattern + Send + Sync>),
+    Mesh(Mesh<N>),
 }
 
 /// A shading dictionary resolved for painting (PDF §8.7.4.3).
@@ -98,11 +115,13 @@ pub struct ResolvedShading {
     /// `Background` converted to sRGB.  It applies only when the shading is
     /// painted as a shading pattern, never through the `sh` operator.
     pub background: Option<[u8; 3]>,
+    /// `Background` as ink, for a shading whose colours are ink.
+    pub background_ink: Option<[u8; 8]>,
     /// The channels the shading paints on an ink canvas: the process
-    /// channels for a shading in a process CMYK space, every channel
-    /// otherwise.  A shading's colours reach the ink canvas through their
-    /// sRGB conversion, so a `Separation` or `DeviceN` shading paints
-    /// process ink and writes every channel.
+    /// channels for a shading in a process CMYK space, the channels of its
+    /// [`ColorantPlan`] for a shading of ink, every channel otherwise.  The
+    /// sRGB colours of any other shading reach the ink canvas through their
+    /// conversion to process ink, which writes every channel.
     pub paints: ChannelMask,
     /// Heap bytes `result` holds: a mesh's triangles or a function-based
     /// shading's samples.
@@ -110,6 +129,11 @@ pub struct ResolvedShading {
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
+
+/// The plan by which the colours of a `Separation` or `DeviceN` space
+/// paint on the ink canvas a shading is resolved for (see
+/// [`resolve_shading_object`]).
+pub(crate) type PlanColorants<'a> = &'a mut dyn FnMut(&ColorSpace) -> ColorantPlan;
 
 /// Resolve the named shading from `shadings`, the `/Shading` resource
 /// sub-dictionary in effect, whose default colour spaces `resources`
@@ -125,13 +149,18 @@ pub(crate) fn resolve_shading(
     name: &[u8],
     ctm: &[f64; 6],
     canvas: Canvas,
+    ink: Option<PlanColorants<'_>>,
 ) -> Option<ResolvedShading> {
-    resolve_shading_object(resources, shadings.get(name)?, ctm, canvas)
+    resolve_shading_object(resources, shadings.get(name)?, ctm, canvas, ink)
 }
 
 /// Resolve the shading `sh_obj` (a dictionary, a stream, or a reference to
 /// either) whose target space `ctm` maps to the device, with the default
 /// colour spaces of `resources`.
+///
+/// With `ink`, the shading is resolved for an ink canvas: a shading in a
+/// `Separation` or `DeviceN` space converts its colours to the ink of the
+/// plan `ink` gives its space, and paints that plan's channels.
 ///
 /// Returns `None` if the type is unsupported or any required key is missing.
 #[must_use]
@@ -140,6 +169,7 @@ pub(crate) fn resolve_shading_object(
     sh_obj: &Object,
     ctm: &[f64; 6],
     canvas: Canvas,
+    ink: Option<PlanColorants<'_>>,
 ) -> Option<ResolvedShading> {
     let doc = resources.doc();
     let page_h = canvas.height;
@@ -166,10 +196,18 @@ pub(crate) fn resolve_shading_object(
         log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
         return None;
     }
-    let paints = if cs_space.is_process_cmyk() {
-        PROCESS_CHANNELS
-    } else {
-        ChannelMask::ALL
+    let plan = ink
+        .filter(|_| {
+            matches!(
+                cs_space,
+                ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
+            )
+        })
+        .map(|plan| plan(&cs_space));
+    let paints = match &plan {
+        Some(plan) => plan.paints(),
+        None if cs_space.is_process_cmyk() => PROCESS_CHANNELS,
+        None => ChannelMask::ALL,
     };
     if cs_space.paints_nothing() {
         log::debug!("shading: every colorant is /None — the shading paints nothing");
@@ -177,6 +215,7 @@ pub(crate) fn resolve_shading_object(
             result: ShadingResult::Mesh(Mesh::new(Vec::new())),
             bbox: None,
             background: None,
+            background_ink: None,
             paints,
             held_bytes: 0,
         });
@@ -185,69 +224,117 @@ pub(crate) fn resolve_shading_object(
         doc,
         space: &cs_space,
     };
-    let n_channels = cs.channels();
     let bbox = read_bbox(&sh_dict, ctm, page_h);
-
-    let mut held_bytes = 0;
-    let result = match shading_type {
-        1 => resolve_function_based(doc, &sh_dict, cs, n_channels, ctm, canvas, bbox.as_ref()).map(
-            |(pattern, bytes)| {
-                held_bytes = bytes;
-                ShadingResult::Pattern(pattern)
-            },
-        ),
-        2 => resolve_axial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
-        3 => resolve_radial(doc, &sh_dict, cs, n_channels, ctm, page_h).map(ShadingResult::Pattern),
-        4..=7 => {
-            let Some(data) = stream_data else {
-                log::warn!("shading: ShadingType {shading_type} must be a stream — skipping");
-                return None;
+    let source = Source {
+        doc,
+        sh: &sh_dict,
+        data: stream_data,
+        shading_type,
+        ctm,
+        canvas,
+        bbox: bbox.as_ref(),
+    };
+    let background = read_background(&sh_dict, cs.channels());
+    let (result, held_bytes, background_ink) = match &plan {
+        None => {
+            let (colours, held) = source.colours(cs)?;
+            let result = match colours {
+                Colours::Pattern(p) => ShadingResult::Pattern(p),
+                Colours::Mesh(m) => ShadingResult::Mesh(m),
             };
-            let mesh_type = u8::try_from(shading_type).ok()?;
-            // PDF §8.7.4.5.5: with a Function, each vertex carries one
-            // parametric value t, mapped through the function; its Decode
-            // range is the interval the function is evaluated over.
-            let mesh = if let Some(fn_obj) = sh_dict.get(b"Function") {
-                let decode = read_decode_array(&sh_dict, 1);
-                let ramp = sample_ramp(doc, fn_obj, cs, n_channels, decode[4], decode[5])?;
-                decode_mesh(
-                    mesh_type,
-                    &sh_dict,
-                    &data,
-                    &ParamColors { ramp },
-                    &decode,
-                    ctm,
-                    page_h,
-                )
-            } else {
-                let decode = read_decode_array(&sh_dict, n_channels);
-                decode_mesh(
-                    mesh_type,
-                    &sh_dict,
-                    &data,
-                    &DirectColors { cs },
-                    &decode,
-                    ctm,
-                    page_h,
-                )
+            (result, held, None)
+        }
+        Some(plan) => {
+            let ink = InkCs { cs, plan };
+            let (colours, held) = source.colours(ink)?;
+            let result = match colours {
+                Colours::Pattern(p) => ShadingResult::InkPattern(p),
+                Colours::Mesh(m) => ShadingResult::InkMesh(m),
             };
-            let mesh = Mesh::new(mesh);
-            held_bytes = std::mem::size_of_val(mesh.triangles());
-            Some(ShadingResult::Mesh(mesh))
+            (result, held, background.as_deref().map(|c| ink.convert(c)))
         }
-        other => {
-            log::warn!("shading: ShadingType {other} is not a shading type (1–7) — skipping");
-            None
-        }
-    }?;
+    };
 
     Some(ResolvedShading {
         result,
         bbox,
-        background: read_background(&sh_dict, cs, n_channels),
+        background: background.as_deref().map(|c| cs.to_rgb(c)),
+        background_ink,
         paints,
         held_bytes,
     })
+}
+
+/// The dictionary and stream of a shading, with the device geometry it is
+/// resolved for.
+struct Source<'a> {
+    doc: &'a Document,
+    sh: &'a Dictionary,
+    /// The decompressed stream of a mesh shading.
+    data: Option<Vec<u8>>,
+    shading_type: i64,
+    ctm: &'a [f64; 6],
+    canvas: Canvas,
+    bbox: Option<&'a [(f64, f64); 4]>,
+}
+
+impl Source<'_> {
+    /// The shading's colours converted through `cs`, with the heap bytes
+    /// they hold; `None` when the shading cannot be resolved.
+    fn colours<const N: usize, C: ShadingColour<N>>(&self, cs: C) -> Option<(Colours<N>, usize)> {
+        let (doc, sh, ctm) = (self.doc, self.sh, self.ctm);
+        let page_h = self.canvas.height;
+        let n_channels = cs.channels();
+        match self.shading_type {
+            1 => resolve_function_based(doc, sh, cs, n_channels, ctm, self.canvas, self.bbox)
+                .map(|(pattern, bytes)| (Colours::Pattern(pattern), bytes)),
+            2 => resolve_axial(doc, sh, cs, n_channels, ctm, page_h)
+                .map(|p| (Colours::Pattern(p), 0)),
+            3 => resolve_radial(doc, sh, cs, n_channels, ctm, page_h)
+                .map(|p| (Colours::Pattern(p), 0)),
+            shading_type @ 4..=7 => {
+                let Some(data) = &self.data else {
+                    log::warn!("shading: ShadingType {shading_type} must be a stream — skipping");
+                    return None;
+                };
+                let mesh_type = u8::try_from(shading_type).ok()?;
+                // PDF §8.7.4.5.5: with a Function, each vertex carries one
+                // parametric value t, mapped through the function; its Decode
+                // range is the interval the function is evaluated over.
+                let mesh = if let Some(fn_obj) = sh.get(b"Function") {
+                    let decode = read_decode_array(sh, 1);
+                    let ramp = sample_ramp(doc, fn_obj, cs, n_channels, decode[4], decode[5])?;
+                    decode_mesh(
+                        mesh_type,
+                        sh,
+                        data,
+                        &ParamColors { ramp },
+                        &decode,
+                        ctm,
+                        page_h,
+                    )
+                } else {
+                    let decode = read_decode_array(sh, n_channels);
+                    decode_mesh(
+                        mesh_type,
+                        sh,
+                        data,
+                        &DirectColors { cs },
+                        &decode,
+                        ctm,
+                        page_h,
+                    )
+                };
+                let mesh = Mesh::new(mesh);
+                let held = std::mem::size_of_val(mesh.triangles());
+                Some((Colours::Mesh(mesh), held))
+            }
+            other => {
+                log::warn!("shading: ShadingType {other} is not a shading type (1–7) — skipping");
+                None
+            }
+        }
+    }
 }
 
 /// Read `BBox` as the device-space corners of its rectangle, whose
@@ -270,9 +357,9 @@ fn read_bbox(sh: &Dictionary, ctm: &[f64; 6], page_h: f64) -> Option<[(f64, f64)
     }
 }
 
-/// Read `Background`, one colour in the shading's colour space, as sRGB.
-/// A `Background` of the wrong length is ignored.
-fn read_background(sh: &Dictionary, cs: ShadingCs<'_>, n: usize) -> Option<[u8; 3]> {
+/// Read `Background`, one colour of `n` components in the shading's colour
+/// space.  A `Background` of the wrong length is ignored.
+fn read_background(sh: &Dictionary, n: usize) -> Option<Vec<f64>> {
     let arr = sh.get(b"Background")?.as_array()?;
     if arr.len() != n {
         log::warn!(
@@ -281,13 +368,12 @@ fn read_background(sh: &Dictionary, cs: ShadingCs<'_>, n: usize) -> Option<[u8; 
         );
         return None;
     }
-    let comps = read_f64_array(sh, b"Background", n)?;
-    Some(cs.to_rgb(&comps))
+    read_f64_array(sh, b"Background", n)
 }
 
 /// Decode the stream of mesh shading `shading_type` (4–7) with vertex
 /// colours from `source` and the shading's `Decode` array `decode`.
-fn decode_mesh<S: CornerSource>(
+fn decode_mesh<const N: usize, S: CornerSource<N>>(
     shading_type: u8,
     sh: &Dictionary,
     data: &[u8],
@@ -295,7 +381,7 @@ fn decode_mesh<S: CornerSource>(
     decode: &[f64],
     ctm: &[f64; 6],
     page_h: f64,
-) -> Vec<[GouraudVertex; 3]> {
+) -> Vec<[GouraudVertex<N>; 3]> {
     let Some(format) = VertexFormat::parse(sh, shading_type, decode, ctm, page_h) else {
         return Vec::new();
     };
@@ -322,10 +408,10 @@ fn stream_content(s: &Stream) -> Option<Vec<u8>> {
 
 // ── Axial (Type 2) ────────────────────────────────────────────────────────────
 
-fn resolve_axial(
+fn resolve_axial<const N: usize, C: ShadingColour<N>>(
     doc: &Document,
     sh: &Dictionary,
-    cs: ShadingCs<'_>,
+    cs: C,
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -364,25 +450,26 @@ fn resolve_axial(
 const RAMP_SAMPLES: u16 = 256;
 
 /// Evaluate the shading function at [`RAMP_SAMPLES`] uniformly spaced
-/// parameter values from `t0` to `t1` and convert each colour to sRGB.
+/// parameter values from `t0` to `t1` and convert each colour through `cs`.
 ///
 /// PDF §8.7.4.5.3: the colour at parameter `t` is the colour-space
-/// conversion of `Function(t)`; between samples the ramp interpolates in
-/// sRGB.  `None` when the function fails to evaluate at any sample.
-fn sample_ramp(
+/// conversion of `Function(t)`; between samples the ramp interpolates the
+/// converted bytes.  `None` when the function fails to evaluate at any
+/// sample.
+fn sample_ramp<const N: usize, C: ShadingColour<N>>(
     doc: &Document,
     fn_obj: &Object,
-    cs: ShadingCs<'_>,
+    cs: C,
     n: usize,
     t0: f64,
     t1: f64,
-) -> Option<ColorRamp> {
+) -> Option<ColorRamp<N>> {
     let function = Function::load(doc, fn_obj);
     let last = f64::from(RAMP_SAMPLES - 1);
     let samples = (0..RAMP_SAMPLES)
         .map(|k| {
             let t = (f64::from(k) / last).mul_add(t1 - t0, t0);
-            function.eval(t, n).map(|c| cs.to_rgb(&c)).ok_or(t)
+            function.eval(t, n).map(|c| cs.convert(&c)).ok_or(t)
         })
         .collect::<Result<Vec<_>, f64>>()
         .map_err(|t| {
@@ -394,10 +481,10 @@ fn sample_ramp(
 
 // ── Radial (Type 3) ───────────────────────────────────────────────────────────
 
-fn resolve_radial(
+fn resolve_radial<const N: usize, C: ShadingColour<N>>(
     doc: &Document,
     sh: &Dictionary,
-    cs: ShadingCs<'_>,
+    cs: C,
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
@@ -566,14 +653,14 @@ fn type1_area(corners: &[(f64, f64)], bbox: Option<&[(f64, f64); 4]>, canvas: Ca
 /// evaluated at; points where it fails take colour components 0, logged
 /// once.  A lattice with no point in the Domain evaluates nothing and paints
 /// nothing.
-fn sample_lattice(
+fn sample_lattice<const N: usize, C: ShadingColour<N>>(
     lattice: Lattice,
     domain_at: &impl Fn(f64, f64) -> (f64, f64, bool),
     function: &Function,
-    cs: ShadingCs<'_>,
+    cs: C,
     n: usize,
     [xd0, xd1, yd0, yd1]: [f64; 4],
-) -> Option<Box<[[u8; 3]]>> {
+) -> Option<Box<[[u8; N]]>> {
     let mut samples = Vec::with_capacity(lattice.cols * lattice.rows);
     let (mut evaluated, mut failures) = (0usize, 0usize);
     for row in 0..lattice.rows {
@@ -581,7 +668,7 @@ fn sample_lattice(
             let (px, py) = lattice.pixel(col, row);
             let (tx, ty, inside) = domain_at(px, py);
             if lattice.step == 1 && !inside {
-                samples.push([0; 3]);
+                samples.push([0; N]);
                 continue;
             }
             let sx = tx.mul_add(xd1 - xd0, xd0);
@@ -591,7 +678,7 @@ fn sample_lattice(
                 failures += 1;
                 vec![0.0; n]
             });
-            samples.push(cs.to_rgb(&channels));
+            samples.push(cs.convert(&channels));
         }
     }
     if evaluated > 0 && failures == evaluated {
@@ -628,18 +715,18 @@ type FunctionBased = (Box<dyn Pattern + Send + Sync>, usize);
 /// A Type 1 shading ready to sample: its function, colour space and
 /// output count, Domain `[x0, x1, y0, y1]`, and the matrix from shading
 /// space to the device.
-struct Type1<'a> {
+struct Type1<'a, C> {
     function: &'a Function,
-    cs: ShadingCs<'a>,
+    cs: C,
     n: usize,
     domain: [f64; 4],
     shading_ctm: [f64; 6],
 }
 
-fn resolve_function_based(
+fn resolve_function_based<const N: usize, C: ShadingColour<N>>(
     doc: &Document,
     sh: &Dictionary,
-    cs: ShadingCs<'_>,
+    cs: C,
     n: usize,
     ctm: &[f64; 6],
     canvas: Canvas,
@@ -657,10 +744,7 @@ fn resolve_function_based(
     let function = Function::load(doc, sh.get(b"Function")?);
     // The point budget is the smaller of a count and the conversion work
     // budget over the cost of one point.
-    let point_cost = function
-        .cost()
-        .saturating_add(cs.space.conversion_cost())
-        .max(1);
+    let point_cost = function.cost().saturating_add(cs.conversion_cost()).max(1);
     let affordable = usize::try_from(EXACT_WORK_BUDGET / point_cost).unwrap_or(usize::MAX);
     let shading = Type1 {
         function: &function,
@@ -674,7 +758,7 @@ fn resolve_function_based(
     shading.pattern(canvas, bbox, TYPE1_LATTICE_MAX.min(affordable).max(4))
 }
 
-impl Type1<'_> {
+impl<C> Type1<'_, C> {
     /// The shading's pattern on `canvas`, within `bbox` when given, from at
     /// most `max_points` samples.
     ///
@@ -684,12 +768,15 @@ impl Type1<'_> {
     /// within `bbox`: at every pixel, which the pattern then reads
     /// unchanged, unless that exceeds `max_points`, when every `step`-th
     /// pixel is sampled and the pixels between are interpolated.
-    fn pattern(
+    fn pattern<const N: usize>(
         &self,
         canvas: Canvas,
         bbox: Option<&[(f64, f64); 4]>,
         max_points: usize,
-    ) -> Option<FunctionBased> {
+    ) -> Option<FunctionBased>
+    where
+        C: ShadingColour<N>,
+    {
         let [xd0, xd1, yd0, yd1] = self.domain;
         let page_h = canvas.height;
         let Some(inv) = device_to_space(&self.shading_ctm, page_h) else {
@@ -729,7 +816,7 @@ impl Type1<'_> {
             log::debug!(
                 "shading/type1: the Domain covers no pixel of the canvas — nothing painted"
             );
-            return Some((Box::new(FunctionPattern::new(|_, _| None)), 0));
+            return Some((Box::new(FunctionPattern::<N>::new(|_, _| None)), 0));
         };
         if lattice.step > 1 {
             log::debug!(
@@ -751,9 +838,9 @@ impl Type1<'_> {
             if !domain_at(px, py).2 {
                 return None;
             }
-            let mut rgb = [0.0_f64; 3];
+            let mut colour = [0.0_f64; N];
             for_each_corner(&lattice.axes(px, py), |index, weight| {
-                for (acc, &v) in rgb.iter_mut().zip(&samples[index]) {
+                for (acc, &v) in colour.iter_mut().zip(&samples[index]) {
                     *acc = weight.mul_add(f64::from(v), *acc);
                 }
             });
@@ -762,7 +849,7 @@ impl Type1<'_> {
                 clippy::cast_sign_loss,
                 reason = "a convex combination of bytes, rounded, lies in [0, 255]"
             )]
-            Some(rgb.map(|v| v.round() as u8))
+            Some(colour.map(|v| v.round() as u8))
         });
         Some((Box::new(pattern), held))
     }
@@ -798,6 +885,67 @@ impl ShadingCs<'_> {
         let mut fitted = channels[..channels.len().min(n)].to_vec();
         fitted.resize(n, 0.0);
         self.space.convert_to_rgb(self.doc, &fitted)
+    }
+}
+
+/// The conversion of a shading's colour components to the `N` bytes of a
+/// pixel.
+pub(super) trait ShadingColour<const N: usize>: Copy {
+    /// Number of colour components a function output or mesh vertex carries.
+    fn channels(self) -> usize;
+
+    /// The pixel bytes of the colour components `comps`, fitted to
+    /// [`Self::channels`] as [`ShadingCs::to_rgb`] fits them.
+    fn convert(self, comps: &[f64]) -> [u8; N];
+
+    /// The work of one conversion, in the units of
+    /// [`ColorSpace::conversion_cost`].
+    fn conversion_cost(self) -> u64;
+}
+
+impl ShadingColour<3> for ShadingCs<'_> {
+    fn channels(self) -> usize {
+        Self::channels(self)
+    }
+
+    fn convert(self, comps: &[f64]) -> [u8; 3] {
+        self.to_rgb(comps)
+    }
+
+    fn conversion_cost(self) -> u64 {
+        self.space.conversion_cost()
+    }
+}
+
+/// A `Separation` or `DeviceN` shading space converting to the ink of
+/// `plan`.
+#[derive(Clone, Copy)]
+struct InkCs<'a> {
+    cs: ShadingCs<'a>,
+    plan: &'a ColorantPlan,
+}
+
+impl ShadingColour<8> for InkCs<'_> {
+    fn channels(self) -> usize {
+        self.cs.channels()
+    }
+
+    fn convert(self, comps: &[f64]) -> [u8; 8] {
+        let (doc, space) = (self.cs.doc, self.cs.space);
+        let n = self.cs.channels();
+        if comps.len() == n {
+            return self.plan.ink(doc, space, comps);
+        }
+        let mut fitted = comps[..comps.len().min(n)].to_vec();
+        fitted.resize(n, 0.0);
+        self.plan.ink(doc, space, &fitted)
+    }
+
+    fn conversion_cost(self) -> u64 {
+        match self.plan {
+            ColorantPlan::Channels(_) => 1,
+            ColorantPlan::Process => self.cs.space.conversion_cost(),
+        }
     }
 }
 

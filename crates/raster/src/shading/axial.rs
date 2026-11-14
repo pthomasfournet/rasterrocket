@@ -22,8 +22,8 @@ use crate::pipe::Pattern;
 /// as `p` is an affine function of the device pixel, so is `s`, held here as
 /// `s = gx·x + gy·y + s0`.  Pixels outside `s ∈ [0, 1]` are painted with the
 /// nearer endpoint colour only when that end is extended.
-pub struct AxialPattern {
-    ramp: ColorRamp,
+pub struct AxialPattern<const N: usize = 3> {
+    ramp: ColorRamp<N>,
     /// Device-space gradient of `s`.
     gx: f64,
     gy: f64,
@@ -35,7 +35,7 @@ pub struct AxialPattern {
     extend_end: bool,
 }
 
-impl AxialPattern {
+impl<const N: usize> AxialPattern<N> {
     /// Create an axial gradient.
     ///
     /// - `ramp`: colours over the normalised parameter, start point → 0 and
@@ -45,7 +45,7 @@ impl AxialPattern {
     /// - `extend_start` / `extend_end`: paint beyond the start / end point.
     #[must_use]
     pub fn new(
-        ramp: ColorRamp,
+        ramp: ColorRamp<N>,
         p0x: f64,
         p0y: f64,
         p1x: f64,
@@ -102,7 +102,7 @@ impl AxialPattern {
     }
 }
 
-impl Pattern for AxialPattern {
+impl<const N: usize> Pattern for AxialPattern<N> {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
         fill_ramp_span(&self.ramp, x0, x1, out, |_, _| {}, |x| self.position(x, y));
     }

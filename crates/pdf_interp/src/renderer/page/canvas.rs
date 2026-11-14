@@ -244,6 +244,35 @@ impl PageCanvas {
         }
     }
 
+    /// Fill one Gouraud-shaded triangle of ink vertices through `pipe`,
+    /// clipped to `clip`, its ink mapped through `transfer`.  Nothing is
+    /// painted on an RGB canvas, which takes no ink.
+    pub(super) fn gouraud_ink_triangle(
+        &mut self,
+        clip: &Clip,
+        pipe: &PipeState<'_>,
+        transfer: Option<&Transfer>,
+        tri: [GouraudVertex<8>; 3],
+    ) {
+        let Self::Ink(b) = self else {
+            debug_assert!(false, "an ink triangle on an RGB canvas");
+            return;
+        };
+        let (width, height) = (b.width, b.height);
+        gouraud_triangle_spans(width, height, clip, tri, |ink, x0, x1, y| {
+            let row = RowPattern { data: ink };
+            render_bitmap_span::<DeviceN8>(
+                b,
+                pipe,
+                &PipeSrc::Pattern(&TransferredInk::new(&row, transfer)),
+                None,
+                x0,
+                x1,
+                y,
+            );
+        });
+    }
+
     /// Open a transparency group over this canvas on `bitmap`, a
     /// transparent canvas of the same kind and size (see
     /// [`raster::transparency::begin_group`]).
@@ -591,14 +620,62 @@ impl Pattern for InkPattern<'_> {
     }
 }
 
-/// A pattern of sRGB bytes as a canvas of a given kind takes it: as it is
-/// on an RGB canvas, where the pipe applies the transfer function, and
-/// through [`InkPattern`], which applies it to the ink, on an ink canvas.
+/// A [`Pattern`] of ink whose pixels map through the ink tables of a
+/// transfer function, if any.  Coverage and the static-colour hint are the
+/// inner pattern's.
+pub(super) struct TransferredInk<'a> {
+    pattern: &'a dyn Pattern,
+    transfer: Option<&'a Transfer>,
+}
+
+impl<'a> TransferredInk<'a> {
+    /// `pattern`, of ink, mapped through `transfer`.
+    pub(super) fn new(pattern: &'a dyn Pattern, transfer: Option<&'a Transfer>) -> Self {
+        Self { pattern, transfer }
+    }
+
+    /// Map the ink pixels of `out` through the transfer function.
+    fn map(&self, out: &mut [u8]) {
+        if let Some(t) = self.transfer {
+            for px in out.as_chunks_mut::<8>().0 {
+                *px = t.apply_ink(*px);
+            }
+        }
+    }
+}
+
+impl Pattern for TransferredInk<'_> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+        self.pattern.fill_span(y, x0, x1, out);
+        self.map(out);
+    }
+
+    fn is_static_color(&self) -> bool {
+        self.pattern.is_static_color()
+    }
+
+    fn may_leave_unpainted(&self) -> bool {
+        self.pattern.may_leave_unpainted()
+    }
+
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
+        self.pattern.fill_span_coverage(y, x0, x1, out, coverage);
+        self.map(out);
+    }
+}
+
+/// A pattern as a canvas of a given kind takes it.  A pattern of sRGB bytes
+/// is taken as it is on an RGB canvas, where the pipe applies the transfer
+/// function, and through [`InkPattern`], which applies it to the ink, on an
+/// ink canvas; a pattern of ink is taken on an ink canvas through
+/// [`TransferredInk`].
 pub(super) enum CanvasPattern<'a> {
     /// The pattern itself.
     Rgb(&'a dyn Pattern),
     /// The pattern converted to ink.
     Ink(InkPattern<'a>),
+    /// A pattern of ink.
+    Native(TransferredInk<'a>),
 }
 
 impl<'a> CanvasPattern<'a> {
@@ -613,6 +690,12 @@ impl<'a> CanvasPattern<'a> {
             CanvasKind::Rgb => Self::Rgb(pattern),
             CanvasKind::Ink => Self::Ink(InkPattern::new(pattern, transfer)),
         }
+    }
+
+    /// `pattern`, of ink, for an ink canvas, its ink mapped through
+    /// `transfer`.
+    pub(super) fn ink(pattern: &'a dyn Pattern, transfer: Option<&'a Transfer>) -> Self {
+        Self::Native(TransferredInk::new(pattern, transfer))
     }
 
     /// The transfer set `pipe` applies for a pattern on a canvas of `kind`:
@@ -632,6 +715,7 @@ impl<'a> CanvasPattern<'a> {
         match self {
             Self::Rgb(p) => *p,
             Self::Ink(p) => p,
+            Self::Native(p) => p,
         }
     }
 }

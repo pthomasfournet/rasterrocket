@@ -568,3 +568,121 @@ fn transfer_maps_derived_ink_after_conversion() {
         );
     }
 }
+
+/// A shading in a `Separation` space paints its spot channel alone, so
+/// under overprint the cyan under it stays: through `sh` for an axial, a
+/// function-based and a mesh shading, and through a shading pattern with a
+/// `Background`.  Without overprint it knocks the cyan out.
+#[test]
+fn spot_shadings_paint_their_colorant_alone() {
+    let spot = format!(
+        "[/Separation /Spot /DeviceCMYK {}]",
+        tint_to_cmyk("0 0.91 0.76 0")
+    );
+    let one = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1 >>";
+    // Two triangles covering the page, every vertex at tint 1.
+    let mesh: String = [[0, 0], [10, 0], [0, 10], [10, 10]]
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &[x, y])| [u8::from(i > 2), x, y, 127])
+        .map(char::from)
+        .collect();
+    let constant = "{ pop pop 1 }";
+    let doc = |op: bool| {
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                format!(
+                    "<< /Type /Page /Resources << /ExtGState << /GS << /op {op} >> >> \
+                     /Shading << /Axial << /ShadingType 2 /ColorSpace {spot} \
+                     /Coords [0 0 10 0] /Function {one} /Extend [true true] >> \
+                     /Fn << /ShadingType 1 /ColorSpace {spot} /Domain [0 10 0 10] \
+                     /Function 6 0 R >> /Mesh 5 0 R >> \
+                     /Pattern << /P << /PatternType 2 /Shading << /ShadingType 2 \
+                     /ColorSpace {spot} /Background [1] /BBox [0 0 1 1] \
+                     /Coords [0 0 10 0] /Function {one} >> >> >> >> >>"
+                ),
+            ),
+            (
+                5,
+                format!(
+                    "<< /ShadingType 4 /ColorSpace {spot} /BitsPerCoordinate 8 \
+                     /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 255 0 255 0 2.0079] \
+                     /Length {} >>\nstream\n{mesh}\nendstream",
+                    mesh.len()
+                ),
+            ),
+            (
+                6,
+                format!(
+                    "<< /FunctionType 4 /Domain [0 10 0 10] /Range [0 1] /Length {} >>\n\
+                     stream\n{constant}\nendstream",
+                    constant.len()
+                ),
+            ),
+        ])
+    };
+    let cyan = "1 0 0 0 k 0 0 10 10 re f /GS gs";
+    for paint in [
+        "q 0 0 5 10 re W n /Axial sh Q",
+        "q 0 0 5 10 re W n /Fn sh Q",
+        "q 0 0 5 10 re W n /Mesh sh Q",
+        "/Pattern cs /P scn 0 0 5 10 re f",
+    ] {
+        let content = format!("{cyan} {paint}");
+        let ink = render_ink(&doc(true), content.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 255, 0, 0, 0], "{paint}");
+        assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0], "{paint}");
+        let ink = render_ink(&doc(false), content.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{paint}");
+    }
+}
+
+/// An image in a `Separation` space paints its spot channel alone, so
+/// under overprint the cyan under it stays: an image `XObject` magnified
+/// and reduced, and an inline image.  Without overprint it knocks the
+/// cyan out.
+#[test]
+fn spot_images_paint_their_colorant_alone() {
+    // 127 under `/Decode [0 2.0079]` is the full tint.
+    let image = |id: u32, size: usize| {
+        let data = "\x7f".repeat(size * size);
+        (
+            id,
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {size} /Height {size} \
+                 /ColorSpace [/Separation /Spot /DeviceCMYK {}] /BitsPerComponent 8 \
+                 /Decode [0 2.0079] /Length {} >>\nstream\n{data}\nendstream",
+                tint_to_cmyk("0 0.91 0.76 0"),
+                data.len()
+            ),
+        )
+    };
+    let doc = |op: bool| {
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                format!(
+                    "<< /Type /Page /Resources << /ExtGState << /GS << /op {op} >> >> \
+                     /ColorSpace << {} >> /XObject << /Big 5 0 R /Small 6 0 R >> >> >>",
+                    spot_space()
+                ),
+            ),
+            image(5, 40),
+            image(6, 2),
+        ])
+    };
+    let cyan = "1 0 0 0 k 0 0 10 10 re f /GS gs q 5 0 0 10 0 0 cm";
+    for paint in [
+        "/Big Do",
+        "/Small Do",
+        "BI /W 1 /H 1 /CS /Spot /BPC 8 /D [0 2.0079] ID \x7f EI",
+    ] {
+        let content = format!("{cyan} {paint} Q");
+        let ink = render_ink(&doc(true), content.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 255, 0, 0, 0], "{paint}");
+        assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0], "{paint}");
+        let ink = render_ink(&doc(false), content.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{paint}");
+    }
+}

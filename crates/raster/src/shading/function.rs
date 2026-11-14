@@ -16,20 +16,20 @@
 
 use crate::pipe::Pattern;
 
-/// The closure type of a [`FunctionPattern`].
-type ShadingFn = dyn Fn(f64, f64) -> Option<[u8; 3]> + Send + Sync;
+/// The closure type of a [`FunctionPattern`] of `N`-byte colours.
+type ShadingFn<const N: usize> = dyn Fn(f64, f64) -> Option<[u8; N]> + Send + Sync;
 
 /// A shading pattern driven by an arbitrary `f(x, y) → Option<[R, G, B]>`
-/// closure.
+/// closure, or one yielding the `N` bytes of another pixel type.
 ///
 /// The closure is boxed so it can capture ICC profiles, LUTs, or any other
 /// per-page state.  It must be `Send + Sync` because [`Pattern`] is used
 /// across rayon threads.
-pub struct FunctionPattern {
-    func: Box<ShadingFn>,
+pub struct FunctionPattern<const N: usize = 3> {
+    func: Box<ShadingFn<N>>,
 }
 
-impl FunctionPattern {
+impl<const N: usize> FunctionPattern<N> {
     /// Create a function-based pattern from a closure `f(x, y)`.
     ///
     /// `x` and `y` are device-space pixel coordinates; `None` leaves the
@@ -37,7 +37,7 @@ impl FunctionPattern {
     #[must_use]
     pub fn new<F>(func: F) -> Self
     where
-        F: Fn(f64, f64) -> Option<[u8; 3]> + Send + Sync + 'static,
+        F: Fn(f64, f64) -> Option<[u8; N]> + Send + Sync + 'static,
     {
         Self {
             func: Box::new(func),
@@ -45,11 +45,11 @@ impl FunctionPattern {
     }
 }
 
-impl Pattern for FunctionPattern {
+impl<const N: usize> Pattern for FunctionPattern<N> {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
-        // out.len() == (x1-x0+1)*3 is an invariant guaranteed by render_span.
-        for (x, px) in (x0..=x1).zip(out.as_chunks_mut::<3>().0) {
-            *px = (self.func)(f64::from(x), f64::from(y)).unwrap_or_default();
+        // out.len() == (x1-x0+1)*N is an invariant guaranteed by render_span.
+        for (x, px) in (x0..=x1).zip(out.as_chunks_mut::<N>().0) {
+            *px = (self.func)(f64::from(x), f64::from(y)).unwrap_or([0; N]);
         }
     }
 
@@ -58,10 +58,10 @@ impl Pattern for FunctionPattern {
     }
 
     fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [u8], coverage: &mut [u8]) {
-        for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<3>().0).zip(coverage) {
-            let rgb = (self.func)(f64::from(x), f64::from(y));
-            *c = u8::from(rgb.is_some()) * 255;
-            *px = rgb.unwrap_or_default();
+        for ((x, px), c) in (x0..=x1).zip(out.as_chunks_mut::<N>().0).zip(coverage) {
+            let colour = (self.func)(f64::from(x), f64::from(y));
+            *c = u8::from(colour.is_some()) * 255;
+            *px = colour.unwrap_or([0; N]);
         }
     }
 }

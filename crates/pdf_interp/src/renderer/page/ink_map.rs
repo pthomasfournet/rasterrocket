@@ -19,7 +19,7 @@ use color::convert::gray_to_u8;
 use pdf::Document;
 use raster::pipe::ChannelMask;
 
-use super::super::color::PROCESS_CHANNELS;
+use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
 use crate::resources::ColorSpace;
 use crate::resources::colorspace::Colorant;
 
@@ -151,28 +151,51 @@ impl InkMap {
         let mut bits = 0u8;
         for (colorant, &tint) in space.colorants().iter().zip(comps) {
             let tint = gray_to_u8(tint);
-            let channel = match colorant {
-                Colorant::None => continue,
-                Colorant::All => {
-                    for v in &mut ink {
-                        *v = (*v).max(tint);
-                    }
-                    bits = ChannelMask::ALL.bits();
-                    continue;
-                }
-                Colorant::Process(process) => process.channel(),
-                Colorant::Spot(name) => {
-                    // Every spot fits, so the slot is given.
-                    let Some(slot) = self.slot(doc, name, space) else {
-                        return process_fallback(self);
-                    };
-                    SPOT_CHANNEL + slot
-                }
+            let Some(channels) = self.channels(doc, space, colorant) else {
+                return process_fallback(self);
             };
-            ink[channel] = ink[channel].max(tint);
-            bits |= 1 << channel;
+            for (i, v) in ink.iter_mut().enumerate() {
+                if channels & 1 << i != 0 {
+                    *v = (*v).max(tint);
+                }
+            }
+            bits |= channels;
         }
         (ink, ChannelMask::new(bits))
+    }
+
+    /// The plan by which every colour of the `Separation` or `DeviceN`
+    /// space `space` paints on the page (see [`Self::colorant_ink`]),
+    /// assigning the space's spot colorants their slots.
+    pub(super) fn plan(&mut self, doc: &Document, space: &ColorSpace) -> ColorantPlan {
+        if !self.fits(space) {
+            self.report_overflow(space);
+            return ColorantPlan::Process;
+        }
+        let channels: Option<Box<[u8]>> = space
+            .colorants()
+            .iter()
+            .map(|colorant| self.channels(doc, space, colorant))
+            .collect();
+        channels.map_or_else(
+            || {
+                self.report_overflow(space);
+                ColorantPlan::Process
+            },
+            ColorantPlan::Channels,
+        )
+    }
+
+    /// The bit mask of the channels `colorant` of `space` paints: its
+    /// process channel or its spot's slot, every channel for `/All`, none
+    /// for `/None`; `None` when its spot finds no slot.
+    fn channels(&mut self, doc: &Document, space: &ColorSpace, colorant: &Colorant) -> Option<u8> {
+        Some(match colorant {
+            Colorant::None => 0,
+            Colorant::All => ChannelMask::ALL.bits(),
+            Colorant::Process(process) => 1 << process.channel(),
+            Colorant::Spot(name) => 1 << (SPOT_CHANNEL + self.slot(doc, name, space)?),
+        })
     }
 }
 

@@ -441,7 +441,7 @@ impl Plan {
 
     /// Resample `src`, `src_w × src_h` pixels of `bpp` bytes, into
     /// `out_w × out_h`.  `None` when `src` is not exactly that size.
-    fn resample(&self, src: &[u8], bpp: usize) -> Option<Vec<u8>> {
+    pub(super) fn resample(&self, src: &[u8], bpp: usize) -> Option<Vec<u8>> {
         let (w, h) = (self.src_w as usize, self.src_h as usize);
         let row_len = w.checked_mul(bpp)?;
         if src.len() != row_len.checked_mul(h)? {

@@ -25,8 +25,10 @@ use raster::{Bitmap, CellPhase};
 
 use super::super::color::RasterColor;
 use super::PageRenderer;
+use super::canvas::CanvasKind;
 use crate::content::Operator;
-use crate::resources::shading::{Canvas, ResolvedShading};
+use crate::resources::ColorSpace;
+use crate::resources::shading::{Canvas, PlanColorants, ResolvedShading};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceIdentity, ResourceKey, ShadingPattern};
 
@@ -46,15 +48,18 @@ pub(super) struct PlacedKey {
     canvas: [u64; 2],
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
+    /// Whether the object is resolved for an ink canvas.
+    ink: bool,
 }
 
 impl PlacedKey {
-    /// The key of object `id` under `matrix` on `canvas`, resolved with
-    /// the default colour spaces of `defaults`.
+    /// The key of object `id` under `matrix` on `canvas`, of the kind
+    /// `kind`, resolved with the default colour spaces of `defaults`.
     pub(super) fn new(
         id: ResourceKey,
         matrix: &[f64; 6],
         canvas: Canvas,
+        kind: CanvasKind,
         defaults: Option<ObjectId>,
     ) -> Self {
         Self {
@@ -62,6 +67,7 @@ impl PlacedKey {
             matrix: matrix.map(f64::to_bits),
             canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
             defaults,
+            ink: kind == CanvasKind::Ink,
         }
     }
 }
@@ -285,36 +291,52 @@ impl PatternMemo {
 
 impl PageRenderer<'_> {
     /// The named `Pattern` resource resolved as a shading pattern under the
-    /// pattern matrix in effect, from the memo when kept.
-    pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
+    /// pattern matrix in effect, for the canvas, from the memo when kept.
+    pub(super) fn memo_shading_pattern(&mut self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
         let canvas = self.shading_canvas();
+        let kind = self.canvas.kind();
         let pattern_ctm = self.window_ctm(&self.pattern_ctm);
         let key = PlacedKey::new(
             self.resources.pattern_key(name)?,
             &pattern_ctm,
             canvas,
+            kind,
             self.default_spaces_context(),
         );
+        let (resources, ink_map) = (&self.resources, &mut self.ink_map);
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
-            self.resources
-                .shading_pattern(name, &pattern_ctm, canvas)
+            let doc = resources.doc();
+            let mut plan = |space: &ColorSpace| ink_map.plan(doc, space);
+            let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
+            resources
+                .shading_pattern(name, &pattern_ctm, canvas, ink)
                 .map(Rc::new)
         })
     }
 
     /// The named `Shading` resource resolved under `ctm`, a matrix into the
-    /// whole page's space, from the memo when kept.
-    pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
+    /// whole page's space, for the canvas, from the memo when kept.
+    pub(super) fn memo_shading(
+        &mut self,
+        name: &[u8],
+        ctm: &[f64; 6],
+    ) -> Option<Rc<ResolvedShading>> {
         let canvas = self.shading_canvas();
+        let kind = self.canvas.kind();
         let ctm = &self.window_ctm(ctm);
         let key = PlacedKey::new(
             self.resources.shading_key(name)?,
             ctm,
             canvas,
+            kind,
             self.default_spaces_context(),
         );
+        let (resources, ink_map) = (&self.resources, &mut self.ink_map);
         self.pattern_memo.borrow_mut().shading(key, || {
-            self.resources.shading(name, ctm, canvas).map(Rc::new)
+            let doc = resources.doc();
+            let mut plan = |space: &ColorSpace| ink_map.plan(doc, space);
+            let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
+            resources.shading(name, ctm, canvas, ink).map(Rc::new)
         })
     }
 
@@ -408,6 +430,7 @@ mod tests {
             result: crate::resources::shading::ShadingResult::Mesh(mesh),
             bbox: None,
             background: None,
+            background_ink: None,
             paints: raster::pipe::ChannelMask::ALL,
             held_bytes,
         })
@@ -423,7 +446,13 @@ mod tests {
             width: 100.0,
             height: page_h,
         };
-        PlacedKey::new(ResourceKey::Object(id), matrix, canvas, None)
+        PlacedKey::new(
+            ResourceKey::Object(id),
+            matrix,
+            canvas,
+            CanvasKind::Rgb,
+            None,
+        )
     }
 
     /// Whether `memo` holds the shading at `key`: a lookup that would

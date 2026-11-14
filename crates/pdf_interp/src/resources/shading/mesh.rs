@@ -4,15 +4,15 @@
 //! when the shading has a `Function`, one parametric value `t` that the
 //! function maps to colour components (PDF §8.7.4.5.5–8).  The two kinds are
 //! [`CornerSource`] implementations: [`DirectColors`] converts components to
-//! sRGB at the vertex and interpolates in sRGB; [`ParamColors`] carries the
-//! parametric value through interpolation and subdivision and converts it
-//! last, so the colour between vertices follows the function rather than the
-//! sRGB chord of its end values.
+//! pixel bytes (sRGB, or ink) at the vertex and interpolates them;
+//! [`ParamColors`] carries the parametric value through interpolation and
+//! subdivision and converts it last, so the colour between vertices follows
+//! the function rather than the chord of its end values.
 
 use raster::shading::ColorRamp;
 use raster::shading::gouraud::GouraudVertex;
 
-use super::ShadingCs;
+use super::ShadingColour;
 
 /// Subdivision stops once every pair of corner colours differs by at most
 /// this much per component (each component normalised to `[0, 1]`).
@@ -31,14 +31,15 @@ pub(super) const MIN_SUBDIVISION_EXTENT: f64 = 1.0;
 /// bounds one mesh near 400 MiB.
 pub(super) const MAX_MESH_TRIANGLES: usize = 1 << 22;
 
-/// The triangles of a mesh being decoded, holding at most a fixed number.
-pub(super) struct TriangleSink {
-    triangles: Vec<[GouraudVertex; 3]>,
+/// The triangles of a mesh being decoded, of `N`-byte colours, holding at
+/// most a fixed number.
+pub(super) struct TriangleSink<const N: usize = 3> {
+    triangles: Vec<[GouraudVertex<N>; 3]>,
     limit: usize,
     full: bool,
 }
 
-impl TriangleSink {
+impl<const N: usize> TriangleSink<N> {
     /// A sink holding at most [`MAX_MESH_TRIANGLES`] triangles.
     pub(super) const fn new() -> Self {
         Self::with_limit(MAX_MESH_TRIANGLES)
@@ -55,7 +56,7 @@ impl TriangleSink {
 
     /// Append `triangle`, or drop it and mark the sink full when the sink
     /// holds its limit.
-    pub(super) fn push(&mut self, triangle: [GouraudVertex; 3]) {
+    pub(super) fn push(&mut self, triangle: [GouraudVertex<N>; 3]) {
         if self.triangles.len() < self.limit {
             self.triangles.push(triangle);
         } else {
@@ -69,7 +70,7 @@ impl TriangleSink {
     }
 
     /// The triangles held, with a warning when some were dropped.
-    pub(super) fn finish(self) -> Vec<[GouraudVertex; 3]> {
+    pub(super) fn finish(self) -> Vec<[GouraudVertex<N>; 3]> {
         if self.full {
             log::warn!(
                 "shading: mesh exceeds {} triangles — the remainder is not painted",
@@ -107,17 +108,13 @@ pub(super) trait Corner: Copy {
     fn delta(a: Self, b: Self) -> f64;
 }
 
-impl Corner for [u8; 3] {
-    const ZERO: Self = [0; 3];
+impl<const N: usize> Corner for [u8; N] {
+    const ZERO: Self = [0; N];
 
     fn mid(a: Self, b: Self) -> Self {
         // lerp_u8(a, b, 128) = round((a + b) / 2).
         use color::convert::lerp_u8;
-        [
-            lerp_u8(a[0], b[0], 128),
-            lerp_u8(a[1], b[1], 128),
-            lerp_u8(a[2], b[2], 128),
-        ]
+        std::array::from_fn(|i| lerp_u8(a[i], b[i], 128))
     }
 
     fn delta(a: Self, b: Self) -> f64 {
@@ -146,8 +143,9 @@ impl Corner for Param {
 }
 
 /// How the colour data of a mesh vertex becomes a [`Corner`] and how a
-/// corner becomes sRGB.
-pub(super) trait CornerSource {
+/// corner becomes the `N` bytes of a pixel: sRGB for `N = 3`, ink for
+/// `N = 8`.
+pub(super) trait CornerSource<const N: usize = 3> {
     /// The corner value this source produces.
     type Corner: Corner;
 
@@ -163,39 +161,40 @@ pub(super) trait CornerSource {
     /// fields, divided by their maximum, are `normalised`.
     fn corner(&self, components: &[f64], normalised: &[f64]) -> Self::Corner;
 
-    /// The sRGB colour of `corner`.
-    fn rgb(&self, corner: Self::Corner) -> [u8; 3];
+    /// The pixel bytes of `corner`.
+    fn color(&self, corner: Self::Corner) -> [u8; N];
 }
 
-/// Vertices carrying the colour space's components, converted at the vertex.
-pub(super) struct DirectColors<'a> {
-    pub(super) cs: ShadingCs<'a>,
+/// Vertices carrying the colour space's components, converted at the vertex
+/// through `cs`.
+pub(super) struct DirectColors<C> {
+    pub(super) cs: C,
 }
 
-impl CornerSource for DirectColors<'_> {
-    type Corner = [u8; 3];
+impl<const N: usize, C: ShadingColour<N>> CornerSource<N> for DirectColors<C> {
+    type Corner = [u8; N];
     const SUBDIVIDE_TRIANGLES: bool = false;
 
     fn components(&self) -> usize {
         self.cs.channels()
     }
 
-    fn corner(&self, components: &[f64], _normalised: &[f64]) -> [u8; 3] {
-        self.cs.to_rgb(components)
+    fn corner(&self, components: &[f64], _normalised: &[f64]) -> [u8; N] {
+        self.cs.convert(components)
     }
 
-    fn rgb(&self, corner: [u8; 3]) -> [u8; 3] {
+    fn color(&self, corner: [u8; N]) -> [u8; N] {
         corner
     }
 }
 
 /// Vertices carrying one parametric value, coloured through `ramp`, which
 /// samples the shading function across the `Decode` range of `t`.
-pub(super) struct ParamColors {
-    pub(super) ramp: ColorRamp,
+pub(super) struct ParamColors<const N: usize = 3> {
+    pub(super) ramp: ColorRamp<N>,
 }
 
-impl CornerSource for ParamColors {
+impl<const N: usize> CornerSource<N> for ParamColors<N> {
     type Corner = Param;
     const SUBDIVIDE_TRIANGLES: bool = true;
 
@@ -207,8 +206,8 @@ impl CornerSource for ParamColors {
         Param(normalised.first().copied().unwrap_or(0.0))
     }
 
-    fn rgb(&self, corner: Param) -> [u8; 3] {
-        let mut out = [0u8; 3];
+    fn color(&self, corner: Param) -> [u8; N] {
+        let mut out = [0u8; N];
         self.ramp.write(corner.0, &mut out);
         out
     }
@@ -239,10 +238,10 @@ impl<C: Corner> MeshVertex<C> {
 /// it spans at most [`MIN_SUBDIVISION_EXTENT`] pixels, or
 /// [`MAX_TRIANGLE_DEPTH`] is reached; the corner values interpolate linearly
 /// across the triangle, so the midpoints are exact.
-pub(super) fn emit_triangle<S: CornerSource>(
+pub(super) fn emit_triangle<const N: usize, S: CornerSource<N>>(
     source: &S,
     tri: [MeshVertex<S::Corner>; 3],
-    out: &mut TriangleSink,
+    out: &mut TriangleSink<N>,
 ) {
     let mut stack = vec![(tri, 0u8)];
     while !out.is_full()
@@ -259,7 +258,7 @@ pub(super) fn emit_triangle<S: CornerSource>(
             out.push([a, b, c].map(|v| GouraudVertex {
                 x: v.x,
                 y: v.y,
-                color: source.rgb(v.corner),
+                color: source.color(v.corner),
             }));
             continue;
         }
@@ -362,7 +361,7 @@ mod tests {
     #[test]
     fn direct_triangle_is_emitted_whole() {
         let source = DirectColors {
-            cs: ShadingCs {
+            cs: super::super::ShadingCs {
                 doc: &crate::test_helpers::empty_doc(),
                 space: &super::super::ColorSpace::DeviceRgb,
             },

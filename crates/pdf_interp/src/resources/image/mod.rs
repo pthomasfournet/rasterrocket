@@ -46,6 +46,7 @@ use std::borrow::Cow;
 
 use pdf::{Dictionary, Document, Object, ObjectId};
 
+use crate::resources::ColorSpace;
 use crate::resources::dict_ext::DictExt;
 
 // ── GPU JPEG/JPEG2k acceleration ──────────────────────────────────────────────
@@ -217,6 +218,24 @@ pub struct DecodedImage {
     /// dictionary declares, or a codec that stopped short): the image is
     /// drawn, and the page is incomplete.
     pub partial: Option<String>,
+    /// The colorant tints of an image in a `Separation` or `DeviceN` space,
+    /// kept when the decode was asked to keep them.
+    pub tints: Option<ImageTints>,
+    /// Whether the decode was asked to keep tints
+    /// ([`ImageDecodeCtx::keep_tints`]): `tints` is then present for every
+    /// image it applies to.
+    pub kept_tints: bool,
+}
+
+/// The colorant tints of an image in a `Separation` or `DeviceN` space, on
+/// the grid of its decoded samples, for drawing on an ink canvas.
+#[derive(Debug)]
+pub struct ImageTints {
+    /// The image's colour space.
+    pub space: ColorSpace,
+    /// One byte per component of `space` per pixel, `/Decode` applied:
+    /// 0 is no colorant, 255 the full tint.
+    pub data: Vec<u8>,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -464,6 +483,10 @@ pub struct ImageDescriptor {
 ///   codec fails on the image or on its `/SMask` or stencil `/Mask`
 ///   (content is lost — surface to the caller).
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the masks, the base decode and the drawing entries of one image dictionary"
+)]
 pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
     ctx: &mut ImageDecodeCtx<'_>,
     xobjects: &Dictionary,
@@ -567,7 +590,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         Err(msg) => return unresolved(&msg),
     };
 
-    let (mut img, partial) = match dispatch::decode_image_stream(
+    let (mut img, partial, tints) = match dispatch::decode_image_stream(
         ctx,
         &src,
         draw_size,
@@ -576,7 +599,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         #[cfg(feature = "gpu-jpeg-huffman")]
         jpeg_gpu,
     ) {
-        Ok(decoded) => (decoded.image, decoded.partial),
+        Ok(decoded) => (decoded.image, decoded.partial, decoded.tints),
         Err(msg) => {
             log::warn!("image: /{}: {msg}", String::from_utf8_lossy(name));
             return ImageResolution::DecodeFailed(msg);
@@ -599,6 +622,8 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
         own_soft_mask: matches!(smask_entry, Some(Object::Reference(_))),
         partial,
+        tints,
+        kept_tints: ctx.keep_tints,
     })
 }
 
@@ -763,6 +788,9 @@ pub struct ImageDecodeCtx<'a> {
     /// Identity of the document within the cache.
     #[cfg(feature = "cache")]
     pub doc_id: Option<gpu::cache::DocId>,
+    /// Keep the colorant tints of an image in a `Separation` or `DeviceN`
+    /// space beside its colours ([`DecodedImage::tints`]).
+    pub keep_tints: bool,
 }
 
 impl<'a> ImageDecodeCtx<'a> {
@@ -786,6 +814,7 @@ impl<'a> ImageDecodeCtx<'a> {
             image_cache: None,
             #[cfg(feature = "cache")]
             doc_id: None,
+            keep_tints: false,
         }
     }
 }

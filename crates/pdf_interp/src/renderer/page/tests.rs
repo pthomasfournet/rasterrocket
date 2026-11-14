@@ -2027,6 +2027,8 @@ fn short_stencil_through_a_pattern_is_an_image_failure() {
         interpolate: false,
         own_soft_mask: false,
         partial: None,
+        tints: None,
+        kept_tints: false,
     };
     renderer.blit_image(&stencil, Some(b"Im0"));
     let failures = renderer.finish().1.image_failures;

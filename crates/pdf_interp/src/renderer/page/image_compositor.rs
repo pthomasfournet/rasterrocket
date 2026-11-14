@@ -8,7 +8,7 @@ use raster::{
     types::BlendMode,
 };
 
-use super::canvas::InkPattern;
+use super::canvas::{InkPattern, TransferredInk};
 use super::image_blit::blend_rgb;
 #[cfg(feature = "cache")]
 use super::image_sampler::{GridClip, SampleGrid};
@@ -90,6 +90,9 @@ pub(super) struct ImageCompositor<'a> {
     /// The transfer function the samples' ink maps through on an ink
     /// bitmap; on an RGB bitmap the samples are mapped beforehand.
     pub(super) transfer: Option<&'a Transfer>,
+    /// Whether the samples are ink, eight bytes each, for an ink bitmap;
+    /// otherwise they are RGB, three bytes each.  Set only with a pipe.
+    pub(super) ink_samples: bool,
 }
 
 impl<'a> ImageCompositor<'a> {
@@ -104,11 +107,13 @@ impl<'a> ImageCompositor<'a> {
             pipe: (!direct).then(|| paint.pipe()),
             solid: None,
             transfer: None,
+            ink_samples: false,
         }
     }
 
     /// Paint the samples of row `y` of `bitmap` from column `x0`: `colours`
-    /// holds the RGB of each sample and `shape` its coverage, `0` where the
+    /// holds the RGB of each sample, or its ink under
+    /// [`Self::ink_samples`], and `shape` its coverage, `0` where the
     /// sample paints nothing.  Columns past the row's end paint nothing.
     ///
     /// Through the pipe, each run of painted samples composites as one span
@@ -124,10 +129,11 @@ impl<'a> ImageCompositor<'a> {
         shape: &[u8],
     ) {
         let bpp = P::BYTES;
+        let sample_bytes = if self.ink_samples { 8 } else { 3 };
         let (row, mut alpha_row) = bitmap.row_and_alpha_mut(y);
         let x0 = x0 as usize;
         let columns = (row.len() / bpp).saturating_sub(x0).min(shape.len());
-        let (colours, shape) = (&colours[..columns * 3], &shape[..columns]);
+        let (colours, shape) = (&colours[..columns * sample_bytes], &shape[..columns]);
         let Some(pipe) = &self.pipe else {
             debug_assert_eq!(P::MODE, PixelMode::Rgb8, "the direct blend writes RGB");
             let dst = &mut row[x0 * 3..(x0 + columns) * 3];
@@ -153,11 +159,13 @@ impl<'a> ImageCompositor<'a> {
                 .map_or(columns, |n| a + n);
             let (c0, c1) = (x0 + a, x0 + b);
             let samples = RowPattern {
-                data: &colours[a * 3..b * 3],
+                data: &colours[a * sample_bytes..b * sample_bytes],
             };
             let ink = InkPattern::new(&samples, self.transfer);
+            let native = TransferredInk::new(&samples, self.transfer);
             let src = match self.solid {
                 Some(solid) => PipeSrc::Solid(solid),
+                None if self.ink_samples => PipeSrc::Pattern(&native),
                 None if P::MODE == PixelMode::DeviceN8 => PipeSrc::Pattern(&ink),
                 None => PipeSrc::Pattern(&samples as &dyn Pattern),
             };

@@ -16,12 +16,12 @@ use crate::resources::dict_ext::DictExt;
 ///   two vertices' flags are ignored);
 /// - 1 → it extends edge (B, C) of the previous triangle: triangle (B, C, D);
 /// - 2 → it extends edge (C, A) of the previous triangle: triangle (C, A, D).
-pub(super) fn decode_free_form<S: CornerSource>(
+pub(super) fn decode_free_form<const N: usize, S: CornerSource<N>>(
     sh: &Dictionary,
     data: &[u8],
     source: &S,
     format: &VertexFormat<'_>,
-    out: &mut TriangleSink,
+    out: &mut TriangleSink<N>,
 ) {
     let Some(bpf) = parse_bits_per_flag(sh, 4) else {
         return;
@@ -75,12 +75,12 @@ pub(super) fn decode_free_form<S: CornerSource>(
 /// of two adjacent rows splits along its diagonal into the triangles
 /// (top-left, top-right, bottom-left) and (top-right, bottom-right,
 /// bottom-left).
-pub(super) fn decode_lattice<S: CornerSource>(
+pub(super) fn decode_lattice<const N: usize, S: CornerSource<N>>(
     sh: &Dictionary,
     data: &[u8],
     source: &S,
     format: &VertexFormat<'_>,
-    out: &mut TriangleSink,
+    out: &mut TriangleSink<N>,
 ) {
     let Some(verts_per_row) = sh.get_i64(b"VerticesPerRow") else {
         log::warn!("shading/type5: VerticesPerRow is missing — skipping the shading");

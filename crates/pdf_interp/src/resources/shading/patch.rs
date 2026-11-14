@@ -138,18 +138,18 @@ pub(super) fn split_patch_v<C: Corner>(p: &Patch<C>) -> (Patch<C>, Patch<C>) {
 ///
 /// `u=0` → row 0; `u=1` → row 3. `v=0` → col 0; `v=1` → col 3.
 #[inline]
-pub(super) fn corner_vertex<S: CornerSource>(
+pub(super) fn corner_vertex<const N: usize, S: CornerSource<N>>(
     source: &S,
     p: &Patch<S::Corner>,
     u: usize,
     v: usize,
-) -> GouraudVertex {
+) -> GouraudVertex<N> {
     let row = u * 3;
     let col = v * 3;
     GouraudVertex {
         x: p.xy[row][col][0],
         y: p.xy[row][col][1],
-        color: source.rgb(p.color[u][v]),
+        color: source.color(p.color[u][v]),
     }
 }
 
@@ -159,10 +159,10 @@ pub(super) fn corner_vertex<S: CornerSource>(
 /// other, the control points span at most [`MIN_SUBDIVISION_EXTENT`] pixels
 /// (the patch lies in their convex hull), or [`MAX_PATCH_DEPTH`] is reached.
 /// The work stack is explicit, so the native stack depth is constant.
-pub(super) fn tessellate_patch<S: CornerSource>(
+pub(super) fn tessellate_patch<const N: usize, S: CornerSource<N>>(
     source: &S,
     patch: Patch<S::Corner>,
-    out: &mut TriangleSink,
+    out: &mut TriangleSink<N>,
 ) {
     // Pre-allocate the work stack.  In a DFS traversal of a 4-ary tree of depth D,
     // at most 3*D+1 nodes are simultaneously live on the stack (3 siblings waiting
@@ -386,13 +386,13 @@ impl PatchKind {
 /// continues the boundary of the previous patch from its corner `f`.  A
 /// record that cannot be placed (a shared-edge flag with no previous patch,
 /// or a flag above 3) is skipped.
-pub(super) fn decode_patch_mesh<S: CornerSource>(
+pub(super) fn decode_patch_mesh<const N: usize, S: CornerSource<N>>(
     sh: &Dictionary,
     data: &[u8],
     source: &S,
     format: &VertexFormat<'_>,
     kind: PatchKind,
-    out: &mut TriangleSink,
+    out: &mut TriangleSink<N>,
 ) {
     let shading_type = kind.shading_type();
     let Some(bpf) = parse_bits_per_flag(sh, shading_type) else {

@@ -86,7 +86,10 @@ impl PageRenderer<'_> {
         };
         // Decode the image only when neither this page nor, for an image
         // other pages draw too, the document holds a decode.
-        let memoized = self.image_memo.borrow().get(key, draw_size);
+        let memoized = self
+            .image_memo
+            .borrow()
+            .get(key, draw_size, self.keeps_tints());
         if let Some(decoded) = memoized {
             self.draw_image_xobject(name, &decoded);
             return;
@@ -151,7 +154,7 @@ impl PageRenderer<'_> {
             Outcome::Image {
                 image,
                 draw_size: made,
-            } if document_images::serves(&image, made, draw_size) => {
+            } if document_images::serves(&image, made, draw_size, self.keeps_tints()) => {
                 if let Some(reason) = &image.partial {
                     self.record_partial_image(Some(name), reason.clone());
                 }
@@ -236,6 +239,7 @@ impl PageRenderer<'_> {
             image_cache: self.cache_state.as_ref().map(|cs| &cs.cache),
             #[cfg(feature = "cache")]
             doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
+            keep_tints: self.keeps_tints(),
         };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).
         // Each branch is a separately monomorphised call; no decoder is wasted.

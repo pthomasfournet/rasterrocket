@@ -95,6 +95,8 @@ pub(crate) fn decode_inline_image<
             interpolate: stream.dict.get_bool(b"Interpolate").unwrap_or(false),
             own_soft_mask: false,
             partial: decoded.partial,
+            tints: decoded.tints,
+            kept_tints: ctx.keep_tints,
         }),
         Err(e) => failed(e),
     }

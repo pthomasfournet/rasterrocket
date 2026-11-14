@@ -19,6 +19,76 @@ use crate::resources::transfer::Transfer;
 /// The process channels C, M, Y and K of an ink canvas.
 pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
 
+/// The ink a `Separation` or `DeviceN` colour of a given space paints on an
+/// ink canvas, fixed for a page once the page's spot slots hold the
+/// space's spot colorants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ColorantPlan {
+    /// Component `i` paints its tint in the channels of bit mask
+    /// `channels[i]`: one bit for a process or slotted spot colorant, every
+    /// bit for `/All`, none for `/None`.  A channel several components
+    /// paint takes the largest tint.
+    Channels(Box<[u8]>),
+    /// The space's spot colorants do not all hold a slot: the colour is the
+    /// process ink of its alternate colour.
+    Process,
+}
+
+impl ColorantPlan {
+    /// The channels a colour of the space paints.
+    pub(crate) fn paints(&self) -> ChannelMask {
+        match self {
+            Self::Channels(channels) => ChannelMask::new(channels.iter().fold(0, |a, &b| a | b)),
+            Self::Process => PROCESS_CHANNELS,
+        }
+    }
+
+    /// The ink of the colour `comps` ([0, 1] each) of `space`, the space
+    /// the plan was made for.
+    pub(crate) fn ink(
+        &self,
+        doc: &pdf::Document,
+        space: &crate::resources::ColorSpace,
+        comps: &[f64],
+    ) -> [u8; 8] {
+        match self {
+            Self::Channels(channels) => {
+                let mut ink = [0u8; 8];
+                for (&bits, &tint) in channels.iter().zip(comps) {
+                    paint_tint(&mut ink, bits, gray_to_u8(tint));
+                }
+                ink
+            }
+            Self::Process => {
+                let [c, m, y, k] = space.process_ink(doc, comps);
+                [c, m, y, k, 0, 0, 0, 0]
+            }
+        }
+    }
+
+    /// The ink of the tints `tints`, one byte per component, under a plan
+    /// of [`Self::Channels`]; `None` under [`Self::Process`].
+    pub(crate) fn ink_of_tints(&self, tints: &[u8]) -> Option<[u8; 8]> {
+        let Self::Channels(channels) = self else {
+            return None;
+        };
+        let mut ink = [0u8; 8];
+        for (&bits, &tint) in channels.iter().zip(tints) {
+            paint_tint(&mut ink, bits, tint);
+        }
+        Some(ink)
+    }
+}
+
+/// Raise each channel of `ink` in the bit mask `bits` to at least `tint`.
+fn paint_tint(ink: &mut [u8; 8], bits: u8, tint: u8) {
+    for (i, v) in ink.iter_mut().enumerate() {
+        if bits & 1 << i != 0 {
+            *v = (*v).max(tint);
+        }
+    }
+}
+
 /// Current fill or stroke colour, in the forms the raster pipeline accepts.
 ///
 /// The colour is held as sRGB bytes, painted on an RGB canvas, and as ink

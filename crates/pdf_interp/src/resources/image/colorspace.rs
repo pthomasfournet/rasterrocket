@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
 
-use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, SoftMask};
+use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask};
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{
     ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
@@ -361,6 +361,46 @@ impl ImageColour {
         }
         let (cs, bytes) = converted?;
         Some(descriptor(width, height, cs, ImageData::Cpu(bytes), smask))
+    }
+}
+
+impl ImageColour {
+    /// The colorant tints of `samples` in the image's `Separation` or
+    /// `DeviceN` space: each component mapped through its `/Decode` pair to
+    /// a byte, 0 no colorant and 255 the full tint.  `None` for any other
+    /// space, for samples whose channel count is not the space's, and for
+    /// samples that are not host-resident.
+    pub(super) fn tints(&self, samples: &Samples) -> Option<ImageTints> {
+        let space = self.space.as_ref().filter(|s| {
+            matches!(
+                s,
+                ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
+            )
+        })?;
+        let n = space.ncomponents();
+        if samples.layout != Layout::Color(u8::try_from(n).ok()?) {
+            return None;
+        }
+        let bytes = samples.data.as_cpu()?;
+        let luts: Vec<[u8; 256]> = self
+            .decode
+            .iter()
+            .map(|&(dmin, dmax)| decode_lut(dmin, dmax))
+            .collect();
+        if luts.len() != n {
+            return None;
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(bytes.len()).ok()?;
+        data.extend(
+            bytes
+                .chunks_exact(n)
+                .flat_map(|px| px.iter().zip(&luts).map(|(&s, lut)| lut[usize::from(s)])),
+        );
+        Some(ImageTints {
+            space: space.clone(),
+            data,
+        })
     }
 }
 
