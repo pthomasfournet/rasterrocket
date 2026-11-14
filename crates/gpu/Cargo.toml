@@ -20,16 +20,15 @@ required-features = ["vulkan", "cache"]
 
 [features]
 # Enable GPU-accelerated JPEG decoding via NVIDIA nvJPEG.
-# Requires libnvjpeg.so to be present at link time (ships with CUDA 12).
+# Requires libnvjpeg.so at link time (ships with the CUDA 13 toolkit).
 nvjpeg = []
 # Enable GPU-accelerated JPEG 2000 decoding via NVIDIA nvJPEG2000.
-# Requires libnvjpeg2k.so at link time. Install location depends on the
-# CUDA toolkit major version: /usr/lib/x86_64-linux-gnu/libnvjpeg2k/13/
-# for CUDA 13 packages, /usr/lib/x86_64-linux-gnu/libnvjpeg2k/12/ for
-# CUDA 12. build.rs probes both, preferring 13.
+# Requires libnvjpeg2k.so at link time, from the CUDA 13 package at
+# /usr/lib/x86_64-linux-gnu/libnvjpeg2k/13/ (build.rs also probes the
+# unversioned /usr/lib/x86_64-linux-gnu/libnvjpeg2k/).
 nvjpeg2k = []
 # Enable GPU rotation via CUDA NPP nppiRotate_8u_C1R_Ctx.
-# Requires libnppig.so + libnppc.so + libcudart.so (all ship with CUDA 12).
+# Requires libnppig.so + libnppc.so + libcudart.so (all ship with the CUDA 13 toolkit).
 gpu-deskew = []
 # Enable GPU vs CPU parity tests (requires a CUDA device at test time).
 # cargo test -p rasterrocket-gpu --lib --features gpu-validation -- aa_fill_gpu_vs_cpu

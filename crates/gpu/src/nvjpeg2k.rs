@@ -1,7 +1,7 @@
 //! nvJPEG2000 GPU-accelerated JPEG 2000 decoding.
 //!
 //! Wraps the NVIDIA nvJPEG2000 library (installed at
-//! `/usr/lib/x86_64-linux-gnu/libnvjpeg2k/12/`) to decode JPEG 2000 bitstreams
+//! `/usr/lib/x86_64-linux-gnu/libnvjpeg2k/13/`) to decode JPEG 2000 bitstreams
 //! on the GPU, then copies the finished planar component planes back to host
 //! memory via `cudaMemcpy2D`.
 //!

@@ -1,6 +1,6 @@
 //! nvJPEG GPU-accelerated JPEG decoding.
 //!
-//! Wraps the NVIDIA nvJPEG library (CUDA 12, version 12.3.5 on this system)
+//! Wraps the NVIDIA nvJPEG library of the CUDA 13 toolkit
 //! to decode JPEG bitstreams on the GPU, writing finished pixel bytes directly
 //! into a host `Vec<u8>` via an async CUDA stream.
 //!
@@ -204,7 +204,7 @@ unsafe extern "C" {
     /// allocator parameters to use the default CUDA allocators (`cudaMalloc` /
     /// `cudaFreeHost`).  `flags` must be 0.
     ///
-    /// Signature (nvjpeg.h, CUDA 12.8):
+    /// Signature (nvjpeg.h):
     /// `nvjpegCreateEx(backend, dev_allocator, pinned_allocator, flags, handle)`
     fn nvjpegCreateEx(
         backend: nvjpegBackend_t,
@@ -309,7 +309,7 @@ impl std::fmt::Display for NvJpegError {
             }
             Self::Overflow => write!(f, "pixel buffer size overflow (image too large)"),
             Self::CudaError(code) => {
-                // Codes from cuda.h (CUDA 12.8); confirmed against installed headers.
+                // Codes from cuda.h.
                 let name = match *code {
                     1 => "CUDA_ERROR_INVALID_VALUE",
                     2 => "CUDA_ERROR_OUT_OF_MEMORY",
