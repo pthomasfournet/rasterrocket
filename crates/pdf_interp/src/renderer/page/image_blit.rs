@@ -9,6 +9,8 @@ use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend_u8, with_canvas};
+#[cfg(feature = "cache")]
+use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
 use super::image_reduce::{self, DeviceWindow};
 use super::image_sampler::{BlendedRows, Filter, GridClip, MaskSampler, SampleGrid, sample_bytes};
@@ -398,17 +400,25 @@ impl PageRenderer<'_> {
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            if self.try_gpu_blit_image(cached, grid, grid_clip, overprint) {
-                self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
-                return Ok(());
+            match self.try_gpu_blit_image(cached, grid, grid_clip, overprint) {
+                BlitOutcome::Drawn => {
+                    self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
+                    return Ok(());
+                }
+                // Nothing is on the bitmap yet: the host copy, when the
+                // read-back succeeds, draws the image through the CPU path.
+                BlitOutcome::NotStarted => {
+                    if let Some(host) = self.host_copy(img, "a failed device blit") {
+                        return self.composite_image(&host, ctm, mask, grid, grid_clip, overprint);
+                    }
+                    return Err("the device blit and the host read-back failed".to_owned());
+                }
+                BlitOutcome::Partial => {
+                    return Err(
+                        "the device blit failed after compositing part of the image".to_owned()
+                    );
+                }
             }
-            // Promotion or kernel dispatch failed and there are no host
-            // bytes to fall back to.  The image decoded successfully but
-            // cannot be rendered: this is the same silent-blank class the
-            // `ImageResolution` contract eradicates upstream, so record it
-            // as an image failure rather than dropping the image with only a
-            // log line.
-            return Err("GPU blit failed, no host fallback".to_owned());
         }
 
         // CPU path: needs host-resident pixels.
