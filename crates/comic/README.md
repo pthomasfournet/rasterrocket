@@ -32,7 +32,7 @@ before any is decoded. Entries are read under a
 with `ComicError::ArchiveTooLarge`), and image dimensions are checked before
 decoding. An embedded PDF opens with `ComicOptions::session`, a
 `SessionConfig` (overprint, antialiasing, annotations, fonts, decryption,
-backend); `rrocket` fills it from the same flags as for PDF input and uses
+backend), whose `rotation` also turns every page image; `rrocket` fills it from the same flags as for PDF input and uses
 this crate for archive input. See the
 [API reference](../../docs/api-reference.md#rasterrocket-comic-crate--comic-archive-input).
 

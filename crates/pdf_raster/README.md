@@ -30,7 +30,18 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - `open_session_from_shared` (`Arc<[u8]>`, `&'static [u8]` or any other
   `AsRef<[u8]>` storage, read in place) and `open_session_from_reader`
   (any `Read`, read to its end) beside `open_session` and
-  `open_session_from_bytes`.
+  `open_session_from_bytes`; `read_into_memory` makes `open_session` copy
+  the file instead of mapping it.
+- `page_box` (`PageBox`, default the `CropBox`) and `rotation` (`Rotation`,
+  quarter turns added to each page's `/Rotate`) set the page geometry.
+- `RasterSession::unsupported_features` and
+  `PageDiagnostics::unsupported_features` list the features the renderer
+  ignores: JavaScript, XFA, portable collections, 3D and multimedia
+  annotations.
+- `SessionConfig::gpu_pages` (`vulkan` feature) renders pages made of solid
+  fills and strokes whole on a Vulkan GPU beside the CPU workers, with the
+  same bytes; `PageDiagnostics::device_page` reports where each page
+  rendered.
 - `transparent_background` (off by default) renders over a transparent
   backdrop: RGBA pages (`PixelFormat::Rgba8`, straight alpha) from the batch
   entry points and `render_page_rgba`, and an RGB bitmap with an alpha plane
