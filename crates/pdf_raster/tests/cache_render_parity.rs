@@ -25,7 +25,10 @@
 )]
 mod common;
 
-use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
+use common::{
+    assert_identical, corpus_fixture, render, render_diagnosed, session, stream_object,
+    with_page_tree,
+};
 use jpeg_encoder::{ColorType, Encoder};
 use rasterrocket::{
     BackendPolicy, RasterError, RasterSession, SessionConfig, open_session, open_session_from_bytes,
@@ -243,8 +246,12 @@ fn synthetic_page_renders_identically(backend: Backend) {
     assert!(cache.is_empty(), "cache must start empty");
 
     // Cold pass: every eligible JPEG misses, decodes, and is inserted.
-    let cold = render(&session, 1);
+    let (cold, diag) = render_diagnosed(&session, 1);
     assert_identical(&cpu, &cold, "cold cache");
+    assert!(
+        diag.device_image_blits > 0,
+        "the cached images are drawn by the device blit kernel"
+    );
     // /ImA is first drawn at its resolution, so it is cached and its later
     // reduced draws read it back; /ImB is cached; /ImC carries an /SMask
     // and must not be.
@@ -266,8 +273,9 @@ on_each_backend!(
     synthetic_page_renders_identically_through_the_vulkan_cache
 );
 
-/// A page painted on the overprint canvas composites its cached images
-/// through the ink conversion, byte-identically to the CPU.
+/// A page painted on the overprint canvas draws its cached images through
+/// the device blit kernel and converts the samples to ink,
+/// byte-identically to the CPU.
 fn overprint_page_renders_identically(backend: Backend) {
     let pdf = fixture_pdf_with("/ExtGState << /GSo << /OP true /OPM 1 >> >>", "/GSo gs\n");
     let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
@@ -285,8 +293,15 @@ fn overprint_page_renders_identically(backend: Backend) {
     let Some(session) = backend.session(open_session_from_bytes(pdf, &config)) else {
         return;
     };
-    let gpu = render(&session, 1);
+    let (gpu, diag) = render_diagnosed(&session, 1);
     assert_identical(&cpu, &gpu, "overprint page");
+    assert!(
+        diag.device_image_blits > 0 && diag.image_failures.is_empty(),
+        "the cached images are drawn by the device blit kernel \
+         ({} blits, failures {:?})",
+        diag.device_image_blits,
+        diag.image_failures
+    );
     assert_eq!(
         session.image_cache().expect("image cache").len(),
         2,

@@ -20,14 +20,14 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
-use rasterrocket::{
-    BackendPolicy, DevicePage, PageDiagnostics, RasterError, RasterSession, RenderParams,
-    SessionConfig, open_session, open_session_from_bytes, render_page_rgb_with_diagnostics,
+use common::{
+    assert_identical, corpus_fixture, render, render_diagnosed, session, stream_object,
+    with_page_tree,
 };
-
-/// A render as [`assert_identical`] compares it.
-type Page = (u32, u32, Vec<u8>);
+use rasterrocket::{
+    BackendPolicy, DevicePage, RasterError, RasterSession, SessionConfig, open_session,
+    open_session_from_bytes,
+};
 
 /// A config rendering GPU pages under `policy` on the device
 /// `PDF_RASTER_VULKAN_DEVICE` names.
@@ -44,14 +44,6 @@ fn gpu_session(pdf: Vec<u8>) -> Option<RasterSession> {
     open_session_from_bytes(pdf, &gpu_config(BackendPolicy::ForceVulkan))
         .inspect_err(|e| eprintln!("skipping: no Vulkan device: {e}"))
         .ok()
-}
-
-/// Page `page` of `session` with the diagnostics of the render.
-fn render_diagnosed(session: &RasterSession, page: u32) -> (Page, PageDiagnostics) {
-    let (bmp, diag) =
-        render_page_rgb_with_diagnostics(session, page, &RenderParams::new(common::SCALE))
-            .expect("render page");
-    ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
 }
 
 /// A one-page PDF of `content` on a 400 × 400 pt page whose resources

@@ -38,8 +38,7 @@ and TIFF (`--tiff`) work, the last also fax-coded (on master).
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
-**Overprint simulation has gaps (on master).** Under `--overprint`,
-`Separation` / `DeviceN` images and shadings, tiling-pattern cells and
+**Overprint simulation has a gap (on master).** Under `--overprint`,
 transparency groups as a whole knock out instead of overprinting; see
 [Current status](#current-status-2026-11-13).
 

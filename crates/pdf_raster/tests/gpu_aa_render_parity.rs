@@ -25,11 +25,11 @@
 )]
 mod common;
 
-use common::{assert_identical, corpus_fixture, render, session, stream_object, with_page_tree};
-use rasterrocket::{
-    BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig, open_session,
-    open_session_from_bytes, render_page_rgb_with_diagnostics,
+use common::{
+    assert_identical, corpus_fixture, render, render_diagnosed, session, stream_object,
+    with_page_tree,
 };
+use rasterrocket::{BackendPolicy, SessionConfig, open_session, open_session_from_bytes};
 
 /// A 400×400 pt page whose fills cover every dispatch decision:
 ///
@@ -125,18 +125,6 @@ fn require_device_fills() {
          and without the override both renders run on the CPU"
     );
 }
-
-/// Page `page` of `session` at [`common::SCALE`] as `(width, height,
-/// bytes)`, with the diagnostics of the same render.
-fn render_diagnosed(session: &RasterSession, page: u32) -> (Page, PageDiagnostics) {
-    let (bmp, diag) =
-        render_page_rgb_with_diagnostics(session, page, &RenderParams::new(common::SCALE))
-            .expect("render page");
-    ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
-}
-
-/// A render as [`assert_identical`] compares it.
-type Page = (u32, u32, Vec<u8>);
 
 /// Fills of the synthetic page the device takes: every fill but the one
 /// under the diamond path clip, which the device fill declines.

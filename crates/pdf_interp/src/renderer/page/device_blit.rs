@@ -38,23 +38,6 @@ impl PageRenderer<'_> {
             .flatten()
     }
 
-    /// `decoded` with its samples host-resident when they are
-    /// device-resident and the canvas holds ink, which the blit kernel
-    /// cannot write; unchanged otherwise, or when the copy fails.  Applied
-    /// before the image enters the image memo, so the samples are read
-    /// back once per page however often the image is drawn.
-    pub(super) fn host_resident_for_ink(
-        &self,
-        mut decoded: crate::resources::DecodedImage,
-    ) -> crate::resources::DecodedImage {
-        if self.canvas.kind() == CanvasKind::Ink
-            && let Some(host) = self.host_copy(&decoded.image, "an ink canvas")
-        {
-            decoded.image = host;
-        }
-        decoded
-    }
-
     /// A host-resident copy of `img` when its samples are device-resident,
     /// read back from the image cache for `purpose`; `None` when they are
     /// host-resident or the read-back fails.

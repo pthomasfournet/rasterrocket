@@ -17,8 +17,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use rasterrocket::{
-    BackendPolicy, RasterError, RasterOptions, RasterSession, RenderPurpose, RenderedPage,
-    SessionConfig, open_session_from_bytes, raster_pdf_from_bytes, render_page_rgb,
+    BackendPolicy, PageDiagnostics, RasterError, RasterOptions, RasterSession, RenderParams,
+    RenderPurpose, RenderedPage, SessionConfig, open_session_from_bytes, raster_pdf_from_bytes,
+    render_page_rgb, render_page_rgb_with_diagnostics,
 };
 
 /// A font directory named `name` under the test target's scratch space,
@@ -121,15 +122,27 @@ pub fn corpus_fixture(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// A render as [`assert_identical`] compares it: `(width, height, rgb
+/// bytes)`.
+pub type Page = (u32, u32, Vec<u8>);
+
 /// `(width, height, rgb bytes)` of one rendered page.
-pub fn render(session: &RasterSession, page: u32) -> (u32, u32, Vec<u8>) {
+pub fn render(session: &RasterSession, page: u32) -> Page {
     let bmp = render_page_rgb(session, page, SCALE).expect("render page");
     (bmp.width, bmp.height, bmp.data().to_vec())
 }
 
+/// Page `page` of `session` at [`SCALE`], with the diagnostics of the
+/// same render.
+pub fn render_diagnosed(session: &RasterSession, page: u32) -> (Page, PageDiagnostics) {
+    let (bmp, diag) = render_page_rgb_with_diagnostics(session, page, &RenderParams::new(SCALE))
+        .expect("render page");
+    ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
+}
+
 /// Assert two renders are byte-identical, reporting the divergence
 /// statistics the way the original findings were measured.
-pub fn assert_identical(cpu: &(u32, u32, Vec<u8>), gpu: &(u32, u32, Vec<u8>), what: &str) {
+pub fn assert_identical(cpu: &Page, gpu: &Page, what: &str) {
     assert_eq!((cpu.0, cpu.1), (gpu.0, gpu.1), "{what}: dimensions differ");
     assert_eq!(cpu.2.len(), gpu.2.len(), "{what}: byte length differs");
     let differing = cpu.2.iter().zip(&gpu.2).filter(|(a, b)| a != b).count();

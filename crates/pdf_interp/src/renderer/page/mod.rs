@@ -943,6 +943,9 @@ impl<'doc> PageRenderer<'doc> {
         diag.device_fill_failures = diag
             .device_fill_failures
             .saturating_add(self.diag.device_fill_failures);
+        diag.device_image_blits = diag
+            .device_image_blits
+            .saturating_add(self.diag.device_image_blits);
         diag.device_icc_conversions = diag
             .device_icc_conversions
             .saturating_add(self.diag.device_icc_conversions);

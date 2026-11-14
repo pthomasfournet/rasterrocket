@@ -95,6 +95,11 @@ pub struct PageDiagnostics {
     /// broken on this host; the first failure of the process is also
     /// logged at `warn`.
     pub device_fill_failures: u32,
+    /// Images drawn through the blit kernel of the image cache's backend
+    /// from device-resident samples.  Zero when the session holds no
+    /// image cache, and for images the CPU draws: masked images, draws
+    /// below the image's resolution, and draws beyond the blit tables.
+    pub device_image_blits: u32,
     /// Images in an ICC-based CMYK space converted to RGB on a GPU
     /// backend.  Zero when the session holds no backend, and for images
     /// below the device's size threshold, which convert on the CPU with

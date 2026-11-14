@@ -379,12 +379,8 @@ impl PageRenderer<'_> {
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            if self.canvas.kind() == CanvasKind::Ink {
-                return Err(
-                    "device-resident image could not be read back for the ink canvas".to_owned(),
-                );
-            }
             if self.try_gpu_blit_image(cached, grid, grid_clip) {
+                self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
                 return Ok(());
             }
             // Promotion or kernel dispatch failed and there are no host
