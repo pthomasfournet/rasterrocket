@@ -603,8 +603,16 @@ pub fn page_size_pts_by_id(
         crop_box: None,
     };
 
-    let Ok(dict) = doc.get_dict(page_id) else {
-        return Ok(fallback);
+    let dict = match doc.get_dict(page_id) {
+        Ok(dict) => dict,
+        Err(e) => {
+            log::warn!(
+                "page object {}: not a readable dictionary ({e}); measuring it as US Letter \
+                 (612 × 792 pt) with no rotation",
+                page_id.0
+            );
+            return Ok(fallback);
+        }
     };
 
     // ISO 32000-2 §7.7.3.4: MediaBox and CropBox are inheritable.
