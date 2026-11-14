@@ -518,7 +518,7 @@ Each document and page is classified:
 | `PASS` | within the limits, not registered |
 | `XFAIL` | a registered failure, within the registered limits |
 | `FAIL` | unexpected: not registered, a different failure, or worse than registered |
-| `XPASS` | surprise pass: registered but now passing; remove or tighten the entry |
+| `XPASS` | surprise pass: registered but now passing; remove the entry |
 
 Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
 

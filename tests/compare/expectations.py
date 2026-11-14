@@ -30,7 +30,7 @@ Every observed test is classified:
     XFAIL   fails as registered, within the registered limits
     FAIL    fails without an entry, with another outcome, or past the
             registered limits (unexpected)
-    XPASS   passes although registered (the entry is to be removed or tightened)
+    XPASS   passes although registered (the entry is to be removed)
 
 A run fails on any FAIL, and on any XPASS under --strict, unless --update
 rewrote a registry from it.  With --update, the registry is rewritten
@@ -176,7 +176,7 @@ def classify(obs: Observation, entry: Entry | None, limits: Mapping[str, float])
         return Result(
             obs,
             Verdict.XPASS,
-            f"registered as {entry.outcome}, now passes: remove or tighten the entry",
+            f"registered as {entry.outcome}, now passes: remove the entry",
             entry,
         )
     if entry is None:

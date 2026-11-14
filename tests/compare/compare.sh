@@ -32,8 +32,8 @@
 #   PASS    within the limits and not registered
 #   XFAIL   a registered failure, within the registered limits
 #   FAIL    unexpected: not registered, another kind, or worse than registered
-#   XPASS   surprise pass: registered as failing but passing; remove or
-#           tighten the entry
+#   XPASS   surprise pass: registered as failing but passing; remove the
+#           entry
 # -U records every new FAIL as an entry, reason "unclassified (seeded
 # DATE)"; reseeds a FAIL worse than registered, keeping its reason with
 # "(worsened DATE)" appended; lowers the limits of an XFAIL entry to the
@@ -226,7 +226,7 @@ if [[ -d "$PDF" ]]; then
     done
     echo "documents:${tally}" >&2
     (( ${by_status[XPASS]:-0} == 0 )) \
-        || echo "XPASS rows: run those PDFs alone to see which entries to remove or tighten" >&2
+        || echo "XPASS rows: run those PDFs alone to see which entries to remove" >&2
     exit "$any_fail"
 fi
 
