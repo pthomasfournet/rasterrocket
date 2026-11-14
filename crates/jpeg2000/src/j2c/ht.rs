@@ -9,8 +9,8 @@
 //! Samples are produced in a doubled domain, one bit below the coefficient's
 //! own least significant bit: a sample decoded down to bitplane `b` holds
 //! `2μ + 1` shifted to bit `b`, so its lowest set bit marks the centre of
-//! its quantisation bin.  [`HtDecodeContext::coefficient_rows`] turns that
-//! into the magnitude and decoded bit position the reconstruction expects.
+//! its quantisation bin.  [`coefficient`] turns that into the magnitude and
+//! decoded bit position the reconstruction expects.
 //!
 //! Copyright (c) 2021, Aous Naman
 //! Copyright (c) 2021, Kakadu Software Pty Ltd, Australia
@@ -66,40 +66,32 @@ pub(crate) struct HtDecodeContext {
     samples: Vec<u32>,
     width: u32,
     height: u32,
-    coefficients: Vec<Coefficient>,
-    states: Vec<CoefficientState>,
 }
 
 impl HtDecodeContext {
-    /// The decoded coefficients, one row at a time.
-    pub(crate) fn coefficient_rows(
-        &self,
-    ) -> impl Iterator<Item = (&[Coefficient], &[CoefficientState])> {
-        let w = self.width.max(1) as usize;
-        self.coefficients
-            .chunks_exact(w)
-            .zip(self.states.chunks_exact(w))
+    /// The decoded samples in the doubled domain, one row at a time; see
+    /// [`coefficient`] for their conversion.
+    pub(crate) fn sample_rows(&self) -> impl Iterator<Item = &[u32]> {
+        self.samples.chunks_exact(self.width.max(1) as usize)
     }
+}
 
-    /// Convert the doubled-domain samples into coefficients.
-    fn finish(&mut self) {
-        self.coefficients.clear();
-        self.states.clear();
-        for &s in &self.samples {
-            let mag = s & 0x7FFF_FFFF;
-            if mag == 0 {
-                self.coefficients.push(Coefficient::default());
-                self.states.push(CoefficientState::default());
-                continue;
-            }
-            let centre = mag.trailing_zeros();
-            let magnitude = (mag ^ (1 << centre)) >> 1;
-            self.coefficients
-                .push(Coefficient::from_sign_magnitude(s >> 31, magnitude));
-            self.states
-                .push(CoefficientState::with_decoded_bit_position(centre as u8));
-        }
+/// The coefficient and decoded bit position of a doubled-domain sample: the
+/// lowest set bit of the magnitude marks the bin centre, the bits above it
+/// the magnitude.  A zero magnitude is the zero coefficient, whatever its
+/// sign bit.
+#[inline(always)]
+pub(crate) fn coefficient(s: u32) -> (Coefficient, CoefficientState) {
+    let mag = s & 0x7FFF_FFFF;
+    if mag == 0 {
+        return (Coefficient::default(), CoefficientState::default());
     }
+    let centre = mag.trailing_zeros();
+    let magnitude = (mag ^ (1 << centre)) >> 1;
+    (
+        Coefficient::from_sign_magnitude(s >> 31, magnitude),
+        CoefficientState::with_decoded_bit_position(centre as u8),
+    )
 }
 
 /// The parameters of one HT code-block.
@@ -142,7 +134,6 @@ pub(crate) fn decode(block: &HtBlock<'_>, ctx: &mut HtDecodeContext) -> Result<(
     if decoded.is_none() {
         ctx.samples.fill(0);
     }
-    ctx.finish();
     decoded.ok_or(HtError::Data)
 }
 

@@ -430,8 +430,8 @@ fn decode_sub_band_bitplanes(
                     header.strict,
                 )?;
                 let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
-                reconstruction.store(
-                    tile_ctx.ht_decode_context.coefficient_rows(),
+                reconstruction.store_ht(
+                    tile_ctx.ht_decode_context.sample_rows(),
                     &mut base_store[base_idx..],
                 );
             } else {
@@ -473,18 +473,47 @@ impl Reconstruction {
         rows: impl Iterator<Item = (&'a [Coefficient], &'a [CoefficientState])>,
         out: &mut [f32],
     ) {
-        let mut base_idx = 0;
-        for (coefficients, coefficient_states) in rows {
-            let Some(out_row) = out.get_mut(base_idx..) else {
-                return;
-            };
+        self.store_rows(rows, out, |(coefficients, coefficient_states), out_row| {
             for ((output, coefficient), coefficient_state) in
                 out_row.iter_mut().zip(coefficients).zip(coefficient_states)
             {
-                *output =
-                    coefficient.reconstructed(coefficient_state, self.irreversible, self.roi_shift)
-                        * self.dequantization_step;
+                *output = self.reconstructed(coefficient, coefficient_state);
             }
+        });
+    }
+
+    /// [`Self::store`] for the doubled-domain sample rows of an HT code
+    /// block.
+    fn store_ht<'a>(&self, rows: impl Iterator<Item = &'a [u32]>, out: &mut [f32]) {
+        self.store_rows(rows, out, |samples, out_row| {
+            for (output, &sample) in out_row.iter_mut().zip(samples) {
+                let (coefficient, coefficient_state) = ht::coefficient(sample);
+                *output = self.reconstructed(&coefficient, &coefficient_state);
+            }
+        });
+    }
+
+    #[inline(always)]
+    fn reconstructed(&self, coefficient: &Coefficient, state: &CoefficientState) -> f32 {
+        coefficient.reconstructed(state, self.irreversible, self.roi_shift)
+            * self.dequantization_step
+    }
+
+    /// Hand each row with the part of `out` it covers, `stride` apart, to
+    /// `write_row`, stopping at the end of `out`.
+    #[inline(always)]
+    fn store_rows<R>(
+        &self,
+        rows: impl Iterator<Item = R>,
+        out: &mut [f32],
+        mut write_row: impl FnMut(R, &mut [f32]),
+    ) {
+        let mut base_idx = 0;
+        for row in rows {
+            let Some(out_row) = out.get_mut(base_idx..) else {
+                return;
+            };
+            write_row(row, out_row);
             base_idx += self.stride;
         }
     }

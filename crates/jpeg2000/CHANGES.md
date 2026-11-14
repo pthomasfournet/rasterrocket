@@ -59,6 +59,20 @@ unchanged.
   ITU-T T.803 | ISO/IEC 15444-4, which decode identically where the
   transcode is lossless.  `tests/ht.rs` covers it.
 
+## HT block decoder speed
+
+Each change keeps decoded output bit-identical (every `f32` sample) on 177
+codestreams (the HTJ2K conformance streams and their classic originals, the
+OpenJPH test codestreams and the suite's own), each decoded in full, in
+strict mode, at half resolution, truncated at five lengths and with twelve
+corruptions in each mode.
+
+- `ht.rs`, `decode.rs`: `HtDecodeContext` keeps only the doubled-domain
+  samples. `Reconstruction::store_ht` converts each sample to its
+  coefficient and decoded bit position (`ht::coefficient`) as it stores it,
+  instead of a second pass filling `Coefficient` and `CoefficientState`
+  vectors that the reconstruction then read.
+
 ## Memory traffic under parallel decoding
 
 Measured on 24 concurrent decodes of a 2 641 × 4 278 RGB 9/7 image (the
