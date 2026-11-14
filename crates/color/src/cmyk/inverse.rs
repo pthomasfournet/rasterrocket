@@ -12,10 +12,14 @@
 //! slices adding cyan lightens blue, so a dark colour may print only
 //! within a narrow band.  A node's black is found by sampling a ladder of
 //! slices down from the bound and bisecting the upper edge of the band
-//! around the highest reproducing sample, then stepping [`MARGIN`] inside
-//! the band where the band allows, since at the edge the CMY sit on a
-//! bound of the slice; the colour's CMY is the preimage on that slice.  A colour nothing
-//! prints takes the ladder sample whose least-squares CMY comes closest.
+//! around the highest reproducing sample.  Where the band is thinner than
+//! [`THICK`] the black steps [`MARGIN`] inside it, since at the edge the
+//! CMY sit on a bound of the slice and the interpolant between nodes on a
+//! thin band can miss it; a thicker band keeps its edge, so that a colour
+//! next to the grey axis prints with no more C, M and Y than its own
+//! chroma needs.  The colour's CMY is the preimage on that slice.  A
+//! colour nothing prints takes the ladder sample whose least-squares CMY
+//! comes closest.
 //!
 //! Each slice is the trilinear interpolation of the eight corners at that
 //! black, inverted by projected Gauss-Newton in `f64` (channels at a bound
@@ -25,9 +29,10 @@
 //! passes re-solve a node far from its neighbours' mean on their band.  A
 //! query is the trilinear interpolation of the eight surrounding nodes,
 //! except that a neutral takes the inks of its grey from a 256-entry
-//! table — black alone down to the floor ([`BLACK_FLOOR`]), solid black
-//! with C, M and Y below it — since interpolating the chromatic neighbours
-//! of the grey axis would add C, M and Y to it.
+//! table — black alone down to the floor ([`BLACK_FLOOR`]), below it
+//! solid black under C, M and Y in the fixed proportions [`GREY_BALANCE`]
+//! — since interpolating the chromatic neighbours of the grey axis would
+//! add C, M and Y to it.
 //!
 //! The table reproduces every colour the model prints within two counts
 //! per channel, except for about one in two thousand dark colours
@@ -45,8 +50,11 @@ const MAX_STEPS: usize = 40;
 const BISECTIONS: usize = 6;
 /// Squared residual below which a slice solve reproduces the colour.
 const EXACT: f64 = 0.25;
-/// Black stepped back from the edge of a band of reproducing blacks.
+/// Black stepped back from the edge of a thin band of reproducing blacks.
 const MARGIN: f64 = 0.03;
+/// Width of black below its edge over which a band that still reproduces
+/// the colour is thick, and keeps its edge.
+const THICK: f64 = 4.0 * MARGIN;
 /// Relaxation passes over the table after the node solves.
 const PASSES: usize = 3;
 /// Ink distance from the neighbours' mean at which a node is re-solved.
@@ -56,6 +64,14 @@ const CHUNK: usize = 256;
 
 /// The darkest grey black ink alone prints: the solid-black corner.
 pub const BLACK_FLOOR: u8 = CORNERS[8][0];
+
+/// The proportions of C, M and Y a neutral darker than [`BLACK_FLOOR`]
+/// prints with under solid black.  Every fraction `s` of the mix under solid
+/// black, and every fraction `a` of all four inks (the mix composited with
+/// paper at coverage `a`, as an antialiased edge is on an ink canvas),
+/// prints within five counts of neutral in the model; the full mix prints
+/// black within two counts.
+const GREY_BALANCE: [f64; 3] = [1.0, 0.725, 0.75];
 
 /// Process-ink equivalent of each tint (0–255) of one spot colorant:
 /// entry `t` is the `[C, M, Y, K]` bytes printing the same colour as the
@@ -295,8 +311,12 @@ fn invert_node(target: [f64; 3]) -> [f64; 4] {
                 }
             }
             // At the edge the CMY sit on a bound of the slice; a step
-            // inside the band keeps the node solution interior, where
-            // neighbouring nodes interpolate to a reproducing ink.
+            // inside a thin band keeps the node solution interior, where
+            // neighbouring nodes interpolate to a reproducing ink.  A thick
+            // band keeps its edge.
+            if lo.1 - THICK >= 0.0 && solve_at(target, lo.1 - THICK, lo.0).2 <= EXACT {
+                return inks(lo);
+            }
             for margin in [MARGIN, MARGIN / 2.0] {
                 if lo.1 - margin >= k {
                     let inside = solve_at(target, lo.1 - margin, lo.0);
@@ -325,8 +345,8 @@ struct Inverse {
     /// Node `(r, g, b)` at index `(r·GRID + g)·GRID + b`, inks in `[0, 1]`.
     nodes: Vec<[f32; 4]>,
     /// The inks of each grey: at or above the floor, the black alone
-    /// printing the nearest grey; below it, solid black with the C, M and
-    /// Y reproducing the grey on the solid-black slice.
+    /// printing the nearest grey; below it, solid black under the
+    /// fraction of [`GREY_BALANCE`] printing the nearest grey.
     neutral: [[u8; 4]; 256],
 }
 
@@ -410,7 +430,6 @@ static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
         reason = "ink amounts lie in [0, 1]; f32 resolution exceeds a byte"
     )]
     let nodes: Vec<[f32; 4]> = raw.iter().map(|inks| inks.map(|v| v as f32)).collect();
-    let solid = slice_corners(1.0);
     let mut neutral = [[0u8; 4]; 256];
     for (grey, inks) in (0..=u8::MAX).zip(neutral.iter_mut()) {
         *inks = if grey >= BLACK_FLOOR {
@@ -420,23 +439,34 @@ static INVERSE: LazyLock<Inverse> = LazyLock::new(|| {
                 .unwrap_or(u8::MAX);
             [0, 0, 0, k]
         } else {
-            let target = [f64::from(grey); 3];
-            let (cmy, _) = invert_slice(&solid, target, [0.5; 3]);
-            let [c, m, y] = ink_bytes(cmy);
-            [c, m, y, u8::MAX]
+            // The balanced mix darkens solid black with its fraction.
+            (0..=u8::MAX)
+                .map(rich_black)
+                .min_by_key(|&[c, m, y, k]| {
+                    let rgb = cmyk_to_rgb(c, m, y, k);
+                    let sum: u16 = rgb.iter().map(|&v| u16::from(v)).sum();
+                    sum.abs_diff(3 * u16::from(grey))
+                })
+                .unwrap_or([0, 0, 0, u8::MAX])
         };
     }
     Inverse { nodes, neutral }
 });
+
+/// Solid black under the fraction `t / 255` of [`GREY_BALANCE`].
+fn rich_black(t: u8) -> [u8; 4] {
+    let [c, m, y] = ink_bytes(GREY_BALANCE.map(|v| v * f64::from(t) / 255.0));
+    [c, m, y, u8::MAX]
+}
 
 /// Convert sRGB to CMYK ink bytes.
 ///
 /// Of the inks printing a colour, ones with the most black
 /// (grey-component replacement), except where relaxation kept a node on
 /// the band of its neighbours: a neutral at or above [`BLACK_FLOOR`] is
-/// black ink alone; a darker neutral is solid black with C, M and Y on
-/// top; a solid process colour has at most a trace of black (two counts),
-/// from table interpolation.  The result maps back through
+/// black ink alone; a darker neutral is solid black under C, M and Y in
+/// proportions whose coverage ramps stay neutral; a solid process colour
+/// has at most a trace of black (two counts), from table interpolation.  The result maps back through
 /// [`cmyk_to_rgb`] to within two counts per channel for every colour the
 /// four-ink model prints, except for about one in two thousand dark
 /// colours (channel mean below 64), within four; and to the nearest

@@ -497,3 +497,27 @@ fn group_pool_keeps_one_canvas_per_kind() {
     assert_eq!(kinds.len(), 2, "{kinds:?}");
     assert!(kinds.contains(&CanvasKind::Rgb) && kinds.contains(&CanvasKind::Ink));
 }
+
+/// The antialiased edge of a grey or RGB black fill on an ink canvas
+/// converts to a neutral grey: the ink of black, composited with paper at
+/// partial coverage, prints with no colour cast.
+#[test]
+fn black_fill_edges_stay_neutral_on_the_ink_canvas() {
+    let doc = overprint_doc("/GS << /op true >>", "");
+    for colour in ["0 g", "0 0 0 rg", "0.05 g"] {
+        let content = format!("{colour} 0 0 m 10 0 l 0 10 l f");
+        let rgb = render_canvas(&doc, 10, content.as_bytes(), true);
+        let edges: Vec<[u8; 3]> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .copied()
+            .filter(|px| px.iter().all(|&v| (40..250).contains(&v)))
+            .collect();
+        assert!(!edges.is_empty(), "{content}: the diagonal has edge pixels");
+        for [r, g, b] in edges {
+            let chroma = r.max(g).max(b) - r.min(g).min(b);
+            assert!(chroma <= 5, "{content}: edge pixel {:?}", [r, g, b]);
+        }
+    }
+}

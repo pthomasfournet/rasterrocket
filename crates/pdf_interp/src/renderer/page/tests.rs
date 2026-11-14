@@ -2224,14 +2224,14 @@ fn ink_canvas_greys_are_black_ink_down_to_the_floor() {
 }
 
 /// Greys and RGB colours render on the ink canvas as on the RGB canvas:
-/// black is black, a mid grey a mid grey; a `DeviceCMYK` black keeps its
-/// own ink and prints the solid-black grey.
+/// black within two counts of black, a mid grey a mid grey; a `DeviceCMYK`
+/// black keeps its own ink and prints the solid-black grey.
 #[test]
 fn ink_canvas_greys_render_as_on_rgb() {
     let doc = crate::test_helpers::make_doc_with_objects(&[(4, "<< /Type /Page >>")]);
     for content in [b"0 g 0 0 10 10 re f".as_slice(), b"0 0 0 rg 0 0 10 10 re f"] {
         let rgb = render_canvas(&doc, 10, content, true);
-        assert!(rgb.iter().all(|&v| v == 0), "{content:?}: {rgb:?}");
+        assert!(rgb.iter().all(|&v| v <= 2), "{content:?}: {rgb:?}");
     }
     let rgb = render_canvas(&doc, 10, b"0.5 g 0 0 10 10 re f", true);
     assert!(rgb.iter().all(|&v| v.abs_diff(128) <= 2), "{rgb:?}");

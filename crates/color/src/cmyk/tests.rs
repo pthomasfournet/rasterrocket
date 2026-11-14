@@ -556,11 +556,62 @@ fn rgb_to_ink_neutrals_are_black_alone_down_to_the_floor() {
         assert!(ink[..3].iter().all(|&v| v > 0), "{g}: {ink:?}");
         assert!(round_trip_error([g; 3]) <= 2, "{g}: {ink:?}");
     }
-    // The darkest printable colour is black.
+    // The darkest printable colour is black; the darkest neutral prints
+    // within two counts of it.
     assert_eq!(cmyk_to_rgb(255, 255, 255, 255), [0, 0, 0]);
     assert_eq!(cmyk_to_rgb(0, 0, 0, 255), [BLACK_FLOOR; 3]);
     let [c, m, y, k] = rgb_to_ink([0, 0, 0]);
-    assert_eq!(cmyk_to_rgb(c, m, y, k), [0, 0, 0]);
+    assert!(cmyk_to_rgb(c, m, y, k).iter().all(|&v| v <= 2));
+}
+
+/// The spread between the largest and smallest channel of `rgb`.
+fn chroma(rgb: [u8; 3]) -> u8 {
+    rgb.iter().max().unwrap() - rgb.iter().min().unwrap()
+}
+
+/// Every neutral, composited with paper in ink at any coverage — the ink
+/// of an antialiased edge on an ink canvas — prints within five counts of
+/// neutral: black alone above the floor, and below it a C, M and Y mix
+/// balanced under black.
+#[test]
+fn rgb_to_ink_neutrals_stay_neutral_at_every_coverage() {
+    for g in 0..=255u8 {
+        let ink = rgb_to_ink([g; 3]);
+        for a in 0..=255u16 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "v · a / 255 is at most 255"
+            )]
+            let [c, m, y, k] = ink.map(|v| ((u16::from(v) * a + 127) / 255) as u8);
+            let rgb = cmyk_to_rgb(c, m, y, k);
+            assert!(
+                chroma(rgb) <= 5,
+                "grey {g} at coverage {a}: {ink:?} -> {rgb:?}"
+            );
+        }
+    }
+}
+
+/// A colour next to the grey axis and above the floor prints with no
+/// shared grey component of C, M and Y: its black stays at the edge of
+/// the band of reproducing blacks, and the exact neutral beside it is
+/// black alone.
+#[test]
+fn rgb_to_ink_near_neutrals_carry_no_grey_component() {
+    for g in [64u8, 128, 192] {
+        for (dr, dg, db) in [(4, 0, 0), (0, 4, 0), (0, 0, 4), (4, 4, 0), (0, 4, 4)] {
+            let rgb = [g + dr, g + dg, g + db];
+            let ink = rgb_to_ink(rgb);
+            assert!(
+                ink[..3].iter().min().is_some_and(|&v| v <= 2),
+                "{rgb:?}: {ink:?}"
+            );
+            assert!(round_trip_error(rgb) <= 2, "{rgb:?}: {ink:?}");
+        }
+    }
+    let [c, m, y, k] = rgb_to_ink([68, 64, 64]);
+    assert!(c <= 2, "{:?}", [c, m, y, k]);
+    assert!(m.max(y) <= 16 && k >= 200, "{:?}", [c, m, y, k]);
 }
 
 /// Black ink replaces the grey component: a dark desaturated colour uses
