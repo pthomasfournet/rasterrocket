@@ -219,8 +219,14 @@ pub fn document_unsupported_features(doc: &Document) -> Vec<UnsupportedFeature> 
     // `/EmbeddedFiles`); only the `/JavaScript` tree is.
     if catalog
         .get(b"Names")
-        .and_then(|n| resources::resolve_dict(doc, n))
-        .is_some_and(|names| names.get(b"JavaScript").is_some())
+        .and_then(|names| {
+            with_dict(doc, names, |names| {
+                names
+                    .get(b"JavaScript")
+                    .is_some_and(|tree| name_tree_has_entries(doc, tree))
+            })
+        })
+        .unwrap_or(false)
     {
         script(ScriptLocation::NameTree);
     }
@@ -363,6 +369,20 @@ pub(crate) fn warn_document_features(doc: &Document) {
 fn with_dict<R>(doc: &Document, obj: &Object, f: impl FnOnce(&Dictionary) -> R) -> Option<R> {
     let resolved = doc.resolve(obj).ok()?;
     resolved.as_dict().map(f)
+}
+
+/// Whether the name tree whose root is `root` holds an entry: the root has
+/// a non-empty `/Names` array (a leaf) or a non-empty `/Kids` array (an
+/// intermediate node, whose descendants are not read).
+fn name_tree_has_entries(doc: &Document, root: &Object) -> bool {
+    with_dict(doc, root, |root| {
+        [b"Names".as_slice(), b"Kids"].iter().any(|key| {
+            root.get(key)
+                .and_then(|a| doc.resolve(a).ok())
+                .is_some_and(|a| a.as_array().is_some_and(|a| !a.is_empty()))
+        })
+    })
+    .unwrap_or(false)
 }
 
 /// The result of inspecting an action or an additional-actions dictionary.
@@ -645,7 +665,8 @@ mod tests {
     fn all_four_document_script_locations_are_reported_in_order() {
         let doc = make_doc(
             " /OpenAction <</S /JavaScript>> /AA <</WC <</S /JavaScript>>>> \
-             /Names <</JavaScript <</Names []>>>> /AcroForm <</AA <</K <</S /JavaScript>>>>>>",
+             /Names <</JavaScript <</Names [(init) <</S /JavaScript /JS (x)>>]>>>> \
+             /AcroForm <</AA <</K <</S /JavaScript>>>>>>",
         );
         assert_eq!(
             document_unsupported_features(&doc),
@@ -668,6 +689,21 @@ mod tests {
         );
         assert_eq!(doc_features(" /Names <</Dests <</Names []>>>>"), NONE);
         assert_eq!(doc_features(""), NONE);
+    }
+
+    #[test]
+    fn only_a_script_name_tree_with_entries_is_javascript() {
+        assert_eq!(doc_features(" /Names <</JavaScript <</Names []>>>>"), NONE);
+        assert_eq!(doc_features(" /Names <</JavaScript <</Kids []>>>>"), NONE);
+        assert_eq!(doc_features(" /Names <</JavaScript <<>>>>"), NONE);
+        assert_eq!(
+            doc_features(" /Names <</JavaScript <</Kids [<</Names [(a) <<>>]>>]>>>>"),
+            [JavaScript(NameTree)]
+        );
+        assert_eq!(
+            doc_features(" /Names <</JavaScript <</Names [(a) <</S /JavaScript>>]>>>>"),
+            [JavaScript(NameTree)]
+        );
     }
 
     #[test]

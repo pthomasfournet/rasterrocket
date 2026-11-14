@@ -184,8 +184,8 @@ impl From<pdf::PdfError> for InterpError {
 /// about once (see [`document_unsupported_features`]):
 /// - JavaScript at the catalog's `/OpenAction` or `/AA`, in the
 ///   `/Names /JavaScript` tree, or in `/AcroForm /AA`.  Scripts are never
-///   executed, and an action counts only when it runs a script, never on
-///   bare key presence;
+///   executed, and an action counts only when it runs a script and the
+///   tree only when it holds an entry, never on bare key presence;
 /// - a dynamic XFA form, whose rendered pages are the placeholder content
 ///   stored in the file;
 /// - a portable collection, whose embedded documents are not rendered.
