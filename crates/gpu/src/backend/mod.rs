@@ -455,7 +455,8 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Returns `BackendError` if the operation cannot be recorded or if
     /// `params.validate(self)` fails.
     fn record_idct(&self, params: params::IdctParams<'_, Self>) -> Result<()>;
-    /// Record a zero-fill of `buf` into the current page's command list.
+    /// Record a zero-fill of the first `len` bytes of `buf` into the current
+    /// page's command list.
     ///
     /// Folds what [`Self::alloc_device_zeroed`] does as a separate one-shot
     /// submission into the page's own command buffer / stream: zero extra
@@ -470,9 +471,10 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     ///
     /// # Errors
     /// Returns `BackendError` if the operation cannot be recorded.
-    /// Vulkan's `vkCmdFillBuffer` requires the buffer size to be a multiple
-    /// of 4; non-aligned sizes return [`BackendError::UnalignedFill`].
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()>;
+    /// `len` beyond the buffer's length is an error.  Vulkan's
+    /// `vkCmdFillBuffer` requires the size to be a multiple of 4; non-aligned
+    /// sizes return [`BackendError::UnalignedFill`].
+    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()>;
     /// Record a copy of `src[..len]` into `dst[..len]` into the current
     /// page's command list.
     ///

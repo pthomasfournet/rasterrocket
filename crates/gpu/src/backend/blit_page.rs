@@ -121,7 +121,7 @@ pub fn blit_image_box<'s, B: GpuBackend>(
     backend.run_page(|backend| {
         unsafe { record_upload(backend, d_cols, col_bytes.len()) }?;
         unsafe { record_upload(backend, d_rows, row_bytes.len()) }?;
-        backend.record_zero_buffer(&target.device)?;
+        backend.record_zero_buffer(&target.device, target_len)?;
         backend.record_blit_image(BlitParams {
             src: src.pixels,
             dst: &target.device,
@@ -155,8 +155,9 @@ mod tests {
     /// Blit a 3×2 RGB image, one sample per pixel, into the box
     /// `[1, 1, 5, 4)` whose columns map to source columns `-1..3` and rows
     /// to source rows `0..3`, and check every target pixel: the samples
-    /// inside the image with alpha 255, zero outside it.  The box is
-    /// blitted twice, so the second blit sees a target the first wrote.
+    /// inside the image with alpha 255, zero outside it.  A larger box is
+    /// blitted first and the box twice, so each check sees a target an
+    /// earlier blit wrote beyond the box's length.
     fn check_box_blit<B: GpuBackend>(backend: &B) {
         let image: Vec<u8> = (0..3 * 2 * 3).map(|i| 10 + i).collect();
         let src_buf = backend.alloc_device(image.len()).expect("alloc");
@@ -170,6 +171,19 @@ mod tests {
         let cols: Vec<u32> = (-1..3).flat_map(|x| entry(x, true)).collect();
         let rows: Vec<u32> = (0..3).flat_map(|y| entry(y, false)).collect();
         let mut scratch = BlitScratch::default();
+        let wide_cols: Vec<u32> = (0..8).flat_map(|x| entry(x % 3, true)).collect();
+        let wide_rows: Vec<u32> = (0..8).flat_map(|y| entry(y % 2, false)).collect();
+        let wide = blit_image_box(
+            backend,
+            &mut scratch,
+            &src,
+            [0, 0, 8, 8],
+            &wide_cols,
+            &wide_rows,
+            0,
+        )
+        .expect("wide blit");
+        assert_eq!(wide.len(), 8 * 8 * RGBA_BPP);
         for _ in 0..2 {
             let out = blit_image_box(backend, &mut scratch, &src, [1, 1, 5, 4], &cols, &rows, 0)
                 .expect("blit")

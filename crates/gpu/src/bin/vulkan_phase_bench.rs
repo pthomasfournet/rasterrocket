@@ -490,7 +490,7 @@ fn bench_blit(backend: &VulkanBackend, cfg: &Config) {
                 if copies {
                     d_c.record_upload(b, cb.len());
                     d_r.record_upload(b, rb.len());
-                    ok(b.record_zero_buffer(&tgt.device), "zero");
+                    ok(b.record_zero_buffer(&tgt.device, target_len), "zero");
                 }
                 for _ in 0..kernels {
                     ok(

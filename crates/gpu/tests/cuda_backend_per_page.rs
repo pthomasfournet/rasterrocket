@@ -42,7 +42,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
         .begin_page()
         .expect("begin_page failed — recorder did not enter page-recording state");
     backend
-        .record_zero_buffer(&rgb)
+        .record_zero_buffer(&rgb, n * 3)
         .expect("record_zero_buffer failed — memset launch error");
     backend
         .record_icc_clut(params::IccClutParams {
@@ -102,7 +102,7 @@ fn cuda_backend_record_zero_buffer_round_trip() {
 
     backend.begin_page().expect("begin_page");
     backend
-        .record_zero_buffer(&buf)
+        .record_zero_buffer(&buf, SIZE)
         .expect("record_zero_buffer");
     let fence = backend.submit_page().expect("submit_page");
     backend.wait_page(fence).expect("wait_page");

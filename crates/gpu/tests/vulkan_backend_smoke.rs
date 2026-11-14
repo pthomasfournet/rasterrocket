@@ -253,7 +253,7 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
 
     backend.begin_page().expect("begin_page");
     backend
-        .record_zero_buffer(&buf)
+        .record_zero_buffer(&buf, SIZE)
         .expect("record_zero_buffer");
     let fence = backend.submit_page().expect("submit_page");
     backend.wait_page(fence).expect("wait_page");
@@ -269,6 +269,36 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
     backend.free_device(buf);
 }
 
+/// A zero-fill of a prefix leaves the rest of the buffer intact, and a
+/// prefix longer than the buffer is rejected.
+#[test]
+fn vulkan_backend_record_zero_buffer_fills_only_the_prefix() {
+    const SIZE: usize = 4096;
+    let (backend, _serial) = shared_backend();
+    let buf = backend.alloc_device(SIZE).expect("alloc_device");
+    backend
+        .upload(&buf, &[0xCD; SIZE])
+        .expect("upload sentinel");
+    backend
+        .run_page(|b| b.record_zero_buffer(&buf, 1024))
+        .expect("prefix fill");
+    let mut readback = vec![0xAA; SIZE];
+    backend.download(&buf, &mut readback).expect("download");
+    assert!(
+        readback[..1024].iter().all(|&b| b == 0),
+        "the prefix is zero"
+    );
+    assert!(
+        readback[1024..].iter().all(|&b| b == 0xCD),
+        "the rest is intact"
+    );
+    let err = backend
+        .run_page(|b| b.record_zero_buffer(&buf, SIZE + 4))
+        .expect_err("a fill past the buffer is rejected");
+    assert!(err.to_string().contains("exceeds"), "{err}");
+    backend.free_device(buf);
+}
+
 #[test]
 fn vulkan_backend_record_zero_buffer_rejects_outside_recording_state() {
     // record_zero_buffer is a state-machine op: legal only between
@@ -277,7 +307,7 @@ fn vulkan_backend_record_zero_buffer_rejects_outside_recording_state() {
     let (backend, _serial) = shared_backend();
     let buf = backend.alloc_device(64).expect("alloc_device");
     let err = backend
-        .record_zero_buffer(&buf)
+        .record_zero_buffer(&buf, 64)
         .expect_err("record_zero_buffer outside Recording must be rejected");
     let msg = err.to_string();
     assert!(
@@ -296,7 +326,7 @@ fn vulkan_backend_record_zero_buffer_rejects_unaligned_size() {
     let buf = backend.alloc_device(17).expect("alloc_device(17)");
     backend.begin_page().expect("begin_page");
     let err = backend
-        .record_zero_buffer(&buf)
+        .record_zero_buffer(&buf, 17)
         .expect_err("record_zero_buffer on 17-byte buf must be rejected");
     assert!(
         matches!(
@@ -534,7 +564,7 @@ fn a_copy_after_a_zero_fill_in_one_page_reads_zeros() {
     let mut out = backend.alloc_host_readback(LEN).expect("readback");
     backend
         .run_page(|b| {
-            b.record_zero_buffer(&buf)?;
+            b.record_zero_buffer(&buf, LEN)?;
             // SAFETY: `run_page` waits for the page before `out` is read.
             unsafe { b.record_copy_to_host(&buf, &mut out, LEN) }
         })

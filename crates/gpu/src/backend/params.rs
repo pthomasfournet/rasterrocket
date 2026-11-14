@@ -1255,7 +1255,11 @@ mod tests {
         fn record_idct(&self, _p: IdctParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
         }
-        fn record_zero_buffer(&self, _buf: &Self::DeviceBuffer) -> super::super::Result<()> {
+        fn record_zero_buffer(
+            &self,
+            _buf: &Self::DeviceBuffer,
+            _len: usize,
+        ) -> super::super::Result<()> {
             unreachable!()
         }
         unsafe fn record_copy_to_device(

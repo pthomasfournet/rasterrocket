@@ -414,24 +414,30 @@ impl PageRecorder {
             .map_err(be)
     }
 
-    /// Record an async zero-fill on the calling thread's stream via
+    /// Record an async zero-fill of `buf[..len]` on the calling thread's stream via
     /// `cuMemsetD8Async`.  The fill writes through a raw device pointer,
     /// so it is ordered only against later work on the same stream: a
     /// later `record_*` call from the same thread observes zeros without
     /// an explicit barrier.
-    pub(super) fn record_zero_buffer(&self, buf: &CudaSlice<u8>) -> Result<()> {
-        let num_bytes = buf.num_bytes();
-        if num_bytes == 0 {
+    pub(super) fn record_zero_buffer(&self, buf: &CudaSlice<u8>, len: usize) -> Result<()> {
+        crate::backend::copy_len(
+            len,
+            buf.num_bytes() as u64,
+            "record_zero_buffer",
+            "destination",
+        )
+        .map(drop)?;
+        if len == 0 {
             return Ok(());
         }
         let stream = self.ctx.stream();
         let (dptr, _sync) = buf.device_ptr(&stream);
         // Safety: dptr was returned by cudarc for `buf` on `stream`;
-        // num_bytes equals the buffer's size; the stream owns the
+        // `len` is at most the buffer's size (checked above); the stream owns the
         // ordering against subsequent kernel launches.  Mirrors the
         // pattern in cudarc's safe `memset_zeros` which calls the same
         // unsafe entry point.
-        unsafe { cudarc::driver::result::memset_d8_async(dptr, 0, num_bytes, stream.cu_stream()) }
+        unsafe { cudarc::driver::result::memset_d8_async(dptr, 0, len, stream.cu_stream()) }
             .map_err(be)?;
         Ok(())
     }
@@ -454,7 +460,7 @@ mod tests {
             let msg = r.expect_err("accepted outside a page").to_string();
             assert!(msg.contains("expected Recording"), "{msg}");
         };
-        outside(b.record_zero_buffer(&device));
+        outside(b.record_zero_buffer(&device, 64));
         // SAFETY: the copy is rejected before anything is queued.
         outside(unsafe { b.record_copy_to_device(&host, &device, 64) });
         outside(b.submit_page().map(drop));
@@ -462,14 +468,14 @@ mod tests {
         b.begin_page().expect("begin_page");
         let msg = b.begin_page().expect_err("nested page").to_string();
         assert!(msg.contains("expected Idle"), "{msg}");
-        b.record_zero_buffer(&device).expect("inside the page");
+        b.record_zero_buffer(&device, 64).expect("inside the page");
         let fence = b.submit_page().expect("submit_page");
         b.wait_page(fence).expect("wait_page");
-        outside(b.record_zero_buffer(&device));
+        outside(b.record_zero_buffer(&device, 64));
 
         let failed = b.run_page(|_| Err(BackendError::msg("injected")));
         assert!(failed.is_err());
-        b.run_page(|b| b.record_zero_buffer(&device))
+        b.run_page(|b| b.record_zero_buffer(&device, 64))
             .expect("a failed page leaves the thread idle");
     }
 
@@ -484,7 +490,7 @@ mod tests {
             scope
                 .spawn(|| {
                     let device = b.alloc_device(64).expect("alloc");
-                    b.run_page(|b| b.record_zero_buffer(&device))
+                    b.run_page(|b| b.record_zero_buffer(&device, 64))
                         .expect("another thread's page is independent");
                 })
                 .join()

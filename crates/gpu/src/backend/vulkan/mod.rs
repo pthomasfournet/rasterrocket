@@ -321,8 +321,8 @@ impl GpuBackend for VulkanBackend {
         ))
     }
 
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()> {
-        self.recorder.record_zero_buffer(buf)
+    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()> {
+        self.recorder.record_zero_buffer(buf, len)
     }
 
     unsafe fn record_copy_to_device(

@@ -195,9 +195,9 @@ impl GpuBackend for CudaBackend {
         ))
     }
 
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer) -> Result<()> {
+    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()> {
         self.recorder.check_recording("record_zero_buffer")?;
-        self.recorder.record_zero_buffer(buf)
+        self.recorder.record_zero_buffer(buf, len)
     }
 
     /// Host access to `src` and its drop wait for the copy through the

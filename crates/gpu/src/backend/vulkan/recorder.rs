@@ -851,7 +851,11 @@ impl PageRecorder {
     /// Validation order is state → size: a wrong-state caller with a
     /// zero-byte buffer still surfaces the state error rather than
     /// silently succeeding (fail-loud).
-    pub(super) fn record_zero_buffer(&self, buf: &super::memory::DeviceBuffer) -> Result<()> {
+    pub(super) fn record_zero_buffer(
+        &self,
+        buf: &super::memory::DeviceBuffer,
+        len: usize,
+    ) -> Result<()> {
         let s = self.inner.lock().expect("recorder mutex poisoned");
         if s.state != State::Recording {
             return Err(BackendError::msg(format!(
@@ -859,7 +863,8 @@ impl PageRecorder {
                 s.state
             )));
         }
-        let size = match super::memory::validate_fill_size(buf.size())? {
+        let len = crate::backend::copy_len(len, buf.size(), "record_zero_buffer", "destination")?;
+        let size = match super::memory::validate_fill_size(len)? {
             super::memory::FillAction::Skip => return Ok(()),
             super::memory::FillAction::Fill(s) => s,
         };
