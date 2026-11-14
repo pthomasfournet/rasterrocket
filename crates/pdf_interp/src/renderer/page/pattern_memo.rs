@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
 
-use color::{DeviceN8, Rgb8};
+use color::{DeviceN8, Pixel, Rgb8};
 use pdf::ObjectId;
 use raster::{Bitmap, CellPhase};
 
@@ -289,17 +289,33 @@ impl PatternMemo {
     pub(super) fn insert_raster(&mut self, key: RasterKey, raster: CellRaster) {
         let bytes = match &raster {
             CellRaster::Mean(..) | CellRaster::InkMean(..) => 0,
-            CellRaster::Cell(bitmap) => {
-                bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
-            }
-            CellRaster::InkCell(bitmap, _) => {
-                bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
-            }
+            CellRaster::Cell(bitmap) => bitmap_bytes(bitmap),
+            CellRaster::InkCell(bitmap, _) => bitmap_bytes(bitmap),
         };
         if !self.rasters.contains_key(&key) && self.budget.reserve(bytes) {
             let _ = self.rasters.insert(key, raster);
         }
     }
+}
+
+/// The bytes `bitmap` holds: its pixels and its alpha plane, if any.
+fn bitmap_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> usize {
+    bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
+}
+
+/// A bound on the bytes of the raster of a cell spanning `cell_w × cell_h`
+/// device pixels in `P`: one pixel more on each axis for the cell's
+/// placement within its pixels, each pixel `P::BYTES` and one byte of
+/// alpha.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "the cell sides are finite and non-negative and P::BYTES is far below 2^52; \
+              the float-to-integer cast saturates"
+)]
+pub(super) fn cell_raster_bytes<P: Pixel>(cell_w: f64, cell_h: f64) -> usize {
+    ((cell_w + 1.0) * (cell_h + 1.0) * (P::BYTES + 1) as f64) as usize
 }
 
 impl PageRenderer<'_> {
@@ -468,6 +484,14 @@ mod tests {
     /// otherwise resolve to `None`.
     fn holds(memo: &mut PatternMemo, key: PlacedKey) -> bool {
         memo.shading(key, || None).is_some()
+    }
+
+    /// A cell raster's bound counts each pixel's bytes in the pixel type
+    /// and its alpha: four for sRGB, nine for ink.
+    #[test]
+    fn cell_raster_bytes_count_the_pixel_type() {
+        assert_eq!(cell_raster_bytes::<Rgb8>(9.0, 4.0), 10 * 5 * 4);
+        assert_eq!(cell_raster_bytes::<DeviceN8>(9.0, 4.0), 10 * 5 * 9);
     }
 
     /// The content of a pattern without resources of its own is parsed in

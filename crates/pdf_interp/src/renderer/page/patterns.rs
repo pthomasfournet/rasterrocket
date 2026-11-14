@@ -3,7 +3,7 @@
 use super::super::color::{InkChannels, RasterColor};
 use super::super::gstate::ctm_multiply;
 use super::canvas::{CanvasKind, PageCanvas};
-use super::pattern_memo::{CellRaster, RasterKey};
+use super::pattern_memo::{CellRaster, RasterKey, cell_raster_bytes};
 use super::pixel_rect::PixelRect;
 use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
 use crate::resources::{ColorSpace, ShadingPattern};
@@ -433,9 +433,7 @@ impl PageRenderer<'_> {
     /// channels its content painted (see [`Self::resolve_fill_pattern`]).
     #[expect(
         clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the region's area is page-bounded; the cell's byte count is positive and saturates"
+        reason = "the region's area is page-bounded, far below 2^52"
     )]
     fn tile<P: CellPixel>(
         &mut self,
@@ -461,12 +459,11 @@ impl PageRenderer<'_> {
         }
         // A cell larger than the region is rendered in place, unless the
         // same cell raster serves repeated fills.
-        let cell_bytes = (cell_w + 1.0) * (cell_h + 1.0) * 4.0;
         if cell_w * cell_h <= region.area() as f64
             || self
                 .pattern_memo
                 .borrow_mut()
-                .repeated(&key, cell_bytes as usize)
+                .repeated(&key, cell_raster_bytes::<P>(cell_w, cell_h))
         {
             self.composed_pattern::<P>(cell, geometry, region, &key)
         } else {
