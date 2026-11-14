@@ -92,7 +92,8 @@ unless the entry says otherwise.
   four components) and requires the Huffman decode within one level, and
   damages every byte of six such streams without a panic.
   `tests/arithmetic_progressive.rs` and its images are upstream's (commit
-  `8cccb0b0`).
+  `8cccb0b0`), its strict decodes of the two jpegsuite streams changed (see
+  below).
 
 - **Arithmetic decoding, three fixes brought over from upstream.**
   `BitStream::marker_ends_data` (upstream `52300d39`): a row of an
@@ -101,7 +102,15 @@ unless the entry says otherwise.
   after an acknowledged EOI as after any marker (`99a07c79`). A
   progressive AC scan in which the decoder finds no end of band keeps the
   coefficients decoded so far and skips the scan's remaining blocks
-  instead of failing the image (`8cccb0b0`).
+  instead of failing the image (`8cccb0b0`); here (ours) the rows from the
+  abandoned block row on do not count as intact for `intact_rows`, and a
+  strict decode fails, as libjpeg reports the band a bad arithmetic code.
+  Upstream's `tests/arithmetic_progressive.rs` decoded its two jpegsuite
+  streams with such bands strictly; it now requires the strict decode to
+  fail and the other to match libjpeg's pixels with fewer rows than the
+  height intact (the streams' arithmetic decode differs from their Huffman
+  transcodes by up to 54 levels: the band's later blocks are lost). Test:
+  `arithmetic::an_ac_band_without_an_end_of_band_is_not_intact`.
 
 - **`JpegDecoder::intact_rows` (new API): how much of an image was decoded
   from data that was present.** The number of leading image rows the last

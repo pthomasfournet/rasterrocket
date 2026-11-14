@@ -148,3 +148,30 @@ fn damaged_arithmetic_streams_decode_or_fail() {
         }
     }
 }
+
+/// An AC-first scan whose decisions run past the end of the band without
+/// an end of band is an error to a strict decode, and to any other
+/// decode an image whose rows from the abandoned block row on are not
+/// intact.
+#[test]
+fn an_ac_band_without_an_end_of_band_is_not_intact() {
+    let (_, data) = image!("gray_arith_prog.jpg");
+    let mut damaged = data.to_vec();
+    damaged[188] = 0x00;
+    let decode = |strict: bool| {
+        let options = DecoderOptions::default().set_strict_mode(strict);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&damaged), options);
+        let result = decoder.decode().map(|_| ());
+        (result, decoder.intact_rows(), decoder.dimensions())
+    };
+    let (strict, _, _) = decode(true);
+    let error = format!(
+        "{:?}",
+        strict.expect_err("a strict decode refuses the band")
+    );
+    assert!(error.contains("end of band"), "{error}");
+    let (lenient, intact, dimensions) = decode(false);
+    lenient.expect("a decode that is not strict draws the image");
+    let (_, height) = dimensions.unwrap();
+    assert!(intact < height, "{intact} rows of {height} reported intact");
+}

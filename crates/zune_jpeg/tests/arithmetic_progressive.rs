@@ -21,29 +21,37 @@ fn decode(data: &[u8], strict: bool) -> Vec<u8> {
         .unwrap()
 }
 
+/// The streams code a zero coefficient at the end of a one-coefficient band
+/// without an end of band, which libjpeg reports as a bad arithmetic code
+/// and stops decoding the scan at: a strict decode fails, any other draws
+/// what libjpeg draws and counts no row from the first such block on as
+/// intact.
 fn assert_libjpeg_pixel_parity(name: &str, data: &[u8], reference: &[u8]) {
     assert_eq!(reference.len(), PIXEL_COUNT);
-    for strict in [false, true] {
-        let actual = decode(data, strict);
-        assert_eq!(actual.len(), PIXEL_COUNT, "{name}: strict={strict}");
+    let options = DecoderOptions::default().set_strict_mode(true);
+    let strict = JpegDecoder::new_with_options(ZCursor::new(data), options).decode();
+    assert!(strict.is_err(), "{name}: a strict decode succeeds");
+    let mut decoder = JpegDecoder::new(ZCursor::new(data));
+    let actual = decoder.decode().unwrap();
+    assert!(decoder.intact_rows() < 32, "{name}: reported intact");
+    assert_eq!(actual.len(), PIXEL_COUNT, "{name}");
 
-        let mut max_delta = 0;
-        let mut total_delta = 0_u64;
-        for (&actual, &expected) in actual.iter().zip(reference) {
-            let delta = actual.abs_diff(expected);
-            max_delta = max_delta.max(delta);
-            total_delta += u64::from(delta);
-        }
-        let average_delta = total_delta as f64 / actual.len() as f64;
-        assert!(
-            max_delta <= 2,
-            "{name}: strict={strict}, max channel delta {max_delta} exceeds 2"
-        );
-        assert!(
-            average_delta < 0.015,
-            "{name}: strict={strict}, average channel delta {average_delta} exceeds 0.015"
-        );
+    let mut max_delta = 0;
+    let mut total_delta = 0_u64;
+    for (&actual, &expected) in actual.iter().zip(reference) {
+        let delta = actual.abs_diff(expected);
+        max_delta = max_delta.max(delta);
+        total_delta += u64::from(delta);
     }
+    let average_delta = total_delta as f64 / actual.len() as f64;
+    assert!(
+        max_delta <= 2,
+        "{name}: max channel delta {max_delta} exceeds 2"
+    );
+    assert!(
+        average_delta < 0.015,
+        "{name}: average channel delta {average_delta} exceeds 0.015"
+    );
 }
 
 #[test]
@@ -106,10 +114,10 @@ fn corresponding_progressive_huffman_orders_are_unchanged() {
     assert_eq!(ascending.len(), PIXEL_COUNT);
     assert_eq!(ascending, descending);
 
-    let arithmetic_ascending = decode(include_bytes!("images/arith/arith_spectral_all.jpg"), true);
+    let arithmetic_ascending = decode(include_bytes!("images/arith/arith_spectral_all.jpg"), false);
     let arithmetic_descending = decode(
         include_bytes!("images/arith/arith_spectral_all_reverse.jpg"),
-        true,
+        false,
     );
     assert_eq!(arithmetic_ascending, arithmetic_descending);
 }

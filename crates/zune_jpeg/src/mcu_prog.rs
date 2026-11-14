@@ -343,9 +343,16 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                 debug_assert!(*stream.eob_run() == 0, "EOB run is not zero");
 
                                 if !stream.decode_mcu_ac_first(&mut self.stream, ac_table, data)? {
-                                    // The arithmetic decoder gave up on the
-                                    // scan; its remaining blocks keep the
-                                    // coefficients they have.
+                                    // The arithmetic decoder found no end of
+                                    // band and gave up on the scan; its
+                                    // remaining blocks keep the coefficients
+                                    // they have.
+                                    if self.options.strict_mode() {
+                                        return Err(DecodeErrors::FormatStatic(
+                                            "AC band without an end of band",
+                                        ));
+                                    }
+                                    self.note_incomplete(i);
                                     return Ok(());
                                 }
                             } else {
