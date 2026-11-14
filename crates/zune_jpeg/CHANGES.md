@@ -129,7 +129,9 @@ unless the entry says otherwise.
   refill is unchanged. An arithmetic-coded scan that stops at a marker
   short of its blocks is not detected (the arithmetic decoder reads zeros
   past a marker as a matter of course). `tests/intact_rows.rs` cuts noise
-  images at every byte of their scan data.
+  images at every byte of their scan data. The row index passed to
+  `decode_mcu_width` and `inner_decode_mcu_width` is named `row` (upstream:
+  `mcu_height`).
 
 - **Streams that stop short: a decode that is not strict draws more of
   them (output changes for such streams only).** Past the end of the input

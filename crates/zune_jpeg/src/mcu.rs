@@ -521,10 +521,12 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         }
     }
 
+    /// Decodes the scan's row `row`: a row of MCUs, or of blocks for a
+    /// scan of one component.
     fn decode_mcu_width<const PROGRESSIVE: bool, B: BitStream>(
         &mut self,
         mcu_width: usize,
-        mcu_height: usize,
+        row: usize,
         is_last_row: bool,
         tmp: &mut [i32; 64],
         stream: &mut B,
@@ -544,7 +546,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         if is_one_by_one {
             self.inner_decode_mcu_width::<PROGRESSIVE, false, B>(
                 mcu_width,
-                mcu_height,
+                row,
                 is_last_row,
                 tmp,
                 stream,
@@ -553,7 +555,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         } else {
             self.inner_decode_mcu_width::<PROGRESSIVE, true, B>(
                 mcu_width,
-                mcu_height,
+                row,
                 is_last_row,
                 tmp,
                 stream,
@@ -571,7 +573,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     fn inner_decode_mcu_width<const PROGRESSIVE: bool, const SAMPLED: bool, B: BitStream>(
         &mut self,
         mcu_width: usize,
-        mcu_height: usize,
+        row: usize,
         is_last_row: bool,
         tmp: &mut [i32; 64],
         stream: &mut B,
@@ -704,10 +706,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             let idct_position = if PROGRESSIVE {
                                 // The block's place in the component's whole plane.
                                 let (block_row, block_col) = if single_component_scan {
-                                    (mcu_height, j)
+                                    (row, j)
                                 } else {
                                     (
-                                        mcu_height * component.vertical_sample + v_samp,
+                                        row * component.vertical_sample + v_samp,
                                         j * component.horizontal_sample + h_samp,
                                     )
                                 };
@@ -752,7 +754,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             if B::marker_ends_data() && stream.marker().is_some() && stream.bits_left() == 0 {
                 if j + 1 < scan_du_width {
                     // The scan's data ends inside this row.
-                    self.note_incomplete(mcu_height);
+                    self.note_incomplete(row);
                 }
                 break;
             }
