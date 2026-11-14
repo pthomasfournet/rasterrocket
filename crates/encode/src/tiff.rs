@@ -87,9 +87,90 @@ const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
     }
 }
 
-/// The refusal of a file beyond the 32-bit offsets of TIFF.
-const TOO_LARGE: EncodeError =
-    EncodeError::InvalidInput("TIFF file exceeds 4 GiB; BigTIFF is not written");
+/// The refusal of a classic file whose data passed 4 GiB as it was written.
+const TOO_LARGE: EncodeError = EncodeError::InvalidInput(
+    "the TIFF's compressed data passed the 4 GiB of a classic TIFF as it was written; \
+     choose another compression, or none, which is laid out as BigTIFF from the start",
+);
+
+/// The two file formats: classic TIFF, of 32-bit offsets, and `BigTIFF`, of
+/// 64-bit ones.  A file is written classic unless its offsets would not
+/// fit 32 bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    Classic,
+    Big,
+}
+
+impl Format {
+    /// The format of a file of `len` bytes.
+    fn for_len(len: u64) -> Self {
+        if u32::try_from(len).is_ok() {
+            Self::Classic
+        } else {
+            Self::Big
+        }
+    }
+
+    /// The header, linking to the first directory at `ifd`.
+    fn header(self, ifd: u64) -> Vec<u8> {
+        match self {
+            Self::Classic => {
+                let ifd = u32::try_from(ifd).expect("a classic file's offsets fit 32 bits");
+                [b"II*\0".as_slice(), &ifd.to_le_bytes()].concat()
+            }
+            // Version 43, offsets of 8 bytes, then a reserved 0.
+            Self::Big => [b"II+\0\x08\0\0\0".as_slice(), &ifd.to_le_bytes()].concat(),
+        }
+    }
+
+    const fn header_len(self) -> u64 {
+        match self {
+            Self::Classic => 8,
+            Self::Big => 16,
+        }
+    }
+
+    /// The offset of the header's link to the first directory.
+    const fn link_at(self) -> u64 {
+        match self {
+            Self::Classic => 4,
+            Self::Big => 8,
+        }
+    }
+
+    /// Bytes of an offset, and of an entry's value field.
+    const fn offset_bytes(self) -> usize {
+        match self {
+            Self::Classic => 4,
+            Self::Big => 8,
+        }
+    }
+
+    /// Bytes of a directory's entry count.
+    const fn count_bytes(self) -> usize {
+        match self {
+            Self::Classic => 2,
+            Self::Big => 8,
+        }
+    }
+
+    /// Bytes of a directory entry: tag, type, count and value field.
+    const fn entry_bytes(self) -> usize {
+        4 + self.offset_bytes() * 2
+    }
+
+    /// `v` as an offset of this format.
+    fn offset(self, v: u64) -> Vec<u8> {
+        match self {
+            Self::Classic => u32::try_from(v)
+                .expect("a classic file's offsets fit 32 bits")
+                .to_le_bytes()
+                .to_vec(),
+            Self::Big => v.to_le_bytes().to_vec(),
+        }
+    }
+}
 
 /// Target size of a strip before compression.
 const STRIP_BYTES: usize = 64 * 1024;
@@ -230,6 +311,36 @@ impl TiffPageEncoder {
         })
     }
 
+    /// A bound on the bytes of a one-page file of this page: its header,
+    /// its strips at the most their coding expands the rows to, and its
+    /// directory.
+    fn file_bound(&self) -> u64 {
+        let rows = u64::from(self.meta.height);
+        let raw = self.row_bytes as u64 * rows;
+        let strips = raw.div_ceil(u64::from(self.meta.rows_per_strip) * self.row_bytes as u64);
+        let coded = match self.meta.compression {
+            TiffCompression::None => raw,
+            // A header byte per 128 bytes of a row.
+            TiffCompression::PackBits => raw + rows * (self.row_bytes as u64).div_ceil(128),
+            // At most 12 bits a byte, a clear code at most every 2^9
+            // codes, and an end code a strip.
+            TiffCompression::Lzw => raw.div_ceil(2) * 3 + raw / 256 + 4 * strips,
+            // Stored blocks: 5 bytes a 64 KiB block, and the zlib wrapper.
+            TiffCompression::Deflate => raw + 5 * raw.div_ceil(65_535) + 11 * strips,
+            // A change costs at most 14 bits of code in G3 and G4, and a
+            // row holds at most one change a pixel.
+            TiffCompression::Group3 { .. } | TiffCompression::Group4 => {
+                rows * (u64::from(self.meta.width) * 2 + 8)
+            }
+        };
+        let directory = directory_len(
+            &self.meta,
+            usize::try_from(strips).unwrap_or(usize::MAX),
+            Format::Big,
+        );
+        Format::Big.header_len() + coded + 1 + directory as u64
+    }
+
     /// Encode the rows of `band`, the next rows of the page.
     ///
     /// # Errors
@@ -339,10 +450,10 @@ impl TiffWriter {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidInput`] without pages, with more than 65535,
-    /// or when the file would exceed the 4 GiB a TIFF can address, all
-    /// found before anything is written; [`EncodeError::Io`] on a write
-    /// failure.
+    /// [`EncodeError::InvalidInput`] without pages or with more than
+    /// 65535, found before anything is written; [`EncodeError::Io`] on a
+    /// write failure.  A file past the 4 GiB of classic TIFF is written as
+    /// `BigTIFF`.
     pub fn write<W: Write>(self, mut out: W) -> Result<(), EncodeError> {
         if self.pages.is_empty() {
             return Err(EncodeError::InvalidInput("a TIFF needs at least one page"));
@@ -353,28 +464,32 @@ impl TiffWriter {
 
         // Lay the file out: header, then per page its strips, a pad byte
         // to an even offset, and its directory with the values that
-        // overflow it.
-        let mut layouts = Vec::with_capacity(self.pages.len());
-        let mut end: u64 = 8;
-        for page in &self.pages {
-            let mut strip_offsets = Vec::with_capacity(page.strips.len());
-            for strip in &page.strips {
-                strip_offsets.push(end);
-                end += strip.len() as u64;
+        // overflow it.  A file whose classic layout passes 4 GiB is laid
+        // out as BigTIFF.
+        let layout = |format: Format| {
+            let mut layouts = Vec::with_capacity(self.pages.len());
+            let mut end = format.header_len();
+            for page in &self.pages {
+                let mut strip_offsets = Vec::with_capacity(page.strips.len());
+                for strip in &page.strips {
+                    strip_offsets.push(end);
+                    end += strip.len() as u64;
+                }
+                end += end % 2;
+                let ifd = end;
+                end += directory_len(&page.meta, page.strips.len(), format) as u64;
+                layouts.push((strip_offsets, ifd));
             }
-            end += end % 2;
-            let ifd = end;
-            end += directory_len(&page.meta, page.strips.len()) as u64;
-            layouts.push((strip_offsets, ifd));
-        }
-        let file_offset = |at: u64| u32::try_from(at).map_err(|_| TOO_LARGE);
-        if u32::try_from(end).is_err() {
-            return Err(TOO_LARGE);
+            (layouts, end)
+        };
+        let (mut layouts, end) = layout(Format::Classic);
+        let format = Format::for_len(end);
+        if format == Format::Big {
+            layouts = layout(Format::Big).0;
         }
 
-        out.write_all(b"II*\0")?;
-        out.write_all(&file_offset(layouts[0].1)?.to_le_bytes())?;
-        let mut at: u64 = 8;
+        out.write_all(&format.header(layouts[0].1))?;
+        let mut at = format.header_len();
         for (number, (page, (strip_offsets, ifd))) in
             (0..count).zip(self.pages.iter().zip(&layouts))
         {
@@ -387,22 +502,17 @@ impl TiffWriter {
                 at += 1;
             }
             debug_assert_eq!(at, *ifd, "the directory lands where it was laid out");
-            let offsets = strip_offsets
-                .iter()
-                .map(|&o| file_offset(o))
-                .collect::<Result<Vec<_>, _>>()?;
-            let next = match layouts.get(usize::from(number) + 1) {
-                Some(&(_, next)) => file_offset(next)?,
-                None => 0,
-            };
+            let next = layouts
+                .get(usize::from(number) + 1)
+                .map_or(0, |&(_, next)| next);
             let directory = directory(
                 &page.meta,
-                &offsets,
+                strip_offsets,
                 &byte_counts(&page.strips),
-                file_offset(*ifd)?,
-                next,
+                (*ifd, next),
                 (number, count),
                 one_of_many,
+                format,
             );
             out.write_all(&directory)?;
             at += directory.len() as u64;
@@ -426,26 +536,25 @@ pub struct TiffStream<W: Write + Seek> {
 /// A one-page file being written: its sink and where its strips went.
 struct StripFile<W> {
     out: W,
+    format: Format,
     /// The sink's position at the header.
     start: u64,
     /// Bytes written from the header on.
     at: u64,
-    offsets: Vec<u32>,
-    counts: Vec<u32>,
+    offsets: Vec<u64>,
+    counts: Vec<u64>,
 }
 
 impl<W: Write + Seek> StripFile<W> {
     /// Append `strips`, recording where each lies.
     fn write_strips(&mut self, strips: &[Vec<u8>]) -> Result<(), EncodeError> {
         for strip in strips {
-            let len = u32::try_from(strip.len()).map_err(|_| TOO_LARGE)?;
-            self.offsets
-                .push(u32::try_from(self.at).map_err(|_| TOO_LARGE)?);
-            self.counts.push(len);
+            self.offsets.push(self.at);
+            self.counts.push(strip.len() as u64);
             self.out.write_all(strip)?;
-            self.at += u64::from(len);
+            self.at += strip.len() as u64;
         }
-        if u32::try_from(self.at).is_err() {
+        if self.format == Format::Classic && u32::try_from(self.at).is_err() {
             return Err(TOO_LARGE);
         }
         Ok(())
@@ -458,15 +567,25 @@ impl<W: Write + Seek> StripFile<W> {
             self.out.write_all(&[0])?;
             self.at += 1;
         }
-        let end = self.at + directory_len(meta, self.offsets.len()) as u64;
-        let ifd = u32::try_from(self.at).map_err(|_| TOO_LARGE)?;
-        if u32::try_from(end).is_err() {
+        let ifd = self.at;
+        let end = ifd + directory_len(meta, self.offsets.len(), self.format) as u64;
+        if self.format == Format::Classic && u32::try_from(end).is_err() {
             return Err(TOO_LARGE);
         }
-        let directory = directory(meta, &self.offsets, &self.counts, ifd, 0, (0, 1), false);
+        let directory = directory(
+            meta,
+            &self.offsets,
+            &self.counts,
+            (ifd, 0),
+            (0, 1),
+            false,
+            self.format,
+        );
         self.out.write_all(&directory)?;
-        let _: u64 = self.out.seek(SeekFrom::Start(self.start + 4))?;
-        self.out.write_all(&ifd.to_le_bytes())?;
+        let _: u64 = self
+            .out
+            .seek(SeekFrom::Start(self.start + self.format.link_at()))?;
+        self.out.write_all(&self.format.offset(ifd))?;
         let _: u64 = self.out.seek(SeekFrom::Start(self.start + end))?;
         self.out.flush()?;
         Ok(self.out)
@@ -476,28 +595,41 @@ impl<W: Write + Seek> StripFile<W> {
 impl<W: Write + Seek> TiffStream<W> {
     /// Begin a `width × height` page stored as `layout` at `dpi`
     /// (horizontal, vertical) pixels per inch, compressed with
-    /// `compression`, on `out` from its position: write the header.
+    /// `compression`, on `out` from its position: write the header.  The
+    /// file is `BigTIFF` when the most its compressed strips can hold would
+    /// pass the 4 GiB of classic TIFF.
     ///
     /// # Errors
     ///
     /// As [`TiffPageEncoder::new`]; [`EncodeError::Io`] on a write
     /// failure.
     pub fn new(
-        mut out: W,
+        out: W,
         (width, height): (u32, u32),
         layout: RowLayout,
         dpi: (f64, f64),
         compression: TiffCompression,
     ) -> Result<Self, EncodeError> {
         let encoder = TiffPageEncoder::new(width, height, layout, dpi, compression)?;
+        let format = Format::for_len(encoder.file_bound());
+        Self::with_format(out, encoder, format)
+    }
+
+    /// [`Self::new`] for `encoder`'s page, laid out as `format`.
+    fn with_format(
+        mut out: W,
+        encoder: TiffPageEncoder,
+        format: Format,
+    ) -> Result<Self, EncodeError> {
         let start = out.stream_position()?;
         // The directory's offset, patched once it is known.
-        out.write_all(b"II*\0\0\0\0\0")?;
+        out.write_all(&format.header(0))?;
         Ok(Self {
             file: StripFile {
                 out,
+                format,
                 start,
-                at: 8,
+                at: format.header_len(),
                 offsets: Vec::new(),
                 counts: Vec::new(),
             },
@@ -510,8 +642,10 @@ impl<W: Write + Seek> TiffStream<W> {
     ///
     /// # Errors
     ///
-    /// As [`TiffPageEncoder::push`]; [`EncodeError::InvalidInput`] once
-    /// the file passes 4 GiB; [`EncodeError::Io`] on a write failure.
+    /// As [`TiffPageEncoder::push`]; [`EncodeError::InvalidInput`] once a
+    /// classic file passes 4 GiB, which a coding expanding its rows past
+    /// the bound [`Self::new`] chose the format by can make it do;
+    /// [`EncodeError::Io`] on a write failure.
     pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
         self.encoder.push(band)?;
         let strips = self.encoder.take_strips();
@@ -548,13 +682,9 @@ pub fn write_tiff<W: Write>(
     writer.write(out)
 }
 
-/// The byte counts of `strips`, each within the 4 GiB file the caller has
-/// checked.
-fn byte_counts(strips: &[Vec<u8>]) -> Vec<u32> {
-    strips
-        .iter()
-        .map(|s| u32::try_from(s.len()).expect("a strip lies within the 4 GiB file"))
-        .collect()
+/// The byte counts of `strips`.
+fn byte_counts(strips: &[Vec<u8>]) -> Vec<u64> {
+    strips.iter().map(|s| s.len() as u64).collect()
 }
 
 /// `bytes`, stored rows of `row_bytes` each, compressed with
@@ -662,6 +792,7 @@ struct Entry {
 const SHORT: u16 = 3;
 const LONG: u16 = 4;
 const RATIONAL: u16 = 5;
+const LONG8: u16 = 16;
 
 fn shorts(tag: u16, values: &[u16]) -> Entry {
     Entry {
@@ -681,6 +812,19 @@ fn longs(tag: u16, values: &[u32]) -> Entry {
     }
 }
 
+/// Strip offsets or byte counts: `LONG` in a classic file, `LONG8` in `BigTIFF`.
+fn offsets_entry(tag: u16, values: &[u64], format: Format) -> Entry {
+    Entry {
+        tag,
+        kind: match format {
+            Format::Classic => LONG,
+            Format::Big => LONG8,
+        },
+        count: u32::try_from(values.len()).expect("strip count fits u32"),
+        bytes: values.iter().flat_map(|&v| format.offset(v)).collect(),
+    }
+}
+
 fn rational_entry(tag: u16, (n, d): (u32, u32)) -> Entry {
     Entry {
         tag,
@@ -691,14 +835,14 @@ fn rational_entry(tag: u16, (n, d): (u32, u32)) -> Entry {
 }
 
 /// The directory entries of `page`, whose strips start at `offsets` and
-/// hold `byte_counts` bytes, sorted by tag.  Their sizes do not depend on
-/// the offset and count values.
+/// hold `byte_counts` bytes, in a file of `format`, sorted by tag.  Their
+/// sizes do not depend on the offset and count values.
 fn entries(
     page: &PageMeta,
-    offsets: &[u32],
-    byte_counts: &[u32],
+    (offsets, byte_counts): (&[u64], &[u64]),
     position: (u16, u16),
     one_of_many: bool,
+    format: Format,
 ) -> Vec<Entry> {
     let (samples, bits, photometric) = page.layout;
     // NewSubfileType bit 1: a page of a multi-page document.
@@ -709,10 +853,10 @@ fn entries(
         shorts(258, &vec![bits; usize::from(samples)]),
         shorts(259, &[page.compression.code()]),
         shorts(262, &[photometric]),
-        longs(273, offsets),
+        offsets_entry(273, offsets, format),
         shorts(277, &[samples]),
         longs(278, &[page.rows_per_strip]),
-        longs(279, byte_counts),
+        offsets_entry(279, byte_counts, format),
         rational_entry(282, page.resolution[0]),
         rational_entry(283, page.resolution[1]),
         shorts(284, &[1]),
@@ -734,60 +878,62 @@ fn entries(
 }
 
 /// The length in bytes of the directory of `page`, of `strips` strips,
-/// with its overflowing values:
-/// two bytes of count, twelve per entry, four of link, then each value
-/// longer than four bytes padded to an even length.
-fn directory_len(page: &PageMeta, strips: usize) -> usize {
+/// in a file of `format`, with its overflowing values: the entry count,
+/// the entries, the link, then each value longer than an entry's value
+/// field padded to an even length.
+fn directory_len(page: &PageMeta, strips: usize, format: Format) -> usize {
     let placeholder = vec![0; strips];
-    let entries = entries(page, &placeholder, &placeholder, (0, 1), false);
-    2 + 12 * entries.len()
-        + 4
+    let entries = entries(page, (&placeholder, &placeholder), (0, 1), false, format);
+    format.count_bytes()
+        + format.entry_bytes() * entries.len()
+        + format.offset_bytes()
         + entries
             .iter()
-            .filter(|e| e.bytes.len() > 4)
+            .filter(|e| e.bytes.len() > format.offset_bytes())
             .map(|e| e.bytes.len() + e.bytes.len() % 2)
             .sum::<usize>()
 }
 
 /// The directory of `page` placed at file offset `at`, its strips at
-/// `offsets` holding `byte_counts` bytes, linking to the directory at `next` (0 for none), followed by
-/// its overflowing values.  The caller has checked that the file, the
-/// directory included, ends within 4 GiB.
+/// `offsets` holding `byte_counts` bytes, linking to the directory at
+/// `next` (0 for none), followed by its overflowing values, in a file of
+/// `format`.  The caller has checked that a classic file, the directory
+/// included, ends within 4 GiB.
 fn directory(
     page: &PageMeta,
-    offsets: &[u32],
-    byte_counts: &[u32],
-    at: u32,
-    next: u32,
+    offsets: &[u64],
+    byte_counts: &[u64],
+    (at, next): (u64, u64),
     position: (u16, u16),
     one_of_many: bool,
+    format: Format,
 ) -> Vec<u8> {
-    let entries = entries(page, offsets, byte_counts, position, one_of_many);
-    let n = u16::try_from(entries.len()).expect("fewer than 65536 entries");
-    let mut overflow = at as usize + 2 + 12 * entries.len() + 4;
-    let mut directory = Vec::with_capacity(directory_len(page, offsets.len()));
+    let entries = entries(page, (offsets, byte_counts), position, one_of_many, format);
+    let inline = format.offset_bytes();
+    let mut overflow =
+        at + (format.count_bytes() + format.entry_bytes() * entries.len() + inline) as u64;
+    let mut directory = Vec::with_capacity(directory_len(page, offsets.len(), format));
     let mut spilled = Vec::new();
-    directory.extend_from_slice(&n.to_le_bytes());
+    let n = entries.len() as u64;
+    directory.extend_from_slice(&n.to_le_bytes()[..format.count_bytes()]);
     for e in &entries {
         directory.extend_from_slice(&e.tag.to_le_bytes());
         directory.extend_from_slice(&e.kind.to_le_bytes());
-        directory.extend_from_slice(&e.count.to_le_bytes());
-        if e.bytes.len() <= 4 {
-            let mut inline = [0u8; 4];
-            inline[..e.bytes.len()].copy_from_slice(&e.bytes);
-            directory.extend_from_slice(&inline);
+        directory.extend_from_slice(&u64::from(e.count).to_le_bytes()[..inline]);
+        if e.bytes.len() <= inline {
+            let mut field = [0u8; 8];
+            field[..e.bytes.len()].copy_from_slice(&e.bytes);
+            directory.extend_from_slice(&field[..inline]);
         } else {
-            let value_at =
-                u32::try_from(overflow).expect("the directory's values lie within the 4 GiB file");
-            directory.extend_from_slice(&value_at.to_le_bytes());
-            overflow += e.bytes.len() + e.bytes.len() % 2;
+            directory.extend_from_slice(&format.offset(overflow));
+            overflow += (e.bytes.len() + e.bytes.len() % 2) as u64;
             spilled.extend_from_slice(&e.bytes);
             if e.bytes.len() % 2 == 1 {
                 spilled.push(0);
             }
         }
     }
-    directory.extend_from_slice(&next.to_le_bytes());
+    directory.extend_from_slice(&format.offset(next));
     directory.extend_from_slice(&spilled);
     directory
 }
@@ -1229,5 +1375,78 @@ mod tests {
         pack_bits(&row, &mut out);
         assert_eq!(unpack(&out), row);
         assert!(out.len() < row.len(), "the runs compress");
+    }
+
+    /// A page laid out as `BigTIFF`, as a file past 4 GiB is, reads back
+    /// through an independent decoder, whole and streamed alike.
+    #[test]
+    fn bigtiff_pages_read_back() {
+        use super::{Format, TiffPageEncoder, TiffStream};
+        let (g, c) = (gray(37, 300), rgb(21, 50));
+        for compression in ALL {
+            for (image, layout, w, h) in [
+                (RowImage::Gray(&g), RowLayout::Gray, 37, 300),
+                (RowImage::Rgb(&c), RowLayout::Rgb, 21, 50),
+            ] {
+                let encoder =
+                    TiffPageEncoder::new(w, h, layout, (150.0, 150.0), compression).unwrap();
+                let mut stream =
+                    TiffStream::with_format(Cursor::new(Vec::new()), encoder, Format::Big).unwrap();
+                stream.push(image).unwrap();
+                let file = stream.finish().unwrap().into_inner();
+                assert_eq!(&file[..4], b"II+\0", "a BigTIFF header");
+                let mut classic = Vec::new();
+                write_tiff(image, (150.0, 150.0), compression, &mut classic).unwrap();
+                assert_eq!(
+                    bytes(decode(&file).read_image().unwrap()),
+                    bytes(decode(&classic).read_image().unwrap()),
+                    "{layout:?} {compression:?}"
+                );
+            }
+        }
+    }
+
+    /// A file is classic while its last byte lies within 32-bit offsets.
+    #[test]
+    fn the_format_follows_the_file_length() {
+        use super::Format;
+        assert_eq!(Format::for_len(u64::from(u32::MAX)), Format::Classic);
+        assert_eq!(Format::for_len(u64::from(u32::MAX) + 1), Format::Big);
+    }
+
+    /// The bound a streamed page chooses its format by covers what each
+    /// coding writes, on rows that compress worst: noise.
+    #[test]
+    fn the_file_bound_covers_the_written_file() {
+        use super::{TiffPageEncoder, TiffStream};
+        let mut noise = Bitmap::<Gray8>::new(255, 64, 1, false);
+        let mut state = 0x9e37_79b9_u32;
+        for v in noise.data_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *v = state.to_le_bytes()[0];
+        }
+        for compression in ALL.into_iter().chain([TiffCompression::Group4]) {
+            let layout = if compression.is_fax() {
+                RowLayout::Bilevel
+            } else {
+                RowLayout::Gray
+            };
+            let bound = TiffPageEncoder::new(255, 64, layout, (72.0, 72.0), compression)
+                .unwrap()
+                .file_bound();
+            let mut stream = TiffStream::new(
+                Cursor::new(Vec::new()),
+                (255, 64),
+                layout,
+                (72.0, 72.0),
+                compression,
+            )
+            .unwrap();
+            stream.push(RowImage::Gray(&noise)).unwrap();
+            let written = stream.finish().unwrap().into_inner().len() as u64;
+            assert!(written <= bound, "{compression:?}: {written} > {bound}");
+        }
     }
 }
