@@ -95,6 +95,14 @@ pub(crate) fn live_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> Cow<'_, [u8]> {
 /// the 8-bit range; lighter pixels are white.
 pub const BLACK_BELOW: u8 = 128;
 
+/// Append the RGBA pixels of the RGB row `rgb` under the alpha row `alpha`
+/// to `out`, four bytes per pixel of `alpha`.
+pub(crate) fn push_rgba(rgb: &[u8], alpha: &[u8], out: &mut Vec<u8>) {
+    let start = out.len();
+    out.resize(start + alpha.len() * 4, 0);
+    raster::interleave_rgba(rgb, Some(alpha), &mut out[start..]);
+}
+
 /// Pack the luma of a row into `out`, one bit per pixel, most significant
 /// first, 1 for black (below [`BLACK_BELOW`]).  `out` holds
 /// `luma.len().div_ceil(8)` bytes and is overwritten.

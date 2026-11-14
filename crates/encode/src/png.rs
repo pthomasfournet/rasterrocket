@@ -94,12 +94,7 @@ fn write_png_rgb<P: Pixel, W: Write>(
     for y in 0..bitmap.height {
         source.convert(bitmap.row_bytes(y), &mut rgb);
         match bitmap.alpha_row(y) {
-            Some(alpha) => {
-                for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha) {
-                    buf.extend_from_slice(px);
-                    buf.push(a);
-                }
-            }
+            Some(alpha) => crate::push_rgba(&rgb, alpha, &mut buf),
             None => buf.extend_from_slice(&rgb),
         }
     }

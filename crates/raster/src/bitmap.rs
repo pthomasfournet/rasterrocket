@@ -479,6 +479,31 @@ impl<P: Pixel> Bitmap<P> {
     }
 }
 
+// ── Row interleaving ──────────────────────────────────────────────────────────
+
+/// Interleave the packed RGB pixels of `rgb` with the alpha bytes of
+/// `alpha` into the RGBA pixels of `out`, alpha not premultiplied; every
+/// pixel is opaque when `alpha` is `None`.
+///
+/// The pixel count is that of the shortest input: `out.len() / 4`,
+/// `rgb.len() / 3` and `alpha.len()`.
+pub fn interleave_rgba(rgb: &[u8], alpha: Option<&[u8]>, out: &mut [u8]) {
+    let rgb = rgb.as_chunks::<3>().0;
+    let out = out.as_chunks_mut::<4>().0;
+    match alpha {
+        Some(alpha) => {
+            for ((d, px), &a) in out.iter_mut().zip(rgb).zip(alpha) {
+                *d = [px[0], px[1], px[2], a];
+            }
+        }
+        None => {
+            for (d, px) in out.iter_mut().zip(rgb) {
+                *d = [px[0], px[1], px[2], u8::MAX];
+            }
+        }
+    }
+}
+
 // ── AaBuf ─────────────────────────────────────────────────────────────────────
 
 /// Anti-aliasing scratch buffer: 4 rows × (`bitmap_width` × 4) columns, 1 bit/pixel.
@@ -939,5 +964,18 @@ mod tests {
         let taken = buffers.take_for(true);
         assert_eq!(taken.alpha.as_ptr(), alpha);
         assert_eq!(buffers.alpha, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn interleave_rgba_pairs_each_pixel_with_its_alpha() {
+        let rgb = [1, 2, 3, 4, 5, 6];
+        let mut out = [0; 8];
+        interleave_rgba(&rgb, Some(&[7, 8]), &mut out);
+        assert_eq!(out, [1, 2, 3, 7, 4, 5, 6, 8]);
+        interleave_rgba(&rgb, None, &mut out);
+        assert_eq!(out, [1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut short = [0; 4];
+        interleave_rgba(&rgb, Some(&[7, 8]), &mut short);
+        assert_eq!(short, [1, 2, 3, 7]);
     }
 }

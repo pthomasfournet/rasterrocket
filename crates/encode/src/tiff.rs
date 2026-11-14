@@ -17,7 +17,7 @@ use color::{Gray8, Rgb8};
 use hayro_ccitt::{EncodeScheme, Encoder};
 use raster::Bitmap;
 
-use crate::{EncodeError, pack_bilevel_row};
+use crate::{EncodeError, pack_bilevel_row, push_rgba};
 
 /// The compression of a TIFF's strips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,12 +116,7 @@ impl TiffImage<'_> {
             Self::Rgb(b) => {
                 let rgb = &b.row_bytes(y)[..b.width as usize * 3];
                 match b.alpha_row(y) {
-                    Some(alpha) => {
-                        for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha) {
-                            out.extend_from_slice(px);
-                            out.push(a);
-                        }
-                    }
+                    Some(alpha) => push_rgba(rgb, alpha, out),
                     None => out.extend_from_slice(rgb),
                 }
             }
