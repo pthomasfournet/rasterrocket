@@ -44,19 +44,24 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
     })
 }
 
-/// The page group of `page_id` for a render that keeps the page's alpha.
-///
-/// [`page_group`] when the page is painted as a group, and an isolated,
-/// non-knockout group otherwise; see
+/// The page group of `page_id` for a render that keeps the page's alpha:
+/// isolated, and a knockout group when the page's `/Group` says so; see
 /// [`PageRenderer::try_finish_transparent`].
+///
+/// This is [`page_group`] whenever that is `Some`, read without its walk
+/// over the page's resources: the walk decides only whether the page is a
+/// group, and here it always is.
 ///
 /// [`PageRenderer::try_finish_transparent`]: crate::renderer::PageRenderer::try_finish_transparent
 #[must_use]
 pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> TransparencyGroupParams {
-    page_group(doc, page_id).unwrap_or(TransparencyGroupParams {
+    let knockout = doc.get_dictionary(page_id).is_ok_and(|page| {
+        crate::resources::read_transparency_group(doc, &page).is_some_and(|g| g.knockout)
+    });
+    TransparencyGroupParams {
         isolated: true,
-        knockout: false,
-    })
+        knockout,
+    }
 }
 
 /// Whether some `ExtGState` reachable from the page's resources, or from
@@ -398,6 +403,27 @@ mod tests {
                 knockout: true
             })
         );
+    }
+
+    #[test]
+    fn the_transparent_page_group_is_isolated_and_knocks_out_as_the_page_says() {
+        for (resources, page_extra) in [
+            ("", ""),
+            ("/ExtGState << /M << /BM /Multiply >> >>", ""),
+            ("", "/Group << /S /Transparency /K true >>"),
+            ("", "/Group << /S /Transparency /K false >>"),
+        ] {
+            let doc = doc_with(resources, page_extra, &[]);
+            let want = page_group(&doc, (4, 0)).unwrap_or(TransparencyGroupParams {
+                isolated: true,
+                knockout: false,
+            });
+            assert_eq!(
+                transparent_page_group(&doc, (4, 0)),
+                want,
+                "{resources} {page_extra}"
+            );
+        }
     }
 
     #[test]
