@@ -220,33 +220,26 @@ fn narrow_runs(
             // Sloped segment: walk scanlines.
             let dxdy = seg.dxdy;
 
-            // Clip the y range to the clip rectangle.
-            let (mut cy0, mut cx0) = (y0, x0);
-            let (mut cy1, mut cx1) = (y1, x1);
-
-            if cy0 < clip.y_min_i {
-                cy0 = clip.y_min_i;
-                cx0 = floor_i32((clip.y_min - sy0).mul_add(dxdy, sx0));
-            }
-            if cy1 > clip.y_max_i {
-                cy1 = clip.y_max_i;
-                cx1 = floor_i32((clip.y_max - sy0).mul_add(dxdy, sx0));
-            }
-
-            // Hoist the shared initialisation out of both branches.  Every
-            // row above the segment's own last row `y1` ends where the
-            // segment crosses the row's bottom edge, a row the clip cuts
-            // short included, so a clip changes which rows are drawn but
-            // not the pixels of a drawn row.
-            let mut xa = cx0;
-            let left_to_right = cx0 <= cx1;
+            // The clip selects rows only: a first row below `y0` starts
+            // where the segment crosses its top edge, every row above `y1`
+            // ends where the segment crosses its bottom edge, and the
+            // direction is that of the whole segment, all as in the
+            // unclipped walk, so a drawn row has the unclipped row's pixels.
+            let cy0 = y0.max(clip.y_min_i);
+            let cy1 = y1.min(clip.y_max_i);
+            let mut xa = if cy0 > y0 {
+                floor_i32((f64::from(cy0) - sy0).mul_add(dxdy, sx0))
+            } else {
+                x0
+            };
+            let left_to_right = x0 <= x1;
             for y in cy0..=cy1 {
                 let xb = if y < y1 {
                     floor_i32((f64::from(y) + 1.0 - sy0).mul_add(dxdy, sx0))
                 } else if left_to_right {
-                    cx1 + 1
+                    x1 + 1
                 } else {
-                    cx1 - 1
+                    x1 - 1
                 };
                 let (span_x0, span_x1) = if left_to_right {
                     if xa == xb { (xa, xa) } else { (xa, xb - 1) }
@@ -427,6 +420,61 @@ mod tests {
                 whole[..height as usize],
                 "clip height {height}"
             );
+        }
+    }
+
+    /// A hairline under a clip whose top or bottom edge lies inside a pixel
+    /// row draws each kept row as the unclipped hairline draws it, for a
+    /// steep leftward segment under the bottom edge and a shallow rightward
+    /// one under the top edge.
+    #[test]
+    fn stroke_narrow_rows_are_unchanged_by_fractional_clip_edges() {
+        let draw = |from: (f64, f64), to: (f64, f64), clip: &Clip| {
+            let mut bmp: Bitmap<Rgb8> = Bitmap::new(24, 16, 4, false);
+            let color = [255u8, 0, 0];
+            let mut b = PathBuilder::new();
+            b.move_to(from.0, from.1).unwrap();
+            b.line_to(to.0, to.1).unwrap();
+            let flat = flatten_path(&b.build(), 1.0);
+            let src = PipeSrc::Solid(&color);
+            stroke_narrow::<Rgb8>(
+                &mut bmp,
+                clip,
+                &flat,
+                &simple_pipe(),
+                &src,
+                &identity_matrix(),
+                1.0,
+            );
+            (0..16)
+                .map(|y| bmp.row(y).iter().map(|p| p.r).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            (
+                (5.9, 0.0),
+                (2.6, 10.0),
+                Clip::new(0.0, 0.0, 24.0, 2.5, false),
+            ),
+            (
+                (0.0, 0.0),
+                (20.0, 10.0),
+                Clip::new(0.0, 2.5, 24.0, 16.0, false),
+            ),
+        ];
+        for (from, to, clip) in cases {
+            let whole = draw(from, to, &make_clip(24, 16));
+            let clipped = draw(from, to, &clip);
+            for y in 0..16 {
+                let kept = (clip.y_min_i..=clip.y_max_i).contains(&y);
+                let row = usize::try_from(y).unwrap();
+                let want = if kept {
+                    whole[row].clone()
+                } else {
+                    vec![0; 24]
+                };
+                assert_eq!(clipped[row], want, "{from:?} to {to:?}, row {y}");
+            }
         }
     }
 

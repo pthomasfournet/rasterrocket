@@ -16,8 +16,9 @@ use crate::clip::Clip;
 use crate::fill::{eo_fill, fill};
 use crate::path::{Path, PathBuilder};
 use crate::pipe::PipeSrc;
+use crate::stroke::{StrokeParams, hairline_runs};
 use crate::testutil::simple_pipe;
-use crate::types::{AA_GAMMA, AA_SIZE};
+use crate::types::{AA_GAMMA, AA_SIZE, LineCap, LineJoin};
 use crate::xpath::XPath;
 use color::Rgb8;
 
@@ -144,6 +145,41 @@ fn subpaths(w: u32, h: u32, curves: bool) -> impl Strategy<Value = Vec<Subpath>>
 /// the bitmap and possibly empty.
 fn rect(w: u32, h: u32) -> impl Strategy<Value = [f64; 4]> {
     (coord(w), coord(h), coord(w), coord(h)).prop_map(<[f64; 4]>::from)
+}
+
+/// A clip rectangle on the grid whose top and bottom edges both lie strictly
+/// inside a pixel row.
+fn fractional_rect(w: u32, h: u32) -> impl Strategy<Value = [f64; 4]> {
+    let row = || {
+        let extent = i32::try_from(h).expect("small");
+        (-MARGIN..extent + MARGIN, 1..GRID)
+            .prop_map(|(i, k)| f64::from(i) + f64::from(k) / f64::from(GRID))
+    };
+    (coord(w), row(), coord(w), row()).prop_map(<[f64; 4]>::from)
+}
+
+/// The pixels a hairline stroke of `path` paints under `clip`, one flag per
+/// pixel.
+fn hairline(path: &Path, clip: &Clip, w: u32, h: u32) -> Vec<bool> {
+    let params = StrokeParams {
+        line_width: 0.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        miter_limit: 10.0,
+        flatness: 0.25,
+        stroke_adjust: false,
+        line_dash: &[],
+        line_dash_phase: 0.0,
+        vector_antialias: false,
+    };
+    let mut painted = vec![false; w as usize * h as usize];
+    hairline_runs(path, &IDENTITY, &params, clip, w, h, |x0, x1, y| {
+        let row = usize::try_from(y).expect("y >= 0") * w as usize;
+        for x in x0..=x1 {
+            painted[row + usize::try_from(x).expect("x >= 0")] = true;
+        }
+    });
+    painted
 }
 
 /// Fill options: antialiased, even-odd.
@@ -322,6 +358,28 @@ proptest! {
             let inside = (clip.x_min_i..=clip.x_max_i).contains(&x)
                 && (clip.y_min_i..=clip.y_max_i).contains(&y);
             prop_assert_eq!(c, if inside { f } else { 0 }, "pixel ({}, {})", x, y);
+        }
+    }
+
+    /// A clip rectangle masks the unclipped hairline, its top and bottom
+    /// edges inside a pixel row: inside its pixel bounds the clipped
+    /// hairline paints the unclipped one's pixels, outside them none.
+    #[test]
+    fn a_clip_rectangle_masks_the_unclipped_hairline(
+        (w, h, path, clip_rect) in (SIDE, SIDE).prop_flat_map(|(w, h)| {
+            (Just(w), Just(h), subpaths(w, h, true), fractional_rect(w, h))
+        }),
+    ) {
+        let path = build(&path);
+        let [x0, y0, x1, y1] = clip_rect;
+        let clip = Clip::new(x0, y0, x1, y1, false);
+        let clipped = hairline(&path, &clip, w, h);
+        let free = hairline(&path, &whole(w, h, false), w, h);
+        for (i, (&c, &f)) in clipped.iter().zip(&free).enumerate() {
+            let (x, y) = at(i, w);
+            let inside = (clip.x_min_i..=clip.x_max_i).contains(&x)
+                && (clip.y_min_i..=clip.y_max_i).contains(&y);
+            prop_assert_eq!(c, inside && f, "pixel ({}, {})", x, y);
         }
     }
 
