@@ -17,7 +17,7 @@ use crate::bitmap::{Bitmap, BitmapAllocError};
 use crate::pipe::TransferSet;
 use crate::pipe::{self, Pattern, PipeSrc, PipeState, RowPattern};
 use crate::types::BlendMode;
-use color::Rgb8;
+use color::{Pixel, Rgb8};
 
 /// Upper bound on the lattice points enumerated for one pattern: cells
 /// outside the rectangle cost an iteration each, and a strongly skewed
@@ -153,7 +153,14 @@ fn source_over() -> PipeState<'static> {
     clippy::cast_sign_loss,
     reason = "the overlap is clamped to the screen, whose dimensions are below 2^31"
 )]
-fn stamp(screen: &mut Bitmap<Rgb8>, cell: &Bitmap<Rgb8>, sx: i64, sy: i64, pipe: &PipeState<'_>) {
+fn stamp<P: Pixel>(
+    screen: &mut Bitmap<P>,
+    cell: &Bitmap<P>,
+    sx: i64,
+    sy: i64,
+    pipe: &PipeState<'_>,
+) {
+    let n = P::BYTES;
     let (sw, sh) = (i64::from(screen.width), i64::from(screen.height));
     let (cw, ch) = (i64::from(cell.width), i64::from(cell.height));
     let (x_a, x_b) = (sx.max(0), (sx + cw).min(sw));
@@ -169,12 +176,12 @@ fn stamp(screen: &mut Bitmap<Rgb8>, cell: &Bitmap<Rgb8>, sx: i64, sy: i64, pipe:
             continue;
         }
         let src = RowPattern {
-            data: &cell.row_bytes(cy)[cx_a * 3..cx_b * 3],
+            data: &cell.row_bytes(cy)[cx_a * n..cx_b * n],
         };
         let (row, alpha) = screen.row_and_alpha_mut(y as u32);
-        let dst = &mut row[x_a as usize * 3..x_b as usize * 3];
+        let dst = &mut row[x_a as usize * n..x_b as usize * n];
         let dst_alpha = alpha.map(|a| &mut a[x_a as usize..x_b as usize]);
-        pipe::render_span::<Rgb8>(
+        pipe::render_span::<P>(
             pipe,
             &PipeSrc::Pattern(&src),
             dst,
@@ -187,34 +194,52 @@ fn stamp(screen: &mut Bitmap<Rgb8>, cell: &Bitmap<Rgb8>, sx: i64, sy: i64, pipe:
     }
 }
 
-/// A tiling pattern resolved to device space.
+/// A tiling pattern resolved to device space, of pixels of type `P`.
 ///
 /// The pattern is defined over one pixel rectangle: outside it, every pixel
 /// is unpainted.  Callers paint within that rectangle.
-pub struct TiledPattern {
-    source: Source,
+pub struct TiledPattern<P: Pixel = Rgb8> {
+    source: Source<P>,
 }
 
-enum Source {
+/// The most bytes of a pixel of any type.
+const MAX_PIXEL_BYTES: usize = 8;
+
+enum Source<P: Pixel> {
     /// The pattern composited over its rectangle, whose top-left pixel is
     /// `(x0, y0)`; `bitmap`'s alpha plane is the coverage of each pixel.
     Screen {
-        bitmap: Bitmap<Rgb8>,
+        bitmap: Bitmap<P>,
         x0: i32,
         y0: i32,
         /// Every pixel of the rectangle has coverage 255.
         fully_covered: bool,
     },
-    /// The same colour and coverage at every pixel.
-    Uniform { colour: [u8; 3], coverage: u8 },
+    /// The same colour, the first `P::BYTES` bytes of `colour`, and
+    /// coverage at every pixel.
+    Uniform {
+        colour: [u8; MAX_PIXEL_BYTES],
+        coverage: u8,
+    },
 }
 
-impl TiledPattern {
-    /// A pattern painting `colour` at `coverage` everywhere.
+impl<P: Pixel> TiledPattern<P> {
+    /// A pattern painting `colour`, the bytes of one pixel, at `coverage`
+    /// everywhere.
+    ///
+    /// # Panics
+    ///
+    /// When `colour` is not `P::BYTES` long.
     #[must_use]
-    pub const fn uniform(colour: [u8; 3], coverage: u8) -> Self {
+    pub fn uniform(colour: &[u8], coverage: u8) -> Self {
+        assert_eq!(colour.len(), P::BYTES, "a uniform pattern takes one pixel");
+        let mut bytes = [0; MAX_PIXEL_BYTES];
+        bytes[..colour.len()].copy_from_slice(colour);
         Self {
-            source: Source::Uniform { colour, coverage },
+            source: Source::Uniform {
+                colour: bytes,
+                coverage,
+            },
         }
     }
 
@@ -222,7 +247,7 @@ impl TiledPattern {
     /// pixel `(x0, y0)` and whose alpha plane, when present, is the
     /// coverage of each pixel; a bitmap without one is fully covered.
     #[must_use]
-    pub fn screen(bitmap: Bitmap<Rgb8>, x0: i32, y0: i32) -> Self {
+    pub fn screen(bitmap: Bitmap<P>, x0: i32, y0: i32) -> Self {
         let fully_covered = bitmap
             .alpha_plane()
             .is_none_or(|a| a.iter().all(|&c| c == 255));
@@ -250,7 +275,7 @@ impl TiledPattern {
     /// [`BitmapAllocError`] when the `width × height` screen cannot be
     /// allocated.
     pub fn compose(
-        mut cell: impl FnMut(CellPhase) -> Option<Rc<Bitmap<Rgb8>>>,
+        mut cell: impl FnMut(CellPhase) -> Option<Rc<Bitmap<P>>>,
         (cell_w, cell_h): (u32, u32),
         lattice: &Lattice,
         x0: i32,
@@ -272,7 +297,7 @@ impl TiledPattern {
         };
         let mut screen = Bitmap::try_new_filled(width, height, 1, true, 0)?;
         let pipe = source_over();
-        let mut phases: [Option<Rc<Bitmap<Rgb8>>>; (CELL_PHASES * CELL_PHASES) as usize] =
+        let mut phases: [Option<Rc<Bitmap<P>>>; (CELL_PHASES * CELL_PHASES) as usize] =
             Default::default();
         let (cw, ch) = (i64::from(cell_w), i64::from(cell_h));
         let (w, h) = (i64::from(width), i64::from(height));
@@ -302,8 +327,8 @@ impl TiledPattern {
 /// columns `x0..=x1` that fall within it, as `(row, local x0, offset, count)`:
 /// `count` pixels from local column `local x0` serve output pixels from
 /// `offset`.
-fn screen_run(
-    bitmap: &Bitmap<Rgb8>,
+fn screen_run<P: Pixel>(
+    bitmap: &Bitmap<P>,
     sx0: i32,
     sy0: i32,
     y: i32,
@@ -331,12 +356,13 @@ fn screen_run(
     })
 }
 
-impl Pattern for TiledPattern {
+impl<P: Pixel> Pattern for TiledPattern<P> {
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [u8]) {
+        let n = P::BYTES;
         match &self.source {
             Source::Uniform { colour, .. } => {
-                for px in out.as_chunks_mut::<3>().0 {
-                    *px = *colour;
+                for px in out.chunks_exact_mut(n) {
+                    px.copy_from_slice(&colour[..n]);
                 }
             }
             Source::Screen {
@@ -346,9 +372,9 @@ impl Pattern for TiledPattern {
                 ..
             } => {
                 out.fill(0);
-                if let Some((row, lx, off, n)) = screen_run(bitmap, *sx0, *sy0, y, x0, x1) {
-                    out[off * 3..(off + n) * 3]
-                        .copy_from_slice(&bitmap.row_bytes(row)[lx * 3..(lx + n) * 3]);
+                if let Some((row, lx, off, count)) = screen_run(bitmap, *sx0, *sy0, y, x0, x1) {
+                    out[off * n..(off + count) * n]
+                        .copy_from_slice(&bitmap.row_bytes(row)[lx * n..(lx + count) * n]);
                 }
             }
         }
@@ -540,13 +566,13 @@ mod tests {
 
     #[test]
     fn uniform_serves_one_colour_and_coverage() {
-        let p = TiledPattern::uniform([1, 2, 3], 100);
+        let p = TiledPattern::<color::Rgb8>::uniform(&[1, 2, 3], 100);
         assert!(p.is_static_color() && p.may_leave_unpainted());
         let mut out = [0u8; 2 * 3];
         let mut cov = [0u8; 2];
         p.fill_span_coverage(-5, 7, 8, &mut out, &mut cov);
         assert_eq!(out, [1, 2, 3, 1, 2, 3]);
         assert_eq!(cov, [100, 100]);
-        assert!(!TiledPattern::uniform([0; 3], 255).may_leave_unpainted());
+        assert!(!TiledPattern::<color::Rgb8>::uniform(&[0; 3], 255).may_leave_unpainted());
     }
 }

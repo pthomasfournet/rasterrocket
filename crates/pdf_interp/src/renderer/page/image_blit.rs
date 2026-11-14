@@ -187,7 +187,7 @@ impl PageRenderer<'_> {
     /// spot colorants find no slot: such an image draws as its sRGB
     /// samples.
     fn ink_samples(
-        &mut self,
+        &self,
         decoded: &crate::resources::DecodedImage,
         plan: Option<&image_reduce::Plan>,
     ) -> Option<(Vec<u8>, ChannelMask)> {
@@ -195,7 +195,10 @@ impl PageRenderer<'_> {
             return None;
         }
         let tints = decoded.tints.as_ref()?;
-        let colorants = self.ink_map.plan(self.resources.doc(), &tints.space);
+        let colorants = self
+            .ink_map
+            .borrow_mut()
+            .plan(self.resources.doc(), &tints.space);
         let n = tints.space.ncomponents();
         let resampled;
         let data = match plan {

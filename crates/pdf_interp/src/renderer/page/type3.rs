@@ -19,7 +19,7 @@ use super::super::gstate::ctm_multiply;
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
-use super::canvas::with_canvas;
+use super::canvas::{CanvasKind, with_canvas};
 use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
@@ -224,7 +224,7 @@ impl PageRenderer<'_> {
     ) -> Option<CachedGlyph> {
         let (width, height) = (frame.width, frame.height);
         let context = self.resources.resource_context_id();
-        let mut child = self.try_child(width, height, context)?;
+        let mut child = self.try_child(CanvasKind::Rgb, width, height, context)?;
         child.pattern_depth = self.pattern_depth;
         child.form_depth = self.form_depth + 1;
         child.resources = self.resources.inherited();

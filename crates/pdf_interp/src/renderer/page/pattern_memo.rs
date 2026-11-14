@@ -19,8 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
 
-use color::Rgb8;
+use color::{DeviceN8, Rgb8};
 use pdf::ObjectId;
+use raster::pipe::ChannelMask;
 use raster::{Bitmap, CellPhase};
 
 use super::super::color::RasterColor;
@@ -80,17 +81,20 @@ pub(super) struct RasterKey {
     tint: Option<RasterColor>,
     context: Option<ResourceIdentity>,
     phase: CellPhase,
+    /// Whether the cell is rasterised in ink, for an ink canvas.
+    ink: bool,
 }
 
 impl RasterKey {
-    /// The key of pattern stream `id` under `device` with `tint`;
-    /// `context` is the identity of the resources a pattern without its
-    /// own inherits.
+    /// The key of pattern stream `id` under `device` with `tint`,
+    /// rasterised for a canvas of `kind`; `context` is the identity of the
+    /// resources a pattern without its own inherits.
     pub(super) fn new(
         id: ObjectId,
         device: &[f64; 6],
         tint: Option<&RasterColor>,
         context: Option<ResourceIdentity>,
+        kind: CanvasKind,
     ) -> Self {
         Self {
             id,
@@ -98,6 +102,7 @@ impl RasterKey {
             tint: tint.cloned(),
             context,
             phase: (0, 0),
+            ink: kind == CanvasKind::Ink,
         }
     }
 
@@ -123,6 +128,11 @@ pub(super) enum CellRaster {
     Mean([u8; 3], u8),
     /// The cell bitmap, composited at every lattice point.
     Cell(Rc<Bitmap<Rgb8>>),
+    /// The mean ink and coverage of a cell below one pixel in area, with
+    /// the channels the cell's content painted.
+    InkMean([u8; 8], u8, ChannelMask),
+    /// The cell bitmap of ink, with the channels its content painted.
+    InkCell(Rc<Bitmap<DeviceN8>>, ChannelMask),
 }
 
 /// Resolved shadings and tiling cells keyed by object.  A `None` value
@@ -278,8 +288,11 @@ impl PatternMemo {
     /// kept stays.
     pub(super) fn insert_raster(&mut self, key: RasterKey, raster: CellRaster) {
         let bytes = match &raster {
-            CellRaster::Mean(..) => 0,
+            CellRaster::Mean(..) | CellRaster::InkMean(..) => 0,
             CellRaster::Cell(bitmap) => {
+                bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
+            }
+            CellRaster::InkCell(bitmap, _) => {
                 bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[u8]>::len)
             }
         };
@@ -292,7 +305,7 @@ impl PatternMemo {
 impl PageRenderer<'_> {
     /// The named `Pattern` resource resolved as a shading pattern under the
     /// pattern matrix in effect, for the canvas, from the memo when kept.
-    pub(super) fn memo_shading_pattern(&mut self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
+    pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
         let pattern_ctm = self.window_ctm(&self.pattern_ctm);
@@ -303,10 +316,10 @@ impl PageRenderer<'_> {
             kind,
             self.default_spaces_context(),
         );
-        let (resources, ink_map) = (&self.resources, &mut self.ink_map);
+        let (resources, ink_map) = (&self.resources, &self.ink_map);
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.plan(doc, space);
+            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
             let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
             resources
                 .shading_pattern(name, &pattern_ctm, canvas, ink)
@@ -316,11 +329,7 @@ impl PageRenderer<'_> {
 
     /// The named `Shading` resource resolved under `ctm`, a matrix into the
     /// whole page's space, for the canvas, from the memo when kept.
-    pub(super) fn memo_shading(
-        &mut self,
-        name: &[u8],
-        ctm: &[f64; 6],
-    ) -> Option<Rc<ResolvedShading>> {
+    pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
         let ctm = &self.window_ctm(ctm);
@@ -331,10 +340,10 @@ impl PageRenderer<'_> {
             kind,
             self.default_spaces_context(),
         );
-        let (resources, ink_map) = (&self.resources, &mut self.ink_map);
+        let (resources, ink_map) = (&self.resources, &self.ink_map);
         self.pattern_memo.borrow_mut().shading(key, || {
             let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.plan(doc, space);
+            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
             let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
             resources.shading(name, ctm, canvas, ink).map(Rc::new)
         })
@@ -557,20 +566,27 @@ mod tests {
     fn a_raster_is_kept_per_tint_context_and_phase() {
         let mut memo = PatternMemo::with_budget(BUDGET_BYTES);
         let red = RasterColor::rgb(1.0, 0.0, 0.0);
-        let key = RasterKey::new(ID, &IDENTITY, Some(&red), None);
+        let key = RasterKey::new(ID, &IDENTITY, Some(&red), None, CanvasKind::Rgb);
         memo.insert_raster(key.clone(), CellRaster::Mean([255, 0, 0], 255));
         assert!(memo.raster(&key).is_some());
         let green = RasterColor::rgb(0.0, 1.0, 0.0);
         assert!(
-            memo.raster(&RasterKey::new(ID, &IDENTITY, Some(&green), None))
-                .is_none()
+            memo.raster(&RasterKey::new(
+                ID,
+                &IDENTITY,
+                Some(&green),
+                None,
+                CanvasKind::Rgb
+            ))
+            .is_none()
         );
         assert!(
             memo.raster(&RasterKey::new(
                 ID,
                 &IDENTITY,
                 Some(&red),
-                Some(ResourceIdentity::Object((1, 0)))
+                Some(ResourceIdentity::Object((1, 0))),
+                CanvasKind::Rgb
             ))
             .is_none()
         );
@@ -580,11 +596,11 @@ mod tests {
     #[test]
     fn a_raster_is_repeated_from_its_second_request_within_the_budget() {
         let mut memo = PatternMemo::with_budget(100);
-        let key = RasterKey::new(ID, &IDENTITY, None, None);
+        let key = RasterKey::new(ID, &IDENTITY, None, None, CanvasKind::Rgb);
         assert!(!memo.repeated(&key, 50));
         assert!(memo.repeated(&key, 50));
         assert!(!memo.repeated(&key, 101), "over the budget left");
-        let other = RasterKey::new((6, 0), &IDENTITY, None, None);
+        let other = RasterKey::new((6, 0), &IDENTITY, None, None, CanvasKind::Rgb);
         memo.insert_raster(other.clone(), CellRaster::Mean([0; 3], 0));
         assert!(memo.repeated(&other, 1000), "a kept raster is repeated");
     }

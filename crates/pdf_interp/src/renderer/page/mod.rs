@@ -100,11 +100,14 @@ use paint::components_to_color;
 pub use view::PageView;
 use view::initial_gstate;
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use color::Rgb8;
 use pdf::{Document, ObjectId};
+use raster::pipe::ChannelMask;
 use raster::{Bitmap, path::PathBuilder, transparency::Backdrop};
 
 use super::font_cache::{DocumentFonts, FontCache};
@@ -276,7 +279,11 @@ pub struct PageRenderer<'doc> {
     /// and canvas kind is allocated over the page's life.
     group_pool: Vec<PageCanvas>,
     /// The spot colorants of the page and their channels on an ink canvas.
-    ink_map: ink_map::InkMap,
+    ink_map: Rc<RefCell<ink_map::InkMap>>,
+    /// The channels the renderer's paints wrote, bit `i` for channel `i`:
+    /// the union over each paint of the channels its overprint leaves it,
+    /// every channel for a paint without overprint.
+    painted: Cell<u8>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
     /// Image `XObjects` already decoded on this page, shared with the
@@ -583,7 +590,8 @@ impl<'doc> PageRenderer<'doc> {
             },
             page_group: group,
             group_pool: Vec::new(),
-            ink_map: ink_map::InkMap::default(),
+            ink_map: Rc::default(),
+            painted: Cell::new(0),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             tint_budget: std::rc::Rc::new(crate::resources::image::colorspace::TintBudget::page()),
@@ -835,16 +843,41 @@ impl<'doc> PageRenderer<'doc> {
         self.tint_budget = std::rc::Rc::clone(&parent.tint_budget);
         self.pattern_memo = std::rc::Rc::clone(&parent.pattern_memo);
         self.form_memo = std::rc::Rc::clone(&parent.form_memo);
+        self.ink_map = Rc::clone(&parent.ink_map);
+    }
+
+    /// The channels the renderer's paints wrote (see the `painted` field).
+    pub(super) const fn painted_channels(&self) -> ChannelMask {
+        ChannelMask::new(self.painted.get())
+    }
+
+    /// Record a paint writing the channels `overprint`, every channel when
+    /// `None`.
+    pub(super) fn record_painted(&self, overprint: Option<ChannelMask>) {
+        let bits = overprint.map_or(ChannelMask::ALL.bits(), ChannelMask::bits);
+        self.painted.set(self.painted.get() | bits);
+    }
+
+    /// Consume a child renderer and return its canvas as painted, in its
+    /// own pixel type, sharing its spot slots with the parent.
+    fn finish_canvas(self) -> PageCanvas {
+        self.into_parts(true).0
     }
 
     /// A renderer of `width × height` pixels, resolving resources in
     /// `context`, that paints content drawn for this one (a tiling cell, a
-    /// Type 3 glyph) onto a transparent RGB canvas whose alpha plane is the
-    /// content's coverage.  It shares this renderer's document fonts,
+    /// Type 3 glyph) onto a transparent canvas of `kind` whose alpha plane is
+    /// the content's coverage.  It shares this renderer's document fonts,
     /// antialiasing, operation budget, memos and optional content.  `None`,
     /// with the render stopped, when the allocator refuses the canvas.
-    pub(super) fn try_child(&mut self, width: u32, height: u32, context: ObjectId) -> Option<Self> {
-        let canvas = self.try_canvas(CanvasKind::Rgb, width, height)?;
+    fn try_child(
+        &mut self,
+        kind: CanvasKind,
+        width: u32,
+        height: u32,
+        context: ObjectId,
+    ) -> Option<Self> {
+        let canvas = self.try_canvas(kind, width, height)?;
         let view = Self::unit_view(width, height);
         let mut child = Self::with_canvas(&view, self.resources.doc(), context, canvas, None);
         child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
@@ -996,6 +1029,9 @@ impl<'doc> PageRenderer<'doc> {
             diag,
             ..
         } = self;
+        // A child shares its parent's map, which stays the parent's.
+        let ink_map = Rc::try_unwrap(ink_map)
+            .map_or_else(|_| ink_map::InkMap::default(), RefCell::into_inner);
         (canvas, output_buffers, ink_map, diag)
     }
 

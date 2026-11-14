@@ -686,3 +686,47 @@ fn spot_images_paint_their_colorant_alone() {
         assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{paint}");
     }
 }
+
+/// A coloured tiling pattern's cell renders in ink with the page's spot
+/// slots: a spot colour in the cell paints its slot, and a cell whose
+/// content overprints leaves the cyan under the pattern.  Overprint set
+/// by the paint using the pattern does not reach the cell's content.
+#[test]
+fn tiling_cells_keep_spots_and_their_own_overprint() {
+    let doc = |cell_op: bool, cells: f64| {
+        let cell = format!("/GS gs /Spot cs 1 scn 0 0 {cells} {cells} re f");
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                format!(
+                    "<< /Type /Page /Resources << /ExtGState << /OP << /op true >> >> \
+                     /ColorSpace << {} >> /Pattern << /P 5 0 R >> >> >>",
+                    spot_space()
+                ),
+            ),
+            (
+                5,
+                format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 {cells} {cells}] \
+                     /XStep {cells} /YStep {cells} /Resources << /ColorSpace << {} >> \
+                     /ExtGState << /GS << /op {cell_op} >> >> >> /Length {} >>\n\
+                     stream\n{cell}\nendstream",
+                    spot_space(),
+                    cell.len()
+                ),
+            ),
+        ])
+    };
+    // A cell larger than the fill, tiled, and below one pixel in area.
+    for cells in [10.0, 2.0, 0.5] {
+        let paint = format!("{CYAN_PAGE} /Pattern cs /P scn 0 0 5 10 re f");
+        let ink = render_ink(&doc(false, cells), paint.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{cells}");
+        assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0], "{cells}");
+        let ink = render_ink(&doc(true, cells), paint.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 255, 0, 0, 0], "{cells}");
+        let paint = format!("{CYAN_PAGE} /OP gs /Pattern cs /P scn 0 0 5 10 re f");
+        let ink = render_ink(&doc(false, cells), paint.as_bytes());
+        assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{cells}");
+    }
+}

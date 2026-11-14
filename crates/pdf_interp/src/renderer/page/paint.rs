@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use color::TransferLut;
 use raster::{
-    TiledPattern, eo_fill, fill,
+    eo_fill, fill,
     path::PathBuilder,
     pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
@@ -19,7 +19,7 @@ use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
 #[cfg(feature = "gpu-aa")]
 use super::gpu_ops::{DeviceFill, try_backend_aa_fill};
-use super::patterns::PatternPaint;
+use super::patterns::{PatternPaint, Tile};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::resources::ColorSpace;
@@ -155,7 +155,7 @@ impl PageRenderer<'_> {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
                 if self.canvas.kind() == CanvasKind::Ink =>
             {
-                let (ink, paints) = self.ink_map.colorant_ink(doc, cs, comps);
+                let (ink, paints) = self.ink_map.borrow_mut().colorant_ink(doc, cs, comps);
                 RasterColor::with_ink(cs.convert_to_rgb(doc, comps), ink, paints)
             }
             // An indexed colour is its palette entry's colour in the base
@@ -276,6 +276,7 @@ impl PageRenderer<'_> {
         blend_mode: BlendMode,
         overprint: Option<ChannelMask>,
     ) -> PaintParams {
+        self.record_painted(overprint);
         PaintParams {
             alpha,
             blend_mode,
@@ -318,6 +319,15 @@ impl PageRenderer<'_> {
             gs.overprint_fill
         };
         (overprint && paints != ChannelMask::ALL).then_some(paints)
+    }
+
+    /// The channels a paint of the tiling pattern `tile` writes on an ink
+    /// canvas, `None` for every channel: those its cell's content painted.
+    /// The cell's own paints carry their overprint, whatever the overprint
+    /// state of the paint that uses the pattern.
+    pub(super) fn tile_overprint(&self, tile: &Tile) -> Option<ChannelMask> {
+        let paints = tile.paints();
+        (self.canvas.kind() == CanvasKind::Ink && paints != ChannelMask::ALL).then_some(paints)
     }
 
     /// The channels a fill or stroke of the solid colour `colour` writes
@@ -414,13 +424,13 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
-        // A tiling pattern writes every channel; a solid colour the
-        // channels of its space under the overprint state in effect.
-        let paint = if tiled.is_some() {
-            self.paint_params(fill_alpha, blend_mode, None)
-        } else {
-            self.solid_paint(false, &solid_color, fill_alpha, blend_mode)
-        };
+        // A tiling pattern writes the channels its cell's content painted;
+        // a solid colour the channels of its space under the overprint
+        // state in effect.
+        let paint = tiled.as_ref().map_or_else(
+            || self.solid_paint(false, &solid_color, fill_alpha, blend_mode),
+            |tile| self.paint_params(fill_alpha, blend_mode, self.tile_overprint(tile)),
+        );
         let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
@@ -623,11 +633,10 @@ impl PageRenderer<'_> {
             Some(None) => return,
             None => None,
         };
-        let paint = if tiled.is_some() {
-            self.paint_params(stroke_alpha, blend_mode, None)
-        } else {
-            self.solid_paint(true, &solid_color, stroke_alpha, blend_mode)
-        };
+        let paint = tiled.as_ref().map_or_else(
+            || self.solid_paint(true, &solid_color, stroke_alpha, blend_mode),
+            |tile| self.paint_params(stroke_alpha, blend_mode, self.tile_overprint(tile)),
+        );
         let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
@@ -695,10 +704,10 @@ impl<'a> PaintSource<'a> {
     /// `kind`.  `solid` is already mapped through the transfer function on
     /// either canvas.  `transfer` applies to the pattern's colours only:
     /// `pipe` takes its tables on an RGB canvas, the pattern applies it
-    /// before conversion on an ink canvas.
+    /// before conversion on an ink canvas; a tile of ink maps its ink.
     fn new(
         kind: CanvasKind,
-        tiled: Option<&'a TiledPattern>,
+        tiled: Option<&'a Tile>,
         solid: &'a RasterColor,
         transfer: Option<&'a Transfer>,
         pipe: &mut PipeState<'a>,
@@ -707,7 +716,10 @@ impl<'a> PaintSource<'a> {
             pipe.transfer = set;
         }
         Self {
-            pattern: tiled.map(|p| CanvasPattern::new(kind, p as &dyn Pattern, transfer)),
+            pattern: tiled.map(|tile| match tile {
+                Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, transfer),
+                Tile::Ink { pattern, .. } => CanvasPattern::ink(pattern, transfer),
+            }),
             solid: solid.bytes_for(kind.mode()),
         }
     }
