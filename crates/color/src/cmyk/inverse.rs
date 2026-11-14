@@ -314,7 +314,7 @@ fn invert_node(target: [f64; 3]) -> [f64; 4] {
             // inside a thin band keeps the node solution interior, where
             // neighbouring nodes interpolate to a reproducing ink.  A thick
             // band keeps its edge.
-            if lo.1 - THICK >= 0.0 && solve_at(target, lo.1 - THICK, lo.0).2 <= EXACT {
+            if thick_band(target, lo, k) {
                 return inks(lo);
             }
             for margin in [MARGIN, MARGIN / 2.0] {
@@ -333,6 +333,31 @@ fn invert_node(target: [f64; 3]) -> [f64; 4] {
         above = k;
     }
     inks(nearest)
+}
+
+/// Whether the band of reproducing blacks whose upper edge is the solve
+/// `edge` reaches [`THICK`] below that edge.  The band holds `[k, edge]`,
+/// `k` being the ladder sample beneath the edge; below `k` it is followed
+/// in steps of [`MARGIN`], so that a lower band of blacks also reproducing
+/// the colour (see [`relax`]) across a gap is not taken for this one.
+fn thick_band(target: [f64; 3], edge: ([f64; 3], f64, f64), k: f64) -> bool {
+    let floor = edge.1 - THICK;
+    if floor < 0.0 {
+        return false;
+    }
+    let mut start = edge.0;
+    let mut black = k.max(floor);
+    loop {
+        black = (black - MARGIN).max(floor);
+        let at = solve_at(target, black, start);
+        if at.2 > EXACT {
+            return false;
+        }
+        if black <= floor {
+            return true;
+        }
+        start = at.0;
+    }
 }
 
 /// `[c, m, y, k]` of a slice solve.
