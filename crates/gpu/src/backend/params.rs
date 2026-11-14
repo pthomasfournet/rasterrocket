@@ -1105,6 +1105,7 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
 /// - `width > 0`, `height > 0`, `num_components ∈ {1, 3}`
 /// - `blocks_wide == ceil(width / 8)`, `blocks_high == ceil(height / 8)`
 /// - `num_qtables ∈ {1..=4}`
+/// - at most [`IDCT_MAX_BLOCKS`] blocks over all components
 /// - `coefficients` capacity ≥ `num_components × blocks_wide × blocks_high × 64 × 4` bytes
 /// - `qtables` capacity ≥ `num_qtables × 64 × 4` bytes
 /// - `dc_values` capacity ≥ `num_components × blocks_wide × blocks_high × 4` bytes
@@ -1136,11 +1137,16 @@ pub struct IdctParams<'a, B: GpuBackend + ?Sized> {
     pub num_qtables: u32,
 }
 
+/// Most 8×8 blocks, over all components, an IDCT dispatch may cover: the
+/// kernels address a coefficient as `block × 64 + slot` in 32 bits.
+pub const IDCT_MAX_BLOCKS: usize = 1 << 26;
+
 impl<B: GpuBackend + ?Sized> IdctParams<'_, B> {
-    /// Total blocks per component (`blocks_wide × blocks_high`).
+    /// Total blocks per component (`blocks_wide × blocks_high`); `None` when
+    /// the product overflows `u32`.
     #[must_use]
-    pub const fn blocks_per_component(&self) -> u32 {
-        self.blocks_wide * self.blocks_high
+    pub const fn blocks_per_component(&self) -> Option<u32> {
+        self.blocks_wide.checked_mul(self.blocks_high)
     }
 
     /// Validate the invariants documented on [`IdctParams`].
@@ -1170,8 +1176,15 @@ impl<B: GpuBackend + ?Sized> IdctParams<'_, B> {
         if self.num_qtables == 0 || self.num_qtables > 4 {
             return Err(inv("num_qtables must be in 1..=4"));
         }
-        let num_blocks =
-            (self.num_components as usize).saturating_mul(self.blocks_per_component() as usize);
+        let per_component = self
+            .blocks_per_component()
+            .ok_or_else(|| inv("blocks_wide × blocks_high overflows u32"))?;
+        let num_blocks = (self.num_components as usize).saturating_mul(per_component as usize);
+        if num_blocks > IDCT_MAX_BLOCKS {
+            return Err(inv(
+                "more than 2^26 blocks exceed the kernels' 32-bit coefficient offsets",
+            ));
+        }
         let coef_bytes = num_blocks.saturating_mul(64 * 4);
         if backend.device_buffer_len(self.coefficients) < coef_bytes {
             return Err(inv(
@@ -1519,6 +1532,33 @@ mod tests {
             Some((900_000_000, 4))
         );
         assert_eq!(blit_extents((1, 1), 0, (50_000, 50_000)), None);
+    }
+
+    // --- IdctParams ---
+
+    /// Dimensions whose block counts overflow `u32`, or exceed the kernels'
+    /// 32-bit coefficient offsets, are invariant errors.
+    #[test]
+    fn idct_validate_rejects_block_counts_past_the_kernel_limit() {
+        let p = |width: u32, height: u32, num_components: u32| IdctParams::<FakeBackend> {
+            coefficients: &FAKE_BUF,
+            qtables: &FAKE_BUF,
+            dc_values: &FAKE_BUF,
+            pixels_rgba: &FAKE_BUF,
+            width,
+            height,
+            num_components,
+            blocks_wide: width.div_ceil(8),
+            blocks_high: height.div_ceil(8),
+            num_qtables: 2,
+        };
+        let err =
+            |p: IdctParams<'_, FakeBackend>| p.validate(&FakeBackend).unwrap_err().to_string();
+        assert!(err(p(1 << 20, 1 << 20, 1)).contains("overflows u32"));
+        assert!(err(p(1 << 16, (1 << 16) + 8, 1)).contains("2^26"));
+        assert!(p(1 << 16, 1 << 16, 1).validate(&FakeBackend).is_ok());
+        assert!(err(p(1 << 15, 1 << 16, 3)).contains("2^26"));
+        assert!(p(1 << 15, 1 << 16, 1).validate(&FakeBackend).is_ok());
     }
 
     // --- per-pixel kernels ---
