@@ -136,6 +136,7 @@ All notable changes to this project will be documented in this file.
 - Head the README with the local-fork note
 - Describe the v2.2.0 structure
 - Correct help text and doc comments that disagree with the code
+- Prep v2.2.0 release notes
 
 ### Features
 
@@ -272,6 +273,7 @@ All notable changes to this project will be documented in this file.
 - Build the device-test helpers only with a device feature
 - Honour the Vulkan device selector in the device tests
 - The Japanese serif preference is asserted only when a serif face is installed
+- A font directory of its own for every font_dir call
 
 ## [2.1.0] - 2026-11-04
 
