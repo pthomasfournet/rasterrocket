@@ -427,18 +427,18 @@ pub(crate) struct Args {
     pub max_archive_mib: Option<u64>,
 
     // ── Backend selection ─────────────────────────────────────────────────────
-    /// Compute backend for image decoding and GPU fills.
+    /// Compute backend for image decoding and GPU kernels.
     ///
-    /// `auto`   — CPU, unless a GPU kernel is enabled by its threshold
-    ///            override (`PDF_RASTER_AA_FILL_THRESHOLD`,
-    ///            `PDF_RASTER_HUFFMAN_THRESHOLD`); then Vulkan if compiled in
+    /// `auto`   — CPU, unless the GPU Huffman JPEG decoder is enabled by its
+    ///            threshold override (`PDF_RASTER_HUFFMAN_THRESHOLD`); then
+    ///            Vulkan if compiled in
     ///            and present, else CUDA, else CPU (silent fallback at every
     ///            step).  Independently, a binary built with `nvjpeg2k`
     ///            decodes a JPEG 2000 image of at least 262 144 pixels on
     ///            the GPU when it is drawn at more than half its size, and
     ///            --gpu-pages opens a Vulkan device.  This is the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
-    /// `cuda`   — Require CUDA (nvJPEG/AA fill/ICC); exit with error if unavailable.
+    /// `cuda`   — Require CUDA (nvJPEG/ICC/image cache); exit with error if unavailable.
     /// `vaapi`  — Require VA-API JPEG; exit with error if the DRM device cannot be opened.
     /// `vulkan` — Require the Vulkan compute backend.
     ///

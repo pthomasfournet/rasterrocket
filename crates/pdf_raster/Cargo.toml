@@ -17,12 +17,11 @@ categories  = ["multimedia::images", "rendering", "parser-implementations"]
 # and are not available on crates.io.  Each feature activates `dep:gpu` so the
 # optional dependency is linked, then forwards to the matching gpu-crate feature
 # (where one exists) and the corresponding pdf_interp feature.
-# `gpu-aa` and `gpu-icc` have no matching gpu-crate feature — they gate code that
-# calls into the gpu crate's default (no-feature) surface (`GpuCtx`, fill thresholds).
+# `gpu-icc` has no matching gpu-crate feature — it gates code that calls into
+# the gpu crate's default (no-feature) surface (`GpuCtx`, the ICC CLUT kernel).
 nvjpeg           = ["dep:gpu", "gpu/nvjpeg",           "pdf_interp/nvjpeg"]
 nvjpeg2k         = ["dep:gpu", "gpu/nvjpeg2k",         "pdf_interp/nvjpeg2k"]
 vaapi            = ["dep:gpu", "gpu/vaapi",             "pdf_interp/vaapi"]
-gpu-aa           = ["dep:gpu",                          "pdf_interp/gpu-aa"]
 gpu-icc          = ["dep:gpu",                          "pdf_interp/gpu-icc"]
 gpu-deskew       = ["dep:gpu", "gpu/gpu-deskew"]
 cache            = ["dep:gpu", "gpu/cache",             "pdf_interp/cache"]

@@ -2,8 +2,8 @@
 //!
 //! Mirrors the CUDA backend's shape: instance → device → queue at init
 //! time, then `begin_page → record_* → submit_page → wait_page` for each
-//! rendered page.  The six kernel families (image blit, AA fill, ICC CLUT,
-//! scan, Huffman, IDCT) dispatch through `record_*` into a per-page command
+//! rendered page.  The five kernel families (image blit, ICC CLUT, scan,
+//! Huffman, IDCT) dispatch through `record_*` into a per-page command
 //! buffer; submission uses a timeline semaphore so the host waits exactly
 //! once per page.  The whole-page raster (`page`) records its own command
 //! buffer from a page's command list.
@@ -284,11 +284,6 @@ impl GpuBackend for VulkanBackend {
     fn record_blit_image(&self, params: params::BlitParams<'_, Self>) -> Result<()> {
         params.validate(self)?;
         self.recorder.record_blit_image(params)
-    }
-
-    fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_aa_fill(params)
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {

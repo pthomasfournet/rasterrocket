@@ -144,24 +144,18 @@ and why it failed. On the
 Apple GPU device buffers live in shared memory, which the CPU reads and
 writes in place, so no data is copied to or from the GPU.
 
-What runs on the GPU in this build is the antialiased path fill (solid
-colour, rectangular clip), and it is off by default:
-`PDF_RASTER_AA_FILL_THRESHOLD=0` sends every eligible fill to the device. A
-`vulkan,gpu-jpeg-huffman` build also runs the parallel-Huffman JPEG
-decoder, off by default as well (`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables
+A `vulkan,gpu-jpeg-huffman` build runs the parallel-Huffman JPEG decoder
+on the GPU, off by default (`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables
 it); a `vulkan,gpu-icc` build converts ICC-based CMYK images of at least
 128 000 px through the profile's lookup table on the device, and a
 `vulkan,cache` build keeps decoded images in the device image cache.
 `--gpu-pages` renders pages made only of solid fills and strokes whole on
 the device, beside the CPU workers. Under the default `--backend auto`, no
-Vulkan device is opened while every Vulkan kernel is off and `--gpu-pages`
+Vulkan device is opened while the Huffman decoder is off and `--gpu-pages`
 is not given.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
-byte-identically on the GPU and the CPU. A page of 300 large solid polygons
-takes about 1 ms per fill on the GPU against about 0.25 ms on the CPU, because
-each fill waits for its result, and that round trip through Metal outweighs the
-fill itself. So the kernel stays off.
+byte-identically on the GPU and the CPU.
 
 ## Comparing against pdftoppm
 

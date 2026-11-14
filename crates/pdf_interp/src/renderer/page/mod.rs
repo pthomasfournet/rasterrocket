@@ -21,7 +21,6 @@
 //! - `canvas` — the page bitmap, of RGB or ink pixels, and the dispatch of
 //!   paint calls to either.
 //! - `annotations` — annotation appearances, stored and synthesised.
-//! - `gpu_ops` — antialiased fill dispatch to a GPU backend.
 //!
 //! # What is implemented
 //!
@@ -64,7 +63,6 @@ mod devices;
 mod diagnostics;
 mod fill_stroke;
 mod form_memo;
-pub(crate) mod gpu_ops;
 mod image_blit;
 mod image_compositor;
 mod image_memo;
@@ -118,7 +116,7 @@ use super::gstate::{Ctm, GStateStack};
 use crate::PageGeometry;
 use crate::content::Operator;
 use crate::resources::{IMAGE_FILTER_COUNT, PageResources};
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache"))]
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
@@ -405,13 +403,13 @@ pub struct PageRenderer<'doc> {
     /// Which decodes are offered [`Self::nvjpeg2k`], and how it is obtained.
     #[cfg(feature = "nvjpeg2k")]
     nvjpeg2k_supply: Nvjpeg2kSupply,
-    /// Shared GPU context for AA fill dispatch and ICC CMYK→RGB colour conversion.
-    /// Present when `gpu-aa` or `gpu-icc` features are enabled.
-    #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+    /// Shared CUDA context for ICC CMYK→RGB colour conversion and image
+    /// blits.  Present when the `gpu-icc` or `cache` feature is enabled.
+    #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     gpu_ctx: Option<Arc<GpuCtx>>,
     /// Vulkan compute backend, attached when the session was opened with
-    /// [`BackendPolicy::ForceVulkan`]; the AA fill and the ICC CMYK→RGB
-    /// CLUT then run on it, and the image cache, when attached, keeps its
+    /// [`BackendPolicy::ForceVulkan`]; the ICC CMYK→RGB CLUT then runs
+    /// on it, and the image cache, when attached, keeps its
     /// slabs and runs its blits on the same device.  Such a session
     /// initialises no CUDA context: `gpu_ctx` is `None` and no nvJPEG or
     /// nvJPEG2000 decoder is built.
@@ -676,7 +674,7 @@ impl<'doc> PageRenderer<'doc> {
             nvjpeg2k: None,
             #[cfg(feature = "nvjpeg2k")]
             nvjpeg2k_supply: Nvjpeg2kSupply::Attached,
-            #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+            #[cfg(any(feature = "gpu-icc", feature = "cache"))]
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]
             vk_backend: None,
@@ -991,10 +989,6 @@ impl<'doc> PageRenderer<'doc> {
         }
         diag.has_images |= self.diag.has_images;
         diag.has_vector_text |= self.diag.has_vector_text;
-        diag.device_fills = diag.device_fills.saturating_add(self.diag.device_fills);
-        diag.device_fill_failures = diag
-            .device_fill_failures
-            .saturating_add(self.diag.device_fill_failures);
         diag.device_image_blits = diag
             .device_image_blits
             .saturating_add(self.diag.device_image_blits);

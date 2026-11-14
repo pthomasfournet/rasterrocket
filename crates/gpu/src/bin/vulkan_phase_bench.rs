@@ -13,7 +13,7 @@
 //! Run:
 //! ```text
 //! cargo build --release -p rasterrocket-gpu --features vulkan,cache --bin vulkan_phase_bench
-//! target/release/vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] [--only icc|aa|blit|lock|readback]
+//! target/release/vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] [--only icc|blit|lock|readback]
 //! ```
 #![expect(
     clippy::cast_precision_loss,
@@ -30,11 +30,11 @@ mod bench_common;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use bench_common::{rect_table, smooth_cmyk};
-use rasterrocket_gpu::backend::params::{AaFillParams, BLIT_FILTER_X, BlitParams, IccClutParams};
+use bench_common::smooth_cmyk;
+use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BlitParams, IccClutParams};
 use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
 use rasterrocket_gpu::backend::{BlitScratch, BlitSource, GpuBackend, blit_image_box, icc_clut};
-use rasterrocket_gpu::{AA_SIZE, AaFillRect, icc_cmyk_to_rgb_cpu};
+use rasterrocket_gpu::icc_cmyk_to_rgb_cpu;
 
 /// Dispatches of the long page the kernel's device time is derived from.
 const REPEATS: u32 = 5;
@@ -48,7 +48,7 @@ struct Config {
 
 /// Command-line usage.
 const USAGE: &str = "vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] \
-                     [--only icc|aa|blit|lock|readback]";
+                     [--only icc|blit|lock|readback]";
 
 fn parse_config() -> Config {
     let mut cfg = Config {
@@ -67,7 +67,7 @@ fn parse_config() -> Config {
                 cfg.only = Some(bench_common::only_value(
                     USAGE,
                     value,
-                    &["icc", "aa", "blit", "lock", "readback"],
+                    &["icc", "blit", "lock", "readback"],
                 ));
             }
         }
@@ -345,76 +345,6 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
     }
 }
 
-fn bench_aa(backend: &VulkanBackend, cfg: &Config) {
-    header("aa_fill: aa_fill_page split (prep = table writes, read = counts copy-out)");
-    for e in [10_u32, 14, 16, 18, 20, 22] {
-        let n = 1usize << e;
-        let w = (n as f64).sqrt().ceil() as u32;
-        let h = (n as u32).div_ceil(w);
-        let (intersects, row_starts) = rect_table(w, h);
-        let ib: &[u8] = bytemuck::cast_slice(&intersects);
-        let rb: &[u8] = bytemuck::cast_slice(&row_starts);
-        let n_px = (w * h) as usize;
-        let mut d_i = Slot::new(backend, ib.len(), true);
-        let mut d_r = Slot::new(backend, rb.len(), true);
-        let mut cov = Slot::new(backend, n_px, false);
-        let mut counts = vec![0; n_px];
-        let rect = AaFillRect {
-            x: 0,
-            y: 0,
-            width: w,
-            height: h,
-        };
-        let n_rows = u32::try_from(row_starts.len() - 1).expect("fits");
-        let mut run = |kernels: u32, copies: bool| {
-            let t = Instant::now();
-            d_i.write(backend, ib);
-            d_r.write(backend, rb);
-            let prep = ns(t);
-            let s = page(backend, |b| {
-                if copies {
-                    d_i.record_upload(b, ib.len());
-                    d_r.record_upload(b, rb.len());
-                }
-                for _ in 0..kernels {
-                    ok(
-                        b.record_aa_fill(AaFillParams {
-                            intersects: &d_i.device,
-                            row_starts: &d_r.device,
-                            coverage: &cov.device,
-                            n_rows,
-                            table_y0: 0,
-                            rect,
-                            aa_width: w * AA_SIZE.unsigned_abs(),
-                            fill_rule: 0,
-                        }),
-                        "record",
-                    );
-                }
-                if copies {
-                    cov.record_download(b, n_px);
-                }
-            });
-            let t = Instant::now();
-            cov.read(backend, &mut counts);
-            Steps {
-                prep,
-                read: ns(t),
-                ..s
-            }
-        };
-        let one = median_steps(cfg, || run(1, true));
-        let xfer = median_steps(cfg, || run(0, true));
-        let k1 = median_steps(cfg, || run(1, false));
-        let kn = median_steps(cfg, || run(REPEATS, false));
-        let exec = kn.wait.saturating_sub(k1.wait) / u64::from(REPEATS - 1);
-        row(&format!("{w}x{h}"), one, xfer.wait, exec, None);
-        d_i.free(backend);
-        d_r.free(backend);
-        cov.free(backend);
-    }
-}
-
 /// Sampling tables of a box of `box_n` pixels along one axis mapping onto
 /// `src_n` source samples, entry layout `[x_hi, x_lo, y_hi, y_lo]`.
 fn table(box_n: u32, src_n: u32, x: bool) -> Vec<u32> {
@@ -624,9 +554,6 @@ fn main() {
     bench_empty(&backend, &cfg);
     if want("icc") {
         bench_icc(&backend, &cfg);
-    }
-    if want("aa") {
-        bench_aa(&backend, &cfg);
     }
     if want("blit") {
         bench_blit(&backend, &cfg);

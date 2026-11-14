@@ -31,7 +31,7 @@ nvjpeg2k = []
 # Requires libnppig.so + libnppc.so + libcudart.so (all ship with the CUDA 13 toolkit).
 gpu-deskew = []
 # Enable GPU vs CPU parity tests (requires a CUDA device at test time).
-# cargo test -p rasterrocket-gpu --lib --features gpu-validation -- aa_fill_gpu_vs_cpu
+# cargo test -p rasterrocket-gpu --lib --features gpu-validation -- icc
 gpu-validation = []
 # Enable VA-API hardware JPEG decoding for AMD/Intel iGPU and discrete GPU on Linux.
 # Requires libva.so.2 and libva-drm.so.2 (Mesa / intel-media-driver).

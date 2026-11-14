@@ -1,12 +1,12 @@
 //! GPU compute for the rasteriser: a CUDA context ([`GpuCtx`], via cudarc)
 //! and the CUDA and Vulkan (`vulkan` feature) backends of
-//! [`backend::GpuBackend`], which run the AA fill, ICC CLUT, image blit and
-//! JPEG decode kernels; the whole-page raster (`page`, `vulkan` feature); the
+//! [`backend::GpuBackend`], which run the ICC CLUT, image blit and JPEG
+//! decode kernels; the whole-page raster (`page`, `vulkan` feature); the
 //! device-resident image cache (`cache`, `cache` feature); and the nvJPEG,
-//! nvJPEG2000 and VA-API decoders.  CPU reference implementations of the
-//! kernels (`aa_fill_cpu`, `icc_cmyk_to_rgb_cpu`) are always built.
+//! nvJPEG2000 and VA-API decoders.  The CPU reference implementation of the
+//! ICC kernel (`icc_cmyk_to_rgb_cpu`) is always built.
 //!
-//! The interpreter depends on this crate through its `gpu-aa`, `gpu-icc`,
+//! The interpreter depends on this crate through its `gpu-icc`,
 //! `cache`, `vulkan`, `gpu-jpeg-huffman`, `nvjpeg`, `nvjpeg2k` and `vaapi`
 //! features.
 //!
@@ -46,7 +46,6 @@ pub mod jpeg_decoder;
 
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub(crate) mod decode_queue;
-mod fill;
 #[cfg(any(feature = "vaapi", feature = "gpu-jpeg-huffman"))]
 pub(crate) mod jpeg;
 pub(crate) mod jpeg_sof;
@@ -59,7 +58,6 @@ pub(crate) mod traits;
 pub use cmyk::icc_cmyk_to_rgb_cpu;
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub use decode_queue::{DecodeQueue, JpegQueueHandle};
-pub use fill::{AA_SIZE, AaFillRect, AaScanTable, ScanIntersect, aa_fill_cpu, pixel_coverage};
 pub use jpeg_sof::{JpegSof, JpegVariant, jpeg_sof_info, jpeg_sof_type};
 pub use traits::{DecodedImage, GpuCompute, GpuDecodeError, GpuJpeg2kDecoder, GpuJpegDecoder};
 
@@ -90,8 +88,6 @@ use cudarc::driver::CudaModule;
 use cudarc::nvrtc::Ptx;
 
 #[cfg(not(ptx_placeholder))]
-const PTX_AA_FILL: &str = include_str!(concat!(env!("OUT_DIR"), "/aa_fill.ptx"));
-#[cfg(not(ptx_placeholder))]
 const PTX_ICC_CLUT: &str = include_str!(concat!(env!("OUT_DIR"), "/icc_clut.ptx"));
 #[cfg(all(not(ptx_placeholder), feature = "cache"))]
 const PTX_BLIT_IMAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/blit_image.ptx"));
@@ -102,17 +98,6 @@ const PTX_PARALLEL_HUFFMAN: &str = include_str!(concat!(env!("OUT_DIR"), "/paral
 #[cfg(all(not(ptx_placeholder), feature = "gpu-jpeg-huffman"))]
 const PTX_IDCT_COLOR: &str = include_str!(concat!(env!("OUT_DIR"), "/idct_color.ptx"));
 
-/// Minimum fill bounding-box area (pixels) for a fill to be dispatched to the
-/// GPU scanline-AA kernel rather than composited from the CPU's own
-/// coverage walk.
-///
-/// `usize::MAX`: the path is dormant.  The kernel replaces only the span walk
-/// and sub-sample count, which the CPU performs as bit-run fills and SIMD
-/// popcounts; scan conversion and compositing stay on the CPU either way, so
-/// the table upload, launch and readback are pure overhead and end-to-end
-/// renders are slower on the GPU at every fill size measured.  The renderer
-/// reads an override from `PDF_RASTER_AA_FILL_THRESHOLD`.
-pub const GPU_AA_FILL_THRESHOLD: usize = usize::MAX;
 /// Bytes per pixel for the RGBA8 pixel format the renderer composites in.
 ///
 /// Lives at the crate root rather than under `cache::` because every
@@ -140,7 +125,6 @@ pub const RGBA_BPP: usize = 4;
 pub const GPU_ICC_CLUT_THRESHOLD: usize = 128_000;
 
 pub(crate) struct GpuKernels {
-    pub(crate) aa_fill: CudaFunction,
     pub(crate) icc_cmyk_matrix: CudaFunction,
     pub(crate) icc_cmyk_clut: CudaFunction,
     #[cfg(feature = "cache")]
@@ -271,7 +255,6 @@ impl GpuCtx {
             cuda: Arc::clone(&ctx),
             scratch: backend::DeviceScratch::new(),
             kernels: GpuKernels {
-                aa_fill: load(PTX_AA_FILL, "aa_fill")?,
                 icc_cmyk_matrix: load(PTX_ICC_CLUT, "icc_cmyk_matrix")?,
                 icc_cmyk_clut: load(PTX_ICC_CLUT, "icc_cmyk_clut")?,
                 #[cfg(feature = "cache")]

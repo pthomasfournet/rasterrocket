@@ -1711,7 +1711,6 @@ dependencies = [
 name = "rasterrocket-interp"
 version = "2.2.0"
 dependencies = [
- "bytemuck",
  "env_logger",
  "hayro-ccitt",
  "hayro-jbig2",

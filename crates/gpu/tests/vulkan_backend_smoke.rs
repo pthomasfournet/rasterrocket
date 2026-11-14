@@ -37,8 +37,7 @@ mod common;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
-use rasterrocket_gpu::backend::{AaFillScratch, BackendError, GpuBackend, aa_fill_page};
-use rasterrocket_gpu::{AA_SIZE, AaFillRect, AaScanTable, ScanIntersect, aa_fill_cpu};
+use rasterrocket_gpu::backend::{BackendError, GpuBackend};
 
 /// Per-process `VulkanBackend`, lazy-initialised on first access.
 ///
@@ -391,70 +390,6 @@ fn vulkan_backend_host_buffer_round_trip() {
     backend.free_host_pinned(buf);
 }
 
-/// A slanted band `rows` AA rows tall: row `r` covers AA columns
-/// `r / 2 + 1 ..= width_aa - 2`, so every fill has partial pixels on its left edge.
-fn slanted_band(rows: u32, width_aa: i32) -> (Vec<ScanIntersect>, Vec<u32>) {
-    let mut intersects = Vec::new();
-    let mut row_starts = vec![0];
-    for r in 0..i32::try_from(rows).expect("rows fit i32") {
-        intersects.push(ScanIntersect {
-            x0: r / 2 + 1,
-            x1: r / 2 + 1,
-            count: 1,
-        });
-        intersects.push(ScanIntersect {
-            x0: width_aa - 2,
-            x1: width_aa - 2,
-            count: -1,
-        });
-        row_starts.push(u32::try_from(intersects.len()).expect("fits u32"));
-    }
-    (intersects, row_starts)
-}
-
-/// Three fills through one scratch on `backend`: each is one submission and
-/// matches the host twin.
-fn assert_fills_in_one_submission(backend: &VulkanBackend) {
-    let mut scratch = AaFillScratch::new();
-    // Small, larger, small again: the scratch grows once and the last fill
-    // reads none of the larger fill's counts.
-    for (rows, width_px) in [(16_u32, 8_u32), (256, 96), (8, 5)] {
-        let width_aa = i32::try_from(width_px).expect("fits i32") * AA_SIZE;
-        let (intersects, row_starts) = slanted_band(rows, width_aa);
-        let table = AaScanTable {
-            intersects: &intersects,
-            row_starts: &row_starts,
-            y_min: 0,
-        };
-        let rect = AaFillRect {
-            x: 0,
-            y: 0,
-            width: width_px,
-            height: rows / AA_SIZE.unsigned_abs(),
-        };
-        let aa_width = width_px * AA_SIZE.unsigned_abs();
-        let before = backend.submits();
-        let counts = aa_fill_page(backend, &mut scratch, &table, rect, aa_width, false)
-            .expect("aa_fill_page");
-        assert_eq!(
-            backend.submits() - before,
-            1,
-            "{rows}-row fill used more than one submission"
-        );
-        assert_eq!(
-            counts,
-            aa_fill_cpu(&table, rect, aa_width, false),
-            "{rows}-row fill"
-        );
-    }
-}
-
-#[test]
-fn aa_fill_page_runs_in_one_submission() {
-    let (backend, _serial) = shared_backend();
-    assert_fills_in_one_submission(&backend);
-}
-
 /// The first integrated GPU: the default device when it is one, else a
 /// device matched by a driver name that only integrated parts carry.
 ///
@@ -479,15 +414,6 @@ fn integrated_backend() -> Option<VulkanBackend> {
             Err(e) => panic!("selecting the {name} device failed: {e}"),
         }
     })
-}
-
-#[test]
-fn aa_fill_page_runs_in_one_submission_on_shared_memory() {
-    let Some(backend) = integrated_backend() else {
-        eprintln!("skipping: no integrated GPU");
-        return;
-    };
-    assert_fills_in_one_submission(&backend);
 }
 
 /// On shared memory an upload writes the device buffer directly, so it must

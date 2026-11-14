@@ -266,7 +266,7 @@ const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
 /// [`PageRenderer::try_with_page_group_in`]: pdf_interp::renderer::PageRenderer::try_with_page_group_in
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
-/// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
+/// All other session state (CUDA context, Vulkan backend, VA-API queue) is unaffected.
 pub(crate) fn render_page_rgb_with_geom(
     session: &RasterSession,
     page_num: u32,
@@ -418,7 +418,7 @@ impl<'a> PageJob<'a> {
         renderer.set_document_images(Arc::clone(&session.images));
         renderer.set_optional_content(Arc::clone(&session.optional_content));
 
-        #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+        #[cfg(any(feature = "gpu-icc", feature = "cache"))]
         renderer.set_gpu_ctx(session.gpu_ctx.as_ref().map(Arc::clone));
 
         #[cfg(feature = "vulkan")]

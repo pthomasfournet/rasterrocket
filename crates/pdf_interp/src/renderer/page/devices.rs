@@ -1,9 +1,9 @@
 //! GPU decoders, kernels and the device image cache attached to a renderer.
 
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache", feature = "vulkan"))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache"))]
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
@@ -167,26 +167,19 @@ impl PageRenderer<'_> {
         self.nvjpeg2k.take()
     }
 
-    /// Attach a GPU context for antialiased fill dispatch.
+    /// Attach a CUDA context for ICC CMYK→RGB conversion and, with the
+    /// `cache` feature, image blits.
     ///
-    /// When set, solid-colour fills under a rectangular clip whose pixel
-    /// bounding-box area reaches the dispatch threshold (dormant by default;
-    /// see [`gpu::GPU_AA_FILL_THRESHOLD`]) have their
-    /// coverage evaluated on the GPU.  The device walks the same 4× scanline
-    /// intersection table the CPU fill builds and the counts are composited
-    /// through the CPU pipeline, so the rendered bytes are identical to the
-    /// CPU-only render.
-    ///
-    /// Call with `None` to revert to CPU-only AA.
-    #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+    /// Call with `None` to detach it.
+    #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     pub fn set_gpu_ctx(&mut self, ctx: Option<Arc<GpuCtx>>) {
         self.gpu_ctx = ctx;
     }
 
     /// Attach a Vulkan compute backend for kernel dispatch.
     ///
-    /// When set, GPU-eligible AA fills and ICC CMYK→RGB conversions run
-    /// on it, ahead of any CUDA context.  Image blits run on the backend of
+    /// When set, ICC CMYK→RGB conversions run on it, ahead of any CUDA
+    /// context.  Image blits run on the backend of
     /// the attached image cache ([`Self::set_image_cache`]).
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {

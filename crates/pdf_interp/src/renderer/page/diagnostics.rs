@@ -89,16 +89,6 @@ pub struct PageDiagnostics {
     /// [`document_unsupported_features`](crate::document_unsupported_features).
     /// Empty when the page uses none.
     pub unsupported_features: Vec<crate::UnsupportedFeature>,
-    /// Fills painted from coverage counts computed on a GPU backend.  Zero
-    /// when every fill ran on the CPU: the default, the device fill being
-    /// dormant unless its size threshold is lowered.  Type 3 glyphs and
-    /// tiling-pattern cells are always filled on the CPU.
-    pub device_fills: u32,
-    /// Fills a GPU backend took and failed, each then painted by the CPU
-    /// fill, so the page is complete.  Non-zero means the device path is
-    /// broken on this host; the first failure of the process is also
-    /// logged at `warn`.
-    pub device_fill_failures: u32,
     /// Images drawn through the blit kernel of the image cache's backend
     /// from device-resident samples.  Zero when the session holds no
     /// image cache, and for images the CPU draws: masked images, draws

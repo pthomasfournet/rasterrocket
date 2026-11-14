@@ -181,25 +181,6 @@ impl PageRecorder {
         ))
     }
 
-    pub(super) fn record_aa_fill(
-        &self,
-        p: params::AaFillParams<'_, super::CudaBackend>,
-    ) -> Result<()> {
-        let eo = p.fill_rule != 0;
-        self.ctx
-            .launch_aa_fill_async(
-                p.intersects,
-                p.row_starts,
-                p.n_rows,
-                p.table_y0,
-                p.rect,
-                p.aa_width,
-                eo,
-                p.coverage,
-            )
-            .map_err(be)
-    }
-
     /// `grid_n` is the value `IccClutParams::validate` derived from the
     /// CLUT length; the `CudaBackend::record_icc_clut` wrapper runs it.
     pub(super) fn record_icc_clut(

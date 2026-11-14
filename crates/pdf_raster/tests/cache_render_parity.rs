@@ -451,14 +451,8 @@ on_each_backend!(
 /// renders as `CpuOnly` does.
 #[test]
 fn auto_session_holds_no_image_cache_while_kernels_are_dormant() {
-    if [
-        "PDF_RASTER_AA_FILL_THRESHOLD",
-        "PDF_RASTER_HUFFMAN_THRESHOLD",
-    ]
-    .iter()
-    .any(|var| std::env::var_os(var).is_some())
-    {
-        eprintln!("skipping: a device kernel threshold is overridden");
+    if std::env::var_os("PDF_RASTER_HUFFMAN_THRESHOLD").is_some() {
+        eprintln!("skipping: the Huffman threshold is overridden");
         return;
     }
     let auto = session(fixture_pdf(), BackendPolicy::Auto);

@@ -138,12 +138,6 @@ impl GpuBackend for CudaBackend {
         self.recorder.record_blit_image(params)
     }
 
-    fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()> {
-        self.recorder.check_recording("record_aa_fill")?;
-        params.validate(self)?;
-        self.recorder.record_aa_fill(params)
-    }
-
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
         self.recorder.check_recording("record_icc_clut")?;
         let grid_n = params.validate(self)?;

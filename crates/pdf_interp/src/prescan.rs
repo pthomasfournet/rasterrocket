@@ -70,9 +70,8 @@ const MAX_PRESCAN_DEPTH: u32 = 4;
 /// `dominant_filter`, a conservative `source_ppi_hint` derived from the
 /// image's PDF dictionary `Width` entry (see module doc for caveats),
 /// `content_failures`, `form_type` and `unsupported_features`.  The fields only rendering measures
-/// (`image_failures`, `missing_fonts`, `unslotted_spots`, `device_fills`,
-/// `device_fill_failures`, `device_image_blits`, `device_icc_conversions`,
-/// `device_icc_failures`)
+/// (`image_failures`, `missing_fonts`, `unslotted_spots`,
+/// `device_image_blits`, `device_icc_conversions`, `device_icc_failures`)
 /// are empty or zero.
 ///
 /// # Errors

@@ -32,7 +32,6 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `nvjpeg` | Any CUDA-capable NVIDIA GPU | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | Any CUDA-capable NVIDIA GPU | `libnvjpeg2k.so` (separate download; build script probes `/13` then `/12`) |
-| `gpu-aa` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-icc` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-deskew` | Any CUDA-capable NVIDIA GPU | CUDA NPP (`libnppig.so`, `libnppc.so`) |
 | `cache` | Any CUDA-capable NVIDIA GPU, or a Vulkan 1.3+ device with `vulkan` | CUDA runtime or Vulkan ICD; opt-in disk-tier persistence via `PDF_RASTER_CACHE_DIR` |
@@ -45,7 +44,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-Vulkan covers the AA-fill kernel, and the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages made only of solid fills and strokes under rectangular clips whole on the Vulkan device, beside the CPU workers and with the same bytes; it is off by default.  Both kernels are dormant by default: the AA fill (`GPU_AA_FILL_THRESHOLD = usize::MAX`) is byte-identical to the CPU fill but slower end to end, and the Huffman decode (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) loses to the multi-threaded CPU decoder; `PDF_RASTER_AA_FILL_THRESHOLD=0` and `PDF_RASTER_HUFFMAN_THRESHOLD=0` enable them.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
+Vulkan covers the parallel-Huffman JPEG decode kernels when the `gpu-jpeg-huffman` feature is also enabled (`vulkan` does not imply it).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages made only of solid fills and strokes under rectangular clips whole on the Vulkan device, beside the CPU workers and with the same bytes; it is off by default.  The Huffman decode is dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`): it loses to the multi-threaded CPU decoder; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
 
@@ -91,7 +90,7 @@ For GPU acceleration — NVIDIA (CUDA 13) + Vulkan (cross-vendor) + VA-API (Linu
 ```toml
 [dependencies]
 # CUDA GPU features (NVIDIA only; full feature set including the image cache):
-rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["nvjpeg", "nvjpeg2k", "gpu-aa", "gpu-icc", "gpu-deskew", "cache"] }
+rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["nvjpeg", "nvjpeg2k", "gpu-icc", "gpu-deskew", "cache"] }
 
 # Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via MoltenVK):
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vulkan"] }
@@ -354,7 +353,7 @@ cargo build --release -p rasterrocket-cli
 # With all GPU features
 # Default CUDA_ARCH is sm_80 (Ampere); override to match your card.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
-  --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc,gpu-deskew,cache"
+  --features "nvjpeg,nvjpeg2k,gpu-icc,gpu-deskew,cache"
 
 # Vulkan backend (needs slangc from the LunarG SDK at build time)
 cargo build --release -p rasterrocket-cli --features vulkan

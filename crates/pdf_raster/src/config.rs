@@ -9,7 +9,7 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
 
-/// Controls which compute backend is used for image decoding and GPU fills.
+/// Controls which compute backend is used for image decoding and GPU kernels.
 ///
 /// The default is [`Auto`](BackendPolicy::Auto), which renders on the CPU
 /// unless a device kernel is enabled by its threshold, and then prefers
@@ -25,9 +25,8 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    /// Auto: the CPU, unless a device kernel (the AA fill, the
-    /// parallel-Huffman JPEG decoder) is enabled by its threshold, which
-    /// none is by default; then prefer Vulkan when present, fall through to
+    /// Auto: the CPU, unless the parallel-Huffman JPEG decoder is enabled
+    /// by its threshold, which it is not by default; then prefer Vulkan when present, fall through to
     /// CUDA, then CPU.  Silent fallback at every step.  A CPU session
     /// initialises no GPU backend, image cache or nvJPEG decoder; with the
     /// `nvjpeg2k` feature a rendering thread builds its nvJPEG2000 decoder
@@ -37,7 +36,7 @@ pub enum BackendPolicy {
     Auto,
     /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.
     CpuOnly,
-    /// Require CUDA (nvJPEG2000, GPU AA fill, ICC CLUT, and nvJPEG while its
+    /// Require CUDA (nvJPEG2000, ICC CLUT, image blits, and nvJPEG while its
     /// threshold enables it).
     /// Returns [`RasterError::BackendUnavailable`] if CUDA initialisation fails
     /// rather than falling back to CPU.
@@ -53,7 +52,7 @@ pub enum BackendPolicy {
     /// [`RasterError::BackendUnavailable`] if Vulkan initialisation fails
     /// (or the binary was built without `--features vulkan`).
     ///
-    /// The AA fill, ICC CMYK→RGB CLUT and image blit kernels dispatch
+    /// The ICC CMYK→RGB CLUT and image blit kernels dispatch
     /// through `VulkanBackend`, and in a build with the `cache` feature the
     /// device-resident image cache keeps its slabs on the Vulkan device.
     ForceVulkan,

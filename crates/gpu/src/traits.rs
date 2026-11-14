@@ -23,7 +23,7 @@
 //! | [`GpuJpegDecoder`] | `NvJpegDecoder` | `nvjpeg` |
 //! | [`GpuJpegDecoder`] | `VapiJpegDecoder` | `vaapi` |
 //! | [`GpuJpeg2kDecoder`] | `NvJpeg2kDecoder` | `nvjpeg2k` |
-//! | [`GpuCompute`] | [`GpuCtx`](crate::GpuCtx) | `gpu-aa` or `gpu-icc` |
+//! | [`GpuCompute`] | [`GpuCtx`](crate::GpuCtx) | `gpu-icc` |
 //!
 //! Metal (Apple Silicon) is planned — see `ROADMAP_INTEL.md` Phase F.
 
@@ -134,7 +134,7 @@ pub trait GpuJpeg2kDecoder: Send {
 
 // ── GpuCompute ────────────────────────────────────────────────────────────────
 
-/// General GPU compute operations: ICC CLUT lookup, AA fill, tile fill.
+/// General GPU compute operations: ICC CLUT lookup.
 ///
 /// Unlike the decoder traits, `GpuCompute` does not mutate internal decoder
 /// state on each call, so implementations may be safely shared via

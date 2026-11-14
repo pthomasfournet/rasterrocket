@@ -13,9 +13,8 @@
 //!   `cargo test -p rasterrocket-gpu --features vulkan --test cu_vs_slang_parity`
 //!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation' --test cu_vs_slang_parity`
 //!
-//! This file has no `aa_fill` or parallel-Huffman cases. The fill kernel's
-//! CUDA / Vulkan / host-twin parity tests live in `aa_fill_parity.rs`; the
-//! Huffman ones live in `huffman::vulkan_tests`, gated on
+//! This file has no parallel-Huffman cases; those live in
+//! `huffman::vulkan_tests`, gated on
 //! `gpu-jpeg-huffman` in addition to `vulkan`:
 //!   `cargo test -p rasterrocket-gpu --features 'vulkan,gpu-validation,gpu-jpeg-huffman' --lib -- vulkan_tests`
 

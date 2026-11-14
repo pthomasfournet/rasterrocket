@@ -13,7 +13,7 @@
 //! Run:
 //! ```text
 //! CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-gpu --bin threshold_bench
-//! target/release/threshold_bench [--iters N] [--warmup N] [--only aa|icc|clut]
+//! target/release/threshold_bench [--iters N] [--warmup N] [--only icc|clut]
 //! ```
 //!
 //! With the `vulkan` feature, `--vulkan-device NAME` (repeatable) adds the
@@ -28,12 +28,10 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bench_common::{rect_table, smooth_cmyk};
+use bench_common::smooth_cmyk;
 use rasterrocket_gpu::backend::cuda::CudaBackend;
-use rasterrocket_gpu::backend::{AaFillScratch, GpuBackend, aa_fill_page, icc_clut};
-use rasterrocket_gpu::{
-    AA_SIZE, AaFillRect, AaScanTable, GpuCtx, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
-};
+use rasterrocket_gpu::backend::{GpuBackend, icc_clut};
+use rasterrocket_gpu::{GpuCtx, icc_cmyk_to_rgb_cpu};
 
 /// Unwrap a GPU `Result`, printing the error with context and exiting with
 /// status 1.  Used inside timing closures where `?` is not available.
@@ -51,7 +49,7 @@ struct Config {
     iters: u32,
     /// Number of warmup iterations (timed but discarded).
     warmup: u32,
-    /// Run only the named benchmark (`aa`, `icc` or `clut`).
+    /// Run only the named benchmark (`icc` or `clut`).
     only: Option<String>,
     /// Vulkan devices the ICC CLUT sweep also runs on.
     vulkan_devices: Vec<String>,
@@ -69,7 +67,7 @@ impl Default for Config {
 }
 
 /// Command-line usage.
-const USAGE: &str = "threshold_bench [--iters N] [--warmup N] [--only aa|icc|clut] \
+const USAGE: &str = "threshold_bench [--iters N] [--warmup N] [--only icc|clut] \
                      [--vulkan-device NAME]...";
 
 fn parse_config() -> Config {
@@ -80,11 +78,7 @@ fn parse_config() -> Config {
             "--iters" => cfg.iters = bench_common::parse_value(USAGE, &flag, &value),
             "--warmup" => cfg.warmup = bench_common::parse_value(USAGE, &flag, &value),
             "--only" => {
-                cfg.only = Some(bench_common::only_value(
-                    USAGE,
-                    value,
-                    &["aa", "icc", "clut"],
-                ));
+                cfg.only = Some(bench_common::only_value(USAGE, value, &["icc", "clut"]));
             }
             _ if cfg!(feature = "vulkan") => cfg.vulkan_devices.push(value),
             _ => bench_common::usage_error(
@@ -101,21 +95,6 @@ fn parse_config() -> Config {
 /// Sizes to sweep: powers-of-2 from 2^8 to 2^22 (256 to 4M pixels).
 fn sweep_sizes() -> Vec<usize> {
     (8u32..=22).map(|e| 1usize << e).collect()
-}
-
-/// Width/height for a near-square bounding box of `n` pixels.
-fn dims(n: usize) -> (u32, u32) {
-    // n ≤ 2^22 = 4M; sqrt ≤ 2048; fits u32 without truncation.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "n ≤ 4_194_304 (22-bit); exact in f64 (52-bit mantissa); sqrt ≤ 2049 — fits u32"
-    )]
-    let w = (n as f64).sqrt().ceil() as u32;
-    #[expect(clippy::cast_possible_truncation, reason = "n ≤ 4_194_304 — fits u32")]
-    let h = (n as u32).div_ceil(w);
-    (w, h)
 }
 
 // ── Timing helpers ──────────────────────────────────────────────────────────
@@ -143,77 +122,6 @@ fn time_ns<F: FnMut()>(mut f: F, warmup: u32, iters: u32) -> u64 {
         })
         .collect();
     median_ns(samples)
-}
-
-// ── Intersection-table fixture: a w×h rectangle at the origin ──────────────
-
-// ── AA fill benchmark ───────────────────────────────────────────────────────
-
-fn bench_aa_fill(ctx: &Arc<GpuCtx>, cfg: &Config) {
-    let backend = CudaBackend::from_ctx(Arc::clone(ctx));
-    println!("\n══ aa_fill: GPU scanline walk vs host twin (informational) ══");
-    println!(
-        "{:>10}  {:>12}  {:>12}  {:>8}  winner",
-        "pixels", "cpu_ns", "gpu_ns", "ratio"
-    );
-    println!("{}", "─".repeat(60));
-
-    for &n in &sweep_sizes() {
-        let (w, h) = dims(n);
-        let (intersects, row_starts) = rect_table(w, h);
-        let table = AaScanTable {
-            intersects: &intersects,
-            row_starts: &row_starts,
-            y_min: 0,
-        };
-        let rect = AaFillRect {
-            x: 0,
-            y: 0,
-            width: w,
-            height: h,
-        };
-        let aa_width = w * AA_SIZE.unsigned_abs();
-
-        let cpu_ns = time_ns(
-            || {
-                let _ = aa_fill_cpu(&table, rect, aa_width, false);
-            },
-            cfg.warmup,
-            cfg.iters,
-        );
-
-        let mut scratch = AaFillScratch::new();
-        let gpu_ns = time_ns(
-            || {
-                let _ = gpu_unwrap(
-                    aa_fill_page(&backend, &mut scratch, &table, rect, aa_width, false),
-                    "aa_fill",
-                );
-            },
-            cfg.warmup,
-            cfg.iters,
-        );
-
-        let ratio = cpu_ns as f64 / gpu_ns as f64;
-        let winner = if gpu_ns < cpu_ns { "GPU ✓" } else { "CPU" };
-
-        println!(
-            "{:>10}  {:>12}  {:>12}  {:>7.2}x  {}",
-            n,
-            fmt_ns(cpu_ns),
-            fmt_ns(gpu_ns),
-            ratio,
-            winner
-        );
-    }
-
-    println!();
-    println!(
-        "  → The host twin is the per-pixel parity oracle, not the production CPU fill \
-         (bit-run spans + SIMD popcount), so this table cannot calibrate \
-         GPU_AA_FILL_THRESHOLD.  Calibrate end to end: render with \
-         PDF_RASTER_AA_FILL_THRESHOLD=<px> under --backend cuda against --backend cpu."
-    );
 }
 
 // ── ICC CMYK→RGB benchmark ──────────────────────────────────────────────────
@@ -403,9 +311,6 @@ fn main() {
     };
     let run = |name: &str| cfg.only.as_deref().is_none_or(|only| only == name);
     if let Some(ctx) = &ctx {
-        if run("aa") {
-            bench_aa_fill(ctx, &cfg);
-        }
         if run("icc") {
             bench_icc_cmyk(ctx, &cfg);
         }

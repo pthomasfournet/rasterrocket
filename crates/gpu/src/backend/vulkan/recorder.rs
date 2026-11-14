@@ -361,36 +361,6 @@ impl PageRecorder {
 
     // ── record_* ─────────────────────────────────────────────────────
 
-    pub(super) fn record_aa_fill(
-        &self,
-        p: params::AaFillParams<'_, super::VulkanBackend>,
-    ) -> Result<()> {
-        // Push: n_rows(u32), table_y0(i32), x_min(i32), y_min(i32),
-        // width(u32), height(u32), aa_width(u32), eo(i32).
-        let mut push = [0u8; 32];
-        push[0..4].copy_from_slice(&p.n_rows.to_ne_bytes());
-        push[4..8].copy_from_slice(&p.table_y0.to_ne_bytes());
-        push[8..12].copy_from_slice(&p.rect.x.to_ne_bytes());
-        push[12..16].copy_from_slice(&p.rect.y.to_ne_bytes());
-        push[16..20].copy_from_slice(&p.rect.width.to_ne_bytes());
-        push[20..24].copy_from_slice(&p.rect.height.to_ne_bytes());
-        push[24..28].copy_from_slice(&p.aa_width.to_ne_bytes());
-        push[28..32].copy_from_slice(&i32::from(p.fill_rule != 0).to_ne_bytes());
-        // One 16×16 workgroup per pixel block; 2D dispatch so every axis
-        // stays within Vulkan's guaranteed `maxComputeWorkGroupCount[i]`.
-        self.dispatch_kernel(
-            KernelId::AaFill,
-            &[
-                p.intersects.handle(),
-                p.row_starts.handle(),
-                p.coverage.handle(),
-            ],
-            &[p.intersects.size(), p.row_starts.size(), p.coverage.size()],
-            &push,
-            (p.rect.width.div_ceil(16), p.rect.height.div_ceil(16), 1),
-        )
-    }
-
     /// `grid_n` is the value `IccClutParams::validate` derived from the
     /// CLUT length; the `VulkanBackend::record_icc_clut` wrapper runs it.
     pub(super) fn record_icc_clut(

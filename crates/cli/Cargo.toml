@@ -23,7 +23,6 @@ path = "src/main.rs"
 nvjpeg           = ["pdf_raster/nvjpeg"]
 nvjpeg2k         = ["pdf_raster/nvjpeg2k"]
 vaapi            = ["pdf_raster/vaapi"]
-gpu-aa           = ["pdf_raster/gpu-aa"]
 gpu-icc          = ["pdf_raster/gpu-icc"]
 gpu-deskew       = ["pdf_raster/gpu-deskew"]
 cache            = ["pdf_raster/cache"]

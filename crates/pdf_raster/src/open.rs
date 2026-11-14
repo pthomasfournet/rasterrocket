@@ -62,7 +62,7 @@ pub struct RasterSession {
     pub(crate) media_warned: AtomicBool,
     /// The document-level features the renderer ignores.
     pub(crate) unsupported_features: Vec<pdf_interp::UnsupportedFeature>,
-    #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+    #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     pub(crate) gpu_ctx: Option<Arc<gpu::GpuCtx>>,
     /// Vulkan compute backend.  `Some` when the `vulkan` feature is
     /// enabled, the policy resolves to `Auto` or `ForceVulkan`, and
@@ -402,20 +402,15 @@ pub fn open_session_from_reader(
 /// on the CPU, the fallback the `Force*` variants exist to prevent.
 const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     let vulkan = cfg!(feature = "vulkan");
-    let cuda = cfg!(any(
-        feature = "gpu-aa",
-        feature = "gpu-icc",
-        feature = "cache"
-    ));
+    let cuda = cfg!(any(feature = "gpu-icc", feature = "cache"));
     match policy {
         BackendPolicy::ForceVulkan if !vulkan => Some(
             "ForceVulkan requires the `vulkan` Cargo feature; \
              rebuild with `--features vulkan` or pick another --backend.",
         ),
         BackendPolicy::ForceCuda if !cuda => Some(
-            "ForceCuda requires at least one of the `gpu-aa`, `gpu-icc`, or \
-             `cache` Cargo features; rebuild with the desired feature set or \
-             pick another --backend.",
+            "ForceCuda requires the `gpu-icc` or `cache` Cargo feature; \
+             rebuild with the desired feature set or pick another --backend.",
         ),
         _ => None,
     }
@@ -423,13 +418,12 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
 
 /// Whether [`BackendPolicy::Auto`] initialises a GPU backend: only while a
 /// device kernel that its dispatch threshold leaves dormant by default is
-/// enabled, the AA fill or the parallel-Huffman JPEG decoder
+/// enabled, the parallel-Huffman JPEG decoder
 /// ([`pdf_interp::device_kernel_enabled`]).  Otherwise an `Auto` session
 /// renders on the CPU: no Vulkan device, CUDA context, image cache or
 /// nvJPEG decoder is created, and an nvJPEG2000 decoder only on a thread
 /// that meets an image it takes.
 #[cfg(any(
-    feature = "gpu-aa",
     feature = "gpu-icc",
     feature = "cache",
     feature = "vulkan",
@@ -437,13 +431,13 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
 ))]
 pub(crate) fn auto_uses_device() -> bool {
     use pdf_interp::{DeviceKernel, device_kernel_enabled};
-    device_kernel_enabled(DeviceKernel::AaFill) || device_kernel_enabled(DeviceKernel::HuffmanJpeg)
+    device_kernel_enabled(DeviceKernel::HuffmanJpeg)
 }
 
 /// The CUDA context of a session under `policy`.  Under `Auto` a Vulkan
 /// backend wins (`vk_won_auto`) and CUDA is not initialised, which saves
 /// its ~240 ms start-up for a path the session will not use.
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache"))]
 fn session_gpu_ctx(
     policy: BackendPolicy,
     vk_won_auto: bool,
@@ -484,9 +478,9 @@ fn open_session_with_doc(
     #[cfg(feature = "vulkan")]
     let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
 
-    #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+    #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     let gpu_ctx = session_gpu_ctx(config.policy, vk_won_auto)?;
-    #[cfg(not(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache")))]
+    #[cfg(not(any(feature = "gpu-icc", feature = "cache")))]
     if matches!(config.policy, BackendPolicy::Auto) {
         log_auto_resolution_once(vk_won_auto, false);
     }
@@ -562,7 +556,7 @@ fn open_session_with_doc(
         javascript_warned: AtomicBool::new(false),
         media_warned: AtomicBool::new(false),
         unsupported_features,
-        #[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+        #[cfg(any(feature = "gpu-icc", feature = "cache"))]
         gpu_ctx,
         #[cfg(feature = "vulkan")]
         vk_backend,
@@ -670,7 +664,7 @@ fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
     });
 }
 
-/// Initialise the CUDA GPU context for AA fill and ICC colour transforms.
+/// Initialise the CUDA GPU context for ICC colour transforms and image blits.
 ///
 /// Returns `None` on `CpuOnly` and `ForceVulkan`, and on `Auto` unless
 /// [`auto_uses_device`].  Errors loudly on
@@ -694,10 +688,10 @@ fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
 /// log the same warning hundreds of times.  `ForceCuda` still surfaces
 /// the cached error message verbatim because the caller asked us to
 /// fail loud rather than fall back.
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache"))]
 static GPU_CTX: std::sync::OnceLock<Result<Arc<gpu::GpuCtx>, String>> = std::sync::OnceLock::new();
 
-#[cfg(any(feature = "gpu-aa", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(feature = "gpu-icc", feature = "cache"))]
 fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
     if matches!(policy, BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan)
         || (matches!(policy, BackendPolicy::Auto) && !auto_uses_device())

@@ -12,12 +12,10 @@
 //! `record_*` calls; the backend resolves them to native pointers (CUDA) or
 //! buffer-device-addresses (Vulkan) at record time.
 
-mod aa_fill;
 #[cfg(feature = "cache")]
 mod blit_page;
 mod scratch;
 mod staged;
-pub use aa_fill::{AaFillScratch, aa_fill, aa_fill_page};
 #[cfg(feature = "cache")]
 pub use blit_page::{BlitScratch, BlitSource, blit_image, blit_image_box};
 pub use scratch::{DeviceScratch, ScratchPool};
@@ -406,11 +404,6 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// # Errors
     /// Returns `BackendError` if the operation cannot be recorded.
     fn record_blit_image(&self, params: params::BlitParams<'_, Self>) -> Result<()>;
-    /// Record an antialiased fill operation into the current page's command list.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded.
-    fn record_aa_fill(&self, params: params::AaFillParams<'_, Self>) -> Result<()>;
     /// Record an ICC CLUT colour-transform into the current page's command list.
     ///
     /// # Errors
@@ -638,8 +631,8 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// exceeds `src`'s device length.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()>;
 
-    /// The scratch buffers of the operations this backend runs ([`aa_fill`],
-    /// [`icc_clut`] and, with the `cache` feature, `blit_image`).
+    /// The scratch buffers of the operations this backend runs ([`icc_clut`]
+    /// and, with the `cache` feature, `blit_image`).
     fn scratch(&self) -> &DeviceScratch<Self>
     where
         Self: Sized;

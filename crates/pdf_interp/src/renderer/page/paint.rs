@@ -17,8 +17,6 @@ use raster::{
 use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
-#[cfg(feature = "gpu-aa")]
-use super::gpu_ops::{DeviceFill, try_backend_aa_fill};
 use super::patterns::{PatternPaint, Tile};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -484,54 +482,10 @@ impl PageRenderer<'_> {
         );
         let src = source.src();
 
-        // Solid-colour fills only. The device evaluates the CPU scanner's
-        // intersection table and the counts are composited through the CPU
-        // pipeline, so either backend yields the bytes the CPU fill below
-        // would. A session attaches at most one of the two backends.
-        #[cfg(feature = "gpu-aa")]
-        if source.pattern.is_none()
-            && self.vector_antialias
-            && self.try_device_aa_fill(path, rule.even_odd, flatness, &pipe, &src)
-        {
-            return;
-        }
-
         let antialias = self.vector_antialias;
         with_canvas!(&mut self.canvas, |b| {
             fill_device_path(b, &clip, path, &pipe, &src, flatness, antialias, rule);
         });
-    }
-
-    /// Fill `path` on the attached GPU backend, if any; `true` when the
-    /// device painted it.  The outcome is counted in the page diagnostics.
-    /// See [`try_backend_aa_fill`].
-    #[cfg(feature = "gpu-aa")]
-    fn try_device_aa_fill(
-        &mut self,
-        path: &raster::path::Path,
-        even_odd: bool,
-        flatness: f64,
-        pipe: &raster::pipe::PipeState<'_>,
-        src: &raster::pipe::PipeSrc<'_>,
-    ) -> bool {
-        let outcome = 'device: {
-            #[cfg(feature = "vulkan")]
-            if let Some(vk) = self.vk_backend.clone() {
-                break 'device try_backend_aa_fill(self, &*vk, path, even_odd, flatness, pipe, src);
-            }
-            let Some(ctx) = self.gpu_ctx.clone() else {
-                break 'device DeviceFill::Declined;
-            };
-            let cuda = gpu::backend::cuda::CudaBackend::from_ctx(ctx);
-            try_backend_aa_fill(self, &cuda, path, even_odd, flatness, pipe, src)
-        };
-        let count = match outcome {
-            DeviceFill::Painted => &mut self.diag.device_fills,
-            DeviceFill::Failed => &mut self.diag.device_fill_failures,
-            DeviceFill::Declined => return false,
-        };
-        *count = count.saturating_add(1);
-        outcome == DeviceFill::Painted
     }
 
     /// Stroke `path` with the current line width, widened to at least one

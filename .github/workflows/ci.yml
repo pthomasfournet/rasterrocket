@@ -70,9 +70,6 @@ jobs:
       - name: Test rasterrocket-interp (unit suite + decoder property harness)
         run: cargo test -p rasterrocket-interp --tests
 
-      - name: Test rasterrocket-interp (GPU fill host twin vs CPU fill, gpu-aa; no device)
-        run: cargo test -p rasterrocket-interp --features gpu-aa --lib -- gpu_ops
-
       - name: Test rasterrocket-render (full unit suite — SIMD dispatch, fill, blend, popcnt)
         run: cargo test -p rasterrocket-render --lib
 
@@ -269,8 +266,8 @@ jobs:
       - name: Clippy (rasterrocket-interp tests)
         run: cargo clippy -p rasterrocket-interp --tests -- -D warnings
 
-      - name: Clippy (rasterrocket-interp, gpu-aa tests)
-        run: cargo clippy -p rasterrocket-interp --features gpu-aa --tests -- -D warnings
+      - name: Clippy (rasterrocket-interp, gpu-icc tests)
+        run: cargo clippy -p rasterrocket-interp --features gpu-icc --tests -- -D warnings
 
       - name: Clippy (rasterrocket tests)
         run: cargo clippy -p rasterrocket --tests -- -D warnings

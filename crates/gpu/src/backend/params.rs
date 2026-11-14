@@ -5,7 +5,6 @@
 //! their native pointer/handle type at record time.
 
 use super::GpuBackend;
-use crate::AaFillRect;
 
 /// [`BlitParams::filter`] bit: interpolate between source columns.
 pub const BLIT_FILTER_X: u32 = 1;
@@ -141,81 +140,6 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
         }
         if backend.device_buffer_len(self.dst) < dst_bytes {
             return Err(invariant("dst buffer shorter than dst_w × dst_h × 4"));
-        }
-        Ok(())
-    }
-}
-
-/// Parameters for a GPU scanline-AA fill pass.
-///
-/// The kernel walks a scanline intersection table in AA coordinates (see
-/// [`crate::AaScanTable`]) and writes one sub-sample count per pixel of
-/// `rect`.
-///
-/// # Invariants enforced by `AaFillParams::validate`
-/// - `row_starts` holds at least `n_rows + 1` `u32` entries
-/// - `coverage` holds at least `rect.width × rect.height` bytes
-/// - `fill_rule` is `0` or `1`
-///
-/// The offsets inside `row_starts` cannot be checked without reading device
-/// memory; the host-side table they were uploaded from must satisfy
-/// [`crate::AaScanTable::assert_well_formed`].
-pub struct AaFillParams<'a, B: GpuBackend + ?Sized> {
-    /// Intersection table in device memory: `i32` triples `[x0, x1, count]`.
-    pub intersects: &'a B::DeviceBuffer,
-    /// Row offsets into `intersects` in device memory: `n_rows + 1` `u32`s.
-    pub row_starts: &'a B::DeviceBuffer,
-    /// Output coverage buffer in device memory: `rect.width × rect.height`
-    /// bytes of sub-sample counts.
-    pub coverage: &'a B::DeviceBuffer,
-    /// Rows in the table.
-    pub n_rows: u32,
-    /// AA row index of table row 0.
-    pub table_y0: i32,
-    /// Output rectangle in device pixels.
-    pub rect: AaFillRect,
-    /// Bitmap width × `AA_SIZE`; spans are clamped to `[0, aa_width)`.
-    pub aa_width: u32,
-    /// Fill rule: 0 = non-zero winding, 1 = even-odd.
-    pub fill_rule: u8,
-}
-
-/// The [`super::BackendError::InvariantViolation`] of a scanline-AA fill
-/// whose input breaks `detail`.
-pub(crate) const fn aa_fill_invariant(detail: &'static str) -> super::BackendError {
-    super::BackendError::InvariantViolation {
-        kind: "AaFillInvariantViolation",
-        detail,
-    }
-}
-
-impl<B: GpuBackend + ?Sized> AaFillParams<'_, B> {
-    /// Check the buffer-size invariants the kernel indexes without bounds
-    /// checks.
-    ///
-    /// # Errors
-    /// Returns a `BackendError` if any documented invariant is violated.
-    pub fn validate(&self, backend: &B) -> super::Result<()> {
-        let invariant = aa_fill_invariant;
-        let offsets_needed = (self.n_rows as usize)
-            .saturating_add(1)
-            .saturating_mul(size_of::<u32>());
-        if backend.device_buffer_len(self.row_starts) < offsets_needed {
-            return Err(invariant("row_starts shorter than (n_rows + 1) × 4 bytes"));
-        }
-        let pixels = self
-            .rect
-            .kernel_pixel_count()
-            .ok_or_else(|| invariant("rect.width × rect.height exceeds the 32-bit pixel index"))?;
-        if backend.device_buffer_len(self.coverage) < pixels {
-            return Err(invariant(
-                "coverage buffer shorter than rect.width × rect.height",
-            ));
-        }
-        if self.fill_rule > 1 {
-            return Err(invariant(
-                "fill_rule must be 0 (non-zero winding) or 1 (even-odd)",
-            ));
         }
         Ok(())
     }
@@ -1253,9 +1177,6 @@ mod tests {
             ABANDONED.set(ABANDONED.get() + 1);
         }
         fn record_blit_image(&self, _p: BlitParams<'_, Self>) -> super::super::Result<()> {
-            unreachable!()
-        }
-        fn record_aa_fill(&self, _p: AaFillParams<'_, Self>) -> super::super::Result<()> {
             unreachable!()
         }
         fn record_icc_clut(&self, _p: IccClutParams<'_, Self>) -> super::super::Result<()> {

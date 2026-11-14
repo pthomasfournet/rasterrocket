@@ -40,7 +40,6 @@ fn link_lib_in_dir(dirs: &[&str], lib: &str, warn_context: &str) {
 /// and the slangc-compile loop stay in sync — adding a new kernel only requires
 /// updating this list.
 const KERNELS: &[&str] = &[
-    "aa_fill",
     "icc_clut",
     "blit_image",
     "blelloch_scan",
@@ -75,7 +74,6 @@ fn slang_entry(kernel: &str) -> Option<&'static str> {
         "blelloch_scan" | "parallel_huffman" => None,
         "idct_color" => Some("idct_dequant_colour"),
         // Default: single entry point named after the file.
-        "aa_fill" => Some("aa_fill"),
         "blit_image" => Some("blit_image"),
         "page_raster" => Some("page_raster"),
         _ => panic!("unknown kernel name: {kernel}"),
@@ -198,9 +196,9 @@ fn main() {
     // PTX policy: compile real kernels whenever NVCC is available; write
     // empty placeholders only as a last-resort fallback for CPU-only CI
     // runners that don't have the CUDA toolkit.  Keying on a feature-flag
-    // heuristic is wrong because rasterrocket-interp's `gpu-aa` / `gpu-icc` features
-    // (which cause `GpuCtx::init` to be called at runtime) don't propagate
-    // to the gpu crate's build environment, so a build with `gpu-aa` alone
+    // heuristic is wrong because rasterrocket-interp's `gpu-icc` feature
+    // (which causes `GpuCtx::init` to be called at runtime) does not propagate
+    // to the gpu crate's build environment, so a build with `gpu-icc` alone
     // would emit placeholders and produce a binary that crashes with
     // `CUDA_ERROR_INVALID_IMAGE` the first time `GpuCtx::init` runs.
     if nvcc_works(nvcc) {

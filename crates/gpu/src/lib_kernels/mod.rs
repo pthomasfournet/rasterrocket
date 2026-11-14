@@ -4,7 +4,6 @@
 //! backend's `record_*` methods call into these modules; tests call the
 //! same `pub fn` entry points directly.
 
-pub(crate) mod aa;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) mod huffman;
 pub(crate) mod icc;

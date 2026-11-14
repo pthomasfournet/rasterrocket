@@ -4,7 +4,6 @@
 use std::sync::{Mutex, PoisonError};
 
 use super::GpuBackend;
-use super::aa_fill::AaFillScratch;
 #[cfg(feature = "cache")]
 use super::blit_page::BlitScratch;
 use super::icc_clut::IccClutScratch;
@@ -84,8 +83,6 @@ impl<T> Default for ScratchPool<T> {
 /// Their buffers belong to the backend's device and live as long as the
 /// backend, so operations on later pages reuse the buffers of earlier ones.
 pub struct DeviceScratch<B: GpuBackend> {
-    /// Scratches of [`super::aa_fill`].
-    pub(crate) aa_fill: ScratchPool<AaFillScratch<B>>,
     /// Scratches of [`super::blit_image`].
     #[cfg(feature = "cache")]
     pub(crate) blit: ScratchPool<BlitScratch<B>>,
@@ -98,7 +95,6 @@ impl<B: GpuBackend> DeviceScratch<B> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            aa_fill: ScratchPool::new(),
             #[cfg(feature = "cache")]
             blit: ScratchPool::new(),
             icc_clut: ScratchPool::new(),
