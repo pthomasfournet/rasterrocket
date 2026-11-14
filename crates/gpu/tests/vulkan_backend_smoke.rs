@@ -32,6 +32,8 @@
 
 #![cfg(feature = "vulkan")]
 
+mod common;
+
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
@@ -65,7 +67,7 @@ fn shared_backend() -> (Arc<VulkanBackend>, MutexGuard<'static, ()>) {
     // report it on the next test that runs.
     let serial = SERIAL.lock().expect("SERIAL poisoned by a prior panic");
     let backend = SHARED
-        .get_or_init(|| Arc::new(VulkanBackend::new().expect("VulkanBackend::new")))
+        .get_or_init(|| Arc::new(crate::common::vulkan_backend().expect("VulkanBackend::new")))
         .clone();
     (backend, serial)
 }
@@ -579,7 +581,7 @@ fn a_copy_after_a_zero_fill_in_one_page_reads_zeros() {
 /// starts from `Idle` instead of finding the recorder still `Recording`.
 #[test]
 fn a_panicking_page_leaves_the_backend_usable() {
-    let backend = VulkanBackend::new().expect("VulkanBackend::new");
+    let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = backend.run_page(|_| -> Result<(), BackendError> { panic!("page closure") });
     }));

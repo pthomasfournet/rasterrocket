@@ -18,6 +18,8 @@
               i32::MAX, clamped bytes; the twin mirrors the kernel's indexing"
 )]
 
+mod common;
+
 use rasterrocket_gpu::backend::GpuBackend;
 use rasterrocket_gpu::backend::params::IdctParams;
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
@@ -215,7 +217,7 @@ impl Case {
 /// Four dispatches of a 96 × 64-block image with `nc` components, each
 /// byte-identical to the CPU twin.
 fn check(nc: usize) {
-    let Ok(backend) = VulkanBackend::new() else {
+    let Ok(backend) = crate::common::vulkan_backend() else {
         eprintln!("skipping: no Vulkan device");
         return;
     };

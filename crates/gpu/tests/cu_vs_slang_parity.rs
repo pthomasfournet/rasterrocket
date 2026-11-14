@@ -30,9 +30,10 @@
               kernel-side math byte-for-byte"
 )]
 
+mod common;
+
 use rasterrocket_gpu::backend::GpuBackend;
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams};
-use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
 // ── icc_cmyk_clut ───────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ fn build_identity_clut(grid_n: u32) -> Vec<u8> {
 }
 
 fn run_icc_clut_vulkan(cmyk: &[u8], clut: &[u8]) -> Vec<u8> {
-    let backend = VulkanBackend::new().expect("VulkanBackend::new");
+    let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
     rasterrocket_gpu::backend::icc_clut(&backend, cmyk, clut).expect("icc_clut")
 }
 
@@ -119,7 +120,7 @@ fn icc_clut_random_inputs() {
     let grid_n = 17u32;
     let clut = pseudo_random((grid_n as usize).pow(4) * 3, 0x0dd_ba11);
     let cmyk = pseudo_random(65_536 * 4, 0x1234_5678);
-    let backend = VulkanBackend::new().expect("VulkanBackend::new");
+    let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
     let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
     let vk = rasterrocket_gpu::backend::icc_clut(&backend, &cmyk, &clut).expect("icc_clut");
     let differing = cpu.iter().zip(&vk).filter(|(a, b)| a != b).count();
@@ -280,7 +281,7 @@ fn run_blit_vulkan(
     rows: &[u32],
     filter: u32,
 ) -> Vec<u8> {
-    let backend = VulkanBackend::new().expect("VulkanBackend::new");
+    let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
     let dst_bytes = (page_w * page_h * 4) as usize;
     let cols_bytes: &[u8] = bytemuck::cast_slice(cols);
     let rows_bytes: &[u8] = bytemuck::cast_slice(rows);

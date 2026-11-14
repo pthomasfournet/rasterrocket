@@ -116,6 +116,12 @@ fn render(session: &RasterSession, page: u32) -> ((u32, u32, Vec<u8>), PageDiagn
 /// The device converts page 1's image and nothing on page 2, without a
 /// failure, and the two pages are byte-identical.
 fn assert_device_conversion_matches_cpu(session: &RasterSession, what: &str) {
+    if std::env::var_os("PDF_RASTER_ICC_CLUT_THRESHOLD").is_some() {
+        eprintln!(
+            "skipping: PDF_RASTER_ICC_CLUT_THRESHOLD overrides the threshold the pages straddle"
+        );
+        return;
+    }
     let (device, diag) = render(session, 1);
     assert_eq!(
         (diag.device_icc_conversions, diag.device_icc_failures),

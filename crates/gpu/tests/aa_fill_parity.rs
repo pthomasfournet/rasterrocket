@@ -10,6 +10,8 @@
 
 #![cfg(any(feature = "gpu-validation", feature = "vulkan"))]
 
+mod common;
+
 use rasterrocket_gpu::{AA_SIZE, AaFillRect, AaScanTable, ScanIntersect, aa_fill_cpu};
 
 // ── fixtures ────────────────────────────────────────────────────────────
@@ -234,7 +236,7 @@ mod vulkan {
 
     #[test]
     fn vulkan_kernel_matches_host_twin() {
-        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
         let mut scratch = AaFillScratch::new();
         for case in cases() {
             for eo in [false, true] {
@@ -253,7 +255,7 @@ mod vulkan {
     /// fails on another's recording state.
     #[test]
     fn a_shared_backend_runs_pages_from_several_threads() {
-        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
         let cases = cases();
         std::thread::scope(|scope| {
             for _ in 0..4 {
@@ -281,7 +283,7 @@ mod vulkan {
     fn a_failed_page_leaves_the_backend_usable() {
         use rasterrocket_gpu::backend::{BackendError, GpuBackend};
 
-        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
         let failed = backend.run_page(|_| Err(BackendError::msg("injected")));
         assert!(failed.is_err());
         let case = &cases()[0];
@@ -297,7 +299,7 @@ mod vulkan {
     #[cfg(feature = "gpu-validation")]
     #[test]
     fn vulkan_kernel_matches_cuda_kernel() {
-        let backend = VulkanBackend::new().expect("VulkanBackend::new");
+        let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
         let cuda_backend = super::cuda::backend();
         let mut cuda_scratch = AaFillScratch::new();
         let mut vk_scratch = AaFillScratch::new();
