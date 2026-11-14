@@ -158,6 +158,26 @@ fn a_word_space_between_strings_keeps_them_apart() {
     assert_eq!(spaced, apart);
 }
 
+/// A text rise moves a string off the baseline of the string before it:
+/// a raised part of a word is drawn as after an operator that ends the
+/// context, on either side of the rise.
+#[test]
+fn a_raised_string_is_no_neighbour() {
+    let names = ["uni062A", "uni064A", "uni0628"];
+    for (raised, apart) in [
+        ("<41> Tj 4 Ts <4243> Tj", "<41> Tj q Q 4 Ts <4243> Tj"),
+        (
+            "[<41> 0 <42>] TJ 4 Ts <43> Tj",
+            "[<41> 0 <42>] TJ q Q 4 Ts <43> Tj",
+        ),
+    ] {
+        assert!(
+            render(&names, raised) == render(&names, apart),
+            "{raised} is drawn as {apart}"
+        );
+    }
+}
+
 /// A form that ends inside a text object gives the string shown after it
 /// no context: the outer string, drawn where the form's last string ends,
 /// is drawn as after an operator that ends the context.  An invisible teh

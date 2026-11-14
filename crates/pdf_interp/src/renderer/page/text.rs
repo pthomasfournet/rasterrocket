@@ -485,7 +485,9 @@ impl PageRenderer<'_> {
         let em = frame.em();
         let mut context = ShapingContext::default();
         if shaped {
-            if let Some(tail) = tail.filter(|tail| neighbours_at(&tail.end, &tm, tail.em)) {
+            if let Some(tail) =
+                tail.filter(|tail| neighbours_at(&tail.end, &tm, frame.rise - tail.rise, tail.em))
+            {
                 context.neighbours.before = tail.texts;
                 context.drift = (0, tail.drift);
             }
@@ -527,6 +529,7 @@ impl PageRenderer<'_> {
             TextTail {
                 texts,
                 end,
+                rise: frame.rise,
                 em,
                 drift: if drift.0 == decoded.len() {
                     drift.1

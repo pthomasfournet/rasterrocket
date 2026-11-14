@@ -5,8 +5,8 @@
 //! one content stream, only operators that change no more than the text
 //! state, the colour or the marked-content nesting come between them
 //! ([`keeps_text_context`]), and the second starts where the first ends:
-//! on its baseline, at most [`MAX_GAP`] em past its end and at most
-//! [`MAX_OVERLAP`] em before it.  A `TJ` adjustment between two strings of
+//! on its baseline, each string's displaced by its text rise, at most
+//! [`MAX_GAP`] em past its end and at most [`MAX_OVERLAP`] em before it.  A `TJ` adjustment between two strings of
 //! an array moves the second within these bounds or out of them.
 //!
 //! The string before is known when a string is shown: its end is kept in
@@ -30,13 +30,14 @@ const MAX_OVERLAP: f64 = 0.5;
 
 /// The end of a shown string: the texts of its last codes in storage
 /// order, at most [`CONTEXT_CODES`], the text matrix after its last
-/// advance, its em, `Tfs × Th`, in text space, and the distance along x
-/// in text space from that end to where the glyphs of its last run end
-/// when that run continues into the string after, else zero.
+/// advance, its text rise, its em, `Tfs × Th`, in text space, and the
+/// distance along x in text space from that end to where the glyphs of its
+/// last run end when that run continues into the string after, else zero.
 #[derive(Clone, Debug)]
 pub(super) struct TextTail {
     pub texts: Vec<CodeText>,
     pub end: TextMatrix,
+    pub rise: f64,
     pub em: f64,
     pub drift: f64,
 }
@@ -84,19 +85,21 @@ pub(super) const fn keeps_text_context(op: &Operator) -> bool {
         )
 }
 
-/// Whether a string whose text matrix is `start` neighbours a string that
-/// ends at `end` with em `em` (see [`offset`]).
-pub(super) fn neighbours(end: &TextMatrix, start: &TextMatrix, em: f64) -> bool {
-    offset(end, start, em).is_some()
+/// Whether a string whose text matrix is `start` and whose text rise
+/// exceeds that of the string before by `rise` neighbours that string,
+/// which ends at `end` with em `em` (see [`offset`]).
+pub(super) fn neighbours(end: &TextMatrix, start: &TextMatrix, rise: f64, em: f64) -> bool {
+    offset(end, start, rise, em).is_some()
 }
 
 /// How far along x in text space past `end` a string whose text matrix is
 /// `start` starts, when it neighbours a string that ends at `end` with em
-/// `em`: the two matrices share their 2×2 part and `start`'s origin lies
-/// on the baseline of `end`, from [`MAX_OVERLAP`] em before it to
-/// [`MAX_GAP`] em after it.
+/// `em`: the two matrices share their 2×2 part and the baseline of the
+/// string, raised by `rise` in text space over that of the string before
+/// (PDF §9.3.7), is the baseline of `end`, from [`MAX_OVERLAP`] em before
+/// it to [`MAX_GAP`] em after it.
 #[expect(clippy::many_single_char_names, reason = "PDF matrix components")]
-fn offset(end: &TextMatrix, start: &TextMatrix, em: f64) -> Option<f64> {
+fn offset(end: &TextMatrix, start: &TextMatrix, rise: f64, em: f64) -> Option<f64> {
     let [a, b, c, d, e, f] = *end;
     let scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
     let det = a.mul_add(d, -(b * c));
@@ -109,7 +112,7 @@ fn offset(end: &TextMatrix, start: &TextMatrix, em: f64) -> Option<f64> {
     // The displacement in text space: (dx, dy) = tx × (a, b) + ty × (c, d).
     let (dx, dy) = (start[4] - e, start[5] - f);
     let tx = dx.mul_add(d, -(dy * c)) / det;
-    let ty = dy.mul_add(a, -(dx * b)) / det;
+    let ty = dy.mul_add(a, -(dx * b)) / det + rise;
     ((-MAX_OVERLAP * em..=MAX_GAP * em).contains(&tx) && ty.abs() <= em * 1e-3).then_some(tx)
 }
 
@@ -124,8 +127,9 @@ pub(super) struct NextString {
 
 impl PageRenderer<'_> {
     /// The start of the string shown after a string that ends at `end`
-    /// with em `em`, when it is a neighbour (see the module documentation)
-    /// drawn by a substitute face in horizontal writing.
+    /// with em `em` in the current text state, when it is a neighbour (see
+    /// the module documentation) drawn by a substitute face in horizontal
+    /// writing.
     pub(super) fn next_string(
         &mut self,
         end: TextMatrix,
@@ -133,9 +137,10 @@ impl PageRenderer<'_> {
         following: Following<'_, '_>,
     ) -> Option<NextString> {
         let mut ts = self.gstate.current().text.clone();
+        let rise = ts.rise;
         ts.text_matrix = end;
         if let Some(bytes) = first_string(&mut ts, following.elements) {
-            return self.next_string_at(&ts, bytes, end, em);
+            return self.next_string_at(&ts, bytes, (end, rise), em);
         }
         for op in following.ops {
             if ts.apply_state_op(op, |name| self.font_cache.select(&self.resources, name)) {
@@ -154,28 +159,28 @@ impl PageRenderer<'_> {
                 return None;
             };
             if !bytes.is_empty() {
-                return self.next_string_at(&ts, bytes, end, em);
+                return self.next_string_at(&ts, bytes, (end, rise), em);
             }
         }
         None
     }
 
     /// The start of `bytes` shown in the text state `ts` after a string
-    /// that ends at `end` with em `em`; `None` unless the two strings are
-    /// neighbours and `bytes` is drawn by a substitute face in horizontal
-    /// writing.
+    /// that ends at `end` with text rise `rise` and em `em`; `None` unless
+    /// the two strings are neighbours and `bytes` is drawn by a substitute
+    /// face in horizontal writing.
     fn next_string_at(
         &mut self,
         ts: &TextState,
         bytes: &[u8],
-        end: TextMatrix,
+        (end, rise): (TextMatrix, f64),
         em: f64,
     ) -> Option<NextString> {
         let font = ts.font.as_ref()?;
         if !font_shapes(&font.descriptor) {
             return None;
         }
-        let start = offset(&end, &ts.text_matrix, em)?;
+        let start = offset(&end, &ts.text_matrix, ts.rise - rise, em)?;
         let ctm = self.gstate.current().ctm;
         let trm = text_rendering_matrix(
             &ts.text_matrix,
@@ -229,24 +234,39 @@ mod tests {
     fn neighbours_share_a_baseline_without_a_word_gap() {
         let end = at(IDENTITY, 100.0, 50.0);
         let em = 10.0;
-        assert!(neighbours(&end, &end, em), "a string shown at the end");
-        assert!(neighbours(&end, &at(IDENTITY, 100.9, 50.0), em));
+        assert!(neighbours(&end, &end, 0.0, em), "a string shown at the end");
+        assert!(neighbours(&end, &at(IDENTITY, 100.9, 50.0), 0.0, em));
         assert!(
-            neighbours(&end, &at(IDENTITY, 96.0, 50.0), em),
+            neighbours(&end, &at(IDENTITY, 96.0, 50.0), 0.0, em),
             "an overlap"
         );
         assert!(
-            !neighbours(&end, &at(IDENTITY, 101.5, 50.0), em),
+            !neighbours(&end, &at(IDENTITY, 101.5, 50.0), 0.0, em),
             "a word gap"
         );
-        assert!(!neighbours(&end, &at(IDENTITY, 94.0, 50.0), em));
+        assert!(!neighbours(&end, &at(IDENTITY, 94.0, 50.0), 0.0, em));
         assert!(
-            !neighbours(&end, &at(IDENTITY, 100.0, 38.0), em),
+            !neighbours(&end, &at(IDENTITY, 100.0, 38.0), 0.0, em),
             "a new line"
         );
         let rotated = [0.0, 1.0, -1.0, 0.0, 0.0, 0.0];
-        assert!(!neighbours(&end, &at(rotated, 100.0, 50.0), em));
-        assert!(!neighbours(&end, &end, 0.0), "no em");
+        assert!(!neighbours(&end, &at(rotated, 100.0, 50.0), 0.0, em));
+        assert!(!neighbours(&end, &end, 0.0, 0.0), "no em");
+    }
+
+    #[test]
+    fn the_text_rise_moves_the_baseline() {
+        let end = at(IDENTITY, 100.0, 50.0);
+        let em = 10.0;
+        assert!(!neighbours(&end, &end, 4.0, em), "a raised string");
+        assert!(!neighbours(&end, &end, -4.0, em), "a lowered string");
+        assert!(
+            neighbours(&end, &at(IDENTITY, 100.0, 46.0), 4.0, em),
+            "raised onto the baseline"
+        );
+        // A scaled baseline: the rise is in text space.
+        let scaled = [2.0, 0.0, 0.0, 2.0, 100.0, 50.0];
+        assert!(neighbours(&scaled, &at(scaled, 100.0, 42.0), 4.0, em));
     }
 
     #[test]
@@ -254,10 +274,10 @@ mod tests {
         // A baseline rotated a quarter turn: text space x is user space y.
         let rotated = [0.0, 2.0, -2.0, 0.0, 10.0, 10.0];
         let em = 1.0;
-        assert!(neighbours(&rotated, &at(rotated, 10.0, 10.1), em));
-        assert!(!neighbours(&rotated, &at(rotated, 10.0, 10.4), em));
+        assert!(neighbours(&rotated, &at(rotated, 10.0, 10.1), 0.0, em));
+        assert!(!neighbours(&rotated, &at(rotated, 10.0, 10.4), 0.0, em));
         assert!(
-            !neighbours(&rotated, &at(rotated, 10.1, 10.0), em),
+            !neighbours(&rotated, &at(rotated, 10.1, 10.0), 0.0, em),
             "off the baseline"
         );
     }
