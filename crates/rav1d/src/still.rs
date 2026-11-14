@@ -202,8 +202,14 @@ impl From<Rav1dError> for StillError {
 /// # Errors
 ///
 /// [`StillError::Decode`] when the stream is malformed, unsupported or over
-/// `limits`; [`StillError::NoPicture`] when it holds no complete frame.
+/// `limits`; [`StillError::NoPicture`] when it holds no complete frame,
+/// empty data included.
 pub fn decode_still(obu: &[u8], limits: StillLimits) -> Result<StillPicture, StillError> {
+    // The decoder's input validation aborts the process on empty data in a
+    // debug build rather than returning its error.
+    if obu.is_empty() {
+        return Err(StillError::NoPicture);
+    }
     let mut settings = Settings::new();
     settings.inner.n_threads = InRange::new(1).ok_or(Rav1dError::InvalidArgument)?;
     settings.inner.max_frame_delay = InRange::new(1).ok_or(Rav1dError::InvalidArgument)?;

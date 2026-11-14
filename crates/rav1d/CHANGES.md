@@ -85,6 +85,10 @@ unless the entry says otherwise.
   crate, one thread, Ryzen 9 9900X3D, medians of 21: 34.0 → 31.9 ms at 8
   bits, 37.9 → 35.8 ms at 10).
 
+- `src/still.rs`: `decode_still` returns `StillError::NoPicture` for empty
+  data before the decoder sees it; `Decoder::send_data` validates its input
+  with `validate_input!`, which aborts the process in a debug build.
+
 - `src/rust_api.rs`: `Picture::color_primaries_code`, `transfer_code`,
   `matrix_code` and `full_range`, the sequence header's colour description
   as code points, beside the existing accessors that return `av-data`
