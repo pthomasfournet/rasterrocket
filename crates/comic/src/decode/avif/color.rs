@@ -217,20 +217,10 @@ impl Matrix {
     }
 }
 
+/// `v` saturated to `0..=255`.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "clamped to 0..=255"
-)]
-const fn clamp(v: i32) -> u8 {
-    if v < 0 {
-        0
-    } else if v > 255 {
-        255
-    } else {
-        v as u8
-    }
+fn clamp(v: i32) -> u8 {
+    u8::try_from(v.clamp(0, 255)).unwrap_or(u8::MAX)
 }
 
 /// Interpolate one chroma row to `out.len()` luma columns.
