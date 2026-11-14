@@ -54,6 +54,9 @@ pub(super) struct DeviceCtx {
     /// time so the kernel-launch helpers can fail with a useful message
     /// instead of letting the driver return `ERROR_DEVICE_LOST`.
     pub(super) max_workgroup_count: [u32; 3],
+    /// `maxStorageBufferRange`: the largest range a storage-buffer
+    /// descriptor may bind, at least 2^27 bytes.
+    pub(super) max_storage_buffer_range: u32,
     /// Bit `i` set for each memory heap `i` device buffers are placed in
     /// ([`buffer_heaps`]); the heaps the VRAM budget covers.
     pub(super) buffer_heaps: u32,
@@ -129,6 +132,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
     // fine — we only check against this to fail loudly, not to clamp.
     let dev_props = unsafe { instance.get_physical_device_properties(phys) };
     let max_workgroup_count = dev_props.limits.max_compute_work_group_count;
+    let max_storage_buffer_range = dev_props.limits.max_storage_buffer_range;
 
     log_chosen_device(&dev_props, &chosen, selector);
 
@@ -149,6 +153,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         phys,
         mem_props,
         max_workgroup_count,
+        max_storage_buffer_range,
         buffer_heaps,
         vram_total,
         has_memory_budget: setup.has_memory_budget(),
@@ -160,6 +165,24 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
 }
 
 impl DeviceCtx {
+    /// Fail when a storage-buffer binding of `len` bytes, holding `what`,
+    /// exceeds [`Self::max_storage_buffer_range`].
+    ///
+    /// # Errors
+    /// [`BackendError::DeviceLimit`] then.
+    pub(super) fn check_storage_range(&self, what: &'static str, len: u64) -> Result<()> {
+        let max = u64::from(self.max_storage_buffer_range);
+        if len > max {
+            return Err(BackendError::DeviceLimit {
+                what,
+                need: len,
+                limit: "maxStorageBufferRange",
+                max,
+            });
+        }
+        Ok(())
+    }
+
     /// Submit `submit` to the compute queue with no fence.
     ///
     /// The queue lock is held for the `vkQueueSubmit` call only.  `what`

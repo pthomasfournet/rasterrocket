@@ -74,6 +74,18 @@ pub enum BackendError {
         /// Human-readable description of the specific violation.
         detail: &'static str,
     },
+    /// A buffer the work needs exceeds a limit of the device: the work is
+    /// too large for it, and the device itself is sound.
+    DeviceLimit {
+        /// The buffer, for diagnostic context.
+        what: &'static str,
+        /// Bytes the work needs.
+        need: u64,
+        /// The device limit's name.
+        limit: &'static str,
+        /// The device limit, in bytes.
+        max: u64,
+    },
     /// An explicit device selector did not resolve to exactly one usable
     /// device.  The message names the selector, the reason, and every
     /// enumerated device.  Distinct from [`BackendError::Other`] so callers
@@ -134,6 +146,15 @@ impl fmt::Display for BackendError {
                 "descriptor pool exhausted: {allocated} sets allocated this page (max {max})"
             ),
             Self::InvariantViolation { kind, detail } => write!(f, "{kind}: {detail}"),
+            Self::DeviceLimit {
+                what,
+                need,
+                limit,
+                max,
+            } => write!(
+                f,
+                "{what} need {need} bytes, above the device's {limit} of {max} bytes"
+            ),
             Self::DeviceSelection(msg) => f.write_str(msg),
             Self::Other(e) => fmt::Display::fmt(e, f),
         }

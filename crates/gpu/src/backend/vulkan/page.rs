@@ -1,140 +1,34 @@
 //! Whole-page raster from a [`PageCommands`] list: one submission and one
 //! wait per page.
 //!
-//! The host bins the commands into tiles ([`PageCommands::bin`]) and writes
-//! the five input arrays into device buffers: in place on a device whose
-//! buffers are host-mapped, otherwise into host staging buffers copied by
-//! the page's own command buffer.  The page then records the raster
-//! dispatch, one workgroup per tile, and on a device whose page buffer the
-//! host cannot read through its cache, a copy into a host read-back
-//! buffer.  Every buffer is kept between pages and grown on demand.
+//! The host bins the commands into tiles ([`PageCommands::bin`]) and stages
+//! the five input arrays ([`crate::backend::staged`]): in place on a device
+//! whose buffers are host-mapped, otherwise into host buffers copied by the
+//! page's own command buffer.  The page then records the raster dispatch,
+//! one workgroup per tile, and on a device whose buffers the host does not
+//! map, a copy of the page into a host read-back buffer.  Every buffer is
+//! kept between pages and grown on demand.
 
+use crate::backend::staged::{
+    Direction, Staged, ensure, host_view, record_download, record_upload, stage,
+};
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::page::{PageCommands, TileBins, pack_rgb};
 
 use super::VulkanBackend;
-use super::memory::{DeviceBuffer, HostAccess, HostBuffer, SlabAllocator};
 use super::pipeline::KernelId;
-use super::recorder::PageRecorder;
 
-/// Smallest buffer the page raster allocates, in bytes; a buffer grows to
-/// the next power of two of what a page needs.
-const MIN_BUFFER: usize = 64 * 1024;
-
-/// One kernel input: its device buffer and, on a device whose buffers the
-/// host does not map, the host buffer it is copied from.
-struct Input {
-    device: DeviceBuffer,
-    staging: Option<HostBuffer>,
-}
-
-/// The page buffer the kernel writes and, when the host cannot read it in
-/// place through its cache, the host buffer it is copied into.
-struct Target {
-    device: DeviceBuffer,
-    readback: Option<HostBuffer>,
-}
+/// The bytes staged for an empty input: a descriptor binds a non-empty
+/// range, and the kernel reads no element of an empty array.
+const EMPTY_INPUT: [u8; 4] = [0; 4];
 
 /// The buffers of the page raster, kept between pages.
 #[derive(Default)]
 pub(super) struct PageScratch {
     /// Commands, intersections, row offsets, tile offsets, tile commands.
-    inputs: [Option<Input>; 5],
+    inputs: [Option<Staged<VulkanBackend>>; 5],
     /// The page.
-    target: Option<Target>,
-}
-
-/// The capacity a buffer holding `len` bytes is allocated with.
-fn capacity(len: usize) -> usize {
-    len.max(MIN_BUFFER).next_power_of_two()
-}
-
-/// Whether a buffer of `size` bytes holds `len` bytes.
-fn fits(size: u64, len: usize) -> bool {
-    usize::try_from(size).is_ok_and(|size| size >= len)
-}
-
-/// `slot`'s value when `keep` accepts it, otherwise a new one from `make`,
-/// left in `slot`.
-fn reuse_or<T>(
-    slot: &mut Option<T>,
-    keep: impl FnOnce(&T) -> bool,
-    make: impl FnOnce() -> Result<T>,
-) -> Result<&mut T> {
-    let value = match slot.take() {
-        Some(value) if keep(&value) => value,
-        old => {
-            drop(old);
-            make()?
-        }
-    };
-    Ok(slot.insert(value))
-}
-
-impl Input {
-    /// An input of at least `len` bytes.
-    fn new(memory: &SlabAllocator, len: usize) -> Result<Self> {
-        let device = memory.alloc_device(capacity(len), HostAccess::Write)?;
-        let staging = if device.is_mapped() {
-            None
-        } else {
-            Some(memory.alloc_host(capacity(len))?)
-        };
-        Ok(Self { device, staging })
-    }
-
-    /// Write `bytes` at the start of the device buffer: in place when it is
-    /// mapped, otherwise into the staging buffer and by a copy recorded on
-    /// the page.  Called while the page is recording, after every earlier
-    /// page that read the buffer has completed.
-    fn write(&mut self, recorder: &PageRecorder, bytes: &[u8]) -> Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        if let Some(mapped) = self.device.mapped_mut() {
-            mapped[..bytes.len()].copy_from_slice(bytes);
-            return Ok(());
-        }
-        let staging = self
-            .staging
-            .as_mut()
-            .ok_or_else(|| BackendError::msg("page input has neither mapping nor staging"))?;
-        staging.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
-        recorder.record_copy(staging.handle(), self.device.handle(), bytes.len() as u64)
-    }
-}
-
-impl Target {
-    /// A page buffer of at least `len` bytes.
-    fn new(memory: &SlabAllocator, len: usize) -> Result<Self> {
-        let device = memory.alloc_device(capacity(len), HostAccess::ReadBack)?;
-        let readback = if device.host_reads_cached() {
-            None
-        } else {
-            Some(memory.alloc_host_readback(capacity(len))?)
-        };
-        Ok(Self { device, readback })
-    }
-
-    /// Record the copy of the page's first `len` bytes into the read-back
-    /// buffer, if the page has one.
-    fn record_readback(&self, recorder: &PageRecorder, len: usize) -> Result<()> {
-        self.readback.as_ref().map_or(Ok(()), |r| {
-            recorder.record_copy(self.device.handle(), r.handle(), len as u64)
-        })
-    }
-
-    /// The page's bytes as the host reads them, once its page has completed.
-    fn pixels(&self) -> Result<&[u8]> {
-        self.readback.as_ref().map_or_else(
-            || {
-                self.device
-                    .mapped()
-                    .ok_or_else(|| BackendError::msg("render_page: page buffer lost its mapping"))
-            },
-            |r| Ok(r.as_slice()),
-        )
-    }
+    target: Option<Staged<VulkanBackend>>,
 }
 
 /// The push constants of the raster of `page` binned as `bins`, in the
@@ -164,6 +58,11 @@ fn push_constants(page: &PageCommands, bins: &TileBins) -> Result<[u8; 28]> {
     Ok(push)
 }
 
+/// `len` bytes as a device size.
+fn device_size(len: usize) -> u64 {
+    u64::try_from(len).expect("usize fits u64 on supported targets")
+}
+
 impl VulkanBackend {
     /// Render `page` on the device and write its pixels into `out`, RGB8:
     /// row `y` at `out[y × stride..][..width × 3]`.  Bytes between rows are
@@ -174,9 +73,11 @@ impl VulkanBackend {
     ///
     /// # Errors
     ///
-    /// When the page has no pixel, `out` or `stride` is too small for it,
-    /// an allocation fails, or the device reports an error.  `out` is
-    /// unchanged then.
+    /// [`BackendError::DeviceLimit`] when an input or the page exceeds the
+    /// device's `maxStorageBufferRange`, before anything is allocated;
+    /// otherwise an error when the page has no pixel, `out` or `stride` is
+    /// too small for it, an allocation fails, or the device reports an
+    /// error.  `out` is unchanged then.
     pub fn render_page(&self, page: &PageCommands, out: &mut [u8], stride: usize) -> Result<()> {
         let (width, height) = (page.width() as usize, page.height() as usize);
         let row = width * 3;
@@ -191,14 +92,32 @@ impl VulkanBackend {
         }
         let bins = page.bin().map_err(BackendError::new)?;
         let push = push_constants(page, &bins)?;
-        let inputs: [&[u8]; 5] = [
-            bytemuck::cast_slice(page.cmds()),
-            bytemuck::cast_slice(page.intersects()),
-            bytemuck::cast_slice(page.row_starts()),
-            bytemuck::cast_slice(&bins.offsets),
-            bytemuck::cast_slice(&bins.cmds),
-        ];
         let page_len = row * height;
+        let inputs: [(&'static str, &[u8]); 5] = [
+            ("render_page commands", bytemuck::cast_slice(page.cmds())),
+            (
+                "render_page intersections",
+                bytemuck::cast_slice(page.intersects()),
+            ),
+            (
+                "render_page row offsets",
+                bytemuck::cast_slice(page.row_starts()),
+            ),
+            (
+                "render_page tile offsets",
+                bytemuck::cast_slice(&bins.offsets),
+            ),
+            (
+                "render_page tile commands",
+                bytemuck::cast_slice(&bins.cmds),
+            ),
+        ];
+        for (what, bytes) in inputs {
+            self.device
+                .check_storage_range(what, device_size(bytes.len()))?;
+        }
+        self.device
+            .check_storage_range("render_page pixels", device_size(page_len))?;
 
         let mut scratch = self
             .page_scratch
@@ -208,42 +127,42 @@ impl VulkanBackend {
             inputs: slots,
             target,
         } = &mut *scratch;
-        let mut inputs_in_place = Vec::with_capacity(slots.len());
-        for (slot, bytes) in slots.iter_mut().zip(inputs) {
-            let input = reuse_or(
-                slot,
-                |i| fits(i.device.size(), bytes.len()),
-                || Input::new(&self.memory, bytes.len()),
-            )?;
-            inputs_in_place.push((input, bytes));
+        let mut staged = Vec::with_capacity(slots.len());
+        for (slot, (_, bytes)) in slots.iter_mut().zip(inputs) {
+            let bytes = if bytes.is_empty() {
+                &EMPTY_INPUT[..]
+            } else {
+                bytes
+            };
+            staged.push((&*stage(self, slot, bytes)?, bytes.len()));
         }
-        let target = reuse_or(
-            target,
-            |t| fits(t.device.size(), page_len),
-            || Target::new(&self.memory, page_len),
-        )?;
+        let target = ensure(self, target, page_len, Direction::ToHost)?;
 
-        self.run_page(|_| {
-            let mut handles = Vec::with_capacity(6);
-            let mut sizes = Vec::with_capacity(6);
-            for (input, bytes) in &mut inputs_in_place {
-                input.write(&self.recorder, bytes)?;
+        // SAFETY (the recorded copies and the read below): the scratch is
+        // held under its lock for this whole call, and `run_page` returns
+        // only once its page has completed or, on failure, been waited on;
+        // nothing touches the buffers in between.
+        self.run_page(|backend| {
+            let mut handles = Vec::with_capacity(staged.len() + 1);
+            let mut sizes = Vec::with_capacity(staged.len() + 1);
+            for &(input, len) in &staged {
+                unsafe { record_upload(backend, input, len) }?;
                 handles.push(input.device.handle());
-                sizes.push(input.device.size());
+                sizes.push(device_size(len));
             }
             handles.push(target.device.handle());
-            sizes.push(target.device.size());
-            self.recorder.dispatch_kernel(
+            sizes.push(device_size(page_len));
+            backend.recorder.dispatch_kernel(
                 KernelId::PageRaster,
                 &handles,
                 &sizes,
                 &push,
                 (bins.tiles_x, bins.tiles_y, 1),
             )?;
-            target.record_readback(&self.recorder, page_len)
+            unsafe { record_download(backend, target, page_len) }
         })?;
 
-        let pixels = &target.pixels()?[..page_len];
+        let pixels = &unsafe { host_view(self, target) }?[..page_len];
         for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(row)) {
             dst[..row].copy_from_slice(src);
         }
@@ -254,6 +173,8 @@ impl VulkanBackend {
 
 #[cfg(test)]
 mod tests {
+    use color::convert::div255;
+
     use crate::fill::{AA_SIZE, AaScanTable, ScanIntersect, pixel_coverage};
     use crate::page::{PageCommands, PixelBounds};
 
@@ -261,11 +182,6 @@ mod tests {
     const AA_GAMMA: [u32; 17] = [
         0, 4, 11, 21, 32, 45, 59, 74, 90, 108, 126, 145, 166, 187, 209, 231, 255,
     ];
-
-    fn div255(x: u32) -> u32 {
-        let t = x + 0x80;
-        ((t + (t >> 8)) >> 8).min(255)
-    }
 
     /// One command as the host model paints it.
     struct HostCmd {
@@ -303,12 +219,11 @@ mod tests {
                     if n == 0 {
                         continue;
                     }
-                    let a = div255(u32::from(c.a_input) * AA_GAMMA[usize::from(n)]);
+                    let a = u32::from(div255(u32::from(c.a_input) * AA_GAMMA[usize::from(n)]));
                     let o = (usize::try_from(y).unwrap() * w + usize::try_from(x).unwrap()) * 3;
                     for (j, &s) in c.rgb.iter().enumerate() {
                         let d = u32::from(out[o + j]);
-                        out[o + j] =
-                            u8::try_from(div255((255 - a) * d + a * u32::from(s))).unwrap();
+                        out[o + j] = div255((255 - a) * d + a * u32::from(s));
                     }
                 }
             }
@@ -439,5 +354,35 @@ mod tests {
                 assert_eq!(out[(y * 8 + x) * 3..][..3], want, "pixel ({x}, {y})");
             }
         }
+    }
+
+    #[test]
+    fn a_page_without_commands_is_paper() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let page = PageCommands::new(19, 3, [1, 2, 3]);
+        let mut out = vec![0; 19 * 3 * 3];
+        backend
+            .render_page(&page, &mut out, 19 * 3)
+            .expect("render_page");
+        assert!(out.as_chunks::<3>().0.iter().all(|&p| p == [1, 2, 3]));
+    }
+
+    #[test]
+    fn bindings_past_the_storage_range_are_refused() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let max = u64::from(backend.device.max_storage_buffer_range);
+        assert!(backend.device.check_storage_range("input", max).is_ok());
+        let err = backend
+            .device
+            .check_storage_range("input", max + 1)
+            .expect_err("past the range");
+        assert!(
+            matches!(err, crate::backend::BackendError::DeviceLimit { need, .. } if need == max + 1),
+            "{err}"
+        );
     }
 }

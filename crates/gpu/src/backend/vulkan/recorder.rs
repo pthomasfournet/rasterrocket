@@ -910,6 +910,9 @@ impl PageRecorder {
         debug_assert_eq!(buffers.len(), handles.n_storage_buffers as usize);
 
         self.check_dispatch_size(groups, id.label())?;
+        for &size in sizes {
+            self.device.check_storage_range(id.label(), size)?;
+        }
 
         let mut s = self.inner.lock().expect("recorder mutex poisoned");
         if s.state != State::Recording {
