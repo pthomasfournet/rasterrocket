@@ -233,9 +233,11 @@ fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
 ///
 /// A page whose recording is refused, or which the device fails on, is
 /// executed again on the CPU with the bitmap buffers of the first pass;
-/// the two passes share the page's operator budget and deadline.  A
-/// recording stopped by the budget or by cancellation is returned as it
-/// stopped, for the caller to report.
+/// the two passes share the page's deadline, and the CPU pass has its own
+/// operator budget, so the page's outcome is the CPU's.  A recording
+/// stopped by the operator budget, the deadline or cancellation is
+/// returned as it stopped, for the caller to report: the CPU pass would
+/// stop the same way.
 ///
 /// # Errors
 ///

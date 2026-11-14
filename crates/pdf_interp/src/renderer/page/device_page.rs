@@ -114,9 +114,8 @@ const fn command_refusal(e: &PageCommandsError) -> &'static str {
 /// What a renderer whose device recording did not render the page hands
 /// to the renderer that renders it on the CPU.
 ///
-/// It holds the page's remaining work budget, so the two passes share one
-/// operator allowance and deadline, and the unsupported operators already
-/// warned about.
+/// It holds the page's deadline and cancellation flag, which the two
+/// passes share, and the unsupported operators already warned about.
 pub struct DeviceFallback {
     budget: WorkBudget,
     warned_unknown_ops: HashSet<Vec<u8>>,
@@ -258,12 +257,16 @@ impl PageRenderer<'_> {
     }
 
     /// Continue from `fallback`, taken from the renderer of this page whose
-    /// device recording did not render it: the page's operators share one
-    /// budget and deadline over both passes, and an operator warned about
-    /// in the first is not warned about again.  Call before
-    /// [`Self::execute`].
+    /// device recording did not render it: both passes run under the one
+    /// page deadline and cancellation flag, this pass with its own operator
+    /// budget, so the page executes the operators it would execute on the
+    /// CPU alone; an operator warned about in the first pass is not warned
+    /// about again.  Call before [`Self::execute`].
     pub fn resume_after_device(&mut self, fallback: DeviceFallback) {
-        self.adopt_budget(fallback.budget);
+        self.adopt_budget(WorkBudget {
+            ops: self.op_budget,
+            ..fallback.budget
+        });
         self.warned_unknown_ops = fallback.warned_unknown_ops;
         self.warned_unknown_ops_capped = fallback.warned_unknown_ops_capped;
     }
@@ -714,26 +717,45 @@ mod tests {
         ));
     }
 
-    /// The renderer that renders a page again on the CPU continues the
-    /// recording renderer's operator count, deadline and warned operators.
+    /// A page refused late in its recording, after more than half of its
+    /// operator budget, renders on the CPU: the CPU pass has its own
+    /// operator budget, and keeps the recording's deadline and warned
+    /// operators.
     #[test]
-    fn the_cpu_pass_continues_the_recording_budget() {
+    fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
+        const CONTENT: &[u8] =
+            b"zz 0 0 1 1 re f 0 0 1 1 re f 0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f";
         let doc = doc();
-        let ops = crate::content::parse(b"zz 0 0 10 10 re f");
+        let ops = crate::content::parse(CONTENT);
+        let n_ops = u64::try_from(ops.len()).expect("few operators");
+        let budget = 15;
+        assert!(n_ops * 2 > budget && n_ops < budget);
         let mut first = PageRenderer::new(50, 50, &doc, (4, 0));
-        first.op_budget = 4;
+        first.op_budget = budget;
         first.record_for_device().expect("an RGB page records");
         first.execute(&ops);
-        assert!(first.budget_status().is_none(), "the page fits the budget");
+        assert!(first.budget_status().is_none());
+        assert!(matches!(
+            first.take_device_recording(),
+            Some(DeviceRecording::Refused("path clip"))
+        ));
+        assert_eq!(first.ops_executed, n_ops, "refused at the last operator");
         let fallback = first.take_device_fallback();
         let mut second = PageRenderer::new(50, 50, &doc, (4, 0));
+        second.op_budget = budget;
         second.resume_after_device(fallback);
         assert_eq!(second.deadline, first.deadline);
         assert!(second.warned_unknown_ops.contains(&b"zz"[..]));
         second.execute(&ops);
         assert!(
-            second.budget_status().is_some(),
-            "the second pass ran on a fresh budget"
+            second.budget_status().is_none(),
+            "the CPU pass ran on the recording's leftover budget: {:?}",
+            second.budget_status()
+        );
+        assert_eq!(
+            second.rgb_canvas().data(),
+            cpu(&doc, 50, 50, CONTENT),
+            "the CPU pass renders the page"
         );
     }
 }
