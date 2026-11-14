@@ -55,8 +55,6 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         setup_component_params(self)?;
         let mut mcu_height;
 
-        // memory location for decoded pixels for components
-        let mut block: [Vec<i16>; MAX_COMPONENTS] = [vec![], vec![], vec![], vec![]];
         let mut mcu_width;
 
         let mut seen_scans = 1;
@@ -98,11 +96,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 
         mcu_width *= 64;
 
-        for (i, comp) in self.components.iter().enumerate() {
-            let len = mcu_width * comp.vertical_sample * comp.horizontal_sample * mcu_height;
-
-            block[i] = vec![0; len];
-        }
+        // The coefficients of every component, for the whole frame.
+        let mut block = self.coefficient_planes(|comp| {
+            mcu_width * comp.vertical_sample * comp.horizontal_sample * mcu_height
+        })?;
 
         let mut stream = B::new_progressive(self.succ_low, self.spec_start, self.spec_end);
         stream.set_strict(self.options.strict_mode());

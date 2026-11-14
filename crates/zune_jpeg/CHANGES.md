@@ -150,6 +150,16 @@ unless the entry says otherwise.
   frame is read from the stream when the entropy decoder has not run into
   it (it was an error).
 
+- **`JpegDecoder::set_max_coefficient_bytes` (new API): a limit on the
+  coefficients a frame holds whole.** A progressive frame, and a
+  sequential frame whose components are coded in several scans, keep two
+  bytes per sample of every component until the last scan, besides the
+  output; a few dozen bytes of headers can declare a frame of gigabytes.
+  Over the limit the decode fails before the coefficients are allocated,
+  strict or not. The default is no limit, so decodes are unchanged
+  otherwise. Both allocation sites share `JpegDecoder::coefficient_planes`.
+  Test: `invalid_images::coefficients_over_the_limit_are_not_allocated`.
+
 ## Upstream review (9706202c..ab211bb1)
 
 The 139 upstream commits to the crate after the base were read; the fixes

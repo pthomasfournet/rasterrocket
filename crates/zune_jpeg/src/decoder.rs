@@ -192,6 +192,9 @@ pub struct JpegDecoder<T> {
     pub(crate) coefficient_precision: [[u8; 64]; MAX_COMPONENTS],
     /// Extended XMP segments
     pub(crate) extended_xmp_segments: Vec<ExtendedXmpSegment>,
+    /// The largest number of bytes the coefficients of a frame buffered
+    /// whole may take; see [`Self::set_max_coefficient_bytes`].
+    pub(crate) max_coefficient_bytes: usize,
 }
 
 impl<T> JpegDecoder<T>
@@ -261,6 +264,7 @@ where
             components_coded: 0,
             coefficient_precision: [[u8::MAX; 64]; MAX_COMPONENTS],
             extended_xmp_segments: vec![],
+            max_coefficient_bytes: usize::MAX,
         }
     }
     /// Decode a buffer already in memory
@@ -453,6 +457,39 @@ where
     /// ```
     pub fn set_options(&mut self, options: DecoderOptions) {
         self.options = options;
+    }
+
+    /// Sets the largest number of bytes the quantised coefficients of a
+    /// frame may take when the decoder holds them whole: a progressive
+    /// frame, and a sequential frame whose components are coded in several
+    /// scans.  Such a frame holds two bytes per sample of every component
+    /// (padded to whole blocks) besides its output; a frame over the limit
+    /// is an error before the coefficients are allocated, whether the
+    /// decode is strict or not.  The default is no limit.
+    pub fn set_max_coefficient_bytes(&mut self, bytes: usize) {
+        self.max_coefficient_bytes = bytes;
+    }
+
+    /// The coefficient planes of the frame's components, `plane_len(c)`
+    /// coefficients for component `c`, zeroed, or an error when together
+    /// they exceed [`Self::set_max_coefficient_bytes`].
+    pub(crate) fn coefficient_planes(
+        &self,
+        plane_len: impl Fn(&Components) -> usize,
+    ) -> Result<[Vec<i16>; MAX_COMPONENTS], DecodeErrors> {
+        let lens: [usize; MAX_COMPONENTS] =
+            core::array::from_fn(|i| self.components.get(i).map_or(0, &plane_len));
+        let bytes = lens
+            .iter()
+            .fold(0_usize, |sum, &len| sum.saturating_add(len))
+            .saturating_mul(core::mem::size_of::<i16>());
+        if bytes > self.max_coefficient_bytes {
+            return Err(DecodeErrors::Format(format!(
+                "the frame's coefficients take {bytes} bytes, over the limit of {} bytes",
+                self.max_coefficient_bytes
+            )));
+        }
+        Ok(lens.map(|len| vec![0; len]))
     }
     #[allow(clippy::cast_possible_truncation)]
     fn reassemble_extended_xmp(&mut self) {

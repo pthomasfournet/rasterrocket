@@ -130,6 +130,54 @@ fn a_progressive_frame_past_the_scan_limit_is_drawn_partial() {
     );
 }
 
+/// A progressive gray frame of `side`×`side` samples whose one DC scan
+/// codes every block as zero: some 60 bytes for any dimensions.
+fn empty_progressive_frame(side: u16) -> Vec<u8> {
+    let [hi, lo] = side.to_be_bytes();
+    let mut data = vec![0xFF, 0xD8];
+    // DQT: table 0, all ones.
+    data.extend([0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    data.extend([1; 64]);
+    // SOF2: 8-bit, one component, 1×1 sampling, table 0.
+    data.extend([
+        0xFF, 0xC2, 0x00, 0x0B, 0x08, hi, lo, hi, lo, 0x01, 0x01, 0x11, 0x00,
+    ]);
+    // DHT: DC table 0, one code of one bit for category 0.
+    data.extend([0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01]);
+    data.extend([0; 15]);
+    data.push(0x00);
+    // SOS: the DC coefficient of component 1, first pass.
+    data.extend([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    data.extend([0x00; 4]);
+    data.extend([0xFF, 0xD9]);
+    data
+}
+
+#[test]
+fn coefficients_over_the_limit_are_not_allocated() {
+    // 16384² samples hold 512 MiB of coefficients.
+    let data = empty_progressive_frame(16_384);
+    for strict in [false, true] {
+        let options = DecoderOptions::default().set_strict_mode(strict);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&data), options);
+        decoder.set_max_coefficient_bytes(1 << 20);
+        let err = decoder.decode().unwrap_err();
+        assert!(
+            matches!(&err, DecodeErrors::Format(m) if m.contains("coefficients")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    // 16² samples hold 512 bytes of coefficients.
+    let data = empty_progressive_frame(16);
+    let mut decoder = JpegDecoder::new(ZCursor::new(&data));
+    decoder.set_max_coefficient_bytes(512);
+    assert_eq!(decoder.decode().unwrap().len(), 16 * 16 * 3);
+    let mut decoder = JpegDecoder::new(ZCursor::new(&data));
+    decoder.set_max_coefficient_bytes(511);
+    assert!(decoder.decode().is_err());
+}
+
 /// Entropy-coded data writer: most significant bit first, 0xFF bytes stuffed, the last
 /// byte padded with 1 bits.
 struct Bits {

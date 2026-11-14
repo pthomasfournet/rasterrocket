@@ -147,18 +147,17 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         // (upsampled) pixels immediately after each MCU, for convenience we use each row of MCUS.
         // Otherwise, we must first wait until following SOS provide the remaining components.
         let all_components_in_first_scan = usize::from(self.num_scans) == self.components.len();
-        let mut progressive_mcus: [Vec<i16>; 4] = core::array::from_fn(|_| vec![]);
-
-        if !all_components_in_first_scan {
-            for (component, mcu) in self.components.iter().zip(&mut progressive_mcus) {
-                let len = mcu_width
+        let mut progressive_mcus: [Vec<i16>; 4] = if all_components_in_first_scan {
+            core::array::from_fn(|_| vec![])
+        } else {
+            self.coefficient_planes(|component| {
+                mcu_width
                     * component.vertical_sample
                     * component.horizontal_sample
                     * mcu_height
-                    * 64;
-                *mcu = vec![0; len];
-            }
-        }
+                    * 64
+            })?
+        };
 
         let mut pixels_written = 0;
 
