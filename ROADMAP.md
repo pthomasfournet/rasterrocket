@@ -56,6 +56,219 @@ v1.2.0 and exists only as a pixel-diff reference baseline.
 
 ## Release history
 
+### v2.2.0 (November 2026)
+
+**New comic formats, caller-owned buffers, whole pages on a Vulkan GPU, and
+overprint simulated in full but for transparency groups; one signature change
+under the `cache` feature.** Comic archives gain RAR, JPEG XL and AVIF pages
+and every page of a multi-page TIFF; the library renders into memory the
+caller owns, over a transparent background, on any page box and with an
+extra quarter-turn rotation, and reports the features it ignores as typed
+values; the JPEG decoder is a local fork that decodes arithmetic-coded and
+multi-scan frames and reports partial streams exactly. Every crate requires
+Rust 1.100. Every addition to the `rasterrocket` API is a new item or a
+field of a `#[non_exhaustive]` type; the one change a v2.1.0 caller can see
+is the return type of `RasterSession::image_cache`, present only with the
+`cache` feature.
+
+**New inputs and formats.**
+- **Comic archives.** `.cbr` (RAR 1.3 to RAR 7) is read through the
+  pure-Rust `rars` decoder, under the entry and 1 GiB dictionary bounds of
+  `.cb7`; a damaged member of a non-solid archive fails that entry only.
+  A multi-page TIFF entry yields every page (reduced-resolution copies and
+  masks skipped). JPEG XL pages (`.jxl`) decode through the `jxl` crate,
+  first frame, 8-bit gray or sRGB. AVIF pages (`.avif`) decode through a
+  HEIF reader in the comic crate (primary item or `grid`, `clap` / `irot` /
+  `imir`, `nclx`) and `rav1d`, vendored as a local fork with a safe
+  `decode_still` entry point: 8 to 12 bits, 4:0:0 to 4:4:4. The fork's
+  assembly kernels are on by default (`av1-asm`; `nasm` is then a build
+  requirement on x86, and `--no-default-features` drops them).
+- **JPEG.** The decoder is a local fork of zune-jpeg (`crates/zune_jpeg`),
+  reviewed against upstream through `ab211bb1`. A baseline frame coded in
+  several scans decodes correctly (subsampled ones were garbage, others
+  lost rows); arithmetic coding (SOF9, SOF10) decodes; a DNL segment is
+  read; a stream with bytes before SOI or an unknown height is repaired,
+  and frames taller or wider than 16 384 px decode within the 1 GiB
+  budget, which now also counts the coefficient planes a progressive or
+  multi-scan frame holds. An image is reported partial exactly when its
+  stream lacks data (`JpegDecoder::intact_rows`), in PDFs and, as a
+  warning, in comic pages.
+- **Transparent output.** `--transparent` (`--transp`), as
+  `pdftocairo -transp`, writes RGBA PNG or TIFF with unassociated alpha;
+  the page is painted as an isolated page group and its alpha kept.
+  Formats without alpha, `--gray` and `--mono` are refused.
+- **Fax.** A `--fax` page longer than B4 (364 mm) is sent as A4-length
+  pieces.
+
+**API and CLI.**
+- **Caller-owned buffers.** `PageBuffer::render_gray_into` /
+  `render_rgb_into` / `render_rgba_into` write a page at the caller's
+  stride, byte-identical to the allocating calls; once its canvas has grown
+  to the largest page, a render allocates no page-sized buffer (corpus-01
+  at 150 dpi: 8.89 → 0.47 MB allocated a page). `RasterSession::page_size_px`
+  sizes the buffer; a short stride or buffer is an error before drawing.
+- **Shared and streamed input.** `open_session_from_shared` opens any
+  `AsRef<[u8]>` storage without a copy, `open_session_from_reader` any
+  `Read` source (to be bounded by the caller); `read_into_memory` reads a
+  file instead of mapping it, so a truncated input cannot raise `SIGBUS`.
+- **Page box and rotation.** `--box media|crop|bleed|trim|art` /
+  `PageBox` (default the CropBox); `--rotate DEG` / `Rotation`, a whole
+  number of quarter turns added to each page's `/Rotate` before the
+  geometry is computed, so every size, region, deskew and output sees the
+  turned page, comic pages included.
+- **Diagnostics.** `RasterSession::unsupported_features` and
+  `PageDiagnostics::unsupported_features` list JavaScript, XFA, portable
+  collections, 3D and multimedia annotations as `UnsupportedFeature`
+  values; `PageDiagnostics` counts device fills, blits and ICC
+  conversions and reports `device_page`.
+- **CLI.** `--box`, `--rotate`, `--transparent`, `--gpu-pages`,
+  `--max-archive-mib`. `--print` appends each page to the spool once the
+  pages before it are done, without barrier windows (a 200-page document,
+  one scan page in ten, at 600 dpi: 7.5 → 4.3 s).
+
+**Rendering correctness.**
+- A function-based (Type 1) shading is evaluated at every device pixel of
+  its Domain instead of on a 64 × 64 grid (above 4 Mi pixels at every k-th
+  pixel, interpolated), its work, memory and area bounded. **This changes
+  pixels** of every Type 1 shading, by 1–2 counts on smooth functions.
+- Text shaping for substituted fonts joins a word split between show
+  strings (`TJ` adjustments, `Tf` mid-word, consecutive `Tj`), draws the
+  marks ending a right-to-left string over the next string's letter of the
+  same script, and sets a synthesised appearance's fallback characters in
+  shared fonts, so a word spanning Unicode blocks is one string.
+- Property suites (parser, fills and clips, colour, encoders, camera
+  geometry) found five bugs, fixed: an aliased fill lost cells of
+  winding-count-0 intersections (**changes pixels** of `--aaVector no`
+  renders), a sloped edge moved by whole pixels could lose a cell,
+  `div255` rounded down at 126 inputs (**changes pixels** by one level
+  where compositing meets them), `round_half_up_i32` took
+  0.49999999999999994 to 1, and `rectify` could exceed its bound.
+- A hairline cut by a clip edge inside a pixel row draws its kept rows as
+  the unclipped hairline does.
+- The glyph advance and text-matrix translations use fused multiply-adds:
+  **this changes pixels**, glyphs on a rounding boundary moving by a device
+  pixel. moxcms 0.9.2 may move colour-managed RGB output by one level.
+- The prescan's PPI hint uses the unrotated page width; a page object
+  that is not a readable dictionary is warned about.
+
+**Overprint.** On the ink canvas, `Separation` and `DeviceN` images and
+shadings paint their colorants' channels; coloured tiling cells render on
+an ink canvas sharing the page's spot slots; `ICCBased` CMYK colours print
+as the process ink that reproduces their profile; transfer functions apply
+in ink space, to the channels a colour carries; a black or near-black gray
+or RGB colour prints as a balanced rich black, so antialiased edges stay
+neutral; and the GPU AA fill and image blit run on the ink canvas,
+byte-identical to the CPU. Transparency groups as a whole are the one part
+still not simulated. Pages rendered without `--overprint` are unchanged.
+
+**GPU.**
+- **Whole pages on Vulkan.** `--gpu-pages` / `SessionConfig::gpu_pages`
+  (off by default) opens the Vulkan device in the background and renders a
+  page of solid fills and strokes under rectangular clips whole on it,
+  from a command list scan-converted by the CPU's own geometry stages,
+  while CPU workers take the other pages; output is byte-identical. A page
+  the device cannot take, or fails on, renders on the CPU; a failed device
+  is retired for the session.
+- **Vulkan parity with CUDA.** The device image cache (`cache`) and the ICC
+  CMYK CLUT (`gpu-icc`, after a one-time exactness probe) run on Vulkan,
+  byte-identical to the CPU on the RTX 5070 and RADV.
+- **`Auto` on the CPU.** `Auto` initialises no GPU backend, image cache or
+  nvJPEG decoder unless a device kernel is enabled, so it matches
+  `--backend cpu` start-up (corpus-02, one page: 283 → 11 ms); it builds an
+  nvJPEG2000 decoder on demand for a JPX of at least 262 144 px not drawn
+  at half its size or less. `GPU_ICC_CLUT_THRESHOLD` is 128 000 px
+  (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it). A JPEG drawn below its
+  resolution is not put in the device cache. **This changes `Auto`
+  pixels** on pages with an ICC-based CMYK image and on JPEG 2000 images
+  drawn at half their size or less; the explicit backends are unchanged.
+- **Integrated GPUs.** An uncached mapped Vulkan buffer is read back
+  through a device copy (an 8.7 MB image on RADV: 27.7 → 0.42 ms).
+- **Kernels.** The dormant composite and soft-mask kernels are deleted;
+  the IDCT kernels no longer race between their passes (wrong chroma on
+  MoltenVK); the CLUT coordinate scale is computed on the host, correctly
+  rounded; blit and CLUT scratch is pooled on the backend.
+- `vulkan_phase_bench`, `startup_bench`, `threshold_bench --only clut` and
+  a page-level GPU raster benchmark measure the backends.
+
+**Hardening.**
+- *Comic archives.* A decompressed total of 4 GiB per archive
+  (`ComicOptions::max_archive_bytes`, `--max-archive-mib`), refused with
+  `ComicError::ArchiveTooLarge` before the first page; a TIFF directory
+  chain walked once; the AVIF container's tables, transforms and sample
+  budget bounded, the budget taken from the stream's own sequence headers.
+- *Library.* The unsupported-feature scan has a step budget; a file too
+  large to read into memory is an I/O error, not an abort; `PageBuffer`
+  keeps its ink and alpha buffers; a failed GPU deskew falls back to the
+  CPU rotation.
+- *GPU.* Device page command lists and storage bindings are bounded by the
+  device's limits; the VRAM budget is reserved before an upload; a corrupt
+  disk-tier entry is removed; a device blit that never starts draws from
+  the host copy; Vulkan transfers wait on their own fence; a Vulkan
+  session builds no CUDA JPEG decoder; IDCT block counts past the kernels'
+  addressing are refused.
+- *JPEG decoder.* Every upstream fix through `ab211bb1` relevant to the
+  fork, and the fork's own: incomplete arithmetic AC bands reported, a
+  64-bit fill-bit count, a coefficient limit
+  (`set_max_coefficient_bytes`).
+
+**Performance.** An image reduction plans once and resamples only the
+columns it reads; HTJ2K blocks reconstruct without a coefficient pass, load
+their bitstreams four bytes at a time and decode quad pairs without
+per-sample branches; spot-slot checks and transparency-group canvases
+allocate less on overprint pages. Renders are unchanged by all of these.
+
+**CI and tooling.**
+- The full CPU suites run on macOS, and a Windows leg runs clippy and the
+  render, interp, `rasterrocket`, font, CLI, parser, colour, encode and
+  comic suites; the tree builds and tests cleanly on Windows.
+- A Coverage workflow reports line coverage (`cargo-llvm-cov`) and gates
+  nothing; a PGO + BOLT workflow builds a release `rrocket` on `v*` tags.
+- `tests/compare/compare.sh` and `pdfium_corpus.py` classify pages against
+  a checked-in registry of expected failures,
+  `tests/compare/expectations.json` (`PASS`, `XFAIL`, `FAIL`, `XPASS`).
+- `pdf_bridge` is left out of the workspace's default members, so a bare
+  `cargo build` needs no poppler source tree; `scripts/check_vendored.py`
+  tracks the zune-jpeg and rav1d forks.
+
+**API changes** (additive in `rasterrocket` but for `image_cache`).
+- `rasterrocket`: `PageBuffer`, `PageInfo`, `PixelFormat` (`Gray8`,
+  `Rgb8`, `Rgba8`; `#[non_exhaustive]`), `RenderedPage::format`,
+  `render_page_rgba`, `render_page_rgb_with_diagnostics`,
+  `open_session_from_shared`, `open_session_from_reader`,
+  `RasterSession::{page_size_px, unsupported_features}`,
+  `SessionConfig::{page_box, rotation, read_into_memory, gpu_pages}`,
+  `RasterOptions::{page_box, rotation, read_into_memory,
+  transparent_background}`, `RenderParams::transparent_background`,
+  `RasterError::{OutputStrideTooSmall, OutputBufferTooSmall}`,
+  `PageDiagnostics::{unsupported_features, device_fills,
+  device_fill_failures, device_image_blits, device_icc_conversions,
+  device_icc_failures, device_page}`, and the re-exports `PageBox`,
+  `Rotation`, `InvalidRotation`, `DevicePage`, `UnsupportedFeature`,
+  `ScriptLocation`, `MediaKind`.
+- Changed: with the `cache` feature, `RasterSession::image_cache` returns
+  `Option<&gpu::cache::ImageCache>` (either backend) instead of
+  `Option<&Arc<gpu::cache::DeviceImageCache>>`. `deskew::apply`,
+  `DeskewError` and `RasterError::Deskew` stay public and are no longer
+  returned.
+- `rasterrocket-comic`: `ComicOptions::max_archive_bytes`,
+  `DEFAULT_MAX_ARCHIVE_BYTES`, `ComicError::ArchiveTooLarge`;
+  `ComicError::RarUnsupported` is removed.
+- `rasterrocket-interp`: `Rotation`, `InvalidRotation`, `PageBox`,
+  `PageGeometry::rotated`, `open_shared_with`,
+  `PageRenderer::{try_with_page_group_in, try_finish_transparent,
+  record_for_device}`, `transparent_page_group`,
+  `document_unsupported_features`, `page_unsupported_features`;
+  `page_size_pts`, `page_size_pts_by_id` and `prescan_page` take the page
+  box. `rasterrocket-render`: `BitmapBuffers`,
+  `Bitmap::{try_new_filled_in, into_buffers, turned_cw}`,
+  `stroke_aa_scanner`, `hairline_runs`. `rasterrocket-parser`:
+  `Document::from_shared(_with)`, `OpenOptions::read_into_memory`.
+- `rasterrocket-gpu`: the image cache and `CachedDeviceImage` take a
+  backend parameter, `ContentHash::of` replaces
+  `DeviceImageCache::hash_bytes`, `CacheError` gains `Backend` and
+  `BackendMismatch`, `gpu::page` holds the page command list, and
+  `GpuBackend::record_composite` / `record_apply_soft_mask` are removed.
+
 ### v2.1.0 (November 2026)
 
 **Output to printers and fax machines, overprint, shaped text for
