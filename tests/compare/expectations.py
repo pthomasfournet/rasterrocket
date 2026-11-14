@@ -47,8 +47,11 @@ on an exclusive lock of `.<name>.lock` beside it.
 The `compare` command serves compare.sh: ROWS is a tab-separated file of
 `label page outcome rmse tile detail` rows, `page` being `-` for the
 document.  It prints a line per non-passing test (every test with
---verbose), then `STATUS <word> <fatal> <fail> <xfail> <xpass>`, where
-<word> is PASS, XFAIL, XPASS or FAIL and <fatal> is 1 when the run fails.
+--verbose), then `STATUS <word> <fatal> <fail> <xfail> <xpass> <over>`,
+where <word> is PASS, XFAIL, XPASS or FAIL, <fatal> is 1 when the run
+fails and <over> counts the pages that do not pass the suite's limits
+(scored over a limit, or a size, missing or unreadable page), expected or
+not.
 
 The `check` command loads the registry and exits 0, or 2 with the error
 when the file is malformed.  Either command exits 2 on a malformed
@@ -168,6 +171,15 @@ def effective_outcome(obs: Observation, limits: Mapping[str, float]) -> str:
     if obs.outcome == OK:
         return PASSING
     return obs.outcome
+
+
+def over_limits(observations: Iterable[Observation], limits: Mapping[str, float]) -> int:
+    """Return the number of page observations that do not pass `limits`, expected or not."""
+    return sum(
+        1
+        for obs in observations
+        if obs.page is not None and effective_outcome(obs, limits) != PASSING
+    )
 
 
 def classify(obs: Observation, entry: Entry | None, limits: Mapping[str, float]) -> Result:
@@ -554,14 +566,9 @@ def compare_main(args: argparse.Namespace) -> int:
         tile=args.tile_limit,
     )
     rows = _read_rows(args.rows, file_key(args.file))
+    observations = [obs for _, _, obs in rows]
     registry = registry_path(args.registry)
-    results = run_suite(
-        registry,
-        suite,
-        [obs for _, _, obs in rows],
-        limits,
-        update=args.update,
-    )
+    results = run_suite(registry, suite, observations, limits, update=args.update)
     for (label, detail, _), r in zip(rows, results, strict=True):
         if r.verdict is Verdict.PASS and not args.verbose:
             continue
@@ -573,7 +580,7 @@ def compare_main(args: argparse.Namespace) -> int:
     fatal = int(run_is_fatal(results, registry, update=args.update, strict=args.strict))
     print(
         f"STATUS {overall(results)} {fatal} {counts[Verdict.FAIL]} "
-        f"{counts[Verdict.XFAIL]} {counts[Verdict.XPASS]}"
+        f"{counts[Verdict.XFAIL]} {counts[Verdict.XPASS]} {over_limits(observations, limits)}"
     )
     return 0
 

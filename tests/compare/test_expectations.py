@@ -97,6 +97,21 @@ class Classify(unittest.TestCase):
         self.assertEqual(self.verdict(doc, entry), ex.Verdict.XPASS)
 
 
+class OverLimits(unittest.TestCase):
+    """The count of pages over the suite's limits."""
+
+    def test_counts_failing_pages_only(self) -> None:
+        """Scored pages over a limit and unscored pages count; documents and passes do not."""
+        observations = [
+            scored(1, 1.0, 5.0),
+            scored(2, 2.5, 5.0),
+            scored(3, 1.0, 12.5),
+            ex.Observation("a.pdf", 4, "size"),
+            ex.Observation("a.pdf", None, "error"),
+        ]
+        self.assertEqual(ex.over_limits(observations, LIMITS), 3)
+
+
 class Outcome(unittest.TestCase):
     """The run's overall verdict and exit status."""
 
@@ -321,15 +336,15 @@ class CompareCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             registry = pathlib.Path(tmp) / "e.json"
             first = self.run_compare(registry, rows, "--update", "--strict")
-            self.assertEqual(first[-1], "STATUS FAIL 0 2 0 0")
+            self.assertEqual(first[-1], "STATUS FAIL 0 2 0 0 2")
             suite = "compare.sh pdftoppm 150dpi rmse<=2 tile<=12"
             entries = ex.load(registry)[suite]
             self.assertEqual(set(entries), {("x.pdf", 2), ("x.pdf", 3)})
             again = self.run_compare(registry, rows)
-            self.assertEqual(again[-1], "STATUS XFAIL 0 0 2 0")
+            self.assertEqual(again[-1], "STATUS XFAIL 0 0 2 0 2")
             fixed = rows.replace("size\t\t\t", "scored\t0.5\t1.0\t")
             surprise = self.run_compare(registry, fixed, "--strict")
-            self.assertEqual(surprise[-1], "STATUS XPASS 1 0 1 1")
+            self.assertEqual(surprise[-1], "STATUS XPASS 1 0 1 1 1")
             self.assertTrue(surprise[1].startswith("XPASS    page-3"))
 
     def test_update_waits_for_the_registry_lock(self) -> None:
@@ -369,19 +384,26 @@ class CompareCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             registry = pathlib.Path(tmp) / "e.json"
             out = self.run_compare(registry, rows, "--update", registry_arg="")
-            self.assertEqual(out[-1], "STATUS FAIL 1 1 0 0")
+            self.assertEqual(out[-1], "STATUS FAIL 1 1 0 0 1")
             self.assertFalse(registry.exists())
 
 
-# Stub renderers: each writes a white 2 x 2 binary PPM as page 1 of the
-# output prefix, its last argument.  The rrocket stub exits with
-# $STUB_STATUS (default 0).
-STUB_PDFTOPPM = """#!/bin/sh
-for a; do prefix=$a; done
-printf 'P6\\n2 2\\n255\\n' > "$prefix-1.ppm"
-head -c 12 /dev/zero | tr '\\0' '\\377' >> "$prefix-1.ppm"
-"""
-STUB_RROCKET = STUB_PDFTOPPM + 'exit "${STUB_STATUS:-0}"\n'
+def stub_renderer(ink: str) -> str:
+    """Return a stub renderer drawing its page in `ink`, a quoted `tr` operand."""
+    return (
+        "#!/bin/sh\n"
+        "for a; do prefix=$a; done\n"
+        "printf 'P6\\n2 2\\n255\\n' > \"$prefix-1.ppm\"\n"
+        f"head -c 12 /dev/zero | tr '\\0' {ink} >> \"$prefix-1.ppm\"\n"
+    )
+
+
+# Stub renderers: each writes a 2 x 2 binary PPM as page 1 of the output
+# prefix, its last argument.  The pdftoppm stub's page is white; the rrocket
+# stub's has every byte $STUB_INK (a `tr` operand, default white) and the
+# stub exits with $STUB_STATUS (default 0).
+STUB_PDFTOPPM = stub_renderer("'\\377'")
+STUB_RROCKET = stub_renderer('"${STUB_INK:-\\377}"') + 'exit "${STUB_STATUS:-0}"\n'
 
 
 @unittest.skipUnless(
@@ -389,7 +411,7 @@ STUB_RROCKET = STUB_PDFTOPPM + 'exit "${STUB_STATUS:-0}"\n'
     "compare.sh needs ImageMagick and bc",
 )
 class CompareScript(unittest.TestCase):
-    """compare.sh end to end, with stub renderers drawing identical pages."""
+    """compare.sh end to end, with stub renderers."""
 
     SUITE = "compare.sh pdftoppm 150dpi rmse<=2 tile<=12"
 
@@ -435,6 +457,14 @@ class CompareScript(unittest.TestCase):
         self.assertIn("XPASS    document", fixed.stdout)
         self.run_script("-U")
         self.assertNotIn(self.SUITE, ex.load(self.registry))
+
+    def test_summary_counts_pages_over_the_limits(self) -> None:
+        """The summary row's failed column counts a page over the limits, expected or not."""
+        self.env["STUB_INK"] = "\\0"
+        first = self.run_script("-s", "-U").stdout.split("\t")
+        self.assertEqual(first[:4], ["FAIL", "1", "1", "0"])
+        again = self.run_script("-s").stdout.split("\t")
+        self.assertEqual(again[:4], ["XFAIL", "1", "1", "0"])
 
     def test_malformed_registry_is_reported_once(self) -> None:
         """Directory mode names a malformed registry instead of an ERROR row per PDF."""

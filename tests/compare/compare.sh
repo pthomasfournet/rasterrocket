@@ -307,8 +307,9 @@ ROWS="${WORK_DIR}/rows.tsv"
 say() { $SUMMARY || printf "$@"; }
 
 # Classifies the rows against the registry, prints the report lines (through
-# `say`) and sets STATUS (the worst verdict), FATAL (1 when the run fails)
-# and N_FAIL, N_XFAIL, N_XPASS.
+# `say`) and sets STATUS (the worst verdict), FATAL (1 when the run fails),
+# N_FAIL, N_XFAIL, N_XPASS and N_OVER (the pages over the limits, expected
+# or not).
 classify_rows() {
     local helper_args=(compare --registry "$EXPECTATIONS" --reference "$REFERENCE"
                        --dpi "$DPI" --rmse-limit "$THRESHOLD" --tile-limit "$TILE_LIMIT"
@@ -321,8 +322,8 @@ classify_rows() {
         || die "expectations.py failed"
     status_line="${out##*$'\n'}"
     [[ "$out" == *$'\n'* ]] && say "%s\n" "${out%$'\n'*}"
-    read -r _ STATUS FATAL N_FAIL N_XFAIL N_XPASS <<< "$status_line"
-    [[ -n "${N_XPASS:-}" ]] || die "unexpected expectations.py output: $status_line"
+    read -r _ STATUS FATAL N_FAIL N_XFAIL N_XPASS N_OVER <<< "$status_line"
+    [[ -n "${N_OVER:-}" ]] || die "unexpected expectations.py output: $status_line"
 }
 
 # Ends the report with the classification and the verdict; the caller exits
@@ -443,8 +444,7 @@ if [[ -n "${RAW_REF_DIR:-}" ]]; then
 fi
 
 # ── compare page by page ──────────────────────────────────────────────────────
-fail=0
-pass=0
+n_scored=0
 size_mismatch=0
 total_rmse="0"
 max_rmse="0"
@@ -473,7 +473,6 @@ for ref_file in "${ref_pages[@]}"; do
 
     if [[ ! -f "$new_file" ]]; then
         printf "%s\t%d\tmissing\t\t\trrocket produced no output\n" "$page_tag" "$page_no" >> "$ROWS"
-        fail=$((fail + 1))
         continue
     fi
 
@@ -483,7 +482,6 @@ for ref_file in "${ref_pages[@]}"; do
         printf "%s\t%d\tsize\t\t\tref=%dx%d  rrocket=%dx%d\n" \
             "$page_tag" "$page_no" "$a" "$b" "$c" "$d" >> "$ROWS"
         size_mismatch=$((size_mismatch + 1))
-        fail=$((fail + 1))
         continue
     fi
     rmse_255="$a"
@@ -493,15 +491,8 @@ for ref_file in "${ref_pages[@]}"; do
     printf "%s\t%d\tscored\t%s\t%s\t%s\n" "$page_tag" "$page_no" "$rmse_255" "$tile_255" \
         "$detail" >> "$ROWS"
 
+    n_scored=$((n_scored + 1))
     total_rmse="$(bc -l <<< "scale=4; ${total_rmse} + ${rmse_255}")"
-
-    rmse_over="$(bc -l <<< "${rmse_255} > ${THRESHOLD}")"
-    tile_over="$(bc -l <<< "${tile_255} > ${TILE_LIMIT}")"
-    if [[ "$rmse_over" -eq 1 || "$tile_over" -eq 1 ]]; then
-        fail=$((fail + 1))
-    else
-        pass=$((pass + 1))
-    fi
 
     if [[ "$(bc -l <<< "${rmse_255} > ${max_rmse}")" -eq 1 ]]; then
         max_rmse="$rmse_255"
@@ -513,15 +504,17 @@ for ref_file in "${ref_pages[@]}"; do
     fi
 done
 
-total=$((pass + fail))
-scored=$((pass + fail - size_mismatch))
+total=${#ref_pages[@]}
 avg_rmse="0"
-[[ $scored -gt 0 ]] && avg_rmse="$(bc -l <<< "scale=4; ${total_rmse} / ${scored}")"
+[[ $n_scored -gt 0 ]] && avg_rmse="$(bc -l <<< "scale=4; ${total_rmse} / ${n_scored}")"
 # Lines rrocket wrote to stderr: warnings about content it skipped or
 # could not decode.
 stderr_lines="$(grep -c . "${WORK_DIR}/new.log" || true)"
 
 classify_rows
+# Pages over the limits, as expectations.py judges them.
+fail=$N_OVER
+pass=$((total - fail))
 
 if $SUMMARY; then
     printf "%s\t%d\t%d\t%d\t%.4f\t%.4f\t%.4f\t%d\t%s\n" "$STATUS" "$total" "$fail" \
