@@ -1,7 +1,7 @@
 //! Baseline TIFF 6.0 writer: one or more pages of RGB (with unassociated
-//! alpha when the bitmap has an alpha plane), gray or bilevel pixels, each in strips, uncompressed or compressed with `PackBits`, LZW
-//! or Deflate, and bilevel pages also with CCITT Group 3 or Group 4 fax
-//! coding.
+//! alpha when the bitmap has an alpha plane), gray or bilevel pixels, each
+//! in strips, uncompressed or compressed with `PackBits`, LZW or Deflate,
+//! and bilevel pages also with CCITT Group 3 or Group 4 fax coding.
 //!
 //! The file is little-endian.  Each page's strips are followed by its image
 //! file directory (IFD), whose values that do not fit in an entry follow
