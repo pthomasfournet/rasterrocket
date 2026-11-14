@@ -376,7 +376,8 @@ fn table_of(
 /// A subpath of a single line (one segment and its closing one) has its
 /// ends moved to the centres of the pixels holding them, so a line on a
 /// pixel boundary covers the pixels after it rather than half of each
-/// side.
+/// side.  A subpath that encloses an area contributes the spikes where it
+/// folds back on itself ([`fold_spikes`]), which enclose none.
 fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
     let mut lines = PathBuilder::new();
     let mut any = false;
@@ -388,6 +389,9 @@ fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
         segs.clear();
         segs.extend(subpath.iter().map(|s| ((s.x0, s.y0), (s.x1, s.y1))));
         let Some(intervals) = collinear::intervals(&segs) else {
+            for (from, to) in fold_spikes(subpath) {
+                any |= add_line(&mut lines, from, to, false);
+            }
             continue;
         };
         let single = subpath.len() <= 2;
@@ -411,6 +415,33 @@ fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
     };
     let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
     stroke_outline(&lines.build(), &identity, &params)
+}
+
+/// The spikes of the closed subpath `segs`: at each vertex where the
+/// subpath turns back along the line it came on, the part the two
+/// segments share, from the vertex to the nearer of their other ends.
+fn fold_spikes(segs: &[crate::xpath::XPathSeg]) -> Vec<(collinear::Point, collinear::Point)> {
+    let directed = |s: &crate::xpath::XPathSeg| {
+        if s.flags.contains(XPathFlags::FLIPPED) {
+            ((s.x1, s.y1), (s.x0, s.y0))
+        } else {
+            ((s.x0, s.y0), (s.x1, s.y1))
+        }
+    };
+    let mut spikes = Vec::new();
+    for (i, seg) in segs.iter().enumerate() {
+        let (prev, vertex) = directed(seg);
+        let (_, next) = directed(&segs[(i + 1) % segs.len()]);
+        let (ax, ay) = (prev.0 - vertex.0, prev.1 - vertex.1);
+        let (bx, by) = (next.0 - vertex.0, next.1 - vertex.1);
+        let (la, lb) = (ax.hypot(ay), bx.hypot(by));
+        let cross = ax.mul_add(by, -(ay * bx));
+        let dot = ax.mul_add(bx, ay * by);
+        if la > 0.0 && lb > 0.0 && dot > 0.0 && cross.abs() <= 1e-9 * la * lb {
+            spikes.push((vertex, if la <= lb { prev } else { next }));
+        }
+    }
+    spikes
 }
 
 /// Append the open subpath `from → to` to `lines`, its ends moved to the
@@ -760,6 +791,37 @@ mod tests {
             false,
         );
         assert!((0..16).all(|y| bmp.row(y).iter().all(|p| p.r == 0)));
+    }
+
+    /// A spike, where an outline that encloses an area runs out and back
+    /// along one line, fills as a faint line too.
+    #[test]
+    fn aa_fill_of_a_spike_draws_a_line() {
+        let mut b = PathBuilder::new();
+        for (k, &(x, y)) in [
+            (2.0, 2.0),
+            (10.0, 2.0),
+            (10.0, 10.0),
+            (6.5, 10.0),
+            (6.5, 14.0),
+            (6.5, 10.0),
+            (2.0, 10.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if k == 0 {
+                b.move_to(x, y).unwrap();
+            } else {
+                b.line_to(x, y).unwrap();
+            }
+        }
+        b.close(true).unwrap();
+        let out = aa_render(&[b.build()], 16, 16, false);
+        let at = |x: usize, y: usize| out[y * 16 + x];
+        assert_eq!(at(6, 5), 255, "inside the square");
+        assert!((1..255).contains(&at(6, 12)), "the spike: {}", at(6, 12));
+        assert_eq!(at(9, 12), 0);
     }
 
     /// The ink an AA fill lays down equals the area of its outline.
