@@ -285,7 +285,10 @@ impl ColorSpace {
 
     /// The process ink `[C, M, Y, K]` (0 = no ink) of the colour `comps`
     /// in this space, as a CMYK device would print it: the components
-    /// themselves in `DeviceCMYK` or a four-component ICC space; the ink of
+    /// themselves in `DeviceCMYK`; in a four-component ICC space, the inks
+    /// nearest the components, with the same zero components, printing the
+    /// profile's sRGB colour in the process-ink model
+    /// ([`color::cmyk::ink_reproducing`]); the ink of
     /// the alternate colour for a `Separation` or `DeviceN` space whose tint
     /// transform evaluates; otherwise [`color::cmyk::rgb_to_ink`] of the
     /// sRGB conversion.  A component count other
@@ -294,9 +297,17 @@ impl ColorSpace {
     #[must_use]
     pub(crate) fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
         match self {
-            Self::DeviceCmyk | Self::IccBased { n: 4, .. } => {
+            Self::DeviceCmyk => {
                 if let &[c, m, y, k] = comps {
                     return [c, m, y, k].map(color::convert::gray_to_u8);
+                }
+            }
+            Self::IccBased { n: 4, .. } => {
+                if let &[c, m, y, k] = comps {
+                    return color::cmyk::ink_reproducing(
+                        self.convert_to_rgb(doc, comps),
+                        [c, m, y, k],
+                    );
                 }
             }
             Self::Separation {

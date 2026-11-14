@@ -144,11 +144,20 @@ impl PageRenderer<'_> {
             // Pattern operands are handled by the pattern dispatch, not here;
             // fall back to the legacy heuristic for any stray component.
             ColorSpace::Pattern { .. } => components_to_color(comps),
-            // A four-component ICC space is a process CMYK space: its
-            // components are the ink.
+            // A four-component ICC space is a process CMYK space.  On an
+            // ink canvas its ink is the process ink printing the profile's
+            // colour, with the components' zeros (see
+            // `ColorSpace::process_ink`).
             ColorSpace::IccBased { n: 4, .. } => match comps {
                 &[c, m, y, k] => {
-                    RasterColor::with_process_inks(cs.convert_to_rgb(doc, comps), [c, m, y, k])
+                    let rgb = cs.convert_to_rgb(doc, comps);
+                    let cmyk = [c, m, y, k];
+                    if self.canvas.kind() == CanvasKind::Ink {
+                        let ink = color::cmyk::ink_reproducing(rgb, cmyk);
+                        RasterColor::with_process_ink_of(rgb, cmyk, ink)
+                    } else {
+                        RasterColor::with_process_inks(rgb, cmyk)
+                    }
                 }
                 _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
             },

@@ -211,7 +211,17 @@ impl RasterColor {
     /// unpainted.
     #[must_use]
     pub(crate) fn with_process_inks(rgb: [u8; 3], cmyk: [f64; 4]) -> Self {
-        let [c, m, y, k] = cmyk.map(gray_to_u8);
+        Self::with_process_ink_of(rgb, cmyk, cmyk.map(gray_to_u8))
+    }
+
+    /// The colour of sRGB `rgb` given in a process space as the components
+    /// `cmyk`, printed as the ink bytes `ink`: like
+    /// [`Self::with_process_inks`], with the ink in place of the
+    /// components.  The channels it paints, under either overprint mode,
+    /// follow the components.
+    #[must_use]
+    pub(crate) fn with_process_ink_of(rgb: [u8; 3], cmyk: [f64; 4], ink: [u8; 4]) -> Self {
+        let [c, m, y, k] = ink;
         let zero_components = cmyk
             .iter()
             .enumerate()

@@ -730,3 +730,55 @@ fn tiling_cells_keep_spots_and_their_own_overprint() {
         assert_eq!(ink_at(&ink, 2, 5), [0, 0, 0, 0, 255, 0, 0, 0], "{cells}");
     }
 }
+
+/// An `ICCBased` CMYK colour prints on an ink canvas as the process ink
+/// reproducing the profile's colour, with the colour's zero components:
+/// a black from the profile stays black ink alone and keeps the cyan
+/// under it under nonzero overprint mode, and a two-ink colour prints
+/// with those two inks.
+#[test]
+fn icc_cmyk_prints_the_profiles_colour_with_its_own_inks() {
+    const PROFILE: &[u8] =
+        include_bytes!("../../../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+    let mut profile = format!("<< /N 4 /Length {} >>\nstream\n", PROFILE.len()).into_bytes();
+    profile.extend_from_slice(PROFILE);
+    profile.extend_from_slice(b"\nendstream");
+    let page = b"<< /Type /Page /Resources << /ExtGState << /GS << /op true /OPM 1 >> >> \
+                 /ColorSpace << /ICC [/ICCBased 5 0 R] >> >> >>"
+        .to_vec();
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, page), (5, profile)]);
+    let space = crate::resources::ColorSpace::IccBased {
+        n: 4,
+        stream_id: Some((5, 0)),
+    };
+    let prints = |ink: [u8; 8]| color::cmyk::cmyk_to_rgb(ink[0], ink[1], ink[2], ink[3]);
+    let near = |a: [u8; 3], b: [u8; 3], tolerance: u8| {
+        a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= tolerance)
+    };
+
+    let black = space.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 1.0]);
+    let content = format!("{CYAN_PAGE} /GS gs /ICC cs 0 0 0 1 sc 0 0 5 10 re f");
+    let ink = render_ink(&doc, content.as_bytes());
+    let k = ink_at(&ink, 2, 5);
+    assert_eq!(
+        (k[0], k[1], k[2], &k[4..]),
+        (255, 0, 0, &[0; 4][..]),
+        "{k:?}"
+    );
+    let alone = prints([0, 0, 0, k[3], 0, 0, 0, 0]);
+    let mean = black.iter().map(|&v| u32::from(v)).sum::<u32>() / 3;
+    assert!(
+        u32::from(alone[0]).abs_diff(mean) <= 1,
+        "{alone:?} for {black:?}"
+    );
+
+    let blue = space.convert_to_rgb(&doc, &[0.6, 0.3, 0.0, 0.0]);
+    let ink = render_ink(&doc, b"/ICC cs 0.6 0.3 0 0 sc 0 0 10 10 re f");
+    let cm = ink_at(&ink, 5, 5);
+    assert_eq!((cm[2], cm[3]), (0, 0), "{cm:?}");
+    assert!(
+        near(prints(cm), blue, 3),
+        "{cm:?} prints {:?}, not {blue:?}",
+        prints(cm)
+    );
+}
