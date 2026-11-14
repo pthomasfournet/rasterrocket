@@ -244,6 +244,32 @@ fn map_file(file: &std::fs::File) -> std::io::Result<Mmap> {
     }
 }
 
+/// An empty buffer with room for the `len` bytes of the file at `path`,
+/// or an [`OutOfMemory`](std::io::ErrorKind::OutOfMemory) error naming the
+/// size when the allocation fails; `mappable` adds the hint that the file
+/// can be mapped instead.
+fn file_buffer(len: u64, path: &Path, mappable: bool) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    usize::try_from(len)
+        .ok()
+        .and_then(|cap| bytes.try_reserve_exact(cap).ok())
+        .ok_or_else(|| {
+            let hint = if mappable {
+                "; open it without `read_into_memory` to map it instead"
+            } else {
+                ""
+            };
+            std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!(
+                    "cannot allocate {len} bytes to read {} into memory{hint}",
+                    path.display()
+                ),
+            )
+        })?;
+    Ok(bytes)
+}
+
 /// The bytes of the file at `path`: a mapping for a file of at least
 /// [`MMAP_MIN_LEN`] bytes, an owned buffer for a shorter one or when
 /// `read_into_memory` is set.
@@ -253,9 +279,7 @@ fn load_file(path: &Path, read_into_memory: bool) -> std::io::Result<MmapOrVec> 
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     if read_into_memory || len < MMAP_MIN_LEN {
-        // A length beyond `usize` reserves nothing up front; `read_to_end`
-        // then grows the buffer or fails to allocate.
-        let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        let mut bytes = file_buffer(len, path, read_into_memory)?;
         let _ = file.read_to_end(&mut bytes)?;
         Ok(MmapOrVec::Owned(bytes))
     } else {
@@ -1442,6 +1466,22 @@ impl std::ops::Deref for Resolved<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file too large to hold in memory is an I/O error naming its size,
+    /// not an allocation abort.
+    #[test]
+    fn an_unallocatable_file_buffer_is_an_out_of_memory_error() {
+        let path = Path::new("huge.pdf");
+        let err = file_buffer(u64::MAX, path, true).expect_err("u64::MAX bytes cannot be reserved");
+        assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory);
+        let msg = err.to_string();
+        assert!(msg.contains(&u64::MAX.to_string()), "{msg}");
+        assert!(
+            msg.contains("huge.pdf") && msg.contains("read_into_memory"),
+            "{msg}"
+        );
+        assert!(file_buffer(16, path, false).is_ok_and(|b| b.capacity() >= 16));
+    }
 
     /// A reference whose generation differs from the object's resolves to
     /// the object, the same `Arc` as the matching reference.
