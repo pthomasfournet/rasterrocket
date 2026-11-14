@@ -582,11 +582,6 @@ pub fn page_size_pts(
 /// # Errors
 /// [`InterpError::InvalidPageGeometry`] if `UserUnit` is present but outside
 /// `[0.1, 10.0]`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "box selection, /Rotate and UserUnit resolve one page dictionary in sequence; \
-              each step is a short match whose result the next consumes"
-)]
 pub fn page_size_pts_by_id(
     doc: &Document,
     page_id: pdf::ObjectId,
@@ -632,85 +627,8 @@ pub fn page_size_pts_by_id(
         (media_box, crop_box),
         (fallback.width_pts, fallback.height_pts),
     );
-
-    // ISO 32000-2 §7.7.3.4: /Rotate is inheritable.  Walk the /Parent chain
-    // for the same reason as MediaBox/CropBox above.  A real number is read
-    // truncated toward zero, as an integer-valued entry such as `90.0` is
-    // meant.
-    let rotate = doc.get_inherited_page_attr(page_id, b"Rotate");
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "f64-to-i64 `as` truncates toward zero and saturates; the value is finite"
-    )]
-    let rotate_n = match &rotate {
-        Some(pdf::Object::Integer(n)) => Some(*n),
-        Some(pdf::Object::Real(r)) if r.is_finite() => Some(f64::from(*r) as i64),
-        _ => None,
-    };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rem_euclid(360) is always 0..=359, which fits u16"
-    )]
-    let rotate_cw: u16 = match (rotate_n, rotate) {
-        (Some(n), _) => {
-            // rem_euclid maps any sign into 0..=359 (so -90 → 270, 450 → 90).
-            let normalized = n.rem_euclid(360) as u16;
-            if !normalized.is_multiple_of(90) {
-                // §7.7.3.4: /Rotate "shall be a multiple of 90".  A
-                // non-multiple is malformed; snapping to the nearest lower
-                // quadrant keeps the page upright-ish rather than rotating it
-                // to a garbage angle, but the author's intent is unknowable —
-                // say so instead of silently mis-rotating.
-                log::warn!(
-                    "/Rotate {n} on page object {} is not a multiple of 90 \
-                     (malformed PDF, ISO 32000-2 §7.7.3.4); snapping to {}",
-                    page_id.0,
-                    normalized / 90 * 90,
-                );
-            }
-            normalized / 90 * 90
-        }
-        // Absent /Rotate is the common, conforming case (no rotation) — silent.
-        (None, None) => 0,
-        // get_inherited_page_attr already resolves indirection, so any value
-        // reaching here that is not a number is a malformed /Rotate type.
-        (None, Some(other)) => {
-            log::warn!(
-                "/Rotate on page object {} is not a finite number (got {}); \
-                 assuming 0 (malformed PDF, ISO 32000-2 §7.7.3.4)",
-                page_id.0,
-                other.enum_variant(),
-            );
-            0
-        }
-    };
-
-    // UserUnit (PDF 1.6+, ISO 32000-2 §14.11.2): scales one default user-space unit
-    // from 1/72 inch to UserUnit/72 inches.  Absent → 1.0.  Must be a finite positive
-    // number.  We reject values outside [0.1, 10.0]: below 0.1 the page would be
-    // unreasonably small at any practical DPI; above 10.0 the pixel dimensions would
-    // exceed MAX_PX_DIMENSION at even modest DPI settings.  NaN/Inf in a Real object
-    // are rejected explicitly because the range check (NaN comparisons are always false)
-    // would otherwise silently pass them through.
-    let user_unit: f64 = match dict.get(b"UserUnit") {
-        None => 1.0, // absent — use default
-        Some(obj) => {
-            let Some(v) = number(doc, obj) else {
-                return Err(InterpError::InvalidPageGeometry(format!(
-                    "UserUnit on page object {} is not a number (got {})",
-                    page_id.0,
-                    obj.enum_variant()
-                )));
-            };
-            if !v.is_finite() || !(0.1..=10.0).contains(&v) {
-                return Err(InterpError::InvalidPageGeometry(format!(
-                    "UserUnit {v} on page object {} is outside the valid range [0.1, 10.0]",
-                    page_id.0,
-                )));
-            }
-            v
-        }
-    };
+    let rotate_cw = page_rotate_cw(doc, page_id);
+    let user_unit = page_user_unit(doc, page_id, &dict)?;
 
     // Swap dimensions for 90°/270° so the caller gets output-bitmap dimensions directly.
     // Scale both dimensions by UserUnit so downstream only needs to apply dpi/72.
@@ -735,6 +653,92 @@ pub fn page_size_pts_by_id(
         media_box: media_box.map(corners),
         crop_box: crop_box.map(corners),
     })
+}
+
+/// The clockwise rotation of page `page_id` in degrees, one of 0, 90, 180
+/// and 270: its inheritable `/Rotate` (ISO 32000-2 §7.7.3.4), 0 when
+/// absent.
+///
+/// A real value is truncated toward zero, so an integer-valued entry such
+/// as `90.0` reads as meant.  Any value is reduced modulo 360; one that is
+/// not a multiple of 90 snaps to the quadrant below it, and one that is not
+/// a finite number reads as 0, each with a warning.
+fn page_rotate_cw(doc: &Document, page_id: pdf::ObjectId) -> u16 {
+    let rotate = doc.get_inherited_page_attr(page_id, b"Rotate");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "f64-to-i64 `as` truncates toward zero and saturates; the value is finite"
+    )]
+    let rotate_n = match &rotate {
+        Some(pdf::Object::Integer(n)) => Some(*n),
+        Some(pdf::Object::Real(r)) if r.is_finite() => Some(f64::from(*r) as i64),
+        _ => None,
+    };
+    match (rotate_n, rotate) {
+        (Some(n), _) => {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "rem_euclid(360) is always 0..=359, which fits u16"
+            )]
+            let normalized = n.rem_euclid(360) as u16;
+            if !normalized.is_multiple_of(90) {
+                log::warn!(
+                    "/Rotate {n} on page object {} is not a multiple of 90 \
+                     (malformed PDF, ISO 32000-2 §7.7.3.4); snapping to {}",
+                    page_id.0,
+                    normalized / 90 * 90,
+                );
+            }
+            normalized / 90 * 90
+        }
+        (None, None) => 0,
+        // The inherited value is already resolved, so a value here is a
+        // direct object of a type other than a number.
+        (None, Some(other)) => {
+            log::warn!(
+                "/Rotate on page object {} is not a finite number (got {}); \
+                 assuming 0 (malformed PDF, ISO 32000-2 §7.7.3.4)",
+                page_id.0,
+                other.enum_variant(),
+            );
+            0
+        }
+    }
+}
+
+/// The `UserUnit` of the page dictionary `dict` of page `page_id` (PDF
+/// 1.6+, ISO 32000-2 §14.11.2): the size of one default user-space unit in
+/// 1/72 inch, 1.0 when absent.
+///
+/// # Errors
+///
+/// [`InterpError::InvalidPageGeometry`] when the value is not a number or
+/// lies outside `[0.1, 10.0]`.  The range excludes NaN and infinities;
+/// below it a page is too small to render at any practical resolution,
+/// and above it the pixel dimensions exceed the 32 768 px per-side limit
+/// at modest ones.
+fn page_user_unit(
+    doc: &Document,
+    page_id: pdf::ObjectId,
+    dict: &pdf::Dictionary,
+) -> Result<f64, InterpError> {
+    let Some(obj) = dict.get(b"UserUnit") else {
+        return Ok(1.0);
+    };
+    let Some(v) = number(doc, obj) else {
+        return Err(InterpError::InvalidPageGeometry(format!(
+            "UserUnit on page object {} is not a number (got {})",
+            page_id.0,
+            obj.enum_variant()
+        )));
+    };
+    if !v.is_finite() || !(0.1..=10.0).contains(&v) {
+        return Err(InterpError::InvalidPageGeometry(format!(
+            "UserUnit {v} on page object {} is outside the valid range [0.1, 10.0]",
+            page_id.0,
+        )));
+    }
+    Ok(v)
 }
 
 /// Parse `bytes`, the content of page `page_id` (from
