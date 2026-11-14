@@ -29,6 +29,48 @@ documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#p
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new in v2.2.0
+
+**Page boxes, rotation, transparent output, more comic formats, whole pages
+on a Vulkan GPU; additive API.** The one signature change is
+`RasterSession::image_cache` (`cache` feature), which returns the
+backend-neutral cache. The full list is in
+[ROADMAP.md](ROADMAP.md#release-history).
+
+- **Page geometry.** `--box media|crop|bleed|trim|art` /
+  `page_box` selects the boundary box rendered (default `crop`), and
+  `--rotate DEG` / `rotation` turns every page by a multiple of 90° on top
+  of its `/Rotate`.
+- **Transparent output.** `--transparent` (`--transp`) /
+  `transparent_background` renders over a transparent backdrop: RGBA PNG or
+  TIFF, straight alpha.
+- **Comic archives.** `.cbr` (RAR 1.3 to 7) archives, JPEG XL and AVIF page
+  images, and every page of a multi-page TIFF entry. The entries'
+  decompressed total is bounded (`ComicOptions::max_archive_bytes`,
+  `--max-archive-mib`, default 4 GiB) beside the per-entry cap.
+- **JPEG.** Arithmetic-coded (SOF9, SOF10) and multi-scan sequential JPEGs
+  decode, through a local fork of `zune-jpeg`; common producer faults are
+  repaired, and scan data that ends early is drawn from what decodes and
+  reported `partial`.
+- **Overprint** now covers Separation and DeviceN images and shadings,
+  tiling-pattern cells, `ICCBased` CMYK colours and transfer functions; only
+  a transparency group as a whole is not simulated.
+- **GPU.** `--gpu-pages` / `SessionConfig::gpu_pages` renders pages made of
+  solid fills and strokes whole on a Vulkan GPU beside the CPU workers,
+  byte-identical to the CPU (`vulkan` build). The image cache and the ICC
+  CMYK lookup table run on Vulkan as well as CUDA; the device ICC
+  threshold is 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD`). `auto` renders
+  on the CPU unless a GPU kernel is enabled by its threshold.
+- **Library.** `PageBuffer` renders into buffers the caller owns and reuses;
+  `open_session_from_shared` and `open_session_from_reader` open a document
+  from shared bytes or any `Read`; `read_into_memory` copies a file instead
+  of mapping it; `RasterSession::unsupported_features` and
+  `PageDiagnostics::unsupported_features` list the features the renderer
+  ignores (JavaScript, XFA, portable collections, 3D and multimedia
+  annotations).
+- **Fax.** A page longer than B4 is sent as A4-length pieces.
+- **Windows** builds and is tested in CI.
+
 ## What's new in v2.1.0
 
 **Output to printers and fax machines, overprint, shaped text for
@@ -121,7 +163,7 @@ once.** The full list, with migration notes, is in
   `--jpeg` with `--jpegopt`, `--tiff`, the fax output,
   printing through CUPS (`--print`) and `--overprint` are implemented; see the
   [CLI reference](docs/cli-reference.md) and
-  [ROADMAP.md](ROADMAP.md#current-status-2026-11-13).)
+  [ROADMAP.md](ROADMAP.md#v210-november-2026).)
 
 ## What's new in v1.5.0
 
@@ -423,11 +465,11 @@ crates.io (see the note at the top).
 
 ## Hardware compatibility
 
-**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux, and clippy with the platform-specific tests on arm64 Linux and macOS; see the platform guides above.
+**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux; clippy on x86-64 and arm64 Linux, macOS and Windows; the NEON tests on arm64 Linux; and the renderer, interpreter, library and font suites on macOS and Windows (on Windows also the CLI, parser, colour, encode and comic suites); see the platform guides above.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG and the AA fill, which are wired but dormant by default because the CPU paths beat them.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) runs under Vulkan too; nvJPEG does not.
+- **Cross-vendor via Vulkan compute** — the AA fill kernel (and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels), both dormant by default, run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too, and `--gpu-pages` renders qualifying pages whole on the device; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -477,11 +519,11 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
 | `gpu-aa` | GPU evaluation of the anti-aliased fill coverage (byte-identical to the CPU fill; dormant by default, see `PDF_RASTER_AA_FILL_THRESHOLD`) | CUDA |
-| `gpu-icc` | GPU CMYK→RGB ICC transform | CUDA |
+| `gpu-icc` | GPU CMYK→RGB ICC transform through the profile's lookup table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU table evaluator | CUDA, or Vulkan with `vulkan` |
 | `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
-| `vulkan` | Vulkan compute backend for the AA fill (cross-vendor) | Vulkan 1.3+ ICD; pulls in `gpu-aa`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `vulkan` | Vulkan compute backend (cross-vendor) for the AA fill and whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD; pulls in `gpu-aa`. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 | `gpu-jpeg-huffman` | Custom parallel-Huffman GPU JPEG decode, on CUDA or (with `vulkan`) Vulkan (dormant; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it) | CUDA or Vulkan |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
@@ -536,11 +578,13 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 
 - **Comic-archive input.** The `.cbz`/`.cb7`/`.cbt`/`.cbr` reader and the loose-image
   decoders (`rasterrocket-comic`) are pure Rust and hold the same bar as the PDF
-  path: a per-entry decompressed-size cap defuses decompression bombs, image
+  path: a per-entry decompressed-size cap and a cap on the archive's
+  decompressed total (`--max-archive-mib`) defuse decompression bombs, image
   dimensions are validated *before* a codec allocates its pixel buffer (defusing
   decode bombs), and a malformed entry is a bounded skip or a clear `Err`, never
-  an OOM, hang, or panic. 7-Zip and RAR decoders are bounded to 1 GiB of
-  dictionary and model memory.
+  an OOM, hang, or panic. The 7-Zip decoders are bounded to 1 GiB of
+  dictionary and model memory, and the RAR decoder to a 1 GiB dictionary
+  and 2 GiB of working memory.
 - **Memory-safe core.** The PDF parser, content interpreter, font-program
   parsing (TrueType, OpenType, CFF, Type 1) and glyph rasterisation, and the
   JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a
@@ -582,8 +626,7 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
 
 > These tables were captured at **v0.9.1** (CPU) and before v0.6.0 (GPU) and
-> have not been re-run since; the current release is v2.0.0, and nvJPEG is
-> disabled by default. Treat them as historical order-of-magnitude
+> have not been re-run since, and nvJPEG is now disabled by default. Treat them as historical order-of-magnitude
 > figures, not a measurement of today's `master`.
 
 **CPU-only (no GPU), Ryzen 9 9900X3D + AVX-512, v0.9.1, RAM-backed output, cold cache, hyperfine 5 runs:**
