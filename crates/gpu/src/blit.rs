@@ -456,9 +456,12 @@ mod tests {
         const SRC: u32 = 4;
         const PAGE: u32 = 6;
 
-        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
-        let stream = ctx.default_stream();
         let gpu = GpuCtx::init().expect("gpu init");
+        // The cache, the page and the blit share the context's stream, as
+        // in the renderer: work on another stream has no order with the
+        // blit, so the page's zero fill or the blit itself could still be
+        // in flight when another stream reads the page.
+        let stream = gpu.stream();
 
         // Distinct bytes per RGB channel so a one-pixel mismatch is
         // visible.  Step 7 stays away from any obvious row/col stride.
@@ -603,9 +606,8 @@ mod tests {
         use crate::cache::{DocId, HostBudget, ObjId, VramBudget};
         use std::sync::Arc;
 
-        let ctx = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
-        let stream = ctx.default_stream();
         let gpu = GpuCtx::init().expect("gpu init");
+        let stream = gpu.stream();
         let pixels = vec![0u8; 4 * 4 * 3];
         let cache = DeviceImageCache::new(
             Arc::clone(&stream),
