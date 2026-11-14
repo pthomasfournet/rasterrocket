@@ -769,10 +769,15 @@ where
             }
 
             Marker::DNL => {
-                return Err(DecodeErrors::Format(format!(
-                    "Parsing of the following header `{m:?}` is not supported,\
-                                cannot continue"
-                )));
+                // The frame's line count is the one its header gives (a
+                // header count of zero is refused when the header is
+                // read), so the count a DNL segment defines is read and
+                // not used.
+                if self.stream.get_u16_be_err()? != 4 {
+                    return Err(DecodeErrors::FormatStatic("Bad DNL length, Corrupt JPEG"));
+                }
+                let lines = self.stream.get_u16_be_err()?;
+                trace!("DNL marker present ({lines} lines), frame height kept");
             }
             Marker::DRI => {
                 if self.stream.get_u16_be_err()? != 4 {

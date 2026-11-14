@@ -150,6 +150,14 @@ unless the entry says otherwise.
   frame is read from the stream when the entropy decoder has not run into
   it (it was an error).
 
+- **A DNL segment after the first scan is read and skipped** (it was an
+  error, and ended a decode that is not strict with the scan's rows after
+  the one the bit reader found it in reported damaged). The frame keeps
+  the height of its header; a header height of zero is still refused.
+  Within a scan's data the segment waits for the scan's last row, as the
+  markers between scans do. Test:
+  `intact_rows::a_dnl_segment_after_the_first_scan_is_skipped`.
+
 - **`JpegDecoder::set_max_coefficient_bytes` (new API): a limit on the
   coefficients a frame holds whole.** A progressive frame, and a
   sequential frame whose components are coded in several scans, keep two
@@ -284,8 +292,9 @@ as before unless an entry says otherwise.
   which change the samples of every image by a level here and there. Not
   a defect fix; to be taken, if at all, as a measured change of its own.
 - **Features**: frames whose height comes from a DNL marker (`506a2af3`,
-  `8f1d3832`; the PDF interpreter takes such a height from the image
-  dictionary), header parsing of lossless and 12-bit frames, which still
+  `8f1d3832`; the PDF interpreter writes the image dictionary's height into
+  the frame header, and the DNL segment is then read and skipped, see
+  "Changes in this fork"), header parsing of lossless and 12-bit frames, which still
   do not decode (`23de4803`, `e668c57a`, `8cbb0712`), YCCK to CMYK output
   (`b39e0123`; the interpreter converts YCCK itself), `into_inner`
   (`cf820760`), SIMD for BGR and BGRA output (`f51cff38`, `ea8efb73`).

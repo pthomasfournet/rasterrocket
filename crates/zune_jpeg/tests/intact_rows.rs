@@ -126,6 +126,28 @@ fn a_complete_stream_is_intact_with_or_without_eoi() {
     }
 }
 
+/// A DNL segment after the first scan (ITU T.81 B.2.5) is read and its
+/// line count left unused: the image decodes whole, strict or not.
+#[test]
+fn a_dnl_segment_after_the_first_scan_is_skipped() {
+    for image in IMAGES {
+        let data = image.data;
+        let after_first_scan = data[entropy_start(data)..]
+            .windows(2)
+            .position(|m| m == [0xFF, 0xDA])
+            .map_or(data.len() - 2, |at| entropy_start(data) + at);
+        let dnl = [0xFF, 0xDC, 0x00, 0x04, 0x00, 0x01];
+        let with_dnl = [&data[..after_first_scan], &dnl, &data[after_first_scan..]].concat();
+        for strict in [true, false] {
+            let whole = decode(data, strict).expect(image.name);
+            let got = decode(&with_dnl, strict)
+                .unwrap_or_else(|e| panic!("{} with DNL, strict {strict}: {e}", image.name));
+            assert_eq!(got.intact_rows, got.height, "{} with DNL", image.name);
+            assert_eq!(got.pixels, whole.pixels, "{} with DNL", image.name);
+        }
+    }
+}
+
 /// Checks the decode of `image` cut after `cut` bytes, the cut being the
 /// end of the input (`eoi` false) or followed by an EOI marker.
 fn check_cut(image: &Image, whole: &Decoded, cut: usize, eoi: bool) -> Option<usize> {

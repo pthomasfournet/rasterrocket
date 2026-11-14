@@ -56,6 +56,24 @@ pub enum Marker {
 }
 
 impl Marker {
+    /// Whether the marker begins a segment that may follow a scan's data
+    /// before the next scan: a scan header, a table or parameter
+    /// definition, a DNL segment, a comment or an application segment.
+    #[must_use]
+    pub(crate) const fn follows_a_scan(self) -> bool {
+        matches!(
+            self,
+            Self::SOS
+                | Self::DAC
+                | Self::DHT
+                | Self::DQT
+                | Self::DRI
+                | Self::COM
+                | Self::DNL
+                | Self::APP(_)
+        )
+    }
+
     #[must_use]
     pub fn from_u8(n: u8) -> Option<Marker> {
         use self::Marker::{APP, COM, DAC, DHT, DNL, DQT, DRI, EOI, RST, SOF, SOI, SOS, UNKNOWN};
