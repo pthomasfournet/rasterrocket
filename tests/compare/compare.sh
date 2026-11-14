@@ -66,7 +66,8 @@
 # pypdfium2 and pillow, by default tests/compare/.venv:
 #   uv venv tests/compare/.venv
 #   uv pip install --python tests/compare/.venv/bin/python pypdfium2 pillow
-# Set PDFIUM_VENV to use another one.
+# Set PDFIUM_VENV to use another one.  RROCKET_BIN overrides the rrocket
+# binary (default target/release/rrocket).
 # The oxide reference is an independent Rust implementation; set
 # PDF_OXIDE_BIN to override discovery.
 #
@@ -77,7 +78,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-RASTER_BIN="${REPO_ROOT}/target/release/rrocket"
+RASTER_BIN="${RROCKET_BIN:-${REPO_ROOT}/target/release/rrocket}"
 OXIDE_BIN="${PDF_OXIDE_BIN:-pdf-oxide}"
 PDFIUM_VENV="${PDFIUM_VENV:-${SCRIPT_DIR}/.venv}"
 PDFIUM_BIN="${PDFIUM_VENV}/bin/pypdfium2"
@@ -404,6 +405,7 @@ if ! "$RASTER_BIN" "${new_args[@]}" "$PDF" "${NEW_DIR}/page" 2>"${WORK_DIR}/new.
     [[ $FATAL -eq 0 ]] || exit 1
     exit 0
 fi
+printf "document\t-\tok\t\t\trrocket exited 0\n" >> "$ROWS"
 
 # ── normalise a PNG reference onto rrocket's filenames ────────────────────────
 if [[ -n "${RAW_REF_DIR:-}" ]]; then

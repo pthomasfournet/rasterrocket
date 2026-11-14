@@ -5,7 +5,9 @@ Run with `python3 -I tests/compare/test_expectations.py`.
 """
 
 import datetime as dt
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -276,6 +278,65 @@ class CompareCommand(unittest.TestCase):
             surprise = self.run_compare(registry, fixed, "--strict")
             self.assertEqual(surprise[-1], "STATUS XPASS 1 0 1 1")
             self.assertTrue(surprise[1].startswith("XPASS    page-3"))
+
+
+# Stub renderers: each writes a white 2 x 2 binary PPM as page 1 of the
+# output prefix, its last argument.  The rrocket stub exits with
+# $STUB_STATUS (default 0).
+STUB_PDFTOPPM = """#!/bin/sh
+for a; do prefix=$a; done
+printf 'P6\\n2 2\\n255\\n' > "$prefix-1.ppm"
+head -c 12 /dev/zero | tr '\\0' '\\377' >> "$prefix-1.ppm"
+"""
+STUB_RROCKET = STUB_PDFTOPPM + 'exit "${STUB_STATUS:-0}"\n'
+
+
+@unittest.skipUnless(
+    all(shutil.which(c) for c in ("compare", "identify", "convert", "bc")),
+    "compare.sh needs ImageMagick and bc",
+)
+class CompareScript(unittest.TestCase):
+    """compare.sh end to end, with stub renderers drawing identical pages."""
+
+    SUITE = "compare.sh pdftoppm 150dpi rmse<=2 tile<=12"
+
+    def setUp(self) -> None:
+        """Create the stub renderers, a PDF argument and an empty registry path."""
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        for name, text in (("pdftoppm", STUB_PDFTOPPM), ("rrocket", STUB_RROCKET)):
+            stub = bin_dir / name
+            stub.write_text(text, encoding="utf-8")
+            stub.chmod(0o755)
+        self.env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "RROCKET_BIN": str(bin_dir / "rrocket"),
+        }
+        self.pdf = self.dir / "x.pdf"
+        self.pdf.write_bytes(b"%PDF-1.4\n")
+        self.registry = self.dir / "e.json"
+
+    def run_script(self, *args: str, status: int = 0) -> subprocess.CompletedProcess[str]:
+        """Run compare.sh on the PDF with `args`, the rrocket stub exiting `status`."""
+        script = pathlib.Path(ex.__file__).with_name("compare.sh")
+        cmd = [str(script), "-E", str(self.registry), *args, str(self.pdf)]
+        env = {**self.env, "STUB_STATUS": str(status)}
+        return subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)  # noqa: S603
+
+    def test_document_that_renders_is_observed(self) -> None:
+        """A document entry seeded from a failure becomes XPASS once rrocket succeeds."""
+        seed = self.run_script("-U", status=1)
+        self.assertEqual(seed.returncode, 0, seed.stderr)
+        entries = ex.load(self.registry)[self.SUITE]
+        self.assertEqual(entries[("x.pdf", None)].outcome, "error")
+        fixed = self.run_script("-S")
+        self.assertEqual(fixed.returncode, 1, fixed.stdout)
+        self.assertIn("XPASS    document", fixed.stdout)
+        self.run_script("-U")
+        self.assertNotIn(self.SUITE, ex.load(self.registry))
 
 
 if __name__ == "__main__":
