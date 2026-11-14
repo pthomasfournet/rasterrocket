@@ -13,6 +13,7 @@ extend-exclude = [
     "crates/rav1d/",
     "crates/read_fonts/",
     "crates/skrifa/",
+    "crates/zune_jpeg/",
     # Compressed Adobe CMap resources.
     "crates/pdf_interp/cmaps/",
 ]
