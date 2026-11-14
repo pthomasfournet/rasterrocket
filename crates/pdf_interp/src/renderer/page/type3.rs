@@ -38,6 +38,11 @@ const PHASES: u32 = 16;
 /// past the box, and such a glyph is not cached.
 const MARGIN: i32 = 2;
 
+/// Largest magnitude, in pixels, of a cached glyph's pen position and of
+/// its box's edges relative to the pen.  Within it the bitmap's edges
+/// (each a pen plus an edge, plus or minus [`MARGIN`]) stay inside `i32`.
+const MAX_FRAME_COORD: f64 = (1u32 << 30) as f64;
+
 impl PageRenderer<'_> {
     /// Execute Type 3 `CharProcs` for all character codes in `bytes`.
     ///
@@ -325,15 +330,11 @@ impl GlyphFrame {
         if !span.is_finite() || span > f64::from(MAX_CACHED_AREA) {
             return None;
         }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "extents are bounded by MAX_CACHED_AREA above"
-        )]
         let (x0, x1, y0, y1) = (
-            x_min.floor() as i32 - MARGIN,
-            x_max.ceil() as i32 + MARGIN,
-            y_min.floor() as i32 - MARGIN,
-            y_max.ceil() as i32 + MARGIN,
+            frame_coord(x_min.floor())? - MARGIN,
+            frame_coord(x_max.ceil())? + MARGIN,
+            frame_coord(y_min.floor())? - MARGIN,
+            frame_coord(y_max.ceil())? + MARGIN,
         );
         let (width, height) = (x1 - x0, y1 - y0);
         let area = i64::from(width) * i64::from(height);
@@ -341,11 +342,7 @@ impl GlyphFrame {
             return None;
         }
         let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "device coordinates of a page fit i32"
-        )]
-        let (pen_x, pen_y) = (column as i32, row as i32);
+        let (pen_x, pen_y) = (frame_coord(column)?, frame_coord(row)?);
         let origin_x = fx - f64::from(x0);
         let origin_y_down = fy - f64::from(y0);
         Some(Self {
@@ -367,6 +364,16 @@ impl GlyphFrame {
             ],
         })
     }
+}
+
+/// The integral `v` as an `i32` when its magnitude is within
+/// [`MAX_FRAME_COORD`], else `None`: such a glyph is drawn uncached.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "|v| ≤ 2^30, an integer, fits i32 exactly"
+)]
+fn frame_coord(v: f64) -> Option<i32> {
+    (v.abs() <= MAX_FRAME_COORD).then_some(v as i32)
 }
 
 #[cfg(test)]
@@ -418,6 +425,19 @@ mod tests {
         // The glyph covers device x 4..20, rows 12..28.
         let row = renderer.rgb_canvas().row_bytes(20);
         assert_eq!(&row[12 * 3..12 * 3 + 3], &[0, 0, 0], "glyph painted");
+    }
+
+    /// A glyph whose pen or box lies past 2^30 px is not cached: its
+    /// bitmap's edges would leave `i32`.  Unchecked, the casts saturated
+    /// at `i32::MAX` and adding the margin overflowed.
+    #[test]
+    fn a_frame_far_off_the_page_is_not_cached() {
+        let unit = [1.0, 0.0, 0.0, 1.0];
+        assert!(GlyphFrame::new(unit, [1e10, 0.0, 1e10 + 1.0, 1.0], 10.0, 10.0).is_none());
+        assert!(GlyphFrame::new(unit, [-1e10 - 1.0, 0.0, -1e10, 1.0], 10.0, 10.0).is_none());
+        assert!(GlyphFrame::new(unit, [0.0, 0.0, 1.0, 1.0], 1e12, 10.0).is_none());
+        assert!(GlyphFrame::new(unit, [0.0, 0.0, 1.0, 1.0], 10.0, -1e12).is_none());
+        assert!(GlyphFrame::new(unit, [0.0, 0.0, 1.0, 1.0], 1e9, 1e9).is_some());
     }
 
     /// A unit-square glyph at 20 px places its bitmap so that the origin
