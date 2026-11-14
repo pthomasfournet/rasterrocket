@@ -8,30 +8,12 @@ use raster::Bitmap;
 /// [`Rotation::None`].  Every pixel is moved, none resampled, so turning by
 /// a rotation and back restores `src` exactly.
 pub(crate) fn turn(src: Bitmap<Gray8>, rotation: Rotation) -> Bitmap<Gray8> {
-    if rotation == Rotation::None {
-        return src;
+    match rotation {
+        Rotation::None => src,
+        Rotation::Cw90 => src.turned_cw(1),
+        Rotation::Cw180 => src.turned_cw(2),
+        Rotation::Cw270 => src.turned_cw(3),
     }
-    let (w, h) = (src.width, src.height);
-    let (dw, dh) = if rotation.is_quarter() {
-        (h, w)
-    } else {
-        (w, h)
-    };
-    let mut dst = Bitmap::<Gray8>::new(dw, dh, 1, false);
-    for dy in 0..dh {
-        let row = dst.row_mut(dy);
-        for (dx, out) in (0..dw).zip(row.iter_mut()) {
-            // The source pixel that lands at (dx, dy).
-            let (sx, sy) = match rotation {
-                Rotation::Cw90 => (dy, h - 1 - dx),
-                Rotation::Cw180 => (w - 1 - dx, h - 1 - dy),
-                Rotation::Cw270 => (w - 1 - dy, dx),
-                Rotation::None => (dx, dy),
-            };
-            *out = src.row(sy)[sx as usize];
-        }
-    }
-    dst
 }
 
 #[cfg(test)]

@@ -118,7 +118,7 @@ impl FaxDocument {
     /// The encoder refused the page.
     pub(crate) fn add(&self, page_num: i32, page: Page, turn: bool) -> Result<(), RenderError> {
         let luma = page.into_luma();
-        let luma = if turn { quarter_turn(&luma) } else { luma };
+        let luma = if turn { luma.turned_cw(3) } else { luma };
         for (index, rows) in (0u32..).zip(pieces(luma.height, self.dpi.1)) {
             let fitted = fit_width(&luma, FAX_WIDTH, rows);
             let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
@@ -207,20 +207,6 @@ pub(crate) fn submit(path: &str, number: &str, queue: Option<&str>) -> Result<()
     .map_err(|e| e.to_string())
 }
 
-/// `src` turned a quarter counterclockwise: its top row becomes the left
-/// column, read upward.
-fn quarter_turn(src: &Bitmap<Gray8>) -> Bitmap<Gray8> {
-    let (w, h) = (src.width, src.height);
-    let mut dst: Bitmap<Gray8> = Bitmap::new(h, w, 1, false);
-    for y in 0..h {
-        let row = &src.row_bytes(y)[..w as usize];
-        for (x, &luma) in (0..w).zip(row) {
-            dst.row_bytes_mut(w - 1 - x)[y as usize] = luma;
-        }
-    }
-    dst
-}
-
 /// The `rows` of `src` made exactly `width` pixels wide: centred on white
 /// paper when narrower, its middle `width` columns when wider.
 fn fit_width(src: &Bitmap<Gray8>, width: u32, rows: std::ops::Range<u32>) -> Bitmap<Gray8> {
@@ -245,7 +231,7 @@ mod tests {
     use color::Gray8;
     use raster::Bitmap;
 
-    use super::{FAX_WIDTH, fit_width, layout, parse_number, pieces, quarter_turn, submission};
+    use super::{FAX_WIDTH, fit_width, layout, parse_number, pieces, submission};
 
     #[test]
     fn fax_numbers_are_dial_strings_that_cannot_pass_for_options() {
@@ -309,13 +295,13 @@ mod tests {
     fn a_quarter_turn_puts_the_top_edge_on_the_left() {
         // 3 × 2, the top-right pixel marked: it ends top-left.
         let src = bitmap(3, 2, |x, y| u8::from(x == 2 && y == 0));
-        let turned = quarter_turn(&src);
+        let turned = src.turned_cw(3);
         assert_eq!((turned.width, turned.height), (2, 3));
         assert_eq!(&turned.row_bytes(0)[..2], &[1, 0]);
         assert_eq!(&turned.row_bytes(2)[..2], &[0, 0]);
         // The bottom-left pixel ends bottom-right.
         let src = bitmap(3, 2, |x, y| u8::from(x == 0 && y == 1));
-        assert_eq!(&quarter_turn(&src).row_bytes(2)[..2], &[0, 1]);
+        assert_eq!(&src.turned_cw(3).row_bytes(2)[..2], &[0, 1]);
     }
 
     #[test]

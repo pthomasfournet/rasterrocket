@@ -46,6 +46,7 @@ pub(crate) mod simd;
 pub mod stroke;
 pub(crate) mod tiling;
 pub mod transparency;
+mod turn;
 pub mod types;
 pub mod xpath;
 
