@@ -101,6 +101,35 @@ fn scans_after_the_last_component_are_not_walked() {
     );
 }
 
+#[test]
+fn a_progressive_frame_past_the_scan_limit_is_drawn_partial() {
+    // A decode that is not strict draws the scans up to the limit and
+    // reports no row intact; a strict decode fails.
+    let data = include_bytes!("images/scans/gray_prog.jpg");
+    let options = DecoderOptions::default().jpeg_set_max_scans(1);
+    let mut decoder = JpegDecoder::new_with_options(
+        ZCursor::new(data.as_slice()),
+        options.set_strict_mode(false),
+    );
+    let pixels = decoder
+        .decode()
+        .expect("the scans up to the limit are drawn");
+    let whole = JpegDecoder::new(ZCursor::new(data.as_slice()))
+        .decode()
+        .unwrap();
+    assert_eq!(pixels.len(), whole.len());
+    assert_eq!(decoder.intact_rows(), 0);
+
+    let err =
+        JpegDecoder::new_with_options(ZCursor::new(data.as_slice()), options.set_strict_mode(true))
+            .decode()
+            .unwrap_err();
+    assert!(
+        matches!(&err, DecodeErrors::Format(m) if m.contains("Too many scans")),
+        "unexpected error: {err:?}"
+    );
+}
+
 /// Entropy-coded data writer: most significant bit first, 0xFF bytes stuffed, the last
 /// byte padded with 1 bits.
 struct Bits {

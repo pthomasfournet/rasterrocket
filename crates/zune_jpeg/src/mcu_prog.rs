@@ -178,10 +178,18 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             marker = marker_n;
                             seen_scans += 1;
                             if seen_scans > self.options.jpeg_get_max_scans() {
-                                return Err(DecodeErrors::Format(format!(
+                                let e = DecodeErrors::Format(format!(
                                     "Too many scans, exceeded limit of {}",
                                     self.options.jpeg_get_max_scans()
-                                )));
+                                ));
+                                if self.options.strict_mode() {
+                                    return Err(e);
+                                }
+                                // The scans decoded so far are drawn; the
+                                // coefficients of the scans left are missing.
+                                warn!("{e}");
+                                self.note_incomplete(0);
+                                break 'eoi;
                             }
 
                             stream.reset();

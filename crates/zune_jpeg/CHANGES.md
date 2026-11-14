@@ -141,7 +141,10 @@ unless the entry says otherwise.
   rows were a few bytes long). A marker segment between scans that cannot
   be read, and a row that fails in a frame of several scans, end the image
   with the scans decoded so far drawn, where they failed the decode or
-  left the image blank. The marker after the first scan of a progressive
+  left the image blank. So does a progressive frame of more scans than
+  `max_scans` (100 by default), with no row counted intact; a strict decode
+  still fails (`invalid_images::a_progressive_frame_past_the_scan_limit_is_drawn_partial`).
+  The marker after the first scan of a progressive
   frame is read from the stream when the entropy decoder has not run into
   it (it was an error).
 
