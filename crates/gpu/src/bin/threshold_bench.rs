@@ -21,14 +21,18 @@
 //!
 //! Output: a table per kernel and a recommended threshold per constant.
 
+#[path = "bench_common/mod.rs"]
+mod bench_common;
+
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bench_common::{rect_table, smooth_cmyk};
 use rasterrocket_gpu::backend::cuda::CudaBackend;
 use rasterrocket_gpu::backend::{AaFillScratch, GpuBackend, aa_fill_page, icc_clut};
 use rasterrocket_gpu::{
-    AA_SIZE, AaFillRect, AaScanTable, GpuCtx, ScanIntersect, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
+    AA_SIZE, AaFillRect, AaScanTable, GpuCtx, aa_fill_cpu, icc_cmyk_to_rgb_cpu,
 };
 
 /// Unwrap a GPU `Result`, printing the error with context and exiting with
@@ -64,24 +68,29 @@ impl Default for Config {
     }
 }
 
+/// Command-line usage.
+const USAGE: &str = "threshold_bench [--iters N] [--warmup N] [--only aa|icc|clut] \
+                     [--vulkan-device NAME]...";
+
 fn parse_config() -> Config {
     let mut cfg = Config::default();
-    let mut args = std::env::args().skip(1);
-    while let Some(flag) = args.next() {
+    let known = ["--iters", "--warmup", "--only", "--vulkan-device"];
+    for (flag, value) in bench_common::flag_pairs(USAGE, &known) {
         match flag.as_str() {
-            "--iters" => {
-                if let Some(v) = args.next() {
-                    cfg.iters = v.parse().unwrap_or(cfg.iters);
-                }
+            "--iters" => cfg.iters = bench_common::parse_value(USAGE, &flag, &value),
+            "--warmup" => cfg.warmup = bench_common::parse_value(USAGE, &flag, &value),
+            "--only" => {
+                cfg.only = Some(bench_common::only_value(
+                    USAGE,
+                    value,
+                    &["aa", "icc", "clut"],
+                ));
             }
-            "--warmup" => {
-                if let Some(v) = args.next() {
-                    cfg.warmup = v.parse().unwrap_or(cfg.warmup);
-                }
-            }
-            "--only" => cfg.only = args.next(),
-            "--vulkan-device" => cfg.vulkan_devices.extend(args.next()),
-            _ => {}
+            _ if cfg!(feature = "vulkan") => cfg.vulkan_devices.push(value),
+            _ => bench_common::usage_error(
+                USAGE,
+                "--vulkan-device needs a build with the `vulkan` feature",
+            ),
         }
     }
     cfg
@@ -137,31 +146,6 @@ fn time_ns<F: FnMut()>(mut f: F, warmup: u32, iters: u32) -> u64 {
 }
 
 // ── Intersection-table fixture: a w×h rectangle at the origin ──────────────
-
-/// Scanline intersection table of a w×h pixel rectangle at (0, 0): every
-/// AA row carries the left edge at AA column 0 and the right edge at
-/// `w × AA_SIZE - 1`.
-fn rect_table(w: u32, h: u32) -> (Vec<ScanIntersect>, Vec<u32>) {
-    let n_rows = h as usize * AA_SIZE as usize;
-    let right = i32::try_from(w).expect("width fits i32") * AA_SIZE - 1;
-    let mut intersects = Vec::with_capacity(n_rows * 2);
-    let mut row_starts = Vec::with_capacity(n_rows + 1);
-    for r in 0..n_rows {
-        row_starts.push(u32::try_from(r * 2).expect("table fits u32"));
-        intersects.push(ScanIntersect {
-            x0: 0,
-            x1: 0,
-            count: -1,
-        });
-        intersects.push(ScanIntersect {
-            x0: right,
-            x1: right,
-            count: 1,
-        });
-    }
-    row_starts.push(u32::try_from(n_rows * 2).expect("table fits u32"));
-    (intersects, row_starts)
-}
 
 // ── AA fill benchmark ───────────────────────────────────────────────────────
 
@@ -305,29 +289,8 @@ fn bench_icc_cmyk(ctx: &GpuCtx, cfg: &Config) {
 
 // ── ICC CMYK→RGB CLUT benchmark ─────────────────────────────────────────────
 
-/// Smooth CMYK test input (gradients, as in photographs and scans) of `n`
-/// pixels.
-fn smooth_cmyk(n: usize) -> Vec<u8> {
-    let width = 2000;
-    let height = n.div_ceil(width);
-    (0..n)
-        .flat_map(|i| {
-            let (col, row) = (i % width, i / width);
-            let cyan = col * 255 / width;
-            let magenta = row * 255 / height;
-            #[expect(clippy::cast_possible_truncation, reason = "each value is at most 255")]
-            [
-                cyan as u8,
-                magenta as u8,
-                cyan.midpoint(magenta) as u8,
-                ((col + 2 * row) % 256) as u8,
-            ]
-        })
-        .collect()
-}
-
-/// The production device conversion ([`icc_clut`]: allocation, uploads, one
-/// page, download) on `backend` against the CPU evaluator the renderer runs
+/// The production device conversion ([`icc_clut`]: staged uploads, kernel
+/// and download in one page) on `backend` against the CPU evaluator the renderer runs
 /// below the threshold, both on a 17-node CLUT, across image sizes.
 fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
     const GRID_N: u32 = 17;
@@ -396,7 +359,8 @@ fn bench_icc_clut_vulkan(cfg: &Config) {
         let t = Instant::now();
         let exact = backend.icc_clut_is_exact();
         println!(
-            "\nVulkan {name}: backend init {init:.1?}, exactness check {:.1?} (exact: {exact}), integrated: {}",
+            "\nVulkan {name} ({}): backend init {init:.1?}, exactness check {:.1?} (exact: {exact}), integrated: {}",
+            backend.device_name(),
             t.elapsed(),
             backend.is_integrated()
         );
@@ -423,10 +387,15 @@ fn main() {
 
     println!("GPU dispatch threshold calibration");
     println!("iters={}, warmup={}", cfg.iters, cfg.warmup);
-    println!("Machine: Ryzen 9 9900X3D + RTX 5070 (CC 12.0, PCIe 5.0)");
 
     let ctx = match GpuCtx::init() {
-        Ok(ctx) => Some(Arc::new(ctx)),
+        Ok(ctx) => {
+            match cudarc::driver::CudaContext::new(0).and_then(|c| c.name()) {
+                Ok(name) => println!("CUDA device 0: {name}"),
+                Err(e) => println!("CUDA device 0: name unavailable ({e})"),
+            }
+            Some(Arc::new(ctx))
+        }
         Err(e) => {
             eprintln!("threshold_bench: CUDA init failed ({e}); CUDA benchmarks skipped");
             None

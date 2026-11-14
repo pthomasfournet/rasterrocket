@@ -595,7 +595,7 @@ fn query_identity(
 
 /// `deviceName` as an owned string; a name without a NUL terminator inside
 /// the fixed-size array is reported as invalid rather than read past.
-fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
+pub(super) fn device_name(props: &vk::PhysicalDeviceProperties) -> String {
     props.device_name_as_c_str().map_or_else(
         |_| "<invalid device name>".to_owned(),
         |s| s.to_string_lossy().into_owned(),

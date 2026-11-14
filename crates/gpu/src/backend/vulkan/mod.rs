@@ -118,6 +118,18 @@ impl VulkanBackend {
         device::check_selector(selector)
     }
 
+    /// The device's `deviceName`.
+    #[must_use]
+    pub fn device_name(&self) -> String {
+        // SAFETY: the instance and the physical device outlive `self`.
+        let props = unsafe {
+            self.device
+                .instance
+                .get_physical_device_properties(self.device.phys)
+        };
+        device::device_name(&props)
+    }
+
     /// Whether the device is an integrated GPU, whose device buffers are
     /// host memory the host writes and reads directly.
     #[must_use]

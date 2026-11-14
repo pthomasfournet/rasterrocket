@@ -24,13 +24,17 @@
               positive and below 2^32; c/m/y/k/w/h name channels and extents"
 )]
 
+#[path = "bench_common/mod.rs"]
+mod bench_common;
+
 use std::fmt::Write as _;
 use std::time::Instant;
 
+use bench_common::{rect_table, smooth_cmyk};
 use rasterrocket_gpu::backend::params::{AaFillParams, BLIT_FILTER_X, BlitParams, IccClutParams};
 use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
 use rasterrocket_gpu::backend::{BlitScratch, BlitSource, GpuBackend, blit_image_box, icc_clut};
-use rasterrocket_gpu::{AA_SIZE, AaFillRect, ScanIntersect, icc_cmyk_to_rgb_cpu};
+use rasterrocket_gpu::{AA_SIZE, AaFillRect, icc_cmyk_to_rgb_cpu};
 
 /// Dispatches of the long page the kernel's device time is derived from.
 const REPEATS: u32 = 5;
@@ -42,6 +46,10 @@ struct Config {
     only: Option<String>,
 }
 
+/// Command-line usage.
+const USAGE: &str = "vulkan_phase_bench [--device NAME] [--iters N] [--warmup N] \
+                     [--only icc|aa|blit|lock|readback]";
+
 fn parse_config() -> Config {
     let mut cfg = Config {
         iters: 9,
@@ -49,15 +57,19 @@ fn parse_config() -> Config {
         device: None,
         only: None,
     };
-    let mut args = std::env::args().skip(1);
-    while let Some(flag) = args.next() {
-        let value = args.next();
-        match (flag.as_str(), value) {
-            ("--iters", Some(v)) => cfg.iters = v.parse().expect("--iters N"),
-            ("--warmup", Some(v)) => cfg.warmup = v.parse().expect("--warmup N"),
-            ("--device", Some(v)) => cfg.device = Some(v),
-            ("--only", Some(v)) => cfg.only = Some(v),
-            (f, _) => panic!("unknown or incomplete flag {f}"),
+    let known = ["--iters", "--warmup", "--device", "--only"];
+    for (flag, value) in bench_common::flag_pairs(USAGE, &known) {
+        match flag.as_str() {
+            "--iters" => cfg.iters = bench_common::parse_value(USAGE, &flag, &value),
+            "--warmup" => cfg.warmup = bench_common::parse_value(USAGE, &flag, &value),
+            "--device" => cfg.device = Some(value),
+            _ => {
+                cfg.only = Some(bench_common::only_value(
+                    USAGE,
+                    value,
+                    &["icc", "aa", "blit", "lock", "readback"],
+                ));
+            }
         }
     }
     cfg
@@ -259,13 +271,13 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
     let table = noise((grid_n as usize).pow(4) * 3, 7);
     for smooth in [true, false] {
         header(&format!(
-            "icc_clut grid {grid_n}, {} pixels: production icc_clut split (prep = alloc + 2 sync uploads, read = sync download + free)",
+            "icc_clut grid {grid_n}, {} pixels: one-shot buffers split (prep = alloc + 2 sync uploads, read = sync download + free)",
             if smooth { "smooth" } else { "random" }
         ));
         for mpx in [0.5_f64, 2.0, 8.0] {
             let n = (mpx * 1e6) as usize;
             let cmyk = if smooth {
-                gradient(n)
+                smooth_cmyk(n)
             } else {
                 noise(n * 4, 11)
             };
@@ -331,50 +343,6 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
             println!("{:>14} whole icc_clut call {} µs", "", us(whole));
         }
     }
-}
-
-/// `n` CMYK pixels of a 2000-pixel-wide image whose channels vary smoothly
-/// along x, y and the diagonals: neighbouring pixels share CLUT cells, as
-/// in photographs and scans.
-fn gradient(n: usize) -> Vec<u8> {
-    let w = 2000;
-    let h = n.div_ceil(w);
-    (0..n)
-        .flat_map(|i| {
-            let (x, y) = (i % w, i / w);
-            let c = x * 255 / w;
-            let m = y * 255 / h;
-            [
-                c as u8,
-                m as u8,
-                c.midpoint(m) as u8,
-                ((x + 2 * y) % 256) as u8,
-            ]
-        })
-        .collect()
-}
-
-/// Scanline intersection table of a `w × h` rectangle at the origin.
-fn rect_table(w: u32, h: u32) -> (Vec<ScanIntersect>, Vec<u32>) {
-    let n_rows = h as usize * AA_SIZE as usize;
-    let right = i32::try_from(w).expect("width fits i32") * AA_SIZE - 1;
-    let mut intersects = Vec::with_capacity(n_rows * 2);
-    let mut row_starts = Vec::with_capacity(n_rows + 1);
-    for r in 0..n_rows {
-        row_starts.push(u32::try_from(r * 2).expect("fits"));
-        intersects.push(ScanIntersect {
-            x0: 0,
-            x1: 0,
-            count: -1,
-        });
-        intersects.push(ScanIntersect {
-            x0: right,
-            x1: right,
-            count: 1,
-        });
-    }
-    row_starts.push(u32::try_from(n_rows * 2).expect("fits"));
-    (intersects, row_starts)
 }
 
 fn bench_aa(backend: &VulkanBackend, cfg: &Config) {
@@ -646,8 +614,8 @@ fn main() {
         .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
     let backend = ok(VulkanBackend::with_selector(selector.as_ref()), "backend");
     println!(
-        "device {:?} integrated={} iters={} warmup={}",
-        cfg.device,
+        "device {} integrated={} iters={} warmup={}",
+        backend.device_name(),
         backend.is_integrated(),
         cfg.iters,
         cfg.warmup
