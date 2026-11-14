@@ -25,7 +25,8 @@ const EMPTY_INPUT: [u8; 4] = [0; 4];
 /// The buffers of the page raster, kept between pages.
 #[derive(Default)]
 pub(super) struct PageScratch {
-    /// Commands, intersections, row offsets, tile offsets, tile commands.
+    /// Commands, coverage table words, row offsets, tile offsets, tile
+    /// commands.
     inputs: [Option<Staged<VulkanBackend>>; 5],
     /// The page.
     target: Option<Staged<VulkanBackend>>,
@@ -33,29 +34,22 @@ pub(super) struct PageScratch {
 
 /// The push constants of the raster of `page` binned as `bins`, in the
 /// order of `Params` in `kernels/page_raster.slang`.
-fn push_constants(page: &PageCommands, bins: &TileBins) -> Result<[u8; 28]> {
-    let aa_width = page.width().checked_mul(4).ok_or_else(|| {
-        BackendError::msg(format!(
-            "render_page: a page {} pixels wide is too wide",
-            page.width()
-        ))
-    })?;
-    let n_cmds = u32::try_from(page.len())
-        .map_err(|_| BackendError::msg("render_page: too many commands"))?;
+fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [u8; 28] {
+    let n_cmds = u32::try_from(page.len()).expect("the push limit bounds the commands");
     let values = [
         n_cmds,
         page.width(),
         page.height(),
         bins.tiles_x,
         bins.tiles_y,
-        aa_width,
+        coverage_base,
         pack_rgb(page.paper()),
     ];
     let mut push = [0u8; 28];
     for (dst, v) in push.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         dst.copy_from_slice(&v.to_ne_bytes());
     }
-    Ok(push)
+    push
 }
 
 /// `len` bytes as a device size.
@@ -91,14 +85,12 @@ impl VulkanBackend {
             )));
         }
         let bins = page.bin().map_err(BackendError::new)?;
-        let push = push_constants(page, &bins)?;
+        let (table, coverage_base) = page.table_words();
+        let push = push_constants(page, &bins, coverage_base);
         let page_len = row * height;
         let inputs: [(&'static str, &[u8]); 5] = [
             ("render_page commands", bytemuck::cast_slice(page.cmds())),
-            (
-                "render_page intersections",
-                bytemuck::cast_slice(page.intersects()),
-            ),
+            ("render_page coverage table", bytemuck::cast_slice(&table)),
             (
                 "render_page row offsets",
                 bytemuck::cast_slice(page.row_starts()),
@@ -175,36 +167,53 @@ impl VulkanBackend {
 mod tests {
     use color::convert::div255;
 
-    use crate::fill::{AA_SIZE, AaScanTable, ScanIntersect, pixel_coverage};
-    use crate::page::{PageCommands, PixelBounds};
-
-    /// The AA gamma map of a sub-sample count, as the CPU fill applies it.
-    const AA_GAMMA: [u32; 17] = [
-        0, 4, 11, 21, 32, 45, 59, 74, 90, 108, 126, 145, 166, 187, 209, 231, 255,
-    ];
+    use crate::page::{CoverageRows, PageCommands, PixelBounds};
 
     /// One command as the host model paints it.
     struct HostCmd {
-        intersects: Vec<ScanIntersect>,
-        row_starts: Vec<u32>,
         y_min: i32,
-        eo: bool,
+        row_starts: Vec<u32>,
+        spans: Vec<[i32; 3]>,
+        bytes: Vec<u8>,
         bounds: PixelBounds,
         rgb: [u8; 3],
         a_input: u8,
     }
 
     impl HostCmd {
-        fn table(&self) -> AaScanTable<'_> {
-            AaScanTable {
-                intersects: &self.intersects,
-                row_starts: &self.row_starts,
+        fn table(&self) -> CoverageRows<'_> {
+            CoverageRows {
                 y_min: self.y_min,
+                row_starts: &self.row_starts,
+                spans: &self.spans,
+                bytes: &self.bytes,
             }
+        }
+
+        /// The coverage of pixel `(x, y)`, by a linear walk of its row.
+        fn coverage(&self, x: i32, y: i32) -> u8 {
+            let Some(row) = usize::try_from(y - self.y_min)
+                .ok()
+                .filter(|&r| r + 1 < self.row_starts.len())
+            else {
+                return 0;
+            };
+            let spans =
+                &self.spans[self.row_starts[row] as usize..self.row_starts[row + 1] as usize];
+            spans
+                .iter()
+                .find(|s| (s[0]..=s[1]).contains(&x))
+                .map_or(0, |&[x0, _, offset]| {
+                    if offset < 0 {
+                        255
+                    } else {
+                        self.bytes[usize::try_from(offset + x - x0).unwrap()]
+                    }
+                })
         }
     }
 
-    /// The page `cmds` paint, by the per-pixel walk of the host twin.
+    /// The page `cmds` paint, composited on the host as the CPU pipe does.
     #[expect(
         clippy::many_single_char_names,
         reason = "pixel coordinates, coverage and alpha of the kernel's formulas"
@@ -215,11 +224,11 @@ mod tests {
         for c in cmds {
             for y in c.bounds.y0.max(0)..=c.bounds.y1.min(h - 1) {
                 for x in c.bounds.x0.max(0)..=c.bounds.x1.min(i32::try_from(w).unwrap() - 1) {
-                    let n = pixel_coverage(&c.table(), width * 4, c.eo, x, y);
+                    let n = c.coverage(x, y);
                     if n == 0 {
                         continue;
                     }
-                    let a = u32::from(div255(u32::from(c.a_input) * AA_GAMMA[usize::from(n)]));
+                    let a = u32::from(div255(u32::from(c.a_input) * u32::from(n)));
                     let o = (usize::try_from(y).unwrap() * w + usize::try_from(x).unwrap()) * 3;
                     for (j, &s) in c.rgb.iter().enumerate() {
                         let d = u32::from(out[o + j]);
@@ -252,34 +261,36 @@ mod tests {
         }
     }
 
-    /// A random table over AA rows near the page: sorted intersections with
-    /// winding counts of -1, 0 and 1, some rows ending inside.
+    /// A random table over rows near the page: disjoint sorted spans, full
+    /// or with random coverage bytes, some reaching off the page.
     fn random_cmd(rng: &mut Rng, width: u32, height: u32) -> HostCmd {
-        let y_min = rng.below(height * 4 + 8) - 8;
-        let n_rows = rng.below(160);
-        let (mut intersects, mut row_starts) = (Vec::new(), vec![0u32]);
+        let y_min = rng.below(height + 8) - 4;
+        let n_rows = rng.below(40);
+        let (mut spans, mut bytes, mut row_starts) = (Vec::new(), Vec::new(), vec![0u32]);
         for _ in 0..n_rows {
-            let mut row: Vec<ScanIntersect> = (0..rng.below(7))
-                .map(|_| {
-                    let x0 = rng.below(width * 4 + 40) - 20;
-                    ScanIntersect {
-                        x0,
-                        x1: x0 + rng.below(12),
-                        count: rng.below(3) - 1,
-                    }
-                })
-                .collect();
-            row.sort_by_key(|i| i.x0);
-            intersects.extend(row);
-            row_starts.push(u32::try_from(intersects.len()).unwrap());
+            let mut x = rng.below(width + 10) - 10;
+            for _ in 0..rng.below(6) {
+                let x0 = x + rng.below(6);
+                let x1 = x0 + rng.below(12);
+                let offset = if rng.below(3) == 0 {
+                    -1
+                } else {
+                    let at = i32::try_from(bytes.len()).unwrap();
+                    bytes.extend((x0..=x1).map(|_| rng.byte()));
+                    at
+                };
+                spans.push([x0, x1, offset]);
+                x = x1 + 1;
+            }
+            row_starts.push(u32::try_from(spans.len()).unwrap());
         }
         let x0 = rng.below(width + 20) - 10;
-        let y0 = (y_min / AA_SIZE) + rng.below(4) - 2;
+        let y0 = y_min + rng.below(4) - 2;
         HostCmd {
-            intersects,
-            row_starts,
             y_min,
-            eo: rng.below(2) == 1,
+            row_starts,
+            spans,
+            bytes,
             bounds: PixelBounds {
                 x0,
                 y0,
@@ -292,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn page_raster_matches_the_host_walk() {
+    fn page_raster_matches_the_host_composite() {
         let Some(backend) = super::super::test_backend() else {
             return;
         };
@@ -304,7 +315,7 @@ mod tests {
                 .collect();
             let mut page = PageCommands::new(width, height, paper);
             for c in &cmds {
-                page.push_coverage(c.table(), c.eo, c.bounds, c.rgb, c.a_input)
+                page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
                     .expect("push");
             }
             let row = width as usize * 3;

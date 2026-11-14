@@ -1,9 +1,9 @@
 //! Recording a page for the whole-page GPU raster.
 //!
 //! While a page is recorded, a fill or stroke of a solid colour is not
-//! painted.  Its geometry is scan-converted on the CPU by the functions
-//! the CPU fill and stroke use (`raster::fill::aa_scanner`,
-//! `raster::stroke_aa_scanner`, `raster::hairline_runs`), and the result is
+//! painted.  Its coverage is computed on the CPU by the functions the CPU
+//! fill and stroke use (`raster::fill::aa_fill_coverage`,
+//! `raster::aa_stroke_coverage`, `raster::hairline_runs`), and the result is
 //! appended to the page's [`PageCommands`] with the colour, constant alpha
 //! and clip rectangle the CPU pipe would composite with.  The device then
 //! composites every command with the CPU's arithmetic, so the page it
@@ -20,13 +20,16 @@ use std::collections::HashSet;
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
-use gpu::page::{PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds};
-use gpu::{AaScanTable, ScanIntersect};
+use gpu::page::{
+    CoverageRows, PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds,
+};
 use raster::clip::Clip;
-use raster::types::{AA_SIZE, BlendMode};
-use raster::{XPathScanner, hairline_runs, stroke_aa_scanner};
+use raster::coverage::CoverageTable;
+use raster::types::BlendMode;
+use raster::{aa_stroke_coverage, hairline_runs};
 
 use super::canvas::{CanvasKind, PageCanvas};
+use super::paint::FillRule;
 use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
 
@@ -38,8 +41,8 @@ pub(super) struct Recording {
     commands: PageCommands,
     /// Why the recording stopped, once it has.
     refused: Option<&'static str>,
-    /// Scratch: the intersections of the table being appended.
-    intersects: Vec<ScanIntersect>,
+    /// Scratch: the spans of the table being appended.
+    spans: Vec<[i32; 3]>,
     /// Scratch: the runs of the hairline being appended.
     runs: Vec<(i32, i32, i32)>,
 }
@@ -122,59 +125,30 @@ pub struct DeviceFallback {
     warned_unknown_ops_capped: bool,
 }
 
-/// The pixels of `scanner`'s fill under the rectangular `clip`: rows the
-/// scanner covers, columns from its leftmost intersection to its rightmost
-/// (to the right edge when a row ends inside the shape under `even_odd`),
-/// within the clip.  Every pixel the CPU fill composites a non-zero shape
-/// onto lies in it, and no pixel outside the clip does.
-fn fill_bounds(scanner: &XPathScanner, even_odd: bool, clip: &Clip) -> PixelBounds {
-    let (starts, ix) = (scanner.row_starts(), scanner.intersects());
-    let eo_mask = if even_odd { 1 } else { !0 };
-    let balanced = starts.windows(2).all(|w| {
-        ix[w[0] as usize..w[1] as usize]
-            .iter()
-            .fold(0i32, |acc, i| acc.wrapping_add(i.count))
-            & eo_mask
-            == 0
-    });
-    let right = if balanced {
-        scanner.x_max.div_euclid(AA_SIZE)
-    } else {
-        i32::MAX
-    };
-    PixelBounds {
-        x0: scanner.x_min.div_euclid(AA_SIZE).max(clip.x_min_i),
-        y0: scanner.y_min.div_euclid(AA_SIZE).max(clip.y_min_i),
-        x1: right.min(clip.x_max_i),
-        y1: scanner.y_max.div_euclid(AA_SIZE).min(clip.y_max_i),
-    }
-}
-
 impl Recording {
-    /// Append the antialiased fill of `scanner` in `rgb` at alpha `alpha`.
-    fn push_fill(
+    /// Append the coverage `tables` in `rgb` at alpha `alpha`, in order.
+    fn push_tables(
         &mut self,
-        scanner: &XPathScanner,
-        even_odd: bool,
-        clip: &Clip,
+        tables: &[CoverageTable],
         rgb: [u8; 3],
         alpha: u8,
     ) -> Result<(), PageCommandsError> {
-        self.intersects.clear();
-        self.intersects
-            .extend(scanner.intersects().iter().map(|i| ScanIntersect {
-                x0: i.x0,
-                x1: i.x1,
-                count: i.count,
-            }));
-        let table = AaScanTable {
-            intersects: &self.intersects,
-            row_starts: scanner.row_starts(),
-            y_min: scanner.y_min,
-        };
-        let bounds = fill_bounds(scanner, even_odd, clip);
-        self.commands
-            .push_coverage(table, even_odd, bounds, rgb, alpha)
+        for table in tables {
+            let Some((x0, y0, x1, y1)) = table.bounds() else {
+                continue;
+            };
+            self.spans.clear();
+            self.spans.extend(table.span_triples());
+            let rows = CoverageRows {
+                y_min: table.y_min(),
+                row_starts: table.row_starts(),
+                spans: &self.spans,
+                bytes: table.bytes(),
+            };
+            self.commands
+                .push_coverage(rows, PixelBounds { x0, y0, x1, y1 }, rgb, alpha)?;
+        }
+        Ok(())
     }
 
     /// Stop the recording with the refusal of `result`'s error, if any,
@@ -225,7 +199,7 @@ impl PageRenderer<'_> {
         self.device_page = Some(Box::new(Recording {
             commands: PageCommands::new(self.width, self.height, PAPER),
             refused: None,
-            intersects: Vec::new(),
+            spans: Vec::new(),
             runs: Vec::new(),
         }));
         Ok(())
@@ -358,18 +332,26 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// Record the fill of `path` that [`Self::fill_within`] would paint.
-    pub(super) fn record_device_fill(&mut self, path: &raster::path::Path, even_odd: bool) {
+    /// Record the fill of `path` under `rule` that [`Self::fill_within`]
+    /// would paint.
+    pub(super) fn record_device_fill(&mut self, path: &raster::path::Path, rule: FillRule) {
         let paint = match self.solid_device_paint(false) {
             Ok(paint) => paint,
             Err(reason) => return self.refuse_device(reason),
         };
         let flatness = self.gstate.current().flatness.max(0.1);
-        let scanner =
-            raster::fill::aa_scanner(path, &DEVICE_MATRIX, flatness, &paint.clip, even_odd);
-        if let (Some(scanner), Some(recording)) = (scanner, self.device_page.as_mut()) {
-            let pushed =
-                recording.push_fill(&scanner, even_odd, &paint.clip, paint.rgb, paint.alpha);
+        let tables = raster::fill::aa_fill_coverage(
+            path,
+            &DEVICE_MATRIX,
+            flatness,
+            &paint.clip,
+            self.width,
+            self.height,
+            rule.even_odd,
+            rule.zero_area_lines,
+        );
+        if let Some(recording) = self.device_page.as_mut() {
+            let pushed = recording.push_tables(&tables, paint.rgb, paint.alpha);
             recording.refuse_on(pushed);
         }
     }
@@ -396,11 +378,15 @@ impl PageRenderer<'_> {
             return;
         };
         if params.line_width != 0.0 {
-            if let Some(scanner) =
-                stroke_aa_scanner(&shape.path, &shape.matrix, &params, &paint.clip)
-            {
-                let pushed =
-                    recording.push_fill(&scanner, false, &paint.clip, paint.rgb, paint.alpha);
+            if let Some(table) = aa_stroke_coverage(
+                &shape.path,
+                &shape.matrix,
+                &params,
+                &paint.clip,
+                width,
+                height,
+            ) {
+                let pushed = recording.push_tables(&[table], paint.rgb, paint.alpha);
                 recording.refuse_on(pushed);
             }
             return;
@@ -703,7 +689,7 @@ mod tests {
     #[test]
     fn a_command_list_past_its_byte_limit_refuses_the_recording() {
         let doc = doc();
-        let fill = b"0 0 2000 2000 re f ".repeat(600);
+        let fill = b"0 0 2000 2000 re f ".repeat(2_000);
         assert!(matches!(
             record(&doc, 2000, 2000, &fill),
             DeviceRecording::Refused("command list size")

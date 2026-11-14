@@ -18,7 +18,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::coverage::AreaRaster;
+use crate::coverage::{AreaRaster, CoverageTable};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
@@ -258,16 +258,41 @@ fn area_fill<P: Pixel>(
     eo: bool,
     weight: u8,
 ) {
-    let Some(mut raster) = area_raster(xpath, clip, bitmap.width, bitmap.height) else {
+    let clipped = !clip.is_rect();
+    area_rows(
+        xpath,
+        clip,
+        bitmap.width,
+        bitmap.height,
+        eo,
+        weight,
+        |y, x, coverage| {
+            if clipped {
+                clip.mul_row(y, x, coverage);
+            }
+            draw_coverage_row::<P>(bitmap, pipe, src, coverage, x, y);
+        },
+    );
+}
+
+/// Call `emit(y, x, coverage)` for each row of the exact-area coverage of
+/// the device-space `xpath` over its pixels inside the clip rectangle and
+/// the `width × height` bitmap, scaled by `weight / 255`; `coverage[i]` is
+/// the coverage of pixel `(x + i, y)` and may be changed in place.
+fn area_rows(
+    xpath: &XPath,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+    eo: bool,
+    weight: u8,
+    mut emit: impl FnMut(i32, i32, &mut [u8]),
+) {
+    let Some(mut raster) = area_raster(xpath, clip, width, height) else {
         return;
     };
-    let clipped = !clip.is_rect();
     let mut scratch = Vec::new();
     raster.rows(eo, |y, x, coverage| {
-        if !clipped && weight == u8::MAX {
-            draw_coverage_row::<P>(bitmap, pipe, src, coverage, x, y);
-            return;
-        }
         scratch.clear();
         scratch.extend_from_slice(coverage);
         if weight != u8::MAX {
@@ -275,11 +300,69 @@ fn area_fill<P: Pixel>(
                 *c = div255(u32::from(*c) * u32::from(weight));
             }
         }
-        if clipped {
-            clip.mul_row(y, x, &mut scratch);
-        }
-        draw_coverage_row::<P>(bitmap, pipe, src, &scratch, x, y);
+        emit(y, x, &mut scratch);
     });
+}
+
+/// The coverage tables an antialiased fill of `path` composites, in order.
+///
+/// The fill is [`fill`] (or [`eo_fill`] when `eo`) under the rectangle of
+/// `clip` on a `width × height` bitmap: the area, then the lines of its
+/// zero-area subpaths when `with_lines` (only the area under
+/// [`fill_area`]).  Compositing each in turn, its coverage as the shape, paints what the
+/// fill paints where the clip is its rectangle.  Empty tables are left out.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the geometry, clip, bitmap size and fill rule are independent inputs"
+)]
+#[must_use]
+pub fn aa_fill_coverage(
+    path: &Path,
+    matrix: &[f64; 6],
+    flatness: f64,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+    eo: bool,
+    with_lines: bool,
+) -> Vec<CoverageTable> {
+    if path.pts.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let mut xpath = XPath::for_model(path, matrix, flatness, true, PixelModel::Area);
+    let lines = with_lines
+        .then(|| zero_area_lines(&xpath, flatness))
+        .flatten();
+    xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
+    let mut layers = vec![table_of(&xpath, clip, width, height, eo, u8::MAX)];
+    if let Some(lines) = lines {
+        layers.push(table_of(
+            &lines,
+            clip,
+            width,
+            height,
+            false,
+            ZERO_AREA_WEIGHT,
+        ));
+    }
+    layers.retain(|t| !t.is_empty());
+    layers
+}
+
+/// The rows of [`area_rows`] as a table.
+fn table_of(
+    xpath: &XPath,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+    eo: bool,
+    weight: u8,
+) -> CoverageTable {
+    let mut table = CoverageTable::empty();
+    area_rows(xpath, clip, width, height, eo, weight, |y, x, coverage| {
+        table.push_row(y, x, coverage);
+    });
+    table
 }
 
 /// The outline, in device space, of a stroke one pixel wide with butt caps

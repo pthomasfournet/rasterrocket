@@ -260,7 +260,10 @@ impl PageRenderer<'_> {
             return;
         }
         let mut clip = clip;
-        clip.clip_to_path(&XPath::new(path, &DEVICE_MATRIX, flatness, true), rule.even_odd);
+        clip.clip_to_path(
+            &XPath::new(path, &DEVICE_MATRIX, flatness, true),
+            rule.even_odd,
+        );
         self.paint_mesh(shading, &clip, pipe, transfer.as_deref());
     }
 

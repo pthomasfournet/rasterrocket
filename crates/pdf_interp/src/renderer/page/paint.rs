@@ -428,7 +428,7 @@ impl PageRenderer<'_> {
     ) {
         #[cfg(feature = "vulkan")]
         if self.device_recording() {
-            self.record_device_fill(path, rule.even_odd);
+            self.record_device_fill(path, rule);
             return;
         }
         let gs = self.gstate.current();

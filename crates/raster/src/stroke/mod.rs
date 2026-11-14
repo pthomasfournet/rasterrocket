@@ -14,7 +14,8 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::fill::{aa_scanner, fill_area};
+use crate::coverage::CoverageTable;
+use crate::fill::{aa_fill_coverage, aa_scanner, fill_area};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
 use crate::scanner::XPathScanner;
@@ -247,6 +248,34 @@ pub fn stroke_aa_scanner(
 ) -> Option<XPathScanner> {
     let outline = stroke_outline_path(path, matrix, params)?;
     aa_scanner(&outline, matrix, params.flatness, clip, false)
+}
+
+/// The coverage table an antialiased [`stroke`] of `path` composites.
+///
+/// The stroke has a positive line width and lies under the rectangle of
+/// `clip` on a `width × height` bitmap; `None` for a hairline (`line_width == 0`) and for a
+/// stroke that covers no pixel.
+#[must_use]
+pub fn aa_stroke_coverage(
+    path: &Path,
+    matrix: &[f64; 6],
+    params: &StrokeParams<'_>,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+) -> Option<CoverageTable> {
+    let outline = stroke_outline_path(path, matrix, params)?;
+    aa_fill_coverage(
+        &outline,
+        matrix,
+        params.flatness,
+        clip,
+        width,
+        height,
+        false,
+        false,
+    )
+    .pop()
 }
 
 /// Walk the segments of the flattened `path` scanline by scanline and emit

@@ -70,7 +70,7 @@ impl CoverageTable {
 
     /// Append the coverage `coverage` of pixels `x..` on row `y`, below every
     /// row already stored.
-    fn push_row(&mut self, y: i32, x: i32, coverage: &[u8]) {
+    pub(crate) fn push_row(&mut self, y: i32, x: i32, coverage: &[u8]) {
         if self.row_start.is_empty() {
             self.y_min = y;
             self.row_start.push(0);
@@ -111,6 +111,49 @@ impl CoverageTable {
 
     fn end_offset(&self) -> u32 {
         u32::try_from(self.spans.len()).expect("coverage table exceeds u32::MAX spans")
+    }
+
+    /// The first row the table stores; `row_starts` counts rows from it.
+    #[must_use]
+    pub const fn y_min(&self) -> i32 {
+        self.y_min
+    }
+
+    /// Span offsets: the spans of row `y_min + i` are
+    /// `spans[row_starts[i]..row_starts[i + 1]]`; empty for an empty table.
+    #[must_use]
+    pub fn row_starts(&self) -> &[u32] {
+        &self.row_start
+    }
+
+    /// Every span as `[x0, x1, offset]`, in row order: pixels `x0..=x1`
+    /// covered fully when `offset` is −1, else by the bytes
+    /// `bytes()[offset..][..x1 − x0 + 1]`.
+    pub fn span_triples(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
+        self.spans.iter().map(|s| {
+            let offset = if s.bytes == FULL {
+                -1
+            } else {
+                i32::try_from(s.bytes).unwrap_or(i32::MAX)
+            };
+            [s.x0, s.x1, offset]
+        })
+    }
+
+    /// The partial spans' coverage bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The pixels the table covers, as `(x0, y0, x1, y1)` inclusive; `None`
+    /// when it covers none.
+    #[must_use]
+    pub fn bounds(&self) -> Option<(i32, i32, i32, i32)> {
+        let (y0, y1) = self.row_range()?;
+        let x0 = self.spans.iter().map(|s| s.x0).min()?;
+        let x1 = self.spans.iter().map(|s| s.x1).max()?;
+        Some((x0, y0, x1, y1))
     }
 
     /// The spans of row `y`.

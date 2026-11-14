@@ -1,8 +1,8 @@
 //! A page as a list of paint commands for the device page raster.
 //!
 //! Each command paints one colour at a constant alpha over an opaque RGB
-//! page, with per-pixel coverage taken from a scanline intersection table
-//! in AA coordinates (the CPU scanner's, see [`AaScanTable`]) and limited
+//! page, with per-pixel coverage taken from a coverage table the CPU
+//! rasteriser computed (see [`CoverageRows`]) and limited
 //! to an inclusive pixel rectangle.  Commands paint in the order they were
 //! pushed.  The table of every command is copied into one shared pair of
 //! buffers, so a page is three flat arrays plus its size and paper colour.
@@ -20,7 +20,55 @@ use std::fmt;
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::fill::{AA_SIZE, AaScanTable, ScanIntersect};
+/// A region's coverage, row by row, as the page raster reads it.
+///
+/// The pixels `x0..=x1` of a span `[x0, x1, offset]` on row `y_min + i` are
+/// covered fully when `offset` is −1, else by `bytes[offset + (x − x0)]`;
+/// the spans of row `y_min + i` are `spans[row_starts[i]..row_starts[i +
+/// 1]]`.  Pixels in no span are uncovered.
+#[derive(Clone, Copy, Debug)]
+pub struct CoverageRows<'a> {
+    /// The row of `row_starts[0]`.
+    pub y_min: i32,
+    /// `n_rows + 1` offsets into `spans`.
+    pub row_starts: &'a [u32],
+    /// The spans, sorted by `x0` within each row.
+    pub spans: &'a [[i32; 3]],
+    /// The coverage bytes of the partial spans.
+    pub bytes: &'a [u8],
+}
+
+impl CoverageRows<'_> {
+    /// Rows the table holds.
+    #[must_use]
+    pub const fn n_rows(&self) -> usize {
+        self.row_starts.len().saturating_sub(1)
+    }
+
+    /// Whether every offset lies within its array: `row_starts` ascends
+    /// from 0 to at most `spans.len()`, and each partial span's bytes lie
+    /// in `bytes`.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        let rows_ok = self.row_starts.first().is_none_or(|&s| s == 0)
+            && self.row_starts.windows(2).all(|w| w[0] <= w[1])
+            && self
+                .row_starts
+                .last()
+                .is_none_or(|&e| e as usize <= self.spans.len());
+        let span_ok = |&[x0, x1, offset]: &[i32; 3]| {
+            let len = usize::try_from(i64::from(x1) - i64::from(x0) + 1).ok();
+            x0 <= x1
+                && (offset == -1
+                    || usize::try_from(offset)
+                        .ok()
+                        .zip(len)
+                        .and_then(|(o, len)| o.checked_add(len))
+                        .is_some_and(|end| end <= self.bytes.len()))
+        };
+        rows_ok && self.spans.iter().all(span_ok)
+    }
+}
 
 /// Side of a binning tile in pixels; equals the raster workgroup's side.
 pub const PAGE_TILE: u32 = 16;
@@ -39,7 +87,7 @@ pub const PAGE_COMMANDS_MAX_BYTES: usize = 1 << 27;
 #[repr(C)]
 pub(crate) struct PageCmd {
     kind: u32,
-    eo: u32,
+    reserved: u32,
     rgb: u32,
     a_input: u32,
     table_y0: i32,
@@ -92,7 +140,7 @@ impl PixelBounds {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageCommandsError {
     /// The page's device inputs would exceed [`PAGE_COMMANDS_MAX_BYTES`],
-    /// or the page is too large for the raster's 32-bit AA coordinates.
+    /// or the page is too large for the raster's 32-bit coordinates.
     TooLarge,
     /// Host memory for the inputs could not be reserved.
     Alloc(TryReserveError),
@@ -104,7 +152,7 @@ impl fmt::Display for PageCommandsError {
             Self::TooLarge => write!(
                 f,
                 "the page's paint commands exceed {PAGE_COMMANDS_MAX_BYTES} bytes or its \
-                 AA coordinates exceed 32 bits"
+                 coordinates exceed 32 bits"
             ),
             Self::Alloc(e) => write!(f, "the page's paint commands cannot be allocated: {e}"),
         }
@@ -141,14 +189,17 @@ pub struct TileBins {
     pub cmds: Vec<u32>,
 }
 
-/// A page's paint commands and the intersection tables they read.
+/// A page's paint commands and the coverage tables they read.
 #[derive(Debug, Clone)]
 pub struct PageCommands {
     width: u32,
     height: u32,
     paper: [u8; 3],
     cmds: Vec<PageCmd>,
-    intersects: Vec<ScanIntersect>,
+    /// Every command's spans, `[x0, x1, offset]`, `offset` into `bytes`.
+    spans: Vec<[i32; 3]>,
+    /// Every command's coverage bytes.
+    bytes: Vec<u8>,
     row_starts: Vec<u32>,
     /// Tile references the commands' bounds make, the length of
     /// [`TileBins::cmds`].
@@ -160,26 +211,26 @@ pub(crate) fn pack_rgb([r, g, b]: [u8; 3]) -> u32 {
     u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16
 }
 
-/// [`AA_SIZE`] as a count.
-const AA: usize = AA_SIZE.unsigned_abs() as usize;
-
 /// `v` as a `u32` element index.
 fn index(v: usize) -> Result<u32, PageCommandsError> {
     u32::try_from(v).map_err(|_| PageCommandsError::TooLarge)
 }
 
-/// The bytes of device inputs holding `cmds` commands, `intersects`
-/// intersections, `row_starts` row offsets and `tile_words` binning words,
-/// saturating.
+/// The bytes of device inputs holding `cmds` commands, `spans` spans,
+/// `coverage` coverage bytes, `row_starts` row offsets and `tile_words`
+/// binning words, saturating.  The coverage bytes are packed four to a
+/// word after the spans.
 const fn input_bytes(
     cmds: usize,
-    intersects: usize,
+    spans: usize,
+    coverage: usize,
     row_starts: usize,
     tile_words: usize,
 ) -> usize {
     size_of::<PageCmd>()
         .saturating_mul(cmds)
-        .saturating_add(size_of::<ScanIntersect>().saturating_mul(intersects))
+        .saturating_add(size_of::<[i32; 3]>().saturating_mul(spans))
+        .saturating_add(coverage.saturating_add(3) / 4 * 4)
         .saturating_add(size_of::<u32>().saturating_mul(row_starts.saturating_add(tile_words)))
 }
 
@@ -192,7 +243,8 @@ impl PageCommands {
             height,
             paper,
             cmds: Vec::new(),
-            intersects: Vec::new(),
+            spans: Vec::new(),
+            bytes: Vec::new(),
             row_starts: Vec::new(),
             tile_refs: 0,
         }
@@ -237,22 +289,24 @@ impl PageCommands {
     /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`].
     #[must_use]
     pub const fn bytes(&self) -> usize {
-        self.bytes_with(0, 0, 0, 0)
+        self.bytes_with(0, 0, 0, 0, 0)
     }
 
     /// Bytes the page's device inputs would take with `cmds` more commands
-    /// holding `intersects` more intersections, `row_starts` more row
-    /// offsets and `tile_refs` more tile references.
+    /// holding `spans` more spans, `coverage` more coverage bytes,
+    /// `row_starts` more row offsets and `tile_refs` more tile references.
     const fn bytes_with(
         &self,
         cmds: usize,
-        intersects: usize,
+        spans: usize,
+        coverage: usize,
         row_starts: usize,
         tile_refs: usize,
     ) -> usize {
         input_bytes(
             self.cmds.len().saturating_add(cmds),
-            self.intersects.len().saturating_add(intersects),
+            self.spans.len().saturating_add(spans),
+            self.bytes.len().saturating_add(coverage),
             self.row_starts.len().saturating_add(row_starts),
             (self.tile_count() + 1)
                 .saturating_add(self.tile_refs)
@@ -260,21 +314,10 @@ impl PageCommands {
         )
     }
 
-    /// The page's pixels, as an inclusive rectangle; `None` for an empty
-    /// page.
-    ///
-    /// # Errors
-    ///
-    /// [`PageCommandsError::TooLarge`] when an AA coordinate of the page
-    /// (a pixel coordinate times [`AA_SIZE`]) does not fit `i32`.
+    /// The page's pixels as bounds, or `None` for a page without pixels.
     fn page_bounds(&self) -> Result<Option<PixelBounds>, PageCommandsError> {
-        let aa_extent = |v: u32| {
-            i32::try_from(v)
-                .ok()
-                .filter(|v| v.checked_mul(AA_SIZE).is_some())
-                .ok_or(PageCommandsError::TooLarge)
-        };
-        let (w, h) = (aa_extent(self.width)?, aa_extent(self.height)?);
+        let extent = |v: u32| i32::try_from(v).map_err(|_| PageCommandsError::TooLarge);
+        let (w, h) = (extent(self.width)?, extent(self.height)?);
         Ok((w > 0 && h > 0).then_some(PixelBounds {
             x0: 0,
             y0: 0,
@@ -284,13 +327,8 @@ impl PageCommands {
     }
 
     /// Paint `rgb` at constant alpha `a_input` with the coverage `table`
-    /// gives under the even-odd (`even_odd`) or non-zero rule, over the
-    /// pixels of `bounds` that lie on the page.  Nothing is pushed when
-    /// none does.
-    ///
-    /// A pixel's coverage is its count of covered sub-samples in the
-    /// table's [`AA_SIZE`] rows and columns, mapped through the AA gamma
-    /// table.
+    /// gives, as the shape, over the pixels of `bounds` that lie on the
+    /// page.  Nothing is pushed when none does.
     ///
     /// # Errors
     ///
@@ -300,39 +338,49 @@ impl PageCommands {
     ///
     /// # Panics
     ///
-    /// When the table is malformed ([`AaScanTable::assert_well_formed`]).
+    /// When the table is malformed ([`CoverageRows::is_well_formed`]).
     pub fn push_coverage(
         &mut self,
-        table: AaScanTable<'_>,
-        even_odd: bool,
+        table: CoverageRows<'_>,
         bounds: PixelBounds,
         rgb: [u8; 3],
         a_input: u8,
     ) -> Result<(), PageCommandsError> {
-        table.assert_well_formed();
+        assert!(
+            table.is_well_formed(),
+            "push_coverage: malformed coverage table"
+        );
         let Some(bounds) = self.page_bounds()?.and_then(|p| p.intersect(bounds)) else {
             return Ok(());
         };
         let tile_refs = bounds.tiles();
-        let (n_ix, n_rows) = (table.intersects.len(), table.row_starts.len());
-        if self.bytes_with(1, n_ix, n_rows, tile_refs) > PAGE_COMMANDS_MAX_BYTES {
+        let (n_spans, n_bytes, n_rows) =
+            (table.spans.len(), table.bytes.len(), table.row_starts.len());
+        if self.bytes_with(1, n_spans, n_bytes, n_rows, tile_refs) > PAGE_COMMANDS_MAX_BYTES {
             return Err(PageCommandsError::TooLarge);
         }
-        let base = index(self.intersects.len())?;
-        // Every row start is at most the table's length (`assert_well_formed`),
-        // so it is at most this total once offset by `base`.
-        index(self.intersects.len() + n_ix).map(drop)?;
+        let span_base = index(self.spans.len())?;
+        index(self.spans.len() + n_spans).map(drop)?;
+        i32::try_from(self.bytes.len() + n_bytes)
+            .map(drop)
+            .map_err(|_| PageCommandsError::TooLarge)?;
+        let byte_base = i32::try_from(self.bytes.len()).map_err(|_| PageCommandsError::TooLarge)?;
         let row_base = index(self.row_starts.len())?;
         let n_table_rows = index(table.n_rows())?;
         self.cmds.try_reserve(1)?;
-        self.intersects.try_reserve(n_ix)?;
+        self.spans.try_reserve(n_spans)?;
+        self.bytes.try_reserve(n_bytes)?;
         self.row_starts.try_reserve(n_rows)?;
-        self.intersects.extend_from_slice(table.intersects);
+        self.spans.extend(
+            table.spans.iter().map(|&[x0, x1, offset]| {
+                [x0, x1, if offset < 0 { -1 } else { offset + byte_base }]
+            }),
+        );
+        self.bytes.extend_from_slice(table.bytes);
         self.row_starts
-            .extend(table.row_starts.iter().map(|&s| s + base));
+            .extend(table.row_starts.iter().map(|&s| s + span_base));
         self.tile_refs += tile_refs;
         self.cmds.push(PageCmd {
-            eo: u32::from(even_odd),
             rgb: pack_rgb(rgb),
             a_input: u32::from(a_input),
             table_y0: table.y_min,
@@ -368,8 +416,7 @@ impl PageCommands {
         let (Some(&(y_first, ..)), Some(&(y_last, ..))) = (runs.first(), runs.last()) else {
             return Ok(());
         };
-        let aa_rows = (y_last - y_first + 1).unsigned_abs() as usize * AA;
-        let n_ix = runs.len() * AA;
+        let n_rows = (y_last - y_first + 1).unsigned_abs() as usize;
         let bounds = runs.iter().fold(
             PixelBounds {
                 x0: i32::MAX,
@@ -383,40 +430,28 @@ impl PageCommands {
                 ..b
             },
         );
-        if self.bytes_with(1, n_ix, aa_rows + 1, bounds.tiles()) > PAGE_COMMANDS_MAX_BYTES {
+        if self.bytes_with(1, runs.len(), 0, n_rows + 1, bounds.tiles()) > PAGE_COMMANDS_MAX_BYTES {
             return Err(PageCommandsError::TooLarge);
         }
-        let mut intersects = Vec::new();
-        intersects.try_reserve_exact(n_ix)?;
+        let mut spans = Vec::new();
+        spans.try_reserve_exact(runs.len())?;
         let mut row_starts = Vec::new();
-        row_starts.try_reserve_exact(aa_rows + 1)?;
+        row_starts.try_reserve_exact(n_rows + 1)?;
         row_starts.push(0u32);
         let mut rest = runs.iter().peekable();
         for y in y_first..=y_last {
-            let row_start = intersects.len();
             while let Some(&(_, x0, x1)) = rest.next_if(|r| r.0 == y) {
-                // Each pixel span covers all of its AA columns; a zero
-                // winding count keeps the spans disjoint.  The page bounds
-                // keep the AA coordinates within `i32`.
-                intersects.push(ScanIntersect {
-                    x0: x0 * AA_SIZE,
-                    x1: x1 * AA_SIZE + AA_SIZE - 1,
-                    count: 0,
-                });
+                spans.push([x0, x1, -1]);
             }
-            let row_end = intersects.len();
-            row_starts.push(index(row_end)?);
-            for _ in 1..AA_SIZE {
-                intersects.extend_from_within(row_start..row_end);
-                row_starts.push(index(intersects.len())?);
-            }
+            row_starts.push(index(spans.len())?);
         }
-        let table = AaScanTable {
-            intersects: &intersects,
+        let table = CoverageRows {
+            y_min: y_first,
             row_starts: &row_starts,
-            y_min: y_first * AA_SIZE,
+            spans: &spans,
+            bytes: &[],
         };
-        self.push_coverage(table, false, bounds, rgb, u8::MAX)
+        self.push_coverage(table, bounds, rgb, u8::MAX)
     }
 
     /// The commands' tile lists, built on the host: each command is listed,
@@ -473,14 +508,30 @@ impl PageCommands {
         &self.cmds
     }
 
-    /// Every command's intersections, concatenated.
-    pub(crate) fn intersects(&self) -> &[ScanIntersect] {
-        &self.intersects
+    /// The spans as words, three each, then the coverage bytes packed four
+    /// to a word, little-endian; and the index of the first coverage word.
+    pub(crate) fn table_words(&self) -> (Vec<u32>, u32) {
+        let mut words: Vec<u32> = self
+            .spans
+            .iter()
+            .flat_map(|s| s.map(i32::cast_unsigned))
+            .collect();
+        let base = u32::try_from(words.len()).expect("the push limit bounds the spans");
+        words.extend(self.bytes.chunks(4).map(|c| {
+            let mut w = [0u8; 4];
+            w[..c.len()].copy_from_slice(c);
+            u32::from_le_bytes(w)
+        }));
+        (words, base)
     }
 
-    /// Absolute row offsets into [`Self::intersects`].
     pub(crate) fn row_starts(&self) -> &[u32] {
         &self.row_starts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spans(&self) -> &[[i32; 3]] {
+        &self.spans
     }
 }
 
@@ -519,21 +570,19 @@ fn merge_runs(runs: &mut [(i32, i32, i32)], page: PixelBounds) -> &[(i32, i32, i
 mod tests {
     use super::*;
 
-    fn rect_table(intersects: &[ScanIntersect], row_starts: &[u32]) -> AaScanTable<'static> {
-        AaScanTable {
-            intersects: Vec::leak(intersects.to_vec()),
-            row_starts: Vec::leak(row_starts.to_vec()),
-            y_min: 0,
-        }
-    }
+    const EMPTY: CoverageRows<'static> = CoverageRows {
+        y_min: 0,
+        row_starts: &[0],
+        spans: &[],
+        bytes: &[],
+    };
 
     #[test]
     fn bins_list_each_command_in_its_tiles_in_paint_order() {
         let mut page = PageCommands::new(40, 20, [255; 3]);
-        let table = rect_table(&[], &[0]);
         let b = |x0, y0, x1, y1| PixelBounds { x0, y0, x1, y1 };
         for bounds in [b(0, 0, 39, 19), b(20, 2, 25, 3), b(5, 17, 100, 100)] {
-            page.push_coverage(table, false, bounds, [0; 3], 255)
+            page.push_coverage(EMPTY, bounds, [0; 3], 255)
                 .expect("push");
         }
         let bins = page.bin().expect("bin");
@@ -551,16 +600,66 @@ mod tests {
     #[test]
     fn bounds_off_the_page_push_nothing() {
         let mut page = PageCommands::new(10, 10, [255; 3]);
-        let table = rect_table(&[], &[0]);
         let bounds = PixelBounds {
             x0: 10,
             y0: 0,
             x1: 20,
             y1: 5,
         };
-        page.push_coverage(table, false, bounds, [0; 3], 255)
+        page.push_coverage(EMPTY, bounds, [0; 3], 255)
             .expect("push");
         assert!(page.is_empty());
+    }
+
+    #[test]
+    fn tables_are_rebased_onto_the_page() {
+        let mut page = PageCommands::new(16, 16, [255; 3]);
+        let table = CoverageRows {
+            y_min: 3,
+            row_starts: &[0, 2, 3],
+            spans: &[[1, 2, 0], [4, 9, -1], [2, 2, 2]],
+            bytes: &[10, 20, 30],
+        };
+        let bounds = PixelBounds {
+            x0: 0,
+            y0: 0,
+            x1: 15,
+            y1: 15,
+        };
+        page.push_coverage(table, bounds, [0; 3], 255)
+            .expect("push");
+        page.push_coverage(table, bounds, [0; 3], 255)
+            .expect("push");
+        assert_eq!(page.row_starts(), [0, 2, 3, 3, 5, 6]);
+        assert_eq!(page.spans()[3..], [[1, 2, 3], [4, 9, -1], [2, 2, 5]]);
+        let (words, base) = page.table_words();
+        assert_eq!(base, 18);
+        assert_eq!(
+            words[18..],
+            [
+                u32::from_le_bytes([10, 20, 30, 10]),
+                u32::from_le_bytes([20, 30, 0, 0])
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed")]
+    fn a_span_past_its_bytes_is_refused() {
+        let mut page = PageCommands::new(16, 16, [255; 3]);
+        let table = CoverageRows {
+            y_min: 0,
+            row_starts: &[0, 1],
+            spans: &[[0, 3, 1]],
+            bytes: &[1, 2, 3, 4],
+        };
+        let bounds = PixelBounds {
+            x0: 0,
+            y0: 0,
+            x1: 3,
+            y1: 0,
+        };
+        let _ = page.push_coverage(table, bounds, [0; 3], 255);
     }
 
     #[test]
@@ -571,14 +670,9 @@ mod tests {
         assert_eq!(page.len(), 1);
         let c = page.cmds()[0];
         assert_eq!((c.x0, c.y0, c.x1, c.y1), (1, 2, 10, 3));
-        assert_eq!((c.table_y0, c.n_rows, c.a_input), (8, 8, 255));
-        let rows = page.row_starts();
-        let row = |r: usize| &page.intersects()[rows[r] as usize..rows[r + 1] as usize];
-        let span = |x0, x1| ScanIntersect { x0, x1, count: 0 };
-        for r in 0..4 {
-            assert_eq!(row(r), [span(4, 27), span(40, 43)]);
-            assert_eq!(row(r + 4), [span(28, 39)]);
-        }
+        assert_eq!((c.table_y0, c.n_rows, c.a_input), (2, 2, 255));
+        assert_eq!(page.row_starts(), [0, 2, 3]);
+        assert_eq!(page.spans(), [[1, 6, -1], [10, 10, -1], [7, 9, -1]]);
     }
 
     #[test]
@@ -595,13 +689,8 @@ mod tests {
         page.push_opaque_runs(&mut runs, [0; 3]).expect("push");
         let c = page.cmds()[0];
         assert_eq!((c.x0, c.y0, c.x1, c.y1), (0, 2, 31, 4));
-        let rows = page.row_starts();
-        let row = |r: usize| &page.intersects()[rows[r] as usize..rows[r + 1] as usize];
-        let span = |x0, x1| ScanIntersect { x0, x1, count: 0 };
-        assert_eq!(row(0), [span(0, 15), span(120, 127)]);
-        assert_eq!(row(4), []);
-        assert_eq!(row(8), [span(0, 127)]);
-        assert_eq!(rows.len(), 3 * 4 + 1);
+        assert_eq!(page.row_starts(), [0, 2, 2, 3]);
+        assert_eq!(page.spans(), [[0, 3, -1], [30, 31, -1], [0, 31, -1]]);
 
         let mut off_page = vec![(-1, 0, 5), (2, 32, 40)];
         page.push_opaque_runs(&mut off_page, [0; 3]).expect("push");
@@ -610,13 +699,14 @@ mod tests {
 
     #[test]
     fn a_push_past_the_byte_limit_fails_and_leaves_the_page_unchanged() {
-        let n = PAGE_COMMANDS_MAX_BYTES / size_of::<ScanIntersect>();
-        let intersects = vec![ScanIntersect::default(); n];
+        let n = PAGE_COMMANDS_MAX_BYTES / size_of::<[i32; 3]>();
+        let spans = vec![[0, 0, -1]; n];
         let row_starts = [0, u32::try_from(n).expect("small")];
-        let table = AaScanTable {
-            intersects: &intersects,
-            row_starts: &row_starts,
+        let table = CoverageRows {
             y_min: 0,
+            row_starts: &row_starts,
+            spans: &spans,
+            bytes: &[],
         };
         let bounds = PixelBounds {
             x0: 0,
@@ -627,28 +717,18 @@ mod tests {
         let mut page = PageCommands::new(16, 16, [255; 3]);
         let before = page.bytes();
         assert_eq!(
-            page.push_coverage(table, false, bounds, [0; 3], 255),
+            page.push_coverage(table, bounds, [0; 3], 255),
             Err(PageCommandsError::TooLarge)
         );
         assert!(page.is_empty());
         assert_eq!(page.bytes(), before);
-        let fits = AaScanTable {
-            intersects: &intersects[..n / 2],
+        let fits = CoverageRows {
+            spans: &spans[..n / 2],
             row_starts: &[0, u32::try_from(n / 2).expect("small")],
-            y_min: 0,
+            ..table
         };
-        page.push_coverage(fits, false, bounds, [0; 3], 255)
+        page.push_coverage(fits, bounds, [0; 3], 255)
             .expect("half the limit fits");
         assert!(page.bytes() <= PAGE_COMMANDS_MAX_BYTES);
-    }
-
-    #[test]
-    fn a_page_beyond_32_bit_aa_coordinates_takes_no_command() {
-        let mut page = PageCommands::new(u32::MAX / 4, 1, [255; 3]);
-        assert_eq!(
-            page.push_opaque_runs(&mut [(0, 0, 0)], [0; 3]),
-            Err(PageCommandsError::TooLarge)
-        );
-        assert!(page.is_empty());
     }
 }
