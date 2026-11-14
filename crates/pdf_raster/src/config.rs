@@ -1,11 +1,11 @@
 //! Backend selection policy and session configuration.
 
 #[cfg(doc)]
-use crate::{PageDiagnostics, RasterError, RasterSession, open_session, open_session_from_bytes};
+use crate::{PageDiagnostics, RasterSession, open_session, open_session_from_bytes};
 
 use std::path::PathBuf;
 
-use crate::{PageBox, Password, RenderPurpose, Rotation};
+use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 
 // ── Backend policy ────────────────────────────────────────────────────────────
 
@@ -389,7 +389,8 @@ pub struct SessionConfig {
     /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
     /// [`ForceVulkan`](BackendPolicy::ForceVulkan), and
     /// [`vector_antialias`](Self::vector_antialias); otherwise
-    /// [`open_session`] returns [`RasterError::InvalidOptions`].
+    /// [`open_session`] returns [`RasterError::InvalidOptions`] (see
+    /// [`check_gpu_pages`](Self::check_gpu_pages)).
     pub gpu_pages: bool,
 }
 
@@ -427,6 +428,56 @@ impl SessionConfig {
             rotation: Rotation::None,
             gpu_pages: false,
         }
+    }
+
+    /// Check that this config can render GPU pages when it asks for them
+    /// ([`gpu_pages`](Self::gpu_pages)): a build with the `vulkan` feature,
+    /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), and
+    /// [`vector_antialias`](Self::vector_antialias) on, since the device
+    /// raster paints antialiased coverage only.  [`open_session`] applies
+    /// the same check; calling it first refuses the combination before any
+    /// document is opened.
+    ///
+    /// # Errors
+    ///
+    /// [`RasterError::InvalidOptions`] naming the conflicting fields and
+    /// their `rrocket` flags (`--gpu-pages`, `--backend`, `--aaVector`).
+    pub fn check_gpu_pages(&self) -> Result<(), RasterError> {
+        if !self.gpu_pages {
+            return Ok(());
+        }
+        let refuse = |why: String| {
+            Err(RasterError::InvalidOptions(format!(
+                "GPU page rendering (`gpu_pages`, --gpu-pages) {why}"
+            )))
+        };
+        if !cfg!(feature = "vulkan") {
+            return refuse(
+                "needs a build with the `vulkan` feature; rebuild with `--features vulkan` \
+                 or drop --gpu-pages"
+                    .to_owned(),
+            );
+        }
+        if !matches!(
+            self.policy,
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan
+        ) {
+            return refuse(format!(
+                "runs on Vulkan, which backend `{0}` (`policy`, --backend {0} or \
+                 PDF_RASTER_BACKEND={0}) does not use; use --backend auto or --backend vulkan, \
+                 or drop --gpu-pages",
+                self.policy.name()
+            ));
+        }
+        if !self.vector_antialias {
+            return refuse(
+                "paints antialiased vector paths only, and vector antialiasing is off \
+                 (`vector_antialias`, --aaVector no); use --aaVector yes or drop --gpu-pages"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// The parser's view of this config's decryption and file-access

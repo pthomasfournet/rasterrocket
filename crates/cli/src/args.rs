@@ -1157,6 +1157,10 @@ impl Args {
     /// device in question, so allowing the combination would silently
     /// ignore a user expectation.  `PDF_RASTER_VULKAN_DEVICE` is consulted
     /// only when `--vulkan-device` is absent and is never rejected.
+    /// Rejects `--gpu-pages` with a backend other than `auto` and `vulkan`,
+    /// with `--aaVector no`, and in a binary without the `vulkan` feature
+    /// ([`SessionConfig::check_gpu_pages`]), so the refusal precedes any
+    /// decryption prompt and covers comic input, which opens no session.
     pub(crate) fn session_config(&self) -> Result<SessionConfig, String> {
         // Precedence: explicit `--backend <X>` wins; otherwise consult
         // `PDF_RASTER_BACKEND`; otherwise default to Auto.  Distinguishing
@@ -1229,6 +1233,7 @@ impl Args {
         {
             config.prefetch = self.prefetch;
         }
+        config.check_gpu_pages().map_err(|e| e.to_string())?;
         Ok(config)
     }
 
@@ -1372,6 +1377,43 @@ mod page_list_tests {
         args.single_file = true;
         let (pages, _) = args.build_page_list(10).unwrap();
         assert_eq!(pages, vec![1]);
+    }
+
+    #[test]
+    fn gpu_pages_conflicts_are_refused_naming_the_flags() {
+        let refusal = |flags: &[&str]| {
+            args_with(flags)
+                .session_config()
+                .expect_err("a conflicting --gpu-pages was accepted")
+        };
+        let conflicts: [(&[&str], &str); 3] = [
+            (&["--backend", "cpu"], "--backend cpu"),
+            (&["--backend", "cuda"], "--backend cuda"),
+            (
+                &["--backend", "vulkan", "--aaVector", "no"],
+                "--aaVector no",
+            ),
+        ];
+        for (flags, named) in conflicts {
+            let msg = refusal(&[&["--gpu-pages"], flags].concat());
+            let named = if cfg!(feature = "vulkan") {
+                named
+            } else {
+                "`vulkan` feature"
+            };
+            assert!(msg.contains("--gpu-pages") && msg.contains(named), "{msg}");
+        }
+        assert_eq!(
+            args_with(&["--gpu-pages", "--backend", "vulkan"])
+                .session_config()
+                .is_ok_and(|config| config.gpu_pages),
+            cfg!(feature = "vulkan")
+        );
+        assert!(
+            args_with(&["--backend", "cpu", "--aaVector", "no"])
+                .session_config()
+                .is_ok()
+        );
     }
 
     #[test]

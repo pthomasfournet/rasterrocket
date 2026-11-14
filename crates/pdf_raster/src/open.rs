@@ -447,39 +447,6 @@ fn session_gpu_ctx(
     Ok(ctx)
 }
 
-/// [`RasterError::InvalidOptions`] unless `config` can render GPU pages
-/// when it asks for them: a build with the `vulkan` feature, under the
-/// `Auto` or `ForceVulkan` policy, with vector antialiasing on (the device
-/// raster paints antialiased coverage only).
-fn check_gpu_pages(config: &SessionConfig) -> Result<(), RasterError> {
-    if !config.gpu_pages {
-        return Ok(());
-    }
-    if !cfg!(feature = "vulkan") {
-        return Err(RasterError::InvalidOptions(
-            "GPU page rendering needs a build with the `vulkan` feature".to_owned(),
-        ));
-    }
-    if !matches!(
-        config.policy,
-        BackendPolicy::Auto | BackendPolicy::ForceVulkan
-    ) {
-        return Err(RasterError::InvalidOptions(format!(
-            "GPU page rendering runs on Vulkan, which backend policy {} does not use; \
-             use auto or vulkan",
-            config.policy.name()
-        )));
-    }
-    if !config.vector_antialias {
-        return Err(RasterError::InvalidOptions(
-            "GPU page rendering paints antialiased vector paths only; turn vector \
-             antialiasing on or GPU page rendering off"
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 /// Shared session assembly from an already-opened document — the backend init,
 /// image cache, doc id, prefetcher, and `RasterSession` construction common to
 /// both the path and in-memory entry points.
@@ -493,7 +460,7 @@ fn open_session_with_doc(
     if let Some(reason) = uncompiled_backend(config.policy) {
         return Err(RasterError::BackendUnavailable(reason.to_owned()));
     }
-    check_gpu_pages(config)?;
+    config.check_gpu_pages()?;
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
     #[cfg(feature = "vulkan")]
