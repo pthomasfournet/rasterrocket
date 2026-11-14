@@ -4,6 +4,7 @@
 Run with `python3 -I tests/compare/test_expectations.py`.
 """
 
+import dataclasses
 import datetime as dt
 import os
 import pathlib
@@ -132,9 +133,9 @@ class Update(unittest.TestCase):
     """Rewriting the registry from a run."""
 
     def test_seeds_new_failures_and_drops_surprise_passes(self) -> None:
-        """FAIL seeds an entry, XPASS removes one, XFAIL and unobserved entries stay."""
+        """FAIL seeds an entry, XPASS removes one, XFAIL is tightened, unobserved stays."""
         entries: dict[ex.TestId, ex.Entry] = {
-            ("a.pdf", 1): differs(1, tile=30.0),  # stays failing: kept
+            ("a.pdf", 1): differs(1, tile=30.0),  # stays failing: tightened
             ("a.pdf", 2): differs(2),  # passes now: dropped
             ("b.pdf", 1): differs(1, "b.pdf"),  # not observed: kept
         }
@@ -150,7 +151,7 @@ class Update(unittest.TestCase):
             [ex.Verdict.XFAIL, ex.Verdict.XPASS, ex.Verdict.FAIL, ex.Verdict.FAIL],
         )
         out = ex.updated(entries, results, LIMITS, TODAY)
-        self.assertEqual(out[("a.pdf", 1)], entries[("a.pdf", 1)])
+        self.assertEqual(out[("a.pdf", 1)], differs(1, tile=20.4))
         self.assertNotIn(("a.pdf", 2), out)
         self.assertEqual(out[("b.pdf", 1)], entries[("b.pdf", 1)])
         self.assertEqual(
@@ -164,13 +165,48 @@ class Update(unittest.TestCase):
         entry = ex.seeded_entry(scored(1, 0.5, 13.0), LIMITS, TODAY)
         self.assertEqual(entry.limits, {"tile": 13.26})
 
-    def test_worse_failure_is_reseeded(self) -> None:
-        """A failure past its limits gets a fresh entry with an unreviewed reason."""
-        entries: dict[ex.TestId, ex.Entry] = {("a.pdf", 1): differs(1, tile=14.0)}
-        results = ex.classify_all([scored(1, 1.0, 20.0)], entries, LIMITS)
-        out = ex.updated(entries, results, LIMITS, TODAY)
-        self.assertEqual(out[("a.pdf", 1)].limits, {"tile": 20.4})
-        self.assertEqual(out[("a.pdf", 1)].reason, SEEDED)
+    def update_one(self, entry: ex.Entry, obs: ex.Observation) -> ex.Entry:
+        """Return the entry of `obs`'s test after an update from `obs`, which still fails."""
+        entries = {entry.test: entry}
+        out = ex.updated(entries, ex.classify_all([obs], entries, LIMITS), LIMITS, TODAY)
+        return out[entry.test]
+
+    def test_worse_failure_keeps_its_reason(self) -> None:
+        """A failure past its limits is reseeded and keeps its reason, dated as worsened."""
+        out = self.update_one(differs(1, tile=14.0), scored(1, 1.0, 20.0))
+        self.assertEqual(
+            out, ex.Entry("a.pdf", 1, ex.DIFFERS, "known (worsened 2026-01-02)", {"tile": 20.4})
+        )
+        again = dataclasses.replace(out, reason="known (worsened 2025-12-01)")
+        self.assertEqual(
+            self.update_one(again, scored(1, 1.0, 30.0)).reason, "known (worsened 2026-01-02)"
+        )
+
+    def test_changed_outcome_gets_an_unreviewed_reason(self) -> None:
+        """A failure of another kind than registered is seeded afresh."""
+        out = self.update_one(differs(1, tile=14.0), ex.Observation("a.pdf", 1, "size"))
+        self.assertEqual(out, ex.Entry("a.pdf", 1, "size", SEEDED))
+
+    def test_expected_failure_is_tightened(self) -> None:
+        """An improved XFAIL lowers its limits to the seeded values and keeps its reason."""
+        out = self.update_one(differs(1, rmse=9.0, tile=50.0), scored(1, 4.0, 13.0))
+        self.assertEqual(out, differs(1, rmse=4.08, tile=13.26))
+
+    def test_tightening_never_loosens(self) -> None:
+        """A limit below the seeded value of the score stays as registered."""
+        out = self.update_one(differs(1, tile=30.0), scored(1, 1.0, 29.9))
+        self.assertEqual(out, differs(1, tile=30.0))
+
+    def test_tightening_drops_limits_the_suite_enforces(self) -> None:
+        """A metric back within the suite's limit loses a looser limit, keeps a stricter one."""
+        out = self.update_one(differs(1, rmse=9.0, tile=50.0), scored(1, 1.0, 20.0))
+        self.assertEqual(out, differs(1, tile=20.4))
+        out = self.update_one(differs(1, rmse=1.5, tile=50.0), scored(1, 1.0, 20.0))
+        self.assertEqual(out, differs(1, rmse=1.5, tile=20.4))
+
+    def test_entry_without_limits_is_not_tightened(self) -> None:
+        """An entry that accepts any value keeps accepting any value."""
+        self.assertEqual(self.update_one(differs(1), scored(1, 5.0, 20.0)), differs(1))
 
     def test_seeded_limit_classifies_the_seeding_run_as_expected(self) -> None:
         """Re-running against a freshly seeded registry yields no FAIL or XPASS."""

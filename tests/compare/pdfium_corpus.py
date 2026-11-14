@@ -48,9 +48,11 @@ expectations.py): PASS, XFAIL (a registered failure within its limits),
 FAIL (unexpected) or XPASS (registered but passing: remove or tighten the
 entry).  A document fails unless its class is `ok`.  The exit status is 1
 on any FAIL, and on any XPASS under --strict.  --update-expectations
-rewrites the registry from the run, seeding each FAIL with the reason
-`unclassified (seeded YYYY-MM-DD)` and removing each XPASS entry; the
-entries of documents the run skipped (--match) are kept.  It exits 0.
+rewrites the registry from the run as expectations.py describes: each
+new FAIL is seeded with the reason `unclassified (seeded YYYY-MM-DD)`,
+a worsened one keeps its reason, an XFAIL entry's limits are tightened
+and each XPASS entry is removed; the entries of documents the run skipped
+(--match) are kept.  It then exits 0, unless the registry is disabled.
 
 Requires: rrocket (release build), ImageMagick, python3; pdftoppm for
 --pdftoppm.

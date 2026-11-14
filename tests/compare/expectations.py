@@ -34,10 +34,14 @@ Every observed test is classified:
 
 A run fails on any FAIL, and on any XPASS under --strict, unless --update
 rewrote a registry from it.  With --update, the registry is rewritten
-from the run: a new or changed failure gets a
-seeded entry (limits 2 % above the observed values, rounded up to 0.01),
-an XPASS entry is removed, and an XFAIL entry and every entry for a test
-the run did not observe are kept as they are.
+from the run: a new or changed failure gets a seeded entry (limits 2 %
+above the observed values, rounded up to 0.01); a failure worse than
+registered, of the outcome registered, is reseeded the same way but keeps
+its reason, followed by `(worsened YYYY-MM-DD)`; an XFAIL `differs` entry
+has each limit lowered to the seeded limit of its observed value where
+that is lower, and drops a limit the suite's own already enforces; an
+XPASS entry is removed; and every entry for a test the run did not
+observe is kept as it is.
 
 The `compare` command serves compare.sh: ROWS is a tab-separated file of
 `label page outcome rmse tile detail` rows, `page` being `-` for the
@@ -59,6 +63,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -75,6 +80,8 @@ DIFFERS = "differs"
 # rendered without a failure.
 SCORED = "scored"
 OK = "ok"
+# The date suffix `updated` appends to a reason when the failure worsens.
+WORSENED = re.compile(r" \(worsened \d{4}-\d{2}-\d{2}\)$")
 ENTRY_KEYS = frozenset({"file", "page", "outcome", "reason", *METRICS})
 
 TestId = tuple[str, int | None]
@@ -214,6 +221,32 @@ def seeded_entry(obs: Observation, limits: Mapping[str, float], today: dt.date) 
     return Entry(obs.file, obs.page, outcome, reason, entry_limits)
 
 
+def tightened_limits(
+    obs: Observation, entry_limits: Mapping[str, float], limits: Mapping[str, float]
+) -> dict[str, float]:
+    """Return the limits of an XFAIL `differs` entry tightened to the scores of `obs`.
+
+    A metric over the suite's limit gets `seed_limit` of its score where that
+    is lower than the registered limit; a metric within the suite's limit
+    loses a registered limit at or above the suite's, which the suite's then
+    replaces.  An entry listing no limit accepts any value and is returned
+    as it is.
+    """
+    out = {}
+    for m, old in entry_limits.items():
+        if obs.metrics[m] > limits[m]:
+            out[m] = min(old, seed_limit(obs.metrics[m]))
+        elif old < limits[m]:
+            out[m] = old
+    return out
+
+
+def _reworded(reason: str, today: dt.date) -> str:
+    """Return `reason` dated as worsened `today`, replacing an earlier such date."""
+    base = WORSENED.sub("", reason)
+    return f"{base} (worsened {today.isoformat()})"
+
+
 def updated(
     entries: Mapping[TestId, Entry],
     results: Iterable[Result],
@@ -222,15 +255,26 @@ def updated(
 ) -> dict[TestId, Entry]:
     """Return `entries` rewritten to register the failures in `results`.
 
-    A FAIL gets a seeded entry, an XPASS loses its entry, and every other
-    entry, including those of tests absent from `results`, is kept.
+    A FAIL gets a seeded entry; one worse than registered, with the outcome
+    registered, keeps the entry's reason, marked worsened today.  An XFAIL
+    `differs` entry has its limits tightened to the scores observed, an
+    XPASS loses its entry, and every other entry, including those of tests
+    absent from `results`, is kept.
     """
     out = dict(entries)
     for r in results:
+        test = r.observation.test
         if r.verdict is Verdict.XPASS:
-            del out[r.observation.test]
+            del out[test]
         elif r.verdict is Verdict.FAIL:
-            out[r.observation.test] = seeded_entry(r.observation, limits, today)
+            seeded = seeded_entry(r.observation, limits, today)
+            old = r.entry
+            if old is not None and old.outcome == seeded.outcome:
+                seeded = dataclasses.replace(seeded, reason=_reworded(old.reason, today))
+            out[test] = seeded
+        elif r.verdict is Verdict.XFAIL and r.entry is not None and r.entry.outcome == DIFFERS:
+            tight = tightened_limits(r.observation, r.entry.limits, limits)
+            out[test] = dataclasses.replace(r.entry, limits=tight)
     return out
 
 

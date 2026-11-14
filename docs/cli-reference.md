@@ -522,7 +522,7 @@ Each document and page is classified:
 
 Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
 
-`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each `FAIL` becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values, each `XPASS` entry is removed, and entries for documents or pages the run did not cover are kept. Review the diff, and replace each seeded reason with the actual cause once it is known.
+`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL` becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values; a `FAIL` worse than registered gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Review the diff, and replace each seeded reason with the actual cause once it is known.
 
 ```bash
 # Seed or refresh the entries for the corpus fixtures

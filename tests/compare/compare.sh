@@ -34,10 +34,13 @@
 #   FAIL    unexpected: not registered, another kind, or worse than registered
 #   XPASS   surprise pass: registered as failing but passing; remove or
 #           tighten the entry
-# -U records every FAIL as a new entry, reason "unclassified (seeded DATE)",
-# and removes the entry of every XPASS; entries for documents and pages
-# this run did not render are kept.  A PDF inside the repository is
-# registered under its repository path, any other under its basename.
+# -U records every new FAIL as an entry, reason "unclassified (seeded
+# DATE)"; reseeds a FAIL worse than registered, keeping its reason with
+# "(worsened DATE)" appended; lowers the limits of an XFAIL entry to the
+# scores observed; and removes the entry of every XPASS.  Entries for
+# documents and pages this run did not render are kept.  A PDF inside the
+# repository is registered under its repository path, any other under its
+# basename.
 #
 # The tile delta (scored by score_pair.sh) is the largest difference in mean
 # luminance between the two renders over 32 x 32 px tiles.  Anti-aliasing
