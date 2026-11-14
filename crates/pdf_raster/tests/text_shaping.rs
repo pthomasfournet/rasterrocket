@@ -26,7 +26,12 @@ const HEIGHT: u32 = 60;
 /// The first page of `pdf` rendered with the bundled faces alone, as rows
 /// of booleans, `true` where inked.
 fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
-    let config = isolated_fonts(vec![font_dir("text-shaping-empty", &[])]);
+    rendered_with(pdf, font_dir("text-shaping-empty", &[]))
+}
+
+/// [`rendered`], with the faces of the font directory `fonts` as well.
+fn rendered_with(pdf: Vec<u8>, fonts: std::path::PathBuf) -> Vec<Vec<bool>> {
+    let config = isolated_fonts(vec![fonts]);
     let session = open_session_from_bytes(pdf, &config).expect("session");
     let page = render_page_rgb(&session, 1, 1.0).expect("render page");
     let width = page.width as usize;
@@ -42,12 +47,17 @@ fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
 /// Render `show`, a text object body, with a font whose codes from 65 on
 /// are the glyphs `names`, selected as `/F1` and as `/F2`.
 fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
-    render_with_form(names, show, "")
+    rendered(page(names, show, ""))
 }
 
 /// [`render`], with the form `/Fm` whose content is `form` and whose
 /// resources select the same font as `/F1`.
 fn render_with_form(names: &[&str], show: &str, form: &str) -> Vec<Vec<bool>> {
+    rendered(page(names, show, form))
+}
+
+/// The document [`render_with_form`] renders.
+fn page(names: &[&str], show: &str, form: &str) -> Vec<u8> {
     let differences = names
         .iter()
         .map(|n| format!("/{n}"))
@@ -58,7 +68,7 @@ fn render_with_form(names: &[&str], show: &str, form: &str) -> Vec<Vec<bool>> {
          /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 {differences}] >> >>"
     );
     let content = format!("BT /F1 36 Tf 20 15 Td {show} ET\n");
-    let pdf = with_page_tree(&[
+    with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] \
              /Resources << /Font << /F1 5 0 R /F2 5 0 R >> /XObject << /Fm 6 0 R >> >> \
@@ -74,8 +84,7 @@ fn render_with_form(names: &[&str], show: &str, form: &str) -> Vec<Vec<bool>> {
             ),
             form.as_bytes(),
         ),
-    ]);
-    rendered(pdf)
+    ])
 }
 
 /// The codes 65.. of `n` glyphs as one show string, and as one per `Tj`
@@ -344,6 +353,34 @@ fn a_hebrew_mark_lies_under_its_letter_across_strings() {
             "{show}: the qamats lies under shin ({centre}, shaped {shaped})"
         );
     }
+}
+
+/// Lamed, qamats, then beh shown after them on the baseline, drawn by one
+/// face with Hebrew and Arabic: a Hebrew mark that ends a string does not
+/// belong to an Arabic letter, so it is shaped in its own string, as when
+/// nothing follows.  The face is the installed `DejaVuSans.ttf`, drawing
+/// Arial; the test is skipped without it.
+#[test]
+fn a_mark_does_not_join_a_letter_of_another_script() {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ];
+    let Some(face) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
+        eprintln!("DejaVu Sans is not installed; skipping");
+        return;
+    };
+    let fonts = font_dir(
+        "text-shaping-hebrew-arabic",
+        &[("LiberationSans-Regular.ttf", &face)],
+    );
+    let names = ["uni05DC", "uni05B8", "uni0628"];
+    let draw = |show: &str| rendered_with(page(&names, show, ""), fonts.clone());
+    assert!(
+        draw("<4142> Tj <43> Tj") == draw("<4142> Tj q Q <43> Tj"),
+        "the qamats is not drawn over beh"
+    );
 }
 
 /// Latin text shows glyph by glyph whether or not it is split.

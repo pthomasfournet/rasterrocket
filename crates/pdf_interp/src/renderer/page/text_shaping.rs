@@ -25,9 +25,9 @@
 //!
 //! Right-to-left visual order stores a combining mark before its letter.
 //! The marks that end a right-to-left string whose neighbour after starts
-//! with a right-to-left letter belong to that letter: they are shaped with
-//! it as a run of their own, drawn over the letter where the string after
-//! draws it.
+//! with a right-to-left letter of the same script belong to that letter:
+//! they are shaped with it as a run of their own, drawn over the letter
+//! where the string after draws it.
 
 use font::face::FontFace;
 use font::program::{ShapeError, ShapedGlyph};
@@ -232,13 +232,18 @@ pub(super) fn shaped_runs<'f>(
             codes.take(CONTEXT_CODES).map_while(|&text| text).collect()
         };
         // The marks that end a right-to-left string belong to the letter
-        // the neighbour after starts with; the run ends before them.
+        // of the run's script the neighbour after starts with; the run ends
+        // before them.
         let next_letter = neighbours
             .after
             .first()
             .copied()
             .flatten()
-            .filter(|&letter| rtl && end == texts.len() && is_rtl_letter(Some(letter)));
+            .filter(|&letter| {
+                rtl && end == texts.len()
+                    && is_rtl_letter(Some(letter))
+                    && class(letter.0) == Some(script)
+            });
         let marks = next_letter.map_or(0, |_| {
             texts[start..end]
                 .iter()
