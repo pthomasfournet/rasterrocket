@@ -521,3 +521,50 @@ fn black_fill_edges_stay_neutral_on_the_ink_canvas() {
         }
     }
 }
+
+/// `/GS_t`: overprint under mode 1 with a transfer function that halves
+/// every ink — `f(x) = (1 + x) / 2` on the additive value.
+const HALVING: &str = "/GS_t << /OP true /op true /OPM 1 \
+     /TR << /FunctionType 2 /Domain [0 1] /C0 [0.5] /C1 [1] /N 1 >> >>";
+
+/// Under a transfer function a process colour still overprints: the black
+/// fill keeps the cyan under it and prints its black mapped through the
+/// function, on the complement of the ink.
+#[test]
+fn transfer_keeps_process_overprint() {
+    let doc = overprint_doc(HALVING, "");
+    let content = format!("{CYAN_PAGE} /GS_t gs 0 0 0 1 k 0 0 5 10 re f");
+    let ink = render_ink(&doc, content.as_bytes());
+    assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 127, 0, 0, 0, 0]);
+    assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// Under a transfer function a spot colour keeps its slot and paints it
+/// alone; its tint maps through the gray function.
+#[test]
+fn transfer_keeps_spot_separation() {
+    let doc = overprint_doc(HALVING, &spot_space());
+    let content = format!("{CYAN_PAGE} /GS_t gs /Spot cs 1 scn 0 0 5 10 re f");
+    let ink = render_ink(&doc, content.as_bytes());
+    assert_eq!(ink_at(&ink, 2, 5), [255, 0, 0, 0, 127, 0, 0, 0]);
+    assert_eq!(ink_at(&ink, 7, 5), [255, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// The ink of a grey colour or a grey image sample under a transfer
+/// function is its converted ink mapped through the ink tables.
+#[test]
+fn transfer_maps_derived_ink_after_conversion() {
+    let doc = overprint_doc(HALVING, "");
+    let want = color::cmyk::rgb_to_ink([0; 3]).map(|v| v / 2);
+    for content in [
+        "/GS_t gs 0 g 0 0 10 10 re f",
+        "/GS_t gs q 10 0 0 10 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x00 EI Q",
+    ] {
+        let ink = render_ink(&doc, content.as_bytes());
+        let px = ink_at(&ink, 5, 5);
+        assert!(
+            px[..4].iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 1),
+            "{content}: {px:?}, want {want:?}"
+        );
+    }
+}

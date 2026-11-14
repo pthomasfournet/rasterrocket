@@ -2244,12 +2244,13 @@ fn ink_canvas_greys_render_as_on_rgb() {
 
 /// Shadings and tiling patterns reach the ink canvas as the ink of their
 /// colours, mapped through the transfer function in effect: the 0.2 grey
-/// of `shading_doc` paints as a 0.2 grey fill does, and under the
-/// inverting transfer as a 0.8 grey fill.
+/// of `shading_doc` paints as a 0.2 grey fill does, with or without the
+/// inverting transfer.
 #[test]
 fn ink_canvas_shadings_and_patterns_paint_their_colours_transferred() {
     let doc = shading_doc("", "/DeviceGray", 0.2);
-    for (transfer, solid) in [("", "0.2"), ("/Inv gs ", "0.8")] {
+    for transfer in ["", "/Inv gs "] {
+        let solid = format!("{transfer}0.2");
         for (content, fill) in [
             ("/Sh sh", format!("{solid} g 0 0 10 10 re f")),
             (

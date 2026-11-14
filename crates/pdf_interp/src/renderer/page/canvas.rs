@@ -214,8 +214,8 @@ impl PageCanvas {
     }
 
     /// Fill one Gouraud-shaded triangle through `pipe`, clipped to `clip`.
-    /// The interpolated sRGB spans reach an ink canvas mapped through
-    /// `transfer` and converted to ink; on an RGB canvas `pipe` carries the
+    /// The interpolated sRGB spans reach an ink canvas converted to ink and
+    /// mapped through `transfer`; on an RGB canvas `pipe` carries the
     /// transfer function.
     pub(super) fn gouraud_triangle(
         &mut self,
@@ -528,9 +528,10 @@ thread_local! {
 }
 
 /// A [`Pattern`] of sRGB bytes served as ink: each pixel the inner pattern
-/// yields is mapped through the transfer function, if any, and becomes the
-/// ink [`rgb_to_ink`] gives it, with no spot ink.  The pattern only
-/// converts; coverage and the static-colour hint are the inner pattern's.
+/// yields becomes the ink [`rgb_to_ink`] gives it, with no spot ink, mapped
+/// through the ink tables of the transfer function, if any.  The pattern
+/// only converts; coverage and the static-colour hint are the inner
+/// pattern's.
 pub(super) struct InkPattern<'a> {
     pattern: &'a dyn Pattern,
     transfer: Option<&'a Transfer>,
@@ -558,9 +559,9 @@ impl<'a> InkPattern<'a> {
                 *dst = match last {
                     Some((seen, ink)) if seen == *src => ink,
                     _ => {
-                        let mapped = self.transfer.map_or(*src, |t| t.apply(*src));
-                        let [c, m, y, k] = rgb_to_ink(mapped);
+                        let [c, m, y, k] = rgb_to_ink(*src);
                         let ink = [c, m, y, k, 0, 0, 0, 0];
+                        let ink = self.transfer.map_or(ink, |t| t.apply_ink(ink));
                         last = Some((*src, ink));
                         ink
                     }
@@ -592,7 +593,7 @@ impl Pattern for InkPattern<'_> {
 
 /// A pattern of sRGB bytes as a canvas of a given kind takes it: as it is
 /// on an RGB canvas, where the pipe applies the transfer function, and
-/// through [`InkPattern`], which applies it, on an ink canvas.
+/// through [`InkPattern`], which applies it to the ink, on an ink canvas.
 pub(super) enum CanvasPattern<'a> {
     /// The pattern itself.
     Rgb(&'a dyn Pattern),

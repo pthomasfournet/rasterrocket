@@ -309,13 +309,19 @@ impl PageRenderer<'_> {
         // the length check above.
         let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
         let rgb = |x, y| sample_bytes::<3>(img_bytes, img_w, bpp, x, y);
+        // On an RGB canvas the samples map through the transfer function
+        // here; on an ink canvas the compositor maps their ink.
         let gs_transfer = self.gstate.current().transfer.clone();
-        let transfer = |px: [u8; 3]| gs_transfer.as_ref().map_or(px, |t| t.apply(px));
+        let kind = self.canvas.kind();
+        let rgb_transfer = gs_transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
+        let transfer = |px: [u8; 3]| rgb_transfer.map_or(px, |t| t.apply(px));
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         // On an ink canvas a stencil paints the fill colour as its ink.
-        let kind = self.canvas.kind();
-        if stencil && kind == CanvasKind::Ink {
-            compositor.solid = Some(painted_fill.bytes_for(kind.mode()));
+        if kind == CanvasKind::Ink {
+            if stencil {
+                compositor.solid = Some(painted_fill.bytes_for(kind.mode()));
+            }
+            compositor.transfer = gs_transfer.as_deref();
         }
 
         // Each row's samples and their coverage are gathered first and

@@ -55,7 +55,7 @@ pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
 /// A shading's `Background` `bg` as painted on a canvas of `kind`: on an
 /// ink canvas mapped through `transfer`, which the pipe applies on an RGB
 /// canvas (see `ShadingPaint::pipe`).
-fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Transfer>) -> RasterColor {
+fn background(kind: CanvasKind, bg: [u8; 3], transfer: Option<&Arc<Transfer>>) -> RasterColor {
     let bg = RasterColor::from_bytes(bg);
     match kind {
         CanvasKind::Rgb => bg,
@@ -229,7 +229,7 @@ impl PageRenderer<'_> {
             });
         };
         if let Some(bg) = shading.background {
-            let bg = background(kind, bg, transfer.as_deref());
+            let bg = background(kind, bg, transfer.as_ref());
             paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
         }
         let clip = clip_to_bbox(clip, shading.bbox, flatness);
@@ -271,7 +271,7 @@ impl PageRenderer<'_> {
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
         if let Some(bg) = shading.background {
-            let bg = background(kind, bg, transfer.as_deref());
+            let bg = background(kind, bg, transfer.as_ref());
             let src = PipeSrc::Solid(bg.bytes_for(kind.mode()));
             with_canvas!(&mut self.canvas, |b| stroke(
                 b, &clip, path, pipe, &src, matrix, params

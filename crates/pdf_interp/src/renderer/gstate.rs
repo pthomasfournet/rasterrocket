@@ -296,13 +296,13 @@ impl InterpGState {
     /// The fill colour as painted: mapped through the transfer function.
     #[must_use]
     pub(crate) fn painted_fill_color(&self) -> RasterColor {
-        self.fill_color.transferred(self.transfer.as_deref())
+        self.fill_color.transferred(self.transfer.as_ref())
     }
 
     /// The stroke colour as painted: mapped through the transfer function.
     #[must_use]
     pub(crate) fn painted_stroke_color(&self) -> RasterColor {
-        self.stroke_color.transferred(self.transfer.as_deref())
+        self.stroke_color.transferred(self.transfer.as_ref())
     }
 }
 

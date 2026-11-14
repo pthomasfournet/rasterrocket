@@ -3,6 +3,13 @@
 //! A transfer function maps each device colour component in `[0, 1]` to a
 //! new value in `[0, 1]`.  Components are 8-bit on the page bitmap, so a
 //! function is tabulated once into a 256-entry table and applied by lookup.
+//!
+//! Transfer functions are defined on additive values (§10.5): on an ink
+//! canvas, whose channels are amounts of a subtractive colorant, a function
+//! maps the complement of the ink and the result is complemented back.  The
+//! red, green and blue functions of a four-function array apply to cyan,
+//! magenta and yellow, and the gray function to black and to the spot
+//! colorants.
 
 use std::sync::Arc;
 
@@ -44,15 +51,38 @@ pub(crate) fn function_lut(doc: &Document, f: &Object) -> Option<[u8; 256]> {
     Some(lut)
 }
 
-/// Transfer tables for the red, green and blue components of the page
-/// bitmap, at least one of which differs from the identity.
+/// Transfer tables for the red, green and blue components of an RGB
+/// canvas and for the eight ink channels of an ink canvas, at least one of
+/// the four functions differing from the identity.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Transfer {
     rgb: [[u8; 256]; 3],
+    /// Ink channel `i`'s table: `255 − f(255 − v)` for the function `f`
+    /// of the channel's colorant.
+    ink: [[u8; 256]; 8],
 }
 
 impl Transfer {
+    /// The tables of the red, green, blue and gray functions, in that
+    /// order.
+    fn new(tables: &[[u8; 256]; 4]) -> Self {
+        let [red, green, blue, _] = *tables;
+        let [cyan, magenta, yellow, black]: [[u8; 256]; 4] = std::array::from_fn(|i| {
+            std::array::from_fn(|v| u8::MAX - tables[i][usize::from(u8::MAX) - v])
+        });
+        Self {
+            rgb: [red, green, blue],
+            ink: [cyan, magenta, yellow, black, black, black, black, black],
+        }
+    }
+
+    /// Map the ink `[C, M, Y, K, S0, S1, S2, S3]` through the ink tables.
+    #[must_use]
+    pub fn apply_ink(&self, ink: [u8; 8]) -> [u8; 8] {
+        std::array::from_fn(|i| self.ink[i][usize::from(ink[i])])
+    }
+
     /// The red, green and blue tables.
     #[must_use]
     pub const fn tables(&self) -> [&[u8; 256]; 3] {
@@ -121,22 +151,23 @@ pub(crate) fn ext_gstate_transfer(doc: &Document, d: &Dictionary) -> Option<Tran
 /// The setting of a direct `TR`/`TR2` value, or of a function given by
 /// reference.
 fn setting_of(doc: &Document, obj: &Object) -> Option<TransferSetting> {
-    let rgb = if let Object::Array(fns) = obj {
-        let [r, g, b, _gray] = fns.as_slice() else {
+    let tables = if let Object::Array(fns) = obj {
+        let [r, g, b, gray] = fns.as_slice() else {
             return None;
         };
         [
             component_lut(doc, r)?,
             component_lut(doc, g)?,
             component_lut(doc, b)?,
+            component_lut(doc, gray)?,
         ]
     } else {
-        [component_lut(doc, obj)?; 3]
+        [component_lut(doc, obj)?; 4]
     };
-    Some(if rgb.iter().all(|lut| *lut == IDENTITY) {
+    Some(if tables.iter().all(|lut| *lut == IDENTITY) {
         TransferSetting::Identity
     } else {
-        TransferSetting::Functions(Arc::new(Transfer { rgb }))
+        TransferSetting::Functions(Arc::new(Transfer::new(&tables)))
     })
 }
 
@@ -198,6 +229,41 @@ mod tests {
             panic!("expected functions, got {setting:?}");
         };
         assert_eq!(t.apply([0, 51, 255]), [255, 51, 0]);
+    }
+
+    /// On ink a function maps the complement: the inverting function maps
+    /// no ink to full ink.  The gray function of an array maps black and
+    /// the spots; a gray function alone is not the identity.
+    #[test]
+    fn ink_tables_map_the_complement_per_colorant() {
+        let doc = invert_doc();
+        let Some(TransferSetting::Functions(t)) = ext_gstate_transfer(&doc, &gs("<< /TR 4 0 R >>"))
+        else {
+            panic!("expected functions");
+        };
+        assert_eq!(
+            t.apply_ink([0, 51, 255, 0, 0, 0, 0, 10]),
+            [255, 204, 0, 255, 255, 255, 255, 245]
+        );
+        let Some(TransferSetting::Functions(t)) =
+            ext_gstate_transfer(&doc, &gs("<< /TR [/Identity /Identity /Identity 4 0 R] >>"))
+        else {
+            panic!("a gray function alone maps ink");
+        };
+        assert_eq!(t.apply([0, 51, 255]), [0, 51, 255]);
+        assert_eq!(
+            t.apply_ink([10, 20, 30, 40, 50, 0, 0, 0]),
+            [10, 20, 30, 215, 205, 255, 255, 255]
+        );
+        let Some(TransferSetting::Functions(t)) =
+            ext_gstate_transfer(&doc, &gs("<< /TR [4 0 R /Identity /Identity /Identity] >>"))
+        else {
+            panic!("expected functions");
+        };
+        assert_eq!(
+            t.apply_ink([10, 20, 30, 40, 0, 0, 0, 0]),
+            [245, 20, 30, 40, 0, 0, 0, 0]
+        );
     }
 
     #[test]

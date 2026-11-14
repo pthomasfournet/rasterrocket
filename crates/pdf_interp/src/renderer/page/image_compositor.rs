@@ -13,6 +13,7 @@ use super::image_blit::blend_rgb;
 #[cfg(feature = "cache")]
 use super::image_sampler::{GridClip, SampleGrid};
 use super::paint::PaintParams;
+use crate::resources::transfer::Transfer;
 
 /// Whole rows of RGBA8 pixels downloaded from a blit target: `width`
 /// pixels per row, the first pixel of the first row at page position
@@ -39,7 +40,7 @@ pub(super) fn composite_rgba_rows(
     grid: &SampleGrid,
     grid_clip: &mut GridClip<'_>,
     compositor: ImageCompositor<'_>,
-    transfer: Option<&crate::resources::transfer::Transfer>,
+    transfer: Option<&Transfer>,
 ) {
     use gpu::cache::RGBA_BPP;
 
@@ -86,6 +87,9 @@ pub(super) struct ImageCompositor<'a> {
     /// A colour, in the destination's pixel bytes, painted in place of the
     /// samples' colours; `None` paints the samples.  Set only with a pipe.
     pub(super) solid: Option<&'a [u8]>,
+    /// The transfer function the samples' ink maps through on an ink
+    /// bitmap; on an RGB bitmap the samples are mapped beforehand.
+    pub(super) transfer: Option<&'a Transfer>,
 }
 
 impl<'a> ImageCompositor<'a> {
@@ -99,6 +103,7 @@ impl<'a> ImageCompositor<'a> {
         Self {
             pipe: (!direct).then(|| paint.pipe()),
             solid: None,
+            transfer: None,
         }
     }
 
@@ -150,7 +155,7 @@ impl<'a> ImageCompositor<'a> {
             let samples = RowPattern {
                 data: &colours[a * 3..b * 3],
             };
-            let ink = InkPattern::new(&samples, None);
+            let ink = InkPattern::new(&samples, self.transfer);
             let src = match self.solid {
                 Some(solid) => PipeSrc::Solid(solid),
                 None if P::MODE == PixelMode::DeviceN8 => PipeSrc::Pattern(&ink),
