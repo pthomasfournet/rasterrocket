@@ -387,4 +387,16 @@ mod vulkan {
         assert!(budget.vram_bytes > 0);
         assert!(budget.vram_bytes <= VramBudget::HARD_CAP_BYTES);
     }
+
+    /// A host-tier allocation the host refuses is an error, not an abort.
+    #[test]
+    fn refused_host_slab_is_an_error() {
+        let Some(cache) = mk_cache(1, 0) else { return };
+        let err = <VulkanBackend as CacheBackend>::alloc_host_slab(cache.device(), usize::MAX)
+            .expect_err("a usize::MAX host slab cannot be allocated");
+        assert!(
+            matches!(err, CacheError::HostAlloc { bytes: usize::MAX }),
+            "{err}"
+        );
+    }
 }

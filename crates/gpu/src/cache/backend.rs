@@ -188,7 +188,11 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
     }
 
     fn alloc_host_slab(_device: &Self::Device, bytes: usize) -> Result<Self::HostSlab, CacheError> {
-        Ok(vec![0; bytes].into_boxed_slice())
+        let mut slab = Vec::new();
+        slab.try_reserve_exact(bytes)
+            .map_err(|_| CacheError::HostAlloc { bytes })?;
+        slab.resize(bytes, 0);
+        Ok(slab.into_boxed_slice())
     }
 
     fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {

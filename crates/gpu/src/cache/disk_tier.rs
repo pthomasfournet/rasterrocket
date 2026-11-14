@@ -621,6 +621,14 @@ enum DiskReadError {
         got: usize,
     },
     DimensionOverflow,
+    /// The header declares a zero width or height.
+    EmptyImage,
+    /// The header's `width × height × bpp` disagrees with the payload
+    /// length the file actually holds.
+    SizeMismatch {
+        declared: usize,
+        actual: u64,
+    },
     /// The `read_entry_into` callback failed for a reason unrelated
     /// to the file's contents (e.g. pinned-host alloc failure, CUDA
     /// driver hiccup).  Distinct so `lookup_into` can treat it as a
@@ -644,6 +652,11 @@ impl std::fmt::Display for DiskReadError {
                 write!(f, "pixels truncated: expected {expected} bytes, got {got}")
             }
             Self::DimensionOverflow => write!(f, "width × height × bpp overflows usize"),
+            Self::EmptyImage => write!(f, "header declares a zero width or height"),
+            Self::SizeMismatch { declared, actual } => write!(
+                f,
+                "header declares {declared} pixel bytes but the file holds {actual}"
+            ),
             Self::CallbackFailed(e) => write!(f, "lookup callback failed: {e}"),
         }
     }
@@ -706,6 +719,16 @@ fn open_and_parse_header(path: &Path) -> Result<(File, DiskHeaderInfo), DiskRead
         .checked_mul(height as usize)
         .and_then(|n| n.checked_mul(layout.bytes_per_pixel()))
         .ok_or(DiskReadError::DimensionOverflow)?;
+    if expected_pixel_bytes == 0 {
+        return Err(DiskReadError::EmptyImage);
+    }
+    let payload_len = f.metadata()?.len().saturating_sub(HEADER_LEN as u64);
+    if payload_len != expected_pixel_bytes as u64 {
+        return Err(DiskReadError::SizeMismatch {
+            declared: expected_pixel_bytes,
+            actual: payload_len,
+        });
+    }
     Ok((
         f,
         DiskHeaderInfo {
@@ -1043,6 +1066,64 @@ mod tests {
         fs::write(&path, header).unwrap();
         assert!(tier.lookup(doc, &hash).is_none());
         assert!(!path.exists());
+    }
+
+    /// Plant an entry whose header declares `width × height` RGB over a
+    /// payload of `payload_len` bytes.
+    fn plant_rgb_entry(
+        tier: &DiskTier,
+        doc: DocId,
+        hash: ContentHash,
+        width: u32,
+        height: u32,
+        payload_len: usize,
+    ) -> PathBuf {
+        let path = entry_path(&tier.state.root, doc, hash);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = vec![0u8; HEADER_LEN + payload_len];
+        bytes[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        bytes[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&width.to_le_bytes());
+        bytes[12..16].copy_from_slice(&height.to_le_bytes());
+        bytes[16] = 3;
+        bytes[17] = FORMAT_RAW;
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn lookup_into_rejects_header_larger_than_file() {
+        // One flipped high bit in the width asks for ~1.9 TB; the header
+        // check must reject it before the callback allocates anything.
+        let dir = tempdir().expect("tempdir");
+        let tier = mk_tier(dir.path(), 0);
+        let doc = DocId([0x31; 32]);
+        let hash = ContentHash([0x32; 32]);
+        let path = plant_rgb_entry(&tier, doc, hash, 0x8000_0190, 300, 400 * 300 * 3);
+        let result = tier.lookup_into(doc, &hash, |_info, _reader| {
+            panic!("the callback must not run for a mis-sized entry")
+        });
+        assert!(result.is_none());
+        assert!(!path.exists(), "a mis-sized entry is removed");
+    }
+
+    #[test]
+    fn lookup_into_rejects_zero_dimension_and_trailing_bytes() {
+        let dir = tempdir().expect("tempdir");
+        let tier = mk_tier(dir.path(), 0);
+        let doc = DocId([0x33; 32]);
+        for (i, (w, h, len)) in [(0u32, 16u32, 0usize), (16, 16, 16 * 16 * 3 + 1)]
+            .into_iter()
+            .enumerate()
+        {
+            let hash = ContentHash([0x40 + u8::try_from(i).unwrap(); 32]);
+            let path = plant_rgb_entry(&tier, doc, hash, w, h, len);
+            let result = tier.lookup_into(doc, &hash, |_info, _reader| {
+                panic!("the callback must not run for {w}×{h} over {len} bytes")
+            });
+            assert!(result.is_none());
+            assert!(!path.exists(), "{w}×{h} over {len} bytes is removed");
+        }
     }
 
     #[test]

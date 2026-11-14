@@ -236,6 +236,11 @@ pub enum CacheError {
     EmptyPayload,
     /// An image of one backend was passed to a cache of another.
     BackendMismatch,
+    /// The host refused an allocation of `bytes` for a host-tier slab.
+    HostAlloc {
+        /// Bytes requested.
+        bytes: usize,
+    },
 }
 
 impl From<BackendError> for CacheError {
@@ -269,6 +274,9 @@ impl std::fmt::Display for CacheError {
             ),
             Self::EmptyPayload => write!(f, "insert called with zero-length pixel buffer"),
             Self::BackendMismatch => write!(f, "image belongs to a cache of another backend"),
+            Self::HostAlloc { bytes } => {
+                write!(f, "host allocation of {bytes} B for a cache slab failed")
+            }
         }
     }
 }
@@ -281,7 +289,8 @@ impl std::error::Error for CacheError {
             Self::OverBudget { .. }
             | Self::EntryExceedsBudget { .. }
             | Self::EmptyPayload
-            | Self::BackendMismatch => None,
+            | Self::BackendMismatch
+            | Self::HostAlloc { .. } => None,
         }
     }
 }
