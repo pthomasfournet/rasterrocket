@@ -31,8 +31,9 @@ Every observed test is classified:
             registered limits (unexpected)
     XPASS   passes although registered (the entry is to be removed or tightened)
 
-A run fails on any FAIL, and on any XPASS under --strict.  With --update,
-the registry is rewritten from the run: a new or changed failure gets a
+A run fails on any FAIL, and on any XPASS under --strict, unless --update
+rewrote a registry from it.  With --update, the registry is rewritten
+from the run: a new or changed failure gets a
 seeded entry (limits 2 % above the observed values, rounded up to 0.01),
 an XPASS entry is removed, and an XFAIL entry and every entry for a test
 the run did not observe are kept as they are.
@@ -248,6 +249,25 @@ def is_fatal(results: Sequence[Result], *, strict: bool) -> bool:
     return counts[Verdict.FAIL] > 0 or (strict and counts[Verdict.XPASS] > 0)
 
 
+def run_is_fatal(
+    results: Sequence[Result],
+    registry: pathlib.Path | None,
+    *,
+    update: bool,
+    strict: bool,
+) -> bool:
+    """Return whether a harness run fails.
+
+    A run that rewrote `registry` from its results (`update` with a
+    registry) recorded every failure and does not fail; any other run fails
+    as `is_fatal` decides, including an `update` run without a registry,
+    which records nothing.
+    """
+    if update and registry is not None:
+        return False
+    return is_fatal(results, strict=strict)
+
+
 # ── file format ──────────────────────────────────────────────────────────────
 
 
@@ -461,8 +481,9 @@ def compare_main(args: argparse.Namespace) -> int:
         tile=args.tile_limit,
     )
     rows = _read_rows(args.rows, file_key(args.file))
+    registry = registry_path(args.registry)
     results = run_suite(
-        registry_path(args.registry),
+        registry,
         suite,
         [obs for _, _, obs in rows],
         limits,
@@ -476,7 +497,7 @@ def compare_main(args: argparse.Namespace) -> int:
             line += f"  [{r.why}]"
         print(line)
     counts = tally(results)
-    fatal = int(is_fatal(results, strict=args.strict) and not args.update)
+    fatal = int(run_is_fatal(results, registry, update=args.update, strict=args.strict))
     print(
         f"STATUS {overall(results)} {fatal} {counts[Verdict.FAIL]} "
         f"{counts[Verdict.XFAIL]} {counts[Verdict.XPASS]}"

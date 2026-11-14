@@ -119,6 +119,14 @@ class Outcome(unittest.TestCase):
         self.assertFalse(ex.is_fatal(self.results(v.XPASS), strict=False))
         self.assertTrue(ex.is_fatal(self.results(v.XPASS), strict=True))
 
+    def test_update_without_registry_still_fails(self) -> None:
+        """--update spares a failing run only when a registry recorded it."""
+        failed = self.results(ex.Verdict.FAIL)
+        registry = pathlib.Path("e.json")
+        self.assertFalse(ex.run_is_fatal(failed, registry, update=True, strict=True))
+        self.assertTrue(ex.run_is_fatal(failed, None, update=True, strict=False))
+        self.assertTrue(ex.run_is_fatal(failed, registry, update=False, strict=False))
+
 
 class Update(unittest.TestCase):
     """Rewriting the registry from a run."""
@@ -231,8 +239,14 @@ class FileFormat(unittest.TestCase):
 class CompareCommand(unittest.TestCase):
     """The `compare` command compare.sh runs."""
 
-    def run_compare(self, registry: pathlib.Path, rows: str, *extra: str) -> list[str]:
-        """Run the command on `rows`; return its output lines."""
+    def run_compare(
+        self, registry: pathlib.Path, rows: str, *extra: str, registry_arg: str | None = None
+    ) -> list[str]:
+        """Run the command on `rows`; return its output lines.
+
+        The rows file is written beside `registry`, which `--registry` names
+        unless `registry_arg` replaces it.
+        """
         rows_file = registry.parent / "rows.tsv"
         rows_file.write_text(rows, encoding="utf-8")
         cmd = [
@@ -241,7 +255,7 @@ class CompareCommand(unittest.TestCase):
             str(pathlib.Path(ex.__file__)),
             "compare",
             "--registry",
-            str(registry),
+            str(registry) if registry_arg is None else registry_arg,
             "--reference",
             "pdftoppm",
             "--dpi",
@@ -278,6 +292,15 @@ class CompareCommand(unittest.TestCase):
             surprise = self.run_compare(registry, fixed, "--strict")
             self.assertEqual(surprise[-1], "STATUS XPASS 1 0 1 1")
             self.assertTrue(surprise[1].startswith("XPASS    page-3"))
+
+    def test_update_without_registry_is_fatal(self) -> None:
+        """--update with the registry disabled records nothing and keeps the FAIL fatal."""
+        rows = "page-1\t1\tscored\t3.0\t20.0\tbad\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = pathlib.Path(tmp) / "e.json"
+            out = self.run_compare(registry, rows, "--update", registry_arg="")
+            self.assertEqual(out[-1], "STATUS FAIL 1 1 0 0")
+            self.assertFalse(registry.exists())
 
 
 # Stub renderers: each writes a white 2 x 2 binary PPM as page 1 of the

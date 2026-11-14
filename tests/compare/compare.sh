@@ -54,7 +54,8 @@
 # pages over the limits, expected or not.
 #
 # Exit code: 0 = no unexpected failure (and, with -S, no surprise pass);
-# 1 = otherwise, or an error.  With -U, 0 unless an error stopped the run.
+# 1 = otherwise, or an error.  With -U and a registry, 0 unless an error
+# stopped the run; -U with -E '' records nothing and exits as without -U.
 # Dry-run always exits 0.
 #
 # Several independent references are supported so that a disagreement can be

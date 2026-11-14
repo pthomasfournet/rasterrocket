@@ -477,7 +477,9 @@ def main() -> None:
     print(f"tables: {args.out / 'results.tsv'}, {args.out / 'pages.tsv'}")
     if args.expectations is not None and args.update_expectations:
         print(f"registry updated: {args.expectations}")
-    elif ex.is_fatal(every, strict=args.strict):
+    if ex.run_is_fatal(
+        every, args.expectations, update=args.update_expectations, strict=args.strict
+    ):
         sys.exit(1)
 
 
