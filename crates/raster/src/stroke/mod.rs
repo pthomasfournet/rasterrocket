@@ -81,12 +81,19 @@ pub fn stroke<P: Pixel>(
 /// hairline (`line_width == 0`) or a stroke that covers nothing.
 #[must_use]
 pub fn stroke_outline(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -> Option<XPath> {
+    let outline = stroke_outline_path(path, matrix, params)?;
+    Some(XPath::new(&outline, matrix, params.flatness, true))
+}
+
+/// The outline of a stroke of `path` with a positive line width, before
+/// flattening into an [`XPath`]; `None` for a hairline (`line_width == 0`)
+/// or a stroke that covers nothing.
+fn stroke_outline_path(path: &Path, matrix: &[f64; 6], params: &StrokeParams<'_>) -> Option<Path> {
     if params.line_width == 0.0 {
         return None;
     }
     let path = flattened_dashed(path, matrix, params)?;
-    let outline = make_stroke_path(&path, params.line_width, params);
-    Some(XPath::new(&outline, matrix, params.flatness, true))
+    Some(make_stroke_path(&path, params.line_width, params))
 }
 
 /// `path` flattened and dashed per `params`; `None` when nothing remains.
@@ -168,11 +175,7 @@ pub fn stroke_aa_scanner(
     params: &StrokeParams<'_>,
     clip: &Clip,
 ) -> Option<XPathScanner> {
-    if params.line_width == 0.0 {
-        return None;
-    }
-    let path = flattened_dashed(path, matrix, params)?;
-    let outline = make_stroke_path(&path, params.line_width, params);
+    let outline = stroke_outline_path(path, matrix, params)?;
     aa_scanner(&outline, matrix, params.flatness, clip, false)
 }
 
@@ -298,19 +301,12 @@ fn narrow_span_runs(
     height: u32,
     emit: &mut impl FnMut(i32, i32, i32),
 ) {
-    if y < 0 {
+    if !u32::try_from(y).is_ok_and(|y| y < height) {
         return;
     }
-    #[expect(clippy::cast_sign_loss, reason = "y >= 0 checked above")]
-    if (y as u32) >= height {
-        return;
-    }
-    // Clamp x to bitmap.
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "bitmap width fits in i32 in practice"
-    )]
-    let width_i = width as i32;
+    // Clamp x to the bitmap; a width beyond `i32` clamps to `i32::MAX`,
+    // past every `i32` column.
+    let width_i = i32::try_from(width).unwrap_or(i32::MAX);
 
     // The span is clamped to the bitmap in both branches: a clip rectangle
     // need not lie within it.
