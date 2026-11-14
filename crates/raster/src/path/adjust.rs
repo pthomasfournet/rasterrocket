@@ -55,7 +55,7 @@ pub(crate) struct XPathAdjust {
     pub x1a: f64,
     /// Right snap window upper bound (`adj1 + 0.01`).
     pub x1b: f64,
-    /// Right snap target (`rounded_adj1 - 0.01`).
+    /// Right snap target (`rounded_adj1 - far_inset`).
     pub x1: f64,
     /// The first of the two points of the edge at `adj1`.  Where the left
     /// and right windows overlap (edges less than 0.02 pixels apart) a
@@ -66,7 +66,8 @@ pub(crate) struct XPathAdjust {
 
 impl XPathAdjust {
     /// Construct an adjust record for two endpoint values `adj0 ≤ adj1`,
-    /// the edge at `adj1` beginning at point `edge1`.  When both round to the
+    /// the edge at `adj1` beginning at point `edge1`, its target lying
+    /// `far_inset` before its rounded boundary.  When both round to the
     /// same pixel boundary, the span is widened to the pixel after it.
     #[must_use]
     pub(crate) fn new(
@@ -76,6 +77,7 @@ impl XPathAdjust {
         adj0: f64,
         adj1: f64,
         edge1: usize,
+        far_inset: f64,
     ) -> Self {
         debug_assert!(adj0 <= adj1, "adj0 must be <= adj1");
 
@@ -98,7 +100,7 @@ impl XPathAdjust {
             xm: r0.midpoint(r1),
             x1a: adj1 - 0.01,
             x1b: adj1 + 0.01,
-            x1: r1 - 0.01,
+            x1: r1 - far_inset,
             edge1,
         }
     }
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn snaps_to_x0() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1, 0.01);
         let mut x = 1.005;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -173,7 +175,7 @@ mod tests {
 
     #[test]
     fn snaps_to_xm() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1, 0.01);
         let mut x = 2.0; // midpoint of [1,3]
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -182,7 +184,7 @@ mod tests {
 
     #[test]
     fn snaps_to_x1() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1, 0.01);
         let mut x = 3.005;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -192,7 +194,7 @@ mod tests {
 
     #[test]
     fn no_snap_outside_windows() {
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1, 0.01);
         let mut x = 5.0;
         let mut y = 0.0;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -201,7 +203,7 @@ mod tests {
 
     #[test]
     fn horizontal_adjusts_y() {
-        let adj = XPathAdjust::new(0, 1, false, 2.0, 4.0, 1);
+        let adj = XPathAdjust::new(0, 1, false, 2.0, 4.0, 1, 0.01);
         let mut x = 0.0;
         let mut y = 2.005;
         stroke_adjust(&adj, &mut x, &mut y);
@@ -213,7 +215,7 @@ mod tests {
     fn coinciding_edges_snap_apart_by_point() {
         // A zero-width rectangle's vertical edges: points 1–2 and 3–4, the
         // range 0..=4 closing on the second edge.
-        let adj = XPathAdjust::new(0, 4, true, 5.3, 5.3, 3);
+        let adj = XPathAdjust::new(0, 4, true, 5.3, 5.3, 3, 0.01);
         let snapped: Vec<f64> = (0..=4)
             .map(|i| {
                 let (mut x, mut y) = (5.3, 0.0);
@@ -223,7 +225,7 @@ mod tests {
             .collect();
         assert_eq!(snapped, [5.99, 5.0, 5.0, 5.99, 5.99]);
         // Apart edges snap by value, as before.
-        let apart = XPathAdjust::new(0, 4, true, 1.0, 3.0, 3);
+        let apart = XPathAdjust::new(0, 4, true, 1.0, 3.0, 3, 0.01);
         let (mut x, mut y) = (1.0, 0.0);
         stroke_adjust_point(&apart, 3, &mut x, &mut y);
         assert!((x - 1.0).abs() < 1e-10, "x={x}");
@@ -233,7 +235,7 @@ mod tests {
     fn snaps_only_within_open_interval() {
         // A coordinate exactly on the window boundary must NOT be snapped,
         // because the windows are open intervals: v ∈ (x0a, x0b), not [x0a, x0b].
-        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1);
+        let adj = XPathAdjust::new(0, 1, true, 1.0, 3.0, 1, 0.01);
         // x0a = adj0 - 0.01 = 0.99 — exactly on the boundary, must not snap.
         let boundary = adj.x0a;
         let mut x = boundary;

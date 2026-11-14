@@ -5,7 +5,7 @@ use super::super::gstate::ctm_multiply;
 use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey, cell_raster_bytes};
 use super::pixel_rect::PixelRect;
-use super::{MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
+use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
@@ -13,7 +13,7 @@ use color::{DeviceN8, Pixel, Rgb8};
 use pdf::Document;
 use raster::path::PathBuilder;
 use raster::pipe::ChannelMask;
-use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern};
+use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern, XPath};
 
 /// Resolve an uncoloured-tiling-pattern tint to a [`RasterColor`].
 ///
@@ -642,7 +642,9 @@ impl PageRenderer<'_> {
                 gs.fill_color = c.clone();
                 gs.stroke_color = c.clone();
             }
-            child.clip_to_user_rect(&desc.bbox);
+            // Cells abut: an aliased edge leaves no pixel on a shared edge
+            // partly covered by each of two cells.
+            child.clip_to_user_rect(&desc.bbox, false);
             child.execute_content_stream(cell.ops);
             child.gstate.restore();
             if child.budget_exceeded.is_some() {
@@ -658,12 +660,14 @@ impl PageRenderer<'_> {
 
     /// Intersect the clip with `bbox`, a rectangle `[x0, y0, x1, y1]` in
     /// user space, under the current CTM.  A non-finite device image of the
-    /// rectangle leaves the clip unchanged.
+    /// rectangle leaves the clip unchanged.  A rectangle not aligned with
+    /// the device axes clips with antialiased edges when `antialias` and the
+    /// clip is antialiased, otherwise with aliased ones.
     #[expect(
         clippy::float_cmp,
         reason = "only a quad whose corners align exactly takes the rectangle clip"
     )]
-    pub(super) fn clip_to_user_rect(&mut self, bbox: &[f64; 4]) {
+    pub(super) fn clip_to_user_rect(&mut self, bbox: &[f64; 4], antialias: bool) {
         let [x0, y0, x1, y1] = *bbox;
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.to_device(x, y));
         if corners
@@ -694,7 +698,16 @@ impl PageRenderer<'_> {
             let _ = pb.line_to(*x, *y);
         }
         let _ = pb.close(true);
-        self.clip_path_into_gstate(&pb.build(), false);
+        if antialias {
+            self.clip_path_into_gstate(&pb.build(), false);
+        } else {
+            let flatness = self.gstate.current().flatness.max(0.1);
+            let xpath = XPath::new(&pb.build(), &DEVICE_MATRIX, flatness, true);
+            self.gstate
+                .current_mut()
+                .clip
+                .clip_to_path_aliased(&xpath, false);
+        }
     }
 }
 

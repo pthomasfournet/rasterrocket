@@ -355,6 +355,68 @@ mod tests {
         }
     }
 
+    /// The red channel of column 8, rows 0..20, after an antialiased stroke
+    /// of width `w` along `y = at` with stroke adjustment `adjust`.
+    fn stroked_column(w: f64, at: f64, adjust: bool) -> Vec<u8> {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 20, 4, false);
+        let clip = Clip::new(0.0, 0.0, 16.0, 20.0, true);
+        let mut b = PathBuilder::new();
+        b.move_to(-2.0, at).unwrap();
+        b.line_to(18.0, at).unwrap();
+        let params = StrokeParams {
+            line_width: w,
+            stroke_adjust: adjust,
+            vector_antialias: true,
+            ..default_params()
+        };
+        let white = [255u8; 3];
+        stroke::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &b.build(),
+            &simple_pipe(),
+            &PipeSrc::Solid(&white),
+            &identity_matrix(),
+            &params,
+        );
+        (0..20).map(|y| bmp.row(y)[8].r).collect()
+    }
+
+    /// A one-unit stroke centred on a row boundary covers the two rows it
+    /// straddles by half each, and one centred on a row covers that row
+    /// alone.
+    #[test]
+    fn aa_stroke_covers_its_exact_area() {
+        let on_boundary = stroked_column(1.0, 10.0, false);
+        assert!(
+            on_boundary[9].abs_diff(on_boundary[10]) <= 1,
+            "{on_boundary:?}"
+        );
+        assert!(on_boundary[9].abs_diff(128) <= 1, "{on_boundary:?}");
+        assert_eq!(on_boundary[8] | on_boundary[11], 0, "{on_boundary:?}");
+
+        let on_row = stroked_column(1.0, 10.5, false);
+        assert_eq!(on_row[10], 255, "{on_row:?}");
+        assert_eq!(on_row[9] | on_row[11], 0, "{on_row:?}");
+
+        let thin = stroked_column(0.3, 10.5, false);
+        assert_eq!(thin[10], 77, "{thin:?}");
+        assert_eq!(thin[9] | thin[11], 0, "{thin:?}");
+    }
+
+    /// Stroke adjustment snaps a one-unit stroke to one whole row: its far
+    /// edge lands on the row boundary, not short of it.
+    #[test]
+    fn adjusted_aa_stroke_fills_whole_rows() {
+        let adjusted = stroked_column(1.0, 10.2, true);
+        assert_eq!(
+            adjusted.iter().filter(|&&v| v != 0).count(),
+            1,
+            "{adjusted:?}"
+        );
+        assert_eq!(adjusted.iter().copied().max(), Some(255), "{adjusted:?}");
+    }
+
     /// `stroke_narrow` should paint pixels along a diagonal line segment.
     #[test]
     fn stroke_narrow_draws_diagonal() {

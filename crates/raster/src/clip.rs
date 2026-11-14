@@ -3,30 +3,33 @@
 //!
 //! ## Sharing semantics
 //!
-//! The path-clip scanners form a persistent singly linked list, newest first:
-//! each node owns one [`XPathScanner`] and an [`Arc`] to the list it was
-//! intersected onto.  [`Clip::clone_shared`] (a graphics-state save) copies the
+//! The path clips form a persistent singly linked list, newest first: each
+//! node owns one region, an [`XPathScanner`] for an aliased clip or a
+//! [`CoverageTable`] for an antialiased one, and an [`Arc`] to the list it
+//! was intersected onto.  [`Clip::clone_shared`] (a graphics-state save) copies the
 //! head pointer, so a save costs O(1) whatever the number of path clips, and
 //! an intersection allocates one node shared by no other clip.  A list that
 //! reaches [`FOLD_DEPTH`] nodes is replaced by one node holding their
 //! intersection, so a list never holds more than `FOLD_DEPTH - 1` nodes.
-//! [`XPathScanner`] instances are immutable after construction, so sharing
+//! The regions are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no
 //! interior mutability in the shared objects.
 
 use std::sync::Arc;
 
-use crate::bitmap::AaBuf;
+use color::convert::div255;
+
+use crate::coverage::{AreaRaster, CoverageTable};
 use crate::scanner::XPathScanner;
-use crate::simd;
 use crate::types::{AA_SIZE, ceil_i32, floor_i32};
 use crate::xpath::XPath;
 
 /// Path clips a [`Clip`] holds at most: intersecting the one that reaches
-/// this many replaces the list with a single scanner of their intersection
-/// ([`XPathScanner::intersection`]), which every query answers exactly as
-/// the list did, so the per-span cost of a clip stays bounded however many
-/// paths it intersects.
+/// this many replaces the list with one region per kind, the intersection
+/// of the aliased scanners ([`XPathScanner::intersection`]) and the product
+/// of the coverage tables ([`CoverageTable::product`]), which every query
+/// answers as the list did, so the per-span cost of a clip stays bounded
+/// however many paths it intersects.
 const FOLD_DEPTH: usize = 8;
 
 // ── ClipResult ────────────────────────────────────────────────────────────────
@@ -49,8 +52,8 @@ pub enum ClipResult {
 ///
 /// The effective clip is the intersection of the rectangle and all path clips.
 pub struct Clip {
-    /// Whether anti-aliasing (supersampling) is enabled; scales coordinates by
-    /// [`AA_SIZE`] when testing path clips.
+    /// Whether path clips are antialiased: their regions are then
+    /// exact-area coverage tables, otherwise aliased scanners.
     pub antialias: bool,
     /// Left edge of the clip rectangle in floating-point device space (inclusive).
     pub x_min: f64,
@@ -79,8 +82,25 @@ pub struct Clip {
 
 /// One path clip of a [`Clip`] and the clips it was intersected with.
 struct ClipNode {
-    scanner: XPathScanner,
+    region: Region,
     parent: Option<Arc<Self>>,
+}
+
+/// The pixels a path clip passes.
+enum Region {
+    /// An aliased clip: the pixels its scanner covers, each fully.
+    Aliased(XPathScanner),
+    /// An antialiased clip: each pixel's exact-area coverage.
+    Area(CoverageTable),
+}
+
+impl Region {
+    fn translated(&self, dx: i32, dy: i32) -> Self {
+        match self {
+            Self::Aliased(s) => Self::Aliased(s.translated(dx, dy)),
+            Self::Area(t) => Self::Area(t.translated(dx, dy)),
+        }
+    }
 }
 
 impl Clip {
@@ -128,22 +148,8 @@ impl Clip {
     /// path clips' intersection tables shift by whole cells, so a pixel
     /// `(x, y)` passes them exactly when `(x − dx, y − dy)` passes this
     /// clip's; the rectangle's bounds move by `dx` and `dy` in `f64`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the shift in the supersampled AA grid overflows `i32`.
     #[must_use]
     pub fn translated(&self, dx: i32, dy: i32) -> Self {
-        let (sx, sy) = if self.antialias {
-            (
-                dx.checked_mul(AA_SIZE)
-                    .expect("Clip::translated: dx * AA_SIZE overflows i32"),
-                dy.checked_mul(AA_SIZE)
-                    .expect("Clip::translated: dy * AA_SIZE overflows i32"),
-            )
-        } else {
-            (dx, dy)
-        };
         let (fx, fy) = (f64::from(dx), f64::from(dy));
         let mut clip = Self {
             antialias: self.antialias,
@@ -163,9 +169,9 @@ impl Clip {
             clippy::needless_collect,
             reason = "the list iterates newest first and is rebuilt oldest first; its iterator is not double-ended"
         )]
-        let shifted: Vec<XPathScanner> = self.scanners().map(|s| s.translated(sx, sy)).collect();
-        clip.scanners = shifted.into_iter().rev().fold(None, |parent, scanner| {
-            Some(Arc::new(ClipNode { scanner, parent }))
+        let shifted: Vec<Region> = self.regions().map(|r| r.translated(dx, dy)).collect();
+        clip.scanners = shifted.into_iter().rev().fold(None, |parent, region| {
+            Some(Arc::new(ClipNode { region, parent }))
         });
         clip.recompute_int_bounds();
         clip
@@ -197,17 +203,25 @@ impl Clip {
     /// Intersect with an arbitrary path clip.
     ///
     /// If the path resolves to a simple axis-aligned rectangle (4 segments,
-    /// axis-aligned), it is reduced to `clip_to_rect`. Otherwise a new
-    /// [`XPathScanner`] is pushed onto the scanner stack, and a stack that
-    /// reaches [`FOLD_DEPTH`] scanners is folded into one.
+    /// axis-aligned), it is reduced to `clip_to_rect`. Otherwise its region
+    /// over the clip rectangle, a coverage table when the clip is
+    /// antialiased and a scanner otherwise, is pushed onto the list, and a
+    /// list that reaches [`FOLD_DEPTH`] regions is folded.
     ///
     /// An empty path forces the clip to be empty (nothing passes through).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the AA y-range arithmetic overflows `i32`.
-    /// In practice `y_max_i` is bounded by the bitmap height (≪ `i32::MAX / AA_SIZE`).
     pub fn clip_to_path(&mut self, xpath: &XPath, eo: bool) {
+        self.clip_to_path_as(xpath, eo, self.antialias);
+    }
+
+    /// [`clip_to_path`](Self::clip_to_path) with an aliased region whatever
+    /// the clip's antialiasing: a pixel passes when the path's closed
+    /// outline meets it, so clips of abutting paths leave no pixel of their
+    /// shared edge partly covered by both.
+    pub fn clip_to_path_aliased(&mut self, xpath: &XPath, eo: bool) {
+        self.clip_to_path_as(xpath, eo, false);
+    }
+
+    fn clip_to_path_as(&mut self, xpath: &XPath, eo: bool, antialias: bool) {
         if xpath.segs.is_empty() {
             // Force empty: nothing passes.
             self.x_max = self.x_min - 1.0;
@@ -220,32 +234,66 @@ impl Clip {
             self.clip_to_rect(rx0, ry0, rx1, ry1);
             return;
         }
-        // General path clip: compute scanline range in (possibly scaled) space.
-        let (y_lo, y_hi) = if self.antialias {
-            self.aa_row_range()
+        let region = if antialias {
+            Region::Area(self.coverage_of(xpath, eo))
         } else {
-            (self.y_min_i, self.y_max_i)
-        };
-        // The scanner is queried in AA space when antialiasing (see
-        // `aa_coords` and `clip_aa_line`), so it must be built from an
-        // AA-scaled copy; `xpath` itself stays in device space, which
-        // `detect_rect` above relies on.
-        let scanner = if self.antialias {
-            XPathScanner::new(&xpath.aa_scaled_copy(), eo, y_lo, y_hi)
-        } else {
-            XPathScanner::new(xpath, eo, y_lo, y_hi)
+            Region::Aliased(XPathScanner::new(xpath, eo, self.y_min_i, self.y_max_i))
         };
         self.scanners = Some(Arc::new(ClipNode {
-            scanner,
+            region,
             parent: self.scanners.take(),
         }));
-        if self.scanners().nth(FOLD_DEPTH - 1).is_some() {
-            let folded = XPathScanner::intersection(self.scanners());
-            self.scanners = Some(Arc::new(ClipNode {
-                scanner: folded,
-                parent: None,
+        if self.regions().nth(FOLD_DEPTH - 1).is_some() {
+            self.fold();
+        }
+    }
+
+    /// The exact-area coverage of `xpath` over the clip rectangle's pixels.
+    fn coverage_of(&self, xpath: &XPath, eo: bool) -> CoverageTable {
+        let Some((lx, hx, ly, hy)) = xpath.bounds() else {
+            return CoverageTable::empty();
+        };
+        let mut raster = AreaRaster::new(
+            self.x_min_i.max(floor_i32(lx)),
+            self.y_min_i.max(floor_i32(ly)),
+            self.x_max_i.min(floor_i32(hx)),
+            self.y_max_i.min(floor_i32(hy)),
+        );
+        raster.add_xpath(xpath);
+        CoverageTable::from_raster(&mut raster, eo)
+    }
+
+    /// Replace the path-clip list with one node per region kind holding
+    /// the conjunction of that kind's regions.
+    fn fold(&mut self) {
+        let aliased: Vec<&XPathScanner> = self
+            .regions()
+            .filter_map(|r| match r {
+                Region::Aliased(s) => Some(s),
+                Region::Area(_) => None,
+            })
+            .collect();
+        let tables: Vec<&CoverageTable> = self
+            .regions()
+            .filter_map(|r| match r {
+                Region::Area(t) => Some(t),
+                Region::Aliased(_) => None,
+            })
+            .collect();
+        let mut folded = None;
+        if !aliased.is_empty() {
+            folded = Some(Arc::new(ClipNode {
+                region: Region::Aliased(XPathScanner::intersection(aliased)),
+                parent: folded,
             }));
         }
+        if !tables.is_empty() {
+            folded = Some(Arc::new(ClipNode {
+                region: Region::Area(CoverageTable::product(tables)),
+                parent: folded,
+            }));
+        }
+        self.scanners = folded;
     }
 
     /// The clip's rows in the supersampled AA grid, inclusive:
@@ -347,27 +395,49 @@ impl Clip {
         if result != ClipResult::AllInside {
             return result;
         }
-        for scanner in self.scanners() {
-            let (sx0, sx1, sy) = aa_coords(x0, x1, y, self.antialias);
-            if !scanner.test_span(sx0, sx1, sy) {
-                return ClipResult::Partial;
-            }
+        let inside = |r: &Region| match r {
+            Region::Aliased(s) => s.test_span(x0, x1, y),
+            Region::Area(t) => t.is_full(x0, x1, y),
+        };
+        if self.regions().all(inside) {
+            ClipResult::AllInside
+        } else {
+            ClipResult::Partial
         }
-        ClipResult::AllInside
     }
 
-    /// Clip an AA buffer row, zeroing bits outside the clip region.
-    ///
-    /// Each path-clip
-    /// scanner intersects its coverage with the sub-samples already in
-    /// `aa_buf` over `[*x0, *x1]`, and the output span is then clamped to the
-    /// integer clip bounds.
-    pub fn clip_aa_line(&self, aa_buf: &mut AaBuf, x0: &mut i32, x1: &mut i32, y: i32) {
-        for scanner in self.scanners() {
-            scanner.clip_aa_line(aa_buf, *x0, *x1, y);
+    /// Scale `out[i]`, a coverage of pixel `(x + i, y)`, by the clip's
+    /// coverage of that pixel: 0 outside the rectangle and outside an
+    /// aliased path clip, `div255(out · c)` for the coverage `c` of each
+    /// antialiased one.
+    pub fn mul_row(&self, y: i32, x: i32, out: &mut [u8]) {
+        let len = i64::try_from(out.len()).unwrap_or(i64::MAX);
+        let end = i64::from(x) + len - 1;
+        if y < self.y_min_i || y > self.y_max_i {
+            out.fill(0);
+            return;
         }
-        *x0 = (*x0).max(self.x_min_i);
-        *x1 = (*x1).min(self.x_max_i);
+        // Columns outside the rectangle.
+        let lo = (i64::from(self.x_min_i) - i64::from(x)).clamp(0, len);
+        let hi = (end.min(i64::from(self.x_max_i)) - i64::from(x) + 1).clamp(lo, len);
+        let (lo, hi) = (
+            usize::try_from(lo).unwrap_or(0),
+            usize::try_from(hi).unwrap_or(0),
+        );
+        out[..lo].fill(0);
+        out[hi..].fill(0);
+        for region in self.regions() {
+            match region {
+                Region::Area(t) => t.mul_row(y, x, out),
+                Region::Aliased(s) => {
+                    for (px, o) in (x..).zip(out.iter_mut()) {
+                        if *o != 0 && !s.test(px, y) {
+                            *o = 0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
@@ -387,16 +457,31 @@ impl Clip {
         self.y_max_i = ceil_i32(self.y_max) - 1;
     }
 
+    /// Whether `(x, y)` passes every path clip: it lies in each aliased
+    /// region, and the product of the antialiased regions' coverages is at
+    /// least one half.
     fn test_clip_paths(&self, x: i32, y: i32) -> bool {
-        let (tx, _, ty) = aa_coords(x, x, y, self.antialias);
-        self.scanners().all(|s| s.test(tx, ty))
+        let mut coverage = u8::MAX;
+        for region in self.regions() {
+            match region {
+                Region::Aliased(s) => {
+                    if !s.test(x, y) {
+                        return false;
+                    }
+                }
+                Region::Area(t) => {
+                    coverage = div255(u32::from(coverage) * u32::from(t.coverage(x, y)));
+                }
+            }
+        }
+        coverage >= 128
     }
 
-    /// The path-clip scanners, newest first.  Every consumer intersects their
-    /// regions, so the order does not affect any result.
-    fn scanners(&self) -> impl Iterator<Item = &XPathScanner> {
+    /// The path-clip regions, newest first.  Every consumer intersects them,
+    /// so the order does not affect any result.
+    fn regions(&self) -> impl Iterator<Item = &Region> {
         std::iter::successors(self.scanners.as_deref(), |node| node.parent.as_deref())
-            .map(|node| &node.scanner)
+            .map(|node| &node.region)
     }
 }
 
@@ -407,19 +492,15 @@ impl Clip {
 /// The span's bounding box is classified once against the clip; rows and
 /// then pixels are resolved only as finely as that classification requires.
 /// A row the clip edge crosses yields the same 0–255 shape a fill's edge
-/// would: with an antialiased clip, every sub-sample of the span is set,
-/// intersected with the clip by [`Clip::clip_aa_line`], counted per pixel and
-/// mapped through the AA gamma table.  A rectangle-only clip has integer
-/// bounds, so its columns come out fully covered or uncovered.  A
-/// non-antialiased clip uses the binary pixel test.
+/// would: the clip's exact-area coverage ([`Clip::mul_row`] of full
+/// coverage).  A rectangle-only clip has integer bounds, so its columns come
+/// out fully covered or uncovered, as do those of an aliased path clip.
 pub struct ClipRows<'a> {
     clip: &'a Clip,
     bbox: ClipResult,
     /// Inclusive column span, clamped to non-negative columns.
     x0: i32,
     x1: i32,
-    /// Sub-sample scratch, allocated on the first row the clip edge crosses.
-    aa_buf: Option<AaBuf>,
     /// Per-column coverage of the current partial row, indexed from `x0`.
     coverage: Vec<u8>,
 }
@@ -440,7 +521,6 @@ impl<'a> ClipRows<'a> {
             bbox,
             x0,
             x1,
-            aa_buf: None,
             coverage: Vec::new(),
         }
     }
@@ -489,39 +569,9 @@ impl<'a> ClipRows<'a> {
             return;
         }
         self.coverage.resize((hi - self.x0 + 1) as usize, 0);
-        if !self.clip.antialias {
-            for (x, cov) in (lo..=hi).zip(&mut self.coverage[(lo - self.x0) as usize..]) {
-                if self.clip.test(x, y) {
-                    *cov = 255;
-                }
-            }
-            return;
-        }
-        let aa_size = AA_SIZE as usize;
-        let buf = self
-            .aa_buf
-            .get_or_insert_with(|| AaBuf::new(hi as usize + 1));
-        buf.clear();
-        for sub_row in 0..buf.height {
-            buf.set_span(sub_row, lo as usize * aa_size, (hi as usize + 1) * aa_size);
-        }
-        let (mut cx0, mut cx1) = (lo, hi);
-        self.clip.clip_aa_line(buf, &mut cx0, &mut cx1, y);
-        let (cx0, cx1) = (cx0.max(lo), cx1.min(hi));
-        if cx0 > cx1 {
-            return;
-        }
-        let rows = [
-            buf.row_slice(0),
-            buf.row_slice(1),
-            buf.row_slice(2),
-            buf.row_slice(3),
-        ];
-        let span = &mut self.coverage[(cx0 - self.x0) as usize..=(cx1 - self.x0) as usize];
-        simd::aa_coverage_span(rows, cx0 as usize, span);
-        // An uncovered span maps to zeros, which callers skip; the
-        // any-covered flag adds nothing here.
-        let _any_covered = simd::apply_aa_gamma(span);
+        let span = &mut self.coverage[(lo - self.x0) as usize..];
+        span.fill(u8::MAX);
+        self.clip.mul_row(y, lo, span);
     }
 }
 
@@ -553,40 +603,6 @@ impl RowClip<'_> {
                 .copied()
                 .unwrap_or(0),
         }
-    }
-}
-
-// ── AA coordinate scaling ─────────────────────────────────────────────────────
-
-/// Scale pixel coordinates to the supersampled AA grid when `antialias` is set.
-///
-/// Returns `(sx0, sx1, sy)` where:
-/// - `sx0 = x0 * AA_SIZE` if AA, else `x0`
-/// - `sx1 = x1 * AA_SIZE + (AA_SIZE - 1)` if AA, else `x1`
-/// - `sy  = y  * AA_SIZE` if AA, else `y`
-///
-/// The expanded `sx1` covers all supersampled sub-pixels within device pixel `x1`.
-///
-/// # Panics
-///
-/// Panics if a scaled coordinate overflows `i32`; pixel coordinates are bounded
-/// by the bitmap dimensions, which are far below `i32::MAX / AA_SIZE`.
-#[inline]
-fn aa_coords(x0: i32, x1: i32, y: i32, antialias: bool) -> (i32, i32, i32) {
-    if antialias {
-        let sx0 = x0
-            .checked_mul(AA_SIZE)
-            .expect("aa_coords: x0 * AA_SIZE overflows i32");
-        let sx1 = x1
-            .checked_mul(AA_SIZE)
-            .and_then(|v| v.checked_add(AA_SIZE - 1))
-            .expect("aa_coords: x1 * AA_SIZE + (AA_SIZE-1) overflows i32");
-        let sy = y
-            .checked_mul(AA_SIZE)
-            .expect("aa_coords: y * AA_SIZE overflows i32");
-        (sx0, sx1, sy)
-    } else {
-        (x0, x1, y)
     }
 }
 
@@ -655,8 +671,8 @@ mod tests {
     use super::*;
     use crate::path::PathBuilder;
 
-    /// An antialiased path clip must select the device-space region the
-    /// path covers, not that region scaled down by `AA_SIZE`.
+    /// An antialiased path clip selects the device-space region the path
+    /// covers.
     #[test]
     fn aa_path_clip_selects_device_space_region() {
         let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
@@ -672,11 +688,7 @@ mod tests {
         let path = builder.build();
         let xpath = XPath::new(&path, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
         clip.clip_to_path(&xpath, false);
-        assert_eq!(
-            clip.scanners().count(),
-            1,
-            "diamond must become a scanner clip"
-        );
+        assert_eq!(clip.regions().count(), 1, "diamond must become a path clip");
 
         assert!(clip.test(16, 16), "diamond centre must be inside the clip");
         assert!(clip.test(16, 8), "upper interior point must be inside");
@@ -689,7 +701,7 @@ mod tests {
         );
         assert!(
             !clip.test(4, 4),
-            "point inside the AA_SIZE-shrunk ghost of the diamond must be clipped"
+            "point outside the diamond must be clipped"
         );
     }
 
@@ -763,7 +775,7 @@ mod tests {
                             single
                         })
                         .collect();
-                    assert!(folded.scanners().count() < FOLD_DEPTH);
+                    assert!(folded.regions().count() < FOLD_DEPTH);
                     let inside = (0..64)
                         .flat_map(|y| (0..64).map(move |x| (x, y)))
                         .filter(|&(x, y)| folded.test(x, y))
@@ -772,7 +784,7 @@ mod tests {
                         partly_inside += 1;
                     }
                     for y in -2..66 {
-                        for x in -2..66 {
+                        for x in (-2..66).filter(|_| !antialias) {
                             assert_eq!(
                                 folded.test(x, y),
                                 singles.iter().all(|c| c.test(x, y)),
@@ -801,35 +813,21 @@ mod tests {
                                 );
                             }
                         }
-                        if antialias {
-                            let full = |buf: &mut AaBuf| {
-                                for row in 0..buf.height {
-                                    buf.set_span(row, 0, 70 * AA_SIZE as usize);
-                                }
-                            };
-                            let mut got = AaBuf::new(70);
-                            full(&mut got);
-                            let (mut gx0, mut gx1) = (0, 69);
-                            folded.clip_aa_line(&mut got, &mut gx0, &mut gx1, y);
-                            let mut want = AaBuf::new(70);
-                            full(&mut want);
-                            // Every scanner of a clip is given the caller's
-                            // columns; only the result is clamped.
-                            let (mut wx0, mut wx1) = (0, 69);
-                            for single in &singles {
-                                let (mut x0, mut x1) = (0, 69);
-                                single.clip_aa_line(&mut want, &mut x0, &mut x1, y);
-                                (wx0, wx1) = (x0, x1);
-                            }
-                            assert_eq!((gx0, gx1), (wx0, wx1));
-                            for row in 0..AA_SIZE as usize {
-                                for x in 0..70 * AA_SIZE as usize {
-                                    assert_eq!(
-                                        aa_bit(&got, row, x),
-                                        aa_bit(&want, row, x),
-                                        "clip_aa_line y {y} sub-row {row} sample {x}"
-                                    );
-                                }
+                        // The folded coverage is the product of the singles',
+                        // rounded once per factor in another order.
+                        let mut got = [u8::MAX; 70];
+                        folded.mul_row(y, -2, &mut got);
+                        let mut want = [u8::MAX; 70];
+                        for single in &singles {
+                            single.mul_row(y, -2, &mut want);
+                        }
+                        for (x, (&g, &w)) in (-2..).zip(got.iter().zip(&want)) {
+                            assert!(
+                                g.abs_diff(w) <= u8::try_from(FOLD_DEPTH).unwrap(),
+                                "mul_row ({x}, {y}): {g} vs {w}, aa {antialias}"
+                            );
+                            if !antialias {
+                                assert_eq!(g, w, "mul_row ({x}, {y})");
                             }
                         }
                     }
@@ -843,64 +841,50 @@ mod tests {
         );
     }
 
-    /// Whether AA sub-sample `x` of sub-row `row` is set.
-    fn aa_bit(buf: &AaBuf, row: usize, x: usize) -> bool {
-        buf.get_byte(row, x / 8) & (0x80 >> (x % 8)) != 0
+    /// The clip's coverage of pixels `x..x + n` on row `y`.
+    fn coverage_row(clip: &Clip, y: i32, x: i32, n: usize) -> Vec<u8> {
+        let mut row = vec![u8::MAX; n];
+        clip.mul_row(y, x, &mut row);
+        row
     }
 
-    /// `clip_aa_line` intersects the row already in the buffer with the
-    /// clip: sub-samples inside the path clip keep their value, those outside
-    /// are cleared, and sub-samples that were never set stay unset.
+    /// `mul_row` scales the coverage already in the row by the clip's:
+    /// pixels inside the path clip keep their value, those outside become
+    /// 0, pixels on its edge take the product.
     #[test]
-    fn clip_aa_line_intersects_with_the_buffer() {
+    fn mul_row_scales_by_the_clip_coverage() {
         let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
-        clip_to_diamond(&mut clip, 16.0, 16.0, 14.0);
-
-        // Row 16 crosses the diamond over device x ≈ 2..30 (AA 8..120).  The
-        // buffer holds a fill over AA 40..200 only.
-        let mut buf = AaBuf::new(64);
-        for row in 0..buf.height {
-            buf.set_span(row, 40, 200);
-        }
-        let (mut x0, mut x1) = (0, 63);
-        clip.clip_aa_line(&mut buf, &mut x0, &mut x1, 16);
-
-        for row in 0..buf.height {
-            assert!(
-                !aa_bit(&buf, row, 20),
-                "inside clip, never set: stays clear"
-            );
-            assert!(aa_bit(&buf, row, 64), "inside clip and fill: kept");
-            assert!(!aa_bit(&buf, row, 160), "fill outside the clip: cleared");
-        }
+        clip_to_diamond(&mut clip, 16.0, 16.5, 14.0);
+        let mut row = [0u8; 64];
+        row[10..50].fill(200);
+        clip.mul_row(16, 0, &mut row);
+        assert_eq!(row[5], 0, "inside the clip, never covered");
+        assert_eq!(row[16], 200, "inside the clip and the row");
+        assert_eq!(row[40], 0, "row coverage outside the clip");
+        let edge = coverage_row(&clip, 16, 2, 1)[0];
+        assert!(
+            (1..255).contains(&edge),
+            "the diamond's tip is partly covered: {edge}"
+        );
     }
 
-    /// Nested path clips intersect: a sub-sample survives only when every
+    /// Nested path clips multiply: a pixel keeps coverage only where every
     /// clip covers it.
     #[test]
-    fn clip_aa_line_nested_clips_intersect() {
+    fn nested_clips_multiply() {
         let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
         clip_to_diamond(&mut clip, 16.0, 16.0, 14.0);
         clip_to_diamond(&mut clip, 28.0, 16.0, 14.0);
-        assert_eq!(clip.scanners().count(), 2);
-
-        let mut buf = AaBuf::new(64);
-        for row in 0..buf.height {
-            buf.set_span(row, 0, 256);
-        }
-        let (mut x0, mut x1) = (0, 63);
-        clip.clip_aa_line(&mut buf, &mut x0, &mut x1, 16);
-
-        for row in 0..buf.height {
-            assert!(!aa_bit(&buf, row, 4 * 8), "only in the first diamond");
-            assert!(aa_bit(&buf, row, 4 * 22), "in both diamonds");
-            assert!(!aa_bit(&buf, row, 4 * 36), "only in the second diamond");
-        }
+        assert_eq!(clip.regions().count(), 2);
+        let row = coverage_row(&clip, 16, 0, 64);
+        assert_eq!(row[8], 0, "only in the first diamond");
+        assert_eq!(row[22], 255, "in both diamonds");
+        assert_eq!(row[36], 0, "only in the second diamond");
     }
 
     /// A translated clip passes and clips exactly what the clip passes and
-    /// clips at the shifted coordinates, pixel by pixel and sub-sample by
-    /// sub-sample.
+    /// clips at the shifted coordinates, pixel by pixel, with the same
+    /// coverage.
     #[test]
     fn translated_clip_tests_the_shifted_pixels() {
         let (dx, dy) = (-9, -5);
@@ -922,29 +906,12 @@ mod tests {
                     assert_eq!(moved.test(x + dx, y + dy), clip.test(x, y), "({x}, {y})");
                 }
             }
-            if antialias {
-                for y in 0..48 {
-                    let mut a = AaBuf::new(64);
-                    let mut b = AaBuf::new(64);
-                    for row in 0..a.height {
-                        a.set_span(row, 0, 256);
-                        b.set_span(row, 0, 256);
-                    }
-                    let (mut ax0, mut ax1) = (9, 63);
-                    clip.clip_aa_line(&mut a, &mut ax0, &mut ax1, y);
-                    let (mut bx0, mut bx1) = (0, 54);
-                    moved.clip_aa_line(&mut b, &mut bx0, &mut bx1, y + dy);
-                    assert_eq!((ax0 + dx, ax1 + dx), (bx0, bx1), "row {y}");
-                    for row in 0..a.height {
-                        for sx in 36..256 {
-                            assert_eq!(
-                                aa_bit(&a, row, sx),
-                                aa_bit(&b, row, sx - 36),
-                                "row {y}, sub-row {row}, sub-sample {sx}"
-                            );
-                        }
-                    }
-                }
+            for y in 0..48 {
+                assert_eq!(
+                    coverage_row(&clip, y, 0, 64),
+                    coverage_row(&moved, y + dy, dx, 64),
+                    "row {y}, aa {antialias}"
+                );
             }
         }
     }
@@ -1006,8 +973,8 @@ mod tests {
         assert_eq!(head.map(Arc::strong_count), Some(2));
 
         clip_to_diamond(&mut saved, 10.0, 32.0, 6.0);
-        assert_eq!(c.scanners().count(), 3);
-        assert_eq!(saved.scanners().count(), 4);
+        assert_eq!(c.regions().count(), 3);
+        assert_eq!(saved.regions().count(), 4);
         // (32, 32) is inside the three shared diamonds but outside the
         // fourth, (10, 32) the other way round.
         assert!(c.test(32, 32) && !saved.test(32, 32));
@@ -1023,23 +990,9 @@ mod tests {
         let mut c = Clip::new(0.0, 0.0, 4.0, 4.0, false);
         for _ in 0..10_000 {
             clip_to_diamond(&mut c, 2.0, 2.0, 1.5);
-            assert!(c.scanners().count() < FOLD_DEPTH);
+            assert!(c.regions().count() < FOLD_DEPTH);
         }
         assert!(c.test(2, 2));
-    }
-
-    #[test]
-    fn aa_coords_non_aa_passthrough() {
-        assert_eq!(aa_coords(3, 7, 5, false), (3, 7, 5));
-    }
-
-    #[test]
-    fn aa_coords_aa_scales() {
-        // AA_SIZE = 4
-        // sx0 = 3 * 4 = 12
-        // sx1 = 7 * 4 + 3 = 31
-        // sy  = 5 * 4 = 20
-        assert_eq!(aa_coords(3, 7, 5, true), (12, 31, 20));
     }
 
     /// `inside_runs` yields the maximal runs inside the clip, including runs

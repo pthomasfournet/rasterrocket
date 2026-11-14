@@ -21,7 +21,7 @@
 //! - `scanner` — [`XPathScanner`] and [`crate::ScanIterator`] (scanline span emission)
 //! - [`clip`] — [`Clip`] (rect + arbitrary path clip stack)
 //! - [`coverage`] — exact-area coverage ([`coverage::AreaRaster`], [`coverage::CoverageTable`])
-//! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and 4× antialiased
+//! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and exact-area antialiased
 //! - [`stroke`](mod@stroke) — stroke-to-path conversion and stroking
 //! - [`glyph`] — glyph bitmap blitting and fill
 //! - [`shading`] — axial, radial, function and Gouraud shadings
@@ -74,4 +74,4 @@ pub use simd::{blend_solid_gray8, blend_solid_rgb8, composite_aa_rgb8_opaque, un
 pub use stroke::{StrokeParams, hairline_runs, stroke, stroke_aa_scanner, stroke_outline};
 pub use tiling::{CELL_PHASES, CellPhase, Lattice, TiledPattern};
 pub use types::*;
-pub use xpath::{XPath, XPathFlags, XPathSeg};
+pub use xpath::{PixelModel, XPath, XPathFlags, XPathSeg};

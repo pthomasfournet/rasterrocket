@@ -10,20 +10,22 @@
 //!
 //! # AA (vector antialias) mode
 //!
-//! When `vector_antialias` is `true` the path is scaled 4× in `XPath` (`aa_scale`),
-//! the scanner operates in 4× AA coordinates, `render_aa_line` fills the `AaBuf`,
-//! the clip AA-masks the buf, and then `draw_aa_line` reads the 4-bit coverage
-//! count (0..16) through the gamma LUT `AA_GAMMA` and composites the row.
+//! When `vector_antialias` is `true` the path is scan-converted by
+//! [`AreaRaster`] into each pixel's exact-area coverage over the clip
+//! rectangle, the coverage of each row is scaled by the clip's
+//! ([`Clip::mul_row`]), and the row is composited with the coverage as its
+//! shape: runs of full coverage without a shape, the rest with one.
 
-use crate::bitmap::{AaBuf, Bitmap};
+use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
+use crate::coverage::AreaRaster;
 use crate::path::Path;
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
 use crate::scanner::iter::ScanIterator;
 use crate::simd;
-use crate::types::AA_SIZE;
-use crate::xpath::XPath;
+use crate::types::floor_i32;
+use crate::xpath::{PixelModel, XPath};
 use color::Pixel;
 
 /// Non-zero winding fill.
@@ -101,105 +103,179 @@ fn fill_impl<P: Pixel>(
         return;
     }
 
-    let scanner = if vector_antialias {
-        aa_scanner(path, matrix, flatness, clip, eo)
-    } else {
-        let mut xpath = XPath::new(path, matrix, flatness, true);
-        xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
-        let scanner = XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i);
-        (!scanner.is_empty()).then_some(scanner)
-    };
-    let Some(scanner) = scanner else {
+    if vector_antialias {
+        area_fill::<P>(bitmap, clip, path, pipe, src, matrix, flatness, eo);
         return;
-    };
+    }
 
-    // Compute pixel-space bbox from scanner.
-    let (x_min_i, y_min_i, x_max_i, y_max_i) = if vector_antialias {
-        (
-            scanner.x_min.div_euclid(AA_SIZE),
-            scanner.y_min.div_euclid(AA_SIZE),
-            scanner.x_max.div_euclid(AA_SIZE),
-            scanner.y_max.div_euclid(AA_SIZE),
-        )
-    } else {
-        (scanner.x_min, scanner.y_min, scanner.x_max, scanner.y_max)
-    };
-
-    let clip_res = clip.test_rect(x_min_i, y_min_i, x_max_i, y_max_i);
+    let mut xpath = XPath::new(path, matrix, flatness, true);
+    xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
+    let scanner = XPathScanner::new(&xpath, eo, clip.y_min_i, clip.y_max_i);
+    if scanner.is_empty() {
+        return;
+    }
+    let clip_res = clip.test_rect(scanner.x_min, scanner.y_min, scanner.x_max, scanner.y_max);
     if clip_res == ClipResult::AllOutside {
         return;
     }
 
-    if vector_antialias {
-        let bitmap_width = bitmap.width as usize;
-        let mut aa_buf = AaBuf::new(bitmap_width);
-        // Per-row shape scratch, reused across rows — `draw_aa_line`
-        // sizes and zero-fills it, avoiding a heap allocation per
-        // output row.
-        let mut shape_scratch = Vec::new();
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "bitmap.width ≤ i32::MAX in practice; zero checked above scanner.is_empty()"
+    )]
+    let width_i = bitmap.width as i32;
 
-        // `render_aa_line` and `clip_aa_line` take a device-pixel row and expand
-        // it into the four AA sub-rows internally. `scanner` is built from an
-        // `aa_scale()`'d path, so its bounds are in AA space and divide down to
-        // pixel rows here.
-        for y in y_min_i..=y_max_i {
-            let (mut x0, mut x1) = (x_min_i, x_max_i);
-
-            // Clears `aa_buf` on entry, then writes all four sub-rows of row `y`.
-            scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
-
-            if clip_res != ClipResult::AllInside {
-                clip.clip_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
-            }
-
-            #[expect(
-                clippy::cast_sign_loss,
-                reason = "y ≥ 0 since scanner.y_min ≥ 0 and AA_SIZE > 0"
-            )]
-            if x0 <= x1 && y >= 0 && (y as u32) < bitmap.height {
-                draw_aa_line::<P>(bitmap, pipe, src, &aa_buf, &mut shape_scratch, x0, x1, y);
-            }
+    // Iterate only over scanlines that have at least one intersection —
+    // skips empty rows in the bounding box without touching the fill loop.
+    for y in scanner.nonempty_rows() {
+        #[expect(clippy::cast_sign_loss, reason = "cast after y < 0 guard")]
+        if y < 0 || (y as u32) >= bitmap.height {
+            continue;
         }
-    } else {
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "bitmap.width ≤ i32::MAX in practice; zero checked above scanner.is_empty()"
-        )]
-        let width_i = bitmap.width as i32;
-
-        // Iterate only over scanlines that have at least one intersection —
-        // skips empty rows in the bounding box without touching the fill loop.
-        for y in scanner.nonempty_rows() {
-            #[expect(clippy::cast_sign_loss, reason = "cast after y < 0 guard")]
-            if y < 0 || (y as u32) >= bitmap.height {
+        for (x0, x1) in ScanIterator::new(&scanner, y) {
+            // The span is clamped to the bitmap in both branches: a clip
+            // rectangle need not lie within it.
+            let (sx0, sx1) = if clip_res == ClipResult::AllInside {
+                (x0.max(0), x1.min(width_i - 1))
+            } else {
+                (
+                    x0.max(clip.x_min_i).max(0),
+                    x1.min(clip.x_max_i).min(width_i - 1),
+                )
+            };
+            if sx0 > sx1 {
                 continue;
             }
-            for (x0, x1) in ScanIterator::new(&scanner, y) {
-                // The span is clamped to the bitmap in both branches: a clip
-                // rectangle need not lie within it.
-                let (sx0, sx1) = if clip_res == ClipResult::AllInside {
-                    (x0.max(0), x1.min(width_i - 1))
-                } else {
-                    (
-                        x0.max(clip.x_min_i).max(0),
-                        x1.min(clip.x_max_i).min(width_i - 1),
-                    )
-                };
-                if sx0 > sx1 {
-                    continue;
-                }
-                if clip_res == ClipResult::AllInside
-                    || clip.test_span(sx0, sx1, y) == ClipResult::AllInside
-                {
-                    pipe::render_bitmap_span(bitmap, pipe, src, None, sx0, sx1, y);
-                } else {
-                    for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
-                        pipe::render_bitmap_span(bitmap, pipe, src, None, rx0, rx1, y);
-                    }
+            if clip_res == ClipResult::AllInside
+                || clip.test_span(sx0, sx1, y) == ClipResult::AllInside
+            {
+                pipe::render_bitmap_span(bitmap, pipe, src, None, sx0, sx1, y);
+            } else {
+                for (rx0, rx1) in clip.inside_runs(sx0, sx1, y) {
+                    pipe::render_bitmap_span(bitmap, pipe, src, None, rx0, rx1, y);
                 }
             }
         }
     }
+}
+
+/// The exact-area rasteriser of `xpath` over its pixels inside the clip
+/// rectangle and the `width × height` bitmap, its segments added; `None`
+/// when no such pixel exists.
+fn area_raster(xpath: &XPath, clip: &Clip, width: u32, height: u32) -> Option<AreaRaster> {
+    let (lx, hx, ly, hy) = xpath.bounds()?;
+    let last = |n: u32| i32::try_from(n).unwrap_or(i32::MAX).saturating_sub(1);
+    let x0 = clip.x_min_i.max(0).max(floor_i32(lx));
+    let y0 = clip.y_min_i.max(0).max(floor_i32(ly));
+    let x1 = clip.x_max_i.min(last(width)).min(floor_i32(hx));
+    let y1 = clip.y_max_i.min(last(height)).min(floor_i32(hy));
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    let mut raster = AreaRaster::new(x0, y0, x1, y1);
+    raster.add_xpath(xpath);
+    Some(raster)
+}
+
+/// Antialiased fill: exact-area coverage, scaled by the clip's, composited
+/// row by row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
+)]
+fn area_fill<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    clip: &Clip,
+    path: &Path,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    matrix: &[f64; 6],
+    flatness: f64,
+    eo: bool,
+) {
+    let mut xpath = XPath::for_model(path, matrix, flatness, true, PixelModel::Area);
+    xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
+    let Some(mut raster) = area_raster(&xpath, clip, bitmap.width, bitmap.height) else {
+        return;
+    };
+    let clipped = !clip.is_rect();
+    let mut scratch = Vec::new();
+    raster.rows(eo, |y, x, coverage| {
+        if clipped {
+            scratch.clear();
+            scratch.extend_from_slice(coverage);
+            clip.mul_row(y, x, &mut scratch);
+            draw_coverage_row::<P>(bitmap, pipe, src, &scratch, x, y);
+        } else {
+            draw_coverage_row::<P>(bitmap, pipe, src, coverage, x, y);
+        }
+    });
+}
+
+/// Runs of at least this many fully covered pixels are composited without
+/// a shape; shorter ones stay in the surrounding shaped span.
+const MIN_SOLID_RUN: usize = 16;
+
+/// Composite `coverage[i]` as the shape of pixel `(x + i, y)`.  Runs of
+/// [`MIN_SOLID_RUN`] or more fully covered pixels are composited with no
+/// shape, uncovered runs as long are skipped, and the pixels between them
+/// with their coverage as the shape.
+fn draw_coverage_row<P: Pixel>(
+    bitmap: &mut Bitmap<P>,
+    pipe: &PipeState<'_>,
+    src: &PipeSrc<'_>,
+    coverage: &[u8],
+    x0: i32,
+    row: i32,
+) {
+    let column = |at: usize| x0.saturating_add(i32::try_from(at).unwrap_or(i32::MAX));
+    let run_of =
+        |from: usize, value: u8| coverage[from..].iter().take_while(|&&c| c == value).count();
+    let flush = |bitmap: &mut Bitmap<P>, from: Option<usize>, to: usize| {
+        if let Some(from) = from
+            && from < to
+        {
+            let shape = &coverage[from..to];
+            pipe::render_bitmap_span::<P>(
+                bitmap,
+                pipe,
+                src,
+                Some(shape),
+                column(from),
+                column(to - 1),
+                row,
+            );
+        }
+    };
+    let mut shaped_from = None;
+    let mut at = 0;
+    while at < coverage.len() {
+        let value = coverage[at];
+        if value == 0 || value == u8::MAX {
+            let run = run_of(at, value);
+            if run >= MIN_SOLID_RUN || (value == 0 && shaped_from.is_none()) {
+                flush(bitmap, shaped_from.take(), at);
+                if value == u8::MAX {
+                    pipe::render_bitmap_span::<P>(
+                        bitmap,
+                        pipe,
+                        src,
+                        None,
+                        column(at),
+                        column(at + run - 1),
+                        row,
+                    );
+                }
+                at += run;
+                continue;
+            }
+        }
+        if shaped_from.is_none() {
+            shaped_from = Some(at);
+        }
+        at += 1;
+    }
+    flush(bitmap, shaped_from, coverage.len());
 }
 
 /// Build the AA-space scanner for `path`: the geometry stage of an
@@ -239,103 +315,30 @@ pub fn aa_scanner(
 /// Antialiased coverage of the device-space `xpath` over the pixels
 /// `[0, width) × [0, height)` under the non-zero winding rule.
 ///
-/// The result holds `width × height` bytes, row-major, each the
-/// gamma-mapped shape an antialiased [`fill`] of the same outline
-/// composites at that pixel.  Placed at an integer pixel offset and
-/// composited as an 8-bit glyph, the coverage reproduces such a fill under
-/// a clip it lies wholly inside.
-///
-/// # Panics
-///
-/// Panics if `height × AA_SIZE` overflows `i32`.
+/// The result holds `width × height` bytes, row-major, each the exact-area
+/// shape an antialiased [`fill`] of the same outline composites at that
+/// pixel.  Placed at an integer pixel offset and composited as an 8-bit
+/// glyph, the coverage reproduces such a fill under a clip it lies wholly
+/// inside.
 #[must_use]
-pub fn aa_coverage(mut xpath: XPath, width: u32, height: u32) -> Vec<u8> {
+pub fn aa_coverage(xpath: &XPath, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let mut coverage = vec![0u8; w * h];
-    if w == 0 || h == 0 {
+    let whole = Clip::new(0.0, 0.0, f64::from(width), f64::from(height), true);
+    let Some(mut raster) = area_raster(xpath, &whole, width, height) else {
         return coverage;
-    }
-    xpath.aa_scale();
-    let aa_rows = i32::try_from(height)
-        .ok()
-        .and_then(|h| h.checked_mul(AA_SIZE))
-        .expect("coverage height overflows the AA row range");
-    let scanner = XPathScanner::new(&xpath, false, 0, aa_rows - 1);
-    if scanner.is_empty() {
-        return coverage;
-    }
-    let mut aa_buf = AaBuf::new(w);
-    for (y, row) in (0..).zip(coverage.chunks_exact_mut(w)) {
-        let (mut x0, mut x1) = (0, 0);
-        scanner.render_aa_line(&mut aa_buf, &mut x0, &mut x1, y);
-        if x0 > x1 {
-            continue;
+    };
+    raster.rows(false, |y, x, row| {
+        if let (Ok(y), Ok(x)) = (usize::try_from(y), usize::try_from(x)) {
+            let start = y * w + x;
+            let n = row.len().min(w - x);
+            coverage[start..start + n].copy_from_slice(&row[..n]);
         }
-        let rows = [
-            aa_buf.row_slice(0),
-            aa_buf.row_slice(1),
-            aa_buf.row_slice(2),
-            aa_buf.row_slice(3),
-        ];
-        simd::aa_coverage_span(rows, 0, row);
-        // The gamma map reports whether any pixel is covered; an uncovered
-        // row stays zero either way.
-        let _ = simd::apply_aa_gamma(row);
-    }
+    });
     coverage
 }
 
 // ── Span drawing helpers ──────────────────────────────────────────────────────
-
-/// Emit one composited output pixel row from the 4-row `AaBuf`.
-///
-/// For each output pixel `x` in `[x0, x1]`, count the set bits across all 4
-/// AA sub-rows via `simd::aa_coverage_span`, map the counts to gamma-corrected
-/// shape bytes via `simd::apply_aa_gamma`, and composite the span through
-/// `pipe::render_span` unless every pixel is uncovered.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "per-row emit helper; the args are the fill loop's live state"
-)]
-fn draw_aa_line<P: Pixel>(
-    bitmap: &mut Bitmap<P>,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
-    aa_buf: &AaBuf,
-    shape_scratch: &mut Vec<u8>,
-    x0: i32,
-    x1: i32,
-    y: i32,
-) {
-    debug_assert!(x0 >= 0, "draw_aa_line: x0={x0} is negative");
-    debug_assert!(x0 <= x1, "draw_aa_line: x0={x0} > x1={x1}");
-    debug_assert!(y >= 0, "draw_aa_line: y={y} is negative");
-
-    #[expect(clippy::cast_sign_loss, reason = "x0 >= 0: asserted above")]
-    let x0_usize = x0 as usize;
-    #[expect(clippy::cast_sign_loss, reason = "x1 >= x0 >= 0")]
-    let count = (x1 - x0 + 1) as usize;
-
-    // Gather raw coverage counts (0..=16) into the reused scratch, then
-    // gamma-map them in place (0 stays 0).
-    let rows = [
-        aa_buf.row_slice(0),
-        aa_buf.row_slice(1),
-        aa_buf.row_slice(2),
-        aa_buf.row_slice(3),
-    ];
-    // The SIMD coverage tiers require an even start column; an odd `x0` would
-    // otherwise fall back to the scalar tier for the whole span. Extending the
-    // span one pixel to the left restores the alignment, and the extra leading
-    // byte is dropped before the shape is used. `lead` is non-zero only when
-    // `x0` is odd, hence `x0 >= 1` and the subtraction cannot underflow.
-    let lead = x0_usize & 1;
-    shape_scratch.clear();
-    shape_scratch.resize(count + lead, 0);
-    simd::aa_coverage_span(rows, x0_usize - lead, shape_scratch);
-
-    draw_aa_counts::<P>(bitmap, pipe, src, &mut shape_scratch[lead..], x0, x1, y);
-}
 
 /// Composite one output row from per-pixel AA coverage counts.
 ///
@@ -388,6 +391,109 @@ mod tests {
     use crate::pipe::PipeSrc;
     use crate::testutil::{identity_matrix, make_clip, rect_path, simple_pipe};
     use color::Rgb8;
+
+    /// The AA fill of `paths` in white on a black `w × h` bitmap, as the
+    /// red channel per pixel, row-major.
+    fn aa_render(paths: &[Path], w: u32, h: u32, eo: bool) -> Vec<u8> {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(w, h, 1, false);
+        let white = [255u8; 3];
+        let clip = Clip::new(0.0, 0.0, f64::from(w), f64::from(h), true);
+        for path in paths {
+            let draw = if eo { eo_fill::<Rgb8> } else { fill::<Rgb8> };
+            draw(
+                &mut bmp,
+                &clip,
+                path,
+                &simple_pipe(),
+                &PipeSrc::Solid(&white),
+                &identity_matrix(),
+                0.1,
+                true,
+            );
+        }
+        (0..h)
+            .flat_map(|y| bmp.row(y).iter().map(|p| p.r).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// A one-pixel band centred on a row boundary covers the rows on either
+    /// side by half each.
+    #[test]
+    fn aa_band_on_a_row_boundary_covers_both_rows_equally() {
+        let out = aa_render(&[rect_path(0.0, 9.5, 16.0, 10.5)], 16, 16, false);
+        for x in 0..16 {
+            let (above, below) = (out[9 * 16 + x], out[10 * 16 + x]);
+            assert!(above.abs_diff(below) <= 1, "column {x}: {above} vs {below}");
+            assert!(above.abs_diff(128) <= 1, "column {x}: {above}");
+            assert_eq!(out[8 * 16 + x] | out[11 * 16 + x], 0, "column {x}");
+        }
+    }
+
+    /// A rectangle offset by half a pixel covers its edge pixels by half
+    /// and its corners by a quarter.
+    #[test]
+    fn aa_half_pixel_offset_rectangle_has_exact_edges() {
+        let out = aa_render(&[rect_path(2.5, 2.5, 6.5, 6.5)], 9, 9, false);
+        let at = |x: usize, y: usize| out[y * 9 + x];
+        assert_eq!([at(2, 2), at(6, 2), at(2, 6), at(6, 6)], [64; 4], "corners");
+        assert_eq!([at(4, 2), at(4, 6), at(2, 4), at(6, 4)], [128; 4], "edges");
+        assert_eq!(at(4, 4), 255);
+        assert_eq!(at(1, 4) | at(7, 4) | at(4, 1) | at(4, 7), 0);
+    }
+
+    /// Under even-odd the overlap of two subpaths is a hole, and a hole
+    /// edge inside a pixel leaves the rest of the pixel covered.
+    #[test]
+    fn aa_even_odd_overlaps_are_holes_with_exact_edges() {
+        let mut b = PathBuilder::new();
+        for (x0, y0, x1, y1) in [
+            (0.0, 0.0, 12.0, 12.0),
+            (2.5, 2.5, 7.5, 7.5),
+            (5.0, 5.0, 10.0, 10.0),
+        ] {
+            b.move_to(x0, y0).unwrap();
+            b.line_to(x1, y0).unwrap();
+            b.line_to(x1, y1).unwrap();
+            b.line_to(x0, y1).unwrap();
+            b.close(true).unwrap();
+        }
+        let path = b.build();
+        let eo = aa_render(std::slice::from_ref(&path), 12, 12, true);
+        let at = |x: usize, y: usize| eo[y * 12 + x];
+        assert_eq!(at(1, 1), 255, "outer ring");
+        assert_eq!(at(2, 3), 128, "hole edge inside the pixel");
+        assert_eq!(at(3, 3), 0, "hole");
+        assert_eq!(at(6, 6), 255, "the third square fills the hole back in");
+        assert_eq!(at(8, 8), 0, "the third square cuts a hole in the outer one");
+        let nz = aa_render(&[path], 12, 12, false);
+        assert!(
+            nz.iter().all(|&v| v == 255),
+            "non-zero covers the whole square"
+        );
+    }
+
+    /// The ink an AA fill lays down equals the area of its outline.
+    #[test]
+    fn aa_fill_ink_equals_area() {
+        let mut b = PathBuilder::new();
+        let tri = [(1.3, 0.7), (29.1, 6.4), (8.2, 27.8)];
+        b.move_to(tri[0].0, tri[0].1).unwrap();
+        b.line_to(tri[1].0, tri[1].1).unwrap();
+        b.line_to(tri[2].0, tri[2].1).unwrap();
+        b.close(true).unwrap();
+        let out = aa_render(&[b.build()], 32, 32, false);
+        let area = 0.5
+            * (tri[1].0 - tri[0].0).mul_add(
+                tri[2].1 - tri[0].1,
+                -(tri[2].0 - tri[0].0) * (tri[1].1 - tri[0].1),
+            );
+        let ink: f64 = out.iter().map(|&v| f64::from(v) / 255.0).sum();
+        assert!(
+            (ink - area.abs()).abs() < 0.2,
+            "ink {ink} vs area {}",
+            area.abs()
+        );
+    }
 
     /// An AA fill covers the whole first sub-row of an edge that lies on a
     /// pixel boundary: the horizontal top edge and the vertical edges'
@@ -467,7 +573,7 @@ mod tests {
         let path = b.build();
         let xpath = XPath::new(&path, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.1, true);
         let (w, h) = (9200, 120);
-        let coverage = aa_coverage(xpath, w, h);
+        let coverage = aa_coverage(&xpath, w, h);
         let at = |x: usize, y: usize| coverage[y * w as usize + x];
         assert_eq!(at(9050, 50), 255, "inside the triangle");
         assert_eq!(at(8191, 50), 0, "far left of it");
@@ -497,7 +603,7 @@ mod tests {
             .flat_map(|y| bmp.row(y).iter().map(|p| p.r))
             .collect();
         let xpath = XPath::new(&path, &identity_matrix(), 0.1, true);
-        let coverage = aa_coverage(xpath, 12, 10);
+        let coverage = aa_coverage(&xpath, 12, 10);
         assert!(
             coverage.iter().any(|&v| v > 0 && v < 255),
             "edges are partial"

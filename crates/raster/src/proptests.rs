@@ -18,7 +18,7 @@ use crate::pipe::PipeSrc;
 use crate::scanner::REANCHOR_ROWS;
 use crate::stroke::{StrokeParams, hairline_runs};
 use crate::testutil::simple_pipe;
-use crate::types::{AA_GAMMA, AA_SIZE, LineCap, LineJoin};
+use crate::types::{LineCap, LineJoin};
 use crate::xpath::XPath;
 use color::Rgb8;
 
@@ -486,12 +486,12 @@ proptest! {
         );
     }
 
-    /// A rectangle with integer corners covers exactly the cells its closed
-    /// outline touches: aliased, the pixels `x0..=x1 × y0..=y1`; antialiased,
-    /// the sub-samples `4·x0..=4·x1 × 4·y0..=4·y1`, so its interior pixels are
-    /// fully covered and the column and row past its far edges a quarter.
+    /// A rectangle with integer corners covers exactly its pixels: aliased,
+    /// the cells its closed outline touches, `x0..=x1 × y0..=y1`;
+    /// antialiased, its area, the pixels `x0..x1 × y0..y1` fully and no
+    /// other.
     #[test]
-    fn a_pixel_aligned_rectangle_covers_its_closed_cells(
+    fn a_pixel_aligned_rectangle_covers_its_pixels(
         (w, h) in (SIDE, SIDE),
         (x0, y0) in (-4i32..40, -4i32..40),
         (dw, dh) in (0i32..24, 0i32..24),
@@ -509,23 +509,14 @@ proptest! {
             sp = sp.reversed();
         }
         let out = render(&build(&[sp]), &whole(w, h, aa), w, h, aa, eo);
-        // Cells of `lo..=hi` (sub-sample units) inside the cell span `c`.
-        let overlap = |c: std::ops::Range<i32>, lo: i32, hi: i32| {
-            u8::try_from((c.end.min(hi + 1) - c.start.max(lo)).max(0)).expect("at most 4")
-        };
         for (i, &v) in out.iter().enumerate() {
             let (x, y) = at(i, w);
-            let want = if aa {
-                let n = AA_SIZE;
-                let cols = overlap(x * n..(x + 1) * n, x0 * n, x1 * n);
-                let rows = overlap(y * n..(y + 1) * n, y0 * n, y1 * n);
-                AA_GAMMA[usize::from(cols * rows)]
-            } else if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
-                255
+            let inside = if aa {
+                (x0..x1).contains(&x) && (y0..y1).contains(&y)
             } else {
-                0
+                (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
             };
-            prop_assert_eq!(v, want, "pixel ({}, {})", x, y);
+            prop_assert_eq!(v, if inside { 255 } else { 0 }, "pixel ({}, {})", x, y);
         }
     }
 

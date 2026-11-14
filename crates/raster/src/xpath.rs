@@ -119,6 +119,32 @@ impl XPathSeg {
     }
 }
 
+// ── PixelModel ────────────────────────────────────────────────────────────────
+
+/// The pixel model of the scan conversion an [`XPath`] is built for.  It
+/// fixes where stroke adjustment places a snapped edge's far side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelModel {
+    /// A pixel is painted when the outline meets its cell, boundary
+    /// included (`XPathScanner`): a snapped far edge lies 0.01 px before its
+    /// pixel boundary, so the pixel past it stays unpainted.
+    Aliased,
+    /// A pixel takes the area of the outline inside it
+    /// ([`crate::coverage::AreaRaster`]): a snapped edge lies on its pixel
+    /// boundary.
+    Area,
+}
+
+impl PixelModel {
+    /// Distance from a snapped far edge to its pixel boundary.
+    const fn far_inset(self) -> f64 {
+        match self {
+            Self::Aliased => 0.01,
+            Self::Area => 0.0,
+        }
+    }
+}
+
 // ── XPath ─────────────────────────────────────────────────────────────────────
 
 /// Matrix-transformed, flattened edge table derived from a [`Path`].
@@ -143,23 +169,6 @@ pub struct XPath {
 }
 
 impl XPath {
-    /// Return a copy of this path with coordinates scaled by [`AA_SIZE`].
-    ///
-    /// The copy shares no state with `self` (the Bezier scratch is not
-    /// carried over) and `self` remains in device space, so this is the
-    /// safe form of [`XPath::aa_scale`] for consumers that must keep the
-    /// device-space original.
-    #[must_use]
-    pub(crate) fn aa_scaled_copy(&self) -> Self {
-        let mut scaled = Self {
-            segs: self.segs.clone(),
-            closed: self.closed,
-            curve_data: None,
-        };
-        scaled.aa_scale();
-        scaled
-    }
-
     /// Create an empty `XPath` (for tests and internal use).
     #[cfg(test)]
     pub(crate) const fn empty() -> Self {
@@ -194,6 +203,19 @@ impl XPath {
     /// [`AA_SIZE`]. It must be called at most once.
     #[must_use]
     pub fn new(path: &Path, matrix: &[f64; 6], flatness: f64, close_subpaths: bool) -> Self {
+        Self::for_model(path, matrix, flatness, close_subpaths, PixelModel::Aliased)
+    }
+
+    /// [`XPath::new`] for the pixel model `model`, which places the edges
+    /// stroke adjustment snaps.
+    #[must_use]
+    pub fn for_model(
+        path: &Path,
+        matrix: &[f64; 6],
+        flatness: f64,
+        close_subpaths: bool,
+        model: PixelModel,
+    ) -> Self {
         let flatness_sq = flatness * flatness;
         let mut xpath = Self {
             segs: Vec::new(),
@@ -208,7 +230,7 @@ impl XPath {
             .map(|p| transform(matrix, p.x, p.y))
             .collect();
 
-        let adjusts = build_adjusts(&path.hints, &tpts);
+        let adjusts = build_adjusts(&path.hints, &tpts, model.far_inset());
 
         // Apply stroke adjustments to the transformed points.
         let mut tpts = tpts;
@@ -382,6 +404,14 @@ impl XPath {
         }
     }
 
+    /// The smallest box `(x_min, x_max, y_min, y_max)` holding every finite
+    /// endpoint, or `None` when there is none.
+    #[must_use]
+    pub fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        let b = bounding_box(&self.segs);
+        (b.0 <= b.1 && b.2 <= b.3 && <[f64; 4]>::from(b).iter().all(|v| v.is_finite())).then_some(b)
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /// Append one line segment to the edge table, enforcing `y0 ≤ y1` for
@@ -499,7 +529,11 @@ pub const fn transform(m: &[f64; 6], xi: f64, yi: f64) -> PathPoint {
 /// skewed pairs are dropped, since snapping applies only to axis-aligned edges.
 /// A hint whose indices fall outside `tpts`, whose range is inverted, or whose
 /// edge points are not finite is dropped too.
-fn build_adjusts(hints: &[StrokeAdjustHint], tpts: &[PathPoint]) -> Vec<XPathAdjust> {
+fn build_adjusts(
+    hints: &[StrokeAdjustHint],
+    tpts: &[PathPoint],
+    far_inset: f64,
+) -> Vec<XPathAdjust> {
     let mut adjusts = Vec::with_capacity(hints.len());
     for h in hints {
         // Each hint names two consecutive point pairs within its range.
@@ -539,6 +573,7 @@ fn build_adjusts(hints: &[StrokeAdjustHint], tpts: &[PathPoint]) -> Vec<XPathAdj
             c0.min(c1),
             c0.max(c1),
             edge1,
+            far_inset,
         ));
     }
     adjusts

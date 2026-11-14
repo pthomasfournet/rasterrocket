@@ -393,7 +393,7 @@ impl PageRenderer<'_> {
         let parent_pattern_ctm = std::mem::replace(&mut self.pattern_ctm, form_ctm);
         // PDF §8.10.1: the form's BBox, in form space, clips its content.
         if let Some(bbox) = form.bbox {
-            self.clip_to_user_rect(&bbox);
+            self.clip_to_user_rect(&bbox, true);
         }
 
         // Switch to the form's resource context, keeping the parent for restore.

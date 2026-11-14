@@ -977,9 +977,8 @@ fn image_blit_honours_rectangular_clip() {
 }
 
 /// An L-shaped path clip over a black image: the image shows through the
-/// L only.  Column 4 of the top half lies on the clip's vertical edge and
-/// carries the clip's antialiased coverage (4 of 16 sub-samples, 223
-/// after the gamma table), exactly like a fill through the same clip.
+/// L only.  The clip's edges lie on pixel boundaries, so its exact-area
+/// coverage leaves no partial pixel.
 #[test]
 fn image_blit_honours_path_clip() {
     let content = [
@@ -991,11 +990,7 @@ fn image_blit_honours_path_clip() {
     let px = render_gray(8, &content);
     for y in 0..8 {
         for x in 0..8 {
-            let want = match (y < 4, x) {
-                (true, 4) => 223,
-                (true, 5..) => 255,
-                _ => 0,
-            };
+            let want = if y < 4 && x >= 4 { 255 } else { 0 };
             assert_eq!(px[y * 8 + x], want, "pixel ({x}, {y})");
         }
     }

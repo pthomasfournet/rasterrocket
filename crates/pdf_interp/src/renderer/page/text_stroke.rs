@@ -150,7 +150,7 @@ impl GlyphStroke {
         )]
         let (width, height, x_off, y_off) =
             (width as u32, height as u32, -left as i32, -top as i32);
-        let data = raster::fill::aa_coverage(xpath, width, height);
+        let data = raster::fill::aa_coverage(&xpath, width, height);
         Some(CachedGlyph {
             x_off,
             y_off,

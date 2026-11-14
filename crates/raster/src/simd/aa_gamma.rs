@@ -1,7 +1,8 @@
 //! Coverage-count → gamma-corrected shape map for AA spans.
 //!
 //! [`apply_aa_gamma`] replaces every byte of a coverage buffer (values
-//! `0..=AA_SIZE²` as produced by `aa_coverage_span`) with `AA_GAMMA[byte]` in
+//! `0..=AA_SIZE²`, the number of covered 4×4 sub-samples of a pixel) with
+//! `AA_GAMMA[byte]` in
 //! place and reports whether any pixel of the span is covered at all.
 //!
 //! # Tiers (x86-64, most to least preferred)
@@ -160,8 +161,8 @@ unsafe fn apply_aa_gamma_avx512(shape: &mut [u8]) -> bool {
 ///
 /// # Preconditions
 ///
-/// Every byte of `shape` must be `≤ AA_SIZE²` (16), as produced by
-/// `aa_coverage_span`.  The scalar tier panics on a larger value; the vector
+/// Every byte of `shape` must be `≤ AA_SIZE²` (16), a 4×4 sub-sample
+/// count.  The scalar tier panics on a larger value; the vector
 /// tiers map it to 0.
 pub(crate) fn apply_aa_gamma(shape: &mut [u8]) -> bool {
     dispatch_gamma(shape)
