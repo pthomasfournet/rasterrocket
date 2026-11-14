@@ -114,8 +114,9 @@ pub(crate) struct HtBlock<'a> {
     pub(crate) stripe_causal: bool,
 }
 
-/// Decode one HT code-block into `ctx`.  `None` when the code-block is
-/// malformed.
+/// Decode one HT code-block into `ctx`.  [`HtError::Size`] when the block
+/// exceeds the code-block size limits, with nothing decoded;
+/// [`HtError::Data`], with the block zeroed, when its data is malformed.
 pub(crate) fn decode(block: &HtBlock<'_>, ctx: &mut HtDecodeContext) -> Result<(), HtError> {
     let (width, height) = (block.width, block.height);
     if width > MAX_BLOCK_SIDE || height > MAX_BLOCK_SIDE || width * height > MAX_BLOCK_AREA {
