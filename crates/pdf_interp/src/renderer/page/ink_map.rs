@@ -20,7 +20,7 @@ use color::convert::gray_to_u8;
 use pdf::Document;
 use raster::pipe::ChannelMask;
 
-use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
+use super::super::color::{ColorantPlan, PROCESS_CHANNELS, paint_tint};
 use crate::resources::ColorSpace;
 use crate::resources::colorspace::Colorant;
 
@@ -194,11 +194,7 @@ impl InkMap {
             let Some(channels) = self.channels(doc, space, colorant) else {
                 return process_fallback(self);
             };
-            for (i, v) in ink.iter_mut().enumerate() {
-                if channels & 1 << i != 0 {
-                    *v = (*v).max(tint);
-                }
-            }
+            paint_tint(&mut ink, channels, tint);
             bits |= channels;
         }
         (ink, ChannelMask::new(bits))

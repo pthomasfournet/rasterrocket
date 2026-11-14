@@ -118,7 +118,7 @@ impl ColorantPlan {
 }
 
 /// Raise each channel of `ink` in the bit mask `bits` to at least `tint`.
-fn paint_tint(ink: &mut [u8; 8], bits: u8, tint: u8) {
+pub(crate) fn paint_tint(ink: &mut [u8; 8], bits: u8, tint: u8) {
     for (i, v) in ink.iter_mut().enumerate() {
         if bits & 1 << i != 0 {
             *v = (*v).max(tint);
