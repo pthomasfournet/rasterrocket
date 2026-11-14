@@ -72,6 +72,13 @@ corruptions in each mode.
   coefficient and decoded bit position (`ht::coefficient`) as it stores it,
   instead of a second pass filling `Coefficient` and `CoefficientState`
   vectors that the reconstruction then read.
+- `ht.rs`: the forward (MagSgn, SigProp) and backward (VLC, MagRef) readers
+  append four bytes at once, through one bounds-checked slice, when no byte
+  among them is unstuffed (forward: none of the first three, nor the byte
+  before them, is `0xFF`; backward: none ends in seven ones), and fall back
+  to the byte-at-a-time path otherwise. Every read consumes at most the 32
+  bits a fetch guarantees, so the bits read are those of the byte-at-a-time
+  reader. Test: `ht::tests::readers_match_byte_at_a_time_reading`.
 
 ## Memory traffic under parallel decoding
 

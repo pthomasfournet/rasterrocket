@@ -289,15 +289,41 @@ impl<'a> Reverse<'a> {
         self.unstuff = d > 0x8F;
     }
 
+    /// Load at least 32 bits.  Four bytes are appended at once when none of
+    /// them can carry 7 bits (none ends in seven ones), one at a time
+    /// otherwise.
     fn fill(&mut self) {
+        if self.bits >= 32 {
+            return;
+        }
+        if self.remaining >= 4
+            && let Some(word) = self
+                .pos
+                .checked_sub(4)
+                .and_then(|start| self.data.get(start..self.pos))
+        {
+            // The byte at `pos − 1` comes first, in the low byte.
+            let w = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+            if !has_zero_byte(!(w | 0x8080_8080)) {
+                self.tmp |= u64::from(w) << self.bits;
+                self.bits += 32;
+                self.pos -= 4;
+                self.remaining -= 4;
+                self.unstuff = w >> 24 > 0x8F;
+                return;
+            }
+        }
         while self.bits < 32 {
             self.feed();
         }
     }
 
     /// At least the next 32 bits.
+    #[inline(always)]
     fn fetch(&mut self) -> u32 {
-        self.fill();
+        if self.bits < 32 {
+            self.fill();
+        }
         self.tmp as u32
     }
 
@@ -307,6 +333,11 @@ impl<'a> Reverse<'a> {
         self.bits -= n.min(self.bits);
         self.tmp as u32
     }
+}
+
+/// Whether any byte of `x` is zero.
+const fn has_zero_byte(x: u32) -> bool {
+    x.wrapping_sub(0x0101_0101) & !x & 0x8080_8080 != 0
 }
 
 /// A bitstream growing forward (MagSgn, SigProp), least significant bit
@@ -333,7 +364,31 @@ impl<'a> Forward<'a> {
         }
     }
 
+    /// At least the next 32 bits.
+    #[inline(always)]
     fn fetch(&mut self) -> u32 {
+        if self.bits < 32 {
+            self.refill();
+        }
+        self.tmp as u32
+    }
+
+    /// Load at least 32 bits.  Four bytes are appended at once when the
+    /// byte before them and the first three are not `0xFF` (each then
+    /// carries 8 bits), one at a time otherwise.
+    fn refill(&mut self) {
+        if !self.unstuff
+            && let Some(word) = self.data.get(self.pos..self.pos + 4)
+        {
+            let w = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            if !has_zero_byte(!w | 0xFF00_0000) {
+                self.tmp |= u64::from(w) << self.bits;
+                self.bits += 32;
+                self.pos += 4;
+                self.unstuff = w >> 24 == 0xFF;
+                return;
+            }
+        }
         while self.bits < 32 {
             let d = self.data.get(self.pos).copied().unwrap_or(self.fill);
             self.pos += 1;
@@ -341,7 +396,6 @@ impl<'a> Forward<'a> {
             self.bits += 8 - u32::from(self.unstuff);
             self.unstuff = d == 0xFF;
         }
-        self.tmp as u32
     }
 
     fn advance(&mut self, n: u32) {
@@ -953,7 +1007,7 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HtBlock, HtDecodeContext, HtError, MAX_BITPLANES, decode};
+    use super::{Forward, HtBlock, HtDecodeContext, HtError, MAX_BITPLANES, Reverse, decode};
 
     /// A block of `width` × `height` with a cleanup segment `cleanup`.
     fn block(cleanup: &[u8], bitplanes: u8, missing_msbs: u8, passes: u8) -> HtBlock<'_> {
@@ -1011,5 +1065,141 @@ mod tests {
         big.width = 4096;
         big.height = 4096;
         assert_eq!(decode(&big, &mut ctx), Err(HtError::Size));
+    }
+
+    /// Byte-at-a-time reference of [`Forward`]: `(tmp, bits)` after each
+    /// byte.
+    struct ByteForward<'a> {
+        data: &'a [u8],
+        pos: usize,
+        tmp: u64,
+        bits: u32,
+        unstuff: bool,
+        fill: u8,
+    }
+
+    impl ByteForward<'_> {
+        fn fetch(&mut self) -> u32 {
+            while self.bits < 32 {
+                let d = self.data.get(self.pos).copied().unwrap_or(self.fill);
+                self.pos += 1;
+                self.tmp |= u64::from(d) << self.bits;
+                self.bits += 8 - u32::from(self.unstuff);
+                self.unstuff = d == 0xFF;
+            }
+            self.tmp as u32
+        }
+
+        fn advance(&mut self, n: u32) {
+            self.tmp >>= n;
+            self.bits -= n.min(self.bits);
+        }
+    }
+
+    /// Byte-at-a-time reference of [`Reverse`].
+    struct ByteReverse<'a> {
+        data: &'a [u8],
+        pos: usize,
+        remaining: usize,
+        tmp: u64,
+        bits: u32,
+        unstuff: bool,
+    }
+
+    impl ByteReverse<'_> {
+        fn fetch(&mut self) -> u32 {
+            while self.bits < 32 {
+                let d = if self.remaining > 0 {
+                    self.pos -= 1;
+                    self.remaining -= 1;
+                    self.data.get(self.pos).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                let d_bits = 8 - u32::from(self.unstuff && d & 0x7F == 0x7F);
+                self.tmp |= u64::from(d) << self.bits;
+                self.bits += d_bits;
+                self.unstuff = d > 0x8F;
+            }
+            self.tmp as u32
+        }
+
+        fn advance(&mut self, n: u32) -> u32 {
+            self.tmp >>= n;
+            self.bits -= n.min(self.bits);
+            self.tmp as u32
+        }
+    }
+
+    /// Bytes drawn mostly from the values the stuffing rules single out.
+    fn stuffing_bytes(seed: u64, len: usize) -> Vec<u8> {
+        const SPECIAL: [u8; 8] = [0xFF, 0x7F, 0xFE, 0x8F, 0x90, 0xFF, 0x7F, 0x00];
+        let mut x = seed | 1;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                if x & 1 == 0 {
+                    SPECIAL[((x >> 8) & 7) as usize]
+                } else {
+                    (x >> 16) as u8
+                }
+            })
+            .collect()
+    }
+
+    /// The word-at-a-time readers return the bits of the byte-at-a-time
+    /// reading: all 32 after a fetch, and those still loaded after an
+    /// advance.
+    #[test]
+    fn readers_match_byte_at_a_time_reading() {
+        for seed in 1..400u64 {
+            let len = (seed as usize * 7) % 97;
+            let data = stuffing_bytes(seed, len);
+            let steps = stuffing_bytes(seed ^ 0xABCD, 64);
+
+            let fill = if seed & 1 == 0 { 0xFF } else { 0 };
+            let mut fast = Forward::new(&data, fill);
+            let mut slow = ByteForward {
+                data: &data,
+                pos: 0,
+                tmp: 0,
+                bits: 0,
+                unstuff: false,
+                fill,
+            };
+            for &step in &steps {
+                assert_eq!(fast.fetch(), slow.fetch(), "forward, seed {seed}");
+                let n = u32::from(step) % 33;
+                fast.advance(n);
+                slow.advance(n);
+            }
+
+            let mut fast = Reverse::mag_ref(&data);
+            let mut slow = ByteReverse {
+                data: &data,
+                pos: data.len(),
+                remaining: data.len(),
+                tmp: 0,
+                bits: 0,
+                unstuff: true,
+            };
+            for &step in &steps {
+                assert_eq!(fast.fetch(), slow.fetch(), "reverse, seed {seed}");
+                // Up to three advances between fetches, as VLC decoding
+                // makes, within the 32 bits a fetch guarantees.
+                let mut left = 32;
+                for k in 0..3 {
+                    let n = (u32::from(step) >> (2 * k)) % 11;
+                    let n = n.min(left);
+                    left -= n;
+                    let loaded = fast.advance(n);
+                    let expected = slow.advance(n);
+                    let mask = u32::MAX.checked_shr(32 - slow.bits.min(32)).unwrap_or(0);
+                    assert_eq!(loaded & mask, expected & mask, "reverse, seed {seed}");
+                }
+            }
+        }
     }
 }
