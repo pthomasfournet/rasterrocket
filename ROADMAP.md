@@ -67,9 +67,9 @@ extra quarter-turn rotation, and reports the features it ignores as typed
 values; the JPEG decoder is a local fork that decodes arithmetic-coded and
 multi-scan frames and reports partial streams exactly. Every crate requires
 Rust 1.100. Every addition to the `rasterrocket` API is a new item or a
-field of a `#[non_exhaustive]` type; the one change a v2.1.0 caller can see
-is the return type of `RasterSession::image_cache`, present only with the
-`cache` feature.
+field of a `#[non_exhaustive]` type; the one existing signature that
+changes is the return type of `RasterSession::image_cache`, present only
+with the `cache` feature.
 
 **New inputs and formats.**
 - **Comic archives.** `.cbr` (RAR 1.3 to RAR 7) is read through the
