@@ -125,8 +125,10 @@ pub struct PageDiagnostics {
 #[non_exhaustive]
 pub enum DevicePage {
     /// The page was not offered to a device: the session renders every
-    /// page on the CPU, the device was busy with another page or not yet
-    /// open, or the page's operators ruled it out before interpretation.
+    /// page on the CPU, or the device was busy with another page, not yet
+    /// open, or retired after a failure.  Also the outcome of a recording
+    /// stopped by the page's work budget or by cancellation, which the
+    /// caller reports as an error.
     #[default]
     NotOffered,
     /// The device rendered the page from `commands` paint commands.
@@ -137,7 +139,8 @@ pub enum DevicePage {
     /// The page paints with something the GPU raster does not render,
     /// named here; it was rendered on the CPU.
     Ineligible(&'static str),
-    /// The device failed on the page; it was rendered on the CPU.
+    /// The device failed on the page, or the page exceeds the device's
+    /// limits; it was rendered on the CPU.
     Failed,
 }
 

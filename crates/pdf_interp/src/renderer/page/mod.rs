@@ -90,7 +90,7 @@ mod xobject;
 
 use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "vulkan")]
-pub use device_page::{DeviceRecording, device_page_operators};
+pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 #[cfg(feature = "cache")]
 use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
@@ -423,6 +423,19 @@ pub struct PageRenderer<'doc> {
     /// raster instead of painted; see [`Self::record_for_device`].
     #[cfg(feature = "vulkan")]
     device_page: Option<Box<device_page::Recording>>,
+}
+
+/// The work watchdog of a page render, as one renderer hands it to the
+/// next ([`PageRenderer::remaining_budget`]).
+pub(super) struct WorkBudget {
+    /// Operators the render may still execute.
+    ops: u64,
+    /// Absolute wall-clock deadline.
+    deadline: Option<std::time::Instant>,
+    /// Caller-owned cancellation flag.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Why the render stopped, if it did.
+    exceeded: Option<RenderAbort>,
 }
 
 /// The transparency group being painted into: the page group, or a form's.
@@ -858,14 +871,30 @@ impl<'doc> PageRenderer<'doc> {
     /// [`fold_child_into`](Self::fold_child_into) on the parent afterwards to
     /// account for the work the child actually performed.
     pub(super) fn adopt_parent_budget(&mut self, parent: &Self) {
-        // Remaining allowance = parent budget − parent ops already spent.
-        // saturating_sub: if the parent is already at/over budget the child
-        // gets zero allowance and trips on its first op.
-        self.op_budget = parent.op_budget.saturating_sub(parent.ops_executed);
+        self.adopt_budget(parent.remaining_budget());
+    }
+
+    /// The work this renderer may still do: its operator budget less the
+    /// operators it executed (zero once spent, so a renderer adopting it
+    /// trips on its first operator), its deadline, its cancellation flag
+    /// and why it stopped, if it did.
+    pub(super) fn remaining_budget(&self) -> WorkBudget {
+        WorkBudget {
+            ops: self.op_budget.saturating_sub(self.ops_executed),
+            deadline: self.deadline,
+            cancel: self.cancel.clone(),
+            exceeded: self.budget_exceeded.clone(),
+        }
+    }
+
+    /// Continue the page's work watchdog from `budget`, a
+    /// [`Self::remaining_budget`] of an earlier renderer of the page.
+    pub(super) fn adopt_budget(&mut self, budget: WorkBudget) {
+        self.op_budget = budget.ops;
         self.ops_executed = 0;
-        self.deadline = parent.deadline;
-        self.cancel.clone_from(&parent.cancel);
-        self.budget_exceeded.clone_from(&parent.budget_exceeded);
+        self.deadline = budget.deadline;
+        self.cancel = budget.cancel;
+        self.budget_exceeded = budget.exceeded;
     }
 
     /// Draw image and form `XObjects`, shadings and tiling cells from

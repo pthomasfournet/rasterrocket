@@ -124,13 +124,12 @@ fn declined_pages_render_on_the_cpu_with_the_reason() {
 #[test]
 fn auto_opens_the_device_beside_the_renders() {
     let pdf = page_pdf(DEVICE_CONTENT);
-    let Ok(gpu) = open_session_from_bytes(pdf.clone(), &gpu_config(BackendPolicy::Auto)) else {
-        eprintln!("skipping: no Vulkan device");
-        return;
-    };
     if gpu_session(pdf.clone()).is_none() {
         return;
     }
+    // An Auto session opens whether or not a device does.
+    let gpu = open_session_from_bytes(pdf.clone(), &gpu_config(BackendPolicy::Auto))
+        .expect("an Auto session opens");
     let cpu = render(&session(pdf, BackendPolicy::CpuOnly), 1);
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {

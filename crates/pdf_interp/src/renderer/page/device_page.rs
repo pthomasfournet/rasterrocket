@@ -16,6 +16,8 @@
 //! reason, and the content stream stops there: the caller renders the page
 //! on the CPU, whole.
 
+use std::collections::HashSet;
+
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::{PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds};
@@ -25,7 +27,7 @@ use raster::types::{AA_SIZE, BlendMode};
 use raster::{XPathScanner, hairline_runs, stroke_aa_scanner};
 
 use super::canvas::{CanvasKind, PageCanvas};
-use super::{DEVICE_MATRIX, PageRenderer};
+use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
 
 /// The colour of the paper an opaque RGB canvas starts as.
@@ -67,17 +69,38 @@ const fn unsupported_operator(op: &Operator<'_>) -> Option<&'static str> {
     }
 }
 
-/// The first operator of `ops` that a recording refuses, as its reason;
-/// `Ok` when there is none.  A page that passes may still be refused while
-/// it is recorded, by the graphics state a paint is made under.
+/// Why a page painted on an ink canvas (`ink`), as a page group (`group`)
+/// or with vector antialiasing off (`!vector_antialias`) cannot be
+/// recorded, if it cannot.
+const fn ineligible_canvas(ink: bool, group: bool, vector_antialias: bool) -> Option<&'static str> {
+    if ink {
+        Some("overprint simulation")
+    } else if group {
+        Some("page group")
+    } else if !vector_antialias {
+        Some("aliased vector paint")
+    } else {
+        None
+    }
+}
+
+/// Why a page whose content is `ops` cannot be recorded, known before it
+/// is interpreted; `None` when nothing rules it out.
 ///
-/// # Errors
-///
-/// The reason of the first operator the recording refuses.
-pub fn device_page_operators(ops: &[Operator<'_>]) -> Result<(), &'static str> {
-    ops.iter()
-        .find_map(unsupported_operator)
-        .map_or(Ok(()), Err)
+/// It is ruled out when it paints on an ink canvas (`ink`), as a page
+/// group (`group`) or with vector antialiasing off (`!vector_antialias`),
+/// or when an operator paints other than by filling or stroking a path.
+/// A page not ruled out may still be refused while it is recorded, by the
+/// graphics state a paint is made under.
+#[must_use]
+pub fn device_page_ineligible(
+    ink: bool,
+    group: bool,
+    vector_antialias: bool,
+    ops: &[Operator<'_>],
+) -> Option<&'static str> {
+    ineligible_canvas(ink, group, vector_antialias)
+        .or_else(|| ops.iter().find_map(unsupported_operator))
 }
 
 /// The refusal reason of a command the page cannot take.
@@ -86,6 +109,18 @@ const fn command_refusal(e: &PageCommandsError) -> &'static str {
         PageCommandsError::TooLarge => "command list size",
         PageCommandsError::Alloc(_) => "command list allocation",
     }
+}
+
+/// What a renderer whose device recording did not render the page hands
+/// to the renderer that renders it on the CPU.
+///
+/// It holds the page's remaining work budget, so the two passes share one
+/// operator allowance and deadline, and the unsupported operators already
+/// warned about.
+pub struct DeviceFallback {
+    budget: WorkBudget,
+    warned_unknown_ops: HashSet<Vec<u8>>,
+    warned_unknown_ops_capped: bool,
 }
 
 /// The pixels of `scanner`'s fill under the rectangular `clip`: rows the
@@ -181,14 +216,12 @@ impl PageRenderer<'_> {
     /// an ink canvas, paints as a page group, or fills without
     /// antialiasing.  The renderer is unchanged then.
     pub fn record_for_device(&mut self) -> Result<(), &'static str> {
-        if self.canvas.kind() != CanvasKind::Rgb {
-            return Err("overprint simulation");
-        }
-        if self.canvas.has_alpha() || self.page_group.is_some() {
-            return Err("page group");
-        }
-        if !self.vector_antialias {
-            return Err("aliased vector paint");
+        if let Some(reason) = ineligible_canvas(
+            self.canvas.kind() != CanvasKind::Rgb,
+            self.canvas.has_alpha() || self.page_group.is_some(),
+            self.vector_antialias,
+        ) {
+            return Err(reason);
         }
         self.device_page = Some(Box::new(Recording {
             commands: PageCommands::new(self.width, self.height, PAPER),
@@ -210,6 +243,29 @@ impl PageRenderer<'_> {
                     DeviceRecording::Refused(reason)
                 }),
         )
+    }
+
+    /// Hand the page's remaining work budget and warned operators to the
+    /// renderer that renders the page again on the CPU
+    /// ([`Self::resume_after_device`]).
+    #[must_use]
+    pub fn take_device_fallback(&mut self) -> DeviceFallback {
+        DeviceFallback {
+            budget: self.remaining_budget(),
+            warned_unknown_ops: std::mem::take(&mut self.warned_unknown_ops),
+            warned_unknown_ops_capped: self.warned_unknown_ops_capped,
+        }
+    }
+
+    /// Continue from `fallback`, taken from the renderer of this page whose
+    /// device recording did not render it: the page's operators share one
+    /// budget and deadline over both passes, and an operator warned about
+    /// in the first is not warned about again.  Call before
+    /// [`Self::execute`].
+    pub fn resume_after_device(&mut self, fallback: DeviceFallback) {
+        self.adopt_budget(fallback.budget);
+        self.warned_unknown_ops = fallback.warned_unknown_ops;
+        self.warned_unknown_ops_capped = fallback.warned_unknown_ops_capped;
     }
 
     /// Render `page`, a recording of this page, on `backend` into the
@@ -383,7 +439,7 @@ mod tests {
     use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
     use pdf::Document;
 
-    use super::{DeviceRecording, PageRenderer, device_page_operators};
+    use super::{DeviceRecording, PageRenderer, device_page_ineligible};
 
     /// A page whose resources name the graphics states the tests use:
     /// `/T` (fill and stroke alpha), `/O` (opaque), `/M` (`Multiply`).
@@ -453,21 +509,17 @@ mod tests {
             z ^ (z >> 31)
         }
 
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
+        fn below(&mut self, n: u32) -> u32 {
+            u32::try_from(self.next() % u64::from(n)).expect("below n")
         }
 
         /// A coordinate in `[-20, span + 20)`, in hundredths.
-        fn coord(&mut self, span: u64) -> f64 {
-            #[expect(clippy::cast_precision_loss, reason = "small test values")]
-            let v = self.below((span + 40) * 100) as f64;
-            v / 100.0 - 20.0
+        fn coord(&mut self, span: u32) -> f64 {
+            f64::from(self.below((span + 40) * 100)) / 100.0 - 20.0
         }
 
         fn unit(&mut self) -> f64 {
-            #[expect(clippy::cast_precision_loss, reason = "small test values")]
-            let v = self.below(1001) as f64;
-            v / 1000.0
+            f64::from(self.below(1001)) / 1000.0
         }
     }
 
@@ -480,7 +532,7 @@ mod tests {
         reason = "coordinates, colours and the stream under construction"
     )]
     fn random_content(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
-        let (w, h) = (u64::from(width), u64::from(height));
+        let (w, h) = (width, height);
         let mut s = vec![String::from("0.83 0 0 0.91 3.3 -2.7 cm")];
         for _ in 0..60 {
             s.push("q".into());
@@ -622,9 +674,24 @@ mod tests {
     #[test]
     fn operators_that_paint_otherwise_are_found_before_recording() {
         let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET");
-        assert_eq!(device_page_operators(&ops), Err("text"));
+        assert_eq!(
+            device_page_ineligible(false, false, true, &ops),
+            Some("text")
+        );
         let ops = crate::content::parse(b"q 0 0 10 10 re f Q");
-        assert_eq!(device_page_operators(&ops), Ok(()));
+        assert_eq!(device_page_ineligible(false, false, true, &ops), None);
+        assert_eq!(
+            device_page_ineligible(true, true, false, &ops),
+            Some("overprint simulation")
+        );
+        assert_eq!(
+            device_page_ineligible(false, true, false, &ops),
+            Some("page group")
+        );
+        assert_eq!(
+            device_page_ineligible(false, false, false, &ops),
+            Some("aliased vector paint")
+        );
     }
 
     /// A page of full-page fills past the byte limit of a command list is
@@ -645,5 +712,28 @@ mod tests {
             record(&doc, 2000, 2000, &hairline),
             DeviceRecording::Refused("command list size")
         ));
+    }
+
+    /// The renderer that renders a page again on the CPU continues the
+    /// recording renderer's operator count, deadline and warned operators.
+    #[test]
+    fn the_cpu_pass_continues_the_recording_budget() {
+        let doc = doc();
+        let ops = crate::content::parse(b"zz 0 0 10 10 re f");
+        let mut first = PageRenderer::new(50, 50, &doc, (4, 0));
+        first.op_budget = 4;
+        first.record_for_device().expect("an RGB page records");
+        first.execute(&ops);
+        assert!(first.budget_status().is_none(), "the page fits the budget");
+        let fallback = first.take_device_fallback();
+        let mut second = PageRenderer::new(50, 50, &doc, (4, 0));
+        second.resume_after_device(fallback);
+        assert_eq!(second.deadline, first.deadline);
+        assert!(second.warned_unknown_ops.contains(&b"zz"[..]));
+        second.execute(&ops);
+        assert!(
+            second.budget_status().is_some(),
+            "the second pass ran on a fresh budget"
+        );
     }
 }

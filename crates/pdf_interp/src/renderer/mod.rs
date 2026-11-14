@@ -20,5 +20,5 @@ pub use page::{
     CanvasBuffers, DevicePage, ImageFailure, PageDiagnostics, PageRenderer, PageView, RenderAbort,
 };
 #[cfg(feature = "vulkan")]
-pub use page::{DeviceRecording, device_page_operators};
+pub use page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 pub use pdf::ContentFailure;
