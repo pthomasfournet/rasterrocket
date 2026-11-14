@@ -1,12 +1,14 @@
 //! Shaping of non-embedded text in scripts that need it: the codes of one
-//! show string drawn by the same substitute face are shaped together.
+//! show string drawn by the same substitute face are shaped together, in
+//! the context of the strings shown next to it on its baseline.
 //!
 //! The faces are the bundled ones (no installed fonts are searched), so the
-//! glyphs are fixed.  Showing a word one code per `Tj` places every code at
-//! the same pen position as one `Tj` but shapes nothing, which gives the
-//! unshaped drawing to compare with.  A text field's value, in logical
-//! order, is drawn through the same path once its appearance has put each
-//! line in visual order.
+//! glyphs are fixed.  Showing a word one code per `Tj`, with `q Q` between
+//! the strings, places every code at the same pen position as one `Tj` but
+//! shapes nothing, since `q` ends the context of the string before it; that
+//! gives the unshaped drawing to compare with.  A text field's value, in
+//! logical order, is drawn through the same path once its appearance has
+//! put each line in visual order.
 #![cfg(feature = "bundled-fonts")]
 
 #[expect(
@@ -38,7 +40,7 @@ fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
 }
 
 /// Render `show`, a text object body, with a font whose codes from 65 on
-/// are the glyphs `names`.
+/// are the glyphs `names`, selected as `/F1` and as `/F2`.
 fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
     let differences = names
         .iter()
@@ -53,7 +55,7 @@ fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
     let pdf = with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] \
-             /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+             /Resources << /Font << /F1 5 0 R /F2 5 0 R >> >> /Contents 4 0 R >>"
         )
         .into_bytes(),
         stream_object("", content.as_bytes()),
@@ -62,7 +64,8 @@ fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
     rendered(pdf)
 }
 
-/// The codes 65.. of `n` glyphs as one show string, and as one per `Tj`.
+/// The codes 65.. of `n` glyphs as one show string, and as one per `Tj`
+/// with no shaping context between them.
 fn shown_whole_and_apart(n: u8) -> (String, String) {
     use std::fmt::Write;
     let codes: Vec<u8> = (65..65 + n).collect();
@@ -75,7 +78,7 @@ fn shown_whole_and_apart(n: u8) -> (String, String) {
         .iter()
         .map(|c| format!("<{c:02X}> Tj"))
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" q Q ");
     (whole, apart)
 }
 
@@ -106,6 +109,39 @@ fn arabic_letters_of_one_string_join() {
         "isolated forms leave gaps between letters"
     );
     assert_joined_beh_yeh_teh(&joined);
+}
+
+/// Beh, yeh, teh split between show strings that follow one another on
+/// the baseline, by a `TJ` adjustment, by `Tf` selecting the font anew and
+/// by consecutive `Tj`s: each part takes the forms that join it to the
+/// other, and each part's glyphs continue where the other's end, so the
+/// word is drawn as when shown whole.  A small adjustment that tightens
+/// the word keeps it connected.
+#[test]
+fn an_arabic_word_split_between_strings_joins_across_the_split() {
+    let names = ["uni062A", "uni064A", "uni0628"];
+    let whole = render(&names, "<414243> Tj");
+    for show in [
+        "[<41> 0 <4243>] TJ",
+        "<41> Tj /F2 36 Tf <42> Tj /F1 36 Tf <43> Tj",
+        "<41> Tj <42> Tj <43> Tj",
+    ] {
+        assert!(
+            render(&names, show) == whole,
+            "{show} is drawn as one string"
+        );
+    }
+    assert_joined_beh_yeh_teh(&render(&names, "[<4142> 20 <43>] TJ"));
+}
+
+/// A `TJ` adjustment as wide as a word space separates the strings around
+/// it: neither part joins the other.
+#[test]
+fn a_word_space_between_strings_keeps_them_apart() {
+    let names = ["uni062A", "uni064A", "uni0628"];
+    let spaced = render(&names, "[<41> -500 <4243>] TJ");
+    let apart = render(&names, "[<41> -500] TJ q Q <4243> Tj");
+    assert_eq!(spaced, apart);
 }
 
 /// A text field whose value is beh, yeh, teh in logical order: its

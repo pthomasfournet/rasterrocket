@@ -94,12 +94,32 @@ impl FontProgram {
     ///
     /// # Errors
     ///
+    /// Those of [`Self::shape_in_context`].
+    pub fn shape(&self, text: &str, rtl: bool) -> Result<Vec<ShapedGlyph>, ShapeError> {
+        self.shape_in_context(text, "", "", rtl)
+    }
+
+    /// [`Self::shape`] for `text` preceded by `before` and followed by
+    /// `after`, all three in logical order.  The context is read by the
+    /// shaper's joining analysis but not shaped: the first character of
+    /// `text` joins the last of `before`, and its last character the first
+    /// of `after`, as within one run.  At most the five characters nearest
+    /// `text` on each side are read.
+    ///
+    /// # Errors
+    ///
     /// [`ShapeError::NotSfnt`] for a program that is not an sfnt;
     /// [`ShapeError::NoShaperFont`] when the shaper reads no font from it;
     /// [`ShapeError::Refused`] when the shaper refuses the run;
     /// [`ShapeError::Exhausted`] when the run exceeds the shaper's limits;
     /// [`ShapeError::NoSelector`] when a shaped glyph has no selector.
-    pub fn shape(&self, text: &str, rtl: bool) -> Result<Vec<ShapedGlyph>, ShapeError> {
+    pub fn shape_in_context(
+        &self,
+        text: &str,
+        before: &str,
+        after: &str,
+        rtl: bool,
+    ) -> Result<Vec<ShapedGlyph>, ShapeError> {
         let face_index = self.sfnt_face_index().ok_or(ShapeError::NotSfnt)?;
         let shaping = self.shaper.get_or_init(|| {
             let data: Arc<dyn AsRef<[u8]> + Send + Sync> = self.shared_data();
@@ -112,6 +132,8 @@ impl FontProgram {
         let shaper = ShaperFont::new(font);
         let mut buffer = Buffer::new();
         buffer.push_str(text);
+        buffer.set_pre_context(before);
+        buffer.set_post_context(after);
         buffer.set_direction(if rtl {
             Direction::RightToLeft
         } else {

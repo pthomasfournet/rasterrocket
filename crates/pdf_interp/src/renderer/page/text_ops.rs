@@ -2,7 +2,8 @@
 //! ([`super::PageRenderer::show_text`]) and the `TJ` kerning offsets of the
 //! operator dispatch.
 
-use crate::renderer::gstate::ctm_transform;
+use crate::renderer::gstate::{ctm_transform, mat2x2_mul};
+use crate::renderer::text::TextState;
 use font::key::FRACTION;
 
 // ── Glyph record ──────────────────────────────────────────────────────────────
@@ -63,6 +64,44 @@ pub(super) const fn translate_text_x(tm: [f64; 6], tx: f64) -> [f64; 6] {
 pub(super) const fn translate_text_y(tm: [f64; 6], ty: f64) -> [f64; 6] {
     let [a, b, c, d, e, f] = tm;
     [a, b, c, d, ty.mul_add(c, e), ty.mul_add(d, f)]
+}
+
+/// Move the text position of `ts` by the `TJ` adjustment `kern`, in
+/// thousandths of a text-space unit (PDF §9.4.3): by
+/// `−kern / 1000 × Tfs × Th` along x, or in vertical writing mode by
+/// `−kern / 1000 × Tfs` along y, without `Th`.
+pub(super) fn apply_kern(ts: &mut TextState, kern: f64) {
+    let vertical = ts
+        .font
+        .as_ref()
+        .and_then(|f| f.descriptor.cid_encoding.as_ref())
+        .is_some_and(|enc| enc.vertical);
+    if vertical {
+        let shift = -kern / 1000.0 * ts.font_size;
+        ts.text_matrix = translate_text_y(ts.text_matrix, shift);
+    } else {
+        let hz = ts.horiz_scaling / 100.0;
+        let shift = -kern / 1000.0 * ts.font_size * hz;
+        ts.text_matrix = translate_text_x(ts.text_matrix, shift);
+    }
+}
+
+/// The 2×2 part of the text rendering matrix in device pixels (PDF
+/// §9.4.4): `[Tfs × Th 0 0 Tfs] × Tm[2×2] × CTM[2×2]`, with `horiz_scaling`
+/// as a fraction.
+pub(super) fn text_rendering_matrix(
+    tm: &[f64; 6],
+    ctm: &[f64; 6],
+    font_size: f64,
+    horiz_scaling: f64,
+) -> [f64; 4] {
+    let [ax, ay, cx, cy] = mat2x2_mul(tm, ctm);
+    [
+        ax * font_size * horiz_scaling,
+        ay * font_size * horiz_scaling,
+        cx * font_size,
+        cy * font_size,
+    ]
 }
 
 /// Map a text-space point through the text matrix and CTM to device-pixel

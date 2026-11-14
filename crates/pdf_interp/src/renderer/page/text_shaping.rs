@@ -6,32 +6,58 @@
 //! vowel signs, mark placement), the codes of a run in such a script are
 //! instead shaped as one text with the drawing face's layout tables.
 //!
-//! A run is a maximal sequence of at least two shown codes drawn by the
-//! same face whose characters belong to one script, with the combining
-//! marks and joiners among them, before them included.  A code's text is
+//! A run is a maximal sequence of shown codes drawn by the same face whose
+//! characters belong to one script, with the combining marks and joiners
+//! among them, before them included.  It is shaped when it holds at least
+//! two codes or ends next to a neighbouring string.  A code's text is
 //! the one or two characters its font maps it to.  Show strings carry
 //! right-to-left text in visual order and left-to-right text in logical
 //! order, so a right-to-left run's codes are reversed into logical order
 //! before shaping, each code's own characters kept in theirs; the shaped
-//! glyphs come back in visual order.  A run never crosses a show string,
-//! so a word split between two strings is shaped as two runs.
+//! glyphs come back in visual order.
+//!
+//! A run never crosses a show string, but the characters around it are
+//! its shaping context: those of the neighbouring codes of its string and,
+//! at the string's ends, those of the strings shown next to it on its
+//! baseline (see [`Neighbours`]).  A word split between two strings is
+//! thereby joined across the split, each part keeping its own positions.
 
 use font::face::FontFace;
 use font::program::{ShapeError, ShapedGlyph};
 
 use crate::renderer::font_cache::PageFace;
-use crate::resources::cmap::DecodedCode;
+
+/// The text of a shown code: the one or two characters its font maps it
+/// to, `None` when unknown.
+pub(super) type CodeText = Option<(char, Option<char>)>;
+
+/// The codes read as context on each side of a run: as many as the shaper
+/// reads characters.
+pub(super) const CONTEXT_CODES: usize = 5;
+
+/// The texts of the codes shown next to a string on its baseline, in
+/// storage order: `before` ends with the code shown just before the
+/// string, `after` starts with the code shown just after it.  Each holds
+/// at most [`CONTEXT_CODES`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Neighbours {
+    pub before: Vec<CodeText>,
+    pub after: Vec<CodeText>,
+}
 
 /// The drawing glyph of a shown code: its face, its selector there and
 /// whether the selector is a glyph index (see [`PageFace::glyph_for`]).
 pub(super) type Drawn<'f> = (&'f FontFace, u32, bool);
 
-/// A run of shown codes `start..end` drawn as `glyphs` from `face`.
+/// A run of shown codes `start..end` drawn as `glyphs` from `face`, which
+/// continues into the string shown before it when `joins.0` and into the
+/// string shown after it when `joins.1`.
 pub(super) struct ShapedRun<'f> {
     pub start: usize,
     pub end: usize,
     pub face: &'f FontFace,
     pub glyphs: Vec<ShapedGlyph>,
+    pub joins: (bool, bool),
 }
 
 /// How a character takes part in a shaped run.
@@ -105,9 +131,16 @@ const fn class(c: char) -> Option<Class> {
     })
 }
 
-/// The shaped runs of a shown string whose codes are `codes` and whose
-/// per-code drawing glyphs are `drawn`, for a string shown with `face`.
-/// Empty unless `face` is a substitute that knows its codes' characters.
+/// Whether a code of text `text` can be part of a run: a letter of a
+/// script that needs shaping, a combining mark or a joiner.
+pub(super) fn takes_context(text: CodeText) -> bool {
+    text.is_some_and(|(first, _)| class(first).is_some())
+}
+
+/// The shaped runs of a shown string whose codes have the texts `texts`
+/// and the drawing glyphs `drawn`, for a string shown with `face` between
+/// `neighbours`.  Empty unless `face` is a substitute that knows its
+/// codes' characters.
 ///
 /// A run is left glyph by glyph when its face is not an sfnt, when a
 /// shaped glyph has no selector, when shaping yields `.notdef`, which a
@@ -116,29 +149,28 @@ const fn class(c: char) -> Option<Class> {
 /// logged at `debug`, the last three at `warn`.
 pub(super) fn shaped_runs<'f>(
     face: &PageFace,
-    codes: &[DecodedCode],
+    texts: &[CodeText],
     drawn: &[Option<Drawn<'f>>],
+    neighbours: &Neighbours,
 ) -> Vec<ShapedRun<'f>> {
-    debug_assert_eq!(codes.len(), drawn.len());
+    debug_assert_eq!(texts.len(), drawn.len());
     if !face.substitute {
         return Vec::new();
     }
-    let texts: Vec<Option<(char, Option<char>)>> =
-        codes.iter().map(|d| face.text(d.code, d.value)).collect();
     let classes: Vec<Option<Class>> = texts
         .iter()
         .map(|text| text.and_then(|(first, _)| class(first)))
         .collect();
     let mut runs = Vec::new();
     let mut start = 0;
-    while start < codes.len() {
+    while start < texts.len() {
         let Some((run_face, ..)) = drawn[start] else {
             start += 1;
             continue;
         };
         let same_face = |i: usize| drawn[i].is_some_and(|(f, ..)| std::ptr::eq(f, run_face));
         // Leading marks join the script that follows them.
-        let first_letter = (start..codes.len())
+        let first_letter = (start..texts.len())
             .take_while(|&i| same_face(i))
             .find(|&i| classes[i] != Some(Class::Inherited));
         let Some(script @ Class::Shaped { rtl, .. }) = first_letter.and_then(|i| classes[i]) else {
@@ -146,20 +178,39 @@ pub(super) fn shaped_runs<'f>(
             continue;
         };
         let after_first = first_letter.map_or(start, |i| i + 1);
-        let end = (after_first..codes.len())
+        let end = (after_first..texts.len())
             .find(|&i| {
                 !same_face(i)
                     || !matches!(classes[i], Some(Class::Inherited)) && classes[i] != Some(script)
             })
-            .unwrap_or(codes.len());
-        if end - start >= 2
-            && let Some(glyphs) = shape(run_face, &texts[start..end], rtl)
+            .unwrap_or(texts.len());
+        // The known texts of the codes on each side, nearest first.
+        let known = |codes: &mut dyn Iterator<Item = &CodeText>| -> Vec<(char, Option<char>)> {
+            codes.take(CONTEXT_CODES).map_while(|&text| text).collect()
+        };
+        let before = known(
+            &mut texts[..start]
+                .iter()
+                .rev()
+                .chain(neighbours.before.iter().rev()),
+        );
+        let after = known(&mut texts[end..].iter().chain(&neighbours.after));
+        // The run continues into a neighbouring string that starts or ends
+        // with a code that can be part of a run; a lone code takes a
+        // contextual form only then.
+        let joins = (
+            start == 0 && neighbours.before.last().is_some_and(|&t| takes_context(t)),
+            end == texts.len() && neighbours.after.first().is_some_and(|&t| takes_context(t)),
+        );
+        if (end - start >= 2 || joins.0 || joins.1)
+            && let Some(glyphs) = shape(run_face, &texts[start..end], &before, &after, rtl)
         {
             runs.push(ShapedRun {
                 start,
                 end,
                 face: run_face,
                 glyphs,
+                joins,
             });
         }
         start = end;
@@ -167,26 +218,39 @@ pub(super) fn shaped_runs<'f>(
     runs
 }
 
-/// The glyphs of the codes whose texts are `texts`, shown in visual order,
-/// shaped with `run_face`; `None` when a code's text is unknown or the
-/// face cannot shape them.
+/// The glyphs of the codes whose texts are `texts`, stored between codes
+/// of the texts `before` and `after`, each listed nearest first, shaped
+/// with `run_face`; `None` when a code's text is unknown or the face
+/// cannot shape them.
 fn shape(
     run_face: &FontFace,
-    texts: &[Option<(char, Option<char>)>],
+    texts: &[CodeText],
+    before: &[(char, Option<char>)],
+    after: &[(char, Option<char>)],
     rtl: bool,
 ) -> Option<Vec<ShapedGlyph>> {
-    let in_logical_order = |texts: &mut dyn Iterator<Item = &Option<(char, Option<char>)>>| {
+    let joined = |texts: &mut dyn Iterator<Item = &(char, Option<char>)>| {
         texts
-            .map(|&text| text.map(|(first, second)| std::iter::once(first).chain(second)))
-            .collect::<Option<Vec<_>>>()
-            .map(|texts| texts.into_iter().flatten().collect::<String>())
+            .flat_map(|&(first, second)| std::iter::once(first).chain(second))
+            .collect::<String>()
     };
-    let text = if rtl {
-        in_logical_order(&mut texts.iter().rev())
+    let texts = texts.iter().copied().collect::<Option<Vec<_>>>()?;
+    // Right-to-left codes are stored in visual order: the logical text
+    // reads them in reverse, so the codes stored after the run precede it.
+    let (text, pre, post) = if rtl {
+        (
+            joined(&mut texts.iter().rev()),
+            joined(&mut after.iter().rev()),
+            joined(&mut before.iter()),
+        )
     } else {
-        in_logical_order(&mut texts.iter())
-    }?;
-    match run_face.program().shape(&text, rtl) {
+        (
+            joined(&mut texts.iter()),
+            joined(&mut before.iter().rev()),
+            joined(&mut after.iter()),
+        )
+    };
+    match run_face.program().shape_in_context(&text, &pre, &post, rtl) {
         Ok(glyphs) if glyphs.iter().all(|g| g.selector != 0) => Some(glyphs),
         Ok(_) => {
             log::debug!("shaping {text:?} yields .notdef; drawn glyph by glyph");

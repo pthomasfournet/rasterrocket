@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use super::super::gstate::ctm_multiply;
 use super::paint::{int_to_cap, int_to_join};
-use super::text_ops::{translate_text_x, translate_text_y};
+use super::text_context::{Following, keeps_text_context};
+use super::text_ops::apply_kern;
 use super::{MAX_WARNED_UNKNOWN_OPS, PageRenderer};
 use crate::content::{Operator, TextArrayElement};
 use crate::resources::ExtGStateParams;
@@ -46,7 +47,11 @@ impl MarkedContent {
 }
 
 impl PageRenderer<'_> {
-    pub(super) fn execute_one(&mut self, op: &Operator) {
+    /// Execute `op`, followed in its content stream by `rest`.
+    pub(super) fn execute_one(&mut self, op: &Operator, rest: &[Operator]) {
+        if !keeps_text_context(op) {
+            self.text_tail = None;
+        }
         // ── Marked content and optional content visibility ─────────────────────
         // Marked-content operators are tracked regardless of visibility; every
         // other operator is skipped inside a hidden optional-content sequence.
@@ -81,7 +86,7 @@ impl PageRenderer<'_> {
             return;
         }
 
-        self.dispatch(op);
+        self.dispatch(op, rest);
     }
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
@@ -89,7 +94,7 @@ impl PageRenderer<'_> {
         clippy::many_single_char_names,
         reason = "PDF matrix components and PDF spec variable names"
     )]
-    fn dispatch(&mut self, op: &Operator) {
+    fn dispatch(&mut self, op: &Operator, rest: &[Operator]) {
         match op {
             // ── Graphics state ────────────────────────────────────────────────
             Operator::Save => self.gstate.save_op(),
@@ -323,45 +328,34 @@ impl PageRenderer<'_> {
 
             // ── Text showing ──────────────────────────────────────────────────
             Operator::ShowText(bytes) => {
-                self.show_text(bytes);
+                self.show_text(bytes, Following::ops(rest));
             }
             Operator::ShowTextArray(elems) => {
-                for elem in elems {
+                for (i, elem) in elems.iter().enumerate() {
                     match elem {
-                        TextArrayElement::Text(bytes) => self.show_text(bytes),
+                        TextArrayElement::Text(bytes) => self.show_text(
+                            bytes,
+                            Following {
+                                elements: &elems[i + 1..],
+                                ops: rest,
+                            },
+                        ),
                         TextArrayElement::Offset(kern) => {
-                            // PDF §9.4.3: kern is in thousandths of a text-space unit.
-                            // Displacement = -(w/1000) * Th * Tfs, where Th is horizontal
-                            // scaling (Tz as a fraction, default 1.0) and Tfs is font size;
-                            // in vertical writing mode -(w/1000) * Tfs along y, without Th.
-                            let ts = &mut self.gstate.current_mut().text;
-                            let vertical = ts
-                                .font
-                                .as_ref()
-                                .and_then(|f| f.descriptor.cid_encoding.as_ref())
-                                .is_some_and(|enc| enc.vertical);
-                            if vertical {
-                                let shift = -kern / 1000.0 * ts.font_size;
-                                ts.text_matrix = translate_text_y(ts.text_matrix, shift);
-                            } else {
-                                let hz = ts.horiz_scaling / 100.0;
-                                let shift = -kern / 1000.0 * ts.font_size * hz;
-                                ts.text_matrix = translate_text_x(ts.text_matrix, shift);
-                            }
+                            apply_kern(&mut self.gstate.current_mut().text, *kern);
                         }
                     }
                 }
             }
             Operator::MoveNextLineShow(bytes) => {
                 self.gstate.current_mut().text.next_line();
-                self.show_text(bytes);
+                self.show_text(bytes, Following::ops(rest));
             }
             Operator::MoveNextLineShowSpaced { aw, ac, text } => {
                 let gs = self.gstate.current_mut();
                 gs.text.word_spacing = *aw;
                 gs.text.char_spacing = *ac;
                 gs.text.next_line();
-                self.show_text(text);
+                self.show_text(text, Following::ops(rest));
             }
 
             // ── XObjects / images / shading ────────────────────────────────────

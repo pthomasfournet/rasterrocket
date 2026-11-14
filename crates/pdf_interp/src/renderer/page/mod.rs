@@ -80,6 +80,7 @@ mod pixel_rect;
 mod shading_paint;
 mod soft_mask;
 mod text;
+mod text_context;
 mod text_ops;
 mod text_shaping;
 mod text_stroke;
@@ -241,6 +242,9 @@ pub struct PageRenderer<'doc> {
     /// such text has been shown.  `ET` intersects the clip with it
     /// (PDF §9.3.6).
     text_clip: Option<raster::path::Path>,
+    /// The end of the string shown last, while only operators that keep
+    /// shaping context have followed it (see [`text_context`]).
+    text_tail: Option<text_context::TextTail>,
     /// Font face cache for this page.
     font_cache: FontCache,
     /// Rasterise glyphs with 8-bit coverage; `false` draws them bilevel.
@@ -574,6 +578,7 @@ impl<'doc> PageRenderer<'doc> {
             path: None,
             pending_clip: None,
             text_clip: None,
+            text_tail: None,
             font_cache,
             text_antialias: true,
             vector_antialias: true,
@@ -1048,7 +1053,7 @@ impl<'doc> PageRenderer<'doc> {
     /// deadline (`PAGE_RENDER_DEADLINE_SECS`).  The deadline is checked once
     /// every `DEADLINE_CHECK_INTERVAL` ops to amortise `Instant::now()` cost.
     pub fn execute(&mut self, ops: &[Operator]) {
-        for op in ops {
+        for (i, op) in ops.iter().enumerate() {
             // Bail early if a previous call (e.g. a recursive form XObject)
             // already tripped the budget.
             if self.budget_exceeded.is_some() {
@@ -1068,7 +1073,7 @@ impl<'doc> PageRenderer<'doc> {
                 });
                 return;
             }
-            self.execute_one(op);
+            self.execute_one(op, &ops[i + 1..]);
             // saturating_add: the op cap fires at MAX_PAGE_OPS long before u64
             // could wrap, but a test or future caller may set a huge budget
             // with the deadline disabled — never silently wrap to a low count
@@ -1140,6 +1145,7 @@ impl<'doc> PageRenderer<'doc> {
         self.path = None;
         self.pending_clip = None;
         self.text_clip = None;
+        self.text_tail = None;
         self.marked_content = operators::MarkedContent::default();
         #[cfg(feature = "vulkan")]
         if self.device_refused() {
