@@ -1193,11 +1193,13 @@ impl<'doc> PageRenderer<'doc> {
     /// sequences are restored afterwards, whatever the nested stream left
     /// open or closed.  A nested stream is executed only while every
     /// enclosing sequence is visible, so the visibility it inherits is
-    /// unchanged.
+    /// unchanged.  Shaping context ends with the stream: the strings shown
+    /// in it are no neighbours of those shown after it.
     fn execute_content_stream(&mut self, ops: &[Operator]) {
         let scope = self.gstate.enter_stream();
         let enclosing = std::mem::take(&mut self.marked_content);
         self.execute(ops);
+        self.text_tail = None;
         self.marked_content = enclosing;
         self.gstate.leave_stream(scope);
     }

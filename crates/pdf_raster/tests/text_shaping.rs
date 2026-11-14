@@ -42,6 +42,12 @@ fn rendered(pdf: Vec<u8>) -> Vec<Vec<bool>> {
 /// Render `show`, a text object body, with a font whose codes from 65 on
 /// are the glyphs `names`, selected as `/F1` and as `/F2`.
 fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
+    render_with_form(names, show, "")
+}
+
+/// [`render`], with the form `/Fm` whose content is `form` and whose
+/// resources select the same font as `/F1`.
+fn render_with_form(names: &[&str], show: &str, form: &str) -> Vec<Vec<bool>> {
     let differences = names
         .iter()
         .map(|n| format!("/{n}"))
@@ -55,11 +61,19 @@ fn render(names: &[&str], show: &str) -> Vec<Vec<bool>> {
     let pdf = with_page_tree(&[
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] \
-             /Resources << /Font << /F1 5 0 R /F2 5 0 R >> >> /Contents 4 0 R >>"
+             /Resources << /Font << /F1 5 0 R /F2 5 0 R >> /XObject << /Fm 6 0 R >> >> \
+             /Contents 4 0 R >>"
         )
         .into_bytes(),
         stream_object("", content.as_bytes()),
         font.into_bytes(),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 {WIDTH} {HEIGHT}] \
+                 /Resources << /Font << /F1 5 0 R >> >>"
+            ),
+            form.as_bytes(),
+        ),
     ]);
     rendered(pdf)
 }
@@ -142,6 +156,23 @@ fn a_word_space_between_strings_keeps_them_apart() {
     let spaced = render(&names, "[<41> -500 <4243>] TJ");
     let apart = render(&names, "[<41> -500] TJ q Q <4243> Tj");
     assert_eq!(spaced, apart);
+}
+
+/// A form that ends inside a text object gives the string shown after it
+/// no context: the outer string, drawn where the form's last string ends,
+/// is drawn as after an operator that ends the context.  An invisible teh
+/// moves the outer pen to that end.
+#[test]
+fn a_form_ends_the_context_of_its_strings() {
+    let names = ["uni062A", "uni064A", "uni0628"];
+    let form = "BT /F1 36 Tf 20 15 Td <41> Tj";
+    let after_form = render_with_form(&names, "3 Tr <41> Tj 0 Tr /Fm Do <4243> Tj", form);
+    let apart = render_with_form(&names, "3 Tr <41> Tj 0 Tr /Fm Do q Q <4243> Tj", form);
+    assert!(gaps(&apart) > 0, "the form's teh stands apart");
+    assert!(
+        after_form == apart,
+        "the outer string takes no context from the form"
+    );
 }
 
 /// A text field whose value is beh, yeh, teh in logical order: its
