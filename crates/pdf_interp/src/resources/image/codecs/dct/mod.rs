@@ -209,12 +209,13 @@ pub(in crate::resources::image) fn decode_dct<
         log::warn!("image: DCTDecode: not a valid JPEG stream");
         return None;
     };
-    if sof.height == u16::MAX {
+    if stream::height_unknown(sof.height) {
         // The repair takes such a frame's height from `/Height` when the
-        // widths agree; otherwise the line count is unknown, and the decoder
-        // would fill every row past the data without reporting it.
+        // widths agree; otherwise the line count, and with it the extent of
+        // the image the page maps the samples onto, is unknown.
         log::warn!(
-            "image: DCTDecode: frame height 0xFFFF (unknown) and width {} differs from /Width {pdf_w}",
+            "image: DCTDecode: frame height {:#06X} (unknown) and width {} differs from /Width {pdf_w}",
+            sof.height,
             sof.width
         );
         return None;

@@ -7,14 +7,18 @@ use std::borrow::Cow;
 /// The JPEG start-of-image marker.
 const SOI: [u8; 2] = [0xFF, 0xD8];
 
-/// The frame-header height some producers write when the line count is not
-/// known when the header is written; the true count is the dictionary's.
-const UNKNOWN_HEIGHT: u16 = 0xFFFF;
+/// Whether a frame-header height `Y` leaves the line count unknown: `0`,
+/// the count a DNL marker after the first scan defines (ITU T.81 B.2.5),
+/// or `0xFFFF`, which some producers write when the count is not known
+/// when the header is written.  The true count is the dictionary's.
+pub(super) const fn height_unknown(height: u16) -> bool {
+    matches!(height, 0 | 0xFFFF)
+}
 
 /// Frame header fields of a JPEG's first SOF marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct JpegSof {
-    /// Number of lines (`Y`); 0 means the height is defined by a later DNL marker.
+    /// Number of lines (`Y`); see [`height_unknown`].
     pub height: u16,
     /// Number of samples per line (`X`).
     pub width: u16,
@@ -77,15 +81,15 @@ pub(super) fn jpeg_sof(data: &[u8]) -> Option<JpegSof> {
 /// the whole image, each the way the stream evidently intends:
 ///
 /// - Bytes before the SOI marker are skipped.
-/// - A frame height of `0xFFFF` whose width equals `/Width` is replaced by
-///   `/Height` (`pdf_h`): the producer wrote the header before it knew the
-///   line count.  The width match keeps an unrelated stream untouched.
+/// - An unknown frame height ([`height_unknown`]) whose width equals
+///   `/Width` is replaced by `/Height` (`pdf_h`).  The width match keeps an
+///   unrelated stream untouched.  The DNL segment of a frame of height `0`
+///   follows the last row of its scan, where the decoder ends the scan.
 ///
-/// A missing EOI marker is left missing: the decoder reads to the end of the
-/// data without it, and an appended marker would hide scan data that ends
-/// short of the frame from the strict decode that detects it.  A stream
-/// without an SOI marker is no JPEG and is returned unchanged.  The stream
-/// is copied only when the height is repaired.
+/// A missing EOI marker is left missing; the decoder reads to the end of the
+/// data without it.  A stream without an SOI marker is no JPEG and is
+/// returned unchanged.  The stream is copied only when the height is
+/// repaired.
 pub(super) fn repair(data: &[u8], pdf_w: u32, pdf_h: u32) -> Cow<'_, [u8]> {
     let Some(start) = data.windows(2).position(|w| w == SOI) else {
         return Cow::Borrowed(data);
@@ -94,13 +98,15 @@ pub(super) fn repair(data: &[u8], pdf_w: u32, pdf_h: u32) -> Cow<'_, [u8]> {
     let mut bytes = Cow::Borrowed(data);
 
     if let Some(sof) = jpeg_sof(data)
-        && sof.height == UNKNOWN_HEIGHT
+        && height_unknown(sof.height)
         && u32::from(sof.width) == pdf_w
         && let Ok(height) = u16::try_from(pdf_h)
-        && height != 0
-        && height != UNKNOWN_HEIGHT
+        && !height_unknown(height)
     {
-        log::debug!("image: DCTDecode: frame height 0xFFFF taken as /Height {height}");
+        log::debug!(
+            "image: DCTDecode: frame height {:#06X} taken as /Height {height}",
+            sof.height
+        );
         bytes.to_mut()[sof.height_at..sof.height_at + 2].copy_from_slice(&height.to_be_bytes());
     }
     bytes
@@ -159,19 +165,27 @@ mod tests {
 
     #[test]
     fn an_unknown_height_takes_the_dictionary_height() {
-        let mut data = complete();
-        data[13..15].copy_from_slice(&[0xFF, 0xFF]);
-        let r = repair(&data, 640, 300);
-        assert_eq!(jpeg_sof(&r).map(|s| s.height), Some(300));
+        for unknown in [0_u16, 0xFFFF] {
+            let mut data = complete();
+            data[13..15].copy_from_slice(&unknown.to_be_bytes());
+            let r = repair(&data, 640, 300);
+            assert_eq!(jpeg_sof(&r).map(|s| s.height), Some(300), "{unknown:#X}");
+        }
     }
 
     #[test]
     fn an_unknown_height_stays_when_the_width_differs() {
-        let mut data = complete();
-        data[13..15].copy_from_slice(&[0xFF, 0xFF]);
-        for (w, h) in [(641, 300), (640, 0), (640, 0xFFFF), (640, 70_000)] {
-            let r = repair(&data, w, h);
-            assert_eq!(jpeg_sof(&r).map(|s| s.height), Some(0xFFFF), "{w}×{h}");
+        for unknown in [0_u16, 0xFFFF] {
+            let mut data = complete();
+            data[13..15].copy_from_slice(&unknown.to_be_bytes());
+            for (w, h) in [(641, 300), (640, 0), (640, 0xFFFF), (640, 70_000)] {
+                let r = repair(&data, w, h);
+                assert_eq!(
+                    jpeg_sof(&r).map(|s| s.height),
+                    Some(unknown),
+                    "{unknown:#X}, {w}×{h}"
+                );
+            }
         }
     }
 

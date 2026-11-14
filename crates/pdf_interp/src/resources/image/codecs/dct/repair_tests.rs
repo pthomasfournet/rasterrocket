@@ -155,6 +155,30 @@ fn an_unknown_frame_height_takes_the_dictionary_height() {
     data[at..at + 2].copy_from_slice(&[0xFF, 0xFF]);
     let img = decode(&data, 32, 24).expect("decode with the dictionary height");
     assert_eq!((img.width, img.height), (32, 24));
+    assert!(img.partial.is_none(), "{:?}", img.partial);
+    assert!(
+        decode(&data, 33, 24).is_none(),
+        "an unknown height is refused when the widths differ"
+    );
+}
+
+/// A frame height of 0 with the line count in a DNL segment after the
+/// scan (ITU T.81 B.2.5) takes the dictionary height, and the segment
+/// ends the scan after its last row.
+#[test]
+fn a_dnl_frame_height_takes_the_dictionary_height() {
+    let whole = rgb_jpeg(32, 24, false);
+    let reference = decode(&whole, 32, 24).expect("reference decode");
+    let at = jpeg_sof(&whole).expect("SOF").height_at;
+    let eoi = whole.len() - 2;
+    let mut data = whole[..eoi].to_vec();
+    data[at..at + 2].copy_from_slice(&[0, 0]);
+    data.extend_from_slice(&[0xFF, 0xDC, 0x00, 0x04, 0x00, 24]);
+    data.extend_from_slice(&whole[eoi..]);
+    let img = decode(&data, 32, 24).expect("decode with the dictionary height");
+    assert_eq!((img.width, img.height), (32, 24));
+    assert_eq!(pixels(&img), pixels(&reference));
+    assert!(img.partial.is_none(), "{:?}", img.partial);
     assert!(
         decode(&data, 33, 24).is_none(),
         "an unknown height is refused when the widths differ"
