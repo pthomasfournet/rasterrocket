@@ -3,7 +3,7 @@
 //! demand, and a timestamp query pool around the stages of a page.
 //!
 //! Memory placement:
-//! - command list, intersections, row offsets: host-visible memory the
+//! - command list, coverage tables, row offsets: host-visible memory the
 //!   host writes in place, device-local when such a type exists;
 //! - tile counts, offsets and lists: device-local;
 //! - page: device-local and host-cached when such a type exists (integrated
@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use ash::vk;
 
-use crate::cmdlist::{CmdList, TILE};
+use crate::cmdlist::{CmdList, PAPER, TILE, pack_rgb};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/page_raster.spv"));
 
@@ -37,14 +37,15 @@ const STAMPS: u32 = 4;
 
 /// Push constants; layout matches `Params` in `page_raster.slang`.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
     n_cmds: u32,
     width: u32,
     height: u32,
     tiles_x: u32,
     tiles_y: u32,
-    aa_width: u32,
+    coverage_base: u32,
+    paper: u32,
 }
 
 type VkResult<T> = Result<T, String>;
@@ -100,8 +101,8 @@ pub struct Gpu {
     pub integrated: bool,
     /// Whether the device writes the page where the host reads it.
     pub page_in_place: bool,
-    /// Fine raster by `fine_raster_rows` (one scan-table walk per tile
-    /// row) instead of `fine_raster` (one per pixel).
+    /// Fine raster by `fine_raster_rows` (one span search per tile row)
+    /// instead of `fine_raster` (one per pixel).
     pub raster_rows: bool,
     /// Start-up steps in ns: loader, instance, device, the rest.
     pub startup: [u64; 4],
@@ -503,10 +504,11 @@ impl Gpu {
         }
     }
 
-    fn write(&self, slot: usize, data: &[u8]) {
+    /// Copy `data` into buffer `slot` from byte `at` on.
+    fn write(&self, slot: usize, at: usize, data: &[u8]) {
         let b = self.bufs[slot].as_ref().expect("ensured");
-        assert!(data.len() as u64 <= b.size && !b.ptr.is_null());
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), b.ptr, data.len()) };
+        assert!((at + data.len()) as u64 <= b.size && !b.ptr.is_null());
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), b.ptr.add(at), data.len()) };
         if !b.coherent {
             let range = vk::MappedMemoryRange::default()
                 .memory(b.memory)
@@ -526,10 +528,12 @@ impl Gpu {
 
         let start = Instant::now();
         let cmd_bytes: &[u8] = bytemuck::cast_slice(&cl.cmds);
-        let ix_bytes: &[u8] = bytemuck::cast_slice(&cl.intersects);
+        // The table buffer: the spans, then the coverage bytes from word
+        // `coverage_base` on, byte i in bits 8 (i % 4) of word i / 4.
+        let span_bytes: &[u8] = bytemuck::cast_slice(&cl.spans);
         let rs_bytes: &[u8] = bytemuck::cast_slice(&cl.row_starts);
         self.ensure(0, cmd_bytes.len() as u64)?;
-        self.ensure(1, ix_bytes.len() as u64)?;
+        self.ensure(1, (span_bytes.len() + cl.coverage.len()) as u64)?;
         self.ensure(2, rs_bytes.len() as u64)?;
         self.ensure(3, n_tiles * 4)?;
         self.ensure(4, (n_tiles + 1) * 4)?;
@@ -538,9 +542,10 @@ impl Gpu {
         if !self.page_in_place {
             self.ensure(7, page_bytes)?;
         }
-        self.write(0, cmd_bytes);
-        self.write(1, ix_bytes);
-        self.write(2, rs_bytes);
+        self.write(0, 0, cmd_bytes);
+        self.write(1, 0, span_bytes);
+        self.write(1, span_bytes.len(), &cl.coverage);
+        self.write(2, 0, rs_bytes);
         t.upload = ns(start);
 
         let start = Instant::now();
@@ -550,7 +555,8 @@ impl Gpu {
             height: h,
             tiles_x,
             tiles_y,
-            aa_width: w * 4,
+            coverage_base: u32::try_from(cl.spans.len()).expect("spans fit u32"),
+            paper: pack_rgb(PAPER),
         };
         self.record(&params, page_bytes)?;
         let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.cmd));
@@ -627,9 +633,6 @@ impl Gpu {
         let rw = vk::AccessFlags::SHADER_WRITE;
         let rd = vk::AccessFlags::SHADER_READ;
         let n_tiles = p.tiles_x * p.tiles_y;
-        let pc: [u32; 6] = [
-            p.n_cmds, p.width, p.height, p.tiles_x, p.tiles_y, p.aa_width,
-        ];
         unsafe {
             d.reset_command_buffer(c, vk::CommandBufferResetFlags::empty())
                 .map_err(vkerr("reset cb"))?;
@@ -654,7 +657,7 @@ impl Gpu {
                 self.layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytemuck::cast_slice(&pc),
+                bytemuck::bytes_of(p),
             );
             d.cmd_bind_pipeline(c, vk::PipelineBindPoint::COMPUTE, self.pipelines[0]);
             d.cmd_dispatch(c, n_tiles.div_ceil(64), 1, 1);

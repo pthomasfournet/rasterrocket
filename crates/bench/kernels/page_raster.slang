@@ -12,38 +12,31 @@
 //               the tile's commands in order, keeps the pixel in registers
 //               and writes it to the page once.
 // fine_raster_rows (alternative to fine_raster) the same output with each
-//               scan-table row walked once per tile instead of once per
-//               pixel; see its comment.
+//               coverage-table row searched once per tile row instead of
+//               once per pixel; see its comment.
 //
-// Command kinds:
-//   KIND_SIMPLE  every pixel of the bounds takes the colour (opaque solid
-//                source, Normal blend, no shape: the CPU pipe's `simple`
-//                variant with an identity transfer).
-//   KIND_AA      scanline-AA fill: the pixel's sub-sample count is the
-//                aa_fill kernel's walk of the command's intersection table,
-//                mapped through AA_GAMMA and composited over an opaque
-//                destination as the CPU's `composite_aa_rgb8_opaque`:
-//                a = div255(a_input * shape),
-//                c = div255((255 - a) * c_dst + a * c_src).
-//                A count of 0 leaves the pixel unchanged, as the CPU's
-//                composite does for a zero shape byte.
+// Every command paints its colour at constant alpha a_input with the
+// coverage of its table, over the pixels of its inclusive bounds
+// (x0, y0) - (x1, y1), which lie on the page.  The table is the CPU
+// rasteriser's exact-area coverage: per row, spans [x0, x1, offset] sorted
+// by x0, the pixels x0..x1 (inclusive) of a span covered fully when offset
+// is -1, else by coverage byte offset + (x - x0).  Pixels in no span are
+// uncovered.  A pixel composites over the opaque destination as the CPU's
+// composite_aa_rgb8_opaque does:
+//   a = div255(a_input * coverage),
+//   c = div255((255 - a) * c_dst + a * c_src).
+// A coverage of 0 leaves the pixel unchanged, as the CPU's composite does
+// for a zero shape byte.  Every pixel starts as the paper colour.
 
-static const int AA_SIZE = 4;
 static const uint TILE = 16;
-static const uint KIND_SIMPLE = 0;
-static const uint KIND_AA = 1;
 static const uint SCAN_THREADS = 256;
 
-static const uint AA_GAMMA[17] = {
-    0, 4, 11, 21, 32, 45, 59, 74, 90, 108, 126, 145, 166, 187, 209, 231, 255
-};
-
 struct Cmd {
-    uint kind;
-    uint eo;
+    uint kind;      // reserved; 0 = coverage table
+    uint reserved;
     uint rgb;       // r | g << 8 | b << 16
     uint a_input;
-    int table_y0;   // AA row of the table's row 0
+    int table_y0;   // pixel row of the table's row 0
     uint n_rows;
     uint row_base;  // index of the table's first entry in row_starts
     uint pad;
@@ -59,15 +52,19 @@ struct Params {
     uint height;
     uint tiles_x;
     uint tiles_y;
-    uint aa_width;
+    uint coverage_base;
+    uint paper;     // r | g << 8 | b << 16
 };
 
 [[vk::push_constant]] ConstantBuffer<Params> pc;
 
 [[vk::binding(0, 0)]] StructuredBuffer<Cmd> cmds;
-// Intersections as int triples [x0, x1, count].
-[[vk::binding(1, 0)]] StructuredBuffer<int> intersects;
-// Absolute offsets into `intersects`; a table of n rows owns n + 1 entries.
+// Every command's spans as int triples [x0, x1, offset], then from word
+// coverage_base on the spans' coverage bytes, four to a word,
+// little-endian.
+[[vk::binding(1, 0)]] StructuredBuffer<int> table;
+// Absolute span offsets; a table of n rows owns n + 1 consecutive entries
+// starting at its row_base.
 [[vk::binding(2, 0)]] StructuredBuffer<uint> row_starts;
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint> tile_counts;
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint> tile_offsets;
@@ -150,60 +147,51 @@ void bin_scatter(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// Sub-sample bitmask of one AA row within the four AA columns
-// [ax0, ax0 + AA_SIZE); the aa_fill kernel's walk.
-uint row_coverage_mask(uint start, uint end, int aa_width, int eo_mask, int ax0)
-{
-    uint mask = 0;
-    int count = 0;
-    uint i = start;
-
-    while (i < end) {
-        int xx0 = intersects[i * 3];
-        if (xx0 >= ax0 + AA_SIZE) break;
-        int xx1 = intersects[i * 3 + 1];
-        count += intersects[i * 3 + 2];
-        i++;
-        while (i < end && (intersects[i * 3] <= xx1 || (count & eo_mask) != 0)) {
-            xx1 = max(xx1, intersects[i * 3 + 1]);
-            count += intersects[i * 3 + 2];
-            i++;
-        }
-        int span_x1 = (i >= end && (count & eo_mask) != 0) ? aa_width : xx1 + 1;
-
-        int bx0 = max(xx0, 0);
-        int bx1 = min(span_x1, aa_width);
-        if (bx0 < bx1) {
-            int lo = max(bx0, ax0);
-            int hi = min(bx1, ax0 + AA_SIZE);
-            if (lo < hi) {
-                mask |= ((1u << uint(hi - lo)) - 1u) << uint(lo - ax0);
-            }
-        }
-    }
-    return mask;
-}
-
-uint coverage_count(Cmd c, int px, int py)
-{
-    int eo_mask = (c.eo != 0) ? 1 : ~0;
-    int ax0 = px * AA_SIZE;
-    int ay0 = py * AA_SIZE;
-    uint total = 0;
-    for (int yy = 0; yy < AA_SIZE; yy++) {
-        int r = ay0 + yy - c.table_y0;
-        if (r < 0 || uint(r) >= c.n_rows) continue;
-        uint start = row_starts[c.row_base + uint(r)];
-        uint end = row_starts[c.row_base + uint(r) + 1];
-        total += countbits(row_coverage_mask(start, end, int(pc.aa_width), eo_mask, ax0));
-    }
-    return total;
-}
-
 uint div255(uint x)
 {
     uint t = x + 0x80;
     return min((t + (t >> 8)) >> 8, 255u);
+}
+
+// Coverage byte i of the table's coverage words.
+uint coverage_byte(uint i)
+{
+    uint word = uint(table[pc.coverage_base + (i >> 2)]);
+    return (word >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+// Index of the first span of [start, end) whose x1 is at least x; end
+// when there is none.
+uint first_span_from(uint start, uint end, int x)
+{
+    uint lo = start;
+    uint hi = end;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (table[mid * 3 + 1] < x) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+// Coverage of pixel x in the spans [start, end) of one row.
+uint row_coverage(uint start, uint end, int x)
+{
+    uint i = first_span_from(start, end, x);
+    if (i >= end) return 0;
+    int x0 = table[i * 3];
+    if (x0 > x) return 0;
+    int offset = table[i * 3 + 2];
+    return offset < 0 ? 255u : coverage_byte(uint(offset + (x - x0)));
+}
+
+// c composited over the opaque pixel (r, g, b) at coverage cov.
+void composite(Cmd c, uint cov, inout uint r, inout uint g, inout uint b)
+{
+    uint a = div255(c.a_input * cov);
+    uint inv = 255 - a;
+    r = div255(inv * r + a * (c.rgb & 0xFF));
+    g = div255(inv * g + a * ((c.rgb >> 8) & 0xFF));
+    b = div255(inv * b + a * ((c.rgb >> 16) & 0xFF));
 }
 
 [shader("compute")]
@@ -220,28 +208,19 @@ void fine_raster(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
 
     int x = int(px);
     int y = int(py);
-    uint r = 0;
-    uint g = 0;
-    uint b = 0;
+    uint r = pc.paper & 0xFF;
+    uint g = (pc.paper >> 8) & 0xFF;
+    uint b = (pc.paper >> 16) & 0xFF;
     for (uint k = begin; k < end; k++) {
         Cmd c = cmds[tile_cmds[k]];
         if (x < c.x0 || x > c.x1 || y < c.y0 || y > c.y1) continue;
-        uint sr = c.rgb & 0xFF;
-        uint sg = (c.rgb >> 8) & 0xFF;
-        uint sb = (c.rgb >> 16) & 0xFF;
-        if (c.kind == KIND_SIMPLE) {
-            r = sr;
-            g = sg;
-            b = sb;
-            continue;
-        }
-        uint n = coverage_count(c, x, y);
-        if (n == 0) continue;
-        uint a = div255(c.a_input * AA_GAMMA[n]);
-        uint inv = 255 - a;
-        r = div255(inv * r + a * sr);
-        g = div255(inv * g + a * sg);
-        b = div255(inv * b + a * sb);
+        int row = y - c.table_y0;
+        if (row < 0 || uint(row) >= c.n_rows) continue;
+        uint start = row_starts[c.row_base + uint(row)];
+        uint stop = row_starts[c.row_base + uint(row) + 1];
+        uint cov = row_coverage(start, stop, x);
+        if (cov == 0) continue;
+        composite(c, cov, r, g, b);
     }
 
     uint o = (py * pc.width + px) * 3;
@@ -250,63 +229,21 @@ void fine_raster(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
     page[o + 2] = uint8_t(b);
 }
 
-// fine_raster_rows: fine_raster with the scan-table walks shared across the
-// tile.  The tile's commands are taken four at a time: thread t walks AA row
-// (t % 64) of the tile for command (t / 64) once, over the tile's 64 AA
-// columns, and stores the row's 64-bit sub-sample mask in workgroup memory;
-// after a barrier every pixel thread composites the four commands in order,
-// its count being the popcount of its 4-bit nibble in its four AA rows.
-// The walk is row_coverage_mask's over a 64-column window, so every count
-// equals fine_raster's.
+// fine_raster_rows: fine_raster with the span search shared across each
+// tile row.  The tile's commands are taken BATCH at a time: thread t
+// searches tile row (t % TILE) of command (t / TILE) once, for the first
+// span reaching the tile's left column, walks the spans that meet the
+// tile's TILE columns and stores the row's TILE coverage bytes, four to a
+// word, in workgroup memory; after a barrier every pixel thread composites
+// the batch's commands in order with its own byte.  Each byte is the one
+// row_coverage reads for that pixel, so every pixel equals fine_raster's.
 
-static const uint BATCH = 4;
-static const uint TILE_AA = TILE * 4;
+// Commands per batch: the TILE * TILE threads cover TILE rows of each.
+static const uint BATCH = TILE;
+static const uint ROW_WORDS = TILE / 4;
 
-groupshared uint2 row_masks[BATCH][TILE_AA];
+groupshared uint row_cov[BATCH][TILE][ROW_WORDS];
 groupshared Cmd batch_cmds[BATCH];
-
-// Set bits [lo, hi) of a 64-bit mask held as (low word, high word).
-void set_bits(inout uint2 m, int lo, int hi)
-{
-    int a = clamp(lo, 0, 32);
-    int b = clamp(hi, 0, 32);
-    if (a < b) m.x |= (b - a == 32 ? 0xFFFFFFFFu : ((1u << uint(b - a)) - 1u)) << uint(a);
-    a = clamp(lo - 32, 0, 32);
-    b = clamp(hi - 32, 0, 32);
-    if (a < b) m.y |= (b - a == 32 ? 0xFFFFFFFFu : ((1u << uint(b - a)) - 1u)) << uint(a);
-}
-
-// Sub-sample mask of one AA row over the window [ax0, ax0 + TILE_AA).
-uint2 row_window_mask(uint start, uint end, int aa_width, int eo_mask, int ax0)
-{
-    uint2 mask = uint2(0, 0);
-    int count = 0;
-    uint i = start;
-    int ax1 = ax0 + int(TILE_AA);
-
-    while (i < end) {
-        int xx0 = intersects[i * 3];
-        if (xx0 >= ax1) break;
-        int xx1 = intersects[i * 3 + 1];
-        count += intersects[i * 3 + 2];
-        i++;
-        while (i < end && (intersects[i * 3] <= xx1 || (count & eo_mask) != 0)) {
-            xx1 = max(xx1, intersects[i * 3 + 1]);
-            count += intersects[i * 3 + 2];
-            i++;
-        }
-        int span_x1 = (i >= end && (count & eo_mask) != 0) ? aa_width : xx1 + 1;
-
-        int bx0 = max(xx0, 0);
-        int bx1 = min(span_x1, aa_width);
-        if (bx0 < bx1) {
-            int lo = max(bx0, ax0);
-            int hi = min(bx1, ax1);
-            if (lo < hi) set_bits(mask, lo - ax0, hi - ax0);
-        }
-    }
-    return mask;
-}
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -316,34 +253,47 @@ void fine_raster_rows(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
     uint py = wid.y * TILE + lid.y;
     bool on_page = px < pc.width && py < pc.height;
     uint t = lid.y * TILE + lid.x;
-    uint slot = t / TILE_AA;
-    uint q = t % TILE_AA;
+    uint slot = t / TILE;
+    uint q = t % TILE;
 
     uint tile = wid.y * pc.tiles_x + wid.x;
     uint begin = tile_offsets[tile];
     uint end = tile_offsets[tile + 1];
-    int ax0 = int(wid.x * TILE_AA);
-    int ay = int(wid.y * TILE_AA + q);
+    int tx0 = int(wid.x * TILE);
+    int tx1 = tx0 + int(TILE) - 1;
+    int ty = int(wid.y * TILE + q);
 
     int x = int(px);
     int y = int(py);
-    uint r = 0;
-    uint g = 0;
-    uint b = 0;
+    uint r = pc.paper & 0xFF;
+    uint g = (pc.paper >> 8) & 0xFF;
+    uint b = (pc.paper >> 16) & 0xFF;
     for (uint k0 = begin; k0 < end; k0 += BATCH) {
         uint k = k0 + slot;
         if (k < end) {
             Cmd c = cmds[tile_cmds[k]];
             if (q == 0) batch_cmds[slot] = c;
-            uint2 m = uint2(0, 0);
-            int row = ay - c.table_y0;
-            if (c.kind == KIND_AA && row >= 0 && uint(row) < c.n_rows) {
-                int eo_mask = (c.eo != 0) ? 1 : ~0;
+            uint words[ROW_WORDS];
+            for (uint w = 0; w < ROW_WORDS; w++) words[w] = 0;
+            int row = ty - c.table_y0;
+            if (row >= 0 && uint(row) < c.n_rows) {
                 uint start = row_starts[c.row_base + uint(row)];
                 uint stop = row_starts[c.row_base + uint(row) + 1];
-                m = row_window_mask(start, stop, int(pc.aa_width), eo_mask, ax0);
+                for (uint i = first_span_from(start, stop, tx0); i < stop; i++) {
+                    int sx0 = table[i * 3];
+                    if (sx0 > tx1) break;
+                    int sx1 = table[i * 3 + 1];
+                    int offset = table[i * 3 + 2];
+                    int lo = max(sx0, tx0);
+                    int hi = min(sx1, tx1);
+                    for (int xx = lo; xx <= hi; xx++) {
+                        uint cov = offset < 0 ? 255u : coverage_byte(uint(offset + (xx - sx0)));
+                        uint col = uint(xx - tx0);
+                        words[col >> 2] |= cov << ((col & 3u) * 8u);
+                    }
+                }
             }
-            row_masks[slot][q] = m;
+            for (uint w = 0; w < ROW_WORDS; w++) row_cov[slot][q][w] = words[w];
         }
         GroupMemoryBarrierWithGroupSync();
 
@@ -351,28 +301,9 @@ void fine_raster_rows(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
         for (uint j = 0; j < n_batch; j++) {
             Cmd c = batch_cmds[j];
             if (x < c.x0 || x > c.x1 || y < c.y0 || y > c.y1) continue;
-            uint sr = c.rgb & 0xFF;
-            uint sg = (c.rgb >> 8) & 0xFF;
-            uint sb = (c.rgb >> 16) & 0xFF;
-            if (c.kind == KIND_SIMPLE) {
-                r = sr;
-                g = sg;
-                b = sb;
-                continue;
-            }
-            uint shift = (lid.x & 7) * 4;
-            uint n = 0;
-            for (uint yy = 0; yy < 4; yy++) {
-                uint2 m = row_masks[j][lid.y * 4 + yy];
-                uint word = lid.x < 8 ? m.x : m.y;
-                n += countbits((word >> shift) & 0xFu);
-            }
-            if (n == 0) continue;
-            uint a = div255(c.a_input * AA_GAMMA[n]);
-            uint inv = 255 - a;
-            r = div255(inv * r + a * sr);
-            g = div255(inv * g + a * sg);
-            b = div255(inv * b + a * sb);
+            uint cov = (row_cov[j][lid.y][lid.x >> 2] >> ((lid.x & 3u) * 8u)) & 0xFFu;
+            if (cov == 0) continue;
+            composite(c, cov, r, g, b);
         }
         GroupMemoryBarrierWithGroupSync();
     }

@@ -2,8 +2,8 @@
 //! list in one Vulkan submission, against the CPU page render.
 //!
 //! The document is `--pages` Letter pages of `--stars` random solid stars
-//! (see `stars.rs`).  The GPU page is: the CPU scan conversion of every fill
-//! into a command list (`cmdlist.rs`), the host writes of that list into
+//! (see `stars.rs`).  The GPU page is: the CPU's exact-area coverage of every
+//! fill as a command list (`cmdlist.rs`), the host writes of that list into
 //! mapped memory, then one submission that bins the commands into 16 × 16
 //! tiles, rasterises and composites every tile in command order, and makes
 //! the page readable by the host.  The CPU page is the library's render of
@@ -18,8 +18,8 @@
 //! - `cpu`, `gpu`, `both`: render the document once and exit, for timing
 //!   the whole process from outside (`both` = `--threads` CPU workers plus
 //!   the GPU thread).
-//! - `--raster`: the fine-raster kernel, `rows` (default, each scan-table
-//!   row walked once per tile) or `pixel` (walked once per pixel).
+//! - `--raster`: the fine-raster kernel, `rows` (default, each coverage-table
+//!   row searched once per tile row) or `pixel` (searched once per pixel).
 //! - `--write-pdf PATH`: write the document and exit.
 //!
 //! Run:
@@ -406,7 +406,7 @@ fn report(cfg: &Config, doc: &Doc) {
         "  GPU page, total                  {}",
         fmt_stats(gpu_total)
     );
-    println!("    CPU scan conversion + list     {}", fmt_stats(prep_t));
+    println!("    CPU coverage tables + list     {}", fmt_stats(prep_t));
     println!("    host writes of the list        {}", pick(|s| s.upload));
     println!("    record + submit                {}", pick(|s| s.submit));
     println!("    wait (submit to fence)         {}", pick(|s| s.wait));
