@@ -179,14 +179,16 @@ impl GpuCtx {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
         let stream = self.stream();
+        let scale = crate::cmyk::clut_scale(grid_n);
         let mut builder = stream.launch_builder(&self.kernels.icc_cmyk_clut);
         builder
             .arg(d_cmyk)
             .arg(d_rgb)
             .arg(d_clut)
             .arg(&grid_n)
-            .arg(&n_pixels);
-        // SAFETY: 5 args match icc_cmyk_clut PTX signature exactly.
+            .arg(&n_pixels)
+            .arg(&scale);
+        // SAFETY: 6 args match icc_cmyk_clut PTX signature exactly.
         unsafe { builder.launch(cfg) }?;
         Ok(())
     }

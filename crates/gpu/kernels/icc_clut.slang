@@ -11,7 +11,8 @@
 // Each lerp is `fma(w, b - a, a)`, the CUDA kernel's `__fmaf_rn` and the
 // CPU fallback's `f32::mul_add`: the product and the sum round once.  The
 // lattice coordinates and weights are `precise`, so no contraction changes
-// them.  Vulkan does not require `fma` to round once, so the host checks
+// them.  The coordinate factor `scale` is `(grid_n - 1) / 255` rounded
+// correctly on the host, since `OpFDiv` carries 2.5 ULP of error.  Vulkan does not require `fma` to round once, so the host checks
 // the kernel against the CPU fallback on each device before using it
 // (`VulkanBackend::icc_clut_is_exact`).
 // CLUT access uses StructuredBuffer<uint8_t> (flat buffer), the layout of
@@ -71,7 +72,8 @@ void icc_cmyk_clut(
     uniform RWStructuredBuffer<uint8_t> rgb,
     uniform StructuredBuffer<uint8_t> clut,
     uniform uint grid_n,
-    uniform uint n)
+    uniform uint n,
+    uniform float scale)
 {
     uint i = tid.x;
     if (i >= n) return;
@@ -79,11 +81,10 @@ void icc_cmyk_clut(
     uint ci_base = i * 4;
     uint ri_base = i * 3;
 
-    float G1 = float(grid_n - 1u);
-    precise float fc = float(uint(cmyk[ci_base + 0])) * (G1 / 255.0f);
-    precise float fm = float(uint(cmyk[ci_base + 1])) * (G1 / 255.0f);
-    precise float fy = float(uint(cmyk[ci_base + 2])) * (G1 / 255.0f);
-    precise float fk = float(uint(cmyk[ci_base + 3])) * (G1 / 255.0f);
+    precise float fc = float(uint(cmyk[ci_base + 0])) * scale;
+    precise float fm = float(uint(cmyk[ci_base + 1])) * scale;
+    precise float fy = float(uint(cmyk[ci_base + 2])) * scale;
+    precise float fk = float(uint(cmyk[ci_base + 3])) * scale;
 
     int G = int(grid_n);
 

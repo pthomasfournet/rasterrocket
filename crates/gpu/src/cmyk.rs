@@ -71,6 +71,21 @@ pub fn icc_cmyk_to_rgb_cpu(cmyk: &[u8], clut: Option<(&[u8], u32)>) -> Vec<u8> {
     rgb
 }
 
+/// `(grid_n − 1) / 255` correctly rounded to f32: the factor taking an input
+/// byte to a lattice coordinate.  Every CLUT evaluator, host or device,
+/// multiplies by this value; the device kernels receive it as a parameter,
+/// since a device division need not round correctly.
+///
+/// `grid_n` must lie in `[2, 255]`, so `grid_n − 1` is exact in f32.
+pub(crate) fn clut_scale(grid_n: u32) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "grid_n ≤ 255, fits exactly in f32 (8 bits < 23-bit mantissa)"
+    )]
+    let g1 = (grid_n - 1) as f32;
+    g1 / 255.0
+}
+
 /// A validated `grid_n⁴` RGB CLUT, indexed `(k·G³ + c·G² + m·G + y) · 3`.
 struct Lattice<'a> {
     table: &'a [u8],
@@ -83,16 +98,10 @@ struct Lattice<'a> {
 impl<'a> Lattice<'a> {
     /// `table` and `grid_n` must have passed [`check_clut`].
     fn new(table: &'a [u8], grid_n: u32) -> Self {
-        // grid_n ≤ 255 → (grid_n - 1) ≤ 254, exact in f32 (needs ≤ 8 mantissa bits).
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "grid_n ≤ 255, fits exactly in f32 (8 bits < 23-bit mantissa)"
-        )]
-        let g1 = (grid_n - 1) as f32;
         Self {
             table,
             g: grid_n as usize,
-            scale: g1 / 255.0,
+            scale: clut_scale(grid_n),
         }
     }
 

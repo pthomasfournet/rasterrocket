@@ -210,6 +210,62 @@ mod probe_tests {
     }
 }
 
+/// Grid sizes the device evaluators are checked on.  For several of them
+/// (`grid_n` 4, 8, 13, 16, 25) a reciprocal-based device division moves
+/// `(grid_n − 1) / 255` by one ULP away from the correctly rounded value.
+#[cfg(test)]
+const EXACTNESS_GRIDS: [u32; 9] = [2, 3, 4, 8, 13, 16, 17, 25, 33];
+
+/// Converts, on each of the [`EXACTNESS_GRIDS`], every grey level and
+/// 65 536 pseudo-random pixels through a pseudo-random table with
+/// `convert(cmyk, table, grid_n)`, and asserts byte equality with
+/// [`crate::icc_cmyk_to_rgb_cpu`].
+#[cfg(test)]
+fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &[u8], u32) -> Vec<u8>) {
+    let lcg = |seed: u32, n: usize| {
+        let mut state = seed;
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                state.to_be_bytes()[0]
+            })
+            .collect::<Vec<u8>>()
+    };
+    let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
+    cmyk.extend(lcg(0x1234_5678, 65_536 * 4));
+    for grid_n in EXACTNESS_GRIDS {
+        let table = lcg(0x0dd_ba11 ^ grid_n, (grid_n as usize).pow(4) * 3);
+        let cpu = crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, grid_n)));
+        let device = convert(&cmyk, &table, grid_n);
+        let differing = cpu.iter().zip(&device).filter(|(a, b)| a != b).count();
+        assert_eq!(
+            differing, 0,
+            "{label}: grid_n {grid_n}: {differing} bytes differ from the CPU evaluator"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_tests {
+    use super::*;
+
+    /// On a device that passes the exactness probe, the Vulkan kernel is
+    /// byte-identical to the CPU evaluator on every grid size.
+    #[test]
+    fn vulkan_icc_clut_exact_across_grids() {
+        let Some(backend) = crate::backend::vulkan::test_backend() else {
+            return;
+        };
+        if !backend.icc_clut_is_exact() {
+            eprintln!("skipping: the device fails the exactness probe");
+            return;
+        }
+        assert_exact_across_grids("vulkan", |cmyk, table, _| {
+            icc_clut(&backend, cmyk, table).expect("icc_clut")
+        });
+    }
+}
+
 #[cfg(all(test, feature = "gpu-validation"))]
 mod tests {
     use super::*;
@@ -222,6 +278,24 @@ mod tests {
             return;
         };
         assert!(icc_clut_matches_cpu(&backend).expect("icc_clut"));
+    }
+
+    /// The CUDA backend's page and the context's direct launch are
+    /// byte-identical to the CPU evaluator on every grid size.
+    #[test]
+    fn cuda_icc_clut_exact_across_grids() {
+        let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        assert_exact_across_grids("cuda backend", |cmyk, table, _| {
+            icc_clut(&backend, cmyk, table).expect("icc_clut")
+        });
+        let gpu = crate::GpuCtx::init().expect("gpu init");
+        assert_exact_across_grids("cuda context", |cmyk, table, grid_n| {
+            gpu.icc_cmyk_to_rgb_gpu(cmyk, Some((table, grid_n)))
+                .expect("icc_cmyk_to_rgb_gpu")
+        });
     }
 
     /// Malformed input is an invariant error, and zero pixels are no work.

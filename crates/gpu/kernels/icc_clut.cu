@@ -140,12 +140,17 @@ __device__ __forceinline__ unsigned char round_half_up_byte(float v) {
 //         index = (k*G^3 + c*G^2 + m*G + y)*3
 // grid_n: number of grid nodes per axis (typically 17)
 // n     : total pixel count
+// scale : (grid_n - 1) / 255 as the host's correctly rounded f32, the
+//         factor of the CPU evaluator; a device division need not round
+//         correctly, and __fmul_rn keeps the product from contracting
+//         into the weight's subtraction
 extern "C" __global__ void icc_cmyk_clut(
     const unsigned char* __restrict__ cmyk,
     unsigned char*       __restrict__ rgb,
     const unsigned char* __restrict__ clut,
     unsigned int grid_n,
-    unsigned int n
+    unsigned int n,
+    float scale
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -154,11 +159,10 @@ extern "C" __global__ void icc_cmyk_clut(
     unsigned int ri_base = i * 3;
 
     // Normalise each channel to [0, grid_n - 1].
-    float G1 = (float)(grid_n - 1);
-    float fc = __ldg(&cmyk[ci_base])     * (G1 / 255.0f);
-    float fm = __ldg(&cmyk[ci_base + 1]) * (G1 / 255.0f);
-    float fy = __ldg(&cmyk[ci_base + 2]) * (G1 / 255.0f);
-    float fk = __ldg(&cmyk[ci_base + 3]) * (G1 / 255.0f);
+    float fc = __fmul_rn((float)__ldg(&cmyk[ci_base]), scale);
+    float fm = __fmul_rn((float)__ldg(&cmyk[ci_base + 1]), scale);
+    float fy = __fmul_rn((float)__ldg(&cmyk[ci_base + 2]), scale);
+    float fk = __fmul_rn((float)__ldg(&cmyk[ci_base + 3]), scale);
 
     int G = (int)grid_n;
 

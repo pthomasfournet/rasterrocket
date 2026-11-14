@@ -395,10 +395,11 @@ impl PageRecorder {
         p: params::IccClutParams<'_, super::VulkanBackend>,
         grid_n: u32,
     ) -> Result<()> {
-        // Push: grid_n(u32), n(u32).
-        let mut push = [0u8; 8];
+        // Push: grid_n(u32), n(u32), scale(f32).
+        let mut push = [0u8; 12];
         push[0..4].copy_from_slice(&grid_n.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());
+        push[8..12].copy_from_slice(&crate::cmyk::clut_scale(grid_n).to_ne_bytes());
         self.dispatch_kernel(
             KernelId::IccClut,
             &[p.cmyk.handle(), p.rgb.handle(), p.clut.handle()],
