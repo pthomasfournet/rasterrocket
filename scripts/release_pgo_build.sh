@@ -37,6 +37,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The training documents given as arguments, relative ones resolved against
+# the caller's directory before the script changes to the repository root.
+ARG_PDFS=()
+for arg in "$@"; do
+    [[ "$arg" == /* ]] || arg="$PWD/$arg"
+    ARG_PDFS+=("$arg")
+done
 cd "$REPO_ROOT"
 
 BINARY="./target/release/rrocket"
@@ -69,8 +76,8 @@ trap cleanup EXIT
 # --- Training documents. -------------------------------------------------------
 REQUIRE_BOLT="${PGO_REQUIRE_BOLT:-0}"
 CORPUS_PDF="tests/fixtures/corpus-04-ebook-mixed.pdf"
-if [[ $# -gt 0 ]]; then
-    TRAINING_PDFS=("$@")
+if [[ ${#ARG_PDFS[@]} -gt 0 ]]; then
+    TRAINING_PDFS=("${ARG_PDFS[@]}")
 elif [[ -f "$CORPUS_PDF" ]]; then
     TRAINING_PDFS=("$CORPUS_PDF")
 else
