@@ -354,6 +354,17 @@ impl PageGeometry {
         let px = |pts: f64, scale: f64| (pts * scale).round() as u32;
         (px(self.width_pts, scale_x), px(self.height_pts, scale_y))
     }
+
+    /// The width of the page box before the page's rotation, in points
+    /// scaled by `UserUnit`: the extent along which an upright image's
+    /// `/Width` runs.
+    pub(crate) const fn unrotated_width_pts(&self) -> f64 {
+        if self.rotate_cw.is_multiple_of(180) {
+            self.width_pts
+        } else {
+            self.height_pts
+        }
+    }
 }
 
 /// A page boundary box (ISO 32000-2 §14.11.2, Table 31).

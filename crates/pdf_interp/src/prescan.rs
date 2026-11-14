@@ -19,11 +19,12 @@
 //! # PPI estimate
 //!
 //! Unlike the full renderer (which projects image pixels through the live CTM
-//! stack), the prescan uses the raw PDF `Width` dict entry and the page width in
-//! points (via the crate-internal `page_size_pts_by_id` helper):
+//! stack), the prescan uses the raw PDF `Width` dict entry and the width in
+//! points of the page box before the page's `/Rotate` (via the crate-internal
+//! `page_size_pts_by_id` helper):
 //!
 //! ```text
-//! ppi ≈ (image_width_px / page_width_pts) × 72
+//! ppi ≈ (image_width_px / unrotated_page_width_pts) × 72
 //! ```
 //!
 //! This assumes the image fills the page width, so it over-estimates PPI on
@@ -89,7 +90,7 @@ pub fn prescan_page(
     let page_id = crate::resolve_page_id(doc, page_num)?;
 
     let geom = page_size_pts_by_id(doc, page_id, page_box)?;
-    let mut scan = ImageScan::new(doc, geom.width_pts);
+    let mut scan = ImageScan::new(doc, geom.unrotated_width_pts());
 
     // 1. Walk XObject resource dictionary (no decoding).
     scan.xobjects(page_id, 0);
@@ -236,12 +237,19 @@ mod tests {
     ///   3: Page (Type=Page, Parent=2, `MediaBox`=[0 0 612 792], Contents=4)
     ///   4: Content stream (length = `content_bytes.len()`)
     fn doc_with_content(content_bytes: &[u8]) -> (Document, u32) {
+        doc_with_page(content_bytes, "")
+    }
+
+    /// [`doc_with_content`] with `page_extra` appended verbatim to the page
+    /// dictionary.
+    fn doc_with_page(content_bytes: &[u8], page_extra: &str) -> (Document, u32) {
         let header = "%PDF-1.4\n";
         let obj1 = "1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n".to_string();
         let obj2 = "2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n".to_string();
-        let obj3 = "3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-                    /Contents 4 0 R>>\nendobj\n"
-            .to_string();
+        let obj3 = format!(
+            "3 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Contents 4 0 R{page_extra}>>\nendobj\n"
+        );
         let stream_len = content_bytes.len();
         let obj4_header = format!("4 0 obj\n<</Length {stream_len}>>\nstream\n");
         let obj4_footer = "\nendstream\nendobj\n";
@@ -277,6 +285,19 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    /// A page-wide image on a page rotated a quarter turn is measured
+    /// against the page width it spans, the box width before rotation.
+    #[test]
+    fn the_ppi_hint_divides_by_the_unrotated_page_width() {
+        let ops = b"q 612 0 0 792 0 0 cm BI /W 1224 /H 1 /BPC 8 /CS /G ID \x00 EI Q";
+        for (rotate, extra) in [(0, ""), (90, " /Rotate 90"), (270, " /Rotate 270")] {
+            let (doc, page_num) = doc_with_page(ops, extra);
+            let diag = prescan_page(&doc, page_num, PageBox::Crop).expect("prescan");
+            let ppi = diag.source_ppi_hint.expect("an inline image gives a hint");
+            assert!((ppi - 144.0).abs() < 1e-3, "/Rotate {rotate}: got {ppi}");
+        }
+    }
 
     #[test]
     fn prescan_page_out_of_range_returns_err() {
