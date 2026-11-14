@@ -45,7 +45,7 @@ pub fn write_pgm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
 }
 
 /// Write the P5 header.
-fn write_pgm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
+pub(crate) fn write_pgm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
     writeln!(out, "P5")?;
     writeln!(out, "{width} {height}")?;
     writeln!(out, "255")?;

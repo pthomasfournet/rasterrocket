@@ -8,13 +8,16 @@
 //! PNG is lossless and carries transparency; prefer it to PPM when the bitmap
 //! has an alpha plane.
 
-use std::io::Write;
+use std::cell::RefCell;
+use std::io::{self, Write};
+use std::rc::Rc;
 
 use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
 use crate::EncodeError;
 use crate::ppm::RgbSource;
+use crate::rows::{RowCount, RowImage, RowLayout};
 
 /// Write `bitmap` to `out` as a PNG image.
 ///
@@ -120,6 +123,149 @@ fn write_png_gray<P: Pixel, W: Write>(bitmap: &Bitmap<P>, out: W) -> Result<(), 
     )?;
     writer.write_image_data(&crate::live_bytes(bitmap))?;
     Ok(())
+}
+
+/// The colour type of a PNG written by [`PngWriter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PngColor {
+    /// 8-bit gray, from gray bands.
+    Gray,
+    /// 8-bit RGB, from RGB bands; an alpha plane is dropped.
+    Rgb,
+    /// 8-bit RGBA, from RGB bands, the alpha plane's (opaque without one).
+    Rgba,
+}
+
+impl PngColor {
+    const fn layout(self) -> RowLayout {
+        match self {
+            Self::Gray => RowLayout::Gray,
+            Self::Rgb => RowLayout::Rgb,
+            Self::Rgba => RowLayout::Rgba,
+        }
+    }
+
+    const fn color_type(self) -> ::png::ColorType {
+        match self {
+            Self::Gray => ::png::ColorType::Grayscale,
+            Self::Rgb => ::png::ColorType::Rgb,
+            Self::Rgba => ::png::ColorType::Rgba,
+        }
+    }
+}
+
+/// A PNG written as its rows arrive, band by band.
+///
+/// Each row is filtered and compressed into the image data as it comes,
+/// with the encoder settings of [`write_png`].  An image written whole and
+/// the same image written in bands give the same bytes.
+pub struct PngWriter<W: Write + 'static> {
+    stream: ::png::StreamWriter<'static, Recording<W>>,
+    sink: Rc<RefCell<Sink<W>>>,
+    color: PngColor,
+    rows: RowCount,
+    row: Vec<u8>,
+}
+
+/// The sink of a [`PngWriter`], and the first error a write to it met.
+struct Sink<W> {
+    out: W,
+    error: Option<io::Error>,
+}
+
+/// A handle on a [`Sink`] given to the encoder, which writes its last
+/// chunk when it is dropped and discards the error of that write: the
+/// sink keeps it, for [`PngWriter::finish`] to report.
+struct Recording<W>(Rc<RefCell<Sink<W>>>);
+
+impl<W: Write> Write for Recording<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut sink = self.0.borrow_mut();
+        sink.out.write(buf).inspect_err(|e| {
+            if sink.error.is_none() {
+                sink.error = Some(io::Error::new(e.kind(), e.to_string()));
+            }
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut sink = self.0.borrow_mut();
+        sink.out.flush().inspect_err(|e| {
+            if sink.error.is_none() {
+                sink.error = Some(io::Error::new(e.kind(), e.to_string()));
+            }
+        })
+    }
+}
+
+impl<W: Write + 'static> PngWriter<W> {
+    /// Begin a `width × height` image of `color` on `out`: write the
+    /// header chunks.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] for an empty image;
+    /// [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure.
+    pub fn new(out: W, (width, height): (u32, u32), color: PngColor) -> Result<Self, EncodeError> {
+        let rows = RowCount::new(width, height)?;
+        let sink = Rc::new(RefCell::new(Sink { out, error: None }));
+        let writer = png_encoder(
+            Recording(Rc::clone(&sink)),
+            width,
+            height,
+            color.color_type(),
+            ::png::BitDepth::Eight,
+        )?;
+        Ok(Self {
+            stream: writer.into_stream_writer()?,
+            sink,
+            color,
+            rows,
+            row: Vec::with_capacity(color.layout().row_bytes(width)),
+        })
+    }
+
+    /// Write the rows of `band`, the next rows of the image.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] for a band of another width, of more
+    /// rows than the image has left, or of colour for a gray image or the
+    /// reverse; [`EncodeError::Io`] on a write failure.
+    pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
+        let layout = self.color.layout();
+        self.rows.take(&band, layout)?;
+        for y in 0..band.size().1 {
+            self.row.clear();
+            band.row(y, layout, &mut self.row);
+            self.stream.write_all(&self.row)?;
+        }
+        Ok(())
+    }
+
+    /// Write the end of the image data and the trailing chunk, flush the
+    /// sink and return it.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] when rows are missing;
+    /// [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure,
+    /// the trailing chunk's included.
+    pub fn finish(self) -> Result<W, EncodeError> {
+        self.rows.finished()?;
+        self.stream.finish()?;
+        let sink = Rc::try_unwrap(self.sink)
+            .map_err(|_| {
+                EncodeError::InvalidInput("the PNG encoder still holds its sink after finishing")
+            })?
+            .into_inner();
+        if let Some(error) = sink.error {
+            return Err(error.into());
+        }
+        let mut out = sink.out;
+        out.flush()?;
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

@@ -1672,6 +1672,7 @@ dependencies = [
  "proptest",
  "rasterrocket-color",
  "rasterrocket-render",
+ "tempfile",
  "tiff",
  "weezl 0.2.1",
  "zune-jpeg",

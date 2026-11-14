@@ -10,14 +10,13 @@
 //! against the 4 GiB a TIFF addresses before the first byte goes out, then
 //! streamed to the sink.
 
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU32;
 
-use color::{Gray8, Rgb8};
 use hayro_ccitt::{EncodeScheme, Encoder};
-use raster::Bitmap;
 
-use crate::{EncodeError, pack_bilevel_row, push_rgba};
+use crate::EncodeError;
+use crate::rows::{RowCount, RowImage, RowLayout};
 
 /// The compression of a TIFF's strips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,68 +70,22 @@ impl TiffCompression {
     }
 }
 
-/// The pixels of a page.
-#[derive(Clone, Copy)]
-pub enum TiffImage<'a> {
-    /// 8-bit RGB; RGBA, the alpha unassociated (`ExtraSamples` 2), when
-    /// the bitmap has an alpha plane.
-    Rgb(&'a Bitmap<Rgb8>),
-    /// 8-bit gray, 0 black.
-    Gray(&'a Bitmap<Gray8>),
-    /// One bit per pixel from gray luma, black below
-    /// [`crate::BLACK_BELOW`].  Written `WhiteIsZero`, a 1 bit black, the
-    /// interpretation the fax profile of TIFF (RFC 2306) prescribes.
-    Bilevel(&'a Bitmap<Gray8>),
-}
-
-impl TiffImage<'_> {
-    const fn size(&self) -> (u32, u32) {
-        match self {
-            Self::Rgb(b) => (b.width, b.height),
-            Self::Gray(b) | Self::Bilevel(b) => (b.width, b.height),
-        }
-    }
-
-    /// Samples per pixel, bits per sample and photometric interpretation.
-    const fn layout(&self) -> (u16, u16, u16) {
-        match self {
-            Self::Rgb(b) if b.has_alpha() => (4, 8, PHOTOMETRIC_RGB),
-            Self::Rgb(_) => (3, 8, PHOTOMETRIC_RGB),
-            Self::Gray(_) => (1, 8, PHOTOMETRIC_BLACK_IS_ZERO),
-            Self::Bilevel(_) => (1, 1, PHOTOMETRIC_WHITE_IS_ZERO),
-        }
-    }
-
-    /// The length of a stored row: its samples' bits padded to a byte.
-    fn row_bytes(&self) -> usize {
-        let (samples, bits, _) = self.layout();
-        (self.size().0 as usize * usize::from(samples) * usize::from(bits)).div_ceil(8)
-    }
-
-    /// Append the bytes of row `y` as stored: live pixels only, bilevel
-    /// rows packed most significant bit first and padded to a byte.
-    fn row(&self, y: u32, out: &mut Vec<u8>) {
-        match self {
-            Self::Rgb(b) => {
-                let rgb = &b.row_bytes(y)[..b.width as usize * 3];
-                match b.alpha_row(y) {
-                    Some(alpha) => push_rgba(rgb, alpha, out),
-                    None => out.extend_from_slice(rgb),
-                }
-            }
-            Self::Gray(b) => out.extend_from_slice(&b.row_bytes(y)[..b.width as usize]),
-            Self::Bilevel(b) => {
-                let start = out.len();
-                out.resize(start + (b.width as usize).div_ceil(8), 0);
-                pack_bilevel_row(&b.row_bytes(y)[..b.width as usize], &mut out[start..]);
-            }
-        }
-    }
-}
-
 const PHOTOMETRIC_WHITE_IS_ZERO: u16 = 0;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const PHOTOMETRIC_RGB: u16 = 2;
+
+/// Samples per pixel, bits per sample and photometric interpretation of
+/// rows stored as `layout`.  RGBA's alpha is unassociated (`ExtraSamples`
+/// 2); a bilevel page is `WhiteIsZero`, a 1 bit black, the interpretation
+/// the fax profile of TIFF (RFC 2306) prescribes.
+const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
+    match layout {
+        RowLayout::Rgba => (4, 8, PHOTOMETRIC_RGB),
+        RowLayout::Rgb => (3, 8, PHOTOMETRIC_RGB),
+        RowLayout::Gray => (1, 8, PHOTOMETRIC_BLACK_IS_ZERO),
+        RowLayout::Bilevel => (1, 1, PHOTOMETRIC_WHITE_IS_ZERO),
+    }
+}
 
 /// The refusal of a file beyond the 32-bit offsets of TIFF.
 const TOO_LARGE: EncodeError =
@@ -141,50 +94,96 @@ const TOO_LARGE: EncodeError =
 /// Target size of a strip before compression.
 const STRIP_BYTES: usize = 64 * 1024;
 
-/// A page encoded into strips, waiting for its directory: encoded on its
-/// own, in any order or thread, and laid out when pushed to a
-/// [`TiffWriter`].
-pub struct TiffPage {
+/// What the directory of a page records besides its strips.
+#[derive(Clone, Copy)]
+struct PageMeta {
     width: u32,
     height: u32,
     /// Samples per pixel, bits per sample, photometric interpretation.
     layout: (u16, u16, u16),
     compression: TiffCompression,
     rows_per_strip: u32,
-    strips: Vec<Vec<u8>>,
     /// Resolution in pixels per inch, as rationals.
     resolution: [(u32, u32); 2],
 }
 
+/// A page encoded into strips, waiting for its directory: encoded on its
+/// own, in any order or thread, and laid out when pushed to a
+/// [`TiffWriter`].
+pub struct TiffPage {
+    meta: PageMeta,
+    strips: Vec<Vec<u8>>,
+}
+
 impl TiffPage {
     /// Encode `image` at `dpi` (horizontal, vertical) pixels per inch,
-    /// compressed with `compression`.
+    /// compressed with `compression`: RGB (RGBA with an alpha plane), gray
+    /// or bilevel as `image` is.
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidInput`] for an empty image or a resolution
-    /// outside what a TIFF rational holds; [`EncodeError::UnsupportedMode`]
-    /// for CCITT compression of a page that is not bilevel.
+    /// As [`TiffPageEncoder::new`].
     pub fn encode(
-        image: TiffImage<'_>,
+        image: RowImage<'_>,
         dpi: (f64, f64),
         compression: TiffCompression,
     ) -> Result<Self, EncodeError> {
         let (width, height) = image.size();
-        let columns =
-            NonZeroU32::new(width)
-                .filter(|_| height > 0)
-                .ok_or(EncodeError::InvalidInput(
-                    "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
-                ))?;
+        let mut encoder = TiffPageEncoder::new(width, height, image.layout(), dpi, compression)?;
+        encoder.push(image)?;
+        encoder.finish()
+    }
+}
+
+/// A page encoded into strips as its rows arrive, band by band: a strip is
+/// compressed once its rows are in, so a page in bands is held as its
+/// compressed strips and at most one strip of rows.
+pub struct TiffPageEncoder {
+    meta: PageMeta,
+    rows: RowCount,
+    layout: RowLayout,
+    row_bytes: usize,
+    /// Rows of the strip being filled, as stored.
+    raw: Vec<u8>,
+    /// The fax coder of a CCITT page, whose single strip spans the page.
+    fax: Option<Encoder>,
+    /// Strips compressed and not yet taken.
+    strips: Vec<Vec<u8>>,
+}
+
+impl TiffPageEncoder {
+    /// An encoder of a `width × height` page stored as `layout`, at `dpi`
+    /// (horizontal, vertical) pixels per inch, compressed with
+    /// `compression`.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] for an empty page or a resolution
+    /// outside what a TIFF rational holds; [`EncodeError::UnsupportedMode`]
+    /// for CCITT compression of a page that is not bilevel.
+    pub fn new(
+        width: u32,
+        height: u32,
+        layout: RowLayout,
+        dpi: (f64, f64),
+        compression: TiffCompression,
+    ) -> Result<Self, EncodeError> {
+        let rows = RowCount::new(width, height).map_err(|_| {
+            EncodeError::InvalidInput(
+                "zero-width or zero-height bitmap: TIFF cannot encode an empty image",
+            )
+        })?;
+        let Some(columns) = NonZeroU32::new(width) else {
+            unreachable!("RowCount refuses a zero width")
+        };
         let fax = compression.is_fax();
-        if fax && !matches!(image, TiffImage::Bilevel(_)) {
+        if fax && layout != RowLayout::Bilevel {
             return Err(EncodeError::UnsupportedMode(
                 "CCITT fax compression codes bilevel pages only",
             ));
         }
         let resolution = [rational(dpi.0)?, rational(dpi.1)?];
-        let row_bytes = image.row_bytes();
+        let row_bytes = layout.row_bytes(width);
         // A CCITT page is one strip, as the fax profile of TIFF (RFC 2306)
         // recommends; each strip would restart the coding's reference row.
         let rows_per_strip = if fax {
@@ -194,24 +193,97 @@ impl TiffPage {
                 .unwrap_or(u32::MAX)
                 .min(height)
         };
-        let mut strips = Vec::new();
-        let mut raw = Vec::with_capacity(row_bytes * rows_per_strip as usize);
-        for first in (0..height).step_by(rows_per_strip as usize) {
-            raw.clear();
-            for y in first..height.min(first.saturating_add(rows_per_strip)) {
-                image.row(y, &mut raw);
-            }
-            strips.push(compress(&raw, row_bytes, columns, compression)?);
-        }
+        let fax = match compression {
+            TiffCompression::Group3 { k } => Some(Encoder::new(
+                columns,
+                EncodeScheme::Group3 {
+                    k,
+                    byte_aligned_eol: true,
+                },
+            )),
+            TiffCompression::Group4 => Some(Encoder::new(columns, EncodeScheme::Group4)),
+            TiffCompression::None
+            | TiffCompression::PackBits
+            | TiffCompression::Lzw
+            | TiffCompression::Deflate => None,
+        };
+        let strip_capacity = if fax.is_some() {
+            row_bytes
+        } else {
+            row_bytes * rows_per_strip as usize
+        };
         Ok(Self {
-            width,
-            height,
-            layout: image.layout(),
-            compression,
-            rows_per_strip,
-            strips,
-            resolution,
+            meta: PageMeta {
+                width,
+                height,
+                layout: tiff_layout(layout),
+                compression,
+                rows_per_strip,
+                resolution,
+            },
+            rows,
+            layout,
+            row_bytes,
+            raw: Vec::with_capacity(strip_capacity),
+            fax,
+            strips: Vec::new(),
         })
+    }
+
+    /// Encode the rows of `band`, the next rows of the page.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] for a band of another width, of more
+    /// rows than the page has left, or of colour for a gray page or the
+    /// reverse.
+    pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
+        self.rows.take(&band, self.layout)?;
+        for y in 0..band.size().1 {
+            band.row(y, self.layout, &mut self.raw);
+            if let Some(fax) = &mut self.fax {
+                fax.encode_packed_row(&self.raw);
+                self.raw.clear();
+            } else if self.raw.len() == self.row_bytes * self.meta.rows_per_strip as usize {
+                self.seal_strip()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Compress the rows held as the next strip.
+    fn seal_strip(&mut self) -> Result<(), EncodeError> {
+        let strip = compress(&self.raw, self.row_bytes, self.meta.compression)?;
+        self.strips.push(strip);
+        self.raw.clear();
+        Ok(())
+    }
+
+    /// The strips compressed since the last call, in page order.
+    fn take_strips(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.strips)
+    }
+
+    /// Compress the last strip and return what is left of the page: its
+    /// directory's record and the strips not yet taken.
+    fn finish_strips(mut self) -> Result<(PageMeta, Vec<Vec<u8>>), EncodeError> {
+        self.rows.finished()?;
+        if let Some(fax) = self.fax.take() {
+            self.strips.push(fax.finish());
+        } else if !self.raw.is_empty() {
+            self.seal_strip()?;
+        }
+        Ok((self.meta, self.strips))
+    }
+
+    /// The page, once every row is pushed.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] when rows are missing.
+    pub fn finish(self) -> Result<TiffPage, EncodeError> {
+        let (meta, strips) = self.finish_strips()?;
+        Ok(TiffPage { meta, strips })
     }
 }
 
@@ -250,7 +322,7 @@ impl TiffWriter {
     /// As [`TiffPage::encode`].
     pub fn add_page(
         &mut self,
-        image: TiffImage<'_>,
+        image: RowImage<'_>,
         dpi: (f64, f64),
         compression: TiffCompression,
     ) -> Result<(), EncodeError> {
@@ -292,7 +364,7 @@ impl TiffWriter {
             }
             end += end % 2;
             let ifd = end;
-            end += directory_len(page) as u64;
+            end += directory_len(&page.meta, page.strips.len()) as u64;
             layouts.push((strip_offsets, ifd));
         }
         let file_offset = |at: u64| u32::try_from(at).map_err(|_| TOO_LARGE);
@@ -324,8 +396,9 @@ impl TiffWriter {
                 None => 0,
             };
             let directory = directory(
-                page,
+                &page.meta,
                 &offsets,
+                &byte_counts(&page.strips),
                 file_offset(*ifd)?,
                 next,
                 (number, count),
@@ -339,13 +412,133 @@ impl TiffWriter {
     }
 }
 
+/// A one-page TIFF written as its rows arrive, band by band, to a seekable
+/// sink.
+///
+/// Each strip is written as it is compressed, the directory last, and the
+/// header's link to it patched in place.  The file holds the bytes
+/// [`write_tiff`] writes for the same page.
+pub struct TiffStream<W: Write + Seek> {
+    file: StripFile<W>,
+    encoder: TiffPageEncoder,
+}
+
+/// A one-page file being written: its sink and where its strips went.
+struct StripFile<W> {
+    out: W,
+    /// The sink's position at the header.
+    start: u64,
+    /// Bytes written from the header on.
+    at: u64,
+    offsets: Vec<u32>,
+    counts: Vec<u32>,
+}
+
+impl<W: Write + Seek> StripFile<W> {
+    /// Append `strips`, recording where each lies.
+    fn write_strips(&mut self, strips: &[Vec<u8>]) -> Result<(), EncodeError> {
+        for strip in strips {
+            let len = u32::try_from(strip.len()).map_err(|_| TOO_LARGE)?;
+            self.offsets
+                .push(u32::try_from(self.at).map_err(|_| TOO_LARGE)?);
+            self.counts.push(len);
+            self.out.write_all(strip)?;
+            self.at += u64::from(len);
+        }
+        if u32::try_from(self.at).is_err() {
+            return Err(TOO_LARGE);
+        }
+        Ok(())
+    }
+
+    /// Write the directory of `meta` after the strips, patch the header's
+    /// link to it, and return the sink at the end of the file.
+    fn finish(mut self, meta: &PageMeta) -> Result<W, EncodeError> {
+        if self.at % 2 == 1 {
+            self.out.write_all(&[0])?;
+            self.at += 1;
+        }
+        let end = self.at + directory_len(meta, self.offsets.len()) as u64;
+        let ifd = u32::try_from(self.at).map_err(|_| TOO_LARGE)?;
+        if u32::try_from(end).is_err() {
+            return Err(TOO_LARGE);
+        }
+        let directory = directory(meta, &self.offsets, &self.counts, ifd, 0, (0, 1), false);
+        self.out.write_all(&directory)?;
+        let _: u64 = self.out.seek(SeekFrom::Start(self.start + 4))?;
+        self.out.write_all(&ifd.to_le_bytes())?;
+        let _: u64 = self.out.seek(SeekFrom::Start(self.start + end))?;
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+impl<W: Write + Seek> TiffStream<W> {
+    /// Begin a `width × height` page stored as `layout` at `dpi`
+    /// (horizontal, vertical) pixels per inch, compressed with
+    /// `compression`, on `out` from its position: write the header.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffPageEncoder::new`]; [`EncodeError::Io`] on a write
+    /// failure.
+    pub fn new(
+        mut out: W,
+        (width, height): (u32, u32),
+        layout: RowLayout,
+        dpi: (f64, f64),
+        compression: TiffCompression,
+    ) -> Result<Self, EncodeError> {
+        let encoder = TiffPageEncoder::new(width, height, layout, dpi, compression)?;
+        let start = out.stream_position()?;
+        // The directory's offset, patched once it is known.
+        out.write_all(b"II*\0\0\0\0\0")?;
+        Ok(Self {
+            file: StripFile {
+                out,
+                start,
+                at: 8,
+                offsets: Vec::new(),
+                counts: Vec::new(),
+            },
+            encoder,
+        })
+    }
+
+    /// Encode the rows of `band`, the next rows of the page, and write the
+    /// strips they complete.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffPageEncoder::push`]; [`EncodeError::InvalidInput`] once
+    /// the file passes 4 GiB; [`EncodeError::Io`] on a write failure.
+    pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
+        self.encoder.push(band)?;
+        let strips = self.encoder.take_strips();
+        self.file.write_strips(&strips)
+    }
+
+    /// Write the last strip and the directory, and return the sink, at the
+    /// end of the file.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffPageEncoder::finish`] and [`Self::push`].
+    pub fn finish(self) -> Result<W, EncodeError> {
+        let Self { mut file, encoder } = self;
+        let (meta, strips) = encoder.finish_strips()?;
+        file.write_strips(&strips)?;
+        file.finish(&meta)
+    }
+}
+
 /// Write `image` as a one-page TIFF to `out`.
 ///
 /// # Errors
 ///
 /// As [`TiffPage::encode`] and [`TiffWriter::write`].
 pub fn write_tiff<W: Write>(
-    image: TiffImage<'_>,
+    image: RowImage<'_>,
     dpi: (f64, f64),
     compression: TiffCompression,
     out: W,
@@ -355,12 +548,21 @@ pub fn write_tiff<W: Write>(
     writer.write(out)
 }
 
-/// `bytes`, stored rows of `row_bytes` each and `columns` pixels,
-/// compressed with `compression`.  `PackBits` runs do not cross a row.
+/// The byte counts of `strips`, each within the 4 GiB file the caller has
+/// checked.
+fn byte_counts(strips: &[Vec<u8>]) -> Vec<u32> {
+    strips
+        .iter()
+        .map(|s| u32::try_from(s.len()).expect("a strip lies within the 4 GiB file"))
+        .collect()
+}
+
+/// `bytes`, stored rows of `row_bytes` each, compressed with
+/// `compression`, which is not a CCITT coding.  `PackBits` runs do not
+/// cross a row.
 fn compress(
     bytes: &[u8],
     row_bytes: usize,
-    columns: NonZeroU32,
     compression: TiffCompression,
 ) -> Result<Vec<u8>, EncodeError> {
     Ok(match compression {
@@ -385,27 +587,10 @@ fn compress(
             encoder.write_all(bytes)?;
             encoder.finish()?
         }
-        TiffCompression::Group3 { k } => fax_code(
-            bytes,
-            row_bytes,
-            columns,
-            EncodeScheme::Group3 {
-                k,
-                byte_aligned_eol: true,
-            },
-        ),
-        TiffCompression::Group4 => fax_code(bytes, row_bytes, columns, EncodeScheme::Group4),
+        TiffCompression::Group3 { .. } | TiffCompression::Group4 => {
+            unreachable!("a CCITT page is coded row by row as its rows arrive")
+        }
     })
-}
-
-/// Packed bilevel rows of `columns` pixels, `row_bytes` each, fax-coded by
-/// `scheme`.
-fn fax_code(bytes: &[u8], row_bytes: usize, columns: NonZeroU32, scheme: EncodeScheme) -> Vec<u8> {
-    let mut encoder = Encoder::new(columns, scheme);
-    for row in bytes.chunks(row_bytes) {
-        encoder.encode_packed_row(row);
-    }
-    encoder.finish()
 }
 
 /// Append `row` `PackBits`-coded to `out`: runs of 2 to 128 equal bytes as
@@ -509,7 +694,7 @@ fn rational_entry(tag: u16, (n, d): (u32, u32)) -> Entry {
 /// hold `byte_counts` bytes, sorted by tag.  Their sizes do not depend on
 /// the offset and count values.
 fn entries(
-    page: &TiffPage,
+    page: &PageMeta,
     offsets: &[u32],
     byte_counts: &[u32],
     position: (u16, u16),
@@ -548,11 +733,12 @@ fn entries(
     entries
 }
 
-/// The length in bytes of `page`'s directory with its overflowing values:
+/// The length in bytes of the directory of `page`, of `strips` strips,
+/// with its overflowing values:
 /// two bytes of count, twelve per entry, four of link, then each value
 /// longer than four bytes padded to an even length.
-fn directory_len(page: &TiffPage) -> usize {
-    let placeholder = vec![0; page.strips.len()];
+fn directory_len(page: &PageMeta, strips: usize) -> usize {
+    let placeholder = vec![0; strips];
     let entries = entries(page, &placeholder, &placeholder, (0, 1), false);
     2 + 12 * entries.len()
         + 4
@@ -564,26 +750,22 @@ fn directory_len(page: &TiffPage) -> usize {
 }
 
 /// The directory of `page` placed at file offset `at`, its strips at
-/// `offsets`, linking to the directory at `next` (0 for none), followed by
+/// `offsets` holding `byte_counts` bytes, linking to the directory at `next` (0 for none), followed by
 /// its overflowing values.  The caller has checked that the file, the
 /// directory included, ends within 4 GiB.
 fn directory(
-    page: &TiffPage,
+    page: &PageMeta,
     offsets: &[u32],
+    byte_counts: &[u32],
     at: u32,
     next: u32,
     position: (u16, u16),
     one_of_many: bool,
 ) -> Vec<u8> {
-    let byte_counts: Vec<u32> = page
-        .strips
-        .iter()
-        .map(|s| u32::try_from(s.len()).expect("a strip lies within the 4 GiB file"))
-        .collect();
-    let entries = entries(page, offsets, &byte_counts, position, one_of_many);
+    let entries = entries(page, offsets, byte_counts, position, one_of_many);
     let n = u16::try_from(entries.len()).expect("fewer than 65536 entries");
     let mut overflow = at as usize + 2 + 12 * entries.len() + 4;
-    let mut directory = Vec::with_capacity(directory_len(page));
+    let mut directory = Vec::with_capacity(directory_len(page, offsets.len()));
     let mut spilled = Vec::new();
     directory.extend_from_slice(&n.to_le_bytes());
     for e in &entries {
@@ -621,7 +803,9 @@ mod tests {
 
     use std::num::NonZeroU32;
 
-    use super::{TiffCompression, TiffImage, TiffPage, TiffWriter, pack_bits, write_tiff};
+    use super::{
+        RowImage, RowLayout, TiffCompression, TiffPage, TiffWriter, pack_bits, write_tiff,
+    };
     use crate::EncodeError;
 
     const ALL: [TiffCompression; 4] = [
@@ -676,7 +860,7 @@ mod tests {
         let (g, c) = (gray(37, 300), rgb(21, 50));
         for compression in ALL {
             let mut out = Vec::new();
-            write_tiff(TiffImage::Gray(&g), (150.0, 150.0), compression, &mut out).unwrap();
+            write_tiff(RowImage::Gray(&g), (150.0, 150.0), compression, &mut out).unwrap();
             let pixels = bytes(decode(&out).read_image().unwrap());
             let want: Vec<u8> = (0..g.height)
                 .flat_map(|y| g.row_bytes(y)[..37].to_vec())
@@ -684,7 +868,7 @@ mod tests {
             assert_eq!(pixels, want, "gray, {compression:?}");
 
             let mut out = Vec::new();
-            write_tiff(TiffImage::Rgb(&c), (72.0, 96.0), compression, &mut out).unwrap();
+            write_tiff(RowImage::Rgb(&c), (72.0, 96.0), compression, &mut out).unwrap();
             let mut decoder = decode(&out);
             assert_eq!(decoder.dimensions().unwrap(), (21, 50));
             let pixels = bytes(decoder.read_image().unwrap());
@@ -720,7 +904,7 @@ mod tests {
         for compression in ALL {
             let mut out = Vec::new();
             write_tiff(
-                TiffImage::Rgb(&with_alpha),
+                RowImage::Rgb(&with_alpha),
                 (72.0, 72.0),
                 compression,
                 &mut out,
@@ -745,13 +929,7 @@ mod tests {
         let g = gray(13, 3);
         for compression in ALL {
             let mut out = Vec::new();
-            write_tiff(
-                TiffImage::Bilevel(&g),
-                (204.0, 196.0),
-                compression,
-                &mut out,
-            )
-            .unwrap();
+            write_tiff(RowImage::Bilevel(&g), (204.0, 196.0), compression, &mut out).unwrap();
             // The reader inverts WhiteIsZero, so its 1 bits are white.
             let pixels = bytes(decode(&out).read_image().unwrap());
             for y in 0..3u32 {
@@ -790,7 +968,7 @@ mod tests {
     fn packed(g: &Bitmap<Gray8>) -> Vec<u8> {
         let mut rows = Vec::new();
         for y in 0..g.height {
-            TiffImage::Bilevel(g).row(y, &mut rows);
+            RowImage::Bilevel(g).row(y, RowLayout::Bilevel, &mut rows);
         }
         rows
     }
@@ -800,7 +978,7 @@ mod tests {
         let g = drawing(1728, 120);
         let mut out = Vec::new();
         write_tiff(
-            TiffImage::Bilevel(&g),
+            RowImage::Bilevel(&g),
             (204.0, 196.0),
             TiffCompression::Group4,
             &mut out,
@@ -857,7 +1035,7 @@ mod tests {
         for (k, options) in [(None, 4), (NonZeroU32::new(2), 5), (NonZeroU32::new(4), 5)] {
             let mut out = Vec::new();
             write_tiff(
-                TiffImage::Bilevel(&g),
+                RowImage::Bilevel(&g),
                 (204.0, 98.0),
                 TiffCompression::Group3 { k },
                 &mut out,
@@ -893,7 +1071,7 @@ mod tests {
     fn fax_coding_refuses_pages_that_are_not_bilevel() {
         let g = gray(16, 4);
         for compression in [TiffCompression::Group4, TiffCompression::Group3 { k: None }] {
-            let result = TiffPage::encode(TiffImage::Gray(&g), (204.0, 196.0), compression);
+            let result = TiffPage::encode(RowImage::Gray(&g), (204.0, 196.0), compression);
             assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
         }
     }
@@ -904,7 +1082,7 @@ mod tests {
         for (mut writer, flag) in [(TiffWriter::new(), 0), (TiffWriter::fax_document(), 2)] {
             writer
                 .add_page(
-                    TiffImage::Bilevel(&g),
+                    RowImage::Bilevel(&g),
                     (204.0, 196.0),
                     TiffCompression::Group4,
                 )
@@ -922,7 +1100,7 @@ mod tests {
         for _ in 0..3 {
             writer
                 .add_page(
-                    TiffImage::Bilevel(&g),
+                    RowImage::Bilevel(&g),
                     (204.0, 97.5),
                     TiffCompression::Deflate,
                 )
@@ -951,10 +1129,10 @@ mod tests {
         let (a, b) = (drawing(40, 30), gray(40, 30));
         let pages = std::thread::scope(|scope| {
             let second = scope.spawn(|| {
-                TiffPage::encode(TiffImage::Gray(&b), (100.0, 100.0), TiffCompression::Lzw)
+                TiffPage::encode(RowImage::Gray(&b), (100.0, 100.0), TiffCompression::Lzw)
             });
             let first = TiffPage::encode(
-                TiffImage::Bilevel(&a),
+                RowImage::Bilevel(&a),
                 (204.0, 196.0),
                 TiffCompression::Group4,
             );
@@ -986,17 +1164,17 @@ mod tests {
                 Err(EncodeError::InvalidInput(_))
             )
         };
-        assert!(invalid(TiffImage::Gray(&empty), (72.0, 72.0)));
-        assert!(invalid(TiffImage::Gray(&g), (0.0, 72.0)));
-        assert!(invalid(TiffImage::Gray(&g), (f64::NAN, 72.0)));
-        assert!(invalid(TiffImage::Gray(&g), (5e6, 72.0)));
+        assert!(invalid(RowImage::Gray(&empty), (72.0, 72.0)));
+        assert!(invalid(RowImage::Gray(&g), (0.0, 72.0)));
+        assert!(invalid(RowImage::Gray(&g), (f64::NAN, 72.0)));
+        assert!(invalid(RowImage::Gray(&g), (5e6, 72.0)));
         assert!(matches!(
             TiffWriter::new().write(Vec::new()),
             Err(EncodeError::InvalidInput(_))
         ));
         let mut file = Vec::new();
         write_tiff(
-            TiffImage::Gray(&g),
+            RowImage::Gray(&g),
             (72.0, 204.0),
             TiffCompression::None,
             &mut file,

@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use color::Rgb8;
 use encode::{
-    EncodeError, TiffImage, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
+    EncodeError, RowImage, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
 };
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
@@ -337,9 +337,9 @@ fn encode_page<W: Write>(
         }
         (OutputFormat::Tiff(compression), page) => {
             let image = match page {
-                Page::Rgb(rgb) => TiffImage::Rgb(rgb),
-                Page::Gray(luma) => TiffImage::Gray(luma),
-                Page::Mono(luma) => TiffImage::Bilevel(luma),
+                Page::Rgb(rgb) => RowImage::Rgb(rgb),
+                Page::Gray(luma) => RowImage::Gray(luma),
+                Page::Mono(luma) => RowImage::Bilevel(luma),
             };
             write_tiff(image, dpi, compression, out)
         }

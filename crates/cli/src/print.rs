@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-use encode::{PdfImage, PdfPage, PdfWriter};
+use encode::{PdfPage, PdfWriter, RowImage};
 
 use crate::cleanup::{Page, SpreadHalf};
 use crate::deliver;
@@ -132,8 +132,8 @@ impl PageSink {
         page: &Page,
     ) -> Result<(), RenderError> {
         let coded = match page {
-            Page::Rgb(rgb) => PdfPage::encode(PdfImage::Rgb(rgb), self.dpi),
-            Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(PdfImage::Gray(luma), self.dpi),
+            Page::Rgb(rgb) => PdfPage::encode(RowImage::Rgb(rgb), self.dpi),
+            Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(RowImage::Gray(luma), self.dpi),
         }?;
         let half = match half {
             None | Some(SpreadHalf::Left) => 0,

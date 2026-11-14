@@ -7,23 +7,14 @@
 //! catalogue and the page tree, written last; a page takes the three
 //! objects that follow the previous page's.
 
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
-use color::{Gray8, Rgb8};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use raster::Bitmap;
 
 use crate::EncodeError;
-
-/// The image of a PDF page.
-#[derive(Clone, Copy)]
-pub enum PdfImage<'a> {
-    /// 8-bit RGB, written `DeviceRGB`.
-    Rgb(&'a Bitmap<Rgb8>),
-    /// 8-bit gray, 0 black, written `DeviceGray`.
-    Gray(&'a Bitmap<Gray8>),
-}
+use crate::rows::{RowCount, RowImage, RowLayout};
 
 /// The largest byte offset a cross-reference entry's ten digits hold.
 const MAX_XREF_OFFSET: u64 = 9_999_999_999;
@@ -32,32 +23,117 @@ const MAX_XREF_OFFSET: u64 = 9_999_999_999;
 const MIN_PAGE_PTS: f64 = 0.001;
 
 /// A page's image, compressed, and its size.
-#[derive(Clone)]
 pub struct PdfPage {
     width: u32,
     height: u32,
     rgb: bool,
     /// The page's width and height in points.
     size_pts: (f64, f64),
-    data: Vec<u8>,
+    data: PageData,
+}
+
+/// Where a page's compressed image is held.
+enum PageData {
+    Memory(Vec<u8>),
+    /// In `file`, from its start, `len` bytes.
+    Spilled {
+        file: File,
+        len: u64,
+    },
+}
+
+impl PageData {
+    const fn len(&self) -> u64 {
+        match self {
+            Self::Memory(data) => data.len() as u64,
+            Self::Spilled { len, .. } => *len,
+        }
+    }
+
+    /// Copy the bytes to `out`.
+    fn copy_to(&self, out: &mut impl Write) -> io::Result<()> {
+        match self {
+            Self::Memory(data) => out.write_all(data),
+            Self::Spilled { file, len } => {
+                let mut file = file;
+                let _: u64 = file.seek(SeekFrom::Start(0))?;
+                let copied = io::copy(&mut file.take(*len), out)?;
+                if copied == *len {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "a page's spilled image is shorter than was written",
+                    ))
+                }
+            }
+        }
+    }
 }
 
 impl PdfPage {
     /// Compress `image`, a page at `dpi` (horizontal, vertical) pixels per
-    /// inch.
+    /// inch: `DeviceRGB` for an RGB image, `DeviceGray` (0 black) for a
+    /// gray or bilevel one.
+    ///
+    /// # Errors
+    ///
+    /// As [`PdfPageEncoder::new`].
+    pub fn encode(image: RowImage<'_>, dpi: (f64, f64)) -> Result<Self, EncodeError> {
+        let layout = match image {
+            RowImage::Rgb(_) => RowLayout::Rgb,
+            RowImage::Gray(_) | RowImage::Bilevel(_) => RowLayout::Gray,
+        };
+        let mut encoder = PdfPageEncoder::new(image.size(), layout, dpi, None)?;
+        encoder.push(image)?;
+        encoder.finish()
+    }
+}
+
+/// The sink of a page's compressed image.
+enum Compressing {
+    Memory(ZlibEncoder<Vec<u8>>),
+    Spill(ZlibEncoder<Counting<BufWriter<File>>>),
+}
+
+/// A page image compressed as its rows arrive, band by band, into memory
+/// or into a file of its own, so a page in bands is held as compressed
+/// data and one row.
+pub struct PdfPageEncoder {
+    width: u32,
+    height: u32,
+    layout: RowLayout,
+    size_pts: (f64, f64),
+    rows: RowCount,
+    row: Vec<u8>,
+    sink: Compressing,
+}
+
+impl PdfPageEncoder {
+    /// An encoder of a `width × height` page image stored as `layout` (RGB
+    /// or gray) at `dpi` (horizontal, vertical) pixels per inch, compressed
+    /// into `spill` from its start when given (an empty file of the
+    /// caller's) and into memory otherwise.
     ///
     /// # Errors
     ///
     /// [`EncodeError::InvalidInput`] for an empty image, a resolution that
-    /// is not positive and finite, or a page side under 0.001 point.
-    pub fn encode(image: PdfImage<'_>, dpi: (f64, f64)) -> Result<Self, EncodeError> {
-        let (width, height, rgb) = match image {
-            PdfImage::Rgb(b) => (b.width, b.height, true),
-            PdfImage::Gray(b) => (b.width, b.height, false),
-        };
-        if width == 0 || height == 0 {
-            return Err(EncodeError::InvalidInput(
+    /// is not positive and finite, a page side under 0.001 point, or a
+    /// layout other than RGB and gray.
+    pub fn new(
+        (width, height): (u32, u32),
+        layout: RowLayout,
+        dpi: (f64, f64),
+        spill: Option<File>,
+    ) -> Result<Self, EncodeError> {
+        let rows = RowCount::new(width, height).map_err(|_| {
+            EncodeError::InvalidInput(
                 "zero-width or zero-height bitmap: a PDF page cannot hold an empty image",
+            )
+        })?;
+        if !matches!(layout, RowLayout::Rgb | RowLayout::Gray) {
+            return Err(EncodeError::InvalidInput(
+                "a PDF page image is 8-bit RGB or gray",
             ));
         }
         if !(dpi.0.is_finite() && dpi.1.is_finite() && dpi.0 > 0.0 && dpi.1 > 0.0) {
@@ -74,17 +150,75 @@ impl PdfPage {
                 "a PDF page side is at least 0.001 point: lower the resolution",
             ));
         }
-        let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
-        match image {
-            PdfImage::Rgb(b) => crate::write_live_rows(b, &mut z)?,
-            PdfImage::Gray(b) => crate::write_live_rows(b, &mut z)?,
-        }
+        let sink = spill.map_or_else(
+            || Compressing::Memory(ZlibEncoder::new(Vec::new(), Compression::fast())),
+            |file| {
+                Compressing::Spill(ZlibEncoder::new(
+                    Counting {
+                        out: BufWriter::with_capacity(crate::PACKED_WRITE_BYTES, file),
+                        written: 0,
+                    },
+                    Compression::fast(),
+                ))
+            },
+        );
         Ok(Self {
             width,
             height,
-            rgb,
+            layout,
             size_pts,
-            data: z.finish()?,
+            rows,
+            row: Vec::with_capacity(layout.row_bytes(width)),
+            sink,
+        })
+    }
+
+    /// Compress the rows of `band`, the next rows of the page.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] for a band of another width, of more
+    /// rows than the page has left, or of colour for a gray page or the
+    /// reverse; [`EncodeError::Io`] on a write failure.
+    pub fn push(&mut self, band: RowImage<'_>) -> Result<(), EncodeError> {
+        self.rows.take(&band, self.layout)?;
+        for y in 0..band.size().1 {
+            self.row.clear();
+            band.row(y, self.layout, &mut self.row);
+            match &mut self.sink {
+                Compressing::Memory(z) => z.write_all(&self.row)?,
+                Compressing::Spill(z) => z.write_all(&self.row)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// The page, once every row is pushed.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidInput`] when rows are missing;
+    /// [`EncodeError::Io`] on a write failure.
+    pub fn finish(self) -> Result<PdfPage, EncodeError> {
+        self.rows.finished()?;
+        let data = match self.sink {
+            Compressing::Memory(z) => PageData::Memory(z.finish()?),
+            Compressing::Spill(z) => {
+                let counting = z.finish()?;
+                let len = counting.written;
+                let file = counting
+                    .out
+                    .into_inner()
+                    .map_err(io::IntoInnerError::into_error)?;
+                PageData::Spilled { file, len }
+            }
+        };
+        Ok(PdfPage {
+            width: self.width,
+            height: self.height,
+            rgb: self.layout == RowLayout::Rgb,
+            size_pts: self.size_pts,
+            data,
         })
     }
 }
@@ -135,7 +269,7 @@ impl<W: Write> PdfWriter<W> {
             if page.rgb { "DeviceRGB" } else { "DeviceGray" },
             page.data.len()
         )?;
-        self.out.write_all(&page.data)?;
+        page.data.copy_to(&mut self.out)?;
         self.out.write_all(b"\nendstream\nendobj\n")?;
 
         let content = format!("q {w} 0 0 {h} 0 0 cm /Im0 Do Q");
@@ -261,7 +395,7 @@ mod tests {
     use flate2::read::ZlibDecoder;
     use raster::Bitmap;
 
-    use super::{PdfImage, PdfPage, PdfWriter, fmt_num};
+    use super::{PdfPage, PdfWriter, RowImage, fmt_num};
 
     fn gray(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Bitmap<Gray8> {
         let mut bmp: Bitmap<Gray8> = Bitmap::new(w, h, 4, false);
@@ -288,7 +422,7 @@ mod tests {
     fn a_page_is_its_image_at_its_resolution() {
         // Letter at 100 dpi.
         let bmp = gray(850, 1100, |x, y| u8::try_from((x + y) % 256).unwrap());
-        let page = PdfPage::encode(PdfImage::Gray(&bmp), (100.0, 100.0)).unwrap();
+        let page = PdfPage::encode(RowImage::Gray(&bmp), (100.0, 100.0)).unwrap();
         let mut writer = PdfWriter::new(Vec::new()).unwrap();
         writer.write_page(&page).unwrap();
         let pdf = writer.finish().unwrap();
@@ -311,7 +445,7 @@ mod tests {
     fn the_cross_reference_table_points_at_every_object() {
         let mut rgb: Bitmap<Rgb8> = Bitmap::new(3, 2, 4, false);
         rgb.row_bytes_mut(1)[..9].copy_from_slice(&[9; 9]);
-        let page = PdfPage::encode(PdfImage::Rgb(&rgb), (72.0, 144.0)).unwrap();
+        let page = PdfPage::encode(RowImage::Rgb(&rgb), (72.0, 144.0)).unwrap();
         let mut writer = PdfWriter::new(Vec::new()).unwrap();
         writer.write_page(&page).unwrap();
         writer.write_page(&page).unwrap();
@@ -349,7 +483,7 @@ mod tests {
 
     #[test]
     fn offsets_past_ten_digits_are_refused() {
-        let page = PdfPage::encode(PdfImage::Gray(&gray(1, 1, |_, _| 0)), (72.0, 72.0)).unwrap();
+        let page = PdfPage::encode(RowImage::Gray(&gray(1, 1, |_, _| 0)), (72.0, 72.0)).unwrap();
         let mut writer = PdfWriter::new(Vec::new()).unwrap();
         writer.out.written = super::MAX_XREF_OFFSET + 1;
         assert!(writer.write_page(&page).is_err());
@@ -359,11 +493,11 @@ mod tests {
     fn empty_documents_images_and_resolutions_are_refused() {
         assert!(PdfWriter::new(Vec::new()).unwrap().finish().is_err());
         let empty: Bitmap<Gray8> = Bitmap::new(0, 4, 4, false);
-        assert!(PdfPage::encode(PdfImage::Gray(&empty), (300.0, 300.0)).is_err());
+        assert!(PdfPage::encode(RowImage::Gray(&empty), (300.0, 300.0)).is_err());
         let bmp = gray(2, 2, |_, _| 0);
-        assert!(PdfPage::encode(PdfImage::Gray(&bmp), (0.0, 300.0)).is_err());
-        assert!(PdfPage::encode(PdfImage::Gray(&bmp), (f64::NAN, 300.0)).is_err());
+        assert!(PdfPage::encode(RowImage::Gray(&bmp), (0.0, 300.0)).is_err());
+        assert!(PdfPage::encode(RowImage::Gray(&bmp), (f64::NAN, 300.0)).is_err());
         // Two pixels at 2 000 000 dpi measure 0.000072 point.
-        assert!(PdfPage::encode(PdfImage::Gray(&bmp), (2.0e6, 300.0)).is_err());
+        assert!(PdfPage::encode(RowImage::Gray(&bmp), (2.0e6, 300.0)).is_err());
     }
 }

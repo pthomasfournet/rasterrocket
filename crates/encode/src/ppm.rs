@@ -50,7 +50,7 @@ pub fn write_ppm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
 }
 
 /// Write the P6 header.
-fn write_ppm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
+pub(crate) fn write_ppm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
     writeln!(out, "P6")?;
     writeln!(out, "{width} {height}")?;
     writeln!(out, "255")?;

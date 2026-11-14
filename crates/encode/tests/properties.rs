@@ -15,7 +15,7 @@ use hayro_ccitt::{DecodeSettings, DecoderContext, EncodeScheme, Encoder, Encodin
 use proptest::prelude::*;
 use raster::Bitmap;
 use rasterrocket_encode::{
-    BLACK_BELOW, JpegOptions, TiffCompression, TiffImage, write_jpeg, write_pbm, write_pgm,
+    BLACK_BELOW, JpegOptions, RowImage, TiffCompression, write_jpeg, write_pbm, write_pgm,
     write_png, write_ppm, write_tiff,
 };
 
@@ -303,14 +303,14 @@ proptest! {
         compression in tiff_compression(),
     ) {
         let mut file = Vec::new();
-        write_tiff(TiffImage::Gray(&gray.bitmap()), (150.0, 150.0), compression, &mut file)
+        write_tiff(RowImage::Gray(&gray.bitmap()), (150.0, 150.0), compression, &mut file)
             .expect("gray TIFF");
         let (color, dims, pixels) = tiff_decode(&file);
         prop_assert_eq!((color, dims), (tiff::ColorType::Gray(8), (gray.w, gray.h)));
         prop_assert_eq!(pixels, gray.live);
 
         let mut file = Vec::new();
-        write_tiff(TiffImage::Rgb(&rgb.bitmap()), (72.0, 96.0), compression, &mut file)
+        write_tiff(RowImage::Rgb(&rgb.bitmap()), (72.0, 96.0), compression, &mut file)
             .expect("RGB TIFF");
         let (color, dims, pixels) = tiff_decode(&file);
         prop_assert_eq!(dims, (rgb.w, rgb.h));
@@ -343,7 +343,7 @@ proptest! {
         compression in prop_oneof![tiff_compression(), Just(TiffCompression::Group4)],
     ) {
         let mut file = Vec::new();
-        write_tiff(TiffImage::Bilevel(&page.bitmap()), (204.0, 196.0), compression, &mut file)
+        write_tiff(RowImage::Bilevel(&page.bitmap()), (204.0, 196.0), compression, &mut file)
             .expect("bilevel TIFF");
         let (_, dims, pixels) = tiff_decode(&file);
         prop_assert_eq!(dims, (page.w, page.h));

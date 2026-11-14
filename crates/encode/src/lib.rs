@@ -17,6 +17,14 @@
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.
 //!
+//! # Row-streamed writers
+//!
+//! [`PnmWriter`], [`PngWriter`], [`TiffStream`] (and [`TiffPageEncoder`])
+//! and [`PdfPageEncoder`] take an image as bands of whole rows
+//! ([`RowImage`]), in order, so an image is never held whole: an image
+//! written in bands and the same image written as one band give the same
+//! bytes.
+//!
 //! # CMYK handling
 //!
 //! Neither PPM nor PNG natively supports CMYK.  [`write_ppm`] and
@@ -29,16 +37,20 @@ pub(crate) mod pbm;
 pub(crate) mod pdf;
 pub(crate) mod pgm;
 pub(crate) mod png;
+pub(crate) mod pnm;
 pub(crate) mod ppm;
+pub(crate) mod rows;
 pub(crate) mod tiff;
 
 pub use jpeg::{JpegOptions, jpeg_gray, write_jpeg};
 pub use pbm::write_pbm;
-pub use pdf::{PdfImage, PdfPage, PdfWriter};
+pub use pdf::{PdfPage, PdfPageEncoder, PdfWriter};
 pub use pgm::write_pgm;
-pub use png::write_png;
+pub use png::{PngColor, PngWriter, write_png};
+pub use pnm::{PnmKind, PnmWriter};
 pub use ppm::write_ppm;
-pub use tiff::{TiffCompression, TiffImage, TiffPage, TiffWriter, write_tiff};
+pub use rows::{RowImage, RowLayout};
+pub use tiff::{TiffCompression, TiffPage, TiffPageEncoder, TiffStream, TiffWriter, write_tiff};
 
 use std::borrow::Cow;
 use std::io::{self, Write};

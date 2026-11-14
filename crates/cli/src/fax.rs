@@ -14,7 +14,7 @@
 //! system's fax service through its submission command, `lp` or `sendfax`.
 
 use color::Gray8;
-use encode::{TiffCompression, TiffImage, TiffPage, TiffWriter};
+use encode::{RowImage, TiffCompression, TiffPage, TiffWriter};
 use raster::Bitmap;
 
 use crate::cleanup::Page;
@@ -121,7 +121,7 @@ impl FaxDocument {
         let luma = if turn { luma.turned_cw(3) } else { luma };
         for (index, rows) in (0u32..).zip(pieces(luma.height, self.dpi.1)) {
             let fitted = fit_width(&luma, FAX_WIDTH, rows);
-            let coded = TiffPage::encode(TiffImage::Bilevel(&fitted), self.dpi, self.compression)?;
+            let coded = TiffPage::encode(RowImage::Bilevel(&fitted), self.dpi, self.compression)?;
             self.pages.push((page_num, index), coded);
         }
         Ok(())

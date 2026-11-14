@@ -34,6 +34,8 @@ zune-jpeg = { workspace = true }
 # Reads the TIFF output back in tests: an independent decoder.
 tiff = { workspace = true }
 proptest = { workspace = true }
+# The spill file of a streamed PDF page in tests.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

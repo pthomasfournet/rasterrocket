@@ -55,7 +55,7 @@ pub fn write_pbm<P: Pixel, W: Write>(bitmap: &Bitmap<P>, mut out: W) -> Result<(
     Ok(())
 }
 
-fn write_pbm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
+pub(crate) fn write_pbm_header<W: Write>(out: &mut W, width: u32, height: u32) -> io::Result<()> {
     writeln!(out, "P4")?;
     writeln!(out, "{width} {height}")?;
     Ok(())
