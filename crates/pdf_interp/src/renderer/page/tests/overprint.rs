@@ -838,3 +838,16 @@ fn icc_cmyk_prints_the_profiles_colour_with_its_own_inks() {
         prints(cm)
     );
 }
+
+/// The page's ink map is the page's when it finishes: a renderer still
+/// sharing it is a bug that debug builds report rather than finish the
+/// page without its spot tables.
+#[test]
+#[should_panic(expected = "outlived the page")]
+fn finishing_while_the_ink_map_is_shared_fails() {
+    let doc = overprint_doc("", &spot_space());
+    let mut renderer = ink_renderer(&doc);
+    renderer.execute(&crate::content::parse(b"/Spot cs 1 scn 0 0 10 10 re f"));
+    let _shared = std::rc::Rc::clone(&renderer.ink_map);
+    let _ = renderer.finish();
+}

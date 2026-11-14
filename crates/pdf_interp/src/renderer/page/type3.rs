@@ -231,7 +231,8 @@ impl PageRenderer<'_> {
         child.gstate.current_mut().ctm = frame.child_ctm;
         child.execute(&glyph.ops);
         child.fold_child_into(self);
-        let bitmap = child.finish().0;
+        // The child's canvas is RGB, which converts with no spot tables.
+        let bitmap = child.finish_canvas().into_rgb(&[None; 4]);
         let data = bitmap.alpha_plane().map_or_default(<[u8]>::to_vec);
         let (w, h) = (width as usize, height as usize);
         let touches_edge = data.len() != w * h

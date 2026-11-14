@@ -222,6 +222,22 @@ pub struct CanvasBuffers {
     pub ink: raster::BitmapBuffers,
 }
 
+/// The ink map of a page, shared by the renderers of its pattern cells
+/// and Type 3 glyphs.
+type SharedInkMap = Rc<RefCell<ink_map::InkMap>>;
+
+/// The ink map of a finished page.  The renderers sharing it are children,
+/// finished before the page; were one to outlive the page, the map is
+/// taken from it rather than lost, and debug builds fail.
+fn page_ink_map(ink_map: SharedInkMap) -> ink_map::InkMap {
+    debug_assert_eq!(
+        Rc::strong_count(&ink_map),
+        1,
+        "a child renderer outlived the page that shares its ink map"
+    );
+    Rc::try_unwrap(ink_map).map_or_else(|shared| shared.take(), RefCell::into_inner)
+}
+
 /// Renders a decoded operator sequence onto a page canvas of RGB or ink
 /// pixels, finished as a `Bitmap<Rgb8>`.
 pub struct PageRenderer<'doc> {
@@ -303,7 +319,7 @@ pub struct PageRenderer<'doc> {
     /// and canvas kind is allocated over the page's life.
     group_pool: Vec<PageCanvas>,
     /// The spot colorants of the page and their channels on an ink canvas.
-    ink_map: Rc<RefCell<ink_map::InkMap>>,
+    ink_map: SharedInkMap,
     /// The channels the renderer's paints wrote — the union over each
     /// paint of the channels its overprint leaves it, every channel for a
     /// paint without overprint — and those their colours carry.
@@ -997,6 +1013,7 @@ impl<'doc> PageRenderer<'doc> {
     #[must_use]
     pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
         let (canvas, _, ink_map, diag) = self.into_parts(true);
+        let ink_map = page_ink_map(ink_map);
         let rgb = canvas.into_rgb(&ink_map.luts());
         (rgb, Self::finish_diagnostics(diag, ink_map))
     }
@@ -1040,6 +1057,7 @@ impl<'doc> PageRenderer<'doc> {
         transparent: bool,
     ) -> Result<(Bitmap<Rgb8>, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
         let (canvas, mut buffers, ink_map, diag) = self.into_parts(!transparent);
+        let ink_map = page_ink_map(ink_map);
         let mut rgb = canvas.try_into_rgb_in(&ink_map.luts(), &mut buffers)?;
         if transparent {
             canvas::zero_transparent_colour(&mut rgb);
@@ -1047,13 +1065,14 @@ impl<'doc> PageRenderer<'doc> {
         Ok((rgb, Self::finish_diagnostics(diag, ink_map), buffers))
     }
 
-    /// The finished canvas, with the storage not in it, the ink map and
-    /// the diagnostics; a page group is composited onto paper when
-    /// `onto_paper`, its alpha plane joining the storage.
+    /// The finished canvas, with the storage not in it, the ink map, shared
+    /// with the parent in a child renderer, and the diagnostics; a page
+    /// group is composited onto paper when `onto_paper`, its alpha plane
+    /// joining the storage.
     fn into_parts(
         mut self,
         onto_paper: bool,
-    ) -> (PageCanvas, CanvasBuffers, ink_map::InkMap, PageDiagnostics) {
+    ) -> (PageCanvas, CanvasBuffers, SharedInkMap, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
         if onto_paper
             && self.page_group.is_some()
@@ -1071,9 +1090,6 @@ impl<'doc> PageRenderer<'doc> {
             diag,
             ..
         } = self;
-        // A child shares its parent's map, which stays the parent's.
-        let ink_map = Rc::try_unwrap(ink_map)
-            .map_or_else(|_| ink_map::InkMap::default(), RefCell::into_inner);
         (canvas, buffers, ink_map, diag)
     }
 
