@@ -9,7 +9,7 @@
 //! [`super::DeviceImageCache`].
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 
@@ -52,7 +52,10 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         }
     }
 
-    /// Evict in LRU order until `needed` bytes of free budget exist.
+    /// Evict in LRU order until `needed` bytes of free budget exist, and
+    /// reserve them: the returned [`Reservation`] holds `needed` bytes of
+    /// `used_bytes` until it is committed to an installed entry or dropped,
+    /// so concurrent inserts cannot together overshoot the budget.
     ///
     /// Each evicted entry is demoted to the host tier (best effort)
     /// before its device memory is released, so a subsequent lookup
@@ -63,7 +66,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
     /// (every entry is pinned by an outstanding `Arc`) or when an
     /// internal safety bound is hit — the latter is a livelock guard
     /// against pathological pin churn under heavy concurrent inserts.
-    pub(super) fn evict_to_fit(&self, needed: u64) -> Result<(), CacheError> {
+    pub(super) fn evict_to_fit(&self, needed: u64) -> Result<Reservation<'_>, CacheError> {
         // Bound the loop so a starvation pattern (every candidate gets
         // pinned the moment we read its strong_count) cannot spin
         // forever.  `2 × len() + 4` lets every entry be considered
@@ -72,11 +75,22 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         let max_iters = self.primary.len().saturating_mul(2).saturating_add(4);
         for _ in 0..max_iters {
             let used = self.used_bytes.load(Ordering::Relaxed);
-            if used
+            if let Some(reserved) = used
                 .checked_add(needed)
-                .is_some_and(|n| n <= self.budget.vram_bytes)
+                .filter(|&n| n <= self.budget.vram_bytes)
             {
-                return Ok(());
+                if self
+                    .used_bytes
+                    .compare_exchange(used, reserved, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return Ok(Reservation {
+                        used: &self.used_bytes,
+                        bytes: needed,
+                    });
+                }
+                // Another thread changed the occupancy; re-read it.
+                continue;
             }
 
             let oldest = pick_oldest_unpinned(&self.primary);
@@ -131,6 +145,30 @@ impl<B: CacheBackend> DeviceImageCache<B> {
     /// guarantees.
     pub(super) fn next_tick(&self) -> u64 {
         self.tick.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Bytes of a cache's `used_bytes` held for an entry being installed
+/// ([`DeviceImageCache::evict_to_fit`]); released on drop unless
+/// [`Self::commit`] hands them to the installed entry.
+#[must_use = "dropping a reservation releases its bytes at once"]
+pub(super) struct Reservation<'a> {
+    used: &'a AtomicU64,
+    bytes: u64,
+}
+
+impl Reservation<'_> {
+    /// Keep the bytes: they now account for an entry in the primary index.
+    pub(super) fn commit(mut self) {
+        self.bytes = 0;
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            let _ = self.used.fetch_sub(self.bytes, Ordering::Relaxed);
+        }
     }
 }
 

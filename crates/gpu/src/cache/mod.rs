@@ -593,9 +593,9 @@ impl<B: CacheBackend> DeviceImageCache<B> {
             self.alias(doc, obj, hash);
             return Ok(existing);
         }
-        // Single Entry transition below so concurrent inserts of the same
-        // hash can't both fetch_add `used_bytes` after their Vacant probe.
-        self.evict_to_fit(needed)?;
+        // The reservation holds `needed` bytes of the budget until the entry
+        // is installed; a failed upload or a lost dedup race releases them.
+        let reservation = self.evict_to_fit(needed)?;
         let slab = B::upload_slab(&self.device, pixels)?;
         let new_entry = Arc::new(CachedDeviceImage::new(
             slab,
@@ -606,8 +606,8 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         match self.primary.entry(hash) {
             Entry::Occupied(occ) => {
                 // Lost the dedup race.  `new_entry` drops on function
-                // exit, freeing its just-uploaded slab; we never
-                // touched `used_bytes`, so accounting stays correct.
+                // exit, freeing its just-uploaded slab, and the
+                // reservation drops with it, releasing its bytes.
                 let existing = occ.get().clone();
                 drop(occ);
                 self.alias(doc, obj, hash);
@@ -615,9 +615,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
                 Ok(existing)
             }
             Entry::Vacant(vac) => {
-                let _ = self
-                    .used_bytes
-                    .fetch_add(new_entry.vram_bytes(), Ordering::Relaxed);
+                reservation.commit();
                 let _ = vac.insert(new_entry.clone());
                 self.alias(doc, obj, hash);
                 // Persist to disk for cross-process / cross-session
@@ -671,6 +669,14 @@ const fn _assert_thread_safety()
 where
     DeviceImageCache: Send + Sync,
     Arc<CachedDeviceImage>: Send + Sync,
+{
+}
+
+#[cfg(feature = "vulkan")]
+const fn _assert_vulkan_thread_safety()
+where
+    DeviceImageCache<crate::backend::vulkan::VulkanBackend>: Send + Sync,
+    Arc<CachedDeviceImage<crate::backend::vulkan::VulkanBackend>>: Send + Sync,
 {
 }
 

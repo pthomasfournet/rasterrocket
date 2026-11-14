@@ -6,10 +6,6 @@ fn doc(byte: u8) -> DocId {
     DocId([byte; 32])
 }
 
-fn hash(byte: u8) -> ContentHash {
-    ContentHash([byte; 32])
-}
-
 /// Smoke test: basic API shape sanity that does not require a
 /// device.  Verifies that newtype keys and the budget struct
 /// round-trip and have the documented properties.
@@ -62,9 +58,6 @@ fn cache_error_is_std_error() {
     // CacheError satisfies std::error::Error (a separate trait-bound
     // assertion would just be redundant ceremony).
     assert!(std::error::Error::source(&e).is_none());
-
-    // Pinning hash is unused; reference it to verify the helper compiles.
-    let _ = hash(7);
 }
 
 /// The checks below run on every backend a device is present for:
@@ -243,6 +236,50 @@ mod device {
         );
     }
 
+    /// Concurrent inserts of distinct images, each kept pinned, never
+    /// together exceed the VRAM budget: each reserves its bytes before
+    /// uploading, so the inserts past the budget fail with `OverBudget`.
+    /// The cache must budget exactly four 256-byte entries.
+    pub(super) fn concurrent_inserts_stay_within_budget<B: CacheBackend>(
+        cache: &DeviceImageCache<B>,
+    ) {
+        const THREADS: u8 = 32;
+        const PIXEL_BYTES: usize = 256;
+        let start = std::sync::Barrier::new(usize::from(THREADS));
+        let held: Vec<_> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|t| {
+                    let start = &start;
+                    s.spawn(move || {
+                        let pixels = vec![t; PIXEL_BYTES];
+                        let _ = start.wait();
+                        cache
+                            .insert(InsertRequest {
+                                doc: doc(2),
+                                obj: ObjId(u32::from(t)),
+                                hash: ContentHash([t.wrapping_add(100); 32]),
+                                width: 16,
+                                height: 16,
+                                layout: ImageLayout::Gray,
+                                pixels: &pixels,
+                            })
+                            .ok()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .filter_map(|w| w.join().expect("insert thread"))
+                .collect()
+        });
+        assert_eq!(
+            held.len(),
+            4,
+            "inserts that succeeded with every entry pinned"
+        );
+        assert_eq!(cache.used_bytes(), 4 * PIXEL_BYTES as u64);
+    }
+
     /// End-to-end host tier round trip: insert entry A, evict it by
     /// inserting B, then look up A again — it must come back via the
     /// host tier's promotion path with bit-identical bytes.  The cache
@@ -326,6 +363,13 @@ macro_rules! device_tests {
         fn concurrent_inserts_dedup_correctly() {
             if let Some(cache) = $mk(8 * 256 * 2, 1 << 24) {
                 super::device::concurrent_inserts_dedup_correctly(&cache);
+            }
+        }
+
+        #[test]
+        fn concurrent_inserts_stay_within_budget() {
+            if let Some(cache) = $mk(4 * 256, 0) {
+                super::device::concurrent_inserts_stay_within_budget(&cache);
             }
         }
 

@@ -6,7 +6,6 @@
 //! sees a re-decode for an image that's still anywhere in the cache.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use dashmap::mapref::entry::Entry;
 
@@ -24,12 +23,10 @@ impl<B: CacheBackend> DeviceImageCache<B> {
     ) -> Option<Arc<CachedDeviceImage<B>>> {
         let host_entry = self.host.lookup(hash, self.next_tick())?;
         let bytes = host_entry.host_bytes();
-        // Make room in the VRAM tier.  If we can't (every entry pinned
-        // by in-flight kernels), fall back to a cache miss; the host
-        // entry stays in place for a future retry.
-        if self.evict_to_fit(bytes).is_err() {
-            return None;
-        }
+        // Make room in the VRAM tier and reserve it.  If we can't (every
+        // entry pinned by in-flight kernels), fall back to a cache miss;
+        // the host entry stays in place for a future retry.
+        let reservation = self.evict_to_fit(bytes).ok()?;
         // `promote` keeps the host slab alive until the copy has read
         // it (see `CacheBackend::promote` for the CUDA mechanism).
         let slab = B::promote(&self.device, &host_entry.pinned)
@@ -43,13 +40,15 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         ));
         match self.primary.entry(*hash) {
             Entry::Occupied(occ) => {
-                // Another thread won the same race — return their entry.
-                Some(occ.get().clone())
+                // Another thread won the same race: return its entry,
+                // touched as the insert path touches it; the reservation
+                // drops, releasing its bytes.
+                let existing = occ.get().clone();
+                existing.touch(self.next_tick());
+                Some(existing)
             }
             Entry::Vacant(vac) => {
-                let _ = self
-                    .used_bytes
-                    .fetch_add(new_entry.vram_bytes(), Ordering::Relaxed);
+                reservation.commit();
                 let _ = vac.insert(new_entry.clone());
                 Some(new_entry)
             }
