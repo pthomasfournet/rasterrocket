@@ -1,6 +1,13 @@
-//! GPU-accelerated rasterizer helpers (CUDA via cudarc).
+//! GPU compute for the rasteriser: a CUDA context ([`GpuCtx`], via cudarc)
+//! and the CUDA and Vulkan (`vulkan` feature) backends of
+//! [`backend::GpuBackend`], which run the AA fill, ICC CLUT, image blit and
+//! JPEG decode kernels; the whole-page raster (`page`, `vulkan` feature); the
+//! device-resident image cache (`cache`, `cache` feature); and the nvJPEG,
+//! nvJPEG2000 and VA-API decoders.  CPU reference implementations of the
+//! kernels (`aa_fill_cpu`, `icc_cmyk_to_rgb_cpu`) are always built.
 //!
-//! The interpreter depends on this crate through its `gpu-aa` and `gpu-icc`
+//! The interpreter depends on this crate through its `gpu-aa`, `gpu-icc`,
+//! `cache`, `vulkan`, `gpu-jpeg-huffman`, `nvjpeg`, `nvjpeg2k` and `vaapi`
 //! features.
 //!
 //! # Usage
@@ -8,7 +15,6 @@
 //! ```no_run
 //! use rasterrocket_gpu::GpuCtx;
 //! let ctx = GpuCtx::init().expect("no CUDA device");
-//! // … call ctx.icc_cmyk_to_rgb(cmyk, clut) etc.
 //! ```
 //!
 //! # Feature flags

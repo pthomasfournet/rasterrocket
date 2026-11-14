@@ -433,7 +433,10 @@ pub(crate) struct Args {
     ///            override (`PDF_RASTER_AA_FILL_THRESHOLD`,
     ///            `PDF_RASTER_HUFFMAN_THRESHOLD`); then Vulkan if compiled in
     ///            and present, else CUDA, else CPU (silent fallback at every
-    ///            step).  This is the default.
+    ///            step).  Independently, a binary built with `nvjpeg2k`
+    ///            decodes a JPEG 2000 image of at least 262 144 pixels on
+    ///            the GPU when it is drawn at more than half its size, and
+    ///            --gpu-pages opens a Vulkan device.  This is the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
     /// `cuda`   — Require CUDA (nvJPEG/AA fill/ICC); exit with error if unavailable.
     /// `vaapi`  — Require VA-API JPEG; exit with error if the DRM device cannot be opened.
@@ -534,10 +537,11 @@ pub(crate) struct Args {
     pub split_spreads: bool,
 
     /// Prefetch image `XObject`s into the device-resident image cache at
-    /// session open.  Only meaningful when the binary was built with the
-    /// `cache` feature; ignored otherwise.  Off by default — the prefetch
-    /// walk is wasted work for short single-page renders, but a clear win
-    /// on multi-page or multi-pass workloads (OCR pipelines).
+    /// session open.  Has no effect on a session without an image cache,
+    /// such as one under `--backend cpu`, or `--backend auto` while every
+    /// GPU kernel is dormant.  Off by default — the prefetch walk is wasted work for
+    /// short single-page renders, but a clear win on multi-page or
+    /// multi-pass workloads (OCR pipelines).
     #[cfg(feature = "cache")]
     #[arg(long = "prefetch")]
     pub prefetch: bool,

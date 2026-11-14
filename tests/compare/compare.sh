@@ -36,8 +36,10 @@
 #           entry
 # -U records every new FAIL as an entry, reason "unclassified (seeded
 # DATE)"; reseeds a FAIL worse than registered, keeping its reason with
-# "(worsened DATE)" appended; lowers the limits of an XFAIL entry to the
-# scores observed; and removes the entry of every XPASS.  Entries for
+# "(worsened DATE)" appended; lowers each limit of an XFAIL `differs`
+# entry to the seeded limit of its observed score (2 % above it, rounded
+# up to 0.01) where that is lower, and drops a limit the suite's own
+# already enforces; and removes the entry of every XPASS.  Entries for
 # documents and pages this run did not render are kept.  A PDF inside the
 # repository is registered under its repository path, any other under its
 # basename.

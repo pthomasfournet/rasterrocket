@@ -16,7 +16,7 @@
 //!    decoded once, not N times.
 //!
 //! Only `/DCTDecode` (JPEG) images are prefetched — those are the
-//! decode-expensive case and the one [`gpu::cache::DeviceImageCache`]
+//! decode-expensive case and the one the [`gpu::cache::ImageCache`]
 //! was built for.  CCITT, JBIG2, and JPEG-2000 images decode on the
 //! renderer's first touch.
 //!

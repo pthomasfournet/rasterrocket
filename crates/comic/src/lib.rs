@@ -211,7 +211,8 @@ pub enum ComicError {
         /// Decoded height in pixels.
         height: u32,
     },
-    /// Deskew failed on a page.
+    /// Deskew failed on a page.  Not returned in this release: deskew
+    /// falls back to the CPU rotation, which cannot fail.
     Deskew(String),
     /// No images and two or more PDFs — the archive is ambiguous.
     AmbiguousArchive(String),

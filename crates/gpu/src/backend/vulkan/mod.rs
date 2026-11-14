@@ -2,9 +2,11 @@
 //!
 //! Mirrors the CUDA backend's shape: instance → device → queue at init
 //! time, then `begin_page → record_* → submit_page → wait_page` for each
-//! rendered page.  All five kernel families dispatch through `record_*`
-//! into a per-page command buffer; submission uses a timeline semaphore
-//! so the host waits exactly once per page.
+//! rendered page.  The six kernel families (image blit, AA fill, ICC CLUT,
+//! scan, Huffman, IDCT) dispatch through `record_*` into a per-page command
+//! buffer; submission uses a timeline semaphore so the host waits exactly
+//! once per page.  The whole-page raster (`page`) records its own command
+//! buffer from a page's command list.
 //!
 //! Module split (all private; named here for orientation only):
 //! - `barrier` — global memory barriers by stage/access scope.

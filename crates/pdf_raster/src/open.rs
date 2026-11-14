@@ -298,9 +298,16 @@ const _: fn() = || {
 /// # Errors
 ///
 /// - [`RasterError::Pdf`] if the file cannot be opened or parsed, or is
-///   encrypted and decryption is not authorised or the password is wrong.
-/// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
-///   `ForceVaapi` and the required GPU context fails to initialise.
+///   encrypted and decryption is not authorised or the password is wrong;
+///   with `config.read_into_memory`, also when the file's bytes cannot be
+///   allocated.
+/// - [`RasterError::BackendUnavailable`] if `config.policy` is
+///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
+///   was not compiled in or fails to initialise, or if `config.gpu_pages`
+///   is set and the thread that opens its device cannot start.
+/// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
+///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
+///   `config.vulkan_device` matches no usable Vulkan device or several.
 pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
@@ -320,8 +327,13 @@ pub fn open_session(
 /// - [`RasterError::Pdf`] if `bytes` is not a parseable PDF, or is an
 ///   encrypted document whose decryption is not authorised or whose
 ///   password is wrong.
-/// - [`RasterError::BackendUnavailable`] if `config.policy` is `ForceCuda` or
-///   `ForceVaapi` and the required GPU context fails to initialise.
+/// - [`RasterError::BackendUnavailable`] if `config.policy` is
+///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
+///   was not compiled in or fails to initialise, or if `config.gpu_pages`
+///   is set and the thread that opens its device cannot start.
+/// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
+///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
+///   `config.vulkan_device` matches no usable Vulkan device or several.
 pub fn open_session_from_bytes(
     bytes: Vec<u8>,
     config: &SessionConfig,

@@ -5,7 +5,7 @@
 //! Currently exposes the [`prefetch`] module — a background worker
 //! that walks every page's `/XObject` resource dict, decodes each
 //! `/DCTDecode`-filtered image once, and primes
-//! [`gpu::cache::DeviceImageCache`] so the renderer thread sees
+//! the session's [`gpu::cache::ImageCache`] so the renderer thread sees
 //! cache hits on first touch.
 
 #![cfg(feature = "cache")]
