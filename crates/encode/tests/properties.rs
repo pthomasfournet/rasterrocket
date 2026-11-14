@@ -16,8 +16,8 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 use raster::Bitmap;
 use rasterrocket_encode::{
-    JpegOptions, TiffCompression, TiffImage, write_jpeg, write_pbm, write_pgm, write_png,
-    write_ppm, write_tiff,
+    BLACK_BELOW, JpegOptions, TiffCompression, TiffImage, write_jpeg, write_pbm, write_pgm,
+    write_png, write_ppm, write_tiff,
 };
 
 /// The runner configuration: `cases` cases, or `PROPTEST_CASES` when set.
@@ -98,21 +98,26 @@ fn image(bytes: usize, max_w: u32, max_h: u32, alpha: bool) -> impl Strategy<Val
         })
 }
 
-/// A gray image of black and white runs, each 1 to 3 000 pixels long but
-/// mostly short, `w` up to `max_w`.
+/// A gray image of alternating black and white runs, each 1 to 3 000
+/// pixels long but mostly short, `w` up to `max_w`.  A black run's level is
+/// below [`BLACK_BELOW`], a white run's at or above it, often the level
+/// next to the threshold.
 fn bilevel(max_w: u32, max_h: u32) -> impl Strategy<Value = Image> {
-    let run = prop_oneof![8 => 1usize..16, 3 => 16usize..300, 1 => 300usize..3000];
+    let len = prop_oneof![8 => 1usize..16, 3 => 16usize..300, 1 => 300usize..3000];
+    let below = prop_oneof![Just(BLACK_BELOW - 1), 0..BLACK_BELOW];
+    let at_or_above = prop_oneof![Just(BLACK_BELOW), BLACK_BELOW..=u8::MAX];
+    let run = (len, below, at_or_above);
     (1..=max_w, 1..=max_h, 1usize..=16, any::<bool>()).prop_flat_map(move |(w, h, pad, first)| {
         let n = w as usize * h as usize;
         prop::collection::vec(run.clone(), 1..64).prop_map(move |runs| {
             let mut live = Vec::with_capacity(n);
             let mut black = first;
-            for len in runs.iter().cycle() {
+            for &(len, dark, light) in runs.iter().cycle() {
                 if live.len() >= n {
                     break;
                 }
-                let gray = if black { 40 } else { 220 };
-                live.extend(std::iter::repeat_n(gray, (*len).min(n - live.len())));
+                let gray = if black { dark } else { light };
+                live.extend(std::iter::repeat_n(gray, len.min(n - live.len())));
                 black = !black;
             }
             Image {
@@ -223,7 +228,7 @@ fn tiff_compression() -> impl Strategy<Value = TiffCompression> {
 proptest! {
     #![proptest_config(config(256))]
 
-    /// PGM holds a gray bitmap's live bytes; PBM its luma below 128 as
+    /// PGM holds a gray bitmap's live bytes; PBM its luma below `BLACK_BELOW` as
     /// black bits; PNG the same gray bytes.
     #[test]
     fn gray_outputs_hold_the_pixels(img in image(1, 300, 240, false)) {
@@ -236,7 +241,7 @@ proptest! {
         write_pbm(&bmp, &mut pbm).expect("PBM");
         prop_assert_eq!(
             netpbm_body(&pbm, "P4", img.w, img.h, false),
-            &packed(&img.live, img.w, |v| v < 128)[..]
+            &packed(&img.live, img.w, |v| v < BLACK_BELOW)[..]
         );
 
         let mut file = Vec::new();
@@ -362,7 +367,7 @@ proptest! {
             row
         };
         let got: Vec<u8> = black.chunks_exact(width.div_ceil(8)).flat_map(mask).collect();
-        prop_assert_eq!(got, packed(&page.live, page.w, |v| v < 128));
+        prop_assert_eq!(got, packed(&page.live, page.w, |v| v < BLACK_BELOW));
     }
 
     /// The fax coder's output decodes back to its rows under every
@@ -370,7 +375,7 @@ proptest! {
     /// or not, and Group 4.
     #[test]
     fn fax_coding_round_trips(page in bilevel(3000, 10), scheme in fax_scheme()) {
-        let rows = packed(&page.live, page.w, |v| v < 128);
+        let rows = packed(&page.live, page.w, |v| v < BLACK_BELOW);
         let width = NonZeroU32::new(page.w).expect("non-zero width");
         let mut encoder = Encoder::new(width, scheme);
         for row in rows.chunks_exact(page.w.div_ceil(8) as usize) {
