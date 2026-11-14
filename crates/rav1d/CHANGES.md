@@ -85,6 +85,15 @@ unless the entry says otherwise.
   crate, one thread, Ryzen 9 9900X3D, medians of 21: 34.0 → 31.9 ms at 8
   bits, 37.9 → 35.8 ms at 10).
 
+- `src/still.rs`: `still_layout(obu) -> Result<StillLayout, StillError>`,
+  re-exported at the crate root, walks the OBU framing and parses each
+  sequence header with the decoder's own `rav1d_parse_sequence_header`,
+  without decoding, and returns the widest chroma layout any of them
+  declares.  `StillLayout` derives `PartialOrd`/`Ord`, its variants ordered
+  by the chroma samples they carry.  A caller bounds the planes
+  `decode_still` will allocate by that layout rather than by what a
+  container declares of the stream.
+
 - `src/still.rs`: `decode_still` returns `StillError::NoPicture` for empty
   data before the decoder sees it; `Decoder::send_data` validates its input
   with `validate_input!`, which aborts the process in a debug build.

@@ -176,8 +176,8 @@ use std::{cmp, mem, ptr, slice, thread};
 use parking_lot::Mutex;
 pub use rust_api::*;
 pub use still::{
-    decode_still, StillColor, StillError, StillLayout, StillLimits, StillPicture, StillPlane,
-    StillSamples,
+    decode_still, still_layout, StillColor, StillError, StillLayout, StillLimits, StillPicture,
+    StillPlane, StillSamples,
 };
 use to_method::To as _;
 

@@ -9,10 +9,15 @@ use std::fmt;
 
 use crate::error::Rav1dError;
 use crate::in_range::InRange;
+use crate::include::dav1d::headers::Rav1dPixelLayout;
+use crate::obu::rav1d_parse_sequence_header;
 use crate::rust_api::{Decoder, Picture, PixelLayout, PlanarImageComponent, Settings};
 
 /// Chroma layout of a decoded picture.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Layouts order by the chroma samples they carry: for every picture size,
+/// a later layout has at least as many samples as an earlier one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum StillLayout {
     /// Luma alone.
     Mono,
@@ -25,6 +30,15 @@ pub enum StillLayout {
 }
 
 impl StillLayout {
+    const fn of(layout: Rav1dPixelLayout) -> Self {
+        match layout {
+            Rav1dPixelLayout::I400 => Self::Mono,
+            Rav1dPixelLayout::I420 => Self::I420,
+            Rav1dPixelLayout::I422 => Self::I422,
+            Rav1dPixelLayout::I444 => Self::I444,
+        }
+    }
+
     /// The right shifts (horizontal, vertical) from luma to chroma
     /// coordinates; `(0, 0)` for [`Self::Mono`], which has no chroma.
     pub const fn chroma_shift(self) -> (u32, u32) {
@@ -239,6 +253,58 @@ pub fn decode_still(obu: &[u8], limits: StillLimits) -> Result<StillPicture, Sti
     Err(StillError::NoPicture)
 }
 
+/// The widest chroma layout (see [`StillLayout`]'s order) that a sequence
+/// header among the OBUs of `obu` declares, read without decoding.
+///
+/// [`decode_still`] decodes a frame with the layout of the sequence header
+/// active at it, so this layout bounds the planes it allocates for any
+/// frame of `obu`, whatever a container says of the stream.
+///
+/// # Errors
+///
+/// [`StillError::Decode`] when an OBU's framing or a sequence header is
+/// malformed; [`StillError::NoPicture`] when `obu` holds no sequence
+/// header, so no frame of it can be decoded.
+pub fn still_layout(obu: &[u8]) -> Result<StillLayout, StillError> {
+    let malformed = StillError::Decode(Rav1dError::InvalidArgument);
+    let mut widest = None;
+    let mut rest = obu;
+    while let Some(&header) = rest.first() {
+        // obu_header: forbidden bit, type (4), extension flag, size flag,
+        // reserved bit; then the extension byte when flagged.
+        let kind = (header >> 3) & 0xF;
+        let mut at = 1 + usize::from(header & 0b100 != 0);
+        let end = if header & 0b10 != 0 {
+            let (size, n) = leb128(rest.get(at..).ok_or(malformed)?).ok_or(malformed)?;
+            at += n;
+            at.checked_add(size).ok_or(malformed)?
+        } else {
+            rest.len()
+        };
+        let unit = rest.get(..end).ok_or(malformed)?;
+        if kind == 1 {
+            let layout = StillLayout::of(rav1d_parse_sequence_header(unit)?.rav1d.layout);
+            widest = widest.max(Some(layout));
+        }
+        rest = &rest[end..];
+    }
+    widest.ok_or(StillError::NoPicture)
+}
+
+/// A `leb128()` value of the AV1 syntax at the start of `data` and the
+/// bytes it spans: at most 8 bytes, a value of at most 32 bits.
+fn leb128(data: &[u8]) -> Option<(usize, usize)> {
+    let mut value = 0u64;
+    for (i, &byte) in data.iter().take(8).enumerate() {
+        value |= u64::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            let value = u32::try_from(value).ok()?;
+            return Some((usize::try_from(value).ok()?, i + 1));
+        }
+    }
+    None
+}
+
 /// Wrap `picture` once its geometry is verified: a non-empty size, a bit
 /// depth of 8, 10 or 12, and in every plane a stride of whole samples that
 /// covers a row, with all rows inside the buffer.
@@ -345,6 +411,29 @@ mod tests {
             Some(StillError::Decode(Rav1dError::OutOfRange))
         );
         assert!(decode_still(OBU, limits(0)).is_ok());
+    }
+
+    #[test]
+    fn the_layout_is_read_from_the_sequence_header() {
+        assert_eq!(still_layout(OBU), Ok(StillLayout::I444));
+        // The sequence header alone, without the frame after it.
+        assert_eq!(still_layout(&OBU[..10]), Ok(StillLayout::I444));
+        assert_eq!(still_layout(&[]), Err(StillError::NoPicture));
+        // A temporal delimiter (type 2, size 0) holds no sequence header.
+        assert_eq!(still_layout(&[0x12, 0x00]), Err(StillError::NoPicture));
+        // A size past the data, and a size field that never ends.
+        assert!(still_layout(&[0x0a, 0x7f]).is_err());
+        assert!(still_layout(&[0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).is_err());
+        for cut in 1..10 {
+            assert!(still_layout(&OBU[..cut]).is_err(), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn layouts_order_by_their_chroma_samples() {
+        assert!(StillLayout::Mono < StillLayout::I420);
+        assert!(StillLayout::I420 < StillLayout::I422);
+        assert!(StillLayout::I422 < StillLayout::I444);
     }
 
     #[test]
