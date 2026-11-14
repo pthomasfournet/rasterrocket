@@ -245,7 +245,7 @@ pub struct PageInfo {
 }
 ```
 
-Renders whole pages at `opts.dpi` into memory the caller owns. Every page is drawn on an RGB canvas the size of the page; a `PageBuffer` keeps that canvas's allocation between renders and writes the finished page into `out`, row `y` at `out[y * stride..]`, in the method's format. Once the canvas has grown to the largest page rendered through it, a render allocates no page-sized buffer: neither canvas nor output. Allocations of the drawing itself (decoded images, glyphs, transparency groups) are unchanged.
+Renders whole pages at `opts.dpi` into memory the caller owns. Every page is drawn on a canvas the size of the page: RGB, or ink when the session simulates overprint on a page that sets it, with an alpha plane when the page is painted as a page group. A `PageBuffer` keeps the allocations of both canvases and of the alpha plane between renders and writes the finished page into `out`, row `y` at `out[y * stride..]`, in the method's format. Once they have grown to the largest page rendered through them, a render allocates no page-sized buffer: neither canvas, alpha plane nor output. Allocations of the drawing itself (decoded images, glyphs, transparency groups, the skew profile of `deskew`) are unchanged, and so are the two page-sized copies a GPU rotation makes under the `gpu-deskew` feature.
 
 | Method | Pixels written | `opts` fields used |
 |---|---|---|

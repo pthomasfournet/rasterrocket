@@ -122,6 +122,8 @@ pub(crate) mod page;
 mod page_buffer;
 mod render;
 mod request;
+#[cfg(test)]
+mod test_pdf;
 #[cfg(feature = "vulkan")]
 mod vk_init;
 

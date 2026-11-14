@@ -21,8 +21,8 @@ use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_tri
 use raster::transparency::{Backdrop, GroupBitmap, GroupParams, begin_group, paint_group};
 use raster::{Bitmap, BitmapBuffers};
 
-use super::PageRenderer;
 use super::pixel_rect::PixelRect;
+use super::{CanvasBuffers, PageRenderer};
 use crate::resources::transfer::Transfer;
 
 /// Run `$body` with `$b` bound to the bitmap of `$canvas`, of either pixel
@@ -177,19 +177,20 @@ impl PageCanvas {
     /// [`Self::into_rgb`] that reports an RGB bitmap the allocator refuses
     /// as an error.
     ///
-    /// The RGB bitmap of an ink canvas is built in `buffers`
-    /// ([`Bitmap::try_new_filled_in`]); an RGB canvas is returned as it is
-    /// and `buffers` are dropped.
+    /// The RGB bitmap of an ink canvas is built in `buffers.rgb`
+    /// ([`Bitmap::try_new_filled_in`]), and the ink canvas's storage is
+    /// then reclaimed into `buffers.ink`; an RGB canvas is returned as it
+    /// is and `buffers` are left as they are.
     pub(super) fn try_into_rgb_in(
         self,
         spots: &[Option<&SpotLut>; 4],
-        buffers: BitmapBuffers,
+        buffers: &mut CanvasBuffers,
     ) -> Result<Bitmap<Rgb8>, raster::BitmapAllocError> {
         match self {
             Self::Rgb(bitmap) => Ok(bitmap),
             Self::Ink(ink) => {
                 let mut rgb = Bitmap::<Rgb8>::try_new_filled_in(
-                    buffers,
+                    buffers.rgb.take_for(ink.has_alpha()),
                     ink.width,
                     ink.height,
                     1,
@@ -197,15 +198,17 @@ impl PageCanvas {
                     0,
                 )?;
                 ink_into_rgb(&ink, spots, &mut rgb);
+                buffers.ink.reclaim(ink);
                 Ok(rgb)
             }
         }
     }
 
     /// Composite the canvas, a page group with an alpha plane, onto opaque
-    /// paper in place (see [`composite_onto_white`]).
-    pub(super) fn composite_onto_white(&mut self) {
-        with_canvas!(self, |b| composite_onto_white(b));
+    /// paper in place (see [`composite_onto_white`]), and return the alpha
+    /// plane removed.
+    pub(super) fn composite_onto_white(&mut self) -> Option<Vec<u8>> {
+        with_canvas!(self, |b| composite_onto_white(b))
     }
 
     /// Make the pixels of `region` transparent.
@@ -356,17 +359,14 @@ impl CanvasGroup {
 
 /// Composite `bitmap`, a page group with an alpha plane, onto opaque paper
 /// in place: each channel becomes `c·α + w·(1 − α)`, `w` being paper white,
-/// and the alpha plane is dropped.  A bitmap without an alpha plane is left
-/// as it is.
-pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) {
-    if !bitmap.has_alpha() {
-        return;
-    }
+/// and the alpha plane is removed and returned.  A bitmap without an alpha
+/// plane is left as it is, and the result is `None`.
+pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) -> Option<Vec<u8>> {
     let white = paper::<P>();
     let n = bitmap.width as usize * P::BYTES;
     for y in 0..bitmap.height {
         let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
-            return;
+            return None;
         };
         for (px, &a) in row[..n].chunks_exact_mut(P::BYTES).zip(&*alpha_row) {
             if a == u8::MAX {
@@ -377,7 +377,7 @@ pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) {
             }
         }
     }
-    bitmap.drop_alpha_plane();
+    bitmap.take_alpha_plane()
 }
 
 /// Set the colour of every pixel of `bitmap` whose alpha is 0 to 0.  A
@@ -772,7 +772,7 @@ mod tests {
         };
         bitmap.row_bytes_mut(0)[3] = 200;
         bitmap.alpha_plane_mut().unwrap()[0] = 128;
-        canvas.composite_onto_white();
+        assert_eq!(canvas.composite_onto_white(), Some(vec![128]));
         assert!(!canvas.has_alpha());
         let PageCanvas::Ink(bitmap) = &canvas else {
             panic!("an ink canvas");

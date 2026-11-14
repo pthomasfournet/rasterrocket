@@ -16,7 +16,9 @@ pub(crate) mod text;
 
 pub use document_images::{DOCUMENT_IMAGE_BUDGET_BYTES, DocumentImages};
 pub use font_cache::DocumentFonts;
-pub use page::{DevicePage, ImageFailure, PageDiagnostics, PageRenderer, PageView, RenderAbort};
+pub use page::{
+    CanvasBuffers, DevicePage, ImageFailure, PageDiagnostics, PageRenderer, PageView, RenderAbort,
+};
 #[cfg(feature = "vulkan")]
 pub use page::{DeviceRecording, device_page_operators};
 pub use pdf::ContentFailure;

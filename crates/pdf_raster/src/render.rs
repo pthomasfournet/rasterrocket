@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use color::Rgb8;
+use pdf_interp::renderer::CanvasBuffers;
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
@@ -79,7 +80,7 @@ pub fn render_page_rgb_with_diagnostics(
         page_id,
         geom,
         params,
-        raster::BitmapBuffers::default(),
+        &mut CanvasBuffers::default(),
     )
 }
 
@@ -114,7 +115,7 @@ pub fn render_page_gray(
         page_id,
         geom,
         &params,
-        raster::BitmapBuffers::default(),
+        &mut CanvasBuffers::default(),
     )?;
     let mut gray = rgb_into_gray(rgb);
 
@@ -166,7 +167,7 @@ pub fn render_page_rgba(
         page_id,
         geom,
         &params,
-        raster::BitmapBuffers::default(),
+        &mut CanvasBuffers::default(),
     )?;
     Ok(crate::page::rgb8_to_rgba_rendered_page(
         &rgb,
@@ -259,7 +260,11 @@ const fn allocation_failed(e: raster::BitmapAllocError) -> RasterError {
 }
 
 /// Inner implementation shared by every page render entry point.  The
-/// bitmap is built in `buffers` ([`raster::Bitmap::try_new_filled_in`]).
+/// page's canvas is built in `buffers`
+/// ([`PageRenderer::try_with_page_group_in`]), and `buffers` is left
+/// holding the storage the returned bitmap does not.
+///
+/// [`PageRenderer::try_with_page_group_in`]: pdf_interp::renderer::PageRenderer::try_with_page_group_in
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (GPU context for AA/ICC, VA-API queue) is unaffected.
@@ -269,7 +274,7 @@ pub(crate) fn render_page_rgb_with_geom(
     page_id: pdf::ObjectId,
     geom: pdf_interp::PageGeometry,
     params: &RenderParams,
-    buffers: raster::BitmapBuffers,
+    buffers: &mut CanvasBuffers,
 ) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
     check_scale(params.scale_x)?;
     check_scale(params.scale_y)?;
@@ -316,9 +321,9 @@ pub(crate) fn render_page_rgb_with_geom(
         policy: effective_policy,
     };
     #[cfg(feature = "vulkan")]
-    let (mut renderer, device_page) = crate::device_pages::render(&job, buffers)?;
+    let (mut renderer, device_page) = crate::device_pages::render(&job, std::mem::take(buffers))?;
     #[cfg(not(feature = "vulkan"))]
-    let mut renderer = job.run(buffers)?;
+    let mut renderer = job.run(std::mem::take(buffers))?;
 
     // A budget breach takes precedence over image failures: the page may not
     // have finished rendering at all.
@@ -356,12 +361,10 @@ pub(crate) fn render_page_rgb_with_geom(
         }
     }
 
-    let (bitmap, mut diag) = if params.transparent_background {
-        renderer.try_finish_transparent()
-    } else {
-        renderer.try_finish()
-    }
-    .map_err(allocation_failed)?;
+    let (bitmap, mut diag, spare) = renderer
+        .try_finish_keeping(params.transparent_background)
+        .map_err(allocation_failed)?;
+    *buffers = spare;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     #[cfg(feature = "vulkan")]
@@ -396,7 +399,7 @@ impl<'a> PageJob<'a> {
     /// built in `buffers`.
     pub(crate) fn renderer(
         &self,
-        buffers: raster::BitmapBuffers,
+        buffers: CanvasBuffers,
     ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
         let session = self.session;
         let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
@@ -456,7 +459,7 @@ impl<'a> PageJob<'a> {
     /// A renderer that has executed the page.
     pub(crate) fn run(
         &self,
-        buffers: raster::BitmapBuffers,
+        buffers: CanvasBuffers,
     ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
         let mut renderer = self.renderer(buffers)?;
         self.execute(&mut renderer)?;

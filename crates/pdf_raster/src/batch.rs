@@ -768,33 +768,12 @@ mod from_bytes_tests {
 
     /// Two empty 100 × 100 pt pages.
     fn two_page_pdf() -> Vec<u8> {
-        let objects = [
+        crate::test_pdf::assemble(&[
             "<</Type /Catalog /Pages 2 0 R>>",
             "<</Type /Pages /Kids [3 0 R 4 0 R] /Count 2>>",
             "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]>>",
             "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]>>",
-        ];
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        let mut offsets = Vec::new();
-        for (i, body) in objects.iter().enumerate() {
-            offsets.push(pdf.len());
-            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
-        }
-        let xref = pdf.len();
-        pdf.extend_from_slice(
-            format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes(),
-        );
-        for off in offsets {
-            pdf.extend_from_slice(format!("{off:010} 00000 n\r\n").as_bytes());
-        }
-        pdf.extend_from_slice(
-            format!(
-                "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref}\n%%EOF",
-                objects.len() + 1
-            )
-            .as_bytes(),
-        );
-        pdf
+        ])
     }
 
     /// The image budget reaches the session's document image store, from

@@ -188,7 +188,7 @@ fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
 /// As [`PageJob::run`].
 pub(crate) fn render<'a>(
     job: &PageJob<'a>,
-    buffers: raster::BitmapBuffers,
+    buffers: pdf_interp::renderer::CanvasBuffers,
 ) -> Result<(PageRenderer<'a>, DevicePage), RasterError> {
     let Some(pages) = job.session.device_pages.as_ref() else {
         return Ok((job.run(buffers)?, DevicePage::NotOffered));
@@ -233,9 +233,12 @@ pub(crate) fn render<'a>(
         _ => DevicePage::NotOffered,
     };
     drop(claim);
-    let buffers = renderer.try_finish().map_or_else(
-        |_| raster::BitmapBuffers::default(),
-        |(bitmap, _)| bitmap.into_buffers(),
+    let buffers = renderer.try_finish_keeping(false).map_or_else(
+        |_| pdf_interp::renderer::CanvasBuffers::default(),
+        |(bitmap, _, mut spare)| {
+            spare.rgb.reclaim(bitmap);
+            spare
+        },
     );
     Ok((job.run(buffers)?, outcome))
 }

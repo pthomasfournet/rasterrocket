@@ -2,7 +2,8 @@
 //! reused from one render to the next.
 
 use color::Rgb8;
-use raster::{Bitmap, BitmapBuffers};
+use pdf_interp::renderer::CanvasBuffers;
+use raster::Bitmap;
 
 use crate::gray::{rgb_into_gray, rgb_rows_to_gray};
 use crate::page::{rgb_rows_copy, rgb_rows_to_rgba};
@@ -14,14 +15,18 @@ use crate::{
 /// Storage reused across page renders, through which pages are rendered
 /// into buffers the caller owns.
 ///
-/// Every page is drawn on an RGB canvas the size of the page.  A
-/// `PageBuffer` keeps that canvas's allocation between renders, and each
-/// `render_*_into` method writes the finished page into the caller's
-/// buffer in its pixel format.  Once the canvas has grown to the largest
-/// page rendered through it, a render allocates no buffer the size of the
-/// page: neither the canvas nor the output.  The allocations the drawing
-/// itself makes (decoded images, glyphs, transparency groups, the skew
-/// profile of deskew) are unchanged.
+/// Every page is drawn on a canvas the size of the page: RGB, or ink when
+/// the session simulates overprint on a page that sets it, with an alpha
+/// plane when the page is painted as a page group.  A `PageBuffer` keeps
+/// the allocations of both canvases and of the alpha plane between
+/// renders, and each `render_*_into` method writes the finished page into
+/// the caller's buffer in its pixel format.  Once they have grown to the
+/// largest page rendered through them, a render allocates no buffer the
+/// size of the page: neither a canvas, the alpha plane nor the output.
+/// The allocations the drawing itself makes (decoded images, glyphs,
+/// transparency groups, the skew profile of deskew) are unchanged, and so
+/// are the two page-sized copies a GPU rotation makes under the
+/// `gpu-deskew` feature.
 ///
 /// The output is byte-identical to the owned-buffer entry points:
 /// [`render_gray_into`](Self::render_gray_into) writes the pixels of
@@ -45,7 +50,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct PageBuffer {
     /// The page canvas's storage between renders.
-    canvas: BitmapBuffers,
+    canvas: CanvasBuffers,
 }
 
 /// What a `render_*_into` method of [`PageBuffer`] wrote.
@@ -104,10 +109,10 @@ impl PageBuffer {
         if opts.deskew {
             let gray = rgb_into_gray(rgb);
             crate::deskew::apply_into(&gray, out, stride);
-            self.canvas = gray.into_buffers();
+            self.canvas.rgb.reclaim(gray);
         } else {
             rgb_rows_to_gray(&rgb, out, stride);
-            self.canvas = rgb.into_buffers();
+            self.canvas.rgb.reclaim(rgb);
         }
         Ok(PageInfo {
             page_num,
@@ -199,7 +204,7 @@ impl PageBuffer {
             rgb_rows_copy(&rgb, out, stride);
         }
         let (width, height) = (rgb.width, rgb.height);
-        self.canvas = rgb.into_buffers();
+        self.canvas.rgb.reclaim(rgb);
         Ok(PageInfo {
             page_num,
             width,
@@ -239,14 +244,7 @@ impl PageBuffer {
             params = params.with_transparent_background();
         }
         params.cancel.clone_from(&opts.cancel);
-        render_page_rgb_with_geom(
-            session,
-            page_num,
-            page_id,
-            geom,
-            &params,
-            std::mem::take(&mut self.canvas),
-        )
+        render_page_rgb_with_geom(session, page_num, page_id, geom, &params, &mut self.canvas)
     }
 }
 
@@ -276,6 +274,61 @@ fn check_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_pdf::{assemble, stream};
+    use crate::{BackendPolicy, SessionConfig, open_session_from_bytes};
+
+    /// A 50 × 40 pt page painted as a page group, its graphics state
+    /// setting a blend mode, then a page of the same size whose graphics
+    /// state sets overprint.
+    fn group_and_overprint_pages() -> Vec<u8> {
+        assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R 4 0 R] /Count 2>>",
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 50 40] /Contents 5 0 R \
+             /Resources <</ExtGState <</G <</BM /Multiply>>>>>>>>",
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 50 40] /Contents 6 0 R \
+             /Resources <</ExtGState <</G <</OP true /op true>>>>>>>>",
+            &stream("/G gs 0 0 1 rg 5 5 20 20 re f"),
+            &stream("/G gs 1 0 0 rg 5 5 20 20 re f"),
+        ])
+    }
+
+    /// The alpha plane of a page group composited onto paper and the ink
+    /// canvas of an overprint page are kept and reused by the next render.
+    #[test]
+    fn the_alpha_plane_and_the_ink_canvas_are_reused() {
+        let config = SessionConfig {
+            overprint: true,
+            ..SessionConfig::with_policy(BackendPolicy::CpuOnly)
+        };
+        let session = open_session_from_bytes(group_and_overprint_pages(), &config).unwrap();
+        let opts = RasterOptions::new(72.0);
+        let mut out = vec![0; 50 * 40];
+        let mut buffer = PageBuffer::new();
+        let mut render = |buffer: &mut PageBuffer, page| {
+            let info = buffer
+                .render_gray_into(&session, page, &opts, &mut out, 50)
+                .unwrap();
+            assert_eq!(info.page_num, page);
+        };
+
+        render(&mut buffer, 1);
+        assert!(buffer.canvas.rgb.alpha.capacity() >= 50 * 40);
+        let alpha = buffer.canvas.rgb.alpha.as_ptr();
+        render(&mut buffer, 1);
+        assert_eq!(
+            buffer.canvas.rgb.alpha.as_ptr(),
+            alpha,
+            "alpha plane reused"
+        );
+
+        render(&mut buffer, 2);
+        assert!(buffer.canvas.ink.data.capacity() >= 50 * 40 * 8);
+        let ink = buffer.canvas.ink.data.as_ptr();
+        render(&mut buffer, 2);
+        assert_eq!(buffer.canvas.ink.data.as_ptr(), ink, "ink canvas reused");
+        assert_eq!(buffer.canvas.rgb.alpha.as_ptr(), alpha, "alpha plane kept");
+    }
 
     #[test]
     fn output_checks() {

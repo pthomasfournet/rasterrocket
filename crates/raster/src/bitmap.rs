@@ -64,6 +64,34 @@ pub struct BitmapBuffers {
     pub alpha: Vec<u8>,
 }
 
+impl BitmapBuffers {
+    /// The buffers a bitmap built by [`Bitmap::try_new_filled_in`] uses:
+    /// the colour buffer, and the alpha buffer when `with_alpha`.  An alpha
+    /// buffer the bitmap does not use stays in `self`.
+    #[must_use]
+    pub fn take_for(&mut self, with_alpha: bool) -> Self {
+        Self {
+            data: std::mem::take(&mut self.data),
+            alpha: if with_alpha {
+                std::mem::take(&mut self.alpha)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Take the storage of `bitmap`: its colour buffer, and its alpha plane
+    /// when it has one.  The alpha buffer held is kept when `bitmap` has
+    /// no alpha plane, so a plane removed during a render
+    /// ([`Bitmap::take_alpha_plane`]) and stored here survives.
+    pub fn reclaim<P: Pixel>(&mut self, bitmap: Bitmap<P>) {
+        self.data = bitmap.data;
+        if let Some(alpha) = bitmap.alpha {
+            self.alpha = alpha;
+        }
+    }
+}
+
 /// `buf` holding `len` copies of `value`, in its own allocation when its
 /// capacity is at least `len` and in a new one otherwise.
 fn refill(mut buf: Vec<u8>, len: usize, value: u8) -> Option<Vec<u8>> {
@@ -326,10 +354,11 @@ impl<P: Pixel> Bitmap<P> {
         self.alpha.as_deref_mut()
     }
 
-    /// Remove the alpha plane, leaving the colour data: the bitmap is opaque
-    /// from here on.  A bitmap without one is unchanged.
-    pub fn drop_alpha_plane(&mut self) {
-        self.alpha = None;
+    /// Remove and return the alpha plane, leaving the colour data: the
+    /// bitmap is opaque from here on.  `None`, the bitmap unchanged, for a
+    /// bitmap without one.
+    pub const fn take_alpha_plane(&mut self) -> Option<Vec<u8>> {
+        self.alpha.take()
     }
 
     /// Simultaneous mutable access to the pixel row and the alpha row.
@@ -878,5 +907,37 @@ mod tests {
         assert_eq!(b.data_len(), Bitmap::<Rgb8>::new(5, 3, 4, false).data_len());
         assert!(b.data().iter().all(|&v| v == 9));
         assert!(b.alpha_plane().is_none());
+    }
+
+    #[test]
+    fn reclaim_keeps_a_taken_alpha_plane() {
+        let mut b = Bitmap::<Rgb8>::new(4, 4, 1, true);
+        let alpha = b.take_alpha_plane().expect("an alpha plane");
+        assert!(!b.has_alpha() && b.take_alpha_plane().is_none());
+        let mut buffers = BitmapBuffers {
+            data: Vec::new(),
+            alpha,
+        };
+        buffers.reclaim(b);
+        assert!(buffers.data.capacity() >= 48 && buffers.alpha.capacity() >= 16);
+        buffers.reclaim(Bitmap::<Rgb8>::new(2, 2, 1, true));
+        assert_eq!(
+            buffers.alpha.len(),
+            4,
+            "a bitmap's own plane replaces the held one"
+        );
+    }
+
+    #[test]
+    fn take_for_an_opaque_bitmap_leaves_the_alpha_buffer() {
+        let mut buffers = Bitmap::<Rgb8>::new(4, 4, 1, true).into_buffers();
+        let alpha = buffers.alpha.as_ptr();
+        let opaque =
+            Bitmap::<Rgb8>::try_new_filled_in(buffers.take_for(false), 4, 4, 1, false, 0).unwrap();
+        assert!(!opaque.has_alpha() && buffers.data.is_empty());
+        assert_eq!(buffers.alpha.as_ptr(), alpha, "alpha buffer left in place");
+        let taken = buffers.take_for(true);
+        assert_eq!(taken.alpha.as_ptr(), alpha);
+        assert_eq!(buffers.alpha, Vec::<u8>::new());
     }
 }

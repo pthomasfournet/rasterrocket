@@ -204,13 +204,32 @@ const DEADLINE_CHECK_INTERVAL: u64 = 4_096;
 /// gigabytes before the operator budget aborts the page.  Not a tuning knob.
 pub(super) const MAX_WARNED_UNKNOWN_OPS: usize = 256;
 
+/// The page-sized storage of a render, carried from one page to the next:
+/// the buffers of the RGB bitmap and of the ink canvas.
+///
+/// [`PageRenderer::try_with_page_group_in`] builds the page's canvas in
+/// them, and [`PageRenderer::try_finish_keeping`] returns those the
+/// finished bitmap does not hold: the ink canvas, and the alpha plane of a
+/// page group composited onto paper.  Reclaiming the bitmap's own storage
+/// into [`rgb`](Self::rgb) ([`raster::BitmapBuffers::reclaim`]) completes
+/// the set for the next page.
+#[derive(Debug, Default)]
+pub struct CanvasBuffers {
+    /// The RGB bitmap's colour buffer and alpha plane.
+    pub rgb: raster::BitmapBuffers,
+    /// The ink canvas's colour buffer and alpha plane.
+    pub ink: raster::BitmapBuffers,
+}
+
 /// Renders a decoded operator sequence onto a page canvas of RGB or ink
 /// pixels, finished as a `Bitmap<Rgb8>`.
 pub struct PageRenderer<'doc> {
     /// Target pixel buffer.
     canvas: PageCanvas,
-    /// Storage the finished RGB bitmap of an ink canvas is built in.
-    output_buffers: raster::BitmapBuffers,
+    /// The storage not in `canvas`: for an ink canvas, the RGB buffers the
+    /// finished bitmap is built in; for an RGB canvas, the ink buffers,
+    /// carried through to the next page.
+    buffers: CanvasBuffers,
     /// Width of the drawn window (the bitmap) in device pixels.
     width: u32,
     /// Height of the drawn window (the bitmap) in device pixels.
@@ -485,21 +504,14 @@ impl<'doc> PageRenderer<'doc> {
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
-        Self::try_with_page_group_in(
-            view,
-            doc,
-            page_id,
-            group,
-            ink,
-            raster::BitmapBuffers::default(),
-        )
+        Self::try_with_page_group_in(view, doc, page_id, group, ink, CanvasBuffers::default())
     }
 
-    /// [`Self::try_with_page_group`] whose finished bitmap is built in
-    /// `buffers` ([`raster::Bitmap::try_new_filled_in`]): an RGB canvas is
-    /// allocated in them, and an ink canvas converts into them on finish.
-    /// [`raster::Bitmap::into_buffers`] recovers them from the finished
-    /// bitmap for the next page.
+    /// [`Self::try_with_page_group`] built in `buffers`
+    /// ([`raster::Bitmap::try_new_filled_in`]): an RGB canvas is allocated
+    /// in `buffers.rgb`; an ink canvas in `buffers.ink`, converting into
+    /// `buffers.rgb` on finish.  [`Self::try_finish_keeping`] returns them
+    /// for the next page.
     ///
     /// # Errors
     ///
@@ -514,19 +526,19 @@ impl<'doc> PageRenderer<'doc> {
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
-        buffers: raster::BitmapBuffers,
+        buffers: CanvasBuffers,
     ) -> Result<Self, raster::BitmapAllocError> {
         let alpha = group.is_some();
-        let (canvas, output_buffers) = if ink {
-            let canvas = PageCanvas::try_new(CanvasKind::Ink, view.width, view.height, alpha)?;
-            (canvas, buffers)
+        let mut spare = buffers;
+        let (kind, held) = if ink {
+            (CanvasKind::Ink, &mut spare.ink)
         } else {
-            let canvas =
-                PageCanvas::try_new_in(CanvasKind::Rgb, view.width, view.height, alpha, buffers)?;
-            (canvas, raster::BitmapBuffers::default())
+            (CanvasKind::Rgb, &mut spare.rgb)
         };
+        let canvas_buffers = held.take_for(alpha);
+        let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, canvas_buffers)?;
         let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group);
-        renderer.output_buffers = output_buffers;
+        renderer.buffers = spare;
         Ok(renderer)
     }
 
@@ -568,7 +580,7 @@ impl<'doc> PageRenderer<'doc> {
 
         Self {
             canvas,
-            output_buffers: raster::BitmapBuffers::default(),
+            buffers: CanvasBuffers::default(),
             width,
             height,
             page_width_pts: view.extent.0 / view.scale_x,
@@ -989,9 +1001,8 @@ impl<'doc> PageRenderer<'doc> {
     ///
     /// The allocator refused the page's RGB bitmap.
     pub fn try_finish(self) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
-        let (canvas, buffers, ink_map, diag) = self.into_parts(true);
-        let rgb = canvas.try_into_rgb_in(&ink_map.luts(), buffers)?;
-        Ok((rgb, Self::finish_diagnostics(diag, ink_map)))
+        self.try_finish_keeping(false)
+            .map(|(rgb, diag, _)| (rgb, diag))
     }
 
     /// [`Self::try_finish`] without the composite onto paper: the bitmap of
@@ -1006,30 +1017,49 @@ impl<'doc> PageRenderer<'doc> {
     pub fn try_finish_transparent(
         self,
     ) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
-        let (canvas, buffers, ink_map, diag) = self.into_parts(false);
-        let mut rgb = canvas.try_into_rgb_in(&ink_map.luts(), buffers)?;
-        canvas::zero_transparent_colour(&mut rgb);
-        Ok((rgb, Self::finish_diagnostics(diag, ink_map)))
+        self.try_finish_keeping(true)
+            .map(|(rgb, diag, _)| (rgb, diag))
     }
 
-    /// The finished canvas, with the output buffers, the ink map and the
-    /// diagnostics; a page group is composited onto paper when `onto_paper`.
+    /// [`Self::try_finish_transparent`] when `transparent`, and
+    /// [`Self::try_finish`] otherwise, also returning the storage the
+    /// bitmap does not hold (see [`CanvasBuffers`]).
+    ///
+    /// # Errors
+    ///
+    /// The allocator refused the page's RGB bitmap.
+    pub fn try_finish_keeping(
+        self,
+        transparent: bool,
+    ) -> Result<(Bitmap<Rgb8>, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
+        let (canvas, mut buffers, ink_map, diag) = self.into_parts(!transparent);
+        let mut rgb = canvas.try_into_rgb_in(&ink_map.luts(), &mut buffers)?;
+        if transparent {
+            canvas::zero_transparent_colour(&mut rgb);
+        }
+        Ok((rgb, Self::finish_diagnostics(diag, ink_map), buffers))
+    }
+
+    /// The finished canvas, with the storage not in it, the ink map and
+    /// the diagnostics; a page group is composited onto paper when
+    /// `onto_paper`, its alpha plane joining the storage.
     fn into_parts(
         mut self,
         onto_paper: bool,
-    ) -> (
-        PageCanvas,
-        raster::BitmapBuffers,
-        ink_map::InkMap,
-        PageDiagnostics,
-    ) {
+    ) -> (PageCanvas, CanvasBuffers, ink_map::InkMap, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
-        if onto_paper && self.page_group.is_some() {
-            self.canvas.composite_onto_white();
+        if onto_paper
+            && self.page_group.is_some()
+            && let Some(alpha) = self.canvas.composite_onto_white()
+        {
+            match self.canvas.kind() {
+                CanvasKind::Rgb => self.buffers.rgb.alpha = alpha,
+                CanvasKind::Ink => self.buffers.ink.alpha = alpha,
+            }
         }
         let Self {
             canvas,
-            output_buffers,
+            buffers,
             ink_map,
             diag,
             ..
@@ -1037,7 +1067,7 @@ impl<'doc> PageRenderer<'doc> {
         // A child shares its parent's map, which stays the parent's.
         let ink_map = Rc::try_unwrap(ink_map)
             .map_or_else(|_| ink_map::InkMap::default(), RefCell::into_inner);
-        (canvas, output_buffers, ink_map, diag)
+        (canvas, buffers, ink_map, diag)
     }
 
     /// `diag` with the spot colorants `ink_map` could not slot.
