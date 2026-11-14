@@ -14,6 +14,7 @@ use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with}
 use raster::Bitmap;
 
 use crate::args::{Args, OutputFormat};
+use crate::bands::{self, BandOutput};
 use crate::cleanup::{self, Page};
 use crate::fax::{self, FaxDocument};
 use crate::naming::output_path_with_prefix;
@@ -139,6 +140,25 @@ pub(crate) fn render_page(
     {
         params = params.with_region(region);
     }
+    let size = params
+        .region
+        .map_or_else(|| geom.size_px(scale_x, scale_y), |r| (r.width, r.height));
+    match (BandOutput::of(args), document) {
+        (Some(BandOutput::File(format)), Document::None) => {
+            return bands::write_page_banded(
+                session,
+                (page_num, total_pages),
+                args,
+                (format, spill),
+                &params,
+                size,
+            );
+        }
+        (Some(BandOutput::Print), Document::Print(sink)) => {
+            return bands::print_page_banded(session, page_num, args, sink, &params, size);
+        }
+        _ => {}
+    }
     let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
     let sink = match (document, fax_layout) {
         (Document::Fax(document), Some(layout)) => Sink::Fax {
@@ -227,8 +247,9 @@ pub(crate) fn write_cleaned(
 
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
-        write_output(&out_path, |out| {
-            encode_page(&page, format, args.dpi(), out).map_err(RenderError::from)
+        write_output(&out_path, |mut out| {
+            encode_page(&page, format, args.dpi(), &mut out)?;
+            Ok(out)
         })?;
     }
     Ok(())
@@ -293,25 +314,25 @@ impl<K: Ord + Copy, P> PageCollector<K, P> {
 pub(crate) const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
 
 /// Create the page output file `out_path` and fill it through an
-/// [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`.  A file this call
-/// created and failed to complete is removed; a file that could not be
-/// created is left as it was.
+/// [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`, which returns the
+/// buffer once the file is complete.  A file this call created and failed
+/// to complete is removed; a file that could not be created is left as it
+/// was.
 ///
 /// # Errors
 /// The creation, encoding or final flush failed.
 pub(crate) fn write_output(
     out_path: &str,
-    encode: impl FnOnce(&mut BufWriter<File>) -> Result<(), RenderError>,
+    encode: impl FnOnce(BufWriter<File>) -> Result<BufWriter<File>, RenderError>,
 ) -> Result<(), RenderError> {
     let file = File::create(out_path)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create {out_path}: {e}")))?;
-    let mut out = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
-    let written = encode(&mut out).and_then(|()| out.flush().map_err(RenderError::from));
-    if written.is_err() {
-        drop(out);
-        if let Err(e) = fs::remove_file(out_path) {
-            eprintln!("rrocket: warning: could not remove the incomplete {out_path}: {e}");
-        }
+    let out = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
+    let written = encode(out).and_then(|mut out| out.flush().map_err(RenderError::from));
+    if written.is_err()
+        && let Err(e) = fs::remove_file(out_path)
+    {
+        eprintln!("rrocket: warning: could not remove the incomplete {out_path}: {e}");
     }
     written
 }

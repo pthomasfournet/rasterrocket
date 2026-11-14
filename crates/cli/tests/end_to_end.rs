@@ -862,3 +862,36 @@ fn comic_embedded_pdf_honours_session_flags() {
         "--hide-annotations leaves the page blank"
     );
 }
+
+/// A page rendered in bands writes the file it writes rendered whole, in
+/// every banded format and colour model: the seam page at 600 dpi is
+/// 1 667 × 833 px, four bands of 1 MiB.
+#[test]
+fn a_page_in_bands_writes_the_file_of_the_whole_page() {
+    let (dir, input) = workdir(&common::seams::seam_page(""));
+    for format in [
+        &[][..],
+        &["--png"],
+        &["--tiff", "--tiffcompression", "deflate"],
+        &["--gray"],
+        &["--png", "--gray", "--invert=always"],
+        &["--mono", "--dither", "halftone"],
+        &["--tiff", "--mono"],
+    ] {
+        let mut files = Vec::new();
+        for band_mib in ["1", "64"] {
+            let out_dir = dir.path().join(format!("{}-{band_mib}", format.join("")));
+            std::fs::create_dir(&out_dir).expect("create output dir");
+            let mut args = vec!["-r", "600", "--band-mib", band_mib];
+            args.extend_from_slice(format);
+            assert_success(&rrocket(&out_dir, &input, &args));
+            let names = outputs(&out_dir);
+            assert_eq!(names.len(), 1, "{format:?}: {names:?}");
+            files.push(std::fs::read(out_dir.join(&names[0])).expect("read output"));
+        }
+        assert!(
+            files[0] == files[1],
+            "{format:?}: bands of 1 MiB differ from one band"
+        );
+    }
+}

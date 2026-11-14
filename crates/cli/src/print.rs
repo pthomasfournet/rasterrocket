@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-use encode::{PdfPage, PdfWriter, RowImage};
+use encode::{PdfPage, PdfPageEncoder, PdfWriter, RowImage, RowLayout};
 
 use crate::cleanup::{Page, SpreadHalf};
 use crate::deliver;
@@ -135,12 +135,46 @@ impl PageSink {
             Page::Rgb(rgb) => PdfPage::encode(RowImage::Rgb(rgb), self.dpi),
             Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(RowImage::Gray(luma), self.dpi),
         }?;
+        self.push(page_num, half, coded);
+        Ok(())
+    }
+
+    /// An encoder of a page of `size` pixels, colour when `rgb` and gray
+    /// otherwise, its compressed image held in a file of its own in the
+    /// spool's directory when `spill`.
+    ///
+    /// # Errors
+    ///
+    /// The file could not be created, or the encoder refused the page.
+    pub(crate) fn encoder(
+        &self,
+        size: (u32, u32),
+        rgb: bool,
+        spill: bool,
+    ) -> Result<PdfPageEncoder, RenderError> {
+        let file = if spill {
+            let dir = spool_dir();
+            Some(tempfile::tempfile_in(&dir).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("cannot create a page spill file in {}: {e}", dir.display()),
+                )
+            })?)
+        } else {
+            None
+        };
+        let layout = if rgb { RowLayout::Rgb } else { RowLayout::Gray };
+        Ok(PdfPageEncoder::new(size, layout, self.dpi, file)?)
+    }
+
+    /// Hold `coded` as document page `page_num`, half `half` of a split
+    /// spread.
+    pub(crate) fn push(&self, page_num: i32, half: Option<SpreadHalf>, coded: PdfPage) {
         let half = match half {
             None | Some(SpreadHalf::Left) => 0,
             Some(SpreadHalf::Right) => 1,
         };
         self.pages.push((page_num, half), coded);
-        Ok(())
     }
 }
 

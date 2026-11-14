@@ -137,7 +137,10 @@ impl FaxDocument {
         for page in self.pages.take_sorted() {
             writer.push_page(page);
         }
-        write_output(path, |out| writer.write(out).map_err(RenderError::from))
+        write_output(path, |mut out| {
+            writer.write(&mut out)?;
+            Ok(out)
+        })
     }
 }
 

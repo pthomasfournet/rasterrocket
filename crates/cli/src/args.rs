@@ -435,6 +435,15 @@ pub(crate) struct Args {
     #[arg(long = "max-page-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_PAGE_MIB))]
     pub max_page_mib: Option<u64>,
 
+    /// The most memory a band of a page holds while it renders, in MiB
+    /// (default 64; 1 to 65536).  A page larger than one band renders in
+    /// horizontal bands written to the output as each completes, so memory
+    /// holds one band per worker thread, not the page; PPM, PNG, TIFF and
+    /// --print output stream.  JPEG output, --fax, --invert auto and the
+    /// camera stages need the whole page and render it in one band.
+    #[arg(long = "band-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_BAND_MIB))]
+    pub band_mib: Option<u64>,
+
     // ── Backend selection ─────────────────────────────────────────────────────
     /// Compute backend for image decoding and GPU kernels.
     ///
@@ -682,6 +691,12 @@ impl Args {
     }
 
     /// Which pages `--invert` turns.
+    /// The bytes of a band of a page ([`Self::band_mib`]).
+    pub(crate) fn band_bytes(&self) -> u64 {
+        self.band_mib
+            .map_or(pdf_raster::DEFAULT_BAND_BYTES, |mib| mib << 20)
+    }
+
     pub(crate) fn invert_when(&self) -> InvertWhen {
         self.invert.unwrap_or(InvertWhen::Never)
     }
@@ -1049,6 +1064,9 @@ impl Args {
 
 /// The ITU-T T.4 period of two-dimensional Group 3 coding at fine
 /// resolution (at least 150 lines per inch) and at standard resolution.
+/// Largest `--band-mib`: 64 GiB.
+const MAX_BAND_MIB: u64 = 1 << 16;
+
 /// Largest `--max-page-mib`: the RGBA bitmap of a page whose sides are both
 /// [`pdf_raster::MAX_PX_SIDE`].
 const MAX_PAGE_MIB: u64 = 1 << 30;
@@ -1249,6 +1267,7 @@ impl Args {
         if let Some(mib) = self.max_page_mib {
             config.max_page_bytes = mib << 20;
         }
+        config.band_bytes = self.band_bytes();
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
@@ -1511,6 +1530,19 @@ mod page_list_tests {
         assert!(refused("0"));
         assert!(refused(&(MAX_PAGE_MIB + 1).to_string()));
         assert!(!refused(&MAX_PAGE_MIB.to_string()));
+    }
+
+    #[test]
+    fn band_mib_sizes_the_bands_and_rejects_zero_and_absurd_values() {
+        let config = |argv: &[&str]| args_with(argv).session_config().unwrap();
+        assert_eq!(config(&[]).band_bytes, pdf_raster::DEFAULT_BAND_BYTES);
+        assert_eq!(config(&["--band-mib", "8"]).band_bytes, 8 << 20);
+        let refused = |mib: &str| {
+            Args::try_parse_from(["rrocket", "--band-mib", mib, "in.pdf", "out"]).is_err()
+        };
+        assert!(refused("0"));
+        assert!(refused("65537"));
+        assert!(!refused("65536"));
     }
 
     #[test]

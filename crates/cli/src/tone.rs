@@ -2,8 +2,9 @@
 //! the colour model of the output, inversion, and the reduction to two
 //! levels.
 
-use color::{Gray8, Pixel};
+use color::{Gray8, Pixel, Rgb8};
 use encode::BLACK_BELOW;
+use pdf_raster::rgb_to_gray;
 use raster::{Bitmap, HalftoneScreen, ScreenParams};
 
 use crate::args::{Args, InvertWhen};
@@ -27,7 +28,7 @@ const GROUND_BAND: usize = 32;
 /// `--invert` selects, and for `--mono` reduced to two levels (see
 /// [`two_levels`]).
 pub(crate) fn prepare(page: Page, args: &Args) -> Page {
-    let mut page = if args.luma_output() {
+    let page = if args.luma_output() {
         Page::Gray(page.into_luma())
     } else {
         Page::Rgb(page.into_rgb())
@@ -37,6 +38,41 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
         InvertWhen::Always => true,
         InvertWhen::Auto => page.with_luma(is_reversed_out),
     };
+    finish(page, invert, args, 0)
+}
+
+/// [`prepare`] for `band`, the rows of a page from row `y0` on, under
+/// `args` whose `--invert` does not depend on the whole page
+/// ([`InvertWhen::Auto`] measures it): `None` when the band is written as
+/// it is, colour not inverted.
+pub(crate) fn prepare_band(band: &Bitmap<Rgb8>, y0: u32, args: &Args) -> Option<Page> {
+    debug_assert!(
+        args.invert_when() != InvertWhen::Auto,
+        "an automatic inversion measures the whole page"
+    );
+    let invert = args.invert_when() == InvertWhen::Always;
+    if !args.luma_output() && !invert {
+        return None;
+    }
+    let page = if args.luma_output() {
+        Page::Gray(rgb_to_gray(band))
+    } else {
+        let mut rgb = Bitmap::<Rgb8>::new(band.width, band.height, 1, band.has_alpha());
+        let live = band.width as usize * 3;
+        for y in 0..band.height {
+            rgb.row_bytes_mut(y)[..live].copy_from_slice(&band.row_bytes(y)[..live]);
+        }
+        if let (Some(src), Some(dst)) = (band.alpha_plane(), rgb.alpha_plane_mut()) {
+            dst.copy_from_slice(src);
+        }
+        Page::Rgb(rgb)
+    };
+    Some(finish(page, invert, args, y0))
+}
+
+/// `page`, in the output's colour model, inverted when `invert`, and for
+/// `--mono` reduced to two levels as rows from `y0` of the page.
+fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
     if invert {
         match &mut page {
             Page::Rgb(rgb) => complement(rgb),
@@ -44,7 +80,7 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
         }
     }
     if args.mono {
-        Page::Mono(two_levels(page.into_luma(), args.screen()))
+        Page::Mono(two_levels(page.into_luma(), args.screen(), y0))
     } else {
         page
     }
@@ -84,8 +120,13 @@ fn complement<P: Pixel>(bmp: &mut Bitmap<P>) {
 /// own buffer: through the halftone `screen` when given, which renders
 /// intermediate grays as dot patterns, else at the midpoint, values below
 /// [`BLACK_BELOW`] black. Each output sample depends only on its own input
-/// sample and position.
-pub(crate) fn two_levels(mut luma: Bitmap<Gray8>, screen: Option<ScreenParams>) -> Bitmap<Gray8> {
+/// sample and position: its column, and its row counted from the top of
+/// the page, whose row `y0` is the bitmap's first.
+pub(crate) fn two_levels(
+    mut luma: Bitmap<Gray8>,
+    screen: Option<ScreenParams>,
+    y0: u32,
+) -> Bitmap<Gray8> {
     let w = luma.width as usize;
     let mut screen = screen.map(HalftoneScreen::new);
     for y in 0..luma.height {
@@ -99,7 +140,7 @@ pub(crate) fn two_levels(mut luma: Bitmap<Gray8>, screen: Option<ScreenParams>) 
             Some(screen) => {
                 // The screen tiles with a power-of-two period, so the
                 // coordinates enter it modulo that period and may wrap.
-                let y = y.cast_signed();
+                let y = y.wrapping_add(y0).cast_signed();
                 for (x, px) in (0i32..).zip(row.iter_mut()) {
                     *px = if screen.test(x, y, *px) { 255 } else { 0 };
                 }
@@ -123,7 +164,7 @@ mod tests {
         let mut gray: Bitmap<Gray8> = Bitmap::new(3, 1, 1, false);
         gray.row_bytes_mut(0)[..3].copy_from_slice(&[0, 127, 128]);
         let buffer = gray.data().as_ptr();
-        let mono = two_levels(gray, None);
+        let mono = two_levels(gray, None, 0);
         assert_eq!(&mono.row_bytes(0)[..3], &[0, 0, 255]);
         assert_eq!(mono.data().as_ptr(), buffer, "converted in the luma buffer");
     }
@@ -137,7 +178,7 @@ mod tests {
             for y in 0..16 {
                 gray.row_bytes_mut(y)[..16].fill(level);
             }
-            let mono = two_levels(gray, screen);
+            let mono = two_levels(gray, screen, 0);
             let white: usize = (0..16)
                 .map(|y| {
                     mono.row_bytes(y)[..16]
