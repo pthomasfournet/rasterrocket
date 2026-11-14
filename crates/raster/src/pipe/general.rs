@@ -346,15 +346,12 @@ pub(crate) fn union_colour(c_dst: &[u8], a_dst: u32, c_0: &[u8], a_0: u32, out: 
         out.fill(0);
         return 0;
     }
+    // `a_union` is the union rounded to nearest, which can lie below the
+    // exact union `a_dst + a_0·(255 − a_dst)/255`; the quotient of a mean of
+    // values near 255 can then exceed 255, and is clamped to it.
     for ((o, &c_d), &c_b) in out.iter_mut().zip(c_dst).zip(c_0) {
         let num = a_dst * u32::from(c_d) * 255 + (255 - a_dst) * a_0 * u32::from(c_b);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a weighted mean of u8 values is at most 255"
-        )]
-        {
-            *o = (num / (255 * a_union)) as u8;
-        }
+        *o = (num / (255 * a_union)).min(255) as u8;
     }
     a_union
 }
@@ -550,6 +547,22 @@ mod tests {
         // A transparent backdrop contributes nothing.
         assert_eq!(union_colour(&[255; 3], 128, &[0; 3], 0, &mut out), 128);
         assert_eq!(out, [255, 255, 255]);
+    }
+
+    /// The union of white over white is white, within the rounding of the
+    /// union alpha (at most six levels, at the smallest alphas), for every
+    /// pair of alphas: the quotient by the rounded union alpha exceeds 255
+    /// for some pairs and must not wrap.
+    #[test]
+    fn union_of_white_over_white_is_white() {
+        let mut out = [0u8; 1];
+        for a_dst in 0..=255 {
+            for a_0 in 0..=255 {
+                if union_colour(&[255], a_dst, &[255], a_0, &mut out) != 0 {
+                    assert!(out[0] >= 249, "a_dst={a_dst} a_0={a_0}: {}", out[0]);
+                }
+            }
+        }
     }
 
     /// Inside a non-isolated group, a blend mode sees the backdrop: blue

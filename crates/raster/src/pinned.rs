@@ -244,7 +244,7 @@ fn colour_ramp_positions() {
 
 const SEPARABLE_DIGEST: u64 = 0x997b_adbe_23b5_0fa5;
 const NONSEPARABLE_DIGEST: u64 = 0x54ca_930d_3671_d848;
-const RGB_SPAN_DIGEST: u64 = 0x4853_5064_4772_930c;
-const GRAY_SPAN_DIGEST: u64 = 0x259f_57a7_2dd2_5bca;
-const INK_SPAN_DIGEST: u64 = 0x890b_5a7c_101d_1ec8;
+const RGB_SPAN_DIGEST: u64 = 0x7a9d_a368_6f82_a82a;
+const GRAY_SPAN_DIGEST: u64 = 0xd835_ca3b_915e_462d;
+const INK_SPAN_DIGEST: u64 = 0xcacd_4f19_3aa8_d646;
 const RAMP_DIGEST: u64 = 0xd4b4_e6e3_cc00_d16a;
