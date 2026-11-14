@@ -153,9 +153,7 @@ pub fn render_page_rgba(
     opts: &RasterOptions,
 ) -> Result<RenderedPage, RasterError> {
     if opts.deskew {
-        return Err(RasterError::InvalidOptions(
-            "deskew applies to gray pages, not to a transparent background".to_owned(),
-        ));
+        return Err(RasterError::deskew_needs_gray());
     }
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;

@@ -68,9 +68,7 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
         )));
     }
     if opts.deskew && opts.transparent_background {
-        return Some(RasterError::InvalidOptions(
-            "deskew applies to gray pages, not to a transparent background".to_owned(),
-        ));
+        return Some(RasterError::deskew_needs_gray());
     }
     if opts.pages.is_none() {
         if opts.first_page == 0 {

@@ -184,9 +184,7 @@ impl PageBuffer {
         stride: usize,
     ) -> Result<PageInfo, RasterError> {
         if opts.deskew {
-            return Err(RasterError::InvalidOptions(
-                "deskew applies to gray pages only".to_owned(),
-            ));
+            return Err(RasterError::deskew_needs_gray());
         }
         let transparent = format == PixelFormat::Rgba8;
         let (rgb, diagnostics) = self.render_canvas(

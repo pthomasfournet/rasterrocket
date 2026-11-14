@@ -178,6 +178,17 @@ impl std::fmt::Display for RasterError {
     }
 }
 
+impl RasterError {
+    /// The refusal of deskew for a render whose output is not gray.
+    pub(crate) fn deskew_needs_gray() -> Self {
+        Self::InvalidOptions(
+            "deskew applies to gray pages only; render the page as gray \
+             (render_page_gray, render_gray_into) or turn deskew off"
+                .to_owned(),
+        )
+    }
+}
+
 impl std::error::Error for RasterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
