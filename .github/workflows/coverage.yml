@@ -11,9 +11,9 @@ name: Coverage
 #
 # Out of the report: the vendored forks (hayro-jpeg2000, hayro-jbig2,
 # hayro-ccitt, read-fonts, skrifa, harfrust, rav1d, zune-jpeg,
-# font_test_data), whose tests are upstream's; pdf_bridge, which is not built; and the bench crate,
-# which has no tests.  Code behind the GPU features is not compiled, so it
-# is not in the report either.
+# font_test_data), whose tests are upstream's; pdf_bridge, which is not
+# built; and the bench crate, which has no tests.  Code behind the GPU
+# features is not compiled, so it is not in the report either.
 
 on:
   push:
