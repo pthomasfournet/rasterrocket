@@ -128,10 +128,10 @@ jobs:
 
       # The cache is saved after a successful run.  Test executables relink
       # in seconds; leaving them out keeps it within the repository's quota.
-      # Cargo writes each unit's outputs to build/<package>/<hash>/out; the
-      # build-script executables there are kept, so a cache hit runs none.
+      # The script keeps the build-script executables, so a cache hit runs
+      # none.
       - name: Drop test executables from the build cache
-        run: find target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
+        run: bash scripts/ci_prune_test_executables.sh target/debug
 
   # ── aarch64 cross-check ───────────────────────────────────────────────────
   #
@@ -341,14 +341,8 @@ jobs:
         run: cargo test -p rasterrocket-color -p rasterrocket-encode -p rasterrocket-comic
 
       # As in the CPU-only job: test executables stay out of the cache.
-      # Windows names them `.exe`, beside their `.pdb` debug information.
       - name: Drop test executables from the build cache
-        if: runner.os != 'Windows'
-        run: find target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
-
-      - name: Drop test executables from the build cache (Windows)
-        if: runner.os == 'Windows'
-        run: find target/debug -path '*/build/*/out/*' -type f \( -name '*.exe' -o -name '*.pdb' \) ! -name 'build_script_build*' -delete
+        run: bash scripts/ci_prune_test_executables.sh target/debug
 
   # ── Fuzz target build ─────────────────────────────────────────────────────
   #

@@ -124,4 +124,4 @@ jobs:
       - name: Drop test executables and profiles from the build cache
         run: |
           cargo llvm-cov clean --profraw-only
-          find target/llvm-cov-target/debug -path '*/build/*/out/*' -type f -perm -u+x ! -name '*.*' ! -name 'build_script_build*' -delete
+          bash scripts/ci_prune_test_executables.sh target/llvm-cov-target/debug
