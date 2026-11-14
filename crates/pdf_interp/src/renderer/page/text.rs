@@ -434,15 +434,14 @@ impl PageRenderer<'_> {
             };
             let em = font_size * horiz_scaling;
             let mut neighbours = Neighbours::default();
-            // How far the glyphs of the run continued from the string
-            // before end past that string's end, and the same for this
-            // string's last run when it continues into the string after.
-            let mut drift = 0.0;
-            let mut end_drift = 0.0;
+            // The index of the code a run continuing the run before starts
+            // at, and how far past that code's pen position the glyphs of
+            // the run before end: from the string before at the start.
+            let mut drift = (usize::MAX, 0.0);
             if shaped {
                 if let Some(tail) = tail.filter(|tail| neighbours_at(&tail.end, &tm, tail.em)) {
                     neighbours.before = tail.texts;
-                    drift = tail.drift;
+                    drift = (0, tail.drift);
                 }
                 if texts.last().is_some_and(|&text| takes_context(text)) {
                     let end = advances
@@ -531,13 +530,13 @@ impl PageRenderer<'_> {
                 } else {
                     1.0
                 };
-                // A run that continues a run of the string before starts
-                // where that run's glyphs end, offset from the string's
-                // start as they are from its end; one that continues into
-                // the string after starts at its own start.
+                // A run that continues the run before it starts where that
+                // run's glyphs end, offset from its own start as they are
+                // from that run's end; one that continues into the code
+                // after it starts at its own start.
                 let mut pen = match run.joins {
-                    (true, _) => drift,
-                    (false, true) => 0.0,
+                    (true, _) if drift.0 == run.start => drift.1,
+                    (true, _) | (false, true) => 0.0,
                     _ if fitted => natural.mul_add(-scale, run_width) / 2.0,
                     _ => 0.0,
                 };
@@ -550,10 +549,15 @@ impl PageRenderer<'_> {
                     pen = (g.advance * em).mul_add(scale, pen);
                 }
                 if run.joins.1 {
-                    end_drift = pen - run_width;
+                    drift = (run.end, pen - run_width);
                 }
             }
             if shaped {
+                let end_drift = if drift.0 == decoded.len() {
+                    drift.1
+                } else {
+                    0.0
+                };
                 let mut texts: Vec<CodeText> = neighbours.before.into_iter().chain(texts).collect();
                 let _ = texts.drain(..texts.len().saturating_sub(CONTEXT_CODES));
                 new_tail = Some(TextTail {

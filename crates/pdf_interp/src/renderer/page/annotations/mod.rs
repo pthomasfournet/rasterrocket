@@ -289,9 +289,9 @@ fn draw_synthesized(
 /// Draw the synthesised appearance that `build` writes, if any, with `resources`,
 /// derived from the form's default resources, in effect; `build` sets its
 /// text with a [`encoder::FontTypesetter`] over those resources.  When the
-/// text needs fallback fonts of Unicode blocks the resources lack, they
-/// are added and `build` sets it again.  The remaining arguments are those
-/// of [`draw_synthesized`].
+/// text needs characters its [`encoder::CharacterFonts`] lack, they are
+/// added, their fonts put in the resources, and `build` sets it again.
+/// The remaining arguments are those of [`draw_synthesized`].
 fn draw_text_appearance(
     renderer: &mut PageRenderer<'_>,
     resources: &Dictionary,
@@ -299,16 +299,16 @@ fn draw_text_appearance(
     no_rotate_rect: Option<[f64; 4]>,
     build: impl Fn(&mut dyn Typesetter) -> Option<Synthesized>,
 ) {
-    // Each pass that finds block fonts missing adds at least one, and an
-    // appearance uses at most `MAX_BLOCK_FONTS`, so the passes end.  Only
-    // a pass with every font present draws, so no content selects a font
-    // the resources lack.
+    // Each pass that finds characters missing adds at least one, and the
+    // set is bounded, so the passes end.  Only a pass with every character
+    // present draws, so no content selects a font the resources lack.
     let mut resources = std::borrow::Cow::Borrowed(resources);
+    let mut characters = encoder::CharacterFonts::default();
     loop {
         let missing = with_resources(renderer, &resources, |renderer| {
-            let mut ts = encoder::FontTypesetter::new(renderer);
+            let mut ts = encoder::FontTypesetter::new(renderer, &characters);
             let appearance = build(&mut ts);
-            let missing = ts.missing_blocks();
+            let missing = ts.missing_characters();
             if missing.is_empty()
                 && let Some(appearance) = appearance
             {
@@ -324,7 +324,8 @@ fn draw_text_appearance(
             Some(Object::Dictionary(fonts)) => fonts.clone(),
             _ => Dictionary::new(),
         };
-        encoder::add_block_fonts(&mut fonts, missing);
+        characters.extend(missing);
+        characters.add_to(&mut fonts);
         resources.set(b"Font", Object::Dictionary(fonts));
     }
 }

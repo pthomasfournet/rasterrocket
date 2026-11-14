@@ -9,13 +9,13 @@
 //!
 //! The fallback fonts are non-embedded Type 0 fonts of the four Adobe
 //! CJK character collections, encoded by their `UTF16-H` `CMaps`, and for
-//! the characters these lack, a non-embedded simple font per block of 256
-//! Unicode scalar values whose code `c` is the glyph named for the block's
-//! scalar value `c` (`uniXXXX`, `uXXXXX`).  They are drawn by the
-//! substitute and fallback faces like any non-embedded font.  The block
-//! fonts a text needs are known only once it is set, so they are added to
-//! the resources on demand: [`FontTypesetter::missing_blocks`] names those
-//! that were missing.
+//! the characters these lack, the [`CharacterFonts`] of the appearance:
+//! non-embedded simple fonts that each name up to 256 of its characters by
+//! their glyph names (`uniXXXX`, `uXXXXX`).  They are drawn by the
+//! substitute and fallback faces like any non-embedded font.  The
+//! characters a text needs are known only once it is set, so their fonts
+//! are added to the resources on demand:
+//! [`FontTypesetter::missing_characters`] names those that were missing.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -140,15 +140,14 @@ impl Fallbacks {
         Self { order }
     }
 
-    /// The first fallback font that shows `c`, its codes there, and the
-    /// Unicode block when it is a block font: for an East Asian character,
-    /// a CJK collection font that maps it to a glyph, else the block font
-    /// of `c`.  Other characters the collections also hold, such as Greek,
-    /// Cyrillic and symbols, are set in their block font, whose glyphs are
-    /// proportional rather than the collections' full width.  `None` for a
-    /// private-use character or a noncharacter, which no face is known to
-    /// show.
-    pub(super) fn find(self, c: char) -> Option<(Vec<u8>, Vec<u8>, Option<u32>)> {
+    /// The first fallback that shows `c`: for an East Asian character, a
+    /// CJK collection font that maps it to a glyph, else the appearance's
+    /// [`CharacterFonts`].  Other characters the collections also hold,
+    /// such as Greek, Cyrillic and symbols, are set in the character fonts,
+    /// whose glyphs are proportional rather than the collections' full
+    /// width.  `None` for a private-use character or a noncharacter, which
+    /// no face is known to show.
+    pub(super) fn find(self, c: char) -> Option<Fallback> {
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         let key = units.iter().fold(0u32, |k, &u| (k << 16) | u32::from(u));
@@ -165,17 +164,105 @@ impl Fallbacks {
             .flatten();
         if let Some((name, _, _)) = collection {
             let codes = units.iter().flat_map(|u| u.to_be_bytes()).collect();
-            return Some((name.to_vec(), codes, None));
+            return Some(Fallback::Collection { font: name, codes });
         }
         let scalar = u32::from(c);
         let private_or_non = matches!(scalar, 0xE000..=0xF8FF | 0xF_0000.. | 0xFDD0..=0xFDEF)
             || scalar & 0xFFFE == 0xFFFE;
-        if private_or_non {
-            return None;
-        }
-        let [.., low] = scalar.to_be_bytes();
-        Some((block_font_name(scalar >> 8), vec![low], Some(scalar >> 8)))
+        (!private_or_non).then_some(Fallback::Character)
     }
+}
+
+/// A fallback that shows a character (see [`Fallbacks::find`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Fallback {
+    /// The CJK collection font `font`, with the character's codes there.
+    Collection { font: &'static [u8], codes: Vec<u8> },
+    /// The appearance's [`CharacterFonts`].
+    Character,
+}
+
+/// Characters one font of [`CharacterFonts`] holds.
+const FONT_CHARACTERS: usize = 256;
+
+/// Most characters the [`CharacterFonts`] of one appearance hold; a
+/// further character is set as `?`.
+const MAX_CHARACTERS: usize = 64 * FONT_CHARACTERS;
+
+/// The fonts that show the characters of one appearance that neither its
+/// fonts nor a collection font show: standard Helvetica re-encoded by
+/// `Differences`, code `k` of font `n` being the glyph named for the
+/// character `256 × n + k` of the set (`uniXXXX`, `uXXXXX`), the set in
+/// scalar order.  Each font is named by a hash of its characters, so a
+/// name always stands for one encoding.
+///
+/// An appearance needing at most 256 such characters sets them all in
+/// one font, so a word whose characters lie in different Unicode blocks,
+/// such as an Arabic word with letters of the Arabic Supplement or a
+/// joiner, is one show string, shaped as one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct CharacterFonts {
+    /// The characters, in scalar order, at most [`MAX_CHARACTERS`].
+    chars: Vec<char>,
+}
+
+impl CharacterFonts {
+    /// Add `chars` to the set, up to [`MAX_CHARACTERS`] in all.
+    pub(super) fn extend(&mut self, chars: impl IntoIterator<Item = char>) {
+        self.chars.extend(chars);
+        self.chars.sort_unstable();
+        self.chars.dedup();
+        self.chars.truncate(MAX_CHARACTERS);
+    }
+
+    /// The resource name of the font of `c` and its code there; `None`
+    /// when the set lacks `c`.
+    fn font_and_code(&self, c: char) -> Option<(Vec<u8>, u8)> {
+        let k = self.chars.binary_search(&c).ok()?;
+        let font = &self.chars[k - k % FONT_CHARACTERS..];
+        let font = &font[..font.len().min(FONT_CHARACTERS)];
+        Some((
+            character_font_name(font),
+            u8::try_from(k % FONT_CHARACTERS).ok()?,
+        ))
+    }
+
+    /// Add the fonts to the font resource dictionary `fonts`.
+    pub(super) fn add_to(&self, fonts: &mut Dictionary) {
+        for chars in self.chars.chunks(FONT_CHARACTERS) {
+            let mut differences = vec![Object::Integer(0)];
+            differences.extend(chars.iter().map(|&c| {
+                let scalar = u32::from(c);
+                let name = if scalar <= 0xFFFF {
+                    format!("uni{scalar:04X}")
+                } else {
+                    format!("u{scalar:X}")
+                };
+                Object::Name(name.into_bytes())
+            }));
+            let mut encoding = Dictionary::new();
+            encoding.set(b"Type", Object::Name(b"Encoding".to_vec()));
+            encoding.set(b"Differences", Object::Array(differences));
+            let mut font = Dictionary::new();
+            font.set(b"Type", Object::Name(b"Font".to_vec()));
+            font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
+            font.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
+            font.set(b"Encoding", Object::Dictionary(encoding));
+            fonts.set(character_font_name(chars), Object::Dictionary(font));
+        }
+    }
+}
+
+/// The resource name of the character font holding `chars`: `FallbackC`
+/// and the 64-bit FNV-1a hash of their scalar values in hexadecimal.
+fn character_font_name(chars: &[char]) -> Vec<u8> {
+    let hash = chars
+        .iter()
+        .flat_map(|&c| u32::from(c).to_le_bytes())
+        .fold(0xCBF2_9CE4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3)
+        });
+    format!("FallbackC{hash:016X}").into_bytes()
 }
 
 /// Whether `c` belongs to an East Asian script or the symbols and forms
@@ -196,40 +283,6 @@ const fn east_asian(c: char) -> bool {
             | 0xFF00..=0xFFEF
             | 0x2_0000..=0x3_FFFF
     )
-}
-
-/// The resource name of the fallback font of the Unicode block `block`,
-/// the scalar values `block << 8` to `block << 8 | 0xFF`.
-fn block_font_name(block: u32) -> Vec<u8> {
-    format!("FallbackU{block:04X}").into_bytes()
-}
-
-/// Add the fallback fonts of the Unicode blocks `blocks` to the font
-/// resource dictionary `fonts`: standard Helvetica re-encoded by
-/// `Differences` so that code `c` is the glyph named for the block's
-/// scalar value `c`.
-pub(super) fn add_block_fonts(fonts: &mut Dictionary, blocks: impl IntoIterator<Item = u32>) {
-    for block in blocks {
-        let mut differences = vec![Object::Integer(0)];
-        differences.extend((0..=0xFFu32).map(|low| {
-            let scalar = block << 8 | low;
-            let name = if scalar <= 0xFFFF {
-                format!("uni{scalar:04X}")
-            } else {
-                format!("u{scalar:X}")
-            };
-            Object::Name(name.into_bytes())
-        }));
-        let mut encoding = Dictionary::new();
-        encoding.set(b"Type", Object::Name(b"Encoding".to_vec()));
-        encoding.set(b"Differences", Object::Array(differences));
-        let mut font = Dictionary::new();
-        font.set(b"Type", Object::Name(b"Font".to_vec()));
-        font.set(b"Subtype", Object::Name(b"Type1".to_vec()));
-        font.set(b"BaseFont", Object::Name(b"Helvetica".to_vec()));
-        font.set(b"Encoding", Object::Dictionary(encoding));
-        fonts.set(block_font_name(block), Object::Dictionary(font));
-    }
 }
 
 /// Add the fallback fonts to the font resource dictionary `fonts`.
@@ -271,18 +324,13 @@ pub(super) struct FontTypesetter<'r, 'p> {
     renderer: &'r mut PageRenderer<'p>,
     /// Encoders by font resource name.
     encoders: HashMap<Vec<u8>, UnicodeEncoder>,
-    /// The Unicode blocks whose fallback font text was set in, at most
-    /// [`MAX_BLOCK_FONTS`].
-    blocks: BTreeSet<u32>,
-    /// Those of [`Self::blocks`] the resources lack.
-    missing: BTreeSet<u32>,
+    /// The character fonts in the resources.
+    characters: &'r CharacterFonts,
+    /// The characters set in a character font that `characters` lacks.
+    missing: BTreeSet<char>,
     /// The state of inverting each font's embedded program.
     inversions: HashMap<Vec<u8>, Inversion>,
 }
-
-/// Most Unicode block fonts the text of one appearance is set in; a
-/// character of a further block is set as `?`.
-const MAX_BLOCK_FONTS: usize = 64;
 
 /// The state of inverting one font's embedded program (see
 /// [`FontTypesetter::invert_program`]).
@@ -297,21 +345,23 @@ struct Inversion {
 }
 
 impl<'r, 'p> FontTypesetter<'r, 'p> {
-    /// A typesetter over the resources in effect in `renderer`.
-    pub(super) fn new(renderer: &'r mut PageRenderer<'p>) -> Self {
+    /// A typesetter over the resources in effect in `renderer`, which hold
+    /// the fonts of `characters`.
+    pub(super) fn new(renderer: &'r mut PageRenderer<'p>, characters: &'r CharacterFonts) -> Self {
         Self {
             renderer,
             encoders: HashMap::new(),
-            blocks: BTreeSet::new(),
+            characters,
             missing: BTreeSet::new(),
             inversions: HashMap::new(),
         }
     }
 
-    /// The Unicode blocks whose fallback font text was set in but the
-    /// resources lack; text set with any of them must be set again with
-    /// their fonts added by [`add_block_fonts`].
-    pub(super) fn missing_blocks(self) -> BTreeSet<u32> {
+    /// The characters set in a character font that the typesetter's
+    /// [`CharacterFonts`] lack, each set as `?`; text set with any must be
+    /// set again with them added to the set and its fonts to the
+    /// resources.
+    pub(super) fn missing_characters(self) -> BTreeSet<char> {
         self.missing
     }
 
@@ -402,7 +452,8 @@ impl<'r, 'p> FontTypesetter<'r, 'p> {
 impl Typesetter for FontTypesetter<'_, '_> {
     fn runs(&mut self, font: &[u8], text: &str) -> Vec<Run> {
         let fallbacks = Fallbacks::for_text(text);
-        let mut blocks = std::mem::take(&mut self.blocks);
+        let characters = self.characters;
+        let mut missing = std::mem::take(&mut self.missing);
         let encoder = self.encoder(font, text);
         let question = encoder.encode('?').unwrap_or(b"?");
         let mut runs: Vec<Run> = Vec::new();
@@ -415,14 +466,25 @@ impl Typesetter for FontTypesetter<'_, '_> {
             };
             let (run_font, codes): (&[u8], &[u8]) = if let Some(codes) = encoder.encode(c) {
                 (font, codes)
-            } else if let Some(found) = found.filter(|(.., block)| {
-                block.is_none_or(|b| blocks.contains(&b) || blocks.len() < MAX_BLOCK_FONTS)
-            }) {
-                fallback = found;
-                blocks.extend(fallback.2);
-                (&fallback.0, &fallback.1)
             } else {
-                (font, question)
+                match found {
+                    Some(Fallback::Collection { font, codes }) => {
+                        fallback = (font.to_vec(), codes);
+                        (&fallback.0, &fallback.1)
+                    }
+                    Some(Fallback::Character) => {
+                        if let Some((name, code)) = characters.font_and_code(c) {
+                            fallback = (name, vec![code]);
+                            (&fallback.0, &fallback.1)
+                        } else {
+                            if characters.chars.len() + missing.len() < MAX_CHARACTERS {
+                                let _ = missing.insert(c);
+                            }
+                            (font, question)
+                        }
+                    }
+                    None => (font, question),
+                }
             };
             match runs.last_mut() {
                 Some(run) if run.font == run_font => run.codes.extend_from_slice(codes),
@@ -432,13 +494,7 @@ impl Typesetter for FontTypesetter<'_, '_> {
                 }),
             }
         }
-        self.blocks = blocks;
-        let resources = &self.renderer.resources;
-        self.missing.extend(
-            self.blocks
-                .iter()
-                .filter(|&&b| resources.font_entry(&block_font_name(b)).is_none()),
-        );
+        self.missing = missing;
         runs
     }
 
@@ -508,11 +564,12 @@ fn code_bytes(cmap: &CMap, code: u32) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fallbacks, UnicodeEncoder, code_bytes, single_scalar};
+    use super::{CharacterFonts, Fallback, Fallbacks, UnicodeEncoder, code_bytes, single_scalar};
     use crate::resources::cmap::CMap;
     use crate::resources::cmap_predefined::predefined_cmap;
     use crate::resources::font::resolve_font;
     use crate::test_helpers::{make_doc_with_object, make_doc_with_objects};
+    use pdf::{Dictionary, Object};
 
     /// The encoder of the font dictionary `font`.
     fn encoder(font: &str) -> UnicodeEncoder {
@@ -594,24 +651,83 @@ mod tests {
     #[test]
     fn kana_select_the_japanese_fallback_and_han_alone_the_chinese() {
         let fallback = |c, text| Fallbacks::for_text(text).find(c).expect("a fallback");
-        let (font, codes, block) = fallback('日', "日本語の");
+        let font = |c, text| match fallback(c, text) {
+            Fallback::Collection { font, .. } => font,
+            Fallback::Character => panic!("{c:?} is in a collection"),
+        };
         assert_eq!(
-            (font.as_slice(), codes.as_slice(), block),
-            (&b"FallbackJapan1"[..], &[0x65, 0xE5][..], None)
+            fallback('日', "日本語の"),
+            Fallback::Collection {
+                font: b"FallbackJapan1",
+                codes: vec![0x65, 0xE5]
+            }
         );
-        assert_eq!(fallback('日', "日本").0, b"FallbackGB1");
-        assert_eq!(fallback('한', "한국").0, b"FallbackKorea1");
-        // Arabic is in no collection: its block font, coded by the low byte.
-        let (font, codes, block) = fallback('\u{0627}', "");
-        assert_eq!(
-            (font.as_slice(), codes.as_slice(), block),
-            (&b"FallbackU0006"[..], &[0x27][..], Some(6))
-        );
+        assert_eq!(font('日', "日本"), b"FallbackGB1");
+        assert_eq!(font('한', "한국"), b"FallbackKorea1");
+        // Arabic is in no collection.
+        assert_eq!(fallback('\u{0627}', ""), Fallback::Character);
         // Private-use characters and noncharacters have no fallback.
         for c in ['\u{E000}', '\u{F0000}', '\u{FDD0}', '\u{FFFF}', '\u{1FFFE}'] {
             assert!(Fallbacks::for_text("").find(c).is_none(), "{c:?}");
         }
         assert_eq!(Fallbacks::for_text("한").order, [3, 0, 1, 2]);
         assert_eq!(Fallbacks::for_text("").order, [1, 0, 2, 3]);
+    }
+
+    /// Arabic letters of the main and supplement blocks and a joiner share
+    /// one font, coded by their rank in scalar order; a font's name stands
+    /// for its characters.
+    #[test]
+    fn the_characters_of_an_appearance_share_one_font() {
+        let mut fonts = CharacterFonts::default();
+        fonts.extend(['\u{0628}', '\u{200C}', '\u{0750}', '\u{08A0}', '\u{0628}']);
+        let coded: Vec<_> = ['\u{0628}', '\u{0750}', '\u{08A0}', '\u{200C}']
+            .map(|c| fonts.font_and_code(c).expect("in the set"))
+            .into_iter()
+            .collect();
+        let name = &coded[0].0;
+        assert!(coded.iter().all(|(font, _)| font == name));
+        assert_eq!(
+            coded.iter().map(|&(_, code)| code).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(fonts.font_and_code('\u{0627}'), None);
+
+        let mut dict = Dictionary::new();
+        fonts.add_to(&mut dict);
+        let Some(Object::Dictionary(font)) = dict.get(name) else {
+            panic!("the font is added under its name");
+        };
+        let Some(Object::Dictionary(encoding)) = font.get(b"Encoding") else {
+            panic!("an encoding");
+        };
+        let Some(Object::Array(differences)) = encoding.get(b"Differences") else {
+            panic!("differences");
+        };
+        let names: Vec<&[u8]> = differences[1..]
+            .iter()
+            .filter_map(|o| match o {
+                Object::Name(n) => Some(n.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, [&b"uni0628"[..], b"uni0750", b"uni08A0", b"uni200C"]);
+
+        let mut more = fonts.clone();
+        more.extend(['\u{0627}']);
+        assert_ne!(more.font_and_code('\u{0628}').expect("in the set").0, *name);
+    }
+
+    /// Past 256 characters the set takes a second font.
+    #[test]
+    fn a_font_holds_256_characters() {
+        let mut fonts = CharacterFonts::default();
+        fonts.extend((0x0600..=0x0700).filter_map(char::from_u32));
+        let first = fonts.font_and_code('\u{0600}').expect("in the set");
+        let last = fonts.font_and_code('\u{06FF}').expect("in the set");
+        let next = fonts.font_and_code('\u{0700}').expect("in the set");
+        assert_eq!((first.0 == last.0, first.1, last.1), (true, 0, 255));
+        assert_eq!(next.1, 0);
+        assert_ne!(next.0, first.0);
     }
 }

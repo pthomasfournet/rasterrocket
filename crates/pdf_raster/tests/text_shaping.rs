@@ -164,6 +164,40 @@ fn an_arabic_field_value_is_reordered_and_joined() {
     assert_joined_beh_yeh_teh(&rendered(pdf));
 }
 
+/// A text field whose value is beh, beh with three dots below (of the
+/// Arabic Supplement), teh, and another holding a zero width non-joiner
+/// between meem-yeh and khah: each word is set in one show string, the
+/// first connected and the second broken at the non-joiner.
+#[test]
+fn an_arabic_field_value_across_unicode_blocks_is_one_string() {
+    let field = |value: &str| {
+        assemble_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] \
+              /DR << /Font << /Helv 5 0 R >> >> >> >>"
+                .to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {WIDTH} {HEIGHT}] /Annots [4 0 R] >>"
+            )
+            .into_bytes(),
+            format!(
+                "<< /Type /Annot /Subtype /Widget /FT /Tx /T (a) /Rect [10 5 150 55] \
+                 /V <FEFF{value}> /DA (/Helv 36 Tf 0 g) >>"
+            )
+            .into_bytes(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                .to_vec(),
+        ])
+    };
+    assert_eq!(
+        gaps(&rendered(field("06280750062A"))),
+        0,
+        "one connected word"
+    );
+    let with_non_joiner = rendered(field("064506CC200C062E"));
+    assert!(gaps(&with_non_joiner) > 0, "the non-joiner breaks the word");
+}
+
 /// `page` shows beh, yeh, teh as one connected word with teh at the left
 /// end: teh's two dots, the word's highest ink, sit over its final form.
 /// A word shaped or ordered left to right puts teh at the right.

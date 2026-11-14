@@ -9,7 +9,8 @@
 //! A run is a maximal sequence of shown codes drawn by the same face whose
 //! characters belong to one script, with the combining marks and joiners
 //! among them, before them included.  It is shaped when it holds at least
-//! two codes or ends next to a neighbouring string.  A code's text is
+//! two codes or a code next to it, in its string or a neighbouring one,
+//! could itself be part of a run.  A code's text is
 //! the one or two characters its font maps it to.  Show strings carry
 //! right-to-left text in visual order and left-to-right text in logical
 //! order, so a right-to-left run's codes are reversed into logical order
@@ -50,8 +51,9 @@ pub(super) struct Neighbours {
 pub(super) type Drawn<'f> = (&'f FontFace, u32, bool);
 
 /// A run of shown codes `start..end` drawn as `glyphs` from `face`, which
-/// continues into the string shown before it when `joins.0` and into the
-/// string shown after it when `joins.1`.
+/// continues the code before it when `joins.0` and the code after it when
+/// `joins.1`: codes of its string drawn by another face, or of the strings
+/// shown next to it, that can be part of a run.
 pub(super) struct ShapedRun<'f> {
     pub start: usize,
     pub end: usize,
@@ -195,12 +197,13 @@ pub(super) fn shaped_runs<'f>(
                 .chain(neighbours.before.iter().rev()),
         );
         let after = known(&mut texts[end..].iter().chain(&neighbours.after));
-        // The run continues into a neighbouring string that starts or ends
-        // with a code that can be part of a run; a lone code takes a
-        // contextual form only then.
+        // Whether the code just before and the code just after the run, of
+        // its string (drawn by another face) or of a neighbouring one, can
+        // be part of a run; a lone code takes a contextual form only then.
+        let in_context = |code: Option<&CodeText>| code.is_some_and(|&t| takes_context(t));
         let joins = (
-            start == 0 && neighbours.before.last().is_some_and(|&t| takes_context(t)),
-            end == texts.len() && neighbours.after.first().is_some_and(|&t| takes_context(t)),
+            in_context(texts[..start].last().or_else(|| neighbours.before.last())),
+            in_context(texts.get(end).or_else(|| neighbours.after.first())),
         );
         if (end - start >= 2 || joins.0 || joins.1)
             && let Some(glyphs) = shape(run_face, &texts[start..end], &before, &after, rtl)
