@@ -212,14 +212,33 @@ fn area_fill<P: Pixel>(
     });
 }
 
-/// Runs of at least this many fully covered pixels are composited without
-/// a shape; shorter ones stay in the surrounding shaped span.
-const MIN_SOLID_RUN: usize = 16;
+/// Pixels per block in which [`draw_coverage_row`] looks for solid runs.
+const BLOCK: usize = 16;
 
-/// Composite `coverage[i]` as the shape of pixel `(x + i, y)`.  Runs of
-/// [`MIN_SOLID_RUN`] or more fully covered pixels are composited with no
-/// shape, uncovered runs as long are skipped, and the pixels between them
-/// with their coverage as the shape.
+/// The number of leading bytes of `bytes` equal to `value`.
+fn run_len(bytes: &[u8], value: u8) -> usize {
+    let (blocks, _) = bytes.as_chunks::<BLOCK>();
+    let whole = blocks.iter().take_while(|b| is_uniform(b, value)).count() * BLOCK;
+    whole + bytes[whole..].iter().take_while(|&&c| c == value).count()
+}
+
+/// Whether every byte of `block` equals `value`.
+const fn is_uniform(block: &[u8; BLOCK], value: u8) -> bool {
+    u128::from_ne_bytes(*block) == u128::from_ne_bytes([value; BLOCK])
+}
+
+/// Whether `block` holds [`BLOCK`] bytes, all equal to `value`.
+fn uniform(block: &[u8], value: u8) -> bool {
+    <&[u8; BLOCK]>::try_from(block).is_ok_and(|b| is_uniform(b, value))
+}
+
+/// Composite `coverage[i]` as the shape of pixel `(x0 + i, row)`.
+///
+/// The row is walked in blocks of [`BLOCK`] pixels from the end of the
+/// previous run: a block of full coverage starts a run composited with no
+/// shape, a block of no coverage starts a run that is skipped, each run
+/// extending as far as its value does; the pixels between runs are
+/// composited with their coverage as the shape.
 fn draw_coverage_row<P: Pixel>(
     bitmap: &mut Bitmap<P>,
     pipe: &PipeState<'_>,
@@ -229,53 +248,41 @@ fn draw_coverage_row<P: Pixel>(
     row: i32,
 ) {
     let column = |at: usize| x0.saturating_add(i32::try_from(at).unwrap_or(i32::MAX));
-    let run_of =
-        |from: usize, value: u8| coverage[from..].iter().take_while(|&&c| c == value).count();
-    let flush = |bitmap: &mut Bitmap<P>, from: Option<usize>, to: usize| {
-        if let Some(from) = from
-            && from < to
-        {
-            let shape = &coverage[from..to];
+    let draw = |bitmap: &mut Bitmap<P>, from: usize, to: usize, solid: bool| {
+        if from < to {
+            let shape = (!solid).then(|| &coverage[from..to]);
             pipe::render_bitmap_span::<P>(
                 bitmap,
                 pipe,
                 src,
-                Some(shape),
+                shape,
                 column(from),
                 column(to - 1),
                 row,
             );
         }
     };
-    let mut shaped_from = None;
-    let mut at = 0;
+    let mut at = run_len(coverage, 0);
+    let mut shaped_from = at;
     while at < coverage.len() {
-        let value = coverage[at];
-        if value == 0 || value == u8::MAX {
-            let run = run_of(at, value);
-            if run >= MIN_SOLID_RUN || (value == 0 && shaped_from.is_none()) {
-                flush(bitmap, shaped_from.take(), at);
-                if value == u8::MAX {
-                    pipe::render_bitmap_span::<P>(
-                        bitmap,
-                        pipe,
-                        src,
-                        None,
-                        column(at),
-                        column(at + run - 1),
-                        row,
-                    );
-                }
-                at += run;
-                continue;
-            }
+        let block = &coverage[at..coverage.len().min(at + BLOCK)];
+        let value = if uniform(block, u8::MAX) {
+            u8::MAX
+        } else if uniform(block, 0) {
+            0
+        } else {
+            at += block.len();
+            continue;
+        };
+        draw(bitmap, shaped_from, at, false);
+        let end = at + run_len(&coverage[at..], value);
+        if value == u8::MAX {
+            draw(bitmap, at, end, true);
         }
-        if shaped_from.is_none() {
-            shaped_from = Some(at);
-        }
-        at += 1;
+        at = end;
+        shaped_from = end;
     }
-    flush(bitmap, shaped_from, coverage.len());
+    draw(bitmap, shaped_from, coverage.len(), false);
 }
 
 /// Build the AA-space scanner for `path`: the geometry stage of an
@@ -414,6 +421,31 @@ mod tests {
         (0..h)
             .flat_map(|y| bmp.row(y).iter().map(|p| p.r).collect::<Vec<_>>())
             .collect()
+    }
+
+    /// Compositing a coverage row by runs gives the pixels compositing it
+    /// as one shaped span gives, at any constant alpha.
+    #[test]
+    fn coverage_rows_composite_as_one_shaped_span() {
+        let mut coverage = vec![0u8; 7];
+        coverage.extend([40, 255, 255, 90]);
+        coverage.extend([255; 37]);
+        coverage.extend([0; 20]);
+        coverage.extend([128, 0, 255, 3]);
+        coverage.extend([0; 16]);
+        let n = u32::try_from(coverage.len()).unwrap();
+        let x0 = 3;
+        for alpha in [255, 128] {
+            let pipe = crate::testutil::make_pipe(alpha, crate::types::BlendMode::Normal);
+            let colour = [200u8, 30, 90];
+            let src = PipeSrc::Solid(&colour);
+            let mut runs: Bitmap<Rgb8> = Bitmap::new(n + 8, 1, 1, false);
+            let mut whole: Bitmap<Rgb8> = Bitmap::new(n + 8, 1, 1, false);
+            draw_coverage_row::<Rgb8>(&mut runs, &pipe, &src, &coverage, x0, 0);
+            let x1 = x0 + i32::try_from(n).unwrap() - 1;
+            pipe::render_bitmap_span::<Rgb8>(&mut whole, &pipe, &src, Some(&coverage), x0, x1, 0);
+            assert_eq!(runs.row(0), whole.row(0), "alpha {alpha}");
+        }
     }
 
     /// A one-pixel band centred on a row boundary covers the rows on either

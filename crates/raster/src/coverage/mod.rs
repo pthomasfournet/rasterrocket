@@ -201,7 +201,7 @@ impl AreaRaster {
         let (dx, dy) = (xb - xa, yb - ya);
         // x on the boundary at the top of each row from `first_row` on.
         let top = first_row * ONE;
-        let mut boundary = Dda::new(xa, i128::from(top - ya) * i128::from(dx), dy, ONE * dx);
+        let mut boundary = Dda::new(xa, (top - ya, dx), dy, ONE * dx);
         for row in first_row..=last_row {
             let row_top = row * ONE;
             let (x_top, fy_top) = if ya >= row_top {
@@ -245,17 +245,19 @@ impl AreaRaster {
             return;
         }
         let first_cell = xl >> SUBPIXEL_BITS;
-        let last_cell = ((xr - 1) >> SUBPIXEL_BITS).min(w - 1);
+        let end_cell = (xr - 1) >> SUBPIXEL_BITS;
+        let last_cell = end_cell.min(w - 1);
+        if first_cell == end_cell && first_cell >= 0 {
+            let cover = sign * (yr - yl);
+            let left = first_cell * ONE;
+            self.deposit(first_cell, ey, cover, cover * (xl + xr - 2 * left));
+            return;
+        }
         let (dx, dy) = (xr - xl, yr - yl);
         // fy on each cell boundary, from the left side of the first cell in
         // the window on.
         let start = first_cell.max(0);
-        let mut boundary = Dda::new(
-            yl,
-            i128::from(start * ONE - xl) * i128::from(dy),
-            dx,
-            ONE * dy,
-        );
+        let mut boundary = Dda::new(yl, (start * ONE - xl, dy), dx, ONE * dy);
         if first_cell < 0 {
             // The cells left of the window add their cover to every pixel of
             // the row inside it: one deposit at its left side, no area.
@@ -406,21 +408,28 @@ struct Dda {
 }
 
 impl Dda {
-    /// The stepper at `n_0` for the divisor `d > 0`.
-    fn new(base: i64, n0: i128, d: i64, step: i64) -> Self {
-        let d128 = i128::from(d);
-        let q = i64::try_from(n0.div_euclid(d128)).unwrap_or(if n0 < 0 {
-            -COORD_LIMIT
-        } else {
-            COORD_LIMIT
-        });
-        let r = i64::try_from(n0.rem_euclid(d128)).unwrap_or(0);
+    /// The stepper at `n_0 = factors.0 · factors.1` for the divisor
+    /// `divisor > 0`.
+    fn new(base: i64, factors: (i64, i64), divisor: i64, step: i64) -> Self {
+        let (quotient, remainder) = factors.0.checked_mul(factors.1).map_or_else(
+            || {
+                let n0 = i128::from(factors.0) * i128::from(factors.1);
+                let wide = i128::from(divisor);
+                let quotient = i64::try_from(n0.div_euclid(wide)).unwrap_or(if n0 < 0 {
+                    -COORD_LIMIT
+                } else {
+                    COORD_LIMIT
+                });
+                (quotient, i64::try_from(n0.rem_euclid(wide)).unwrap_or(0))
+            },
+            |n0| (n0.div_euclid(divisor), n0.rem_euclid(divisor)),
+        );
         Self {
-            q: base.saturating_add(q),
-            r,
-            lift: step.div_euclid(d),
-            rem: step.rem_euclid(d),
-            d,
+            q: base.saturating_add(quotient),
+            r: remainder,
+            lift: step.div_euclid(divisor),
+            rem: step.rem_euclid(divisor),
+            d: divisor,
         }
     }
 
