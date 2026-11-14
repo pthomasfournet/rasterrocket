@@ -495,4 +495,18 @@ mod tests {
             "{outcomes:?}"
         );
     }
+
+    /// GPU pages are refused at open without vector antialiasing, which
+    /// the device raster needs.
+    #[test]
+    fn gpu_pages_need_vector_antialiasing() {
+        let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
+        config.gpu_pages = true;
+        config.vector_antialias = false;
+        match open_session_from_bytes(pdf(&[DEVICE]), &config) {
+            Err(RasterError::InvalidOptions(msg)) => assert!(msg.contains("antialias"), "{msg}"),
+            Err(other) => panic!("expected InvalidOptions, got {other:?}"),
+            Ok(_) => panic!("a session without vector antialiasing accepted GPU pages"),
+        }
+    }
 }

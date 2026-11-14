@@ -450,7 +450,8 @@ fn session_gpu_ctx(
 
 /// [`RasterError::InvalidOptions`] unless `config` can render GPU pages
 /// when it asks for them: a build with the `vulkan` feature, under the
-/// `Auto` or `ForceVulkan` policy.
+/// `Auto` or `ForceVulkan` policy, with vector antialiasing on (the device
+/// raster paints antialiased coverage only).
 fn check_gpu_pages(config: &SessionConfig) -> Result<(), RasterError> {
     if !config.gpu_pages {
         return Ok(());
@@ -469,6 +470,13 @@ fn check_gpu_pages(config: &SessionConfig) -> Result<(), RasterError> {
              use auto or vulkan",
             config.policy.name()
         )));
+    }
+    if !config.vector_antialias {
+        return Err(RasterError::InvalidOptions(
+            "GPU page rendering paints antialiased vector paths only; turn vector \
+             antialiasing on or GPU page rendering off"
+                .to_owned(),
+        ));
     }
     Ok(())
 }

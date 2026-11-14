@@ -384,9 +384,10 @@ pub struct SessionConfig {
     /// reports where each page rendered and why.  A device that does not
     /// open is logged at `error` and leaves every page on the CPU.
     ///
-    /// Requires a build with the `vulkan` feature and
+    /// Requires a build with the `vulkan` feature,
     /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan); otherwise
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), and
+    /// [`vector_antialias`](Self::vector_antialias); otherwise
     /// [`open_session`] returns [`RasterError::InvalidOptions`].
     pub gpu_pages: bool,
 }

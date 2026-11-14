@@ -474,8 +474,8 @@ pub(crate) struct Args {
     /// The device opens in the background; once open, a page made only of
     /// solid fills and strokes (rectangle clips, Normal blend, constant
     /// alpha) renders on it while it is idle, every other page on the CPU,
-    /// with identical output.  Needs a build with the `vulkan` feature and
-    /// --backend auto or vulkan.
+    /// with identical output.  Needs a build with the `vulkan` feature,
+    /// --backend auto or vulkan, and --aaVector yes.
     #[arg(long = "gpu-pages", verbatim_doc_comment)]
     pub gpu_pages: bool,
 
