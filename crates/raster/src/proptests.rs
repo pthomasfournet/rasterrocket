@@ -16,6 +16,7 @@ use crate::clip::Clip;
 use crate::fill::{eo_fill, fill};
 use crate::path::{Path, PathBuilder};
 use crate::pipe::PipeSrc;
+use crate::scanner::REANCHOR_ROWS;
 use crate::stroke::{StrokeParams, hairline_runs};
 use crate::testutil::simple_pipe;
 use crate::types::{AA_GAMMA, AA_SIZE, LineCap, LineJoin};
@@ -182,6 +183,29 @@ fn hairline(path: &Path, clip: &Clip, w: u32, h: u32) -> Vec<bool> {
     painted
 }
 
+/// A triangle with one vertex thousands of rows above the bitmap, placed so
+/// that a re-anchor row of its two long edges (every [`REANCHOR_ROWS`]
+/// scanner rows from the vertex's row, in pixel rows aliased and in
+/// sub-sample rows antialiased) falls on a bitmap row, and possibly far to
+/// either side of it.  Its other two vertices lie near the bitmap.
+fn tall_triangle(w: u32, h: u32) -> impl Strategy<Value = Subpath> {
+    let rows = i32::try_from(h).expect("small");
+    let far_x = prop_oneof![
+        coord(w),
+        (-(1i32 << 30)..=1 << 30, 0..GRID)
+            .prop_map(|(i, k)| f64::from(i) + f64::from(k) / f64::from(GRID)),
+    ];
+    (1i32..=2, 0..rows, 0..GRID, far_x, point(w, h), point(w, h)).prop_map(
+        move |(k, row, step, x, a, b)| {
+            let y = f64::from(row - k * REANCHOR_ROWS) + f64::from(step) / f64::from(GRID);
+            Subpath {
+                start: (x, y),
+                segs: vec![Seg::Line(a), Seg::Line(b)],
+            }
+        },
+    )
+}
+
 /// Fill options: antialiased, even-odd.
 fn mode() -> impl Strategy<Value = (bool, bool)> {
     (any::<bool>(), any::<bool>())
@@ -319,6 +343,45 @@ fn star(w: u32, h: u32) -> impl Strategy<Value = Subpath> {
     )
 }
 
+/// Checks that moving the outline and the clip of `scene` by `(dx, dy)`
+/// pixels moves its render by as many.
+fn assert_translation_moves_the_render(
+    scene: &Scene,
+    dx: i32,
+    dy: i32,
+) -> Result<(), TestCaseError> {
+    let Scene { w, h, aa, eo, .. } = *scene;
+    let clip = scene.clip();
+    let moved: Vec<Subpath> = scene
+        .path
+        .iter()
+        .map(|sp| sp.translated(f64::from(dx), f64::from(dy)))
+        .collect();
+    let before = render(&build(&scene.path), &clip, w, h, aa, eo);
+    let after = render(&build(&moved), &clip.translated(dx, dy), w, h, aa, eo);
+    let (width, height) = (
+        i32::try_from(w).expect("small"),
+        i32::try_from(h).expect("small"),
+    );
+    for (i, &v) in before.iter().enumerate() {
+        let (x, y) = at(i, w);
+        let (mx, my) = (x + dx, y + dy);
+        if (0..width).contains(&mx) && (0..height).contains(&my) {
+            let j = usize::try_from(my * width + mx).expect("in range");
+            prop_assert_eq!(
+                after[j],
+                v,
+                "pixel ({}, {}) moved to ({}, {})",
+                x,
+                y,
+                mx,
+                my
+            );
+        }
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(config(2048))]
 
@@ -401,20 +464,21 @@ proptest! {
         dx in -6i32..=6,
         dy in -6i32..=6,
     ) {
-        let clip = s.clip();
-        let moved: Vec<Subpath> =
-            s.path.iter().map(|sp| sp.translated(f64::from(dx), f64::from(dy))).collect();
-        let a = render(&build(&s.path), &clip, s.w, s.h, s.aa, s.eo);
-        let b = render(&build(&moved), &clip.translated(dx, dy), s.w, s.h, s.aa, s.eo);
-        let (w, h) = (i32::try_from(s.w).expect("small"), i32::try_from(s.h).expect("small"));
-        for (i, &v) in a.iter().enumerate() {
-            let (x, y) = at(i, s.w);
-            let (mx, my) = (x + dx, y + dy);
-            if (0..w).contains(&mx) && (0..h).contains(&my) {
-                let j = usize::try_from(my * w + mx).expect("in range");
-                prop_assert_eq!(b[j], v, "pixel ({}, {}) moved to ({}, {})", x, y, mx, my);
-            }
-        }
+        assert_translation_moves_the_render(&s, dx, dy)?;
+    }
+
+    /// Moving by whole pixels an outline whose long edges are re-anchored
+    /// on bitmap rows, and may reach far to the side, moves the render.
+    #[test]
+    fn integer_translation_moves_a_tall_render(
+        (s, tall) in scene(true, true)
+            .prop_flat_map(|s| { let (w, h) = (s.w, s.h); (Just(s), tall_triangle(w, h)) }),
+        dx in -6i32..=6,
+        dy in -6i32..=6,
+    ) {
+        let mut path = s.path.clone();
+        path.push(tall);
+        assert_translation_moves_the_render(&Scene { path, ..s }, dx, dy)?;
     }
 
     /// A simple polygon fills the same under both winding rules.

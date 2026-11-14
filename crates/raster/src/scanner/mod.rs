@@ -73,7 +73,7 @@ fn fp_column(fp: i64) -> i32 {
 /// Stepping by the rounded slope drifts by at most 2⁻¹⁷ px per row, so an
 /// edge's position on any row is within `REANCHOR_ROWS`·2⁻¹⁷ px (1/32 px) plus
 /// two 2⁻¹⁶ conversions of the exact value, whatever the segment's length.
-const REANCHOR_ROWS: i32 = 4096;
+pub(crate) const REANCHOR_ROWS: i32 = 4096;
 
 // ── Intersect ─────────────────────────────────────────────────────────────────
 
