@@ -1,11 +1,15 @@
-//! The object parser reads back what a conforming writer produces.
+//! The object parser reads back what a reference serialiser produces.
 //!
-//! A reference serialiser writes a generated [`Object`] in one of the many
-//! spellings ISO 32000-2 §7.3 allows (separators and comments, name and
-//! string escapes, octal escapes and line continuations, hex digit case and
+//! The serialiser writes a generated [`Object`] in one of the many
+//! spellings ISO 32000-2 §7.3 allows (separators and comments, optional
+//! where a delimiter bounds a token, name and string escapes, octal escapes
+//! of one to three digits and line continuations, hex digit case and
 //! whitespace, number forms), choosing among them from a byte stream that
-//! proptest generates and shrinks with the object.  [`parse_object`] must
-//! return the object and stop exactly at its end.
+//! proptest generates and shrinks with the object.  It also writes two
+//! spellings a conforming writer may not use and the parser accepts:
+//! reals with an exponent (§7.3.3 has none), for very small and very
+//! large values, and `#00` in names (§7.3.5 excludes NUL).  [`parse_object`]
+//! must return the object and stop exactly at its end.
 
 use proptest::prelude::*;
 
@@ -57,6 +61,32 @@ fn opt_sep(out: &mut Vec<u8>, style: &mut Style<'_>) {
     }
 }
 
+/// Appends `token` after a separator, which is optional when the text so far
+/// ends with a closing delimiter or `token` starts with a delimiter
+/// (ISO 32000-2 §7.2.3).  A trailing `/` or `<` does not count: an empty
+/// name followed by a regular byte reads as one longer name, and `<` is
+/// only ever followed here by a token that opens with a delimiter.
+fn join(out: &mut Vec<u8>, token: &[u8], style: &mut Style<'_>) {
+    let closed = matches!(out.last(), Some(b')' | b'>' | b']'));
+    let opens = matches!(
+        token.first(),
+        Some(b'/' | b'(' | b')' | b'<' | b'>' | b'[' | b']')
+    );
+    if closed || opens {
+        opt_sep(out, style);
+    } else {
+        sep(out, style);
+    }
+    out.extend_from_slice(token);
+}
+
+/// `obj` as written by [`write_object`], on its own.
+fn written(obj: &Object, style: &mut Style<'_>) -> Vec<u8> {
+    let mut token = Vec::new();
+    write_object(&mut token, obj, style);
+    token
+}
+
 fn hex_digit(nibble: u8, upper: bool) -> u8 {
     let digits = if upper {
         b"0123456789ABCDEF"
@@ -76,6 +106,8 @@ const fn is_regular_name_byte(b: u8) -> bool {
         )
 }
 
+/// `/name`, each byte verbatim or as `#xx`; a NUL byte is written `#00`,
+/// which the parser accepts beyond §7.3.5.
 fn write_name(out: &mut Vec<u8>, name: &[u8], style: &mut Style<'_>) {
     out.push(b'/');
     for &b in name {
@@ -90,7 +122,7 @@ fn write_name(out: &mut Vec<u8>, name: &[u8], style: &mut Style<'_>) {
 
 fn write_literal(out: &mut Vec<u8>, s: &[u8], style: &mut Style<'_>) {
     out.push(b'(');
-    for &b in s {
+    for (i, &b) in s.iter().enumerate() {
         // A backslash before an EOL is a line continuation and adds nothing.
         // A bare CR continuation before an LF would read as one CRLF.
         if style.pick(8) == 0 {
@@ -112,7 +144,21 @@ fn write_literal(out: &mut Vec<u8>, s: &[u8], style: &mut Style<'_>) {
         match style.pick(3) {
             0 if !must_escape => out.push(b),
             1 if named.is_some() => out.extend_from_slice(&[b'\\', named.unwrap_or(b)]),
-            _ => out.extend_from_slice(format!("\\{b:03o}").as_bytes()),
+            _ => {
+                // An escape may have fewer than three digits unless an
+                // octal digit follows it (§7.3.4.2).
+                let fewest: u8 = match b {
+                    0..8 => 1,
+                    8..64 => 2,
+                    _ => 3,
+                };
+                let digits = usize::from(if matches!(s.get(i + 1), Some(b'0'..=b'7')) {
+                    3
+                } else {
+                    fewest + style.pick(4 - fewest)
+                });
+                out.extend_from_slice(format!("\\{b:0digits$o}").as_bytes());
+            }
         }
     }
     out.push(b')');
@@ -155,7 +201,8 @@ fn write_integer(out: &mut Vec<u8>, n: i64, style: &mut Style<'_>) {
 }
 
 /// A real in the shortest form that reads back exactly, as `ddd.ddd`,
-/// `.ddd`, `ddd.` or with an exponent.
+/// `.ddd`, `ddd.` or, for very small and very large values, with an exponent,
+/// which the parser accepts beyond §7.3.3.
 fn write_real(out: &mut Vec<u8>, r: f32, style: &mut Style<'_>) {
     let text = format!("{r:?}");
     let mut text = text.as_str();
@@ -184,14 +231,14 @@ fn write_real(out: &mut Vec<u8>, r: f32, style: &mut Style<'_>) {
 
 fn write_dict(out: &mut Vec<u8>, dict: &Dictionary, style: &mut Style<'_>) {
     out.extend_from_slice(b"<<");
-    opt_sep(out, style);
     for (key, value) in dict {
-        write_name(out, key, style);
-        sep(out, style);
-        write_object(out, value, style);
-        sep(out, style);
+        let mut name = Vec::new();
+        write_name(&mut name, key, style);
+        join(out, &name, style);
+        let value = written(value, style);
+        join(out, &value, style);
     }
-    out.extend_from_slice(b">>");
+    join(out, b">>", style);
 }
 
 fn write_object(out: &mut Vec<u8>, obj: &Object, style: &mut Style<'_>) {
@@ -205,21 +252,16 @@ fn write_object(out: &mut Vec<u8>, obj: &Object, style: &mut Style<'_>) {
         Object::String(s, StringFormat::Hexadecimal) => write_hex(out, s, style),
         Object::Array(items) => {
             out.push(b'[');
-            opt_sep(out, style);
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    sep(out, style);
-                }
-                write_object(out, item, style);
+            for item in items {
+                let item = written(item, style);
+                join(out, &item, style);
             }
-            opt_sep(out, style);
-            out.push(b']');
+            join(out, b"]", style);
         }
         Object::Dictionary(d) => write_dict(out, d, style),
         Object::Stream(s) => {
             write_dict(out, &s.dict, style);
-            sep(out, style);
-            out.extend_from_slice(b"stream");
+            join(out, b"stream", style);
             out.extend_from_slice(if style.flip() { b"\r\n" } else { b"\n" });
             out.extend_from_slice(&s.content);
             out.extend_from_slice([&b"\n"[..], b"\r\n", b"\r"][usize::from(style.pick(3))]);
