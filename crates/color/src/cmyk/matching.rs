@@ -29,14 +29,23 @@ const HALVINGS: usize = 10;
 ///
 /// Each evaluation is about the work of one colour conversion: the test of
 /// the given inks and their cost, then per step the model, the two ends of
-/// each ink's Jacobian column and every candidate of the line search.
-pub const INK_REPRODUCING_COST: u64 = (2 + MAX_STEPS * (1 + 2 * 4 + HALVINGS)) as u64;
+/// each ink's Jacobian column and every candidate of up to two line
+/// searches.
+pub const INK_REPRODUCING_COST: u64 = (2 + MAX_STEPS * (1 + 2 * 4 + 2 * HALVINGS)) as u64;
 
 /// Weight of the pull of each ink toward its given amount, in squared
 /// colour counts per squared unit of ink: a change of one byte of ink
 /// weighs as 1/255 of a squared count, so the colour decides and the pull
 /// selects among the inks reproducing it.
 const ANCHOR: f64 = 255.0;
+
+/// The distance from a bound within which an ink the gradient pushes past
+/// that bound is set to it and held, when the step holding only the inks
+/// at a bound fails to lower the cost; below half an 8-bit ink level.
+/// Left free, such an ink takes steps the bound clamps, and clamped steps
+/// can fail to lower the cost while the other inks are still far from
+/// their optimum.
+const HOLD: f64 = 0.5 / 255.0;
 
 /// The largest channel error, in counts, of inks that print a colour:
 /// the model's own fixed-point rounding.
@@ -155,41 +164,20 @@ fn reproduce(target: [f64; 3], given: [f64; 4]) -> [f64; 4] {
             let colour: f64 = (0..3).map(|r| jac[r][a] * res[r]).sum();
             ANCHOR.mul_add(x[a] - given[a], colour)
         });
-        // An ink given as 0, or at a bound the gradient pushes past, is
-        // held for the step: an identity row with no right-hand side.
-        let free = [0, 1, 2, 3].map(|a| {
-            open[a] && !((x[a] <= 0.0 && grad[a] > 0.0) || (x[a] >= 1.0 && grad[a] < 0.0))
-        });
-        let mut normal = [[0.0; 4]; 4];
-        let mut rhs = [0.0; 4];
-        for i in 0..4 {
-            if free[i] {
-                for j in 0..4 {
-                    if free[j] {
-                        normal[i][j] = (0..3).map(|r| jac[r][i] * jac[r][j]).sum();
-                    }
-                }
-                normal[i][i] += ANCHOR;
-                rhs[i] = -grad[i];
-            } else {
-                normal[i][i] = 1.0;
-            }
-        }
-        let Some(step) = solve4(normal, rhs) else {
-            break;
-        };
-        let mut scale = 1.0;
+        // The step holds the inks at a bound the gradient pushes past; when
+        // it fails to lower the cost, the inks within `HOLD` of such a
+        // bound are set to it and held as well.
+        let exact = held_inks(open, x, grad, 0.0);
+        let near = held_inks(open, x, grad, HOLD);
         let mut improved = false;
-        for _ in 0..HALVINGS {
-            let cand = [0, 1, 2, 3].map(|a| step[a].mul_add(scale, x[a]).clamp(0.0, 1.0));
-            let e = cost(cand, target, given);
-            if e < err {
-                improved = err - e > 1e-9;
-                x = cand;
-                err = e;
+        for held in std::iter::once(exact).chain((near != exact).then_some(near)) {
+            let Some(step) = gauss_newton_step(&jac, grad, held) else {
+                break;
+            };
+            (x, err, improved) = line_search((x, err), step, held, target, given);
+            if improved {
                 break;
             }
-            scale *= 0.5;
         }
         if !improved {
             break;
@@ -198,10 +186,78 @@ fn reproduce(target: [f64; 3], given: [f64; 4]) -> [f64; 4] {
     x
 }
 
+/// The inks held for a step, each as the amount it is held at: an ink
+/// given as 0 at 0, and an ink within `tolerance` of a bound the gradient
+/// `grad` pushes past at that bound.
+fn held_inks(open: [bool; 4], x: [f64; 4], grad: [f64; 4], tolerance: f64) -> [Option<f64>; 4] {
+    [0, 1, 2, 3].map(|a| {
+        if !open[a] {
+            Some(x[a])
+        } else if x[a] <= tolerance && grad[a] > 0.0 {
+            Some(0.0)
+        } else if x[a] >= 1.0 - tolerance && grad[a] < 0.0 {
+            Some(1.0)
+        } else {
+            None
+        }
+    })
+}
+
+/// The Gauss-Newton step of the free inks from the Jacobian `jac` and the
+/// gradient `grad`; a held ink has an identity row with no right-hand side.
+/// `None` if the system is singular.
+fn gauss_newton_step(
+    jac: &[[f64; 4]; 3],
+    grad: [f64; 4],
+    held: [Option<f64>; 4],
+) -> Option<[f64; 4]> {
+    let free = held.map(|h| h.is_none());
+    let mut normal = [[0.0; 4]; 4];
+    let mut rhs = [0.0; 4];
+    for i in 0..4 {
+        if free[i] {
+            for j in 0..4 {
+                if free[j] {
+                    normal[i][j] = (0..3).map(|r| jac[r][i] * jac[r][j]).sum();
+                }
+            }
+            normal[i][i] += ANCHOR;
+            rhs[i] = -grad[i];
+        } else {
+            normal[i][i] = 1.0;
+        }
+    }
+    solve4(normal, rhs)
+}
+
+/// The first of `step`, halved up to [`HALVINGS`] times, clamped to
+/// `[0, 1]` and with the held inks at their amounts, that lowers the cost
+/// `err` of `x`: the new inks, their cost, and whether the cost fell by
+/// more than rounding noise.  `x` and `err` when none does.
+fn line_search(
+    (x, err): ([f64; 4], f64),
+    step: [f64; 4],
+    held: [Option<f64>; 4],
+    target: [f64; 3],
+    given: [f64; 4],
+) -> ([f64; 4], f64, bool) {
+    let mut scale = 1.0;
+    for _ in 0..HALVINGS {
+        let cand = [0, 1, 2, 3]
+            .map(|a| held[a].unwrap_or_else(|| step[a].mul_add(scale, x[a]).clamp(0.0, 1.0)));
+        let e = cost(cand, target, given);
+        if e < err {
+            return (cand, e, err - e > 1e-9);
+        }
+        scale *= 0.5;
+    }
+    (x, err, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::cmyk_to_rgb;
-    use super::ink_reproducing;
+    use super::{cost, ink_reproducing, reproduce};
 
     fn unit(b: [u8; 4]) -> [f64; 4] {
         b.map(|v| f64::from(v) / 255.0)
@@ -224,6 +280,45 @@ mod tests {
             for a in 0..4 {
                 assert!(got[a].abs_diff(ink[a]) <= 2, "{ink:?} -> {got:?}");
             }
+        }
+    }
+
+    /// The largest rate, in cost per unit of ink, at which moving one open
+    /// ink of `x` into `[0, 1]` lowers the cost: 0 at a stationary point of
+    /// the bounded problem.
+    fn descent_rate(x: [f64; 4], target: [f64; 3], given: [f64; 4]) -> f64 {
+        const H: f64 = 1e-6;
+        let at = cost(x, target, given);
+        let mut rate = 0.0f64;
+        for a in (0..4).filter(|&a| given[a] > 0.0) {
+            for dir in [-1.0f64, 1.0] {
+                let mut moved = x;
+                moved[a] = dir.mul_add(H, x[a]).clamp(0.0, 1.0);
+                let distance = (moved[a] - x[a]).abs();
+                if distance > 0.0 {
+                    rate = rate.max((at - cost(moved, target, given)) / distance);
+                }
+            }
+        }
+        rate
+    }
+
+    /// A solve whose step clamps an ink lying just inside a bound continues
+    /// with that ink at the bound instead of stopping short of the minimum.
+    #[test]
+    fn an_ink_beside_a_bound_does_not_stall_the_solve() {
+        for (rgb, inks) in [
+            ([235, 49, 130], [84, 0, 80, 50]),
+            ([168, 105, 156], [157, 66, 219, 86]),
+            ([60, 156, 196], [63, 189, 29, 1]),
+        ] {
+            let (target, given) = (rgb.map(f64::from), unit(inks));
+            let x = reproduce(target, given);
+            let rate = descent_rate(x, target, given);
+            assert!(
+                rate < 1.0,
+                "{rgb:?} from {inks:?}: {x:?} descends at {rate}"
+            );
         }
     }
 
