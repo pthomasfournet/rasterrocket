@@ -2163,6 +2163,10 @@ fn decode_fixed(bytes: &[u8], mut power_ten: i32) -> Option<Fixed> {
     let &first = bytes.get(idx)?;
     let sign = if first == b'-' || first == b'+' {
         idx += 1;
+        // A number carries at most one sign; a second one reads as zero.
+        if matches!(bytes.get(idx), Some(b'-' | b'+')) {
+            return Some(Fixed::ZERO);
+        }
         if first == b'-' {
             -1
         } else {
@@ -2670,6 +2674,33 @@ mod tests {
             Fixed::from_f64(1500.0)
         );
         assert_eq!(decode_fixed(b"1.000e-3", 3).unwrap(), Fixed::from_f64(1.0));
+    }
+
+    #[test]
+    fn parse_fixed_double_sign() {
+        for source in ["--100", "--1.5", "+-5", "-+5", "--32768", "--30000e1"] {
+            assert_eq!(
+                decode_fixed(source.as_bytes(), 0),
+                Some(Fixed::ZERO),
+                "{source}"
+            );
+        }
+        assert_eq!(decode_fixed(b"--32768", 3), Some(Fixed::ZERO));
+    }
+
+    #[test]
+    fn font_bbox_double_sign() {
+        let source = font_test_data::type1::NOTO_SERIF_REGULAR_SUBSET_PFA;
+        let bbox = b"{5 0 989 775 }";
+        let pos = source
+            .windows(bbox.len())
+            .position(|window| window == bbox)
+            .unwrap();
+        let mut data = source[..pos].to_vec();
+        data.extend_from_slice(b"{5 --32768 989 775 }");
+        data.extend_from_slice(&source[pos + bbox.len()..]);
+        let font = Type1Font::new(&data).unwrap();
+        assert_eq!(font.bbox().y_min, Fixed::ZERO);
     }
 
     #[test]
