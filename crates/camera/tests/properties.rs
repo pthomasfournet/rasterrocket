@@ -1,12 +1,14 @@
 //! Property tests: the geometric stages return exactly the pixels their
 //! documentation names, and refuse, without panicking, what lies outside
-//! the image.
+//! the image; the Sauvola threshold is monotone in its sensitivity.
 //!
 //! Each property runs the case count given to `config` unless
 //! `PROPTEST_CASES` sets another.
 
 use proptest::prelude::*;
-use rasterrocket_camera::{CameraError, Detected, GrayView, Quad, Rect, crop, rectify, split_at};
+use rasterrocket_camera::{
+    CameraError, Detected, GrayView, Quad, Rect, Threshold, binarize, crop, rectify, split_at,
+};
 
 #[path = "../../../tests/support/proptest_config.rs"]
 mod proptest_config;
@@ -177,6 +179,22 @@ proptest! {
                 prop_assert_eq!(page.data.len(), page.width * page.height);
             }
             Detected::Declined(reason) => prop_assert!(!reason.is_empty()),
+        }
+    }
+
+    /// Raising Sauvola's `k` never adds a black pixel.
+    #[test]
+    fn raising_k_never_adds_black(
+        img in image(),
+        window_px in 1u32..40,
+        (k, dk) in (0u16..3000, 1u16..3000),
+    ) {
+        let at = |k_per_mille| {
+            binarize(img.view(), Threshold::Sauvola { window_px, k_per_mille }).expect("a valid view")
+        };
+        let (low, high) = (at(k), at(k + dk));
+        for (&l, &h) in low.data.iter().zip(&high.data) {
+            prop_assert!(h == 255 || l == 0, "k {} → {}: a pixel turned black", k, k + dk);
         }
     }
 }

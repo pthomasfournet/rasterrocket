@@ -5,8 +5,9 @@
 //! documented invariants.
 
 use rasterrocket_camera::{
-    CameraError, CameraOptions, Detected, GrayPage, GrayView, Outcome, Quad, Rect, crop,
-    detect_page_quad, dewarp, find_gutter, measure_background, process, rectify, split_at,
+    CameraError, CameraOptions, Detected, GrayPage, GrayView, Outcome, Quad, Rect, Threshold,
+    binarize, crop, detect_page_quad, dewarp, find_gutter, measure_background, process, rectify,
+    split_at,
 };
 
 /// 64-bit linear congruential generator (Knuth's MMIX constants).
@@ -312,6 +313,41 @@ fn check_background(img: GrayView<'_>, ctx: &str) -> usize {
     found
 }
 
+/// Binarisation under fixed thresholds and Sauvola windows from 1 px to
+/// beyond the clamp gives a packed page of 0 and 255 only.
+fn check_binarize(img: GrayView<'_>, ctx: &str) {
+    let mut methods = vec![
+        Threshold::Fixed(0),
+        Threshold::Fixed(128),
+        Threshold::Fixed(255),
+    ];
+    for window_px in [1, 2, 49, 4095, u32::MAX] {
+        for k_per_mille in [0, 340, u16::MAX] {
+            methods.push(Threshold::Sauvola {
+                window_px,
+                k_per_mille,
+            });
+        }
+    }
+    for method in methods {
+        let page = binarize(img, method).unwrap_or_else(|e| panic!("{ctx} {method:?}: {e}"));
+        assert_eq!((page.width, page.height), (img.width, img.height), "{ctx}");
+        assert_packed(&page, ctx);
+        assert!(
+            page.data.iter().all(|&v| v == 0 || v == 255),
+            "{ctx} {method:?}: not bilevel"
+        );
+    }
+    let zero = Threshold::Sauvola {
+        window_px: 0,
+        k_per_mille: 340,
+    };
+    assert!(matches!(
+        binarize(img, zero),
+        Err(CameraError::ZeroSize { .. })
+    ));
+}
+
 #[test]
 fn small_and_odd_sizes_under_every_option_set() {
     let sizes = [
@@ -355,6 +391,7 @@ fn small_and_odd_sizes_under_every_option_set() {
                 }
                 check_stages(img, &mut rng, &ctx);
                 measured += check_background(img, &ctx);
+                check_binarize(img, &ctx);
             }
         }
     }
@@ -387,6 +424,7 @@ fn large_and_elongated_sizes() {
         crop_split.split_spreads = true;
         let _ = check_process(img, crop_split, &ctx);
         let _ = check_background(img, &ctx);
+        check_binarize(img, &ctx);
     }
 }
 
@@ -415,6 +453,7 @@ fn malformed_views_are_errors() {
             find_gutter(img).err(),
             dewarp(img).err(),
             measure_background(img, 8).err(),
+            binarize(img, Threshold::sauvola_at(300)).err(),
             split_at(img, 1).err(),
             crop(
                 img,

@@ -50,6 +50,10 @@
 //!   illumination and ink keeps its tone relative to it.  The gain replays
 //!   on every channel and at 16 bits.  Declines on a page whose background
 //!   is already white.
+//! - **Binarisation** ([`binarize`]): a fixed threshold, or Sauvola's local
+//!   threshold from the mean and deviation of a window around each pixel,
+//!   which follows paper whose level varies across the page.  Never
+//!   declines; a reversed-out page needs inverting first.
 //!
 //! Every function runs on the calling thread, keeps no global state and
 //! returns on any input without panicking; the crate has no dependencies
@@ -74,12 +78,14 @@ mod stats;
 #[cfg(test)]
 mod testutil;
 mod textlines;
+mod threshold;
 
 pub use background::{Background, background_tile_px, measure_background};
 pub use error::{CameraError, MAX_DIMENSION};
 pub use image::{GrayPage, GrayView, Rect};
 pub use pipeline::{Gutter, Outcome, Processed, Report, Timings, process};
 pub use sample::Sample;
+pub use threshold::{Threshold, binarize};
 
 use num::{floor_index, to_f64};
 
