@@ -253,7 +253,8 @@ impl OutputProfile {
     /// values under `intent`, with black-point compensation when `bpc`: in
     /// place for an RGB profile, into a gray canvas built in `buffers` for
     /// a gray one, the working-space storage then reclaimed into
-    /// `buffers`.  A canvas already in a gray space is returned as it is.
+    /// `buffers`.  A canvas already in a gray space is returned as it is,
+    /// and so is a CMYK canvas, which holds device values.
     ///
     /// # Errors
     ///
@@ -266,7 +267,13 @@ impl OutputProfile {
         (intent, bpc): (RenderingIntent, bool),
         buffers: &mut CanvasBuffers,
     ) -> Result<FinishedCanvas, OutputProfileError> {
-        if matches!(canvas, FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_)) {
+        if matches!(
+            canvas,
+            FinishedCanvas::Gray8(_)
+                | FinishedCanvas::Gray16(_)
+                | FinishedCanvas::Cmyk8(_)
+                | FinishedCanvas::Cmyk16(_)
+        ) {
             return Ok(canvas);
         }
         let xform = self.executor(intent, bpc)?;
@@ -292,7 +299,13 @@ impl OutputProfile {
                 buffers.rgb16.reclaim(rgb);
                 FinishedCanvas::Gray16(gray)
             }
-            (canvas @ (FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_)), _) => canvas,
+            (
+                canvas @ (FinishedCanvas::Gray8(_)
+                | FinishedCanvas::Gray16(_)
+                | FinishedCanvas::Cmyk8(_)
+                | FinishedCanvas::Cmyk16(_)),
+                _,
+            ) => canvas,
         })
     }
 }

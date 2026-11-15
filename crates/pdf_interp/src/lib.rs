@@ -23,6 +23,7 @@ pub(crate) mod prescan;
 pub mod renderer;
 pub mod resources;
 mod rotation;
+pub mod separation;
 #[cfg(test)]
 mod test_helpers;
 pub mod unsupported;
@@ -34,6 +35,7 @@ pub use output_profile::{OutputProfile, OutputProfileError, OutputSpace};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
 pub use rotation::{InvalidRotation, Rotation};
+pub use separation::{CanvasRequest, Separation};
 pub use unsupported::{
     MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
     page_has_javascript, page_unsupported_features,

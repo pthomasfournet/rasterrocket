@@ -16,6 +16,7 @@ use super::image_blit::blend_rgb;
 use super::image_sampler::{GridClip, SampleGrid};
 use super::paint::PaintParams;
 use crate::resources::transfer::Transfer;
+use crate::separation::Separator;
 
 /// Whole rows of RGBA8 pixels downloaded from a blit target: `width`
 /// pixels per row, the first pixel of the first row at page position
@@ -101,6 +102,9 @@ pub(super) struct ImageCompositor<'a> {
     /// The transfer function the samples map through on a 16-bit bitmap,
     /// once widened.
     pub(super) wide_transfer: Option<&'a Transfer>,
+    /// The separator of the samples, and of a solid colour not given as
+    /// ink, on an ink bitmap.
+    pub(super) separator: &'a Separator,
     /// The channels that carry the samples' colorants when the samples
     /// are ink, eight samples each, for an ink bitmap; `None` when they
     /// are RGB, three samples each.  Set only with a pipe.
@@ -109,8 +113,13 @@ pub(super) struct ImageCompositor<'a> {
 
 impl<'a> ImageCompositor<'a> {
     /// The compositor of samples painted onto `bitmap` with the
-    /// parameters `paint`.
-    pub(super) fn new<P: Pixel>(bitmap: &Bitmap<P>, paint: &'a PaintParams) -> Self {
+    /// parameters `paint`, converted to ink by `separator` on an ink
+    /// bitmap.
+    pub(super) fn new<P: Pixel>(
+        bitmap: &Bitmap<P>,
+        paint: &'a PaintParams,
+        separator: &'a Separator,
+    ) -> Self {
         let direct = matches!(P::MODE, PixelMode::Rgb8 | PixelMode::Rgb16)
             && bitmap.alpha_plane().is_none()
             && paint.alpha == u8::MAX
@@ -120,6 +129,7 @@ impl<'a> ImageCompositor<'a> {
             solid: None,
             transfer: None,
             wide_transfer: None,
+            separator,
             ink_samples: None,
         }
     }
@@ -180,7 +190,9 @@ impl<'a> ImageCompositor<'a> {
         let ink_bitmap = matches!(P::MODE, PixelMode::DeviceN8 | PixelMode::DeviceN16);
         let sample_n = if self.ink_samples.is_some() { 8 } else { 3 };
         let zero = P::Sample::default();
-        let solid = self.solid.map(|c| P::Sample::solid(c, P::MODE));
+        let solid = self
+            .solid
+            .map(|c| P::Sample::solid(c, P::MODE, self.separator));
         let (row, mut alpha_row) = bitmap.row_and_alpha_mut(y);
         let x0 = x0 as usize;
         let columns = (row.len() / n).saturating_sub(x0).min(shape.len());
@@ -212,7 +224,7 @@ impl<'a> ImageCompositor<'a> {
             let (c0, c1) = (x0 + a, x0 + b);
             let data = &colours[a * sample_n..b * sample_n];
             let samples = RowPattern { data };
-            let ink = InkPattern::new(&samples, self.transfer);
+            let ink = InkPattern::new(&samples, self.transfer, self.separator);
             let native = self
                 .ink_samples
                 .map(|channels| TransferredInk::new(&samples, self.transfer, channels));

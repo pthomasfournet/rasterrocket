@@ -324,7 +324,7 @@ impl PageRenderer<'_> {
         colour: &RasterColor,
     ) {
         let pipe = CanvasPipe::of(paint);
-        let source = CanvasSource::Solid(colour);
+        let source = CanvasSource::Solid(colour, &self.ink.separator);
         for rec in records {
             #[expect(
                 clippy::cast_possible_wrap,

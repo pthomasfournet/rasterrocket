@@ -225,7 +225,7 @@ fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
         return Some("16-bit samples");
     }
     pdf_interp::renderer::device_page_ineligible(
-        job.ink,
+        job.canvas.is_ink(),
         job.group.is_some(),
         job.session.vector_antialias,
         job.ops,

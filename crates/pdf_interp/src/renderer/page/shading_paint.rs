@@ -25,6 +25,7 @@ use crate::renderer::color::RasterColor;
 use crate::resources::ShadingPattern;
 use crate::resources::shading::{ResolvedShading, ShadingResult};
 use crate::resources::transfer::Transfer;
+use crate::separation::Separator;
 
 /// Return `clip` intersected with the device-space quadrilateral `bbox`.
 fn clip_to_bbox(mut clip: Clip, bbox: Option<[(f64, f64); 4]>, flatness: f64) -> Clip {
@@ -102,18 +103,19 @@ fn window_pattern(shading: &ResolvedShading, origin: (i32, i32)) -> Option<Windo
 }
 
 /// `window`, the [`window_pattern`] of `shading`, for a canvas of `kind`,
-/// its colours mapped through `transfer` on an ink canvas; `None` for
+/// its colours converted to ink by `separator` and mapped through
+/// `transfer` on an ink canvas; `None` for
 /// colours of ink on an RGB canvas, which takes none, and for 16-bit
 /// colours on an 8-bit canvas, which is never given them.
 fn smooth_pattern<'a>(
     kind: CanvasKind,
     shading: &ResolvedShading,
     window: &'a WindowPattern<'a>,
-    transfer: Option<&'a Transfer>,
+    (transfer, separator): (Option<&'a Transfer>, &'a Separator),
 ) -> Option<CanvasPattern<'a>> {
     match (window, &shading.result, kind) {
         (WindowPattern::U8(window), ShadingResult::Pattern(_), _) => {
-            Some(CanvasPattern::new(kind, window, transfer))
+            Some(CanvasPattern::new(kind, window, (transfer, separator)))
         }
         (WindowPattern::U8(window), ShadingResult::InkPattern(_), CanvasKind::Ink) => {
             Some(CanvasPattern::ink(window, transfer, shading.carries()))
@@ -122,7 +124,7 @@ fn smooth_pattern<'a>(
             WindowPattern::U16(window),
             ShadingResult::Pattern16(_),
             CanvasKind::Rgb16 | CanvasKind::Ink16,
-        ) => Some(CanvasPattern::wide(kind, window, transfer)),
+        ) => Some(CanvasPattern::wide(kind, window, (transfer, separator))),
         (WindowPattern::U16(window), ShadingResult::InkPattern16(_), CanvasKind::Ink16) => {
             Some(CanvasPattern::ink16(window, transfer, shading.carries()))
         }
@@ -258,7 +260,9 @@ impl PageRenderer<'_> {
                 let Some(window) = window_pattern(&shading, origin) else {
                     return;
                 };
-                let Some(pattern) = smooth_pattern(kind, &shading, &window, transfer) else {
+                let separator = r.ink.separator.clone();
+                let Some(pattern) = smooth_pattern(kind, &shading, &window, (transfer, &separator))
+                else {
                     return;
                 };
                 with_canvas!(&mut r.canvas, |b| {
@@ -302,6 +306,7 @@ impl PageRenderer<'_> {
         let antialias = self.vector_antialias;
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
+        let separator = self.ink.separator.clone();
         let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
             with_canvas!(&mut r.canvas, |b| {
                 let pipe = pipe.at();
@@ -311,11 +316,13 @@ impl PageRenderer<'_> {
             });
         };
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
-            paint(self, &clip, CanvasSource::Solid(&bg));
+            paint(self, &clip, CanvasSource::Solid(&bg, &separator));
         }
         let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
         if let Some(window) = window_pattern(shading, self.page_origin()) {
-            if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
+            if let Some(pattern) =
+                smooth_pattern(kind, shading, &window, (transfer.as_deref(), &separator))
+            {
                 paint(self, &clip, CanvasSource::Pattern(&pattern));
             }
             return;
@@ -342,14 +349,24 @@ impl PageRenderer<'_> {
         match &shading.result {
             ShadingResult::Mesh(mesh) => {
                 for tri in mesh.meeting(clip, origin) {
-                    self.canvas
-                        .gouraud_triangle(origin, clip, pipe, transfer, tri);
+                    self.canvas.gouraud_triangle(
+                        origin,
+                        clip,
+                        pipe,
+                        (transfer, &self.ink.separator),
+                        tri,
+                    );
                 }
             }
             ShadingResult::Mesh16(mesh) => {
                 for tri in mesh.meeting(clip, origin) {
-                    self.canvas
-                        .gouraud_triangle16(origin, clip, pipe, transfer, tri);
+                    self.canvas.gouraud_triangle16(
+                        origin,
+                        clip,
+                        pipe,
+                        (transfer, &self.ink.separator),
+                        tri,
+                    );
                 }
             }
             ShadingResult::InkMesh(mesh) => {
@@ -404,6 +421,7 @@ impl PageRenderer<'_> {
     ) {
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
+        let separator = self.ink.separator.clone();
         let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
             with_canvas!(&mut r.canvas, |b| {
                 let pipe = pipe.at();
@@ -413,11 +431,13 @@ impl PageRenderer<'_> {
             });
         };
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
-            paint(self, &clip, CanvasSource::Solid(&bg));
+            paint(self, &clip, CanvasSource::Solid(&bg, &separator));
         }
         let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
         if let Some(window) = window_pattern(shading, self.page_origin()) {
-            if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
+            if let Some(pattern) =
+                smooth_pattern(kind, shading, &window, (transfer.as_deref(), &separator))
+            {
                 paint(self, &clip, CanvasSource::Pattern(&pattern));
             }
             return;

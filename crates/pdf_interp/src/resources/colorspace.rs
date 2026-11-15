@@ -50,6 +50,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 use super::shading::function::Function;
 use crate::renderer::color::Srgb;
 use crate::resources::dict_ext::DictExt as _;
+use crate::separation::Separator;
 
 mod cal;
 pub(crate) mod icc;
@@ -313,20 +314,26 @@ impl ColorSpace {
 
     /// The process ink `[C, M, Y, K]` (0 = no ink) of the colour `comps`
     /// in this space, as a CMYK device would print it: the components
-    /// themselves in `DeviceCMYK`; in a four-component ICC space, the inks
-    /// nearest the components, with the same zero components, printing the
-    /// profile's sRGB colour in the process-ink model
-    /// ([`color::cmyk::ink_reproducing`]); the ink of
-    /// the alternate colour for a `Separation` or `DeviceN` space whose tint
-    /// transform evaluates; otherwise [`color::cmyk::rgb_to_ink`] of the
-    /// sRGB conversion.  A component count other
+    /// themselves in `DeviceCMYK`; in a four-component ICC space, under
+    /// the preview's separator ([`Separator::Model`]) the inks nearest the
+    /// components, with the same zero components, printing the profile's
+    /// sRGB colour in the process-ink model
+    /// ([`color::cmyk::ink_reproducing`]), and the components themselves
+    /// under any other; the ink of the alternate colour for a `Separation`
+    /// or `DeviceN` space whose tint transform evaluates; otherwise
+    /// `separator`'s ink of the sRGB conversion.  A component count other
     /// than [`ncomponents`](Self::ncomponents) converts as
     /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.  The ink
     /// and the colours it is found from are at the depth of `S`
-    /// ([`Self::convert`], [`color::cmyk::rgb_to_ink_at`]).
+    /// ([`Self::convert`]).
     #[must_use]
-    pub(crate) fn process_ink<S: Sample>(&self, doc: &Document, comps: &[f64]) -> [S; 4] {
-        self.process_ink_with(doc, comps, &mut color::cmyk::ink_reproducing_at)
+    pub(crate) fn process_ink<S: Sample>(
+        &self,
+        doc: &Document,
+        comps: &[f64],
+        separator: &Separator,
+    ) -> [S; 4] {
+        self.process_ink_with(doc, comps, separator, &mut color::cmyk::ink_reproducing_at)
     }
 
     /// [`process_ink`](Self::process_ink) with the inks reproducing the
@@ -337,6 +344,7 @@ impl ColorSpace {
         &self,
         doc: &Document,
         comps: &[f64],
+        separator: &Separator,
         reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
     ) -> [S; 4] {
         match self {
@@ -347,6 +355,9 @@ impl ColorSpace {
             }
             Self::IccBased { n: 4, .. } => {
                 if let &[c, m, y, k] = comps {
+                    if !separator.reproduces_process_colour() {
+                        return [c, m, y, k].map(S::from_unit);
+                    }
                     return reproduce(self.convert::<S>(doc, comps), [c, m, y, k]);
                 }
             }
@@ -361,12 +372,12 @@ impl ColorSpace {
                 ..
             } if comps.len() == self.ncomponents() => {
                 if let Some(alt) = tint.alternate_components(alternate, comps) {
-                    return alternate.process_ink_with(doc, &alt, reproduce);
+                    return alternate.process_ink_with(doc, &alt, separator, reproduce);
                 }
             }
             _ => {}
         }
-        color::cmyk::rgb_to_ink_at(self.convert::<S>(doc, comps))
+        separator.ink(self.convert::<S>(doc, comps))
     }
 
     /// Convert a tint-component slice to an sRGB byte triple per PDF §8.6.

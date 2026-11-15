@@ -105,8 +105,10 @@ impl PageRenderer<'_> {
             diag: std::mem::take(&mut self.diag),
             filter_counts: self.filter_counts,
         };
+        let cmyk = self.ink.cmyk;
         let (canvas, mut buffers, ink_map, _) = self.into_parts(!transparent);
-        let mut finished = canvas.try_into_finished_in(&ink_map.borrow().luts(), &mut buffers)?;
+        let mut finished =
+            canvas.try_into_finished_in(&ink_map.borrow().luts(), cmyk, &mut buffers)?;
         if transparent {
             finished.zero_transparent_colour();
         }

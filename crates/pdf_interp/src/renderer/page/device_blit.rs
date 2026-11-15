@@ -142,7 +142,7 @@ impl PageRenderer<'_> {
         let rgb_transfer = transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
         let gpu_ctx = self.gpu_ctx.as_deref();
         with_canvas!(&mut self.canvas, |bitmap| {
-            let mut compositor = ImageCompositor::new(bitmap, &paint);
+            let mut compositor = ImageCompositor::new(bitmap, &paint, &self.ink.separator);
             match kind {
                 CanvasKind::Rgb => {}
                 CanvasKind::Rgb16 => compositor.wide_transfer = transfer.as_deref(),

@@ -11,7 +11,7 @@
 
 use std::num::NonZeroU32;
 
-use color::{Gray8, Gray16, Rgb8, Rgb16};
+use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16};
 use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageState};
 use raster::Bitmap;
 
@@ -35,7 +35,8 @@ pub struct Band<'a> {
 
 /// The pixels of a [`Band`], of the depth of [`RenderParams::depth`]:
 /// sRGB, or the device values of the session's
-/// [`output_profile`](crate::SessionConfig::output_profile).
+/// [`output_profile`](crate::SessionConfig::output_profile), or the
+/// process ink of a page rendered as CMYK.
 #[derive(Clone, Copy)]
 pub enum BandBitmap<'a> {
     /// 8-bit RGB.
@@ -46,16 +47,23 @@ pub enum BandBitmap<'a> {
     Gray8(&'a Bitmap<Gray8>),
     /// 16-bit gray, of a gray output profile.
     Gray16(&'a Bitmap<Gray16>),
+    /// 8-bit CMYK, 0 no ink.
+    Cmyk8(&'a Bitmap<Cmyk8>),
+    /// 16-bit CMYK, 0 no ink.
+    Cmyk16(&'a Bitmap<Cmyk16>),
 }
 
 impl<'a> BandBitmap<'a> {
-    /// The band of `canvas`.
-    const fn of(canvas: &'a FinishedCanvas) -> Self {
+    /// The whole of `canvas` as a band.
+    #[must_use]
+    pub const fn of(canvas: &'a FinishedCanvas) -> Self {
         match canvas {
             FinishedCanvas::Rgb8(b) => Self::Rgb8(b),
             FinishedCanvas::Rgb16(b) => Self::Rgb16(b),
             FinishedCanvas::Gray8(b) => Self::Gray8(b),
             FinishedCanvas::Gray16(b) => Self::Gray16(b),
+            FinishedCanvas::Cmyk8(b) => Self::Cmyk8(b),
+            FinishedCanvas::Cmyk16(b) => Self::Cmyk16(b),
         }
     }
 
@@ -67,6 +75,8 @@ impl<'a> BandBitmap<'a> {
             Self::Rgb16(b) => (b.width, b.height),
             Self::Gray8(b) => (b.width, b.height),
             Self::Gray16(b) => (b.width, b.height),
+            Self::Cmyk8(b) => (b.width, b.height),
+            Self::Cmyk16(b) => (b.width, b.height),
         }
     }
 

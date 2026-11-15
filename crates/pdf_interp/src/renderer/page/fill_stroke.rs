@@ -103,7 +103,7 @@ impl PageRenderer<'_> {
             backdrop: None,
         };
         let pipe = paint.pipe();
-        let src = PipeSrc::Solid(white.bytes_for(CanvasKind::Rgb.mode()));
+        let src = PipeSrc::Solid(white.bytes_for(CanvasKind::Rgb.mode(), &self.ink.separator));
         stroke(
             &mut bitmap,
             &clip,

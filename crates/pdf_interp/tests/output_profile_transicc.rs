@@ -213,6 +213,7 @@ fn ours(
         FinishedCanvas::Rgb16(b) => b.row_samples(0).iter().map(|&v| f64::from(v)).collect(),
         FinishedCanvas::Gray8(b) => b.row_samples(0).iter().map(|&v| f64::from(v)).collect(),
         FinishedCanvas::Gray16(b) => b.row_samples(0).iter().map(|&v| f64::from(v)).collect(),
+        other => panic!("an RGB or gray conversion, not {other:?}"),
     };
     let n = samples.len() / patches.len();
     samples

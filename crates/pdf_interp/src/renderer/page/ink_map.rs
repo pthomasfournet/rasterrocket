@@ -24,6 +24,7 @@ use raster::pipe::ChannelMask;
 use super::super::color::{ColorantPlan, PROCESS_CHANNELS, no_spots, paint_tint};
 use crate::resources::ColorSpace;
 use crate::resources::colorspace::Colorant;
+use crate::separation::Separator;
 
 /// The number of spot slots of an ink canvas.
 const SLOTS: usize = 4;
@@ -53,6 +54,9 @@ pub(super) struct InkMap {
     /// The same for the process equivalents of the slots' tints, which
     /// would otherwise fill the table of the page's colours.
     spot_reproduced: Reproduced,
+    /// The conversion of the colours not given as ink: the process
+    /// equivalent of a spot whose alternate colour is not process ink.
+    separator: Separator,
 }
 
 /// The results of [`color::cmyk::ink_reproducing_at`], keyed by its
@@ -89,10 +93,12 @@ struct Slot {
 }
 
 impl InkMap {
-    /// The map of a page of samples of `depth`.
-    pub(super) fn new(depth: SampleDepth) -> Self {
+    /// The map of a page of samples of `depth`, whose colours not given
+    /// as ink convert by `separator`.
+    pub(super) fn new(depth: SampleDepth, separator: Separator) -> Self {
         Self {
             depth,
+            separator,
             ..Self::default()
         }
     }
@@ -109,9 +115,10 @@ impl InkMap {
         if self.slots.len() == SLOTS {
             return None;
         }
-        let lut = Box::new(spot_lut(doc, name, space, &mut self.spot_reproduced));
+        let (separator, reproduced) = (&self.separator, &mut self.spot_reproduced);
+        let lut = Box::new(spot_lut(doc, name, space, separator, reproduced));
         let lut16 = (self.depth == SampleDepth::Sixteen)
-            .then(|| spot_lut16(doc, name, space, &mut self.spot_reproduced));
+            .then(|| spot_lut16(doc, name, space, separator, reproduced));
         self.slots.push(Slot {
             name: Arc::from(name),
             lut,
@@ -209,8 +216,10 @@ impl InkMap {
     ) -> ([S; 8], ChannelMask) {
         let process_fallback = |map: &mut Self| {
             map.report_overflow(space);
-            let cmyk = space
-                .process_ink_with(doc, comps, &mut |rgb, given| map.reproduced.get(rgb, given));
+            let reproduced = &mut map.reproduced;
+            let cmyk = space.process_ink_with(doc, comps, &map.separator, &mut |rgb, given| {
+                reproduced.get(rgb, given)
+            });
             (no_spots(cmyk), PROCESS_CHANNELS)
         };
         if !self.fits(space) {
@@ -235,7 +244,7 @@ impl InkMap {
     pub(super) fn plan(&mut self, doc: &Document, space: &ColorSpace) -> ColorantPlan {
         if !self.fits(space) {
             self.report_overflow(space);
-            return ColorantPlan::Process;
+            return ColorantPlan::Process(self.separator.clone());
         }
         let channels: Option<Box<[u8]>> = space
             .colorants()
@@ -245,7 +254,7 @@ impl InkMap {
         channels.map_or_else(
             || {
                 self.report_overflow(space);
-                ColorantPlan::Process
+                ColorantPlan::Process(self.separator.clone())
             },
             ColorantPlan::Channels,
         )
@@ -281,6 +290,7 @@ struct SpotTint<'a> {
     space: &'a ColorSpace,
     component: usize,
     comps: Vec<f64>,
+    separator: &'a Separator,
     reproduced: &'a mut Reproduced,
 }
 
@@ -292,7 +302,7 @@ impl SpotTint<'_> {
         }
         let reproduced = &mut *self.reproduced;
         self.space
-            .process_ink_with(self.doc, &self.comps, &mut |rgb, given| {
+            .process_ink_with(self.doc, &self.comps, self.separator, &mut |rgb, given| {
                 reproduced.get(rgb, given)
             })
     }
@@ -304,9 +314,10 @@ fn spot_lut(
     doc: &Document,
     name: &[u8],
     space: &ColorSpace,
+    separator: &Separator,
     reproduced: &mut Reproduced,
 ) -> SpotLut {
-    let mut tint = spot_tint(doc, name, space, reproduced);
+    let mut tint = spot_tint(doc, name, space, separator, reproduced);
     std::array::from_fn(|t| tint.ink(f64::from(u8::try_from(t).unwrap_or(u8::MAX)) / 255.0))
 }
 
@@ -315,9 +326,10 @@ fn spot_lut16(
     doc: &Document,
     name: &[u8],
     space: &ColorSpace,
+    separator: &Separator,
     reproduced: &mut Reproduced,
 ) -> SpotLut16 {
-    let mut tint = spot_tint(doc, name, space, reproduced);
+    let mut tint = spot_tint(doc, name, space, separator, reproduced);
     SpotLut16::from_fn(|t| tint.ink(t))
 }
 
@@ -328,6 +340,7 @@ fn spot_tint<'a>(
     doc: &'a Document,
     name: &[u8],
     space: &'a ColorSpace,
+    separator: &'a Separator,
     reproduced: &'a mut Reproduced,
 ) -> SpotTint<'a> {
     let component = space
@@ -344,6 +357,7 @@ fn spot_tint<'a>(
         space,
         component: component.unwrap_or(0),
         comps: vec![0.0; space.ncomponents()],
+        separator,
         reproduced,
     }
 }
@@ -452,6 +466,7 @@ mod tests {
             &doc,
             b"Teal",
             &separation(&doc, "Teal", "1 0 0.5 0"),
+            &Separator::Model,
             &mut Reproduced::default(),
         );
         assert_eq!(lut[0], [0, 0, 0, 0]);
@@ -469,7 +484,13 @@ mod tests {
             ),
         )]);
         let dn = space(&doc, "[/DeviceN [/Black /Teal] /DeviceCMYK 4 0 R]");
-        let lut = spot_lut(&doc, b"Teal", &dn, &mut Reproduced::default());
+        let lut = spot_lut(
+            &doc,
+            b"Teal",
+            &dn,
+            &Separator::Model,
+            &mut Reproduced::default(),
+        );
         assert_eq!(lut[255], [0, 255, 255, 0]);
         assert_eq!(lut[0], [0, 0, 0, 0]);
         assert_eq!(lut[102], [0, 102, 102, 0]);
@@ -574,7 +595,13 @@ mod tests {
     fn spot_lut_degrades_when_the_tint_transform_fails() {
         let doc = empty_doc();
         let broken = space(&doc, "[/Separation /Spot /DeviceCMYK 999 0 R]");
-        let lut = spot_lut(&doc, b"Spot", &broken, &mut Reproduced::default());
+        let lut = spot_lut(
+            &doc,
+            b"Spot",
+            &broken,
+            &Separator::Model,
+            &mut Reproduced::default(),
+        );
         assert_eq!(lut[0], [0; 4]);
         assert_eq!(lut[255][3], 255);
         assert!(
@@ -589,7 +616,7 @@ mod tests {
     fn a_16_bit_page_slots_its_spots_at_16_bits() {
         let doc = empty_doc();
         let teal = separation(&doc, "Teal", "1 0 0.5 0");
-        let mut map = InkMap::new(SampleDepth::Sixteen);
+        let mut map = InkMap::new(SampleDepth::Sixteen, Separator::Model);
         let (ink, paints) = map.colorant_ink::<u16>(&doc, &teal, &[0.25]);
         assert_eq!(
             (ink, paints),

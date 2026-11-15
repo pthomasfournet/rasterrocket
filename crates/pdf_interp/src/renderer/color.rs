@@ -15,6 +15,7 @@ use raster::pipe::ChannelMask;
 
 use crate::resources::OverprintMode;
 use crate::resources::transfer::Transfer;
+use crate::separation::Separator;
 
 /// The process channels C, M, Y and K of an ink canvas.
 pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
@@ -67,8 +68,9 @@ pub(crate) enum ColorantPlan {
     /// paint takes the largest tint.
     Channels(Box<[u8]>),
     /// The space's spot colorants do not all hold a slot: the colour is the
-    /// process ink of its alternate colour.
-    Process,
+    /// process ink of its alternate colour, a colour that is not process
+    /// ink converted by the separator.
+    Process(Separator),
 }
 
 impl ColorantPlan {
@@ -76,7 +78,7 @@ impl ColorantPlan {
     pub(crate) fn paints(&self) -> ChannelMask {
         match self {
             Self::Channels(channels) => ChannelMask::new(channels.iter().fold(0, |a, &b| a | b)),
-            Self::Process => PROCESS_CHANNELS,
+            Self::Process(_) => PROCESS_CHANNELS,
         }
     }
 
@@ -96,7 +98,7 @@ impl ColorantPlan {
                 }
                 ink
             }
-            Self::Process => no_spots(space.process_ink::<S>(doc, comps)),
+            Self::Process(separator) => no_spots(space.process_ink::<S>(doc, comps, separator)),
         }
     }
 
@@ -135,10 +137,11 @@ pub(crate) fn paint_tint<S: Sample>(ink: &mut [S; 8], bits: u8, tint: S) {
 /// amounts `[C, M, Y, K, S0, S1, S2, S3]` (0 = no ink), painted on an ink
 /// canvas.  A colour given in a four-component process space keeps its
 /// components as the ink, and a colour given in a `Separation` or `DeviceN`
-/// space its colorants' tints; any other colour's ink is
-/// [`color::cmyk::rgb_to_ink`] of its sRGB bytes — the inks printing the
-/// colour with the most black — with no spot ink, computed on first use so
-/// that a page painted on an RGB canvas never evaluates it.
+/// space its colorants' tints; any other colour's ink is the page's
+/// [`Separator`] of its sRGB bytes, with no spot ink, computed on first use
+/// so that a page painted on an RGB canvas never evaluates it.  A colour
+/// lives within one page, whose canvas has one separator, so the ink it
+/// keeps is that separator's.
 ///
 /// On an ink canvas the colour paints the channels of [`Self::paints`] and
 /// keeps the backdrop in the others: the process channels for a
@@ -154,8 +157,7 @@ pub(crate) fn paint_tint<S: Sample>(ink: &mut [S; 8], bits: u8, tint: S) {
 /// function maps it through the function itself, evaluated on first use.
 /// Its ink is held at 16 bits too ([`Inks`]): a given ink as the same
 /// tints rounded at 16 bits, or the 16-bit solve of a 16-bit page; a
-/// derived ink converts from the 16-bit sRGB value
-/// ([`color::cmyk::rgb_to_ink16`]) on first use.
+/// derived ink converts from the 16-bit sRGB value on first use.
 ///
 /// `PipeSrc::Solid` takes the pixel's samples and asserts their count
 /// equals the pixel's channel count; [`Self::bytes_for`] returns them for
@@ -363,11 +365,12 @@ impl RasterColor {
         })
     }
 
-    /// The ink amounts `[C, M, Y, K, S0, S1, S2, S3]`.
+    /// The ink amounts `[C, M, Y, K, S0, S1, S2, S3]`; a derived ink is
+    /// `separator`'s conversion of the colour.
     #[must_use]
-    pub(crate) fn ink(&self) -> &[u8; 8] {
+    pub(crate) fn ink(&self, separator: &Separator) -> &[u8; 8] {
         self.ink.get_or_init(|| {
-            let [c, m, y, k] = color::cmyk::rgb_to_ink(self.source.bytes);
+            let [c, m, y, k] = separator.ink(self.source.bytes);
             let ink = [c, m, y, k, 0, 0, 0, 0];
             self.ink_transfer
                 .as_ref()
@@ -376,12 +379,12 @@ impl RasterColor {
     }
 
     /// The 16-bit ink amounts `[C, M, Y, K, S0, S1, S2, S3]`: a derived
-    /// ink converts from the 16-bit colour ([`color::cmyk::rgb_to_ink16`])
-    /// and maps through the transfer function at 16 bits.
+    /// ink converts from the 16-bit colour by `separator` and maps through
+    /// the transfer function at 16 bits.
     #[must_use]
-    pub(crate) fn ink16(&self) -> &[u16; 8] {
+    pub(crate) fn ink16(&self, separator: &Separator) -> &[u16; 8] {
         self.ink16.get_or_init(|| {
-            let [c, m, y, k] = color::cmyk::rgb_to_ink16(self.source.wide);
+            let [c, m, y, k] = separator.ink(self.source.wide);
             let ink = [c, m, y, k, 0, 0, 0, 0];
             self.ink_transfer
                 .as_ref()
@@ -427,11 +430,12 @@ impl RasterColor {
     }
 
     /// The colour's bytes for a pixel of `mode`: the ink amounts for
-    /// [`PixelMode::DeviceN8`], the RGB bytes for every other mode.
+    /// [`PixelMode::DeviceN8`], a derived ink by `separator`, the RGB
+    /// bytes for every other mode.
     #[must_use]
-    pub(crate) fn bytes_for(&self, mode: PixelMode) -> &[u8] {
+    pub(crate) fn bytes_for(&self, mode: PixelMode, separator: &Separator) -> &[u8] {
         match mode {
-            PixelMode::DeviceN8 => self.ink(),
+            PixelMode::DeviceN8 => self.ink(separator),
             _ => &self.bytes,
         }
     }
@@ -625,21 +629,24 @@ mod tests {
     fn raster_color_ink_is_given_cmyk_or_derived() {
         let c = RasterColor::cmyk(0.2, 0.5, 0.1, 0.3);
         assert_eq!(
-            c.bytes_for(PixelMode::DeviceN8),
+            c.bytes_for(PixelMode::DeviceN8, &Separator::Model),
             &[51, 128, 26, 77, 0, 0, 0, 0]
         );
-        assert_eq!(c.bytes_for(PixelMode::Rgb8), c.as_slice());
+        assert_eq!(
+            c.bytes_for(PixelMode::Rgb8, &Separator::Model),
+            c.as_slice()
+        );
         let white = RasterColor::gray(1.0);
-        assert_eq!(white.ink(), &[0; 8]);
+        assert_eq!(white.ink(&Separator::Model), &[0; 8]);
         // A grey prints in black ink alone, the black printing that grey.
         let grey = RasterColor::gray(0.2);
-        let grey = grey.ink();
+        let grey = grey.ink(&Separator::Model);
         assert_eq!(grey[..3], [0, 0, 0]);
         assert_eq!(grey[4..], [0; 4]);
         assert!(color::cmyk::cmyk_to_rgb(0, 0, 0, grey[3])[0].abs_diff(51) <= 1);
         // Equal RGB given as process inks differs from the derived colour.
         let given = RasterColor::with_process_inks(Srgb::of_bytes([255; 3]), [0.0; 4]);
-        assert_eq!(given.ink(), white.ink());
+        assert_eq!(given.ink(&Separator::Model), white.ink(&Separator::Model));
         assert_ne!(given, white);
     }
 
@@ -655,7 +662,7 @@ mod tests {
         );
         assert_eq!(spot.paints(), ChannelMask::new(0b1_0000));
         assert!(!spot.opm_eligible());
-        assert_eq!(spot.ink(), &[0, 0, 0, 0, 153, 0, 0, 0]);
+        assert_eq!(spot.ink(&Separator::Model), &[0, 0, 0, 0, 153, 0, 0, 0]);
         // The same ink in a different channel is a different colour.
         assert_ne!(
             spot,
@@ -685,7 +692,7 @@ mod tests {
         );
         // A component however small is painted; only an exact 0 is not.
         let faint = RasterColor::cmyk(0.001, 0.0, 0.5, 0.0);
-        assert_eq!(faint.ink()[0], 0);
+        assert_eq!(faint.ink(&Separator::Model)[0], 0);
         assert_eq!(
             faint.paints_with_opm(OverprintMode::NonZero),
             ChannelMask::new(0b0101)
@@ -693,7 +700,7 @@ mod tests {
         assert_ne!(faint, RasterColor::cmyk(0.0, 0.0, 0.5, 0.0));
         // A component that clamps to no ink counts as zero.
         let clamped = RasterColor::cmyk(-0.25, f64::NAN, 0.5, 0.0);
-        assert_eq!(clamped.ink()[..2], [0, 0]);
+        assert_eq!(clamped.ink(&Separator::Model)[..2], [0, 0]);
         assert_eq!(
             clamped.paints_with_opm(OverprintMode::NonZero),
             ChannelMask::new(0b0100)
@@ -740,14 +747,14 @@ mod tests {
         let mapped = spot.transferred(Some(&transfer));
         assert_eq!(mapped.bytes(), [55, 225, 195]);
         assert_eq!(mapped.paints(), ChannelMask::new(0b1_0000));
-        assert_eq!(mapped.ink(), &[0, 0, 0, 0, 102, 0, 0, 0]);
+        assert_eq!(mapped.ink(&Separator::Model), &[0, 0, 0, 0, 102, 0, 0, 0]);
         // The 16-bit value maps through the function at 16 bits.
         assert_eq!(mapped.rgb16(), &transfer.apply16(*spot.rgb16()));
         assert_eq!(spot.rgb16(), &[200, 30, 60].map(u16::from_u8));
         assert_eq!(spot.transferred(None), spot);
         // A process colour keeps its eligibility and its zero components.
         let black = RasterColor::cmyk(0.0, 0.0, 0.0, 1.0).transferred(Some(&transfer));
-        assert_eq!(black.ink()[..4], [255, 255, 255, 0]);
+        assert_eq!(black.ink(&Separator::Model)[..4], [255, 255, 255, 0]);
         assert_eq!(
             black.paints_with_opm(OverprintMode::NonZero),
             ChannelMask::new(0b1000)
@@ -757,10 +764,14 @@ mod tests {
         let mapped = grey.transferred(Some(&transfer));
         assert_eq!(mapped.paints(), ChannelMask::ALL);
         assert_eq!(
-            mapped.ink(),
-            &transfer.apply_ink(*grey.ink(), PROCESS_CHANNELS)
+            mapped.ink(&Separator::Model),
+            &transfer.apply_ink(*grey.ink(&Separator::Model), PROCESS_CHANNELS)
         );
-        assert_eq!(mapped.ink()[4..], [0; 4], "a derived ink holds no spot ink");
+        assert_eq!(
+            mapped.ink(&Separator::Model)[4..],
+            [0; 4],
+            "a derived ink holds no spot ink"
+        );
     }
 
     #[test]

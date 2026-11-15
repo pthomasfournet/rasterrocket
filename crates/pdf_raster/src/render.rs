@@ -138,7 +138,16 @@ pub(crate) fn rgb8(canvas: FinishedCanvas) -> Result<Bitmap<Rgb8>, RasterError> 
             "a 16-bit page where an 8-bit one was rendered".to_owned(),
         )),
         FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_) => Err(gray_output()),
+        FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => Err(cmyk_output()),
     }
+}
+
+/// The refusal of an RGB or gray result for a page rendered as CMYK.
+pub(crate) fn cmyk_output() -> RasterError {
+    RasterError::InvalidOptions(
+        "the page is rendered as CMYK: render it with render_page_canvas or render_page_bands"
+            .to_owned(),
+    )
 }
 
 /// The refusal of an RGB result for a page a gray output profile converts
@@ -226,6 +235,7 @@ pub fn render_page_gray(
                 diagnostics,
             ));
         }
+        FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
     };
 
     if opts.deskew {
@@ -290,6 +300,7 @@ pub fn render_page_rgba(
             crate::page::rgb16_to_rgba16_rendered_page(&rgb, page_num, dpi, diagnostics)
         }
         FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_) => return Err(gray_output()),
+        FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
     })
 }
 
@@ -556,8 +567,8 @@ pub(crate) struct PageJob<'a> {
     pub(crate) ops: &'a [pdf_interp::content::Operator<'a>],
     /// The page group the page is painted as.
     pub(crate) group: Option<pdf_interp::resources::TransparencyGroupParams>,
-    /// Whether the page is painted on an ink canvas.
-    pub(crate) ink: bool,
+    /// The canvas the page is painted on.
+    pub(crate) canvas: pdf_interp::CanvasRequest,
     pub(crate) params: &'a RenderParams,
     /// The backend policy for GPU decoder selection.
     policy: crate::BackendPolicy,
@@ -567,7 +578,7 @@ impl<'a> PageJob<'a> {
     /// The job of drawing `ops`, the content of page `page_id`, in `view`
     /// as `params` asks.  The page is painted on an ink canvas, which
     /// simulates overprint, when the session simulates it and some
-    /// graphics state the page draws with sets it.
+    /// graphics state the page draws with sets it (see [`canvas_request`]).
     pub(crate) fn new(
         session: &'a RasterSession,
         page_num: u32,
@@ -585,8 +596,7 @@ impl<'a> PageJob<'a> {
             view,
             ops,
             group: page_group(doc, page_id, params.transparent_background),
-            ink: session.overprint
-                && pdf_interp::page_uses_overprint(doc, page_id, session.annotations),
+            canvas: canvas_request(session, page_id),
             params,
             policy,
         }
@@ -604,7 +614,7 @@ impl<'a> PageJob<'a> {
             &session.doc,
             self.page_id,
             self.group,
-            self.ink,
+            &self.canvas,
             self.params.depth,
             buffers,
         )
@@ -662,6 +672,19 @@ impl<'a> PageJob<'a> {
         let mut renderer = self.renderer(buffers)?;
         self.execute(&mut renderer)?;
         Ok(renderer)
+    }
+}
+
+/// The canvas page `page_id` of `session` is painted on: the overprint
+/// preview when the session simulates overprint and some graphics state
+/// the page draws with sets it, sRGB otherwise.
+fn canvas_request(session: &RasterSession, page_id: pdf::ObjectId) -> pdf_interp::CanvasRequest {
+    if session.overprint
+        && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations)
+    {
+        pdf_interp::CanvasRequest::OverprintPreview
+    } else {
+        pdf_interp::CanvasRequest::Rgb
     }
 }
 

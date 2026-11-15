@@ -57,16 +57,13 @@ fn planes(canvas: BandBitmap<'_>) -> (Vec<u32>, Vec<u32>) {
         BandBitmap::Rgb16(b) => of(b),
         BandBitmap::Gray8(b) => of(b),
         BandBitmap::Gray16(b) => of(b),
+        BandBitmap::Cmyk8(b) => of(b),
+        BandBitmap::Cmyk16(b) => of(b),
     }
 }
 
 fn whole_planes(canvas: &FinishedCanvas) -> (Vec<u32>, Vec<u32>) {
-    planes(match canvas {
-        FinishedCanvas::Rgb8(b) => BandBitmap::Rgb8(b),
-        FinishedCanvas::Rgb16(b) => BandBitmap::Rgb16(b),
-        FinishedCanvas::Gray8(b) => BandBitmap::Gray8(b),
-        FinishedCanvas::Gray16(b) => BandBitmap::Gray16(b),
-    })
+    planes(BandBitmap::of(canvas))
 }
 
 /// The bands of 7 rows of page 1, their colour and alpha samples stacked.

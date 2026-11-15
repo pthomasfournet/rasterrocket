@@ -176,6 +176,13 @@ pub(crate) fn render_page(
             )
             .into());
         }
+        FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => {
+            return Err(RasterError::InvalidOptions(
+                "a CMYK page is written as CMYK TIFF or JPEG; this output takes RGB or gray pages"
+                    .to_owned(),
+            )
+            .into());
+        }
     };
     let sink = match (document, fax_layout) {
         (Document::Fax(document), Some(layout)) => Sink::Fax {

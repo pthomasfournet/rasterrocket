@@ -1,0 +1,234 @@
+//! Pages finished as CMYK: the process ink of an ink canvas, its spots
+//! folded in, with overprint simulated only when requested.
+
+use color::cmyk::rgb_to_device_cmyk;
+use color::{Sample, SampleDepth};
+use pdf::Document;
+
+use super::*;
+use crate::renderer::FinishedCanvas;
+use crate::separation::{CanvasRequest, Separation};
+
+/// Page `(4, 0)` whose `/ExtGState` resources are the entries `states` and
+/// whose `/ColorSpace` resources are the entries `spaces`.
+fn page_doc(states: &str, spaces: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[(
+        4,
+        format!(
+            "<< /Type /Page /Resources << /ExtGState << {states} >> \
+             /ColorSpace << {spaces} >> >> >>"
+        ),
+    )])
+}
+
+/// The request of a CMYK page separated by the device conversion,
+/// simulating overprint when `overprint`.
+const fn cmyk(overprint: bool) -> CanvasRequest {
+    CanvasRequest::Cmyk {
+        overprint,
+        separation: Separation::Device,
+    }
+}
+
+/// `content` rendered on page `(4, 0)` of `doc`, `size` pixels square, as
+/// a CMYK page of samples of `depth` under `request`: four samples a
+/// pixel, widened to 16 bits.
+fn render(
+    doc: &Document,
+    (size, depth): (u32, SampleDepth),
+    request: &CanvasRequest,
+    content: &[u8],
+) -> Vec<u16> {
+    let view = PageRenderer::unit_view(size, size);
+    let mut renderer = PageRenderer::try_with_page_group_in(
+        &view,
+        doc,
+        (4, 0),
+        None,
+        request,
+        depth,
+        super::super::CanvasBuffers::default(),
+    )
+    .expect("the canvas is allocated");
+    renderer.execute(&crate::content::parse(content));
+    match renderer.try_finish_keeping(false).expect("finishes").0 {
+        FinishedCanvas::Cmyk8(b) => b.data().iter().map(|&v| u16::from(v)).collect(),
+        FinishedCanvas::Cmyk16(b) => b.data().to_vec(),
+        other => panic!("a CMYK page, not {other:?}"),
+    }
+}
+
+/// The CMYK of pixel `(x, y)` of the 10-pixel-square page `page`.
+fn at(page: &[u16], x: usize, y: usize) -> [u16; 4] {
+    let i = (y * 10 + x) * 4;
+    page[i..i + 4].try_into().unwrap()
+}
+
+/// The samples of `v` ([0, 1] each) at `depth`, widened to 16 bits.
+fn of_unit(v: [f64; 4], depth: SampleDepth) -> [u16; 4] {
+    v.map(|v| match depth {
+        SampleDepth::Eight => u16::from(u8::from_unit(v)),
+        SampleDepth::Sixteen => u16::from_unit(v),
+    })
+}
+
+const DEPTHS: [SampleDepth; 2] = [SampleDepth::Eight, SampleDepth::Sixteen];
+
+/// The `DeviceCMYK` colours of the swatch fixture.
+const SWATCHES: [[f64; 4]; 6] = [
+    [0.87, 0.01, 0.0, 0.0],
+    [1.0, 0.46, 0.05, 0.18],
+    [0.0, 0.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0, 0.0],
+    [0.0, 1.0, 1.0, 0.0],
+    [0.5, 0.5, 0.5, 0.0],
+];
+
+#[test]
+fn device_cmyk_fills_keep_their_values() {
+    let doc = page_doc("", "");
+    for depth in DEPTHS {
+        for swatch in SWATCHES {
+            let [c, m, y, k] = swatch;
+            let content = format!("{c} {m} {y} {k} k 0 0 10 10 re f");
+            let page = render(&doc, (10, depth), &cmyk(false), content.as_bytes());
+            assert_eq!(
+                at(&page, 5, 5),
+                of_unit(swatch, depth),
+                "{swatch:?} at {depth:?}"
+            );
+        }
+        let blank = render(&doc, (10, depth), &cmyk(false), b"");
+        assert!(blank.iter().all(|&v| v == 0), "paper is no ink");
+    }
+}
+
+#[test]
+fn a_fill_in_a_transparency_group_keeps_its_values() {
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /XObject << /F 5 0 R >> >> >>".to_owned(),
+        ),
+        (
+            5,
+            super::stream_object(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /I true >>",
+                "1 0.46 0.05 0.18 k 0 0 10 10 re f",
+            ),
+        ),
+    ]);
+    for depth in DEPTHS {
+        let page = render(&doc, (10, depth), &cmyk(false), b"/F Do");
+        assert_eq!(at(&page, 5, 5), of_unit(SWATCHES[1], depth), "{depth:?}");
+    }
+}
+
+#[test]
+fn overprint_is_simulated_only_when_requested() {
+    let doc = page_doc("/GS_op << /OP true /op true /OPM 1 >>", "");
+    let content = b"1 0 0 0 k 0 0 10 10 re f /GS_op gs 0 0 0 1 k 0 0 5 10 re f";
+    let knocked = render(&doc, (10, SampleDepth::Eight), &cmyk(false), content);
+    assert_eq!(at(&knocked, 2, 5), [0, 0, 0, 255]);
+    assert_eq!(at(&knocked, 7, 5), [255, 0, 0, 0]);
+    let kept = render(&doc, (10, SampleDepth::Eight), &cmyk(true), content);
+    assert_eq!(at(&kept, 2, 5), [255, 0, 0, 255]);
+    assert_eq!(at(&kept, 7, 5), [255, 0, 0, 0]);
+}
+
+#[test]
+fn gray_and_rgb_separate_by_the_device_conversion() {
+    let doc = page_doc("", "");
+    for (content, rgb) in [
+        (&b"0 g"[..], [0u8; 3]),
+        (b"0.5 g", [128; 3]),
+        (b"1 0 0 rg", [255, 0, 0]),
+        (b"0.4 0.8 0.1 rg", [102, 204, 26]),
+    ] {
+        let fill = [content, b" 0 0 10 10 re f"].concat();
+        let page = render(&doc, (10, SampleDepth::Eight), &cmyk(false), &fill);
+        let want = rgb_to_device_cmyk(rgb).map(u16::from);
+        assert_eq!(
+            at(&page, 5, 5),
+            want,
+            "{}",
+            String::from_utf8_lossy(content)
+        );
+    }
+    let page = render(
+        &doc,
+        (10, SampleDepth::Sixteen),
+        &cmyk(false),
+        b"0 g 0 0 10 10 re f",
+    );
+    assert_eq!(
+        at(&page, 5, 5),
+        [0, 0, 0, 65_535],
+        "black text is black ink alone"
+    );
+}
+
+#[test]
+fn a_spot_folds_into_its_process_equivalent() {
+    let space = format!(
+        "/Spot [/Separation /Spot /DeviceCMYK {}]",
+        super::tint_to_cmyk("0 0.91 0.76 0")
+    );
+    let doc = page_doc("/GS << /op true >>", &space);
+    for depth in DEPTHS {
+        let page = render(
+            &doc,
+            (10, depth),
+            &cmyk(false),
+            b"/Spot cs 1 scn 0 0 10 10 re f",
+        );
+        assert_eq!(
+            at(&page, 5, 5),
+            of_unit([0.0, 0.91, 0.76, 0.0], depth),
+            "{depth:?}"
+        );
+    }
+    // Overprinting cyan, the spot keeps the cyan under it.
+    let content = b"1 0 0 0 k 0 0 10 10 re f /GS gs /Spot cs 1 scn 0 0 10 10 re f";
+    let page = render(&doc, (10, SampleDepth::Eight), &cmyk(true), content);
+    assert_eq!(at(&page, 5, 5), [255, 232, 194, 0]);
+}
+
+/// An `ICCBased` CMYK colour paints its components on a CMYK page: they
+/// are a CMYK device's values already.
+#[test]
+fn icc_cmyk_colours_keep_their_components() {
+    const PROFILE: &[u8] =
+        include_bytes!("../../../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+    let mut profile = format!("<< /N 4 /Length {} >>\nstream\n", PROFILE.len()).into_bytes();
+    profile.extend_from_slice(PROFILE);
+    profile.extend_from_slice(b"\nendstream");
+    let page =
+        b"<< /Type /Page /Resources << /ColorSpace << /ICC [/ICCBased 5 0 R] >> >> >>".to_vec();
+    let doc = crate::test_helpers::make_doc_with_objects(&[(4, page), (5, profile)]);
+    for depth in DEPTHS {
+        let page = render(
+            &doc,
+            (10, depth),
+            &cmyk(false),
+            b"/ICC cs 0.6 0.3 0 0.1 sc 0 0 10 10 re f",
+        );
+        assert_eq!(
+            at(&page, 5, 5),
+            of_unit([0.6, 0.3, 0.0, 0.1], depth),
+            "{depth:?}"
+        );
+    }
+}
+
+/// The overprint preview of the same page is unchanged by the CMYK
+/// finish: it renders through the same canvas to sRGB.
+#[test]
+fn the_overprint_preview_still_finishes_as_srgb() {
+    let doc = page_doc("", "");
+    let mut renderer = PageRenderer::new_ink(10, 10, &doc, (4, 0));
+    renderer.execute(&crate::content::parse(b"0.2 0.5 0.1 0.3 k 0 0 10 10 re f"));
+    let (finished, _, _) = renderer.try_finish_keeping(false).expect("finishes");
+    assert!(matches!(finished, FinishedCanvas::Rgb8(_)), "{finished:?}");
+}

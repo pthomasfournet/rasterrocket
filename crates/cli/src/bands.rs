@@ -196,14 +196,9 @@ fn render_into(
             FinishedCanvas::Rgb16(rgb) => tone::is_reversed_out16(rgb),
             FinishedCanvas::Gray8(gray) => tone::is_reversed_out(gray),
             FinishedCanvas::Gray16(gray) => tone::is_reversed_out(gray),
+            FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => false,
         };
-        let band = match &canvas {
-            FinishedCanvas::Rgb8(rgb) => BandBitmap::Rgb8(rgb),
-            FinishedCanvas::Rgb16(rgb) => BandBitmap::Rgb16(rgb),
-            FinishedCanvas::Gray8(gray) => BandBitmap::Gray8(gray),
-            FinishedCanvas::Gray16(gray) => BandBitmap::Gray16(gray),
-        };
-        return prepared(band, 0, args, invert, &mut push);
+        return prepared(BandBitmap::of(&canvas), 0, args, invert, &mut push);
     }
     let invert = args.invert_when() == InvertWhen::Always;
     render_page_bands(session, page_num, params, |band| {
@@ -240,6 +235,8 @@ fn prepared(
             None => push(RowImage::Gray16(band)),
             Some(gray) => push(RowImage::Gray16(&gray)),
         },
+        BandBitmap::Cmyk8(band) => push(RowImage::Cmyk(band)),
+        BandBitmap::Cmyk16(band) => push(RowImage::Cmyk16(band)),
     }
 }
 

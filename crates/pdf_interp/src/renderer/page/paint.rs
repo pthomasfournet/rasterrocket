@@ -24,6 +24,7 @@ use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::resources::ColorSpace;
 use crate::resources::transfer::Transfer;
+use crate::separation::Separator;
 
 /// `path` with every point mapped through `m`.  An affine map carries Bézier
 /// control points to the control points of the mapped curve, so flags and
@@ -171,14 +172,18 @@ impl PageRenderer<'_> {
             // Pattern operands are handled by the pattern dispatch, not here;
             // fall back to the legacy heuristic for any stray component.
             ColorSpace::Pattern { .. } => components_to_color(comps),
-            // A four-component ICC space is a process CMYK space.  On an
-            // ink canvas its ink is the process ink printing the profile's
-            // colour, with the components' zeros (see
+            // A four-component ICC space is a process CMYK space.  On the
+            // preview's ink canvas its ink is the process ink printing the
+            // profile's colour, with the components' zeros; on a canvas
+            // finished as CMYK, the components (see
             // `ColorSpace::process_ink`).
             ColorSpace::IccBased { n: 4, .. } => match comps {
                 &[c, m, y, k] => {
                     let rgb = srgb(cs);
                     let cmyk = [c, m, y, k];
+                    if !self.ink.separator.reproduces_process_colour() {
+                        return RasterColor::with_process_inks(rgb, cmyk);
+                    }
                     let mut map = self.ink_map.borrow_mut();
                     let ink = match self.canvas.kind() {
                         CanvasKind::Ink => Inks::process(map.ink_reproducing(rgb.bytes, cmyk)),
@@ -347,14 +352,16 @@ impl PageRenderer<'_> {
     /// The channels a paint of the stroking (`stroke`) or non-stroking
     /// operation writes when its source paints the channels `paints`
     /// (ISO 32000-1 §8.6.7): `paints` with overprint set for the operation on an
-    /// ink canvas; otherwise `None`, every channel — on an RGB canvas,
-    /// with overprint off, and when `paints` covers every channel.
+    /// ink canvas that simulates overprint; otherwise `None`, every
+    /// channel — on an RGB canvas, on an ink canvas that does not simulate
+    /// overprint, with overprint off, and when `paints` covers every
+    /// channel.
     pub(super) fn overprint_channels(
         &self,
         stroke: bool,
         paints: ChannelMask,
     ) -> Option<ChannelMask> {
-        if !self.canvas.kind().is_ink() {
+        if !self.simulates_overprint() {
             return None;
         }
         let gs = self.gstate.current();
@@ -367,12 +374,18 @@ impl PageRenderer<'_> {
     }
 
     /// The channels a paint of the tiling pattern `tile` writes on an ink
-    /// canvas, `None` for every channel: those its cell's content painted.
-    /// The cell's own paints carry their overprint, whatever the overprint
-    /// state of the paint that uses the pattern.
+    /// canvas that simulates overprint, `None` for every channel: those
+    /// its cell's content painted.  The cell's own paints carry their
+    /// overprint, whatever the overprint state of the paint that uses the
+    /// pattern.
     pub(super) fn tile_overprint(&self, tile: &Tile) -> Option<ChannelMask> {
         let paints = tile.paints();
-        (self.canvas.kind().is_ink() && paints != ChannelMask::ALL).then_some(paints)
+        (self.simulates_overprint() && paints != ChannelMask::ALL).then_some(paints)
+    }
+
+    /// Whether the canvas is of ink and simulates overprint.
+    pub(super) const fn simulates_overprint(&self) -> bool {
+        self.canvas.kind().is_ink() && self.ink.overprint
     }
 
     /// The channels a fill or stroke of the solid colour `colour` writes
@@ -508,7 +521,7 @@ impl PageRenderer<'_> {
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
-            transfer.as_deref(),
+            (transfer.as_deref(), &self.ink.separator),
         );
         let pipe = source.pipe(&paint);
         let source = source.source();
@@ -671,7 +684,7 @@ impl PageRenderer<'_> {
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
-            transfer.as_deref(),
+            (transfer.as_deref(), &self.ink.separator),
         );
         let pipe = source.pipe(&paint);
         let source = source.source();
@@ -762,6 +775,8 @@ struct PaintSource<'a> {
     pattern: Option<CanvasPattern<'a>>,
     /// The solid colour.
     solid: &'a RasterColor,
+    /// The separator of colours not given as ink.
+    separator: &'a Separator,
     /// The transfer function the pipe applies to the pattern's colours.
     pipe_transfer: Option<&'a Transfer>,
 }
@@ -772,16 +787,17 @@ impl<'a> PaintSource<'a> {
     /// every canvas.  `transfer` applies to the pattern's colours only:
     /// the pipe takes its tables on an RGB canvas, the pattern applies it
     /// before conversion on an ink canvas; a tile of ink maps its ink.
+    /// `separator` converts colours not given as ink on an ink canvas.
     fn new(
         kind: CanvasKind,
         tiled: Option<&'a Tile>,
         solid: &'a RasterColor,
-        transfer: Option<&'a Transfer>,
+        (transfer, separator): (Option<&'a Transfer>, &'a Separator),
     ) -> Self {
         Self {
             pattern: tiled.map(|tile| match tile {
-                Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, transfer),
-                Tile::Rgb16(p) => CanvasPattern::wide(kind, p, transfer),
+                Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, (transfer, separator)),
+                Tile::Rgb16(p) => CanvasPattern::wide(kind, p, (transfer, separator)),
                 Tile::Ink { pattern, channels } => {
                     CanvasPattern::ink(pattern, transfer, channels.carries)
                 }
@@ -790,6 +806,7 @@ impl<'a> PaintSource<'a> {
                 }
             }),
             solid,
+            separator,
             pipe_transfer: tiled.and_then(|_| CanvasPattern::pipe_transfer(kind, transfer)),
         }
     }
@@ -807,9 +824,10 @@ impl<'a> PaintSource<'a> {
 
     /// The source as a canvas of any depth takes it.
     fn source(&self) -> CanvasSource<'_> {
-        self.pattern
-            .as_ref()
-            .map_or(CanvasSource::Solid(self.solid), CanvasSource::Pattern)
+        self.pattern.as_ref().map_or(
+            CanvasSource::Solid(self.solid, self.separator),
+            CanvasSource::Pattern,
+        )
     }
 }
 

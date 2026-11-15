@@ -24,6 +24,7 @@ use super::{
     DEADLINE_CHECK_INTERVAL, MAX_WARNED_UNKNOWN_OPS, PageDiagnostics, PageGeometry, PageRenderer,
     PageView, RenderAbort,
 };
+use crate::separation::Separator;
 
 #[test]
 fn image_draw_size_measures_the_transformed_unit_square() {
@@ -583,7 +584,7 @@ fn image_rows_composite_like_single_samples() {
                 overprint: None,
                 backdrop: None,
             };
-            let compositor = ImageCompositor::new(&base, &paint);
+            let compositor = ImageCompositor::new(&base, &paint, &Separator::Model);
             let mut runs = make_base();
             compositor.paint_row(&mut runs, 0, 0, &colours, &shape);
             let mut single = make_base();
@@ -2483,7 +2484,7 @@ fn fifth_spot_falls_back_to_process() {
     // The fifth spot has no slot: it paints its alternate in process ink.
     let (fill, _) = ink_fill(&doc, format!("{content} /S4 cs 0.5 scn").as_bytes());
     assert_eq!(fill.paints(), ChannelMask::new(0b1111));
-    assert_eq!(fill.ink(), &[0, 0, 128, 0, 0, 0, 0, 0]);
+    assert_eq!(fill.ink(&Separator::Model), &[0, 0, 128, 0, 0, 0, 0, 0]);
     // The page's diagnostics name it, once.
     let mut renderer = ink_renderer(&doc);
     renderer.execute(&crate::content::parse(
@@ -2501,5 +2502,6 @@ fn cmyk_colour_paints_process_inks_and_is_opm_eligible() {
 }
 
 mod allocation;
+mod cmyk;
 mod intent;
 mod overprint;

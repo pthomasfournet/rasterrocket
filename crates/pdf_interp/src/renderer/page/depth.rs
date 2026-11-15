@@ -16,6 +16,7 @@ use raster::transparency::Backdrop;
 
 use super::super::color::RasterColor;
 use crate::resources::transfer::Transfer;
+use crate::separation::Separator;
 
 /// Samples of either depth, held by a value the renderer keeps across
 /// paints of one canvas.
@@ -61,8 +62,8 @@ pub(super) trait CanvasSample: Sample {
     /// The samples of the solid colour `colour` for a pixel of `mode`:
     /// its bytes for an 8-bit pixel ([`RasterColor::bytes_for`]); for a
     /// 16-bit one its 16-bit ink on an ink pixel, its 16-bit sRGB
-    /// otherwise.
-    fn solid(colour: &RasterColor, mode: PixelMode) -> &[Self];
+    /// otherwise; a derived ink is `separator`'s.
+    fn solid<'a>(colour: &'a RasterColor, mode: PixelMode, separator: &Separator) -> &'a [Self];
 
     /// The red, green and blue tables of `transfer` at this depth.
     fn rgb_tables(transfer: &Transfer) -> [&Self::Table; 3];
@@ -120,8 +121,8 @@ impl CanvasSample for u8 {
         CanvasBackdrop::U8(b)
     }
 
-    fn solid(colour: &RasterColor, mode: PixelMode) -> &[Self] {
-        colour.bytes_for(mode)
+    fn solid<'a>(colour: &'a RasterColor, mode: PixelMode, separator: &Separator) -> &'a [Self] {
+        colour.bytes_for(mode, separator)
     }
 
     fn rgb_tables(transfer: &Transfer) -> [&Self::Table; 3] {
@@ -171,9 +172,9 @@ impl CanvasSample for u16 {
         CanvasBackdrop::U16(b)
     }
 
-    fn solid(colour: &RasterColor, mode: PixelMode) -> &[Self] {
+    fn solid<'a>(colour: &'a RasterColor, mode: PixelMode, separator: &Separator) -> &'a [Self] {
         if mode == PixelMode::DeviceN16 {
-            colour.ink16()
+            colour.ink16(separator)
         } else {
             colour.rgb16()
         }

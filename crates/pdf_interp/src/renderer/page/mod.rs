@@ -120,6 +120,7 @@ use super::gstate::{Ctm, GStateStack};
 use crate::PageGeometry;
 use crate::content::Operator;
 use crate::resources::{IMAGE_FILTER_COUNT, PageResources};
+use crate::separation::{CanvasRequest, InkSetup};
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
@@ -232,6 +233,11 @@ pub struct CanvasBuffers {
     pub gray: raster::BitmapBuffers,
     /// The 16-bit gray bitmap's colour buffer and alpha plane.
     pub gray16: raster::BitmapBuffers<u16>,
+    /// The CMYK bitmap's colour buffer and alpha plane, of an ink canvas
+    /// finished as CMYK.
+    pub cmyk: raster::BitmapBuffers,
+    /// The 16-bit CMYK bitmap's colour buffer and alpha plane.
+    pub cmyk16: raster::BitmapBuffers<u16>,
 }
 
 /// The ink map of a page, shared by the renderers of its pattern cells
@@ -336,6 +342,11 @@ pub struct PageRenderer<'doc> {
     group_pool: Vec<PageCanvas>,
     /// The spot colorants of the page and their channels on an ink canvas.
     ink_map: SharedInkMap,
+    /// The settings of an ink canvas: whether overprint is simulated, the
+    /// separator of colours not given as ink, and whether the page
+    /// finishes as CMYK.  Shared by the renderers of the page's content
+    /// (see [`Self::share_memos`]).
+    pub(super) ink: InkSetup,
     /// The channels the renderer's paints wrote — the union over each
     /// paint of the channels its overprint leaves it, every channel for a
     /// paint without overprint — and those their colours carry.
@@ -495,7 +506,8 @@ impl<'doc> PageRenderer<'doc> {
     /// [`Self::new`] on an ink canvas, whatever the page's graphics states.
     #[cfg(test)]
     pub(crate) fn new_ink(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
-        Self::with_page_group(&Self::unit_view(width, height), doc, page_id, None, true)
+        let view = Self::unit_view(width, height);
+        Self::with_page_group(&view, doc, page_id, None, &CanvasRequest::OverprintPreview)
     }
 
     /// The whole of a `width` × `height`-point page at one pixel per point.
@@ -522,17 +534,17 @@ impl<'doc> PageRenderer<'doc> {
     /// number.
     #[must_use]
     pub fn with_view(view: &PageView, doc: &'doc Document, page_id: ObjectId) -> Self {
-        Self::with_page_group(view, doc, page_id, None, false)
+        Self::with_page_group(view, doc, page_id, None, &CanvasRequest::Rgb)
     }
 
     /// [`Self::with_view`] for a page painted as the transparency group
-    /// `group` (see [`Self::set_page_group`]), and, when `ink`, on a canvas
-    /// of process and spot inks on which overprint (ISO 32000-1 §8.6.7) is
-    /// simulated.  The canvas is allocated once: transparent for a group
-    /// and opaque white otherwise.  An ink canvas renders a page without
-    /// overprint as overprint off does, at the cost of the ink model, so
-    /// `ink` is meant for pages for which [`crate::page_uses_overprint`]
-    /// holds.
+    /// `group` (see [`Self::set_page_group`]), on the canvas `canvas`
+    /// requests: sRGB, or process and spot inks finished as sRGB with
+    /// overprint (ISO 32000-1 §8.6.7) simulated, or finished as CMYK.  The
+    /// canvas is allocated once: transparent for a group and opaque white
+    /// otherwise.  The overprint preview renders a page without overprint
+    /// as overprint off does, at the cost of the ink model, so it is meant
+    /// for pages for which [`crate::page_uses_overprint`] holds.
     ///
     /// # Panics
     ///
@@ -543,9 +555,9 @@ impl<'doc> PageRenderer<'doc> {
         doc: &'doc Document,
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
-        ink: bool,
+        canvas: &CanvasRequest,
     ) -> Self {
-        Self::try_with_page_group(view, doc, page_id, group, ink)
+        Self::try_with_page_group(view, doc, page_id, group, canvas)
             .expect("PageRenderer::with_page_group: canvas allocation failed")
     }
 
@@ -564,14 +576,14 @@ impl<'doc> PageRenderer<'doc> {
         doc: &'doc Document,
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
-        ink: bool,
+        canvas: &CanvasRequest,
     ) -> Result<Self, raster::BitmapAllocError> {
         Self::try_with_page_group_in(
             view,
             doc,
             page_id,
             group,
-            ink,
+            canvas,
             SampleDepth::Eight,
             CanvasBuffers::default(),
         )
@@ -580,8 +592,9 @@ impl<'doc> PageRenderer<'doc> {
     /// [`Self::try_with_page_group`] of samples of `depth`, built in
     /// `buffers` ([`raster::Bitmap::try_new_filled_in`]): an RGB canvas is
     /// allocated in `buffers.rgb`, or `buffers.rgb16` at 16 bits; an ink
-    /// canvas, which is 8-bit whatever `depth`, in `buffers.ink`,
-    /// converting into `buffers.rgb` on finish.
+    /// canvas in `buffers.ink` or `buffers.ink16`, converting on finish
+    /// into the RGB buffers of its depth, or the CMYK ones (`cmyk`,
+    /// `cmyk16`) for a page finished as CMYK.
     /// [`Self::try_finish_keeping`] returns them for the next page.
     ///
     /// # Errors
@@ -596,25 +609,26 @@ impl<'doc> PageRenderer<'doc> {
         doc: &'doc Document,
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
-        ink: bool,
+        canvas: &CanvasRequest,
         depth: SampleDepth,
         buffers: CanvasBuffers,
     ) -> Result<Self, raster::BitmapAllocError> {
         let alpha = group.is_some();
         let mut spare = buffers;
-        let kind = if ink {
+        let kind = if canvas.is_ink() {
             CanvasKind::ink(depth)
         } else {
             CanvasKind::rgb(depth)
         };
+        let ink = canvas.ink_setup();
         let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?;
-        let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group);
+        let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group, ink);
         renderer.buffers = spare;
         Ok(renderer)
     }
 
     /// A renderer for `view` painting onto `canvas`, a bitmap of the view's
-    /// window, as the page group `group`.
+    /// window, as the page group `group`, an ink canvas set up as `ink`.
     ///
     /// # Panics
     ///
@@ -625,6 +639,7 @@ impl<'doc> PageRenderer<'doc> {
         page_id: ObjectId,
         canvas: PageCanvas,
         group: Option<crate::resources::TransparencyGroupParams>,
+        ink: InkSetup,
     ) -> Self {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
@@ -648,7 +663,7 @@ impl<'doc> PageRenderer<'doc> {
 
         let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
-        let ink_map = ink_map::InkMap::new(canvas.kind().depth());
+        let ink_map = ink_map::InkMap::new(canvas.kind().depth(), ink.separator.clone());
 
         Self {
             canvas,
@@ -681,6 +696,7 @@ impl<'doc> PageRenderer<'doc> {
             page_group: group,
             group_pool: Vec::new(),
             ink_map: Rc::new(RefCell::new(ink_map)),
+            ink,
             painted: Cell::new(InkChannels::NONE),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
@@ -988,7 +1004,14 @@ impl<'doc> PageRenderer<'doc> {
     ) -> Option<Self> {
         let canvas = self.try_canvas(kind, width, height)?;
         let view = Self::unit_view(width, height);
-        let mut child = Self::with_canvas(&view, self.resources.doc(), context, canvas, None);
+        let mut child = Self::with_canvas(
+            &view,
+            self.resources.doc(),
+            context,
+            canvas,
+            None,
+            self.ink.clone(),
+        );
         child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
         child.set_antialias(self.text_antialias, self.vector_antialias);
         child.adopt_parent_budget(self);
@@ -1077,7 +1100,8 @@ impl<'doc> PageRenderer<'doc> {
 
     /// Consume the renderer of 8-bit samples and return the finished
     /// bitmap, in sRGB, and page diagnostics.  An ink canvas converts with
-    /// the process equivalents of the page's spot colorants.
+    /// the process equivalents of the page's spot colorants, one requested
+    /// as CMYK too; its CMYK finish is [`Self::try_finish_keeping`]'s.
     ///
     /// # Panics
     ///
@@ -1088,7 +1112,7 @@ impl<'doc> PageRenderer<'doc> {
     pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
         let (canvas, _, ink_map, diag) = self.into_parts(true);
         let ink_map = page_ink_map(ink_map);
-        let rgb = rgb8(canvas.into_finished(&ink_map.luts()));
+        let rgb = rgb8(canvas.into_finished(&ink_map.luts(), false));
         (rgb, Self::finish_diagnostics(diag, ink_map))
     }
 
@@ -1139,9 +1163,10 @@ impl<'doc> PageRenderer<'doc> {
         self,
         transparent: bool,
     ) -> Result<(FinishedCanvas, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
+        let cmyk = self.ink.cmyk;
         let (canvas, mut buffers, ink_map, diag) = self.into_parts(!transparent);
         let ink_map = page_ink_map(ink_map);
-        let mut finished = canvas.try_into_finished_in(&ink_map.luts(), &mut buffers)?;
+        let mut finished = canvas.try_into_finished_in(&ink_map.luts(), cmyk, &mut buffers)?;
         if transparent {
             finished.zero_transparent_colour();
         }
