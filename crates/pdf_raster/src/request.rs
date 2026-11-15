@@ -132,6 +132,33 @@ pub struct RenderParams {
     /// darkest neutral.  Refused without an output profile, and under
     /// absolute colorimetry, which reproduces measured colour.
     pub black_point_compensation: bool,
+    /// The colour model of the page: sRGB (the default), or the process
+    /// ink of a CMYK device, which [`render_page_canvas`](crate::render_page_canvas)
+    /// and [`render_page_bands`](crate::render_page_bands) return as
+    /// [`FinishedCanvas::Cmyk8`](crate::FinishedCanvas::Cmyk8) or
+    /// `Cmyk16`.  A CMYK page is painted on an ink canvas, eight samples a
+    /// pixel against the byte budget, and is opaque: refused with
+    /// [`transparent_background`](Self::transparent_background), and with
+    /// an output profile that is not CMYK.
+    pub color: ColorModel,
+}
+
+/// The colour model a page is rendered in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ColorModel {
+    /// sRGB, or the device values of the session's RGB or gray output
+    /// profile.
+    #[default]
+    Rgb,
+    /// The process ink of a CMYK device, `[C, M, Y, K]`, 0 no ink.  Colours
+    /// given in `DeviceCMYK`, a four-component ICC space or as process
+    /// colorants paint their components; spot colorants fold into their
+    /// process equivalents; any other colour is separated, by the session's
+    /// CMYK output profile when it has one and by the device conversion of
+    /// ISO 32000-2 §10.4.2.3 otherwise.  Overprint is simulated when the
+    /// session simulates it.
+    Cmyk,
 }
 
 impl RenderParams {
@@ -157,6 +184,7 @@ impl RenderParams {
             depth: SampleDepth::Eight,
             intent: None,
             black_point_compensation: false,
+            color: ColorModel::Rgb,
         }
     }
 
@@ -205,10 +233,20 @@ impl RenderParams {
         self
     }
 
-    /// The layout of the canvas the render allocates.
+    /// Render the page as CMYK (see [`color`](Self::color)).
+    #[must_use]
+    pub const fn with_cmyk(mut self) -> Self {
+        self.color = ColorModel::Cmyk;
+        self
+    }
+
+    /// The layout of the canvas the render allocates: of ink for a CMYK
+    /// page; a page simulating overprint is painted on ink too (see
+    /// [`CanvasLayout::with_ink`]).
     #[must_use]
     pub const fn canvas_layout(&self) -> crate::CanvasLayout {
         crate::CanvasLayout::new(self.depth, self.transparent_background)
+            .with_ink(matches!(self.color, ColorModel::Cmyk))
     }
 
     /// Render bands of `rows` rows (see [`band_rows`](Self::band_rows)).
@@ -252,6 +290,12 @@ mod tests {
             .with_depth(SampleDepth::Sixteen);
         assert_eq!(params.depth, SampleDepth::Sixteen);
         assert_eq!(params.canvas_layout().bytes_per_px(), 8);
+        assert_eq!(params.color, ColorModel::Rgb);
+        let cmyk = RenderParams::new(1.0).with_cmyk();
+        assert_eq!(cmyk.color, ColorModel::Cmyk);
+        assert_eq!(cmyk.canvas_layout().bytes_per_px(), 8);
+        let wide = cmyk.with_depth(SampleDepth::Sixteen);
+        assert_eq!(wide.canvas_layout().bytes_per_px(), 16);
         assert_eq!(params.band_rows.map(NonZeroU32::get), Some(7));
         assert!((params.scale_x - 2.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 2.0).abs() < f64::EPSILON);

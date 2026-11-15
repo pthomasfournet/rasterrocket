@@ -10,11 +10,15 @@ use crate::{RasterError, RasterSession, RenderParams};
 
 /// Refuse `params` asking for a conversion that `session` cannot make: an
 /// intent or black-point compensation without an output profile, or
-/// compensation under absolute colorimetry.
+/// compensation under absolute colorimetry; and a CMYK page over a
+/// transparent backdrop, or under an output profile that is not CMYK.
 pub(crate) fn check_params(
     session: &RasterSession,
     params: &RenderParams,
 ) -> Result<(), RasterError> {
+    if params.color == crate::ColorModel::Cmyk {
+        check_cmyk(session, params)?;
+    }
     if session.output_profile.is_none()
         && (params.intent.is_some() || params.black_point_compensation)
     {
@@ -31,6 +35,22 @@ pub(crate) fn check_params(
         return Err(RasterError::InvalidOptions(
             "black-point compensation does not apply to absolute colorimetry, which reproduces \
              measured colour: choose another intent or drop the compensation"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a CMYK page that `session` and `params` cannot render.
+fn check_cmyk(session: &RasterSession, params: &RenderParams) -> Result<(), RasterError> {
+    if params.transparent_background {
+        return Err(RasterError::InvalidOptions(
+            "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
+        ));
+    }
+    if session.output_profile.is_some() {
+        return Err(RasterError::InvalidOptions(
+            "the session's output profile converts sRGB pages; a CMYK page is rendered without              an output profile"
                 .to_owned(),
         ));
     }

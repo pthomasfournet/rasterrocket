@@ -158,10 +158,10 @@ pub use pdf_interp::{
 };
 pub use pdf_interp::{IntentSet, OutputProfile, OutputProfileError, OutputSpace, RenderingIntent};
 pub use render::{
-    render_page_canvas, render_page_canvas_with_diagnostics, render_page_gray, render_page_rgb,
-    render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
+    render_page_canvas, render_page_canvas_with_diagnostics, render_page_cmyk, render_page_gray,
+    render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
 };
-pub use request::{CancelToken, RenderParams, RenderRegion};
+pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 
 /// Eagerly release GPU decoders on every rayon worker thread.
 ///
@@ -476,7 +476,8 @@ pub struct RasterOptions {
     /// The ICC profile the pages are converted to; see
     /// [`SessionConfig::output_profile`].  Default `None`.  The gray pages
     /// take a gray profile, the RGBA pages of
-    /// [`transparent_background`](Self::transparent_background) an RGB one.
+    /// [`transparent_background`](Self::transparent_background) an RGB one,
+    /// the CMYK pages of [`color`](Self::color) a CMYK one.
     pub output_profile: Option<std::sync::Arc<OutputProfile>>,
 
     /// The rendering intent of the conversion to
@@ -488,6 +489,14 @@ pub struct RasterOptions {
     /// compensates the black point; see
     /// [`RenderParams::black_point_compensation`].  Default `false`.
     pub black_point_compensation: bool,
+
+    /// The colour model of the pages (see [`RenderParams::color`]).
+    /// Default [`ColorModel::Rgb`]: gray pages, or RGBA over a transparent
+    /// backdrop; [`ColorModel::Cmyk`] yields [`PixelFormat::Cmyk8`] pages,
+    /// or [`PixelFormat::Cmyk16`] at [`depth`](Self::depth) 16.
+    /// Incompatible with [`deskew`](Self::deskew) and
+    /// [`transparent_background`](Self::transparent_background).
+    pub color: ColorModel,
 
     /// Cancellation flag polled while each page renders; default `None`.
     ///
@@ -540,6 +549,7 @@ impl Default for RasterOptions {
             output_profile: None,
             intent: None,
             black_point_compensation: false,
+            color: ColorModel::Rgb,
             cancel: None,
         }
     }
@@ -564,6 +574,10 @@ pub enum PixelFormat {
     /// Four 16-bit samples per pixel, `[R, G, B, A]` in sRGB, alpha not
     /// premultiplied.
     Rgba16,
+    /// Four bytes per pixel, `[C, M, Y, K]`, 0 no ink.
+    Cmyk8,
+    /// Four 16-bit samples per pixel, `[C, M, Y, K]`, 0 no ink.
+    Cmyk16,
 }
 
 impl PixelFormat {
@@ -579,7 +593,7 @@ impl PixelFormat {
         match self {
             Self::Gray8 | Self::Gray16 => 1,
             Self::Rgb8 | Self::Rgb16 => 3,
-            Self::Rgba8 | Self::Rgba16 => 4,
+            Self::Rgba8 | Self::Rgba16 | Self::Cmyk8 | Self::Cmyk16 => 4,
         }
     }
 
@@ -587,8 +601,8 @@ impl PixelFormat {
     #[must_use]
     pub const fn depth(self) -> SampleDepth {
         match self {
-            Self::Gray8 | Self::Rgb8 | Self::Rgba8 => SampleDepth::Eight,
-            Self::Gray16 | Self::Rgb16 | Self::Rgba16 => SampleDepth::Sixteen,
+            Self::Gray8 | Self::Rgb8 | Self::Rgba8 | Self::Cmyk8 => SampleDepth::Eight,
+            Self::Gray16 | Self::Rgb16 | Self::Rgba16 | Self::Cmyk16 => SampleDepth::Sixteen,
         }
     }
 }
@@ -646,8 +660,9 @@ impl Pixels {
     }
 }
 
-/// A single rendered page: 8-bit grayscale pixels, or RGBA pixels when
-/// rendered over a transparent backdrop.
+/// A single rendered page: 8-bit grayscale pixels, RGBA pixels when
+/// rendered over a transparent backdrop, or CMYK pixels under
+/// [`ColorModel::Cmyk`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RenderedPage {
@@ -664,9 +679,10 @@ pub struct RenderedPage {
     /// samples: `width * height` for the default gray pages.
     pub pixels: Pixels,
     /// The layout of [`pixels`](Self::pixels): [`PixelFormat::Gray8`], or
-    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`];
-    /// [`PixelFormat::Gray16`] and [`PixelFormat::Rgba16`] at
-    /// [`RasterOptions::depth`] 16.
+    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`],
+    /// or [`PixelFormat::Cmyk8`] under [`ColorModel::Cmyk`];
+    /// [`PixelFormat::Gray16`], [`PixelFormat::Rgba16`] and
+    /// [`PixelFormat::Cmyk16`] at [`RasterOptions::depth`] 16.
     pub format: PixelFormat,
     /// Physical resolution of the bitmap in pixels per inch (`opts.dpi`).
     ///

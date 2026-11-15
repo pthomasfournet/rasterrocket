@@ -171,7 +171,7 @@ pub fn render_page_bands<E>(
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
     let policy = begin(session, params)?;
-    let bytes_per_px = params.canvas_layout().bytes_per_px();
+    let bytes_per_px = crate::render::page_layout(session, page_id, params).bytes_per_px();
     let view = page_view(
         &geom,
         (params.scale_x, params.scale_y),

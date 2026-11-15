@@ -4,7 +4,7 @@
 //! grayscale `RenderedPage`; this module is the single definition of how one is
 //! born from a `Bitmap<Gray8>` and of the pixel-dimension safety limits.
 
-use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
+use color::{Cmyk8, Cmyk16, Gray8, Gray16, Pixel, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
 use crate::{PageDiagnostics, PixelFormat, Pixels, RasterError, RenderedPage};
@@ -31,28 +31,46 @@ pub const DEFAULT_MAX_PAGE_BYTES: u64 = 1_800_000_000;
 /// 64 MiB, 1 412 rows of a 44-inch-wide page at 360 dpi in 8-bit RGB.
 pub const DEFAULT_BAND_BYTES: u64 = 64 << 20;
 
-/// The pixel layout of a page canvas: RGB samples of `depth`, and an alpha
-/// plane of the same depth over a transparent backdrop.
+/// The pixel layout of a page canvas, which the byte budget counts.
+///
+/// A pixel is three RGB samples of `depth`, or the eight ink samples of an
+/// ink canvas (process and spot inks, which a page simulating overprint or
+/// rendered as CMYK is painted on), and an alpha sample of the same depth
+/// over a transparent backdrop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CanvasLayout {
     /// Bits per sample.
     pub depth: SampleDepth,
     /// Whether the canvas has an alpha plane.
     pub alpha: bool,
+    /// Whether the canvas holds ink.
+    pub ink: bool,
 }
 
 impl CanvasLayout {
-    /// The canvas of `depth`, with an alpha plane when `alpha`.
+    /// The RGB canvas of `depth`, with an alpha plane when `alpha`.
     #[must_use]
     pub const fn new(depth: SampleDepth, alpha: bool) -> Self {
-        Self { depth, alpha }
+        Self {
+            depth,
+            alpha,
+            ink: false,
+        }
+    }
+
+    /// The layout with ink samples in place of RGB ones when `ink`.
+    #[must_use]
+    pub const fn with_ink(mut self, ink: bool) -> Self {
+        self.ink = ink;
+        self
     }
 
     /// Bytes a pixel of the canvas holds: 3 for 8-bit RGB, 4 with alpha;
-    /// 6 and 8 at 16 bits.
+    /// 8 for 8-bit ink, 9 with alpha; twice as many at 16 bits.
     #[must_use]
     pub const fn bytes_per_px(self) -> u32 {
-        (3 + self.alpha as u32) * self.depth.bytes()
+        let samples = if self.ink { 8 } else { 3 };
+        (samples + self.alpha as u32) * self.depth.bytes()
     }
 }
 
@@ -178,6 +196,35 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
     }
 }
 
+/// The samples of `bmp`'s live pixels, rows packed.
+fn packed_samples<P: Pixel>(bmp: &Bitmap<P>) -> Vec<P::Sample> {
+    let live = bmp.width as usize * P::NCOMPS;
+    let mut samples = Vec::with_capacity(live * bmp.height as usize);
+    for y in 0..bmp.height {
+        samples.extend_from_slice(&bmp.row_samples(y)[..live]);
+    }
+    samples
+}
+
+/// The `width × height` [`RenderedPage`] of `pixels` in `format`.
+fn rendered_page(
+    (width, height): (u32, u32),
+    (pixels, format): (Pixels, PixelFormat),
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    RenderedPage {
+        page_num,
+        width,
+        height,
+        pixels,
+        format,
+        dpi,
+        diagnostics,
+    }
+}
+
 /// A [`PixelFormat::Gray16`] [`RenderedPage`] of `bmp`, its rows packed.
 pub(crate) fn gray16_into_rendered_page(
     bmp: &Bitmap<Gray16>,
@@ -185,20 +232,30 @@ pub(crate) fn gray16_into_rendered_page(
     dpi: f32,
     diagnostics: PageDiagnostics,
 ) -> RenderedPage {
-    let w = bmp.width as usize;
-    let mut pixels = Vec::with_capacity(w * bmp.height as usize);
-    for y in 0..bmp.height {
-        pixels.extend_from_slice(&bmp.row_samples(y)[..w]);
-    }
-    RenderedPage {
-        page_num,
-        width: bmp.width,
-        height: bmp.height,
-        pixels: Pixels::U16(pixels),
-        format: PixelFormat::Gray16,
-        dpi,
-        diagnostics,
-    }
+    let pixels = (Pixels::U16(packed_samples(bmp)), PixelFormat::Gray16);
+    rendered_page((bmp.width, bmp.height), pixels, page_num, dpi, diagnostics)
+}
+
+/// A [`PixelFormat::Cmyk8`] [`RenderedPage`] of `bmp`, its rows packed.
+pub(crate) fn cmyk8_rendered_page(
+    bmp: &Bitmap<Cmyk8>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let pixels = (Pixels::U8(packed_samples(bmp)), PixelFormat::Cmyk8);
+    rendered_page((bmp.width, bmp.height), pixels, page_num, dpi, diagnostics)
+}
+
+/// A [`PixelFormat::Cmyk16`] [`RenderedPage`] of `bmp`, its rows packed.
+pub(crate) fn cmyk16_rendered_page(
+    bmp: &Bitmap<Cmyk16>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let pixels = (Pixels::U16(packed_samples(bmp)), PixelFormat::Cmyk16);
+    rendered_page((bmp.width, bmp.height), pixels, page_num, dpi, diagnostics)
 }
 
 /// [`rgb8_to_rgba_rendered_page`] at 16 bits: a [`PixelFormat::Rgba16`]

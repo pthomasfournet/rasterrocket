@@ -304,6 +304,69 @@ pub fn render_page_rgba(
     })
 }
 
+/// Render page `page_num` (1-based) of `session` to the CMYK
+/// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it
+/// under [`ColorModel::Cmyk`](crate::ColorModel::Cmyk):
+/// [`PixelFormat::Cmyk8`](crate::PixelFormat::Cmyk8), or
+/// [`PixelFormat::Cmyk16`](crate::PixelFormat::Cmyk16) at
+/// [`RasterOptions::depth`] 16.
+///
+/// Of `opts`, only [`dpi`](RasterOptions::dpi),
+/// [`depth`](RasterOptions::depth), [`intent`](RasterOptions::intent),
+/// [`black_point_compensation`](RasterOptions::black_point_compensation)
+/// and [`cancel`](RasterOptions::cancel) apply.
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`], plus [`RasterError::InvalidOptions`] when
+/// [`deskew`](RasterOptions::deskew) or
+/// [`transparent_background`](RasterOptions::transparent_background) is
+/// set, and when the session's output profile is not CMYK.
+pub fn render_page_cmyk(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError> {
+    if opts.deskew {
+        return Err(RasterError::deskew_needs_gray());
+    }
+    let dpi = opts.dpi;
+    let page_id = session.resolve_page(page_num)?;
+    let geom = session.geometry_by_id(page_id)?;
+    let mut params = RenderParams::new(f64::from(dpi) / 72.0)
+        .with_cmyk()
+        .with_depth(opts.depth);
+    params.transparent_background = opts.transparent_background;
+    params.cancel.clone_from(&opts.cancel);
+    params.intent = opts.intent;
+    params.black_point_compensation = opts.black_point_compensation;
+    let (canvas, diagnostics) = render_page_canvas_with_geom(
+        session,
+        page_num,
+        page_id,
+        geom,
+        &params,
+        &mut CanvasBuffers::default(),
+    )?;
+    match canvas {
+        FinishedCanvas::Cmyk8(cmyk) => Ok(crate::page::cmyk8_rendered_page(
+            &cmyk,
+            page_num,
+            dpi,
+            diagnostics,
+        )),
+        FinishedCanvas::Cmyk16(cmyk) => Ok(crate::page::cmyk16_rendered_page(
+            &cmyk,
+            page_num,
+            dpi,
+            diagnostics,
+        )),
+        other => Err(RasterError::InvalidOptions(format!(
+            "a CMYK render finished as {other:?}: the renderer finishes a CMYK request as CMYK"
+        ))),
+    }
+}
+
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
 /// whole page, or `region` of it.  The page's sides are held to
 /// [`MAX_PX_SIDE`](crate::MAX_PX_SIDE), and the bitmap drawn, of
@@ -406,7 +469,7 @@ pub(crate) fn render_page_canvas_with_geom(
         &geom,
         (params.scale_x, params.scale_y),
         params.region,
-        params.canvas_layout().bytes_per_px(),
+        page_layout(session, page_id, params).bytes_per_px(),
         session.max_page_bytes,
     )?;
     let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);
@@ -596,7 +659,7 @@ impl<'a> PageJob<'a> {
             view,
             ops,
             group: page_group(doc, page_id, params.transparent_background),
-            canvas: canvas_request(session, page_id),
+            canvas: canvas_request(session, page_id, params),
             params,
             policy,
         }
@@ -675,10 +738,22 @@ impl<'a> PageJob<'a> {
     }
 }
 
-/// The canvas page `page_id` of `session` is painted on: the overprint
-/// preview when the session simulates overprint and some graphics state
-/// the page draws with sets it, sRGB otherwise.
-fn canvas_request(session: &RasterSession, page_id: pdf::ObjectId) -> pdf_interp::CanvasRequest {
+/// The canvas page `page_id` of `session` is painted on under `params`:
+/// for a CMYK page an ink canvas finished as CMYK, simulating overprint
+/// when the session does; otherwise the overprint preview when the session
+/// simulates overprint and some graphics state the page draws with sets
+/// it, sRGB otherwise.
+fn canvas_request(
+    session: &RasterSession,
+    page_id: pdf::ObjectId,
+    params: &RenderParams,
+) -> pdf_interp::CanvasRequest {
+    if params.color == crate::ColorModel::Cmyk {
+        return pdf_interp::CanvasRequest::Cmyk {
+            overprint: session.overprint,
+            separation: pdf_interp::Separation::Device,
+        };
+    }
     if session.overprint
         && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations)
     {
@@ -686,6 +761,19 @@ fn canvas_request(session: &RasterSession, page_id: pdf::ObjectId) -> pdf_interp
     } else {
         pdf_interp::CanvasRequest::Rgb
     }
+}
+
+/// The layout of the canvas page `page_id` of `session` is painted on
+/// under `params`, which the byte budget counts: of ink for a page
+/// painted on an ink canvas (see [`canvas_request`]).
+pub(crate) fn page_layout(
+    session: &RasterSession,
+    page_id: pdf::ObjectId,
+    params: &RenderParams,
+) -> crate::CanvasLayout {
+    params
+        .canvas_layout()
+        .with_ink(canvas_request(session, page_id, params).is_ink())
 }
 
 /// Warn about the first page found to carry JavaScript and the first

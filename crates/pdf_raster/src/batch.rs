@@ -70,6 +70,16 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
     if opts.deskew && opts.transparent_background {
         return Some(RasterError::deskew_needs_gray());
     }
+    if opts.color == crate::ColorModel::Cmyk && opts.deskew {
+        return Some(RasterError::InvalidOptions(
+            "deskew operates on 8-bit gray: CMYK pages are not deskewed".to_owned(),
+        ));
+    }
+    if opts.color == crate::ColorModel::Cmyk && opts.transparent_background {
+        return Some(RasterError::InvalidOptions(
+            "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
+        ));
+    }
     if opts.depth != color::SampleDepth::Eight && opts.deskew {
         return Some(RasterError::InvalidOptions(
             "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
@@ -353,10 +363,12 @@ pub(crate) fn render_channel(
     rx
 }
 
-// ── Single-page render (gray + deskew, or RGBA) ───────────────────────────────────────
+// ── Single-page render (gray + deskew, RGBA or CMYK) ──────────────────────────────────
 
 fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, RasterError> {
-    if state.opts.transparent_background {
+    if state.opts.color == crate::ColorModel::Cmyk {
+        crate::render_page_cmyk(&state.session, page_num, &state.opts)
+    } else if state.opts.transparent_background {
         render_page_rgba(&state.session, page_num, &state.opts)
     } else {
         render_page_gray(&state.session, page_num, &state.opts)
