@@ -141,6 +141,11 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   reservation is never outgrown. The new-symbol lists keep their
   reservation by the declared count, charged to the budget, which
   bounds it; reserving less would let them grow uncharged.
+- `c04e1e46b` (#1797), adapted: a height-class collective bitmap, the
+  one bitmap bounded by area rather than by its sides, is also at most
+  2^22 pixels wide (and 65 535 high), which keeps its coordinates plus
+  offsets within `i32`. Every other bitmap keeps the 65 535-pixel side
+  limit, tighter than upstream's 2^22. Test: `bitmap::tests`.
 
 ## Upstream review (2026-10-30)
 

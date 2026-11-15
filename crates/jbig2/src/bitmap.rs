@@ -14,6 +14,10 @@ use alloc::vec::Vec;
 // to `u16::MAX`, which should be more than enough.
 pub(crate) const MAX_DIMENSION: u32 = u16::MAX as u32;
 
+/// Upper bound on the width of a [`Bitmap::new_wide`] bitmap, which keeps
+/// its pixel coordinates plus offsets within `i32`.
+const MAX_WIDE_WIDTH: u32 = 1 << 22;
+
 /// The underlying word type for packed pixel storage.
 /// Change this to `u32` to switch back to 32-bit words.
 pub(crate) type Word = u32;
@@ -55,10 +59,13 @@ impl Bitmap {
         Self::new_with(width, height, 0, 0, false, budget)
     }
 
-    /// Like [`Bitmap::new`], but bounded by area (65 535² pixels) instead of
-    /// by each side.
+    /// Like [`Bitmap::new`], but bounded by area (65 535² pixels) and a
+    /// width of 2^22 instead of 65 535 per side.
     pub(crate) fn new_wide(width: u32, height: u32, budget: &Budget) -> Result<Self> {
-        if u64::from(width) * u64::from(height) > u64::from(MAX_DIMENSION).pow(2) {
+        if width > MAX_WIDE_WIDTH
+            || height > MAX_DIMENSION
+            || u64::from(width) * u64::from(height) > u64::from(MAX_DIMENSION).pow(2)
+        {
             bail!(OverflowError::BitmapDimension);
         }
 
@@ -294,6 +301,25 @@ impl Bitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_bitmaps_are_bounded_by_width_and_area() {
+        use crate::error::DecodeError;
+
+        // An empty budget refuses every admitted size with a budget error,
+        // so no test case allocates.
+        let budget = Budget::with_limits(0, 0);
+        let error = |width, height| Bitmap::new_wide(width, height, &budget).err();
+        let admitted = Some(DecodeError::Overflow(OverflowError::MemoryBudget));
+        let refused = Some(DecodeError::Overflow(OverflowError::BitmapDimension));
+
+        assert_eq!(error(MAX_WIDE_WIDTH, 1), admitted);
+        assert_eq!(error(MAX_WIDE_WIDTH, 1023), admitted);
+        assert_eq!(error(MAX_WIDE_WIDTH, 1024), refused);
+        assert_eq!(error(MAX_WIDE_WIDTH + 1, 1), refused);
+        assert_eq!(error(u32::MAX, 0), refused);
+        assert_eq!(error(1, MAX_DIMENSION + 1), refused);
+    }
 
     #[test]
     fn combine_far_away() {
