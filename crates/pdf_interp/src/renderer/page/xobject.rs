@@ -18,7 +18,7 @@ use crate::resources::image::ImageResolution;
 /// Device-pixel extent `(width, height)` of an image drawn under `ctm`: the
 /// lengths of the images of its unit x and y vectors, rounded up.  Correct
 /// under rotation and skew.  `None` for a degenerate or non-finite matrix.
-pub(super) fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
+pub(crate) fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
     let extent = |dx: f64, dy: f64| {
         let len = dx.hypot(dy).ceil();
         #[expect(

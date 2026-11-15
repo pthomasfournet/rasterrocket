@@ -846,7 +846,7 @@ pub(crate) const MAX_DECODED_BYTES: u64 = 1 << 30;
     clippy::cast_possible_truncation,
     reason = "value range validated to [1, MAX_IMAGE_SIDE] — fits in u32 without loss"
 )]
-pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)> {
+pub(crate) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)> {
     if w_raw <= 0 || h_raw <= 0 || w_raw > MAX_IMAGE_SIDE || h_raw > MAX_IMAGE_SIDE {
         return None;
     }

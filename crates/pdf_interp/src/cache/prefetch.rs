@@ -15,6 +15,13 @@
 //! 3. Dedupes by `ObjId` so an image referenced from N pages is
 //!    decoded once, not N times.
 //!
+//! When the scale the pages render at is known ([`PrefetchConfig::scale`]),
+//! discovery also walks each page's content stream for the transformation
+//! in effect at each `Do`, and an image every draw of which reduces it
+//! (see [`draw_reduces`]) is not prefetched: the render resamples such a
+//! draw from host-resident samples and bypasses the cache, so its decode
+//! would be wasted work.
+//!
 //! Only `/DCTDecode` (JPEG) images are prefetched — those are the
 //! decode-expensive case and the one the [`gpu::cache::ImageCache`]
 //! was built for.  CCITT, JBIG2, and JPEG-2000 images decode on the
@@ -25,7 +32,7 @@
 //! count is intentionally low (2) — the goal is to be done before
 //! the renderer reaches the image, not to saturate the CPU.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -33,8 +40,14 @@ use std::thread;
 use gpu::cache::{DocId, ImageCache, ObjId};
 use pdf::{Document, Object, ObjectId};
 
-use crate::resources::image::{ImageFilter, filter_name};
+use crate::content::Operator;
+use crate::renderer::PageView;
+use crate::renderer::gstate::{Ctm, ctm_multiply};
+use crate::renderer::page::{draw_reduces, image_draw_size};
+use crate::resources::dict_ext::DictExt;
+use crate::resources::image::{ImageFilter, ImageRequest, filter_name, validated_dims};
 use crate::resources::resolve_image;
+use crate::{PageBox, Rotation};
 
 /// Upper bound on prefetcher worker threads.
 ///
@@ -68,6 +81,17 @@ pub struct PrefetchConfig {
     /// tens of thousands of image `XObject`s; the renderer can still
     /// decode unprefetched images on first touch.  Default 4096.
     pub max_images: usize,
+    /// Device pixels per point `(x, y)` along the device axes at which every
+    /// page of the session renders, when that is one scale for all pages.
+    /// An image is then prefetched only when some draw of it on a page's own
+    /// content stream does not reduce it.  `None` (the default) prefetches
+    /// every JPEG image at full resolution.  A scale that is not finite and
+    /// positive counts as `None`.
+    pub scale: Option<(f64, f64)>,
+    /// The session's rotation, added to each page's `/Rotate`; it decides
+    /// which device axis each scale applies to.  Default
+    /// [`Rotation::None`].
+    pub rotation: Rotation,
 }
 
 impl Default for PrefetchConfig {
@@ -75,7 +99,21 @@ impl Default for PrefetchConfig {
         Self {
             workers: 2,
             max_images: 4096,
+            scale: None,
+            rotation: Rotation::None,
         }
+    }
+}
+
+impl PrefetchConfig {
+    /// The scale of [`Self::scale`] when it is finite and positive along
+    /// both axes.
+    fn valid_scale(&self) -> Option<(f64, f64)> {
+        self.scale.filter(|&scale| {
+            <[f64; 2]>::from(scale)
+                .into_iter()
+                .all(|s| s.is_finite() && s > 0.0)
+        })
     }
 }
 
@@ -139,6 +177,7 @@ pub fn spawn_prefetch(
         doc,
         doc_id,
         cancel: Arc::new(AtomicBool::new(false)),
+        view: config.valid_scale().map(|scale| (scale, config.rotation)),
     });
     let workers = clamp_workers(config.workers);
     let mut handles = Vec::with_capacity(workers + 1);
@@ -195,6 +234,9 @@ fn spawn_threads(
 struct PrefetchJob {
     page_id: ObjectId,
     image_name: Vec<u8>,
+    /// The device-pixel extent of a draw of the image that does not reduce
+    /// it; `None` for a full-resolution decode.
+    draw_size: Option<(u32, u32)>,
 }
 
 /// Bundled state borrowed by both [`discover_pages`] and
@@ -209,6 +251,9 @@ struct PrefetchState {
     doc: Arc<Document>,
     doc_id: DocId,
     cancel: Arc<AtomicBool>,
+    /// The valid [`PrefetchConfig::scale`] and the session rotation; `None`
+    /// when the scale is unknown.
+    view: Option<((f64, f64), Rotation)>,
 }
 
 /// Walk every page's `/XObject` resource dict and emit a
@@ -220,6 +265,11 @@ struct PrefetchState {
 /// renderer will decode them on first touch.  The renderer already
 /// pays that cost only once per image (subsequent pages hit the
 /// cache), so the gap is bounded.
+///
+/// When the scale is known, an image is emitted with the size of a draw
+/// on the page that does not reduce it (see [`cached_draw`]), and skipped
+/// on a page whose draws all reduce it; a later page drawing it larger
+/// still emits it.
 fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<PrefetchJob>) {
     // Discovery is single-threaded so the dedup set is a plain
     // local — no Mutex / Arc.  An image referenced from N pages
@@ -229,7 +279,8 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
     // allocates more dedup space than it'd ever populate.
     let mut seen: HashSet<ObjId> = HashSet::with_capacity(max_images.min(256));
     let mut emitted = 0usize;
-    'pages: for (_page_num, page_id) in state.doc.get_pages() {
+    let doc = state.doc.as_ref();
+    'pages: for (_page_num, page_id) in doc.get_pages() {
         if state.cancel.load(Ordering::Acquire) {
             break;
         }
@@ -237,9 +288,11 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
         // /Resources inheritance chain and resolves indirect refs;
         // when /XObject is absent we just get a NotFound error and
         // skip this page.
-        let Ok(xobj_dict) = state.doc.get_page_resource_dict(page_id, b"XObject") else {
+        let Ok(xobj_dict) = doc.get_page_resource_dict(page_id, b"XObject") else {
             continue;
         };
+        // The content stream is walked for the first JPEG candidate only.
+        let mut draws = None;
         for (name, value) in &xobj_dict {
             if state.cancel.load(Ordering::Acquire) {
                 break 'pages;
@@ -252,23 +305,34 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
                 continue;
             };
             let obj_id = ObjId(stream_id.0);
-            if !seen.insert(obj_id) {
+            if seen.contains(&obj_id) {
                 continue;
             }
-            if state.cache.lookup_by_id(state.doc_id, obj_id).is_some() {
+            // Only DCT images with valid dimensions are pushed; the
+            // worker re-resolves the stream and owns the decode.
+            let Some(dims) = dct_image_dims(doc, *stream_id)
+                .filter(|_| state.cache.lookup_by_id(state.doc_id, obj_id).is_none())
+            else {
+                let _ = seen.insert(obj_id);
                 continue;
-            }
-            // Quick filter check: only push DCT images.  We re-resolve
-            // the stream object inside the worker (so the worker
-            // owns the decode); here we just need to confirm
-            // `/Subtype Image` and `/Filter DCTDecode` cheaply.
-            if !is_dct_image_stream(&state.doc, *stream_id) {
-                continue;
-            }
+            };
+            let draw_size = match state.view {
+                Some((scale, rotation)) => {
+                    let draws =
+                        draws.get_or_insert_with(|| page_draws(doc, page_id, scale, rotation));
+                    match cached_draw(dims, draws.get(name.as_slice())) {
+                        Prefetch::At(draw_size) => draw_size,
+                        Prefetch::Skip => continue,
+                    }
+                }
+                None => None,
+            };
+            let _ = seen.insert(obj_id);
             if tx
                 .send(PrefetchJob {
                     page_id,
                     image_name: name.clone(),
+                    draw_size,
                 })
                 .is_err()
             {
@@ -331,37 +395,106 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &ImageCache, job: &PrefetchJ
     let _ = resolve_image(
         &mut ctx,
         &xobjects,
-        crate::resources::image::ImageRequest::full(&job.image_name),
+        ImageRequest {
+            name: &job.image_name,
+            draw_size: job.draw_size,
+        },
         #[cfg(feature = "gpu-jpeg-huffman")]
         None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
     );
 }
 
-/// Cheap pre-filter: does `stream_id` resolve to a stream with
-/// `/Subtype Image` and `/Filter DCTDecode`?  Avoids spinning up a
-/// worker for non-image references or non-DCT images.
+/// Cheap pre-filter: the `/Width` and `/Height` of `stream_id` when it
+/// resolves to a stream with `/Subtype Image`, `/Filter DCTDecode` and
+/// valid dimensions; `None` otherwise.  Avoids spinning up a worker for
+/// non-image references, non-DCT images, or images the decode rejects.
 ///
 /// Filter normalisation (single-name vs single-element array vs
 /// chained filters vs empty array) is delegated to the shared
 /// [`filter_name`] helper used by the image decode path so the
 /// prefetcher and the renderer agree on what "is JPEG" means.
-fn is_dct_image_stream(doc: &Document, stream_id: ObjectId) -> bool {
-    let Ok(obj_arc) = doc.get_object(stream_id) else {
-        return false;
-    };
-    let Some(stream) = obj_arc.as_stream() else {
-        return false;
-    };
-    if !matches!(stream.dict.get(b"Subtype"), Some(Object::Name(n)) if n == b"Image") {
-        return false;
+fn dct_image_dims(doc: &Document, stream_id: ObjectId) -> Option<(u32, u32)> {
+    let obj_arc = doc.get_object(stream_id).ok()?;
+    let dict = &obj_arc.as_stream()?.dict;
+    if !matches!(dict.get(b"Subtype"), Some(Object::Name(n)) if n == b"Image") {
+        return None;
     }
-    let Some(filter_obj) = stream.dict.get(b"Filter") else {
-        return false;
+    let filter = ImageFilter::from_filter_str(filter_name(dict.get(b"Filter")?).as_deref());
+    if !matches!(filter, ImageFilter::Dct) {
+        return None;
+    }
+    validated_dims(dict.get_i64(b"Width")?, dict.get_i64(b"Height")?)
+}
+
+/// The prefetch of an image on one page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prefetch {
+    /// No draw on the page reads the image cache.
+    Skip,
+    /// Decode for a draw of this device-pixel extent; `None` decodes at
+    /// full resolution.
+    At(Option<(u32, u32)>),
+}
+
+/// The prefetch of a `dims` image given `draws`, the device-pixel extents
+/// (`image_draw_size`) of its draws on a page: at a draw that does not
+/// reduce the image, or [`Prefetch::Skip`] when every draw reduces it or
+/// the page draws it nowhere.  A draw of unknown extent decodes at full
+/// resolution and does not reduce.
+fn cached_draw(
+    (width, height): (u32, u32),
+    draws: Option<&HashSet<Option<(u32, u32)>>>,
+) -> Prefetch {
+    draws
+        .into_iter()
+        .flatten()
+        .copied()
+        .find(|draw| !draw.is_some_and(|draw| draw_reduces(width, height, draw)))
+        .map_or(Prefetch::Skip, Prefetch::At)
+}
+
+/// The device-pixel extents (`image_draw_size`) of the draws of each
+/// `XObject` that the content stream of page `page_id` paints by name,
+/// at `scale` device pixels per point under the session rotation
+/// `rotation`.  Only `q`, `Q` and `cm` change the transformation followed;
+/// the `XObjects` of forms are not visited.  Empty when the page's geometry
+/// or content cannot be read.
+fn page_draws(
+    doc: &Document,
+    page_id: ObjectId,
+    scale: (f64, f64),
+    rotation: Rotation,
+) -> HashMap<Vec<u8>, HashSet<Option<(u32, u32)>>> {
+    let mut draws: HashMap<Vec<u8>, HashSet<Option<(u32, u32)>>> = HashMap::new();
+    // The extents depend on the linear part of the page CTM alone, which
+    // the page box does not enter.
+    let Ok(geom) = crate::page_size_pts_by_id(doc, page_id, PageBox::default()) else {
+        return draws;
     };
-    matches!(
-        ImageFilter::from_filter_str(filter_name(filter_obj).as_deref()),
-        ImageFilter::Dct
-    )
+    let Ok(content) = doc.page_content(page_id) else {
+        return draws;
+    };
+    let mut ctm: Ctm = PageView::whole(&geom.rotated(rotation), scale).page_ctm();
+    let mut saved: Vec<Ctm> = Vec::new();
+    for op in &crate::parse_page_content(doc, page_id, &content.bytes) {
+        match op {
+            Operator::Save => saved.push(ctm),
+            Operator::Restore => {
+                if let Some(outer) = saved.pop() {
+                    ctm = outer;
+                }
+            }
+            Operator::ConcatMatrix(m) => ctm = ctm_multiply(m, &ctm),
+            Operator::PaintXObject(name) => {
+                let _ = draws
+                    .entry(name.to_vec())
+                    .or_default()
+                    .insert(image_draw_size(&ctm));
+            }
+            _ => {}
+        }
+    }
+    draws
 }
 
 #[cfg(test)]
@@ -411,11 +544,113 @@ startxref\n180\n%%EOF"
     }
 
     #[test]
-    fn is_dct_image_stream_rejects_non_streams_and_missing_objects() {
+    fn dct_image_dims_rejects_non_streams_and_missing_objects() {
         let doc = Document::from_bytes_owned(minimal_pdf_no_images()).expect("minimal PDF");
         // Object 1 is the catalog dict, not a stream.
-        assert!(!is_dct_image_stream(&doc, (1, 0)));
-        // Object 99 does not exist — must return false, not panic.
-        assert!(!is_dct_image_stream(&doc, (99, 0)));
+        assert_eq!(dct_image_dims(&doc, (1, 0)), None);
+        // Object 99 does not exist — must return None, not panic.
+        assert_eq!(dct_image_dims(&doc, (99, 0)), None);
+    }
+
+    /// Page `(4, 0)`, 400 points square, whose content stream is `content`
+    /// and whose `/Im` is a 400 × 400 JPEG image `XObject`.
+    fn page_with_jpeg(content: &str) -> Document {
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /MediaBox [0 0 400 400] /Contents 5 0 R \
+                 /Resources << /XObject << /Im 6 0 R >> >> >>"
+                    .to_owned(),
+            ),
+            (
+                5,
+                format!(
+                    "<< /Length {} >>\nstream\n{content}\nendstream",
+                    content.len()
+                ),
+            ),
+            (
+                6,
+                "<< /Type /XObject /Subtype /Image /Filter /DCTDecode /Width 400 \
+                 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 0 >>\n\
+                 stream\n\nendstream"
+                    .to_owned(),
+            ),
+        ])
+    }
+
+    /// The prefetch of `/Im` on page `(4, 0)` at `scale`.
+    fn prefetched_draw(doc: &Document, scale: (f64, f64)) -> Prefetch {
+        let dims = dct_image_dims(doc, (6, 0)).expect("a JPEG image");
+        let draws = page_draws(doc, (4, 0), scale, Rotation::None);
+        cached_draw(dims, draws.get(b"Im".as_slice()))
+    }
+
+    #[test]
+    fn an_image_drawn_below_half_its_size_is_not_prefetched() {
+        let doc = page_with_jpeg("q 150 0 0 150 0 0 cm /Im Do Q");
+        assert_eq!(prefetched_draw(&doc, (1.0, 1.0)), Prefetch::Skip);
+        // At three times the scale the same draw covers 450 pixels.
+        assert_eq!(
+            prefetched_draw(&doc, (3.0, 3.0)),
+            Prefetch::At(Some((450, 450)))
+        );
+    }
+
+    #[test]
+    fn an_image_is_prefetched_for_a_draw_that_does_not_reduce_it() {
+        let doc = page_with_jpeg(
+            "q 100 0 0 100 0 0 cm /Im Do Q q 2 0 0 2 0 0 cm 200 0 0 200 0 0 cm /Im Do Q",
+        );
+        assert_eq!(
+            prefetched_draw(&doc, (1.0, 1.0)),
+            Prefetch::At(Some((400, 400)))
+        );
+    }
+
+    #[test]
+    fn restore_returns_to_the_saved_transformation() {
+        let doc = page_with_jpeg("q 0.1 0 0 0.1 0 0 cm Q 400 0 0 400 0 0 cm /Im Do");
+        assert_eq!(
+            prefetched_draw(&doc, (1.0, 1.0)),
+            Prefetch::At(Some((400, 400)))
+        );
+    }
+
+    #[test]
+    fn the_session_rotation_turns_the_scales_onto_the_other_axes() {
+        // 400 × 100 points, drawn at 1 pixel a point across and 4 down: the
+        // image is reduced across.  Turned a quarter, its width lies down.
+        let doc = page_with_jpeg("q 400 0 0 100 0 0 cm /Im Do Q");
+        let dims = dct_image_dims(&doc, (6, 0)).expect("a JPEG image");
+        let at = |rotation| {
+            let draws = page_draws(&doc, (4, 0), (1.0, 4.0), rotation);
+            cached_draw(dims, draws.get(b"Im".as_slice()))
+        };
+        assert_eq!(at(Rotation::None), Prefetch::At(Some((400, 400))));
+        assert_eq!(at(Rotation::Cw90), Prefetch::Skip);
+    }
+
+    #[test]
+    fn an_image_the_page_does_not_draw_is_not_prefetched() {
+        let doc = page_with_jpeg("");
+        assert_eq!(prefetched_draw(&doc, (1.0, 1.0)), Prefetch::Skip);
+    }
+
+    #[test]
+    fn a_scale_that_is_not_finite_and_positive_is_unknown() {
+        let with = |scale| PrefetchConfig {
+            scale: Some(scale),
+            ..PrefetchConfig::default()
+        };
+        assert_eq!(with((2.0, 3.0)).valid_scale(), Some((2.0, 3.0)));
+        for bad in [
+            (0.0, 1.0),
+            (1.0, -1.0),
+            (f64::NAN, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert_eq!(with(bad).valid_scale(), None, "{bad:?}");
+        }
     }
 }

@@ -106,6 +106,8 @@ use paint::components_to_color;
 pub use trace::PaintTrace;
 pub use view::PageView;
 use view::initial_gstate;
+#[cfg(feature = "cache")]
+pub(crate) use xobject::image_draw_size;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

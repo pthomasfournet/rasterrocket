@@ -247,6 +247,16 @@ pub struct SessionConfig {
     /// initialisation fails (no cache → nowhere to prefetch into).
     #[cfg(feature = "cache")]
     pub prefetch: bool,
+    /// Device pixels per point `(x, y)` at which every page of the session
+    /// is rendered, when that is one scale for all pages (`dpi / 72` at a
+    /// fixed resolution); `None` (the default) when unknown or page
+    /// dependent.  With a scale the prefetcher skips an image every draw of
+    /// which on its page is smaller than the image, which the render
+    /// resamples on the host without the image cache; without one it
+    /// prefetches every JPEG image.  No effect unless
+    /// [`prefetch`](Self::prefetch) is set.
+    #[cfg(feature = "cache")]
+    pub prefetch_scale: Option<(f64, f64)>,
     /// Whether the caller has authorised decrypting an encrypted (PDF
     /// Standard Security Handler) document.
     ///
@@ -443,6 +453,8 @@ impl SessionConfig {
             vulkan_device: None,
             #[cfg(feature = "cache")]
             prefetch: false,
+            #[cfg(feature = "cache")]
+            prefetch_scale: None,
             decrypt_authorized: false,
             password: None,
             read_into_memory: false,

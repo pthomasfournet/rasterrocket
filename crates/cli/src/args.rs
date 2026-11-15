@@ -845,6 +845,19 @@ impl Args {
         }
     }
 
+    /// The scales [`Self::scales`] gives every page, when they do not
+    /// depend on the page: `None` under the `--scale-to` flags, a fax
+    /// layout, or a per-page print resolution.
+    #[cfg(feature = "cache")]
+    pub(crate) fn uniform_scales(&self) -> Option<(f64, f64)> {
+        let per_page = self.faxing()
+            || self.print_resolution_per_page
+            || self.scale_to.is_some()
+            || self.scale_to_x.is_some()
+            || self.scale_to_y.is_some();
+        (!per_page).then(|| (self.x_dpi() / 72.0, self.y_dpi() / 72.0))
+    }
+
     /// The area `-x`/`-y`/`-W`/`-H` select on a page of `page_w × page_h`
     /// pixels, or `None` when none of them is given.  A width or height
     /// reaching past the page is clipped to it.
@@ -1618,6 +1631,7 @@ impl Args {
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
+            config.prefetch_scale = self.uniform_scales();
         }
         config.check_gpu_pages().map_err(|e| e.to_string())?;
         Ok(config)
@@ -1898,6 +1912,15 @@ mod page_list_tests {
         assert!(!lenient.strict);
         let strict = args_with(&["--strict"]).session_config().unwrap();
         assert!(strict.strict);
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn the_prefetch_scale_is_the_resolution_unless_it_depends_on_the_page() {
+        let scale = |argv: &[&str]| args_with(argv).session_config().unwrap().prefetch_scale;
+        assert_eq!(scale(&["--rx", "144", "--ry", "36"]), Some((2.0, 0.5)));
+        assert_eq!(scale(&["--scale-to", "400"]), None);
+        assert_eq!(scale(&["--scale-to-y", "300"]), None);
     }
 
     #[test]

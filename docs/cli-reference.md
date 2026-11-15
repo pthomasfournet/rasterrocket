@@ -448,7 +448,7 @@ A built-in spill policy reads the kernel's available-memory estimate before each
 | `--vaapi-device PATH\|auto` | `auto` | VA-API DRM render node; `auto` probes for one (only used with `auto` or `vaapi`). |
 | `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
 | `--gpu-pages` | off | Render qualifying pages whole on a Vulkan GPU beside the CPU workers. Needs a build with the `vulkan` feature, `--backend auto` or `vulkan`, and `--aaVector yes`; see below. |
-| `--prefetch` | off | Prefetch image XObjects into the device-resident image cache when the document is opened. Present only in a binary built with the `cache` feature; worth it for long or repeated renders of one document. |
+| `--prefetch` | off | Prefetch image XObjects into the device-resident image cache when the document is opened. Present only in a binary built with the `cache` feature; worth it for long or repeated renders of one document. At a fixed resolution (no `--scale-to*`, fax or per-page print resolution) an image every draw of which on its page is smaller than the image is not prefetched: such a draw is resampled on the CPU and never reads the cache. |
 
 When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
 read (same values; `vaapi` only in a build with the `vaapi` feature, and an

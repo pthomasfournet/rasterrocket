@@ -199,7 +199,7 @@ impl PageView {
     /// enter the matrix: a renderer of a window keeps every CTM in the whole
     /// page's device space and moves device coordinates into the window
     /// last (see [`window_ctm`]).
-    pub(super) fn page_ctm(&self) -> Ctm {
+    pub(crate) fn page_ctm(&self) -> Ctm {
         build_initial_ctm(
             self.page_height,
             self.extent,

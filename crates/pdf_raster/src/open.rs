@@ -538,16 +538,14 @@ fn open_session_with_doc(
     let prefetch = if config.prefetch
         && let Some(cache) = image_cache.as_ref()
     {
-        pdf_interp::cache::spawn_prefetch(
-            Arc::clone(&doc),
-            cache.clone(),
-            doc_id,
-            pdf_interp::cache::PrefetchConfig::default(),
-        )
-        .inspect_err(|e| {
-            log::warn!("image prefetch disabled: cannot start its threads ({e})");
-        })
-        .ok()
+        let mut prefetch_config = pdf_interp::cache::PrefetchConfig::default();
+        prefetch_config.scale = config.prefetch_scale;
+        prefetch_config.rotation = config.rotation;
+        pdf_interp::cache::spawn_prefetch(Arc::clone(&doc), cache.clone(), doc_id, prefetch_config)
+            .inspect_err(|e| {
+                log::warn!("image prefetch disabled: cannot start its threads ({e})");
+            })
+            .ok()
     } else {
         None
     };
