@@ -3035,6 +3035,27 @@ on ISO Coated v2 (up to 4.4 % ink, about 11 levels of an 8-bit channel, at
 black), and from L* 8.0 to 11.1 on the synthetic test press; `--cmyk` without
 `--bpc`, and RGB and gray output profiles, are unchanged.
 
+**Unreleased on master: forced-CUDA deskew, deep forms, JPEG 2000 matte
+and truncation, Type 3 without `/FontMatrix`.**  Under `--backend cuda` a
+deskew rotation that fails on the GPU is `RasterError::BackendUnavailable`
+instead of a silent CPU rotation (`deskew::DeskewError` is now an enum,
+`TooLarge` or `GpuRotation`). A Form XObject nested `MAX_FORM_DEPTH` (now
+40, about 5.6 KB of stack a level) forms deep is skipped with a warning and
+listed in `PageDiagnostics::forms_too_deep`, and the rest of the page
+renders; previously the whole page was lost at 32 (`--strict` still fails
+the page; `RenderAbort::FormDepth` is gone). A `/SMaskInData 2` JPEG 2000
+image is un-premultiplied against its dictionary's `/Matte` rather than
+against black. A JPEG 2000 codestream that ends before a tile's data is
+skipped and reported instead of drawn as mid-grey; one whose tiles are all
+present but cut short is drawn as far as it decodes and reported partial
+(the local `hayro-jpeg2000` fork reports `DecoderContext::completeness`).
+A Type 3 font without a valid `/FontMatrix` uses the identity, not
+0.001, and logs a warning. The `nvjpeg2k` build of the interpreter compiles
+again. pdfium corpus: `bug_972999` passes and `bug_557223` matches its
+expected image; `jpxdecode_smask_in_data_2` is reclassified as a divergence
+(its references draw the colour opaque, ignoring alpha) and `bug_1128284`
+now draws two of its three marks.
+
 **Unreleased on master: a clip takes effect after the paint that ends its
 path.** A `W`/`W*` followed by a painting operator (`W f`, `W S`, `W B`,
 `W b` and their even-odd forms) now paints the path unclipped by it, then
