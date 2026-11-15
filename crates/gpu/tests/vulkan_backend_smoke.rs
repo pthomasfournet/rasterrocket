@@ -196,23 +196,27 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
 
     let (backend, _serial) = shared_backend();
     let cmyk = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc cmyk");
-    let rgb = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc rgb");
+    let mut rgb = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc rgb");
     let clut = backend.alloc_device_zeroed(CLUT_BYTES).expect("alloc clut");
-    let params = || IccClutParams {
-        cmyk: &cmyk,
-        rgb: &rgb,
-        clut: &clut,
-        n_pixels: N_PIXELS,
-    };
 
     backend.begin_page().expect("begin_page");
     for i in 0..PER_PAGE_MAX {
         backend
-            .record_icc_clut(params())
+            .record_icc_clut(IccClutParams {
+                cmyk: &cmyk,
+                rgb: &mut rgb,
+                clut: &clut,
+                n_pixels: N_PIXELS,
+            })
             .unwrap_or_else(|e| panic!("record_icc_clut #{i} of {PER_PAGE_MAX} failed: {e}"));
     }
     let err = backend
-        .record_icc_clut(params())
+        .record_icc_clut(IccClutParams {
+            cmyk: &cmyk,
+            rgb: &mut rgb,
+            clut: &clut,
+            n_pixels: N_PIXELS,
+        })
         .expect_err("record_icc_clut past the cap must be rejected");
     let BackendError::DescriptorPoolExhausted { allocated, max } = err else {
         panic!("expected DescriptorPoolExhausted, got: {err:?}");

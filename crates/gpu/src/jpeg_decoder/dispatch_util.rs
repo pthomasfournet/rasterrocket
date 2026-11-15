@@ -130,6 +130,15 @@ impl<'a, B: GpuBackend + ?Sized> DeviceBufferGuard<'a, B> {
         }
     }
 
+    /// Borrow the underlying buffer uniquely, for device work that writes
+    /// it.  Does not transfer ownership; the guard still frees on Drop.
+    pub(super) const fn as_mut(&mut self) -> &mut B::DeviceBuffer {
+        match &mut self.buf {
+            Some(b) => b,
+            None => panic!("DeviceBufferGuard::as_mut after take"),
+        }
+    }
+
     /// Transfer the buffer to the caller. Drop becomes a no-op;
     /// the caller is now responsible for freeing the buffer (e.g.,
     /// via `backend.free_device`).

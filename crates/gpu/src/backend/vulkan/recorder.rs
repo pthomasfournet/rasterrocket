@@ -546,6 +546,7 @@ impl PageRecorder {
             .expect("validate() proved mcu_schedule is Some for JpegPhase1IntraSync");
         let memo = p
             .memo
+            .as_deref()
             .expect("validate() proved memo is Some for JpegPhase1IntraSync");
         // Buffer order matches binding_slots = [0, 1, 2, 7, 8, 10].
         self.dispatch_kernel(
@@ -590,12 +591,14 @@ impl PageRecorder {
             .expect("validate() proved mcu_schedule is Some for JpegPhase2InterSync");
         let flags = p
             .sync_flags
+            .as_deref()
             .expect("validate() proved sync_flags is Some for JpegPhase2InterSync");
         let prev = p
             .s_info_prev
             .expect("validate() proved s_info_prev is Some for JpegPhase2InterSync");
         let memo = p
             .memo
+            .as_deref()
             .expect("validate() proved memo is Some for JpegPhase2InterSync");
         // Buffer order matches binding_slots = [0, 1, 2, 3, 7, 8, 9, 10]:
         // bitstream, codebook, s_info (write side), sync_flags,
@@ -653,9 +656,11 @@ impl PageRecorder {
             .expect("validate() proved offsets is Some for JpegPhase4Redecode");
         let symbols_out = p
             .symbols_out
+            .as_deref()
             .expect("validate() proved symbols_out is Some for JpegPhase4Redecode");
         let decode_status = p
             .decode_status
+            .as_deref()
             .expect("validate() proved decode_status is Some for JpegPhase4Redecode");
         self.dispatch_kernel(
             KernelId::JpegPhase4Redecode,

@@ -13,10 +13,11 @@
 //!
 //! cudarc records a write event on a kernel argument only when the
 //! argument is a `&mut CudaSlice`; a `&CudaSlice` argument records a read.
-//! The blit destination is `&mut`, so a read of the page on another stream
-//! waits for the blit.  Buffers the other kernels write are still passed
-//! by `&`: their writes are ordered only against later work on the
-//! recording thread's stream, which is where every caller reads them.
+//! Every buffer a kernel writes is therefore passed by `&mut`, through the
+//! `&mut` fields of `params::*Params`, and every buffer it only reads by
+//! `&`: a launch on another stream waits for the last recorded write of
+//! each buffer it reads, and for the last recorded read and write of each
+//! buffer it writes.
 
 #![expect(
     clippy::needless_pass_by_value,

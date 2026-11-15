@@ -32,8 +32,8 @@ impl GpuCtx {
     )]
     pub(crate) fn launch_scan_async(
         &self,
-        data: &CudaSlice<u8>,
-        block_sums: &CudaSlice<u8>,
+        data: &mut CudaSlice<u8>,
+        block_sums: &mut CudaSlice<u8>,
         len_elems: u32,
         phase: ScanPhase,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -54,8 +54,11 @@ impl GpuCtx {
         // two take (data, block_sums, len_elems). Arg order matches
         // the .cu signatures.
         match phase {
-            ScanPhase::PerWorkgroup | ScanPhase::ScatterBlockSums => {
+            ScanPhase::PerWorkgroup => {
                 builder.arg(data).arg(block_sums).arg(&len_elems);
+            }
+            ScanPhase::ScatterBlockSums => {
+                builder.arg(data).arg(&*block_sums).arg(&len_elems);
             }
             ScanPhase::BlockSums => {
                 builder.arg(block_sums).arg(&len_elems);

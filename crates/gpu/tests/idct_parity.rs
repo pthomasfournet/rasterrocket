@@ -188,14 +188,14 @@ impl Case {
         let coefficients = upload(&self.coefficients);
         let qtables = upload(&self.qtables);
         let dc_values = upload(&self.dc_values);
-        let pixels = backend.alloc_device_readback(out_bytes).expect("alloc");
+        let mut pixels = backend.alloc_device_readback(out_bytes).expect("alloc");
         backend
             .run_page(|b| {
                 b.record_idct(IdctParams {
                     coefficients: &coefficients,
                     qtables: &qtables,
                     dc_values: &dc_values,
-                    pixels_rgba: &pixels,
+                    pixels_rgba: &mut pixels,
                     width: w,
                     height: h,
                     num_components: self.nc as u32,

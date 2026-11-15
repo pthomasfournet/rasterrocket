@@ -86,7 +86,7 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], table: &[u8]) -> Result
             unsafe { record_upload(backend, d_clut, table.len()) }?;
             backend.record_icc_clut(IccClutParams {
                 cmyk: &d_cmyk.device,
-                rgb: &d_rgb.device,
+                rgb: &mut d_rgb.device,
                 clut: &d_clut.device,
                 n_pixels,
             })?;

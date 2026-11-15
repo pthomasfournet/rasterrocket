@@ -26,7 +26,7 @@ impl GpuCtx {
         coefficients: &CudaSlice<u8>,
         qtables: &CudaSlice<u8>,
         dc_values: &CudaSlice<u8>,
-        pixels_rgba: &CudaSlice<u8>,
+        pixels_rgba: &mut CudaSlice<u8>,
         width: u32,
         height: u32,
         num_components: u32,

@@ -93,14 +93,21 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
         })
     }
 
-    /// `HuffmanParams` skeleton with the shared buffers and dims.
-    const fn base_params(&self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+    /// `HuffmanParams` with the shared buffers and dims for `phase`.  Phase 2
+    /// reads `s_info` and writes `s_info_scratch`; the other phases take
+    /// `s_info` itself.  The flags and Phase 4's buffers are left `None`.
+    const fn base_params(&mut self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+        let (s_info, s_info_prev) = if matches!(phase, HuffmanPhase::Phase2InterSync) {
+            (self.s_info_scratch.as_mut(), Some(self.s_info.as_ref()))
+        } else {
+            (self.s_info.as_mut(), None)
+        };
         HuffmanParams {
             bitstream: self.bitstream.as_ref(),
             codebook: self.codebook.as_ref(),
-            s_info: self.s_info.as_ref(),
+            s_info,
             sync_flags: None,
-            s_info_prev: None,
+            s_info_prev,
             offsets: None,
             symbols_out: None,
             decode_status: None,
@@ -118,7 +125,7 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
     }
 
     /// Record and run Phase 1 into `s_info`.
-    fn run_phase1(&self, backend: &B) -> Result<()> {
+    fn run_phase1(&mut self, backend: &B) -> Result<()> {
         backend.run_page(|backend| {
             backend.record_huffman(self.base_params(HuffmanPhase::Phase1IntraSync))
         })
@@ -147,7 +154,7 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
 fn run_phase1_and_phase2<B: GpuBackend>(
     backend: &B,
     setup: &mut SyntheticDispatchSetup<'_, B>,
-    sync_flags: &DeviceBufferGuard<'_, B>,
+    sync_flags: &mut DeviceBufferGuard<'_, B>,
 ) -> Result<Phase2Outcome> {
     let bound = retry_bound(setup.num_subsequences as usize);
     let mut flags_host = vec![0u32; setup.num_subsequences as usize];
@@ -157,9 +164,7 @@ fn run_phase1_and_phase2<B: GpuBackend>(
                 backend.record_huffman(setup.base_params(HuffmanPhase::Phase1IntraSync))?;
             }
             let mut params = setup.base_params(HuffmanPhase::Phase2InterSync);
-            params.s_info = setup.s_info_scratch.as_ref();
-            params.s_info_prev = Some(setup.s_info.as_ref());
-            params.sync_flags = Some(sync_flags.as_ref());
+            params.sync_flags = Some(sync_flags.as_mut());
             backend.record_huffman(params)?;
             Ok(())
         })?;
@@ -194,7 +199,7 @@ pub(super) fn dispatch_phase1_intra_sync<B: GpuBackend>(
     if stream.length_bits == 0 {
         return Ok(Vec::new());
     }
-    let setup = SyntheticDispatchSetup::new(
+    let mut setup = SyntheticDispatchSetup::new(
         backend,
         "dispatch_phase1_intra_sync",
         stream,
@@ -230,9 +235,9 @@ pub(super) fn dispatch_phase1_then_phase2<B: GpuBackend>(
         codebooks,
         subsequence_bits,
     )?;
-    let sync_flags =
+    let mut sync_flags =
         DeviceBufferGuard::alloc_readback(backend, (setup.num_subsequences as usize) * 4)?;
-    let outcome = run_phase1_and_phase2(backend, &mut setup, &sync_flags)?;
+    let outcome = run_phase1_and_phase2(backend, &mut setup, &mut sync_flags)?;
     Ok((setup.download_s_info(backend)?, outcome))
 }
 
@@ -265,9 +270,9 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
         subsequence_bits,
     )?;
     let per_subseq_bytes = (setup.num_subsequences as usize) * 4;
-    let sync_flags = DeviceBufferGuard::alloc_readback(backend, per_subseq_bytes)?;
+    let mut sync_flags = DeviceBufferGuard::alloc_readback(backend, per_subseq_bytes)?;
     if !matches!(
-        run_phase1_and_phase2(backend, &mut setup, &sync_flags)?,
+        run_phase1_and_phase2(backend, &mut setup, &mut sync_flags)?,
         Phase2Outcome::Converged { .. }
     ) {
         return Err(BackendError::msg(
@@ -291,16 +296,17 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
 
     let offsets = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
     backend.upload(offsets.as_ref(), bytemuck::cast_slice(&offsets_host))?;
-    let symbols = DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
+    let mut symbols =
+        DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
     // does not reach reads back clean.
-    let decode_status = DeviceBufferGuard::alloc_readback_zeroed(backend, per_subseq_bytes)?;
+    let mut decode_status = DeviceBufferGuard::alloc_readback_zeroed(backend, per_subseq_bytes)?;
 
     backend.run_page(|backend| {
         let mut params = setup.base_params(HuffmanPhase::Phase4Redecode);
         params.offsets = Some(offsets.as_ref());
-        params.symbols_out = Some(symbols.as_ref());
-        params.decode_status = Some(decode_status.as_ref());
+        params.symbols_out = Some(symbols.as_mut());
+        params.decode_status = Some(decode_status.as_mut());
         params.total_symbols = total_symbols;
         backend.record_huffman(params)
     })?;

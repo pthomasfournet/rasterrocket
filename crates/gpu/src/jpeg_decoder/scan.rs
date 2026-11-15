@@ -52,8 +52,8 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
     // Guards free their buffers on Drop, so any `?` between here
     // and the explicit `take() + free_device` at the bottom doesn't
     // leak. See `dispatch_util` module doc-comment for the rationale.
-    let data = DeviceBufferGuard::alloc_readback(backend, data_bytes)?;
-    let block_sums = DeviceBufferGuard::alloc(backend, block_sums_bytes)?;
+    let mut data = DeviceBufferGuard::alloc_readback(backend, data_bytes)?;
+    let mut block_sums = DeviceBufferGuard::alloc(backend, block_sums_bytes)?;
 
     let input_bytes = bytemuck::cast_slice::<u32, u8>(input);
     backend.upload(data.as_ref(), input_bytes)?;
@@ -65,8 +65,8 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
             ScanPhase::ScatterBlockSums,
         ] {
             backend.record_scan(ScanParams {
-                data: data.as_ref(),
-                block_sums: block_sums.as_ref(),
+                data: data.as_mut(),
+                block_sums: block_sums.as_mut(),
                 len_elems,
                 phase,
             })?;

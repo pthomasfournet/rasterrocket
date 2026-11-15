@@ -253,21 +253,32 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         })
     }
 
-    /// `HuffmanParams` skeleton with the shared buffers and dims; the
-    /// per-phase helpers below fill in the phase-specific fields.
-    const fn base_params(&self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+    /// `HuffmanParams` with the shared buffers and dims for `phase`.  Phase 2
+    /// reads `s_info` and writes `s_info_scratch` and `sync_flags`; the other
+    /// phases take `s_info` itself.  Phase 4's own buffers are left `None`.
+    const fn base_params(&mut self, phase: HuffmanPhase) -> HuffmanParams<'_, B> {
+        let phase2 = matches!(phase, HuffmanPhase::JpegPhase2InterSync);
+        let (s_info, s_info_prev, sync_flags) = if phase2 {
+            (
+                self.s_info_scratch.as_mut(),
+                Some(self.s_info.as_ref()),
+                Some(self.sync_flags.as_mut()),
+            )
+        } else {
+            (self.s_info.as_mut(), None, None)
+        };
         HuffmanParams {
             bitstream: self.bitstream.as_ref(),
             codebook: self.codebook.as_ref(),
-            s_info: self.s_info.as_ref(),
-            sync_flags: None,
-            s_info_prev: None,
+            s_info,
+            sync_flags,
+            s_info_prev,
             offsets: None,
             symbols_out: None,
             decode_status: None,
             dc_codebook: Some(self.dc_codebook.as_ref()),
             mcu_schedule: Some(self.mcu_schedule.as_ref()),
-            memo: Some(self.memo.as_ref()),
+            memo: Some(self.memo.as_mut()),
             length_bits: self.length_bits,
             subsequence_bits: self.subsequence_bits,
             num_components: self.num_components,
@@ -280,7 +291,7 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
 
     /// Record and run JPEG Phase 1 into `s_info`.
     #[cfg(all(test, feature = "gpu-validation"))]
-    fn run_phase1(&self, backend: &B) -> Result<()> {
+    fn run_phase1(&mut self, backend: &B) -> Result<()> {
         backend.run_page(|backend| {
             backend.record_huffman(self.base_params(HuffmanPhase::JpegPhase1IntraSync))
         })
@@ -344,9 +355,6 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
                 backend.record_huffman(setup.base_params(HuffmanPhase::JpegPhase1IntraSync))?;
             }
             let mut params = setup.base_params(HuffmanPhase::JpegPhase2InterSync);
-            params.s_info = setup.s_info_scratch.as_ref();
-            params.s_info_prev = Some(setup.s_info.as_ref());
-            params.sync_flags = Some(setup.sync_flags.as_ref());
             params.redecode_budget = budget.redecodes;
             backend.record_huffman(params)?;
             Ok(())
@@ -402,7 +410,7 @@ fn dispatch_jpeg_phase1_intra_sync<B: GpuBackend>(
     if prep.bitstream.length_bits == 0 {
         return Ok(Vec::new());
     }
-    let setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
     setup.run_phase1(backend)?;
     let out = setup.download_s_info(backend)?;
     setup.free_all(backend);
@@ -421,7 +429,7 @@ fn dispatch_jpeg_phase1_memo<B: GpuBackend>(
     prep: &crate::jpeg_decoder::JpegPreparedInput,
     subsequence_bits: u32,
 ) -> Result<Vec<[SubsequenceState; 4]>> {
-    let setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
+    let mut setup = JpegDispatchSetup::new(backend, prep, subsequence_bits)?;
     setup.run_phase1(backend)?;
     let mut out = vec![
         [<SubsequenceState as bytemuck::Zeroable>::zeroed(); 4];
@@ -609,18 +617,18 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
     let offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
     backend.upload(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
 
-    let symbols_buf =
+    let mut symbols_buf =
         DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel
     // does not reach reads back clean.
-    let decode_status_buf = DeviceBufferGuard::alloc_readback_zeroed(backend, flags_bytes)?;
+    let mut decode_status_buf = DeviceBufferGuard::alloc_readback_zeroed(backend, flags_bytes)?;
 
     // Phase 4.
     backend.run_page(|backend| {
         let mut params = setup.base_params(HuffmanPhase::JpegPhase4Redecode);
         params.offsets = Some(offsets_buf.as_ref());
-        params.symbols_out = Some(symbols_buf.as_ref());
-        params.decode_status = Some(decode_status_buf.as_ref());
+        params.symbols_out = Some(symbols_buf.as_mut());
+        params.decode_status = Some(decode_status_buf.as_mut());
         params.total_symbols = total_symbols;
         backend.record_huffman(params)
     })?;

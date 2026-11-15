@@ -29,7 +29,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     let clut = backend
         .alloc_device(clut_host.len())
         .expect("alloc_device(clut) failed — VRAM exhausted or driver error");
-    let rgb = backend
+    let mut rgb = backend
         .alloc_device(n * 3)
         .expect("alloc_device(rgb) failed — VRAM exhausted or driver error");
     backend.upload(&cmyk, &cmyk_host).expect("upload(cmyk)");
@@ -47,7 +47,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     backend
         .record_icc_clut(params::IccClutParams {
             cmyk: &cmyk,
-            rgb: &rgb,
+            rgb: &mut rgb,
             clut: &clut,
             n_pixels,
         })

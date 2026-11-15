@@ -109,16 +109,16 @@ impl GpuCtx {
         let d_cmyk = stream.clone_htod(cmyk)?;
         // Device-side zero alloc — both kernels write every output pixel,
         // so nothing is gained by shipping a zero Vec over PCIe.
-        let d_rgb = stream.alloc_zeros::<u8>(n * 3)?;
+        let mut d_rgb = stream.alloc_zeros::<u8>(n * 3)?;
 
         match clut {
             None => {
                 let d_corners = stream.clone_htod(&color::cmyk::CORNER_TABLE)?;
-                self.launch_icc_matrix_async(&d_cmyk, &d_rgb, &d_corners, n_u32)?;
+                self.launch_icc_matrix_async(&d_cmyk, &mut d_rgb, &d_corners, n_u32)?;
             }
             Some((table, grid_n)) => {
                 let d_clut = stream.clone_htod(table)?;
-                self.launch_icc_clut_async(&d_cmyk, &d_rgb, &d_clut, grid_n, n_u32)?;
+                self.launch_icc_clut_async(&d_cmyk, &mut d_rgb, &d_clut, grid_n, n_u32)?;
             }
         }
 
@@ -145,7 +145,7 @@ impl GpuCtx {
     pub(crate) fn launch_icc_matrix_async(
         &self,
         d_cmyk: &CudaSlice<u8>,
-        d_rgb: &CudaSlice<u8>,
+        d_rgb: &mut CudaSlice<u8>,
         d_corners: &CudaSlice<u8>,
         n_pixels: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -172,7 +172,7 @@ impl GpuCtx {
     pub(crate) fn launch_icc_clut_async(
         &self,
         d_cmyk: &CudaSlice<u8>,
-        d_rgb: &CudaSlice<u8>,
+        d_rgb: &mut CudaSlice<u8>,
         d_clut: &CudaSlice<u8>,
         grid_n: u32,
         n_pixels: u32,

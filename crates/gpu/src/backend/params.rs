@@ -3,6 +3,11 @@
 //! Each struct holds references (not owned values) to caller-owned device
 //! buffers and small scalar args. Backends resolve buffer references to
 //! their native pointer/handle type at record time.
+//!
+//! A buffer the kernel writes in any phase is held by `&mut`, one it only
+//! reads by `&`, so a backend that orders work across queues by recorded
+//! reads and writes (the CUDA backend's per-buffer events) sees every
+//! write.
 
 use super::GpuBackend;
 
@@ -188,7 +193,7 @@ pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     /// Input CMYK pixels in device memory.
     pub cmyk: &'a B::DeviceBuffer,
     /// Output RGB pixels in device memory.
-    pub rgb: &'a B::DeviceBuffer,
+    pub rgb: &'a mut B::DeviceBuffer,
     /// CLUT table in device memory.
     pub clut: &'a B::DeviceBuffer,
     /// Number of pixels to transform.
@@ -376,11 +381,11 @@ pub const fn scan_block_count(len_elems: u32) -> u32 {
 pub struct ScanParams<'a, B: GpuBackend + ?Sized> {
     /// Input/output u32 buffer scanned in place. Must hold at least
     /// `len_elems` u32s.
-    pub data: &'a B::DeviceBuffer,
+    pub data: &'a mut B::DeviceBuffer,
     /// Per-workgroup scratch holding tile sums between phases. Sized
     /// for the worst-case block count (must hold at least
     /// `ceil(len_elems / 1024)` u32s).
-    pub block_sums: &'a B::DeviceBuffer,
+    pub block_sums: &'a mut B::DeviceBuffer,
     /// Number of u32 elements to scan. Backend computes the dispatch
     /// grid from this; the kernel reads it as a push-constant /
     /// kernel-arg.
@@ -570,13 +575,14 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// Entry layout: bits 8..16 = `num_bits`, bits 0..8 = `symbol`.
     /// `num_bits == 0` = no codeword matches that prefix.
     pub codebook: &'a B::DeviceBuffer,
-    /// Per-subsequence output state: `uint4 = (p, n, c, z)` each.
-    pub s_info: &'a B::DeviceBuffer,
+    /// Per-subsequence state: `uint4 = (p, n, c, z)` each.  Written by
+    /// Phases 1 and 2, read by Phase 4.
+    pub s_info: &'a mut B::DeviceBuffer,
     /// Per-subseq sync flag (1 = synced with right neighbour,
     /// 0 = unsynced and advanced this pass). Required for
     /// `Phase2InterSync` and `JpegPhase2InterSync`; ignored for the
     /// Phase 1 / Phase 4 variants.
-    pub sync_flags: Option<&'a B::DeviceBuffer>,
+    pub sync_flags: Option<&'a mut B::DeviceBuffer>,
     /// Previous pass's per-subsequence states — the Jacobi read side
     /// of the JPEG Phase 2 propagation ([`Self::s_info`] is the
     /// write side; the host swaps the two buffers between passes).
@@ -594,7 +600,7 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// for `Phase4Redecode` and `JpegPhase4Redecode`; ignored for
     /// the Phase 1 / Phase 2 variants. Caller sizes it from
     /// Phase 3's scan total + last subseq's `n`.
-    pub symbols_out: Option<&'a B::DeviceBuffer>,
+    pub symbols_out: Option<&'a mut B::DeviceBuffer>,
     /// Per-subseq exit-condition output (`u32[num_subsequences]`):
     /// `decode_status[i]` encodes the Phase 4 kernel's exit
     /// condition for subseq `i` — `Phase4FailureKind::Ok` on clean
@@ -604,7 +610,7 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// default to Ok. Required for `Phase4Redecode` and
     /// `JpegPhase4Redecode`; ignored for the Phase 1 / Phase 2
     /// variants.
-    pub decode_status: Option<&'a B::DeviceBuffer>,
+    pub decode_status: Option<&'a mut B::DeviceBuffer>,
     /// Flat DC-class codebook for the JPEG-framed phases.  Same
     /// layout as [`Self::codebook`] (one
     /// `HUFFMAN_CODEBOOK_ENTRIES`-wide block per selector).
@@ -625,7 +631,7 @@ pub struct HuffmanParams<'a, B: GpuBackend + ?Sized> {
     /// it, Phase 2 reads it and rewrites the second entry of every
     /// slot. Required for `JpegPhase1IntraSync` and
     /// `JpegPhase2InterSync`; ignored for every other phase.
-    pub memo: Option<&'a B::DeviceBuffer>,
+    pub memo: Option<&'a mut B::DeviceBuffer>,
     /// Exact bit count of `bitstream`.
     pub length_bits: u32,
     /// Subsequence size in bits (Wei §III).
@@ -853,7 +859,7 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
             self.phase,
             HuffmanPhase::Phase2InterSync | HuffmanPhase::JpegPhase2InterSync,
         ) {
-            let Some(flags) = self.sync_flags else {
+            let Some(flags) = self.sync_flags.as_deref() else {
                 return Err(invariant(
                     "Phase2InterSync (or JpegPhase2InterSync) requires sync_flags to be Some",
                 ));
@@ -915,12 +921,12 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
                 "Phase4Redecode (or JpegPhase4Redecode) requires offsets to be Some",
             ));
         };
-        let Some(symbols_out) = self.symbols_out else {
+        let Some(symbols_out) = self.symbols_out.as_deref() else {
             return Err(invariant(
                 "Phase4Redecode (or JpegPhase4Redecode) requires symbols_out to be Some",
             ));
         };
-        let Some(decode_status) = self.decode_status else {
+        let Some(decode_status) = self.decode_status.as_deref() else {
             return Err(invariant(
                 "Phase4Redecode (or JpegPhase4Redecode) requires decode_status to be Some",
             ));
@@ -998,7 +1004,7 @@ impl<B: GpuBackend + ?Sized> HuffmanParams<'_, B> {
             self.phase,
             HuffmanPhase::JpegPhase1IntraSync | HuffmanPhase::JpegPhase2InterSync,
         ) {
-            let Some(memo) = self.memo else {
+            let Some(memo) = self.memo.as_deref() else {
                 return Err(invariant(
                     "JpegPhase1IntraSync (or JpegPhase2InterSync) requires memo to be Some",
                 ));
@@ -1046,7 +1052,7 @@ pub struct IdctParams<'a, B: GpuBackend + ?Sized> {
     /// Layout: `[comp][block_y][block_x]` as i32.
     pub dc_values: &'a B::DeviceBuffer,
     /// RGBA8 output buffer, row-major, `width × height` u32 pixels.
-    pub pixels_rgba: &'a B::DeviceBuffer,
+    pub pixels_rgba: &'a mut B::DeviceBuffer,
     /// Image width in pixels (> 0).
     pub width: u32,
     /// Image height in pixels (> 0).
@@ -1301,7 +1307,12 @@ mod tests {
     /// A "large enough" fake buffer a kernel writes: a leaked unique
     /// reference, as the parameter structs take written buffers by `&mut`.
     fn fake_out() -> &'static mut usize {
-        Box::leak(Box::new(FAKE_BUF))
+        fake_out_of(FAKE_BUF)
+    }
+
+    /// A fake written buffer of `len` bytes, as [`fake_out`].
+    fn fake_out_of(len: usize) -> &'static mut usize {
+        Box::leak(Box::new(len))
     }
 
     /// Sampling tables sized exactly for `ok_blit`'s 100×100 bbox.
@@ -1471,7 +1482,7 @@ mod tests {
             coefficients: &FAKE_BUF,
             qtables: &FAKE_BUF,
             dc_values: &FAKE_BUF,
-            pixels_rgba: &FAKE_BUF,
+            pixels_rgba: fake_out(),
             width,
             height,
             num_components,
@@ -1493,11 +1504,10 @@ mod tests {
     #[test]
     fn icc_clut_validate_returns_grid_and_checks_buffers() {
         static CLUT17: usize = 17 * 17 * 17 * 17 * 3;
-        static SHORT: usize = 11;
         static ODD_CLUT: usize = 100 * 3;
         let ok = || IccClutParams::<FakeBackend> {
             cmyk: &FAKE_BUF,
-            rgb: &FAKE_BUF,
+            rgb: fake_out(),
             clut: &CLUT17,
             n_pixels: 4,
         };
@@ -1505,7 +1515,7 @@ mod tests {
         let err =
             |p: IccClutParams<'_, FakeBackend>| p.validate(&FakeBackend).unwrap_err().to_string();
         let e = err(IccClutParams {
-            rgb: &SHORT,
+            rgb: fake_out_of(11),
             ..ok()
         });
         assert!(e.contains("rgb buffer"), "{e}");
@@ -1533,8 +1543,8 @@ mod tests {
     /// `device_buffer_len`, which for `FakeBackend` is identity over
     /// the `usize` buffer).
     fn scan_params<'a>(
-        data_bytes: &'a usize,
-        block_sums_bytes: &'a usize,
+        data_bytes: &'a mut usize,
+        block_sums_bytes: &'a mut usize,
         len_elems: u32,
         phase: ScanPhase,
     ) -> ScanParams<'a, FakeBackend> {
@@ -1556,18 +1566,18 @@ mod tests {
 
     #[test]
     fn scan_validate_accepts_minimal_valid() {
-        let data = 4096usize;
-        let block_sums = 16usize;
-        let p = scan_params(&data, &block_sums, 1024, ScanPhase::PerWorkgroup);
+        let mut data = 4096usize;
+        let mut block_sums = 16usize;
+        let p = scan_params(&mut data, &mut block_sums, 1024, ScanPhase::PerWorkgroup);
         p.validate(&FakeBackend)
             .expect("4 KiB data + 1024 elems is valid");
     }
 
     #[test]
     fn scan_validate_rejects_zero_len() {
-        let data = 4096usize;
-        let block_sums = 16usize;
-        let p = scan_params(&data, &block_sums, 0, ScanPhase::PerWorkgroup);
+        let mut data = 4096usize;
+        let mut block_sums = 16usize;
+        let p = scan_params(&mut data, &mut block_sums, 0, ScanPhase::PerWorkgroup);
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("len_elems"), "{err}");
     }
@@ -1575,9 +1585,9 @@ mod tests {
     #[test]
     fn scan_validate_rejects_undersized_data_buffer() {
         // 1024 elems * 4 bytes = 4096 bytes needed; provide 4095.
-        let data = 4095usize;
-        let block_sums = 16usize;
-        let p = scan_params(&data, &block_sums, 1024, ScanPhase::PerWorkgroup);
+        let mut data = 4095usize;
+        let mut block_sums = 16usize;
+        let p = scan_params(&mut data, &mut block_sums, 1024, ScanPhase::PerWorkgroup);
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("data buffer"), "{err}");
     }
@@ -1585,9 +1595,9 @@ mod tests {
     #[test]
     fn scan_validate_rejects_undersized_block_sums() {
         // 2049 elems → block_count = ceil(2049/1024) = 3 → 12 bytes needed.
-        let data = 2049 * 4usize;
-        let block_sums = 4usize; // only room for 1 block
-        let p = scan_params(&data, &block_sums, 2049, ScanPhase::PerWorkgroup);
+        let mut data = 2049 * 4usize;
+        let mut block_sums = 4usize; // only room for 1 block
+        let p = scan_params(&mut data, &mut block_sums, 2049, ScanPhase::PerWorkgroup);
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("block_sums buffer"), "{err}");
     }
@@ -1595,9 +1605,14 @@ mod tests {
     #[test]
     fn scan_validate_rejects_too_many_blocks() {
         // len_elems = 1024 * 1024 + 1 → block_count = 1025 > SCAN_MAX_BLOCKS.
-        let data = (1024 * 1024 + 1) * 4usize;
-        let block_sums = 1025 * 4usize;
-        let p = scan_params(&data, &block_sums, 1024 * 1024 + 1, ScanPhase::PerWorkgroup);
+        let mut data = (1024 * 1024 + 1) * 4usize;
+        let mut block_sums = 1025 * 4usize;
+        let p = scan_params(
+            &mut data,
+            &mut block_sums,
+            1024 * 1024 + 1,
+            ScanPhase::PerWorkgroup,
+        );
         let err = p.validate(&FakeBackend).unwrap_err().to_string();
         assert!(err.contains("block_count"), "{err}");
         assert!(err.contains("recursive scan"), "{err}");
@@ -1607,9 +1622,14 @@ mod tests {
     fn scan_validate_accepts_at_max_blocks() {
         // Exactly SCAN_MAX_BLOCKS blocks (the upper limit).
         let max_elems = SCAN_MAX_BLOCKS * 2 * SCAN_WORKGROUP_SIZE;
-        let data = (max_elems as usize) * 4;
-        let block_sums = (SCAN_MAX_BLOCKS as usize) * 4;
-        let p = scan_params(&data, &block_sums, max_elems, ScanPhase::PerWorkgroup);
+        let mut data = (max_elems as usize) * 4;
+        let mut block_sums = (SCAN_MAX_BLOCKS as usize) * 4;
+        let p = scan_params(
+            &mut data,
+            &mut block_sums,
+            max_elems,
+            ScanPhase::PerWorkgroup,
+        );
         p.validate(&FakeBackend)
             .expect("exactly SCAN_MAX_BLOCKS is valid");
     }
@@ -1703,7 +1723,7 @@ mod tests {
     fn ok_huffman_synthetic<'a>(
         bitstream: &'a usize,
         codebook: &'a usize,
-        s_info: &'a usize,
+        s_info: &'a mut usize,
     ) -> HuffmanParams<'a, FakeBackend> {
         HuffmanParams {
             bitstream,
@@ -1734,8 +1754,8 @@ mod tests {
         // codebook: 1 component × 65536 × 4 = 262144 bytes.
         let codebook = 1 << 18;
         // s_info: ceil(256/128) = 2 subsequences × 16 bytes = 32.
-        let s_info = 32;
-        let params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut s_info = 32;
+        let params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params
             .validate(&FakeBackend)
             .expect("synthetic phase1 with sized buffers must validate");
@@ -1745,8 +1765,8 @@ mod tests {
     fn huffman_validate_rejects_jpeg_phase_without_dc_codebook() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut s_info = 32;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.blocks_per_mcu = 1;
         let mcu_schedule = 4;
@@ -1770,9 +1790,9 @@ mod tests {
     fn huffman_validate_rejects_jpeg_phase_without_mcu_schedule() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.blocks_per_mcu = 1;
         params.dc_codebook = Some(&dc_codebook);
@@ -1795,16 +1815,16 @@ mod tests {
     fn huffman_validate_rejects_jpeg_phase2_without_s_info_prev() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         let mcu_schedule = 4;
-        let sync_flags = 8;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut sync_flags = 8;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase2InterSync;
         params.blocks_per_mcu = 1;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
-        params.sync_flags = Some(&sync_flags);
+        params.sync_flags = Some(&mut sync_flags);
         // s_info_prev intentionally None.
         let err = params
             .validate(&FakeBackend)
@@ -1824,11 +1844,11 @@ mod tests {
     fn huffman_validate_rejects_synthetic_phase2_without_s_info_prev() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
-        let sync_flags = 8;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut s_info = 32;
+        let mut sync_flags = 8;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::Phase2InterSync;
-        params.sync_flags = Some(&sync_flags);
+        params.sync_flags = Some(&mut sync_flags);
         // s_info_prev intentionally None.
         let err = params
             .validate(&FakeBackend)
@@ -1848,18 +1868,18 @@ mod tests {
     fn huffman_validate_rejects_undersized_s_info_prev() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         let mcu_schedule = 4;
-        let sync_flags = 8;
+        let mut sync_flags = 8;
         // 2 subsequences need 32 bytes; provide 16.
         let s_info_prev = 16;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase2InterSync;
         params.blocks_per_mcu = 1;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
-        params.sync_flags = Some(&sync_flags);
+        params.sync_flags = Some(&mut sync_flags);
         params.s_info_prev = Some(&s_info_prev);
         let err = params
             .validate(&FakeBackend)
@@ -1879,10 +1899,10 @@ mod tests {
     fn huffman_validate_rejects_jpeg_phase_with_zero_blocks_per_mcu() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         let mcu_schedule = 4;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
@@ -1905,17 +1925,17 @@ mod tests {
     fn huffman_validate_accepts_jpeg_phase1_with_all_jpeg_fields() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         // blocks_per_mcu = 1 × 4 = 4 bytes.
         let mcu_schedule = 4;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
         params.blocks_per_mcu = 1;
-        let memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE;
-        params.memo = Some(&memo);
+        let mut memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE;
+        params.memo = Some(&mut memo);
         params
             .validate(&FakeBackend)
             .expect("JPEG-framed phase1 with all required fields must validate");
@@ -1925,10 +1945,10 @@ mod tests {
     fn huffman_validate_rejects_jpeg_phase1_without_memo() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         let mcu_schedule = 4;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
@@ -1952,21 +1972,21 @@ mod tests {
     fn huffman_validate_rejects_undersized_memo() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         let mcu_schedule = 4;
-        let sync_flags = 8;
+        let mut sync_flags = 8;
         let s_info_prev = 32;
         // 2 subsequences need 128 bytes; provide one byte less.
-        let memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE - 1;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut memo = 2 * JPEG_MEMO_BYTES_PER_SUBSEQUENCE - 1;
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase2InterSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
         params.blocks_per_mcu = 1;
-        params.sync_flags = Some(&sync_flags);
+        params.sync_flags = Some(&mut sync_flags);
         params.s_info_prev = Some(&s_info_prev);
-        params.memo = Some(&memo);
+        params.memo = Some(&mut memo);
         let err = params
             .validate(&FakeBackend)
             .expect_err("under-sized memo must be rejected");
@@ -1985,11 +2005,11 @@ mod tests {
     fn huffman_validate_rejects_undersized_dc_codebook() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         // dc_codebook one byte too small.
         let dc_codebook = (1 << 18) - 1;
         let mcu_schedule = 4;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);
@@ -2012,11 +2032,11 @@ mod tests {
     fn huffman_validate_rejects_undersized_mcu_schedule() {
         let bitstream = 36;
         let codebook = 1 << 18;
-        let s_info = 32;
+        let mut s_info = 32;
         let dc_codebook = 1 << 18;
         // blocks_per_mcu = 4 needs 16 bytes; provide 12.
         let mcu_schedule = 12;
-        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &s_info);
+        let mut params = ok_huffman_synthetic(&bitstream, &codebook, &mut s_info);
         params.phase = HuffmanPhase::JpegPhase1IntraSync;
         params.dc_codebook = Some(&dc_codebook);
         params.mcu_schedule = Some(&mcu_schedule);

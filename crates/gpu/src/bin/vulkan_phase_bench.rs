@@ -308,7 +308,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                 let t = Instant::now();
                 let c = ok(backend.alloc_device(cmyk.len()), "alloc");
                 let l = ok(backend.alloc_device(table.len()), "alloc");
-                let r = ok(backend.alloc_device_readback(n * 3), "alloc");
+                let mut r = ok(backend.alloc_device_readback(n * 3), "alloc");
                 ok(backend.upload(&c, &cmyk), "upload");
                 ok(backend.upload(&l, &table), "upload");
                 let prep = ns(t);
@@ -317,7 +317,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                         ok(
                             b.record_icc_clut(IccClutParams {
                                 cmyk: &c,
-                                rgb: &r,
+                                rgb: &mut r,
                                 clut: &l,
                                 n_pixels: n_px,
                             }),
