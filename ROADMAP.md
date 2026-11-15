@@ -2829,6 +2829,26 @@ intents of the separation.  API changes: `PageRenderer::with_page_group`,
 `RowLayout::Cmyk`/`Cmyk16` and CMYK `write_jpeg`/`IccProfile` in
 `rasterrocket-encode`.
 
+**Unreleased on master: visible-text diagnostic.** `PageDiagnostics::glyphs`
+(`GlyphCounts`) counts the glyphs a page shows, one per character code, by
+text rendering mode (`fill`, `stroke`, `fill_stroke`, `invisible` for
+`3 Tr`, `clip_painted` for 4–6, `clip_only` for 7) when the glyph can mark
+the page, and otherwise by why not (`zero_size`, `unrendered`, `off_page`
+against the page box, `transparent`); `PageDiagnostics::has_visible_text()`
+tells a caller whether to skip OCR.  The counts are the page's whether it
+is rendered whole, in bands or as a region; text in pattern cells, soft-mask
+groups and Type 3 glyph descriptions is not counted, and the clip, soft
+masks and backdrop colour are not considered.  Over 173 pages (first,
+thirds, last) of 44 archive PDFs (39 from `publications/` and `droit/`, 5
+from `rituels/`), recognised scans report only invisible glyphs,
+born-digital pages only visible ones (SCOTUS opinions add a small
+invisible layer), scans without a text layer none, and 163 pages agree
+with an independent trace glyph for glyph; the others differ by ligature
+codes the trace expands to several characters, and by 61 glyphs of two
+running heads set beside the page, counted `off_page`.  No
+pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
+page diagnostics, so its output is unchanged.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in

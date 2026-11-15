@@ -549,6 +549,46 @@ Collected at zero extra cost during rendering.
 | `device_page` | `DevicePage` | Whether the page was rendered whole on a GPU (`SessionConfig::gpu_pages`), and why not when it was offered and declined. |
 | `content_intents` | `IntentSet` | The rendering intents in force at the page's marking operators: the graphics state's (`ri`, `ExtGState` `/RI`, relative colorimetric where none is set) for paths, text and shadings, an image's own `/Intent` where it has one. Empty on a page that marks nothing. |
 | `output_intent` | `Option<RenderingIntent>` | The intent the page was converted to `SessionConfig::output_profile` under; `None` without a profile. |
+| `glyphs` | `GlyphCounts` | The glyphs the page's text-showing operators showed, by text rendering mode and by why a glyph cannot mark the page; see [`GlyphCounts`](#glyphcounts). All zero from `prescan_session`, which executes nothing. |
+
+#### `GlyphCounts`
+
+```rust
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GlyphCounts {
+    pub fill: u32,          // 0 Tr
+    pub stroke: u32,        // 1 Tr
+    pub fill_stroke: u32,   // 2 Tr
+    pub invisible: u32,     // 3 Tr: the text layer a recogniser lays over a scan
+    pub clip_painted: u32,  // 4, 5, 6 Tr (and a Type 3 glyph in 7 Tr, whose description paints)
+    pub clip_only: u32,     // 7 Tr
+    pub zero_size: u32,     // singular text matrix, font size 0, Tz 0; an em below one device pixel (not Type 3)
+    pub unrendered: u32,    // no glyph for the code, an unloadable font program, a Type 3 code without a CharProc,
+                            // or shown before any font was selected
+    pub off_page: u32,      // the em square widened by one em on each side misses the page box
+    pub transparent: u32,   // every paint of the mode has opacity 0 or a colour space of colorants None
+}
+impl GlyphCounts { pub const fn visible(&self) -> u32 }   // fill + stroke + fill_stroke + clip_painted
+impl PageDiagnostics { pub const fn has_visible_text(&self) -> bool }  // glyphs.visible() > 0
+```
+
+One glyph per character code shown, each counted once. A glyph in a painting mode (0, 1, 2, 4, 5, 6) is counted under its mode only when it can mark the page, else under the first of `zero_size`, `unrendered`, `off_page`, `transparent` that applies; a glyph in mode 3 or 7 is counted under its mode. The counts are the page's: the same whether it is rendered whole, in bands (`render_page_bands`) or as a `RenderRegion`, at any `band_rows`. Only the `zero_size` case of an em below one pixel depends on the render's resolution.
+
+Not considered: the clip (a glyph clipped away still counts as visible), soft masks, blend modes, a colour equal to the backdrop's (white text on white), and empty outlines (a space counts as drawn). Glyphs inside a tiling pattern's cell, a soft mask's group and a Type 3 glyph's own description are not counted; a Type 3 glyph counts as one glyph of its string, and text in a substitute or fallback face counts as any other.
+
+`has_visible_text()` is the test for skipping OCR: `false` on a scanned page whose only text is an invisible `3 Tr` layer, or that has none; `true` on a page that draws native text, whether or not it also has images or an invisible layer:
+
+```rust
+let d = &page.diagnostics;
+if d.has_visible_text() {
+    // native text: extract it, skip OCR
+} else if d.glyphs.invisible > 0 {
+    // a recognised scan: an earlier OCR's text layer is present
+} else if d.has_images {
+    // a scan without a text layer: OCR it
+}
+```
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -875,7 +915,8 @@ under [Size limits](cli-reference.md#size-limits) in the CLI reference.
 
 ```rust
 pub use rasterrocket_interp::renderer::{
-    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, ImageFailure, PageDiagnostics,
+    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, GlyphCounts, ImageFailure,
+    PageDiagnostics,
 };
 pub use rasterrocket_interp::resources::ImageFilter;
 pub use rasterrocket_interp::{
