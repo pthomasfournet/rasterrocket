@@ -24,6 +24,11 @@ use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
 /// codestream's colour specification carries is returned with the samples
 /// (`Samples::embedded_profile`) for an image dictionary that names no
 /// colour space.  The error names what the decoder refused.
+///
+/// A codestream that ends early is judged by [`judged`]: one with a tile
+/// that holds no data is an error, and the image is not drawn; one whose
+/// every tile holds data, some of them cut short, is drawn from the
+/// packets present and marked partial (`Samples::partial`).
 pub(in crate::resources::image) fn decode_jpx(
     data: &[u8],
     pdf_w: u32,
@@ -89,8 +94,9 @@ pub(in crate::resources::image) fn decode_jpx(
         return Err(format!("codestream reports zero dimensions {jw}×{jh}"));
     }
     if draw_size.is_none() && (jw != pdf_w || jh != pdf_h) {
-        log::debug!(
-            "image: JPXDecode: PDF dict says {pdf_w}×{pdf_h}, JP2 reports {jw}×{jh} — using JP2 dims"
+        log::warn!(
+            "image: JPXDecode: the image dictionary says {pdf_w}×{pdf_h} and the codestream \
+             {jw}×{jh}; drawing at the codestream's size"
         );
     }
 
@@ -141,8 +147,31 @@ pub(in crate::resources::image) fn decode_jpx(
         samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
         samples
     };
+    samples.partial = judged(ctx.completeness())?;
     samples.embedded_profile = embedded_profile;
     Ok(samples)
+}
+
+/// The completeness `c` of a decoded codestream as a draw decision: `Err`
+/// when a tile holds no data, which would be drawn as the
+/// zero-coefficient level (mid-grey) over its whole area; the reason the
+/// image is partial when every tile holds data but some lost part of it
+/// to the end of the codestream, their packets being drawn as decoded;
+/// `None` when every tile is whole.
+fn judged(c: hayro_jpeg2000::Completeness) -> Result<Option<String>, String> {
+    if c.tiles_without_data > 0 {
+        return Err(format!(
+            "the codestream ends early: {} of its {} tiles hold no data",
+            c.tiles_without_data, c.tiles
+        ));
+    }
+    Ok((c.truncated_tiles > 0).then(|| {
+        format!(
+            "JPXDecode: the codestream ends early: {} of its {} tiles are cut short; the \
+             image is drawn as far as it decodes",
+            c.truncated_tiles, c.tiles
+        )
+    }))
 }
 
 /// `Err` naming the counts when `got` samples are not the `expected` of a
@@ -322,7 +351,9 @@ fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
         .iter()
         .map(|&v| v.round().clamp(0.0, 255.0) as u8)
         .collect();
-    Ok(Samples::gray(jw, jh, indices))
+    let mut samples = Samples::gray(jw, jh, indices);
+    samples.partial = judged(ctx.completeness())?;
+    Ok(samples)
 }
 
 /// The decode budget ([`crate::resources::image::decode_budget`]) applied to the
@@ -512,6 +543,33 @@ mod tests {
             img.data.as_cpu(),
             Some(&include_bytes!("../testdata/rgb8.rgb")[..])
         );
+    }
+
+    /// A codestream that ends early: with its only tile cut short it is
+    /// drawn as decoded and marked partial; ended before the tile's data
+    /// it is not drawn.  `rgb8.j2k` holds one tile-part, its `SOT` at
+    /// byte 119 and its `SOD` at 131.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn a_truncated_codestream_is_partial_or_refused() {
+        let j2k = include_bytes!("../testdata/rgb8.j2k");
+        assert_eq!(&j2k[119..121], [0xFF, 0x90]);
+        assert_eq!(&j2k[131..133], [0xFF, 0x93]);
+        let decode = |len: usize| decode_jpx(&j2k[..len], 8, 8, None, &PLAIN);
+        assert!(decode(j2k.len()).expect("whole").partial.is_none());
+        let cut = decode(170).expect("cut short");
+        let reason = cut.partial.expect("partial");
+        assert!(
+            reason.contains("1 of its 1 tiles are cut short"),
+            "{reason}"
+        );
+        for len in [131, 133] {
+            let err = decode(len).expect_err("no tile data");
+            assert!(
+                err.contains("1 of its 1 tiles hold no data"),
+                "{len}: {err}"
+            );
+        }
     }
 
     /// Decode a 32 × 32 raw codestream under a dictionary whose colour space

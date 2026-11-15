@@ -31,6 +31,17 @@ pub(crate) struct Tile<'a> {
     pub(crate) progression_changes: Vec<ProgressionChange>,
     pub(crate) num_layers: u8,
     pub(crate) mct: bool,
+    /// The tile lost data to the end of the codestream: a tile-part whose
+    /// data or header ended before its declared length, or fewer
+    /// tile-parts than a tile-part header declared.
+    pub(crate) truncated: bool,
+    /// The tile-part count a tile-part header declared (`TNsot`), when
+    /// one did.
+    declared_parts: Option<u8>,
+    /// The tile-parts of the tile the codestream holds, empty or not.
+    parsed_parts: u16,
+    /// Bytes of packet headers and packet data in the tile's tile-parts.
+    data_bytes: usize,
 }
 
 /// A tile part where packet headers and packet data are interleaved.
@@ -122,6 +133,10 @@ impl<'a> Tile<'a> {
             progression_changes: vec![],
             mct: header.global_coding_style.mct,
             num_layers: header.global_coding_style.num_layers,
+            truncated: false,
+            declared_parts: None,
+            parsed_parts: 0,
+            data_bytes: 0,
         }
     }
 
@@ -156,7 +171,53 @@ pub(crate) fn parse<'a>(
         bail!(MarkerError::Expected("EOC"));
     }
 
+    for tile in &mut tiles {
+        if tile
+            .declared_parts
+            .is_some_and(|n| tile.parsed_parts < u16::from(n))
+        {
+            tile.truncated = true;
+        }
+    }
+
     Ok(tiles)
+}
+
+/// How much of its tile data a codestream holds, as the last decode with
+/// a [`DecoderContext`](crate::DecoderContext) found it.
+///
+/// Outside strict mode a codestream that ends early decodes from the data
+/// present: a tile without any data decodes to the zero-coefficient level
+/// (mid-grey for unsigned samples), and a tile cut short to the packets
+/// it holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Completeness {
+    /// Tiles of the image.
+    pub tiles: u32,
+    /// Tiles of which the codestream holds no data.
+    pub tiles_without_data: u32,
+    /// Tiles with data that lost some of it to the end of the codestream:
+    /// a tile-part shorter than its declared length, or fewer tile-parts
+    /// than declared.
+    pub truncated_tiles: u32,
+}
+
+impl Completeness {
+    /// Whether every tile holds all the data its headers declare.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.tiles_without_data == 0 && self.truncated_tiles == 0
+    }
+
+    pub(crate) fn of(tiles: &[Tile<'_>]) -> Self {
+        let count =
+            |pred: &dyn Fn(&Tile<'_>) -> bool| tiles.iter().filter(|t| pred(t)).count() as u32;
+        Self {
+            tiles: tiles.len() as u32,
+            tiles_without_data: count(&|t| t.data_bytes == 0),
+            truncated_tiles: count(&|t| t.data_bytes > 0 && t.truncated),
+        }
+    }
 }
 
 fn parse_tile_part<'a>(
@@ -189,6 +250,10 @@ fn parse_tile_part<'a>(
 
     let tile = &mut tiles[tile_part_header.tile_index as usize];
     let num_components = tile.component_infos.len();
+    tile.parsed_parts = tile.parsed_parts.saturating_add(1);
+    if tile_part_header.num_tile_parts != 0 {
+        tile.declared_parts = Some(tile_part_header.num_tile_parts);
+    }
 
     let mut ppt_headers = vec![];
 
@@ -208,6 +273,7 @@ fn parse_tile_part<'a>(
             return if main_header.strict {
                 err!(MarkerError::Invalid)
             } else {
+                tile.truncated |= reader.at_end();
                 Ok(())
             };
         };
@@ -325,9 +391,11 @@ fn parse_tile_part<'a>(
 
     ppt_headers.sort_by_key(|p1| p1.sequence_idx);
     let mut headers: Vec<_> = ppt_headers.iter().map(|i| BitReader::new(i.data)).collect();
+    let mut header_bytes: usize = ppt_headers.iter().map(|i| i.data.len()).sum();
 
     if let Some(ppm_marker) = main_header.ppm_packets.get(tile_part_idx) {
         headers.push(BitReader::new(ppm_marker));
+        header_bytes += ppm_marker.len();
     }
 
     let data = match reader.read_bytes(remaining_bytes) {
@@ -337,6 +405,7 @@ fn parse_tile_part<'a>(
         None if !main_header.strict => {
             let data = reader.tail().ok_or(TileError::Invalid)?;
             reader.jump_to_end();
+            tile.truncated = true;
             data
         }
         None => bail!(TileError::Invalid),
@@ -354,6 +423,10 @@ fn parse_tile_part<'a>(
         })
     };
 
+    tile.data_bytes = tile
+        .data_bytes
+        .saturating_add(header_bytes)
+        .saturating_add(data.len());
     tile.tile_parts.push(tile_part);
 
     Ok(())
@@ -730,6 +803,8 @@ impl<'a> ResolutionTile<'a> {
 struct TilePartHeader {
     tile_index: u16,
     tile_part_length: u32,
+    /// `TNsot`: the tile's tile-part count, 0 when not given here.
+    num_tile_parts: u8,
 }
 
 struct PptMarkerData<'a> {
@@ -756,13 +831,14 @@ fn sot_marker(reader: &mut BitReader<'_>) -> Option<TilePartHeader> {
     let tile_index = reader.read_u16()?;
     let tile_part_length = reader.read_u32()?;
 
-    // We infer those ourselves.
+    // The tile-part index is inferred from the order of the tile-parts.
     let _tile_part_index = reader.read_byte()? as u16;
-    let _num_tile_parts = reader.read_byte()?;
+    let num_tile_parts = reader.read_byte()?;
 
     Some(TilePartHeader {
         tile_index,
         tile_part_length,
+        num_tile_parts,
     })
 }
 

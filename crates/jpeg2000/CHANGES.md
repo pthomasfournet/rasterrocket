@@ -135,6 +135,18 @@ byte-identical on the benchmark images and passes the full test suite.
   10-run sets; one thread 3.74 s → 3.61 s. No change at 150 dpi, where the
   images are decoded reduced.
 
+## Truncation report
+
+- `j2c/tile.rs`, `j2c/decode.rs`: `DecoderContext::completeness` reports,
+  for the last decode, how many tiles the codestream holds no data for
+  (no packet header or data bytes in any tile-part) and how many lost data
+  to its end (a tile-part whose header or data ends before its declared
+  length, or fewer tile-parts than a `TNsot` declares), as `Completeness`.
+  Outside strict mode such a codestream still decodes from the data
+  present, the tiles without data at the zero-coefficient level; the
+  caller decides whether to draw it. Decoded output is unchanged.
+  `TNsot`, read and ignored before, is kept for the count.
+
 ## Release tooling
 
 - `Cargo.toml`: `[package.metadata.release] release = false`, so

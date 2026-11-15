@@ -13,7 +13,7 @@ mod common;
 use std::fmt::Write as _;
 
 use common::{assert_rgb_near, session, stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use rasterrocket::{BackendPolicy, RasterError, RasterOptions, render_page_rgb};
 
 /// 8 × 8 one-channel 8-bit JP2; row `r` holds the value of `GRAY8_ROWS[r]`.
 const GRAY8: &[u8] = include_bytes!("../../pdf_interp/src/resources/image/testdata/gray8.jp2");
@@ -30,6 +30,16 @@ const SIDE: u32 = 8;
 /// Render the JPX `data` with extra dictionary entries `entries` over a
 /// white page and return the pixel at column `col` of row `row`.
 fn pixel(entries: &str, data: &[u8], col: usize, row: usize) -> [u8; 3] {
+    let s = session(page(entries, data), BackendPolicy::CpuOnly);
+    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
+    let at = row * bmp.stride + col * 3;
+    let px = &bmp.data()[at..at + 3];
+    [px[0], px[1], px[2]]
+}
+
+/// A page drawing the JPX `data` with extra dictionary entries `entries`
+/// over the whole of it.
+fn page(entries: &str, data: &[u8]) -> Vec<u8> {
     let objects = vec![
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIDE} {SIDE}] \
@@ -48,11 +58,7 @@ fn pixel(entries: &str, data: &[u8], col: usize, row: usize) -> [u8; 3] {
             data,
         ),
     ];
-    let s = session(with_page_tree(&objects), BackendPolicy::CpuOnly);
-    let bmp = render_page_rgb(&s, 1, 1.0).expect("render page");
-    let at = row * bmp.stride + col * 3;
-    let px = &bmp.data()[at..at + 3];
-    [px[0], px[1], px[2]]
+    with_page_tree(&objects)
 }
 
 /// [`assert_rgb_near`] within ±4 per channel.
@@ -183,4 +189,42 @@ fn embedded_icc_profile_applies_only_without_a_pdf_colour_space() {
         "profile {through_profile:?} should lighten the device reading {plain:?}"
     );
     assert_ne!(through_profile, plain);
+}
+
+/// A codestream that ends before its only tile's data draws nothing and
+/// is reported as a skipped image; one cut inside the tile's data is drawn
+/// from the packets present and reported as partial.  Under `strict` both
+/// fail the page.  `rgb8.j2k` holds one tile-part, its `SOD` at byte 131.
+#[test]
+fn a_truncated_codestream_is_skipped_or_partial() {
+    let render = |len: usize, strict: bool| {
+        let mut opts = RasterOptions::new(72.0);
+        opts.strict = strict;
+        common::render_one(page("/ColorSpace /DeviceRGB", &RGB8_J2K[..len]), &opts)
+    };
+    let skipped = render(131, false).expect("the page renders");
+    assert!(
+        (0..SIDE).all(|y| (0..SIDE).all(|x| common::gray_at(&skipped, x, y) == 255)),
+        "nothing is drawn"
+    );
+    let failures = &skipped.diagnostics.image_failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(!failures[0].partial);
+    assert!(
+        failures[0].reason.contains("hold no data"),
+        "{}",
+        failures[0].reason
+    );
+
+    let cut = render(170, false).expect("the page renders");
+    let failures = &cut.diagnostics.image_failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].partial, "{failures:?}");
+
+    for len in [131, 170] {
+        assert!(
+            matches!(render(len, true), Err(RasterError::ImageDecodeFailed(_))),
+            "{len}"
+        );
+    }
 }

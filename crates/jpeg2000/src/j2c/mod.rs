@@ -25,6 +25,7 @@ pub(crate) use bitplane::BITPLANE_BIT_SIZE;
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
 pub(crate) use decode::{Deferred, decode};
+pub use tile::Completeness;
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,

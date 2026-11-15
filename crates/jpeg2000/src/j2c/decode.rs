@@ -57,6 +57,7 @@ pub(crate) fn decode<'a>(
     if tiles.is_empty() {
         bail!(TileError::Invalid);
     }
+    ctx.completeness = tile::Completeness::of(&tiles);
 
     ctx.reset(header, &tiles[0])?;
 
@@ -114,9 +115,17 @@ pub struct DecoderContext<'a> {
     /// The raw, decoded samples for each channel.
     pub(crate) channel_data: Vec<ComponentData>,
     storage: DecompositionStorage<'a>,
+    completeness: tile::Completeness,
 }
 
 impl DecoderContext<'_> {
+    /// How much of its tile data the codestream of the last decode held
+    /// (see [`Completeness`](tile::Completeness)); the default before any
+    /// decode.
+    pub fn completeness(&self) -> tile::Completeness {
+        self.completeness
+    }
+
     fn reset(&mut self, header: &Header, initial_tile: &Tile<'_>) -> Result<()> {
         self.tile_decode_context.reset();
         self.storage.reset();
