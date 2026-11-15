@@ -24,8 +24,9 @@ rasterrocket-color
   │     │           GSUB / GPOS shaping of substitute-drawn text
   │     │
   │     ├── rasterrocket-encode
-  │     │     PPM / PGM / PBM / PNG / JPEG output; TIFF, CCITT G3/G4 coded
-  │     │     for fax; PDF of page images (the --print document)
+  │     │     PPM / PGM / PBM / PNG / JPEG output; TIFF (BigTIFF past 4 GiB),
+  │     │     CCITT G3/G4 coded for fax; PDF of page images (the --print
+  │     │     document); row-streamed writers; ICC profile tagging
   │     │
   │     └── rasterrocket-interp
   │           PDF content stream interpreter + operator dispatcher
@@ -86,10 +87,12 @@ rasterrocket_interp::open()
     ▼ Vec<Operator>
 rasterrocket_interp::parse_page_content()    content tokenizer → operator decode (operands borrow the content)
     │
-    ▼ PageCanvas  (blank, sized by PageGeometry::size_px): Bitmap<Rgb8>, or
-    │             Bitmap<DeviceN8> of CMYK + four spot inks when overprint is
-    │             simulated and page_uses_overprint holds
-rasterrocket_interp::PageRenderer::try_with_page_group_in(&PageView::whole(..), .., ink, CanvasBuffers)
+    ▼ PageCanvas  (blank, sized by PageGeometry::size_px or a band's window):
+    │             Bitmap<Rgb8> / Bitmap<Rgb16>, or an ink canvas
+    │             Bitmap<DeviceN8> / Bitmap<DeviceN16> of CMYK + four spot
+    │             inks when overprint is simulated and page_uses_overprint
+    │             holds, or the page is rendered as CMYK
+rasterrocket_interp::PageRenderer::try_with_page_group_in(&PageView::whole(..), .., &CanvasRequest, CanvasBuffers)
     │                                 builds the canvas in the buffers of the
     │                                 previous page (PageBuffer); initial CTM
     ▼
@@ -118,15 +121,20 @@ PageRenderer::execute(ops)           dispatch loop:
     │
     ▼ PageRenderer::try_finish_keeping(transparent)
     │                                 page group onto white, unless rendered over
-    │                                 a transparent background; an ink canvas is
-    │                                 converted to sRGB (color::cmyk::ink_to_rgb_row,
-    │                                 spots through their process equivalents)
-    ▼ Bitmap<Rgb8>  (+ alpha plane when transparent)
+    │                                 a transparent background; the overprint
+    │                                 preview's ink canvas is converted to sRGB
+    │                                 (color::cmyk::ink_to_rgb_row, spots through
+    │                                 their process equivalents), a CMYK page's
+    │                                 finished as its process ink
+    ▼ FinishedCanvas  Rgb8 / Rgb16 (+ alpha plane when transparent), Cmyk8 / Cmyk16
+OutputProfile::convert (optional)    to an RGB profile in place, to a gray one into
+    │                                 Gray8 / Gray16
 rasterrocket::rgb_into_gray()        Y = 0.30 R + 0.59 G + 0.11 B (ISO 32000-1 §10.3.3),
     │                                 written over the RGB buffer in place
+    │                                 (rgb16_to_gray16 at 16 bits)
     │
-    ▼ Vec<u8>  (width × height, 8-bit grayscale; a transparent render skips
-    │           the gray step and yields RGBA)
+    ▼ Pixels::U8 / Pixels::U16  (width × height gray samples; a transparent
+    │           render skips the gray step and yields RGBA, a CMYK one CMYK)
 RenderedPage { page_num, pixels, format, width, height, dpi, diagnostics }
     │
     ▼
@@ -149,9 +157,15 @@ document is decrypted in process as its objects are parsed.
 Single source of truth for pixel types and colour math. No SIMD, no I/O.
 
 **Types** (re-exported at the crate root)
-- `Pixel` trait — `Copy + Pod + Zeroable + Send + Sync + 'static`
-- Concrete: `Rgb8`, `Gray8`, `Cmyk8`, `DeviceN8`, `AnyColor`
-- `PixelMode` enum — `Mono1 | Mono8 | Rgb8 | Bgr8 | Xbgr8 | Cmyk8 | DeviceN8`
+- `Pixel` trait — `Copy + Pod + Zeroable + Send + Sync + 'static`, with its
+  sample type and channel count
+- `Sample` trait — `u8` and `u16`: the compositing arithmetic written once
+  over `S::MAX` and a wide product type (`u32`, `u64`), conversions between
+  depths; `SampleDepth` (`Eight`, `Sixteen`)
+- Concrete: `Rgb8`, `Gray8`, `Cmyk8`, `DeviceN8`, and at 16 bits `Rgb16`,
+  `Gray16`, `Cmyk16`, `DeviceN16`; `AnyColor`
+- `PixelMode` enum — `Mono1 | Mono8 | Rgb8 | Bgr8 | Xbgr8 | Cmyk8 | DeviceN8 |
+  Mono16 | Rgb16 | DeviceN16 | Cmyk16`
 - `TransferLut` — `[u8; 256]` newtype for transfer functions
 
 **Primitives** (`convert`)
@@ -169,7 +183,9 @@ Single source of truth for pixel types and colour math. No SIMD, no I/O.
   grey-component replacement, tabulated on a 65³ grid built once per
   process on first use (about 0.75 s); neutrals come from a 256-entry grey
   table. `ink_to_rgb_row` converts a row of `[C, M, Y, K, S0..S3]` ink
-  pixels to sRGB, folding each spot in through its `SpotLut`
+  pixels to sRGB, folding each spot in through its `SpotLut`; `rgb_to_ink16`,
+  `SpotLut16` and `ink_to_rgb_row16` are the same at 16 bits, and the
+  ink-to-CMYK rows fold the spots into process ink for CMYK output
 - `ink_reproducing` (`cmyk/matching.rs`) — the CMYK inks printing a given
   sRGB colour, solved from a given set of inks by projected Gauss-Newton on
   the same model: an ink given as 0 stays 0, and of the solutions the one
@@ -182,8 +198,8 @@ Single source of truth for pixel types and colour math. No SIMD, no I/O.
 bitmaps, and compositing parameters; knows nothing about operators or resources.
 
 **`Bitmap<P: Pixel>`**
-The primary output container. Width, height, stride, `Vec<u8>` data, optional
-separate alpha plane. Generic over `P` — the compiler generates one code path
+The primary output container. Width, height, stride, typed samples of `P`'s
+sample type (8 or 16 bits), optional separate alpha plane. Generic over `P` — the compiler generates one code path
 per pixel format with no runtime mode dispatch in hot loops.
 `Bitmap::into_buffers` detaches the colour buffer and alpha plane as a
 `BitmapBuffers`, and `Bitmap::try_new_filled_in` builds a later bitmap in
@@ -195,25 +211,38 @@ resampling.
 ```
 PathBuilder  →  Path  →  flatten_path()  →  XPath (edge table)
                           make_stroke_path()      │
-                                                  ▼
-                                           XPathScanner  →  ScanIterator
-                                                            (x0, x1, y) spans
+                                     ┌────────────┴────────────┐
+                                     ▼                         ▼
+                      coverage::AreaRaster          XPathScanner  →  ScanIterator
+                      (antialiased: exact-area      (aliased: pixel-centre
+                       coverage rows,                (x0, x1, y) spans)
+                       CoverageTable)
 ```
 Bézier flattening by De Casteljau subdivision: a curve is a segment once both
 control points lie within the flatness of its chord segment. Stroke expansion
 produces a fill path from
 the outline — strokes and fills share a single rasterizer. The geometry
-stages are public on their own: `fill::aa_scanner` (the AA-space scanner of
-a fill), `stroke_aa_scanner` (that of a stroke's outline) and
-`hairline_runs` (the pixel runs of a zero-width stroke), so a caller can
-scan-convert exactly as `fill` and `stroke` do and composite elsewhere.
+stages are public on their own: `fill::aa_fill_coverage` (the coverage
+tables an antialiased fill composites), `aa_stroke_coverage` (that of a
+stroke's outline) and `hairline_runs` (the pixel runs of a zero-width
+stroke), so a caller can scan-convert exactly as `fill` and `stroke` do and
+composite elsewhere.
 
-**Fill rasterizer**
-Active edge table scan, 4× supersampled AA (`AA_SIZE = 4`). Coverage per output
-pixel = popcount of 4 nibbles across 4 AA sub-rows. Hot path:
-`aa_coverage_span()` → SIMD popcount tier (see §5).
+**Coverage rasteriser** (`coverage/`)
+One integer rasteriser serves antialiased fills, clips, strokes and glyphs
+(`rasterrocket-font` calls it too). `AreaRaster` scan-converts the flattened
+outline in fixed point of 1/256 pixel: each segment, clipped to the raster
+window, deposits per cell its signed cover and area, and a running sum along
+each row gives every pixel the exact fraction of its area inside the outline
+under the non-zero or even-odd rule, as a byte `round(255 · area)`. Moving an
+outline and its window by whole pixels moves the coverage exactly, and a
+pixel's coverage does not depend on the window, so tiles and bands of a page
+match the whole-page render. A `CoverageTable` holds a region's coverage as
+per-row spans, each fully covered or carrying one byte per pixel. With
+vector antialiasing off, paths are scan-converted at pixel centres by
+`XPathScanner`.
 
-Three compositing pipeline variants, selected at paint time by `PipeState::no_transparency()` / `use_aa_path()`:
+Three compositing pipeline variants, selected at paint time by `PipeState::no_transparency()` / `use_aa_path()`, each generic over the sample type, so one formula serves 8- and 16-bit canvases (coverage stays 8-bit and is widened exactly at the boundary):
 
 | Variant | When |
 |---|---|
@@ -279,11 +308,10 @@ Per-arch dispatch helpers; each arch gets its own function, not a cfg/return cha
 ```
 blend_solid_rgb8 / blend_solid_gray8  (movdir64b → AVX2 → NEON → scalar)
 composite_aa_rgb8_opaque              (AVX-512 → scalar)
-aa_coverage_span                      (AVX-512 BITALG → AVX2 → SVE2 → NEON → scalar)
-apply_aa_gamma                        (AVX-512 VBMI → SSSE3 → scalar)
 unpack_mono_row                       (SSE2 → NEON → scalar)
 ```
-SVE2 tier requires `nightly-sve2` Cargo feature (nightly Rust + `stdarch_aarch64_sve`).
+The 8-bit kernels are reached through the sample's byte view; 16-bit
+canvases take the generic scalar code.
 
 ### 3.3 `rasterrocket-font`
 
@@ -318,7 +346,9 @@ programs are parsed by the local forks `crates/read_fonts` and `crates/skrifa`
 
 ### 3.4 `rasterrocket-encode`
 
-Thin I/O layer. Takes `Bitmap<P>`, writes file format bytes to a `Write` sink.
+Thin I/O layer. Takes `Bitmap<P>`, or an image as bands of whole rows
+(`RowImage`, stored as a `RowLayout`), and writes file format bytes to a
+`Write` sink.
 
 - `write_ppm` — Netpbm P6 from `Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8` or `DeviceN8`;
   CMYK and DeviceN process channels convert through the process-ink model
@@ -327,12 +357,27 @@ Thin I/O layer. Takes `Bitmap<P>`, writes file format bytes to a `Write` sink.
 - `write_pbm` — Netpbm P4 1-bit
 - `write_png` — `png` crate; `Gray8` as grayscale, the colour modes of
   `write_ppm` as RGB (RGBA when the bitmap has an alpha plane)
-- `write_jpeg` — JPEG of a `Gray8`, `Rgb8` or `Bgr8` bitmap under
-  `JpegOptions` (quality, progressive, optimised tables); `jpeg_gray` is the
-  baseline grayscale form used by `encode_for_gcv`
-- `write_tiff` / `TiffWriter` — baseline TIFF, uncompressed, PackBits, LZW,
-  Deflate or, for bilevel pages, CCITT G3 / G4; an RGB bitmap with an
-  alpha plane is written as RGBA with unassociated alpha
+- `write_jpeg` — JPEG of a `Gray8`, `Rgb8`, `Bgr8` or `Cmyk8` bitmap (CMYK
+  as Adobe YCCK, `APP14` transform 2) under `JpegOptions` (quality,
+  progressive, optimised tables); `jpeg_gray` is the baseline grayscale form
+  used by `encode_for_gcv`
+- `write_tiff` / `TiffWriter` — baseline TIFF of RGB, RGBA (unassociated
+  alpha), gray, CMYK (`Separated`, `InkSet` 1) or bilevel pages, 8 or 16
+  bits per sample, uncompressed, PackBits, LZW, Deflate or, for bilevel
+  pages, CCITT G3 / G4; a file past the 4 GiB of classic TIFF is written as
+  BigTIFF
+- Row-streamed writers — `PnmWriter` (PPM, PGM, PBM, 16-bit of maxval
+  65535), `PngWriter` (bit depth 8 or 16), `TiffStream` / `TiffPageEncoder`
+  (on a seekable sink, strips first and the directory last) and
+  `PdfPageEncoder` take an image band by band, so a page larger than memory
+  is written as it renders; the bytes do not depend on the band heights.
+  `TiffPage::encode` and `PdfPage::encode` run through the same encoders
+- `PdfWriter` — the `--print` document: a PDF of page images, 8 or 16 bits
+  per component
+- `IccProfile` — an RGB, gray or CMYK ICC profile, its header checked;
+  written as a PNG `iCCP` chunk, TIFF tag 34675, JPEG `APP2` segments, or
+  an `ICCBased` colour space on every page image of a `PdfWriter`. A writer
+  refuses a profile of another colour space than its image's
 
 No pixel processing beyond colour-mode conversion at the boundary.
 
@@ -433,6 +478,17 @@ content/
   operator.rs        — 150+ typed operator variants
   mod.rs             — parse(bytes) → Vec<Operator>
 
+intent.rs            — RenderingIntent and IntentSet: the intents a page's
+                       marking operators painted under
+output_profile.rs    — OutputProfile: a finished page converted to an RGB or
+                       gray ICC output profile, compiled once per intent and
+                       black-point compensation (working_space.rs: the sRGB
+                       source with the intent's adjustments); a CMYK
+                       profile's separation table
+separation.rs        — CanvasRequest (sRGB, overprint preview, CMYK) and the
+                       Separator that turns non-ink colours into ink: the
+                       process-ink inverse, a CMYK profile's separation, or
+                       the ISO 32000-2 §10.4.2.3 device conversion
 optional_content.rs  — OptionalContent: the /OCProperties /D configuration
                        resolved once per session for a RenderPurpose; OCG and
                        OCMD (/P, /VE) visibility for BDC /OC, XObject /OC and
@@ -473,9 +529,15 @@ renderer/
   bundled_fonts.rs   — Noto fallback faces compiled in (`bundled-fonts`)
   page/
     mod.rs           — PageRenderer: construction, execute(), finish()
-    canvas.rs        — PageCanvas: an RGB or an ink (DeviceN8) bitmap;
-                       with_canvas! dispatch; InkPattern converts sRGB
-                       sources (shadings, tiling cells, images, meshes) to ink
+    canvas.rs        — PageCanvas: an RGB or an ink (DeviceN8 / DeviceN16)
+                       bitmap at 8 or 16 bits; with_canvas! dispatch;
+                       InkPattern converts sRGB sources (shadings, tiling
+                       cells, images, meshes) to ink
+    depth.rs         — CanvasSample: paint sources and buffers at the
+                       canvas's depth; 8-bit sources widened exactly
+    band.rs          — PageState: what the renderers of one page's bands
+                       share (decoded images, forms, shadings, tiling cells,
+                       tint budget, spot slots, diagnostics)
     ink_map.rs       — InkMap: spot colorants of a page assigned to the four
                        spot channels, each with its SpotLut; the
                        ColorantPlan of each Separation / DeviceN space
@@ -495,6 +557,8 @@ renderer/
     device_page.rs   — record_for_device: a page's solid fills and strokes
                        recorded as PageCommands for the GPU page raster
     diagnostics.rs   — PageDiagnostics, DevicePage, ImageFailure, RenderAbort
+    text_census.rs   — GlyphCounts: shown glyphs by text rendering mode, or
+                       by why a glyph cannot mark the page
     devices.rs       — GPU decoders, kernels and image cache of a renderer
     text.rs          — show_text: a string's glyph layout, by code or by
                        shaped run
@@ -547,8 +611,6 @@ renderer/
     image_reduce.rs  — area-averaging of minified images
     image_memo.rs    — decoded images of one page: XObjects by object,
                        inline images by context and bytes
-    gpu_ops.rs       — AA fill dispatch threshold; the device fill on either
-                       backend (gpu::backend::aa_fill)
 
 resources/
   mod.rs             — PageResources; lazy resolve_*
@@ -658,9 +720,28 @@ reproduces the profile's sRGB colour (`color::cmyk::ink_reproducing`,
 memoised per page), keeping its zero components zero. Transfer functions
 act on ink as on the additive complement: red, green and blue on C, M and
 Y, gray on K and the spots; ink derived from sRGB is converted first and
-then mapped. The device AA fill composites its counts through the generic
-`draw_aa_counts`, and the device blit's samples go through the image
-compositor's ink conversion, so both produce the CPU's ink bytes.
+then mapped. The device blit's samples go through the image compositor's ink
+conversion, so it produces the CPU's ink bytes.
+
+The same canvas serves CMYK output (`CanvasRequest::Cmyk`): overprint is
+simulated only when the session asks for it, and the finished page is its
+process ink with the slotted spots folded in (`FinishedCanvas::Cmyk8` /
+`Cmyk16`). `DeviceCMYK`, `ICCBased` CMYK and the process colorants of
+`Separation` / `DeviceN` colours keep their values; every other colour is
+separated as it is painted, through the CMYK output profile's table
+(`OutputProfile::separation`) or the ISO 32000-2 §10.4.2.3 device conversion.
+
+**16 bits per sample** (`renderer/page/depth.rs`). A page canvas, RGB or ink,
+holds 8- or 16-bit samples, chosen per render. Shadings evaluate straight to
+16 bits, mesh shadings subdivide to a tolerance of the canvas's depth,
+images of more than 8 bits decode at 16 bits, and soft masks, groups and
+blend modes composite at the canvas's depth.
+
+**Bands** (`renderer/page/band.rs`). A page rendered in bands is drawn by
+one renderer per band window over the whole content stream; `PageState`
+carries what one renderer decoded and resolved to the next, so each image is
+decoded once per page, spot slots are assigned as in the whole-page render,
+and the page reports one set of diagnostics.
 
 **Fonts** (`renderer/font_cache/` and its neighbours)
 
@@ -764,8 +845,8 @@ compositor's ink conversion, so both produce the CPU's ink bytes.
 resolution is stateless and on-demand; no per-page pre-computation. This
 makes unit testing straightforward: inject a `Document` and page `ObjectId`.
 
-**GPU integration points** (feature-gated; `renderer/page/gpu_ops.rs`,
-`device_blit.rs`, `device_page.rs`, `resources/image/icc_device.rs`)
+**GPU integration points** (feature-gated; `renderer/page/device_blit.rs`,
+`device_page.rs`, `resources/image/icc_device.rs`)
 - DCTDecode: `gpu::NvJpegDecoder::decode_sync()` if pixels ≥
   `GPU_JPEG_THRESHOLD_PX` (dormant: `u32::MAX`)
 - JPXDecode: `gpu::NvJpeg2kDecoder::decode_sync()` if pixels ≥
@@ -779,13 +860,6 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   kernels reproduce byte for byte; the Vulkan backend when the session
   holds one, otherwise CUDA. A Vulkan device that fails a one-time
   exactness probe (`VulkanBackend::icc_clut_is_exact`) is not used.
-- AA fill: `gpu::backend::aa_fill` on either backend if the bbox area ≥
-  `GPU_AA_FILL_THRESHOLD`
-  (dormant: `usize::MAX`; override with `PDF_RASTER_AA_FILL_THRESHOLD`)
-  (solid-colour fills under a rectangular clip only).  The device evaluates
-  the CPU scanner's intersection table with the CPU's span walk and the
-  counts go through the CPU compositing pipeline, so the output is
-  byte-identical to the CPU fill.
 - Image blit: an image held in the device image cache is sampled by the
   blit kernel of the cache's backend and composited on the host; a draw
   that reduces the image, or a blit that does not start, draws through the
@@ -838,14 +912,13 @@ GpuBackend trait          (backend/mod.rs)
 ```
 
 The trait surface is `begin_page → record_* → submit_page → wait_page`
-(`run_page` wraps the four and abandons a page whose step fails), with six
-kernel `record_*` methods (blit, AA fill, ICC CLUT and the three JPEG
-stages), the copy and zero-fill records, `alloc_device` / `alloc_host_pinned`
+(`run_page` wraps the four and abandons a page whose step fails), with five
+kernel `record_*` methods (blit, ICC CLUT and the three JPEG stages), the copy and zero-fill records, `alloc_device` / `alloc_host_pinned`
 / `upload` / `download`, and `scratch()`.  GATs (`type DeviceBuffer`) make it
 usable only as a generic parameter, not `dyn` — callers monomorphise per
 backend; the trait is sealed to the two backends of the crate.  The
-backend-generic operations (`backend::aa_fill`, `backend::blit_image`,
-`backend::icc_clut`) each run as one page: uploads, kernel and download.
+backend-generic operations (`backend::blit_image`, `backend::icc_clut`) each
+run as one page: uploads, kernel and download.
 Their device buffers come from the backend's `DeviceScratch`, one
 `ScratchPool` per operation, which lends a scratch to each operation in
 flight and keeps it, at the largest size it served, for later pages.  The
@@ -863,20 +936,20 @@ shared by every session naming it; loads the Vulkan instance, picks a device
 integrated > virtual > CPU), creates a single compute queue, and lazy-loads
 SPIR-V → `VkPipeline` per kernel.  Persistent `VkPipelineCache` blob at
 `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin` across runs.  Shared
-via `Arc<VulkanBackend>`.  The renderer dispatches the AA fill, the ICC CLUT
-conversion and the cached-image blit through it, and `VulkanBackend::render_page`
+via `Arc<VulkanBackend>`.  The renderer dispatches the ICC CLUT conversion
+and the cached-image blit through it, and `VulkanBackend::render_page`
 renders whole pages (*Page raster* below).
 
 **Backend start-up under `Auto`.**  A session under `BackendPolicy::Auto`
 initialises no GPU backend, image cache or nvJPEG decoder unless a device
-kernel is enabled by its threshold (`device_kernel_enabled`: the AA fill or
-the parallel-Huffman decoder), so with the default thresholds `Auto`
+kernel is enabled by its threshold (`device_kernel_enabled`: the
+parallel-Huffman decoder or nvJPEG), so with the default thresholds `Auto`
 renders on the CPU, except JPEG 2000 images for which a thread's nvJPEG2000
 decoder is built on demand.  `ForceCuda` / `ForceVulkan` initialise their
 backend regardless.  When a Vulkan backend is held under `Auto`, CUDA is not
 initialised.
 
-**Kernel inventory.**  Six kernels exist in **both** `.cu` (CUDA, compiled to
+**Kernel inventory.**  Five kernel sources exist in **both** `.cu` (CUDA, compiled to
 PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
 time, gated on the `vulkan` feature; `page_raster` exists in Slang only.  The
 table below lists the render-path kernels; the remaining three —
@@ -886,7 +959,6 @@ JPEG pipeline and are dormant by default
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
-| `aa_fill` | aa_fill.cu | aa_fill.slang | 4× scanline-AA sub-sample counts from the CPU scanner's intersection table (byte-identical to the CPU fill) | dormant (`usize::MAX`) |
 | `icc_cmyk_clut` | icc_clut.cu | icc_clut.slang | ICC CMYK→RGB via 4D quadrilinear CLUT (byte-identical to `icc_cmyk_to_rgb_cpu`) | 128 000 px |
 | `icc_cmyk_matrix` | icc_clut.cu | — | profile-free CMYK→RGB by the process-ink model; not dispatched by the renderer | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image sampling onto an RGBA target (`cache` feature) | always |
@@ -898,19 +970,19 @@ and require byte-equal output.
 
 **Page raster** (`gpu::page`, `backend/vulkan/page.rs`, Vulkan only).  A
 `PageCommands` list holds a page as paint commands: one colour at a constant
-alpha over an opaque RGB page, coverage from a scanline intersection table in
-AA coordinates (the CPU scanner's `AaScanTable`), limited to an inclusive
-pixel rectangle, painted in push order.  Every command's table is copied into
+alpha over an opaque RGB page, per-pixel coverage from a coverage table the
+CPU's exact-area rasteriser computed (`CoverageRows`), limited to an
+inclusive pixel rectangle, painted in push order.  Every command's table is copied into
 one shared pair of buffers, and the device inputs, binning included, are
 bounded by `PAGE_COMMANDS_MAX_BYTES` (128 MiB): a push past it fails and
 leaves the list unchanged.  The host bins the commands into 16-pixel tiles
 (`PageCommands::bin`); `VulkanBackend::render_page` stages the inputs, runs
-one workgroup per tile that walks its commands in order with the span walk
-and compositing of the CPU's antialiased fill, and reads the page back, in
+one workgroup per tile that walks its commands in order and composites each
+pixel's coverage as the CPU's `aa` pipe does, and reads the page back, in
 one submission and one wait.  The interpreter records a page
 (`PageRenderer::record_for_device`, `renderer/page/device_page.rs`): each
 fill or stroke of a solid colour is scan-converted by the CPU's own geometry
-stages (`raster::fill::aa_scanner`, `raster::stroke_aa_scanner`,
+stages (`raster::fill::aa_fill_coverage`, `raster::aa_stroke_coverage`,
 `raster::hairline_runs`) and appended with the colour, constant alpha and
 clip rectangle the CPU's `aa` pipe would composite with.  The first paint
 outside that model — text, XObjects, annotation appearances, inline images,
@@ -919,7 +991,8 @@ clips, translucent hairlines or fill-and-stroke — refuses the recording with
 a reason and stops the content stream.  An ink canvas, a page group,
 vector antialiasing off, or a content-stream operator that paints other
 than by a path rule the page out before interpretation
-(`renderer::device_page_ineligible`).  A recorded page is therefore
+(`renderer::device_page_ineligible`); a CMYK page is on an ink canvas, and
+the page queue keeps a 16-bit render on the CPU.  A recorded page is therefore
 byte-identical to the CPU page.  The queue that offers
 pages to the device is `rasterrocket`'s (§3.7).
 
@@ -958,7 +1031,9 @@ RasterOptions::new(dpi)   // #[non_exhaustive]; fields: dpi, first_page, last_pa
                           // pages, strict, purpose, annotations, text_antialias,
                           // vector_antialias, overprint, decrypt_authorized, password,
                           // read_into_memory, font_dirs, system_fonts, image_budget,
-                          // page_box, rotation, transparent_background, cancel
+                          // max_page_bytes, page_box, rotation, transparent_background,
+                          // depth, output_profile, intent, black_point_compensation,
+                          // color, cancel
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
@@ -969,12 +1044,18 @@ open_session_from_shared(impl AsRef<[u8]> + Send + Sync, config) → Result<Rast
 open_session_from_reader(impl Read, config) → Result<RasterSession, RasterError>
 render_page_gray(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>
 render_page_rgba(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>   // transparent
+render_page_cmyk(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>   // CMYK
 render_page_rgb(session, page_num, scale) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with(session, page_num, &RenderParams) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with_diagnostics(session, page_num, &RenderParams)
     → Result<(Bitmap<Rgb8>, PageDiagnostics), RasterError>
     // RenderParams { scale_x, scale_y, region: Option<RenderRegion>, policy,
-    //                cancel: Option<CancelToken>, transparent_background }
+    //                cancel: Option<CancelToken>, transparent_background,
+    //                band_rows, depth, intent, black_point_compensation, color }
+render_page_canvas(session, page_num, &RenderParams) → Result<FinishedCanvas, RasterError>
+    // at the requested depth and colour model: Rgb8 / Rgb16 / Gray8 / Gray16 / Cmyk8 / Cmyk16
+render_page_bands(session, page_num, &RenderParams, sink: FnMut(Band) → Result<(), E>)
+    → Result<PageDiagnostics, BandError<E>>   // a page as bands of rows
 PageBuffer::new().render_{gray,rgb,rgba}_into(session, page_num, &opts, out, stride)
     → Result<PageInfo, RasterError>   // into a caller-owned buffer
 session.page_geometry(page_num) → Result<PageGeometry, RasterError>   // size, rotation, boxes; size_px(sx, sy)
@@ -992,9 +1073,27 @@ the end into memory first. Every function and type
 is exported at the crate root; the modules that implement them are private,
 except `deskew`.
 
-`RenderedPage` carries: `page_num`, `pixels: Vec<u8>` (tightly packed, in
-`format`: 8-bit gray, or RGBA under `transparent_background`), `width`,
-`height`, `format`, `dpi` (pixels per physical inch), and `PageDiagnostics`.
+`RenderedPage` carries: `page_num`, `pixels: Pixels` (`U8` or `U16`, tightly
+packed, in `format`: gray, RGBA under `transparent_background`, CMYK under
+`ColorModel::Cmyk`, at 8 or 16 bits), `width`, `height`, `format`, `dpi`
+(pixels per physical inch), and `PageDiagnostics`.
+
+**Page budget and bands.** A render's canvas holds at most
+`SessionConfig::max_page_bytes` (default `DEFAULT_MAX_PAGE_BYTES`, 1.8 GB),
+counted by `CanvasLayout::bytes_per_px`: 3 bytes a pixel for 8-bit RGB, 4
+with alpha, 8 on an ink canvas (a CMYK page, or a page on the overprint
+preview), 9 with alpha, twice as many at 16 bits; no side exceeds
+`MAX_PX_SIDE` (2²⁴). `render_page_bands` renders a page as horizontal bands
+of `RenderParams::band_rows` rows, else as many as `SessionConfig::band_bytes`
+hold (default 64 MiB), each band a window of the page drawn by its own
+renderer (§3.5, *Bands*); stacked, the bands are the whole-page bitmap byte
+for byte.
+
+**Output profile.** `SessionConfig::output_profile` converts each finished
+page, or band, to an RGB or gray ICC profile under the page's rendering
+intent (`RenderParams::intent`, else the one intent its content used, else
+relative colorimetric), with optional black-point compensation; a CMYK
+profile separates CMYK pages as they are painted instead.
 
 `PageDiagnostics::suggested_dpi(min, max)` — hint for re-rendering at native image
 resolution. Returns `None` for vector/text-only pages.
@@ -1108,9 +1207,10 @@ Binary entry point. Thin glue over `rasterrocket` + `rasterrocket-encode`.
 
 ```
 clap args → SessionConfig → open_session → rayon ThreadPool
-  → pool.install(|| per page: prescan_session, render_page_rgb_with,
-                    encode::write_ppm / write_pgm / write_pbm / write_png /
-                    write_jpeg / write_tiff)
+  → pool.install(|| per page: prescan_session,
+                    render_page_bands (streamed outputs) or render_page_canvas,
+                    tone (gray, mono, invert) per band,
+                    encode::PnmWriter / PngWriter / TiffStream / write_jpeg)
   → pool.broadcast(release_gpu_decoders)    // teardown before pool drops
   → main returns ExitCode                   // RAM-output guard and pool drop
 ```
@@ -1124,7 +1224,16 @@ page too.
 `--box`, `--rotate` and `--gpu-pages` set `SessionConfig::page_box`,
 `rotation` and `gpu_pages`; `--transparent` sets
 `RenderParams::transparent_background`; it requires PNG or TIFF output,
-which carry the alpha plane, and PDF input.
+which carry the alpha plane, and PDF input. `--depth`, `--cmyk` (and
+`--jpegcmyk`), `--intent` and `--bpc` set `RenderParams::depth`, `color`,
+`intent` and `black_point_compensation`, `--output-profile` sets
+`SessionConfig::output_profile` and tags the files with it, and
+`--max-page-mib` / `--band-mib` set `max_page_bytes` and `band_bytes`
+(`bands.rs`: PPM, PNG, TIFF and the `--print` spool are written band by
+band; JPEG, `--fax`, `--invert=auto` and the camera stages take the page as
+one band). Under `--print` without a resolution flag each page takes 600
+dpi, or 360 dpi when its 600 dpi canvas would pass the bytes of a 600 Mpx
+8-bit RGB page.
 
 `--crop`, `--rectify`, `--split-spreads` and `--dewarp` run `rasterrocket-camera`
 on each rendered page before encoding (PDF and comic input alike). Detection
@@ -1196,11 +1305,10 @@ rasterrocket-cli    → rasterrocket       → rasterrocket-interp → rasterroc
 nvjpeg              → nvjpeg             → nvjpeg              → nvjpeg
 nvjpeg2k            → nvjpeg2k           → nvjpeg2k            → nvjpeg2k
 vaapi               → vaapi              → vaapi               → vaapi
-gpu-aa              → gpu-aa             → gpu-aa              → (crate only)
 gpu-icc             → gpu-icc            → gpu-icc             → (crate only)
 gpu-deskew          → gpu-deskew         →                     → gpu-deskew
 cache               → cache              → cache               → cache
-vulkan              → vulkan             → vulkan (+ gpu-aa)   → vulkan
+vulkan              → vulkan             → vulkan              → vulkan
 gpu-jpeg-huffman    → gpu-jpeg-huffman   → gpu-jpeg-huffman    → gpu-jpeg-huffman
 gpu-validation      → gpu-validation     →                     → gpu-validation
 bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
@@ -1209,7 +1317,8 @@ bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
 
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
-  nightly-sve2     aarch64 only; SVE2 coverage tier (requires nightly Rust)
+  nightly-sve2     aarch64 only, nightly Rust; enables the stdarch SVE
+                   feature gate and no kernel (no SVE2 tier exists)
 
 AVX-512 tiers are selected at runtime via `is_x86_feature_detected!`, so they
 need no feature flag.
@@ -1229,46 +1338,38 @@ All public SIMD functions delegate to a private per-arch `dispatch_*` helper.
 Each arch gets its own clean function; no cfg/return fallthrough chains.
 
 ```rust
-pub(crate) fn aa_coverage_span(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
-    if shape.is_empty() { return; }
-    dispatch_coverage(rows, x0, shape);
+pub fn unpack_mono_row(packed: &[u8], width: usize, out: &mut [u8]) {
+    dispatch_unpack(packed, width, out);
 }
 
 #[cfg(target_arch = "x86_64")]
-fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
-    /* avx512bitalg (≥ 128 px) → avx2 (≥ 64 px) → scalar */
+fn dispatch_unpack(packed: &[u8], width: usize, out: &mut [u8]) {
+    /* sse2 → scalar */
 }
 
 #[cfg(target_arch = "aarch64")]
-fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
-    // SVE2 tier above NEON when the `nightly-sve2` feature is active
-    #[cfg(feature = "nightly-sve2")]
-    if is_aarch64_feature_detected!("sve2") {
-        unsafe { aa_coverage_span_sve2(rows, x0, shape) };
-        return;
-    }
-    unsafe { aa_coverage_span_neon(rows, x0, shape) };
+fn dispatch_unpack(packed: &[u8], width: usize, out: &mut [u8]) {
+    /* neon, always present */
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
-    aa_coverage_span_scalar(rows, x0, shape);
+fn dispatch_unpack(packed: &[u8], width: usize, out: &mut [u8]) {
+    /* scalar */
 }
 ```
 
 ### Coverage by operation and platform
 
-| Operation | File | Ryzen (AVX-512) | Intel consumer (AVX2) | ARM NEON | ARM SVE2 |
-|---|---|---|---|---|---|
-| AA coverage span | `raster/src/simd/aa_coverage.rs` | BITALG `_mm512_popcnt_epi8` | AVX2 VPSHUFB | `vcntq_u8` + `vst2q_u8` | `svcnt_u8_z` † |
-| AA gamma map | `raster/src/simd/aa_gamma.rs` | AVX-512 VBMI | SSSE3 | scalar | scalar |
-| Solid fill (RGB) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst3q_u8` | (NEON sufficient) |
-| Solid fill (Gray) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst1q_u8` | (NEON sufficient) |
-| AA composite | `raster/src/simd/composite.rs` | AVX-512 | scalar | scalar | scalar |
-| Glyph unpack | `raster/src/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` | (NEON sufficient) |
-| CMYK→RGB | `color/src/cmyk/simd.rs` | AVX-512 VBMI | AVX2 | `vld4q_u8` + `vst3q_u8` | (NEON sufficient) |
+| Operation | File | Ryzen (AVX-512) | Intel consumer (AVX2) | ARM NEON |
+|---|---|---|---|---|
+| Solid fill (RGB) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst3q_u8` |
+| Solid fill (Gray) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst1q_u8` |
+| AA composite | `raster/src/simd/composite.rs` | AVX-512 | scalar | scalar |
+| Glyph unpack | `raster/src/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` |
+| CMYK→RGB | `color/src/cmyk/simd.rs` | AVX-512 VBMI | AVX2 | `vld4q_u8` + `vst3q_u8` |
 
-† SVE2 tier requires `nightly-sve2` Cargo feature.
+Exact-area coverage (`raster/src/coverage/`) is integer scalar code on every
+platform.
 
 ### Key platform facts
 
@@ -1277,9 +1378,6 @@ fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
   disabled on Arrow Lake; disabled by microcode on Raptor. No current Intel consumer
   CPU has usable AVX-512 — Xeon only.
 - `movdir64b` is present on i9-14900K and Core Ultra 9 285K; absent on i7-8700K.
-- AA coverage has an AVX2 tier (VPSHUFB nibble lookup,
-  `aa_coverage_span_avx2`), so every Intel consumer CPU has a vectorised
-  path.
 
 **ARM / aarch64**
 - NEON is mandatory on all ARMv8-A. No runtime detection needed — `#[cfg(target_arch = "aarch64")]` is sufficient.
@@ -1287,10 +1385,7 @@ fn dispatch_coverage(rows: [&[u8]; 4], x0: usize, shape: &mut [u8]) {
   Never use `__builtin_popcountll` on ARM — it compiles to a software sequence.
 - `STNP` is an allocation hint only, not a cache-bypass guarantee. For zero-fill use
   `DC ZVA` (zeros full cacheline without read). For non-zero solid fill: `vst1q_u8`.
-- Apple M4 has SVE2 (128-bit fixed width). An SVE2 coverage tier is implemented
-  behind the `nightly-sve2` feature (`svcnt_u8_z`). At 128-bit
-  width it matches NEON throughput; on wide-SVE2 server chips (Graviton4 full
-  width) it gives up to 4× NEON throughput.
+- No kernel uses SVE2; the NEON tiers serve every aarch64 target.
 
 ### iGPU / integrated compute
 
