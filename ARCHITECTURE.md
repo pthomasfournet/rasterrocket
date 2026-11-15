@@ -853,13 +853,17 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   `GPU_JPEG2K_THRESHOLD_PX` (262 144); under `Auto` only when the draw
   does not reduce the image to half its size or less on both axes, and the
   thread's decoder is then built on demand
-- ICC CMYK→RGB: with a GPU backend in the session, the profile's lookup
-  table, through `gpu::backend::icc_clut` on the device if pixels ≥
-  `GPU_ICC_CLUT_THRESHOLD` (128 000; `PDF_RASTER_ICC_CLUT_THRESHOLD`
-  overrides) and through `gpu::icc_cmyk_to_rgb_cpu` below it, which the
-  kernels reproduce byte for byte; the Vulkan backend when the session
-  holds one, otherwise CUDA. A Vulkan device that fails a one-time
-  exactness probe (`VulkanBackend::icc_clut_is_exact`) is not used.
+- ICC CMYK→RGB: with a GPU backend in the session, an image of at least
+  `GPU_ICC_CLUT_THRESHOLD` pixels (128 000; `PDF_RASTER_ICC_CLUT_THRESHOLD`
+  overrides) converts through the profile's lookup table by
+  `gpu::backend::icc_clut` on the device, byte-identical to the CPU
+  evaluator `gpu::icc_cmyk_to_rgb_cpu`; the Vulkan backend when the
+  session holds one, otherwise CUDA. Smaller images, and those the device
+  declines or fails, convert through the profile transform as in a CPU
+  session, so the two sessions differ only in the images counted in
+  `PageDiagnostics::device_icc_conversions`. A Vulkan device that fails a
+  one-time exactness probe (`VulkanBackend::icc_clut_is_exact`) is not
+  used.
 - Image blit: an image held in the device image cache is sampled by the
   blit kernel of the cache's backend and composited on the host; a draw
   that reduces the image, or a blit that does not start, draws through the

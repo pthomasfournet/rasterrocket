@@ -107,8 +107,9 @@ const PTX_IDCT_COLOR: &str = include_str!(concat!(env!("OUT_DIR"), "/idct_color.
 pub const RGBA_BPP: usize = 4;
 /// Minimum pixel count for the device ICC CMYK→RGB CLUT conversion.
 ///
-/// A session with a GPU backend converts a smaller ICC CMYK image with
-/// [`icc_cmyk_to_rgb_cpu`] on the CPU; both produce the same bytes.
+/// The device kernels reproduce [`icc_cmyk_to_rgb_cpu`] byte for byte;
+/// the renderer converts a smaller ICC CMYK image through the profile
+/// transform, as without a GPU backend.
 ///
 /// Applies only when a full ICC CLUT is available (clut=Some).  The matrix path
 /// (clut=None) always uses the CPU AVX-512 fallback — `threshold_bench` showed the GPU

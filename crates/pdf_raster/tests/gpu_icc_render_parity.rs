@@ -1,13 +1,16 @@
-//! End-to-end check of the device ICC CMYK → RGB conversion: an image in
-//! an ICC-based CMYK space at or above `GPU_ICC_CLUT_THRESHOLD` pixels is
-//! converted on the session's GPU backend, byte-identically to the CPU
-//! evaluation of the same lookup table.
+//! End-to-end check of the ICC CMYK → RGB dispatch of a GPU session: an
+//! image in an ICC-based CMYK space of at least `GPU_ICC_CLUT_THRESHOLD`
+//! pixels converts on the device through the profile's lookup table, and
+//! every smaller image converts through the profile transform, exactly as
+//! in a CPU session.
 //!
 //! Page 1 draws one 1000 × 600 image (600 000 pixels, converted on the
 //! device); page 2 draws the same samples as six 1000 × 100 images, each
-//! below the threshold and so converted on the CPU by the evaluator the
-//! device kernels reproduce.  Both pages are rendered at one pixel per
-//! sample, so the two bitmaps must be byte-identical.
+//! below the threshold.  Both pages are rendered at one pixel per sample in
+//! a GPU and a CPU session: page 2 must be byte-identical between them,
+//! page 1 within the interpolation error of the table.  The byte identity
+//! of the device kernels to the CPU evaluation of the table is checked in
+//! the gpu crate.
 //!
 //! The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE` names, or
 //! the automatically ranked one, and is skipped when no Vulkan device
@@ -31,7 +34,7 @@ mod common;
 
 use std::fmt::Write as _;
 
-use common::{assemble_pdf, assert_identical, stream_object};
+use common::{assemble_pdf, assert_identical, session, stream_object};
 use rasterrocket::{
     BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig,
     open_session_from_bytes, render_page_rgb_with_diagnostics,
@@ -113,34 +116,53 @@ fn render(session: &RasterSession, page: u32) -> ((u32, u32, Vec<u8>), PageDiagn
     ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
 }
 
+/// Largest channel difference between the table interpolation and the
+/// profile transform on the fixture's samples.
+const TABLE_TOLERANCE: u8 = 4;
+
 /// The device converts page 1's image and nothing on page 2, without a
-/// failure, and the two pages are byte-identical.
-fn assert_device_conversion_matches_cpu(session: &RasterSession, what: &str) {
+/// failure; page 2 is byte-identical to the CPU session's, page 1 within
+/// [`TABLE_TOLERANCE`] of it.
+fn assert_device_conversion_matches_cpu(gpu: &RasterSession, what: &str) {
     if std::env::var_os("PDF_RASTER_ICC_CLUT_THRESHOLD").is_some() {
         eprintln!(
             "skipping: PDF_RASTER_ICC_CLUT_THRESHOLD overrides the threshold the pages straddle"
         );
         return;
     }
-    let (device, diag) = render(session, 1);
+    let cpu_session = session(fixture_pdf(), BackendPolicy::CpuOnly);
+    let (device, diag) = render(gpu, 1);
     assert_eq!(
         (diag.device_icc_conversions, diag.device_icc_failures),
         (1, 0),
         "{what}: device ICC conversions and failures on the large image's page \
          (0 conversions without a failure: the device failed the exactness check)"
     );
-    let (cpu, diag) = render(session, 2);
-    assert_eq!(
-        (diag.device_icc_conversions, diag.device_icc_failures),
-        (0, 0),
-        "{what}: images below the threshold reached the device"
-    );
     assert_eq!((device.0, device.1), (1000, 600), "{what}: page size");
     assert!(
         device.2.iter().any(|&b| b != 0xff),
         "{what}: the image rendered blank"
     );
-    assert_identical(&cpu, &device, what);
+    let (cpu, _) = render(&cpu_session, 1);
+    let max_delta = cpu
+        .2
+        .iter()
+        .zip(&device.2)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_delta <= TABLE_TOLERANCE,
+        "{what}: the device conversion is {max_delta} from the profile transform"
+    );
+    let (strips, diag) = render(gpu, 2);
+    assert_eq!(
+        (diag.device_icc_conversions, diag.device_icc_failures),
+        (0, 0),
+        "{what}: images below the threshold reached the device"
+    );
+    let (cpu, _) = render(&cpu_session, 2);
+    assert_identical(&cpu, &strips, what);
 }
 
 #[cfg(feature = "vulkan")]

@@ -1,14 +1,14 @@
 //! Device dispatch of the ICC CMYK → RGB conversion.
 //!
-//! An image in an ICC-based CMYK space converts through the profile's
-//! `DEFAULT_GRID_N`⁴ lookup table, baked once per profile, whenever the
-//! session holds a GPU backend: on the device at or above
-//! [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, and below it on the CPU by
-//! [`gpu::icc_cmyk_to_rgb_cpu`], the evaluator both device kernels
-//! reproduce byte for byte.  The bytes of a conversion therefore depend on
-//! neither the image's size nor the backend, nor on whether the device
-//! call succeeded.  A session without a backend converts through the
-//! profile transform itself.
+//! An image in an ICC-based CMYK space of at least
+//! [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels converts on the session's GPU
+//! backend through the profile's `DEFAULT_GRID_N`⁴ lookup table, baked once
+//! per profile; the device kernels reproduce the CPU evaluator
+//! [`gpu::icc_cmyk_to_rgb_cpu`] byte for byte.  Every other image, and one
+//! the device declines or fails, converts through the profile transform,
+//! as in a session without a backend.  A GPU session's output therefore
+//! differs from a CPU session's only in the images counted in
+//! [`DeviceIccCounts::converted`], by the interpolation error of the table.
 //!
 //! The Vulkan backend is used when the session holds one, otherwise the
 //! CUDA context; both run [`gpu::backend::icc_clut`].  A Vulkan device
@@ -27,7 +27,6 @@ use gpu::backend::GpuBackend;
 use gpu::backend::vulkan::VulkanBackend;
 
 use crate::resources::colorspace::icc::IccConversion;
-use crate::resources::colorspace::icc::clut::DEFAULT_GRID_N;
 
 /// The GPU backends an ICC CMYK conversion may run on, and the counters
 /// its outcome is recorded in.
@@ -86,8 +85,8 @@ impl DeviceIccCounts {
         self.converted.get()
     }
 
-    /// Conversions the device took and failed, each then performed on the
-    /// CPU.
+    /// Conversions the device took and failed, each then performed
+    /// through the profile transform.
     #[must_use]
     pub const fn failed(&self) -> u32 {
         self.failed.get()
@@ -104,29 +103,22 @@ enum DeviceIcc {
     Failed,
 }
 
-/// The RGB conversion of the CMYK pixels `cmyk` through the lookup table
-/// of `conv`, or `None` when no backend is attached or the table cannot be
-/// baked, the caller then converting through the profile transform.
-///
-/// Images below [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, and those the
-/// device declines or fails, convert on the CPU by
-/// [`gpu::icc_cmyk_to_rgb_cpu`], which the device reproduces byte for
-/// byte.  A device failure is counted and logged (see
-/// [`report_failure`]).
+/// The RGB conversion of the CMYK pixels `cmyk` on the device, through
+/// the lookup table of `conv`; `None` when the caller converts through
+/// the profile transform instead: no backend is attached, the image is
+/// below [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, the table cannot be baked,
+/// or the device declines or fails.  A device failure is counted and
+/// logged (see [`report_failure`]).
 pub(super) fn cmyk_clut_to_rgb(
     icc: &IccHandles<'_>,
     cmyk: &[u8],
     conv: &IccConversion,
 ) -> Option<Vec<u8>> {
-    if !icc.has_device() {
+    if !icc.has_device() || cmyk.len() / 4 < icc_clut_threshold() {
         return None;
     }
     let clut = conv.cmyk_clut()?;
     let clut = &*clut;
-    let cpu = || gpu::icc_cmyk_to_rgb_cpu(cmyk, Some((clut, DEFAULT_GRID_N)));
-    if cmyk.len() / 4 < icc_clut_threshold() {
-        return Some(cpu());
-    }
     let outcome = 'device: {
         #[cfg(feature = "vulkan")]
         if let Some(vk) = icc.vk_backend {
@@ -151,9 +143,9 @@ pub(super) fn cmyk_clut_to_rgb(
         }
         DeviceIcc::Failed => {
             icc.count(|c| &c.failed);
-            Some(cpu())
+            None
         }
-        DeviceIcc::Declined => Some(cpu()),
+        DeviceIcc::Declined => None,
     }
 }
 
