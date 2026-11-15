@@ -1,5 +1,5 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 text /T3(5 0 R) size=24 Tr=0 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,10,50] ctm=[1,0,0,1,0,0] paint=DeviceRGB(0,0,1) ca=255 clip=0000000000000000
   glyph c=61 sel=97 pen=10,50
   glyph c=62 sel=98 pen=34,50

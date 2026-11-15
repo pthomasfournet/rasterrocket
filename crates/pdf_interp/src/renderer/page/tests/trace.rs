@@ -86,7 +86,7 @@ fn a_fill_prints_its_path_rule_and_paint() {
     let trace = renderer.take_paint_trace().expect("recorded").into_string();
     let mut lines = trace.lines();
     assert_eq!(lines.next(), Some("rasterrocket-paint-trace 1"));
-    assert_eq!(lines.next(), Some("page px=64x64"));
+    assert_eq!(lines.next(), Some("page px=64x64 scale=1"));
     let fill = lines.next().expect("the fill's line");
     assert!(
         fill.starts_with("fill nz n=5 sub=1 cub=0 bbox=10,49,30,54 h="),

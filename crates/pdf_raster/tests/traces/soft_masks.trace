@@ -1,5 +1,5 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 smask feedd6395bc26fb9 (5 0 R) luminosity bc=[0] ctm=[1,0,0,1,0,0]
   form (5 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,100,100 group isolated=0 knockout=0 ca=255 clip=0000000000000000
     clip 4f15dd2b241ba9e7<0000000000000000 rect 0,100 100,100 100,0 0,0

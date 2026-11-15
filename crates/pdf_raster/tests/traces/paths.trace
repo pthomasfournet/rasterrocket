@@ -1,9 +1,9 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 fill nz n=5 sub=1 cub=0 bbox=10,70,40,90 h=6c95d1dc979e7146 pts=m10,90 l40,90 l40,70 l10,70 l10,90 z paint=DeviceRGB(0,0,1) ca=255 clip=0000000000000000
 fill eo n=8 sub=2 cub=0 bbox=50,60,90,90 h=cdb5ef90c6de9bfc pts=m50,90 l90,90 l70,60 l50,90 z m60,85 l80,85 l70,70 l60,85 z paint=DeviceRGB(0,1,0) ca=255 clip=0000000000000000
-stroke n=4 sub=1 cub=1 bbox=10,10,90,50 h=144d6ea7b6e7400e pts=m10,50 c30,10 c50,50 l90,10 lw=3 cap=Round join=Round ml=10 dash=[6,2] phase=1 | paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
-fillstroke nz n=5 sub=1 cub=0 bbox=20,10,50,40 h=24e1d5c9aadf35be pts=m20,40 l50,40 l50,10 l20,10 l20,40 z paint=DeviceGray(0.5) ca=255 clip=0000000000000000 lw=0.5 cap=Projecting join=Bevel ml=4 dash=[6,2] phase=1 | paint=DeviceGray(0) CA=255 clip=0000000000000000
+stroke n=4 sub=1 cub=1 bbox=10,10,90,50 h=144d6ea7b6e7400e pts=m10,50 c30,10 c50,50 l90,10 lw=3 dlw=3 cap=Round join=Round ml=10 dash=[6,2] phase=1 | paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
+fillstroke nz n=5 sub=1 cub=0 bbox=20,10,50,40 h=24e1d5c9aadf35be pts=m20,40 l50,40 l50,10 l20,10 l20,40 z paint=DeviceGray(0.5) ca=255 clip=0000000000000000 lw=0.5 dlw=1 cap=Projecting join=Bevel ml=4 dash=[6,2] phase=1 | paint=DeviceGray(0) CA=255 clip=0000000000000000
 fill nz n=2 sub=1 cub=0 bbox=10,5,90,5 h=6502f08ede3e82e0 pts=m10,5 l90,5 paint=DeviceGray(0) ca=255 clip=0000000000000000
-stroke n=2 sub=1 cub=0 bbox=5,95,95,95 h=e5b59778eda43ef0 pts=m5,95 l95,95 lw=0 cap=Projecting join=Bevel ml=4 dash=[6,2] phase=1 | paint=DeviceGray(0) CA=255 clip=0000000000000000
+stroke n=2 sub=1 cub=0 bbox=5,95,95,95 h=e5b59778eda43ef0 pts=m5,95 l95,95 lw=0 dlw=0 cap=Projecting join=Bevel ml=4 dash=[6,2] phase=1 | paint=DeviceGray(0) CA=255 clip=0000000000000000
 annotations

@@ -80,10 +80,14 @@ pub struct PaintTrace {
 }
 
 impl PaintTrace {
-    /// An empty trace of a page `width` × `height` device pixels.
-    fn new(width: u32, height: u32) -> Self {
+    /// An empty trace of a page `width` × `height` device pixels, drawn
+    /// at `scale` device pixels per unit of default user space.
+    fn new(width: u32, height: u32, scale: f64) -> Self {
+        let mut text = format!("{HEADER}\npage px={width}x{height} scale=");
+        push_unit(&mut text, scale);
+        text.push('\n');
         Self {
-            text: format!("{HEADER}\npage px={width}x{height}\n"),
+            text,
             depth: 0,
             quiet: 0,
             sealed: false,
@@ -454,7 +458,13 @@ impl PageRenderer<'_> {
     /// [`Self::execute`].  Only the renderer of a page's first window
     /// records: [`Self::adopt_page_state`] stops a later window's trace.
     pub fn set_paint_trace(&mut self) {
-        self.trace = Some(Box::new(PaintTrace::new(self.page_width, self.page_height)));
+        let m = &self.initial_ctm;
+        let scale = m[0].mul_add(m[3], -(m[1] * m[2])).abs().sqrt();
+        self.trace = Some(Box::new(PaintTrace::new(
+            self.page_width,
+            self.page_height,
+            scale,
+        )));
     }
 
     /// The paint trace recorded since [`Self::set_paint_trace`], if any.
@@ -576,6 +586,15 @@ impl PageRenderer<'_> {
         let _ = write!(out, " clip={:016x}", gs.trace_clip);
     }
 
+    /// Append the device width of a stroke `line_width` user-space units
+    /// wide under the current CTM, scaled by its area scale (a width under
+    /// a singular CTM is in device pixels).
+    fn push_device_width(&self, out: &mut String, line_width: f64) {
+        out.push_str(" dlw=");
+        let scale = super::paint::area_scale(&self.device_matrix()).unwrap_or(1.0);
+        push_coord(out, line_width * scale);
+    }
+
     /// Record the fill (`stroke == false`), stroke, or fill and stroke
     /// (`fill_rule` and `stroke`) of `path` by a path-painting operator.
     pub(super) fn trace_path_paint(&mut self, path: &Path, fill_rule: Option<bool>, stroke: bool) {
@@ -608,6 +627,7 @@ impl PageRenderer<'_> {
             let gs = self.gstate.current();
             out.push_str(" lw=");
             push_coord(&mut out, gs.line_width);
+            self.push_device_width(&mut out, self.min_stroke_width());
             let _ = write!(out, " cap={:?} join={:?} ml=", gs.line_cap, gs.line_join);
             push_coord(&mut out, gs.miter_limit);
             if !gs.dash.0.is_empty() {
@@ -688,6 +708,7 @@ impl PageRenderer<'_> {
         if mode.stroke {
             out.push_str(" | lw=");
             push_coord(&mut out, gs.line_width);
+            self.push_device_width(&mut out, gs.line_width);
             self.push_paint(&mut out, true);
         }
         if mode.clip {

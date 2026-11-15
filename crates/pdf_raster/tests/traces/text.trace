@@ -1,18 +1,18 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 text /F1(5 0 R) size=12 Tr=0 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,85] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
   glyph c=46 sel=70 pen=5,15
   glyph c=69 sel=105 pen=12.33203125,15
   glyph c=6c sel=108 pen=14.99609375,15
   glyph c=6c sel=108 pen=17.66015625,15
-text /F1(5 0 R) size=12 Tr=1 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,71] ctm=[1,0,0,1,0,0] | lw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
+text /F1(5 0 R) size=12 Tr=1 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,71] ctm=[1,0,0,1,0,0] | lw=1 dlw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
   glyph c=53 sel=83 pen=5,29
   glyph c=74 sel=116 pen=13.00390625,29
   glyph c=72 sel=114 pen=16.33984375,29
   glyph c=6f sel=111 pen=20.3359375,29
   glyph c=6b sel=107 pen=27.0078125,29
   glyph c=65 sel=101 pen=33.0078125,29
-text /F1(5 0 R) size=12 Tr=2 Tc=3 Tw=2 Tz=100 Ts=0 tm=[1,0,0,1,5,57] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000 | lw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
+text /F1(5 0 R) size=12 Tr=2 Tc=3 Tw=2 Tz=100 Ts=0 tm=[1,0,0,1,5,57] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000 | lw=1 dlw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
   glyph c=46 sel=70 pen=5,43
   glyph c=69 sel=105 pen=15.33203125,43
   glyph c=6c sel=108 pen=20.99609375,43

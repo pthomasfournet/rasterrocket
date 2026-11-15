@@ -1,5 +1,5 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 form (5 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,60,60 group isolated=1 knockout=0 ca=128 bm=Multiply clip=0000000000000000
   clip 302b02cef944fd69<0000000000000000 rect 5,95 65,95 65,35 5,35
   fill nz n=5 sub=1 cub=0 bbox=5,55,45,95 h=306c696dde2ae154 pts=m5,95 l45,95 l45,55 l5,55 l5,95 z paint=DeviceRGB(0,0,1) ca=255 clip=302b02cef944fd69

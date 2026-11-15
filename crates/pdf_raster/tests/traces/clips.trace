@@ -1,5 +1,5 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 clip c41ba7ff71848bb9<0000000000000000 nz n=5 sub=1 cub=0 bbox=10,10,90,90 h=986cf5a046442542 pts=m10,90 l90,90 l90,10 l10,10 l10,90 z
 clip ca508c3f985383ef<c41ba7ff71848bb9 eo n=4 sub=1 cub=0 bbox=20,20,80,80 h=d2a6c16a48b87f80 pts=m20,80 l80,80 l50,20 l20,80 z
 fill nz n=5 sub=1 cub=0 bbox=0,0,100,100 h=9e0d98eb32ac0c8e pts=m0,100 l100,100 l100,0 l0,0 l0,100 z paint=DeviceGray(0) ca=255 clip=ca508c3f985383ef

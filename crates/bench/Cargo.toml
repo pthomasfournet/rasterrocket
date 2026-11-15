@@ -14,6 +14,10 @@ name = "contest_v11"
 path = "src/contest_v11/main.rs"
 
 [[bin]]
+name = "paint_trace"
+path = "src/paint_trace/main.rs"
+
+[[bin]]
 name = "page_gpu_bench"
 path = "src/page_gpu/main.rs"
 required-features = ["vulkan"]

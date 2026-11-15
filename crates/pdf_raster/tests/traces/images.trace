@@ -1,5 +1,5 @@
 rasterrocket-paint-trace 1
-page px=100x100
+page px=100x100 scale=1
 image /Im(5 0 R) size=2x2 bpc=8 cs=/DeviceRGB interpolate n=5 sub=1 cub=0 bbox=5,65,45,95 h=29facb245a3cfac8 pts=m5,95 l45,95 l45,65 l5,65 l5,95 z ca=255 clip=0000000000000000
 image /Mask(6 0 R) size=8x2 bpc=1 cs=- stencil n=5 sub=1 cub=0 bbox=55,65,85,95 h=45fa0c818e23715a pts=m55,95 l85,95 l85,65 l55,65 l55,95 z paint=DeviceRGB(1,0,0) ca=255 clip=0000000000000000
 image inline len=9 data=492b7b2910525d11 size=2x2 bpc=8 cs=/DeviceGray n=5 sub=1 cub=0 bbox=10,20,40,40 h=46e3504f4156e3e8 pts=m10,40 l30,40 l40,20 l20,20 l10,40 z ca=255 clip=0000000000000000
