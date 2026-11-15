@@ -126,8 +126,8 @@ fn max_difference(a: (&str, &[u8]), b: (&str, &[u8])) -> u8 {
 }
 
 /// A progressive stream of the same coefficients decodes to the same
-/// image; the two paths pick their inverse transforms differently, which
-/// may round a sample one level apart.
+/// image: the two paths pick their inverse transforms (full, 4×4, DC only)
+/// differently, and every one of them rounds alike.
 #[test]
 fn progressive_matches_sequential() {
     let pairs = [
@@ -140,12 +140,7 @@ fn progressive_matches_sequential() {
     ];
     for (sequential, progressive) in pairs {
         let d = max_difference(sequential, progressive);
-        assert!(
-            d <= 1,
-            "{}: differs from {} by {d}",
-            progressive.0,
-            sequential.0
-        );
+        assert_eq!(d, 0, "{}: differs from {}", progressive.0, sequential.0);
     }
 }
 

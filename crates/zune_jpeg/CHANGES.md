@@ -252,6 +252,31 @@ as before unless an entry says otherwise.
   stuffed byte, so the 0xFF counts as made-up bits for `intact_rows`.
   Test: `intact_rows::a_cut_after_a_data_byte_of_ff_is_not_whole`.
 
+- **The inverse DCT and YCbCr → RGB conversion round as libjpeg's accurate
+  integer decode (output changes)** (`8385ce39`, `80193182`, `3820eb5f`,
+  `c0b6a3fd`). The transform uses 13-bit constants and two fractional bits
+  between passes, and no longer adds the first pass's rounding bias to the
+  second; the full, 4×4 and DC-only transforms agree. The conversion uses
+  16 fractional bits and rounds halves up; each coefficient is split into
+  a whole part, applied as additions, and a fraction that fits a signed
+  16-bit multiplier, which the AVX2 path takes from upstream and the NEON
+  path does in the same form (upstream's NEON corrects its old 14-bit
+  products instead). Upstream's BGR SIMD paths are left out.
+  Over 346 streams (this crate's 91 test images, 255 images of 22 PDFs)
+  0.29 % of the samples change, by at most 3 levels. Against
+  `djpeg -dct int` (libjpeg-turbo 2.1.5; CMYK through PIL's
+  libjpeg-turbo; 288 of the streams, YCCK left out), gray, CMYK and 4:4:4
+  frames now match exactly (they differed in 0.4 %, 1.1 % and 1.7 % of
+  their samples, by up to 1, 1 and 3 levels); subsampled frames still
+  differ by their chroma up-sampling, whose rounding is unchanged, and
+  their mean error drops by 8 to 15 %. Against `djpeg -dct float` the
+  mean error is unchanged within 0.005 levels per image. Scalar, AVX2 and
+  NEON decode all 346 streams to identical bytes. Tests: `idct::tests`
+  (upstream's), `color_convert::tests` (upstream's exhaustive check,
+  rewritten for the converters here), `libjpeg_parity`, and
+  `scan_layouts::progressive_matches_sequential`, which now requires
+  equal samples.
+
 ### Already here, in this fork's own code
 
 - Sequential frames in several scans (`0346b875`, `90b6bbca`, `dc4211c6`)
@@ -287,10 +312,6 @@ as before unless an entry says otherwise.
   `fb9fc04f` `c3b9adbe` `c65df8ee` `c5ddc597` `58d2d171` `49855297`
   `ba9fc244`. (`8620bb88` also reads every marker segment whole before
   parsing it; the checks are the same.)
-- **A more accurate inverse DCT and YCbCr conversion** (`8385ce39`,
-  `80193182`, `3820eb5f`, `c0b6a3fd`): 13-bit constants and other rounding,
-  which change the samples of every image by a level here and there. Not
-  a defect fix; to be taken, if at all, as a measured change of its own.
 - **Features**: frames whose height comes from a DNL marker (`506a2af3`,
   `8f1d3832`; the PDF interpreter writes the image dictionary's height into
   the frame header, and the DNL segment is then read and skipped, see

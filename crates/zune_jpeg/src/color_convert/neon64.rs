@@ -11,33 +11,49 @@
 
 #![cfg(all(feature = "neon", target_arch = "aarch64"))]
 use core::arch::aarch64::{
-    uint8x16_t, uint8x16x3_t, uint8x16x4_t, vcombine_s16, vcombine_u16, vcombine_u8, vcreate_s16,
-    vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, vget_low_s16, vld1q_s16, vmlal_high_laneq_s16,
-    vmlal_laneq_s16, vqmovn_u16, vqshrun_n_s32, vst3q_u8, vst4q_u8, vsubq_s16,
+    int16x8_t, int32x4_t, uint8x16_t, uint8x16x3_t, uint8x16x4_t, vaddq_s16, vcombine_s16,
+    vcombine_u8, vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, vget_low_s16, vld1q_s16, vmlal_high_n_s16,
+    vmlal_n_s16, vqmovun_s16, vshlq_n_s16, vshrn_n_s32, vst3q_u8, vst4q_u8, vsubq_s16,
 };
 
-use crate::color_convert::scalar::{CB_CF, CR_CF, C_G_CB_COEF_2, C_G_CR_COEF_1, YUV_RND, Y_CF};
+use crate::color_convert::scalar::{CB_FRAC, CR_FRAC, C_G_CB_FRAC, C_G_CR_FRAC, YUV_RND};
 
-const C_1: u64 = u64::from_ne_bytes([
-    Y_CF.to_ne_bytes()[0],
-    Y_CF.to_ne_bytes()[1],
-    CR_CF.to_ne_bytes()[0],
-    CR_CF.to_ne_bytes()[1],
-    CB_CF.to_ne_bytes()[0],
-    CB_CF.to_ne_bytes()[1],
-    C_G_CR_COEF_1.to_ne_bytes()[0],
-    C_G_CR_COEF_1.to_ne_bytes()[1],
-]);
-const C_2: u64 = u64::from_ne_bytes([
-    C_G_CB_COEF_2.to_ne_bytes()[0],
-    C_G_CB_COEF_2.to_ne_bytes()[1],
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-]);
+/// `(bias + a * ka + b * kb) >> 16` per lane, narrowed to 16 bits.
+#[inline(always)]
+unsafe fn fraction(bias: int32x4_t, a: int16x8_t, ka: i16, b: int16x8_t, kb: i16) -> int16x8_t {
+    unsafe {
+        let low = vmlal_n_s16(vmlal_n_s16(bias, vget_low_s16(a), ka), vget_low_s16(b), kb);
+        let high = vmlal_high_n_s16(vmlal_high_n_s16(bias, a, ka), b, kb);
+        vcombine_s16(vshrn_n_s32::<16>(low), vshrn_n_s32::<16>(high))
+    }
+}
+
+/// Eight samples to RGB: the whole part of each coefficient is applied as
+/// additions and its 16-bit fraction as a multiply-accumulate, with the
+/// arithmetic of the scalar conversion.
+#[inline(always)]
+unsafe fn ycbcr_to_rgb_8(
+    y: int16x8_t,
+    cb: int16x8_t,
+    cr: int16x8_t,
+) -> (int16x8_t, int16x8_t, int16x8_t) {
+    unsafe {
+        let bias = vdupq_n_s32(YUV_RND);
+        let bias16 = vdupq_n_s16(128);
+        let cb = vsubq_s16(cb, bias16);
+        let cr = vsubq_s16(cr, bias16);
+        let r = vaddq_s16(vaddq_s16(y, cr), fraction(bias, cr, CR_FRAC, cb, 0));
+        let g = vaddq_s16(
+            vsubq_s16(y, cr),
+            fraction(bias, cr, C_G_CR_FRAC, cb, C_G_CB_FRAC),
+        );
+        let b = vaddq_s16(
+            vaddq_s16(y, vshlq_n_s16::<1>(cb)),
+            fraction(bias, cb, CB_FRAC, cr, 0),
+        );
+        (r, g, b)
+    }
+}
 
 #[inline(always)]
 unsafe fn ycbcr_to_rgb_baseline_no_clamp(
@@ -46,83 +62,21 @@ unsafe fn ycbcr_to_rgb_baseline_no_clamp(
     cr: &[i16; 16],
 ) -> (uint8x16_t, uint8x16_t, uint8x16_t) {
     unsafe {
-        // NEON has 32 registers, so it is good idea to utilize a lot of variables at once
-
-        let cb_cr_bias = vdupq_n_s16(128);
-        // 0 - Y coeff, 1 - Cr, 2 - Cb, 3 - G1, 4 - G2
-        let coefficients = vcombine_s16(vcreate_s16(C_1), vcreate_s16(C_2));
-
-        let y0 = vld1q_s16(y.as_ptr().cast());
-        let y1 = vld1q_s16(y[8..].as_ptr().cast());
-
-        let mut cb0 = vld1q_s16(cb.as_ptr().cast());
-        let mut cb1 = vld1q_s16(cb[8..].as_ptr().cast());
-
-        let mut cr0 = vld1q_s16(cr.as_ptr().cast());
-        let mut cr1 = vld1q_s16(cr[8..].as_ptr().cast());
-
-        cb0 = vsubq_s16(cb0, cb_cr_bias);
-        cb1 = vsubq_s16(cb1, cb_cr_bias);
-
-        cr0 = vsubq_s16(cr0, cb_cr_bias);
-        cr1 = vsubq_s16(cr1, cb_cr_bias);
-
-        let bias = vdupq_n_s32(i32::from(YUV_RND));
-
-        let acc0 = vmlal_laneq_s16::<0>(bias, vget_low_s16(y0), coefficients);
-        let acc1 = vmlal_high_laneq_s16::<0>(bias, y0, coefficients);
-        let acc2 = vmlal_laneq_s16::<0>(bias, vget_low_s16(y1), coefficients);
-        let acc3 = vmlal_high_laneq_s16::<0>(bias, y1, coefficients);
-
-        let r0 = vmlal_laneq_s16::<1>(acc0, vget_low_s16(cr0), coefficients);
-        let r1 = vmlal_high_laneq_s16::<1>(acc1, cr0, coefficients);
-        let r2 = vmlal_laneq_s16::<1>(acc2, vget_low_s16(cr1), coefficients);
-        let r3 = vmlal_high_laneq_s16::<1>(acc3, cr1, coefficients);
-
-        let b0 = vmlal_laneq_s16::<2>(acc0, vget_low_s16(cb0), coefficients);
-        let b1 = vmlal_high_laneq_s16::<2>(acc1, cb0, coefficients);
-        let b2 = vmlal_laneq_s16::<2>(acc2, vget_low_s16(cb1), coefficients);
-        let b3 = vmlal_high_laneq_s16::<2>(acc3, cb1, coefficients);
-
-        // Saturating shift right with signed -> unsigned saturation
-        let qr0 = vqshrun_n_s32::<14>(r0);
-        let qr1 = vqshrun_n_s32::<14>(r1);
-        let qr2 = vqshrun_n_s32::<14>(r2);
-        let qr3 = vqshrun_n_s32::<14>(r3);
-
-        let mut g0 = vmlal_laneq_s16::<4>(acc0, vget_low_s16(cb0), coefficients);
-        let mut g1 = vmlal_high_laneq_s16::<4>(acc1, cb0, coefficients);
-        let mut g2 = vmlal_laneq_s16::<4>(acc2, vget_low_s16(cb1), coefficients);
-        let mut g3 = vmlal_high_laneq_s16::<4>(acc3, cb1, coefficients);
-
-        let qb0 = vqshrun_n_s32::<14>(b0);
-        let qb1 = vqshrun_n_s32::<14>(b1);
-        let qb2 = vqshrun_n_s32::<14>(b2);
-        let qb3 = vqshrun_n_s32::<14>(b3);
-
-        let r0 = vqmovn_u16(vcombine_u16(qr0, qr1));
-        let r1 = vqmovn_u16(vcombine_u16(qr2, qr3));
-
-        let b0 = vqmovn_u16(vcombine_u16(qb0, qb1));
-        let b1 = vqmovn_u16(vcombine_u16(qb2, qb3));
-
-        g0 = vmlal_laneq_s16::<3>(g0, vget_low_s16(cr0), coefficients);
-        g1 = vmlal_high_laneq_s16::<3>(g1, cr0, coefficients);
-        g2 = vmlal_laneq_s16::<3>(g2, vget_low_s16(cr1), coefficients);
-        g3 = vmlal_high_laneq_s16::<3>(g3, cr1, coefficients);
-
-        let qg0 = vqshrun_n_s32::<14>(g0);
-        let qg1 = vqshrun_n_s32::<14>(g1);
-        let qg2 = vqshrun_n_s32::<14>(g2);
-        let qg3 = vqshrun_n_s32::<14>(g3);
-
-        let g0 = vqmovn_u16(vcombine_u16(qg0, qg1));
-        let g1 = vqmovn_u16(vcombine_u16(qg2, qg3));
-
+        let (r0, g0, b0) = ycbcr_to_rgb_8(
+            vld1q_s16(y.as_ptr()),
+            vld1q_s16(cb.as_ptr()),
+            vld1q_s16(cr.as_ptr()),
+        );
+        let (r1, g1, b1) = ycbcr_to_rgb_8(
+            vld1q_s16(y[8..].as_ptr()),
+            vld1q_s16(cb[8..].as_ptr()),
+            vld1q_s16(cr[8..].as_ptr()),
+        );
+        // Signed to unsigned narrowing saturates to 0..=255.
         (
-            vcombine_u8(r0, r1),
-            vcombine_u8(g0, g1),
-            vcombine_u8(b0, b1),
+            vcombine_u8(vqmovun_s16(r0), vqmovun_s16(r1)),
+            vcombine_u8(vqmovun_s16(g0), vqmovun_s16(g1)),
+            vcombine_u8(vqmovun_s16(b0), vqmovun_s16(b1)),
         )
     }
 }

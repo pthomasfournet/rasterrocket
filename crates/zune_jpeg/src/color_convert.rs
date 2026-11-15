@@ -101,3 +101,58 @@ pub fn choose_ycbcr_to_rgb_convert_func(
         _ => None,
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color_convert::scalar::{
+        ycbcr_to_rgb_inner_16_scalar, ycbcr_to_rgba_inner_16_scalar,
+    };
+
+    /// Every Cb/Cr pair at sixteen luma values, through the scalar and the
+    /// dispatched converter of each packed layout, against BT.601 at 16
+    /// fractional bits with halves rounded up; the bytes around the output
+    /// stay untouched.
+    #[test]
+    fn ycbcr_to_rgb_matches_16_bit_reference() {
+        let options = DecoderOptions::default();
+        let y: [i16; 16] = core::array::from_fn(|index| (index * 17) as i16);
+        let layouts: [(ColorSpace, ColorConvert16Ptr); 4] = [
+            (ColorSpace::RGB, ycbcr_to_rgb_inner_16_scalar::<false>),
+            (ColorSpace::RGBA, ycbcr_to_rgba_inner_16_scalar::<false>),
+            (ColorSpace::BGR, ycbcr_to_rgb_inner_16_scalar::<true>),
+            (ColorSpace::BGRA, ycbcr_to_rgba_inner_16_scalar::<true>),
+        ];
+        for (format, scalar) in layouts {
+            let channels = format.num_components();
+            let dispatched = choose_ycbcr_to_rgb_convert_func(format, &options).unwrap();
+            for convert in [scalar, dispatched] {
+                for cb in 0_i16..=255 {
+                    for cr in 0_i16..=255 {
+                        let mut output = [0xa5; 82];
+                        let mut offset = 7;
+                        convert(&y, &[cb; 16], &[cr; 16], &mut output, &mut offset);
+                        assert_eq!(offset, 7 + channels * 16);
+                        assert_eq!(&output[..7], &[0xa5; 7]);
+                        assert!(output[offset..].iter().all(|&byte| byte == 0xa5));
+                        let (cb, cr) = (i32::from(cb) - 128, i32::from(cr) - 128);
+                        for (index, pixel) in output[7..offset].chunks_exact(channels).enumerate() {
+                            let y = i32::from(y[index]);
+                            let channel =
+                                |sum: i32| (y + ((sum + 32_768) >> 16)).clamp(0, 255) as u8;
+                            let red = channel(91_881 * cr);
+                            let green = channel(-46_802 * cr - 22_554 * cb);
+                            let blue = channel(116_130 * cb);
+                            let expected = if matches!(format, ColorSpace::BGR | ColorSpace::BGRA) {
+                                [blue, green, red, 255]
+                            } else {
+                                [red, green, blue, 255]
+                            };
+                            assert_eq!(pixel, &expected[..channels], "{format:?} cb {cb} cr {cr}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
