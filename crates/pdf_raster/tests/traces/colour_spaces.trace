@@ -1,0 +1,10 @@
+rasterrocket-paint-trace 1
+page px=100x100
+fill nz n=5 sub=1 cub=0 bbox=0,80,20,100 h=f46c6cf2c46b3c4e pts=m0,100 l20,100 l20,80 l0,80 l0,100 z paint=DeviceCMYK(0.1,0.2,0.3,0.4) ca=255 clip=0000000000000000
+fill nz n=5 sub=1 cub=0 bbox=20,80,40,100 h=3333068b80d24422 pts=m20,100 l40,100 l40,80 l20,80 l20,100 z paint=Separation[/Spot DeviceCMYK](0.7) ca=255 clip=0000000000000000
+fill nz n=5 sub=1 cub=0 bbox=40,80,60,100 h=fde5db09bbf81796 pts=m40,100 l60,100 l60,80 l40,80 l40,100 z paint=DeviceN[/Cyan /Spot2 DeviceCMYK](0.5,0.25) ca=255 clip=0000000000000000
+fill nz n=5 sub=1 cub=0 bbox=60,80,80,100 h=7a63efec356aaaaa pts=m60,100 l80,100 l80,80 l60,80 l60,100 z paint=Indexed[DeviceRGB 1](1) ca=255 clip=0000000000000000
+fill nz n=5 sub=1 cub=0 bbox=80,80,100,100 h=4d912f94a33a073e pts=m80,100 l100,100 l100,80 l80,80 l80,100 z paint=Cal(0.3,0.6,0.9) ca=255 clip=0000000000000000
+fill nz n=5 sub=1 cub=0 bbox=0,60,20,80 h=7f2587e33a80f3e2 pts=m0,80 l20,80 l20,60 l0,60 l0,80 z paint=Lab(50,10,-20) ca=255 clip=0000000000000000
+stroke n=2 sub=1 cub=0 bbox=0,50,100,50 h=c3677ea7627e77be pts=m0,50 l100,50 lw=2 cap=Butt join=Miter ml=10 | paint=Separation[/Spot DeviceCMYK](1) CA=255 clip=0000000000000000
+annotations

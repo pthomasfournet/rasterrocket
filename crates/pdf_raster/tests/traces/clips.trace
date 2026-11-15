@@ -1,0 +1,15 @@
+rasterrocket-paint-trace 1
+page px=100x100
+clip c41ba7ff71848bb9<0000000000000000 nz n=5 sub=1 cub=0 bbox=10,10,90,90 h=986cf5a046442542 pts=m10,90 l90,90 l90,10 l10,10 l10,90 z
+clip ca508c3f985383ef<c41ba7ff71848bb9 eo n=4 sub=1 cub=0 bbox=20,20,80,80 h=d2a6c16a48b87f80 pts=m20,80 l80,80 l50,20 l20,80 z
+fill nz n=5 sub=1 cub=0 bbox=0,0,100,100 h=9e0d98eb32ac0c8e pts=m0,100 l100,100 l100,0 l0,0 l0,100 z paint=DeviceGray(0) ca=255 clip=ca508c3f985383ef
+fill nz n=5 sub=1 cub=0 bbox=0,50,50,100 h=93f5c9406e6fbbd6 pts=m0,100 l50,100 l50,50 l0,50 l0,100 z paint=DeviceRGB(0,0,1) ca=255 clip=c41ba7ff71848bb9
+fill nz n=5 sub=1 cub=0 bbox=60,10,90,40 h=b1f489c61a66d046 pts=m60,40 l90,40 l90,10 l60,10 l60,40 z paint=DeviceRGB(1,0,0) ca=255 clip=0000000000000000
+text /F1(5 0 R) size=30 Tr=7 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,10,40] ctm=[1,0,0,1,0,0] | clips
+  glyph c=43 sel=67 pen=10,60
+  glyph c=6c sel=108 pen=31.66015625,60
+  glyph c=69 sel=105 pen=38.3203125,60
+  glyph c=70 sel=112 pen=44.98046875,60
+clip 3db12ee4434ec5f1<0000000000000000 nz n=75 sub=6 cub=16 bbox=11.3203125,37.890625,60.48828125,66.2109375 h=f6c8646236c77f2a
+fill nz n=5 sub=1 cub=0 bbox=0,0,100,100 h=9e0d98eb32ac0c8e pts=m0,100 l100,100 l100,0 l0,0 l0,100 z paint=DeviceRGB(0,1,0) ca=255 clip=3db12ee4434ec5f1
+annotations

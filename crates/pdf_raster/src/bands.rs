@@ -12,7 +12,7 @@
 use std::num::NonZeroU32;
 
 use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16};
-use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageState};
+use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageState, PaintTrace};
 use raster::Bitmap;
 
 use crate::render::{
@@ -168,24 +168,13 @@ pub fn render_page_bands<E>(
     params: &RenderParams,
     mut sink: impl FnMut(Band<'_>) -> Result<(), E>,
 ) -> Result<PageDiagnostics, BandError<E>> {
-    let page_id = session.resolve_page(page_num)?;
-    let geom = session.geometry_by_id(page_id)?;
-    let policy = begin(session, params)?;
-    let bytes_per_px = crate::render::page_layout(session, page_id, params)?.bytes_per_px();
-    let view = page_view(
-        &geom,
-        (params.scale_x, params.scale_y),
-        params.region,
-        bytes_per_px,
-        session.max_page_bytes,
-    )?;
-    let rows = band_rows(session, params, view.width, bytes_per_px);
-    if rows >= view.height {
+    let plan = BandPlan::new(session, page_num, params)?;
+    if plan.rows >= plan.view.height {
         let (bitmap, diag) = render_page_canvas_with_geom(
             session,
             page_num,
-            page_id,
-            geom,
+            plan.page_id,
+            plan.geom,
             params,
             &mut CanvasBuffers::default(),
         )?;
@@ -196,7 +185,82 @@ pub fn render_page_bands<E>(
         .map_err(BandError::Sink)?;
         return Ok(diag);
     }
+    draw_bands(session, page_num, &plan, params, false, sink).map(|(diag, _)| diag)
+}
 
+/// The paint trace of page `page_num` (1-based) rendered as `params`
+/// describes (see [`pdf_interp::renderer::PaintTrace`]): recorded by the
+/// renderer of the first band of [`render_page_bands`]' band loop, which
+/// draws the page even when it fits one band, on the CPU.
+///
+/// # Errors
+///
+/// As [`render_page_bands`].
+pub(crate) fn paint_trace(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+) -> Result<String, RasterError> {
+    let plan = BandPlan::new(session, page_num, params)?;
+    let discard = |_: Band<'_>| Ok::<(), std::convert::Infallible>(());
+    match draw_bands(session, page_num, &plan, params, true, discard) {
+        Ok((_, trace)) => Ok(trace.map_or_else(String::new, PaintTrace::into_string)),
+        Err(BandError::Raster(e)) => Err(e),
+        Err(BandError::Sink(never)) => match never {},
+    }
+}
+
+/// What a banded render of a page is drawn from: the page, its geometry,
+/// the backend policy, the view drawn and the rows of each band.
+struct BandPlan {
+    page_id: pdf::ObjectId,
+    geom: crate::PageGeometry,
+    policy: crate::BackendPolicy,
+    view: pdf_interp::renderer::PageView,
+    rows: u32,
+}
+
+impl BandPlan {
+    /// The plan of page `page_num` rendered as `params` describes.
+    fn new(
+        session: &RasterSession,
+        page_num: u32,
+        params: &RenderParams,
+    ) -> Result<Self, RasterError> {
+        let page_id = session.resolve_page(page_num)?;
+        let geom = session.geometry_by_id(page_id)?;
+        let policy = begin(session, params)?;
+        let bytes_per_px = crate::render::page_layout(session, page_id, params)?.bytes_per_px();
+        let view = page_view(
+            &geom,
+            (params.scale_x, params.scale_y),
+            params.region,
+            bytes_per_px,
+            session.max_page_bytes,
+        )?;
+        let rows = band_rows(session, params, view.width, bytes_per_px);
+        Ok(Self {
+            page_id,
+            geom,
+            policy,
+            view,
+            rows,
+        })
+    }
+}
+
+/// Draw the bands of `plan` on the CPU, from the top, handing each to
+/// `sink`; returns the page's diagnostics and, when `trace`, the paint
+/// trace the first band's renderer recorded.
+fn draw_bands<E>(
+    session: &RasterSession,
+    page_num: u32,
+    plan: &BandPlan,
+    params: &RenderParams,
+    trace: bool,
+    mut sink: impl FnMut(Band<'_>) -> Result<(), E>,
+) -> Result<(PageDiagnostics, Option<PaintTrace>), BandError<E>> {
+    let (page_id, view) = (plan.page_id, &plan.view);
     let unsupported_features = pdf_interp::page_unsupported_features(&session.doc, page_id);
     warn_unsupported(session, page_num, &unsupported_features);
     let content = page_content(session, page_id)?;
@@ -207,12 +271,22 @@ pub fn render_page_bands<E>(
     let mut intent = None;
     let mut y = 0;
     while y < view.height {
-        let height = rows.min(view.height - y);
+        let height = plan.rows.min(view.height - y);
         let band_view = view.window(view.x, view.y + y, view.width, height);
-        let job = PageJob::new(session, page_num, page_id, &band_view, &ops, params, policy)?;
+        let job = PageJob::new(
+            session,
+            page_num,
+            page_id,
+            &band_view,
+            &ops,
+            params,
+            plan.policy,
+        )?;
         let mut renderer = job.renderer(std::mem::take(&mut buffers))?;
-        if let Some(state) = state.take() {
-            renderer.adopt_page_state(state);
+        match state.take() {
+            Some(state) => renderer.adopt_page_state(state),
+            None if trace => renderer.set_paint_trace(),
+            None => {}
         }
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
@@ -240,6 +314,8 @@ pub fn render_page_bands<E>(
     }
 
     // The view has a row, so a band was drawn and `state` holds its page.
+    let mut state = state;
+    let trace = state.as_mut().and_then(PageState::take_paint_trace);
     let mut diag = state.map_or_else(PageDiagnostics::default, |s| s.diagnostics());
     log_failures(page_num, &content.failures);
     diag.content_failures = content.failures;
@@ -247,5 +323,5 @@ pub fn render_page_bands<E>(
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     diag.output_intent = intent;
-    Ok(diag)
+    Ok((diag, trace))
 }

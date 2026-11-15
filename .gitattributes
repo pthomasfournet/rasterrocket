@@ -1,0 +1,2 @@
+# Paint-trace goldens are compared byte for byte on every platform.
+*.trace text eol=lf

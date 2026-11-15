@@ -1,0 +1,19 @@
+rasterrocket-paint-trace 1
+page px=100x100
+smask feedd6395bc26fb9 (5 0 R) luminosity bc=[0] ctm=[1,0,0,1,0,0]
+  form (5 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,100,100 group isolated=0 knockout=0 ca=255 clip=0000000000000000
+    clip 4f15dd2b241ba9e7<0000000000000000 rect 0,100 100,100 100,0 0,0
+    fill nz n=5 sub=1 cub=0 bbox=0,0,50,100 h=b403d76d24aef51a pts=m0,100 l50,100 l50,0 l0,0 l0,100 z paint=DeviceGray(0.8) ca=255 clip=4f15dd2b241ba9e7
+  form end
+smask end
+fill nz n=5 sub=1 cub=0 bbox=0,50,100,100 h=14f03c1065c7452a pts=m0,100 l100,100 l100,50 l0,50 l0,100 z paint=DeviceRGB(0,0,1) ca=255 smask=feedd6395bc26fb9 clip=0000000000000000
+smask none
+fill nz n=5 sub=1 cub=0 bbox=0,40,100,50 h=24e6c1f08c0361c0 pts=m0,50 l100,50 l100,40 l0,40 l0,50 z paint=DeviceRGB(0,0,1) ca=255 clip=0000000000000000
+smask ca2ae51b028df404 (5 0 R) alpha bc=[] ctm=[1,0,0,1,0,0]
+  form (5 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,100,100 group isolated=0 knockout=0 ca=255 clip=0000000000000000
+    clip 4f15dd2b241ba9e7<0000000000000000 rect 0,100 100,100 100,0 0,0
+    fill nz n=5 sub=1 cub=0 bbox=0,0,50,100 h=b403d76d24aef51a pts=m0,100 l50,100 l50,0 l0,0 l0,100 z paint=DeviceGray(0.8) ca=255 clip=4f15dd2b241ba9e7
+  form end
+smask end
+fill nz n=5 sub=1 cub=0 bbox=0,0,100,40 h=912c0983bfcd3dd2 pts=m0,40 l100,40 l100,0 l0,0 l0,40 z paint=DeviceRGB(1,0,0) ca=255 smask=ca2ae51b028df404 clip=0000000000000000
+annotations

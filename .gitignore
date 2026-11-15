@@ -98,3 +98,9 @@ mutants.out.old/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# ── Paint-trace goldens ───────────────────────────────────────────────────────
+# Goldens of the gitignored corpus fixtures stay with them; a trace that
+# differs from its golden is written next to it as `.trace.actual`.
+tests/fixtures/traces/
+*.trace.actual

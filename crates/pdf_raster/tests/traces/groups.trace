@@ -1,0 +1,17 @@
+rasterrocket-paint-trace 1
+page px=100x100
+form (5 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,60,60 group isolated=1 knockout=0 ca=128 bm=Multiply clip=0000000000000000
+  clip 302b02cef944fd69<0000000000000000 rect 5,95 65,95 65,35 5,35
+  fill nz n=5 sub=1 cub=0 bbox=5,55,45,95 h=306c696dde2ae154 pts=m5,95 l45,95 l45,55 l5,55 l5,95 z paint=DeviceRGB(0,0,1) ca=255 clip=302b02cef944fd69
+  fill nz n=5 sub=1 cub=0 bbox=25,35,65,75 h=b8c9b7aba366b66c pts=m25,75 l65,75 l65,35 l25,35 l25,75 z paint=DeviceRGB(1,0,0) ca=255 clip=302b02cef944fd69
+form end
+form (6 0 R) matrix=[1,0,0,1,0,0] bbox=0,0,60,60 group isolated=0 knockout=1 ca=255 clip=0000000000000000
+  clip 2bf2f63f5e299ead<0000000000000000 rect 40,60 100,60 100,0 40,0
+  fill nz n=5 sub=1 cub=0 bbox=40,20,80,60 h=afac7b873f38de1e pts=m40,60 l80,60 l80,20 l40,20 l40,60 z paint=DeviceGray(0) ca=128 clip=2bf2f63f5e299ead
+  fill nz n=5 sub=1 cub=0 bbox=50,10,90,50 h=3c1e2562b883a352 pts=m50,50 l90,50 l90,10 l50,10 l50,50 z paint=DeviceGray(0) ca=128 clip=2bf2f63f5e299ead
+form end
+form (7 0 R) matrix=[1,0,0,1,2,2] bbox=0,0,50,50 ca=255 clip=0000000000000000
+  clip 3ea555ebab3798bf<0000000000000000 rect 1,39 26,39 26,14 1,14
+  fill nz n=5 sub=1 cub=0 bbox=1,14,26,39 h=a187c9abca9a9efc pts=m1,39 l26,39 l26,14 l1,14 l1,39 z paint=DeviceRGB(0,1,0) ca=255 clip=3ea555ebab3798bf
+form end
+annotations

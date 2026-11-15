@@ -1,0 +1,6 @@
+rasterrocket-paint-trace 1
+page px=100x100
+fill nz n=5 sub=1 cub=0 bbox=0,50,50,100 h=93f5c9406e6fbbd6 pts=m0,100 l50,100 l50,50 l0,50 l0,100 z paint=DeviceGray(0) ca=255 clip=0000000000000000
+hidden /Off
+hidden /Fm
+annotations

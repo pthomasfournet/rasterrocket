@@ -1,0 +1,56 @@
+rasterrocket-paint-trace 1
+page px=100x100
+text /F1(5 0 R) size=12 Tr=0 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,85] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
+  glyph c=46 sel=70 pen=5,15
+  glyph c=69 sel=105 pen=12.33203125,15
+  glyph c=6c sel=108 pen=14.99609375,15
+  glyph c=6c sel=108 pen=17.66015625,15
+text /F1(5 0 R) size=12 Tr=1 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,71] ctm=[1,0,0,1,0,0] | lw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
+  glyph c=53 sel=83 pen=5,29
+  glyph c=74 sel=116 pen=13.00390625,29
+  glyph c=72 sel=114 pen=16.33984375,29
+  glyph c=6f sel=111 pen=20.3359375,29
+  glyph c=6b sel=107 pen=27.0078125,29
+  glyph c=65 sel=101 pen=33.0078125,29
+text /F1(5 0 R) size=12 Tr=2 Tc=3 Tw=2 Tz=100 Ts=0 tm=[1,0,0,1,5,57] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000 | lw=1 paint=DeviceRGB(1,0,0) CA=255 clip=0000000000000000
+  glyph c=46 sel=70 pen=5,43
+  glyph c=69 sel=105 pen=15.33203125,43
+  glyph c=6c sel=108 pen=20.99609375,43
+  glyph c=6c sel=108 pen=26.66015625,43
+  glyph c=20 sel=32 pen=32.32421875,43
+  glyph c=73 sel=115 pen=40.66015625,43
+  glyph c=74 sel=116 pen=49.66015625,43
+  glyph c=72 sel=114 pen=55.99609375,43
+  glyph c=6f sel=111 pen=62.9921875,43
+  glyph c=6b sel=107 pen=72.6640625,43
+  glyph c=65 sel=101 pen=81.6640625,43
+text /F1(5 0 R) size=12 Tr=3 Tc=3 Tw=2 Tz=100 Ts=0 tm=[1,0,0,1,5,43] ctm=[1,0,0,1,0,0]
+  glyph c=49 sel=73 pen=5,57
+  glyph c=6e sel=110 pen=11.3359375,57
+  glyph c=76 sel=118 pen=21.0078125,57
+  glyph c=69 sel=105 pen=30.0078125,57
+  glyph c=73 sel=115 pen=35.671875,57
+  glyph c=69 sel=105 pen=44.671875,57
+  glyph c=62 sel=98 pen=50.3359375,57
+  glyph c=6c sel=108 pen=60.0078125,57
+  glyph c=65 sel=101 pen=65.671875,57
+text /F1(5 0 R) size=12 Tr=0 Tc=0 Tw=0 Tz=80 Ts=4 tm=[1,0,0,1,5,29] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
+  glyph c=4b sel=75 pen=5,67
+  glyph c=65 sel=101 pen=11.40234375,67
+text /F1(5 0 R) size=12 Tr=0 Tc=0 Tw=0 Tz=80 Ts=4 tm=[1,0,0,1,19.1408,29] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
+  glyph c=72 sel=114 pen=19.140625,67
+  glyph c=6e sel=110 pen=22.3359375,67
+text /F2(6 0 R) size=10 Tr=0 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,5,1] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
+  glyph c=54 sel=84 pen=5,99
+  glyph c=69 sel=105 pen=11.109375,99
+  glyph c=6d sel=109 pen=13.890625,99
+  glyph c=65 sel=101 pen=21.671875,99
+  glyph c=73 sel=115 pen=26.109375,99
+text /F2(6 0 R) size=10 Tr=0 Tc=1 Tw=2 Tz=100 Ts=0 tm=[1,0,0,1,5,-13] ctm=[1,0,0,1,0,0] paint=DeviceGray(0) ca=255 clip=0000000000000000
+  glyph c=53 sel=83 pen=5,113
+  glyph c=70 sel=112 pen=11.55859375,113
+  glyph c=61 sel=97 pen=17.55859375,113
+  glyph c=63 sel=99 pen=23,113
+  glyph c=65 sel=101 pen=28.44140625,113
+  glyph c=64 sel=100 pen=33.87890625,113
+annotations

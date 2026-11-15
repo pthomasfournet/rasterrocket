@@ -136,6 +136,31 @@ mod vk_init;
 
 use std::path::Path;
 
+/// Development tools of the library's own tests and benchmarks; not part
+/// of its stable interface, and changed without notice.
+#[doc(hidden)]
+pub mod dev {
+    use crate::{RasterError, RasterSession, RenderParams};
+
+    /// The paint trace of page `page_num` (1-based) rendered as `params`
+    /// describes.
+    ///
+    /// The trace holds one line of text per painting operation of the
+    /// page, in the page's device space at the render's scale, and is the
+    /// same whatever band height or region `params` gives.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::render_page_bands`].
+    pub fn paint_trace(
+        session: &RasterSession,
+        page_num: u32,
+        params: &RenderParams,
+    ) -> Result<String, RasterError> {
+        crate::bands::paint_trace(session, page_num, params)
+    }
+}
+
 pub use bands::{Band, BandBitmap, BandError, render_page_bands};
 pub use color::SampleDepth;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};

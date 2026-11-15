@@ -1,0 +1,8 @@
+rasterrocket-paint-trace 1
+page px=100x100
+clip 879571babdfc5911<0000000000000000 nz n=5 sub=1 cub=0 bbox=0,70,100,100 h=99e82d7b32f845ba pts=m0,100 l100,100 l100,70 l0,70 l0,100 z
+sh /Ax(5 0 R) ctm=[1,0,0,1,0,0] ca=255 clip=879571babdfc5911
+clip 04eb02da280d7800<0000000000000000 nz n=5 sub=1 cub=0 bbox=0,30,100,60 h=914c1bc19c71b9a2 pts=m0,60 l100,60 l100,30 l0,30 l0,60 z
+sh /Ra(6 0 R) ctm=[1,0,0,1,0,0] ca=255 clip=04eb02da280d7800
+fill nz n=5 sub=1 cub=0 bbox=10,5,90,25 h=1a004aeca023af61 pts=m10,25 l90,25 l90,5 l10,5 l10,25 z paint=pattern/P(7 0 R) ca=255 clip=0000000000000000
+annotations
