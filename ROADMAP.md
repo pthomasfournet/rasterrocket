@@ -2944,6 +2944,34 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: input ICC conversions honour the rendering intent.**
+An `ICCBased` colour converts to sRGB under the intent it is painted with
+(ISO 32000-1 §8.6.5.8): the graphics state's (`ri`, `gs /RI`, initially
+relative colorimetric) for fills, strokes, pattern tints, shadings and
+mask backdrops, and an image's own `/Intent` before it for images, inline
+images, their embedded profiles, `/Matte` and the GPU CMYK lookup table.
+Previously every conversion used the profile's perceptual table.
+- **Tables and colorimetry.** A table-based profile now converts through
+  `AToB1` under the colorimetric intents and `AToB2` under saturation,
+  `AToB0` standing in for a missing table.
+- **Absolute colorimetry.** It scales the PCS by the source's media white,
+  so a press profile's paper is drawn tinted.
+- **Matrix/TRC and AToB.** A gray or RGB profile carrying both a
+  matrix/TRC model and `AToB` tables converts through the tables.
+- **Matrix profiles.** They convert as before under every intent but
+  absolute.
+- **Pixel impact.** Of 1,168 archive PDFs, 4 carry a profile whose
+  perceptual and colorimetric tables differ: the US Web Coated (SWOP) v2
+  CMYK profile. Those 4 documents now show the press's measured black
+  (K100 about sRGB 55 where it was about 35, as Little CMS's relative
+  colorimetric gives it), changing up to every page (max channel delta
+  38). The repository fixtures render byte for byte as before.
+- **Against Little CMS.** CMYK and gray profiles agree within ΔE00 1.5 at
+  8 bits and 1.0 at 16 under the colorimetric intents
+  (`input_profile_transicc`, ignored). Perceptual and saturation differ
+  at the dark end, where Little CMS compensates the black point of
+  version 4 profiles.
+
 **Unreleased on master: OCR preparation of scans.**  `rasterrocket-camera`
 gains three operations measured on 8-bit luma, in integer arithmetic so
 their output is identical on every platform.  `measure_background` /
