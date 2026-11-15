@@ -3,6 +3,10 @@ use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
 };
+use super::{
+    SPOT_TINTS16, SpotLut16, cmyk_to_rgb_at, ink_reproducing, ink_reproducing_at, ink_to_rgb_row16,
+    rgb_to_ink_at, rgb_to_ink16,
+};
 use crate::Sample;
 
 /// Corner index `k·8 + c·4 + m·2 + y` → ink bytes `[c, m, y, k]`.
@@ -740,4 +744,149 @@ fn unit_conversion_at_either_depth() {
         super::cmyk_f64_to_rgb_at::<u16>(0.0, 0.0, 0.0, 0.0),
         [u16::MAX; 3]
     );
+}
+
+/// At 16 bits the inverse interpolates the same table at the same grid
+/// coordinate: a widened 8-bit colour takes the 8-bit inks to within a
+/// count.  A grey takes its inks from the 16-bit neutral table, whose
+/// rich blacks can differ from the 8-bit ones where the darkest greys
+/// barely change with the ink; it prints the colour the 8-bit inks print
+/// to within a count.  At 8 bits the generic form is the 8-bit inverse
+/// itself.
+#[test]
+fn rgb_to_ink16_follows_the_8_bit_inverse() {
+    let samples = bytes(3 * 4000, 23);
+    for &rgb in samples.as_chunks::<3>().0 {
+        let narrow = rgb_to_ink(rgb);
+        assert_eq!(rgb_to_ink_at(rgb), narrow);
+        let wide = rgb_to_ink16(rgb.map(u16::from_u8));
+        for (w, n) in wide.iter().zip(narrow) {
+            assert!(
+                w.to_u8().abs_diff(n) <= 1,
+                "{rgb:?}: {wide:?} vs {narrow:?}"
+            );
+        }
+    }
+    for grey in 0..=u8::MAX {
+        let [c, m, y, k] = rgb_to_ink([grey; 3]);
+        let narrow = cmyk_to_rgb(c, m, y, k);
+        let [c, m, y, k] = rgb_to_ink16([u16::from_u8(grey); 3]);
+        let wide = cmyk_to_rgb_at(c, m, y, k);
+        for (w, n) in wide.iter().zip(narrow) {
+            assert!(
+                w.to_u8().abs_diff(n) <= 1,
+                "grey {grey}: {wide:?} vs {narrow:?}"
+            );
+        }
+    }
+}
+
+/// A 16-bit grey prints through its neutral inks to within a 16-bit count
+/// of 4 per channel mean (a sixteenth of an 8-bit count), black alone down
+/// to the grey of solid black and the balanced rich black below it, whose
+/// blacks rise as the grey falls.
+#[test]
+fn the_16_bit_neutrals_print_their_grey() {
+    let floor = cmyk_to_rgb_at(0u16, 0, 0, u16::MAX)[0];
+    let darkest: u32 = {
+        let [c, m, y, k] = rgb_to_ink16([0; 3]);
+        cmyk_to_rgb_at(c, m, y, k)
+            .iter()
+            .map(|&v| u32::from(v))
+            .sum::<u32>()
+            / 3
+    };
+    let mut last_ink = [0u16; 4];
+    for grey in (0..=u16::MAX).rev().step_by(7) {
+        let ink = rgb_to_ink16([grey; 3]);
+        if grey >= floor {
+            assert_eq!(ink[..3], [0; 3], "grey {grey}: {ink:?}");
+        } else {
+            assert_eq!(ink[3], u16::MAX, "grey {grey}: {ink:?}");
+        }
+        assert!(
+            ink.iter()
+                .zip(last_ink)
+                .all(|(&a, b)| a >= b || grey >= floor),
+            "grey {grey}: {ink:?} after {last_ink:?}"
+        );
+        last_ink = ink;
+        let [c, m, y, k] = ink;
+        let mean = cmyk_to_rgb_at(c, m, y, k)
+            .iter()
+            .map(|&v| u32::from(v))
+            .sum::<u32>()
+            / 3;
+        let target = u32::from(grey).max(darkest);
+        assert!(
+            mean.abs_diff(target) <= 4,
+            "grey {grey}: {ink:?} prints {mean}"
+        );
+    }
+}
+
+/// The 16-bit table holds its tints at entries `i / 1024` and interpolates
+/// between them.
+#[test]
+fn a_16_bit_spot_table_interpolates_its_tints() {
+    let lut = SpotLut16::from_fn(|t| [u16::from_unit(t), u16::from_unit(t * t), 0, 40_000]);
+    assert_eq!(lut.at(0), [0, 0, 0, 40_000]);
+    assert_eq!(lut.at(u16::MAX), [u16::MAX, u16::MAX, 0, 40_000]);
+    for tint in (0..=u16::MAX).step_by(97) {
+        let [c, m, y, k] = lut.at(tint);
+        assert!(c.abs_diff(tint) <= 1, "tint {tint}: {c}");
+        let square = u16::from_unit(tint.to_unit() * tint.to_unit());
+        // The chord of t² lies above it by at most (1/1024)²/4 of full ink.
+        assert!(m.abs_diff(square) <= 2, "tint {tint}: {m} vs {square}");
+        assert_eq!((y, k), (0, 40_000));
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "SPOT_TINTS16 < 65536")]
+    let step = (65_535 / SPOT_TINTS16) as u16;
+    assert!(step >= 63);
+}
+
+/// An ink row converts at 16 bits as at 8: a widened 8-bit row narrows to
+/// the 8-bit conversion within a count, and with spots, whose 8-bit table
+/// entries and union are each rounded, within two.
+#[test]
+fn ink_to_rgb_row16_follows_the_8_bit_conversion() {
+    let spot = |t: f64| [0.1 * t, 0.9 * t, 0.2 * t, 0.05 * t];
+    let lut8: SpotLut = std::array::from_fn(|t| {
+        #[expect(clippy::cast_precision_loss, reason = "t < 256")]
+        spot(t as f64 / 255.0).map(<u8 as Sample>::from_unit)
+    });
+    let lut16 = SpotLut16::from_fn(|t| spot(t).map(u16::from_unit));
+    let ink = bytes(8 * 3000, 41);
+    for (spots, limit) in [([None; 4], 1), ([Some(&lut8), None, Some(&lut8), None], 2)] {
+        let spots16 = spots.map(|s| s.map(|_| &lut16));
+        let mut narrow = vec![0u8; 3 * 3000];
+        ink_to_rgb_row(&ink, &spots, &mut narrow);
+        let wide_ink: Vec<u16> = ink.iter().map(|&v| u16::from_u8(v)).collect();
+        let mut wide = vec![0u16; 3 * 3000];
+        ink_to_rgb_row16(&wide_ink, &spots16, &mut wide);
+        for (w, n) in wide.iter().zip(&narrow) {
+            assert!(w.to_u8().abs_diff(*n) <= limit, "{w} vs {n}");
+        }
+    }
+}
+
+/// The reproducing solve at 16 bits starts from the same inks and aims at
+/// the same colour: a widened 8-bit colour takes the 8-bit inks to within
+/// a count.  At 8 bits the generic form is the 8-bit solve itself.
+#[test]
+fn ink_reproducing_at_16_bits_follows_the_8_bit_solve() {
+    let samples = bytes(7 * 300, 5);
+    for px in samples.as_chunks::<7>().0 {
+        let given = [px[0], px[1], px[2], px[3]].map(|v| f64::from(v) / 255.0);
+        let rgb = [px[4], px[5], px[6]];
+        let narrow = ink_reproducing(rgb, given);
+        assert_eq!(ink_reproducing_at(rgb, given), narrow);
+        let wide = ink_reproducing_at(rgb.map(u16::from_u8), given);
+        for (w, n) in wide.iter().zip(narrow) {
+            assert!(
+                w.to_u8().abs_diff(n) <= 1,
+                "{rgb:?} {given:?}: {wide:?} vs {narrow:?}"
+            );
+        }
+    }
 }

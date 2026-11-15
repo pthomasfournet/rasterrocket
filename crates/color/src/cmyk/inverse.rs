@@ -41,7 +41,8 @@
 use std::sync::LazyLock;
 
 use super::model::{self, ink_bytes};
-use super::{CORNERS, cmyk_to_rgb, cmyk_to_rgb_row};
+use super::{CORNERS, cmyk_to_rgb, cmyk_to_rgb_at, cmyk_to_rgb_row};
+use crate::sample::Sample;
 
 /// Nodes per axis of the inverse table.
 const GRID: u8 = 65;
@@ -78,6 +79,53 @@ const GREY_BALANCE: [f64; 3] = [1.0, 0.725, 0.75];
 /// entry `t` is the `[C, M, Y, K]` bytes printing the same colour as the
 /// spot at tint `t`.
 pub type SpotLut = [[u8; 4]; 256];
+
+/// Tint intervals of a [`SpotLut16`].
+pub const SPOT_TINTS16: usize = 1024;
+
+/// Process-ink equivalent of the tints of one spot colorant at 16 bits.
+///
+/// Entry `i` is the `[C, M, Y, K]` printing the same colour as the spot
+/// at tint `i / SPOT_TINTS16`, and a tint between two entries interpolates
+/// them linearly ([`Self::at`]).
+///
+/// Entries lie 64 counts apart; a tint transform smooth on that scale
+/// interpolates to within a count, and the table is a quarter of the size
+/// of one entry per 16-bit tint over a sixty-fourth of the evaluations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpotLut16(Box<[[u16; 4]]>);
+
+impl SpotLut16 {
+    /// The table whose entry `i` is `ink(i / SPOT_TINTS16)`.
+    #[must_use]
+    pub fn from_fn(mut ink: impl FnMut(f64) -> [u16; 4]) -> Self {
+        #[expect(clippy::cast_precision_loss, reason = "i ≤ SPOT_TINTS16, exact in f64")]
+        let entries = (0..=SPOT_TINTS16).map(|i| ink(i as f64 / SPOT_TINTS16 as f64));
+        Self(entries.collect())
+    }
+
+    /// The process ink of the 16-bit tint `tint`: the entries either side
+    /// of it interpolated linearly, rounded to nearest.
+    #[must_use]
+    pub fn at(&self, tint: u16) -> [u16; 4] {
+        const MAX: u64 = u16::MAX as u64;
+        let pos = u64::from(tint) * SPOT_TINTS16 as u64;
+        let i = usize::try_from(pos / MAX).unwrap_or(SPOT_TINTS16);
+        let t = pos % MAX;
+        let lo = self.0[i];
+        if t == 0 {
+            return lo;
+        }
+        let hi = self.0[i + 1];
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a convex combination of two u16 values fits u16"
+        )]
+        std::array::from_fn(|c| {
+            ((u64::from(lo[c]) * (MAX - t) + u64::from(hi[c]) * t + MAX / 2) / MAX) as u16
+        })
+    }
+}
 
 /// The eight CMY corners of the model at black `k`: `CORNERS[i]` and
 /// `CORNERS[8 + i]` interpolated, index `c·4 + m·2 + y`.
@@ -372,6 +420,49 @@ struct Inverse {
     neutral: [[u8; 4]; 256],
 }
 
+/// The 16-bit inks of each 16-bit grey, chosen as [`Inverse::neutral`]'s
+/// are from the model at 16 bits ([`cmyk_to_rgb_at`]): at or above the
+/// grey solid black prints, the black alone printing the nearest grey;
+/// below it, solid black under the fraction of [`GREY_BALANCE`] printing
+/// the nearest grey, by the mean of its channels.  Both greys fall
+/// monotonically with the ink, so the nearest is found by bisection.
+static NEUTRAL16: LazyLock<Box<[[u16; 4]]>> = LazyLock::new(|| {
+    let black: Vec<u32> = (0..=u16::MAX)
+        .map(|k| u32::from(cmyk_to_rgb_at(0, 0, 0, k)[0]))
+        .collect();
+    let rich: Vec<u32> = (0..=u16::MAX)
+        .map(|t| {
+            let [c, m, y, k] = rich_black16(t);
+            cmyk_to_rgb_at(c, m, y, k)
+                .iter()
+                .map(|&v| u32::from(v))
+                .sum()
+        })
+        .collect();
+    let floor = black[usize::from(u16::MAX)];
+    (0..=u16::MAX)
+        .map(|grey| {
+            let grey = u32::from(grey);
+            if grey >= floor {
+                [0, 0, 0, nearest_falling(&black, grey)]
+            } else {
+                rich_black16(nearest_falling(&rich, 3 * grey))
+            }
+        })
+        .collect()
+});
+
+/// The first index of the value of `values`, a non-increasing sequence of
+/// 65 536 entries, nearest `target`.
+fn nearest_falling(values: &[u32], target: u32) -> u16 {
+    let at = values.partition_point(|&v| v > target);
+    let below = at
+        .checked_sub(1)
+        .filter(|_| at == values.len() || values[at - 1] - target <= target - values[at]);
+    let index = below.map_or(at, |b| values.partition_point(|&v| v > values[b]));
+    u16::try_from(index.min(values.len() - 1)).unwrap_or(u16::MAX)
+}
+
 /// Re-solve the nodes whose inks lie far from the mean of their six axis
 /// neighbours, from that mean on its black, keeping the result when it
 /// reproduces the node's colour.
@@ -471,6 +562,13 @@ fn rich_black(t: u8) -> [u8; 4] {
     [c, m, y, u8::MAX]
 }
 
+/// Solid black under the fraction `t / 65535` of [`GREY_BALANCE`], at 16
+/// bits.
+fn rich_black16(t: u16) -> [u16; 4] {
+    let [c, m, y] = GREY_BALANCE.map(|v| u16::from_unit(v * t.to_unit()));
+    [c, m, y, u16::MAX]
+}
+
 /// Convert sRGB to CMYK ink bytes.
 ///
 /// Of the inks printing a colour, ones with the most black
@@ -496,7 +594,42 @@ pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
     let scaled = rgb.map(|v| u16::from(v) * span);
     let cell = scaled.map(|s| (s / 255).min(span - 1));
     let frac = [0, 1, 2].map(|i| f64::from(scaled[i] - cell[i] * 255) / 255.0);
-    let lo = cell.map(usize::from);
+    ink_bytes(interpolate(table, cell.map(usize::from), frac))
+}
+
+/// [`rgb_to_ink`] of a 16-bit colour, its inks at 16 bits.
+///
+/// The same table is interpolated at the colour's exact grid coordinate;
+/// a neutral takes the inks of its 16-bit grey from a 65 536-entry table
+/// built the way the 8-bit one is.
+#[must_use]
+pub fn rgb_to_ink16(rgb: [u16; 3]) -> [u16; 4] {
+    if rgb[0] == rgb[1] && rgb[1] == rgb[2] {
+        return NEUTRAL16[usize::from(rgb[0])];
+    }
+    let span = u32::from(GRID - 1);
+    let max = u32::from(u16::MAX);
+    let scaled = rgb.map(|v| u32::from(v) * span);
+    let cell = scaled.map(|s| (s / max).min(span - 1));
+    let frac = [0, 1, 2].map(|i| f64::from(scaled[i] - cell[i] * max) / f64::from(max));
+    interpolate(&INVERSE, cell.map(|c| c as usize), frac).map(u16::from_unit)
+}
+
+/// [`rgb_to_ink`] at the depth of `S`: [`rgb_to_ink`] itself for `u8`,
+/// [`rgb_to_ink16`] for `u16`.
+#[must_use]
+pub fn rgb_to_ink_at<S: Sample>(rgb: [S; 3]) -> [S; 4] {
+    if let Some(&[r, g, b]) = S::as_u8(&rgb) {
+        return rgb_to_ink([r, g, b]).map(S::from_u8);
+    }
+    let wide: [u16; 3] = std::array::from_fn(|i| S::as_u16(&rgb).map_or(0, |w| w[i]));
+    let ink = rgb_to_ink16(wide);
+    std::array::from_fn(|i| S::from_u16_slice(&ink).map_or(S::ZERO, |s| s[i]))
+}
+
+/// The trilinear interpolation of the inverse table's eight nodes around
+/// the cell whose low corner is `lo`, at fractions `frac` across it.
+fn interpolate(table: &Inverse, lo: [usize; 3], frac: [f64; 3]) -> [f64; 4] {
     let n = usize::from(GRID);
     let mut inks = [0.0f64; 4];
     for corner in 0..8 {
@@ -507,7 +640,7 @@ pub fn rgb_to_ink(rgb: [u8; 3]) -> [u8; 4] {
             *o = w.mul_add(f64::from(v), *o);
         }
     }
-    ink_bytes(inks)
+    inks
 }
 
 /// Convert an ink canvas row to sRGB.
@@ -555,6 +688,61 @@ pub fn ink_to_rgb_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8])
         }
         cmyk_to_rgb_row(&cmyk[..n * 4], dst);
     }
+}
+
+/// Convert a 16-bit ink canvas row to 16-bit sRGB.
+///
+/// This is [`ink_to_rgb_row`] at 16 bits: each spot's process equivalent
+/// is read from its [`SpotLut16`], the union taken at 16 bits
+/// ([`ink_union16`]) and the model evaluated at 16 bits
+/// ([`cmyk_to_rgb_at`]).
+///
+/// # Panics
+///
+/// Panics if `ink.len()` is not a multiple of 8 or
+/// `out.len() != ink.len() / 8 * 3`.
+pub fn ink_to_rgb_row16(ink: &[u16], spots: &[Option<&SpotLut16>; 4], out: &mut [u16]) {
+    assert!(
+        ink.len().is_multiple_of(8),
+        "ink_to_rgb_row16: ink length {} is not a multiple of 8",
+        ink.len()
+    );
+    assert_eq!(
+        out.len(),
+        ink.len() / 8 * 3,
+        "ink_to_rgb_row16: output length must be 3 samples per ink pixel ({} ink samples)",
+        ink.len()
+    );
+    for (px, rgb) in ink
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<3>().0)
+    {
+        let mut quad = [px[0], px[1], px[2], px[3]];
+        for (lut, &tint) in spots.iter().zip(&px[4..]) {
+            if let Some(lut) = lut {
+                for (c, q) in quad.iter_mut().zip(lut.at(tint)) {
+                    *c = ink_union16(*c, q);
+                }
+            }
+        }
+        let [c, m, y, k] = quad;
+        *rgb = cmyk_to_rgb_at(c, m, y, k);
+    }
+}
+
+/// [`ink_union`] of 16-bit coverages: `a + b − a·b/65535`, rounded to
+/// nearest, unambiguous since 65535 is odd.
+#[must_use]
+pub(crate) fn ink_union16(a: u16, b: u16) -> u16 {
+    let uncovered = u64::from(u16::MAX - a) * u64::from(u16::MAX - b);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "uncovered ≤ 65535², so the rounded quotient ≤ 65535"
+    )]
+    let paper = ((uncovered + 32_767) / 65_535) as u16;
+    u16::MAX - paper
 }
 
 /// The probabilistic union of two ink coverages `a` and `b` (0 = no ink):

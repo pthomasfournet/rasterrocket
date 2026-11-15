@@ -93,7 +93,11 @@ impl RgbSource {
             PixelMode::Xbgr8 => Some(Self::Xbgr),
             PixelMode::Cmyk8 => Some(Self::Cmyk),
             PixelMode::DeviceN8 => Some(Self::DeviceN),
-            PixelMode::Mono1 | PixelMode::Mono8 | PixelMode::Mono16 | PixelMode::Rgb16 => None,
+            PixelMode::Mono1
+            | PixelMode::Mono8
+            | PixelMode::Mono16
+            | PixelMode::Rgb16
+            | PixelMode::DeviceN16 => None,
         }
     }
 

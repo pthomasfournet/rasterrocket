@@ -16,6 +16,7 @@
 
 use super::CORNERS;
 use super::model::{self, ink_bytes};
+use crate::sample::Sample;
 
 /// Gauss-Newton iterations at most.
 const MAX_STEPS: usize = 40;
@@ -108,15 +109,31 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
 /// prints `rgb` within [`PRINTS`] counts per channel.
 #[must_use]
 pub fn ink_reproducing(rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
+    ink_bytes(reproduce(rgb.map(f64::from), given))
+}
+
+/// [`ink_reproducing`] at the depth of `S`: the 8-bit solve itself for
+/// `u8`; for `u16`, the same solve towards the 16-bit colour, its inks
+/// quantised to 16 bits.
+#[must_use]
+pub fn ink_reproducing_at<S: Sample>(rgb: [S; 3], given: [f64; 4]) -> [S; 4] {
+    match S::as_u8(&rgb) {
+        Some(&[r, g, b]) => ink_reproducing([r, g, b], given).map(S::from_u8),
+        _ => reproduce(rgb.map(|v| v.to_unit() * 255.0), given).map(S::from_unit),
+    }
+}
+
+/// The `[0, 1]` inks of [`ink_reproducing`] for the colour `target`, on
+/// the 0–255 scale of the model's corners.
+fn reproduce(target: [f64; 3], given: [f64; 4]) -> [f64; 4] {
     let given = given.map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) });
     let open = given.map(|v| v > 0.0);
-    let target = rgb.map(f64::from);
     if forward(given)
         .iter()
         .zip(target)
         .all(|(a, b)| (a - b).abs() <= PRINTS)
     {
-        return ink_bytes(given);
+        return given;
     }
     let mut x = given;
     let mut err = cost(x, target, given);
@@ -177,7 +194,7 @@ pub fn ink_reproducing(rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
             break;
         }
     }
-    ink_bytes(x)
+    x
 }
 
 #[cfg(test)]

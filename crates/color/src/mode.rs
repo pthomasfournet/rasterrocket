@@ -64,6 +64,8 @@ pub enum PixelMode {
     Mono16 = 7,
     /// 6 bytes/pixel, channel order R G B, 16-bit samples.
     Rgb16 = 8,
+    /// 16 bytes/pixel: C M Y K + 4 spot channels, 16-bit samples.
+    DeviceN16 = 9,
 }
 
 /// Bytes per pixel for each [`PixelMode`] variant, indexed by discriminant.
@@ -75,16 +77,17 @@ pub enum PixelMode {
 /// the `raster` crate re-exports it. New variants **must** be reflected here
 /// *and* in the `match` inside [`PixelMode::bytes_per_pixel`]; a
 /// `#[cfg(debug_assertions)]` test asserts they stay in sync.
-pub const NCOMPS: [usize; 9] = [
-    0, // Mono1  — packed bits, not a whole byte count
-    1, // Mono8
-    3, // Rgb8
-    3, // Bgr8
-    4, // Xbgr8
-    4, // Cmyk8
-    8, // DeviceN8
-    2, // Mono16
-    6, // Rgb16
+pub const NCOMPS: [usize; 10] = [
+    0,  // Mono1  — packed bits, not a whole byte count
+    1,  // Mono8
+    3,  // Rgb8
+    3,  // Bgr8
+    4,  // Xbgr8
+    4,  // Cmyk8
+    8,  // DeviceN8
+    2,  // Mono16
+    6,  // Rgb16
+    16, // DeviceN16
 ];
 
 impl PixelMode {
@@ -112,6 +115,7 @@ impl PixelMode {
             Self::Xbgr8 | Self::Cmyk8 => 4,
             Self::Rgb16 => 6,
             Self::DeviceN8 => 8,
+            Self::DeviceN16 => 16,
         }
     }
 
@@ -132,6 +136,7 @@ impl PixelMode {
     /// | `DeviceN8` |   64 |
     /// | `Mono16`   |   16 |
     /// | `Rgb16`    |   48 |
+    /// | `DeviceN16`|  128 |
     #[inline]
     #[must_use]
     pub const fn bits_per_pixel(self) -> usize {
@@ -143,6 +148,7 @@ impl PixelMode {
             Self::Xbgr8 | Self::Cmyk8 => 32,
             Self::Rgb16 => 48,
             Self::DeviceN8 => 64,
+            Self::DeviceN16 => 128,
         }
     }
 
@@ -182,6 +188,7 @@ impl PixelMode {
             6 => Some(Self::DeviceN8),
             7 => Some(Self::Mono16),
             8 => Some(Self::Rgb16),
+            9 => Some(Self::DeviceN16),
             _ => None,
         }
     }
@@ -224,6 +231,7 @@ mod tests {
         PixelMode::DeviceN8,
         PixelMode::Mono16,
         PixelMode::Rgb16,
+        PixelMode::DeviceN16,
     ];
 
     /// `NCOMPS` and `bytes_per_pixel` must agree for every variant.
@@ -249,7 +257,7 @@ mod tests {
 
     #[test]
     fn from_u8_invalid() {
-        for v in 9u8..=255 {
+        for v in 10u8..=255 {
             assert_eq!(PixelMode::from_u8(v), None);
         }
     }

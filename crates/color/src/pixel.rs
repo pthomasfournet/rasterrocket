@@ -43,6 +43,7 @@ const _: () = assert!(std::mem::size_of::<Rgb8>() == Rgb8::BYTES);
 const _: () = assert!(std::mem::size_of::<Gray8>() == Gray8::BYTES);
 const _: () = assert!(std::mem::size_of::<Cmyk8>() == Cmyk8::BYTES);
 const _: () = assert!(std::mem::size_of::<DeviceN8>() == DeviceN8::BYTES);
+const _: () = assert!(std::mem::size_of::<DeviceN16>() == DeviceN16::BYTES);
 const _: () = assert!(std::mem::size_of::<Rgb16>() == Rgb16::BYTES);
 const _: () = assert!(std::mem::size_of::<Gray16>() == Gray16::BYTES);
 
@@ -144,6 +145,24 @@ impl Pixel for DeviceN8 {
     const NCOMPS: usize = 8;
 }
 
+/// CMYK + 4 spot channels of 16-bit samples, 16 bytes/pixel, wire layout
+/// `[C, M, Y, K, S0, S1, S2, S3]` of native-endian `u16`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Pod, Zeroable)]
+pub struct DeviceN16 {
+    /// Process channels C, M, Y and K, `0` = no ink, `65535` = full
+    /// coverage.
+    pub cmyk: [u16; 4],
+    /// Spot channels `S0`–`S3`, `0` = no ink, `65535` = full coverage.
+    pub spots: [u16; 4],
+}
+
+impl Pixel for DeviceN16 {
+    const MODE: PixelMode = PixelMode::DeviceN16;
+    type Sample = u16;
+    const NCOMPS: usize = 8;
+}
+
 /// 16-bit RGB, 6 bytes/pixel, wire layout `[R, G, B]` of native-endian
 /// `u16`.
 #[repr(C)]
@@ -179,7 +198,7 @@ impl Pixel for Gray16 {
 
 // ── Erased pixel buffer ───────────────────────────────────────────────────────
 
-/// A mode-erased pixel value carrying up to 8 bytes, the widest pixel mode.
+/// A mode-erased pixel value carrying up to 16 bytes, the widest pixel mode.
 ///
 /// # When to use `AnyColor` vs a concrete `Pixel` type
 ///
@@ -191,7 +210,7 @@ impl Pixel for Gray16 {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct AnyColor {
     /// Raw pixel bytes; only the first `mode.bytes_per_pixel()` entries are meaningful.
-    pub bytes: [u8; 8],
+    pub bytes: [u8; 16],
     /// The pixel format that determines how `bytes` should be interpreted.
     pub mode: PixelMode,
 }
@@ -201,7 +220,7 @@ impl AnyColor {
     #[must_use]
     pub const fn black(mode: PixelMode) -> Self {
         Self {
-            bytes: [0; 8],
+            bytes: [0; 16],
             mode,
         }
     }
@@ -217,10 +236,10 @@ impl AnyColor {
     /// | `Rgb8`, `Bgr8` | `bytes[0..3] = [255, 255, 255]` |
     /// | `Xbgr8` | `bytes[0..4] = [255, 255, 255, 255]` — `byte[3]` is the ignored X/padding byte, set to 255 for consistency so the full 4-byte value reads as opaque white in any RGBA interpretation |
     /// | `Mono16`, `Rgb16` | every byte of every sample `0xFF` |
-    /// | `Cmyk8`, `DeviceN8` | all bytes zero — CMYK white is zero ink on all channels |
+    /// | `Cmyk8`, `DeviceN8`, `DeviceN16` | all bytes zero — CMYK white is zero ink on all channels |
     #[must_use]
     pub const fn white(mode: PixelMode) -> Self {
-        let mut bytes = [0u8; 8];
+        let mut bytes = [0u8; 16];
         match mode {
             // Mono1: 0xFF means all 8 packed bits = 1 = white (MSB-first format).
             // Mono8: 255 = maximum luminance = white.
@@ -252,7 +271,7 @@ impl AnyColor {
                 bytes[3] = 255;
             }
             // CMYK/DeviceN white = no ink on any channel = all zeros.
-            PixelMode::Cmyk8 | PixelMode::DeviceN8 => {}
+            PixelMode::Cmyk8 | PixelMode::DeviceN8 | PixelMode::DeviceN16 => {}
         }
         Self { bytes, mode }
     }
@@ -271,6 +290,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Gray8>(), Gray8::BYTES);
         assert_eq!(std::mem::size_of::<Cmyk8>(), Cmyk8::BYTES);
         assert_eq!(std::mem::size_of::<DeviceN8>(), DeviceN8::BYTES);
+        assert_eq!(std::mem::size_of::<DeviceN16>(), DeviceN16::BYTES);
         assert_eq!(std::mem::size_of::<Rgb16>(), Rgb16::BYTES);
         assert_eq!(std::mem::size_of::<Gray16>(), Gray16::BYTES);
     }
@@ -300,13 +320,15 @@ mod tests {
     #[test]
     fn any_color_white_xbgr8_sets_padding_byte() {
         let w = AnyColor::white(PixelMode::Xbgr8);
-        assert_eq!(w.bytes, [255, 255, 255, 255, 0, 0, 0, 0]);
+        assert_eq!(w.bytes[..8], [255, 255, 255, 255, 0, 0, 0, 0]);
+        assert_eq!(w.bytes[8..], [0; 8]);
     }
 
     /// CMYK/DeviceN white is zero ink on all channels.
     #[test]
     fn any_color_white_cmyk_is_zero() {
-        let w = AnyColor::white(PixelMode::Cmyk8);
-        assert_eq!(w.bytes, [0u8; 8]);
+        for mode in [PixelMode::Cmyk8, PixelMode::DeviceN8, PixelMode::DeviceN16] {
+            assert_eq!(AnyColor::white(mode).bytes, [0u8; 16], "{mode:?}");
+        }
     }
 }

@@ -41,8 +41,11 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-pub use inverse::{BLACK_FLOOR, SpotLut, ink_to_rgb_row, rgb_to_ink};
-pub use matching::{INK_REPRODUCING_COST, ink_reproducing};
+pub use inverse::{
+    BLACK_FLOOR, SPOT_TINTS16, SpotLut, SpotLut16, ink_to_rgb_row, ink_to_rgb_row16, rgb_to_ink,
+    rgb_to_ink_at, rgb_to_ink16,
+};
+pub use matching::{INK_REPRODUCING_COST, ink_reproducing, ink_reproducing_at};
 
 use crate::sample::{Sample, SampleDepth};
 
