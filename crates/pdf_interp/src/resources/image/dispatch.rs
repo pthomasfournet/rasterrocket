@@ -13,7 +13,7 @@ use pdf::{Object, Stream};
 use crate::resources::dict_ext::DictExt as _;
 
 use super::codecs::{JpxOptions, decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
-use super::colorspace::{ImageColour, Samples};
+use super::colorspace::{ImageColour, KeySamples, Samples};
 use super::raw::{apply_stencil_decode, decode_raw};
 use super::smask::{colour_key_mask, colour_key_mask_with};
 use super::{
@@ -143,7 +143,7 @@ pub(super) fn decode_image_stream<
     };
     let parms = terminal_decode_parms(dict, chain_len);
 
-    let wide = keeps_wide(ctx, src)?;
+    let wide = keeps_wide(ctx, src, super::MAX_DECODED_BYTES);
     let decoded = match filter {
         None => decode_raw(&input, w, h, is_mask, dict, &src.colour, wide),
         Some(f) if is_transport_filter(f) => {
@@ -242,18 +242,20 @@ fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
 
 /// Whether the samples of `src` of more than 8 bits are kept at 16 bits:
 /// for a 16-bit render, in a space that converts at 16 bits
-/// ([`ImageColour::converts_wide`]).
-///
-/// # Errors
-/// The budget's reason, when 16-bit raw samples, at two bytes each,
-/// exceed it ([`decode_budget`]).
-fn keeps_wide(ctx: &ImageDecodeCtx<'_>, src: &ImageStream<'_>) -> Result<bool, String> {
+/// ([`ImageColour::converts_wide`]), when 16-bit raw samples, at two bytes
+/// each, fit `budget` bytes.  Samples over it decode at 8 bits, with a
+/// warning.
+fn keeps_wide(ctx: &ImageDecodeCtx<'_>, src: &ImageStream<'_>, budget: u64) -> bool {
     let wide =
         ctx.depth == color::SampleDepth::Sixteen && !src.is_mask && src.colour.converts_wide();
     if wide && src.stream.dict.get_i64(b"BitsPerComponent") == Some(16) {
-        decode_budget(src.width, src.height, 2 * src.colour.budget_components())?;
+        let components = 2 * src.colour.budget_components();
+        if let Err(why) = super::decode_budget_of(src.width, src.height, components, budget) {
+            log::warn!("image: {why} at 16 bits a sample — decoding at 8 bits");
+            return false;
+        }
     }
-    Ok(wide)
+    wide
 }
 
 /// The colour-key mask (§8.9.6.4) of a codec's host-resident samples,
@@ -272,20 +274,34 @@ fn codec_colour_key_mask(
     let super::colorspace::Layout::Color(n) = samples.layout else {
         return None;
     };
-    if let Some(key) = &samples.key_source {
-        let n = usize::from(n);
-        let npix = (samples.width as usize).checked_mul(samples.height as usize)?;
-        if key.len() < npix.checked_mul(n)? {
+    match &samples.key_source {
+        Some(KeySamples::Precise(key)) => {
+            let n = usize::from(n);
+            let npix = (samples.width as usize).checked_mul(samples.height as usize)?;
+            if key.len() < npix.checked_mul(n)? {
+                log::warn!(
+                    "image: colour-key /Mask: {} key samples for {npix} pixels — drawn without the mask",
+                    key.len()
+                );
+                return None;
+            }
+            return colour_key_mask_with(ranges, n, samples.width, samples.height, |p, c| {
+                u32::from(key[p * n + c])
+            });
+        }
+        Some(KeySamples::Unusable(why)) => {
+            log::warn!("image: colour-key /Mask: {why} — drawn without the mask");
             return None;
         }
-        return colour_key_mask_with(ranges, n, samples.width, samples.height, |p, c| {
-            key[p * n + c]
-        });
+        None => {}
     }
     let Some(bytes) = samples.data.as_cpu() else {
-        log::warn!(
-            "image: colour-key /Mask on GPU-resident base image not supported — blitting image without mask"
-        );
+        let held = if samples.data.as_cpu16().is_some() {
+            "samples held at 16 bits without their own values"
+        } else {
+            "device-resident samples"
+        };
+        log::warn!("image: colour-key /Mask on {held} not supported — drawn without the mask");
         return None;
     };
     if bilevel {
@@ -298,4 +314,34 @@ fn codec_colour_key_mask(
         });
     }
     colour_key_mask(ranges, bytes, usize::from(n), samples.width, samples.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pdf::Dictionary;
+
+    /// A 16-bit render keeps 16-bit raw samples within the budget, and
+    /// decodes samples whose two bytes each exceed it at 8 bits.
+    #[test]
+    fn samples_over_the_budget_at_16_bits_decode_at_8() {
+        let doc = crate::test_helpers::empty_doc();
+        let mut dict = Dictionary::new();
+        dict.set("BitsPerComponent", Object::Integer(16));
+        let stream = Stream::new(dict, Vec::new());
+        let src = ImageStream::new(
+            &stream,
+            100,
+            100,
+            false,
+            ImageColour::of(crate::resources::ColorSpace::DeviceGray),
+        )
+        .expect("within the decode budget");
+        let mut ctx = ImageDecodeCtx::cpu(&doc);
+        ctx.depth = color::SampleDepth::Sixteen;
+        assert!(keeps_wide(&ctx, &src, 20_000));
+        assert!(!keeps_wide(&ctx, &src, 19_999));
+        ctx.depth = color::SampleDepth::Eight;
+        assert!(!keeps_wide(&ctx, &src, 20_000));
+    }
 }

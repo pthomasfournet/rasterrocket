@@ -825,14 +825,24 @@ pub(super) const fn validated_dims(w_raw: i64, h_raw: i64) -> Option<(u32, u32)>
 /// Whether a `width × height` image of `components` samples per pixel fits
 /// [`MAX_DECODED_BYTES`]; the message names the excess otherwise.
 pub(super) fn decode_budget(width: u32, height: u32, components: usize) -> Result<(), String> {
+    decode_budget_of(width, height, components, MAX_DECODED_BYTES)
+}
+
+/// [`decode_budget`] against a budget of `budget` bytes.
+pub(super) fn decode_budget_of(
+    width: u32,
+    height: u32,
+    components: usize,
+    budget: u64,
+) -> Result<(), String> {
     let bytes = decoded_bytes(width, height, components);
-    if bytes <= MAX_DECODED_BYTES {
+    if bytes <= budget {
         return Ok(());
     }
     Err(format!(
         "image of {width}×{height}×{components} samples ({} MiB) exceeds the {} MiB decode budget",
         bytes >> 20,
-        MAX_DECODED_BYTES >> 20
+        budget >> 20
     ))
 }
 
@@ -1062,6 +1072,89 @@ mod tests {
             let want = if row == 1 { 0 } else { 255 };
             assert!(alpha.iter().all(|&a| a == want), "row {row}: {alpha:?}");
         }
+    }
+
+    /// `/Im1`, object 4 of `doc`, resolved for a render at `depth`.
+    fn resolve_im1(doc: &Document, depth: color::SampleDepth) -> DecodedImage {
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((4, 0)));
+        let mut ctx = ImageDecodeCtx::cpu(doc);
+        ctx.depth = depth;
+        let ImageResolution::Ok(decoded) = resolve_image(
+            &mut ctx,
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        ) else {
+            panic!("the image decodes");
+        };
+        decoded
+    }
+
+    /// A document whose object 4 is an image `XObject` of the dictionary
+    /// entries `dict` and the stream bytes `data`.
+    fn image_doc(dict: &str, data: &[u8]) -> Document {
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image {dict} /Length {} >>\nstream\n",
+            data.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(data);
+        image.extend_from_slice(b"\nendstream");
+        crate::test_helpers::make_doc_with_objects(&[(4, image)])
+    }
+
+    /// The colour key of a JPEG 2000 codestream of 4-bit samples compares
+    /// them in their own range, `[15 15]` keying the value 15 out, at either
+    /// depth.
+    #[test]
+    fn a_jpx_colour_key_compares_4_bit_samples_in_their_own_range() {
+        let doc = image_doc(
+            "/Width 4 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 4 \
+             /Filter /JPXDecode /Mask [15 15]",
+            include_bytes!("testdata/gray4.jp2"),
+        );
+        for depth in [color::SampleDepth::Eight, color::SampleDepth::Sixteen] {
+            let mask = resolve_im1(&doc, depth)
+                .image
+                .smask
+                .expect("the colour key masks");
+            assert_eq!(mask.alpha(), [255, 255, 0, 0, 0, 255, 0, 255], "{depth:?}");
+        }
+    }
+
+    /// At depth 16 a colour key still compares the samples in their own
+    /// range: a 16-bit JPEG 2000 codestream and 16-bit raw samples, both
+    /// kept at 16 bits, mask the samples inside `[9000 9500]`.
+    #[test]
+    fn a_colour_key_at_depth_16_compares_the_source_samples() {
+        let sixteen = color::SampleDepth::Sixteen;
+        let jpx = image_doc(
+            "/Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 16 \
+             /Filter /JPXDecode /Mask [9000 9500]",
+            include_bytes!("testdata/gray16.jp2"),
+        );
+        let decoded = resolve_im1(&jpx, sixteen);
+        assert!(decoded.image.data.as_cpu16().is_some(), "kept at 16 bits");
+        let mask = decoded.image.smask.expect("the colour key masks");
+        for (row, alpha) in mask.alpha().as_chunks::<8>().0.iter().enumerate() {
+            let want = if row == 1 { 0 } else { 255 };
+            assert!(alpha.iter().all(|&a| a == want), "row {row}: {alpha:?}");
+        }
+        let samples: Vec<u8> = [9362u16, 100, 9000, 9501]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let raw = image_doc(
+            "/Width 4 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 16 \
+             /Mask [9000 9500]",
+            &samples,
+        );
+        let decoded = resolve_im1(&raw, sixteen);
+        assert!(decoded.image.data.as_cpu16().is_some(), "kept at 16 bits");
+        let mask = decoded.image.smask.expect("the colour key masks");
+        assert_eq!(mask.alpha(), [0, 255, 0, 255]);
     }
 
     // ── Spot-colour images through the full XObject path ─────────────────────

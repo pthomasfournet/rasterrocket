@@ -75,9 +75,19 @@ pub(super) struct Samples {
     /// stopped short, leaves the missing samples padded.
     pub partial: Option<String>,
     /// The colour components at the codestream's own precision, when it
-    /// exceeds 8 bits and a colour-key `/Mask` compares them in their own
-    /// range (§8.9.6.4); `data` holds them scaled to 8 bits.
-    pub key_source: Option<Vec<u32>>,
+    /// is not 8 bits and a colour-key `/Mask` compares them in their own
+    /// range (§8.9.6.4); `data` holds them scaled.
+    pub key_source: Option<KeySamples>,
+}
+
+/// The samples a colour key compares, at the codestream's own precision.
+#[derive(Debug)]
+pub(crate) enum KeySamples {
+    /// The colour components interleaved, at most 16 bits each.
+    Precise(Vec<u16>),
+    /// The samples could not be kept, for the reason given: the key is
+    /// not applied.
+    Unusable(String),
 }
 
 impl Samples {

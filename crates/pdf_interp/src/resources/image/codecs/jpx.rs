@@ -1,7 +1,7 @@
 //! `JPXDecode` (JPEG 2000): the CPU decoder and nvJPEG2000 behind its
 //! feature.
 
-use crate::resources::image::colorspace::{Layout, Samples};
+use crate::resources::image::colorspace::{KeySamples, Layout, Samples};
 
 #[cfg(feature = "nvjpeg2k")]
 use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
@@ -54,17 +54,18 @@ pub(in crate::resources::image) fn decode_jpx(
     // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
     // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
     // never needs `/SMaskInData`.  Its samples are 8-bit: a codestream of
-    // more than 8 bits kept at 16, or whose colour key compares more than 8
-    // bits, decodes on the CPU.
-    let deep = img.original_bit_depth() > 8;
-    let precise_key = opts.colour_key && deep;
-    let wide = opts.wide && deep;
-    if wide {
-        // Each sample kept at 16 bits takes two bytes.
-        jpx_budget(&img, 2)?;
-    }
+    // more than 8 bits kept at 16, or with a colour key, which compares the
+    // samples at their own precision, decodes on the CPU.  Samples whose
+    // two bytes each exceed the budget are kept at 8 bits.
+    let wide = opts.wide
+        && img.original_bit_depth() > 8
+        && jpx_budget(&img, 2)
+            .inspect_err(|why| {
+                log::warn!("image: JPXDecode: {why} at 16 bits — decoding at 8 bits");
+            })
+            .is_ok();
     #[cfg(feature = "nvjpeg2k")]
-    if let Some(dec) = gpu.filter(|_| !precise_key && !wide) {
+    if let Some(dec) = gpu.filter(|_| !opts.colour_key && !wide) {
         let area = pdf_w.saturating_mul(pdf_h);
         if area >= crate::resources::image::GPU_JPEG2K_THRESHOLD_PX {
             if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
@@ -101,9 +102,12 @@ pub(in crate::resources::image) fn decode_jpx(
         .checked_mul(jh as usize)
         .and_then(|npx| npx.checked_mul(stride));
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
-    let mut samples = if precise_key || wide {
+    let mut samples = if opts.colour_key || wide {
         let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
-        let key_source = precise_key.then(|| source_samples(&decoded, channels));
+        let key_source = opts
+            .colour_key
+            .then(|| key_samples(&decoded, channels, (jw, jh)))
+            .flatten();
         let mut samples = if wide {
             let wide = wide_samples(&decoded);
             check_len(wide.len(), expected, (jw, jh, stride))?;
@@ -207,24 +211,53 @@ fn wide_samples(decoded: &hayro_jpeg2000::DecodedImage<'_>) -> Vec<u16> {
     out
 }
 
-/// The first `channels` components of `decoded` interleaved at their own
-/// precision: each sample rounded and clamped to `0..=2^bits − 1`.
-fn source_samples(decoded: &hayro_jpeg2000::DecodedImage<'_>, channels: usize) -> Vec<u32> {
+/// The samples a colour key compares for the first `channels` components
+/// of `decoded`, a `w × h` image: `None` when every component is of 8
+/// bits, whose 8-bit samples are their own; otherwise the components
+/// interleaved at their own precision, each sample rounded and clamped to
+/// `0..=2^bits − 1`, or why they cannot be kept — a component of more than
+/// 16 bits, two bytes a sample over the decode budget, or an allocation
+/// refused.
+fn key_samples(
+    decoded: &hayro_jpeg2000::DecodedImage<'_>,
+    channels: usize,
+    (w, h): (u32, u32),
+) -> Option<KeySamples> {
     let components = &decoded.components()[..channels.min(decoded.components().len())];
+    if components.iter().all(|c| c.bit_depth() == 8) {
+        return None;
+    }
+    if let Some(c) = components.iter().find(|c| c.bit_depth() > 16) {
+        return Some(KeySamples::Unusable(format!(
+            "a {}-bit component exceeds the 16 bits a key sample holds",
+            c.bit_depth()
+        )));
+    }
+    if let Err(why) = crate::resources::image::decode_budget(w, h, 2 * components.len()) {
+        return Some(KeySamples::Unusable(format!("key samples: {why}")));
+    }
     let len = components.first().map_or(0, |c| c.samples().len());
-    let mut out = Vec::with_capacity(len * components.len());
+    let mut out = Vec::new();
+    if out.try_reserve_exact(len * components.len()).is_err() {
+        return Some(KeySamples::Unusable(
+            "key samples: allocation refused".to_owned(),
+        ));
+    }
+    let maxima: Vec<f64> = components
+        .iter()
+        .map(|c| f64::from(u16::MAX >> (16 - c.bit_depth().clamp(1, 16))))
+        .collect();
     for i in 0..len {
-        for c in components {
-            let max = f64::from(u32::MAX >> (32 - u32::from(c.bit_depth()).clamp(1, 32)));
+        for (c, &max) in components.iter().zip(&maxima) {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "clamped to 0..=2^bits − 1, which u32 holds"
+                reason = "clamped to 0..=2^bits − 1 with bits ≤ 16, which u16 holds"
             )]
-            out.push(f64::from(c.samples()[i]).round().clamp(0.0, max) as u32);
+            out.push(f64::from(c.samples()[i]).round().clamp(0.0, max) as u16);
         }
     }
-    out
+    Some(KeySamples::Precise(out))
 }
 
 /// Decode a JPEG 2000 codestream's first component as palette indices
@@ -282,9 +315,9 @@ pub(in crate::resources::image) struct JpxOptions {
     /// `/SMaskInData` (§8.9.5): 0 ignores an alpha channel, 1 makes it the
     /// soft mask, 2 makes it the soft mask of colour premultiplied by it.
     pub smask_in_data: i64,
-    /// A colour-key `/Mask` compares the samples: a codestream of more than
-    /// 8 bits keeps them at its own precision as well
-    /// ([`Samples::key_source`]).
+    /// A colour-key `/Mask` compares the samples: a codestream of any
+    /// component precision other than 8 bits keeps them at that precision
+    /// as well ([`Samples::key_source`]).
     pub colour_key: bool,
     /// Keep the samples of a codestream of more than 8 bits at 16 bits.
     pub wide: bool,
