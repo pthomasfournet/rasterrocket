@@ -133,6 +133,15 @@ pub(crate) fn make_doc_with_object(obj2_body: &str) -> Document {
 /// - `3 0 obj` — empty Pages tree
 /// - `4..` — caller's `objects`
 pub(crate) fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Document {
+    make_doc_with_catalog_and_objects("", objects)
+}
+
+/// [`make_doc_with_objects`] with `extra_catalog` appended to the
+/// Catalog's entries (e.g. `" /OutputIntents [4 0 R]"`).
+pub(crate) fn make_doc_with_catalog_and_objects<B: AsRef<[u8]>>(
+    extra_catalog: &str,
+    objects: &[(u32, B)],
+) -> Document {
     // The xref is a single `0 N` subsection, so the kth offset is bound to
     // object id k.  Ids must therefore be exactly 4, 5, 6, … in order; a gap
     // would silently bind the wrong object to a reference.  Assert loudly so a
@@ -145,8 +154,9 @@ pub(crate) fn make_doc_with_objects<B: AsRef<[u8]>>(objects: &[(u32, B)]) -> Doc
     }
 
     let header = b"%PDF-1.4\n";
+    let catalog = format!("1 0 obj\n<</Type /Catalog /Pages 3 0 R{extra_catalog}>>\nendobj\n");
     let fixed: [&[u8]; 3] = [
-        b"1 0 obj\n<</Type /Catalog /Pages 3 0 R>>\nendobj\n",
+        catalog.as_bytes(),
         b"2 0 obj\nnull\nendobj\n",
         b"3 0 obj\n<</Type /Pages /Kids [] /Count 0>>\nendobj\n",
     ];

@@ -17,6 +17,7 @@ pub mod content;
 pub mod form_type;
 pub mod intent;
 pub(crate) mod optional_content;
+pub mod output_intent;
 pub mod output_profile;
 pub mod page_group;
 mod pcs;
@@ -32,6 +33,9 @@ pub mod unsupported;
 pub use form_type::{FormType, form_type};
 pub use intent::{ColourIntent, IntentSet, RenderingIntent};
 pub use optional_content::{OptionalContent, RenderPurpose};
+pub use output_intent::{
+    OutputIntent, OutputIntentError, document_output_intent, page_output_intent,
+};
 pub use output_profile::{OutputProfile, OutputProfileError, OutputSpace};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
