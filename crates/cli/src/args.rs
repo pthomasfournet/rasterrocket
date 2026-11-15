@@ -790,13 +790,13 @@ impl Args {
         })
     }
 
-    /// Which pages `--invert` turns.
     /// The bytes of a band of a page ([`Self::band_mib`]).
     pub(crate) fn band_bytes(&self) -> u64 {
         self.band_mib
             .map_or(pdf_raster::DEFAULT_BAND_BYTES, |mib| mib << 20)
     }
 
+    /// Which pages `--invert` turns.
     pub(crate) fn invert_when(&self) -> InvertWhen {
         self.invert.unwrap_or(InvertWhen::Never)
     }
@@ -1408,8 +1408,6 @@ impl Args {
     }
 }
 
-/// The ITU-T T.4 period of two-dimensional Group 3 coding at fine
-/// resolution (at least 150 lines per inch) and at standard resolution.
 /// Largest `--band-mib`: 64 GiB.
 const MAX_BAND_MIB: u64 = 1 << 16;
 
@@ -1417,6 +1415,8 @@ const MAX_BAND_MIB: u64 = 1 << 16;
 /// are both [`pdf_raster::MAX_PX_SIDE`].
 const MAX_PAGE_MIB: u64 = 1 << 31;
 
+/// The ITU-T T.4 period of two-dimensional Group 3 coding at fine
+/// resolution (at least 150 lines per inch) and at standard resolution.
 const K_FINE: NonZeroU32 = NonZeroU32::new(4).expect("4 is not zero");
 const K_STANDARD: NonZeroU32 = NonZeroU32::new(2).expect("2 is not zero");
 

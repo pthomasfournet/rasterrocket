@@ -308,7 +308,7 @@ pub struct PageRenderer<'doc> {
     font_cache: FontCache,
     /// Rasterise glyphs with 8-bit coverage; `false` draws them bilevel.
     text_antialias: bool,
-    /// Fill, stroke and clip paths with supersampled coverage; `false`
+    /// Fill, stroke and clip paths with exact-area coverage; `false`
     /// scan-converts them at pixel centres.
     vector_antialias: bool,
     /// Resource accessor for the current page or innermost form.

@@ -5,8 +5,9 @@
 //! - [`eo_fill`] — even-odd fill
 //!
 //! Both entry points are thin wrappers around the private `fill_impl` which
-//! does the actual work: build `XPath` → optionally AA-scale → build
-//! `XPathScanner` → walk spans → clip → `pipe::render_bitmap_span`.
+//! does the actual work: build `XPath`, then either build `XPathScanner` →
+//! walk spans → clip → `pipe::render_bitmap_span` (aliased), or the
+//! exact-area coverage below (antialiased).
 //!
 //! # AA (vector antialias) mode
 //!
