@@ -329,7 +329,7 @@ fn alpha_from_decoded(desc: &ImageDescriptor) -> Result<Vec<u8>, String> {
 /// 8-bit decoded samples: `base` holds `components` bytes per pixel.
 ///
 /// See [`colour_key_mask_with`].  Returns `None` when the array does not
-/// match the component count or `base` is shorter than the image.
+/// apply to the component count or `base` is shorter than the image.
 pub(super) fn colour_key_mask(
     ranges: &[Object],
     base: &[u8],
@@ -354,9 +354,12 @@ pub(super) fn colour_key_mask(
 /// falls within its `[min, max]` range is masked (alpha `0x00`); every
 /// other pixel is opaque (alpha `0xFF`).
 ///
-/// The mask shares the image's grid.  Returns `None` when the array length
-/// does not match `components` or a range is inverted, so the caller blits
-/// unmasked.
+/// An array longer than `2 × n` is keyed on its first `2 × n` entries and
+/// the excess is reported with a warning.
+///
+/// The mask shares the image's grid.  Returns `None` when the array holds
+/// fewer than `2 × n` entries, one of the first `2 × n` is not an integer,
+/// or a range is inverted, so the caller blits unmasked.
 pub(super) fn colour_key_mask_with(
     ranges: &[Object],
     components: usize,
@@ -364,9 +367,19 @@ pub(super) fn colour_key_mask_with(
     img_h: u32,
     sample: impl Fn(usize, usize) -> u32,
 ) -> Option<SoftMask> {
-    if components == 0 || ranges.len() != components * 2 {
+    let needed = components.checked_mul(2)?;
+    if components == 0 || ranges.len() < needed {
         return None;
     }
+    if ranges.len() > needed {
+        log::warn!(
+            "image: colour-key /Mask has {} entries for {components} components — keying on the \
+             first {needed}, ignoring {}",
+            ranges.len(),
+            ranges.len() - needed
+        );
+    }
+    let ranges = &ranges[..needed];
     let bounds: Vec<i64> = ranges.iter().filter_map(pdf::Object::as_i64).collect();
     if bounds.len() != components * 2 {
         return None;
@@ -789,10 +802,19 @@ mod tests {
     }
 
     #[test]
-    fn colour_key_mask_arity_mismatch_returns_none() {
-        // 3 ints for a 1-component image (needs exactly 2) ⇒ None.
-        let ranges = [Object::Integer(0), Object::Integer(1), Object::Integer(2)];
+    fn colour_key_mask_short_array_returns_none() {
+        // 1 int for a 1-component image (needs 2) ⇒ None.
+        let ranges = [Object::Integer(0)];
         assert!(colour_key_mask(&ranges, &[0u8], 1, 1, 1).is_none());
+    }
+
+    /// An array longer than `2 × n` keys on its first `2 × n` entries; the
+    /// excess, here a range that would key every pixel, is ignored.
+    #[test]
+    fn colour_key_mask_extra_entries_use_the_first_pairs() {
+        let ranges = [0, 0, 0, 255, 0, 255].map(Object::Integer);
+        let mask = colour_key_mask(&ranges, &[0u8, 1, 0, 7], 1, 4, 1).expect("keyed on [0 0]");
+        assert_eq!(mask.alpha(), &[0x00, 0xFF, 0x00, 0xFF]);
     }
 
     /// §8.9.6.4 requires `min ≤ max`.  An inverted range must fail loudly-
