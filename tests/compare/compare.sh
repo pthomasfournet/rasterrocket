@@ -73,7 +73,9 @@
 #   uv venv tests/compare/.venv
 #   uv pip install --python tests/compare/.venv/bin/python pypdfium2 pillow
 # Set PDFIUM_VENV to use another one.  RROCKET_BIN overrides the rrocket
-# binary (default target/release/rrocket).
+# binary (default target/release/rrocket).  Renders are written below
+# COMPARE_WORK_ROOT (default target/compare), on disk: a tmpfs /tmp would
+# hold a scan fixture's several GB of pages in memory.
 # The oxide reference is an independent Rust implementation; set
 # PDF_OXIDE_BIN to override discovery.
 #
@@ -291,7 +293,9 @@ fi
 }
 
 # ── temp workspace ────────────────────────────────────────────────────────────
-WORK_DIR="$(mktemp -d)"
+WORK_ROOT="${COMPARE_WORK_ROOT:-${REPO_ROOT}/target/compare}"
+mkdir -p "$WORK_ROOT" || die "cannot create the work directory root $WORK_ROOT"
+WORK_DIR="$(mktemp -d -p "$WORK_ROOT")"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 

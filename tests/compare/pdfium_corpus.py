@@ -19,7 +19,9 @@ each row ending in its verdict (below).
 
 Each document is rendered by rrocket at 72 dpi (1 px per point, the scale
 of pdfium's expected images) with `--strict --backend cpu`, under a
-timeout, and classified:
+timeout, and with `--decrypt-owned`, so that an encrypted document is
+decrypted as pdfium decrypts it rather than refused at the prompt; it is
+then classified:
 
     ok          exit 0
     strict      exit 1 under --strict, exit 0 without it: some image or
@@ -191,7 +193,7 @@ def run_rrocket(
     cfg: Config, pdf: pathlib.Path, prefix: pathlib.Path, *, strict: bool
 ) -> tuple[int | None, str]:
     """Return the exit code (`None` on timeout) and stderr of one render."""
-    args = [str(cfg.rrocket), "--no-ram", "--backend", "cpu", "-r", "72"]
+    args = [str(cfg.rrocket), "--no-ram", "--decrypt-owned", "--backend", "cpu", "-r", "72"]
     if strict:
         args.append("--strict")
     r = run_limited([*args, str(pdf), str(prefix)], cfg.timeout)
