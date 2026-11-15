@@ -19,6 +19,7 @@ use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, CanvasPipe, CanvasSource, PageCanvas, with_canvas};
+use super::text_census::GlyphCensus;
 use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
@@ -47,9 +48,10 @@ impl PageRenderer<'_> {
     ///
     /// Each `CharProc` is a PDF content stream that paints the glyph using the
     /// full graphics pipeline.  This method sets up the CTM for each glyph
-    /// position and executes the stream, then advances the text matrix.
-    /// A `d1` glyph of an indirect font is drawn from its cached coverage
-    /// when its fill allows ([`Self::paint_type3_cached`]).
+    /// position and executes the stream, then advances the text matrix,
+    /// counting each code's glyph in `census`.  A `d1` glyph of an
+    /// indirect font is drawn from its cached coverage when its fill allows
+    /// ([`Self::paint_type3_cached`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "mirrors show_text() parameter set; all values are needed for glyph placement"
@@ -67,6 +69,7 @@ impl PageRenderer<'_> {
         horiz_scaling: f64,
         rise: f64,
         do_paint: bool,
+        mut census: Option<&mut GlyphCensus>,
     ) {
         // The CharProcs resolve their named resources in the font's own
         // `/Resources` when it has them, else in the resources in effect.
@@ -80,6 +83,9 @@ impl PageRenderer<'_> {
         let text_space = [font_size * horiz_scaling, 0.0, 0.0, font_size, 0.0, rise];
         let glyph_to_text = ctm_multiply(&t3.font_matrix, &text_space);
         for &byte in bytes {
+            if let Some(census) = census.as_deref_mut() {
+                census.glyph(&tm, t3.glyph(byte).is_some());
+            }
             // A code without a CharProc paints nothing but advances by its
             // width (PDF §9.4.4).
             if let Some(glyph) = t3.glyph(byte)
@@ -125,7 +131,7 @@ impl PageRenderer<'_> {
         // fresh graphics state, not a text object).
         self.gstate.current_mut().text = TextState::default();
 
-        self.execute_content_stream(&glyph.ops);
+        self.without_glyph_census(|r| r.execute_content_stream(&glyph.ops));
 
         self.form_depth -= 1;
         self.gstate.restore();

@@ -80,6 +80,7 @@ mod pixel_rect;
 mod shading_paint;
 mod soft_mask;
 mod text;
+mod text_census;
 mod text_context;
 mod text_glyphs;
 mod text_ops;
@@ -97,7 +98,7 @@ pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 #[cfg(feature = "cache")]
 use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
-pub use diagnostics::{DevicePage, ImageFailure, PageDiagnostics, RenderAbort};
+pub use diagnostics::{DevicePage, GlyphCounts, ImageFailure, PageDiagnostics, RenderAbort};
 #[cfg(feature = "cache")]
 pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;
@@ -353,6 +354,12 @@ pub struct PageRenderer<'doc> {
     painted: Cell<InkChannels>,
     /// Accumulated page diagnostics, populated during rendering.
     diag: PageDiagnostics,
+    /// Whether shown glyphs are added to [`PageDiagnostics::glyphs`]:
+    /// not in the renderer of a pattern cell or Type 3 glyph, nor in a
+    /// window after a page's first (each window executes the whole
+    /// content, which the first has counted), nor while a soft mask's
+    /// group or a Type 3 glyph's description executes.
+    census: text_census::Census,
     /// Image `XObjects` already decoded on this page, shared with the
     /// renderers of its pattern cells, and the document's shared decodes.
     image_memo: image_memo::SharedImageMemo,
@@ -699,6 +706,7 @@ impl<'doc> PageRenderer<'doc> {
             ink,
             painted: Cell::new(InkChannels::NONE),
             diag: PageDiagnostics::default(),
+            census: text_census::Census::Counted,
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             tint_budget: std::rc::Rc::new(crate::resources::image::colorspace::TintBudget::page()),
             pattern_memo: pattern_memo::PatternMemo::shared(),
@@ -1017,6 +1025,7 @@ impl<'doc> PageRenderer<'doc> {
         child.adopt_parent_budget(self);
         child.share_memos(self);
         child.set_optional_content(Arc::clone(self.optional_content()));
+        child.census = text_census::Census::Uncounted;
         Some(child)
     }
 

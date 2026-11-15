@@ -89,7 +89,7 @@ impl PageRenderer<'_> {
         }
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
-        self.do_form_xobject(&form);
+        self.without_glyph_census(|r| r.do_form_xobject(&form));
         let canvas = std::mem::replace(&mut self.canvas, page);
         self.group = enclosing;
         self.gstate.restore();

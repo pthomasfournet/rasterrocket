@@ -88,7 +88,34 @@ fn assert_bands_are_the_page(session: &RasterSession, params: &RenderParams, wha
         assert_eq!(diag.missing_fonts, full_diag.missing_fonts, "{what}");
         assert_eq!(diag.has_images, full_diag.has_images, "{what}");
         assert_eq!(diag.has_vector_text, full_diag.has_vector_text, "{what}");
+        assert_eq!(
+            diag.glyphs, full_diag.glyphs,
+            "{what}, bands of {rows} rows"
+        );
     }
+}
+
+/// The glyphs of a page are counted once, whether it is rendered whole,
+/// in bands, or as a region of it.
+#[test]
+fn bands_and_regions_count_the_page_glyphs_once() {
+    let s = session_of(
+        seam_page(""),
+        &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+    );
+    let params = RenderParams::new(SCALE);
+    let (_, full) = whole(&s, &params);
+    let g = full.glyphs;
+    assert_eq!(
+        (g.fill, g.clip_only, g.visible()),
+        (8, 4, 8),
+        "Helvetica and Type 3 runs filled, a clip run: {g:?}"
+    );
+    let (_, banded) = banded(&s, &params, 7);
+    assert_eq!(banded.glyphs, g, "bands");
+    let region = RenderRegion::new(31, 17, 50, 40);
+    let (_, region) = whole(&s, &params.with_region(region));
+    assert_eq!(region.glyphs, g, "region");
 }
 
 #[test]
@@ -199,9 +226,10 @@ fn corpus_pages_band_exactly() {
         };
         let s = open_session(&path, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
             .expect("open corpus fixture");
-        let (full, _) = whole(&s, &params);
-        let (stacked, _) = banded(&s, &params, 64);
+        let (full, full_diag) = whole(&s, &params);
+        let (stacked, diag) = banded(&s, &params, 64);
         common::assert_identical(&full, &stacked, name);
+        assert_eq!(diag.glyphs, full_diag.glyphs, "{name}");
     }
 }
 

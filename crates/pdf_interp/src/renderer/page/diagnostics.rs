@@ -115,6 +115,92 @@ pub struct PageDiagnostics {
     /// The rendering intent the page was converted to its output profile
     /// under; `None` when it was not converted.
     pub output_intent: Option<crate::RenderingIntent>,
+    /// The glyphs the page's text-showing operators showed, by text
+    /// rendering mode and by why a glyph could not mark the page.  Zero
+    /// from [`prescan_page`](crate::prescan_page), which executes nothing.
+    pub glyphs: GlyphCounts,
+}
+
+/// The glyphs a page's text-showing operators (`Tj`, `TJ`, `'`, `"`)
+/// showed: one per character code shown, each counted once.
+///
+/// A glyph in a painting mode (`Tr` 0, 1, 2, 4, 5, 6) is counted under its
+/// mode only if it can mark the page; otherwise under the first of
+/// [`zero_size`](Self::zero_size), [`unrendered`](Self::unrendered),
+/// [`off_page`](Self::off_page) and [`transparent`](Self::transparent)
+/// that applies.  A glyph in mode 3 or 7, which paints nothing, is counted
+/// under its mode.  The counts are those of the page's content: the same
+/// for a page rendered whole, in bands or as a region of it.
+///
+/// What can mark the page is judged from the glyph's position, size and
+/// paint alone.  The clip, a soft mask, the blend mode and a colour equal
+/// to the backdrop's are not considered, nor whether the glyph's outline
+/// is empty (a space counts as drawn).  Glyphs inside a tiling pattern's
+/// cell, a soft mask's group and a Type 3 glyph's description are not
+/// counted; a Type 3 glyph is counted as one glyph of its string.  Text
+/// in a substitute or fallback face is counted as any other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GlyphCounts {
+    /// Glyphs filled (`0 Tr`).
+    pub fill: u32,
+    /// Glyphs stroked (`1 Tr`).
+    pub stroke: u32,
+    /// Glyphs filled and stroked (`2 Tr`).
+    pub fill_stroke: u32,
+    /// Glyphs neither painted nor added to the clip (`3 Tr`): the mode of
+    /// the text layer a recogniser lays over a scanned page.
+    pub invisible: u32,
+    /// Glyphs painted and added to the clip (`4`, `5` and `6 Tr`).
+    pub clip_painted: u32,
+    /// Glyphs only added to the clip (`7 Tr`).  A Type 3 glyph, whose
+    /// description paints in every mode but 3, is counted under
+    /// [`clip_painted`](Self::clip_painted) instead.
+    pub clip_only: u32,
+    /// Glyphs in a painting mode that draw nothing at the render's scale:
+    /// a singular text rendering matrix (font size 0, `Tz 0`, a degenerate
+    /// text matrix or CTM), or, for a font other than Type 3, an em below
+    /// one device pixel.  The second case depends on the resolution.
+    pub zero_size: u32,
+    /// Glyphs in a painting mode that render nothing for want of a glyph:
+    /// a code the face has no glyph for, a font program that cannot be
+    /// loaded, a Type 3 code without a `CharProc`, and every code shown
+    /// before any font is selected.
+    pub unrendered: u32,
+    /// Glyphs in a painting mode lying wholly outside the page box: the
+    /// glyph's em square, widened by one em on each side, does not meet
+    /// the page.
+    pub off_page: u32,
+    /// Glyphs in a painting mode whose paint marks nothing: each of the
+    /// mode's paints (fill, stroke) has opacity 0 or a colour space whose
+    /// colorants are all `None`.  A Type 3 glyph is transparent when the
+    /// fill opacity is 0.
+    pub transparent: u32,
+}
+
+impl GlyphCounts {
+    /// Glyphs that can mark the page: those counted under a painting mode.
+    #[must_use]
+    pub const fn visible(&self) -> u32 {
+        self.fill
+            .saturating_add(self.stroke)
+            .saturating_add(self.fill_stroke)
+            .saturating_add(self.clip_painted)
+    }
+
+    /// Add the counts of `other` to these, saturating.
+    pub(crate) const fn add(&mut self, other: &Self) {
+        self.fill = self.fill.saturating_add(other.fill);
+        self.stroke = self.stroke.saturating_add(other.stroke);
+        self.fill_stroke = self.fill_stroke.saturating_add(other.fill_stroke);
+        self.invisible = self.invisible.saturating_add(other.invisible);
+        self.clip_painted = self.clip_painted.saturating_add(other.clip_painted);
+        self.clip_only = self.clip_only.saturating_add(other.clip_only);
+        self.zero_size = self.zero_size.saturating_add(other.zero_size);
+        self.unrendered = self.unrendered.saturating_add(other.unrendered);
+        self.off_page = self.off_page.saturating_add(other.off_page);
+        self.transparent = self.transparent.saturating_add(other.transparent);
+    }
 }
 
 /// How a page used the whole-page GPU raster.
@@ -174,6 +260,14 @@ impl std::fmt::Display for ImageFailure {
 }
 
 impl PageDiagnostics {
+    /// Whether the page shows a glyph that can mark it (see
+    /// [`GlyphCounts::visible`]): text drawn on the page rather than only
+    /// an invisible (`3 Tr`) or clip-only layer.
+    #[must_use]
+    pub const fn has_visible_text(&self) -> bool {
+        self.glyphs.visible() > 0
+    }
+
     /// Add the device ICC conversions `counts` recorded to the page's.
     #[cfg(feature = "gpu-icc")]
     pub(crate) const fn add_device_icc(

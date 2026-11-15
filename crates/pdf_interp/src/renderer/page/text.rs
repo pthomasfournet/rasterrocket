@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::PageRenderer;
+use super::text_census::GlyphCensus;
 use super::text_context::{Following, TextTail, neighbours as neighbours_at};
 use super::text_glyphs::{GlyphSink, TextModeOps};
 use super::text_ops::{
@@ -183,7 +184,8 @@ struct Layout<'a, 'f> {
 impl Layout<'_, '_> {
     /// Add the glyphs of the string to `sink`, each code's at its pen
     /// position from the text matrix `tm` and each of `runs` from its first
-    /// code's, in `context`.  Returns the text matrix after the last
+    /// code's, in `context`, and count each code's glyph at its pen
+    /// position in `census`.  Returns the text matrix after the last
     /// advance and the drift of a run continuing into the string after
     /// (see [`ShapingContext::drift`]).
     fn place(
@@ -192,6 +194,7 @@ impl Layout<'_, '_> {
         runs: &[ShapedRun<'_>],
         context: &ShapingContext,
         sink: &mut GlyphSink,
+        mut census: Option<&mut GlyphCensus>,
     ) -> (TextMatrix, (usize, f64)) {
         let mut drift = context.drift;
         let mut runs = runs.iter().peekable();
@@ -200,6 +203,9 @@ impl Layout<'_, '_> {
         let mut run_origin = tm;
         let mut run_width = 0.0;
         for (i, (d, &drawn)) in self.decoded.iter().zip(self.drawn).enumerate() {
+            if let Some(census) = census.as_deref_mut() {
+                census.glyph(&tm, drawn.is_some());
+            }
             while runs.next_if(|run| run.end <= i).is_some() {}
             let run = runs.peek().filter(|run| run.start <= i);
             if run.is_some_and(|run| run.start == i) {
@@ -348,10 +354,17 @@ impl PageRenderer<'_> {
                 "rasterrocket-interp: no font dict for /{}",
                 String::from_utf8_lossy(&self.gstate.current().text.font_name)
             );
+            // Without a font the codes are not delimited: each byte counts
+            // as a glyph.
+            let mut census = self.glyph_census(mode, false);
+            if let Some(census) = census.as_mut() {
+                census.fontless(bytes.len());
+            }
+            self.record_glyphs(census);
             return;
         };
         if let Some(t3) = &font.descriptor.type3 {
-            self.show_type3_string(bytes, t3, &font.key, mode.fill || mode.stroke || mode.clip);
+            self.show_type3_string(bytes, t3, &font.key, mode);
             return;
         }
         let glyph_stroke = if mode.stroke {
@@ -363,14 +376,23 @@ impl PageRenderer<'_> {
         } else {
             None
         };
-        let (sink, tm, new_tail) = self.lay_out(&font, bytes, following, tail, mode, glyph_stroke);
+        let mut census = self.glyph_census(mode, false);
+        let (sink, tm, new_tail) = self.lay_out(
+            &font,
+            bytes,
+            following,
+            tail,
+            (mode, glyph_stroke),
+            census.as_mut(),
+        );
+        self.record_glyphs(census);
         self.paint_glyphs(&sink);
         self.gstate.current_mut().text.text_matrix = tm;
         self.text_tail = new_tail;
     }
 
     /// Show `bytes` with the Type 3 font of glyph descriptions `t3` and
-    /// resource key `font_key`, painting when `paints`.
+    /// resource key `font_key` in the mode of operations `mode`.
     ///
     /// Type 3 glyphs are content streams executed at the current pen
     /// position, painting directly into the page.  A glyph description
@@ -383,8 +405,10 @@ impl PageRenderer<'_> {
         bytes: &[u8],
         t3: &Type3Data,
         font_key: &ResourceKey,
-        paints: bool,
+        mode: TextModeOps,
     ) {
+        let paints = mode.fill || mode.stroke || mode.clip;
+        let mut census = self.glyph_census(mode, true);
         let gs = self.gstate.current();
         let ts = &gs.text;
         let (ctm, tm) = (gs.ctm, ts.text_matrix);
@@ -406,23 +430,25 @@ impl PageRenderer<'_> {
                 horiz_scaling,
                 rise,
                 paints,
+                census.as_mut(),
             );
         });
+        self.record_glyphs(census);
     }
 
     /// Lay out the glyphs of `bytes`, shown with `font` in the current text
     /// state, after the string whose end is `tail` and before `following`,
-    /// into a sink for `mode` and the cached stroke `glyph_stroke`.  Returns
-    /// the sink, the text matrix after the string and, when the string is
-    /// shaped, its end.
+    /// into a sink for `mode` and the cached stroke `glyph_stroke`, counting
+    /// each code's glyph in `census`.  Returns the sink, the text matrix
+    /// after the string and, when the string is shaped, its end.
     fn lay_out(
         &mut self,
         font: &ActiveFont,
         bytes: &[u8],
         following: Following<'_, '_>,
         tail: Option<TextTail>,
-        mode: TextModeOps,
-        glyph_stroke: Option<GlyphStroke>,
+        (mode, glyph_stroke): (TextModeOps, Option<GlyphStroke>),
+        census: Option<&mut GlyphCensus>,
     ) -> (GlyphSink, TextMatrix, Option<TextTail>) {
         let gs = self.gstate.current();
         let ts = &gs.text;
@@ -516,7 +542,7 @@ impl PageRenderer<'_> {
                 && !descriptor.substitute.standard
                 && vertical.is_none(),
         };
-        let (end, drift) = layout.place(tm, &runs, &context, &mut sink);
+        let (end, drift) = layout.place(tm, &runs, &context, &mut sink, census);
         let tail = shaped.then(|| {
             let mut texts: Vec<CodeText> =
                 context.neighbours.before.into_iter().chain(texts).collect();

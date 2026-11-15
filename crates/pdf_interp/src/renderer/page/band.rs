@@ -40,8 +40,9 @@ pub struct PageState {
 impl PageState {
     /// The diagnostics of every window drawn with this state: an image
     /// failure or missing font reported once, the flags of any window, the
-    /// largest source-resolution hint, device counters summed, and the
-    /// dominant filter over the image draws of all windows.
+    /// largest source-resolution hint, device counters summed, the glyph
+    /// counts of the first window, and the dominant filter over the image
+    /// draws of all windows.
     #[must_use]
     pub fn diagnostics(&self) -> PageDiagnostics {
         let mut diag = self.diag.clone();
@@ -61,7 +62,8 @@ impl PageState {
 impl PageRenderer<'_> {
     /// Continue the page whose earlier window `state` comes from: draw from
     /// its memos, spend its tint budget, slot spot colorants in its ink
-    /// map and add to its diagnostics.  Call before execute, after
+    /// map and add to its diagnostics, whose glyph counts, the first
+    /// window's, are the page's.  Call before execute, after
     /// [`set_document_images`](Self::set_document_images), whose store the
     /// state's image memo already holds.
     pub fn adopt_page_state(&mut self, state: PageState) {
@@ -81,6 +83,7 @@ impl PageRenderer<'_> {
         self.ink_map = ink_map;
         self.diag = diag;
         self.filter_counts = filter_counts;
+        self.census = super::text_census::Census::Uncounted;
     }
 
     /// Finish the window this renderer drew, as
