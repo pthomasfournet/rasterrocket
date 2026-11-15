@@ -111,6 +111,21 @@ impl<'a, S: Sample> GrayView<'a, S> {
         Ok(())
     }
 
+    /// [`validate`](Self::validate), then require the size `expected`.
+    ///
+    /// # Errors
+    ///
+    /// The first violated invariant, or [`CameraError::SizeMismatch`].
+    pub(crate) fn validate_size(&self, expected: (usize, usize)) -> Result<(), CameraError> {
+        self.validate()?;
+        let actual = (self.width, self.height);
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(CameraError::SizeMismatch { expected, actual })
+        }
+    }
+
     /// Row `y` as `width` samples.  Caller guarantees `y < height` on a
     /// validated view.
     pub(crate) fn row(&self, y: usize) -> &'a [S] {

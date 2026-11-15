@@ -38,6 +38,19 @@
 //!   vertical displacement only (glyphs foreshortened near a spine stay
 //!   narrow), and a page needs at least five tracked text lines.
 //!
+//! # OCR preparation
+//!
+//! Three operations on scanned pages, outside [`process`], prepare them
+//! for text recognition.  Each works in integer arithmetic, so its output
+//! is identical on every platform.
+//!
+//! - **Background normalisation** ([`measure_background`],
+//!   [`Background::normalize`]): the paper level is measured in tiles on
+//!   8-bit luma and divided out, so paper becomes white under uneven
+//!   illumination and ink keeps its tone relative to it.  The gain replays
+//!   on every channel and at 16 bits.  Declines on a page whose background
+//!   is already white.
+//!
 //! Every function runs on the calling thread, keeps no global state and
 //! returns on any input without panicking; the crate has no dependencies
 //! beyond `std`.
@@ -46,6 +59,7 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
+mod background;
 mod dewarp;
 mod error;
 mod homography;
@@ -61,6 +75,7 @@ mod stats;
 mod testutil;
 mod textlines;
 
+pub use background::{Background, background_tile_px, measure_background};
 pub use error::{CameraError, MAX_DIMENSION};
 pub use image::{GrayPage, GrayView, Rect};
 pub use pipeline::{Gutter, Outcome, Processed, Report, Timings, process};

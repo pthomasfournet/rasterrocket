@@ -71,13 +71,19 @@ pub enum CameraError {
         /// Image width in pixels.
         width: usize,
     },
-    /// An image passed to [`Report::replay`](crate::Report::replay) differs
-    /// in size from the image the report was computed on.
+    /// An image passed to [`Report::replay`](crate::Report::replay) or
+    /// [`Background::normalize`](crate::Background::normalize) differs in
+    /// size from the image the measurement was taken on.
     SizeMismatch {
         /// `(width, height)` of the processed image.
         expected: (usize, usize),
         /// `(width, height)` of the image passed.
         actual: (usize, usize),
+    },
+    /// A size argument in pixels is zero.
+    ZeroSize {
+        /// The name of the argument.
+        parameter: &'static str,
     },
 }
 
@@ -125,9 +131,12 @@ impl fmt::Display for CameraError {
             ),
             Self::SizeMismatch { expected, actual } => write!(
                 f,
-                "image is {}×{}; the report was computed on a {}×{} image and replays only on that size",
+                "image is {}×{}; the measurement was taken on a {}×{} image and applies only to that size",
                 actual.0, actual.1, expected.0, expected.1
             ),
+            Self::ZeroSize { parameter } => {
+                write!(f, "{parameter} is 0; it must be at least 1 pixel")
+            }
         }
     }
 }

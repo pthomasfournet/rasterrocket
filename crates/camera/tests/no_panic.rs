@@ -5,8 +5,8 @@
 //! documented invariants.
 
 use rasterrocket_camera::{
-    CameraError, CameraOptions, GrayPage, GrayView, Outcome, Quad, Rect, crop, detect_page_quad,
-    dewarp, find_gutter, process, rectify, split_at,
+    CameraError, CameraOptions, Detected, GrayPage, GrayView, Outcome, Quad, Rect, crop,
+    detect_page_quad, dewarp, find_gutter, measure_background, process, rectify, split_at,
 };
 
 /// 64-bit linear congruential generator (Knuth's MMIX constants).
@@ -270,6 +270,48 @@ fn check_stages(img: GrayView<'_>, rng: &mut Lcg, ctx: &str) {
     }
 }
 
+/// Background measurement at tile sizes from 1 px to beyond the image;
+/// a found gain normalises the image at 8 and 16 bits, keeps its size and
+/// rejects an image of another size.  Returns how many tile sizes measured
+/// a background.
+fn check_background(img: GrayView<'_>, ctx: &str) -> usize {
+    let mut found = 0;
+    for tile in [1, 3, 8, 37, img.width.max(img.height) + 1, usize::MAX] {
+        let ctx = format!("{ctx} tile {tile}");
+        let Detected::Found(bg) =
+            measure_background(img, tile).unwrap_or_else(|e| panic!("{ctx}: {e}"))
+        else {
+            continue;
+        };
+        found += 1;
+        let page = bg.normalize(img).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+        assert_eq!((page.width, page.height), (img.width, img.height), "{ctx}");
+        assert_packed(&page, &ctx);
+        let deep: Vec<u16> = (0..img.height)
+            .flat_map(|y| {
+                (0..img.width).map(move |x| u16::from(img.data[y * img.stride + x]) * 257)
+            })
+            .collect();
+        let wide = bg
+            .normalize(GrayView::packed(&deep, img.width, img.height))
+            .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+        assert_eq!(wide.data.len(), img.width * img.height, "{ctx}: not packed");
+        let other = vec![0u8; img.width + 1];
+        assert!(
+            matches!(
+                bg.normalize(GrayView::packed(&other, img.width + 1, 1)),
+                Err(CameraError::SizeMismatch { .. })
+            ),
+            "{ctx}"
+        );
+    }
+    assert!(matches!(
+        measure_background(img, 0),
+        Err(CameraError::ZeroSize { .. })
+    ));
+    found
+}
+
 #[test]
 fn small_and_odd_sizes_under_every_option_set() {
     let sizes = [
@@ -292,6 +334,7 @@ fn small_and_odd_sizes_under_every_option_set() {
     let mut rng = Lcg(0x5EED);
     let mut runs = 0;
     let mut applied = [0usize; 4];
+    let mut measured = 0;
     for (w, h) in sizes {
         for p in PATTERNS {
             for pad in [0, 3] {
@@ -311,6 +354,7 @@ fn small_and_odd_sizes_under_every_option_set() {
                     runs += 1;
                 }
                 check_stages(img, &mut rng, &ctx);
+                measured += check_background(img, &ctx);
             }
         }
     }
@@ -318,6 +362,7 @@ fn small_and_odd_sizes_under_every_option_set() {
     // The page-like patterns exercise the resampling paths, not only the
     // declines.
     assert!(applied.iter().all(|&n| n > 0), "{applied:?}");
+    assert!(measured > 0, "no background was measured");
 }
 
 #[test]
@@ -341,6 +386,7 @@ fn large_and_elongated_sizes() {
         crop_split.crop = true;
         crop_split.split_spreads = true;
         let _ = check_process(img, crop_split, &ctx);
+        let _ = check_background(img, &ctx);
     }
 }
 
@@ -368,6 +414,7 @@ fn malformed_views_are_errors() {
             detect_page_quad(img).err(),
             find_gutter(img).err(),
             dewarp(img).err(),
+            measure_background(img, 8).err(),
             split_at(img, 1).err(),
             crop(
                 img,

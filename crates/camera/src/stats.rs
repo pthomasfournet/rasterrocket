@@ -60,10 +60,25 @@ pub(crate) fn otsu(hist: &[u64; 256]) -> Option<(u8, f64)> {
 pub(crate) fn percentile(hist: &[u64; 256], q: f64) -> u8 {
     let total: u64 = hist.iter().sum();
     let target = q.clamp(0.0, 1.0) * to_f64_u64(total);
+    first_reaching(hist, |acc| to_f64_u64(acc) >= target)
+}
+
+/// [`percentile`] at the exact fraction `num / den` (`num ≤ den`, `den > 0`),
+/// in integer arithmetic.
+pub(crate) fn percentile_ratio(hist: &[u64; 256], num: u64, den: u64) -> u8 {
+    let total = u128::from(hist.iter().sum::<u64>());
+    first_reaching(hist, |acc| {
+        u128::from(acc) * u128::from(den) >= total * u128::from(num.min(den))
+    })
+}
+
+/// The smallest value whose cumulative mass `acc > 0` satisfies `reached`;
+/// [`u8::MAX`] when none does.
+fn first_reaching(hist: &[u64; 256], reached: impl Fn(u64) -> bool) -> u8 {
     let mut acc = 0u64;
     for (v, &c) in hist.iter().enumerate() {
         acc += c;
-        if to_f64_u64(acc) >= target && acc > 0 {
+        if acc > 0 && reached(acc) {
             return u8::try_from(v).unwrap_or(u8::MAX);
         }
     }
@@ -99,5 +114,9 @@ mod tests {
         assert_eq!(percentile(&hist, 0.0), 10);
         assert_eq!(percentile(&hist, 0.5), 20);
         assert_eq!(percentile(&hist, 1.0), 40);
+        assert_eq!(percentile_ratio(&hist, 0, 1), 10);
+        assert_eq!(percentile_ratio(&hist, 1, 2), 20);
+        assert_eq!(percentile_ratio(&hist, 3, 4), 30);
+        assert_eq!(percentile_ratio(&hist, 1, 1), 40);
     }
 }

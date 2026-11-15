@@ -112,14 +112,7 @@ impl Report {
     /// [`CameraError::SizeMismatch`] when its size differs from the
     /// processed image.
     pub fn replay<S: Sample>(&self, img: GrayView<'_, S>) -> Result<Vec<GrayPage<S>>, CameraError> {
-        img.validate()?;
-        let actual = (img.width, img.height);
-        if actual != self.transform.input {
-            return Err(CameraError::SizeMismatch {
-                expected: self.transform.input,
-                actual,
-            });
-        }
+        img.validate_size(self.transform.input)?;
         Ok(self.transform.apply(img))
     }
 }

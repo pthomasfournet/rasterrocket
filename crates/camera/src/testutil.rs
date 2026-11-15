@@ -1,7 +1,7 @@
 //! Synthetic images shared by the unit tests.
 
 use crate::image::GrayPage;
-use crate::num::{floor_index, to_f64};
+use crate::num::{floor_index, round_index, to_f64};
 
 /// A `w × h` page with pixel `(x, y) = f(x, y)`.
 pub(crate) fn plane(w: usize, h: usize, f: impl Fn(usize, usize) -> u8) -> GrayPage {
@@ -41,6 +41,20 @@ pub(crate) fn curved_text(w: usize, h: usize, bow: impl Fn(f64, f64) -> f64) -> 
         height: h,
         data,
     }
+}
+
+/// [`curved_text`] without bow under an
+/// illumination falling linearly from 235 at the left edge to 110 at the
+/// right edge; with its ink mask.
+pub(crate) fn ramp_lit(w: usize, h: usize) -> (GrayPage, Vec<bool>) {
+    let page = curved_text(w, h, |_, _| 0.0);
+    let ink: Vec<bool> = page.data.iter().map(|&v| v == 25).collect();
+    let lit = plane(w, h, |x, y| {
+        let light = 125.0f64.mul_add(-to_f64(x) / to_f64(w - 1), 235.0);
+        let v = f64::from(page.data[y * w + x]) * light / 235.0;
+        u8::try_from(round_index(v)).unwrap_or(u8::MAX)
+    });
+    (lit, ink)
 }
 
 /// FNV-1a 64 of the dimensions and samples of `pages`: a golden digest of

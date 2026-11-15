@@ -21,6 +21,12 @@ pub trait Sample: sealed::Sealed + Copy + Default + Eq + std::fmt::Debug + 'stat
 
     /// `v` rounded half up and saturated to `0..=MAX`; NaN maps to 0.
     fn from_f64(v: f64) -> Self;
+
+    /// The value as `u32` (exact).
+    fn to_u32(self) -> u32;
+
+    /// `v` saturated to `0..=MAX`.
+    fn saturate_u32(v: u32) -> Self;
 }
 
 impl Sample for u8 {
@@ -37,6 +43,14 @@ impl Sample for u8 {
     )]
     fn from_f64(v: f64) -> Self {
         (v + 0.5).clamp(0.0, 255.0) as Self
+    }
+
+    fn to_u32(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn saturate_u32(v: u32) -> Self {
+        Self::try_from(v).unwrap_or(Self::MAX)
     }
 }
 
@@ -55,6 +69,14 @@ impl Sample for u16 {
     fn from_f64(v: f64) -> Self {
         (v + 0.5).clamp(0.0, 65_535.0) as Self
     }
+
+    fn to_u32(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn saturate_u32(v: u32) -> Self {
+        Self::try_from(v).unwrap_or(Self::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -70,5 +92,8 @@ mod tests {
         assert_eq!(u16::from_f64(32_767.5), 32_768);
         assert_eq!(u16::from_f64(70_000.0), 65_535);
         assert_eq!(u16::from_f64(f64::NAN), 0);
+        assert_eq!(u8::saturate_u32(256), 255);
+        assert_eq!(u16::saturate_u32(65_536), 65_535);
+        assert_eq!(u16::saturate_u32(1000), 1000);
     }
 }
