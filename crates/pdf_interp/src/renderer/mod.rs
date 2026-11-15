@@ -18,7 +18,7 @@ pub use document_images::{DOCUMENT_IMAGE_BUDGET_BYTES, DocumentImages};
 pub use font_cache::DocumentFonts;
 pub use page::{
     CanvasBuffers, DevicePage, FinishedCanvas, GlyphCounts, ImageFailure, PageDiagnostics,
-    PageRenderer, PageState, PageView, RenderAbort,
+    PageRenderer, PageState, PageView, PaintTrace, RenderAbort,
 };
 #[cfg(feature = "vulkan")]
 pub use page::{DeviceFallback, DeviceRecording, device_page_ineligible};

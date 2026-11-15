@@ -185,10 +185,14 @@ impl PageRenderer<'_> {
     ///
     /// # Errors
     ///
-    /// Why the page cannot be recorded at all: it is painted at 16 bits,
-    /// simulates overprint on an ink canvas, paints as a page group, or
-    /// fills without antialiasing.  The renderer is unchanged then.
+    /// Why the page cannot be recorded at all: its paint trace, which only
+    /// the CPU records, is armed, or it is painted at 16 bits, simulates
+    /// overprint on an ink canvas, paints as a page group, or fills
+    /// without antialiasing.  The renderer is unchanged then.
     pub fn record_for_device(&mut self) -> Result<(), &'static str> {
+        if self.trace.is_some() {
+            return Err("paint trace");
+        }
         if self.canvas.kind().depth() == color::SampleDepth::Sixteen {
             return Err("16-bit samples");
         }

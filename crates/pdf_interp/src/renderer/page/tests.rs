@@ -2505,3 +2505,4 @@ mod allocation;
 mod cmyk;
 mod intent;
 mod overprint;
+mod trace;

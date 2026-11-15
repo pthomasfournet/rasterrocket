@@ -61,6 +61,9 @@ impl PageRenderer<'_> {
                     .resources
                     .property(key)
                     .is_none_or(|oc| self.oc_visible(&oc));
+                if !visible && !self.marked_content.hidden() {
+                    self.trace_hidden(key);
+                }
                 self.marked_content.open(visible);
                 return;
             }
@@ -90,6 +93,9 @@ impl PageRenderer<'_> {
         }
 
         self.dispatch(op, rest);
+        if op.sets_colour() {
+            self.trace_colour(op);
+        }
     }
 
     /// Record that a marking operator paints under `own`, an image's own
@@ -351,6 +357,7 @@ impl PageRenderer<'_> {
             }
             Operator::InlineImage { params, data } => {
                 self.record_intent(inline_intent(params));
+                self.trace_inline_image(params, data);
                 // The same block in a form or pattern cell drawn repeatedly
                 // decodes once per page.
                 let key = super::image_memo::ImageMemo::inline_key(

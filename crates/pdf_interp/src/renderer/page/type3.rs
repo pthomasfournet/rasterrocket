@@ -20,7 +20,7 @@ use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, CanvasPipe, CanvasSource, PageCanvas, with_canvas};
 use super::text_census::GlyphCensus;
-use super::text_ops::{glyph_advance, translate_text_x};
+use super::text_ops::{glyph_advance, text_to_device, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
 use crate::resources::font::{Type3Data, Type3Glyph};
@@ -69,7 +69,7 @@ impl PageRenderer<'_> {
         horiz_scaling: f64,
         rise: f64,
         do_paint: bool,
-        mut census: Option<&mut GlyphCensus>,
+        (mut census, mut glyph_trace): (Option<&mut GlyphCensus>, Option<&mut String>),
     ) {
         // The CharProcs resolve their named resources in the font's own
         // `/Resources` when it has them, else in the resources in effect.
@@ -85,6 +85,11 @@ impl PageRenderer<'_> {
         for &byte in bytes {
             if let Some(census) = census.as_deref_mut() {
                 census.glyph(&tm, t3.glyph(byte).is_some());
+            }
+            if let Some(out) = glyph_trace.as_deref_mut() {
+                let pen = text_to_device(&ctm, &tm, 0.0, rise, self.page_height);
+                let proc = t3.glyph(byte).map(|_| (u32::from(byte), false));
+                super::trace::push_glyph(out, u32::from(byte), proc, pen);
             }
             // A code without a CharProc paints nothing but advances by its
             // width (PDF §9.4.4).
@@ -131,7 +136,7 @@ impl PageRenderer<'_> {
         // fresh graphics state, not a text object).
         self.gstate.current_mut().text = TextState::default();
 
-        self.without_glyph_census(|r| r.execute_content_stream(&glyph.ops));
+        self.without_glyph_census(|r| r.without_trace(|r| r.execute_content_stream(&glyph.ops)));
 
         self.form_depth -= 1;
         self.gstate.restore();

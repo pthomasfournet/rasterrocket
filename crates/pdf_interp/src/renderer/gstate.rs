@@ -178,6 +178,15 @@ pub(crate) struct InterpGState {
     /// in the text fill colour, so the colour operators of the description
     /// are ignored until it ends (PDF §9.6.5).
     pub colour_locked: bool,
+    /// The paint trace's name of the clip in effect; 0 for the page's.
+    pub trace_clip: u64,
+    /// The paint trace's text of the fill colour last set, while a trace
+    /// is recorded; `None` for the initial colour.
+    pub trace_fill: Option<Arc<str>>,
+    /// The stroking counterpart of `trace_fill`.
+    pub trace_stroke: Option<Arc<str>>,
+    /// The paint trace's name of the soft mask in effect; 0 for none.
+    pub trace_smask: u64,
 }
 
 /// A soft mask resolved to one value per device pixel (PDF §11.6.5.2).
@@ -226,6 +235,10 @@ impl Clone for InterpGState {
             soft_mask: self.soft_mask.clone(),
             transfer: self.transfer.clone(),
             colour_locked: self.colour_locked,
+            trace_clip: self.trace_clip,
+            trace_fill: self.trace_fill.clone(),
+            trace_stroke: self.trace_stroke.clone(),
+            trace_smask: self.trace_smask,
         }
     }
 }
@@ -264,6 +277,10 @@ impl InterpGState {
             soft_mask: None,
             transfer: None,
             colour_locked: false,
+            trace_clip: 0,
+            trace_fill: None,
+            trace_stroke: None,
+            trace_smask: 0,
         }
     }
 

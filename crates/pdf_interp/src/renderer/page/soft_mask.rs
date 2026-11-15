@@ -35,7 +35,13 @@ use crate::resources::{SoftMaskParams, colorspace, resolve_dict};
 impl PageRenderer<'_> {
     /// Apply an `ExtGState` `SMask` entry to the current graphics state.
     pub(super) fn set_soft_mask(&mut self, params: &SoftMaskParams) {
-        let plane = match params {
+        let plane = self.trace_soft_mask(params, |r| r.soft_mask_plane(params));
+        self.gstate.current_mut().soft_mask = plane;
+    }
+
+    /// The mask values of the soft mask `params` describes.
+    fn soft_mask_plane(&mut self, params: &SoftMaskParams) -> Option<Arc<SoftMaskPlane>> {
+        match params {
             SoftMaskParams::None => None,
             SoftMaskParams::Group {
                 luminosity,
@@ -51,8 +57,7 @@ impl PageRenderer<'_> {
                 }
                 plane.map(Arc::new)
             }
-        };
-        self.gstate.current_mut().soft_mask = plane;
+        }
     }
 
     /// Render the mask group `group` and reduce it to mask values.  A mask

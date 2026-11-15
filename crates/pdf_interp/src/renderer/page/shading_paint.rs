@@ -221,6 +221,7 @@ impl PageRenderer<'_> {
     /// Execute an `sh` shading operator: paint the named shading over the
     /// current clip region.  The shading's `Background` does not apply.
     pub(super) fn do_shading(&mut self, name: &[u8]) {
+        self.trace_shading(name);
         let gs = self.gstate.current();
         let ctm = gs.ctm;
         let flatness = gs.flatness.max(0.1);

@@ -13,8 +13,8 @@
 use std::rc::Rc;
 
 use super::{
-    CanvasBuffers, FinishedCanvas, PageDiagnostics, PageRenderer, SharedInkMap, form_memo,
-    image_memo, pattern_memo,
+    CanvasBuffers, FinishedCanvas, PageDiagnostics, PageRenderer, PaintTrace, SharedInkMap,
+    form_memo, image_memo, pattern_memo,
 };
 use crate::resources::IMAGE_FILTER_COUNT;
 use crate::resources::image::colorspace::TintBudget;
@@ -35,6 +35,9 @@ pub struct PageState {
     diag: PageDiagnostics,
     /// The image draws of the windows drawn so far, by filter.
     filter_counts: [u32; IMAGE_FILTER_COUNT],
+    /// The paint trace of the first window, which is the page's, until
+    /// it is taken.
+    trace: Option<Box<PaintTrace>>,
 }
 
 impl PageState {
@@ -57,13 +60,21 @@ impl PageState {
     pub const fn content_intents(&self) -> crate::IntentSet {
         self.diag.content_intents
     }
+
+    /// The page's paint trace, recorded by the renderer of its first
+    /// window (see [`PageRenderer::set_paint_trace`]); `None` when it was
+    /// not recorded or has been taken.
+    pub fn take_paint_trace(&mut self) -> Option<PaintTrace> {
+        self.trace.take().map(|t| *t)
+    }
 }
 
 impl PageRenderer<'_> {
     /// Continue the page whose earlier window `state` comes from: draw from
     /// its memos, spend its tint budget, slot spot colorants in its ink
     /// map and add to its diagnostics, whose glyph counts, the first
-    /// window's, are the page's.  Call before execute, after
+    /// window's, are the page's, as its paint trace is: this renderer
+    /// records none.  Call before execute, after
     /// [`set_document_images`](Self::set_document_images), whose store the
     /// state's image memo already holds.
     pub fn adopt_page_state(&mut self, state: PageState) {
@@ -75,6 +86,7 @@ impl PageRenderer<'_> {
             ink_map,
             diag,
             filter_counts,
+            trace,
         } = state;
         self.image_memo = image_memo;
         self.tint_budget = tint_budget;
@@ -84,6 +96,10 @@ impl PageRenderer<'_> {
         self.diag = diag;
         self.filter_counts = filter_counts;
         self.census = super::text_census::Census::Uncounted;
+        self.trace = trace.map(|mut trace| {
+            trace.seal();
+            trace
+        });
     }
 
     /// Finish the window this renderer drew, as
@@ -107,6 +123,7 @@ impl PageRenderer<'_> {
             ink_map: Rc::clone(&self.ink_map),
             diag: std::mem::take(&mut self.diag),
             filter_counts: self.filter_counts,
+            trace: self.trace.take(),
         };
         let cmyk = self.ink.cmyk;
         let (canvas, mut buffers, ink_map, _) = self.into_parts(!transparent);

@@ -287,6 +287,13 @@ impl PageRenderer<'_> {
 
     /// Intersect `path` into the current graphics-state clip region.
     pub(super) fn clip_path_into_gstate(&mut self, path: &raster::path::Path, even_odd: bool) {
+        self.trace_clip_path(path, even_odd);
+        self.intersect_clip_path(path, even_odd);
+    }
+
+    /// [`Self::clip_path_into_gstate`] unrecorded in the paint trace: the
+    /// clip of an operation the trace records as a whole.
+    pub(super) fn intersect_clip_path(&mut self, path: &raster::path::Path, even_odd: bool) {
         let flatness = self.gstate.current().flatness.max(0.1);
         let xpath = XPath::new(path, &DEVICE_MATRIX, flatness, true);
         self.gstate
@@ -403,6 +410,7 @@ impl PageRenderer<'_> {
         };
         let path = builder.build();
         self.apply_pending_clip_with(&path);
+        self.trace_path_paint(&path, Some(even_odd), false);
         self.fill_path(&path, even_odd);
     }
 
@@ -413,6 +421,7 @@ impl PageRenderer<'_> {
         };
         let path = builder.build();
         self.apply_pending_clip_with(&path);
+        self.trace_path_paint(&path, None, true);
         self.stroke_path(&path);
     }
 
@@ -423,6 +432,7 @@ impl PageRenderer<'_> {
         };
         let path = builder.build();
         self.apply_pending_clip_with(&path);
+        self.trace_path_paint(&path, Some(even_odd), true);
         self.fill_and_stroke(&path, even_odd);
     }
 

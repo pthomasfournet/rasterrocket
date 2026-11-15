@@ -55,6 +55,7 @@ impl PageRenderer<'_> {
         if let Some(oc) = self.resources.xobject_optional_content(name)
             && !self.oc_visible(&oc)
         {
+            self.trace_hidden(name);
             return;
         }
         // Try Form first (cheap dict lookup, no pixel decoding).
@@ -76,6 +77,7 @@ impl PageRenderer<'_> {
             }
         }
         self.record_intent(self.resources.xobject_intent(name));
+        self.trace_image_xobject(name);
         let draw_size = image_draw_size(&self.gstate.current().ctm);
         let key = self.resources.xobject_id(name).map(|id| ImageKey {
             id,
@@ -373,6 +375,7 @@ impl PageRenderer<'_> {
             return;
         }
         self.active_forms.push(form.resources_id);
+        self.trace_form(form);
 
         // Capture the parent's compositing state before saving, so the group is
         // painted using the opacity/blend that was active when the form was invoked
@@ -487,6 +490,7 @@ impl PageRenderer<'_> {
         self.form_depth -= 1;
         let _ = self.active_forms.pop();
         self.gstate.restore();
+        self.trace_close(Some("form end"));
     }
 
     /// Execute the operators of `form` from `source`, in the resources and

@@ -779,6 +779,7 @@ impl PageRenderer<'_> {
     pub(super) fn clip_to_user_rect(&mut self, bbox: &[f64; 4], antialias: bool) {
         let [x0, y0, x1, y1] = *bbox;
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.to_device(x, y));
+        self.trace_clip_rect(&corners);
         if corners
             .iter()
             .any(|(x, y)| !x.is_finite() || !y.is_finite())
@@ -808,7 +809,7 @@ impl PageRenderer<'_> {
         }
         let _ = pb.close(true);
         if antialias {
-            self.clip_path_into_gstate(&pb.build(), false);
+            self.intersect_clip_path(&pb.build(), false);
         } else {
             let flatness = self.gstate.current().flatness.max(0.1);
             let xpath = XPath::new(&pb.build(), &DEVICE_MATRIX, flatness, true);

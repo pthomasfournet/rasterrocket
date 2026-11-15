@@ -237,6 +237,14 @@ impl GlyphSink {
     }
 }
 
+impl GlyphSink {
+    /// Whether the fill paints through filled outlines rather than glyph
+    /// bitmaps.
+    pub(super) const fn fills_as_path(&self) -> bool {
+        self.fill_as_path
+    }
+}
+
 impl PageRenderer<'_> {
     /// Paint the glyphs of `sink`: fill them, then stroke them, then add
     /// their outlines to the text object's clip (modes 4–7), which `ET`

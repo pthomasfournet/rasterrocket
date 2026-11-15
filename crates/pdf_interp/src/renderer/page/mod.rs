@@ -86,6 +86,7 @@ mod text_glyphs;
 mod text_ops;
 mod text_shaping;
 mod text_stroke;
+mod trace;
 mod type3;
 mod view;
 mod xobject;
@@ -102,6 +103,7 @@ pub use diagnostics::{DevicePage, GlyphCounts, ImageFailure, PageDiagnostics, Re
 #[cfg(feature = "cache")]
 pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;
+pub use trace::PaintTrace;
 pub use view::PageView;
 use view::initial_gstate;
 
@@ -360,6 +362,10 @@ pub struct PageRenderer<'doc> {
     /// content, which the first has counted), nor while a soft mask's
     /// group or a Type 3 glyph's description executes.
     census: text_census::Census,
+    /// The page's paint trace while it is recorded (see the `trace`
+    /// module): only in the renderer of a page's first window, never in
+    /// the renderer of a pattern cell or Type 3 glyph.
+    trace: Option<Box<trace::PaintTrace>>,
     /// Image `XObjects` already decoded on this page, shared with the
     /// renderers of its pattern cells, and the document's shared decodes.
     image_memo: image_memo::SharedImageMemo,
@@ -707,6 +713,7 @@ impl<'doc> PageRenderer<'doc> {
             painted: Cell::new(InkChannels::NONE),
             diag: PageDiagnostics::default(),
             census: text_census::Census::Counted,
+            trace: None,
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),
             tint_budget: std::rc::Rc::new(crate::resources::image::colorspace::TintBudget::page()),
             pattern_memo: pattern_memo::PatternMemo::shared(),
@@ -1317,6 +1324,7 @@ impl<'doc> PageRenderer<'doc> {
         if self.device_refused() {
             return;
         }
+        self.trace_line("annotations");
         annotations::render_annotations(self, page_id);
     }
 }
