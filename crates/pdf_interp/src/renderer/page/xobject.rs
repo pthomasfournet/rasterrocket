@@ -225,6 +225,7 @@ impl PageRenderer<'_> {
         #[cfg(feature = "gpu-icc")]
         let icc_counts = crate::resources::image::DeviceIccCounts::default();
         let keep_tints = self.keeps_tints();
+        let intent = self.painting_intent(self.resources.xobject_intent(name));
         let mut ctx = crate::resources::image::ImageDecodeCtx {
             doc: self.resources.doc(),
             color_spaces: self.resources.color_space_dict(),
@@ -247,7 +248,7 @@ impl PageRenderer<'_> {
             #[cfg(feature = "cache")]
             doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
             keep_tints,
-            intent: self.painting_intent(self.resources.xobject_intent(name)),
+            intent,
             depth: self.canvas.kind().depth(),
         };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).

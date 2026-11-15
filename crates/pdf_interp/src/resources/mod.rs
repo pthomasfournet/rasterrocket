@@ -1258,7 +1258,8 @@ mod tests {
     #[cfg(feature = "nvjpeg2k")]
     #[test]
     fn device_jpx_is_offered_where_the_cpu_decode_cannot_reduce() {
-        let jpx = "/Type /XObject /Subtype /Image /Width 1000 /Height 1000 \
+        const { assert!(4096 * 4096 >= image::GPU_JPEG2K_THRESHOLD_PX) };
+        let jpx = "/Type /XObject /Subtype /Image /Width 4096 /Height 4096 \
                    /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode";
         let stream = |extra: &str| format!("<< {jpx} {extra} /Length 0 >>\nstream\n\nendstream");
         let doc = crate::test_helpers::make_doc_with_objects(&[
@@ -1272,16 +1273,16 @@ mod tests {
             (6, stream("/SMask 7 0 R")),
             (
                 7,
-                "<< /Type /XObject /Subtype /Image /Width 1000 /Height 1000 /ColorSpace \
+                "<< /Type /XObject /Subtype /Image /Width 4096 /Height 4096 /ColorSpace \
                  /DeviceGray /BitsPerComponent 8 /Matte [0 0 0] /Length 0 >>\nstream\n\nendstream"
                     .to_owned(),
             ),
             (8, stream("/Mask [0 0 0 0 0 0]")),
         ]);
         let resources = PageResources::new(&doc, (4, 0));
-        let half = Some((500, 500));
+        let half = Some((2048, 2048));
         assert!(!resources.xobject_takes_device_jpx(b"Plain", half));
-        assert!(resources.xobject_takes_device_jpx(b"Plain", Some((501, 500))));
+        assert!(resources.xobject_takes_device_jpx(b"Plain", Some((2049, 2048))));
         assert!(resources.xobject_takes_device_jpx(b"Plain", None));
         assert!(resources.xobject_takes_device_jpx(b"Matted", half));
         assert!(resources.xobject_takes_device_jpx(b"Keyed", half));
