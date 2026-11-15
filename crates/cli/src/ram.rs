@@ -9,8 +9,8 @@
 //! The user's `OUTPUT_PREFIX` becomes the file stem inside that dir, so
 //! downstream consumers that read `out-NNN.ppm` keep working unchanged.
 //!
-//! The default applies only where `/dev/shm` exists; elsewhere (macOS, the
-//! BSDs) a bare stem is written to the working directory like any prefix,
+//! The default applies only where `/dev/shm` exists; elsewhere (macOS, Windows,
+//! the BSDs) a bare stem is written to the working directory like any prefix,
 //! and RAM output needs `--ram-path` on a RAM disk the user has mounted.
 //!
 //! The redirect is suppressed when `OUTPUT_PREFIX` looks like a path
@@ -200,8 +200,28 @@ fn available_memory() -> Option<u64> {
     (level <= 100).then(|| total / 100 * u64::from(level))
 }
 
+/// The memory, in bytes, a new workload can allocate without paging:
+/// `ullAvailPhys` of `GlobalMemoryStatusEx`, the free, zeroed and standby
+/// (file cache) pages together.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "GlobalMemoryStatusEx is the only interface to the system's memory statistics"
+)]
+fn available_memory() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(size_of::<MEMORYSTATUSEX>()).ok()?,
+        ..MEMORYSTATUSEX::default()
+    };
+    // SAFETY: `status` is a writable `MEMORYSTATUSEX` whose `dwLength`
+    // holds its size, as the call requires; the call writes only within it.
+    let ok = unsafe { GlobalMemoryStatusEx(&raw mut status) };
+    (ok != 0).then_some(status.ullAvailPhys)
+}
+
 /// No available-memory estimate on this platform.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 const fn available_memory() -> Option<u64> {
     None
 }
@@ -251,7 +271,7 @@ fn read_mem_available() -> Option<u64> {
 /// 1. `--no-ram` → always disk
 /// 2. `--ram` or `--ram-path` → always RAM
 /// 3. Heuristic on `output_prefix`, applied only when [`RAM_ROOT`] exists
-///    (it does not on macOS or the BSDs, nor in some containers):
+///    (it does not on macOS, Windows or the BSDs, nor in some containers):
 ///    - bare stem (e.g. `out`, `p`) → RAM (default)
 ///    - path-like (`./out`, `dir/p`, `/abs/path`) → disk
 ///
@@ -464,7 +484,7 @@ mod tests {
         assert!(!missing.exists(), "the root is not created");
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn available_memory_is_plausible() {
         let bytes = available_memory().expect("this platform has a memory estimate");
@@ -569,7 +589,7 @@ mod tests {
 
     #[test]
     fn bare_stem_uses_disk_without_ram_root() {
-        // No tmpfs mount (macOS, the BSDs): the heuristic writes where asked,
+        // No tmpfs mount (macOS, Windows, the BSDs): the heuristic writes where asked,
         // while an explicit --ram or --ram-path keeps its meaning.
         assert!(!use_ram_for(false, false, "out", false));
         assert!(use_ram_for(false, true, "out", false));

@@ -39,8 +39,10 @@ tested. Please report what you find.
 - **Fonts:** searched in `C:/Windows/Fonts`. Fonts installed for one user
   only (`%LOCALAPPDATA%\Microsoft\Windows\Fonts`) are not searched yet; name
   that directory with `RROCKET_FONT_DIR`.
-- **Writing output to RAM:** as on the BSDs, a bare prefix writes to the
-  current directory, and `--ram` and `--ram-path` are refused.
+- **Writing output to RAM:** there is no `/dev/shm`, so a bare prefix writes
+  to the current directory and `--ram` is refused. `--ram-path` writes into
+  a directory on a RAM disk you have mounted, moving to disk once the
+  available physical memory falls below 1 GiB.
 - **GPU:** CUDA and Vulkan are untested on Windows.
 - **Printing and fax:** `--print` and `--fax-to` are refused: both submit
   through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.

@@ -445,7 +445,7 @@ pub(crate) struct Args {
     /// `/dev/shm`, because writing to disk is 10–20× slower than RAM and
     /// dominates wall time. Path-like prefixes (anything with `/` or
     /// starting with `.`) opt out of that redirect and write to disk, as do
-    /// all prefixes on systems without `/dev/shm` (macOS, the BSDs).
+    /// all prefixes on systems without `/dev/shm` (macOS, Windows, the BSDs).
     ///
     /// Use `--ram` to override the heuristic: redirect to tmpfs even when
     /// the user-supplied prefix would otherwise be treated as a real path.
@@ -462,7 +462,7 @@ pub(crate) struct Args {
 
     /// Override the tmpfs directory used by RAM-backed output. Implies the
     /// RAM redirect. Default is a fresh `/dev/shm/rrocket-<pid>-<nanos>/`.
-    /// On systems without `/dev/shm` (macOS), point it into a RAM disk.
+    /// On systems without `/dev/shm` (macOS, Windows), point it into a RAM disk.
     /// The path must not exist: the directory is created for the run and
     /// removed, with its contents, on exit.
     #[arg(long = "ram-path", value_name = "PATH", conflicts_with = "no_ram")]

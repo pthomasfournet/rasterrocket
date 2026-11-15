@@ -54,12 +54,17 @@ tempfile    = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc        = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# GlobalMemoryStatusEx: the available-memory probe of RAM output.
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
 [dev-dependencies]
 # Reads TIFF output back in the end-to-end tests: an independent decoder.
 tiff = { workspace = true }
 
 [lints.rust]
-# One scoped `#[expect]` reads the macOS memory sysctls; nothing else is unsafe.
+# Scoped `#[expect]`s read the macOS memory sysctls and the Windows memory
+# status; nothing else is unsafe.
 unsafe_code    = "deny"
 missing_docs   = "allow"   # binary crate; public docs are not required
 unused_results = "warn"
