@@ -5,8 +5,11 @@
 use super::view::page_to_window;
 use std::sync::Arc;
 
+use super::super::color::RasterColor;
 use super::PageRenderer;
 use super::canvas::with_canvas;
+use super::canvas::{CanvasPipe, CanvasSource};
+use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use super::text_ops::{GlyphRecord, glyph_placement};
 use super::text_shaping::Drawn;
@@ -17,7 +20,6 @@ use font::key::FaceId;
 use raster::Clip;
 use raster::glyph::{GlyphBitmap, fill_glyph};
 use raster::path::Path;
-use raster::pipe::{PipeSrc, PipeState};
 use raster::types::BlendMode;
 
 /// The painting operations of a text rendering mode (PDF §9.3.6, Table 106).
@@ -245,11 +247,8 @@ impl PageRenderer<'_> {
         // under the soft mask in effect.
         if !sink.stroke_records.is_empty() && !self.gstate.current().stroke_paints_nothing() {
             let stroke_color = self.gstate.current().painted_stroke_color();
-            let stroke_bytes = stroke_color.bytes_for(self.canvas.kind().mode());
             let clip = self.gstate.current().clip.clone_shared();
             let paint = self.solid_paint(true, &stroke_color, u8::MAX, BlendMode::Normal);
-            let pipe = paint.pipe();
-            let src = PipeSrc::Solid(stroke_bytes);
             let region = PixelRect::around(
                 glyph_corners(&sink.stroke_records),
                 1.0,
@@ -257,7 +256,7 @@ impl PageRenderer<'_> {
                 self.height,
             );
             self.paint_object(region, u8::MAX, |r| {
-                r.blit_glyph_records(&sink.stroke_records, &clip, &pipe, &src);
+                r.blit_glyph_records(&sink.stroke_records, &clip, &paint, &stroke_color);
             });
         }
         // The stroke parameters are user-space quantities under the CTM, as
@@ -282,12 +281,9 @@ impl PageRenderer<'_> {
             return;
         }
         let fill_color = self.gstate.current().painted_fill_color();
-        let fill_bytes = fill_color.bytes_for(self.canvas.kind().mode());
         let clip = self.gstate.current().clip.clone_shared();
         let gs = self.gstate.current();
         let paint = self.solid_paint(false, &fill_color, gs.fill_alpha, gs.blend_mode);
-        let pipe = paint.pipe();
-        let src = PipeSrc::Solid(fill_bytes);
         // The outline fills lie within one pixel of their points.
         let outline_points = sink
             .fill_paths
@@ -301,7 +297,7 @@ impl PageRenderer<'_> {
         );
         let alpha = self.gstate.current().fill_alpha;
         self.paint_object(region, alpha, |r| {
-            r.blit_glyph_records(&sink.records, &clip, &pipe, &src);
+            r.blit_glyph_records(&sink.records, &clip, &paint, &fill_color);
             if sink.pattern_fill {
                 let mut union = Path::new();
                 for path in &sink.fill_paths {
@@ -318,15 +314,17 @@ impl PageRenderer<'_> {
         });
     }
 
-    /// Composite the glyph bitmaps of `records` through `clip` with `pipe`
-    /// and `src`.
+    /// Composite the glyph bitmaps of `records` through `clip` in the solid
+    /// colour `colour` with the parameters `paint`.
     fn blit_glyph_records(
         &mut self,
         records: &[GlyphRecord],
         clip: &Clip,
-        pipe: &PipeState<'_>,
-        src: &PipeSrc<'_>,
+        paint: &PaintParams,
+        colour: &RasterColor,
     ) {
+        let pipe = CanvasPipe::of(paint);
+        let source = CanvasSource::Solid(colour);
         for rec in records {
             #[expect(
                 clippy::cast_possible_wrap,
@@ -343,9 +341,12 @@ impl PageRenderer<'_> {
             };
             // Whether the glyph lay inside the clip matters only to a
             // clipping render mode, whose clip is built from the outlines.
-            let _ = with_canvas!(&mut self.canvas, |b| fill_glyph(
-                b, clip, pipe, src, rec.pen_x, rec.pen_y, &glyph
-            ));
+            with_canvas!(&mut self.canvas, |b| {
+                let pipe = pipe.at();
+                source.paint(b, |b, src| {
+                    let _ = fill_glyph(b, clip, &pipe, src, rec.pen_x, rec.pen_y, &glyph);
+                });
+            });
         }
     }
 }

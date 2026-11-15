@@ -7,7 +7,7 @@ use raster::{transparency::GroupParams, types::BlendMode};
 
 use super::super::document_images::{self, ImageKey, Lookup, Outcome};
 use super::super::gstate::{ctm_multiply, ctm_transform};
-use super::canvas::PageCanvas;
+use super::canvas::{CanvasPipe, PageCanvas};
 use super::form_memo::{FormKey, KeptForm};
 use super::pixel_rect::PixelRect;
 use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer, RenderAbort};
@@ -465,7 +465,7 @@ impl PageRenderer<'_> {
                 None,
                 ChannelMask::new(0),
             );
-            let pipe = paint.pipe();
+            let pipe = CanvasPipe::of(&paint);
             let (x0, y0, x1, y1) = g.region();
             let region = PixelRect::new(x0, y0, x1, y1);
             let composite = |r: &mut Self| {

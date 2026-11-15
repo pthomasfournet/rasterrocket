@@ -44,9 +44,11 @@
 
 use std::sync::Arc;
 
+use color::Sample;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::shading::function::Function;
+use crate::renderer::color::Srgb;
 use crate::resources::dict_ext::DictExt as _;
 
 mod cal;
@@ -405,6 +407,34 @@ impl ColorSpace {
     ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
     pub fn convert_to_rgb(&self, doc: &Document, comps: &[f64]) -> [u8; 3] {
+        self.convert::<u8>(doc, comps)
+    }
+
+    /// [`Self::convert_to_rgb`] at both depths for a render at `depth`:
+    /// the 8-bit bytes, and the 16-bit value converted at 16 bits for a
+    /// 16-bit render, the bytes widened otherwise.
+    #[must_use]
+    pub(crate) fn convert_to_srgb(
+        &self,
+        doc: &Document,
+        comps: &[f64],
+        depth: color::SampleDepth,
+    ) -> Srgb {
+        let bytes = self.convert::<u8>(doc, comps);
+        match depth {
+            color::SampleDepth::Eight => Srgb::of_bytes(bytes),
+            color::SampleDepth::Sixteen => Srgb {
+                bytes,
+                wide: self.convert::<u16>(doc, comps),
+            },
+        }
+    }
+
+    /// [`Self::convert_to_rgb`] at the depth of `S`: every conversion
+    /// evaluates at that depth and quantises its result once, so the 8-bit
+    /// instance is the 8-bit conversion.
+    #[must_use]
+    pub(crate) fn convert<S: Sample>(&self, doc: &Document, comps: &[f64]) -> [S; 3] {
         if comps.len() != self.ncomponents() {
             log::debug!(
                 "colorspace: {:?} expects {} components, got {}",
@@ -412,13 +442,13 @@ impl ColorSpace {
                 self.ncomponents(),
                 comps.len(),
             );
-            return [0, 0, 0];
+            return [S::default(); 3];
         }
         match self {
-            Self::DeviceGray => gray_byte_to_rgb(color::convert::gray_to_u8(comps[0])),
-            Self::DeviceRgb => color::convert::rgb_to_bytes(comps[0], comps[1], comps[2]),
+            Self::DeviceGray => [S::from_unit(comps[0]); 3],
+            Self::DeviceRgb => [comps[0], comps[1], comps[2]].map(S::from_unit),
             Self::DeviceCmyk => {
-                color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3])
+                color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3])
             }
             Self::Cal(cal) => cal.convert(comps),
             Self::Lab(lab) => lab.convert(comps),
@@ -426,10 +456,11 @@ impl ColorSpace {
                 .and_then(|id| IccConversion::load(doc, id, *n))
                 .and_then(|conv| conv.convert(doc, comps))
                 .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
-            Self::Indexed { .. } => self
-                .indexed_base_components(comps)
-                .map_or([0, 0, 0], |(base, entry)| base.convert_to_rgb(doc, &entry)),
-            Self::Pattern { .. } => [0, 0, 0],
+            Self::Indexed { .. } => self.indexed_base_components(comps).map_or_else(
+                || [S::default(); 3],
+                |(base, entry)| base.convert(doc, &entry),
+            ),
+            Self::Pattern { .. } => [S::default(); 3],
             Self::Separation {
                 alternate, tint, ..
             } => {
@@ -459,11 +490,6 @@ impl ColorSpace {
             }
         }
     }
-}
-
-/// Expand a single grey byte into an opaque RGB triple `[v, v, v]`.
-const fn gray_byte_to_rgb(v: u8) -> [u8; 3] {
-    [v, v, v]
 }
 
 /// A compiled `Separation` / `DeviceN` tint transform (PDF §8.6.6.4),
@@ -497,9 +523,14 @@ impl TintTransform {
 
     /// Pass `tints` through the function and convert the result in
     /// `alternate`.  `None` when evaluation fails.
-    fn to_rgb(&self, doc: &Document, alternate: &ColorSpace, tints: &[f64]) -> Option<[u8; 3]> {
+    fn to_rgb<S: Sample>(
+        &self,
+        doc: &Document,
+        alternate: &ColorSpace,
+        tints: &[f64],
+    ) -> Option<[S; 3]> {
         let outputs = self.alternate_components(alternate, tints)?;
-        Some(alternate.convert_to_rgb(doc, &outputs))
+        Some(alternate.convert(doc, &outputs))
     }
 }
 
@@ -585,19 +616,18 @@ pub(crate) fn decoded_sample(s: u8, (dmin, dmax): (f64, f64), max_sample: f64) -
 /// A spot tint with no resolvable transform approximates as gray with
 /// `1 - tint`: tint 0 is no colorant (white), tint 1 is full colorant
 /// (black), per PDF §8.6.6.4.
-fn separation_fallback_gray(tint: f64) -> [u8; 3] {
-    let v = (1.0 - tint).clamp(0.0, 1.0);
-    gray_byte_to_rgb(color::convert::gray_to_u8(v))
+fn separation_fallback_gray<S: Sample>(tint: f64) -> [S; 3] {
+    [S::from_unit(1.0 - tint); 3]
 }
 
 /// Fall back to the device space matching the ICC profile's channel count
 /// when the moxcms transform isn't available. Mirrors the pre-CLUT behaviour.
-fn icc_fallback_by_n(n: u8, comps: &[f64]) -> [u8; 3] {
+fn icc_fallback_by_n<S: Sample>(n: u8, comps: &[f64]) -> [S; 3] {
     match n {
-        1 => gray_byte_to_rgb(color::convert::gray_to_u8(comps[0])),
-        3 => color::convert::rgb_to_bytes(comps[0], comps[1], comps[2]),
-        4 => color::cmyk::cmyk_f64_to_rgb(comps[0], comps[1], comps[2], comps[3]),
-        _ => [0, 0, 0],
+        1 => [S::from_unit(comps[0]); 3],
+        3 => [comps[0], comps[1], comps[2]].map(S::from_unit),
+        4 => color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3]),
+        _ => [S::default(); 3],
     }
 }
 
@@ -1259,6 +1289,51 @@ mod tests {
             stream_id: Some((1, 0)),
         };
         assert_eq!(icc.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
+    }
+
+    /// Every conversion at 16 bits, narrowed to 8, lies within one level of
+    /// the 8-bit conversion: device, CIE-based and ICC-based spaces alike.
+    #[test]
+    fn sixteen_bit_conversions_narrow_to_the_8_bit_ones() {
+        let gamma = moxcms::ToneReprCurve::Lut(vec![461]);
+        let mut rgb = moxcms::ColorProfile::new_srgb();
+        rgb.cicp = None;
+        rgb.red_trc = Some(gamma.clone());
+        rgb.green_trc = Some(gamma.clone());
+        rgb.blue_trc = Some(gamma);
+        let shaper = crate::test_helpers::make_doc_with_stream(&rgb.encode().unwrap(), " /N 3");
+        let mut adobe = moxcms::ColorProfile::new_adobe_rgb();
+        adobe.cicp = None;
+        let matrix = crate::test_helpers::make_doc_with_stream(&adobe.encode().unwrap(), " /N 3");
+        let icc = ColorSpace::IccBased {
+            n: 3,
+            stream_id: Some((2, 0)),
+        };
+        let empty = empty_doc();
+        let cases: [(&Document, ColorSpace, Vec<f64>); 6] = [
+            (&empty, ColorSpace::DeviceGray, vec![0.37]),
+            (&empty, ColorSpace::DeviceCmyk, vec![0.1, 0.6, 0.3, 0.2]),
+            (&empty, lab_d65(), vec![61.0, 12.0, -40.0]),
+            (&shaper, icc.clone(), vec![0.2, 0.5, 0.8]),
+            (&matrix, icc.clone(), vec![0.9, 0.4, 0.1]),
+            (&empty, icc, vec![0.3, 0.3, 0.3]),
+        ];
+        for (doc, space, comps) in cases {
+            let narrow = space.convert::<u8>(doc, &comps);
+            let wide = space.convert::<u16>(doc, &comps);
+            for (w, n) in wide.iter().zip(narrow) {
+                assert!(
+                    w.to_u8().abs_diff(n) <= 1,
+                    "{space:?} {comps:?}: {wide:?} {narrow:?}"
+                );
+            }
+            assert_eq!(
+                space
+                    .convert_to_srgb(doc, &comps, color::SampleDepth::Sixteen)
+                    .wide,
+                wide
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, compone
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
-use color::{DeviceN8, Pixel, Rgb8};
+use color::{DeviceN8, Pixel, Rgb8, Rgb16, Sample, SampleDepth};
 use pdf::Document;
 use raster::path::PathBuilder;
 use raster::pipe::ChannelMask;
@@ -22,10 +22,15 @@ use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern, XPath};
 /// (PDF §8.7.3.3), and convert through `base`.  A bare `/Pattern` space,
 /// or a component count `base` does not take, is read by its count:
 /// 1 grey, 3 RGB, 4 CMYK.
-fn resolve_pattern_tint(doc: &Document, fill_cs: &ColorSpace, components: &[f64]) -> RasterColor {
+fn resolve_pattern_tint(
+    doc: &Document,
+    fill_cs: &ColorSpace,
+    components: &[f64],
+    depth: SampleDepth,
+) -> RasterColor {
     if let ColorSpace::Pattern { base: Some(base) } = fill_cs {
         if components.len() == base.ncomponents() {
-            return RasterColor::from_bytes(base.convert_to_rgb(doc, components));
+            return RasterColor::from_srgb(base.convert_to_srgb(doc, components, depth));
         }
         log::debug!(
             "rasterrocket-interp: pattern tint comp count {} mismatches base CS expected {} — using heuristic",
@@ -59,40 +64,37 @@ fn pixel_ceil(v: f64) -> f64 {
 }
 
 /// The mean of `sample` over a period of `period_px` pixels: its
-/// alpha-weighted mean colour, one pixel's bytes, and its coverage,
-/// `Σ alpha / period_px` clamped to 255.  The colour is all zeros where
-/// nothing is painted.
-fn mean_over_period<P: Pixel<Sample = u8>>(sample: &Bitmap<P>, period_px: f64) -> (Vec<u8>, u8) {
+/// alpha-weighted mean colour, one pixel's samples, and its coverage,
+/// `Σ alpha / period_px` clamped to the sample's maximum.  The colour is
+/// all zeros where nothing is painted.
+fn mean_over_period<P: Pixel>(sample: &Bitmap<P>, period_px: f64) -> (Vec<P::Sample>, P::Sample) {
+    let wide = |v: P::Sample| u64::try_from(v.signed()).unwrap_or(0);
     let mut sum_a = 0u64;
-    let mut sum_c = vec![0u64; P::BYTES];
+    let mut sum_c = vec![0u64; P::NCOMPS];
     for y in 0..sample.height {
-        let row = sample.row_bytes(y);
+        let row = sample.row_samples(y);
         let alpha = sample.alpha_row(y);
-        for (x, px) in row.chunks_exact(P::BYTES).enumerate() {
-            let a = u64::from(alpha.map_or(255, |r| r[x]));
+        for (x, px) in row.chunks_exact(P::NCOMPS).enumerate() {
+            let a = wide(alpha.map_or(P::Sample::MAX, |r| r[x]));
             sum_a += a;
             for (s, &c) in sum_c.iter_mut().zip(px) {
-                *s += a * u64::from(c);
+                *s += a * wide(c);
             }
         }
     }
     if sum_a == 0 {
-        return (vec![0; P::BYTES], 0);
+        return (vec![P::Sample::default(); P::NCOMPS], P::Sample::default());
     }
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
         clippy::cast_precision_loss,
-        reason = "the quotients are clamped to [0, 255] before the cast"
+        reason = "the quotient is rounded, and clamped to the sample range by from_signed"
     )]
-    let coverage = (sum_a as f64 / period_px).round().clamp(0.0, 255.0) as u8;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "an alpha-weighted mean of u8 values is at most 255"
-    )]
+    let coverage = P::Sample::from_signed((sum_a as f64 / period_px).round() as i64);
+    // An alpha-weighted mean of samples is at most the sample's maximum.
     let colour = sum_c
         .iter()
-        .map(|s| ((s + sum_a / 2) / sum_a) as u8)
+        .map(|s| P::Sample::from_signed(i64::try_from((s + sum_a / 2) / sum_a).unwrap_or(0)))
         .collect();
     (colour, coverage)
 }
@@ -109,6 +111,8 @@ pub(super) enum PatternPaint {
 pub(super) enum Tile {
     /// A tile of sRGB, for an RGB canvas.
     Rgb(TiledPattern),
+    /// A tile of 16-bit sRGB, for a 16-bit RGB canvas.
+    Rgb16(TiledPattern<Rgb16>),
     /// A tile of ink, for an ink canvas, with the channels the cell's
     /// content painted and carried: the union over its paints of the
     /// channels each wrote and those its colour carried.
@@ -123,7 +127,7 @@ impl Tile {
     /// content painted for a tile of ink, every channel for one of sRGB.
     pub(super) const fn paints(&self) -> ChannelMask {
         match self {
-            Self::Rgb(_) => ChannelMask::ALL,
+            Self::Rgb(_) | Self::Rgb16(_) => ChannelMask::ALL,
             Self::Ink { channels, .. } => channels.paints,
         }
     }
@@ -133,16 +137,20 @@ impl Tile {
     /// of sRGB.
     pub(super) const fn carries(&self) -> ChannelMask {
         match self {
-            Self::Rgb(_) => ChannelMask::ALL,
+            Self::Rgb(_) | Self::Rgb16(_) => ChannelMask::ALL,
             Self::Ink { channels, .. } => channels.carries,
         }
     }
 }
 
+/// The mean colour, coverage and channels of a cell as the pattern memo
+/// keeps them.
+type KeptMean<'a, S> = (&'a [S], S, InkChannels);
+
 /// The pixel type a tiling cell is rasterised in: the pixel type of the
 /// canvas the pattern paints, so that a cell on an ink canvas keeps its
 /// spot colorants and the channels its content wrote.
-trait CellPixel: Pixel<Sample = u8> {
+trait CellPixel: Pixel {
     /// The canvas of this pixel type.
     const KIND: CanvasKind;
 
@@ -155,14 +163,14 @@ trait CellPixel: Pixel<Sample = u8> {
 
     /// The mean colour, coverage and channels of a cell, as the pattern
     /// memo keeps them.
-    fn mean(colour: &[u8], coverage: u8, channels: InkChannels) -> CellRaster;
+    fn mean(colour: &[Self::Sample], coverage: Self::Sample, channels: InkChannels) -> CellRaster;
 
     /// The cell bitmap and channels of a kept raster of this pixel type.
     fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)>;
 
     /// The mean colour, coverage and channels of a kept raster of this
     /// pixel type.
-    fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, InkChannels)>;
+    fn as_mean(raster: &CellRaster) -> Option<KeptMean<'_, Self::Sample>>;
 }
 
 impl CellPixel for Rgb8 {
@@ -171,7 +179,7 @@ impl CellPixel for Rgb8 {
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
         match canvas {
             PageCanvas::Rgb(b) => Some(b),
-            PageCanvas::Ink(_) => None,
+            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => None,
         }
     }
 
@@ -200,13 +208,48 @@ impl CellPixel for Rgb8 {
     }
 }
 
+impl CellPixel for Rgb16 {
+    const KIND: CanvasKind = CanvasKind::Rgb16;
+
+    fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
+        match canvas {
+            PageCanvas::Rgb16(b) => Some(b),
+            PageCanvas::Rgb(_) | PageCanvas::Ink(_) => None,
+        }
+    }
+
+    fn cell(bitmap: Rc<Bitmap<Self>>, _channels: InkChannels) -> CellRaster {
+        CellRaster::Cell16(bitmap)
+    }
+
+    fn mean(colour: &[u16], coverage: u16, _channels: InkChannels) -> CellRaster {
+        let mut rgb = [0; 3];
+        rgb.copy_from_slice(colour);
+        CellRaster::Mean16(rgb, coverage)
+    }
+
+    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)> {
+        match raster {
+            CellRaster::Cell16(bitmap) => Some((bitmap, InkChannels::ALL)),
+            _ => None,
+        }
+    }
+
+    fn as_mean(raster: &CellRaster) -> Option<(&[u16], u16, InkChannels)> {
+        match raster {
+            CellRaster::Mean16(colour, coverage) => Some((colour, *coverage, InkChannels::ALL)),
+            _ => None,
+        }
+    }
+}
+
 impl CellPixel for DeviceN8 {
     const KIND: CanvasKind = CanvasKind::Ink;
 
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
         match canvas {
             PageCanvas::Ink(b) => Some(b),
-            PageCanvas::Rgb(_) => None,
+            PageCanvas::Rgb(_) | PageCanvas::Rgb16(_) => None,
         }
     }
 
@@ -399,6 +442,7 @@ impl PageRenderer<'_> {
                 self.resources.doc(),
                 &gs.fill_color_space,
                 &gs.fill_pattern_components,
+                self.canvas.kind().depth(),
             ))
         } else {
             None
@@ -438,6 +482,9 @@ impl PageRenderer<'_> {
             CanvasKind::Rgb => self
                 .tile::<Rgb8>(name, &cell, &geometry, (region, extent), key)
                 .map(|(pattern, _)| Tile::Rgb(pattern)),
+            CanvasKind::Rgb16 => self
+                .tile::<Rgb16>(name, &cell, &geometry, (region, extent), key)
+                .map(|(pattern, _)| Tile::Rgb16(pattern)),
             CanvasKind::Ink => self
                 .tile::<DeviceN8>(name, &cell, &geometry, (region, extent), key)
                 .map(|(pattern, channels)| Tile::Ink { pattern, channels }),
@@ -816,7 +863,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceRgb)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0, 0.0, 0.0]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0, 0.0, 0.0], SampleDepth::Eight);
         assert_eq!(tint.as_slice(), &[255, 0, 0]);
     }
 
@@ -832,7 +879,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(lab)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[50.0, 0.0, 0.0]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[50.0, 0.0, 0.0], SampleDepth::Eight);
         // sRGB-encoded mid-grey from L*=50 is ~119 (gamma-correct).
         let &[r, g, b] = tint.as_slice() else {
             panic!("RasterColor must produce a 3-byte slice");
@@ -848,7 +895,7 @@ mod tests {
         // No base on the Pattern (malformed PDF) → heuristic path.
         let doc = empty_doc();
         let fill_cs = ColorSpace::Pattern { base: None };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5, 0.5, 0.5]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5, 0.5, 0.5], SampleDepth::Eight);
         // components_to_color heuristic: 3 components → RGB(0.5, 0.5, 0.5).
         assert_eq!(tint.as_slice(), &[128, 128, 128]);
     }
@@ -860,7 +907,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceRgb)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5], SampleDepth::Eight);
         // Heuristic: 1 component → Gray(0.5) = mid-grey.
         assert_eq!(tint.as_slice(), &[128, 128, 128]);
     }
@@ -871,7 +918,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceGray)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0], SampleDepth::Eight);
         assert_eq!(tint.as_slice(), &[255, 255, 255]);
     }
 
@@ -882,7 +929,7 @@ mod tests {
             base: Some(Box::new(ColorSpace::DeviceCmyk)),
         };
         // (0,0,0,1) = solid K: all four components reach the CMYK conversion.
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.0, 0.0, 0.0, 1.0]);
+        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.0, 0.0, 0.0, 1.0], SampleDepth::Eight);
         assert_eq!(tint.as_slice(), &color::cmyk::cmyk_to_rgb(0, 0, 0, 255));
     }
 }

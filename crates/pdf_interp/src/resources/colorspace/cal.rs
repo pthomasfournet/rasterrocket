@@ -156,7 +156,7 @@ impl CalSpace {
 
     /// Convert `comps` (each clipped to `[0, 1]`) to sRGB bytes.  The
     /// caller guarantees `comps.len() == self.ncomponents()`.
-    pub(super) fn convert(&self, comps: &[f64]) -> [u8; 3] {
+    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64]) -> [S; 3] {
         let decode = |i: usize| {
             let c = comps[i.min(comps.len() - 1)];
             let c = if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) };
@@ -166,7 +166,7 @@ impl CalSpace {
         let [r, g, b] = self
             .to_linear_srgb
             .map(|row| row[0].mul_add(abc[0], row[1].mul_add(abc[1], row[2] * abc[2])));
-        color::convert::rgb_to_bytes(srgb_encode(r), srgb_encode(g), srgb_encode(b))
+        [r, g, b].map(|c| S::from_unit(srgb_encode(c)))
     }
 }
 

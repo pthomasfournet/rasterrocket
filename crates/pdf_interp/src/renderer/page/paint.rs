@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use color::TransferLut;
 use raster::{
     eo_fill, fill, fill_area,
     path::PathBuilder,
@@ -16,7 +15,8 @@ use raster::{
 
 use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
-use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
+use super::canvas::{CanvasKind, CanvasPattern, CanvasPipe, CanvasSource, with_canvas};
+use super::depth::{CanvasBackdrop, CanvasSample};
 use super::patterns::{PatternPaint, Tile};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -49,20 +49,45 @@ pub(super) struct PaintParams {
     /// The channels the paint writes; `None` for all.
     pub(super) overprint: Option<ChannelMask>,
     /// The group backdrop the paint consults, if any.
-    pub(super) backdrop: Option<Arc<Backdrop>>,
+    pub(super) backdrop: Option<Arc<CanvasBackdrop>>,
 }
 
 impl PaintParams {
-    /// The pipe of the paint, with the identity transfer.
-    pub(super) fn pipe(&self) -> PipeState<'_> {
+    /// The pipe of the paint for samples of type `S`, with the identity
+    /// transfer.
+    pub(super) fn pipe<S: CanvasSample>(&self) -> PipeState<'_, S> {
+        self.pipe_with(None)
+    }
+
+    /// The pipe of the paint for samples of type `S`, applying the tables
+    /// of `transfer` at that depth, if any: the constant alpha widened
+    /// exactly, the backdrop of the samples' depth.
+    pub(super) fn pipe_with<'a, S: CanvasSample>(
+        &'a self,
+        transfer: Option<&'a Transfer>,
+    ) -> PipeState<'a, S> {
         PipeState {
             blend_mode: self.blend_mode,
-            a_input: self.alpha,
-            transfer: TransferSet::identity_rgb(),
-            backdrop: self.backdrop.as_deref().map(Backdrop::as_pipe_backdrop),
+            a_input: S::from_u8(self.alpha),
+            transfer: transfer.map_or_else(|| TransferSet::identity_rgb(), transfer_set),
+            backdrop: self
+                .backdrop
+                .as_deref()
+                .and_then(S::backdrop)
+                .map(Backdrop::as_pipe_backdrop),
             overprint: self.overprint,
         }
     }
+}
+
+/// The tables of `transfer` as the pipe applies them to a source that
+/// is not mapped beforehand: a pattern's colours, a shading and its
+/// background.  A solid fill or stroke colour is mapped before painting
+/// (see `InterpGState::painted_fill_color`) and paints through the
+/// identity.
+pub(super) fn transfer_set<S: CanvasSample>(transfer: &Transfer) -> TransferSet<'_, S> {
+    let id = S::identity_table();
+    TransferSet::new(S::rgb_tables(transfer), id, [id; 4], [id; 8])
 }
 
 /// The area scale `√|det|` of the linear part of `m`: the factor by which
@@ -135,6 +160,8 @@ impl PageRenderer<'_> {
     /// `Indexed` colour resolves as its palette entry in the base space.
     pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
         let doc = self.resources.doc();
+        let depth = self.canvas.kind().depth();
+        let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, comps, depth);
         match cs {
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
                 components_to_color(comps)
@@ -148,30 +175,30 @@ impl PageRenderer<'_> {
             // `ColorSpace::process_ink`).
             ColorSpace::IccBased { n: 4, .. } => match comps {
                 &[c, m, y, k] => {
-                    let rgb = cs.convert_to_rgb(doc, comps);
+                    let rgb = srgb(cs);
                     let cmyk = [c, m, y, k];
                     if self.canvas.kind() == CanvasKind::Ink {
-                        let ink = self.ink_map.borrow_mut().ink_reproducing(rgb, cmyk);
+                        let ink = self.ink_map.borrow_mut().ink_reproducing(rgb.bytes, cmyk);
                         RasterColor::with_process_ink_of(rgb, cmyk, ink)
                     } else {
                         RasterColor::with_process_inks(rgb, cmyk)
                     }
                 }
-                _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
+                _ => RasterColor::from_srgb(srgb(cs)),
             },
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
                 if self.canvas.kind() == CanvasKind::Ink =>
             {
                 let (ink, paints) = self.ink_map.borrow_mut().colorant_ink(doc, cs, comps);
-                RasterColor::with_ink(cs.convert_to_rgb(doc, comps), ink, paints)
+                RasterColor::with_ink(srgb(cs), ink, paints)
             }
             // An indexed colour is its palette entry's colour in the base
             // space.
             ColorSpace::Indexed { .. } => match cs.indexed_base_components(comps) {
                 Some((base, entry)) => self.color_for_components(base, &entry),
-                None => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
+                None => RasterColor::from_srgb(srgb(cs)),
             },
-            _ => RasterColor::from_bytes(cs.convert_to_rgb(doc, comps)),
+            _ => RasterColor::from_srgb(srgb(cs)),
         }
     }
 
@@ -248,16 +275,6 @@ impl PageRenderer<'_> {
             .clip_to_path(&xpath, even_odd);
     }
 
-    /// The tables of `transfer` as the pipe applies them to a source that
-    /// is not mapped beforehand: a pattern's colours, a shading and its
-    /// background.  A solid fill or stroke colour is mapped before painting
-    /// (see `InterpGState::painted_fill_color`) and paints through the
-    /// identity.
-    pub(super) fn transfer_set(transfer: &Transfer) -> TransferSet<'_> {
-        let id = TransferLut::IDENTITY.as_array();
-        TransferSet::new(transfer.tables(), id, [id; 4], [id; 8])
-    }
-
     /// The backdrop a paint under `blend_mode` writing the channels
     /// `overprint` consults: the enclosing non-isolated group's, unless the
     /// mode is `Normal` and the paint writes every channel.  A `Normal`
@@ -267,7 +284,7 @@ impl PageRenderer<'_> {
         &self,
         blend_mode: BlendMode,
         overprint: Option<ChannelMask>,
-    ) -> Option<Arc<Backdrop>> {
+    ) -> Option<Arc<CanvasBackdrop>> {
         (blend_mode != BlendMode::Normal || overprint.is_some())
             .then(|| self.group.backdrop.clone())
             .flatten()
@@ -472,19 +489,21 @@ impl PageRenderer<'_> {
                 )
             },
         );
-        let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
             transfer.as_deref(),
-            &mut pipe,
         );
-        let src = source.src();
+        let pipe = source.pipe(&paint);
+        let source = source.source();
 
         let antialias = self.vector_antialias;
         with_canvas!(&mut self.canvas, |b| {
-            fill_device_path(b, &clip, path, &pipe, &src, flatness, antialias, rule);
+            let pipe = pipe.at();
+            source.paint(b, |b, src| {
+                fill_device_path(b, &clip, path, &pipe, src, flatness, antialias, rule);
+            });
         });
     }
 
@@ -633,19 +652,21 @@ impl PageRenderer<'_> {
                 )
             },
         );
-        let mut pipe = paint.pipe();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
             transfer.as_deref(),
-            &mut pipe,
         );
-        let src = source.src();
+        let pipe = source.pipe(&paint);
+        let source = source.source();
 
-        with_canvas!(&mut self.canvas, |b| stroke(
-            b, &clip, path, &pipe, &src, matrix, &params
-        ));
+        with_canvas!(&mut self.canvas, |b| {
+            let pipe = pipe.at();
+            source.paint(b, |b, src| {
+                stroke(b, &clip, path, &pipe, src, matrix, &params);
+            });
+        });
     }
 }
 
@@ -664,12 +685,12 @@ pub(super) struct FillRule {
     clippy::too_many_arguments,
     reason = "the destination, clip, geometry, compositing state and rasterisation options are independent inputs"
 )]
-pub(super) fn fill_device_path<P: color::Pixel<Sample = u8>>(
+pub(super) fn fill_device_path<P: color::Pixel>(
     bitmap: &mut raster::Bitmap<P>,
     clip: &raster::Clip,
     path: &raster::path::Path,
-    pipe: &PipeState<'_>,
-    src: &PipeSrc<'_>,
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
     flatness: f64,
     antialias: bool,
     rule: FillRule,
@@ -724,43 +745,53 @@ impl StrokeShape {
 struct PaintSource<'a> {
     /// The tiling pattern, if the paint has one.
     pattern: Option<CanvasPattern<'a>>,
-    /// The solid colour's bytes for the canvas.
-    solid: &'a [u8],
+    /// The solid colour.
+    solid: &'a RasterColor,
+    /// The transfer function the pipe applies to the pattern's colours.
+    pipe_transfer: Option<&'a Transfer>,
 }
 
 impl<'a> PaintSource<'a> {
     /// The source of a paint of `tiled`, or else of `solid`, on a canvas of
     /// `kind`.  `solid` is already mapped through the transfer function on
-    /// either canvas.  `transfer` applies to the pattern's colours only:
-    /// `pipe` takes its tables on an RGB canvas, the pattern applies it
+    /// every canvas.  `transfer` applies to the pattern's colours only:
+    /// the pipe takes its tables on an RGB canvas, the pattern applies it
     /// before conversion on an ink canvas; a tile of ink maps its ink.
     fn new(
         kind: CanvasKind,
         tiled: Option<&'a Tile>,
         solid: &'a RasterColor,
         transfer: Option<&'a Transfer>,
-        pipe: &mut PipeState<'a>,
     ) -> Self {
-        if let Some(set) = tiled.and_then(|_| CanvasPattern::pipe_transfer(kind, transfer)) {
-            pipe.transfer = set;
-        }
         Self {
             pattern: tiled.map(|tile| match tile {
                 Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, transfer),
+                Tile::Rgb16(p) => CanvasPattern::Rgb16(p),
                 Tile::Ink { pattern, channels } => {
                     CanvasPattern::ink(pattern, transfer, channels.carries)
                 }
             }),
-            solid: solid.bytes_for(kind.mode()),
+            solid,
+            pipe_transfer: tiled.and_then(|_| CanvasPattern::pipe_transfer(kind, transfer)),
         }
     }
 
-    /// The source as the pipe takes it.
-    fn src(&self) -> PipeSrc<'_> {
-        self.pattern.as_ref().map_or_else(
-            || PipeSrc::Solid(self.solid),
-            |p| PipeSrc::Pattern(p.as_dyn()),
-        )
+    /// The pipe of `paint` for the source.
+    const fn pipe<'p>(&self, paint: &'p PaintParams) -> CanvasPipe<'p>
+    where
+        'a: 'p,
+    {
+        CanvasPipe {
+            paint,
+            transfer: self.pipe_transfer,
+        }
+    }
+
+    /// The source as a canvas of any depth takes it.
+    fn source(&self) -> CanvasSource<'_> {
+        self.pattern
+            .as_ref()
+            .map_or(CanvasSource::Solid(self.solid), CanvasSource::Pattern)
     }
 }
 

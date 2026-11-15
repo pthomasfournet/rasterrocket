@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use color::Rgb8;
-use pdf_interp::renderer::CanvasBuffers;
+use color::{Rgb8, SampleDepth};
+use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas};
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
@@ -312,10 +312,11 @@ pub(crate) fn render_page_rgb_with_geom(
     check_strict_images(session, renderer.image_failures())?;
     log_failures(page_num, renderer.image_failures());
 
-    let (bitmap, mut diag, spare) = renderer
+    let (canvas, mut diag, spare) = renderer
         .try_finish_keeping(params.transparent_background)
         .map_err(allocation_failed)?;
     *buffers = spare;
+    let bitmap = rgb8(canvas)?;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     #[cfg(feature = "vulkan")]
@@ -323,6 +324,22 @@ pub(crate) fn render_page_rgb_with_geom(
         diag.device_page = device_page;
     }
     Ok((bitmap, diag))
+}
+
+/// The 8-bit bitmap of `canvas`, rendered at 8 bits.
+///
+/// # Errors
+///
+/// [`RasterError::InvalidOptions`] for a 16-bit bitmap: the renderer
+/// returns a bitmap of the depth it is asked for, and these renders ask
+/// for 8 bits.
+pub(crate) fn rgb8(canvas: FinishedCanvas) -> Result<Bitmap<Rgb8>, RasterError> {
+    match canvas {
+        FinishedCanvas::Rgb8(bitmap) => Ok(bitmap),
+        FinishedCanvas::Rgb16(_) => Err(RasterError::InvalidOptions(
+            "a 16-bit page where an 8-bit one was rendered".to_owned(),
+        )),
+    }
 }
 
 /// The error of a render that `renderer` stopped early: cancelled, out of
@@ -480,6 +497,7 @@ impl<'a> PageJob<'a> {
             self.page_id,
             self.group,
             self.ink,
+            SampleDepth::Eight,
             buffers,
         )
         .map_err(allocation_failed)?;

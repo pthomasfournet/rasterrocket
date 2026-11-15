@@ -1,40 +1,44 @@
 //! The page canvas: the bitmap a page is painted on, of RGB or ink pixels.
 //!
-//! An RGB canvas holds sRGB bytes, `0xFF` being paper white.  An ink canvas
+//! An RGB canvas holds sRGB samples of 8 or 16 bits, full intensity being
+//! paper white.  An ink canvas
 //! holds [`DeviceN8`] pixels, the amounts `[C, M, Y, K, S0, S1, S2, S3]` of
 //! four process and four spot inks, `0` being no ink, so that paper white
 //! is all zeros; it is converted to sRGB when the page is finished.
 //!
 //! The raster primitives are generic over the pixel type.  [`with_canvas!`]
-//! dispatches one call to the bitmap of either kind, so a paint is written
-//! once.  The sources the renderer builds in sRGB — shadings, tiling cells,
-//! image samples, mesh triangles — reach an ink canvas through
-//! [`InkPattern`], which converts each span to ink.
+//! dispatches one call to the bitmap of any kind, so a paint is written
+//! once; its pipe and source are taken at the canvas's depth (see
+//! [`CanvasPipe`], [`CanvasPattern::at`]).  The sources the renderer builds
+//! in sRGB — shadings, tiling cells, image samples, mesh triangles — reach
+//! an ink canvas through [`InkPattern`], which converts each span to ink.
 
 use std::cell::RefCell;
 
 use color::cmyk::{SpotLut, ink_to_rgb_row, rgb_to_ink};
-use color::{DeviceN8, Pixel, PixelMode, Rgb8};
+use color::{DeviceN8, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth};
 use raster::clip::Clip;
-use raster::pipe::{
-    ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, TransferSet, render_bitmap_span,
-};
+use raster::pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
-use raster::transparency::{Backdrop, GroupBitmap, GroupParams, begin_group, paint_group};
+use raster::transparency::{GroupBitmap, GroupParams, begin_group, paint_group};
 use raster::{Bitmap, BitmapBuffers};
 
 use super::super::color::PROCESS_CHANNELS;
+use super::depth::{CanvasBackdrop, CanvasSample, SampleVec, SourcePattern};
+use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use super::{CanvasBuffers, PageRenderer};
 use crate::resources::transfer::Transfer;
 
-/// Run `$body` with `$b` bound to the bitmap of `$canvas`, of either pixel
+/// Run `$body` with `$b` bound to the bitmap of `$canvas`, of any pixel
 /// type: `with_canvas!(&mut self.canvas, |b| fill(b, ..))` binds `b` as
-/// `&mut Bitmap<Rgb8>` in one arm and `&mut Bitmap<DeviceN8>` in the other.
+/// `&mut Bitmap<Rgb8>`, `&mut Bitmap<Rgb16>` and `&mut Bitmap<DeviceN8>`
+/// in turn, so `$body` is written once over the pixel type.
 macro_rules! with_canvas {
     ($canvas:expr, |$b:ident| $body:expr) => {
         match $canvas {
             $crate::renderer::page::canvas::PageCanvas::Rgb($b) => $body,
+            $crate::renderer::page::canvas::PageCanvas::Rgb16($b) => $body,
             $crate::renderer::page::canvas::PageCanvas::Ink($b) => $body,
         }
     };
@@ -42,10 +46,12 @@ macro_rules! with_canvas {
 pub(super) use with_canvas;
 
 /// The pixel type of a [`PageCanvas`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum CanvasKind {
     /// sRGB, three bytes per pixel.
     Rgb,
+    /// sRGB, three 16-bit samples per pixel.
+    Rgb16,
     /// Process and spot ink amounts, eight bytes per pixel.
     Ink,
 }
@@ -55,7 +61,29 @@ impl CanvasKind {
     pub(super) const fn mode(self) -> PixelMode {
         match self {
             Self::Rgb => PixelMode::Rgb8,
+            Self::Rgb16 => PixelMode::Rgb16,
             Self::Ink => PixelMode::DeviceN8,
+        }
+    }
+
+    /// The sRGB canvas of samples of `depth`.
+    pub(super) const fn rgb(depth: SampleDepth) -> Self {
+        match depth {
+            SampleDepth::Eight => Self::Rgb,
+            SampleDepth::Sixteen => Self::Rgb16,
+        }
+    }
+
+    /// Whether the canvas holds ink.
+    pub(super) const fn is_ink(self) -> bool {
+        matches!(self, Self::Ink)
+    }
+
+    /// The depth of the canvas's samples.
+    pub(super) const fn depth(self) -> SampleDepth {
+        match self {
+            Self::Rgb | Self::Ink => SampleDepth::Eight,
+            Self::Rgb16 => SampleDepth::Sixteen,
         }
     }
 }
@@ -64,26 +92,76 @@ impl CanvasKind {
 pub(super) enum PageCanvas {
     /// sRGB pixels.
     Rgb(Bitmap<Rgb8>),
+    /// sRGB pixels of 16-bit samples.
+    Rgb16(Bitmap<Rgb16>),
     /// Ink pixels.
     Ink(Bitmap<DeviceN8>),
 }
 
-/// The value of every channel of paper white in pixels of type `P`.
-fn paper<P: Pixel>() -> u8 {
-    if P::MODE == PixelMode::DeviceN8 {
-        0
-    } else {
-        u8::MAX
+/// A finished page: the canvas as sRGB pixels at its depth.
+pub enum FinishedCanvas {
+    /// 8-bit sRGB.
+    Rgb8(Bitmap<Rgb8>),
+    /// 16-bit sRGB.
+    Rgb16(Bitmap<Rgb16>),
+}
+
+impl std::fmt::Debug for FinishedCanvas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (width, height) = self.dims();
+        f.debug_struct("FinishedCanvas")
+            .field("depth", &self.depth())
+            .field("width", &width)
+            .field("height", &height)
+            .finish_non_exhaustive()
     }
 }
 
-/// The byte every channel of a fresh canvas of `kind` holds: paper white
-/// for an opaque RGB canvas, 0 (transparent, or no ink) otherwise.
-const fn initial_fill(kind: CanvasKind, alpha: bool) -> u8 {
-    if matches!(kind, CanvasKind::Rgb) && !alpha {
-        u8::MAX
+impl FinishedCanvas {
+    /// The bitmap's `(width, height)` in pixels.
+    #[must_use]
+    pub const fn dims(&self) -> (u32, u32) {
+        match self {
+            Self::Rgb8(b) => (b.width, b.height),
+            Self::Rgb16(b) => (b.width, b.height),
+        }
+    }
+
+    /// The depth of the bitmap's samples.
+    #[must_use]
+    pub const fn depth(&self) -> SampleDepth {
+        match self {
+            Self::Rgb8(_) => SampleDepth::Eight,
+            Self::Rgb16(_) => SampleDepth::Sixteen,
+        }
+    }
+
+    /// Set the colour of every pixel whose alpha is 0 to 0 (see
+    /// [`zero_transparent_colour`]).
+    pub(super) fn zero_transparent_colour(&mut self) {
+        match self {
+            Self::Rgb8(b) => zero_transparent_colour(b),
+            Self::Rgb16(b) => zero_transparent_colour(b),
+        }
+    }
+}
+
+/// The value of every channel of paper white in pixels of type `P`.
+fn paper<P: Pixel>() -> P::Sample {
+    if P::MODE == PixelMode::DeviceN8 {
+        P::Sample::default()
     } else {
-        0
+        P::Sample::MAX
+    }
+}
+
+/// The sample every channel of a fresh bitmap of pixels `P` holds: paper
+/// white for an opaque bitmap, 0 (transparent) otherwise.
+fn initial_fill<P: Pixel>(alpha: bool) -> P::Sample {
+    if alpha {
+        P::Sample::default()
+    } else {
+        paper::<P>()
     }
 }
 
@@ -123,26 +201,31 @@ impl PageCanvas {
         height: u32,
         alpha: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
-        Self::try_new_in(kind, width, height, alpha, BitmapBuffers::default())
+        Self::try_new_in(kind, width, height, alpha, &mut CanvasBuffers::default())
     }
 
-    /// [`Self::try_new`] built in `buffers`
-    /// ([`Bitmap::try_new_filled_in`]).
+    /// [`Self::try_new`] built in the buffers of `buffers` for `kind`
+    /// ([`Bitmap::try_new_filled_in`]), which are taken from it.
     pub(super) fn try_new_in(
         kind: CanvasKind,
         width: u32,
         height: u32,
         alpha: bool,
-        buffers: BitmapBuffers,
+        buffers: &mut CanvasBuffers,
     ) -> Result<Self, raster::BitmapAllocError> {
-        let fill = initial_fill(kind, alpha);
+        fn bitmap<P: Pixel>(
+            held: &mut BitmapBuffers<P::Sample>,
+            width: u32,
+            height: u32,
+            alpha: bool,
+        ) -> Result<Bitmap<P>, raster::BitmapAllocError> {
+            let fill = initial_fill::<P>(alpha);
+            Bitmap::try_new_filled_in(held.take_for(alpha), width, height, 1, alpha, fill)
+        }
         Ok(match kind {
-            CanvasKind::Rgb => Self::Rgb(Bitmap::try_new_filled_in(
-                buffers, width, height, 1, alpha, fill,
-            )?),
-            CanvasKind::Ink => Self::Ink(Bitmap::try_new_filled_in(
-                buffers, width, height, 1, alpha, fill,
-            )?),
+            CanvasKind::Rgb => Self::Rgb(bitmap(&mut buffers.rgb, width, height, alpha)?),
+            CanvasKind::Rgb16 => Self::Rgb16(bitmap(&mut buffers.rgb16, width, height, alpha)?),
+            CanvasKind::Ink => Self::Ink(bitmap(&mut buffers.ink, width, height, alpha)?),
         })
     }
 
@@ -150,6 +233,7 @@ impl PageCanvas {
     pub(super) const fn kind(&self) -> CanvasKind {
         match self {
             Self::Rgb(_) => CanvasKind::Rgb,
+            Self::Rgb16(_) => CanvasKind::Rgb16,
             Self::Ink(_) => CanvasKind::Ink,
         }
     }
@@ -164,33 +248,36 @@ impl PageCanvas {
         with_canvas!(self, |b| b.has_alpha())
     }
 
-    /// The canvas as sRGB pixels, keeping its alpha plane.  Ink converts
-    /// through [`ink_to_rgb_row`] with the spot colourants `spots`.
-    pub(super) fn into_rgb(self, spots: &[Option<&SpotLut>; 4]) -> Bitmap<Rgb8> {
+    /// The canvas as sRGB pixels at its depth, keeping its alpha plane.
+    /// Ink converts through [`ink_to_rgb_row`] with the spot colourants
+    /// `spots`.
+    pub(super) fn into_finished(self, spots: &[Option<&SpotLut>; 4]) -> FinishedCanvas {
         match self {
-            Self::Rgb(bitmap) => bitmap,
+            Self::Rgb(bitmap) => FinishedCanvas::Rgb8(bitmap),
+            Self::Rgb16(bitmap) => FinishedCanvas::Rgb16(bitmap),
             Self::Ink(ink) => {
                 let mut rgb = Bitmap::<Rgb8>::new(ink.width, ink.height, 1, ink.has_alpha());
                 ink_into_rgb(&ink, spots, &mut rgb);
-                rgb
+                FinishedCanvas::Rgb8(rgb)
             }
         }
     }
 
-    /// [`Self::into_rgb`] that reports an RGB bitmap the allocator refuses
-    /// as an error.
+    /// [`Self::into_finished`] that reports an RGB bitmap the allocator
+    /// refuses as an error.
     ///
     /// The RGB bitmap of an ink canvas is built in `buffers.rgb`
     /// ([`Bitmap::try_new_filled_in`]), and the ink canvas's storage is
     /// then reclaimed into `buffers.ink`; an RGB canvas is returned as it
     /// is and `buffers` are left as they are.
-    pub(super) fn try_into_rgb_in(
+    pub(super) fn try_into_finished_in(
         self,
         spots: &[Option<&SpotLut>; 4],
         buffers: &mut CanvasBuffers,
-    ) -> Result<Bitmap<Rgb8>, raster::BitmapAllocError> {
+    ) -> Result<FinishedCanvas, raster::BitmapAllocError> {
         match self {
-            Self::Rgb(bitmap) => Ok(bitmap),
+            Self::Rgb(bitmap) => Ok(FinishedCanvas::Rgb8(bitmap)),
+            Self::Rgb16(bitmap) => Ok(FinishedCanvas::Rgb16(bitmap)),
             Self::Ink(ink) => {
                 let mut rgb = Bitmap::<Rgb8>::try_new_filled_in(
                     buffers.rgb.take_for(ink.has_alpha()),
@@ -202,16 +289,32 @@ impl PageCanvas {
                 )?;
                 ink_into_rgb(&ink, spots, &mut rgb);
                 buffers.ink.reclaim(ink);
-                Ok(rgb)
+                Ok(FinishedCanvas::Rgb8(rgb))
             }
         }
     }
 
     /// Composite the canvas, a page group with an alpha plane, onto opaque
-    /// paper in place (see [`composite_onto_white`]), and return the alpha
-    /// plane removed.
-    pub(super) fn composite_onto_white(&mut self) -> Option<Vec<u8>> {
-        with_canvas!(self, |b| composite_onto_white(b))
+    /// paper in place (see [`composite_onto_white`]), the alpha plane
+    /// removed into the buffers of `buffers` for its kind.
+    pub(super) fn composite_onto_white(&mut self, buffers: &mut CanvasBuffers) {
+        match self {
+            Self::Rgb(b) => {
+                if let Some(alpha) = composite_onto_white(b) {
+                    buffers.rgb.alpha = alpha;
+                }
+            }
+            Self::Rgb16(b) => {
+                if let Some(alpha) = composite_onto_white(b) {
+                    buffers.rgb16.alpha = alpha;
+                }
+            }
+            Self::Ink(b) => {
+                if let Some(alpha) = composite_onto_white(b) {
+                    buffers.ink.alpha = alpha;
+                }
+            }
+        }
     }
 
     /// Make the pixels of `region` transparent.
@@ -219,27 +322,46 @@ impl PageCanvas {
         with_canvas!(self, |b| clear(b, region));
     }
 
-    /// Fill one Gouraud-shaded triangle through `pipe`, clipped to `clip`.
-    /// The interpolated sRGB spans reach an ink canvas converted to ink and
-    /// mapped through `transfer`; on an RGB canvas `pipe` carries the
-    /// transfer function.
+    /// Fill one Gouraud-shaded triangle of 8-bit sRGB vertices through
+    /// `pipe`, clipped to `clip`.  The interpolated sRGB spans reach an ink
+    /// canvas converted to ink and mapped through `transfer`, and a 16-bit
+    /// canvas widened; on an RGB canvas `pipe` carries the transfer
+    /// function.
     pub(super) fn gouraud_triangle(
         &mut self,
         origin: (i32, i32),
         clip: &Clip,
-        pipe: &PipeState<'_>,
+        pipe: &CanvasPipe<'_>,
         transfer: Option<&Transfer>,
         tri: [GouraudVertex; 3],
     ) {
         match self {
-            Self::Rgb(b) => gouraud_triangle_fill(b, origin, clip, pipe, tri),
+            Self::Rgb(b) => gouraud_triangle_fill(b, origin, clip, &pipe.at(), tri),
+            Self::Rgb16(b) => {
+                let (width, height) = (b.width, b.height);
+                let pipe = pipe.at();
+                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
+                    let row = RowPattern { data: rgb };
+                    let source = SourcePattern::<u16>::of_u8(&row);
+                    render_bitmap_span::<Rgb16>(
+                        b,
+                        &pipe,
+                        &PipeSrc::Pattern(source.as_dyn()),
+                        None,
+                        x0,
+                        x1,
+                        y,
+                    );
+                });
+            }
             Self::Ink(b) => {
                 let (width, height) = (b.width, b.height);
+                let pipe = pipe.at();
                 gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
                     let row = RowPattern { data: rgb };
                     render_bitmap_span::<DeviceN8>(
                         b,
-                        pipe,
+                        &pipe,
                         &PipeSrc::Pattern(&InkPattern::new(&row, transfer)),
                         None,
                         x0,
@@ -251,6 +373,23 @@ impl PageCanvas {
         }
     }
 
+    /// Fill one Gouraud-shaded triangle of 16-bit sRGB vertices through
+    /// `pipe`, clipped to `clip`.  Nothing is painted on an 8-bit canvas,
+    /// whose shadings are resolved at 8 bits.
+    pub(super) fn gouraud_triangle16(
+        &mut self,
+        origin: (i32, i32),
+        clip: &Clip,
+        pipe: &CanvasPipe<'_>,
+        tri: [GouraudVertex<3, u16>; 3],
+    ) {
+        let Self::Rgb16(b) = self else {
+            debug_assert!(false, "a 16-bit triangle on an 8-bit canvas");
+            return;
+        };
+        gouraud_triangle_fill(b, origin, clip, &pipe.at(), tri);
+    }
+
     /// Fill one Gouraud-shaded triangle of ink vertices through `pipe`,
     /// clipped to `clip`, the ink of the channels `channels` mapped through
     /// `transfer`.  Nothing is painted on an RGB canvas, which takes no
@@ -259,7 +398,7 @@ impl PageCanvas {
         &mut self,
         origin: (i32, i32),
         clip: &Clip,
-        pipe: &PipeState<'_>,
+        pipe: &CanvasPipe<'_>,
         transfer: Option<&Transfer>,
         channels: ChannelMask,
         tri: [GouraudVertex<8>; 3],
@@ -269,11 +408,12 @@ impl PageCanvas {
             return;
         };
         let (width, height) = (b.width, b.height);
+        let pipe = pipe.at();
         gouraud_triangle_spans(width, height, origin, clip, tri, |ink, x0, x1, y| {
             let row = RowPattern { data: ink };
             render_bitmap_span::<DeviceN8>(
                 b,
-                pipe,
+                &pipe,
                 &PipeSrc::Pattern(&TransferredInk::new(&row, transfer, channels)),
                 None,
                 x0,
@@ -289,21 +429,36 @@ impl PageCanvas {
     ///
     /// # Panics
     ///
-    /// Panics if `bitmap` is of the other kind.
+    /// Panics if `bitmap` is of another kind.
     pub(super) fn begin_group(
         &self,
-        backdrop: Option<&Backdrop>,
+        backdrop: Option<&CanvasBackdrop>,
         clip: &Clip,
         params: GroupParams,
         bitmap: Self,
     ) -> CanvasGroup {
         match (self, bitmap) {
-            (Self::Rgb(p), Self::Rgb(b)) => {
-                CanvasGroup::Rgb(begin_group(p, backdrop, clip, params, b))
-            }
-            (Self::Ink(p), Self::Ink(b)) => {
-                CanvasGroup::Ink(begin_group(p, backdrop, clip, params, b))
-            }
+            (Self::Rgb(p), Self::Rgb(b)) => CanvasGroup::Rgb(begin_group(
+                p,
+                backdrop.and_then(u8::backdrop),
+                clip,
+                params,
+                b,
+            )),
+            (Self::Rgb16(p), Self::Rgb16(b)) => CanvasGroup::Rgb16(begin_group(
+                p,
+                backdrop.and_then(u16::backdrop),
+                clip,
+                params,
+                b,
+            )),
+            (Self::Ink(p), Self::Ink(b)) => CanvasGroup::Ink(begin_group(
+                p,
+                backdrop.and_then(u8::backdrop),
+                clip,
+                params,
+                b,
+            )),
             _ => panic!("begin_group: the group canvas differs in kind from its parent"),
         }
     }
@@ -312,10 +467,11 @@ impl PageCanvas {
     ///
     /// # Panics
     ///
-    /// Panics if `group` is of the other kind.
+    /// Panics if `group` is of another kind.
     pub(super) fn swap_group(&mut self, group: &mut CanvasGroup) {
         match (self, group) {
             (Self::Rgb(c), CanvasGroup::Rgb(g)) => std::mem::swap(c, &mut g.bitmap),
+            (Self::Rgb16(c), CanvasGroup::Rgb16(g)) => std::mem::swap(c, &mut g.bitmap),
             (Self::Ink(c), CanvasGroup::Ink(g)) => std::mem::swap(c, &mut g.bitmap),
             _ => panic!("swap_group: the group differs in kind from the canvas"),
         }
@@ -328,20 +484,23 @@ impl PageCanvas {
     ///
     /// # Panics
     ///
-    /// Panics if `group` is of the other kind.
-    pub(super) fn paint_group(&mut self, group: CanvasGroup, pipe: &PipeState<'_>) -> Self {
+    /// Panics if `group` is of another kind.
+    pub(super) fn paint_group(&mut self, group: CanvasGroup, pipe: &CanvasPipe<'_>) -> Self {
         match (self, group) {
-            (Self::Rgb(c), CanvasGroup::Rgb(g)) => Self::Rgb(paint_group(c, g, pipe).1),
-            (Self::Ink(c), CanvasGroup::Ink(g)) => Self::Ink(paint_group(c, g, pipe).1),
+            (Self::Rgb(c), CanvasGroup::Rgb(g)) => Self::Rgb(paint_group(c, g, &pipe.at()).1),
+            (Self::Rgb16(c), CanvasGroup::Rgb16(g)) => Self::Rgb16(paint_group(c, g, &pipe.at()).1),
+            (Self::Ink(c), CanvasGroup::Ink(g)) => Self::Ink(paint_group(c, g, &pipe.at()).1),
             _ => panic!("paint_group: the group differs in kind from the canvas"),
         }
     }
 }
 
-/// An open transparency group of either pixel type.
+/// An open transparency group of any pixel type.
 pub(super) enum CanvasGroup {
     /// A group over an RGB canvas.
     Rgb(GroupBitmap<Rgb8>),
+    /// A group over a 16-bit RGB canvas.
+    Rgb16(GroupBitmap<Rgb16>),
     /// A group over an ink canvas.
     Ink(GroupBitmap<DeviceN8>),
 }
@@ -351,16 +510,44 @@ impl CanvasGroup {
     pub(super) const fn region(&self) -> (u32, u32, u32, u32) {
         match self {
             Self::Rgb(g) => g.region(),
+            Self::Rgb16(g) => g.region(),
             Self::Ink(g) => g.region(),
         }
     }
 
     /// Take the backdrop of a non-isolated group.
-    pub(super) const fn take_backdrop(&mut self) -> Option<Backdrop> {
+    pub(super) fn take_backdrop(&mut self) -> Option<CanvasBackdrop> {
         match self {
-            Self::Rgb(g) => g.backdrop.take(),
-            Self::Ink(g) => g.backdrop.take(),
+            Self::Rgb(g) => g.backdrop.take().map(u8::into_backdrop),
+            Self::Rgb16(g) => g.backdrop.take().map(u16::into_backdrop),
+            Self::Ink(g) => g.backdrop.take().map(u8::into_backdrop),
         }
+    }
+}
+
+/// The compositing state of a paint as a canvas of any depth takes it: the
+/// paint's parameters, and the transfer function the pipe applies to a
+/// source that is not mapped beforehand (see [`CanvasPattern::pipe_transfer`]).
+#[derive(Clone, Copy)]
+pub(super) struct CanvasPipe<'a> {
+    /// The alpha, blend mode, channels and backdrop of the paint.
+    pub(super) paint: &'a PaintParams,
+    /// The transfer function the pipe applies, if any.
+    pub(super) transfer: Option<&'a Transfer>,
+}
+
+impl<'a> CanvasPipe<'a> {
+    /// The pipe of `paint`, with the identity transfer.
+    pub(super) const fn of(paint: &'a PaintParams) -> Self {
+        Self {
+            paint,
+            transfer: None,
+        }
+    }
+
+    /// The pipe for samples of type `S`.
+    pub(super) fn at<S: CanvasSample>(&self) -> PipeState<'a, S> {
+        self.paint.pipe_with(self.transfer)
     }
 }
 
@@ -368,21 +555,19 @@ impl CanvasGroup {
 /// in place: each channel becomes `c·α + w·(1 − α)`, `w` being paper white,
 /// and the alpha plane is removed and returned.  A bitmap without an alpha
 /// plane is left as it is, and the result is `None`.
-pub(super) fn composite_onto_white<P: Pixel<Sample = u8>>(
-    bitmap: &mut Bitmap<P>,
-) -> Option<Vec<u8>> {
+pub(super) fn composite_onto_white<P: Pixel>(bitmap: &mut Bitmap<P>) -> Option<Vec<P::Sample>> {
     let white = paper::<P>();
-    let n = bitmap.width as usize * P::BYTES;
+    let n = bitmap.width as usize * P::NCOMPS;
     for y in 0..bitmap.height {
         let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
             return None;
         };
-        for (px, &a) in row[..n].chunks_exact_mut(P::BYTES).zip(&*alpha_row) {
-            if a == u8::MAX {
+        for (px, &a) in row[..n].chunks_exact_mut(P::NCOMPS).zip(&*alpha_row) {
+            if a == P::Sample::MAX {
                 continue;
             }
             for c in px {
-                *c = blend_u8(*c, white, a);
+                *c = blend(*c, white, a);
             }
         }
     }
@@ -391,43 +576,39 @@ pub(super) fn composite_onto_white<P: Pixel<Sample = u8>>(
 
 /// Set the colour of every pixel of `bitmap` whose alpha is 0 to 0.  A
 /// bitmap without an alpha plane is left as it is.
-pub(super) fn zero_transparent_colour<P: Pixel<Sample = u8>>(bitmap: &mut Bitmap<P>) {
-    let n = bitmap.width as usize * P::BYTES;
+pub(super) fn zero_transparent_colour<P: Pixel>(bitmap: &mut Bitmap<P>) {
+    let n = bitmap.width as usize * P::NCOMPS;
     for y in 0..bitmap.height {
         let (row, Some(alpha_row)) = bitmap.row_and_alpha_mut(y) else {
             return;
         };
-        for (px, &a) in row[..n].chunks_exact_mut(P::BYTES).zip(&*alpha_row) {
-            if a == 0 {
-                px.fill(0);
+        for (px, &a) in row[..n].chunks_exact_mut(P::NCOMPS).zip(&*alpha_row) {
+            if a == P::Sample::default() {
+                px.fill(P::Sample::default());
             }
         }
     }
 }
 
-/// Porter-Duff source-over blend for a single 8-bit channel:
-/// `(src × alpha + dst × (255 − alpha)) / 255`.
+/// Porter-Duff source-over blend for a single channel:
+/// `(src × alpha + dst × (MAX − alpha)) / MAX`, the quotient truncated.
 ///
-/// The two weights sum to 255, so the sum of products is at most
-/// `255 × 255 = 65025`, within `u16`.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the sum of products is at most 255 × 255, so the quotient is at most 255"
-)]
-pub(super) fn blend_u8(src: u8, dst: u8, alpha: u8) -> u8 {
-    let (a, ia) = (u16::from(alpha), u16::from(u8::MAX - alpha));
-    ((u16::from(src) * a + u16::from(dst) * ia) / 255) as u8
+/// The two weights sum to `MAX`, so the sum of products is at most `MAX²`
+/// and the quotient at most `MAX`.
+pub(super) fn blend<S: Sample>(src: S, dst: S, alpha: S) -> S {
+    let ia = S::MAX.wide() - alpha.wide();
+    S::from_wide((src.wide() * alpha.wide() + dst.wide() * ia) / S::max_wide())
 }
 
 /// Make the pixels of `region` transparent: colour and alpha zero.
-pub(super) fn clear<P: Pixel<Sample = u8>>(bitmap: &mut Bitmap<P>, region: PixelRect) {
+pub(super) fn clear<P: Pixel>(bitmap: &mut Bitmap<P>, region: PixelRect) {
     let PixelRect { x0, y0, x1, y1 } = region;
-    let n = P::BYTES;
+    let n = P::NCOMPS;
     for y in y0..y1 {
         let (row, alpha) = bitmap.row_and_alpha_mut(y);
-        row[x0 as usize * n..x1 as usize * n].fill(0);
+        row[x0 as usize * n..x1 as usize * n].fill(P::Sample::default());
         if let Some(alpha) = alpha {
-            alpha[x0 as usize..x1 as usize].fill(0);
+            alpha[x0 as usize..x1 as usize].fill(P::Sample::default());
         }
     }
 }
@@ -439,33 +620,36 @@ pub(super) struct Snapshot {
     pub(super) x0: u32,
     pub(super) y0: u32,
     pub(super) x1: u32,
-    /// Bytes per pixel of the canvas.
-    pub(super) bpp: usize,
-    /// Colour bytes, `bpp` per pixel, row-major over the rectangle.
-    pub(super) color: Vec<u8>,
+    /// Samples per pixel of the canvas.
+    pub(super) ncomps: usize,
+    /// Colour samples, `ncomps` per pixel, row-major over the rectangle.
+    pub(super) color: SampleVec,
     /// Alpha per pixel, or `None` for a bitmap without an alpha plane.
-    pub(super) alpha: Option<Vec<u8>>,
+    pub(super) alpha: Option<SampleVec>,
 }
 
 impl Snapshot {
     /// Capture `region` of `bitmap`, or the error for a buffer of the
     /// region's size when the allocator refuses one.
-    pub(super) fn try_take<P: Pixel<Sample = u8>>(
+    pub(super) fn try_take<P: Pixel>(
         bitmap: &Bitmap<P>,
         region: PixelRect,
-    ) -> Result<Self, raster::BitmapAllocError> {
+    ) -> Result<Self, raster::BitmapAllocError>
+    where
+        P::Sample: CanvasSample,
+    {
         let PixelRect { x0, y0, x1, y1 } = region;
         let refused = |()| raster::BitmapAllocError {
             width: region.width(),
             height: region.height(),
         };
-        let bpp = P::BYTES;
-        let (cx0, cx1) = (x0 as usize * bpp, x1 as usize * bpp);
+        let ncomps = P::NCOMPS;
+        let (cx0, cx1) = (x0 as usize * ncomps, x1 as usize * ncomps);
         let (ax0, ax1) = (x0 as usize, x1 as usize);
         let rows = (y1 - y0) as usize;
-        let buffer = |bytes: Option<usize>| -> Result<Vec<u8>, ()> {
+        let buffer = |samples: Option<usize>| -> Result<Vec<P::Sample>, ()> {
             let mut v = Vec::new();
-            v.try_reserve_exact(bytes.ok_or(())?).map_err(|_| ())?;
+            v.try_reserve_exact(samples.ok_or(())?).map_err(|_| ())?;
             Ok(v)
         };
         let mut color = buffer((cx1 - cx0).checked_mul(rows)).map_err(refused)?;
@@ -475,7 +659,7 @@ impl Snapshot {
             None
         };
         for y in y0..y1 {
-            color.extend_from_slice(&bitmap.row_bytes(y)[cx0..cx1]);
+            color.extend_from_slice(&bitmap.row_samples(y)[cx0..cx1]);
             if let (Some(a), Some(row)) = (alpha.as_mut(), bitmap.alpha_row(y)) {
                 a.extend_from_slice(&row[ax0..ax1]);
             }
@@ -484,9 +668,9 @@ impl Snapshot {
             x0,
             y0,
             x1,
-            bpp,
-            color,
-            alpha,
+            ncomps,
+            color: P::Sample::into_samples(color),
+            alpha: alpha.map(P::Sample::into_samples),
         })
     }
 
@@ -495,24 +679,42 @@ impl Snapshot {
         (self.x1 - self.x0) as usize
     }
 
+    /// The colour and alpha samples, of the type of a canvas the snapshot
+    /// was taken from; `None` for a canvas of another depth.
+    pub(super) fn samples<S: CanvasSample>(&self) -> Option<(&[S], Option<&[S]>)> {
+        let color = S::samples(&self.color)?;
+        let alpha = match &self.alpha {
+            Some(a) => Some(S::samples(a)?),
+            None => None,
+        };
+        Some((color, alpha))
+    }
+
     /// Write the snapshot back over its rectangle of `bitmap`.
-    fn restore<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>) {
+    fn restore<P: Pixel>(self, bitmap: &mut Bitmap<P>)
+    where
+        P::Sample: CanvasSample,
+    {
         debug_assert_eq!(
-            self.bpp,
-            P::BYTES,
+            self.ncomps,
+            P::NCOMPS,
             "a snapshot restores onto its own canvas"
         );
-        let span = self.span();
-        let (cx0, ax0) = (self.x0 as usize * self.bpp, self.x0 as usize);
-        for (i, prior) in self.color.chunks_exact(span * self.bpp).enumerate() {
+        let Some((color, alpha)) = self.samples::<P::Sample>() else {
+            debug_assert!(false, "a snapshot restores onto a canvas of its depth");
+            return;
+        };
+        let (span, n) = (self.span(), self.ncomps);
+        let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);
+        for (i, prior) in color.chunks_exact(span * n).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
             )]
             let y = self.y0 + i as u32;
             let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
-            row[cx0..cx0 + span * self.bpp].copy_from_slice(prior);
-            if let (Some(prior_a), Some(alpha_row)) = (self.alpha.as_ref(), alpha_row) {
+            row[cx0..cx0 + span * n].copy_from_slice(prior);
+            if let (Some(prior_a), Some(alpha_row)) = (alpha, alpha_row) {
                 alpha_row[ax0..ax0 + span].copy_from_slice(&prior_a[i * span..(i + 1) * span]);
             }
         }
@@ -546,12 +748,14 @@ impl PageRenderer<'_> {
     ///
     /// # Panics
     ///
-    /// Panics on an ink canvas.
+    /// Panics on a canvas of another kind.
     #[cfg(test)]
     pub(super) fn rgb_canvas(&self) -> &Bitmap<Rgb8> {
         match &self.canvas {
             PageCanvas::Rgb(b) => b,
-            PageCanvas::Ink(_) => panic!("rgb_canvas: the canvas holds ink"),
+            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => {
+                panic!("rgb_canvas: the canvas is not 8-bit RGB")
+            }
         }
     }
 }
@@ -686,14 +890,16 @@ impl Pattern for TransferredInk<'_> {
     }
 }
 
-/// A pattern as a canvas of a given kind takes it.  A pattern of sRGB bytes
-/// is taken as it is on an RGB canvas, where the pipe applies the transfer
-/// function, and through [`InkPattern`], which applies it to the ink, on an
-/// ink canvas; a pattern of ink is taken on an ink canvas through
-/// [`TransferredInk`].
+/// A pattern as a canvas of a given kind takes it.  A pattern of sRGB is
+/// taken as it is on an RGB canvas, where the pipe applies the transfer
+/// function, widened on a 16-bit canvas, and through [`InkPattern`], which
+/// applies it to the ink, on an ink canvas; a pattern of ink is taken on an
+/// ink canvas through [`TransferredInk`].
 pub(super) enum CanvasPattern<'a> {
-    /// The pattern itself.
+    /// A pattern of 8-bit sRGB.
     Rgb(&'a dyn Pattern),
+    /// A pattern of 16-bit sRGB, for a 16-bit canvas.
+    Rgb16(&'a dyn Pattern<u16>),
     /// The pattern converted to ink.
     Ink(InkPattern<'a>),
     /// A pattern of ink.
@@ -701,15 +907,15 @@ pub(super) enum CanvasPattern<'a> {
 }
 
 impl<'a> CanvasPattern<'a> {
-    /// `pattern` for a canvas of `kind`, its colours mapped through
-    /// `transfer` on an ink canvas.
+    /// `pattern`, of 8-bit sRGB, for a canvas of `kind`, its colours mapped
+    /// through `transfer` on an ink canvas.
     pub(super) fn new(
         kind: CanvasKind,
         pattern: &'a dyn Pattern,
         transfer: Option<&'a Transfer>,
     ) -> Self {
         match kind {
-            CanvasKind::Rgb => Self::Rgb(pattern),
+            CanvasKind::Rgb | CanvasKind::Rgb16 => Self::Rgb(pattern),
             CanvasKind::Ink => Self::Ink(InkPattern::new(pattern, transfer)),
         }
     }
@@ -724,24 +930,59 @@ impl<'a> CanvasPattern<'a> {
         Self::Native(TransferredInk::new(pattern, transfer, channels))
     }
 
-    /// The transfer set `pipe` applies for a pattern on a canvas of `kind`:
-    /// the tables of `transfer` on an RGB canvas; on an ink canvas the
-    /// pattern itself applies them (see [`InkPattern`]), so none.
+    /// The transfer function `pipe` applies for a pattern on a canvas of
+    /// `kind`: `transfer` on an RGB canvas; on an ink canvas the pattern
+    /// itself applies it (see [`InkPattern`]), so none.
     pub(super) fn pipe_transfer(
         kind: CanvasKind,
         transfer: Option<&Transfer>,
-    ) -> Option<TransferSet<'_>> {
-        transfer
-            .filter(|_| kind == CanvasKind::Rgb)
-            .map(PageRenderer::transfer_set)
+    ) -> Option<&Transfer> {
+        transfer.filter(|_| !kind.is_ink())
     }
 
-    /// The pattern to hand to the pipe.
-    pub(super) fn as_dyn(&self) -> &dyn Pattern {
+    /// The pattern as a canvas of samples of type `S` takes it; `None` for
+    /// a pattern of 16-bit samples on an 8-bit canvas, which is never made
+    /// for one.
+    pub(super) fn at<S: CanvasSample>(&self) -> Option<SourcePattern<'_, S>> {
         match self {
-            Self::Rgb(p) => *p,
-            Self::Ink(p) => p,
-            Self::Native(p) => p,
+            Self::Rgb(p) => Some(SourcePattern::of_u8(*p)),
+            Self::Rgb16(p) => S::pattern_u16(*p).map(SourcePattern::Native),
+            Self::Ink(p) => Some(SourcePattern::of_u8(p)),
+            Self::Native(p) => Some(SourcePattern::of_u8(p)),
+        }
+    }
+}
+
+/// What a paint composites, as a canvas of any depth takes it: a solid
+/// colour or a pattern.
+#[derive(Clone, Copy)]
+pub(super) enum CanvasSource<'a> {
+    /// A solid colour, already mapped through the transfer function.
+    Solid(&'a super::super::color::RasterColor),
+    /// A pattern.
+    Pattern(&'a CanvasPattern<'a>),
+}
+
+impl CanvasSource<'_> {
+    /// Run `paint` on `bitmap` with the source as the pipe takes it on a
+    /// canvas of pixels `P`; nothing runs for a pattern the canvas cannot
+    /// take (see [`CanvasPattern::at`]).
+    pub(super) fn paint<P: Pixel>(
+        self,
+        bitmap: &mut Bitmap<P>,
+        paint: impl FnOnce(&mut Bitmap<P>, &PipeSrc<'_, P::Sample>),
+    ) where
+        P::Sample: CanvasSample,
+    {
+        match self {
+            Self::Solid(colour) => {
+                paint(bitmap, &PipeSrc::Solid(P::Sample::solid(colour, P::MODE)));
+            }
+            Self::Pattern(pattern) => {
+                if let Some(source) = pattern.at::<P::Sample>() {
+                    paint(bitmap, &PipeSrc::Pattern(source.as_dyn()));
+                }
+            }
         }
     }
 }
@@ -750,21 +991,28 @@ impl<'a> CanvasPattern<'a> {
 mod tests {
     use super::*;
 
+    /// The 8-bit RGB bitmap of a finished canvas.
+    fn rgb8(canvas: PageCanvas) -> Bitmap<Rgb8> {
+        match canvas.into_finished(&[None; 4]) {
+            FinishedCanvas::Rgb8(b) => b,
+            FinishedCanvas::Rgb16(_) => panic!("an 8-bit canvas"),
+        }
+    }
+
     #[test]
     fn a_fresh_canvas_is_paper_white_or_transparent() {
-        let rgb = PageCanvas::new(CanvasKind::Rgb, 2, 1, false).into_rgb(&[None; 4]);
+        let rgb = rgb8(PageCanvas::new(CanvasKind::Rgb, 2, 1, false));
         assert!(rgb.data().iter().all(|&v| v == u8::MAX));
+        let PageCanvas::Rgb16(wide) = PageCanvas::new(CanvasKind::Rgb16, 2, 1, false) else {
+            panic!("a 16-bit canvas");
+        };
+        assert!(wide.data().iter().all(|&v| v == u16::MAX));
         let ink = PageCanvas::new(CanvasKind::Ink, 2, 1, false);
         let PageCanvas::Ink(bitmap) = &ink else {
             panic!("an ink canvas");
         };
         assert!(bitmap.data().iter().all(|&v| v == 0), "white is no ink");
-        assert!(
-            ink.into_rgb(&[None; 4])
-                .data()
-                .iter()
-                .all(|&v| v == u8::MAX)
-        );
+        assert!(rgb8(ink).data().iter().all(|&v| v == u8::MAX));
         let PageCanvas::Ink(group) = PageCanvas::new(CanvasKind::Ink, 2, 1, true) else {
             panic!("an ink canvas");
         };
@@ -776,6 +1024,8 @@ mod tests {
         for (kind, alpha) in [
             (CanvasKind::Rgb, false),
             (CanvasKind::Rgb, true),
+            (CanvasKind::Rgb16, false),
+            (CanvasKind::Rgb16, true),
             (CanvasKind::Ink, false),
             (CanvasKind::Ink, true),
         ] {
@@ -783,7 +1033,7 @@ mod tests {
             let b = PageCanvas::try_new(kind, 3, 2, alpha).unwrap();
             assert_eq!(a.kind(), b.kind());
             assert_eq!(a.has_alpha(), b.has_alpha());
-            let bytes = |c: &PageCanvas| with_canvas!(c, |b| b.data().to_vec());
+            let bytes = |c: &PageCanvas| with_canvas!(c, |b| b.row_bytes(0).to_vec());
             assert_eq!(bytes(&a), bytes(&b), "{kind:?} alpha {alpha}");
         }
         // 36 PB of ink: representable, but no allocator grants it.
@@ -798,7 +1048,9 @@ mod tests {
         };
         bitmap.row_bytes_mut(0)[3] = 200;
         bitmap.alpha_plane_mut().unwrap()[0] = 128;
-        assert_eq!(canvas.composite_onto_white(), Some(vec![128]));
+        let mut buffers = CanvasBuffers::default();
+        canvas.composite_onto_white(&mut buffers);
+        assert_eq!(buffers.ink.alpha, vec![128]);
         assert!(!canvas.has_alpha());
         let PageCanvas::Ink(bitmap) = &canvas else {
             panic!("an ink canvas");

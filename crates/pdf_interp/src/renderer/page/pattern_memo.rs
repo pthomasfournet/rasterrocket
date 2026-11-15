@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use color::{DeviceN8, Pixel, Rgb8};
+use color::{DeviceN8, Pixel, Rgb8, Rgb16};
 use pdf::ObjectId;
 use raster::{Bitmap, CellPhase};
 
@@ -48,8 +48,8 @@ pub(super) struct PlacedKey {
     canvas: [u64; 2],
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
-    /// Whether the object is resolved for an ink canvas.
-    ink: bool,
+    /// The canvas the object is resolved for.
+    kind: CanvasKind,
 }
 
 impl PlacedKey {
@@ -67,7 +67,7 @@ impl PlacedKey {
             matrix: matrix.map(f64::to_bits),
             canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
             defaults,
-            ink: kind == CanvasKind::Ink,
+            kind,
         }
     }
 }
@@ -80,8 +80,8 @@ pub(super) struct RasterKey {
     tint: Option<RasterColor>,
     context: Option<ResourceIdentity>,
     phase: CellPhase,
-    /// Whether the cell is rasterised in ink, for an ink canvas.
-    ink: bool,
+    /// The canvas the cell is rasterised for.
+    kind: CanvasKind,
 }
 
 impl RasterKey {
@@ -101,7 +101,7 @@ impl RasterKey {
             tint: tint.cloned(),
             context,
             phase: (0, 0),
-            ink: kind == CanvasKind::Ink,
+            kind,
         }
     }
 
@@ -127,6 +127,11 @@ pub(super) enum CellRaster {
     Mean([u8; 3], u8),
     /// The cell bitmap, composited at every lattice point.
     Cell(Rc<Bitmap<Rgb8>>),
+    /// The mean 16-bit colour and coverage of a cell below one pixel in
+    /// area.
+    Mean16([u16; 3], u16),
+    /// The cell bitmap of 16-bit samples.
+    Cell16(Rc<Bitmap<Rgb16>>),
     /// The mean ink and coverage of a cell below one pixel in area, with
     /// the channels the cell's content painted and carried.
     InkMean([u8; 8], u8, InkChannels),
@@ -266,8 +271,9 @@ impl PatternMemo {
     /// kept stays.
     pub(super) fn insert_raster(&mut self, key: RasterKey, raster: CellRaster) {
         let bytes = match &raster {
-            CellRaster::Mean(..) | CellRaster::InkMean(..) => 0,
+            CellRaster::Mean(..) | CellRaster::Mean16(..) | CellRaster::InkMean(..) => 0,
             CellRaster::Cell(bitmap) => bitmap_bytes(bitmap),
+            CellRaster::Cell16(bitmap) => bitmap_bytes(bitmap),
             CellRaster::InkCell(bitmap, _) => bitmap_bytes(bitmap),
         };
         if !self.rasters.contains_key(&key) && self.budget.reserve(bytes) {
@@ -351,6 +357,7 @@ impl PageRenderer<'_> {
         Canvas {
             width: f64::from(self.page_width),
             height: f64::from(self.page_height),
+            depth: self.canvas.kind().depth(),
         }
     }
 
@@ -451,6 +458,7 @@ mod tests {
         let canvas = Canvas {
             width: 100.0,
             height: page_h,
+            depth: color::SampleDepth::Eight,
         };
         PlacedKey::new(
             ResourceKey::Object(id),

@@ -96,7 +96,7 @@ impl LabSpace {
 
     /// Convert `(L*, a*, b*)` to sRGB bytes, each component clipped to its
     /// range.  The caller guarantees `comps.len() == 3`.
-    pub(super) fn convert(&self, comps: &[f64]) -> [u8; 3] {
+    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64]) -> [S; 3] {
         let finite = |v: f64| if v.is_nan() { 0.0 } else { v };
         let l_star = finite(comps[0]).clamp(0.0, 100.0);
         let a_star = finite(comps[1]).clamp(self.range[0], self.range[1]);
@@ -112,7 +112,7 @@ impl LabSpace {
         let [r, g, b] = self
             .to_linear_srgb
             .map(|row| row[0].mul_add(xyz[0], row[1].mul_add(xyz[1], row[2] * xyz[2])));
-        color::convert::rgb_to_bytes(srgb_encode(r), srgb_encode(g), srgb_encode(b))
+        [r, g, b].map(|c| S::from_unit(srgb_encode(c)))
     }
 }
 

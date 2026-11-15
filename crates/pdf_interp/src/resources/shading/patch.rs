@@ -143,7 +143,7 @@ pub(super) fn corner_vertex<const N: usize, S: CornerSource<N>>(
     p: &Patch<S::Corner>,
     u: usize,
     v: usize,
-) -> GouraudVertex<N> {
+) -> GouraudVertex<N, S::Sample> {
     let row = u * 3;
     let col = v * 3;
     GouraudVertex {
@@ -162,7 +162,7 @@ pub(super) fn corner_vertex<const N: usize, S: CornerSource<N>>(
 pub(super) fn tessellate_patch<const N: usize, S: CornerSource<N>>(
     source: &S,
     patch: Patch<S::Corner>,
-    out: &mut TriangleSink<N>,
+    out: &mut TriangleSink<N, S::Sample>,
 ) {
     // Pre-allocate the work stack.  In a DFS traversal of a 4-ary tree of depth D,
     // at most 3*D+1 nodes are simultaneously live on the stack (3 siblings waiting
@@ -392,7 +392,7 @@ pub(super) fn decode_patch_mesh<const N: usize, S: CornerSource<N>>(
     source: &S,
     format: &VertexFormat<'_>,
     kind: PatchKind,
-    out: &mut TriangleSink<N>,
+    out: &mut TriangleSink<N, S::Sample>,
 ) {
     let shading_type = kind.shading_type();
     let Some(bpf) = parse_bits_per_flag(sh, shading_type) else {
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn color_delta_max_diff_is_one() {
-        let mut p = Patch::zero();
+        let mut p = Patch::<[u8; 3]>::zero();
         p.color[0][0] = [0, 0, 0];
         p.color[0][1] = [255, 0, 0];
         p.color[1][0] = [0, 0, 0];
@@ -586,12 +586,10 @@ mod tests {
             [128, 128, 128],
         );
         let doc = crate::test_helpers::empty_doc();
-        let source = super::super::mesh::DirectColors {
-            cs: super::super::ShadingCs {
-                doc: &doc,
-                space: &super::super::ColorSpace::DeviceRgb,
-            },
-        };
+        let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
+            doc: &doc,
+            space: &super::super::ColorSpace::DeviceRgb,
+        });
         let mut sink = TriangleSink::new();
         tessellate_patch(&source, p, &mut sink);
         assert_eq!(
@@ -615,12 +613,10 @@ mod tests {
             [0, 0, 255],
         );
         let doc = crate::test_helpers::empty_doc();
-        let source = super::super::mesh::DirectColors {
-            cs: super::super::ShadingCs {
-                doc: &doc,
-                space: &super::super::ColorSpace::DeviceRgb,
-            },
-        };
+        let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
+            doc: &doc,
+            space: &super::super::ColorSpace::DeviceRgb,
+        });
         let mut sink = TriangleSink::new();
         tessellate_patch(&source, p, &mut sink);
         assert_eq!(sink.finish().len(), 2);
@@ -735,12 +731,10 @@ mod tests {
         data.extend([128; 2]);
 
         let doc = crate::test_helpers::empty_doc();
-        let source = super::super::mesh::DirectColors {
-            cs: super::super::ShadingCs {
-                doc: &doc,
-                space: &super::super::ColorSpace::DeviceGray,
-            },
-        };
+        let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
+            doc: &doc,
+            space: &super::super::ColorSpace::DeviceGray,
+        });
         let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
         // page_h = 0: device y is the negated shading y.
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];

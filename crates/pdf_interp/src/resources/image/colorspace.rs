@@ -800,7 +800,7 @@ impl<'a> Decoded<'a> {
         if let Some(profile) = &self.profile {
             return match &**profile {
                 IccConversion::Shaper(ProfileConversion::Rgb(Some(shaper))) => {
-                    RgbConvert::Shaper(Arc::clone(shaper))
+                    RgbConvert::Shaper(Arc::clone(&shaper.shaper))
                 }
                 IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(profile)),
                 _ => RgbConvert::Identity,
@@ -819,7 +819,7 @@ impl<'a> Decoded<'a> {
                 };
                 match &*conv {
                     IccConversion::Shaper(ProfileConversion::Rgb(Some(shaper))) => {
-                        RgbConvert::Shaper(Arc::clone(shaper))
+                        RgbConvert::Shaper(Arc::clone(&shaper.shaper))
                     }
                     IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(&conv)),
                     IccConversion::Alternate(ColorSpace::Cal(cal)) => cal

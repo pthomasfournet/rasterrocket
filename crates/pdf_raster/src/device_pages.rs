@@ -21,7 +21,9 @@ use std::thread::JoinHandle;
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
-use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRenderer};
+use pdf_interp::renderer::{
+    CanvasBuffers, DevicePage, DeviceRecording, FinishedCanvas, PageRenderer,
+};
 
 use crate::RasterError;
 use crate::render::PageJob;
@@ -301,8 +303,11 @@ pub(crate) fn render<'a>(
     let fallback = renderer.take_device_fallback();
     let buffers = renderer.try_finish_keeping(false).map_or_else(
         |_| CanvasBuffers::default(),
-        |(bitmap, _, mut spare)| {
-            spare.rgb.reclaim(bitmap);
+        |(canvas, _, mut spare)| {
+            match canvas {
+                FinishedCanvas::Rgb8(bitmap) => spare.rgb.reclaim(bitmap),
+                FinishedCanvas::Rgb16(bitmap) => spare.rgb16.reclaim(bitmap),
+            }
             spare
         },
     );

@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use raster::clip::Clip;
 use raster::path::{Path, PathBuilder};
-use raster::pipe::{Pattern, PipeSrc, PipeState, Shifted};
+use raster::pipe::{Pattern, Shifted};
 use raster::shading::shaded_fill;
 use raster::stroke::{StrokeParams, stroke, stroke_outline};
 use raster::xpath::XPath;
 
-use super::canvas::{CanvasKind, CanvasPattern, with_canvas};
+use super::canvas::{CanvasKind, CanvasPattern, CanvasPipe, CanvasSource, with_canvas};
 use super::paint::{FillRule, PaintParams, fill_device_path};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -62,40 +62,59 @@ fn background(
 ) -> Option<RasterColor> {
     let bg = shading.background?;
     Some(match (kind, shading.background_ink) {
-        (CanvasKind::Rgb, _) => RasterColor::from_bytes(bg),
-        (CanvasKind::Ink, None) => RasterColor::from_bytes(bg).transferred(transfer),
+        (CanvasKind::Rgb | CanvasKind::Rgb16, _) => RasterColor::from_srgb(bg),
+        (CanvasKind::Ink, None) => RasterColor::from_srgb(bg).transferred(transfer),
         (CanvasKind::Ink, Some(ink)) => {
             RasterColor::with_ink(bg, ink, shading.paints).transferred(transfer)
         }
     })
 }
 
+/// The pattern of a smooth shading's colours, of the depth it was resolved
+/// at, read on a window of the page.
+enum WindowPattern<'a> {
+    /// 8-bit sRGB or ink.
+    U8(Shifted<'a, u8>),
+    /// 16-bit sRGB.
+    U16(Shifted<'a, u16>),
+}
+
 /// The pattern of a smooth shading's colours, resolved on the page's
 /// pixel grid, read on the window whose pixel `(0, 0)` is the page's pixel
 /// `origin`; `None` for a mesh.
-fn window_pattern(shading: &ResolvedShading, origin: (i32, i32)) -> Option<Shifted<'_>> {
+fn window_pattern(shading: &ResolvedShading, origin: (i32, i32)) -> Option<WindowPattern<'_>> {
     match &shading.result {
         ShadingResult::Pattern(p) | ShadingResult::InkPattern(p) => {
             let inner: &dyn Pattern = p.as_ref();
-            Some(Shifted { inner, origin })
+            Some(WindowPattern::U8(Shifted { inner, origin }))
         }
-        ShadingResult::Mesh(_) | ShadingResult::InkMesh(_) => None,
+        ShadingResult::Pattern16(p) => {
+            let inner: &dyn Pattern<u16> = p.as_ref();
+            Some(WindowPattern::U16(Shifted { inner, origin }))
+        }
+        ShadingResult::Mesh(_) | ShadingResult::Mesh16(_) | ShadingResult::InkMesh(_) => None,
     }
 }
 
 /// `window`, the [`window_pattern`] of `shading`, for a canvas of `kind`,
 /// its colours mapped through `transfer` on an ink canvas; `None` for
-/// colours of ink on an RGB canvas, which takes none.
+/// colours of ink on an RGB canvas, which takes none, and for 16-bit
+/// colours on an 8-bit canvas, which is never given them.
 fn smooth_pattern<'a>(
     kind: CanvasKind,
     shading: &ResolvedShading,
-    window: &'a Shifted<'a>,
+    window: &'a WindowPattern<'a>,
     transfer: Option<&'a Transfer>,
 ) -> Option<CanvasPattern<'a>> {
-    match (&shading.result, kind) {
-        (ShadingResult::Pattern(_), _) => Some(CanvasPattern::new(kind, window, transfer)),
-        (ShadingResult::InkPattern(_), CanvasKind::Ink) => {
+    match (window, &shading.result, kind) {
+        (WindowPattern::U8(window), ShadingResult::Pattern(_), _) => {
+            Some(CanvasPattern::new(kind, window, transfer))
+        }
+        (WindowPattern::U8(window), ShadingResult::InkPattern(_), CanvasKind::Ink) => {
             Some(CanvasPattern::ink(window, transfer, shading.carries()))
+        }
+        (WindowPattern::U16(window), ShadingResult::Pattern16(_), CanvasKind::Rgb16) => {
+            Some(CanvasPattern::Rgb16(window))
         }
         _ => None,
     }
@@ -115,12 +134,11 @@ impl ShadingPaint {
     /// function to the shading's colours on an RGB canvas.  On an ink
     /// canvas the shading's sources apply it before their conversion to
     /// ink.
-    fn pipe(&self, kind: CanvasKind) -> PipeState<'_> {
-        let mut pipe = self.paint.pipe();
-        if let Some(set) = CanvasPattern::pipe_transfer(kind, self.transfer.as_deref()) {
-            pipe.transfer = set;
+    fn pipe(&self, kind: CanvasKind) -> CanvasPipe<'_> {
+        CanvasPipe {
+            paint: &self.paint,
+            transfer: CanvasPattern::pipe_transfer(kind, self.transfer.as_deref()),
         }
-        pipe
     }
 }
 
@@ -162,7 +180,7 @@ impl PageRenderer<'_> {
         pattern: &ShadingPattern,
         stroke: bool,
         region: Option<PixelRect>,
-        paint: impl FnOnce(&mut Self, &PipeState<'_>, &ResolvedShading),
+        paint: impl FnOnce(&mut Self, &CanvasPipe<'_>, &ResolvedShading),
     ) {
         let ShadingPattern {
             shading,
@@ -217,7 +235,9 @@ impl PageRenderer<'_> {
         let region = PixelRect::of_clip(&clip, self.width, self.height);
         let kind = self.canvas.kind();
         self.paint_object(region, state.paint.alpha, |r| match &shading.result {
-            ShadingResult::Pattern(_) | ShadingResult::InkPattern(_) => {
+            ShadingResult::Pattern(_)
+            | ShadingResult::Pattern16(_)
+            | ShadingResult::InkPattern(_) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),
                     (clip.x_max, clip.y_min),
@@ -230,19 +250,25 @@ impl PageRenderer<'_> {
                 let Some(pattern) = smooth_pattern(kind, &shading, &window, transfer) else {
                     return;
                 };
-                with_canvas!(&mut r.canvas, |b| shaded_fill(
-                    b,
-                    &clip,
-                    &area,
-                    &pipe,
-                    pattern.as_dyn(),
-                    &DEVICE_MATRIX,
-                    flatness,
-                    true,
-                    false,
-                ));
+                with_canvas!(&mut r.canvas, |b| {
+                    let pipe = pipe.at();
+                    let Some(pattern) = pattern.at() else {
+                        return;
+                    };
+                    shaded_fill(
+                        b,
+                        &clip,
+                        &area,
+                        &pipe,
+                        pattern.as_dyn(),
+                        &DEVICE_MATRIX,
+                        flatness,
+                        true,
+                        false,
+                    );
+                });
             }
-            ShadingResult::Mesh(_) | ShadingResult::InkMesh(_) => {
+            ShadingResult::Mesh(_) | ShadingResult::Mesh16(_) | ShadingResult::InkMesh(_) => {
                 r.paint_mesh(&shading, &clip, &pipe, transfer);
             }
         });
@@ -255,25 +281,28 @@ impl PageRenderer<'_> {
         path: &Path,
         rule: FillRule,
         clip: Clip,
-        pipe: &PipeState<'_>,
+        pipe: &CanvasPipe<'_>,
         flatness: f64,
         shading: &ResolvedShading,
     ) {
         let antialias = self.vector_antialias;
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
-        let paint = |r: &mut Self, clip: &Clip, src: &PipeSrc<'_>| {
+        let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
             with_canvas!(&mut r.canvas, |b| {
-                fill_device_path(b, clip, path, pipe, src, flatness, antialias, rule);
+                let pipe = pipe.at();
+                source.paint(b, |b, src| {
+                    fill_device_path(b, clip, path, &pipe, src, flatness, antialias, rule);
+                });
             });
         };
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
-            paint(self, &clip, &PipeSrc::Solid(bg.bytes_for(kind.mode())));
+            paint(self, &clip, CanvasSource::Solid(&bg));
         }
         let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
         if let Some(window) = window_pattern(shading, self.page_origin()) {
             if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
-                paint(self, &clip, &PipeSrc::Pattern(pattern.as_dyn()));
+                paint(self, &clip, CanvasSource::Pattern(&pattern));
             }
             return;
         }
@@ -292,7 +321,7 @@ impl PageRenderer<'_> {
         &mut self,
         shading: &ResolvedShading,
         clip: &Clip,
-        pipe: &PipeState<'_>,
+        pipe: &CanvasPipe<'_>,
         transfer: Option<&Transfer>,
     ) {
         let origin = self.page_origin();
@@ -301,6 +330,11 @@ impl PageRenderer<'_> {
                 for tri in mesh.meeting(clip, origin) {
                     self.canvas
                         .gouraud_triangle(origin, clip, pipe, transfer, tri);
+                }
+            }
+            ShadingResult::Mesh16(mesh) => {
+                for tri in mesh.meeting(clip, origin) {
+                    self.canvas.gouraud_triangle16(origin, clip, pipe, tri);
                 }
             }
             ShadingResult::InkMesh(mesh) => {
@@ -315,7 +349,9 @@ impl PageRenderer<'_> {
                     );
                 }
             }
-            ShadingResult::Pattern(_) | ShadingResult::InkPattern(_) => {}
+            ShadingResult::Pattern(_)
+            | ShadingResult::Pattern16(_)
+            | ShadingResult::InkPattern(_) => {}
         }
     }
 
@@ -334,25 +370,27 @@ impl PageRenderer<'_> {
         matrix: &[f64; 6],
         params: &StrokeParams<'_>,
         clip: Clip,
-        pipe: &PipeState<'_>,
+        pipe: &CanvasPipe<'_>,
         flatness: f64,
         shading: &ResolvedShading,
     ) {
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
+        let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
+            with_canvas!(&mut r.canvas, |b| {
+                let pipe = pipe.at();
+                source.paint(b, |b, src| {
+                    stroke(b, clip, path, &pipe, src, matrix, params);
+                });
+            });
+        };
         if let Some(bg) = background(kind, shading, transfer.as_ref()) {
-            let src = PipeSrc::Solid(bg.bytes_for(kind.mode()));
-            with_canvas!(&mut self.canvas, |b| stroke(
-                b, &clip, path, pipe, &src, matrix, params
-            ));
+            paint(self, &clip, CanvasSource::Solid(&bg));
         }
         let clip = clip_to_bbox(clip, shading.bbox.map(|c| self.window_corners(c)), flatness);
         if let Some(window) = window_pattern(shading, self.page_origin()) {
             if let Some(pattern) = smooth_pattern(kind, shading, &window, transfer.as_deref()) {
-                let src = PipeSrc::Pattern(pattern.as_dyn());
-                with_canvas!(&mut self.canvas, |b| stroke(
-                    b, &clip, path, pipe, &src, matrix, params
-                ));
+                paint(self, &clip, CanvasSource::Pattern(&pattern));
             }
             return;
         }

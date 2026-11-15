@@ -22,6 +22,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use color::Sample;
 use moxcms::{ColorProfile, DataColorSpace, ToneReprCurve, Xyzd};
 use pdf::{Document, ObjectId};
 
@@ -222,15 +223,22 @@ fn is_identity(m: &Mat3) -> bool {
 
 // ── Evaluated conversions ─────────────────────────────────────────────────────
 
-/// 8-bit gray → 8-bit sRGB gray: `table[v] = encode(grayTRC(v / 255))`.
-#[derive(Debug, PartialEq, Eq)]
+/// 8-bit gray → 8-bit sRGB gray: `table[v] = encode(grayTRC(v / 255))`,
+/// with the curve itself for a conversion at another precision.
+#[derive(Debug, PartialEq)]
 pub(crate) struct GrayShaper {
     table: [u8; 256],
+    trc: ToneReprCurve,
 }
 
 impl GrayShaper {
     pub(super) const fn convert(&self, v: u8) -> u8 {
         self.table[v as usize]
+    }
+
+    /// `encode(grayTRC(v))` of the normalised gray `v`, computed directly.
+    fn convert_unit(&self, v: f64) -> f64 {
+        eval_trc(&self.trc, v).map_or(0.0, srgb_encode)
     }
 }
 
@@ -301,6 +309,35 @@ impl RgbShaper {
     }
 }
 
+/// An RGB matrix/TRC profile: its 8-bit shaper, and its tone curves and
+/// composite matrix for a conversion at another precision.
+#[derive(Debug, PartialEq)]
+pub(crate) struct RgbProfile {
+    /// The 8-bit evaluation.
+    pub(crate) shaper: Arc<RgbShaper>,
+    /// The red, green and blue tone curves.
+    trcs: [ToneReprCurve; 3],
+    /// PCS → linear sRGB composed with the profile's colorant matrix.
+    matrix: [[f32; 3]; 3],
+}
+
+impl RgbProfile {
+    /// `encode(matrix · (TRC_r(r), TRC_g(g), TRC_b(b)))` of the normalised
+    /// components `px`, computed directly: each curve evaluated at the
+    /// component, the matrix product in `f32` and the encoding of its
+    /// result, without the tables of the 8-bit evaluation.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a linear-light value needs no more than f32 precision"
+    )]
+    fn convert_unit(&self, px: [f64; 3]) -> [f64; 3] {
+        let [r, g, b] =
+            std::array::from_fn(|c| eval_trc(&self.trcs[c], px[c]).unwrap_or(0.0) as f32);
+        self.matrix
+            .map(|row| srgb_encode(f64::from(row[2].mul_add(b, row[0].mul_add(r, row[1] * g)))))
+    }
+}
+
 /// The evaluated form of one ICC profile for 8-bit input.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ProfileConversion {
@@ -309,7 +346,7 @@ pub(crate) enum ProfileConversion {
     /// A gray TRC profile; `None` when it equals the sRGB encoding at 8 bits.
     Gray(Option<Arc<GrayShaper>>),
     /// An RGB matrix/TRC profile; `None` when it equals sRGB at 8 bits.
-    Rgb(Option<Arc<RgbShaper>>),
+    Rgb(Option<Arc<RgbProfile>>),
 }
 
 impl ProfileConversion {
@@ -335,6 +372,34 @@ impl ProfileConversion {
         }
     }
 
+    /// [`Self::convert_components`] at the depth of `S`: at 8 bits through
+    /// the tables; at 16 bits the curves and matrix evaluated at the
+    /// components directly.  A profile equal to sRGB at 8 bits is the
+    /// identity at either depth.
+    pub(super) fn convert_components_at<S: Sample>(&self, comps: &[f64]) -> Option<[S; 3]> {
+        if S::DEPTH == color::SampleDepth::Eight {
+            return self
+                .convert_components(comps)
+                .map(|rgb| rgb.map(S::from_u8));
+        }
+        match (self, comps) {
+            (Self::Gray(shaper), &[v]) => {
+                let v = shaper.as_ref().map_or(v, |s| s.convert_unit(v));
+                Some([S::from_unit(v); 3])
+            }
+            (Self::Rgb(profile), &[r, g, b]) => {
+                let px = [r, g, b];
+                Some(
+                    profile
+                        .as_ref()
+                        .map_or(px, |p| p.convert_unit(px))
+                        .map(S::from_unit),
+                )
+            }
+            _ => None,
+        }
+    }
+
     /// Convert normalised components through the profile when it is a
     /// shaper profile of exactly `comps.len()` channels.
     ///
@@ -348,9 +413,9 @@ impl ProfileConversion {
                 let v = q(v);
                 Some([shaper.as_ref().map_or(v, |s| s.convert(v)); 3])
             }
-            (Self::Rgb(shaper), &[r, g, b]) => {
+            (Self::Rgb(profile), &[r, g, b]) => {
                 let px = [q(r), q(g), q(b)];
-                Some(shaper.as_ref().map_or(px, |s| s.convert(px)))
+                Some(profile.as_ref().map_or(px, |p| p.shaper.convert(px)))
             }
             _ => None,
         }
@@ -370,7 +435,10 @@ fn gray_conversion(trc: &ToneReprCurve) -> ProfileConversion {
     ProfileConversion::Gray(if is_identity_table(&table) {
         None
     } else {
-        Some(Arc::new(GrayShaper { table }))
+        Some(Arc::new(GrayShaper {
+            table,
+            trc: trc.clone(),
+        }))
     })
 }
 
@@ -389,7 +457,7 @@ fn rgb_conversion(p: &ColorProfile) -> ProfileConversion {
 }
 
 /// `Err` for an unsupported profile, `Ok(None)` for the identity.
-fn rgb_shaper(p: &ColorProfile) -> Result<Option<Arc<RgbShaper>>, ()> {
+fn rgb_shaper(p: &ColorProfile) -> Result<Option<Arc<RgbProfile>>, ()> {
     let (Some(rt), Some(gt), Some(bt)) = (&p.red_trc, &p.green_trc, &p.blue_trc) else {
         return Err(());
     };
@@ -417,7 +485,20 @@ fn rgb_shaper(p: &ColorProfile) -> Result<Option<Arc<RgbShaper>>, ()> {
             }
         }
     }
-    Ok(RgbShaper::from_linearisation(linear, &composite))
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "matrix coefficients need no more than f32 precision"
+    )]
+    let matrix = composite.map(|row| row.map(|v| v as f32));
+    Ok(
+        RgbShaper::from_linearisation(linear, &composite).map(|shaper| {
+            Arc::new(RgbProfile {
+                shaper,
+                trcs: trcs.map(Clone::clone),
+                matrix,
+            })
+        }),
+    )
 }
 
 impl RgbShaper {
@@ -601,11 +682,12 @@ mod tests {
     #[test]
     fn gamma_1_8_rgb_profile_lightens_mid_tones() {
         let bytes = profile_with(&ToneReprCurve::Lut(vec![GAMMA_1_8]));
-        let ProfileConversion::Rgb(Some(shaper)) = ProfileConversion::from_profile_bytes(&bytes)
+        let ProfileConversion::Rgb(Some(profile)) = ProfileConversion::from_profile_bytes(&bytes)
         else {
             panic!("gamma 1.8 on sRGB primaries is a per-channel shaper");
         };
-        assert!(matches!(*shaper, RgbShaper::PerChannel(_)));
+        let shaper = &profile.shaper;
+        assert!(matches!(**shaper, RgbShaper::PerChannel(_)));
         // encode((128/255)^1.8) = 0.5740 → 146.
         assert_eq!(shaper.convert([128, 128, 128]), [146, 146, 146]);
         assert_eq!(shaper.convert([0, 0, 0]), [0, 0, 0]);
@@ -618,11 +700,12 @@ mod tests {
         let mut p = ColorProfile::new_adobe_rgb();
         p.cicp = None;
         let bytes = p.encode().unwrap();
-        let ProfileConversion::Rgb(Some(shaper)) = ProfileConversion::from_profile_bytes(&bytes)
+        let ProfileConversion::Rgb(Some(profile)) = ProfileConversion::from_profile_bytes(&bytes)
         else {
             panic!("Adobe RGB needs a matrix");
         };
-        assert!(matches!(*shaper, RgbShaper::Matrix { .. }));
+        let shaper = &profile.shaper;
+        assert!(matches!(**shaper, RgbShaper::Matrix { .. }));
         // Neutrals stay neutral; saturated green leaves the sRGB gamut and
         // clips with red at zero.
         let [r, g, b] = shaper.convert([128, 128, 128]);
@@ -638,10 +721,11 @@ mod tests {
         let mut p = ColorProfile::new_adobe_rgb();
         p.cicp = None;
         let bytes = p.encode().unwrap();
-        let ProfileConversion::Rgb(Some(shaper)) = ProfileConversion::from_profile_bytes(&bytes)
+        let ProfileConversion::Rgb(Some(profile)) = ProfileConversion::from_profile_bytes(&bytes)
         else {
             panic!("Adobe RGB needs a matrix");
         };
+        let shaper = &profile.shaper;
         let src = ColorProfile::new_from_slice(&bytes).unwrap();
         let xform = src
             .create_transform_8bit(
@@ -718,10 +802,11 @@ mod tests {
     #[test]
     fn convert_in_place_matches_per_pixel() {
         let bytes = profile_with(&ToneReprCurve::Lut(vec![GAMMA_1_8]));
-        let ProfileConversion::Rgb(Some(shaper)) = ProfileConversion::from_profile_bytes(&bytes)
+        let ProfileConversion::Rgb(Some(profile)) = ProfileConversion::from_profile_bytes(&bytes)
         else {
             panic!("shaper expected");
         };
+        let shaper = &profile.shaper;
         let mut buf = vec![10, 20, 30, 128, 64, 200, 7];
         shaper.convert_in_place(&mut buf);
         assert_eq!(&buf[..3], &shaper.convert([10, 20, 30]));

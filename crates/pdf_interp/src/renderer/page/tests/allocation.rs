@@ -176,7 +176,9 @@ fn page_sized_coverage(
     let black = PageCanvas::Rgb(Bitmap::<Rgb8>::new(r.width, r.height, 1, false));
     let page = std::mem::replace(&mut r.canvas, black);
     r.stroke_within(path, line_width, Some(rect));
-    let canvas = std::mem::replace(&mut r.canvas, page).into_rgb(&[None; 4]);
+    let PageCanvas::Rgb(canvas) = std::mem::replace(&mut r.canvas, page) else {
+        panic!("an 8-bit RGB canvas");
+    };
     r.gstate.restore();
     let (cx0, cx1) = (rect.x0 as usize * 3, rect.x1 as usize * 3);
     (rect.y0..rect.y1)

@@ -13,7 +13,7 @@ use raster::types::BlendMode;
 use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform};
 use super::canvas::PageCanvas;
-use super::canvas::blend_u8;
+use super::canvas::blend;
 use super::image_blit::{ImageLenError, blend_rgb, check_image_bytes_len};
 use super::image_compositor::ImageCompositor;
 use super::paint::PaintParams;
@@ -587,14 +587,14 @@ fn image_rows_composite_like_single_samples() {
             let mut runs = make_base();
             compositor.paint_row(&mut runs, 0, 0, &colours, &shape);
             let mut single = make_base();
-            if let Some(pipe) = &compositor.pipe {
-                paint_row_per_pixel(&mut single, pipe, 0, &colours, &shape);
+            if let Some(paint) = compositor.paint {
+                paint_row_per_pixel(&mut single, &paint.pipe(), 0, &colours, &shape);
             } else {
                 let row = single.row_bytes_mut(0);
                 for (x, &c) in shape.iter().enumerate() {
                     if c != 0 {
                         let src = [colours[x * 3], colours[x * 3 + 1], colours[x * 3 + 2]];
-                        blend_rgb(&mut row[x * 3..x * 3 + 3], src, c);
+                        blend_rgb(&mut row[x * 3..x * 3 + 3], &src, c);
                     }
                 }
             }
@@ -612,35 +612,35 @@ fn image_rows_composite_like_single_samples() {
     }
 }
 
-// ── blend_u8 ──────────────────────────────────────────────────────────────
+// ── blend ──────────────────────────────────────────────────────────────
 
 #[test]
 fn blend_u8_opaque_returns_src() {
-    assert_eq!(blend_u8(200, 50, 255), 200);
-    assert_eq!(blend_u8(0, 255, 255), 0);
-    assert_eq!(blend_u8(255, 0, 255), 255);
+    assert_eq!(blend::<u8>(200, 50, 255), 200);
+    assert_eq!(blend::<u8>(0, 255, 255), 0);
+    assert_eq!(blend::<u8>(255, 0, 255), 255);
 }
 
 #[test]
 fn blend_u8_transparent_returns_dst() {
     // alpha=0 is short-circuited by the caller (continue), but the function
     // itself must still be well-defined (returns dst).
-    assert_eq!(blend_u8(200, 50, 0), 50);
+    assert_eq!(blend::<u8>(200, 50, 0), 50);
 }
 
 #[test]
 fn blend_u8_50pct_midpoints_correctly() {
     // src=255, dst=0, alpha=128 → (255*128 + 0*127)/255 = 128.
-    assert_eq!(blend_u8(255, 0, 128), 128);
+    assert_eq!(blend::<u8>(255, 0, 128), 128);
     // src=0, dst=255, alpha=128 → (0*128 + 255*127)/255 = 127.
-    assert_eq!(blend_u8(0, 255, 128), 127);
+    assert_eq!(blend::<u8>(0, 255, 128), 127);
 }
 
 #[test]
 fn blend_u8_no_overflow_at_max_values() {
     // Worst-case intermediate: 255*254 + 255*1 = 65025, fits u16.
-    assert_eq!(blend_u8(255, 255, 254), 255);
-    assert_eq!(blend_u8(255, 255, 1), 255);
+    assert_eq!(blend::<u8>(255, 255, 254), 255);
+    assert_eq!(blend::<u8>(255, 255, 1), 255);
 }
 
 // ── per-page work watchdog ────────────────────────────────────────────────
@@ -1888,7 +1888,9 @@ fn render_forms<'a>(doc: &'a Document, content: &[u8]) -> PageRenderer<'a> {
 fn rgb_bytes(renderer: &PageRenderer<'_>) -> Vec<u8> {
     match &renderer.canvas {
         super::canvas::PageCanvas::Rgb(bitmap) => bitmap.data().to_vec(),
-        super::canvas::PageCanvas::Ink(_) => panic!("an RGB canvas was expected"),
+        super::canvas::PageCanvas::Rgb16(_) | super::canvas::PageCanvas::Ink(_) => {
+            panic!("an RGB canvas was expected")
+        }
     }
 }
 

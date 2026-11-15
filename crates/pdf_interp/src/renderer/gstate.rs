@@ -179,16 +179,18 @@ pub(crate) struct InterpGState {
 
 /// A soft mask resolved to one value per device pixel (PDF §11.6.5.2).
 ///
-/// `values` is row-major over the page bitmap, `width × height` bytes; each
-/// byte scales the opacity of everything painted at that pixel.
+/// `values` is row-major over the page bitmap, `width × height` samples of
+/// the canvas's depth; each scales the opacity of everything painted at
+/// that pixel.
 #[derive(Debug)]
 pub(crate) struct SoftMaskPlane {
     /// Bitmap width in pixels.
     pub width: u32,
     /// Bitmap height in pixels.
     pub height: u32,
-    /// Mask value per pixel: 0 = nothing painted, 255 = painted unchanged.
-    pub values: Vec<u8>,
+    /// Mask value per pixel: 0 = nothing painted, the sample's maximum =
+    /// painted unchanged.
+    pub values: crate::renderer::page::depth::SampleVec,
 }
 
 impl Clone for InterpGState {

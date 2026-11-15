@@ -18,8 +18,9 @@
 
 use super::PageRenderer;
 use super::canvas::{Snapshot, with_canvas};
+use super::depth::CanvasSample;
 use super::pixel_rect::PixelRect;
-use color::Pixel;
+use color::{Pixel, Sample, Wide};
 use raster::Bitmap;
 
 impl PageRenderer<'_> {
@@ -56,15 +57,24 @@ impl Snapshot {
     /// `alpha`, under the object as painted onto the cleared region: each
     /// pixel becomes `painted + (1 − f)·prior` on premultiplied colour and
     /// alpha, `f` being the painted alpha over `alpha`.
-    fn merge_under<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>, alpha: u8) {
-        debug_assert_eq!(self.bpp, P::BYTES, "a snapshot merges onto its own canvas");
-        let Some(prior_a) = self.alpha.as_ref() else {
+    fn merge_under<P: Pixel>(self, bitmap: &mut Bitmap<P>, alpha: u8)
+    where
+        P::Sample: CanvasSample,
+    {
+        debug_assert_eq!(
+            self.ncomps,
+            P::NCOMPS,
+            "a snapshot merges onto its own canvas"
+        );
+        let Some((colour, Some(prior_a))) = self.samples::<P::Sample>() else {
             return;
         };
-        let (span, n) = (self.span(), P::BYTES);
+        let (span, n) = (self.span(), P::NCOMPS);
         let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);
-        let alpha = u32::from(alpha);
-        for (i, prior) in self.color.chunks_exact(span * n).enumerate() {
+        let w = <<P::Sample as Sample>::Wide as Wide>::of;
+        let max = P::Sample::max_wide();
+        let alpha = P::Sample::from_u8(alpha).wide();
+        for (i, prior) in colour.chunks_exact(span * n).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
@@ -81,33 +91,24 @@ impl Snapshot {
                 .zip(painted.chunks_exact_mut(n))
                 .zip(painted_a.iter_mut())
             {
-                if pa == 0 {
+                if pa == P::Sample::default() {
                     continue;
                 }
-                let a = u32::from(*ca);
+                let a = ca.wide();
                 // The object's shape, from its painted alpha `f·alpha`.
-                let shape = ((a * 255 + alpha / 2) / alpha).min(255);
-                if shape == 255 {
+                let shape = ((a * max + alpha / w(2)) / alpha).min(max);
+                if shape == max {
                     continue;
                 }
-                let keep = (255 - shape) * u32::from(pa);
-                // Premultiplied numerators, scaled by 255 · 255.
-                let out_a = a * 255 + keep;
+                let keep = (max - shape) * pa.wide();
+                // Premultiplied numerators, scaled by MAX².
+                let out_a = a * max + keep;
                 for (&b, x) in p.iter().zip(c.iter_mut()) {
-                    let num = u32::from(*x) * a * 255 + u32::from(b) * keep;
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "a weighted mean of u8 values is at most 255"
-                    )]
-                    let v = ((num + out_a / 2) / out_a) as u8;
-                    *x = v;
+                    let num = x.wide() * a * max + b.wide() * keep;
+                    *x = P::Sample::from_wide((num + out_a / w(2)) / out_a);
                 }
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "out_a ≤ 255 · 255, so the rounded quotient is at most 255"
-                )]
-                let merged = ((out_a + 127) / 255) as u8;
-                *ca = merged;
+                // out_a ≤ MAX², so the rounded quotient is at most MAX.
+                *ca = P::Sample::from_wide((out_a + max / w(2)) / max);
             }
         }
     }

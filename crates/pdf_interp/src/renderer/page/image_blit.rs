@@ -1,6 +1,7 @@
 //! Drawing a decoded image or stencil mask onto the page through the clip,
 //! on the CPU or through the device blit kernel.
 
+use color::Sample;
 use color::convert::div255;
 use raster::ClipResult;
 use raster::pipe::ChannelMask;
@@ -8,7 +9,7 @@ use raster::pipe::ChannelMask;
 use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
 use super::super::gstate::Ctm;
 use super::PageRenderer;
-use super::canvas::{CanvasKind, blend_u8, with_canvas};
+use super::canvas::{CanvasKind, blend, with_canvas};
 #[cfg(feature = "cache")]
 use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
@@ -420,6 +421,14 @@ impl PageRenderer<'_> {
         // The kernel composites opaquely and takes no mask: the decoder
         // keeps every masked image host-resident, so masked images of any
         // resolution take the CPU path below.
+        // The device blit composites 8-bit samples: a 16-bit canvas takes
+        // the host copy through the CPU path.
+        #[cfg(feature = "cache")]
+        if self.canvas.kind() == CanvasKind::Rgb16
+            && let Some(host) = self.host_copy(img, "a 16-bit canvas")
+        {
+            return self.composite_image(&host, ctm, mask, grid, grid_clip, overprint);
+        }
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
@@ -496,12 +505,23 @@ impl PageRenderer<'_> {
         let rgb_transfer = gs_transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
         let transfer = |px: [u8; 3]| rgb_transfer.map_or(px, |t| t.apply(px));
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
-        // On an ink canvas a stencil paints the fill colour as its ink.
-        if kind == CanvasKind::Ink {
-            if stencil {
-                compositor.solid = Some(painted_fill.bytes_for(kind.mode()));
+        // On an ink canvas a stencil paints the fill colour as its ink, on
+        // a 16-bit canvas as its 16-bit colour; there the samples map
+        // through the 16-bit tables once widened.
+        match kind {
+            CanvasKind::Rgb => {}
+            CanvasKind::Rgb16 => {
+                if stencil {
+                    compositor.solid = Some(&painted_fill);
+                }
+                compositor.wide_transfer = gs_transfer.as_deref();
             }
-            compositor.transfer = gs_transfer.as_deref();
+            CanvasKind::Ink => {
+                if stencil {
+                    compositor.solid = Some(&painted_fill);
+                }
+                compositor.transfer = gs_transfer.as_deref();
+            }
         }
 
         // Each row's samples and their coverage are gathered first and
@@ -680,15 +700,15 @@ fn verify_sample_len(img: &crate::resources::ImageDescriptor, len: usize) -> Res
 /// Paint `src` onto the RGB triple `dst` with coverage `alpha`; an opaque
 /// sample copies, anything else blends per channel.
 #[inline]
-pub(super) fn blend_rgb(dst: &mut [u8], src: [u8; 3], alpha: u8) {
-    if alpha == 255 {
-        dst.copy_from_slice(&src);
+pub(super) fn blend_rgb<S: Sample>(dst: &mut [S], src: &[S], alpha: S) {
+    if alpha == S::MAX {
+        dst.copy_from_slice(&src[..3]);
     } else {
         // Each output channel blends against its own existing value —
         // the destination is RGB and channels may differ.
-        dst[0] = blend_u8(src[0], dst[0], alpha);
-        dst[1] = blend_u8(src[1], dst[1], alpha);
-        dst[2] = blend_u8(src[2], dst[2], alpha);
+        dst[0] = blend(src[0], dst[0], alpha);
+        dst[1] = blend(src[1], dst[1], alpha);
+        dst[2] = blend(src[2], dst[2], alpha);
     }
 }
 

@@ -7,7 +7,7 @@
 //!
 //! An object painted under a mask is painted normally, then each pixel it
 //! touched is moved back toward its prior value: with mask value `m`, the
-//! result is `prior + (painted − prior) × m / 255`, taken on
+//! result is `prior + (painted − prior) × m / MAX`, taken on
 //! alpha-premultiplied colour when the bitmap carries alpha.  Every
 //! compositing operation is linear in its source alpha in that space, so the
 //! result equals painting the object with its alpha scaled by `m`, whatever
@@ -15,18 +15,21 @@
 //! pixels are captured over the object's own rectangle within the clip,
 //! which each painting primitive knows.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use color::{Pixel, Rgb8};
+use color::{Pixel, Sample, Wide};
 use raster::Bitmap;
 use raster::types::BlendMode;
 
 use super::PageRenderer;
-use super::canvas::{CanvasKind, Snapshot, with_canvas};
+use super::canvas::{CanvasKind, PageCanvas, Snapshot, with_canvas};
+use super::depth::{CanvasSample, SampleVec};
 use super::pixel_rect::PixelRect;
-use crate::renderer::color::RasterColor;
+use crate::renderer::color::{RasterColor, Srgb};
 use crate::renderer::gstate::SoftMaskPlane;
-use crate::resources::transfer::function_lut;
+use crate::resources::shading::function::Function;
+use crate::resources::transfer::tabulate;
 use crate::resources::{SoftMaskParams, colorspace, resolve_dict};
 
 impl PageRenderer<'_> {
@@ -66,8 +69,9 @@ impl PageRenderer<'_> {
         // painted in sRGB whatever the page's canvas: its luminosity is
         // that of its colours (ISO 32000-1 §11.6.5.2), not of the inks
         // that print them, which reproduce a colour only within the
-        // process gamut.
-        let mask = self.try_canvas(CanvasKind::Rgb, self.width, self.height)?;
+        // process gamut.  It is painted at the depth of the page.
+        let depth = self.canvas.kind().depth();
+        let mask = self.try_canvas(CanvasKind::rgb(depth), self.width, self.height)?;
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
@@ -86,31 +90,30 @@ impl PageRenderer<'_> {
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
         self.do_form_xobject(&form);
-        // The canvas is RGB, so the conversion moves its bitmap out.
-        let canvas = std::mem::replace(&mut self.canvas, page).into_rgb(&[None; 4]);
+        let canvas = std::mem::replace(&mut self.canvas, page);
         self.group = enclosing;
         self.gstate.restore();
 
-        let lut = transfer.and_then(|f| function_lut(self.resources.doc(), f));
-        let mut values = match mask_plane(canvas.width, canvas.height) {
-            Ok(values) => values,
+        let function = transfer.map(|f| Function::load(self.resources.doc(), f));
+        let reduce = if luminosity {
+            Reduce::Luminosity(self.mask_backdrop_rgb(group, backdrop))
+        } else {
+            Reduce::Alpha
+        };
+        let values = match canvas {
+            PageCanvas::Rgb(b) => mask_values(&b, reduce, function.as_deref()),
+            PageCanvas::Rgb16(b) => mask_values(&b, reduce, function.as_deref()),
+            PageCanvas::Ink(_) => {
+                debug_assert!(false, "a soft mask group is painted on an RGB canvas");
+                return None;
+            }
+        };
+        let values = match values {
+            Ok(values) => values?,
             Err(e) => {
                 self.abort_allocation(e);
                 return None;
             }
-        };
-        if luminosity {
-            luminosity_values(
-                &canvas,
-                self.mask_backdrop_rgb(group, backdrop),
-                &mut values,
-            );
-        } else {
-            values.extend_from_slice(canvas.alpha_plane()?);
-        }
-        let values = match lut {
-            Some(lut) => values.into_iter().map(|v| lut[usize::from(v)]).collect(),
-            None => values,
         };
         Some(SoftMaskPlane {
             width: self.width,
@@ -119,11 +122,11 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// The backdrop colour `BC` of the mask group `group` as sRGB bytes:
-    /// `BC` is given in the group's colour space (`/Group /CS`, PDF
-    /// §11.6.5.2).  A group without a space of `BC`'s component count reads
-    /// `BC` by its count (see [`backdrop_rgb`]).
-    fn mask_backdrop_rgb(&self, group: pdf::ObjectId, bc: &[f64]) -> [u8; 3] {
+    /// The backdrop colour `BC` of the mask group `group` as sRGB at the
+    /// page's depth: `BC` is given in the group's colour space (`/Group
+    /// /CS`, PDF §11.6.5.2).  A group without a space of `BC`'s component
+    /// count reads `BC` by its count (see [`backdrop_rgb`]).
+    fn mask_backdrop_rgb(&self, group: pdf::ObjectId, bc: &[f64]) -> Srgb {
         let doc = self.resources.doc();
         let space = doc.get_object(group).ok().and_then(|obj| {
             let group_dict = obj.as_stream()?.dict.get(b"Group")?;
@@ -132,7 +135,7 @@ impl PageRenderer<'_> {
         });
         match space {
             Some(space) if !bc.is_empty() && space.ncomponents() == bc.len() => {
-                space.convert_to_rgb(doc, bc)
+                space.convert_to_srgb(doc, bc, self.canvas.kind().depth())
             }
             _ => backdrop_rgb(bc),
         }
@@ -190,7 +193,7 @@ impl PageRenderer<'_> {
             return;
         };
         let view = MaskView {
-            values: &mask.values,
+            values: MaskValues::Plane(&mask.values),
             width: mask.width as usize,
             x0: 0,
             y0: 0,
@@ -223,7 +226,7 @@ impl PageRenderer<'_> {
             return;
         };
         let view = MaskView {
-            values: coverage,
+            values: MaskValues::Coverage(coverage),
             width: rect.width() as usize,
             x0: rect.x0,
             y0: rect.y0,
@@ -261,7 +264,7 @@ impl PageRenderer<'_> {
             return;
         };
         let view = MaskView {
-            values: coverage,
+            values: MaskValues::Coverage(coverage),
             width: rect.width() as usize,
             x0: rect.x0,
             y0: rect.y0,
@@ -279,10 +282,34 @@ impl PageRenderer<'_> {
     }
 }
 
+/// The values of a [`MaskView`]: a soft mask's plane, of the canvas's
+/// depth, or 8-bit coverage, widened for a canvas of another depth.
+#[derive(Clone, Copy)]
+enum MaskValues<'a> {
+    /// A soft mask's values.
+    Plane(&'a SampleVec),
+    /// Coverage from the rasteriser.
+    Coverage(&'a [u8]),
+}
+
+impl<'a> MaskValues<'a> {
+    /// The values as samples of type `S`; `None` for a plane of another
+    /// depth, which a canvas is never given.
+    fn at<S: CanvasSample>(self) -> Option<Cow<'a, [S]>> {
+        match self {
+            Self::Plane(values) => S::samples(values).map(Cow::Borrowed),
+            Self::Coverage(bytes) => Some(S::from_u8_slice(bytes).map_or_else(
+                || Cow::Owned(bytes.iter().map(|&v| S::from_u8(v)).collect()),
+                Cow::Borrowed,
+            )),
+        }
+    }
+}
+
 /// Mask values over a rectangle of the bitmap whose top-left pixel is
 /// `(x0, y0)`, `width` values per row.
 struct MaskView<'a> {
-    values: &'a [u8],
+    values: MaskValues<'a>,
     width: usize,
     x0: u32,
     y0: u32,
@@ -292,22 +319,35 @@ impl Snapshot {
     /// Replace each pixel of the rectangle by its interpolation between the
     /// snapshot and its current value, weighted by the mask.
     /// The snapshot lies within the mask's rectangle.
-    fn blend_back<P: Pixel<Sample = u8>>(self, bitmap: &mut Bitmap<P>, mask: &MaskView<'_>) {
-        debug_assert_eq!(self.bpp, P::BYTES, "a snapshot blends onto its own canvas");
-        let (span, n) = (self.span(), P::BYTES);
+    fn blend_back<P: Pixel>(self, bitmap: &mut Bitmap<P>, mask: &MaskView<'_>)
+    where
+        P::Sample: CanvasSample,
+    {
+        debug_assert_eq!(
+            self.ncomps,
+            P::NCOMPS,
+            "a snapshot blends onto its own canvas"
+        );
+        let (Some((colour, alpha)), Some(values)) =
+            (self.samples::<P::Sample>(), mask.values.at::<P::Sample>())
+        else {
+            debug_assert!(false, "a snapshot and its mask are of the canvas's depth");
+            return;
+        };
+        let (span, n) = (self.span(), P::NCOMPS);
         let (cx0, ax0) = (self.x0 as usize * n, self.x0 as usize);
         let mx0 = (self.x0 - mask.x0) as usize;
-        for (i, prior) in self.color.chunks_exact(span * n).enumerate() {
+        for (i, prior) in colour.chunks_exact(span * n).enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "i counts rows of the snapshot, which lie below the bitmap's u32 height"
             )]
             let y = self.y0 + i as u32;
             let m_off = (y - mask.y0) as usize * mask.width + mx0;
-            let m = &mask.values[m_off..m_off + span];
+            let m = &values[m_off..m_off + span];
             let (row, alpha_row) = bitmap.row_and_alpha_mut(y);
             let row = &mut row[cx0..cx0 + span * n];
-            match (self.alpha.as_ref(), alpha_row) {
+            match (alpha, alpha_row) {
                 (Some(prior_a), Some(alpha_row)) => blend_back_premultiplied(
                     n,
                     prior,
@@ -322,34 +362,35 @@ impl Snapshot {
     }
 }
 
-/// `painted ← prior + (painted − prior) × m / 255` per channel, for a
-/// bitmap without alpha whose pixels are `n` bytes.
-fn blend_back_opaque(n: usize, prior: &[u8], painted: &mut [u8], mask: &[u8]) {
+/// `painted ← prior + (painted − prior) × m / MAX` per channel, rounded,
+/// for a bitmap without alpha whose pixels are `n` samples.
+fn blend_back_opaque<S: Sample>(n: usize, prior: &[S], painted: &mut [S], mask: &[S]) {
     for ((p, c), &m) in prior
         .chunks_exact(n)
         .zip(painted.chunks_exact_mut(n))
         .zip(mask)
     {
-        if m == 255 {
+        if m == S::MAX {
             continue;
         }
-        let m = u32::from(m);
+        let (w, iw) = (m.wide(), S::max_wide() - m.wide());
         for (&b, a) in p.iter().zip(c.iter_mut()) {
-            *a = lerp_u8(b, *a, m);
+            *a = S::div_max(a.wide() * w + b.wide() * iw);
         }
     }
 }
 
 /// The interpolation of [`blend_back_opaque`] on alpha-premultiplied
 /// colour, for a bitmap that stores straight colour beside an alpha plane.
-fn blend_back_premultiplied(
+fn blend_back_premultiplied<S: Sample>(
     n: usize,
-    prior: &[u8],
-    prior_a: &[u8],
-    painted: &mut [u8],
-    painted_a: &mut [u8],
-    mask: &[u8],
+    prior: &[S],
+    prior_a: &[S],
+    painted: &mut [S],
+    painted_a: &mut [S],
+    mask: &[S],
 ) {
+    let two = <S::Wide as Wide>::of(2);
     for ((((p, &pa), c), ca), &m) in prior
         .chunks_exact(n)
         .zip(prior_a)
@@ -357,66 +398,46 @@ fn blend_back_premultiplied(
         .zip(painted_a.iter_mut())
         .zip(mask)
     {
-        if m == 255 {
+        if m == S::MAX {
             continue;
         }
-        let m = u32::from(m);
-        let (pa, a) = (u32::from(pa), u32::from(*ca));
-        // Premultiplied numerators, scaled by 255 · 255.
-        let wa = a * m;
-        let wb = pa * (255 - m);
+        // Premultiplied numerators, scaled by MAX².
+        let wa = ca.wide() * m.wide();
+        let wb = pa.wide() * (S::max_wide() - m.wide());
         let alpha_scaled = wa + wb;
-        if alpha_scaled == 0 {
+        if alpha_scaled == <S::Wide as Wide>::ZERO {
             p.iter().zip(c.iter_mut()).for_each(|(&b, x)| *x = b);
-            *ca = 0;
+            *ca = S::default();
             continue;
         }
         for (&b, x) in p.iter().zip(c.iter_mut()) {
-            let num = u32::from(*x) * wa + u32::from(b) * wb;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a weighted mean of u8 values is at most 255"
-            )]
-            let v = ((num + alpha_scaled / 2) / alpha_scaled) as u8;
-            *x = v;
+            let num = x.wide() * wa + b.wide() * wb;
+            // A weighted mean of samples is at most MAX.
+            *x = S::from_wide((num + alpha_scaled / two) / alpha_scaled);
         }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "alpha_scaled ≤ 255 · 255, so the rounded quotient is at most 255"
-        )]
-        let out_a = ((alpha_scaled + 127) / 255) as u8;
-        *ca = out_a;
+        *ca = S::div_max(alpha_scaled);
     }
 }
 
-/// `prior + (painted − prior) × weight / 255`, rounded.
-fn lerp_u8(prior: u8, painted: u8, weight: u32) -> u8 {
-    let sum = u32::from(painted) * weight + u32::from(prior) * (255 - weight);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a weighted mean of u8 values is at most 255"
-    )]
-    let mean = ((sum + 127) / 255) as u8;
-    mean
-}
-
-/// Backdrop colour `BC` as sRGB bytes; black when absent.
+/// Backdrop colour `BC` as sRGB; black when absent.
 ///
 /// The component count selects the space: 1 grey, 3 RGB, 4 CMYK.
-fn backdrop_rgb(bc: &[f64]) -> [u8; 3] {
+fn backdrop_rgb(bc: &[f64]) -> Srgb {
     let c = match *bc {
         [g] => RasterColor::gray(g),
         [r, g, b] => RasterColor::rgb(r, g, b),
         [c, m, y, k] => RasterColor::cmyk(c, m, y, k),
         _ => RasterColor::gray(0.0),
     };
-    let s = c.as_slice();
-    [s[0], s[1], s[2]]
+    Srgb {
+        bytes: c.bytes(),
+        wide: *c.rgb16(),
+    }
 }
 
 /// An empty buffer with room for the `width × height` values of a mask
 /// plane.
-fn mask_plane(width: u32, height: u32) -> Result<Vec<u8>, raster::BitmapAllocError> {
+fn mask_plane<S: Sample>(width: u32, height: u32) -> Result<Vec<S>, raster::BitmapAllocError> {
     let error = raster::BitmapAllocError { width, height };
     let len = (width as usize).checked_mul(height as usize).ok_or(error)?;
     let mut values = Vec::new();
@@ -424,25 +445,66 @@ fn mask_plane(width: u32, height: u32) -> Result<Vec<u8>, raster::BitmapAllocErr
     Ok(values)
 }
 
+/// How a mask group's canvas reduces to mask values.
+#[derive(Clone, Copy)]
+enum Reduce {
+    /// The luminosity of the group over the opaque backdrop colour.
+    Luminosity(Srgb),
+    /// The group's alpha.
+    Alpha,
+}
+
+/// The mask values of `group`, the mask group's canvas, reduced as
+/// `reduce` gives and mapped through the transfer function `function`, if
+/// any, tabulated at the canvas's depth.  `Ok(None)` for an alpha mask of
+/// a canvas without an alpha plane; the error names a plane the allocator
+/// refuses.
+fn mask_values<P: Pixel>(
+    group: &Bitmap<P>,
+    reduce: Reduce,
+    function: Option<&Function>,
+) -> Result<Option<SampleVec>, raster::BitmapAllocError>
+where
+    P::Sample: CanvasSample,
+{
+    let mut values = mask_plane::<P::Sample>(group.width, group.height)?;
+    match reduce {
+        Reduce::Luminosity(bc) => luminosity_values(group, bc.at(), &mut values),
+        Reduce::Alpha => match group.alpha_plane() {
+            Some(alpha) => values.extend_from_slice(alpha),
+            None => return Ok(None),
+        },
+    }
+    if let Some(function) = function {
+        let mut lut = vec![P::Sample::default(); P::Sample::identity_table().as_ref().len()];
+        if tabulate(function, &mut lut).is_some() {
+            for v in &mut values {
+                *v = lut[sample_index(*v)];
+            }
+        }
+    }
+    Ok(Some(P::Sample::into_samples(values)))
+}
+
+/// The index of `v` in a table of one entry per sample value.
+fn sample_index<S: Sample>(v: S) -> usize {
+    usize::try_from(v.signed()).unwrap_or(0)
+}
+
 /// Append to `out` the luminosity mask values: each pixel of `group`
 /// composited over the opaque backdrop `bc`, reduced to its luminosity by
-/// [`color::convert::luminosity`] (PDF §11.3.5.3).
-fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3], out: &mut Vec<u8>) {
+/// [`color::convert::luminosity_at`] (PDF §11.3.5.3).
+fn luminosity_values<P: Pixel>(group: &Bitmap<P>, bc: [P::Sample; 3], out: &mut Vec<P::Sample>) {
     let w = group.width as usize;
     for y in 0..group.height {
-        let row = group.row_bytes(y);
+        let row = group.row_samples(y);
         let alpha = group.alpha_row(y);
         for x in 0..w {
-            let a = alpha.map_or(255, |r| u32::from(r[x]));
+            let a = alpha.map_or(P::Sample::MAX, |r| r[x]).wide();
+            let ia = P::Sample::max_wide() - a;
             let px = &row[x * 3..x * 3 + 3];
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a weighted mean of two u8 values is at most 255"
-            )]
-            let ch = |i: usize| {
-                ((u32::from(px[i]) * a + u32::from(bc[i]) * (255 - a) + 127) / 255) as u8
-            };
-            out.push(color::convert::luminosity(ch(0), ch(1), ch(2)));
+            let ch = |i: usize| P::Sample::div_max(px[i].wide() * a + bc[i].wide() * ia);
+            out.push(color::convert::luminosity_at(ch(0), ch(1), ch(2)));
         }
     }
 }
@@ -450,11 +512,12 @@ fn luminosity_values(group: &Bitmap<Rgb8>, bc: [u8; 3], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use color::Rgb8;
 
     #[test]
     fn opaque_blend_back_scales_the_change_by_the_mask() {
-        let prior = [200, 100, 0, 200, 100, 0, 200, 100, 0];
-        let mut painted = [0, 0, 255, 0, 0, 255, 0, 0, 255];
+        let prior = [200u8, 100, 0, 200, 100, 0, 200, 100, 0];
+        let mut painted = [0u8, 0, 255, 0, 0, 255, 0, 0, 255];
         blend_back_opaque(3, &prior, &mut painted, &[0, 255, 128]);
         assert_eq!(painted, [200, 100, 0, 0, 0, 255, 100, 50, 128]);
     }
@@ -463,20 +526,20 @@ mod tests {
     fn premultiplied_blend_back_matches_painting_at_reduced_alpha() {
         // Transparent backdrop; black painted at full alpha; mask 25 %.
         // Painting black at alpha 64 gives black at alpha 64.
-        let mut c = [0, 0, 0];
-        let mut a = [255];
+        let mut c = [0u8, 0, 0];
+        let mut a = [255u8];
         blend_back_premultiplied(3, &[255, 255, 255], &[0], &mut c, &mut a, &[64]);
         assert_eq!((c, a), ([0, 0, 0], [64]));
 
         // Opaque white backdrop; black painted; mask 50 %: mid-grey, opaque.
-        let mut c = [0, 0, 0];
-        let mut a = [255];
+        let mut c = [0u8, 0, 0];
+        let mut a = [255u8];
         blend_back_premultiplied(3, &[255, 255, 255], &[255], &mut c, &mut a, &[128]);
         assert_eq!((c, a), ([127, 127, 127], [255]));
 
         // Mask zero restores the prior pixel, including a transparent one.
-        let mut c = [9, 9, 9];
-        let mut a = [255];
+        let mut c = [9u8, 9, 9];
+        let mut a = [255u8];
         blend_back_premultiplied(3, &[1, 2, 3], &[0], &mut c, &mut a, &[0]);
         assert_eq!((c, a), ([1, 2, 3], [0]));
     }
@@ -490,7 +553,7 @@ mod tests {
             .unwrap()
             .copy_from_slice(&[255, 255, 0]);
         let values = |bc| {
-            let mut out = mask_plane(3, 1).unwrap();
+            let mut out = mask_plane::<u8>(3, 1).unwrap();
             luminosity_values(&bmp, bc, &mut out);
             out
         };
@@ -501,8 +564,8 @@ mod tests {
 
     #[test]
     fn a_mask_plane_beyond_the_address_space_is_an_error() {
-        assert!(mask_plane(4, 2).unwrap().capacity() >= 8);
-        let refused = mask_plane(u32::MAX, u32::MAX).unwrap_err();
+        assert!(mask_plane::<u8>(4, 2).unwrap().capacity() >= 8);
+        let refused = mask_plane::<u8>(u32::MAX, u32::MAX).unwrap_err();
         assert_eq!((refused.width, refused.height), (u32::MAX, u32::MAX));
     }
 
@@ -520,20 +583,24 @@ mod tests {
             ),
         ]);
         let renderer = PageRenderer::new(1, 1, &doc, (4, 0));
-        let white = renderer.mask_backdrop_rgb((5, 0), &[100.0, 0.0, 0.0]);
+        let white = renderer.mask_backdrop_rgb((5, 0), &[100.0, 0.0, 0.0]).bytes;
         assert!(white.iter().all(|&v| v >= 250), "{white:?}");
         // A count that does not match the group's space falls back to it.
-        assert_eq!(renderer.mask_backdrop_rgb((5, 0), &[1.0]), [255, 255, 255]);
         assert_eq!(
-            renderer.mask_backdrop_rgb((9, 0), &[1.0, 0.0, 0.0]),
+            renderer.mask_backdrop_rgb((5, 0), &[1.0]).bytes,
+            [255, 255, 255]
+        );
+        assert_eq!(
+            renderer.mask_backdrop_rgb((9, 0), &[1.0, 0.0, 0.0]).bytes,
             [255, 0, 0]
         );
     }
 
     #[test]
     fn backdrop_component_count_selects_the_space() {
-        assert_eq!(backdrop_rgb(&[]), [0, 0, 0]);
-        assert_eq!(backdrop_rgb(&[1.0]), [255, 255, 255]);
-        assert_eq!(backdrop_rgb(&[1.0, 0.0, 0.0]), [255, 0, 0]);
+        assert_eq!(backdrop_rgb(&[]).bytes, [0, 0, 0]);
+        assert_eq!(backdrop_rgb(&[1.0]).bytes, [255, 255, 255]);
+        assert_eq!(backdrop_rgb(&[1.0, 0.0, 0.0]).bytes, [255, 0, 0]);
+        assert_eq!(backdrop_rgb(&[1.0, 0.0, 0.0]).wide, [u16::MAX, 0, 0]);
     }
 }

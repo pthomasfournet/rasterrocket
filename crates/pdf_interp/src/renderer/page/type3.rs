@@ -12,14 +12,13 @@
 use font::bitmap::GlyphBitmap as CachedGlyph;
 use font::key::GlyphKey;
 use raster::glyph::{GlyphBitmap, fill_glyph};
-use raster::pipe::PipeSrc;
 use raster::types::BlendMode;
 
 use super::super::gstate::ctm_multiply;
 use super::super::text::TextState;
 use super::MAX_FORM_DEPTH;
 use super::PageRenderer;
-use super::canvas::{CanvasKind, with_canvas};
+use super::canvas::{CanvasKind, CanvasPipe, CanvasSource, PageCanvas, with_canvas};
 use super::text_ops::{glyph_advance, translate_text_x};
 use crate::content::Operator;
 use crate::resources::ResourceKey;
@@ -187,8 +186,6 @@ impl PageRenderer<'_> {
         }
         let fill = self.gstate.current().painted_fill_color();
         let paint = self.solid_paint(false, &fill, u8::MAX, BlendMode::Normal);
-        let pipe = paint.pipe();
-        let fill = fill.bytes_for(self.canvas.kind().mode());
         let clip = self.gstate.current().clip.clone_shared();
         #[expect(
             clippy::cast_possible_wrap,
@@ -202,16 +199,14 @@ impl PageRenderer<'_> {
             h: coverage.height as i32,
             aa: coverage.aa,
         };
-        let src = PipeSrc::Solid(fill);
-        let _ = with_canvas!(&mut self.canvas, |b| fill_glyph(
-            b,
-            &clip,
-            &pipe,
-            &src,
-            frame.pen_x,
-            frame.pen_y,
-            &bitmap
-        ));
+        let pipe = CanvasPipe::of(&paint);
+        let source = CanvasSource::Solid(&fill);
+        with_canvas!(&mut self.canvas, |b| {
+            let pipe = pipe.at();
+            source.paint(b, |b, src| {
+                let _ = fill_glyph(b, &clip, &pipe, src, frame.pen_x, frame.pen_y, &bitmap);
+            });
+        });
         true
     }
 
@@ -236,9 +231,14 @@ impl PageRenderer<'_> {
         child.gstate.current_mut().ctm = frame.child_ctm;
         child.execute(&glyph.ops);
         child.fold_child_into(self);
-        // The child's canvas is RGB, which converts with no spot tables.
-        let bitmap = child.finish_canvas().into_rgb(&[None; 4]);
-        let data = bitmap.alpha_plane().map_or_default(<[u8]>::to_vec);
+        // The coverage is the alpha plane of the child's 8-bit RGB canvas.
+        let data = match child.finish_canvas() {
+            PageCanvas::Rgb(bitmap) => bitmap.alpha_plane().map_or_default(<[u8]>::to_vec),
+            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => {
+                debug_assert!(false, "a Type 3 coverage canvas is 8-bit RGB");
+                Vec::new()
+            }
+        };
         let (w, h) = (width as usize, height as usize);
         let touches_edge = data.len() != w * h
             || data[..w].iter().any(|&v| v != 0)

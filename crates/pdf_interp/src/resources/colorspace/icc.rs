@@ -3,17 +3,19 @@
 //! A profile stream is compiled once per document into an
 //! [`IccConversion`]: a gray or RGB matrix/TRC profile into the shared
 //! shaper tables of `super::super::icc_shaper`, any other 3- or 4-channel
-//! profile into a `moxcms` 8-bit transform to sRGB.  A profile that admits
+//! profile into a `moxcms` 8-bit transform to sRGB, beside which a 16-bit
+//! transform is created on first use by a 16-bit render.  A profile that admits
 //! neither compiles to its `/Alternate` space when that space takes the
 //! same number of components (§8.6.5.5, Table 66).  Converting a colour
 //! value is then a table lookup, one transform call, or a conversion in the
 //! alternate space.
 
-use std::sync::Arc;
-#[cfg(feature = "gpu-icc")]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use moxcms::{ColorProfile, Layout, Transform8BitExecutor, TransformOptions};
+use color::Sample;
+use moxcms::{
+    ColorProfile, Layout, Transform8BitExecutor, Transform16BitExecutor, TransformOptions,
+};
 use pdf::{Document, ObjectId};
 
 use super::ColorSpace;
@@ -32,6 +34,11 @@ pub(crate) enum IccConversion {
     Transform {
         n: u8,
         xform: Arc<Transform8BitExecutor>,
+        /// The source profile, from which the 16-bit transform is created.
+        profile: Box<ColorProfile>,
+        /// The 16-bit transform, created on first use; `None` when moxcms
+        /// refuses it.
+        xform16: OnceLock<Option<Arc<Transform16BitExecutor>>>,
         /// The CMYK → sRGB lookup table of a four-channel transform for the
         /// device conversion, baked on first use (see [`Self::cmyk_clut`]).
         #[cfg(feature = "gpu-icc")]
@@ -110,6 +117,8 @@ impl IccConversion {
         Some(Self::Transform {
             n,
             xform,
+            profile: Box::new(src),
+            xform16: OnceLock::new(),
             #[cfg(feature = "gpu-icc")]
             clut: OnceLock::new(),
         })
@@ -122,7 +131,10 @@ impl IccConversion {
     pub(crate) fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
         use clut::{DEFAULT_GRID_N, bake_cmyk_clut_with};
 
-        let Self::Transform { n: 4, xform, clut } = self else {
+        let Self::Transform {
+            n: 4, xform, clut, ..
+        } = self
+        else {
             return None;
         };
         clut.get_or_init(|| {
@@ -169,33 +181,77 @@ impl IccConversion {
             .ok()
     }
 
-    /// Convert normalised components to sRGB bytes.  Components are
-    /// quantised to 8 bits for the shaper and the transform.  `None` when
-    /// `comps` does not hold the compiled component count or the transform
-    /// fails.
-    pub(crate) fn convert(&self, doc: &Document, comps: &[f64]) -> Option<[u8; 3]> {
+    /// Convert normalised components to sRGB at the depth of `S`.
+    /// Components are quantised to that depth for the transform, which is
+    /// the 8-bit or the 16-bit one; the shaper evaluates at that depth (see
+    /// `ProfileConversion::convert_components_at`).  `None` when `comps`
+    /// does not hold the compiled component count or the transform fails.
+    pub(crate) fn convert<S: Sample>(&self, doc: &Document, comps: &[f64]) -> Option<[S; 3]> {
         match self {
             Self::Alternate(space) => {
-                (comps.len() == space.ncomponents()).then(|| space.convert_to_rgb(doc, comps))
+                (comps.len() == space.ncomponents()).then(|| space.convert(doc, comps))
             }
-            Self::Shaper(shaper) => shaper.convert_components(comps),
-            Self::Transform { n, xform, .. } => {
+            Self::Shaper(shaper) => shaper.convert_components_at(comps),
+            Self::Transform {
+                n,
+                xform,
+                profile,
+                xform16,
+                ..
+            } => {
                 if comps.len() != usize::from(*n) {
                     return None;
                 }
-                let mut src = [0u8; 4];
-                for (dst, &c) in src.iter_mut().zip(comps) {
-                    *dst = color::convert::gray_to_u8(c);
+                if S::DEPTH == color::SampleDepth::Eight {
+                    return run(&**xform, comps).map(|rgb| rgb.map(S::from_u8));
                 }
-                let mut rgb = [0u8; 3];
-                xform
-                    .transform(&src[..comps.len()], &mut rgb)
-                    .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
-                    .ok()?;
-                Some(rgb)
+                let xform16 = xform16.get_or_init(|| {
+                    let layout = match n {
+                        1 => Layout::Gray,
+                        3 => Layout::Rgb,
+                        _ => Layout::Rgba,
+                    };
+                    profile
+                        .create_transform_16bit(
+                            layout,
+                            &ColorProfile::new_srgb(),
+                            Layout::Rgb,
+                            TransformOptions::default(),
+                        )
+                        .map_err(|e| {
+                            log::warn!(
+                                "colorspace: 16-bit ICC transform creation failed, \
+                                 converting at 8 bits: {e}"
+                            );
+                        })
+                        .ok()
+                });
+                xform16.as_ref().map_or_else(
+                    || run(&**xform, comps).map(|rgb| rgb.map(S::from_u8)),
+                    |x| run(&**x, comps).map(|rgb| rgb.map(|v| S::from_unit(v.to_unit()))),
+                )
             }
         }
     }
+}
+
+/// Run `xform` on the normalised components `comps`, quantised to its
+/// sample type: one pixel of `comps.len()` channels to one sRGB pixel.
+/// `None` when the transform fails.
+fn run<S: Sample>(
+    xform: &(dyn moxcms::TransformExecutor<S> + Send + Sync),
+    comps: &[f64],
+) -> Option<[S; 3]> {
+    let mut src = [S::default(); 4];
+    for (dst, &c) in src.iter_mut().zip(comps) {
+        *dst = S::from_unit(c);
+    }
+    let mut rgb = [S::default(); 3];
+    xform
+        .transform(&src[..comps.len()], &mut rgb)
+        .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
+        .ok()?;
+    Some(rgb)
 }
 
 #[cfg(test)]
@@ -245,8 +301,11 @@ mod tests {
         let doc = srgb_doc();
         let conv = IccConversion::load(&doc, (2, 0), 3).expect("sRGB profile compiles");
         assert!(matches!(*conv, IccConversion::Shaper(_)));
-        assert_eq!(conv.convert(&doc, &[1.0, 0.0, 0.0]), Some([255, 0, 0]));
-        assert_eq!(conv.convert(&doc, &[1.0, 0.0]), None);
+        assert_eq!(
+            conv.convert::<u8>(&doc, &[1.0, 0.0, 0.0]),
+            Some([255, 0, 0])
+        );
+        assert_eq!(conv.convert::<u8>(&doc, &[1.0, 0.0]), None);
     }
 
     #[test]

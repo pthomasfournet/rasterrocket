@@ -21,7 +21,7 @@ pub(super) fn decode_free_form<const N: usize, S: CornerSource<N>>(
     data: &[u8],
     source: &S,
     format: &VertexFormat<'_>,
-    out: &mut TriangleSink<N>,
+    out: &mut TriangleSink<N, S::Sample>,
 ) {
     let Some(bpf) = parse_bits_per_flag(sh, 4) else {
         return;
@@ -80,7 +80,7 @@ pub(super) fn decode_lattice<const N: usize, S: CornerSource<N>>(
     data: &[u8],
     source: &S,
     format: &VertexFormat<'_>,
-    out: &mut TriangleSink<N>,
+    out: &mut TriangleSink<N, S::Sample>,
 ) {
     let Some(verts_per_row) = sh.get_i64(b"VerticesPerRow") else {
         log::warn!("shading/type5: VerticesPerRow is missing — skipping the shading");
@@ -144,12 +144,10 @@ mod tests {
         shading_type: u8,
     ) -> Vec<[raster::shading::gouraud::GouraudVertex; 3]> {
         let doc = empty_doc();
-        let source = DirectColors {
-            cs: ShadingCs {
-                doc: &doc,
-                space: &ColorSpace::DeviceGray,
-            },
-        };
+        let source = DirectColors::new(ShadingCs {
+            doc: &doc,
+            space: &ColorSpace::DeviceGray,
+        });
         let decode = default_decode(1);
         let format =
             VertexFormat::parse(sh, shading_type, &decode, &IDENTITY, 1.0).expect("format");

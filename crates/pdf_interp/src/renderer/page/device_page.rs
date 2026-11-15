@@ -185,10 +185,13 @@ impl PageRenderer<'_> {
     ///
     /// # Errors
     ///
-    /// Why the page cannot be recorded at all: it simulates overprint on
-    /// an ink canvas, paints as a page group, or fills without
-    /// antialiasing.  The renderer is unchanged then.
+    /// Why the page cannot be recorded at all: it is painted at 16 bits,
+    /// simulates overprint on an ink canvas, paints as a page group, or
+    /// fills without antialiasing.  The renderer is unchanged then.
     pub fn record_for_device(&mut self) -> Result<(), &'static str> {
+        if self.canvas.kind() == CanvasKind::Rgb16 {
+            return Err("16-bit samples");
+        }
         if let Some(reason) = ineligible_canvas(
             self.canvas.kind() != CanvasKind::Rgb,
             self.canvas.has_alpha() || self.page_group.is_some(),

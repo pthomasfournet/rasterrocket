@@ -12,12 +12,9 @@
 
 use std::rc::Rc;
 
-use color::Rgb8;
-use raster::Bitmap;
-
 use super::{
-    CanvasBuffers, PageDiagnostics, PageRenderer, SharedInkMap, canvas, form_memo, image_memo,
-    pattern_memo,
+    CanvasBuffers, FinishedCanvas, PageDiagnostics, PageRenderer, SharedInkMap, form_memo,
+    image_memo, pattern_memo,
 };
 use crate::resources::IMAGE_FILTER_COUNT;
 use crate::resources::image::colorspace::TintBudget;
@@ -91,7 +88,7 @@ impl PageRenderer<'_> {
     pub fn try_finish_band(
         mut self,
         transparent: bool,
-    ) -> Result<(Bitmap<Rgb8>, PageState, CanvasBuffers), raster::BitmapAllocError> {
+    ) -> Result<(FinishedCanvas, PageState, CanvasBuffers), raster::BitmapAllocError> {
         let state = PageState {
             image_memo: Rc::clone(&self.image_memo),
             tint_budget: Rc::clone(&self.tint_budget),
@@ -102,10 +99,10 @@ impl PageRenderer<'_> {
             filter_counts: self.filter_counts,
         };
         let (canvas, mut buffers, ink_map, _) = self.into_parts(!transparent);
-        let mut rgb = canvas.try_into_rgb_in(&ink_map.borrow().luts(), &mut buffers)?;
+        let mut finished = canvas.try_into_finished_in(&ink_map.borrow().luts(), &mut buffers)?;
         if transparent {
-            canvas::zero_transparent_colour(&mut rgb);
+            finished.zero_transparent_colour();
         }
-        Ok((rgb, state, buffers))
+        Ok((finished, state, buffers))
     }
 }

@@ -57,6 +57,7 @@
 mod annotations;
 mod band;
 mod canvas;
+pub(crate) mod depth;
 mod device_blit;
 #[cfg(feature = "vulkan")]
 mod device_page;
@@ -89,6 +90,7 @@ mod view;
 mod xobject;
 
 pub use band::PageState;
+pub use canvas::FinishedCanvas;
 use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "vulkan")]
 pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
@@ -107,10 +109,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use color::Rgb8;
+use color::{Rgb8, SampleDepth};
 use pdf::{Document, ObjectId};
 use raster::pipe::ChannelMask;
-use raster::{Bitmap, path::PathBuilder, transparency::Backdrop};
+use raster::{Bitmap, path::PathBuilder};
 
 use super::color::InkChannels;
 use super::font_cache::{DocumentFonts, FontCache};
@@ -219,6 +221,8 @@ pub(super) const MAX_WARNED_UNKNOWN_OPS: usize = 256;
 pub struct CanvasBuffers {
     /// The RGB bitmap's colour buffer and alpha plane.
     pub rgb: raster::BitmapBuffers,
+    /// The 16-bit RGB bitmap's colour buffer and alpha plane.
+    pub rgb16: raster::BitmapBuffers<u16>,
     /// The ink canvas's colour buffer and alpha plane.
     pub ink: raster::BitmapBuffers,
 }
@@ -431,6 +435,21 @@ pub struct PageRenderer<'doc> {
     device_page: Option<Box<device_page::Recording>>,
 }
 
+/// The 8-bit bitmap of `finished`, the canvas of a renderer of 8-bit
+/// samples.
+///
+/// # Panics
+///
+/// On a 16-bit bitmap: a renderer's depth is fixed when it is built.
+fn rgb8(finished: FinishedCanvas) -> Bitmap<Rgb8> {
+    match finished {
+        FinishedCanvas::Rgb8(rgb) => rgb,
+        FinishedCanvas::Rgb16(_) => {
+            panic!("an 8-bit finish of a renderer of 16-bit samples")
+        }
+    }
+}
+
 /// The work watchdog of a page render, as one renderer hands it to the
 /// next ([`PageRenderer::remaining_budget`]).
 pub(super) struct WorkBudget {
@@ -449,7 +468,7 @@ pub(super) struct WorkBudget {
 struct GroupContext {
     /// The backdrop under a non-isolated group, consulted by blend modes
     /// applied inside it; `None` for an isolated group and for the page.
-    backdrop: Option<Arc<Backdrop>>,
+    backdrop: Option<Arc<depth::CanvasBackdrop>>,
     /// Whether the group is a knockout group, in which each object
     /// composites with the group's initial backdrop (see the `knockout`
     /// module).
@@ -540,14 +559,23 @@ impl<'doc> PageRenderer<'doc> {
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
     ) -> Result<Self, raster::BitmapAllocError> {
-        Self::try_with_page_group_in(view, doc, page_id, group, ink, CanvasBuffers::default())
+        Self::try_with_page_group_in(
+            view,
+            doc,
+            page_id,
+            group,
+            ink,
+            SampleDepth::Eight,
+            CanvasBuffers::default(),
+        )
     }
 
-    /// [`Self::try_with_page_group`] built in `buffers`
-    /// ([`raster::Bitmap::try_new_filled_in`]): an RGB canvas is allocated
-    /// in `buffers.rgb`; an ink canvas in `buffers.ink`, converting into
-    /// `buffers.rgb` on finish.  [`Self::try_finish_keeping`] returns them
-    /// for the next page.
+    /// [`Self::try_with_page_group`] of samples of `depth`, built in
+    /// `buffers` ([`raster::Bitmap::try_new_filled_in`]): an RGB canvas is
+    /// allocated in `buffers.rgb`, or `buffers.rgb16` at 16 bits; an ink
+    /// canvas, which is 8-bit whatever `depth`, in `buffers.ink`,
+    /// converting into `buffers.rgb` on finish.
+    /// [`Self::try_finish_keeping`] returns them for the next page.
     ///
     /// # Errors
     ///
@@ -562,17 +590,17 @@ impl<'doc> PageRenderer<'doc> {
         page_id: ObjectId,
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: bool,
+        depth: SampleDepth,
         buffers: CanvasBuffers,
     ) -> Result<Self, raster::BitmapAllocError> {
         let alpha = group.is_some();
         let mut spare = buffers;
-        let (kind, held) = if ink {
-            (CanvasKind::Ink, &mut spare.ink)
+        let kind = if ink {
+            CanvasKind::Ink
         } else {
-            (CanvasKind::Rgb, &mut spare.rgb)
+            CanvasKind::rgb(depth)
         };
-        let canvas_buffers = held.take_for(alpha);
-        let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, canvas_buffers)?;
+        let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?;
         let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group);
         renderer.buffers = spare;
         Ok(renderer)
@@ -1039,14 +1067,20 @@ impl<'doc> PageRenderer<'doc> {
         )
     }
 
-    /// Consume the renderer and return the finished bitmap, in sRGB, and
-    /// page diagnostics.  An ink canvas converts with the process
-    /// equivalents of the page's spot colorants.
+    /// Consume the renderer of 8-bit samples and return the finished
+    /// bitmap, in sRGB, and page diagnostics.  An ink canvas converts with
+    /// the process equivalents of the page's spot colorants.
+    ///
+    /// # Panics
+    ///
+    /// On a renderer of 16-bit samples ([`Self::try_with_page_group_in`]
+    /// at [`SampleDepth::Sixteen`]), which finishes through
+    /// [`Self::try_finish_keeping`].
     #[must_use]
     pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
         let (canvas, _, ink_map, diag) = self.into_parts(true);
         let ink_map = page_ink_map(ink_map);
-        let rgb = canvas.into_rgb(&ink_map.luts());
+        let rgb = rgb8(canvas.into_finished(&ink_map.luts()));
         (rgb, Self::finish_diagnostics(diag, ink_map))
     }
 
@@ -1056,9 +1090,13 @@ impl<'doc> PageRenderer<'doc> {
     /// # Errors
     ///
     /// The allocator refused the page's RGB bitmap.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::finish`].
     pub fn try_finish(self) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
         self.try_finish_keeping(false)
-            .map(|(rgb, diag, _)| (rgb, diag))
+            .map(|(rgb, diag, _)| (rgb8(rgb), diag))
     }
 
     /// [`Self::try_finish`] without the composite onto paper: the bitmap of
@@ -1070,16 +1108,21 @@ impl<'doc> PageRenderer<'doc> {
     /// # Errors
     ///
     /// The allocator refused the page's RGB bitmap.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::finish`].
     pub fn try_finish_transparent(
         self,
     ) -> Result<(Bitmap<Rgb8>, PageDiagnostics), raster::BitmapAllocError> {
         self.try_finish_keeping(true)
-            .map(|(rgb, diag, _)| (rgb, diag))
+            .map(|(rgb, diag, _)| (rgb8(rgb), diag))
     }
 
     /// [`Self::try_finish_transparent`] when `transparent`, and
-    /// [`Self::try_finish`] otherwise, also returning the storage the
-    /// bitmap does not hold (see [`CanvasBuffers`]).
+    /// [`Self::try_finish`] otherwise, at the renderer's depth, also
+    /// returning the storage the bitmap does not hold (see
+    /// [`CanvasBuffers`]).
     ///
     /// # Errors
     ///
@@ -1087,14 +1130,14 @@ impl<'doc> PageRenderer<'doc> {
     pub fn try_finish_keeping(
         self,
         transparent: bool,
-    ) -> Result<(Bitmap<Rgb8>, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
+    ) -> Result<(FinishedCanvas, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
         let (canvas, mut buffers, ink_map, diag) = self.into_parts(!transparent);
         let ink_map = page_ink_map(ink_map);
-        let mut rgb = canvas.try_into_rgb_in(&ink_map.luts(), &mut buffers)?;
+        let mut finished = canvas.try_into_finished_in(&ink_map.luts(), &mut buffers)?;
         if transparent {
-            canvas::zero_transparent_colour(&mut rgb);
+            finished.zero_transparent_colour();
         }
-        Ok((rgb, Self::finish_diagnostics(diag, ink_map), buffers))
+        Ok((finished, Self::finish_diagnostics(diag, ink_map), buffers))
     }
 
     /// The finished canvas, with the storage not in it, the ink map, shared
@@ -1106,14 +1149,8 @@ impl<'doc> PageRenderer<'doc> {
         onto_paper: bool,
     ) -> (PageCanvas, CanvasBuffers, SharedInkMap, PageDiagnostics) {
         self.diag.dominant_filter = crate::resources::image::dominant_filter(&self.filter_counts);
-        if onto_paper
-            && self.page_group.is_some()
-            && let Some(alpha) = self.canvas.composite_onto_white()
-        {
-            match self.canvas.kind() {
-                CanvasKind::Rgb => self.buffers.rgb.alpha = alpha,
-                CanvasKind::Ink => self.buffers.ink.alpha = alpha,
-            }
+        if onto_paper && self.page_group.is_some() {
+            self.canvas.composite_onto_white(&mut self.buffers);
         }
         let Self {
             canvas,

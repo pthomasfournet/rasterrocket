@@ -12,6 +12,7 @@
 //! every query; a triangle with a non-finite vertex has no bounds and is
 //! yielded for every query.
 
+use color::Sample;
 use raster::Clip;
 use raster::shading::gouraud::GouraudVertex;
 
@@ -28,8 +29,8 @@ const MAX_BANDS: u32 = 1 << 14;
 const MAX_TRIANGLE_BANDS: usize = 64;
 
 /// A triangle list of `N`-byte vertex colours with a row index.
-pub struct Mesh<const N: usize = 3> {
-    triangles: Vec<[GouraudVertex<N>; 3]>,
+pub struct Mesh<const N: usize = 3, S: Sample = u8> {
+    triangles: Vec<[GouraudVertex<N, S>; 3]>,
     /// `(x_min, y_min, x_max, y_max)` of each triangle.
     bounds: Vec<[f64; 4]>,
     /// For each band, the triangles meeting it, in mesh order.
@@ -39,10 +40,10 @@ pub struct Mesh<const N: usize = 3> {
     unbanded: Vec<u32>,
 }
 
-impl<const N: usize> Mesh<N> {
+impl<const N: usize, S: Sample> Mesh<N, S> {
     /// Index `triangles`.
     #[must_use]
-    pub fn new(triangles: Vec<[GouraudVertex<N>; 3]>) -> Self {
+    pub fn new(triangles: Vec<[GouraudVertex<N, S>; 3]>) -> Self {
         let bounds: Vec<[f64; 4]> = triangles
             .iter()
             .map(|t| {
@@ -88,7 +89,7 @@ impl<const N: usize> Mesh<N> {
 
     /// Every triangle, in mesh order.
     #[must_use]
-    pub fn triangles(&self) -> &[[GouraudVertex<N>; 3]] {
+    pub fn triangles(&self) -> &[[GouraudVertex<N, S>; 3]] {
         &self.triangles
     }
 
@@ -99,7 +100,7 @@ impl<const N: usize> Mesh<N> {
         &self,
         clip: &Clip,
         origin: (i32, i32),
-    ) -> impl Iterator<Item = [GouraudVertex<N>; 3]> + '_ {
+    ) -> impl Iterator<Item = [GouraudVertex<N, S>; 3]> + '_ {
         // A triangle paints the rows and columns its vertices round to, half
         // a pixel past its bounds at most: the rectangle is widened by one
         // pixel on each side.

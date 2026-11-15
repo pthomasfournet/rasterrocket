@@ -143,8 +143,10 @@ impl PageRenderer<'_> {
         let gpu_ctx = self.gpu_ctx.as_deref();
         with_canvas!(&mut self.canvas, |bitmap| {
             let mut compositor = ImageCompositor::new(bitmap, &paint);
-            if kind == CanvasKind::Ink {
-                compositor.transfer = transfer.as_deref();
+            match kind {
+                CanvasKind::Rgb => {}
+                CanvasKind::Rgb16 => compositor.wide_transfer = transfer.as_deref(),
+                CanvasKind::Ink => compositor.transfer = transfer.as_deref(),
             }
             let composite = |rows: RgbaRows<'_>| {
                 composite_rgba_rows(bitmap, rows, grid, grid_clip, compositor, rgb_transfer);

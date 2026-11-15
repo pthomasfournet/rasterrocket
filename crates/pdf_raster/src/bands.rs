@@ -17,7 +17,7 @@ use raster::Bitmap;
 
 use crate::render::{
     PageJob, allocation_failed, begin, check_aborted, check_strict_images, log_failures,
-    page_content, page_view, render_page_rgb_with_geom, warn_unsupported,
+    page_content, page_view, render_page_rgb_with_geom, rgb8, warn_unsupported,
 };
 use crate::{RasterError, RasterSession, RenderParams};
 
@@ -160,9 +160,10 @@ pub fn render_page_bands<E>(
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
         check_strict_images(session, renderer.image_failures())?;
-        let (bitmap, next, spare) = renderer
+        let (canvas, next, spare) = renderer
             .try_finish_band(params.transparent_background)
             .map_err(allocation_failed)?;
+        let bitmap = rgb8(canvas)?;
         sink(Band { y, bitmap: &bitmap }).map_err(BandError::Sink)?;
         buffers = spare;
         buffers.rgb.reclaim(bitmap);
