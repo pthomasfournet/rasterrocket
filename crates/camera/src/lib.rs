@@ -1,6 +1,7 @@
-//! Cleanup of camera-captured pages on 8-bit grayscale images: page crop,
-//! perspective rectification, double-page spread splitting and page
-//! curvature dewarp.
+//! Cleanup of camera-captured pages, measured on 8-bit grayscale images:
+//! page crop, perspective rectification, double-page spread splitting and
+//! page curvature dewarp.  [`Report::replay`] resamples another image of
+//! the same size, 8- or 16-bit ([`Sample`]), through the measured geometry.
 //!
 //! # Pipeline
 //!
@@ -53,6 +54,7 @@ mod linalg;
 mod num;
 mod pipeline;
 mod quad;
+mod sample;
 mod spread;
 mod stats;
 #[cfg(test)]
@@ -62,6 +64,7 @@ mod textlines;
 pub use error::{CameraError, MAX_DIMENSION};
 pub use image::{GrayPage, GrayView, Rect};
 pub use pipeline::{Gutter, Outcome, Processed, Report, Timings, process};
+pub use sample::Sample;
 
 use num::{floor_index, to_f64};
 

@@ -194,7 +194,7 @@ mod tests {
         let fold = 640.0;
         let p = text_columns(w, h, &[(80, 600), (680, 1320)], |x| {
             let d = (to_f64(x) - fold) / 25.0;
-            crate::num::clamp_u8(70.0f64.mul_add(-(-d * d).exp(), 235.0))
+            <u8 as crate::Sample>::from_f64(70.0f64.mul_add(-(-d * d).exp(), 235.0))
         });
         let x = find_gutter(&p.view()).expect("gutter");
         assert!(x.abs_diff(640) <= 6, "split at {x}");

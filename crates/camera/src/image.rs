@@ -1,38 +1,44 @@
 //! Grayscale image types, box downsampling and inverse-mapped resampling.
 //!
+//! The images hold samples of a [`Sample`] type: 8-bit for detection, 8-
+//! or 16-bit for the replayed resampling.  Lengths and strides count
+//! samples.
+//!
 //! Coordinate convention: integer coordinates address pixel centres; the
 //! continuous extent of a `w`-pixel row is `[-0.5, w - 0.5]`.
 
 use crate::error::{CameraError, MAX_DIMENSION};
-use crate::num::{clamp_u8, floor_index, to_f64};
+use crate::num::{floor_index, to_f64};
+use crate::sample::Sample;
 
-/// A borrowed 8-bit grayscale image: row `y` is
-/// `data[y · stride .. y · stride + width]`, top-down.
+/// A borrowed grayscale image of samples `S` (8-bit by default): row `y`
+/// is `data[y · stride .. y · stride + width]`, top-down.
 ///
 /// Every function taking a view validates it first (see
 /// [`validate`](Self::validate)).
 #[derive(Debug, Clone, Copy)]
-pub struct GrayView<'a> {
-    /// Pixel bytes; at least `stride · (height − 1) + width` long.
-    pub data: &'a [u8],
+pub struct GrayView<'a, S: Sample = u8> {
+    /// Samples; at least `stride · (height − 1) + width` long.
+    pub data: &'a [S],
     /// Width in pixels.
     pub width: usize,
     /// Height in pixels.
     pub height: usize,
-    /// Distance in bytes between the starts of consecutive rows (≥ `width`).
+    /// Distance in samples between the starts of consecutive rows
+    /// (≥ `width`).
     pub stride: usize,
 }
 
-/// An owned, tightly packed 8-bit grayscale image (`stride == width`),
-/// row-major, top-down.
+/// An owned, tightly packed grayscale image of samples `S` (8-bit by
+/// default; `stride == width`), row-major, top-down.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrayPage {
+pub struct GrayPage<S: Sample = u8> {
     /// Width in pixels.
     pub width: usize,
     /// Height in pixels.
     pub height: usize,
-    /// `width · height` pixel bytes.
-    pub data: Vec<u8>,
+    /// `width · height` samples.
+    pub data: Vec<S>,
 }
 
 /// An axis-aligned pixel rectangle: columns `x .. x + width`, rows
@@ -49,10 +55,10 @@ pub struct Rect {
     pub height: usize,
 }
 
-impl<'a> GrayView<'a> {
+impl<'a, S: Sample> GrayView<'a, S> {
     /// A view of a tightly packed buffer (`stride == width`).
     #[must_use]
-    pub const fn packed(data: &'a [u8], width: usize, height: usize) -> Self {
+    pub const fn packed(data: &'a [S], width: usize, height: usize) -> Self {
         Self {
             data,
             width,
@@ -63,7 +69,7 @@ impl<'a> GrayView<'a> {
 
     /// Check the view's invariants: non-zero dimensions not above
     /// [`MAX_DIMENSION`], `stride ≥ width`, a buffer of at least
-    /// `stride · (height − 1) + width` bytes, and a pixel area whose double
+    /// `stride · (height − 1) + width` samples, and a pixel area whose double
     /// fits in `usize`.
     ///
     /// # Errors
@@ -105,15 +111,15 @@ impl<'a> GrayView<'a> {
         Ok(())
     }
 
-    /// Row `y` as `width` bytes.  Caller guarantees `y < height` on a
+    /// Row `y` as `width` samples.  Caller guarantees `y < height` on a
     /// validated view.
-    pub(crate) fn row(&self, y: usize) -> &'a [u8] {
+    pub(crate) fn row(&self, y: usize) -> &'a [S] {
         let start = y * self.stride;
         &self.data[start..start + self.width]
     }
 
     /// Value at `(x, y)`.  Caller guarantees `x < width`, `y < height`.
-    pub(crate) const fn at(&self, x: usize, y: usize) -> u8 {
+    pub(crate) const fn at(&self, x: usize, y: usize) -> S {
         self.data[y * self.stride + x]
     }
 
@@ -140,7 +146,7 @@ impl<'a> GrayView<'a> {
     }
 
     /// A packed copy of the view.
-    pub(crate) fn to_page(self) -> GrayPage {
+    pub(crate) fn to_page(self) -> GrayPage<S> {
         let mut data = Vec::with_capacity(self.width * self.height);
         for y in 0..self.height {
             data.extend_from_slice(self.row(y));
@@ -151,7 +157,9 @@ impl<'a> GrayView<'a> {
             data,
         }
     }
+}
 
+impl GrayView<'_> {
     /// Smallest integer factor `f ≥ 1` with `max(w, h) / f ≤ max_side`.
     pub(crate) fn factor_for(&self, max_side: usize) -> usize {
         self.width.max(self.height).div_ceil(max_side.max(1)).max(1)
@@ -201,10 +209,10 @@ impl<'a> GrayView<'a> {
     }
 }
 
-impl GrayPage {
+impl<S: Sample> GrayPage<S> {
     /// A view of the page.
     #[must_use]
-    pub fn view(&self) -> GrayView<'_> {
+    pub fn view(&self) -> GrayView<'_, S> {
         GrayView::packed(&self.data, self.width, self.height)
     }
 }
@@ -218,14 +226,21 @@ pub(crate) fn upscale_coord(v: f64, factor: usize) -> f64 {
 /// Build an `out_w × out_h` page whose pixel `(x, y)` is the bilinear
 /// sample of `src` at `map(x, y)`.
 ///
-/// Samples outside the continuous extent of `src` are white (255).  Inside
-/// it, the 2×2 footprint is clamped to the edge pixels.  Caller guarantees
-/// `out_w, out_h ≥ 1` and a validated `src`.
-pub(crate) fn resample<F>(src: GrayView<'_>, out_w: usize, out_h: usize, map: F) -> GrayPage
+/// Samples outside the continuous extent of `src` are white
+/// ([`Sample::MAX`]).  Inside it, the 2×2 footprint is clamped to the edge
+/// pixels and the blend is rounded half up ([`Sample::from_f64`]).  Caller
+/// guarantees `out_w, out_h ≥ 1` and a validated `src`.
+pub(crate) fn resample<S, F>(
+    src: GrayView<'_, S>,
+    out_w: usize,
+    out_h: usize,
+    map: F,
+) -> GrayPage<S>
 where
+    S: Sample,
     F: Fn(f64, f64) -> (f64, f64),
 {
-    let mut data = vec![u8::MAX; out_w * out_h];
+    let mut data = vec![S::MAX; out_w * out_h];
     let (sw, sh) = (src.width, src.height);
     let (max_x, max_y) = (to_f64(sw) - 0.5, to_f64(sh) - 0.5);
     for (oy, row) in data.chunks_exact_mut(out_w.max(1)).enumerate() {
@@ -240,9 +255,9 @@ where
             let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
             let (fx, fy) = (xc - to_f64(x0), yc - to_f64(y0));
             let (r0, r1) = (src.row(y0), src.row(y1));
-            let top = f64::from(r0[x0]).mul_add(1.0 - fx, f64::from(r0[x1]) * fx);
-            let bot = f64::from(r1[x0]).mul_add(1.0 - fx, f64::from(r1[x1]) * fx);
-            *px = clamp_u8(top.mul_add(1.0 - fy, bot * fy));
+            let top = r0[x0].to_f64().mul_add(1.0 - fx, r0[x1].to_f64() * fx);
+            let bot = r1[x0].to_f64().mul_add(1.0 - fx, r1[x1].to_f64() * fx);
+            *px = S::from_f64(top.mul_add(1.0 - fy, bot * fy));
         }
     }
     GrayPage {
@@ -290,6 +305,16 @@ mod tests {
         let src = plane(2, 2, |_, _| 0);
         let dst = resample(src.view(), 2, 1, |x, y| (x + 10.0, y));
         assert_eq!(dst.data, vec![255, 255]);
+        let deep = GrayPage::<u16> {
+            width: 2,
+            height: 2,
+            data: vec![0, 1000, 2000, 3000],
+        };
+        let out = resample(deep.view(), 3, 1, |x, y| (x * 0.5, y + 0.5));
+        // x = 0, 0.5 at row 0.5: the blends 1000 and 1500; x = 1 → 2000.
+        assert_eq!(out.data, vec![1000, 1500, 2000]);
+        let outside = resample(deep.view(), 1, 1, |x, y| (x + 10.0, y));
+        assert_eq!(outside.data, vec![u16::MAX]);
     }
 
     #[test]
@@ -339,6 +364,22 @@ mod tests {
         assert!(matches!(
             v(MAX_DIMENSION + 1, 1, MAX_DIMENSION + 1).validate(),
             Err(CameraError::TooLarge { .. })
+        ));
+        // Lengths count samples, not bytes.
+        let deep = [0u16; 10];
+        assert!(GrayView::packed(&deep, 5, 2).validate().is_ok());
+        assert!(matches!(
+            GrayView {
+                data: &deep,
+                width: 5,
+                height: 2,
+                stride: 6
+            }
+            .validate(),
+            Err(CameraError::BufferTooShort {
+                len: 10,
+                required: 11
+            })
         ));
     }
 }

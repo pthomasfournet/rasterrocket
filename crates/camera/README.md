@@ -1,6 +1,6 @@
 # rasterrocket-camera
 
-Cleanup of camera-captured pages on 8-bit grayscale images: page crop,
+Cleanup of camera-captured pages, measured on 8-bit grayscale images: page crop,
 perspective rectification, double-page spread splitting and an experimental
 dewarp. It has no dependencies beyond `std`, runs on the calling thread, keeps
 no global state and returns on any input without panicking (MSRV 1.100).
@@ -26,7 +26,9 @@ fn clean(pixels: &[u8], width: usize, height: usize) -> Result<(), CameraError> 
 ```
 
 `Report::replay` applies the same geometry to another image of the same size,
-such as each channel of the colour image whose luma was processed. `rrocket`
+such as each channel of the colour image whose luma was processed, at 8 or 16
+bits per sample (`GrayView<'_, u16>`): a 16-bit page is measured on its 8-bit
+luma and resampled at 16 bits. `rrocket`
 exposes the stages as `--crop`, `--rectify`, `--split-spreads` and `--dewarp`.
 Stage criteria and types: the
 [API reference](../../docs/api-reference.md#rasterrocket-camera-crate--camera-capture-page-cleanup).

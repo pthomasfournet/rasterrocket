@@ -6,7 +6,7 @@ use crate::dewarp::Surface;
 use crate::homography::{Homography, rectified_size};
 use crate::image::{GrayPage, GrayView, Rect, resample};
 use crate::num::to_f64;
-use crate::{CameraError, CameraOptions, Quad, cut_line, dewarp, quad, textlines};
+use crate::{CameraError, CameraOptions, Quad, Sample, cut_line, dewarp, quad, textlines};
 
 /// The pages produced by [`process`] and the report of how.
 #[derive(Debug, Clone)]
@@ -102,15 +102,16 @@ pub struct Report {
 impl Report {
     /// Apply the geometry computed by [`process`] to another image of the
     /// same size, such as one colour channel of the image whose luma was
-    /// processed.  Replaying on the processed image itself reproduces
-    /// [`Processed::pages`].
+    /// processed, or the same image at 16 bits per sample.  Replaying on
+    /// the processed image itself reproduces [`Processed::pages`].  The
+    /// resampling runs at the depth of `S`.
     ///
     /// # Errors
     ///
     /// [`CameraError`] when `img` is malformed, or
     /// [`CameraError::SizeMismatch`] when its size differs from the
     /// processed image.
-    pub fn replay(&self, img: GrayView<'_>) -> Result<Vec<GrayPage>, CameraError> {
+    pub fn replay<S: Sample>(&self, img: GrayView<'_, S>) -> Result<Vec<GrayPage<S>>, CameraError> {
         img.validate()?;
         let actual = (img.width, img.height);
         if actual != self.transform.input {
@@ -151,7 +152,7 @@ impl Warp {
     }
 
     /// Resample `img` through the warp.
-    pub(crate) fn apply(&self, img: GrayView<'_>) -> GrayPage {
+    pub(crate) fn apply<S: Sample>(&self, img: GrayView<'_, S>) -> GrayPage<S> {
         resample(img, self.width, self.height, |x, y| self.hmg.apply(x, y))
     }
 }
@@ -163,7 +164,7 @@ pub(crate) fn fit_surface(img: GrayView<'_>) -> Result<Surface, String> {
 }
 
 /// Resample `img` through a dewarp surface.
-pub(crate) fn apply_surface(img: GrayView<'_>, surface: &Surface) -> GrayPage {
+pub(crate) fn apply_surface<S: Sample>(img: GrayView<'_, S>, surface: &Surface) -> GrayPage<S> {
     resample(img, img.width, img.height, |x, y| {
         (x, surface.source_y(x, y))
     })
@@ -171,7 +172,7 @@ pub(crate) fn apply_surface(img: GrayView<'_>, surface: &Surface) -> GrayPage {
 
 /// Columns `[0, x)` and `[x, width)` of `img`.  Caller guarantees
 /// `0 < x < width`.
-pub(crate) fn split_views(img: GrayView<'_>, x: usize) -> [GrayView<'_>; 2] {
+pub(crate) fn split_views<S: Sample>(img: GrayView<'_, S>, x: usize) -> [GrayView<'_, S>; 2] {
     let h = img.height;
     [
         img.sub(Rect {
@@ -198,13 +199,13 @@ enum Frame {
 }
 
 /// A framed image: a view into the source, or a resampled page.
-enum Framed<'a> {
-    View(GrayView<'a>),
-    Owned(GrayPage),
+enum Framed<'a, S: Sample = u8> {
+    View(GrayView<'a, S>),
+    Owned(GrayPage<S>),
 }
 
-impl Framed<'_> {
-    fn view(&self) -> GrayView<'_> {
+impl<S: Sample> Framed<'_, S> {
+    fn view(&self) -> GrayView<'_, S> {
         match self {
             Self::View(v) => *v,
             Self::Owned(p) => p.view(),
@@ -213,7 +214,7 @@ impl Framed<'_> {
 }
 
 impl Frame {
-    fn apply<'a>(&self, img: GrayView<'a>) -> Framed<'a> {
+    fn apply<'a, S: Sample>(&self, img: GrayView<'a, S>) -> Framed<'a, S> {
         match self {
             Self::Whole => Framed::View(img),
             Self::Crop(rect) => Framed::View(img.sub(*rect)),
@@ -242,7 +243,7 @@ struct Transform {
 
 impl Transform {
     /// Caller guarantees a validated `img` of size `self.input`.
-    fn apply(&self, img: GrayView<'_>) -> Vec<GrayPage> {
+    fn apply<S: Sample>(&self, img: GrayView<'_, S>) -> Vec<GrayPage<S>> {
         let framed = self.frame.apply(img);
         let parts = parts(framed.view(), self.split);
         parts
@@ -258,7 +259,7 @@ impl Transform {
 }
 
 /// The page views of `img`: the whole, or both sides of a split.
-fn parts(img: GrayView<'_>, split: Option<usize>) -> Vec<GrayView<'_>> {
+fn parts<S: Sample>(img: GrayView<'_, S>, split: Option<usize>) -> Vec<GrayView<'_, S>> {
     split.map_or_else(|| vec![img], |x| split_views(img, x).to_vec())
 }
 
@@ -478,7 +479,7 @@ fn gutter_report(frame: &Frame, x: usize, height: usize) -> Gutter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::plane;
+    use crate::testutil::{curved_text, digest, plane, tilted_page};
 
     /// A light page with text bars on a darker desk; `page` is
     /// `(x0, y0, x1, y1)`, exclusive at the end.
@@ -616,5 +617,87 @@ mod tests {
             assert!(matches!(outcome, Outcome::Skipped(_)), "{outcome:?}");
         }
         assert_eq!(out.pages, vec![img]);
+    }
+
+    /// The 8-bit pages of fixed inputs, digested before the resamplers
+    /// became generic over the sample.
+    #[test]
+    fn eight_bit_output_matches_its_golden_digests() {
+        let all = CameraOptions::all();
+        let desk = page_on_desk(900, 1200, (100, 150, 800, 1100));
+        let tilted = tilted_page(1000, 1300);
+        let curved = curved_text(1200, 1000, |x, _| 40.0 * (x / 1200.0).powi(3));
+        let crop = opts(|o| o.crop = true);
+        let rectify = opts(|o| o.rectify = true);
+        let dewarp = opts(|o| o.dewarp = true);
+        let got: Vec<u64> = [
+            (&desk, all),
+            (&tilted, rectify),
+            (&tilted, crop),
+            (&curved, dewarp),
+        ]
+        .into_iter()
+        .map(|(img, o)| {
+            let out = process(img.view(), &o).expect("valid input");
+            assert!(changed(&out.report), "{:?}", out.report);
+            digest(&out.pages)
+        })
+        .collect();
+        assert_eq!(got, GOLDEN, "{got:#x?}");
+    }
+
+    const GOLDEN: [u64; 4] = [
+        0xac3c_a584_5c68_fbe4,
+        0xe5ae_7f73_826a_3125,
+        0xf9dd_9700_a596_0696,
+        0x5fea_0d1c_825b_cdd6,
+    ];
+
+    fn changed(r: &Report) -> bool {
+        r.crop.applied() || r.rectify.applied() || r.dewarp.iter().any(Outcome::applied)
+    }
+
+    /// `page`'s samples widened to 16 bits (`v · 257`).
+    fn widened(page: &GrayPage) -> GrayPage<u16> {
+        GrayPage {
+            width: page.width,
+            height: page.height,
+            data: page.data.iter().map(|&v| u16::from(v) * 257).collect(),
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_replay_follows_the_eight_bit_geometry() {
+        let desk = page_on_desk(900, 1200, (100, 150, 800, 1100));
+        let tilted = tilted_page(1000, 1300);
+        let curved = curved_text(1200, 1000, |x, _| 40.0 * (x / 1200.0).powi(3));
+        for (img, o) in [
+            (&desk, CameraOptions::all()),
+            (&tilted, opts(|o| o.rectify = true)),
+            (&tilted, opts(|o| o.crop = true)),
+            (&curved, opts(|o| o.dewarp = true)),
+        ] {
+            let out = process(img.view(), &o).expect("valid input");
+            let wide = widened(img);
+            let pages = out.report.replay(wide.view()).expect("same size");
+            assert_eq!(pages.len(), out.pages.len());
+            for (deep, narrow) in pages.iter().zip(&out.pages) {
+                assert_eq!((deep.width, deep.height), (narrow.width, narrow.height));
+                for (&d, &n) in deep.data.iter().zip(&narrow.data) {
+                    // round(d / 257) and the 8-bit blend round the same
+                    // bilinear value, so they differ by at most one level.
+                    let level = (u32::from(d) + 128) / 257;
+                    assert!(level.abs_diff(u32::from(n)) <= 1, "{d} vs {n}");
+                }
+            }
+        }
+        let small = plane(10, 10, |_, _| 0);
+        assert!(matches!(
+            process(desk.view(), &CameraOptions::all())
+                .expect("valid input")
+                .report
+                .replay(widened(&small).view()),
+            Err(CameraError::SizeMismatch { .. })
+        ));
     }
 }

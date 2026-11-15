@@ -33,16 +33,16 @@ pub enum CameraError {
     },
     /// The row stride is smaller than the width.
     StrideTooSmall {
-        /// Row stride in bytes.
+        /// Row stride in samples.
         stride: usize,
         /// Width in pixels.
         width: usize,
     },
-    /// The buffer holds fewer than `stride · (height − 1) + width` bytes.
+    /// The buffer holds fewer than `stride · (height − 1) + width` samples.
     BufferTooShort {
-        /// Buffer length in bytes.
+        /// Buffer length in samples.
         len: usize,
-        /// Required length in bytes.
+        /// Required length in samples.
         required: usize,
     },
     /// `stride · (height − 1) + width`, or twice the pixel area, does not
@@ -52,7 +52,7 @@ pub enum CameraError {
         width: usize,
         /// Height in pixels.
         height: usize,
-        /// Row stride in bytes.
+        /// Row stride in samples.
         stride: usize,
     },
     /// A rectangle is empty or extends beyond the image.
@@ -98,7 +98,7 @@ impl fmt::Display for CameraError {
             ),
             Self::BufferTooShort { len, required } => write!(
                 f,
-                "image buffer holds {len} bytes; stride × (height − 1) + width requires {required}"
+                "image buffer holds {len} samples; stride × (height − 1) + width requires {required}"
             ),
             Self::Overflow {
                 width,

@@ -37,13 +37,3 @@ pub(crate) const fn floor_index(v: f64) -> usize {
 pub(crate) fn round_index(v: f64) -> usize {
     floor_index(v + 0.5)
 }
-
-/// Round and saturate to `u8`.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is clamped to [0, 255] before the cast"
-)]
-pub(crate) fn clamp_u8(v: f64) -> u8 {
-    (v + 0.5).clamp(0.0, 255.0) as u8
-}
