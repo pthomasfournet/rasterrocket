@@ -204,9 +204,20 @@ pub(crate) struct Args {
     #[arg(long = "jpegopt", value_name = "OPTIONS", value_parser = parse_jpeg_options)]
     pub jpegopt: Option<encode::JpegOptions>,
 
-    /// CMYK JPEG output: not implemented; refused at startup.
+    /// Output CMYK JPEG: `--jpeg --cmyk`.
     #[arg(long)]
     pub jpegcmyk: bool,
+
+    /// Render CMYK pages and write them as CMYK TIFF (with --tiff) or
+    /// CMYK JPEG (with --jpeg, Adobe YCCK).  `DeviceCMYK`, ICC-based CMYK
+    /// and process colorants keep their values; spot colorants fold into
+    /// their process equivalents; other colours separate through a CMYK
+    /// --output-profile, else as ISO 32000 §10.4.2 converts them (gray is
+    /// black ink alone).  Overprint is simulated with --overprint.  Not
+    /// with PNG, PPM, --print, --fax, --mono, --gray, --transparent,
+    /// --invert, the camera cleanup flags, --gpu-pages or comic input.
+    #[arg(long)]
+    pub cmyk: bool,
 
     /// Output TIFF.
     #[arg(long)]
@@ -245,8 +256,10 @@ pub(crate) struct Args {
     /// Convert every page to the ICC profile FILE once composited and tag
     /// the output with it (PNG iCCP, TIFF tag 34675, JPEG APP2, the
     /// --print spool's page images; PPM and PGM cannot carry it).  An
-    /// RGB or gray output, display or colour-space profile; a gray one
-    /// writes gray pages.  Not with --mono, --dither, --fax or comic input.
+    /// RGB, gray or CMYK output, display or colour-space profile; a gray
+    /// one writes gray pages, a CMYK one takes --cmyk or --jpegcmyk and
+    /// separates the colours that are not CMYK already.  Not with --mono,
+    /// --dither, --fax or comic input.
     #[arg(long = "output-profile", value_name = "FILE")]
     pub output_profile: Option<std::path::PathBuf>,
 
@@ -254,7 +267,7 @@ pub(crate) struct Args {
     /// `perceptual`, `relative` (relative colorimetric), `saturation` or
     /// `absolute` (absolute colorimetric).  Default: the one intent a
     /// page's content uses (`ri`, `/RI`, an image's `/Intent`), else
-    /// relative colorimetric.
+    /// relative colorimetric; for a CMYK profile, relative colorimetric.
     #[arg(long = "intent", value_name = "INTENT", value_enum)]
     pub intent: Option<IntentArg>,
 
@@ -361,8 +374,8 @@ pub(crate) struct Args {
     pub vector_antialias: AaFlag,
 
     /// Simulate overprint (`OP`, `op`, `OPM`) for pages that use it
-    /// (default off).  Without it every object knocks out what lies
-    /// beneath it.
+    /// (default off), on RGB and gray output and on --cmyk pages.  Without
+    /// it every object knocks out what lies beneath it.
     #[arg(long)]
     pub overprint: bool,
 
@@ -866,12 +879,7 @@ impl Args {
     /// Call this once at startup, before any page is rendered.
     pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
         self.validate_depth_flags()?;
-        if self.jpegcmyk {
-            return Err(
-                "--jpegcmyk output is not implemented; use --jpeg, --png or the default PPM output"
-                    .to_owned(),
-            );
-        }
+        self.validate_cmyk_flags()?;
         self.validate_transparent_flags()?;
         self.validate_output_profile_flags()?;
         self.validate_fax_flags()?;
@@ -879,19 +887,19 @@ impl Args {
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
-        if [self.png, self.jpeg, self.tiff]
+        if [self.png, self.jpeg_output(), self.tiff]
             .iter()
             .filter(|&&f| f)
             .count()
             > 1
         {
-            return Err("--png, --jpeg and --tiff are mutually exclusive".to_owned());
+            return Err("--png, --jpeg (--jpegcmyk) and --tiff are mutually exclusive".to_owned());
         }
         if self.dither != DitherArg::None && !(self.mono || self.faxing()) {
             return Err("--dither applies to --mono and --fax output only".to_owned());
         }
-        if self.jpegopt.is_some() && !self.jpeg {
-            return Err("--jpegopt applies to --jpeg output only".to_owned());
+        if self.jpegopt.is_some() && !self.jpeg_output() {
+            return Err("--jpegopt applies to --jpeg and --jpegcmyk output only".to_owned());
         }
         match self.tiffcompression {
             Some(_) if !(self.tiff || self.faxing()) => {
@@ -912,6 +920,82 @@ impl Args {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether pages are rendered as CMYK: `--cmyk`, or `--jpegcmyk`,
+    /// which implies it.
+    pub(crate) const fn cmyk(&self) -> bool {
+        self.cmyk || self.jpegcmyk
+    }
+
+    /// Whether pages are written as JPEG: `--jpeg`, or `--jpegcmyk`, which
+    /// implies it.
+    pub(crate) const fn jpeg_output(&self) -> bool {
+        self.jpeg || self.jpegcmyk
+    }
+
+    /// Refuse CMYK pages with the outputs that hold no CMYK and the flags
+    /// that work on RGB, gray or bilevel pages.
+    fn validate_cmyk_flags(&self) -> Result<(), String> {
+        if !self.cmyk() {
+            return Ok(());
+        }
+        let flag = if self.cmyk { "--cmyk" } else { "--jpegcmyk" };
+        let colour = "it works on RGB or gray pages; drop it for CMYK pages";
+        let camera = "the camera cleanup works on gray pages; drop it for CMYK pages";
+        let refused = [
+            (
+                self.png,
+                "--png",
+                "PNG holds no CMYK; write CMYK pages with --tiff or --jpeg",
+            ),
+            (
+                self.printing(),
+                "--print",
+                "the print spool takes RGB or gray pages; drop --cmyk to print",
+            ),
+            (
+                self.faxing(),
+                "--fax",
+                "a fax holds bilevel pages; drop --cmyk",
+            ),
+            (self.mono, "--mono", "it writes bilevel pages"),
+            (self.gray, "--gray", "it writes gray pages"),
+            (
+                self.dither != DitherArg::None,
+                "--dither",
+                "it writes bilevel pages",
+            ),
+            (
+                self.transparent,
+                "--transparent",
+                "a CMYK page is opaque, over white paper",
+            ),
+            (self.invert.is_some(), "--invert", colour),
+            (self.crop, "--crop", camera),
+            (self.rectify, "--rectify", camera),
+            (self.split_spreads, "--split-spreads", camera),
+            (self.dewarp, "--dewarp", camera),
+            (
+                self.gpu_pages,
+                "--gpu-pages",
+                "the GPU page raster composites RGB pages; drop --gpu-pages for CMYK pages",
+            ),
+            (
+                self.is_comic_input(),
+                "comic-archive input",
+                "its pages are decoded RGB or gray images",
+            ),
+        ];
+        if let Some((_, what, why)) = refused.iter().find(|(set, _, _)| *set) {
+            return Err(format!("{flag} is refused with {what}: {why}"));
+        }
+        if !(self.tiff || self.jpeg_output()) {
+            return Err(format!(
+                "{flag} needs an output that holds CMYK: PPM has none; add --tiff or --jpeg"
+            ));
+        }
+        Ok(())
     }
 
     /// Refuse `--depth 16` with the flags and input whose pages are 8-bit
@@ -993,7 +1077,7 @@ impl Args {
         if self.png || self.tiff {
             return Ok(());
         }
-        let format = if self.jpeg { "JPEG" } else { "PPM" };
+        let format = if self.jpeg_output() { "JPEG" } else { "PPM" };
         Err(format!(
             "--transparent needs an output with an alpha channel: {format} has none; \
              add --png or --tiff"
@@ -1049,6 +1133,18 @@ impl Args {
         let profile = pdf_raster::OutputProfile::from_bytes(bytes)
             .map_err(|e| format!("--output-profile {shown}: {e}"))?;
         match profile.space() {
+            pdf_raster::OutputSpace::Cmyk if !self.cmyk() => {
+                return Err(format!(
+                    "--output-profile {shown} is a CMYK profile, which separates CMYK pages: \
+                     add --cmyk with --tiff or --jpeg, or --jpegcmyk"
+                ));
+            }
+            pdf_raster::OutputSpace::Rgb | pdf_raster::OutputSpace::Gray if self.cmyk() => {
+                return Err(format!(
+                    "--output-profile {shown} is an RGB or gray profile and --cmyk writes CMYK \
+                     pages: give a CMYK output profile, or drop --cmyk"
+                ));
+            }
             pdf_raster::OutputSpace::Rgb if self.gray => {
                 return Err(format!(
                     "--output-profile {shown} is an RGB profile and --gray writes gray pages: \
@@ -1074,7 +1170,8 @@ impl Args {
     /// The warning of an output that cannot carry the output profile:
     /// PPM and PGM files, whose pixels are still converted.
     pub(crate) fn untagged_output_warning(&self) -> Option<String> {
-        let netpbm = !(self.png || self.jpeg || self.tiff || self.printing() || self.faxing());
+        let netpbm =
+            !(self.png || self.jpeg_output() || self.tiff || self.printing() || self.faxing());
         (self.output_profile.is_some() && netpbm).then(|| {
             "PPM and PGM files cannot carry an ICC profile: the pages hold --output-profile's \
              device values untagged; add --png or --tiff to embed the profile"
@@ -1161,7 +1258,7 @@ impl Args {
         }
         let excluded = [
             (self.png, "--png"),
-            (self.jpeg, "--jpeg"),
+            (self.jpeg_output(), "--jpeg"),
             (self.tiff, "--tiff"),
             (self.single_file, "--singlefile"),
             (self.ram || self.ram_path.is_some(), "--ram / --ram-path"),
@@ -1240,7 +1337,7 @@ impl Args {
         }
         let fixed = [
             (self.png, "--png"),
-            (self.jpeg, "--jpeg"),
+            (self.jpeg_output(), "--jpeg"),
             (self.gray, "--gray"),
             (self.resolution.is_some(), "-r"),
             (self.resolution_x.is_some(), "--rx"),
@@ -1301,7 +1398,7 @@ impl Args {
     pub(crate) fn output_format(&self) -> OutputFormat {
         if self.png {
             OutputFormat::Png
-        } else if self.jpeg {
+        } else if self.jpeg_output() {
             OutputFormat::Jpeg(self.jpegopt.unwrap_or_default())
         } else if self.tiff {
             OutputFormat::Tiff(self.tiff_compression())
@@ -1987,15 +2084,48 @@ mod page_list_tests {
     }
 
     #[test]
-    fn unimplemented_formats_are_refused_up_front() {
-        let err = args_with(&["--jpegcmyk"])
-            .validate_format_flags()
-            .unwrap_err();
+    fn cmyk_takes_tiff_or_jpeg_and_jpegcmyk_is_jpeg_cmyk() {
+        for argv in [
+            &["--cmyk", "--tiff"][..],
+            &["--cmyk", "--jpeg"],
+            &["--jpegcmyk"],
+        ] {
+            assert!(args_with(argv).validate_format_flags().is_ok(), "{argv:?}");
+        }
+        let jpeg = args_with(&["--jpegcmyk", "--jpegopt", "quality=90"]);
+        assert!(jpeg.validate_format_flags().is_ok());
+        assert!(jpeg.cmyk() && jpeg.jpeg_output());
+        assert!(matches!(jpeg.output_format(), OutputFormat::Jpeg(o) if o.quality == 90));
+        assert!(!base_args().cmyk());
+        for (argv, needle) in [
+            (&["--cmyk"][..], "PPM has none; add --tiff or --jpeg"),
+            (&["--cmyk", "--png"], "--cmyk is refused with --png"),
+            (
+                &["--jpegcmyk", "--gray"],
+                "--jpegcmyk is refused with --gray",
+            ),
+            (&["--cmyk", "--tiff", "--mono"], "--mono"),
+            (&["--cmyk", "--tiff", "--transparent"], "--transparent"),
+            (&["--cmyk", "--tiff", "--invert"], "--invert"),
+            (&["--cmyk", "--tiff", "--crop"], "--crop"),
+            (&["--cmyk", "--tiff", "--split-spreads"], "--split-spreads"),
+            (&["--cmyk", "--print"], "--print"),
+            (&["--cmyk", "--fax"], "--fax"),
+            (&["--jpegcmyk", "--gpu-pages"], "--gpu-pages"),
+            (&["--jpegcmyk", "--tiff"], "mutually exclusive"),
+            (&["--jpegcmyk", "--depth", "16"], "baseline JPEG is 8-bit"),
+        ] {
+            let err = args_with(argv).validate_format_flags().unwrap_err();
+            assert!(err.contains(needle), "{argv:?}: {err}");
+        }
+        let comic = Args::parse_from(["rrocket", "--jpegcmyk", "book.cbz", "out"]);
+        let err = comic.validate_format_flags().unwrap_err();
+        assert!(err.contains("comic-archive input"), "{err}");
         assert!(
-            err.starts_with("--jpegcmyk") && err.contains("--jpeg,"),
-            "{err}"
+            args_with(&["--cmyk", "--tiff", "--depth", "16"])
+                .validate_format_flags()
+                .is_ok()
         );
-        assert!(base_args().validate_format_flags().is_ok());
     }
 
     #[test]

@@ -14,8 +14,8 @@ use encode::{
     TiffStream,
 };
 use pdf_raster::{
-    BandBitmap, BandError, FinishedCanvas, RasterSession, RenderParams, render_page_bands,
-    render_page_canvas,
+    BandBitmap, BandError, FinishedCanvas, RasterError, RasterSession, RenderParams,
+    render_page_bands, render_page_canvas,
 };
 use raster::Bitmap;
 
@@ -83,11 +83,15 @@ enum Model {
     Gray,
     /// Two levels.
     Mono,
+    /// CMYK.
+    Cmyk,
 }
 
 impl Model {
     fn of(args: &Args) -> Self {
-        if args.mono {
+        if args.cmyk() {
+            Self::Cmyk
+        } else if args.mono {
             Self::Mono
         } else if args.luma_output() {
             Self::Gray
@@ -118,6 +122,9 @@ impl FileWriter {
         icc: Option<&IccProfile>,
     ) -> Result<Self, RenderError> {
         let wide = depth == SampleDepth::Sixteen;
+        let no_cmyk = || -> RenderError {
+            RasterError::InvalidOptions("CMYK pages are written as TIFF or JPEG".to_owned()).into()
+        };
         Ok(match format {
             FileFormat::Ppm => {
                 let kind = match (model, wide) {
@@ -126,6 +133,7 @@ impl FileWriter {
                     (Model::Gray, false) => PnmKind::Pgm,
                     (Model::Gray, true) => PnmKind::Pgm16,
                     (Model::Mono, _) => PnmKind::Pbm,
+                    (Model::Cmyk, _) => return Err(no_cmyk()),
                 };
                 Self::Pnm(PnmWriter::new(out, size, kind)?)
             }
@@ -137,6 +145,7 @@ impl FileWriter {
                     (Model::Rgb { alpha: false }, true) => PngColor::Rgb16,
                     (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
                     (Model::Gray | Model::Mono, true) => PngColor::Gray16,
+                    (Model::Cmyk, _) => return Err(no_cmyk()),
                 };
                 Self::Png(PngWriter::new(out, size, color, icc)?)
             }
@@ -146,6 +155,7 @@ impl FileWriter {
                     Model::Rgb { alpha: true } => RowLayout::Rgba,
                     Model::Gray => RowLayout::Gray,
                     Model::Mono => RowLayout::Bilevel,
+                    Model::Cmyk => RowLayout::Cmyk,
                 };
                 Self::Tiff(TiffStream::new(
                     out,

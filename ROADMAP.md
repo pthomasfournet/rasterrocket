@@ -2781,6 +2781,54 @@ proofing, a wider-than-sRGB working space. API changes: `FinishedCanvas` /
 `TiffStream::new`, `TiffPageEncoder::new` and `PdfWriter::new` take an
 `Option<&IccProfile>`.
 
+**Unreleased on master: CMYK raster output.** `--cmyk` with `--tiff` or
+`--jpeg`, and `--jpegcmyk` (= `--jpeg --cmyk`, as `pdftoppm -jpegcmyk`),
+render pages in process inks (library: `ColorModel::Cmyk`,
+`RenderParams::with_cmyk`, `RasterOptions::color`, `render_page_cmyk`,
+`PixelFormat::Cmyk8`/`Cmyk16`, `FinishedCanvas`/`BandBitmap::Cmyk8`/`Cmyk16`).
+A CMYK page is painted on the overprint ink canvas and finished as its
+process ink, the first four spot colorants folded into their process
+equivalents.  DeviceCMYK and ICC-based CMYK colours, images and shadings
+and process colorants keep their values (the swatch fixture round-trips
+exactly at 8 and 16 bits); other colours separate through a CMYK
+`--output-profile` (now accepted: a 65³ table of its conversion from the
+working space, under `--intent`, default relative colorimetric, and
+`--bpc`; `transicc` within 1.5 % of each ink on the new
+`tests/fixtures/icc/printer-cmyk-v4.icc`), else by the ISO 32000-2
+§10.4.2.3 device conversion, so gray and black text are black ink alone.
+Overprint is simulated with `--overprint` and knocked out otherwise.
+Written as Separated TIFF (`InkSet` 1, 8 or 16 bits, banded, tagged with the
+profile) and Adobe YCCK JPEG (`APP14` transform 2, inverted, the layout
+`pdftoppm -jpegcmyk` writes).  Against `pdftoppm -tiff -overprint` at
+72 dpi the swatch fixture is identical in every channel; on eight pages
+of four archive documents the mean per-channel difference is 0–4.4
+levels, but 9.6 (K) on a page of an RGB JPEG cover whose page means agree
+within 0.7, the images being resampled differently; the largest
+differences lie at glyph and image edges.  Refused: PNG, PPM, `--print`, `--fax`, `--mono`, `--gray`,
+`--dither`, `--transparent`, `--invert`, the camera stages, `--gpu-pages`,
+comic input, `--jpegcmyk --depth 16`, and an output profile of the other
+colour model.  DeviceCMYK images and shadings now paint their own ink on
+the overprint preview too (`--overprint`: 0 of 215 fixture outputs and 45
+of 1 015 outputs of the 68 archive PDFs that set overprint differ, from
+overprint meeting the image's real inks and from CMYK images reduced in
+ink rather than sRGB).  The page budget counts the ink canvas's eight
+samples a pixel, for CMYK pages and for pages on the overprint preview,
+which were counted as RGB.  Default output is byte-identical (ab_render:
+0 of 215 fixture outputs at 8 bits, 0 of 129 at 16, 0 of 1 315 over 89
+archive PDFs that use CMYK or overprint).  Not done: `BG`/`UCR`, CMYK →
+CMYK conversion of ICC-based CMYK content to a different output profile,
+indexed images over a CMYK base (drawn as sRGB, then separated), per-object
+intents of the separation.  API changes: `PageRenderer::with_page_group`,
+`try_with_page_group(_in)` take a `&CanvasRequest` (`Rgb`,
+`OverprintPreview`, `Cmyk { overprint, separation }`) in place of
+`ink: bool`; `CanvasBuffers::cmyk`/`cmyk16`; `CanvasLayout::ink`;
+`OutputSpace::Cmyk`, `OutputProfile::separation`, `Separation`,
+`ProfileSeparation`, `OutputProfileError::Mismatch` (`Cmyk` removed);
+`PixelMode::Cmyk16`, `Cmyk16`, `ink_to_cmyk_row{,16}`, `fold_spots{,16}`,
+`rgb_to_device_cmyk` in `rasterrocket-color`; `RowImage::Cmyk`/`Cmyk16`,
+`RowLayout::Cmyk`/`Cmyk16` and CMYK `write_jpeg`/`IccProfile` in
+`rasterrocket-encode`.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in

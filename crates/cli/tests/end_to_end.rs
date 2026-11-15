@@ -1213,6 +1213,7 @@ fn output_profile_refusals_name_the_conflict() {
     let (rgb, gray) = (rgb.to_str().unwrap(), gray.to_str().unwrap());
     let cmyk = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+    let cmyk_printer = icc_fixture("printer-cmyk-v4.icc");
     for (args, message) in [
         (
             vec!["--intent", "perceptual"],
@@ -1243,6 +1244,175 @@ fn output_profile_refusals_name_the_conflict() {
             vec!["--output-profile", cmyk.to_str().unwrap()],
             "input profile",
         ),
+        (
+            vec!["--output-profile", cmyk_printer.to_str().unwrap()],
+            "add --cmyk with --tiff or --jpeg",
+        ),
+        (
+            vec!["--output-profile", rgb, "--cmyk", "--tiff"],
+            "give a CMYK output profile",
+        ),
+    ] {
+        let out = rrocket(dir.path(), &input, &args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+        assert!(outputs(dir.path()).is_empty(), "{args:?} wrote files");
+    }
+}
+
+/// A 60 × 10 pt page of six `DeviceCMYK` swatches, 10 pt each, and an RGB
+/// red and a gray square over the last two.
+fn cmyk_swatch_pdf() -> Vec<u8> {
+    with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 10] /Contents 4 0 R >>".to_vec(),
+        stream_object(
+            "",
+            b"0.87 0.01 0 0 k 0 0 10 10 re f 1 0.46 0.05 0.18 k 10 0 10 10 re f \
+              0 0 0 1 k 20 0 10 10 re f 0.5 0.5 0.5 0 k 30 0 10 10 re f \
+              1 0 0 rg 40 0 10 10 re f 0.5 g 50 0 10 10 re f",
+        ),
+    ])
+}
+
+/// The ink of each swatch of [`cmyk_swatch_pdf`]: its `DeviceCMYK`
+/// values, the red as magenta and yellow, the gray as black ink alone.
+const SWATCH_INK: [[u8; 4]; 6] = [
+    [222, 3, 0, 0],
+    [255, 117, 13, 46],
+    [0, 0, 0, 255],
+    [128, 128, 128, 0],
+    [0, 255, 255, 0],
+    [0, 0, 0, 127],
+];
+
+/// A TIFF's photometric interpretation, ink set and samples, widened to
+/// 16 bits.
+fn cmyk_tiff(path: &Path) -> (u32, u32, Vec<u16>) {
+    let file = std::fs::read(path).expect("read TIFF");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    let photometric = decoder
+        .get_tag_u32(tiff::tags::Tag::PhotometricInterpretation)
+        .expect("a photometric interpretation");
+    let ink_set = decoder
+        .get_tag_u32(tiff::tags::Tag::Unknown(332))
+        .expect("an ink set");
+    let samples = match decoder.read_image().expect("decodes") {
+        tiff::decoder::DecodingResult::U8(v) => v.into_iter().map(u16::from).collect(),
+        tiff::decoder::DecodingResult::U16(v) => v,
+        _ => panic!("8- or 16-bit samples"),
+    };
+    (photometric, ink_set, samples)
+}
+
+/// The ink at the centre of each swatch of a 60 × 10 pixel CMYK page.
+fn swatch_centres(samples: &[u16]) -> Vec<[u16; 4]> {
+    (0..6)
+        .map(|i| {
+            let at = (5 * 60 + i * 10 + 5) * 4;
+            samples[at..at + 4].try_into().unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn cmyk_tiff_keeps_device_cmyk_at_both_depths() {
+    let (dir, input) = workdir(&cmyk_swatch_pdf());
+    // At 16 bits each component rounds at 16 bits, and the gray's sRGB
+    // value 32768 leaves 32767 of black.
+    let wide = [
+        [57_015, 655, 0, 0],
+        [65_535, 30_146, 3_277, 11_796],
+        [0, 0, 0, 65_535],
+        [32_768, 32_768, 32_768, 0],
+        [0, 65_535, 65_535, 0],
+        [0, 0, 0, 32_767],
+    ];
+    let narrow = SWATCH_INK.map(|ink| ink.map(u16::from));
+    for (depth, want) in [("8", narrow), ("16", wide)] {
+        let out = rrocket(
+            dir.path(),
+            &input,
+            &["--cmyk", "--tiff", "-r", "72", "--depth", depth],
+        );
+        assert_success(&out);
+        let (photometric, ink_set, samples) = cmyk_tiff(&dir.path().join("out-1.tif"));
+        assert_eq!((photometric, ink_set), (5, 1), "separated, CMYK");
+        assert_eq!(swatch_centres(&samples), want, "depth {depth}");
+    }
+}
+
+#[test]
+fn jpegcmyk_writes_an_adobe_ycck_jpeg() {
+    let (dir, input) = workdir(&cmyk_swatch_pdf());
+    let out = rrocket(dir.path(), &input, &["--jpegcmyk", "-r", "72"]);
+    assert_success(&out);
+    let jpeg = std::fs::read(dir.path().join("out-1.jpg")).expect("a JPEG");
+    let app14 = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xEE])
+        .expect("an Adobe APP14 marker");
+    assert_eq!(&jpeg[app14 + 4..app14 + 9], b"Adobe");
+    assert_eq!(jpeg[app14 + 15], 2, "colour transform YCCK");
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("a baseline frame");
+    assert_eq!(jpeg[sof + 9], 4, "four components");
+    let same = rrocket(dir.path(), &input, &["--jpeg", "--cmyk", "-r", "72"]);
+    assert_success(&same);
+    assert_eq!(std::fs::read(dir.path().join("out-1.jpg")).unwrap(), jpeg);
+}
+
+#[test]
+fn cmyk_output_profile_tags_the_tiff_and_keeps_device_cmyk() {
+    let (dir, input) = workdir(&cmyk_swatch_pdf());
+    let profile = icc_fixture("printer-cmyk-v4.icc");
+    let out = rrocket(
+        dir.path(),
+        &input,
+        &[
+            "--cmyk",
+            "--tiff",
+            "-r",
+            "72",
+            "--output-profile",
+            profile.to_str().unwrap(),
+        ],
+    );
+    assert_success(&out);
+    let path = dir.path().join("out-1.tif");
+    let (icc, _) = tiff_profile_and_samples(&path);
+    assert_eq!(
+        icc,
+        std::fs::read(&profile).unwrap(),
+        "tagged with the profile"
+    );
+    let (_, _, samples) = cmyk_tiff(&path);
+    let centres = swatch_centres(&samples);
+    let device: Vec<[u16; 4]> = SWATCH_INK[..4]
+        .iter()
+        .map(|ink| ink.map(u16::from))
+        .collect();
+    assert_eq!(centres[..4], device[..], "DeviceCMYK passes through");
+    let [c, m, y, k] = centres[5];
+    assert!(
+        k > 100 && c.max(m).max(y) < 12,
+        "gray separates to black: {:?}",
+        centres[5]
+    );
+}
+
+#[test]
+fn cmyk_refusals_name_the_conflict() {
+    let (dir, input) = workdir(&cmyk_swatch_pdf());
+    for (args, message) in [
+        (vec!["--cmyk"], "add --tiff or --jpeg"),
+        (vec!["--cmyk", "--png"], "PNG holds no CMYK"),
+        (vec!["--jpegcmyk", "--mono"], "--mono"),
+        (vec!["--cmyk", "--tiff", "--gray"], "--gray"),
+        (vec!["--cmyk", "--tiff", "--transparent"], "opaque"),
+        (vec!["--jpegcmyk", "--print"], "print spool"),
     ] {
         let out = rrocket(dir.path(), &input, &args);
         assert!(!out.status.success(), "{args:?} succeeded");

@@ -141,6 +141,9 @@ pub(crate) fn render_page(
     if args.transparent {
         params = params.with_transparent_background();
     }
+    if args.cmyk() {
+        params = params.with_cmyk();
+    }
     if let Some(region) = args
         .crop_region(geom.size_px(scale_x, scale_y))
         .map_err(RasterError::InvalidOptions)?
@@ -166,6 +169,9 @@ pub(crate) fn render_page(
             return bands::print_page_banded(session, page_num, args, sink, &params, (size, dpi));
         }
         _ => {}
+    }
+    if args.cmyk() {
+        return write_cmyk_page(session, (page_num, total_pages), args, spill, &params);
     }
     let page = match render_page_canvas(session, page_num, &params)? {
         FinishedCanvas::Rgb8(rgb) => Page::Rgb(rgb),
@@ -204,6 +210,41 @@ pub(crate) fn render_page(
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
     write_cleaned(page, args, sink, page_num as i32, total_pages as i32)
+}
+
+/// Render page `page_num` under `params`, a CMYK page, whole and write it
+/// as the page file of the output format, CMYK JPEG: the one CMYK output
+/// not written band by band.
+fn write_cmyk_page(
+    session: &RasterSession,
+    (page_num, total_pages): (u32, u32),
+    args: &Args,
+    spill: &SpillPolicy,
+    params: &RenderParams,
+) -> Result<(), RenderError> {
+    let format = args.output_format();
+    let OutputFormat::Jpeg(options) = format else {
+        return Err(RasterError::InvalidOptions(
+            "a CMYK page is written whole as JPEG only; CMYK TIFF is written band by band"
+                .to_owned(),
+        )
+        .into());
+    };
+    let FinishedCanvas::Cmyk8(cmyk) = render_page_canvas(session, page_num, params)? else {
+        return Err(
+            RasterError::InvalidOptions("a CMYK JPEG holds an 8-bit CMYK page".to_owned()).into(),
+        );
+    };
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "page_num and total_pages ≤ i32::MAX; validated in main before calling this function"
+    )]
+    let (number, total) = (page_num as i32, total_pages as i32);
+    let path = output_path_with_prefix(spill.next_prefix(), args, number, total, format, None);
+    write_output(&path, |mut out| {
+        write_jpeg(&cmyk, options, &mut out, args.output_icc.as_ref())?;
+        Ok(out)
+    })
 }
 
 /// Where a cleaned page goes.

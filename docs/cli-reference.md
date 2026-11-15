@@ -8,8 +8,8 @@ rrocket --list-printers
 
 Renders pages to image files. Flag names and output naming follow `pdftoppm`
 wherever rrocket has the same feature, so most `pdftoppm` command lines run
-unchanged; the differences are listed under each section (CMYK JPEG output is
-not implemented, and the CropBox, not the MediaBox, is rendered by default).
+unchanged; the differences are listed under each section (for one, the
+CropBox, not the MediaBox, is rendered by default).
 
 `-h` / `--help` lists the flags and `-V` / `--version` prints the version.
 
@@ -185,10 +185,11 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG, or with `--transparent` for RGBA. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
-| `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg`. |
-| `--jpegcmyk` | | JPEG in CMYK colour space. Not implemented: refused at startup ("--jpegcmyk output is not implemented; use --jpeg, --png or the default PPM output"), exit status 1, nothing rendered. |
+| `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg` or `--jpegcmyk`. |
+| `--jpegcmyk` | `.jpg` | CMYK JPEG, as `pdftoppm -jpegcmyk`: `--jpeg --cmyk`. |
+| `--cmyk` | | Render CMYK pages (see [CMYK output](#cmyk-output)) and write them as CMYK TIFF (with `--tiff`) or CMYK JPEG (with `--jpeg`). |
 | `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB (RGBA with `--transparent`), gray with `--gray`, or 1 bit per pixel with `--mono` (`WhiteIsZero`, the fax interpretation). The resolution tags carry `-r` / `--rx` / `--ry`. |
-| `--depth 8\|16` | | Bits per sample of the rendered pages, default `8`. `--depth 16` renders at 16 bits per channel throughout: colour conversions, shadings (evaluated straight to 16 bits), soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels, so smooth gradients do not band at 256 levels. Written as 16-bit PPM/PGM (maxval 65535, big-endian), PNG (bit depth 16), TIFF (`BitsPerSample` 16) or, with `--print`, a PDF 1.5 spool of `/BitsPerComponent 16` images. Combines with `--gray`, `--transparent`, `--invert`, `--overprint` and the band and size flags; a 16-bit page costs twice the memory (see [Size limits](#size-limits)). Refused at startup with `--mono`, `--dither`, `--fax`, `--jpeg`/`--jpegopt`/`--jpegcmyk`, `--crop`, `--rectify`, `--split-spreads`, `--dewarp`, `--gpu-pages` and comic-archive input ("--depth 16 is refused with --mono: it writes 1-bit pages; use --gray for 16-bit gray"), exit status 1. GPU decode and conversion paths are bypassed for the CPU's, which they match. |
+| `--depth 8\|16` | | Bits per sample of the rendered pages, default `8`. `--depth 16` renders at 16 bits per channel throughout: colour conversions, shadings (evaluated straight to 16 bits), soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels, so smooth gradients do not band at 256 levels. Written as 16-bit PPM/PGM (maxval 65535, big-endian), PNG (bit depth 16), TIFF (`BitsPerSample` 16) or, with `--print`, a PDF 1.5 spool of `/BitsPerComponent 16` images. Combines with `--gray`, `--transparent`, `--invert`, `--overprint` and the band and size flags; a 16-bit page costs twice the memory (see [Size limits](#size-limits)). Combines with `--cmyk --tiff` for 16-bit CMYK TIFF. Refused at startup with `--mono`, `--dither`, `--fax`, `--jpeg`/`--jpegopt`/`--jpegcmyk`, `--crop`, `--rectify`, `--split-spreads`, `--dewarp`, `--gpu-pages` and comic-archive input ("--depth 16 is refused with --mono: it writes 1-bit pages; use --gray for 16-bit gray"), exit status 1. GPU decode and conversion paths are bypassed for the CPU's, which they match. |
 | `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, as `pdftocairo -transp`: RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2). Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--gray`, `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
 | `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 | `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the page budget at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
@@ -214,6 +215,66 @@ A gray `--output-profile` writes gray pages and names them as `--gray` does.
 
 ---
 
+## CMYK output
+
+`--cmyk` (with `--tiff` or `--jpeg`) and `--jpegcmyk` render each page in
+the process inks of a CMYK printer, C, M, Y and K, 0 no ink:
+
+- `DeviceCMYK` colours, images and shadings, `ICCBased` CMYK colours and
+  images, and the process colorants of `Separation` and `DeviceN` colours
+  keep their values: a `0 0 0 1 k` text is black ink alone, a 100 % cyan
+  swatch cyan alone.
+- Spot colorants fold into their process equivalents (their alternate
+  colour's process ink).  The first four spot colorants of a page are kept
+  as inks while it is painted, so an overprinting spot keeps the inks
+  beneath it under `--overprint`; further ones print their alternate colour.
+- Every other colour (`DeviceGray`, `DeviceRGB`, `Lab`, `CalRGB`, `ICCBased`
+  RGB and gray, images and shadings in them) separates through the CMYK
+  `--output-profile` when one is given, under `--intent` (default relative
+  colorimetric) and `--bpc`; without one, by the conversion ISO 32000-2
+  §10.4.2.3 defines for a device without a profile, as `pdftoppm -jpegcmyk`
+  does: `c = 1 − r`, `m = 1 − g`, `y = 1 − b`, the common part moved to
+  black, so gray is black ink alone (`0.5 g` is 50 % K) and black text is
+  K only.  The `ExtGState` black-generation and undercolour-removal
+  functions (`BG`, `UCR`) are not applied.
+- Overprint (`OP`, `op`, `OPM`) is simulated with `--overprint`, as on RGB
+  output; without it every object knocks out every ink beneath it.
+
+A CMYK TIFF is `Separated` (Photometric 5) with `InkSet` 1, four samples of
+8 or 16 bits (`--depth 16`), written band by band like other TIFFs, under any
+`--tiffcompression` but the fax codings.  A CMYK JPEG is 8-bit, written as
+Adobe JPEGs are: an `APP14` marker of colour transform 2 (YCCK), its samples
+in the inverted sense that marker implies, so that readers of Adobe CMYK
+JPEGs (Photoshop, Pillow, libjpeg-based viewers) recover the inks; this is
+the layout `pdftoppm -jpegcmyk` writes.  `--jpegopt` applies.  With a CMYK
+`--output-profile` both are tagged with it (TIFF tag 34675, JPEG `APP2`).
+
+A CMYK page is painted on a canvas of eight inks a pixel, against the page
+budget (see [Size limits](#size-limits)): 8 bytes a pixel, 16 at 16 bits.
+
+Refused at start-up, exit status 1, nothing rendered: PNG and PPM, which hold
+no CMYK ("--cmyk needs an output that holds CMYK: PPM has none; add --tiff or
+--jpeg"); `--print`, `--fax`, `--mono`, `--gray`, `--dither`,
+`--transparent`, `--invert`, `--crop`, `--rectify`, `--split-spreads`,
+`--dewarp`, `--gpu-pages` and comic-archive input ("--cmyk is refused with
+--gray: it writes gray pages"); `--jpegcmyk` with `--depth 16`; an RGB or gray
+`--output-profile` with CMYK output, and a CMYK one without it.
+
+Differences from `pdftoppm`: `pdftoppm -tiff -overprint` writes CMYK TIFF;
+rrocket's `--tiff --overprint` stays RGB, and CMYK TIFF is `--tiff --cmyk`.
+Spot inks fold into process ink as the union of coverages
+(`a + b − a·b`), where `pdftoppm` adds and clips.
+
+```bash
+# CMYK TIFF of a press PDF at 300 dpi, overprint simulated
+rrocket --cmyk --tiff --overprint -r 300 press.pdf out
+
+# CMYK JPEG, separated through the printer's profile
+rrocket --jpegcmyk --jpegopt quality=95 --output-profile coated.icc press.pdf out
+```
+
+---
+
 ## Colour management
 
 Pages are composited in sRGB.  With an output profile each page is then
@@ -223,8 +284,8 @@ viewer reads the values for what they are.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--output-profile FILE` | | Convert every page to the ICC profile `FILE` and tag the output with it: a PNG `iCCP` chunk, TIFF tag 34675 (`InterColorProfile`), JPEG `APP2` `ICC_PROFILE` segments, and with `--print` an `ICCBased` colour space on every image of the spool (PDF 1.5, 1.6 or 1.7 as the profile's ICC version needs). PPM and PGM cannot carry a profile: their pixels are still converted, and a warning says so at start-up. The profile is an RGB or gray profile of the output (`prtr`), display (`mntr`) or colour-space (`spac`) class, with an XYZ or Lab connection space; table-based (`AToB`/`BToA`) printer profiles, the kind paper profiles are, and matrix/TRC profiles alike. A gray profile writes gray pages (PGM, gray PNG, JPEG or TIFF, gray spool pages), the gray coming from the profile rather than the luma weights of `--gray`. Works at both `--depth`s (the conversion runs on 16-bit samples either way) and with `--transparent` (an RGB profile; the alpha is unchanged). `--invert` complements the converted device values. Refused at start-up, exit status 1, nothing rendered: an unreadable file, a file that is not an ICC profile, a CMYK profile ("CMYK raster output is not written"), a device-link, abstract, named-colour or input profile, an RGB profile with `--gray`, a gray one with `--transparent`, and `--mono`, `--dither`, `--fax` and comic-archive input. |
-| `--intent INTENT` | the content's, else `relative` | The rendering intent of the conversion: `perceptual`, `relative` (relative colorimetric), `saturation` or `absolute` (absolute colorimetric: the source white is reproduced on the paper, its tint simulated). Without it, a page converts under the one intent its content paints with (`ri`, an `ExtGState` `/RI`, an image's `/Intent`; relative colorimetric where it sets none), and a page that mixes intents converts relative colorimetric, with one warning naming the intents seen. With it, the conversion is compiled at start-up, so a profile that cannot convert under it fails before anything renders. Needs `--output-profile`. |
+| `--output-profile FILE` | | Convert every page to the ICC profile `FILE` and tag the output with it: a PNG `iCCP` chunk, TIFF tag 34675 (`InterColorProfile`), JPEG `APP2` `ICC_PROFILE` segments, and with `--print` an `ICCBased` colour space on every image of the spool (PDF 1.5, 1.6 or 1.7 as the profile's ICC version needs). PPM and PGM cannot carry a profile: their pixels are still converted, and a warning says so at start-up. The profile is an RGB, gray or CMYK profile of the output (`prtr`), display (`mntr`) or colour-space (`spac`) class, with an XYZ or Lab connection space; table-based (`AToB`/`BToA`) printer profiles, the kind paper profiles are, and matrix/TRC profiles alike. A gray profile writes gray pages (PGM, gray PNG, JPEG or TIFF, gray spool pages), the gray coming from the profile rather than the luma weights of `--gray`. A CMYK profile takes `--cmyk` or `--jpegcmyk` and separates the colours that are not CMYK already (see [CMYK output](#cmyk-output)). Works at both `--depth`s (the conversion runs on 16-bit samples either way) and with `--transparent` (an RGB profile; the alpha is unchanged). `--invert` complements the converted device values. Refused at start-up, exit status 1, nothing rendered: an unreadable file, a file that is not an ICC profile, a CMYK profile without `--cmyk` / `--jpegcmyk` and an RGB or gray one with them, a device-link, abstract, named-colour or input profile, an RGB profile with `--gray`, a gray one with `--transparent`, and `--mono`, `--dither`, `--fax` and comic-archive input. |
+| `--intent INTENT` | the content's, else `relative` | The rendering intent of the conversion (of the separation, for a CMYK profile, which is relative colorimetric by default whatever the content's intents): `perceptual`, `relative` (relative colorimetric), `saturation` or `absolute` (absolute colorimetric: the source white is reproduced on the paper, its tint simulated). Without it, a page converts under the one intent its content paints with (`ri`, an `ExtGState` `/RI`, an image's `/Intent`; relative colorimetric where it sets none), and a page that mixes intents converts relative colorimetric, with one warning naming the intents seen. With it, the conversion is compiled at start-up, so a profile that cannot convert under it fails before anything renders. Needs `--output-profile`. |
 | `--bpc` | off | Black-point compensation (ISO 18619): the page's black maps to the profile's darkest neutral, so shadow detail is kept on a paper whose black is lighter than the page's. A perceptual or saturation conversion to an ICC v4 profile always compensates, as the v4 perceptual connection space requires. Needs `--output-profile`; refused with `--intent absolute`. |
 
 The conversion matches Little CMS (`transicc`) within ΔE00 1 on every patch
@@ -272,7 +333,7 @@ rrocket --printer Office --copies 2 --duplex long --gray document.pdf
 |---|---|---|
 | `--aa yes\|no` | `yes` | Antialias text. `no` draws glyphs with hard, bilevel edges. |
 | `--aaVector yes\|no` | `yes` | Antialias path fills, strokes and clips. `no` draws them with hard, bilevel edges. |
-| `--overprint` | off | Simulate overprint (`OP`, `op`, `OPM`; ISO 32000-1 §8.6.7) for pages that use it. Without it every object knocks out what lies beneath it. A page on which some graphics state reachable from its content or from a drawn annotation sets `OP` or `op` is painted in four process and four spot inks and converted to RGB at the end of the page; an overprinting object leaves the inks it does not paint. A transfer function (`TR`, `TR2`) maps the inks: its red, green, blue and gray functions apply to cyan, magenta, yellow, and to black and the spot inks. The first four spot colorants of a page take the spot inks; further ones print their alternate colour in process ink and are named in a warning. Other pages render exactly as without the flag. The first overprint page builds a colour table once per process (about 0.75 s, 4.4 MB); pages rendering in parallel wait for it, so the first overprint page of a run is that much slower. Images, shadings and tiling-pattern cells paint the inks of their own colorants; `ICCBased` CMYK colours print as the process ink that reproduces their profile's colour. Not simulated: a transparency group as a whole paints every ink. A black or near-black gray or RGB colour prints as a rich black balanced so that its antialiased edges stay neutral, within two counts of black when solid. |
+| `--overprint` | off | Simulate overprint (`OP`, `op`, `OPM`; ISO 32000-1 §8.6.7) for pages that use it. Without it every object knocks out what lies beneath it. A page on which some graphics state reachable from its content or from a drawn annotation sets `OP` or `op` is painted in four process and four spot inks and converted to RGB at the end of the page; an overprinting object leaves the inks it does not paint. A transfer function (`TR`, `TR2`) maps the inks: its red, green, blue and gray functions apply to cyan, magenta, yellow, and to black and the spot inks. The first four spot colorants of a page take the spot inks; further ones print their alternate colour in process ink and are named in a warning. Other pages render exactly as without the flag. With `--cmyk` the same simulation runs on the CMYK page, which is then written as its inks. The first overprint page builds a colour table once per process (about 0.75 s, 4.4 MB); pages rendering in parallel wait for it, so the first overprint page of a run is that much slower. Images, shadings and tiling-pattern cells paint the inks of their own colorants, `DeviceCMYK` ones their process inks; `ICCBased` CMYK colours print as the process ink that reproduces their profile's colour. Not simulated: a transparency group as a whole paints every ink. A black or near-black gray or RGB colour prints as a rich black balanced so that its antialiased edges stay neutral, within two counts of black when solid. |
 | `--hide-annotations` | off | Draw no annotations (form fields, comments, stamps): the page content alone. |
 | `--no-system-fonts` | off | Do not search the system font directories for fonts the document does not embed: draw them from `RROCKET_FONT_DIR` and the faces compiled into the binary only. |
 
