@@ -29,7 +29,7 @@ fn solid_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
         }
     }
     let mut out = Vec::new();
-    encode::write_png(&bmp, &mut out, None).unwrap();
+    encode::write_png(&bmp, None, &mut out, None).unwrap();
     out
 }
 

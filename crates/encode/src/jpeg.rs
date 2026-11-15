@@ -16,7 +16,7 @@ use crate::EncodeError;
 use crate::icc::{self, IccProfile};
 use crate::rows::RowLayout;
 
-use jpeg_encoder::{ColorType, Encoder};
+use jpeg_encoder::{ColorType, Encoder, PixelDensity, PixelDensityUnit};
 
 /// How [`write_jpeg`] encodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,8 +43,12 @@ impl Default for JpegOptions {
 }
 
 /// Encode a gray (`Gray8`/`Mono8`), `Rgb8`, `Bgr8` or `Cmyk8` bitmap as
-/// JPEG into `out`, tagged with `icc` (`APP2` `ICC_PROFILE` segments) when
-/// given.  A CMYK image is coded as YCCK (see the module documentation).
+/// JPEG into `out`, at `dpi` and tagged with `icc` when given.
+///
+/// The resolution `dpi` (horizontal, vertical) is the JFIF density, rounded
+/// to whole dots per inch; without one the density is the pixel aspect
+/// ratio 1:1.  The profile `icc` is written as `APP2` `ICC_PROFILE`
+/// segments.  A CMYK image is coded as YCCK (see the module documentation).
 ///
 /// Stride padding is excluded: only the live `width` pixels of each row
 /// are encoded.
@@ -54,14 +58,16 @@ impl Default for JpegOptions {
 /// - [`EncodeError::UnsupportedMode`] for other pixel modes.
 /// - [`EncodeError::InvalidInput`] for a zero-width or zero-height bitmap
 ///   (JPEG has no empty-image encoding), or when a dimension exceeds
-///   `u16::MAX` (the JPEG format ceiling, 65535 px/side), or for a profile
-///   of another colour space than the image's.
+///   `u16::MAX` (the JPEG format ceiling, 65535 px/side), for a profile
+///   of another colour space than the image's, or for a resolution that
+///   does not round to 1 to 65535 dots per inch.
 /// - [`EncodeError::Io`] when writing or flushing `out` fails.
 /// - [`EncodeError::Jpeg`] on another encoder failure, a profile too large
 ///   for the 255 segments it can span among them.
 pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     options: JpegOptions,
+    dpi: Option<(f64, f64)>,
     mut out: W,
     icc: Option<&IccProfile>,
 ) -> Result<(), EncodeError> {
@@ -93,7 +99,11 @@ pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
         .map_err(|_| EncodeError::InvalidInput("height exceeds the JPEG limit of 65535 px"))?;
 
     icc::check(icc, layout)?;
+    let density = dpi.map(jfif_density).transpose()?;
     let mut encoder = Encoder::new(&mut out, options.quality.clamp(1, 100));
+    if let Some(density) = density {
+        encoder.set_density(density);
+    }
     if let Some(icc) = icc {
         encoder.add_icc_profile(icc.bytes())?;
     }
@@ -102,6 +112,22 @@ pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
     encoder.encode(&crate::live_bytes(bitmap), width, height, color)?;
     out.flush()?;
     Ok(())
+}
+
+/// `(x, y)` dots per inch as a JFIF density: whole dots per inch, each
+/// within `1..=65535`.
+fn jfif_density((x, y): (f64, f64)) -> Result<PixelDensity, EncodeError> {
+    let whole = |dpi| {
+        crate::whole_units(dpi, u32::from(u16::MAX))
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or(EncodeError::InvalidInput(
+                "JPEG resolution must round to 1 to 65535 dots per inch",
+            ))
+    };
+    Ok(PixelDensity {
+        density: (whole(x)?, whole(y)?),
+        unit: PixelDensityUnit::Inches,
+    })
 }
 
 /// Encode an 8-bit grayscale (`Gray8`/`Mono8`) bitmap to baseline JPEG
@@ -126,6 +152,7 @@ pub fn jpeg_gray<P: Pixel<Sample = u8>>(
             quality,
             ..JpegOptions::default()
         },
+        None,
         &mut out,
         None,
     )?;
@@ -159,7 +186,7 @@ mod tests {
 
     fn encode(bmp: &Bitmap<Rgb8>, options: JpegOptions) -> Vec<u8> {
         let mut out = Vec::new();
-        write_jpeg(bmp, options, &mut out, None).expect("encodes");
+        write_jpeg(bmp, options, None, &mut out, None).expect("encodes");
         out
     }
 
@@ -255,7 +282,7 @@ mod tests {
             ..JpegOptions::default()
         };
         let mut bytes = Vec::new();
-        write_jpeg(&bmp, options, &mut bytes, None).expect("encodes");
+        write_jpeg(&bmp, options, None, &mut bytes, None).expect("encodes");
         // APP14 "Adobe", version 100, flags 0 and 0, transform 2.
         let app14 = bytes
             .windows(2)
@@ -278,7 +305,7 @@ mod tests {
     #[test]
     fn device_n_bitmaps_are_refused() {
         let bmp: Bitmap<color::DeviceN8> = Bitmap::new(8, 1, 1, false);
-        let result = write_jpeg(&bmp, JpegOptions::default(), Vec::new(), None);
+        let result = write_jpeg(&bmp, JpegOptions::default(), None, Vec::new(), None);
         assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
     }
 
@@ -360,7 +387,7 @@ mod tests {
     #[test]
     fn a_failing_sink_is_an_io_error() {
         let bmp = make_gray_bitmap(16, 16, 200);
-        let result = write_jpeg(&bmp, JpegOptions::default(), Full, None);
+        let result = write_jpeg(&bmp, JpegOptions::default(), None, Full, None);
         assert!(
             matches!(&result, Err(EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::StorageFull),
             "{result:?}"
@@ -431,5 +458,56 @@ mod tests {
             bytes_padded, bytes_tight,
             "multi-row padded vs tight must encode identically"
         );
+    }
+
+    /// The units and densities of the JFIF `APP0` segment of `jpeg`.
+    fn jfif_density_of(jpeg: &[u8]) -> (u8, u16, u16) {
+        let at = jpeg
+            .windows(5)
+            .position(|w| w == b"JFIF\0")
+            .expect("a JFIF segment");
+        let d = &jpeg[at + 7..at + 12];
+        (
+            d[0],
+            u16::from_be_bytes([d[1], d[2]]),
+            u16::from_be_bytes([d[3], d[4]]),
+        )
+    }
+
+    /// A resolution is written as the JFIF density in whole dots per inch;
+    /// without one the density is the 1:1 aspect ratio; one JFIF cannot
+    /// hold is refused.
+    #[test]
+    fn the_resolution_is_written_as_the_jfif_density() {
+        let bmp = solid_rgb(8, 8, [1, 2, 3]);
+        let mut out = Vec::new();
+        write_jpeg(
+            &bmp,
+            JpegOptions::default(),
+            Some((300.4, 199.6)),
+            &mut out,
+            None,
+        )
+        .unwrap();
+        assert_eq!(jfif_density_of(&out), (1, 300, 200));
+        assert_eq!(
+            jfif_density_of(&encode(&bmp, JpegOptions::default())),
+            (0, 1, 1)
+        );
+        for dpi in [0.2, 65_535.6, f64::NAN] {
+            assert!(
+                matches!(
+                    write_jpeg(
+                        &bmp,
+                        JpegOptions::default(),
+                        Some((72.0, dpi)),
+                        Vec::new(),
+                        None
+                    ),
+                    Err(EncodeError::InvalidInput(_))
+                ),
+                "{dpi}"
+            );
+        }
     }
 }

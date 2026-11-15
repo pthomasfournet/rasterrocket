@@ -5,7 +5,8 @@ use std::io::{BufWriter, Seek, Write};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use encode::{
-    EncodeError, TiffStream, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
+    EncodeError, TiffStream, write_jpeg, write_pbm, write_pgm, write_png, write_png_bilevel,
+    write_ppm, write_tiff,
 };
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
@@ -237,7 +238,13 @@ fn write_cmyk_page(
     let (number, total) = (page_num as i32, total_pages as i32);
     let path = output_path_with_prefix(spill.next_prefix(), args, number, total, format, None);
     write_output(&path, |mut out| {
-        write_jpeg(&cmyk, options, &mut out, args.output_icc.as_ref())?;
+        write_jpeg(
+            &cmyk,
+            options,
+            Some(args.dpi()),
+            &mut out,
+            args.output_icc.as_ref(),
+        )?;
         Ok(out)
     })
 }
@@ -401,10 +408,10 @@ pub(crate) fn write_output(
 }
 
 /// Encode `page`, an 8-bit page, in `format` to `out`: colour, gray or
-/// bilevel as the page is, Netpbm choosing PPM, PGM or PBM by it, tagged
-/// with the output profile by the formats that carry one.  The resolution
-/// is recorded by the formats that carry it.  A 16-bit page is
-/// [`bands::write_whole`]'s.
+/// bilevel as the page is, Netpbm choosing PPM, PGM or PBM by it and PNG
+/// bit depth 8 or 1, tagged with the output profile by the formats that
+/// carry one.  The resolution is recorded by the formats that carry it:
+/// PNG, JPEG and TIFF.  A 16-bit page is [`bands::write_whole`]'s.
 fn encode_page<W: Write + Seek>(
     page: &Page,
     format: OutputFormat,
@@ -412,15 +419,17 @@ fn encode_page<W: Write + Seek>(
     out: W,
 ) -> Result<(), EncodeError> {
     let icc = args.output_icc.as_ref();
+    let dpi = Some(args.dpi());
     match (format, page) {
         (OutputFormat::Ppm, Page::Rgb(rgb)) => write_ppm(rgb, out),
         (OutputFormat::Ppm, Page::Gray(luma)) => write_pgm(luma, out),
         (OutputFormat::Ppm, Page::Mono(luma)) => write_pbm(luma, out),
-        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out, icc),
-        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out, icc),
-        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out, icc),
+        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, dpi, out, icc),
+        (OutputFormat::Png, Page::Gray(luma)) => write_png(luma, dpi, out, icc),
+        (OutputFormat::Png, Page::Mono(luma)) => write_png_bilevel(luma, dpi, out, icc),
+        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, dpi, out, icc),
         (OutputFormat::Jpeg(options), Page::Gray(luma) | Page::Mono(luma)) => {
-            write_jpeg(luma, options, out, icc)
+            write_jpeg(luma, options, dpi, out, icc)
         }
         (_, Page::Rgb16(_) | Page::Gray16(_)) => Err(EncodeError::UnsupportedMode(
             "a 16-bit page is written by the row-streamed writers",

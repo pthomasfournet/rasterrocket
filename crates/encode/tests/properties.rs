@@ -236,7 +236,7 @@ proptest! {
         );
 
         let mut file = Vec::new();
-        write_png(&bmp, &mut file, None).expect("PNG");
+        write_png(&bmp, None, &mut file, None).expect("PNG");
         let (color, w, h, pixels) = png_decode(&file);
         prop_assert_eq!((color, w, h), (png::ColorType::Grayscale, img.w, img.h));
         prop_assert_eq!(pixels, img.live);
@@ -277,20 +277,20 @@ proptest! {
         let (mut ppm, mut png) = (Vec::new(), Vec::new());
         let bmp = rgb.bitmap::<Rgb8>();
         write_ppm(&bmp, &mut ppm).expect("PPM");
-        write_png(&bmp, &mut png, None).expect("PNG");
+        write_png(&bmp, None, &mut png, None).expect("PNG");
         check(&rgb, &ppm, &png, rgb.live.clone())?;
 
         let to_rgb = |px: &[u8]| cmyk_to_rgb(px[0], px[1], px[2], px[3]);
         let (mut ppm, mut png) = (Vec::new(), Vec::new());
         let bmp = cmyk.bitmap::<Cmyk8>();
         write_ppm(&bmp, &mut ppm).expect("PPM");
-        write_png(&bmp, &mut png, None).expect("PNG");
+        write_png(&bmp, None, &mut png, None).expect("PNG");
         check(&cmyk, &ppm, &png, cmyk.pixels(4).flat_map(to_rgb).collect())?;
 
         let (mut ppm, mut png) = (Vec::new(), Vec::new());
         let bmp = devicen.bitmap::<DeviceN8>();
         write_ppm(&bmp, &mut ppm).expect("PPM");
-        write_png(&bmp, &mut png, None).expect("PNG");
+        write_png(&bmp, None, &mut png, None).expect("PNG");
         check(&devicen, &ppm, &png, devicen.pixels(8).flat_map(to_rgb).collect())?;
     }
 
@@ -413,9 +413,9 @@ proptest! {
             let source = Image { live, ..img.clone() };
             let mut file = Vec::new();
             if gray {
-                write_jpeg(&source.bitmap::<Gray8>(), options, &mut file, None)
+                write_jpeg(&source.bitmap::<Gray8>(), options, None, &mut file, None)
             } else {
-                write_jpeg(&source.bitmap::<Rgb8>(), options, &mut file, None)
+                write_jpeg(&source.bitmap::<Rgb8>(), options, None, &mut file, None)
             }
             .expect("JPEG");
             let mut decoder =

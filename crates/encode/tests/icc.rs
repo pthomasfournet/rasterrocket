@@ -48,10 +48,10 @@ fn png_profile(bytes: &[u8]) -> Option<Vec<u8>> {
 fn png_carries_the_profile_in_iccp() {
     let icc = profile(*b"RGB ", (4, 3), 3000);
     let mut whole = Vec::new();
-    write_png(&rgb(), &mut whole, Some(&icc)).unwrap();
+    write_png(&rgb(), None, &mut whole, Some(&icc)).unwrap();
     assert_eq!(png_profile(&whole).as_deref(), Some(icc.bytes()));
 
-    let mut w = PngWriter::new(Vec::new(), (9, 5), PngColor::Rgb, Some(&icc)).unwrap();
+    let mut w = PngWriter::new(Vec::new(), (9, 5), PngColor::Rgb, None, Some(&icc)).unwrap();
     w.push(RowImage::Rgb(&rgb())).unwrap();
     assert_eq!(
         png_profile(&w.finish().unwrap()).as_deref(),
@@ -59,12 +59,12 @@ fn png_carries_the_profile_in_iccp() {
     );
 
     let mut untagged = Vec::new();
-    write_png(&rgb(), &mut untagged, None).unwrap();
+    write_png(&rgb(), None, &mut untagged, None).unwrap();
     assert_eq!(png_profile(&untagged), None);
 
     let gray_icc = profile(*b"GRAY", (2, 1), 200);
     let mut g = Vec::new();
-    write_png(&gray(), &mut g, Some(&gray_icc)).unwrap();
+    write_png(&gray(), None, &mut g, Some(&gray_icc)).unwrap();
     assert_eq!(png_profile(&g).as_deref(), Some(gray_icc.bytes()));
 }
 
@@ -100,7 +100,7 @@ fn tiff_carries_the_profile_in_tag_34675() {
 fn jpeg_carries_the_profile_in_app2() {
     let icc = profile(*b"RGB ", (4, 3), 70_000);
     let mut bytes = Vec::new();
-    write_jpeg(&rgb(), JpegOptions::default(), &mut bytes, Some(&icc)).unwrap();
+    write_jpeg(&rgb(), JpegOptions::default(), None, &mut bytes, Some(&icc)).unwrap();
     let mut decoder =
         zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(&bytes));
     decoder.decode_headers().unwrap();
@@ -139,16 +139,27 @@ fn a_profile_of_another_colour_space_is_refused() {
     let rgb_icc = profile(*b"RGB ", (4, 3), 200);
     let gray_icc = profile(*b"GRAY", (4, 3), 200);
     let refused = |r: Result<(), EncodeError>| matches!(r, Err(EncodeError::InvalidInput(_)));
-    assert!(refused(write_png(&gray(), Vec::new(), Some(&rgb_icc))));
-    assert!(refused(write_png(&rgb(), Vec::new(), Some(&gray_icc))));
+    assert!(refused(write_png(
+        &gray(),
+        None,
+        Vec::new(),
+        Some(&rgb_icc)
+    )));
+    assert!(refused(write_png(
+        &rgb(),
+        None,
+        Vec::new(),
+        Some(&gray_icc)
+    )));
     assert!(refused(write_jpeg(
         &gray(),
         JpegOptions::default(),
+        None,
         Vec::new(),
         Some(&rgb_icc)
     )));
     assert!(refused(
-        PngWriter::new(Vec::new(), (9, 5), PngColor::Gray, Some(&rgb_icc)).map(drop)
+        PngWriter::new(Vec::new(), (9, 5), PngColor::Gray, None, Some(&rgb_icc)).map(drop)
     ));
     assert!(refused(
         TiffStream::new(

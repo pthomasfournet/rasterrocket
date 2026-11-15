@@ -141,13 +141,14 @@ impl FileWriter {
                 let color = match (model, wide) {
                     (Model::Rgb { alpha: false }, false) => PngColor::Rgb,
                     (Model::Rgb { alpha: true }, false) => PngColor::Rgba,
-                    (Model::Gray | Model::Mono, false) => PngColor::Gray,
+                    (Model::Mono, _) => PngColor::Bilevel,
+                    (Model::Gray, false) => PngColor::Gray,
                     (Model::Rgb { alpha: false }, true) => PngColor::Rgb16,
                     (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
-                    (Model::Gray | Model::Mono, true) => PngColor::Gray16,
+                    (Model::Gray, true) => PngColor::Gray16,
                     (Model::Cmyk, _) => return Err(no_cmyk()),
                 };
-                Self::Png(PngWriter::new(out, size, color, icc)?)
+                Self::Png(PngWriter::new(out, size, color, Some(dpi), icc)?)
             }
             FileFormat::Tiff(compression) => {
                 let layout = match model {

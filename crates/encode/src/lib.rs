@@ -9,6 +9,7 @@
 //! | [`write_pgm`] | Netpbm P5 binary | `Gray8` |
 //! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (luma below 128 = black) |
 //! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
+//! | [`write_png_bilevel`] | PNG of bit depth 1 | `Gray8` (luma below 128 = black) |
 //! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8`, `Cmyk8` (Adobe YCCK) |
 //! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
 //! | [`write_tiff`], [`TiffWriter`], [`TiffStream`] | TIFF (`BigTIFF` past 4 GiB), one or more pages | `Rgb8` and `Rgb16` (RGBA with an alpha plane), `Gray8`, `Gray16`, `Cmyk8`, `Cmyk16`, bilevel from `Gray8` |
@@ -27,6 +28,14 @@
 //! `Gray16`): Netpbm of maxval 65535 and PNG of bit depth 16, samples
 //! most significant byte first; a TIFF stores them least significant
 //! byte first, as its `II` byte order declares.
+//!
+//! # Resolution
+//!
+//! TIFF records the resolution of every page.  PNG ([`write_png`],
+//! [`write_png_bilevel`], [`PngWriter`]) records one given as a `pHYs`
+//! chunk in pixels per metre, JPEG ([`write_jpeg`]) as the JFIF density in
+//! dots per inch; each rounds it to the whole units the format stores and
+//! refuses one outside them.  Netpbm has no place for one.
 //!
 //! All functions consume the output sink (`W: Write`).  Wrap in
 //! [`std::io::BufWriter`] at the call site if buffering is needed.
@@ -65,7 +74,7 @@ pub use jpeg::{JpegOptions, jpeg_gray, write_jpeg};
 pub use pbm::write_pbm;
 pub use pdf::{PdfPage, PdfPageEncoder, PdfWriter};
 pub use pgm::write_pgm;
-pub use png::{PngColor, PngWriter, write_png};
+pub use png::{PngColor, PngWriter, write_png, write_png_bilevel};
 pub use pnm::{PnmKind, PnmWriter};
 pub use ppm::write_ppm;
 pub use rows::{RowImage, RowLayout};
@@ -120,6 +129,21 @@ pub(crate) fn live_bytes<P: Pixel<Sample = u8>>(bitmap: &Bitmap<P>) -> Cow<'_, [
                 .collect(),
         )
     }
+}
+
+/// `value` rounded to a whole number, when that lies within `1..=max`: a
+/// resolution in the units a format stores.
+pub(crate) fn whole_units(value: f64, max: u32) -> Option<u32> {
+    let rounded = value.round();
+    if !(1.0..=f64::from(max)).contains(&rounded) {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded is a whole number within 1..=max ≤ u32::MAX, checked above"
+    )]
+    Some(rounded as u32)
 }
 
 /// Luma below which a pixel is black in bilevel output, the midpoint of

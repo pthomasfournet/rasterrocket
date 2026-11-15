@@ -1506,3 +1506,53 @@ fn comic_pages_render_at_16_bits() {
     };
     assert_eq!(got, samples);
 }
+
+/// The `(bit depth, colour type)` of a PNG's `IHDR` and the pixels per
+/// metre of its `pHYs` chunk, if any.
+fn png_header(png: &[u8]) -> ((u8, u8), Option<(u32, u32)>) {
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
+    let phys = png.windows(4).position(|w| w == b"pHYs").map(|at| {
+        let be = |i: usize| u32::from_be_bytes(png[i..i + 4].try_into().expect("4 bytes"));
+        assert_eq!(png[at + 12], 1, "pHYs in metres");
+        (be(at + 4), be(at + 8))
+    });
+    ((png[24], png[25]), phys)
+}
+
+/// `--mono --png` writes a PNG of bit depth 1, banded and whole (under a
+/// camera stage, which renders the page whole) alike; every PNG and JPEG
+/// records the render resolution.
+#[test]
+fn png_and_jpeg_record_the_resolution_and_mono_png_is_one_bit() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let read = |name: &str| std::fs::read(dir.path().join(name)).expect("read output");
+    // 150 dpi is 5906 pixels per metre, 75 dpi 2953.
+    for extra in [&[][..], &["--crop"]] {
+        let mut args = vec!["--rx", "150", "--ry", "75", "-l", "1", "--png", "--mono"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        assert_eq!(
+            png_header(&read("out-1.png")),
+            ((1, 0), Some((5906, 2953))),
+            "{extra:?}"
+        );
+    }
+    for (extra, ihdr) in [(&["--gray"][..], (8, 0)), (&[], (8, 2))] {
+        let mut args = vec!["-r", "150", "-l", "1", "--png"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        assert_eq!(png_header(&read("out-1.png")), (ihdr, Some((5906, 5906))));
+    }
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["-r", "150", "-l", "1", "--jpeg"],
+    ));
+    let jpeg = read("out-1.jpg");
+    let at = jpeg
+        .windows(5)
+        .position(|w| w == b"JFIF\0")
+        .expect("a JFIF segment");
+    // Units 1 (dots per inch), then the horizontal and vertical density.
+    assert_eq!(&jpeg[at + 7..at + 12], &[1, 0, 150, 0, 150]);
+}

@@ -778,18 +778,10 @@ fn pack_bits(row: &[u8], out: &mut Vec<u8>) {
 /// `dpi` as a TIFF rational: a whole number of pixels per inch over 1, or
 /// thousandths reduced by their common divisor.
 fn rational(dpi: f64) -> Result<(u32, u32), EncodeError> {
-    let scaled = (dpi * 1000.0).round();
-    if !(dpi.is_finite() && scaled >= 1.0 && scaled <= f64::from(u32::MAX)) {
-        return Err(EncodeError::InvalidInput(
+    let thousandths =
+        crate::whole_units(dpi * 1000.0, u32::MAX).ok_or(EncodeError::InvalidInput(
             "TIFF resolution must lie between 0.001 and 4294967 pixels per inch",
-        ));
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "scaled is a whole number within 1..=u32::MAX, checked above"
-    )]
-    let thousandths = scaled as u32;
+        ))?;
     let divisor = gcd(thousandths, 1000);
     Ok((thousandths / divisor, 1000 / divisor))
 }
