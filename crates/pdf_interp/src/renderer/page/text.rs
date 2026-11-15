@@ -371,9 +371,8 @@ impl PageRenderer<'_> {
                 census.fontless(bytes.len());
             }
             self.record_glyphs(census);
-            if self.tracing() {
-                let glyphs = format!("fontless n={}\n", bytes.len());
-                self.trace_text(None, mode, false, &glyphs);
+            if let Some(text) = self.text_trace_line(None, mode, false) {
+                self.trace_text(&text, &format!("fontless n={}", bytes.len()));
             }
             return;
         };
@@ -401,8 +400,10 @@ impl PageRenderer<'_> {
             (census.as_mut(), glyph_trace.as_mut()),
         );
         self.record_glyphs(census);
-        if let Some(glyphs) = glyph_trace {
-            self.trace_text(Some(&font.key), mode, sink.fills_as_path(), &glyphs);
+        if let Some(glyphs) = glyph_trace
+            && let Some(text) = self.text_trace_line(Some(&font.key), mode, sink.fills_as_path())
+        {
+            self.trace_text(&text, &glyphs);
         }
         self.paint_glyphs(&sink);
         self.gstate.current_mut().text.text_matrix = tm;
@@ -427,7 +428,8 @@ impl PageRenderer<'_> {
     ) {
         let paints = mode.fill || mode.stroke || mode.clip;
         let mut census = self.glyph_census(mode, true);
-        let mut glyph_trace = self.tracing().then(String::new);
+        let text_trace = self.text_trace_line(Some(font_key), mode, false);
+        let mut glyph_trace = text_trace.as_ref().map(|_| String::new());
         let gs = self.gstate.current();
         let ts = &gs.text;
         let (ctm, tm) = (gs.ctm, ts.text_matrix);
@@ -453,8 +455,8 @@ impl PageRenderer<'_> {
             );
         });
         self.record_glyphs(census);
-        if let Some(glyphs) = glyph_trace {
-            self.trace_text(Some(font_key), mode, false, &glyphs);
+        if let (Some(text), Some(glyphs)) = (text_trace, glyph_trace) {
+            self.trace_text(&text, &glyphs);
         }
     }
 

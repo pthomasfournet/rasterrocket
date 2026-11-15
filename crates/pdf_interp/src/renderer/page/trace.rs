@@ -641,19 +641,19 @@ impl PageRenderer<'_> {
         self.trace_clip(&body);
     }
 
-    /// Record the text object a string shown with the font `font` (`None`
-    /// without one) in the mode of operations `mode` paints, its fill
-    /// through outlines when `fill_as_path`, and its glyphs' lines
-    /// `glyphs`.
-    pub(super) fn trace_text(
-        &mut self,
+    /// The line of a string shown with the font `font` (`None` without
+    /// one) in the mode of operations `mode`, its fill through outlines
+    /// when `fill_as_path`, under the current graphics and text state;
+    /// `None` when no trace is recorded.  Built before the string is
+    /// shown, which advances the text matrix.
+    pub(super) fn text_trace_line(
+        &self,
         font: Option<&ResourceKey>,
         mode: TextModeOps,
         fill_as_path: bool,
-        glyphs: &str,
-    ) {
+    ) -> Option<String> {
         if !self.tracing() {
-            return;
+            return None;
         }
         let gs = self.gstate.current();
         let ts = &gs.text;
@@ -693,10 +693,16 @@ impl PageRenderer<'_> {
         if mode.clip {
             out.push_str(" | clips");
         }
+        Some(out)
+    }
+
+    /// Record the string of line `text` and the lines of its glyphs
+    /// `glyphs`, one per line, nested under it.
+    pub(super) fn trace_text(&mut self, text: &str, glyphs: &str) {
         let Some(trace) = self.trace.as_deref_mut() else {
             return;
         };
-        trace.open(&out);
+        trace.open(text);
         for line in glyphs.lines() {
             trace.line(line);
         }
@@ -726,7 +732,11 @@ impl PageRenderer<'_> {
             return;
         }
         let dict = crate::resources::image::inline::parse_inline_params(params);
-        let mut out = format!("image inline len={} h={:016x}", data.len(), Fnv1a::of(data));
+        let mut out = format!(
+            "image inline len={} data={:016x}",
+            data.len(),
+            Fnv1a::of(data)
+        );
         self.push_image(&mut out, Some(&dict));
         self.trace_line(&out);
     }
@@ -749,7 +759,7 @@ impl PageRenderer<'_> {
         let stencil = flag(b"ImageMask");
         let _ = write!(
             out,
-            " w={} h={} bpc={}",
+            " size={}x{} bpc={}",
             int(b"Width"),
             int(b"Height"),
             int(b"BitsPerComponent")
