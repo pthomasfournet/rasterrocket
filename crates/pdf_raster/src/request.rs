@@ -242,7 +242,7 @@ impl RenderParams {
 
     /// The layout of the canvas the render allocates: of ink for a CMYK
     /// page; a page simulating overprint is painted on ink too (see
-    /// [`CanvasLayout::with_ink`]).
+    /// [`CanvasLayout::with_ink`](crate::CanvasLayout::with_ink)).
     #[must_use]
     pub const fn canvas_layout(&self) -> crate::CanvasLayout {
         crate::CanvasLayout::new(self.depth, self.transparent_background)

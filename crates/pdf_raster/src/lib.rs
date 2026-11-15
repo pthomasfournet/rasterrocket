@@ -2,6 +2,11 @@
 //!
 //! Converts PDF pages to 8-bit grayscale pixel buffers ready for Tesseract OCR
 //! (or any other consumer) without writing files or spawning processes.
+//! [`RasterOptions`] also selects RGBA pages over a transparent backdrop,
+//! CMYK pages ([`ColorModel::Cmyk`]), 16 bits per sample
+//! ([`SampleDepth::Sixteen`]) and the conversion to an ICC output profile
+//! ([`OutputProfile`]); [`render_page_bands`] renders a page larger than
+//! memory as bands of rows.
 //!
 //! # Quick start
 //!
@@ -15,8 +20,8 @@
 //! for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 //!     match result {
 //!         Ok(page) => {
-//!             // page.pixels: Vec<u8>, 8-bit grayscale, width × height, top-to-bottom
-//!             // pass to tesseract::ocr_from_frame(&page.pixels, page.width, page.height, 1, page.width, "eng")
+//!             // page.pixels.as_u8(): 8-bit grayscale, width × height, top-to-bottom
+//!             // pass to tesseract::ocr_from_frame(pixels, page.width, page.height, 1, page.width, "eng")
 //!         }
 //!         Err(e) => eprintln!("page {page_num}: {e}"),
 //!     }
@@ -696,7 +701,8 @@ pub struct RenderedPage {
     /// Lightweight metadata collected at zero extra cost during rendering.
     ///
     /// Use this to route pages to different OCR configurations — e.g. skip deskew
-    /// on `has_vector_text = true` pages, or set Tesseract PSM based on `is_scan`.
+    /// on `has_vector_text = true` pages, or send only the pages without
+    /// [`PageDiagnostics::has_visible_text`] to OCR.
     pub diagnostics: PageDiagnostics,
 }
 
@@ -709,10 +715,11 @@ pub struct RenderedPage {
 /// not abort remaining pages — the caller decides whether to skip or propagate.
 ///
 /// GPU resources are initialised lazily on first use and reused across pages.
-/// Backend selection follows [`SessionConfig::default`] — Vulkan when present,
-/// CUDA next, CPU last; the `PDF_RASTER_BACKEND` env var overrides the
-/// default.  Use [`open_session`] + [`render_page_rgb`] directly when you
-/// need explicit [`SessionConfig`] control.
+/// Backend selection follows [`SessionConfig::default`]: the policy
+/// `PDF_RASTER_BACKEND` names, else [`BackendPolicy::Auto`], which renders on
+/// the CPU unless a GPU kernel is enabled by its threshold.  Use
+/// [`open_session`] + [`render_page_rgb`] directly when you need explicit
+/// [`SessionConfig`] control.
 ///
 /// # Errors
 ///
