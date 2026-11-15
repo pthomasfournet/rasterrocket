@@ -3,7 +3,8 @@
 //! to a row-streamed writer, so memory holds a band, not the page.  A page
 //! of one band takes the same writers, so the bytes of a file do not
 //! depend on the band height.  A 16-bit page is always written by these
-//! writers: as one band of the whole page when `--invert auto` measures it.
+//! writers: as one band of the whole page when `--invert auto` measures it
+//! or a camera stage reshapes it ([`write_whole`]).
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -25,7 +26,7 @@ use crate::naming::output_path_with_prefix;
 use crate::print::{PageSink, page_encoder};
 use crate::ram::SpillPolicy;
 use crate::render::{RenderError, write_output};
-use crate::tone::{self, WidePage};
+use crate::tone;
 
 /// Where a page written band by band goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,8 +49,7 @@ impl BandOutput {
     /// The output of `args` when its pages are written band by band: a
     /// PPM, PNG or TIFF file or the print spool, under no stage that needs
     /// the whole page (the camera stages, `--invert auto` at 8 bits),
-    /// outside a fax document.  `None` renders pages whole.  Every 16-bit
-    /// output is one of these.
+    /// outside a fax document.  `None` renders pages whole.
     pub(crate) fn of(args: &Args) -> Option<Self> {
         let camera = args.camera_options();
         if args.faxing()
@@ -234,8 +234,7 @@ fn prepared(
         BandBitmap::Rgb8(band) => prepared8(band, y, args, invert, push),
         BandBitmap::Rgb16(band) => match tone::prepare_band16(band, invert, args) {
             None => push(RowImage::Rgb16(band)),
-            Some(WidePage::Rgb(rgb)) => push(RowImage::Rgb16(&rgb)),
-            Some(WidePage::Gray(luma)) => push(RowImage::Gray16(&luma)),
+            Some(page) => push(page.row_image()),
         },
         BandBitmap::Gray8(band) => match tone::prepare_gray_band(band, invert) {
             None => push(RowImage::Gray(band)),
@@ -260,9 +259,61 @@ fn prepared8(
 ) -> Result<(), RenderError> {
     match tone::prepare_band(band, y, args, invert) {
         None => push(RowImage::Rgb(band)),
-        Some(Page::Rgb(rgb)) => push(RowImage::Rgb(&rgb)),
-        Some(Page::Gray(luma) | Page::Mono(luma)) => push(RowImage::Gray(&luma)),
+        // A band writer takes the two levels of a bilevel band as luma.
+        Some(Page::Mono(luma)) => push(RowImage::Gray(&luma)),
+        Some(page) => push(page.row_image()),
     }
+}
+
+/// Write `image`, a whole page, to `out` as the page file of `format`, at
+/// the resolution and tagged with the output profile of `args`: through
+/// the writers a page in bands takes.  Its colour model and depth are the
+/// image's.
+///
+/// # Errors
+///
+/// JPEG, which these writers do not write, and any writer error.
+pub(crate) fn write_whole(
+    out: BufWriter<File>,
+    format: OutputFormat,
+    image: RowImage<'_>,
+    args: &Args,
+) -> Result<BufWriter<File>, RenderError> {
+    let format = match format {
+        OutputFormat::Ppm => FileFormat::Ppm,
+        OutputFormat::Png => FileFormat::Png,
+        OutputFormat::Tiff(compression) => FileFormat::Tiff(compression),
+        OutputFormat::Jpeg(_) => {
+            return Err(RasterError::InvalidOptions(
+                "baseline JPEG is 8-bit; use --png or --tiff for 16-bit pages".to_owned(),
+            )
+            .into());
+        }
+    };
+    let (model, depth) = match image {
+        RowImage::Rgb(_) => (Model::Rgb { alpha: false }, SampleDepth::Eight),
+        RowImage::Gray(_) => (Model::Gray, SampleDepth::Eight),
+        RowImage::Bilevel(_) => (Model::Mono, SampleDepth::Eight),
+        RowImage::Rgb16(_) => (Model::Rgb { alpha: false }, SampleDepth::Sixteen),
+        RowImage::Gray16(_) => (Model::Gray, SampleDepth::Sixteen),
+        RowImage::Cmyk(_) => (Model::Cmyk, SampleDepth::Eight),
+        RowImage::Cmyk16(_) => (Model::Cmyk, SampleDepth::Sixteen),
+    };
+    // A band writer takes the two levels of a bilevel page as luma.
+    let image = match image {
+        RowImage::Bilevel(luma) => RowImage::Gray(luma),
+        image => image,
+    };
+    let size = image.size();
+    let mut writer = FileWriter::new(
+        out,
+        format,
+        (model, depth),
+        (size, args.dpi()),
+        args.output_icc.as_ref(),
+    )?;
+    writer.push(image)?;
+    writer.finish()
 }
 
 /// Render page `page_num` under `params`, a page of `size` pixels, in

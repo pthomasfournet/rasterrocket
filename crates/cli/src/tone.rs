@@ -2,7 +2,7 @@
 //! the colour model of the output, inversion, and the reduction to two
 //! levels.
 
-use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, Sample};
+use color::{Gray8, Pixel, Rgb8, Rgb16, Sample};
 use encode::BLACK_BELOW;
 use pdf_raster::{rgb_to_gray, rgb16_to_gray16};
 use raster::{Bitmap, HalftoneScreen, ScreenParams};
@@ -29,14 +29,19 @@ const GROUND_BAND: usize = 32;
 /// [`two_levels`]).
 pub(crate) fn prepare(page: Page, args: &Args) -> Page {
     let page = if args.luma_output() {
-        Page::Gray(page.into_luma())
+        page.into_luma_model()
     } else {
-        Page::Rgb(page.into_rgb())
+        page.into_rgb_model()
     };
     let invert = match args.invert_when() {
         InvertWhen::Never => false,
         InvertWhen::Always => true,
-        InvertWhen::Auto => page.with_luma(is_reversed_out),
+        InvertWhen::Auto => match &page {
+            Page::Rgb(rgb) => is_reversed_out8(rgb),
+            Page::Rgb16(rgb) => is_reversed_out16(rgb),
+            Page::Gray(luma) | Page::Mono(luma) => is_reversed_out(luma),
+            Page::Gray16(luma) => is_reversed_out(luma),
+        },
     };
     finish(page, invert, args, 0)
 }
@@ -61,17 +66,10 @@ pub(crate) fn prepare_band(
     Some(finish(page, invert, args, y0))
 }
 
-/// A page of 16-bit samples in the colour model of the output.
-pub(crate) enum WidePage {
-    /// Colour pixels.
-    Rgb(Bitmap<Rgb16>),
-    /// Luma pixels.
-    Gray(Bitmap<Gray16>),
-}
-
 /// [`prepare_band`] for `band`, of 16-bit samples, inverted when `invert`:
-/// `None` when the band is written as it is.
-pub(crate) fn prepare_band16(band: &Bitmap<Rgb16>, invert: bool, args: &Args) -> Option<WidePage> {
+/// `None` when the band is written as it is, else a [`Page::Rgb16`] or
+/// [`Page::Gray16`].
+pub(crate) fn prepare_band16(band: &Bitmap<Rgb16>, invert: bool, args: &Args) -> Option<Page> {
     if !args.luma_output() && !invert {
         return None;
     }
@@ -80,13 +78,13 @@ pub(crate) fn prepare_band16(band: &Bitmap<Rgb16>, invert: bool, args: &Args) ->
         if invert {
             complement(&mut luma);
         }
-        WidePage::Gray(luma)
+        Page::Gray16(luma)
     } else {
         let mut rgb = copy_of(band);
         if invert {
             complement(&mut rgb);
         }
-        WidePage::Rgb(rgb)
+        Page::Rgb16(rgb)
     })
 }
 
@@ -132,6 +130,8 @@ fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
         match &mut page {
             Page::Rgb(rgb) => complement(rgb),
             Page::Gray(luma) | Page::Mono(luma) => complement(luma),
+            Page::Rgb16(rgb) => complement(rgb),
+            Page::Gray16(luma) => complement(luma),
         }
     }
     if args.mono {
@@ -263,7 +263,7 @@ mod tests {
     fn luma(page: &Page) -> Vec<u8> {
         match page {
             Page::Gray(g) | Page::Mono(g) => g.row_bytes(0)[..10].to_vec(),
-            Page::Rgb(_) => panic!("a luma page"),
+            _ => panic!("an 8-bit luma page"),
         }
     }
 

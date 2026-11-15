@@ -5,8 +5,7 @@ use std::io::{BufWriter, Seek, Write};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use encode::{
-    EncodeError, RowImage, TiffStream, write_jpeg, write_pbm, write_pgm, write_png, write_ppm,
-    write_tiff,
+    EncodeError, TiffStream, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
 };
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
@@ -176,12 +175,8 @@ pub(crate) fn render_page(
     let page = match render_page_canvas(session, page_num, &params)? {
         FinishedCanvas::Rgb8(rgb) => Page::Rgb(rgb),
         FinishedCanvas::Gray8(gray) => Page::Gray(gray),
-        FinishedCanvas::Rgb16(_) | FinishedCanvas::Gray16(_) => {
-            return Err(RasterError::InvalidOptions(
-                "a 16-bit page is written band by band; this output takes 8-bit pages".to_owned(),
-            )
-            .into());
-        }
+        FinishedCanvas::Rgb16(rgb) => Page::Rgb16(rgb),
+        FinishedCanvas::Gray16(gray) => Page::Gray16(gray),
         FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => {
             return Err(RasterError::InvalidOptions(
                 "a CMYK page is written as CMYK TIFF or JPEG; this output takes RGB or gray pages"
@@ -313,6 +308,9 @@ pub(crate) fn write_cleaned(
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
         write_output(&out_path, |mut out| {
+            if let Some(image) = page.wide_image() {
+                return bands::write_whole(out, format, image, args);
+            }
             encode_page(&page, format, args, &mut out)?;
             Ok(out)
         })?;
@@ -402,10 +400,11 @@ pub(crate) fn write_output(
     written
 }
 
-/// Encode `page` in `format` to `out`: colour, gray or bilevel as the
-/// page is, Netpbm choosing PPM, PGM or PBM by it, tagged with the output
-/// profile by the formats that carry one.  The resolution is recorded by
-/// the formats that carry it.
+/// Encode `page`, an 8-bit page, in `format` to `out`: colour, gray or
+/// bilevel as the page is, Netpbm choosing PPM, PGM or PBM by it, tagged
+/// with the output profile by the formats that carry one.  The resolution
+/// is recorded by the formats that carry it.  A 16-bit page is
+/// [`bands::write_whole`]'s.
 fn encode_page<W: Write + Seek>(
     page: &Page,
     format: OutputFormat,
@@ -423,12 +422,11 @@ fn encode_page<W: Write + Seek>(
         (OutputFormat::Jpeg(options), Page::Gray(luma) | Page::Mono(luma)) => {
             write_jpeg(luma, options, out, icc)
         }
+        (_, Page::Rgb16(_) | Page::Gray16(_)) => Err(EncodeError::UnsupportedMode(
+            "a 16-bit page is written by the row-streamed writers",
+        )),
         (OutputFormat::Tiff(compression), page) => {
-            let image = match page {
-                Page::Rgb(rgb) => RowImage::Rgb(rgb),
-                Page::Gray(luma) => RowImage::Gray(luma),
-                Page::Mono(luma) => RowImage::Bilevel(luma),
-            };
+            let image = page.row_image();
             match icc {
                 None => write_tiff(image, args.dpi(), compression, out),
                 Some(icc) => {

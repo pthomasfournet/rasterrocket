@@ -1009,7 +1009,7 @@ fn depth_16_prints_a_spool_of_16_bit_images() {
 }
 
 /// `--depth 16` is refused, at startup and writing nothing, with the flags
-/// and input whose pages are 8-bit or bilevel.
+/// whose pages are 8-bit or bilevel; a comic archive renders at 16 bits.
 #[test]
 fn depth_16_refuses_8_bit_and_bilevel_outputs() {
     for (flags, needle) in [
@@ -1017,8 +1017,6 @@ fn depth_16_refuses_8_bit_and_bilevel_outputs() {
         (&["--dither", "halftone"], "--dither"),
         (&["--fax"], "--fax"),
         (&["--jpeg"], "use --png or --tiff"),
-        (&["--crop"], "--crop"),
-        (&["--split-spreads"], "--split-spreads"),
         (&["--gpu-pages"], "drop --gpu-pages"),
     ] {
         let (dir, input) = workdir(&two_page_pdf());
@@ -1036,12 +1034,8 @@ fn depth_16_refuses_8_bit_and_bilevel_outputs() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let input = dir.path().join("in.cbt");
     std::fs::write(&input, tar_of("book.pdf", &annotated_pdf())).expect("write archive");
-    let out = rrocket(dir.path(), &input, &["--depth", "16"]);
-    assert!(
-        !out.status.success(),
-        "a comic archive at 16 bits succeeded"
-    );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("comic-archive input"));
+    assert_success(&rrocket(dir.path(), &input, &["--depth", "16", "--gray"]));
+    assert_eq!(pnm_header(&dir.path().join("out-1.pgm"))[3], "65535");
 }
 
 /// The levels of the gradient page's axial ramp at each depth, read back
@@ -1420,4 +1414,95 @@ fn cmyk_refusals_name_the_conflict() {
         assert!(stderr.contains(message), "{args:?}: {stderr}");
         assert!(outputs(dir.path()).is_empty(), "{args:?} wrote files");
     }
+}
+
+/// A light sheet with bars of text on a darker desk, 400 × 500 pt.
+fn page_on_desk_pdf() -> Vec<u8> {
+    let mut content = b"0.3 g 0 0 400 500 re f 0.95 g 50 60 300 380 re f 0.1 g".to_vec();
+    for line in 0..12 {
+        content.extend_from_slice(format!(" 90 {} 220 8 re", 100 + line * 25).as_bytes());
+    }
+    content.extend_from_slice(b" f");
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 500] /Contents 4 0 R >>".to_vec(),
+        stream_object("", &content),
+    ])
+}
+
+/// The size, colour type and samples of the TIFF at `path`.
+fn read_tiff(path: &Path) -> (u32, u32, tiff::ColorType, tiff::decoder::DecodingResult) {
+    let file = std::fs::read(path).expect("read TIFF");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    let (w, h) = decoder.dimensions().expect("dimensions");
+    let colour = decoder.colortype().expect("colour type");
+    (w, h, colour, decoder.read_image().expect("decodes"))
+}
+
+/// The camera stages run on 16-bit pages and write them at 16 bits, cut as
+/// at 8 bits; a stage that leaves the page as it is writes the file of the
+/// page without it.
+#[test]
+fn camera_stages_clean_16_bit_pages() {
+    let (dir, input) = workdir(&page_on_desk_pdf());
+    let page = |args: &[&str]| {
+        let mut all = vec!["-r", "72", "--tiff"];
+        all.extend_from_slice(args);
+        assert_success(&rrocket(dir.path(), &input, &all));
+        read_tiff(&dir.path().join("out-1.tif"))
+    };
+    let (w8, h8, colour, _) = page(&["--crop"]);
+    assert_eq!(colour, tiff::ColorType::RGB(8));
+    assert!(w8 < 400 && h8 < 500, "the crop applies: {w8}×{h8}");
+    let (w, h, colour, samples) = page(&["--crop", "--depth", "16"]);
+    assert_eq!(colour, tiff::ColorType::RGB(16));
+    assert!(
+        w.abs_diff(w8) <= 2 && h.abs_diff(h8) <= 2,
+        "{w}×{h} vs {w8}×{h8}"
+    );
+    let tiff::decoder::DecodingResult::U16(samples) = samples else {
+        panic!("16-bit samples");
+    };
+    assert_eq!(samples.len(), (w * h * 3) as usize);
+    let (.., colour, _) = page(&["--crop", "--depth", "16", "--gray"]);
+    assert_eq!(colour, tiff::ColorType::Gray(16));
+
+    let file = |args: &[&str]| {
+        let mut all = vec!["-r", "72", "--png", "--depth", "16"];
+        all.extend_from_slice(args);
+        assert_success(&rrocket(dir.path(), &input, &all));
+        std::fs::read(dir.path().join("out-1.png")).expect("read PNG")
+    };
+    // Dewarp needs five tracked text lines of curved text, and declines.
+    assert!(
+        file(&["--dewarp"]) == file(&[]),
+        "an unchanged page is written as it is"
+    );
+}
+
+/// A comic archive renders at 16 bits: a 16-bit image keeps its samples.
+#[test]
+fn comic_pages_render_at_16_bits() {
+    use tiff::encoder::{TiffEncoder, colortype};
+    let samples: Vec<u16> = (0..12u16).map(|i| i * 5000 + 7).collect();
+    let mut image = std::io::Cursor::new(Vec::new());
+    TiffEncoder::new(&mut image)
+        .expect("encoder")
+        .write_image::<colortype::Gray16>(4, 3, &samples)
+        .expect("encode");
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let input = dir.path().join("in.cbt");
+    std::fs::write(&input, tar_of("1.tif", &image.into_inner())).expect("write archive");
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["--depth", "16", "--tiff", "--gray"],
+    ));
+    let (w, h, colour, got) = read_tiff(&dir.path().join("out-1.tif"));
+    assert_eq!((w, h, colour), (4, 3, tiff::ColorType::Gray(16)));
+    let tiff::decoder::DecodingResult::U16(got) = got else {
+        panic!("16-bit samples");
+    };
+    assert_eq!(got, samples);
 }

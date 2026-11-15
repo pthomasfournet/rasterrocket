@@ -150,7 +150,7 @@ impl PageSink {
 
     /// Compress `page`, rendered at `dpi`, and hold it as document page
     /// `page_num`, half `half` of a split spread: colour, or gray for a
-    /// luma page.
+    /// luma page, at the page's depth.
     ///
     /// # Errors
     ///
@@ -162,8 +162,8 @@ impl PageSink {
         dpi: (f64, f64),
     ) -> Result<(), RenderError> {
         let coded = match page {
-            Page::Rgb(rgb) => PdfPage::encode(RowImage::Rgb(rgb), dpi),
             Page::Gray(luma) | Page::Mono(luma) => PdfPage::encode(RowImage::Gray(luma), dpi),
+            page => PdfPage::encode(page.row_image(), dpi),
         }?;
         self.push(page_num, half, coded);
         Ok(())

@@ -1018,7 +1018,6 @@ impl Args {
             return Ok(());
         }
         let jpeg = "baseline JPEG is 8-bit; use --png or --tiff for 16-bit pages";
-        let camera = "the camera cleanup works on 8-bit pages; drop it for 16-bit pages";
         let refused = [
             (
                 self.mono,
@@ -1038,19 +1037,10 @@ impl Args {
             (self.jpeg, "--jpeg", jpeg),
             (self.jpegopt.is_some(), "--jpegopt", jpeg),
             (self.jpegcmyk, "--jpegcmyk", jpeg),
-            (self.crop, "--crop", camera),
-            (self.rectify, "--rectify", camera),
-            (self.split_spreads, "--split-spreads", camera),
-            (self.dewarp, "--dewarp", camera),
             (
                 self.gpu_pages,
                 "--gpu-pages",
                 "the GPU page raster composites 8-bit pages; drop --gpu-pages for 16-bit pages",
-            ),
-            (
-                self.is_comic_input(),
-                "comic-archive input",
-                "its pages are 8-bit images; drop --depth 16",
             ),
         ];
         match refused.iter().find(|(set, _, _)| *set) {
@@ -2071,10 +2061,6 @@ mod page_list_tests {
             (&["--jpeg"], "use --png or --tiff"),
             (&["--jpeg", "--jpegopt", "quality=90"], "--jpeg"),
             (&["--jpegcmyk"], "--jpegcmyk"),
-            (&["--crop"], "drop it"),
-            (&["--rectify"], "--rectify"),
-            (&["--split-spreads"], "--split-spreads"),
-            (&["--dewarp"], "--dewarp"),
             (&["--gpu-pages"], "drop --gpu-pages"),
         ] {
             let mut argv = vec!["--depth", "16"];
@@ -2085,9 +2071,21 @@ mod page_list_tests {
                 "{flags:?}: {err}"
             );
         }
-        let comic = Args::parse_from(["rrocket", "--depth", "16", "book.cbz", "out"]);
-        let err = comic.validate_format_flags().unwrap_err();
-        assert!(err.contains("comic-archive input"), "{err}");
+        for flags in [
+            &["--crop"][..],
+            &["--rectify", "--png"],
+            &["--split-spreads", "--tiff"],
+            &["--dewarp", "--gray"],
+        ] {
+            let mut argv = vec!["--depth", "16"];
+            argv.extend_from_slice(flags);
+            assert!(
+                args_with(&argv).validate_format_flags().is_ok(),
+                "{flags:?}"
+            );
+        }
+        let comic = Args::parse_from(["rrocket", "--depth", "16", "--crop", "book.cbz", "out"]);
+        assert!(comic.validate_format_flags().is_ok());
     }
 
     #[cfg(not(windows))]

@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use color::Gray8;
+use color::{Gray8, Gray16};
 use comic::{ComicError, ComicOptions, RenderedPage, open_comic};
 use raster::Bitmap;
 
@@ -45,6 +45,7 @@ pub(crate) fn run(
     // shrunken total.
     let mut opts = ComicOptions::new(dpi);
     opts.session = session;
+    opts.depth = args.depth();
     if let Some(mib) = args.max_archive_mib {
         opts.max_archive_bytes = mib << 20;
     }
@@ -91,7 +92,7 @@ pub(crate) fn run(
     Ok((written, failed))
 }
 
-/// Write the luma [`RenderedPage`] `page` through the shared page writer
+/// Write the 8- or 16-bit luma [`RenderedPage`] `page` through the shared page writer
 /// ([`render::write_cleaned`]), which applies the camera stages, the tone
 /// operations and the output format exactly as the PDF path does. The page's
 /// packed pixel buffer becomes the bitmap's buffer.
@@ -108,13 +109,14 @@ fn write_page(
         spill,
         format: args.output_format(),
     };
-    let pdf_raster::Pixels::U8(pixels) = page.pixels else {
-        return Err(RenderError::Raster(
-            pdf_raster::RasterError::InvalidOptions(
-                "a comic page decodes to 8-bit gray".to_owned(),
-            ),
-        ));
+    let (width, height) = (page.width, page.height);
+    let luma = match page.pixels {
+        pdf_raster::Pixels::U8(pixels) => {
+            Page::Gray(Bitmap::<Gray8>::from_packed(width, height, pixels))
+        }
+        pdf_raster::Pixels::U16(samples) => {
+            Page::Gray16(Bitmap::<Gray16>::from_packed(width, height, samples))
+        }
     };
-    let luma = Bitmap::<Gray8>::from_packed(page.width, page.height, pixels);
-    render::write_cleaned(Page::Gray(luma), args, sink, page_i32, total_pages)
+    render::write_cleaned(luma, args, sink, page_i32, total_pages)
 }
