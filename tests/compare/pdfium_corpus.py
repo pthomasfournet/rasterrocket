@@ -3,7 +3,7 @@
 
     python3 -I tests/compare/pdfium_corpus.py --pdfium PDFIUM_SRC --out DIR
         [--rrocket BIN] [--jobs N] [--timeout S] [--pdftoppm] [--match TEXT]
-        [--rmse-limit T] [--tile-limit K] [--expectations FILE]
+        [--rmse-limit T|none] [--tile-limit K] [--expectations FILE]
         [--update-expectations] [--strict]
 
 The corpus is PDFIUM_SRC/testing/resources (BSD-3-Clause, see
@@ -41,8 +41,11 @@ Pages with a plain `<stem>_expected.pdf.<N>.png` next to the source (no
 platform or backend suffix) are scored against it with score_pair.sh: RMSE,
 tile delta, or a size mismatch.  With --pdftoppm, pages of documents
 without an expected image are scored against `pdftoppm -cropbox -r 72`.
-A scored page passes when its RMSE is at most --rmse-limit and its tile
-delta at most --tile-limit (2 and 12, compare.sh's defaults).
+A scored page passes when its RMSE is at most --rmse-limit (default 2;
+`none` judges the tile delta alone) and its tile delta at most
+--tile-limit (default 12).  pdfium's expected images are small synthetic
+tests at 72 dpi, where antialiasing moves RMSE little and a difference
+in a 1 px feature moves it a lot, so RMSE stays judged here.
 
 Every document and reference page is then classified against the
 expectations registry (tests/compare/expectations.json; see
@@ -389,7 +392,12 @@ def parse_args() -> argparse.Namespace:
         help="score documents without an expected image against pdftoppm",
     )
     ap.add_argument("--match", default="", help="only documents whose path contains TEXT")
-    ap.add_argument("--rmse-limit", type=float, default=2.0, help="largest passing page RMSE")
+    ap.add_argument(
+        "--rmse-limit",
+        type=ex.optional_limit,
+        default=2.0,
+        help="largest passing page RMSE, or none to judge the tile delta alone",
+    )
     ap.add_argument("--tile-limit", type=float, default=12.0, help="largest passing tile delta")
     ap.add_argument(
         "--expectations",
@@ -417,7 +425,7 @@ def classify_run(
             args.expectations,
             suite,
             [*doc_obs, *page_obs],
-            {"rmse": args.rmse_limit, "tile": args.tile_limit},
+            ex.suite_limits(rmse=args.rmse_limit, tile=args.tile_limit),
             update=args.update_expectations,
         )
     except ex.RegistryError as e:

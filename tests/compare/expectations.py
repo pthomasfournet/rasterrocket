@@ -2,7 +2,7 @@
 """Expected-results registry for the reference-comparison harnesses.
 
     python3 -I tests/compare/expectations.py compare --reference REF --dpi DPI
-        --rmse-limit T --tile-limit K --file PDF [--registry PATH]
+        --rmse-limit T|none --tile-limit K --file PDF [--registry PATH]
         [--update] [--strict] [--verbose] ROWS
     python3 -I tests/compare/expectations.py check [--registry PATH]
 
@@ -10,7 +10,9 @@ The registry (tests/compare/expectations.json by default) lists the known
 failing outcomes of compare.sh and pdfium_corpus.py.  It holds one list of
 entries per suite: a harness and the settings that decide what passes
 (reference renderer, resolution, RMSE and tile-delta limits), so entries
-recorded under one setting never classify a run under another.  An entry
+recorded under one setting never classify a run under another.  A suite
+without an RMSE limit (`--rmse-limit none`) decides on the tile delta
+alone; RMSE is then reported and not judged.  An entry
 names a test, a document (`file`) or one of its pages (`file` and `page`,
 1-based), and records:
 
@@ -22,7 +24,8 @@ names a test, a document (`file`) or one of its pages (`file` and `page`,
 - `rmse`, `tile` (optional, `differs` only): the largest value accepted
   for that metric, in place of the suite's limit.  A metric the entry does
   not list keeps the suite's limit; an entry listing neither accepts any
-  value of both.
+  value of both.  A limit for a metric the suite does not judge is
+  ignored, and dropped by --update.
 
 Every observed test is classified:
 
@@ -152,9 +155,18 @@ class Result:
     entry: Entry | None
 
 
-def suite_name(harness: str, *, reference: str, dpi: int, rmse: float, tile: float) -> str:
-    """Return the suite key of a harness run under the given settings."""
-    return f"{harness} {reference} {dpi}dpi rmse<={rmse:g} tile<={tile:g}"
+def suite_name(harness: str, *, reference: str, dpi: int, rmse: float | None, tile: float) -> str:
+    """Return the suite key of a harness run under the given settings.
+
+    A `None` RMSE limit leaves RMSE unjudged and out of the key.
+    """
+    rmse_part = "" if rmse is None else f" rmse<={rmse:g}"
+    return f"{harness} {reference} {dpi}dpi{rmse_part} tile<={tile:g}"
+
+
+def suite_limits(*, rmse: float | None, tile: float) -> dict[str, float]:
+    """Return the limits a suite judges: the tile delta, and RMSE unless `None`."""
+    return {"tile": tile} if rmse is None else {"rmse": rmse, "tile": tile}
 
 
 def test_label(test: TestId) -> str:
@@ -164,9 +176,12 @@ def test_label(test: TestId) -> str:
 
 
 def effective_outcome(obs: Observation, limits: Mapping[str, float]) -> str:
-    """Return `pass`, `differs` (a scored page over a limit) or the failure named."""
+    """Return `pass`, `differs` (a scored page over a limit) or the failure named.
+
+    Only the metrics `limits` names are judged.
+    """
     if obs.outcome == SCORED:
-        over = any(obs.metrics[m] > limits[m] for m in obs.metrics)
+        over = any(obs.metrics[m] > limit for m, limit in limits.items())
         return DIFFERS if over else PASSING
     if obs.outcome == OK:
         return PASSING
@@ -199,10 +214,10 @@ def classify(obs: Observation, entry: Entry | None, limits: Mapping[str, float])
     if entry.outcome != outcome:
         return Result(obs, Verdict.FAIL, f"registered as {entry.outcome}, now {outcome}", entry)
     if outcome == DIFFERS and entry.limits:
-        allowed = {m: entry.limits.get(m, limits[m]) for m in obs.metrics}
+        allowed = {m: entry.limits.get(m, limit) for m, limit in limits.items()}
         worse = [
             f"{m} {obs.metrics[m]:g} > {allowed[m]:g}"
-            for m in sorted(obs.metrics)
+            for m in sorted(allowed)
             if obs.metrics[m] > allowed[m]
         ]
         if worse:
@@ -231,7 +246,9 @@ def seeded_entry(obs: Observation, limits: Mapping[str, float], today: dt.date) 
     outcome = effective_outcome(obs, limits)
     entry_limits = {}
     if outcome == DIFFERS:
-        entry_limits = {m: seed_limit(v) for m, v in sorted(obs.metrics.items()) if v > limits[m]}
+        entry_limits = {
+            m: seed_limit(obs.metrics[m]) for m in sorted(limits) if obs.metrics[m] > limits[m]
+        }
     reason = f"unclassified (seeded {today.isoformat()})"
     return Entry(obs.file, obs.page, outcome, reason, entry_limits)
 
@@ -244,11 +261,13 @@ def tightened_limits(
     A metric over the suite's limit gets `seed_limit` of its score where that
     is lower than the registered limit; a metric within the suite's limit
     loses a registered limit at or above the suite's, which the suite's then
-    replaces.  An entry listing no limit accepts any value and is returned
-    as it is.
+    replaces; a metric the suite does not judge loses its limit.  An entry
+    listing no limit accepts any value and is returned as it is.
     """
     out = {}
     for m, old in entry_limits.items():
+        if m not in limits:
+            continue
         if obs.metrics[m] > limits[m]:
             out[m] = min(old, seed_limit(obs.metrics[m]))
         elif old < limits[m]:
@@ -557,7 +576,7 @@ def _read_rows(path: pathlib.Path, file: str) -> list[tuple[str, str, Observatio
 
 def compare_main(args: argparse.Namespace) -> int:
     """Classify one compare.sh document and print its report and STATUS line."""
-    limits = {"rmse": args.rmse_limit, "tile": args.tile_limit}
+    limits = suite_limits(rmse=args.rmse_limit, tile=args.tile_limit)
     suite = suite_name(
         "compare.sh",
         reference=args.reference,
@@ -593,6 +612,20 @@ def check_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def optional_limit(text: str) -> float | None:
+    """Parse a limit argument: a finite non-negative number, or `none` for no limit."""
+    if text == "none":
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not (math.isfinite(value) and value >= 0):
+        msg = f"not a non-negative number or none: {text}"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Return the command-line arguments."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -604,7 +637,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     c.add_argument("--registry", default=str(DEFAULT_REGISTRY), help="'' for none")
     c.add_argument("--reference", required=True)
     c.add_argument("--dpi", type=int, required=True)
-    c.add_argument("--rmse-limit", type=float, required=True)
+    c.add_argument("--rmse-limit", type=optional_limit, required=True, help="a number or none")
     c.add_argument("--tile-limit", type=float, required=True)
     c.add_argument("--file", required=True, help="the PDF, as compare.sh was given it")
     c.add_argument("--update", action="store_true")

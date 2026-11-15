@@ -9,7 +9,8 @@
 #   -r DPI          Resolution in DPI (default: 150)
 #   -f PAGE         First page, 1-based (default: 1)
 #   -l PAGE         Last page, 1-based (default: all)
-#   -t THRESHOLD    Max allowed RMSE per page, 0-255 scale (default: 2.0)
+#   -t THRESHOLD    Max allowed RMSE per page, 0-255 scale, or `none` to
+#                   report RMSE without judging it (default: none)
 #   -k TILE_DELTA   Max allowed tile delta per page, 0-255 scale (default: 12)
 #   -R RENDERER     Reference renderer: pdftoppm (default), pdfium or oxide
 #   -v              Verbose: print per-page stats even when passing
@@ -21,7 +22,8 @@
 #   -U              Rewrite the registry from this run.  Also --update-expectations.
 #   -S              Fail on surprise passes too.  Also --strict.
 #
-# A page fails when its RMSE exceeds -t, when its tile delta exceeds -k, or
+# A page fails when its tile delta exceeds -k, when its RMSE exceeds -t (if
+# -t is a number), or
 # when the two renders differ in size by more than 1 px in either dimension
 # (reported as SIZE: a page-box or rotation disagreement).  Renders within
 # 1 px of each other are cropped to their common size before scoring.  A
@@ -44,12 +46,15 @@
 # repository is registered under its repository path, any other under its
 # basename.
 #
-# The tile delta (scored by score_pair.sh) is the largest difference in mean
-# luminance between the two renders over 32 x 32 px tiles.  Anti-aliasing
-# and hinting differences between renderers move coverage within a tile but
-# hardly change its mean (text pages score 4-6 against pdftoppm at 150 dpi),
-# while content present in one render and missing from the other changes it
-# wholesale (one dropped word scores ~26) and barely moves the page-wide RMSE.
+# The tile delta (scored by score_pair.sh) is the largest difference in the
+# mean of one channel (R, G or B) between the two renders over 32 x 32 px
+# tiles.  Anti-aliasing and hinting differences between renderers move
+# coverage within a tile but hardly change its mean (text pages score 4-8
+# against pdftoppm at 150 dpi), while content present in one render and
+# missing from the other changes it wholesale (one dropped word scores ~26).
+# RMSE is not judged by default: glyph-edge coverage alone puts a correct
+# text page at RMSE 15-33 against pdftoppm at 150 dpi, so a fixed RMSE limit
+# separates no correct page from a wrong one.
 #
 # Summary row (-s, and each row of directory mode), tab-separated:
 #   status pages failed size_mismatches avg_rmse max_rmse max_tile_delta
@@ -96,7 +101,7 @@ PDFIUM_PY="${PDFIUM_VENV}/bin/python"
 DPI=150
 FIRST=1
 LAST=""
-THRESHOLD="2.0"
+THRESHOLD="none"
 TILE_LIMIT="12"
 REFERENCE="pdftoppm"
 VERBOSE=false
@@ -181,7 +186,8 @@ PDF="$1"
 is_positive_int "$DPI"   || die "-r DPI must be a positive integer, got: $DPI"
 is_positive_int "$FIRST" || die "-f PAGE must be a positive integer, got: $FIRST"
 [[ -z "$LAST" ]] || is_positive_int "$LAST" || die "-l PAGE must be a positive integer, got: $LAST"
-is_pos_number "$THRESHOLD" || die "-t THRESHOLD must be a non-negative number, got: $THRESHOLD"
+[[ "$THRESHOLD" == none ]] || is_pos_number "$THRESHOLD" \
+    || die "-t THRESHOLD must be a non-negative number or none, got: $THRESHOLD"
 is_pos_number "$TILE_LIMIT" || die "-k TILE_DELTA must be a non-negative number, got: $TILE_LIMIT"
 [[ -n "$LAST" && "$LAST" -lt "$FIRST" ]] && die "-l ($LAST) must be >= -f ($FIRST)"
 case "$REFERENCE" in
@@ -265,10 +271,10 @@ if $DRY_RUN; then
     echo "  [render new]  $RASTER_BIN ${new_args[*]} $PDF <OUT>/new/page"
     echo "  [per page]    compare -metric RMSE <OUT>/ref/page-NNN.ppm \\"
     echo "                        <OUT>/new/page-NNN.ppm <DIFF>/page-NNN-diff.png"
-    echo "  [per page]    convert <ref> <new> -colorspace gray -filter box -resize <tiles>! \\"
-    echo "                        -compose difference -composite   (tile delta)"
+    echo "  [per page]    convert <ref> <new> -filter box -resize <tiles>! \\"
+    echo "                        -compose difference -composite -separate   (tile delta)"
     echo ""
-    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  threshold=${THRESHOLD}/255  tile=${TILE_LIMIT}/255  ref=${REFERENCE}"
+    echo "  Settings: DPI=${DPI}  first=${FIRST}  last=${LAST:-all}  rmse<=${THRESHOLD}  tile<=${TILE_LIMIT}  ref=${REFERENCE}"
     [[ -n "$OUT_DIR" ]] && echo "  Diff dir: ${OUT_DIR}"
     exit 0
 fi
@@ -540,7 +546,11 @@ printf "  Pages:      %d total, %d within the limits, %d over (%d size mismatche
 printf "  Avg RMSE:   %.4f / 255\n" "$avg_rmse"
 printf "  Max RMSE:   %.4f / 255  (%s)\n" "$max_rmse" "${worst_page:-none}"
 printf "  Max tile:   %.4f / 255  (%s)\n" "$max_tile" "${worst_tile_page:-none}"
-printf "  Thresholds: RMSE %.1f / 255, tile %.1f / 255\n" "$THRESHOLD" "$TILE_LIMIT"
+if [[ "$THRESHOLD" == none ]]; then
+    printf "  Thresholds: tile %.1f / 255 (RMSE not judged)\n" "$TILE_LIMIT"
+else
+    printf "  Thresholds: RMSE %.1f / 255, tile %.1f / 255\n" "$THRESHOLD" "$TILE_LIMIT"
+fi
 printf "  rrocket stderr: %d lines\n" "$stderr_lines"
 [[ -n "$OUT_DIR" ]] && printf "  Diff dir:   %s\n" "$DIFF_DIR"
 finish

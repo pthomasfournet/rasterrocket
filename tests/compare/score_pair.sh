@@ -10,9 +10,11 @@
 #
 # Renders within 1 px of each other are cropped to their common area before
 # scoring.  RMSE is ImageMagick's over all channels.  The tile delta is the
-# largest difference in mean luminance over 32 x 32 px tiles: anti-aliasing
-# and hinting differences move coverage within a tile but hardly change its
-# mean, while content present in only one render changes it wholesale.
+# largest difference in the mean of one channel (R, G or B) over 32 x 32 px
+# tiles: anti-aliasing and hinting differences move coverage within a tile
+# but hardly change its mean, while content present in only one render
+# changes it wholesale.  Each channel is compared on its own, so a change of
+# hue at equal luminance counts in full.
 # DIFF, when given, receives ImageMagick's difference image.
 #
 # Exit code: 0 = scored (or SIZE); 2 = an image could not be read.
@@ -61,8 +63,12 @@ rmse_norm="$(printf '%s' "$rmse_line" | grep -Eo '\([0-9.e+-]+\)' | tr -d '()')"
 
 tiles_x=$(( (w + TILE_PX - 1) / TILE_PX ))
 tiles_y=$(( (h + TILE_PX - 1) / TILE_PX ))
-tile_norm="$(convert "${pair[@]}" -colorspace gray -filter box \
+# -separate splits the tile difference into one gray image per channel; the
+# largest of their maxima is the delta.
+tile_norm="$(convert "${pair[@]}" -filter box \
     -resize "${tiles_x}x${tiles_y}!" -compose difference -composite \
-    -format "%[fx:maxima]" info:)" || fail "tile delta failed"
+    -separate -format "%[fx:maxima]\n" info: \
+    | awk 'NR == 1 || $1 > m { m = $1 } END { if (NR) print m; else exit 1 }')" \
+    || fail "tile delta failed"
 
 awk -v r="$rmse_norm" -v t="$tile_norm" 'BEGIN { printf "SCORE %.4f %.4f\n", r * 255, t * 255 }'

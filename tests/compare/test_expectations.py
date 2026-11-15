@@ -4,6 +4,7 @@
 Run with `python3 -I tests/compare/test_expectations.py`.
 """
 
+import argparse
 import contextlib
 import dataclasses
 import datetime as dt
@@ -19,6 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import expectations as ex
 
 LIMITS = {"rmse": 2.0, "tile": 12.0}
+TILE_ONLY = ex.suite_limits(rmse=None, tile=12.0)
 TODAY = dt.date(2026, 1, 2)
 SEEDED = "unclassified (seeded 2026-01-02)"
 
@@ -95,6 +97,49 @@ class Classify(unittest.TestCase):
         doc = ex.Observation("a.pdf", None, ex.OK)
         entry = ex.Entry("a.pdf", None, "error", "known")
         self.assertEqual(self.verdict(doc, entry), ex.Verdict.XPASS)
+
+
+class TileOnlySuite(unittest.TestCase):
+    """A suite without an RMSE limit judges the tile delta alone."""
+
+    def test_suite_key_and_limits(self) -> None:
+        """No RMSE limit leaves RMSE out of the key and out of the limits."""
+        key = ex.suite_name("compare.sh", reference="pdftoppm", dpi=150, rmse=None, tile=12)
+        self.assertEqual(key, "compare.sh pdftoppm 150dpi tile<=12")
+        self.assertEqual(TILE_ONLY, {"tile": 12.0})
+        both = ex.suite_name("compare.sh", reference="pdftoppm", dpi=150, rmse=2, tile=12)
+        self.assertEqual(both, "compare.sh pdftoppm 150dpi rmse<=2 tile<=12")
+
+    def test_rmse_is_not_judged(self) -> None:
+        """Any RMSE passes; the tile delta still decides."""
+        self.assertEqual(
+            ex.classify(scored(1, 30.0, 5.0), None, TILE_ONLY).verdict, ex.Verdict.PASS
+        )
+        self.assertEqual(
+            ex.classify(scored(1, 0.0, 12.5), None, TILE_ONLY).verdict, ex.Verdict.FAIL
+        )
+
+    def test_entry_rmse_limit_is_ignored(self) -> None:
+        """An entry's RMSE limit neither fails a page nor survives an update."""
+        entry = differs(1, rmse=3.0, tile=21.0)
+        obs = scored(1, 40.0, 20.0)
+        result = ex.classify(obs, entry, TILE_ONLY)
+        self.assertEqual(result.verdict, ex.Verdict.XFAIL)
+        out = ex.updated({entry.test: entry}, [result], TILE_ONLY, TODAY)
+        self.assertEqual(out[entry.test], differs(1, tile=20.4))
+
+    def test_seeded_entry_has_no_rmse_limit(self) -> None:
+        """A page seeded under a tile-only suite registers its tile delta alone."""
+        entry = ex.seeded_entry(scored(1, 30.0, 13.0), TILE_ONLY, TODAY)
+        self.assertEqual(entry.limits, {"tile": 13.26})
+
+    def test_optional_limit(self) -> None:
+        """`none` is no limit; a negative or non-finite number is rejected."""
+        self.assertIsNone(ex.optional_limit("none"))
+        self.assertEqual(ex.optional_limit("2"), 2.0)
+        for bad in ("-1", "nan", "inf", "two", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                ex.optional_limit(bad)
 
 
 class OverLimits(unittest.TestCase):
@@ -294,7 +339,12 @@ class CompareCommand(unittest.TestCase):
     """The `compare` command compare.sh runs."""
 
     def run_compare(
-        self, registry: pathlib.Path, rows: str, *extra: str, registry_arg: str | None = None
+        self,
+        registry: pathlib.Path,
+        rows: str,
+        *extra: str,
+        registry_arg: str | None = None,
+        rmse_limit: str = "2.0",
     ) -> list[str]:
         """Run the command on `rows`; return its output lines.
 
@@ -315,7 +365,7 @@ class CompareCommand(unittest.TestCase):
             "--dpi",
             "150",
             "--rmse-limit",
-            "2.0",
+            rmse_limit,
             "--tile-limit",
             "12",
             "--file",
@@ -378,6 +428,16 @@ class CompareCommand(unittest.TestCase):
                 self.assertEqual(proc.wait(timeout=30), 0)
             self.assertTrue(registry.exists())
 
+    def test_rmse_limit_none(self) -> None:
+        """--rmse-limit none passes a page on its tile delta and keys the suite without RMSE."""
+        rows = "page-1\t1\tscored\t30.0\t5.0\tok\npage-2\t2\tscored\t0.0\t20.0\tbad\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = pathlib.Path(tmp) / "e.json"
+            out = self.run_compare(registry, rows, "--update", rmse_limit="none")
+            self.assertEqual(out[-1], "STATUS FAIL 0 1 0 0 1")
+            entries = ex.load(registry)["compare.sh pdftoppm 150dpi tile<=12"]
+            self.assertEqual(entries[("x.pdf", 2)].limits, {"tile": 20.4})
+
     def test_update_without_registry_is_fatal(self) -> None:
         """--update with the registry disabled records nothing and keeps the FAIL fatal."""
         rows = "page-1\t1\tscored\t3.0\t20.0\tbad\n"
@@ -413,7 +473,7 @@ STUB_RROCKET = stub_renderer('"${STUB_INK:-\\377}"') + 'exit "${STUB_STATUS:-0}"
 class CompareScript(unittest.TestCase):
     """compare.sh end to end, with stub renderers."""
 
-    SUITE = "compare.sh pdftoppm 150dpi rmse<=2 tile<=12"
+    SUITE = "compare.sh pdftoppm 150dpi tile<=12"
 
     def setUp(self) -> None:
         """Create the stub renderers, a PDF argument and an empty registry path."""
@@ -477,6 +537,39 @@ class CompareScript(unittest.TestCase):
         self.assertEqual(r.stdout, "")
         self.assertIn("not JSON", r.stderr)
         self.assertIn("expectations registry is unusable", r.stderr)
+
+
+def write_ppm(path: pathlib.Path, rgb: tuple[int, int, int], size: int = 32) -> None:
+    """Write a `size` x `size` binary PPM filled with `rgb`."""
+    path.write_bytes(f"P6\n{size} {size}\n255\n".encode() + bytes(rgb) * (size * size))
+
+
+@unittest.skipUnless(
+    all(shutil.which(c) for c in ("compare", "identify", "convert")),
+    "score_pair.sh needs ImageMagick",
+)
+class ScorePair(unittest.TestCase):
+    """score_pair.sh's metrics."""
+
+    def score(self, ref: tuple[int, int, int], new: tuple[int, int, int]) -> list[str]:
+        """Return score_pair.sh's output fields for two flat pages."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = pathlib.Path(tmp) / "a.ppm", pathlib.Path(tmp) / "b.ppm"
+            write_ppm(a, ref)
+            write_ppm(b, new)
+            script = pathlib.Path(ex.__file__).with_name("score_pair.sh")
+            r = subprocess.run(  # noqa: S603
+                [str(script), str(a), str(b)], check=True, capture_output=True, text=True
+            )
+            return r.stdout.split()
+
+    def test_identical_pages_score_zero(self) -> None:
+        """Equal renders score zero on both metrics."""
+        self.assertEqual(self.score((10, 20, 30), (10, 20, 30)), ["SCORE", "0.0000", "0.0000"])
+
+    def test_hue_change_at_equal_luminance_counts(self) -> None:
+        """Red against a green of the same luminance is a full tile delta, not none."""
+        self.assertEqual(self.score((255, 0, 0), (0, 76, 0))[2], "255.0000")
 
 
 if __name__ == "__main__":
