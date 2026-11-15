@@ -170,6 +170,7 @@ pub(super) fn decode_image_stream<
             let opts = JpxOptions {
                 indices: !is_mask && src.colour.indexed(),
                 smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
+                colour_key: !is_mask && matches!(dict.get(b"Mask"), Some(Object::Array(_))),
             };
             #[cfg(feature = "nvjpeg2k")]
             let samples = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
@@ -227,9 +228,12 @@ pub(super) fn decode_image_stream<
     })
 }
 
-/// The colour-key mask (§8.9.6.4) of a codec's host-resident samples.
-/// A `bilevel` codec's samples are one bit each, expanded to `0x00` and
-/// `0xFF`, so its ranges are compared with the bit values.
+/// The colour-key mask (§8.9.6.4) of a codec's host-resident samples,
+/// compared in the range of the stream's own samples: the codec's samples
+/// at their own precision when it kept them ([`Samples::key_source`]),
+/// its 8-bit samples otherwise.  A `bilevel` codec's samples are one bit
+/// each, expanded to `0x00` and `0xFF`, so its ranges are compared with
+/// the bit values.
 /// Device-resident samples cannot be range-tested; the mask is dropped
 /// with a warning rather than silently.
 fn codec_colour_key_mask(
@@ -240,6 +244,16 @@ fn codec_colour_key_mask(
     let super::colorspace::Layout::Color(n) = samples.layout else {
         return None;
     };
+    if let Some(key) = &samples.key_source {
+        let n = usize::from(n);
+        let npix = (samples.width as usize).checked_mul(samples.height as usize)?;
+        if key.len() < npix.checked_mul(n)? {
+            return None;
+        }
+        return colour_key_mask_with(ranges, n, samples.width, samples.height, |p, c| {
+            key[p * n + c]
+        });
+    }
     let Some(bytes) = samples.data.as_cpu() else {
         log::warn!(
             "image: colour-key /Mask on GPU-resident base image not supported — blitting image without mask"

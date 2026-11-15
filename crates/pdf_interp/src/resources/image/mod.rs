@@ -1009,6 +1009,40 @@ pub(super) fn terminal_decode_parms(dict: &Dictionary, filter_count: usize) -> O
 mod tests {
     use super::*;
 
+    /// A colour-key `/Mask` on a JPEG 2000 image of more than 8 bits is
+    /// compared in the codestream's own range: on the 16-bit gray fixture,
+    /// whose second row holds 9362 and whose other rows lie outside
+    /// [9000, 9500], the key masks that row alone.
+    #[test]
+    fn a_jpx_colour_key_compares_the_samples_at_their_own_precision() {
+        let jpx = include_bytes!("testdata/gray16.jp2");
+        let mut image = format!(
+            "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+             /BitsPerComponent 16 /Filter /JPXDecode /Mask [9000 9500] /Length {} >>\nstream\n",
+            jpx.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(jpx);
+        image.extend_from_slice(b"\nendstream");
+        let doc = crate::test_helpers::make_doc_with_objects(&[(4, image)]);
+        let mut xobjects = Dictionary::new();
+        xobjects.set("Im1", Object::Reference((4, 0)));
+        let ImageResolution::Ok(decoded) = resolve_image(
+            &mut ImageDecodeCtx::cpu(&doc),
+            &xobjects,
+            ImageRequest::full(b"Im1"),
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        ) else {
+            panic!("the image decodes");
+        };
+        let mask = decoded.image.smask.expect("the colour key masks");
+        for (row, alpha) in mask.alpha().as_chunks::<8>().0.iter().enumerate() {
+            let want = if row == 1 { 0 } else { 255 };
+            assert!(alpha.iter().all(|&a| a == want), "row {row}: {alpha:?}");
+        }
+    }
+
     // ── Spot-colour images through the full XObject path ─────────────────────
 
     /// Decode `/Im1`, an image whose `ColorSpace` is `[/Separation /Black

@@ -54,8 +54,11 @@ pub(in crate::resources::image) fn decode_jpx(
     // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
     // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
     // never needs `/SMaskInData`.
+    // A colour key compared at more than 8 bits needs the samples the
+    // 8-bit device decode does not keep.
+    let precise_key = opts.colour_key && img.original_bit_depth() > 8;
     #[cfg(feature = "nvjpeg2k")]
-    if let Some(dec) = gpu {
+    if let Some(dec) = gpu.filter(|_| !precise_key) {
         let area = pdf_w.saturating_mul(pdf_h);
         if area >= crate::resources::image::GPU_JPEG2K_THRESHOLD_PX {
             if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
@@ -80,7 +83,13 @@ pub(in crate::resources::image) fn decode_jpx(
     let channels = usize::from(img.color_space().num_channels());
     let has_alpha = img.has_alpha();
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
-    let samples = img.decode_u8(&mut ctx).map_err(|e| e.to_string())?;
+    let (samples, key_source) = if precise_key {
+        let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
+        let key = source_samples(&decoded, channels);
+        (decoded.data_u8(), Some(key))
+    } else {
+        (img.decode_u8(&mut ctx).map_err(|e| e.to_string())?, None)
+    };
 
     let stride = channels + usize::from(has_alpha);
     let expected = (jw as usize)
@@ -126,7 +135,28 @@ pub(in crate::resources::image) fn decode_jpx(
     let mut samples = Samples::cpu(jw, jh, layout, colour);
     samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
     samples.embedded_profile = embedded_profile;
+    samples.key_source = key_source;
     Ok(samples)
+}
+
+/// The first `channels` components of `decoded` interleaved at their own
+/// precision: each sample rounded and clamped to `0..=2^bits − 1`.
+fn source_samples(decoded: &hayro_jpeg2000::DecodedImage<'_>, channels: usize) -> Vec<u32> {
+    let components = &decoded.components()[..channels.min(decoded.components().len())];
+    let len = components.first().map_or(0, |c| c.samples().len());
+    let mut out = Vec::with_capacity(len * components.len());
+    for i in 0..len {
+        for c in components {
+            let max = f64::from(u32::MAX >> (32 - u32::from(c.bit_depth()).clamp(1, 32)));
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=2^bits − 1, which u32 holds"
+            )]
+            out.push(f64::from(c.samples()[i]).round().clamp(0.0, max) as u32);
+        }
+    }
+    out
 }
 
 /// Decode a JPEG 2000 codestream's first component as palette indices
@@ -184,6 +214,10 @@ pub(in crate::resources::image) struct JpxOptions {
     /// `/SMaskInData` (§8.9.5): 0 ignores an alpha channel, 1 makes it the
     /// soft mask, 2 makes it the soft mask of colour premultiplied by it.
     pub smask_in_data: i64,
+    /// A colour-key `/Mask` compares the samples: a codestream of more than
+    /// 8 bits keeps them at its own precision as well
+    /// ([`Samples::key_source`]).
+    pub colour_key: bool,
 }
 
 /// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
@@ -240,6 +274,7 @@ mod tests {
     const PLAIN: JpxOptions = JpxOptions {
         indices: false,
         smask_in_data: 0,
+        colour_key: false,
     };
 
     /// Colour samples as stored, an alpha channel as the soft mask.
@@ -247,6 +282,7 @@ mod tests {
     const WITH_ALPHA: JpxOptions = JpxOptions {
         indices: false,
         smask_in_data: 1,
+        colour_key: false,
     };
 
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
@@ -347,6 +383,7 @@ mod tests {
         let opts = JpxOptions {
             indices: false,
             smask_in_data: 0,
+            colour_key: false,
         };
         #[cfg(feature = "nvjpeg2k")]
         let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the limit");

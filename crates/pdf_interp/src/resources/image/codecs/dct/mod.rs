@@ -508,6 +508,7 @@ fn samples_from_cached(cached: CachedImage, pdf_w: u32, pdf_h: u32) -> Samples {
         smask: None,
         embedded_profile: None,
         partial: None,
+        key_source: None,
     }
 }
 

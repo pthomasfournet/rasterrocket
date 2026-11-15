@@ -73,6 +73,10 @@ pub(super) struct Samples {
     /// a stream shorter than its dictionary declares, or a codec that
     /// stopped short, leaves the missing samples padded.
     pub partial: Option<String>,
+    /// The colour components at the codestream's own precision, when it
+    /// exceeds 8 bits and a colour-key `/Mask` compares them in their own
+    /// range (§8.9.6.4); `data` holds them scaled to 8 bits.
+    pub key_source: Option<Vec<u32>>,
 }
 
 impl Samples {
@@ -86,6 +90,7 @@ impl Samples {
             smask: None,
             embedded_profile: None,
             partial: None,
+            key_source: None,
         }
     }
 
@@ -283,6 +288,7 @@ impl ImageColour {
             smask,
             embedded_profile,
             partial: _,
+            key_source: _,
         } = samples;
         let n = match layout {
             Layout::Mask => {
