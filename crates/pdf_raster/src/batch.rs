@@ -72,17 +72,12 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
     }
     if opts.color == crate::ColorModel::Cmyk && opts.deskew {
         return Some(RasterError::InvalidOptions(
-            "deskew operates on 8-bit gray: CMYK pages are not deskewed".to_owned(),
+            "deskew operates on gray pages: CMYK pages are not deskewed".to_owned(),
         ));
     }
     if opts.color == crate::ColorModel::Cmyk && opts.transparent_background {
         return Some(RasterError::InvalidOptions(
             "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
-        ));
-    }
-    if opts.depth != color::SampleDepth::Eight && opts.deskew {
-        return Some(RasterError::InvalidOptions(
-            "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
         ));
     }
     if opts.pages.is_none() {

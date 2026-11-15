@@ -226,7 +226,7 @@ fn rendered_page(
 }
 
 /// A [`PixelFormat::Gray16`] [`RenderedPage`] of `bmp`, its rows packed.
-pub(crate) fn gray16_into_rendered_page(
+pub(crate) fn gray16_to_rendered_page(
     bmp: &Bitmap<Gray16>,
     page_num: u32,
     dpi: f32,
@@ -234,6 +234,26 @@ pub(crate) fn gray16_into_rendered_page(
 ) -> RenderedPage {
     let pixels = (Pixels::U16(packed_samples(bmp)), PixelFormat::Gray16);
     rendered_page((bmp.width, bmp.height), pixels, page_num, dpi, diagnostics)
+}
+
+/// [`gray8_into_rendered_page`] at 16 bits: a [`PixelFormat::Gray16`]
+/// page that takes over a packed bitmap's buffer, its spare capacity
+/// released; a padded bitmap is copied row by row.
+#[must_use]
+pub fn gray16_into_rendered_page(
+    bmp: Bitmap<Gray16>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    if bmp.stride != bmp.width as usize {
+        return gray16_to_rendered_page(&bmp, page_num, dpi, diagnostics);
+    }
+    let size = (bmp.width, bmp.height);
+    let mut samples = bmp.into_data();
+    samples.shrink_to_fit();
+    let pixels = (Pixels::U16(samples), PixelFormat::Gray16);
+    rendered_page(size, pixels, page_num, dpi, diagnostics)
 }
 
 /// A [`PixelFormat::Cmyk8`] [`RenderedPage`] of `bmp`, its rows packed.
@@ -410,11 +430,19 @@ mod tests {
     fn sixteen_bit_pages_pack_their_samples() {
         let mut gray = Bitmap::<Gray16>::new(2, 1, 4, false);
         gray.row_samples_mut(0)[..2].copy_from_slice(&[1, 65_535]);
-        let page = gray16_into_rendered_page(&gray, 1, 72.0, PageDiagnostics::default());
+        let page = gray16_to_rendered_page(&gray, 1, 72.0, PageDiagnostics::default());
         assert_eq!(
             (page.format, page.pixels),
             (PixelFormat::Gray16, Pixels::U16(vec![1, 65_535]))
         );
+        for bmp in [gray, Bitmap::<Gray16>::from_packed(2, 1, vec![1, 65_535])] {
+            let page = gray16_into_rendered_page(bmp, 3, 72.0, PageDiagnostics::default());
+            assert_eq!((page.width, page.height, page.page_num), (2, 1, 3));
+            assert_eq!(
+                (page.format, page.pixels),
+                (PixelFormat::Gray16, Pixels::U16(vec![1, 65_535]))
+            );
+        }
         let mut rgb = Bitmap::<Rgb16>::new(1, 1, 1, true);
         rgb.row_samples_mut(0).copy_from_slice(&[1, 2, 3]);
         rgb.alpha_plane_mut().unwrap()[0] = 400;

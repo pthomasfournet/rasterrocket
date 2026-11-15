@@ -341,10 +341,10 @@ fn batch_pages_carry_16_bit_samples() {
     assert_eq!(rgba.pixels.byte_len(), rgba.pixels.len() * 2);
 }
 
-/// A 16-bit render is refused where it cannot hold: by the 8-bit entry
-/// points and with deskew.
+/// A 16-bit render is refused by the 8-bit entry points, and deskewed at
+/// 16 bits by the gray one.
 #[test]
-fn a_16_bit_render_is_refused_where_it_cannot_hold() {
+fn a_16_bit_render_is_refused_by_8_bit_entry_points_and_deskewed_at_16() {
     let params = RenderParams::new(1.0).with_depth(SampleDepth::Sixteen);
     let plain = session(gradient_page());
     let Err(err) = rasterrocket::render_page_rgb_with(&plain, 1, &params) else {
@@ -354,8 +354,9 @@ fn a_16_bit_render_is_refused_where_it_cannot_hold() {
     let mut opts = RasterOptions::new(72.0);
     opts.depth = SampleDepth::Sixteen;
     opts.deskew = true;
-    let err = render_page_gray(&plain, 1, &opts).unwrap_err();
-    assert!(err.to_string().contains("deskew"), "{err}");
+    let gray = render_page_gray(&plain, 1, &opts).expect("a deskewed 16-bit page");
+    assert_eq!(gray.format, PixelFormat::Gray16);
+    assert!(matches!(gray.pixels, Pixels::U16(_)));
 }
 
 /// The spot colorant of [`overprint_page`]: teal, printing cyan and half

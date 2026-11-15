@@ -166,14 +166,15 @@ pub use color::SampleDepth;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
-pub use gray::{rgb_into_gray, rgb_to_gray, rgb16_to_gray16};
+pub use gray::{rgb_into_gray, rgb_to_gray, rgb16_into_gray16, rgb16_to_gray16};
 pub use open::{
     RasterSession, open_session, open_session_from_bytes, open_session_from_reader,
     open_session_from_shared, prescan_session,
 };
 pub use page::{
     CanvasLayout, DEFAULT_BAND_BYTES, DEFAULT_MAX_PAGE_BYTES, MAX_PX_SIDE,
-    gray8_into_rendered_page, gray8_to_rendered_page, validate_page_bytes,
+    gray8_into_rendered_page, gray8_to_rendered_page, gray16_into_rendered_page,
+    validate_page_bytes,
 };
 pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;

@@ -8,7 +8,7 @@ use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas};
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
-use crate::gray::{rgb_into_gray, rgb16_to_gray16};
+use crate::gray::{rgb_into_gray, rgb16_into_gray16};
 use crate::{RasterError, RasterOptions, RasterSession, RenderParams, RenderRegion, RenderedPage};
 
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
@@ -177,19 +177,12 @@ pub(crate) fn gray_output() -> RasterError {
 /// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
 /// is asked of a page larger than
 /// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE) (see
-/// [`deskew::apply`](crate::deskew::apply)), and
-/// [`RasterError::InvalidOptions`] when deskew is asked of a 16-bit page:
-/// deskew operates on 8-bit gray.
+/// [`deskew::apply`](crate::deskew::apply)).
 pub fn render_page_gray(
     session: &RasterSession,
     page_num: u32,
     opts: &RasterOptions,
 ) -> Result<RenderedPage, RasterError> {
-    if opts.deskew && opts.depth != SampleDepth::Eight {
-        return Err(RasterError::InvalidOptions(
-            "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
-        ));
-    }
     let rgb_profile = session
         .output_profile
         .as_ref()
@@ -216,39 +209,41 @@ pub fn render_page_gray(
         &params,
         &mut CanvasBuffers::default(),
     )?;
-    let mut gray = match canvas {
-        FinishedCanvas::Rgb8(rgb) => rgb_into_gray(rgb),
-        FinishedCanvas::Gray8(gray) => gray,
-        FinishedCanvas::Rgb16(rgb) => {
-            return Ok(crate::page::gray16_into_rendered_page(
-                &rgb16_to_gray16(&rgb),
-                page_num,
-                dpi,
-                diagnostics,
-            ));
-        }
-        FinishedCanvas::Gray16(gray) => {
-            return Ok(crate::page::gray16_into_rendered_page(
-                &gray,
-                page_num,
-                dpi,
-                diagnostics,
-            ));
-        }
+    let gray = match canvas {
+        FinishedCanvas::Rgb8(rgb) => GrayCanvas::Eight(rgb_into_gray(rgb)),
+        FinishedCanvas::Gray8(gray) => GrayCanvas::Eight(gray),
+        FinishedCanvas::Rgb16(rgb) => GrayCanvas::Sixteen(rgb16_into_gray16(rgb)),
+        FinishedCanvas::Gray16(gray) => GrayCanvas::Sixteen(gray),
         FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
     };
+    Ok(match gray {
+        GrayCanvas::Eight(mut gray) => {
+            deskewed(&mut gray, opts.deskew, session.policy)?;
+            crate::page::gray8_into_rendered_page(gray, page_num, dpi, diagnostics)
+        }
+        GrayCanvas::Sixteen(mut gray) => {
+            deskewed(&mut gray, opts.deskew, session.policy)?;
+            crate::page::gray16_into_rendered_page(gray, page_num, dpi, diagnostics)
+        }
+    })
+}
 
-    if opts.deskew {
-        crate::deskew::apply(&mut gray, session.policy)
-            .map_err(|e| RasterError::Deskew(e.to_string()))?;
+/// A gray page at the depth it was rendered at.
+enum GrayCanvas {
+    Eight(Bitmap<color::Gray8>),
+    Sixteen(Bitmap<color::Gray16>),
+}
+
+/// Deskew `gray` under `policy` when `deskew`.
+fn deskewed<P: crate::deskew::DeskewPixel>(
+    gray: &mut Bitmap<P>,
+    deskew: bool,
+    policy: crate::BackendPolicy,
+) -> Result<(), RasterError> {
+    if deskew {
+        crate::deskew::apply(gray, policy).map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
-
-    Ok(crate::page::gray8_into_rendered_page(
-        gray,
-        page_num,
-        dpi,
-        diagnostics,
-    ))
+    Ok(())
 }
 
 /// Render page `page_num` (1-based) of `session` over a transparent

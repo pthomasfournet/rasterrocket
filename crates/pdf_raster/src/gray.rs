@@ -15,7 +15,7 @@
 //! the dot product directly and a single shift replaces the decimal
 //! divide (the parity test is exhaustive over all 2²⁴ inputs).
 
-use color::{Gray8, Gray16, Rgb8, Rgb16};
+use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16};
 use raster::Bitmap;
 
 /// `DeviceRGB` → `DeviceGray` weights in 1.15 fixed point; they sum to
@@ -54,22 +54,38 @@ pub(crate) fn rgb_rows_to_gray(src: &Bitmap<Rgb8>, out: &mut [u8], stride: usize
 /// The packed gray rows are written over the front of the colour buffer,
 /// which is truncated to `width * height` bytes and keeps its capacity. The
 /// alpha plane, if any, is dropped.
+#[must_use]
+pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8> {
+    into_gray(src, convert_row)
+}
+
+/// [`rgb16_to_gray16`] in the RGB bitmap's own allocation, as
+/// [`rgb_into_gray`] does at 8 bits.
+#[must_use]
+pub fn rgb16_into_gray16(src: Bitmap<Rgb16>) -> Bitmap<Gray16> {
+    into_gray(src, convert_row16)
+}
+
+/// The packed gray bitmap of `src`, each row converted by `convert` over
+/// the front of the colour buffer.
 ///
-/// Gray row `y` occupies bytes `[y·w, y·w + w)` and RGB row `y` starts at
+/// Gray row `y` occupies samples `[y·w, y·w + w)` and RGB row `y` starts at
 /// `y·stride ≥ 3·y·w`, so for `y ≥ 1` the destination row ends at or before
 /// the source row begins and the two are disjoint halves of one
 /// `split_at_mut`. Row 0 overlaps itself and is converted from a copy.
-#[must_use]
-pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8> {
+fn into_gray<S: color::Sample, C: Pixel<Sample = S>, G: Pixel<Sample = S>>(
+    src: Bitmap<C>,
+    convert: fn(&[S], &mut [S]),
+) -> Bitmap<G> {
     let (width, height, stride) = (src.width, src.height, src.stride);
     let w = width as usize;
     let mut data = src.into_data();
     if height > 0 && w > 0 {
         let row0 = data[..w * 3].to_vec();
-        convert_row(&row0, &mut data[..w]);
+        convert(&row0, &mut data[..w]);
         for y in 1..height as usize {
             let (dst, src) = data.split_at_mut(y * stride);
-            convert_row(&src[..w * 3], &mut dst[y * w..(y + 1) * w]);
+            convert(&src[..w * 3], &mut dst[y * w..(y + 1) * w]);
         }
     }
     data.truncate(w * height as usize);
@@ -483,5 +499,33 @@ mod tests {
         assert_eq!((got.width, got.height, got.data_len()), (0, 4, 0));
         let got = rgb_into_gray(Bitmap::<Rgb8>::new(5, 0, 1, false));
         assert_eq!((got.width, got.height, got.data_len()), (5, 0, 0));
+    }
+
+    /// [`rgb16_into_gray16`] matches [`rgb16_to_gray16`] sample for sample.
+    #[test]
+    fn in_place_matches_copying_conversion_at_16_bits() {
+        let mut seed = 0x9e37_79b9_u32;
+        for (w, h) in [(1, 1), (1, 9), (7, 1), (17, 5), (33, 4)] {
+            for row_pad in [1, 3, 4] {
+                let mut bmp = Bitmap::<Rgb16>::new(w, h, row_pad, true);
+                for sample in bmp.data_mut() {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    *sample = u16::from_le_bytes([seed.to_le_bytes()[0], seed.to_le_bytes()[1]]);
+                }
+                let want = rgb16_to_gray16(&bmp);
+                let got = rgb16_into_gray16(bmp);
+                assert_eq!((got.width, got.height, got.stride), (w, h, w as usize));
+                assert!(got.alpha_plane().is_none());
+                for y in 0..h {
+                    assert_eq!(
+                        got.row_samples(y),
+                        &want.row_samples(y)[..w as usize],
+                        "{w}x{h} pad {row_pad} row {y}"
+                    );
+                }
+            }
+        }
     }
 }

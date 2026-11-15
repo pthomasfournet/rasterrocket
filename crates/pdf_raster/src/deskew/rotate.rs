@@ -1,7 +1,8 @@
 //! Image rotation for deskew correction.
 //!
 //! Rotates an 8-bit grayscale bitmap by a given angle (in degrees, CW positive)
-//! using bilinear interpolation.  Background pixels introduced by the rotation
+//! using bilinear interpolation; the scalar kernel, shared with the 16-bit
+//! rotation, is in the `bilinear` module.  Background pixels introduced by the rotation
 //! are set to 255 (white — scanner background convention).
 //!
 //! # Implementation
@@ -34,16 +35,18 @@ use raster::Bitmap;
 
 #[cfg(feature = "gpu-deskew")]
 use super::DeskewError;
+#[cfg(target_arch = "aarch64")]
+use super::bilinear::footprint;
+use super::bilinear::{RowParams, rotate_cpu_with, rotate_rows, rotate_span_scalar};
 use crate::BackendPolicy;
 
-/// Rotate `img` in place by `angle_deg` degrees (clockwise positive).
+/// `img` rotated by `angle_deg` degrees (clockwise positive).
 ///
-/// The image is replaced with a new bitmap of the same dimensions holding
-/// the rotated content; out-of-bounds source pixels are filled with 255
+/// A new bitmap of the same dimensions holds the rotated content; out-of-bounds source pixels are filled with 255
 /// (white).  The rotation runs on the GPU when [`rotated_on_gpu`] gives a
 /// result under `policy`, and on the CPU otherwise.
-pub(crate) fn rotate_inplace(img: &mut Bitmap<Gray8>, angle_deg: f32, policy: BackendPolicy) {
-    *img = rotated_on_gpu(img, angle_deg, policy).unwrap_or_else(|| rotate_cpu(img, angle_deg));
+pub(crate) fn rotated(img: &Bitmap<Gray8>, angle_deg: f32, policy: BackendPolicy) -> Bitmap<Gray8> {
+    rotated_on_gpu(img, angle_deg, policy).unwrap_or_else(|| rotate_cpu(img, angle_deg))
 }
 
 /// `img` rotated by `angle_deg` degrees clockwise on the GPU, or `None`
@@ -85,106 +88,6 @@ const fn rotates_on_gpu(policy: BackendPolicy) -> bool {
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => false,
     }
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
-
-/// Parameters shared between the scalar and SIMD row kernels.
-///
-/// Passed by value to avoid threading individual scalars through dispatch helpers.
-struct RowParams {
-    cos_a: f32,
-    sin_a: f32,
-    sx_base: f32,
-    sy_base: f32,
-    sx_max: i32,
-    sy_max: i32,
-}
-
-/// The 2×2 bilinear footprint `[p00, p10, p01, p11]` at origin `(x0, y0)`.
-///
-/// `x0` and `y0` must already be bounds-checked (`0 ≤ x0 ≤ sx_max = w-1`,
-/// `0 ≤ y0 ≤ sy_max = h-1`). On the last column/row the footprint is clamped
-/// to the edge, so the missing neighbour duplicates the edge pixel and the
-/// interpolation degrades gracefully to nearest-neighbour there.
-#[inline]
-fn footprint(src: &Bitmap<Gray8>, x0: usize, y0: usize) -> [u8; 4] {
-    let x1 = (x0 + 1).min(src.width as usize - 1);
-    let y1 = (y0 + 1).min(src.height as usize - 1);
-    // y0 ≤ sy_max = h-1 ≤ 32767 and y1 ≤ h-1 — safe casts.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "y0 ≤ h-1 ≤ 32767 and y1 ≤ h-1; both fit in u32"
-    )]
-    let (r0, r1) = (src.row_bytes(y0 as u32), src.row_bytes(y1 as u32));
-    [r0[x0], r0[x1], r1[x0], r1[x1]]
-}
-
-/// Bilinear interpolation at source `(sx, sy)` given pre-floored origin `(x0, y0)`
-/// and fractions `(fx, fy)`; the origin contract is that of [`footprint`].
-#[inline]
-fn bilinear_sample(src: &Bitmap<Gray8>, x0: usize, y0: usize, fx: f32, fy: f32) -> u8 {
-    let [p00, p10, p01, p11] = footprint(src, x0, y0).map(f32::from);
-
-    let top = (p10 - p00).mul_add(fx, p00);
-    let bot = (p11 - p01).mul_add(fx, p01);
-    let val = (bot - top).mul_add(fy, top);
-
-    // Bilinear of values in [0, 255] stays in [0, 255].
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "bilinear of [0,255] inputs stays in [0,255]; rounding keeps it non-negative"
-    )]
-    {
-        val.round() as u8
-    }
-}
-
-/// Compute a single output pixel at column `ox`.
-///
-/// Returns 255 (white) when the source coordinates are out of the valid
-/// bilinear-sampling range.
-#[inline]
-fn rotate_pixel_scalar(src: &Bitmap<Gray8>, ox: f32, p: &RowParams) -> u8 {
-    let sx = p.cos_a.mul_add(ox, p.sx_base);
-    let sy = p.sin_a.mul_add(ox, p.sy_base);
-
-    // floor() → i32: coordinates bounded by ≤ 32768·√2 ≈ 46341 — fits in i32.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "image coordinates bounded by rotated extent ≤ 32768 * sqrt(2) ≈ 46341; fits in i32"
-    )]
-    let x0 = sx.floor() as i32;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "image coordinates bounded by rotated extent ≤ 32768 * sqrt(2) ≈ 46341; fits in i32"
-    )]
-    let y0 = sy.floor() as i32;
-
-    if x0 < 0 || y0 < 0 || x0 > p.sx_max || y0 > p.sy_max {
-        return 255;
-    }
-
-    // x0 ≥ 0, y0 ≥ 0 verified above.
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "x0 ≥ 0 and y0 ≥ 0 verified by the guard above"
-    )]
-    let (x0u, y0u) = (x0 as usize, y0 as usize);
-    // x0 ≤ 46341 ≤ 2^23 — exactly representable in f32; subtraction is exact.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "x0 ≤ 46341 ≤ 2^23 — exactly representable in f32"
-    )]
-    let fx = sx - x0 as f32;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "y0 ≤ 46341 ≤ 2^23 — exactly representable in f32"
-    )]
-    let fy = sy - y0 as f32;
-
-    bilinear_sample(src, x0u, y0u, fx, fy)
 }
 
 // ── Per-arch row implementations ──────────────────────────────────────────────
@@ -503,19 +406,6 @@ fn rotate_row_scalar(dst_row: &mut [u8], src: &Bitmap<Gray8>, p: &RowParams) {
     rotate_span_scalar(dst_row, 0, src, p);
 }
 
-/// Scalar per-pixel loop over output columns `first .. first + span.len()`.
-fn rotate_span_scalar(span: &mut [u8], first: usize, src: &Bitmap<Gray8>, p: &RowParams) {
-    for (i, dst_px) in span.iter_mut().enumerate() {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "column ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
-        )]
-        {
-            *dst_px = rotate_pixel_scalar(src, (first + i) as f32, p);
-        }
-    }
-}
-
 // ── Per-arch dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
@@ -576,95 +466,6 @@ pub(crate) fn rotate_cpu(src: &Bitmap<Gray8>, angle_deg: f32) -> Bitmap<Gray8> {
 /// `stride ≥ src.width`.
 pub(crate) fn rotate_cpu_into(src: &Bitmap<Gray8>, angle_deg: f32, dst: &mut [u8], stride: usize) {
     rotate_rows(src, angle_deg, dst, stride, dispatch_rotate_row);
-}
-
-/// [`rotate_rows`] into a new packed bitmap.
-fn rotate_cpu_with(
-    src: &Bitmap<Gray8>,
-    angle_deg: f32,
-    row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams),
-) -> Bitmap<Gray8> {
-    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
-    let stride = dst.stride;
-    rotate_rows(src, angle_deg, dst.data_mut(), stride, row_fn);
-    dst
-}
-
-/// Row-loop driver shared by [`rotate_cpu`], [`rotate_cpu_into`] and the
-/// per-row parity tests: computes the per-row inverse-map parameters and
-/// hands each output row, `dst[oy * stride..][..width]`, to `row_fn`.
-#[expect(
-    clippy::similar_names,
-    reason = "sx_*/sy_* are paired coordinate variables; renaming would obscure the symmetry"
-)]
-fn rotate_rows(
-    src: &Bitmap<Gray8>,
-    angle_deg: f32,
-    dst: &mut [u8],
-    stride: usize,
-    row_fn: impl Fn(&mut [u8], &Bitmap<Gray8>, &RowParams),
-) {
-    let w = src.width as usize;
-    let h = src.height as usize;
-
-    let rad = angle_deg.to_radians();
-    let cos_a = rad.cos();
-    let sin_a = rad.sin();
-
-    // Rotation centre: image centre (may be fractional).
-    // w, h ≤ DESKEW_MAX_SIDE = 32768; exact in f32 (24-bit mantissa covers integers to 16 M).
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
-    )]
-    let cx = (w as f32 - 1.0) * 0.5;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
-    )]
-    let cy = (h as f32 - 1.0) * 0.5;
-
-    // Valid source coordinate range: x ∈ [0, w-1], y ∈ [0, h-1].
-    // `bilinear_sample` clamps its 2×2 footprint to the edge, so the last
-    // column/row are sampleable rather than white-filled.
-    // w, h ≤ 32768 — safe to cast to i32 (fits in i32 range).
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; fits in i32"
-    )]
-    let sx_max = (w as i32) - 1;
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; fits in i32"
-    )]
-    let sy_max = (h as i32) - 1;
-
-    for oy in 0..h {
-        // oy < h ≤ 32768; safe to cast to u32.
-        let dst_row = &mut dst[oy * stride..][..w];
-
-        // Pre-compute y-dependent terms outside the x loop.
-        // oy ≤ 32768; exact in f32.
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "oy ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
-        )]
-        let dy = oy as f32 - cy;
-        let sx_base = cos_a.mul_add(-cx, -(sin_a * dy)) + cx;
-        let sy_base = sin_a.mul_add(-cx, cos_a * dy) + cy;
-
-        let params = RowParams {
-            cos_a,
-            sin_a,
-            sx_base,
-            sy_base,
-            sx_max,
-            sy_max,
-        };
-        row_fn(dst_row, src, &params);
-    }
 }
 
 /// GPU rotation via CUDA NPP (`nppiRotate_8u_C1R_Ctx`).
@@ -926,17 +727,17 @@ mod tests {
         }
     }
 
-    /// `rotate_inplace` at 0° does not panic.
+    /// `rotated` at 0° does not panic.
     #[test]
-    fn rotate_inplace_zero_no_panic() {
-        let mut img = Bitmap::<Gray8>::new(32, 32, 1, false);
-        rotate_inplace(&mut img, 0.0, BackendPolicy::CpuOnly);
+    fn rotated_zero_no_panic() {
+        let img = Bitmap::<Gray8>::new(32, 32, 1, false);
+        let _ = rotated(&img, 0.0, BackendPolicy::CpuOnly);
     }
 
-    /// `rotate_inplace` replaces `*img` with the rotated image: the pixel
-    /// content changes after a non-trivial rotation.
+    /// `rotated` returns the rotated image: the pixel content changes after
+    /// a non-trivial rotation.
     #[test]
-    fn rotate_inplace_modifies_pixels() {
+    fn rotated_modifies_pixels() {
         // 32×32 image with a single white-stripe column on the left half so
         // any non-no-op rotation visibly redistributes the white.
         let mut img = Bitmap::<Gray8>::new(32, 32, 1, false);
@@ -946,11 +747,11 @@ mod tests {
         }
         let before_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         // 45° rotation breaks the vertical line into diagonal pieces.
-        rotate_inplace(&mut img, 45.0, BackendPolicy::CpuOnly);
+        img = rotated(&img, 45.0, BackendPolicy::CpuOnly);
         let after_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         assert_ne!(
             before_col5, after_col5,
-            "rotate_inplace at 45° must mutate the bitmap, not no-op"
+            "rotated at 45° must change the pixels, not no-op"
         );
     }
 
