@@ -265,7 +265,16 @@ fn length_lands_on_endstream(data: &[u8], start: usize, len: usize) -> bool {
     while matches!(data.get(p), Some(b'\r' | b'\n' | b' ' | b'\t')) {
         p += 1;
     }
-    data[p..].starts_with(b"endstream")
+    keyword_at(data, p, b"endstream")
+}
+
+/// Whether keyword `kw` starts at `pos` and ends at whitespace, a delimiter
+/// or the end of the data.
+fn keyword_at(data: &[u8], pos: usize, kw: &[u8]) -> bool {
+    data.get(pos..).is_some_and(|rest| rest.starts_with(kw))
+        && data
+            .get(pos + kw.len())
+            .is_none_or(|&b| is_ws(b) || is_delim(b))
 }
 
 /// Trim the single EOL delimiter (CRLF, LF, or CR) that PDF writers insert
@@ -320,8 +329,17 @@ const MAX_NESTING: usize = 256;
 ///   2. else last EOL-preceded `endstream` (writers always EOL-precede it; a
 ///      stray in-body hit is followed by more data then the real terminator,
 ///      so the *last* such hit is the safer pick);
-///   3. else first raw `endstream` (degenerate input — recover *something*
-///      rather than dropping the whole page).
+///   3. else first `endstream` keyword;
+///   4. else the first `endstream` bytes in any context (degenerate input —
+///      recover *something* rather than dropping the whole page).
+///
+/// `endstream` is a keyword when a whitespace or delimiter byte, or the end
+/// of the data, follows it (`endstream.` is body data), and no delimiter
+/// precedes it (`(endstream` opens a string; `ETendstream` ends a body that
+/// omits the EOL).  An `endobj`
+/// between whitespace, met before any `endstream` and before the `obj` of
+/// another object, ends the body: the object closes without the stream's
+/// terminator.
 ///
 /// Once a candidate is known, the scan ends at the next `endobj` or
 /// `stream` keyword: past it lies another object, whose `endstream` cannot
@@ -329,7 +347,7 @@ const MAX_NESTING: usize = 256;
 /// is followed by `endobj` is thereby scanned in time linear in its size
 /// rather than once to the end of the file per stream.
 ///
-/// Returns `None` if no `endstream` keyword is found within
+/// Returns `None` if neither `endstream` nor `endobj` is found within
 /// [`MAX_STREAM_SCAN`] of `start` (truncated / malformed object, or no
 /// terminator), so the caller fails loudly rather than scanning unbounded.
 fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
@@ -340,19 +358,59 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
     let scan_end = start.saturating_add(MAX_STREAM_SCAN).min(data.len());
     let window = &data[start..scan_end];
 
+    // The first `endstream` that counts as a keyword, and the first run of
+    // its bytes in any context.
     let mut first_raw: Option<usize> = None;
+    let mut first_bytes: Option<usize> = None;
     let mut last_eol_preceded: Option<usize> = None;
 
+    let keyword_at_rel = |rel: usize, kw: &[u8]| keyword_at(data, start + rel, kw);
+    let byte_before = |rel: usize| (start + rel).checked_sub(1).map(|before| data[before]);
+    // Whether an `endobj` may still end the body: no other object's
+    // `obj` keyword lies between it and the body.
+    let mut endobj_ends_body = true;
     for rel in 0..window.len() {
         let rest = &window[rel..];
         if !rest.starts_with(KW) {
+            let ws_before = byte_before(rel).is_none_or(is_ws);
+            if first_raw.is_none() && ws_before && keyword_at_rel(rel, b"obj") {
+                endobj_ends_body = false;
+            }
+            let found = first_raw.or(first_bytes).is_some();
+            if keyword_at_rel(rel, b"endobj") {
+                // A whole-word `endobj` before any `endstream` keyword ends
+                // the body itself.
+                if first_raw.is_none()
+                    && endobj_ends_body
+                    && ws_before
+                    && data.get(start + rel + 6).is_none_or(|&b| is_ws(b))
+                {
+                    log::warn!(
+                        "stream at offset {start}: `endobj` before any `endstream`; \
+                         the body ends at `endobj`"
+                    );
+                    return Some(trim_eol_before(data, start, start + rel));
+                }
+                if found {
+                    break;
+                }
+            }
             let opens_stream = rest.starts_with(b"stream") && !window[..rel].ends_with(b"end");
-            if first_raw.is_some() && (opens_stream || rest.starts_with(b"endobj")) {
+            if found && opens_stream {
                 break;
             }
             continue;
         }
         let kw = start + rel;
+        if first_bytes.is_none() {
+            first_bytes = Some(kw);
+        }
+        // `endstream` right after a delimiter is text, as in a string
+        // `(endstream is …)`; after data glued to it, as in `ETendstream`, a
+        // terminator.
+        if byte_before(rel).is_some_and(is_delim) || !keyword_at_rel(rel, KW) {
+            continue;
+        }
         if first_raw.is_none() {
             first_raw = Some(kw);
         }
@@ -376,7 +434,7 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
         }
     }
 
-    let kw = last_eol_preceded.or(first_raw)?;
+    let kw = last_eol_preceded.or(first_raw).or(first_bytes)?;
     Some(trim_eol_before(data, start, kw))
 }
 
@@ -409,7 +467,15 @@ pub(crate) fn stream_body(data: &[u8], dict: &Dictionary, pos: usize) -> StreamB
         return StreamBody::None;
     }
     peek += 6;
-    // Consume exactly one newline after "stream".
+    // Consume exactly one newline after "stream", and the spaces or tabs
+    // some writers put before it.
+    let blanks = data[peek..]
+        .iter()
+        .take_while(|&&b| matches!(b, b' ' | b'\t'))
+        .count();
+    if matches!(data.get(peek + blanks), Some(b'\r' | b'\n')) {
+        peek += blanks;
+    }
     if data.get(peek) == Some(&b'\r') {
         peek += 1;
     }
@@ -671,18 +737,18 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
 /// a caller stepping through a long token byte by byte stays linear in its
 /// length.
 fn at_object_keyword(data: &[u8], pos: usize) -> bool {
-    let rest = &data[pos.min(data.len())..];
-    let keyword_at = |kw: &[u8]| {
-        rest.starts_with(kw) && rest.get(kw.len()).is_none_or(|&b| is_ws(b) || is_delim(b))
-    };
+    let keyword_here = |kw: &[u8]| keyword_at(data, pos, kw);
     let token_starts = pos
         .checked_sub(1)
         .and_then(|before| data.get(before))
         .is_none_or(|&b| is_ws(b) || is_delim(b));
     [b"endobj".as_slice(), b"stream", b"endstream"]
         .into_iter()
-        .any(keyword_at)
-        || (token_starts && [b"obj".as_slice(), b"trailer"].into_iter().any(keyword_at))
+        .any(keyword_here)
+        || (token_starts
+            && [b"obj".as_slice(), b"trailer"]
+                .into_iter()
+                .any(keyword_here))
 }
 
 /// Parse a complete indirect object (`<id> <gen> obj … endobj`) at `offset`.
@@ -944,6 +1010,70 @@ mod tests {
         let data = b"abc\nendstream junk endobj more\nendstream\n";
         let end = find_endstream(data, 0).expect("found");
         assert_eq!(&data[..end], b"abc");
+    }
+
+    /// The content of the stream object `6 0 obj <</Length len>> stream<eol>
+    /// body`.
+    fn stream_content(len: usize, eol: &str, body: &str) -> Vec<u8> {
+        let src = format!("6 0 obj\n<</Length {len}>>\nstream{eol}{body}");
+        let Some((_, Object::Stream(s))) = parse_indirect_object(src.as_bytes(), 0) else {
+            panic!("a stream: {src:?}");
+        };
+        s.content
+    }
+
+    /// pdfium's seven `/Length` recovery cases (its `bug_524043_*` pixel
+    /// tests) and the `ETendstream` one (`bug_551258_1`): the body around a
+    /// `/Length` that is right, or that misses `endstream`, against keywords
+    /// in and after the data.
+    #[test]
+    fn stream_length_recovery_cases() {
+        let head = "BT\n20 50 Td\n/F1 12 Tf\n(endobj is text) Tj\n";
+        let tail = "0 50 Td\n/F2 13 Tf\n(second) Tj\nET";
+        let both = |mid: &str| format!("{head}{mid}\n{tail}");
+        let cut = head.len() + 3;
+        // 1: a /Length that lands on the real `endstream` is kept.
+        let body = both("endstream");
+        let src = format!("{body}\nendstream\nendobj\n");
+        assert_eq!(stream_content(body.len(), "\n", &src), body.as_bytes());
+        // 2: a wrong /Length; the `endobj`-anchored terminator wins.
+        assert_eq!(stream_content(cut, "\n", &src), body.as_bytes());
+        // 3: `eendstream` in the data is not a terminator either.
+        let body = both("eendstream");
+        let src = format!("{body}\nendstream\nendobj\n");
+        assert_eq!(stream_content(cut, "\n", &src), body.as_bytes());
+        // 4: `endstream.` is data, also where /Length lands on it, and so is
+        // `(endstream`; the object's `endobj` ends the body.
+        let body = format!("{}(endstream) Tj\n", both("endstream."));
+        let src = format!("{body}\nendobj\n");
+        assert_eq!(stream_content(cut, "\n", &src), body.as_bytes());
+        assert_eq!(stream_content(head.len(), "\n", &src), body.as_bytes());
+        // 5: `endstream%` is a candidate, but the later EOL-preceded one wins.
+        let body = both("endstream%");
+        let src = format!("{body}\nendstream\nxref\n");
+        assert_eq!(stream_content(cut, "\n", &src), body.as_bytes());
+        // 6: `endstream+` is no keyword, and nothing terminates the stream:
+        // its bytes end the body as a last resort.
+        let src = format!("{}\nxref\ntrailer\n", both("endstream+"));
+        assert_eq!(stream_content(cut, "\n", &src), head.trim_end().as_bytes());
+        // 7: a lone `endstream` in the data, nothing after: cut there.
+        let src = format!("{}\nxref\ntrailer\n", both("endstream"));
+        assert_eq!(stream_content(cut, "\n", &src), head.trim_end().as_bytes());
+        // `stream`, a space, then the EOL: /Length counts from the line
+        // after, and lands on an `endstream` glued to the data.
+        let body = both("endstream");
+        let src = format!("{body}endstream\nendobj\n");
+        assert_eq!(stream_content(body.len(), " \n", &src), body.as_bytes());
+    }
+
+    /// An `endobj` ends a body without `endstream` only as a whole word and
+    /// before another object's header; a later object's `endobj` does not.
+    #[test]
+    fn endobj_ends_a_body_only_within_its_object() {
+        let data = b"abc\nendobj\n2 0 obj";
+        assert_eq!(find_endstream(data, 0), Some(3));
+        assert_eq!(find_endstream(b"(endobj) x>>endobj\n", 0), None);
+        assert_eq!(find_endstream(b"abc\n2 0 obj\n<<>>\nendobj\n", 0), None);
     }
 
     /// A flood of streams whose terminators are never followed by
