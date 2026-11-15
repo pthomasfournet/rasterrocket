@@ -2944,6 +2944,14 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: reviewed expected-failures registry.** The
+comparison harness judges a page by its worst per-channel tile delta
+(≤ 12, so colour errors a gray metric hid now count) and judges RMSE only
+against pdfium; `compare.sh` renders under `target/compare` on disk.
+Re-seeded, the pdftoppm suite falls from 2,889 registered pages to 27 and
+the pdfium suite holds 186; every entry carries a reason: antialiasing,
+a named divergence with its evidence, or a defect with its audit ticket.
+
 **Unreleased on master: JPEG 2000 device threshold and prefetch scale.**
 `GPU_JPEG2K_THRESHOLD_PX` rises from 262 144 to 2 097 152 px, from an
 end-to-end sweep of real archive codestreams by area and bytes per pixel
