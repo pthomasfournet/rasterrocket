@@ -13,9 +13,9 @@ keywords             = ["cbz", "comic", "ocr", "image", "archive"]
 categories           = ["multimedia::images"]
 
 [dependencies]
-pdf_raster = { package = "rasterrocket",        path = "../pdf_raster", version = "2.2", default-features = false }
-color      = { package = "rasterrocket-color",  path = "../color",      version = "2.2" }
-raster     = { package = "rasterrocket-render", path = "../raster",     version = "2.2" }
+pdf_raster = { package = "rasterrocket",        path = "../pdf_raster", version = "2.3", default-features = false }
+color      = { package = "rasterrocket-color",  path = "../color",      version = "2.3" }
+raster     = { package = "rasterrocket-render", path = "../raster",     version = "2.3" }
 log        = { workspace = true }
 
 # Archives — all pure-Rust, no system libs.
@@ -48,7 +48,7 @@ tempfile = { workspace = true }
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # `Builder` writes the RAR fixtures.
 rars         = { version = "0.12.4", default-features = false, features = ["write"] }
-encode   = { package = "rasterrocket-encode", path = "../encode", version = "2.2" }
+encode   = { package = "rasterrocket-encode", path = "../encode", version = "2.3" }
 
 [lints]
 workspace = true
