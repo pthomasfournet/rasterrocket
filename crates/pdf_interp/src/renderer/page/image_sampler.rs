@@ -803,17 +803,11 @@ impl<'a> MaskSampler<'a> {
         })
     }
 
-    /// Alpha of device pixel `(dx, dy)`, whose image taps are `image`.
+    /// Alpha of device pixel `(dx, dy)`, whose image taps are `image`, as
+    /// a sample of type `S`: from the 16-bit alpha of a mask that has one
+    /// for a 16-bit sample, else the 8-bit alpha on the sample's scale.
     ///
     /// `dx`/`dy` must lie inside the bounding box.
-    #[inline]
-    pub(super) fn alpha(&self, dx: u32, dy: u32, image: &Taps) -> u8 {
-        self.alpha_at(dx, dy, image)
-    }
-
-    /// [`Self::alpha`] as a sample of type `S`: from the 16-bit alpha of a
-    /// mask that has one for a 16-bit sample, else the 8-bit alpha on the
-    /// sample's scale.
     #[inline]
     pub(super) fn alpha_at<S: Sample>(&self, dx: u32, dy: u32, image: &Taps) -> S {
         let taps = self
@@ -1141,7 +1135,11 @@ mod tests {
                 let px = grid.sample(dx, dy).expect("inside");
                 assert_eq!(px, Taps::point(dx / 4, dy / 4));
                 let want = u8::try_from(dy * 8 + dx).unwrap();
-                assert_eq!(sampler.alpha(dx, dy, &px), want, "pixel ({dx}, {dy})");
+                assert_eq!(
+                    sampler.alpha_at::<u8>(dx, dy, &px),
+                    want,
+                    "pixel ({dx}, {dy})"
+                );
             }
         }
     }
@@ -1164,7 +1162,7 @@ mod tests {
                 .expect("sampler");
         assert!(sampler.grid.is_none());
         assert_eq!(
-            sampler.alpha(0, 0, &Taps::point(3, 2)),
+            sampler.alpha_at::<u8>(0, 0, &Taps::point(3, 2)),
             mask.alpha()[2 * 40 + 3]
         );
     }

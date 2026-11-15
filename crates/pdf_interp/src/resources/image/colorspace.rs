@@ -36,7 +36,9 @@ use std::sync::Arc;
 use color::Sample;
 use pdf::{Dictionary, Document, Object};
 
-use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask};
+use super::{
+    ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask, TintData,
+};
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{
     ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
@@ -285,8 +287,8 @@ impl ImageColour {
 
     /// Whether 16-bit samples of the image convert at 16 bits (see
     /// [`convert16`]): those of a device, CIE-based or ICC-based space, and
-    /// of an image naming no space.  Samples in any other space decode to 8
-    /// bits at every depth.
+    /// of an image naming no space.  Samples in any other space convert at
+    /// 8 bits at every depth.
     pub(super) fn converts_wide(&self) -> bool {
         self.space.as_ref().is_none_or(|space| {
             matches!(
@@ -299,6 +301,15 @@ impl ImageColour {
                     | ColorSpace::IccBased { .. }
             )
         })
+    }
+
+    /// Whether the image is in a `Separation` or `DeviceN` space, whose
+    /// samples are colorant tints ([`Self::tints`]).
+    pub(super) const fn has_tints(&self) -> bool {
+        matches!(
+            self.space,
+            Some(ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. })
+        )
     }
 
     /// Convert `samples` to the gray or RGB descriptor the blit draws.
@@ -407,19 +418,28 @@ impl ImageColour {
 impl ImageColour {
     /// The colorant tints of `samples` in the image's `Separation` or
     /// `DeviceN` space: each component mapped through its `/Decode` pair to
-    /// a byte, 0 no colorant and 255 the full tint.  `None` for any other
-    /// space, for samples whose channel count is not the space's, and for
-    /// samples that are not host-resident.
+    /// a sample of the samples' depth, 0 no colorant and the maximum the
+    /// full tint.  `None` for any other space, for samples whose channel
+    /// count is not the space's, and for samples that are not
+    /// host-resident.
     pub(super) fn tints(&self, samples: &Samples) -> Option<ImageTints> {
-        let space = self.space.as_ref().filter(|s| {
-            matches!(
-                s,
-                ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
-            )
-        })?;
+        let space = self.space.as_ref().filter(|_| self.has_tints())?;
         let n = space.ncomponents();
-        if samples.layout != Layout::Color(u8::try_from(n).ok()?) {
+        if samples.layout != Layout::Color(u8::try_from(n).ok()?) || self.decode.len() != n {
             return None;
+        }
+        if let Some(wide) = samples.data.as_cpu16() {
+            let mut data = Vec::new();
+            data.try_reserve_exact(wide.len()).ok()?;
+            data.extend(wide.chunks_exact(n).flat_map(|px| {
+                px.iter().zip(&self.decode).map(|(&s, &(dmin, dmax))| {
+                    u16::from_unit(s.to_unit().mul_add(dmax - dmin, dmin))
+                })
+            }));
+            return Some(ImageTints {
+                space: space.clone(),
+                data: TintData::U16(data),
+            });
         }
         let bytes = samples.data.as_cpu()?;
         let luts: Vec<[u8; 256]> = self
@@ -439,7 +459,7 @@ impl ImageColour {
         );
         Some(ImageTints {
             space: space.clone(),
-            data,
+            data: TintData::U8(data),
         })
     }
 }

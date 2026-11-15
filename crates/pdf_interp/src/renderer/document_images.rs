@@ -307,7 +307,7 @@ pub(crate) fn host_bytes(image: &DecodedImage) -> usize {
     let mask = image.image.smask.as_ref().map_or(0, |m| {
         m.alpha().len() + m.alpha16().map_or(0, |a| a.len() * 2)
     });
-    let tints = image.tints.as_ref().map_or(0, |t| t.data.len());
+    let tints = image.tints.as_ref().map_or(0, |t| t.data.byte_len());
     pixels + mask + tints
 }
 

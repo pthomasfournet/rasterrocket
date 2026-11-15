@@ -233,9 +233,30 @@ pub struct DecodedImage {
 pub struct ImageTints {
     /// The image's colour space.
     pub space: ColorSpace,
-    /// One byte per component of `space` per pixel, `/Decode` applied:
-    /// 0 is no colorant, 255 the full tint.
-    pub data: Vec<u8>,
+    /// One sample per component of `space` per pixel, `/Decode` applied:
+    /// 0 is no colorant, the sample's maximum the full tint.
+    pub data: TintData,
+}
+
+/// The tints of an image at the depth they were kept at: 16 bits for the
+/// samples of more than 8 bits of a 16-bit render, 8 otherwise.
+#[derive(Debug, Clone)]
+pub enum TintData {
+    /// 8-bit tints.
+    U8(Vec<u8>),
+    /// 16-bit tints.
+    U16(Vec<u16>),
+}
+
+impl TintData {
+    /// The bytes the tints hold.
+    #[must_use]
+    pub const fn byte_len(&self) -> usize {
+        match self {
+            Self::U8(t) => t.len(),
+            Self::U16(t) => t.len() * 2,
+        }
+    }
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -397,6 +418,15 @@ impl ImageData {
     #[must_use]
     pub const fn is_host(&self) -> bool {
         matches!(self, Self::Cpu(_) | Self::Cpu16(_))
+    }
+
+    /// The host-resident 16-bit samples of a [`Self::Cpu16`] image
+    /// narrowed to bytes ([`color::Sample::to_u8`]); any other variant is
+    /// left as it is.
+    pub(crate) fn narrow(&mut self) {
+        if let Self::Cpu16(wide) = self {
+            *self = Self::Cpu(wide.iter().map(|&v| color::Sample::to_u8(v)).collect());
+        }
     }
 
     /// Borrow the host-resident 16-bit samples of a [`Self::Cpu16`] image.

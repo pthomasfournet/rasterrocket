@@ -464,6 +464,79 @@ fn process_swatches_on_the_ink_canvas_narrow_to_their_8_bit_render() {
     assert!(table.iter().all(|&(max, _)| max <= 1), "{table:?}");
 }
 
+/// The zlib stream of the big-endian 16-bit ramp from 0 to 65535 over
+/// 1024 samples, `rows` times.
+fn ramp16(rows: usize) -> Vec<u8> {
+    use std::io::Write as _;
+    let row: Vec<u8> = (0..1024u32)
+        .flat_map(|x| u16::try_from(x * 65_535 / 1023).unwrap().to_be_bytes())
+        .collect();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&row.repeat(rows)).unwrap();
+    z.finish().unwrap()
+}
+
+/// A 1024 × 4 point page under overprint simulation: in the lower half a
+/// 16-bit Flate image of the teal spot, its tint rising from 0 to 1
+/// across it; in the upper half an 8-bit image of full teal under a
+/// 16-bit soft mask rising from transparent to opaque.
+fn spot_image_page() -> Vec<u8> {
+    common::with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1024 4] \
+          /Resources << /ExtGState << /GS0 << /OP true /op true /OPM 1 >> >> \
+          /XObject << /Ramp 5 0 R /Solid 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        common::stream_object(
+            "",
+            b"q /GS0 gs q 1024 0 0 2 0 0 cm /Ramp Do Q q 1024 0 0 2 0 2 cm /Solid Do Q Q",
+        ),
+        common::stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace {TEAL} \
+                 /BitsPerComponent 16 /Filter /FlateDecode"
+            ),
+            &ramp16(2),
+        ),
+        common::stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace {TEAL} \
+                 /BitsPerComponent 8 /SMask 7 0 R"
+            ),
+            &[255; 2048],
+        ),
+        common::stream_object(
+            "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace /DeviceGray \
+             /BitsPerComponent 16 /Filter /FlateDecode",
+            &ramp16(2),
+        ),
+    ])
+}
+
+/// On the ink canvas a 16-bit spot image keeps its tints at 16 bits and a
+/// 16-bit soft mask its levels: each ramp shows more than 256 levels in
+/// its red channel at depth 16 and at most 256 at depth 8, the 16-bit
+/// render narrowing to the 8-bit one within two levels (the 8-bit spot
+/// table, union and model each rounded to a byte).
+#[test]
+fn spot_images_on_the_ink_canvas_keep_16_bits() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = true;
+    let session = open_session_from_bytes(spot_image_page(), &config).expect("open session");
+    let wide = rgb16(render(&session, SampleDepth::Sixteen));
+    let narrow = rgb8(render(&session, SampleDepth::Eight));
+    for (name, row) in [("16-bit spot image", 3), ("16-bit soft mask", 0)] {
+        let (l16, l8) = (
+            levels(wide.row_samples(row), 0),
+            levels(narrow.row_samples(row), 0),
+        );
+        eprintln!("{name}: {l16} levels at 16 bits, {l8} at 8");
+        assert!(l16 > 256 && l8 <= 256, "{name}: {l16} and {l8} levels");
+    }
+    let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+    eprintln!("spot images: {table:?}");
+    assert!(table.iter().all(|&(max, _)| max <= 2), "{table:?}");
+}
+
 /// The 16-vs-8 table of the corpus fixtures and the gradient page: each
 /// page rendered at 150 dpi at both depths, the 16-bit render narrowed, the
 /// largest difference and the differing samples per channel printed.  Run

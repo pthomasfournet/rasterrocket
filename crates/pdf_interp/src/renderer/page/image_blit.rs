@@ -2,7 +2,6 @@
 //! on the CPU or through the device blit kernel.
 
 use color::Sample;
-use color::convert::div255;
 use raster::ClipResult;
 use raster::pipe::ChannelMask;
 
@@ -19,7 +18,7 @@ use super::image_sampler::{
     BlendedRows, Filter, GridClip, GridView, MaskSampler, SampleGrid, sample_bytes,
 };
 use super::pixel_rect::PixelRect;
-use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask};
+use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask, TintData};
 
 impl PageRenderer<'_> {
     /// Whether image decodes keep their colorant tints: on an ink canvas,
@@ -211,8 +210,8 @@ impl PageRenderer<'_> {
         match colorants {
             Some(colorants @ ColorantPlan::Channels(_)) => {
                 let samples = img.width as usize * img.height as usize;
-                if let Some(ink) = ink_samples(decoded, colorants, plan)
-                    .filter(|ink| ink.data.len() == samples * 8)
+                if let Some(ink) =
+                    ink_samples(decoded, colorants, plan).filter(|ink| ink.len() == samples * 8)
                 {
                     return ImageSource::Ink(ink);
                 }
@@ -251,7 +250,8 @@ impl PageRenderer<'_> {
     /// were resampled with, sampled through `grid` under `ctm`, onto the
     /// ink canvas within `grid_clip`, writing their channels under
     /// overprint; `mask` is the image's soft mask with the matrix that
-    /// draws it.
+    /// draws it.  The samples are blended at their own depth and their
+    /// shape taken at the canvas's (see [`Self::composite_host`]).
     fn composite_ink_image(
         &mut self,
         ink: &InkSamples,
@@ -278,25 +278,56 @@ impl PageRenderer<'_> {
             }
             None => None,
         };
+        let mask = mask.as_ref();
+        let deep = self.canvas.kind().depth() == color::SampleDepth::Sixteen;
+        let paints = ink.paints;
+        match (&ink.data, deep) {
+            (InkData::U8(d), false) => {
+                self.composite_ink_host::<_, u8>(d, paints, img, mask, grid, grid_clip);
+            }
+            (InkData::U8(d), true) => {
+                self.composite_ink_host::<_, u16>(d, paints, img, mask, grid, grid_clip);
+            }
+            (InkData::U16(d), false) => {
+                self.composite_ink_host::<_, u8>(d, paints, img, mask, grid, grid_clip);
+            }
+            (InkData::U16(d), true) => {
+                self.composite_ink_host::<_, u16>(d, paints, img, mask, grid, grid_clip);
+            }
+        }
+    }
+
+    /// [`Self::composite_ink_image`] of the ink `data`, eight samples of
+    /// type `T` a pixel painting the channels `paints`, its alpha as
+    /// samples of type `A`.
+    fn composite_ink_host<T: CanvasSample, A: CanvasSample>(
+        &mut self,
+        data: &[T],
+        paints: ChannelMask,
+        img: &crate::resources::ImageDescriptor,
+        mask: Option<&MaskSampler<'_>>,
+        grid: &SampleGrid,
+        grid_clip: &mut GridClip<'_>,
+    ) {
         let (fill_alpha, blend_mode, transfer) = {
             let gs = self.gstate.current();
             (gs.fill_alpha, gs.blend_mode, gs.transfer.clone())
         };
-        let overprint = self.overprint_channels(false, ink.paints);
-        let paint = self.paint_params(fill_alpha, blend_mode, overprint, ink.paints);
+        let overprint = self.overprint_channels(false, paints);
+        let paint = self.paint_params(fill_alpha, blend_mode, overprint, paints);
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         compositor.transfer = transfer.as_deref();
-        compositor.ink_samples = Some(ink.paints);
+        compositor.ink_samples = Some(paints);
         let img_w = img.width as usize;
-        let at = |x, y| sample_bytes::<_, 8>(&ink.data, img_w, 8, x, y);
+        let at = |x, y| sample_bytes::<T, 8>(data, img_w, 8, x, y);
         let span = (grid.x1 - grid.x0) as usize;
-        let mut colours = vec![0u8; span * 8];
-        let mut shape = vec![0u8; span];
+        let mut colours = vec![T::ZERO; span * 8];
+        let mut shape = vec![A::ZERO; span];
         for dy in grid.y0..grid.y1 {
             let Some(row_clip) = grid_clip.row(dy) else {
                 continue;
             };
-            shape.fill(0);
+            shape.fill(A::ZERO);
             for ((dx, out), shape) in (grid.x0..grid.x1)
                 .zip(colours.as_chunks_mut::<8>().0)
                 .zip(shape.iter_mut())
@@ -308,11 +339,11 @@ impl PageRenderer<'_> {
                 let Some(taps) = grid.sample(dx, dy) else {
                     continue;
                 };
-                let alpha = div255(
-                    u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, &taps)))
-                        * u32::from(coverage),
+                let alpha = A::div_max(
+                    mask.map_or(A::MAX, |m| m.alpha_at(dx, dy, &taps)).wide()
+                        * A::from_u8(coverage).wide(),
                 );
-                if alpha == 0 {
+                if alpha == A::ZERO {
                     continue;
                 }
                 *out = taps.blend_px(at);
@@ -684,19 +715,38 @@ enum ImageSource {
     Samples(Option<ChannelMask>),
 }
 
-/// The ink of an image's samples on the ink canvas.
+/// The ink of an image's samples, eight samples a pixel, and the channels
+/// it paints.
 struct InkSamples {
-    /// Eight bytes per sample.
-    data: Vec<u8>,
+    /// The ink, at the depth of the image's tints.
+    data: InkData,
     /// The channels the image paints.
     paints: ChannelMask,
 }
 
+impl InkSamples {
+    /// The number of ink samples.
+    const fn len(&self) -> usize {
+        match &self.data {
+            InkData::U8(d) => d.len(),
+            InkData::U16(d) => d.len(),
+        }
+    }
+}
+
+/// Ink samples of either depth.
+enum InkData {
+    /// 8-bit ink.
+    U8(Vec<u8>),
+    /// 16-bit ink.
+    U16(Vec<u16>),
+}
+
 /// The ink of each sample of the colorant tints of `decoded` under
 /// `colorants`, their plan, resampled through `plan` when the draw reduces
-/// the image.  `None` for an image without tints, under
-/// [`ColorantPlan::Process`], and when the samples cannot be resampled or
-/// held.
+/// the image, at the depth of the tints.  `None` for an image without
+/// tints, under [`ColorantPlan::Process`], and when the samples cannot be
+/// resampled or held.
 fn ink_samples(
     decoded: &crate::resources::DecodedImage,
     colorants: &ColorantPlan,
@@ -704,23 +754,38 @@ fn ink_samples(
 ) -> Option<InkSamples> {
     let tints = decoded.tints.as_ref()?;
     let n = tints.space.ncomponents();
+    let data = match &tints.data {
+        TintData::U8(t) => InkData::U8(tint_ink(t, n, colorants, plan)?),
+        TintData::U16(t) => InkData::U16(tint_ink(t, n, colorants, plan)?),
+    };
+    Some(InkSamples {
+        data,
+        paints: colorants.paints(),
+    })
+}
+
+/// The ink of `tints`, `n` a pixel, under `colorants`, resampled through
+/// `plan` first when there is one.
+fn tint_ink<S: color::Sample>(
+    tints: &[S],
+    n: usize,
+    colorants: &ColorantPlan,
+    plan: Option<&image_reduce::Plan>,
+) -> Option<Vec<S>> {
     let resampled;
     let data = match plan {
         Some(plan) => {
-            resampled = plan.resample(&tints.data, n)?;
+            resampled = plan.resample(tints, n)?;
             &resampled
         }
-        None => &tints.data,
+        None => tints,
     };
     let mut ink = Vec::new();
     ink.try_reserve_exact(data.len() / n * 8).ok()?;
     for px in data.chunks_exact(n) {
         ink.extend_from_slice(&colorants.ink_of_tints(px)?);
     }
-    Some(InkSamples {
-        data: ink,
-        paints: colorants.paints(),
-    })
+    Some(ink)
 }
 
 /// Checks the decoder contract that `len` bytes hold `img`'s samples, so

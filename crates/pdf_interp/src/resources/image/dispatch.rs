@@ -202,11 +202,7 @@ pub(super) fn decode_image_stream<
     }
 
     let partial = samples.partial.take();
-    let tints = if ctx.keep_tints {
-        src.colour.tints(&samples)
-    } else {
-        None
-    };
+    let tints = kept_tints(ctx, src, &mut samples);
     let mut image = src
         .colour
         .convert(
@@ -223,6 +219,25 @@ pub(super) fn decode_image_stream<
         partial,
         tints,
     })
+}
+
+/// The colorant tints of `samples`, when `ctx` keeps them; samples kept
+/// at 16 bits for their tints alone are then narrowed to the 8 bits their
+/// colour converts at.
+fn kept_tints(
+    ctx: &ImageDecodeCtx<'_>,
+    src: &ImageStream<'_>,
+    samples: &mut Samples,
+) -> Option<ImageTints> {
+    let tints = if ctx.keep_tints {
+        src.colour.tints(samples)
+    } else {
+        None
+    };
+    if !src.colour.converts_wide() {
+        samples.data.narrow();
+    }
+    tints
 }
 
 /// What the dictionary of `src` decides about its JPEG 2000 codestream,
@@ -242,12 +257,14 @@ fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
 
 /// Whether the samples of `src` of more than 8 bits are kept at 16 bits:
 /// for a 16-bit render, in a space that converts at 16 bits
-/// ([`ImageColour::converts_wide`]), when 16-bit raw samples, at two bytes
+/// ([`ImageColour::converts_wide`]) or whose tints the render keeps
+/// ([`ImageColour::has_tints`]), when 16-bit raw samples, at two bytes
 /// each, fit `budget` bytes.  Samples over it decode at 8 bits, with a
 /// warning.
 fn keeps_wide(ctx: &ImageDecodeCtx<'_>, src: &ImageStream<'_>, budget: u64) -> bool {
-    let wide =
-        ctx.depth == color::SampleDepth::Sixteen && !src.is_mask && src.colour.converts_wide();
+    let wide = ctx.depth == color::SampleDepth::Sixteen
+        && !src.is_mask
+        && (src.colour.converts_wide() || (ctx.keep_tints && src.colour.has_tints()));
     if wide && src.stream.dict.get_i64(b"BitsPerComponent") == Some(16) {
         let components = 2 * src.colour.budget_components();
         if let Err(why) = super::decode_budget_of(src.width, src.height, components, budget) {

@@ -100,13 +100,13 @@ impl ColorantPlan {
         }
     }
 
-    /// The ink of the tints `tints`, one byte per component, under a plan
+    /// The ink of the tints `tints`, one sample per component, under a plan
     /// of [`Self::Channels`]; `None` under [`Self::Process`].
-    pub(crate) fn ink_of_tints(&self, tints: &[u8]) -> Option<[u8; 8]> {
+    pub(crate) fn ink_of_tints<S: Sample>(&self, tints: &[S]) -> Option<[S; 8]> {
         let Self::Channels(channels) = self else {
             return None;
         };
-        let mut ink = [0u8; 8];
+        let mut ink = [S::ZERO; 8];
         for (&bits, &tint) in channels.iter().zip(tints) {
             paint_tint(&mut ink, bits, tint);
         }
