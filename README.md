@@ -2,7 +2,7 @@
 
 Pure Rust PDF → pixels pipeline. Zero Poppler, zero subprocesses, zero Leptonica in the render path.
 
-Renders PDF pages to 8-bit grayscale pixel buffers for direct consumption by Tesseract OCR or any other downstream consumer. No intermediate files.
+Renders PDF pages to 8-bit grayscale pixel buffers for direct consumption by Tesseract OCR or any other downstream consumer. No intermediate files. Pages can also be rendered as RGB, RGBA or CMYK, at 8 or 16 bits per sample, and converted to an ICC output profile.
 
 ```toml
 # Cargo.toml — library (git dependency; see note below)
@@ -17,7 +17,8 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 
 **Platform guides:** [Linux](docs/platforms/linux.md) · [macOS](docs/platforms/macos.md) · [BSD and Windows](docs/platforms/other.md)
 
-Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF), `rrocket` prints
+Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF; 16-bit with `--depth 16`,
+CMYK TIFF and JPEG with `--cmyk`), `rrocket` prints
 through the system's print service (`--print`, CUPS) and writes or sends fax
 documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#printing).
 Pages larger than memory, such as large-format posters and roll banners,
@@ -33,6 +34,39 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 > — that is the only supported path, and the only one that gets you
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
+
+## Unreleased on master
+
+**Exact-area antialiasing, large-format pages, 16 bits per sample, output
+ICC profiles and CMYK output; the API breaks.** `RenderedPage::pixels` is a
+`Pixels` enum (read 8-bit pages with `page.pixels.as_u8()`), the pixel caps
+are replaced by a byte budget, and the image writers of `rasterrocket-encode`
+take rows; the full list is in [ROADMAP.md](ROADMAP.md).
+
+- **Antialiasing.** Fills, clips, strokes and glyphs take exact-area
+  coverage from one integer rasteriser (`raster::coverage`, 1/256 px), in
+  place of 4 × 4 supersampling; the device AA fill and the `gpu-aa` feature
+  are removed, and `--gpu-pages` composites the CPU's coverage.
+- **Large pages.** A page byte budget (`--max-page-mib`,
+  `max_page_bytes`, default 1.8 GB) replaces the pixel caps; larger pages
+  render in bands (`render_page_bands`, `--band-mib`) and are written as
+  they render, TIFF as BigTIFF past 4 GiB; `--print` picks each page's
+  resolution from its size.
+- **16 bits per sample.** `--depth 16` / `RasterOptions::depth` renders and
+  writes 16-bit PNG, PPM/PGM, TIFF and print spools, overprint included.
+- **Output profiles.** `--output-profile`, `--intent` and `--bpc` /
+  `SessionConfig::output_profile` convert each page to an RGB, gray or CMYK
+  ICC profile, embedded in PNG, TIFF, JPEG and the print spool.
+- **CMYK output.** `--cmyk` and `--jpegcmyk` / `ColorModel::Cmyk` write
+  CMYK TIFF (8 or 16 bits) and Adobe CMYK JPEG; process colours keep their
+  values, others separate through a CMYK profile or the ISO 32000-2 device
+  conversion.
+- **Text census.** `PageDiagnostics::glyphs` (`GlyphCounts`) counts the
+  glyphs shown by rendering mode, and `has_visible_text()` tells native
+  text from a scan with an invisible OCR layer.
+- **Fixes.** JPEG decodes with libjpeg-accurate IDCT and YCbCr rounding;
+  the vendored shaper, font, JBIG2, CCITT and JPEG 2000 forks take upstream
+  fixes; shading and Gouraud mesh edge fixes.
 
 ## What's new in v2.2.0
 
@@ -438,7 +472,7 @@ let opts = RasterOptions::new(300.0);
 
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     let page = result?;
-    // page.pixels — Vec<u8>, 8-bit greyscale, width × height, top-to-bottom
+    // page.pixels.as_u8() — 8-bit greyscale, width × height, top-to-bottom
     // page.dpi — pixels per physical inch; pass it to your OCR engine
     // See the OCR Integration wiki for Tesseract, ocrs, Google Cloud Vision, and GPT-5 patterns.
 }
@@ -470,7 +504,7 @@ crates.io (see the note at the top).
 
 ## Hardware compatibility
 
-**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON (and SVE2 on nightly) on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux; clippy on x86-64 and arm64 Linux, macOS and Windows; the NEON tests on arm64 Linux; and the renderer, interpreter, library and font suites on macOS and Windows (on Windows also the CLI, parser, colour, encode and comic suites); see the platform guides above.
+**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux; clippy on x86-64 and arm64 Linux, macOS and Windows; the NEON tests on arm64 Linux; and the renderer, interpreter, library and font suites on macOS and Windows (on Windows also the CLI, parser, colour, encode and comic suites); see the platform guides above.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
@@ -596,7 +630,7 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   unbounded allocation, an infinite loop, or a process abort. The render
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an
   aggregate content-size cap, a filter-chain length and decompression-bomb
-  cap, a total-raster-area cap and a per-image decode budget (see
+  cap, a per-page bitmap byte budget and a per-image decode budget (see
   [Size limits](docs/cli-reference.md#size-limits)). Release builds use
   `panic = "abort"`, so a panic would end the process; the fuzz targets
   exist to keep the renderer from reaching one.
