@@ -56,8 +56,9 @@ pub enum RasterError {
         height: u32,
     },
     /// Deskew was refused: the page exceeds
-    /// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE).  A GPU rotation
-    /// that fails falls back to the CPU rotation, which cannot fail.
+    /// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE).  A failed GPU
+    /// rotation under [`BackendPolicy::ForceCuda`](crate::BackendPolicy::ForceCuda)
+    /// is [`Self::BackendUnavailable`].
     Deskew(String),
     /// The row stride given for a caller-owned output buffer is shorter
     /// than one row of the page.
@@ -222,6 +223,21 @@ impl From<pdf_interp::InterpError> for RasterError {
     }
 }
 
+/// A deskew error as the render's: an oversized page is
+/// [`RasterError::Deskew`], and a failed forced GPU rotation is
+/// [`RasterError::BackendUnavailable`], as a forced backend's other
+/// failures are.
+impl From<crate::deskew::DeskewError> for RasterError {
+    fn from(e: crate::deskew::DeskewError) -> Self {
+        match e {
+            crate::deskew::DeskewError::TooLarge(msg) => Self::Deskew(msg),
+            e @ crate::deskew::DeskewError::GpuRotation(_) => {
+                Self::BackendUnavailable(e.to_string())
+            }
+        }
+    }
+}
+
 /// Direct conversion from `pdf::PdfError` so call sites can write
 /// `e.into()` instead of the two-level `RasterError::from(InterpError::from(e))`.
 ///
@@ -258,5 +274,23 @@ mod tests {
             .expect_err("over the ceiling")
             .to_string();
         assert!(msg.contains("per-side ceiling of 16777216 px"), "{msg}");
+    }
+
+    /// An oversized deskew is a deskew error, a failed forced GPU rotation
+    /// an unavailable backend.
+    #[test]
+    fn a_failed_gpu_rotation_is_an_unavailable_backend() {
+        use crate::RasterError;
+        use crate::deskew::DeskewError;
+        let e = RasterError::from(DeskewError::TooLarge("too large".to_owned()));
+        assert!(
+            matches!(e, RasterError::Deskew(ref m) if m == "too large"),
+            "{e}"
+        );
+        let e = RasterError::from(DeskewError::GpuRotation("no device".to_owned()));
+        assert!(
+            matches!(e, RasterError::BackendUnavailable(ref m) if m.contains("GPU rotation failed: no device")),
+            "{e}"
+        );
     }
 }

@@ -783,8 +783,8 @@ pub struct RenderedPage {
 ///   process can instead be stopped by the out-of-memory killer when the
 ///   memory is touched.
 /// - [`RasterError::Deskew`] — deskew was asked of a page larger than
-///   [`deskew::DESKEW_MAX_SIDE`]; a failed GPU rotation falls back to the
-///   CPU.
+///   [`deskew::DESKEW_MAX_SIDE`]; a failed GPU rotation under a forced CUDA
+///   backend is [`RasterError::BackendUnavailable`].
 /// - [`RasterError::BackendUnavailable`] — `PDF_RASTER_BACKEND` requested a
 ///   forced backend (e.g. `cuda`, `vulkan`) and that backend's runtime
 ///   is unavailable.  Cannot occur if the env var is unset or `auto`.

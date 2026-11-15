@@ -176,7 +176,9 @@ pub(crate) fn gray_output() -> RasterError {
 ///
 /// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
 /// is asked of a page larger than
-/// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE) (see
+/// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE) and
+/// [`RasterError::BackendUnavailable`] when the GPU rotation of
+/// [`BackendPolicy::ForceCuda`](crate::BackendPolicy::ForceCuda) fails (see
 /// [`deskew::apply`](crate::deskew::apply)).
 pub fn render_page_gray(
     session: &RasterSession,
@@ -245,7 +247,7 @@ fn deskewed<P: crate::deskew::DeskewPixel>(
     if !deskew {
         return Ok(None);
     }
-    crate::deskew::apply(gray, policy).map_err(|e| RasterError::Deskew(e.to_string()))
+    Ok(crate::deskew::apply(gray, policy)?)
 }
 
 /// Render page `page_num` (1-based) of `session` over a transparent

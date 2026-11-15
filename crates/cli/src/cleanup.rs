@@ -185,14 +185,13 @@ pub(crate) fn clean(
 /// ([`pdf_raster::deskew::apply`]): rotated to correct the skew of its
 /// lines, or unchanged when it has no confident angle.
 pub(crate) fn deskewed(page: Page, policy: BackendPolicy) -> Result<Page, RenderError> {
-    let deskew_error = |e: pdf_raster::deskew::DeskewError| RasterError::Deskew(e.to_string());
     Ok(match page.into_luma_model() {
         Page::Gray(mut luma) => {
-            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(deskew_error)?;
+            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(RasterError::from)?;
             Page::Gray(luma)
         }
         Page::Gray16(mut luma) => {
-            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(deskew_error)?;
+            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(RasterError::from)?;
             Page::Gray16(luma)
         }
         // `into_luma_model` yields gray pages only.

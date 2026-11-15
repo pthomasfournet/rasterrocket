@@ -114,7 +114,7 @@ impl PageBuffer {
             let gray = rgb_into_gray(rgb);
             let deskewed = crate::deskew::apply_into(&gray, out, stride, session.policy);
             self.canvas.rgb.reclaim(gray);
-            deskewed.map_err(|e| RasterError::Deskew(e.to_string()))?
+            deskewed?
         } else {
             rgb_rows_to_gray(&rgb, out, stride);
             self.canvas.rgb.reclaim(rgb);

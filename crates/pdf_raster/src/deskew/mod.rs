@@ -12,9 +12,10 @@
 //!
 //! 2. **Rotation** (`rotate` module): bilinear rotation by the detected
 //!    angle, white outside the source.  For 8-bit gray: on the GPU (CUDA
-//!    NPP `nppiRotate`) when the `gpu-deskew` feature is enabled, the
-//!    backend policy is [`BackendPolicy::ForceCuda`] and a CUDA device is
-//!    available; on the CPU otherwise.  16-bit gray is measured on its
+//!    NPP `nppiRotate`) when the `gpu-deskew` feature is enabled and the
+//!    backend policy is [`BackendPolicy::ForceCuda`], where a failed GPU
+//!    rotation is an error ([`DeskewError::GpuRotation`]); on the CPU
+//!    otherwise.  16-bit gray is measured on its
 //!    8-bit levels and rotated on the CPU at 16 bits, through the scalar
 //!    kernel the 8-bit SIMD tiers are exact with.  Rotation is
 //!    clockwise-positive: a detected counter-clockwise tilt of +θ° is
@@ -84,14 +85,23 @@ pub struct Skew {
 /// of 2^15 × 2^15 bytes (2^30) leaves inside `i32`.
 pub const DESKEW_MAX_SIDE: u32 = 32_768;
 
-/// Error type for deskew operations: an image larger than
-/// [`DESKEW_MAX_SIDE`], or a rotation that failed (see [`apply`]).
+/// Error type for deskew operations (see [`apply`]).
 #[derive(Debug)]
-pub struct DeskewError(pub(crate) String);
+#[non_exhaustive]
+pub enum DeskewError {
+    /// A side of the image exceeds [`DESKEW_MAX_SIDE`].
+    TooLarge(String),
+    /// The GPU rotation [`BackendPolicy::ForceCuda`] requires failed: no
+    /// CUDA device, or a CUDA or NPP call failed.
+    GpuRotation(String),
+}
 
 impl std::fmt::Display for DeskewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::TooLarge(msg) => f.write_str(msg),
+            Self::GpuRotation(msg) => write!(f, "deskew: GPU rotation failed: {msg}"),
+        }
     }
 }
 
@@ -110,8 +120,17 @@ pub trait DeskewPixel: Pixel + sealed::Sealed {
     fn measured(img: &Bitmap<Self>) -> Option<Skew>;
 
     /// `img` rotated clockwise by `angle_deg` degrees, under `policy`.
+    ///
+    /// # Errors
+    ///
+    /// [`DeskewError::GpuRotation`] when `policy` requires the GPU
+    /// rotation and it fails.
     #[doc(hidden)]
-    fn rotated(img: &Bitmap<Self>, angle_deg: f32, policy: BackendPolicy) -> Bitmap<Self>;
+    fn rotated(
+        img: &Bitmap<Self>,
+        angle_deg: f32,
+        policy: BackendPolicy,
+    ) -> Result<Bitmap<Self>, DeskewError>;
 
     /// The sample as `f32` (exact).
     #[doc(hidden)]
@@ -123,7 +142,11 @@ impl DeskewPixel for Gray8 {
         detect::detect(img)
     }
 
-    fn rotated(img: &Bitmap<Self>, angle_deg: f32, policy: BackendPolicy) -> Bitmap<Self> {
+    fn rotated(
+        img: &Bitmap<Self>,
+        angle_deg: f32,
+        policy: BackendPolicy,
+    ) -> Result<Bitmap<Self>, DeskewError> {
         rotate::rotated(img, angle_deg, policy)
     }
 
@@ -140,8 +163,12 @@ impl DeskewPixel for Gray16 {
     }
 
     /// On the CPU, whatever the policy: the GPU rotation is 8-bit.
-    fn rotated(img: &Bitmap<Self>, angle_deg: f32, _policy: BackendPolicy) -> Bitmap<Self> {
-        bilinear::rotate_scalar(img, angle_deg)
+    fn rotated(
+        img: &Bitmap<Self>,
+        angle_deg: f32,
+        _policy: BackendPolicy,
+    ) -> Result<Bitmap<Self>, DeskewError> {
+        Ok(bilinear::rotate_scalar(img, angle_deg))
     }
 
     fn to_f32(s: u16) -> f32 {
@@ -155,7 +182,7 @@ impl DeskewPixel for Gray16 {
 ///
 /// # Errors
 ///
-/// [`DeskewError`] when a side of `img` exceeds [`DESKEW_MAX_SIDE`].
+/// [`DeskewError::TooLarge`] when a side of `img` exceeds [`DESKEW_MAX_SIDE`].
 pub fn detect<P: DeskewPixel>(img: &Bitmap<P>) -> Result<Option<Skew>, DeskewError> {
     check_size(img)?;
     Ok(P::measured(img))
@@ -173,23 +200,23 @@ pub fn detect<P: DeskewPixel>(img: &Bitmap<P>) -> Result<Option<Skew>, DeskewErr
 ///
 /// # Errors
 ///
-/// [`DeskewError`] when a side of `img` exceeds [`DESKEW_MAX_SIDE`]; `img`
-/// is then left as it is.  A GPU rotation that fails falls back to the CPU
-/// rotation, which cannot fail.
+/// [`DeskewError::TooLarge`] when a side of `img` exceeds
+/// [`DESKEW_MAX_SIDE`], and [`DeskewError::GpuRotation`] when the GPU
+/// rotation `policy` requires fails; `img` is then left as it is.  The CPU
+/// rotation cannot fail.
 pub fn apply<P: DeskewPixel>(
     img: &mut Bitmap<P>,
     policy: BackendPolicy,
 ) -> Result<Option<Skew>, DeskewError> {
     let skew = detect(img)?;
     if let Some(angle_deg) = correction(skew) {
-        *img = P::rotated(img, angle_deg, policy);
+        *img = P::rotated(img, angle_deg, policy)?;
     }
     Ok(skew)
 }
 
 /// [`apply`] writing the corrected image to `out`, row `y` at
 /// `out[y * stride..y * stride + img.width]`, and leaving `img` as it is.
-/// A failed GPU rotation falls back to the CPU, which cannot fail.
 ///
 /// `out` must hold `(img.height - 1) * stride + img.width` bytes and
 /// `stride ≥ img.width`.
@@ -208,7 +235,7 @@ pub(crate) fn apply_into(
         copy_rows(img, out, stride);
         return Ok(skew);
     };
-    match rotate::rotated_on_gpu(img, angle_deg, policy) {
+    match rotate::rotated_on_gpu(img, angle_deg, policy)? {
         Some(rotated) => copy_rows(&rotated, out, stride),
         None => rotate::rotate_cpu_into(img, angle_deg, out, stride),
     }
@@ -225,7 +252,7 @@ fn correction(skew: Option<Skew>) -> Option<f32> {
 /// [`DeskewError`] unless both sides of `img` are within [`DESKEW_MAX_SIDE`].
 fn check_size<P: Pixel>(img: &Bitmap<P>) -> Result<(), DeskewError> {
     if img.width > DESKEW_MAX_SIDE || img.height > DESKEW_MAX_SIDE {
-        return Err(DeskewError(format!(
+        return Err(DeskewError::TooLarge(format!(
             "deskew applies to pages up to {DESKEW_MAX_SIDE} px a side, and this one is \
              {}×{}; lower the resolution or turn deskew off",
             img.width, img.height

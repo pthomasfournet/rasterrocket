@@ -26,14 +26,12 @@
 //!
 //! **GPU path** (`gpu-deskew` feature, optional): CUDA NPP `nppiRotate_8u_C1R_Ctx`
 //! with hardware bilinear via texture units.  ~0.3–0.5 ms for a 2550×3300 image
-//! on RTX 5070.  Taken only under [`BackendPolicy::ForceCuda`]; falls back to
-//! the CPU, with a warning, when the GPU rotation fails, as it does without a
-//! CUDA device.
+//! on RTX 5070.  Taken only under [`BackendPolicy::ForceCuda`], where a
+//! failed GPU rotation, as without a CUDA device, is an error.
 
 use color::Gray8;
 use raster::Bitmap;
 
-#[cfg(feature = "gpu-deskew")]
 use super::DeskewError;
 #[cfg(target_arch = "aarch64")]
 use super::bilinear::footprint;
@@ -45,35 +43,50 @@ use crate::BackendPolicy;
 /// A new bitmap of the same dimensions holds the rotated content; out-of-bounds source pixels are filled with 255
 /// (white).  The rotation runs on the GPU when [`rotated_on_gpu`] gives a
 /// result under `policy`, and on the CPU otherwise.
-pub(crate) fn rotated(img: &Bitmap<Gray8>, angle_deg: f32, policy: BackendPolicy) -> Bitmap<Gray8> {
-    rotated_on_gpu(img, angle_deg, policy).unwrap_or_else(|| rotate_cpu(img, angle_deg))
+///
+/// # Errors
+///
+/// As [`rotated_on_gpu`].
+pub(crate) fn rotated(
+    img: &Bitmap<Gray8>,
+    angle_deg: f32,
+    policy: BackendPolicy,
+) -> Result<Bitmap<Gray8>, DeskewError> {
+    Ok(rotated_on_gpu(img, angle_deg, policy)?.unwrap_or_else(|| rotate_cpu(img, angle_deg)))
 }
 
 /// `img` rotated by `angle_deg` degrees clockwise on the GPU, or `None`
-/// when [`rotates_on_gpu`] refuses `policy` or, with a warning, when the
-/// GPU rotation fails; the caller then rotates on the CPU.
+/// when [`rotates_on_gpu`] refuses `policy`; the caller then rotates on the
+/// CPU.
+///
+/// # Errors
+///
+/// [`DeskewError::GpuRotation`] when `policy` requires the GPU rotation
+/// and it fails.
 #[cfg(feature = "gpu-deskew")]
 pub(crate) fn rotated_on_gpu(
     img: &Bitmap<Gray8>,
     angle_deg: f32,
     policy: BackendPolicy,
-) -> Option<Bitmap<Gray8>> {
+) -> Result<Option<Bitmap<Gray8>>, DeskewError> {
     if !rotates_on_gpu(policy) {
-        return None;
+        return Ok(None);
     }
-    rotate_gpu(img, angle_deg)
-        .inspect_err(|e| log::warn!("deskew: GPU rotation failed ({e}); rotating on the CPU"))
-        .ok()
+    rotate_gpu(img, angle_deg).map(Some)
 }
 
-/// No GPU rotation without the `gpu-deskew` feature: always `None`.
+/// No GPU rotation without the `gpu-deskew` feature: always `Ok(None)`.
 #[cfg(not(feature = "gpu-deskew"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the signature of the `gpu-deskew` build, whose GPU rotation can fail"
+)]
 pub(crate) const fn rotated_on_gpu(
     _img: &Bitmap<Gray8>,
     _angle_deg: f32,
     _policy: BackendPolicy,
-) -> Option<Bitmap<Gray8>> {
-    None
+) -> Result<Option<Bitmap<Gray8>>, DeskewError> {
+    Ok(None)
 }
 
 /// Whether `policy` rotates on the GPU.  The rotation is a CUDA kernel, so
@@ -476,13 +489,13 @@ pub(crate) fn rotate_gpu(
 ) -> Result<Bitmap<Gray8>, DeskewError> {
     let pixels =
         gpu::npp_rotate::rotate_gray8(src.data(), src.stride, src.width, src.height, angle_deg)
-            .map_err(|e| DeskewError(e.to_string()))?;
+            .map_err(|e| DeskewError::GpuRotation(e.to_string()))?;
 
     // `rotate_gray8` returns `width × height` bytes with no row padding,
     // the layout of a bitmap with a row pad of 1.
     let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
     if pixels.len() != dst.data().len() {
-        return Err(DeskewError(format!(
+        return Err(DeskewError::GpuRotation(format!(
             "GPU rotation returned {} bytes for a {}×{} image ({} expected)",
             pixels.len(),
             src.width,
@@ -723,7 +736,32 @@ mod tests {
             #[cfg(feature = "vaapi")]
             BackendPolicy::ForceVaapi,
         ] {
-            assert!(rotated_on_gpu(&img, 3.0, policy).is_none(), "{policy:?}");
+            assert!(
+                matches!(rotated_on_gpu(&img, 3.0, policy), Ok(None)),
+                "{policy:?}"
+            );
+        }
+    }
+
+    /// Under `ForceCuda` the rotation is the GPU's or an error, never a
+    /// silent CPU rotation: with `CUDA_VISIBLE_DEVICES` empty it is
+    /// [`DeskewError::GpuRotation`].
+    #[test]
+    #[cfg(feature = "gpu-deskew")]
+    fn forced_cuda_rotation_is_the_gpus_or_an_error() {
+        let img = Bitmap::<Gray8>::new_filled(64, 64, 1, false, 128);
+        match rotated_on_gpu(&img, 3.0, BackendPolicy::ForceCuda) {
+            Ok(Some(out)) => assert_eq!((out.width, out.height), (64, 64)),
+            Err(DeskewError::GpuRotation(_)) => {}
+            Ok(None) => panic!("ForceCuda declined the GPU rotation"),
+            Err(e) => panic!("ForceCuda rotation failed with {e:?}"),
+        }
+        let rotated = rotated(&img, 3.0, BackendPolicy::ForceCuda);
+        if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some_and(|v| v.is_empty()) {
+            assert!(
+                matches!(rotated, Err(DeskewError::GpuRotation(_))),
+                "no CUDA device, yet a ForceCuda rotation"
+            );
         }
     }
 
@@ -731,7 +769,8 @@ mod tests {
     #[test]
     fn rotated_zero_no_panic() {
         let img = Bitmap::<Gray8>::new(32, 32, 1, false);
-        let _ = rotated(&img, 0.0, BackendPolicy::CpuOnly);
+        let out = rotated(&img, 0.0, BackendPolicy::CpuOnly).expect("CPU rotation");
+        assert_eq!((out.width, out.height), (32, 32));
     }
 
     /// `rotated` returns the rotated image: the pixel content changes after
@@ -747,7 +786,7 @@ mod tests {
         }
         let before_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         // 45° rotation breaks the vertical line into diagonal pieces.
-        img = rotated(&img, 45.0, BackendPolicy::CpuOnly);
+        img = rotated(&img, 45.0, BackendPolicy::CpuOnly).expect("CPU rotation");
         let after_col5 = (0..32u32).map(|y| img.row_bytes(y)[5]).collect::<Vec<_>>();
         assert_ne!(
             before_col5, after_col5,

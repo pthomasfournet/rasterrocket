@@ -562,7 +562,7 @@ pub fn rotate_gray8(
             match NppRotator::new() {
                 Ok(r) => *slot = RotatorSlot::Ready(r),
                 Err(e) => {
-                    log::warn!("npp_rotate: GPU init failed ({e}); falling back to CPU for all pages on this thread");
+                    log::warn!("npp_rotate: GPU init failed ({e}); later rotations on this thread fail without retrying");
                     *slot = RotatorSlot::Failed;
                     return Err(e);
                 }
