@@ -187,8 +187,8 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B), or by a gray `--output-profile` (see [Colour management](#colour-management)). The page is rendered in RGB and converted in place, so peak memory is that of the RGB render. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
-| `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG, or with `--transparent` for RGBA. |
-| `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
+| `--png` | `.png` | PNG. Combine with `--gray` for grayscale PNG, `--mono` for a PNG of bit depth 1, or `--transparent` for RGBA. A `pHYs` chunk records `-r` / `--rx` / `--ry` in pixels per metre. |
+| `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. The JFIF density records `-r` / `--rx` / `--ry` in whole dots per inch; a resolution that does not round to 1–65 535 dpi fails the page. |
 | `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg` or `--jpegcmyk`. |
 | `--jpegcmyk` | `.jpg` | CMYK JPEG, as `pdftoppm -jpegcmyk`: `--jpeg --cmyk`. |
 | `--cmyk` | | Render CMYK pages (see [CMYK output](#cmyk-output)) and write them as CMYK TIFF (with `--tiff`) or CMYK JPEG (with `--jpeg`). |
@@ -375,9 +375,10 @@ without the flags.
 | `--rectify` | off | Find that page, correct the perspective and crop to the page. Supersedes `--crop` when it applies. |
 | `--split-spreads` | off | Split a double-page spread at its gutter. The halves of page N are written with an `a` (left) and `b` (right) suffix: `out-07a.png`, `out-07b.png`. Pages not detected as spreads keep their usual name. |
 | `--dewarp` | off | Straighten text lines curved by a page bending toward the spine. Experimental: vertical displacement only. Pages whose lines are already straight, or with fewer than five text lines, are written unchanged. |
+| `--deskew` | off | Straighten a page scanned at a slant: measure the tilt of its lines, up to ±6.75°, to about 2/W radians on a page W pixels wide (0.05° for A4 at 300 dpi), and rotate the page about its centre to correct it, white filling the corners; the page keeps its size. A page without a confident angle (the profile of its rows varies less than threefold across the angles searched: photographs, blank pages, pages without lines of text) or tilted by less than 0.05° is written unchanged. Gray output only: needs `--gray`, `--mono` or `--fax`, and is refused at start-up otherwise ("--deskew applies to gray pages only: add --gray, --mono or --fax, or drop --deskew"), with `--cmyk` and with `--transparent`, exit status 1. Works at `--depth 16` (measured on the 8-bit levels, rotated at 16 bits). Renders the page whole. |
 
-The stages run crop or rectify → split → dewarp, on PDF and comic-archive input
-alike. Detection runs on the page's luma, its nearest 8-bit levels under
+The stages run crop or rectify → split → dewarp → deskew, on PDF and
+comic-archive input alike. Detection runs on the page's luma, its nearest 8-bit levels under
 `--depth 16`. `--gray` and `--mono` output is written from the processed
 luma; colour output applies the same geometry to each colour channel, so
 colour is kept, and a 16-bit page is resampled at 16 bits.

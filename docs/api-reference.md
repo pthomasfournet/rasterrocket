@@ -332,6 +332,7 @@ pub struct PageInfo {
     pub format: PixelFormat,     // Gray8, Rgb8 or Rgba8
     pub dpi: f32,
     pub diagnostics: PageDiagnostics,
+    pub skew: Option<deskew::Skew>,  // as RenderedPage::skew
 }
 ```
 
@@ -438,7 +439,7 @@ pub struct RasterOptions {
 | `first_page` | `≥ 1` | 1-based inclusive. Ignored when `pages` is `Some`. |
 | `last_page` | `≥ first_page` | 1-based inclusive. Clamped to document length silently. Ignored when `pages` is `Some`. |
 | `cancel` | — | When `Some` and cancelled, the page in progress stops at its next operator and is yielded as `RasterError::Cancelled`; the iterator or channel then ends. |
-| `deskew` | — | Applies intensity-weighted projection-profile deskew (±7°, sub-0.05° accuracy). Disable for native-text PDFs. |
+| `deskew` | — | Applies intensity-weighted projection-profile deskew to gray pages: skew within ±6.75°, measured to about 2/W radians on a page W px wide (0.05° for A4 at 300 dpi). A page without a confident angle (best-to-worst sweep score ratio below 3, e.g. a photograph or a blank page) is left as it is. The measurement is in `RenderedPage::skew`. Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
 | `strict` | — | When `true`, a page with an image that cannot be decoded or drawn, or is drawn only in part, returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded, or decodes only in part, returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped (or drawn from the data that decoded) and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
 | `purpose` | — | `RenderPurpose::View` (on-screen viewing) or `RenderPurpose::Print`. See [`RenderPurpose`](#renderpurpose). |
@@ -533,6 +534,7 @@ pub struct RenderedPage {
     pub format: PixelFormat,
     pub dpi: f32,
     pub diagnostics: PageDiagnostics,
+    pub skew: Option<deskew::Skew>,  // measured by deskew; None when off or not confident
 }
 
 pub enum Pixels { U8(Vec<u8>), U16(Vec<u16>) }   // U16: native-endian samples
@@ -858,10 +860,12 @@ An extra clockwise rotation (`SessionConfig::rotation`, `RasterOptions::rotation
 
 The `deskew` module exposes a limited public API:
 
-- `deskew::apply<P: DeskewPixel>(&mut Bitmap<P>, policy: BackendPolicy) -> Result<(), DeskewError>` — detects the skew of a grayscale bitmap (searched within ±7°) and rotates it in place to correct it; angles too small to matter are left alone, and a failed detection counts as no skew. `DeskewPixel` is a sealed trait of `Gray8` and `Gray16`: an 8-bit page rotates on the GPU under `BackendPolicy::ForceCuda` in a `gpu-deskew` build and on the CPU otherwise; a 16-bit page is measured on its nearest 8-bit levels and rotated on the CPU at 16 bits. `DeskewError` for a side over `DESKEW_MAX_SIDE`; a failed GPU rotation falls back to the CPU rotation, which cannot fail.
-- `deskew::DeskewError` — error type of `apply` (a failed rotation); not returned in this release, for the same reason.
+- `deskew::detect<P: DeskewPixel>(&Bitmap<P>) -> Result<Option<Skew>, DeskewError>` — measures the skew of a grayscale bitmap: an intensity-weighted projection-profile sweep of 57 angles (0.25° apart, ±`MAX_SEARCH_DEG` = 7°) on a 4× reduction, refined on a 2× reduction. `None` when the page has no confident angle: a confidence (best over worst sweep score) below `MIN_CONFIDENCE` (3.0), a flat profile (blank or uniform page), or a best angle within one sweep step of either end (beyond ±6.75°). The angle resolves about 2/W radians on a page W px wide; pages narrower than about 1200 px measure less reliably.
+- `deskew::Skew { angle_deg: f32, confidence: f32 }` — the tilt of the page's lines, counter-clockwise positive, and the confidence (at least `MIN_CONFIDENCE`).
+- `deskew::apply<P: DeskewPixel>(&mut Bitmap<P>, policy: BackendPolicy) -> Result<Option<Skew>, DeskewError>` — `detect`, then rotates the bitmap in place to correct a skew of at least `MIN_CORRECT_DEG` (0.05°); returns the skew measured, and leaves the bitmap as it is when that is `None` or smaller. `DeskewPixel` is a sealed trait of `Gray8` and `Gray16`: an 8-bit page rotates on the GPU under `BackendPolicy::ForceCuda` in a `gpu-deskew` build and on the CPU otherwise; a 16-bit page is measured on its nearest 8-bit levels and rotated on the CPU at 16 bits. `DeskewError` for a side over `DESKEW_MAX_SIDE`; a failed GPU rotation falls back to the CPU rotation, which cannot fail.
+- `deskew::DeskewError` — error type of `detect` and `apply`: a side over `DESKEW_MAX_SIDE`.
 
-The `deskew::detect` and `deskew::rotate` submodules are `pub(crate)` and are not part of the public API.
+The `deskew::rotate` submodule is `pub(crate)` and not part of the public API.
 
 ---
 
@@ -1032,6 +1036,8 @@ pub fn jpeg_gray<P: Pixel>(bitmap: &Bitmap<P>, quality: u8)
 ```
 
 Baseline 8-bit grayscale JPEG (`Gray8`/`Mono8` only; `quality` clamped 1–100). A plain codec with no consumer-specific policy.
+
+The page writers record the resolution: `write_png(bitmap, dpi: Option<(f64, f64)>, out, icc)`, `write_png_bilevel` (bit depth 1, black below 128) and `PngWriter::new(out, size, color, dpi, icc)` write a `pHYs` chunk in whole pixels per metre; `write_jpeg(bitmap, options, dpi, out, icc)` writes the JFIF density in whole dots per inch (1 to 65535). `None` writes no `pHYs` chunk and the 1:1 JFIF aspect ratio; a resolution the format cannot hold is `EncodeError::InvalidInput`. `PngColor::Bilevel` streams a 1-bit PNG from gray bands.
 
 ---
 

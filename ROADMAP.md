@@ -2944,6 +2944,29 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: deskew confidence, `--deskew`, resolution in
+PNG and JPEG, 1-bit mono PNG.**  Deskew now declines a page without a
+confident angle: the ratio of the best to the worst score of its angle
+sweep must reach 3 (0 for a flat profile), and a best angle within one
+sweep step of ±7° is declined.  It refines on the 2× reduction, so the
+angle resolves about 2/W radians on a page W px wide (0.05° for A4 at
+300 dpi), as now documented and tested; the projection is sheared about
+the page's centre line and scores only the rows every column reaches, so
+negative angles no longer drop the top-right of the page and the sheared
+page edges no longer dominate dark pages.  Behaviour change: deskew
+leaves photographs, noise, blank pages and pages tilted past ±6.75° as
+they are, where it used to rotate them, and the angle of the pages it
+corrects changes slightly.  `deskew::detect` and `deskew::Skew` (angle,
+confidence) are public, `deskew::apply` returns the skew, and
+`RenderedPage::skew` / `PageInfo::skew` carry it.  `rrocket --deskew`
+straightens gray pages (`--gray`, `--mono`, `--fax`; comic input too) and
+is refused at start-up with colour, `--cmyk` and `--transparent` output.
+PNG output carries a `pHYs` chunk and JPEG output the JFIF density of the
+render resolution (`write_png`, `PngWriter::new` and `write_jpeg` take a
+resolution), so PNG and JPEG bytes change; `--mono --png` writes a PNG of
+bit depth 1 (`write_png_bilevel`, `PngColor::Bilevel`) where it wrote 8-bit
+gray holding two levels.  PPM, TIFF, fax and print output are unchanged.
+
 **Unreleased on master: 16-bit comic input, camera stages and deskew.**
 `--depth 16` now combines with comic-archive input and with `--crop`,
 `--rectify`, `--split-spreads` and `--dewarp`.  Comic pages decode at
