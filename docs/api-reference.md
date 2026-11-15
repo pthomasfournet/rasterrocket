@@ -92,7 +92,7 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ### Session API
 
-Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `render_page_rgb_with_diagnostics`, `render_page_rgba`, `render_page_cmyk`, `render_page_canvas`, `render_page_canvas_with_diagnostics`, `render_page_bands`, `rgb_to_gray`, `rgb_into_gray` and `rgb16_to_gray16`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `render_page_rgb_with_diagnostics`, `render_page_rgba`, `render_page_cmyk`, `render_page_canvas`, `render_page_canvas_with_diagnostics`, `render_page_bands`, `rgb_to_gray`, `rgb_into_gray`, `rgb16_to_gray16` and `rgb16_into_gray16`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
@@ -276,7 +276,7 @@ pub struct IntentSet { /* a set of RenderingIntent */ }      // contains, is_emp
 
 Renders the page (or `params.region`) as horizontal bands of whole rows from the top, handing each to `sink` in order, so a page larger than memory is drawn a band at a time. Stacked, the bands are the bitmap `render_page_rgb_with` returns for the same `params`, byte for byte. A band holds `params.band_rows` rows (`RenderParams::with_band_rows`), else as many as `SessionConfig::band_bytes` hold. The content is parsed once and executed per band; the bands share the page's decoded images, forms, shadings and tiling cells, its tint budget, its spot-ink slots and its diagnostics, and each has its own operator budget and deadline. A page of one band renders as `render_page_rgb_with` does (on the GPU page device when the session has one); several bands render on the CPU. The byte budget bounds the page the bands make up. Errors are `render_page_rgb_with`'s as `BandError::Raster` (under `strict`, an image failure fails the band where it is met), or the sink's as `BandError::Sink`, after which no band is rendered.
 
-**16 bits per sample.** `RenderParams::with_depth(SampleDepth::Sixteen)` renders the page at 16 bits per channel: colour conversions, shadings, soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels. `render_page_canvas(session, page_num, &params) -> Result<FinishedCanvas, RasterError>` (and `render_page_canvas_with_diagnostics`) returns the page at the depth asked for, `FinishedCanvas::Rgb8(Bitmap<Rgb8>)` or `FinishedCanvas::Rgb16(Bitmap<Rgb16>)`; `render_page_rgb*` serve 8-bit renders and refuse a 16-bit one with `RasterError::InvalidOptions` naming `render_page_canvas`. `render_page_bands` hands each band as `Band { y, bitmap: BandBitmap::Rgb8(..) | BandBitmap::Rgb16(..) }`. A 16-bit canvas pixel holds 6 bytes (8 over a transparent backdrop) of the page budget (`CanvasLayout::bytes_per_px`). The 8-bit path is unchanged, byte for byte. `PageBuffer` and deskew are 8-bit only (`InvalidOptions` at depth 16).
+**16 bits per sample.** `RenderParams::with_depth(SampleDepth::Sixteen)` renders the page at 16 bits per channel: colour conversions, shadings, soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels. `render_page_canvas(session, page_num, &params) -> Result<FinishedCanvas, RasterError>` (and `render_page_canvas_with_diagnostics`) returns the page at the depth asked for, `FinishedCanvas::Rgb8(Bitmap<Rgb8>)` or `FinishedCanvas::Rgb16(Bitmap<Rgb16>)`; `render_page_rgb*` serve 8-bit renders and refuse a 16-bit one with `RasterError::InvalidOptions` naming `render_page_canvas`. `render_page_bands` hands each band as `Band { y, bitmap: BandBitmap::Rgb8(..) | BandBitmap::Rgb16(..) }`. A 16-bit canvas pixel holds 6 bytes (8 over a transparent backdrop) of the page budget (`CanvasLayout::bytes_per_px`). The 8-bit path is unchanged, byte for byte. `PageBuffer` is 8-bit only (`InvalidOptions` at depth 16); deskew runs at either depth (see the `deskew` module).
 
 **CMYK pages.** `RenderParams::with_cmyk()` (`color: ColorModel::Cmyk`) renders the page in the process inks of a CMYK device on a canvas of four process and four spot inks: `render_page_canvas` returns `FinishedCanvas::Cmyk8(Bitmap<Cmyk8>)` or `Cmyk16(Bitmap<Cmyk16>)`, `render_page_bands` `BandBitmap::Cmyk8` / `Cmyk16` bands (`BandBitmap::of(&canvas)` views a whole canvas as a band), samples `[C, M, Y, K]`, 0 no ink. `DeviceCMYK` and `ICCBased` CMYK colours, images and shadings and the process colorants of `Separation` / `DeviceN` colours keep their values; the first four spot colorants of the page are painted as spot inks and folded into their process equivalents at the end; other colours separate through the session's CMYK output profile, else by the ISO 32000-2 §10.4.2.3 device conversion (gray is black ink alone). Overprint is simulated when `SessionConfig::overprint` is set and knocked out otherwise. A CMYK canvas pixel holds 8 bytes (16 at 16 bits) of the page budget; `CanvasLayout { depth, alpha, ink }` counts the ink canvas of a CMYK page and of a page the session paints on the overprint preview. Refused (`RasterError::InvalidOptions`): `with_transparent_background`, an RGB or gray output profile, and `render_page_rgb*`, `render_page_gray` and `render_page_rgba`, which return RGB or gray. `RasterOptions::color` selects the same for `raster_pdf` and `render_channel`, yielding `PixelFormat::Cmyk8` / `Cmyk16` pages.
 
@@ -292,7 +292,7 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
 pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8>
 ```
 
-The same conversion, byte for byte, in the RGB bitmap's own allocation: the gray rows are written packed (`stride == width`) over the front of the colour buffer, which keeps its capacity; an alpha plane is dropped. No second buffer is allocated, so a gray render peaks at the memory of the RGB render. `raster_pdf`, `render_channel`, `render_page_gray`, the comic decoder and the CLI's `--gray` / `--mono` use it. `rasterrocket_render::Bitmap::into_data` (the colour buffer, `stride × height` bytes) and `Bitmap::from_packed(width, height, data)` (a packed bitmap over a buffer of exactly `width × height × bytes-per-pixel`; panics otherwise) move a buffer out of and into a bitmap without a copy.
+The same conversion, byte for byte, in the RGB bitmap's own allocation: the gray rows are written packed (`stride == width`) over the front of the colour buffer, which keeps its capacity; an alpha plane is dropped. No second buffer is allocated, so a gray render peaks at the memory of the RGB render. `raster_pdf`, `render_channel`, `render_page_gray`, the comic decoder and the CLI's `--gray` / `--mono` use it. `rgb16_into_gray16(src: Bitmap<Rgb16>) -> Bitmap<Gray16>` is the same at 16 bits, sample for sample `rgb16_to_gray16`. `rasterrocket_render::Bitmap::converted::<Q>()` copies a bitmap to the depth of `Q`'s samples: widened exactly from 8 bits (`v · 257`), narrowed to the nearest 8-bit level. `rasterrocket_render::Bitmap::into_data` (the colour buffer, `stride × height` bytes) and `Bitmap::from_packed(width, height, data)` (a packed bitmap over a buffer of exactly `width × height × bytes-per-pixel`; panics otherwise) move a buffer out of and into a bitmap without a copy.
 
 ```rust
 pub fn prescan_session(
@@ -455,7 +455,7 @@ pub struct RasterOptions {
 | `max_page_bytes` | — | The most bytes one page canvas may hold (`CanvasLayout::bytes_per_px` per pixel); see [`SessionConfig`](#sessionconfig). |
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
 | `rotation` | — | A clockwise quarter-turn rotation added to each page's `/Rotate`; see [`Rotation`](#rotation). |
-| `depth` | not `Sixteen` with `deskew` | `SampleDepth::Eight` (default) or `SampleDepth::Sixteen`, which renders at 16 bits per channel and yields `PixelFormat::Gray16` pages, or `Rgba16` with `transparent_background`, of `Pixels::U16`. |
+| `depth` | — | `SampleDepth::Eight` (default) or `SampleDepth::Sixteen`, which renders at 16 bits per channel and yields `PixelFormat::Gray16` pages, or `Rgba16` with `transparent_background`, of `Pixels::U16`. |
 | `output_profile` | — | The ICC profile the pages are converted to; see [`SessionConfig`](#sessionconfig). The gray pages take a gray profile, the RGBA pages of `transparent_background` an RGB one. |
 | `intent` | needs `output_profile` | The rendering intent of the conversion; see `RenderParams::intent`. |
 | `black_point_compensation` | needs `output_profile`, not with `AbsoluteColorimetric` | Black-point compensation in the conversion. |
@@ -858,7 +858,7 @@ An extra clockwise rotation (`SessionConfig::rotation`, `RasterOptions::rotation
 
 The `deskew` module exposes a limited public API:
 
-- `deskew::apply(&mut Bitmap<Gray8>) -> Result<(), DeskewError>` — detects the skew of a grayscale bitmap (searched within ±7°) and rotates it in place to correct it; angles too small to matter are left alone, and a failed detection counts as no skew. Returns no error in this release: a failed GPU rotation (`gpu-deskew`) falls back to the CPU rotation, which cannot fail.
+- `deskew::apply<P: DeskewPixel>(&mut Bitmap<P>, policy: BackendPolicy) -> Result<(), DeskewError>` — detects the skew of a grayscale bitmap (searched within ±7°) and rotates it in place to correct it; angles too small to matter are left alone, and a failed detection counts as no skew. `DeskewPixel` is a sealed trait of `Gray8` and `Gray16`: an 8-bit page rotates on the GPU under `BackendPolicy::ForceCuda` in a `gpu-deskew` build and on the CPU otherwise; a 16-bit page is measured on its nearest 8-bit levels and rotated on the CPU at 16 bits. `DeskewError` for a side over `DESKEW_MAX_SIDE`; a failed GPU rotation falls back to the CPU rotation, which cannot fail.
 - `deskew::DeskewError` — error type of `apply` (a failed rotation); not returned in this release, for the same reason.
 
 The `deskew::detect` and `deskew::rotate` submodules are `pub(crate)` and are not part of the public API.
@@ -982,7 +982,7 @@ pub use rasterrocket_parser::Password;
 
 `ImageFilter` identifies which decode filter was used for an embedded image (`Dct`, `Jpx`, `CcittFax`, `Jbig2`, `Flate`, `Raw`). Available through `PageDiagnostics` for routing decisions.
 
-The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `is_encrypted_bytes(&[u8]) -> bool` (the same probe of a document in memory) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `gray8_into_rendered_page` / `validate_page_bytes`, the helpers every `RenderedPage` producer shares. `gray8_into_rendered_page(bmp, page_num, dpi, diagnostics)` takes the bitmap by value and hands a packed buffer (as `rgb_into_gray` returns) to the page without a copy; a padded one is copied row by row as by `gray8_to_rendered_page`.
+The crate root also exports `is_encrypted(path) -> bool` (a structural probe of the trailer for `/Encrypt`; `false` when the file cannot be read) and `is_encrypted_bytes(&[u8]) -> bool` (the same probe of a document in memory) and `decrypt_gate_declined_message() -> String` (the error text for an encrypted document whose decryption was not authorised), which the CLI uses for its liability prompt, and `gray8_to_rendered_page` / `gray8_into_rendered_page` / `gray16_into_rendered_page` / `validate_page_bytes`, the helpers every `RenderedPage` producer shares. `gray8_into_rendered_page(bmp, page_num, dpi, diagnostics)` takes the bitmap by value and hands a packed buffer (as `rgb_into_gray` returns) to the page without a copy; a padded one is copied row by row as by `gray8_to_rendered_page`. `gray16_into_rendered_page` does the same for a `Bitmap<Gray16>`, yielding a `PixelFormat::Gray16` page.
 
 ---
 
@@ -1087,7 +1087,11 @@ returned in this release, as `deskew::apply` returns no error), `Pdf`, and `BadA
 ZIP entry, a damaged or encrypted member of a non-solid RAR).
 
 **`ComicOptions`** mirrors the relevant subset of `RasterOptions`: `dpi: f32`,
-`first_page: u32`, `last_page: u32`, `deskew: bool`, `max_archive_bytes: u64`
+`first_page: u32`, `last_page: u32`, `deskew: bool`, `depth: SampleDepth`
+(default `Eight`, `Gray8` pages; `Sixteen` yields `Gray16` pages: a PNG,
+TIFF, JPEG XL or AVIF image of more than 8 bits a sample keeps its levels,
+an 8-bit image is widened exactly, `v · 257`, an embedded PDF renders at 16
+bits, and the page budget counts 6 bytes a pixel), `max_archive_bytes: u64`
 (default `DEFAULT_MAX_ARCHIVE_BYTES`, 4 GiB: the most bytes all entries
 together may decompress to), and `session:
 SessionConfig` (default `SessionConfig::default()`), the session an embedded
@@ -1109,9 +1113,9 @@ workspace by 2 GiB.
 
 ## `rasterrocket-camera` crate — camera-capture page cleanup
 
-Cleanup of camera-captured pages on 8-bit grayscale images: page crop,
-perspective rectification, double-page spread splitting and (experimental)
-dewarp. Independent of PDF: it depends on `std` alone, runs on the calling
+Cleanup of camera-captured pages, measured on 8-bit grayscale images and
+replayed at 8 or 16 bits: page crop, perspective rectification, double-page
+spread splitting and (experimental) dewarp. Independent of PDF: it depends on `std` alone, runs on the calling
 thread with no global state, and returns on any input without panicking.
 Deskew is not part of it (see the `deskew` module above).
 
@@ -1123,8 +1127,9 @@ malformed input is an error.
 ### Types
 
 ```rust
-pub struct GrayView<'a> { pub data: &'a [u8], pub width: usize, pub height: usize, pub stride: usize }
-pub struct GrayPage { pub width: usize, pub height: usize, pub data: Vec<u8> }   // packed, stride == width
+pub trait Sample: Copy + Default + Eq + Debug + 'static { const MAX: Self; /* sealed: u8, u16 */ }
+pub struct GrayView<'a, S: Sample = u8> { pub data: &'a [S], pub width: usize, pub height: usize, pub stride: usize }
+pub struct GrayPage<S: Sample = u8> { pub width: usize, pub height: usize, pub data: Vec<S> }   // packed, stride == width
 pub struct Rect { pub x: usize, pub y: usize, pub width: usize, pub height: usize }
 pub struct Quad { pub corners: [[f64; 2]; 4] }   // TL, TR, BR, BL, at the page edge, source pixels
 
@@ -1132,11 +1137,11 @@ pub struct Quad { pub corners: [[f64; 2]; 4] }   // TL, TR, BR, BL, at the page 
 #[derive(Default)]                                // every stage off
 pub struct CameraOptions { pub crop: bool, pub rectify: bool, pub split_spreads: bool, pub dewarp: bool }
 
-impl GrayView<'_> {
-    pub const fn packed(data: &[u8], width: usize, height: usize) -> GrayView<'_>;
-    pub const fn validate(&self) -> Result<(), CameraError>;
+impl<'a, S: Sample> GrayView<'a, S> {
+    pub const fn packed(data: &'a [S], width: usize, height: usize) -> Self;
+    pub const fn validate(&self) -> Result<(), CameraError>;   // lengths and strides in samples
 }
-impl GrayPage { pub fn view(&self) -> GrayView<'_>; }
+impl<S: Sample> GrayPage<S> { pub fn view(&self) -> GrayView<'_, S>; }
 impl Quad { pub fn bounding_rect(&self, width: usize, height: usize) -> Option<Rect>; }
 impl CameraOptions { pub const fn all() -> Self; pub const fn any(&self) -> bool; }
 ```
@@ -1171,7 +1176,7 @@ pub struct Report {
     /* private: the replayable transform */
 }
 impl Report {
-    pub fn replay(&self, img: GrayView<'_>) -> Result<Vec<GrayPage>, CameraError>;
+    pub fn replay<S: Sample>(&self, img: GrayView<'_, S>) -> Result<Vec<GrayPage<S>>, CameraError>;
 }
 
 #[non_exhaustive]
@@ -1185,8 +1190,10 @@ pub struct Gutter {
 ```
 
 `Report::replay` applies the computed geometry to another image of the same
-size — e.g. each channel of the colour image whose luma was processed — and
-reproduces `pages` when given the processed image itself.
+size — e.g. each channel of the colour image whose luma was processed, or the
+16-bit image whose 8-bit levels were processed (`GrayView<'_, u16>`), which it
+resamples at 16 bits — and reproduces `pages` when given the processed image
+itself. `process` and the stage functions take 8-bit views.
 
 ### Stage functions
 

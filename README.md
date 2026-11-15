@@ -18,6 +18,7 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 **Platform guides:** [Linux](docs/platforms/linux.md) · [macOS](docs/platforms/macos.md) · [BSD and Windows](docs/platforms/other.md)
 
 Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF; 16-bit with `--depth 16`,
+from PDFs and comic archives alike,
 CMYK TIFF and JPEG with `--cmyk`), `rrocket` prints
 through the system's print service (`--print`, CUPS) and writes or sends fax
 documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#printing).
@@ -496,7 +497,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 |---|---|
 | `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
 | `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt`/`.cbr` comic-archive input |
-| `rasterrocket-camera` | Library — camera-capture page cleanup on 8-bit grayscale: crop, rectify, spread split, dewarp; no dependencies |
+| `rasterrocket-camera` | Library — camera-capture page cleanup measured on 8-bit grayscale and replayed at 8 or 16 bits: crop, rectify, spread split, dewarp; no dependencies |
 | `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with `pdftoppm`-style flags; also reads comic archives |
 
 All four are built from this repository. Nothing here is maintained on

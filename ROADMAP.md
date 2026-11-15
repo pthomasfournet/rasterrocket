@@ -2944,6 +2944,22 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: 16-bit comic input, camera stages and deskew.**
+`--depth 16` now combines with comic-archive input and with `--crop`,
+`--rectify`, `--split-spreads` and `--dewarp`.  Comic pages decode at
+`ComicOptions::depth`: a PNG, TIFF, JPEG XL or AVIF image of more than 8
+bits a sample keeps its levels (an AVIF picture converts by its matrix
+straight to 16 bits), an 8-bit image is widened exactly (`v · 257`), and
+the page budget counts 6 bytes a pixel.  The camera stages measure on the
+page's nearest 8-bit levels and `Report::replay` resamples each channel at
+16 bits (`GrayView<'_, S>`, `GrayPage<S>`, `camera::Sample`).
+`deskew::apply` takes `Gray8` or `Gray16` (`DeskewPixel`), so
+`RasterOptions::deskew` is accepted at depth 16; a 16-bit page rotates on
+the CPU.  New: `rgb16_into_gray16`, `gray16_into_rendered_page`,
+`Bitmap::converted`.  8-bit output is unchanged, byte for byte (golden
+digests).  The GPU paths stay on the CPU at 16 bits, and `--gpu-pages`
+stays refused there.
+
 **Unreleased on master: 16-bit DeviceCMYK corners and an ink-solve
 stall.** At 16 bits the DeviceCMYK model interpolates `color::cmyk::CORNERS16`,
 the sixteen corners converted at 16 bits from the same characterisation
