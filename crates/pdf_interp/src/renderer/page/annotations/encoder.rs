@@ -256,12 +256,11 @@ impl CharacterFonts {
 /// The resource name of the character font holding `chars`: `FallbackC`
 /// and the 64-bit FNV-1a hash of their scalar values in hexadecimal.
 fn character_font_name(chars: &[char]) -> Vec<u8> {
-    let hash = chars
-        .iter()
-        .flat_map(|&c| u32::from(c).to_le_bytes())
-        .fold(0xCBF2_9CE4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3)
-        });
+    let mut hash = raster::fnv::Fnv1a::new();
+    for &c in chars {
+        hash.update(&u32::from(c).to_le_bytes());
+    }
+    let hash = hash.finish();
     format!("FallbackC{hash:016X}").into_bytes()
 }
 

@@ -7,28 +7,13 @@
 //! compositor; any change to the arithmetic an 8-bit render performs
 //! changes a digest.
 
+use crate::fnv::Fnv1a;
 use crate::pipe::{
     ChannelMask, GroupBackdrop, PipeSrc, PipeState, RowPattern, TransferSet, blend, render_span,
 };
 use crate::shading::ColorRamp;
 use crate::types::BlendMode;
 use color::{DeviceN8, Gray8, Pixel, Rgb8, TransferLut};
-
-/// FNV-1a over a byte stream.
-struct Fnv(u64);
-
-impl Fnv {
-    const fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= u64::from(b);
-            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-}
 
 /// A 64-bit linear congruential sequence (Knuth's MMIX constants).
 struct Lcg(u64);
@@ -90,30 +75,40 @@ const NONSEPARABLE: [BlendMode; 4] = [
 
 #[test]
 fn separable_blend_modes_over_every_pair() {
-    let mut h = Fnv::new();
+    let mut h = Fnv1a::new();
     let src: Vec<u8> = (0..=255u8).collect();
     let mut out = [0u8; 256];
     for mode in SEPARABLE {
         for d in 0..=255u8 {
             blend::apply_separable(mode, &src, &[d; 256], &mut out);
-            h.bytes(&out);
+            h.update(&out);
         }
     }
-    assert_eq!(h.0, SEPARABLE_DIGEST, "separable digest {:#x}", h.0);
+    assert_eq!(
+        h.finish(),
+        SEPARABLE_DIGEST,
+        "separable digest {:#x}",
+        h.finish()
+    );
 }
 
 #[test]
 fn nonseparable_blend_modes_over_a_sequence() {
-    let mut h = Fnv::new();
+    let mut h = Fnv1a::new();
     let mut rng = Lcg(1);
     for mode in NONSEPARABLE {
         for _ in 0..200_000 {
             let s = [rng.level(), rng.level(), rng.level()];
             let d = [rng.level(), rng.level(), rng.level()];
-            h.bytes(&blend::apply_nonseparable_rgb(mode, s, d));
+            h.update(&blend::apply_nonseparable_rgb(mode, s, d));
         }
     }
-    assert_eq!(h.0, NONSEPARABLE_DIGEST, "non-separable digest {:#x}", h.0);
+    assert_eq!(
+        h.finish(),
+        NONSEPARABLE_DIGEST,
+        "non-separable digest {:#x}",
+        h.finish()
+    );
 }
 
 const ALL_MODES: [BlendMode; 16] = [
@@ -143,7 +138,7 @@ fn span_digest<P: Pixel<Sample = u8>>(spans: usize, seed: u64) -> u64 {
     let id = TransferLut::IDENTITY.as_array();
     let inv = TransferLut::INVERTED.as_array();
     let n = P::BYTES;
-    let mut h = Fnv::new();
+    let mut h = Fnv1a::new();
     let mut rng = Lcg(seed);
     for _ in 0..spans {
         let count = 1 + rng.below(40);
@@ -195,12 +190,12 @@ fn span_digest<P: Pixel<Sample = u8>>(spans: usize, seed: u64) -> u64 {
             x1,
             0,
         );
-        h.bytes(&dst);
+        h.update(&dst);
         if with_alpha {
-            h.bytes(&alpha);
+            h.update(&alpha);
         }
     }
-    h.0
+    h.finish()
 }
 
 #[test]
@@ -223,7 +218,7 @@ fn ink_spans() {
 
 #[test]
 fn colour_ramp_positions() {
-    let mut h = Fnv::new();
+    let mut h = Fnv1a::new();
     let two = ColorRamp::two([0u8, 128, 255], [255, 7, 0]);
     let many = ColorRamp::from_samples(
         (0..=255u8)
@@ -235,10 +230,10 @@ fn colour_ramp_positions() {
     for ramp in [&two, &many] {
         for k in 0..=70_000u32 {
             ramp.write(f64::from(k) / 70_000.0, &mut out);
-            h.bytes(&out);
+            h.update(&out);
         }
     }
-    assert_eq!(h.0, RAMP_DIGEST, "ramp digest {:#x}", h.0);
+    assert_eq!(h.finish(), RAMP_DIGEST, "ramp digest {:#x}", h.finish());
 }
 
 const SEPARABLE_DIGEST: u64 = 0x997b_adbe_23b5_0fa5;

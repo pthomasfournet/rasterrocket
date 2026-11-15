@@ -22,6 +22,7 @@
 //! - [`clip`] — [`Clip`] (rect + arbitrary path clip stack)
 //! - [`coverage`] — exact-area coverage ([`coverage::AreaRaster`], [`coverage::CoverageTable`])
 //! - [`fill`](mod@fill) — non-zero and even-odd path fill, aliased and exact-area antialiased
+//! - [`fnv`] — the 64-bit FNV-1a hash ([`fnv::Fnv1a`])
 //! - [`stroke`](mod@stroke) — stroke-to-path conversion and stroking
 //! - [`glyph`] — glyph bitmap blitting and fill
 //! - [`shading`] — axial, radial, function and Gouraud shadings
@@ -38,6 +39,7 @@ pub mod coverage;
 #[cfg(test)]
 mod depth16;
 pub mod fill;
+pub mod fnv;
 pub mod glyph;
 pub mod path;
 #[cfg(test)]
