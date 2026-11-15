@@ -270,7 +270,13 @@ pub fn gouraud_triangle_spans<const N: usize, S: Sample>(
     for y in scan_y0..=scan_y2 {
         let yf = f64::from(y);
 
-        let short_edge = if y <= y1 { &upper_edge } else { &lower_edge };
+        // A horizontal upper edge (`y0 == y1`) holds only its start x, so
+        // the top row of a flat-top triangle is bounded by the lower edge.
+        let short_edge = if y <= y1 && y0 < y1 {
+            &upper_edge
+        } else {
+            &lower_edge
+        };
         let (xl, cl) = long_edge.eval::<S>(yf);
         let (xs, cs) = short_edge.eval::<S>(yf);
 
@@ -568,6 +574,42 @@ mod tests {
             any_painted,
             "mid-row of flat-bottom triangle should be painted"
         );
+    }
+
+    /// The top row of a flat-top triangle (`y0 == y1`) spans both of its
+    /// top vertices, for either order of those vertices.
+    #[test]
+    fn flat_top_triangle_paints_its_top_row() {
+        let corner = |x, c| GouraudVertex {
+            x,
+            y: 0.0,
+            color: [c; 3],
+        };
+        let bottom = GouraudVertex {
+            x: 8.0,
+            y: 8.0,
+            color: [255u8; 3],
+        };
+        for top in [
+            [corner(0.0, 0), corner(8.0, 255)],
+            [corner(8.0, 255), corner(0.0, 0)],
+        ] {
+            let mut rows = Vec::new();
+            gouraud_triangle_spans(
+                10,
+                10,
+                (0, 0),
+                &make_clip(10, 10),
+                [top[0], top[1], bottom],
+                |c, x0, x1, y| rows.push((y, x0, x1, c[0], c[c.len() - 1])),
+            );
+            assert_eq!(
+                rows[0],
+                (0, 0, 8, 0, 255),
+                "top row, top {:?}",
+                top.map(|v| v.x)
+            );
+        }
     }
 
     /// A window of the vertices' grid receives the spans the whole grid
