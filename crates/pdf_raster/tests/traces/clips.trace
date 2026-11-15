@@ -12,4 +12,7 @@ text /F1(5 0 R) size=30 Tr=7 Tc=0 Tw=0 Tz=100 Ts=0 tm=[1,0,0,1,10,40] ctm=[1,0,0
   glyph c=70 sel=112 pen=44.98046875,60
 clip 3db12ee4434ec5f1<0000000000000000 nz n=75 sub=6 cub=16 bbox=11.3203125,37.890625,60.48828125,66.2109375 h=f6c8646236c77f2a
 fill nz n=5 sub=1 cub=0 bbox=0,0,100,100 h=9e0d98eb32ac0c8e pts=m0,100 l100,100 l100,0 l0,0 l0,100 z paint=DeviceRGB(0,1,0) ca=255 clip=3db12ee4434ec5f1
+stroke n=5 sub=1 cub=0 bbox=20,50,50,80 h=391a1b8cde4de7f6 pts=m20,80 l50,80 l50,50 l20,50 l20,80 z lw=2 dlw=2 cap=Butt join=Miter ml=10 | paint=DeviceGray(0) CA=255 clip=3db12ee4434ec5f1
+clip 776173d8a13088e2<3db12ee4434ec5f1 nz n=5 sub=1 cub=0 bbox=20,50,50,80 h=391a1b8cde4de7f6 pts=m20,80 l50,80 l50,50 l20,50 l20,80 z
+fill nz n=5 sub=1 cub=0 bbox=0,0,100,100 h=9e0d98eb32ac0c8e pts=m0,100 l100,100 l100,0 l0,0 l0,100 z paint=DeviceRGB(0,1,0) ca=255 clip=776173d8a13088e2
 annotations

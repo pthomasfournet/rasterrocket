@@ -247,9 +247,8 @@ impl PageRenderer<'_> {
 
     /// Apply a pending `W`/`W*` clip using an already-built path.
     ///
-    /// Called by paint helpers (`do_fill`, `do_stroke`, `do_fill_then_stroke`)
-    /// when a `W`/`W*` preceded the painting operator.  The same path is used
-    /// for both clipping and painting (PDF §8.5.4).
+    /// The path a painting operator has painted becomes the clip of the
+    /// operations that follow it, not of its own paint (ISO 32000-1 §8.5.4).
     pub(super) fn apply_pending_clip_with(&mut self, path: &raster::path::Path) {
         if let Some(even_odd) = self.pending_clip.take() {
             self.clip_path_into_gstate(path, even_odd);
@@ -375,36 +374,41 @@ impl PageRenderer<'_> {
     }
 
     pub(super) fn do_fill(&mut self, even_odd: bool) {
-        let Some(builder) = self.path.take() else {
-            self.pending_clip = None;
-            return;
-        };
-        let path = builder.build();
-        self.apply_pending_clip_with(&path);
-        self.trace_path_paint(&path, Some(even_odd), false);
-        self.fill_path(&path, even_odd);
+        self.paint_current_path(Some(even_odd), false, |r, path| {
+            r.fill_path(path, even_odd);
+        });
     }
 
     pub(super) fn do_stroke(&mut self) {
-        let Some(builder) = self.path.take() else {
-            self.pending_clip = None;
-            return;
-        };
-        let path = builder.build();
-        self.apply_pending_clip_with(&path);
-        self.trace_path_paint(&path, None, true);
-        self.stroke_path(&path);
+        self.paint_current_path(None, true, Self::stroke_path);
     }
 
     pub(super) fn do_fill_then_stroke(&mut self, even_odd: bool) {
+        self.paint_current_path(Some(even_odd), true, |r, path| {
+            r.fill_and_stroke(path, even_odd);
+        });
+    }
+
+    /// End the current path with a painting operator: `paint` draws it,
+    /// then a pending `W`/`W*` intersects it into the clip, so the paint
+    /// is not clipped by the path it consumes (ISO 32000-1 §8.5.4).  The
+    /// trace records the paint as filled under the even-odd rule
+    /// `fill` (`None` when unfilled) and stroked when `stroke`.  Without
+    /// a current path nothing is painted and the pending clip is dropped.
+    fn paint_current_path(
+        &mut self,
+        fill: Option<bool>,
+        stroke: bool,
+        paint: impl FnOnce(&mut Self, &raster::path::Path),
+    ) {
         let Some(builder) = self.path.take() else {
             self.pending_clip = None;
             return;
         };
         let path = builder.build();
+        self.trace_path_paint(&path, fill, stroke);
+        paint(self, &path);
         self.apply_pending_clip_with(&path);
-        self.trace_path_paint(&path, Some(even_odd), true);
-        self.fill_and_stroke(&path, even_odd);
     }
 
     /// Fill `path` using the current fill colour or pattern, as the fill

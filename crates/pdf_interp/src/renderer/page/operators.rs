@@ -304,9 +304,9 @@ impl PageRenderer<'_> {
             }
 
             // ── Clipping ──────────────────────────────────────────────────────
-            // W/W* set a pending flag; the clip is applied by the *next*
-            // path-terminating operator (PDF §8.5.4).  The path is NOT
-            // consumed here — it may still be painted by e.g. "W f".
+            // W/W* set a pending flag; the path-terminating operator that
+            // follows paints the path, then intersects it into the clip
+            // (ISO 32000-1 §8.5.4).
             Operator::Clip => self.pending_clip = Some(false),
             Operator::ClipEvenOdd => self.pending_clip = Some(true),
 

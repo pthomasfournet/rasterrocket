@@ -138,7 +138,8 @@ fn clips() {
             "/Font << /F1 5 0 R >>",
             "q 10 10 80 80 re W n q 20 20 m 80 20 l 50 80 l h W* n 0 g 0 0 100 100 re f Q \
              0 0 1 rg 0 0 50 50 re f Q 1 0 0 rg 60 60 30 30 re f \
-             BT /F1 30 Tf 7 Tr 10 40 Td (Clip) Tj ET 0 1 0 rg 0 0 100 100 re f",
+             BT /F1 30 Tf 7 Tr 10 40 Td (Clip) Tj ET 0 1 0 rg 0 0 100 100 re f \
+             q 2 w 20 20 30 30 re W S 0 0 100 100 re f Q",
             &[b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()],
         ),
     );
