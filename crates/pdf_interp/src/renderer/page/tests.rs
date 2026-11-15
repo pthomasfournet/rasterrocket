@@ -2507,3 +2507,63 @@ mod cmyk;
 mod intent;
 mod overprint;
 mod trace;
+
+/// Page `(4, 0)` invoking `/F`, the first of `MAX_FORM_DEPTH + 1` nested
+/// forms (objects 5 onwards), each invoking the next.  The form invoked
+/// `MAX_FORM_DEPTH - 1` forms deep fills the top-left quarter of the 8 pt
+/// page after its `Do`, the one below it the top-right quarter.
+fn nested_forms_doc() -> Document {
+    let forms = super::MAX_FORM_DEPTH + 1;
+    let page = "<< /Type /Page /Resources << /XObject << /F 5 0 R >> >> >>".to_owned();
+    let objects = std::iter::once((4, page))
+        .chain((0..forms).map(|k| {
+            let id = 5 + k;
+            let (resources, content) = if k + 1 == forms {
+                (String::new(), "4 4 4 4 re f")
+            } else if k + 2 == forms {
+                (
+                    format!(" /Resources << /XObject << /F {} 0 R >> >>", id + 1),
+                    "/F Do 0 4 4 4 re f",
+                )
+            } else {
+                (
+                    format!(" /Resources << /XObject << /F {} 0 R >> >>", id + 1),
+                    "/F Do",
+                )
+            };
+            (
+                id,
+                stream_object(
+                    &format!("/Type /XObject /Subtype /Form /BBox [0 0 8 8]{resources}"),
+                    content,
+                ),
+            )
+        }))
+        .collect::<Vec<_>>();
+    crate::test_helpers::make_doc_with_objects(&objects)
+}
+
+/// A form invoked `MAX_FORM_DEPTH` forms deep is not drawn and is
+/// recorded; the forms above it and the rest of the page are drawn.
+#[test]
+fn a_form_too_deep_is_skipped_and_the_page_continues() {
+    let doc = nested_forms_doc();
+    let size = 8u32;
+    let mut renderer = PageRenderer::new(size, size, &doc, (4, 0));
+    renderer.execute(&crate::content::parse(b"/F Do 0 0 8 4 re f"));
+    assert!(
+        renderer.budget_status().is_none(),
+        "the page is not aborted"
+    );
+    let deepest = 5 + super::MAX_FORM_DEPTH;
+    assert_eq!(renderer.forms_too_deep(), [(deepest, 0)]);
+    let stride = renderer.rgb_canvas().stride;
+    let data = renderer.rgb_canvas().data();
+    let px = |x: usize, y: usize| data[y * stride + x * 3];
+    for y in 0..8 {
+        for x in 0..8 {
+            let want = if y >= 4 || x < 4 { 0 } else { 255 };
+            assert_eq!(px(x, y), want, "pixel ({x}, {y})");
+        }
+    }
+}

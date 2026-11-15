@@ -65,6 +65,11 @@ pub struct PageDiagnostics {
     /// Either way, whatever the lost data would have drawn is missing.
     /// Empty on a complete render.
     pub content_failures: Vec<ContentFailure>,
+    /// Form `XObjects` not drawn because they lie more than
+    /// [`MAX_FORM_DEPTH`] forms deep, each once, by object
+    /// identifier.  The rest of the page rendered without them.  Empty when
+    /// every form was drawn.
+    pub forms_too_deep: Vec<pdf::ObjectId>,
     /// Font resource names (without the leading `/`) that `Tf` selected but
     /// the `/Font` resources in effect do not define.  Their text is drawn
     /// in Helvetica.  Empty when every font resolved.
@@ -328,8 +333,6 @@ pub enum RenderAbort {
         /// Operators executed when the deadline was detected.
         ops: u64,
     },
-    /// Form `XObjects` nested deeper than the renderer's limit.
-    FormDepth,
     /// The caller's cancellation flag was raised.
     Cancelled {
         /// Operators executed before the flag was observed.
@@ -359,10 +362,6 @@ impl std::fmt::Display for RenderAbort {
                 f,
                 "page render exceeded {PAGE_RENDER_DEADLINE_SECS}s deadline after {ops} ops; aborting"
             ),
-            Self::FormDepth => write!(
-                f,
-                "Form XObject nesting depth {MAX_FORM_DEPTH} exceeded; aborting page render"
-            ),
             Self::Cancelled { ops } => write!(f, "page render cancelled after {ops} ops"),
             Self::AllocationFailed { width, height } => write!(
                 f,
@@ -378,6 +377,29 @@ impl PageRenderer<'_> {
     #[must_use]
     pub fn image_failures(&self) -> &[ImageFailure] {
         &self.diag.image_failures
+    }
+
+    /// Form `XObjects` skipped on this page for their nesting depth; also
+    /// returned in [`PageDiagnostics::forms_too_deep`] by
+    /// [`finish`](Self::finish).
+    #[must_use]
+    pub fn forms_too_deep(&self) -> &[pdf::ObjectId] {
+        &self.diag.forms_too_deep
+    }
+
+    /// Record the form `id`, entered at [`MAX_FORM_DEPTH`] forms deep, as
+    /// skipped, once per page.
+    pub(super) fn record_form_too_deep(&mut self, id: pdf::ObjectId) {
+        if self.diag.forms_too_deep.contains(&id) {
+            return;
+        }
+        log::warn!(
+            "rasterrocket-interp: Form XObject ({}, {}) lies more than {MAX_FORM_DEPTH} forms \
+             deep — not drawn",
+            id.0,
+            id.1
+        );
+        self.diag.forms_too_deep.push(id);
     }
 
     /// Content streams skipped on this page; also returned in

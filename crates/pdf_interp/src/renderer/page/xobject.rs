@@ -10,7 +10,7 @@ use super::super::gstate::{ctm_multiply, ctm_transform};
 use super::canvas::{CanvasPipe, PageCanvas};
 use super::form_memo::{FormKey, KeptForm};
 use super::pixel_rect::PixelRect;
-use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer, RenderAbort};
+use super::{GroupContext, MAX_FORM_DEPTH, PageRenderer};
 use crate::content::Operator;
 use crate::resources::FormXObject;
 use crate::resources::image::ImageResolution;
@@ -343,7 +343,9 @@ impl PageRenderer<'_> {
     /// into an intermediate group bitmap and composited back (PDF §11.6.6).
     ///
     /// A form invoked while it is already executing, directly or through
-    /// other forms, draws nothing.
+    /// other forms, draws nothing, as does one invoked [`MAX_FORM_DEPTH`]
+    /// forms deep, which is recorded in
+    /// [`PageDiagnostics::forms_too_deep`](super::PageDiagnostics::forms_too_deep).
     pub(super) fn do_form_xobject(&mut self, form: &FormXObject) {
         self.run_form_xobject(form, FormContent::Unkeyed);
     }
@@ -357,10 +359,7 @@ impl PageRenderer<'_> {
             return;
         }
         if self.form_depth >= MAX_FORM_DEPTH {
-            self.budget_exceeded = Some(RenderAbort::FormDepth);
-            log::warn!(
-                "rasterrocket-interp: Form XObject nesting depth {MAX_FORM_DEPTH} exceeded — aborting"
-            );
+            self.record_form_too_deep(form.resources_id);
             return;
         }
         // Propagate an already-tripped budget: a recursive form call after

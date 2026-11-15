@@ -148,8 +148,6 @@
       {"file": "pixel/bug_867501.pdf", "page": 1, "outcome": "differs", "rmse": 150.17, "tile": 260.1, "reason": "divergence: malformed 1 x 3 JBIG2 stream that ends inside its first segment; skipped here (warned), drawn white by pdftoppm, black by mutool, half black by pdfium"},
       {"file": "pixel/bug_909762.in", "page": 1, "outcome": "differs", "rmse": 2.48, "reason": "aa: glyph, stroke and shading edges only; the content matches pdfium's expected image, nothing is missing or recoloured (examined side by side)"},
       {"file": "pixel/bug_963885.in", "outcome": "strict", "reason": "divergence: undecodable JBIG2 image; the page matches pdfium's expected image (both blank, RMSE 0), --strict reports the decode failure"},
-      {"file": "pixel/bug_972999.in", "outcome": "error", "reason": "defect: audit/2026-11-15_form-nesting-depth.md"},
-      {"file": "pixel/bug_972999.in", "page": 1, "outcome": "missing", "reason": "defect: audit/2026-11-15_form-nesting-depth.md"},
       {"file": "pixel/checkbox_radiobutton.in", "page": 1, "outcome": "differs", "rmse": 8.02, "reason": "divergence: interactive state; pdfium's test replays the user events of its .evt file (focus, typing, selection, opening a list) before rendering, a static render shows the document as saved"},
       {"file": "pixel/checkbox_radiobutton_hide.in", "page": 1, "outcome": "differs", "rmse": 6.63, "reason": "divergence: document JavaScript (hide / reset a field) that pdfium runs before rendering; JavaScript is not run"},
       {"file": "pixel/checkbox_radiobutton_reset.in", "page": 1, "outcome": "differs", "rmse": 7.26, "reason": "divergence: document JavaScript (hide / reset a field) that pdfium runs before rendering; JavaScript is not run"},

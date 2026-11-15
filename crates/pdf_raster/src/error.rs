@@ -97,9 +97,12 @@ pub enum RasterError {
     /// and the page renders from the data that decoded.
     ContentDecodeFailed(Vec<String>),
     /// The page render was aborted because it exceeded the per-page operator
-    /// budget or wall-clock deadline.  The page is pathological (e.g.
-    /// infinite-loop content stream or unbounded form-`XObject` recursion).
-    /// The rendered bitmap is partial.
+    /// budget or wall-clock deadline, the page being pathological (e.g. an
+    /// infinite-loop content stream), or, in a
+    /// [strict](crate::SessionConfig::strict) session, because a Form
+    /// `XObject` lay more than
+    /// [`MAX_FORM_DEPTH`](crate::MAX_FORM_DEPTH) forms deep.
+    /// The rendered bitmap is partial and is discarded.
     PageBudgetExceeded(String),
     /// The render was stopped through its [`CancelToken`](crate::CancelToken).
     /// The rendered bitmap is partial and is discarded.

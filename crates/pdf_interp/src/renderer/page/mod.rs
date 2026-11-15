@@ -163,9 +163,11 @@ const DEVICE_MATRIX: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// Maximum nesting depth for Form `XObjects`.
 ///
 /// A form never re-enters itself (see `PageRenderer::active_forms`), so this
-/// bounds the nesting of distinct forms.  The page-group and overprint
-/// scans follow resources to the same depth.
-pub(crate) const MAX_FORM_DEPTH: u32 = 32;
+/// bounds the nesting of distinct forms, and with it the recursion of the
+/// form interpreter.  A form invoked this many forms deep is not drawn and
+/// the page continues (see [`PageDiagnostics::forms_too_deep`]).  The
+/// page-group and overprint scans follow resources to the same depth.
+pub const MAX_FORM_DEPTH: u32 = 40;
 
 /// Maximum side, in device pixels, of the bitmap on which a sub-pixel
 /// pattern cell is sampled for its mean.
@@ -1042,7 +1044,7 @@ impl<'doc> PageRenderer<'doc> {
     /// Fold a finished child renderer (a tiling-pattern tile or a Type 3
     /// glyph) into its parent: its watchdog consumption, so the shared
     /// per-page budget keeps accounting for work done inside sub-renders,
-    /// its skipped images, so they are reported on the page, and its device
+    /// its skipped images and forms, so they are reported on the page, and its device
     /// fill counts (zero while children are built without a device).
     ///
     /// Without this the parent's `ops_executed` would not reflect the child's
@@ -1064,6 +1066,11 @@ impl<'doc> PageRenderer<'doc> {
         for failure in &self.diag.image_failures {
             if !diag.image_failures.contains(failure) {
                 diag.image_failures.push(failure.clone());
+            }
+        }
+        for &id in &self.diag.forms_too_deep {
+            if !diag.forms_too_deep.contains(&id) {
+                diag.forms_too_deep.push(id);
             }
         }
         for font in &self.diag.missing_fonts {

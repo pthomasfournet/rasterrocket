@@ -1,6 +1,7 @@
 //! A form `XObject` that invokes itself, directly or through another form,
 //! is not executed again while it is running: the recursive `Do` draws
-//! nothing and the rest of the page renders.
+//! nothing and the rest of the page renders.  A form invoked
+//! `MAX_FORM_DEPTH` forms deep is not drawn either, and is reported.
 
 #[expect(
     dead_code,
@@ -9,7 +10,7 @@
 mod common;
 
 use common::{stream_object, with_page_tree};
-use rasterrocket::{BackendPolicy, render_page_rgb};
+use rasterrocket::{BackendPolicy, MAX_FORM_DEPTH, RasterError, RasterOptions, render_page_rgb};
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
 const H: u32 = 100;
@@ -72,4 +73,56 @@ fn a_form_invoked_twice_in_sequence_renders_twice() {
     // Not a cycle: /B is not running when /A invokes it the second time.
     let px = bars(page(b"/B Do 0 0 1 rg /B Do", b"0 1 0 rg 40 0 20 100 re f"));
     assert_eq!(px, [RED, GREEN, BLUE]);
+}
+
+/// A page painting a red bar and invoking `/F`, the first of
+/// `MAX_FORM_DEPTH + 1` nested forms (objects 5 onwards), then painting a
+/// blue bar.  The form invoked `MAX_FORM_DEPTH - 1` forms deep paints the
+/// green bar after its `Do`; the one below it paints over the red bar.
+fn nested(forms: u32) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+           /Resources << /XObject << /F 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object(
+            "",
+            b"1 0 0 rg 0 0 20 100 re f /F Do 0 0 1 rg 80 0 20 100 re f",
+        ),
+    ];
+    for k in 0..forms {
+        let resources = format!("/Resources << /XObject << /F {} 0 R >> >>", 6 + k);
+        let (resources, content): (&str, &[u8]) = match forms - k {
+            1 => ("", b"0 0 0 rg 0 0 20 100 re f"),
+            2 => (&resources, b"/F Do 0 1 0 rg 40 0 20 100 re f"),
+            _ => (&resources, b"/F Do"),
+        };
+        objects.push(stream_object(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] {resources}"),
+            content,
+        ));
+    }
+    with_page_tree(&objects)
+}
+
+#[test]
+fn a_form_too_deep_is_skipped_and_reported() {
+    let pdf = nested(MAX_FORM_DEPTH + 1);
+    assert_eq!(bars(pdf.clone()), [RED, GREEN, BLUE]);
+    let page = common::render_one(pdf, &RasterOptions::new(72.0)).expect("the page renders");
+    assert_eq!(page.diagnostics.forms_too_deep, [(5 + MAX_FORM_DEPTH, 0)]);
+}
+
+#[test]
+fn a_form_too_deep_fails_a_strict_page() {
+    let mut opts = RasterOptions::new(72.0);
+    opts.strict = true;
+    match common::render_one(nested(MAX_FORM_DEPTH + 1), &opts) {
+        Err(RasterError::PageBudgetExceeded(msg)) => {
+            assert!(
+                msg.contains(&format!("more than {MAX_FORM_DEPTH} forms deep")),
+                "{msg}"
+            );
+        }
+        other => panic!("expected PageBudgetExceeded, got {other:?}"),
+    }
 }

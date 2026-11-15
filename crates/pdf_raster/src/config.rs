@@ -302,7 +302,10 @@ pub struct SessionConfig {
     /// the failure is reported in [`PageDiagnostics::image_failures`] or
     /// [`PageDiagnostics::content_failures`].  When `true` the page returns
     /// [`RasterError::ImageDecodeFailed`] or
-    /// [`RasterError::ContentDecodeFailed`] instead.
+    /// [`RasterError::ContentDecodeFailed`] instead.  A Form `XObject`
+    /// nested too deep to draw is likewise skipped and reported in
+    /// [`PageDiagnostics::forms_too_deep`], or, when `true`, fails the page
+    /// with [`RasterError::PageBudgetExceeded`].
     pub strict: bool,
     /// What the pages are rendered for: on-screen viewing (the default) or
     /// printing.

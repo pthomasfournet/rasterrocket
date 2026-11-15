@@ -317,10 +317,13 @@ mod tests {
     #[test]
     fn page_uses_overprint_follows_forms_to_the_render_depth() {
         let op = "/ExtGState << /O << /OP true >> >>";
-        let doc = doc_with("/XObject << /F 5 0 R >>", "", &form_chain(5, 32, op));
-        assert!(page_uses_overprint(&doc, (4, 0), true), "32 deep");
-        let doc = doc_with("/XObject << /F 5 0 R >>", "", &form_chain(5, 33, op));
-        assert!(!page_uses_overprint(&doc, (4, 0), true), "33 deep");
+        let deep = |n| doc_with("/XObject << /F 5 0 R >>", "", &form_chain(5, n, op));
+        assert!(page_uses_overprint(&deep(MAX_FORM_DEPTH), (4, 0), true));
+        assert!(!page_uses_overprint(
+            &deep(MAX_FORM_DEPTH + 1),
+            (4, 0),
+            true
+        ));
     }
 
     /// A tiling pattern first met beyond the depth bound, through the
@@ -328,15 +331,20 @@ mod tests {
     /// page's patterns are scanned after its forms.
     #[test]
     fn a_pattern_met_too_deep_first_is_walked_from_a_shallower_path() {
-        let mut objects = form_chain(5, 32, "/Pattern << /P 37 0 R >>");
+        let pattern = 5 + MAX_FORM_DEPTH;
+        let mut objects = form_chain(
+            5,
+            MAX_FORM_DEPTH,
+            &format!("/Pattern << /P {pattern} 0 R >>"),
+        );
         objects.push((
-            37,
+            pattern,
             "<< /PatternType 1 /Resources << /ExtGState << /O << /op true >> >> >> \
              /Length 0 >>\nstream\n\nendstream"
                 .to_owned(),
         ));
         let doc = doc_with(
-            "/XObject << /A 5 0 R >> /Pattern << /P 37 0 R >>",
+            &format!("/XObject << /A 5 0 R >> /Pattern << /P {pattern} 0 R >>"),
             "",
             &objects,
         );

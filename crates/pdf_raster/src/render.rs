@@ -499,7 +499,7 @@ pub(crate) fn render_page_canvas_with_geom(
     check_aborted(&renderer)?;
     log_failures(page_num, &content_failures);
     renderer.record_content_failures(content_failures);
-    check_strict_images(session, renderer.image_failures())?;
+    check_strict(session, &renderer)?;
     log_failures(page_num, renderer.image_failures());
 
     let (bitmap, mut diag, spare) = renderer
@@ -538,16 +538,27 @@ pub(crate) fn check_aborted(
     }
 }
 
-/// [`RasterError::ImageDecodeFailed`] when the session is strict and any
-/// image of the page failed.
-pub(crate) fn check_strict_images(
+/// The error of a strict session for what `renderer` skipped:
+/// [`RasterError::ImageDecodeFailed`] when an image of the page failed,
+/// [`RasterError::PageBudgetExceeded`] when a form lay too deep to draw.
+pub(crate) fn check_strict(
     session: &RasterSession,
-    failures: &[pdf_interp::renderer::ImageFailure],
+    renderer: &pdf_interp::renderer::PageRenderer<'_>,
 ) -> Result<(), RasterError> {
-    if session.strict && !failures.is_empty() {
+    if !session.strict {
+        return Ok(());
+    }
+    let failures = renderer.image_failures();
+    if !failures.is_empty() {
         return Err(RasterError::ImageDecodeFailed(
             failures.iter().map(ToString::to_string).collect(),
         ));
+    }
+    if let Some(&(num, generation)) = renderer.forms_too_deep().first() {
+        return Err(RasterError::PageBudgetExceeded(format!(
+            "Form XObject ({num}, {generation}) lies more than {} forms deep; not drawn",
+            crate::MAX_FORM_DEPTH
+        )));
     }
     Ok(())
 }

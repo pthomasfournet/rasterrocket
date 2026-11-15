@@ -16,8 +16,8 @@ use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageS
 use raster::Bitmap;
 
 use crate::render::{
-    PageJob, allocation_failed, begin, check_aborted, check_strict_images, log_failures,
-    page_content, page_view, render_page_canvas_with_geom, warn_unsupported,
+    PageJob, allocation_failed, begin, check_aborted, check_strict, log_failures, page_content,
+    page_view, render_page_canvas_with_geom, warn_unsupported,
 };
 use crate::{RasterError, RasterSession, RenderParams};
 
@@ -156,8 +156,8 @@ fn band_rows(session: &RasterSession, params: &RenderParams, width: u32, bytes_p
 /// # Errors
 ///
 /// [`BandError::Raster`] with the errors of [`render_page_rgb_with`], each
-/// band failing as a page does; under a strict session an image failure
-/// fails the band in which it is first met.  [`BandError::Sink`] with the
+/// band failing as a page does; under a strict session an image failure or
+/// a form too deep to draw fails the band in which it is first met.  [`BandError::Sink`] with the
 /// error of `sink`.
 ///
 /// [`render_page_rgb_with`]: crate::render_page_rgb_with
@@ -290,7 +290,7 @@ fn draw_bands<E>(
         }
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
-        check_strict_images(session, renderer.image_failures())?;
+        check_strict(session, &renderer)?;
         let (bitmap, next, mut spare) = renderer
             .try_finish_band(params.transparent_background)
             .map_err(allocation_failed)?;
