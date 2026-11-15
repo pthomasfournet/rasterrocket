@@ -48,8 +48,10 @@ brew install tesseract
 
 ### Feed raw pixels, not an encoded image
 
-`RenderedPage::pixels` is raw 8-bit grayscale, one byte per pixel, rows packed
-top to bottom (`stride == width`). Hand it to Tesseract with `set_frame`
+`RenderedPage::pixels` is a `Pixels` enum; under the default options it is
+`Pixels::U8`, raw 8-bit grayscale, one byte per pixel, rows packed top to
+bottom (`stride == width`), and `page.pixels.as_u8()` returns it as `&[u8]`
+(`None` only for the 16-bit pages of `RasterOptions::depth`). Hand it to Tesseract with `set_frame`
 (bytes per pixel `1`, bytes per line `width`). `set_image_from_mem` is the
 wrong call: it decodes an image *file* held in memory (PNG, TIFF, …) and
 rejects or misreads raw pixels.
@@ -60,7 +62,7 @@ rejects or misreads raw pixels.
 
 ```rust
 // ❌ DO NOT USE IN A PIPELINE — engine initialisation on every page
-let text = tesseract::ocr_from_frame(&page.pixels, w, h, 1, w, "eng")?;
+let text = tesseract::ocr_from_frame(page.pixels.as_u8().expect("8-bit page"), w, h, 1, w, "eng")?;
 ```
 
 Initialisation loads the language model from disk each time; on a
@@ -91,8 +93,10 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
         // Pixels per physical inch, the page's UserUnit included.
         let ppi = page.dpi.round() as i32;
 
+        // Gray8 under the default options: one byte per pixel.
+        let pixels = page.pixels.as_u8().expect("8-bit page");
         tess = tess
-            .set_frame(&page.pixels, width, height, 1, width)?
+            .set_frame(pixels, width, height, 1, width)?
             .set_source_resolution(ppi);
         results.push(tess.get_text()?);
     }
@@ -134,8 +138,9 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
                         Err(e) => { eprintln!("page {page_num}: {e}"); continue; }
                     };
                     let (w, h) = (page.width as i32, page.height as i32);
+                    let pixels = page.pixels.as_u8().expect("8-bit page");
                     tess = tess
-                        .set_frame(&page.pixels, w, h, 1, w)
+                        .set_frame(pixels, w, h, 1, w)
                         .expect("set_frame")
                         .set_source_resolution(page.dpi.round() as i32);
                     let text = tess.get_text().unwrap_or_default();
@@ -154,6 +159,15 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
 ```
 
 > **Note:** `render_channel` returns `std::sync::mpsc::Receiver`, which is not `Clone`. The example above wraps it in `Arc<Mutex<_>>` so multiple threads can drain the same channel. For higher throughput, `crossbeam-channel` eliminates the per-recv mutex.
+
+### Pages that need no OCR
+
+`page.diagnostics.has_visible_text()` is `true` when the page's text operators
+drew glyphs that can mark the page, native text whose characters the PDF
+already holds; `false` on a scan, and on a scan whose only text is an
+invisible (`3 Tr`) layer from an earlier recogniser, which
+`page.diagnostics.glyphs.invisible` counts. Send only the pages without
+visible text to the engine, or OCR every page and compare.
 
 ### Pages with missing content
 
@@ -225,9 +239,10 @@ fn ocr_pdf(path: &Path, dpi: f32) -> anyhow::Result<Vec<String>> {
     for (_page_num, result) in raster_pdf(path, &opts) {
         let page = result?;
 
-        // Zero allocation: from_bytes creates a tensor view over page.pixels.
+        // Zero allocation: from_bytes creates a tensor view over the pixels.
         // One f32 buffer is allocated inside prepare_input (u8→f32 normalisation).
-        let source = ImageSource::from_bytes(&page.pixels, (page.width, page.height))?;
+        let pixels = page.pixels.as_u8().expect("8-bit page");
+        let source = ImageSource::from_bytes(pixels, (page.width, page.height))?;
         let input = engine.prepare_input(source)?;
 
         let words = engine.detect_words(&input)?;
@@ -284,7 +299,7 @@ fn ocr_pdf_parallel(path: &Path, dpi: f32, workers: usize) -> anyhow::Result<Vec
                         Err(e) => { eprintln!("page {page_num}: {e}"); continue; }
                     };
                     let source = ImageSource::from_bytes(
-                        &page.pixels, (page.width, page.height)
+                        page.pixels.as_u8().expect("8-bit page"), (page.width, page.height)
                     ).expect("ImageSource");
                     let input = engine.prepare_input(source).expect("prepare_input");
                     let words = engine.detect_words(&input).expect("detect_words");

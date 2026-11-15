@@ -362,15 +362,17 @@ tests/compare/compare.sh -r 150 input.pdf
 
 To time the GPU backends, build with the GPU features and pass
 `--backend cuda` (or `vaapi`, `vulkan`) to the same `hyperfine` command.
-nvJPEG, VA-API JPEG, the parallel-Huffman decoder and the AA fill are dormant
-by default (see the API reference's GPU dispatch thresholds);
-`PDF_RASTER_HUFFMAN_THRESHOLD=0` and `PDF_RASTER_AA_FILL_THRESHOLD=0` enable
-the last two at runtime:
+nvJPEG, VA-API JPEG and the parallel-Huffman decoder are dormant by default
+(see the API reference's GPU dispatch thresholds);
+`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables the last at runtime. Fills always
+run on the CPU: the device AA fill and its `gpu-aa` feature, which the
+historical runs above were built with, have been removed, and `--gpu-pages`
+(a `vulkan` build) composites the CPU's coverage on the device:
 
 ```bash
 CUDA_ARCH=sm_120 RUSTFLAGS="-C target-cpu=native" \
   cargo build --release -p rasterrocket-cli \
-  --features "nvjpeg,nvjpeg2k,gpu-aa,gpu-icc"
+  --features "nvjpeg,nvjpeg2k,gpu-icc"
 
 RUSTFLAGS="-C target-cpu=native" \
   cargo build --release -p rasterrocket-cli --features "vulkan,gpu-jpeg-huffman"
