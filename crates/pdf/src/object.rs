@@ -600,8 +600,10 @@ fn parse_real(s: &str) -> Option<f32> {
 ///
 /// A key whose value is not an object (a bare keyword, a stray delimiter) is
 /// dropped together with the offending token, and the remaining entries are
-/// read.  An object-level keyword (`endobj`, `stream`, `endstream`) where a
-/// key or value is expected ends the dictionary without being consumed.
+/// read.  An object-level keyword (`endobj`, `stream`, `endstream`, or the
+/// `obj` or `trailer` that opens what follows an unterminated dictionary)
+/// where a key or value is expected ends the dictionary without being
+/// consumed.
 /// `None` only when the dictionary, or a container value inside it, nests
 /// deeper than [`MAX_NESTING`].
 fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> {
@@ -658,18 +660,29 @@ fn parse_dict(data: &[u8], pos: &mut usize, depth: usize) -> Option<Dictionary> 
     Some(dict)
 }
 
-/// Whether the token at `pos` is a keyword that ends an indirect object or
-/// opens a stream body, so no dictionary entry can continue past it.
+/// Whether the token at `pos` is a keyword that ends an indirect object,
+/// opens a stream body, or opens the next indirect object or the trailer,
+/// so no dictionary entry can continue past it.
 ///
-/// Reads at most one byte past the longest keyword, so a caller stepping
-/// through a long token byte by byte stays linear in its length.
+/// `endobj`, `stream` and `endstream` count wherever they start; `obj` and
+/// `trailer` only at a token boundary, as the `obj` of the next object's
+/// `N G obj` header or the `trailer` of an unterminated object's file.
+/// Reads at most one byte before `pos` and one past the longest keyword, so
+/// a caller stepping through a long token byte by byte stays linear in its
+/// length.
 fn at_object_keyword(data: &[u8], pos: usize) -> bool {
     let rest = &data[pos.min(data.len())..];
+    let keyword_at = |kw: &[u8]| {
+        rest.starts_with(kw) && rest.get(kw.len()).is_none_or(|&b| is_ws(b) || is_delim(b))
+    };
+    let token_starts = pos
+        .checked_sub(1)
+        .and_then(|before| data.get(before))
+        .is_none_or(|&b| is_ws(b) || is_delim(b));
     [b"endobj".as_slice(), b"stream", b"endstream"]
-        .iter()
-        .any(|kw| {
-            rest.starts_with(kw) && rest.get(kw.len()).is_none_or(|&b| is_ws(b) || is_delim(b))
-        })
+        .into_iter()
+        .any(keyword_at)
+        || (token_starts && [b"obj".as_slice(), b"trailer"].into_iter().any(keyword_at))
 }
 
 /// Parse a complete indirect object (`<id> <gen> obj … endobj`) at `offset`.
@@ -1077,6 +1090,36 @@ mod tests {
         };
         assert_eq!(stream.content, b"abc");
         assert_eq!(stream.dict.get(b"Length"), Some(&Object::Integer(3)));
+    }
+
+    /// The `obj` of the next object's header and a `trailer` keyword end an
+    /// unclosed dictionary unconsumed; within a longer token they do not.
+    #[test]
+    fn next_object_or_trailer_ends_an_unclosed_dictionary() {
+        for (src, rest) in [
+            (&b"<< /A 1 /B\n9 0 obj [1] endobj"[..], &b"obj"[..]),
+            (b"<< /A 1 /B 9 0 obj [1] endobj", b"obj"),
+            (b"<< /A 1 [2]trailer << /Root 3 0 R >>", b"trailer"),
+        ] {
+            let mut pos = 0;
+            let Some(Object::Dictionary(d)) = parse_object(src, &mut pos) else {
+                panic!("expected a dictionary: {}", String::from_utf8_lossy(src));
+            };
+            assert_eq!(d.get(b"A"), Some(&Object::Integer(1)));
+            assert!(!d.contains_key(b"Root"));
+            assert!(
+                src[pos..].starts_with(rest),
+                "{}",
+                String::from_utf8_lossy(src)
+            );
+        }
+        assert_eq!(
+            entries(b"<< /A 1 xobj /B 2 /C trailers >>"),
+            vec![
+                (b"A".to_vec(), Object::Integer(1)),
+                (b"B".to_vec(), Object::Integer(2)),
+            ]
+        );
     }
 
     /// Spellings of infinity and NaN are not PDF numbers; `str::parse::<f32>`

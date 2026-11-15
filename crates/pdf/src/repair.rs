@@ -376,6 +376,43 @@ mod tests {
         );
     }
 
+    /// An unclosed dictionary ends at the next object's header and at the
+    /// `trailer`, so neither the objects after it nor the trailer's `/Root`
+    /// is lost to it.
+    #[test]
+    fn unclosed_dictionary_keeps_the_objects_and_trailer_after_it() {
+        let body = b"%PDF\n\
+1 0 obj<</Type/Page/Contents 5 0 R\n\
+2 0 obj<</Kids[1 0 R]/Count 1\n\
+3 0 obj<</Pages 2 0 R>>endobj\n\
+4 0 obj<</FunctionType 3/n\nf\n\
+5 0 obj[/DeviceRGB 4 0 R]trailer\n<</Root 3 0 R>>";
+        let table = reconstruct_xref(body).expect("repair must succeed");
+        for num in 1..=5 {
+            assert!(table.entries.contains(num), "object {num} lost");
+        }
+        assert_eq!(table.trailer.get(b"Root"), Some(&Object::Reference((3, 0))));
+    }
+
+    /// A flood of unclosed dictionaries, each ended by the next object's
+    /// header, is scanned in one linear pass.
+    #[test]
+    fn unclosed_dictionary_flood_is_bounded() {
+        let mut body = b"%PDF\n".to_vec();
+        for num in 0..400_000 {
+            body.extend_from_slice(format!("{num} 0 obj<</A 1 /B\n").as_bytes());
+        }
+        body.extend_from_slice(b"trailer<</Root 1 0 R>>");
+        let start = std::time::Instant::now();
+        let table = reconstruct_xref(&body).expect("repair must succeed");
+        assert_eq!(table.entries.len(), 400_000);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "unclosed-dictionary scan must be linear, took {:?}",
+            start.elapsed()
+        );
+    }
+
     /// When two usable `/Type /Catalog` objects exist (incremental update
     /// replaced the catalogue), the synthetic trailer must point at the
     /// one written LAST in the file, never a stale earlier copy.

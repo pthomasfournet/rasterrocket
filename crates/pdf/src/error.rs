@@ -13,11 +13,11 @@ pub enum PdfError {
     /// placeholder, interrupted scan-to-disk).  Distinct from a generic
     /// xref failure so the operator is told the real problem.
     EmptyInput,
-    /// No `%PDF-` signature was found near the start of the file, so the
+    /// No `%PDF` signature was found near the start of the file, so the
     /// input is not a PDF at all (wrong file, HTML error page saved as
     /// `.pdf`, random binary).
     NotPdf,
-    /// A `%PDF-` header is present but no usable cross-reference table or
+    /// A `%PDF` header is present but no usable cross-reference table or
     /// trailer could be found or reconstructed — the file is truncated or
     /// corrupt.  The string carries the underlying low-level reason.
     MissingXref(String),
@@ -54,7 +54,7 @@ impl fmt::Display for PdfError {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::BadXref(msg) => write!(f, "xref error: {msg}"),
             Self::EmptyInput => write!(f, "input file is empty (0 bytes)"),
-            Self::NotPdf => write!(f, "not a PDF file (missing %PDF- header)"),
+            Self::NotPdf => write!(f, "not a PDF file (missing %PDF header)"),
             Self::MissingXref(msg) => write!(
                 f,
                 "truncated or corrupt PDF (no cross-reference table found: {msg})"

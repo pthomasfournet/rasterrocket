@@ -160,7 +160,7 @@ pub struct Document {
     /// The document bytes.
     data: MmapOrVec,
     /// Position in `data` that the cross-reference offsets are relative to:
-    /// 0, or the `%PDF-` header's position when bytes precede the header
+    /// 0, or the `%PDF` header's position when bytes precede the header
     /// and the offsets were written without them.
     base: usize,
     xref: XrefTable,
@@ -292,7 +292,7 @@ fn load_file(path: &Path, read_into_memory: bool) -> std::io::Result<MmapOrVec> 
 fn parse_structure(data: &[u8]) -> Result<(XrefTable, usize), PdfError> {
     let header = validate_pdf_input(data)?;
     read_xref(data, header).map_err(|e| match e {
-        // A `%PDF-` header is present (validate_pdf_input passed) but the
+        // A `%PDF` header is present (validate_pdf_input passed) but the
         // xref could neither be parsed nor reconstructed: the file is
         // truncated or corrupt.  Replace the low-level "startxref not
         // found" with an accurate, operator-actionable diagnosis.
@@ -1414,7 +1414,7 @@ impl Iterator for PageIter<'_> {
     }
 }
 
-/// How far into the file the `%PDF-` header may legally appear.
+/// How far into the file the `%PDF` header may legally appear.
 ///
 /// The spec puts the header at byte 0, but real-world files prepend a few
 /// junk bytes (mail transfer artefacts, UTF-8 BOM, shebang lines), so the
@@ -1424,7 +1424,11 @@ const HEADER_SCAN_WINDOW: usize = 1024;
 /// Reject obviously-unusable input *before* the xref parser runs so the
 /// operator gets an accurate diagnosis ("file is empty" / "not a PDF")
 /// instead of the low-level, misleading "'startxref' not found", and return
-/// the position of the `%PDF-` header.
+/// the position of the `%PDF` header.
+///
+/// The header is the first `%PDF` in [`HEADER_SCAN_WINDOW`].  One without
+/// the `-<digit>` of `%PDF-1.7` is accepted with a warning: the version is
+/// not consulted anywhere, and the body is read as for any other version.
 ///
 /// This is the single entry choke point shared by [`Document::open`] and
 /// [`Document::from_bytes_owned`].
@@ -1433,10 +1437,18 @@ fn validate_pdf_input(data: &[u8]) -> Result<usize, PdfError> {
         return Err(PdfError::EmptyInput);
     }
     let window = &data[..data.len().min(HEADER_SCAN_WINDOW)];
-    window
-        .windows(5)
-        .position(|w| w == b"%PDF-")
-        .ok_or(PdfError::NotPdf)
+    let header = window
+        .windows(4)
+        .position(|w| w == b"%PDF")
+        .ok_or(PdfError::NotPdf)?;
+    let version = &data[header + 4..data.len().min(header + 6)];
+    if !matches!(version, [b'-', b'0'..=b'9']) {
+        log::warn!(
+            "header at byte {header} carries no version (`%PDF{}`); reading the body regardless",
+            String::from_utf8_lossy(version).escape_debug()
+        );
+    }
+    Ok(header)
 }
 
 /// An object reached by [`Document::resolve`]: the caller's direct object,
@@ -2441,7 +2453,7 @@ startxref\n180\n%%EOF"
             matches!(err, PdfError::NotPdf),
             "non-PDF input must yield NotPdf, got: {err}"
         );
-        // Binary garbage with no %PDF- header takes the same path.
+        // Binary garbage with no %PDF header takes the same path.
         let err2 = open_err(vec![0u8; 2048]);
         assert!(matches!(err2, PdfError::NotPdf), "2KB NUL: {err2}");
     }
@@ -2504,6 +2516,27 @@ startxref\n180\n%%EOF"
             matches!(err, PdfError::MissingXref(_)),
             "header-after-junk must pass the NotPdf gate, got: {err}"
         );
+    }
+
+    /// A header without a version (`%PDF` followed by a newline or other
+    /// bytes) is a header; the body is then repaired as for any version.
+    #[test]
+    fn header_without_version_is_accepted() {
+        for header in [&b"%PDF\n"[..], b"%PDF-\n", b"%PDF\x00", b"junk %PDF"] {
+            let mut bytes = header.to_vec();
+            bytes.extend_from_slice(
+                b"\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n",
+            );
+            let doc = Document::from_bytes_owned(bytes)
+                .unwrap_or_else(|e| panic!("{:?} must open: {e}", String::from_utf8_lossy(header)));
+            assert_eq!(doc.page_count(), 1);
+        }
+        assert!(matches!(
+            open_err(b"%PD\n1 0 obj".to_vec()),
+            PdfError::NotPdf
+        ));
     }
 
     #[test]
