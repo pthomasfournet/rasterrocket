@@ -24,8 +24,8 @@ use moxcms::{ColorProfile, RenderingIntent};
 
 use crate::pcs::D50;
 use crate::pcs::black::{
-    MAX_BLACK_Y, PERCEPTUAL_BLACK_Y, as_version_2, darkest_colorant_y, is_v4, lab_l_to_y,
-    lifted_srgb_curve, round_trip_ramp,
+    MAX_BLACK_Y, PERCEPTUAL_BLACK_Y, as_version_2, is_v4, lab_l_to_y, lifted_srgb_curve,
+    round_trip_ramp, source_black,
 };
 
 /// The source profile of a conversion to `dest` under `intent`: the
@@ -109,11 +109,11 @@ pub(super) fn black_lift(
 /// The luminance of `dest`'s neutral black under `intent` (ISO 18619 §7):
 /// for a destination converting through PCS → device tables, found on the
 /// round trip of the neutral `L*` ramp through the device (under `intent`
-/// there, relative colorimetry back); otherwise the PCS of the device's
-/// darkest colorant (device 0 of an additive space).  Neutral, and at
+/// there, relative colorimetry back); otherwise the black the profile
+/// reaches as a conversion source ([`source_black`]).  Neutral, and at
 /// most `L* = 50`.
 ///
-/// On the round trip the black is the darkest colorant's under relative
+/// On the round trip the black is the source black under relative
 /// colorimetry when the ramp's midrange is straight (within 4 `L*` of the
 /// identity above the bottom fifth of its range); otherwise, and always
 /// under the other intents, the vertex of the least-squares quadratic
@@ -128,7 +128,7 @@ fn destination_black(
         || dest.lut_b_to_a_colorimetric.is_some()
         || dest.lut_b_to_a_saturation.is_some();
     let initial = if relative || !tables {
-        darkest_colorant_y(dest, intent)?.clamp(0.0, MAX_BLACK_Y)
+        source_black(dest, intent)?.clamp(0.0, MAX_BLACK_Y)
     } else {
         0.0
     };
@@ -216,6 +216,7 @@ mod tests {
     use moxcms::Xyzd;
 
     use super::*;
+    use crate::pcs::black::darkest_colorant_y;
 
     #[test]
     fn the_working_space_black_of_a_matrix_destination_is_its_origin() {

@@ -207,6 +207,60 @@ fn a_cmyk_profile_separates_like_transicc() {
     );
 }
 
+/// The compensated separation to the CMYK printer prints the colours of
+/// `transicc -t 1 -b`'s within 1.5 levels of 8-bit sRGB: the working-space
+/// black maps to the printer's black as a conversion source detects it,
+/// the round trip of the perceptual black (`L*` 10.6), not its darkest
+/// colorant (`L*` 8).  Near black the inks themselves may differ, as many
+/// inks print one dark colour.
+#[test]
+fn a_compensated_cmyk_separation_maps_black_to_the_perceptual_black() {
+    let profile = cmyk_printer();
+    let Separation::Profile(table) = profile
+        .separation(RenderingIntent::RelativeColorimetric, true)
+        .expect("separates")
+    else {
+        panic!("a profile separation")
+    };
+    let mut srgb = ColorProfile::new_srgb();
+    srgb.cicp = None;
+    let printed = profile
+        .profile
+        .create_transform_f64(
+            Layout::Rgba,
+            &srgb,
+            Layout::Rgb,
+            TransformOptions {
+                rendering_intent: moxcms::RenderingIntent::RelativeColorimetric,
+                allow_use_cicp_transfer: false,
+                ..TransformOptions::default()
+            },
+        )
+        .unwrap();
+    // transicc -n -i '*sRGB' -o printer-cmyk-v4.icc -t 1 -b, in percent.
+    let reference: [([u8; 3], [f64; 4]); 3] = [
+        ([0, 0, 0], [45.1850, 14.2992, 7.1870, 91.9539]),
+        ([64, 64, 64], [3.0594, 2.5376, 2.5940, 72.5948]),
+        ([0, 0, 255], [100.0, 100.0, 0.0, 0.0]),
+    ];
+    for (rgb, want) in reference {
+        let got = table
+            .ink(rgb.map(u16::from_u8))
+            .map(|v| f64::from(v) / 65535.0);
+        let mut colours = [0.0; 6];
+        printed
+            .transform(&[got, want.map(|w| w / 100.0)].concat(), &mut colours)
+            .unwrap();
+        let (ours, theirs) = colours.split_at(3);
+        for (o, t) in ours.iter().zip(theirs) {
+            assert!(
+                (o - t).abs() * 255.0 <= 1.5,
+                "{rgb:?}: ink {got:?} prints {ours:?}, transicc's {want:?} % prints {theirs:?}"
+            );
+        }
+    }
+}
+
 /// A CMYK profile separates CMYK pages and converts no sRGB page; an RGB
 /// one has no separation and converts no CMYK page.
 #[test]
