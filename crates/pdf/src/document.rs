@@ -179,9 +179,12 @@ pub struct Document {
     /// `/Pages` root reference, resolved once from the catalog.  Cached
     /// because every page-tree descent reads it.
     pages_root_id: OnceLock<ObjectId>,
-    /// `/Pages /Count`, memoised on first read.  Falls back to the eager
-    /// walk on malformed catalogs.
+    /// The page count of [`Document::page_count_fast`], memoised on first
+    /// read.
     page_count_cache: OnceLock<u32>,
+    /// The pages of the document-order walk of the page tree, memoised on
+    /// first use.
+    walked_pages: OnceLock<Vec<ObjectId>>,
     /// Cached linearization hints, parsed lazily on first access.
     lin_hints: OnceLock<Option<LinearizationHints>>,
     /// Object headers found by scanning the whole file, built the first time
@@ -424,6 +427,7 @@ impl Document {
             catalog_id: OnceLock::new(),
             pages_root_id: OnceLock::new(),
             page_count_cache: OnceLock::new(),
+            walked_pages: OnceLock::new(),
             lin_hints: OnceLock::new(),
             scanned_offsets: OnceLock::new(),
             derived: DerivedCache::default(),
@@ -955,13 +959,20 @@ impl Document {
     /// saturating at `u32::MAX`.
     #[must_use]
     pub fn page_count(&self) -> u32 {
-        u32::try_from(self.get_pages().count()).unwrap_or(u32::MAX)
+        u32::try_from(self.walked_pages().len()).unwrap_or(u32::MAX)
+    }
+
+    /// The pages of [`Self::get_pages`] in document order, memoised.
+    pub(crate) fn walked_pages(&self) -> &[ObjectId] {
+        self.walked_pages
+            .get_or_init(|| self.get_pages().map(|(_, id)| id).collect())
     }
 
     /// The number of pages, memoised: the page tree root's `/Count` when it
     /// is plausible, at least 1 and at most the number of cross-reference
-    /// entries (every page is an object of its own), else the count of an
-    /// eager walk of the tree ([`Self::page_count`]).
+    /// entries (every page is an object of its own), and the `/Count`
+    /// entries lead to a page at its last index; else the count of an eager
+    /// walk of the tree ([`Self::page_count`]).
     #[must_use]
     pub fn page_count_fast(&self) -> u32 {
         *self
@@ -978,7 +989,19 @@ impl Document {
             .and_then(|root| self.get_dict(root).ok())
             .and_then(|dict| dict.get(b"Count").and_then(Object::as_u32));
         match declared {
-            Some(count) if count >= 1 && count as usize <= self.xref.entries.len() => count,
+            Some(count) if count >= 1 && count as usize <= self.xref.entries.len() => {
+                match crate::page_tree::descend_by_count(self, count - 1) {
+                    Err(crate::page_tree::Descent::Miscounted(err)) => {
+                        let walked = self.page_count();
+                        log::warn!(
+                            "/Pages /Count {count} disagrees with the page tree ({err}), \
+                             which holds {walked} pages; using {walked}"
+                        );
+                        walked
+                    }
+                    Ok(_) | Err(crate::page_tree::Descent::Failed(_)) => count,
+                }
+            }
             Some(count) => {
                 let walked = self.page_count();
                 if walked != count {
@@ -1320,6 +1343,12 @@ impl Document {
 
 // ── Page iterator ─────────────────────────────────────────────────────────────
 
+/// Most node visits plus `/Kids` entries one page-tree walk processes.  A
+/// kid referenced from several `/Kids` arrays is visited once per
+/// reference, so a tree of shared nodes describes exponentially many
+/// pages in linear space; the walk ends at this bound instead.
+pub(crate) const MAX_PAGE_TREE_WORK: usize = 1 << 22;
+
 struct PageIter<'a> {
     doc: &'a Document,
     /// Interior nodes on the traversal path, each with its resolved `/Kids`.
@@ -1330,6 +1359,8 @@ struct PageIter<'a> {
     /// The `/Pages` root, visited on the first call to `next`.
     root: Option<ObjectId>,
     page_num: u32,
+    /// Work left of [`MAX_PAGE_TREE_WORK`].
+    budget: usize,
 }
 
 /// One interior page-tree node: its `/Kids` references, resolved once, and
@@ -1354,7 +1385,26 @@ impl<'a> PageIter<'a> {
             on_stack: std::collections::HashSet::new(),
             root: catalog.get(b"Pages").and_then(Object::as_reference),
             page_num: 0,
+            budget: MAX_PAGE_TREE_WORK,
         }
+    }
+
+    /// Take `work` units from the budget; on exhaustion the walk ends.
+    fn charge(&mut self, work: usize) -> bool {
+        if let Some(left) = self.budget.checked_sub(work) {
+            self.budget = left;
+            return true;
+        }
+        log::warn!(
+            "page-tree walk stopped after {MAX_PAGE_TREE_WORK} node visits and /Kids entries \
+             ({} pages found); the tree repeats nodes past that bound",
+            self.page_num
+        );
+        self.budget = 0;
+        self.root = None;
+        self.stack.clear();
+        self.on_stack.clear();
+        false
     }
 
     /// Visit node `id`: a page object (see [`crate::page_tree::is_interior`])
@@ -1362,6 +1412,9 @@ impl<'a> PageIter<'a> {
     /// (direct, or an indirect reference to one) is pushed.  Anything else is
     /// skipped.
     fn visit(&mut self, id: ObjectId) -> Option<(u32, ObjectId)> {
+        if !self.charge(1) {
+            return None;
+        }
         let obj = self.doc.get_object(id).ok()?;
         let dict = obj.as_dict()?;
         if !crate::page_tree::is_interior(dict) {
@@ -1379,6 +1432,9 @@ impl<'a> PageIter<'a> {
             }
             _ => return None,
         };
+        if !self.charge(kids.len()) {
+            return None;
+        }
         let _ = self.on_stack.insert(id.0);
         self.stack.push(PageTreeFrame { id, kids, next: 0 });
         None

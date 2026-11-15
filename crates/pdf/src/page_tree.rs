@@ -22,8 +22,12 @@ const MAX_DEPTH: usize = 64;
 /// root-to-leaf path.
 ///
 /// Returns `PdfError::PageOutOfRange { page, total }` if `idx` is
-/// outside `[0, total)` where `total` is the catalog's `/Pages /Count`
-/// (or the eager page count if `/Count` is missing or invalid).
+/// outside `[0, total)` where `total` is [`Document::page_count_fast`].
+///
+/// The descent trusts each interior node's `/Count`.  Where the counts do
+/// not match the tree (a node without `/Count`, a `/Count` past the
+/// leaves, a `/Kids` cycle), the page is taken from the document-order walk
+/// of [`Document::get_pages`], memoised on first use.
 ///
 /// Cycle protection: tracks visited object numbers in a `HashSet<u32>`.
 /// Depth protection: bounded to `MAX_DEPTH` levels.
@@ -31,30 +35,58 @@ const MAX_DEPTH: usize = 64;
 /// # Errors
 /// [`PdfError::PageOutOfRange`] for an index past the page count; the
 /// errors of [`Document::get_object`] for the nodes visited; and
-/// [`PdfError::BadObject`] or [`PdfError::MissingKey`] when the tree is
-/// cyclic, deeper than `MAX_DEPTH`, or its `/Kids` and `/Count` entries are
-/// inconsistent with the requested index.
+/// [`PdfError::BadObject`] or [`PdfError::MissingKey`] when a `/Kids` entry
+/// is malformed, or when the counts disagree with the tree and the walk has
+/// no page `idx` either.
 //
 // The descent does not consult linearization hints: `LinearizationHints`
 // holds only the `/Linearized` dictionary entries, and the page offset
 // hint table, which would map idx to a byte offset, is not parsed.
 pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfError> {
-    let pages_root = doc.pages_root_id()?;
     let total = doc.page_count_fast();
     if idx >= total {
         return Err(PdfError::PageOutOfRange { page: idx, total });
     }
+    match descend_by_count(doc, idx) {
+        Ok(id) => Ok(id),
+        Err(Descent::Miscounted(err)) => {
+            log::debug!("page index {idx}: {err}; taking the page from the page-tree walk");
+            doc.walked_pages().get(idx as usize).copied().ok_or(err)
+        }
+        Err(Descent::Failed(err)) => Err(err),
+    }
+}
 
+/// Why [`descend_by_count`] found no page.
+pub(crate) enum Descent {
+    /// The `/Count` entries do not describe the tree: an interior node
+    /// without `/Count`, a `/Count` past the leaves below it, a cycle or a
+    /// path deeper than [`MAX_DEPTH`].  A walk of the tree decides.
+    Miscounted(PdfError),
+    /// A node could not be read, or a `/Kids` entry is malformed.
+    Failed(PdfError),
+}
+
+impl From<PdfError> for Descent {
+    fn from(err: PdfError) -> Self {
+        Self::Failed(err)
+    }
+}
+
+/// The page at 0-based index `idx` by descent from the `/Pages` root,
+/// choosing each branch by its `/Count`.
+pub(crate) fn descend_by_count(doc: &Document, idx: u32) -> Result<ObjectId, Descent> {
+    let pages_root = doc.pages_root_id()?;
     let mut visited: HashSet<u32> = HashSet::new();
     let mut current = pages_root;
     let mut remaining = idx;
 
     for _ in 0..MAX_DEPTH {
         if !visited.insert(current.0) {
-            return Err(PdfError::BadObject {
+            return Err(Descent::Miscounted(PdfError::BadObject {
                 id: current.0,
                 detail: "cyclic /Kids reference during descent".into(),
-            });
+            }));
         }
         let node_obj = doc.get_dict_arc(current)?;
         let node_dict = dict_of(&node_obj, current)?;
@@ -70,19 +102,15 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
         // it may be an interior node with a single leaf below it.
         let parent_count = node_dict.get(b"Count").and_then(Object::as_u32);
         if parent_count == Some(u32::try_from(kids.len()).unwrap_or(u32::MAX)) {
-            // Bounds: idx < total ≤ Σ /Count along the descent path, and
-            // here parent /Count == kids.len(), so `remaining` is a valid
-            // index into kids[].
-            let kid = kids
-                .get(remaining as usize)
-                .copied()
-                .ok_or_else(|| PdfError::BadObject {
+            let kid = kids.get(remaining as usize).copied().ok_or_else(|| {
+                Descent::Miscounted(PdfError::BadObject {
                     id: current.0,
                     detail: format!(
                         "flat /Pages: remaining={remaining} >= kids.len()={}",
                         kids.len()
                     ),
-                })?;
+                })
+            })?;
             let kid_obj = doc.get_dict_arc(kid)?;
             if !is_interior(dict_of(&kid_obj, kid)?) {
                 return Ok(kid);
@@ -112,18 +140,18 @@ pub fn descend_to_page_index(doc: &Document, idx: u32) -> Result<ObjectId, PdfEr
             remaining -= kid_count;
         }
         if !descended {
-            return Err(PdfError::BadObject {
+            return Err(Descent::Miscounted(PdfError::BadObject {
                 id: current.0,
                 detail: format!(
                     "ran out of /Kids before reaching requested page (remaining={remaining})",
                 ),
-            });
+            }));
         }
     }
-    Err(PdfError::BadObject {
+    Err(Descent::Miscounted(PdfError::BadObject {
         id: current.0,
         detail: "page-tree descent exceeded depth limit".into(),
-    })
+    }))
 }
 
 /// The dictionary of an object returned by [`Document::get_dict_arc`], which
@@ -148,18 +176,20 @@ pub(crate) fn is_interior(dict: &Dictionary) -> bool {
 }
 
 /// Read a kid's subtree page count: 1 for a page, `/Count` for an
-/// interior node (see [`is_interior`]).  Returns `BadObject` if an interior
-/// node lacks a valid `/Count`.
-fn kid_subtree_count(kid_id: ObjectId, kid_dict: &Dictionary) -> Result<u32, PdfError> {
+/// interior node (see [`is_interior`]).  [`Descent::Miscounted`] if an
+/// interior node lacks a valid `/Count`.
+fn kid_subtree_count(kid_id: ObjectId, kid_dict: &Dictionary) -> Result<u32, Descent> {
     if !is_interior(kid_dict) {
         return Ok(1);
     }
     kid_dict
         .get(b"Count")
         .and_then(Object::as_u32)
-        .ok_or_else(|| PdfError::BadObject {
-            id: kid_id.0,
-            detail: "interior page-tree node missing /Count".into(),
+        .ok_or_else(|| {
+            Descent::Miscounted(PdfError::BadObject {
+                id: kid_id.0,
+                detail: "interior page-tree node missing /Count".into(),
+            })
         })
 }
 
@@ -461,6 +491,90 @@ startxref\n258\n%%EOF"
         // Without a root `/Count` the page count comes from the eager walk.
         let doc = Document::from_bytes_owned(untyped_leaf_pdf("")).unwrap();
         assert_eq!(doc.page_count(), 3);
+    }
+
+    /// The pages of `doc` by descent, in index order.
+    fn descended(doc: &Document) -> Vec<u32> {
+        (0..doc.page_count_fast())
+            .map(|i| descend_to_page_index(doc, i).expect("page").0)
+            .collect()
+    }
+
+    /// A root `/Count` past the leaves gives way to the walked count; a
+    /// `/Count` the tree bears out is kept.
+    #[test]
+    fn count_past_the_leaves_takes_the_walked_count() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R] /Count 3>>",
+            "<</Type /Page /Parent 2 0 R>>",
+        ]))
+        .unwrap();
+        assert_eq!(doc.page_count_fast(), 1);
+        assert_eq!(descended(&doc), [3]);
+        assert!(matches!(
+            descend_to_page_index(&doc, 1),
+            Err(PdfError::PageOutOfRange { page: 1, total: 1 })
+        ));
+
+        let doc = Document::from_bytes_owned(three_level_pdf()).unwrap();
+        assert_eq!(doc.page_count_fast(), 4);
+    }
+
+    /// Without `/Count` anywhere, a kid listed twice is a page twice, and
+    /// every index resolves through the walk.
+    #[test]
+    fn tree_without_counts_resolves_repeated_kids_by_walk() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R 3 0 R]>>",
+            "<</Type /Pages /Parent 2 0 R /Kids [4 0 R 4 0 R 4 0 R]>>",
+            "<</Type /Page /Parent 3 0 R>>",
+        ]))
+        .unwrap();
+        assert_eq!(doc.page_count_fast(), 6);
+        assert_eq!(descended(&doc), [4; 6]);
+    }
+
+    /// An interior node without `/Count` below a root that has one is
+    /// counted by the walk.
+    #[test]
+    fn interior_node_without_count_resolves_by_walk() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids [3 0 R 4 0 R] /Count 3>>",
+            "<</Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R]>>",
+            "<</Type /Page /Parent 2 0 R>>",
+            "<</Type /Page /Parent 3 0 R>>",
+            "<</Type /Page /Parent 3 0 R>>",
+        ]))
+        .unwrap();
+        assert_eq!(doc.page_count_fast(), 3);
+        assert_eq!(descended(&doc), [5, 6, 4]);
+    }
+
+    /// A chain of nodes each listing the next twice describes 2^40 pages in
+    /// 42 objects; the walk stops at its work bound.
+    #[test]
+    fn shared_node_page_tree_walk_is_bounded() {
+        let mut bodies = vec!["<</Type /Catalog /Pages 2 0 R>>".to_owned()];
+        for num in 2..42 {
+            bodies.push(format!(
+                "<</Type /Pages /Kids [{next} 0 R {next} 0 R]>>",
+                next = num + 1
+            ));
+        }
+        bodies.push("<</Type /Page>>".to_owned());
+        let bodies: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        let doc = Document::from_bytes_owned(assemble(&bodies)).unwrap();
+        let start = std::time::Instant::now();
+        let count = doc.page_count_fast();
+        assert!(count > 0 && (count as usize) < crate::document::MAX_PAGE_TREE_WORK);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "page-tree walk must be bounded, took {:?}",
+            start.elapsed()
+        );
     }
 
     /// `/Type` decides over `/Kids`: a `/Page` with a stray `/Kids` is a page,

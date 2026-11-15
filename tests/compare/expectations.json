@@ -50,7 +50,6 @@
       {"file": "bug_644.pdf", "outcome": "error", "reason": "divergence: encrypted with a user password the harness does not supply; pdfium refuses it without one too (cpdf_security_handler_embeddertest: NoPassword, NoPasswordVersion5, and the hello-world documents opened only with their passwords)"},
       {"file": "bug_828049.pdf", "outcome": "error", "reason": "defect: audit/2026-11-15_lenient-pdf-header.md"},
       {"file": "circular_viewer_ref.pdf", "outcome": "error", "reason": "divergence: the file has no page tree; pdfium has no page to render either (fpdf_view/cpdf_parser/fpdf_dataavail/fpdf_ppo embedder tests open it without loading a page, or refuse it)"},
-      {"file": "document_aactions.pdf", "outcome": "error", "reason": "defect: audit/2026-11-15_page-tree-count-mismatch.md"},
       {"file": "encrypted.pdf", "outcome": "error", "reason": "divergence: encrypted with a user password the harness does not supply; pdfium refuses it without one too (cpdf_security_handler_embeddertest: NoPassword, NoPasswordVersion5, and the hello-world documents opened only with their passwords)"},
       {"file": "encrypted_hello_world_r2.pdf", "outcome": "error", "reason": "divergence: encrypted with a user password the harness does not supply; pdfium refuses it without one too (cpdf_security_handler_embeddertest: NoPassword, NoPasswordVersion5, and the hello-world documents opened only with their passwords)"},
       {"file": "encrypted_hello_world_r2_bad_okey.pdf", "outcome": "error", "reason": "divergence: damaged /O entry (31 bytes); pdfium refuses it as well (cpdf_security_handler_embeddertest BadOkeyVersion2/3: EXPECT_FALSE)"},
@@ -62,8 +61,6 @@
       {"file": "javascript/xfa_specific/bug_1043510.pdf", "outcome": "error", "reason": "divergence: XFA-only form without PDF pages; XFA is not processed (pdfium's case is a JavaScript test with no expected image)"},
       {"file": "javascript/xfa_specific/bug_1047914.in", "outcome": "error", "reason": "divergence: XFA-only form without PDF pages; XFA is not processed (pdfium's case is a JavaScript test with no expected image)"},
       {"file": "javascript/xfa_specific/bug_1312736.in", "outcome": "error", "reason": "divergence: XFA-only form without PDF pages; XFA is not processed (pdfium's case is a JavaScript test with no expected image)"},
-      {"file": "named_dests_old_style.pdf", "outcome": "error", "reason": "defect: audit/2026-11-15_page-tree-count-mismatch.md"},
-      {"file": "no_page_count.pdf", "outcome": "error", "reason": "defect: audit/2026-11-15_page-tree-count-mismatch.md"},
       {"file": "pixel/bug_1015233.in", "page": 1, "outcome": "differs", "rmse": 8.17, "reason": "aa: glyph, stroke and shading edges only; the content matches pdfium's expected image, nothing is missing or recoloured (examined side by side)"},
       {"file": "pixel/bug_1021762.in", "page": 1, "outcome": "differs", "rmse": 5.13, "reason": "aa: glyph, stroke and shading edges only; the content matches pdfium's expected image, nothing is missing or recoloured (examined side by side)"},
       {"file": "pixel/bug_1072440.in", "page": 1, "outcome": "differs", "rmse": 11.16, "tile": 24.7, "reason": "defect: audit/2026-11-15_textfield-maxlen-comb.md"},
@@ -205,8 +202,7 @@
       {"file": "pixel/xfa_specific/xfa_tiff_lzw_image.in", "page": 1, "outcome": "differs", "rmse": 76.5, "tile": 260.1, "reason": "divergence: XFA form; pdfium lays the page out from the XFA template, XFA is not processed here (warned for dynamic forms) and the PDF page content is drawn as it stands"},
       {"file": "pixel/xfa_specific/xfa_tiff_packbits_image.in", "page": 1, "outcome": "differs", "rmse": 76.5, "tile": 260.1, "reason": "divergence: XFA form; pdfium lays the page out from the XFA template, XFA is not processed here (warned for dynamic forms) and the PDF page content is drawn as it stands"},
       {"file": "raw_type_text.pdf", "outcome": "strict", "reason": "divergence: an image resource that is not a stream; it is skipped (pdfium's case is a structure-tree test with no expected image); --strict reports the skip"},
-      {"file": "repeat_viewer_ref.pdf", "outcome": "error", "reason": "divergence: the file has no page tree; pdfium has no page to render either (fpdf_view/cpdf_parser/fpdf_dataavail/fpdf_ppo embedder tests open it without loading a page, or refuse it)"},
-      {"file": "unsupported_feature.pdf", "outcome": "error", "reason": "defect: audit/2026-11-15_page-tree-count-mismatch.md"}
+      {"file": "repeat_viewer_ref.pdf", "outcome": "error", "reason": "divergence: the file has no page tree; pdfium has no page to render either (fpdf_view/cpdf_parser/fpdf_dataavail/fpdf_ppo embedder tests open it without loading a page, or refuse it)"}
     ]
   }
 }
