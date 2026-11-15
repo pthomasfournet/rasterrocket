@@ -4,10 +4,10 @@
 //! grayscale `RenderedPage`; this module is the single definition of how one is
 //! born from a `Bitmap<Gray8>` and of the pixel-dimension safety limits.
 
-use color::{Gray8, Rgb8, SampleDepth};
+use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
-use crate::{PageDiagnostics, PixelFormat, RasterError, RenderedPage};
+use crate::{PageDiagnostics, PixelFormat, Pixels, RasterError, RenderedPage};
 
 // ── Safety limits ───────────────────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ pub fn gray8_to_rendered_page(
         page_num,
         width: bmp.width,
         height: bmp.height,
-        pixels,
+        pixels: Pixels::U8(pixels),
         format: PixelFormat::Gray8,
         dpi,
         diagnostics,
@@ -147,7 +147,7 @@ pub fn gray8_into_rendered_page(
         page_num,
         width,
         height,
-        pixels,
+        pixels: Pixels::U8(pixels),
         format: PixelFormat::Gray8,
         dpi,
         diagnostics,
@@ -171,8 +171,65 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
         page_num,
         width: bmp.width,
         height: bmp.height,
-        pixels,
+        pixels: Pixels::U8(pixels),
         format: PixelFormat::Rgba8,
+        dpi,
+        diagnostics,
+    }
+}
+
+/// A [`PixelFormat::Gray16`] [`RenderedPage`] of `bmp`, its rows packed.
+pub(crate) fn gray16_into_rendered_page(
+    bmp: &Bitmap<Gray16>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let w = bmp.width as usize;
+    let mut pixels = Vec::with_capacity(w * bmp.height as usize);
+    for y in 0..bmp.height {
+        pixels.extend_from_slice(&bmp.row_samples(y)[..w]);
+    }
+    RenderedPage {
+        page_num,
+        width: bmp.width,
+        height: bmp.height,
+        pixels: Pixels::U16(pixels),
+        format: PixelFormat::Gray16,
+        dpi,
+        diagnostics,
+    }
+}
+
+/// [`rgb8_to_rgba_rendered_page`] at 16 bits: a [`PixelFormat::Rgba16`]
+/// page, alpha not premultiplied, opaque where the bitmap has no alpha
+/// plane.
+pub(crate) fn rgb16_to_rgba16_rendered_page(
+    bmp: &Bitmap<Rgb16>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let w = bmp.width as usize;
+    let mut pixels = Vec::with_capacity(w * 4 * bmp.height as usize);
+    for y in 0..bmp.height {
+        let alpha = bmp.alpha_row(y);
+        for (x, rgb) in bmp.row_samples(y)[..w * 3]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            pixels.extend_from_slice(rgb);
+            pixels.push(alpha.map_or(u16::MAX, |a| a[x]));
+        }
+    }
+    RenderedPage {
+        page_num,
+        width: bmp.width,
+        height: bmp.height,
+        pixels: Pixels::U16(pixels),
+        format: PixelFormat::Rgba16,
         dpi,
         diagnostics,
     }
@@ -272,7 +329,7 @@ mod tests {
         assert_eq!((page.width, page.height), (2, 2));
         assert_eq!(
             page.pixels,
-            vec![10, 20, 30, 40],
+            Pixels::U8(vec![10, 20, 30, 40]),
             "must be tight, padding stripped"
         );
         assert_eq!(page.pixels.len(), 4);
@@ -286,10 +343,28 @@ mod tests {
         bmp.alpha_plane_mut().unwrap().copy_from_slice(&[0, 200]);
         let page = rgb8_to_rgba_rendered_page(&bmp, 1, 72.0, PageDiagnostics::default());
         assert_eq!(page.format, PixelFormat::Rgba8);
-        assert_eq!(page.pixels, vec![1, 2, 3, 0, 4, 5, 6, 200]);
+        assert_eq!(page.pixels, Pixels::U8(vec![1, 2, 3, 0, 4, 5, 6, 200]));
         let opaque = Bitmap::<Rgb8>::new(1, 1, 1, false);
         let page = rgb8_to_rgba_rendered_page(&opaque, 1, 72.0, PageDiagnostics::default());
-        assert_eq!(page.pixels[3], u8::MAX);
+        assert_eq!(page.pixels.as_u8().unwrap()[3], u8::MAX);
+    }
+
+    #[test]
+    fn sixteen_bit_pages_pack_their_samples() {
+        let mut gray = Bitmap::<Gray16>::new(2, 1, 4, false);
+        gray.row_samples_mut(0)[..2].copy_from_slice(&[1, 65_535]);
+        let page = gray16_into_rendered_page(&gray, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(
+            (page.format, page.pixels),
+            (PixelFormat::Gray16, Pixels::U16(vec![1, 65_535]))
+        );
+        let mut rgb = Bitmap::<Rgb16>::new(1, 1, 1, true);
+        rgb.row_samples_mut(0).copy_from_slice(&[1, 2, 3]);
+        rgb.alpha_plane_mut().unwrap()[0] = 400;
+        let page = rgb16_to_rgba16_rendered_page(&rgb, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(page.format, PixelFormat::Rgba16);
+        assert_eq!(page.pixels, Pixels::U16(vec![1, 2, 3, 400]));
+        assert_eq!(page.format.bytes_per_pixel(), 8);
     }
 
     #[test]

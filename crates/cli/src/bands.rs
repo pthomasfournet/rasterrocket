@@ -7,12 +7,12 @@
 use std::fs::File;
 use std::io::BufWriter;
 
-use color::Rgb8;
 use encode::{
     PngColor, PngWriter, PnmKind, PnmWriter, RowImage, RowLayout, TiffCompression, TiffStream,
 };
-use pdf_raster::{BandError, RasterSession, RenderParams, render_page_bands};
-use raster::Bitmap;
+use pdf_raster::{
+    BandBitmap, BandError, RasterError, RasterSession, RenderParams, render_page_bands,
+};
 
 use crate::args::{Args, InvertWhen, OutputFormat};
 use crate::cleanup::Page;
@@ -180,11 +180,16 @@ fn render_into(
 /// Bring `band`, rows from `y` of the page, to the output's colour model
 /// and hand it to `push`.
 fn prepared(
-    band: &Bitmap<Rgb8>,
+    band: BandBitmap<'_>,
     y: u32,
     args: &Args,
     push: &mut impl FnMut(RowImage<'_>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {
+    let BandBitmap::Rgb8(band) = band else {
+        return Err(RenderError::Raster(RasterError::InvalidOptions(
+            "a 16-bit band of an 8-bit render".to_owned(),
+        )));
+    };
     match tone::prepare_band(band, y, args) {
         None => push(RowImage::Rgb(band)),
         Some(Page::Rgb(rgb)) => push(RowImage::Rgb(&rgb)),

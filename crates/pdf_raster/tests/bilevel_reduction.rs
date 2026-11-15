@@ -82,13 +82,13 @@ fn render(pdf: Vec<u8>, dpi: f32) -> RenderedPage {
 fn assert_reduction_conserves_coverage(pdf: &[u8], what: &str) {
     let full = render(pdf.to_vec(), 288.0);
     assert_eq!((full.width, full.height), (400, 400));
-    let row = &full.pixels[..400];
+    let row = &full.pixels.as_u8().unwrap()[..400];
     assert!(
         row.iter().all(|&g| g == 0 || g == 255) && row[0] != row[1],
         "{what}: full-resolution row is not the crisp source pattern: {:?}",
         &row[..8],
     );
-    for (i, &g) in full.pixels.iter().enumerate() {
+    for (i, &g) in full.pixels.as_u8().unwrap().iter().enumerate() {
         assert_eq!(
             g,
             row[i % 400],
@@ -101,7 +101,7 @@ fn assert_reduction_conserves_coverage(pdf: &[u8], what: &str) {
     let block_mean = row[..4].iter().map(|&g| u32::from(g)).sum::<u32>() / 4;
     let reduced = render(pdf.to_vec(), 72.0);
     assert_eq!((reduced.width, reduced.height), (100, 100));
-    for (i, &g) in reduced.pixels.iter().enumerate() {
+    for (i, &g) in reduced.pixels.as_u8().unwrap().iter().enumerate() {
         assert!(
             u32::from(g).abs_diff(block_mean) <= 2,
             "{what}: reduced pixel ({}, {}) = {g}, expected the block mean {block_mean}",

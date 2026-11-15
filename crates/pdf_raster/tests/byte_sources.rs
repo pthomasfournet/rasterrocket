@@ -27,7 +27,7 @@ impl AsRef<[u8]> for Storage {
 }
 
 /// Gray pixels of the first `pages` pages of `session` at 72 dpi.
-fn renders(session: &RasterSession, pages: u32) -> Vec<Vec<u8>> {
+fn renders(session: &RasterSession, pages: u32) -> Vec<rasterrocket::Pixels> {
     let opts = RasterOptions::new(72.0);
     (1..=pages.min(session.total_pages()))
         .map(|page| {
@@ -169,7 +169,7 @@ fn large_file_renders_identically_mapped_and_read() {
     mapped.last_page = 1;
     let mut read = mapped.clone();
     read.read_into_memory = true;
-    let pixels = |opts: &RasterOptions| -> Vec<Vec<u8>> {
+    let pixels = |opts: &RasterOptions| -> Vec<rasterrocket::Pixels> {
         raster_pdf(file.path(), opts)
             .map(|(_, page)| page.expect("page renders").pixels)
             .collect()

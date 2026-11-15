@@ -300,7 +300,7 @@ pub fn gray_at(page: &RenderedPage, x: u32, y: u32) -> u8 {
         "({x}, {y}) is off the page"
     );
     let row = page.height - 1 - y;
-    page.pixels[(row * page.width + x) as usize]
+    page.pixels.as_u8().unwrap()[(row * page.width + x) as usize]
 }
 
 /// RGB of page 1 of `pdf`, rendered at 72 dpi on the CPU for `purpose`, at

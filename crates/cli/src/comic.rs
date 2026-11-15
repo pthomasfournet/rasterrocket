@@ -108,6 +108,13 @@ fn write_page(
         spill,
         format: args.output_format(),
     };
-    let luma = Bitmap::<Gray8>::from_packed(page.width, page.height, page.pixels);
+    let pdf_raster::Pixels::U8(pixels) = page.pixels else {
+        return Err(RenderError::Raster(
+            pdf_raster::RasterError::InvalidOptions(
+                "a comic page decodes to 8-bit gray".to_owned(),
+            ),
+        ));
+    };
+    let luma = Bitmap::<Gray8>::from_packed(page.width, page.height, pixels);
     render::write_cleaned(Page::Gray(luma), args, sink, page_i32, total_pages)
 }

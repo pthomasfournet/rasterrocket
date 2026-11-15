@@ -221,6 +221,9 @@ fn device_render(
 
 /// Why `job`'s page cannot be recorded, known before interpretation.
 fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
+    if job.params.depth != color::SampleDepth::Eight {
+        return Some("16-bit samples");
+    }
     pdf_interp::renderer::device_page_ineligible(
         job.ink,
         job.group.is_some(),

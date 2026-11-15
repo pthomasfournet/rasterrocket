@@ -56,7 +56,7 @@ fn overprint_changes_only_when_enabled() {
 
 /// Gray value at row `row`, column `x` of `page`.
 fn px(page: &RenderedPage, row: u32, x: u32) -> u8 {
-    page.pixels[(row * page.width + x) as usize]
+    page.pixels.as_u8().unwrap()[(row * page.width + x) as usize]
 }
 
 #[test]

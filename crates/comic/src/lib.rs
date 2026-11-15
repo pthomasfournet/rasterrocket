@@ -563,7 +563,10 @@ startxref\n180\n%%EOF"
         assert_eq!((*n1, *n2), (1, 2));
         let p1 = r1.as_ref().unwrap();
         let p2 = r2.as_ref().unwrap();
-        assert!(p1.pixels[0] < p2.pixels[0], "page2 darker than page10");
+        assert!(
+            p1.pixels.as_u8().unwrap()[0] < p2.pixels.as_u8().unwrap()[0],
+            "page2 darker than page10"
+        );
         assert_eq!((p1.width, p1.height), (4, 4));
     }
 
@@ -582,7 +585,11 @@ startxref\n180\n%%EOF"
         // Gray falls along the row as red gives way to blue's smaller
         // weight... the first pixel (0, 0, 255) is darker than the last of
         // the row (210, 0, 45).
-        assert!(page.pixels[0] < page.pixels[7], "{:?}", &page.pixels[..8]);
+        assert!(
+            page.pixels.as_u8().unwrap()[0] < page.pixels.as_u8().unwrap()[7],
+            "{:?}",
+            &page.pixels.as_u8().unwrap()[..8]
+        );
     }
 
     #[test]
@@ -601,8 +608,10 @@ startxref\n180\n%%EOF"
         let turned = render(pdf_raster::Rotation::Cw90);
         assert_eq!((turned.width, turned.height), (4, 8));
         // The top row, left to right, is now the right column, top to bottom.
-        let right_column: Vec<u8> = (0..8).map(|y| turned.pixels[y * 4 + 3]).collect();
-        assert_eq!(right_column, upright.pixels[..8]);
+        let right_column: Vec<u8> = (0..8)
+            .map(|y| turned.pixels.as_u8().unwrap()[y * 4 + 3])
+            .collect();
+        assert_eq!(right_column, upright.pixels.as_u8().unwrap()[..8]);
     }
 
     #[test]
@@ -612,7 +621,7 @@ startxref\n180\n%%EOF"
         let (_dir, path) = write_temp_cbz("book.cbz", &cbz);
         let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
             .expect("open")
-            .map(|(n, page)| (n, page.expect("page").pixels[0]))
+            .map(|(n, page)| (n, page.expect("page").pixels.as_u8().unwrap()[0]))
             .collect();
         let numbers: Vec<u32> = pages.iter().map(|&(n, _)| n).collect();
         assert_eq!(
@@ -637,7 +646,7 @@ startxref\n180\n%%EOF"
         let (_dir, path) = write_temp_cbz("book.cbr", &builder.to_bytes().expect("archive"));
         let pages: Vec<_> = open_comic(&path, &ComicOptions::default())
             .expect("open")
-            .map(|(n, page)| (n, page.expect("page").pixels[0]))
+            .map(|(n, page)| (n, page.expect("page").pixels.as_u8().unwrap()[0]))
             .collect();
         assert_eq!(pages.len(), 2);
         assert_eq!((pages[0].0, pages[1].0), (1, 2));
@@ -797,7 +806,7 @@ startxref\n180\n%%EOF"
             let mut opts = ComicOptions::new(72.0);
             opts.session.annotations = annotations;
             let (_, page) = open_comic(&path, &opts).unwrap().next().unwrap();
-            page.unwrap().pixels
+            page.unwrap().pixels.as_u8().unwrap().to_vec()
         };
         let shown = render(true);
         assert!(

@@ -53,7 +53,7 @@ fn reduced_rgb_image_is_area_averaged_with_or_without_trailing_bytes() {
         let page = render(&columns(trailing));
         let interior: Vec<u8> = (10..90)
             .flat_map(|y| (10..90).map(move |x| (x, y)))
-            .map(|(x, y)| page.pixels[(y * page.width + x) as usize])
+            .map(|(x, y)| page.pixels.as_u8().unwrap()[(y * page.width + x) as usize])
             .collect();
         assert!(
             interior.iter().all(|&v| (120..=136).contains(&v)),

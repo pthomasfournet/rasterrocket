@@ -130,12 +130,12 @@ mod vk_init;
 
 use std::path::Path;
 
-pub use bands::{Band, BandError, render_page_bands};
+pub use bands::{Band, BandBitmap, BandError, render_page_bands};
 pub use color::SampleDepth;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
-pub use gray::{rgb_into_gray, rgb_to_gray};
+pub use gray::{rgb_into_gray, rgb_to_gray, rgb16_to_gray16};
 pub use open::{
     RasterSession, open_session, open_session_from_bytes, open_session_from_reader,
     open_session_from_shared, prescan_session,
@@ -146,6 +146,7 @@ pub use page::{
 };
 pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;
+pub use pdf_interp::renderer::FinishedCanvas;
 pub use pdf_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, ImageFailure, PageDiagnostics,
 };
@@ -155,8 +156,8 @@ pub use pdf_interp::{
     ScriptLocation, UnsupportedFeature,
 };
 pub use render::{
-    render_page_gray, render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics,
-    render_page_rgba,
+    render_page_canvas, render_page_canvas_with_diagnostics, render_page_gray, render_page_rgb,
+    render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
 };
 pub use request::{CancelToken, RenderParams, RenderRegion};
 
@@ -463,6 +464,13 @@ pub struct RasterOptions {
     /// `[0, 0, 0, 0]`.  Incompatible with [`deskew`](Self::deskew).
     pub transparent_background: bool,
 
+    /// The depth of the pages' samples (see [`RenderParams::depth`]).
+    /// Default [`SampleDepth::Eight`]; [`SampleDepth::Sixteen`] yields
+    /// [`PixelFormat::Gray16`] pages, or [`PixelFormat::Rgba16`] over a
+    /// transparent backdrop, of [`Pixels::U16`].  Incompatible with
+    /// [`deskew`](Self::deskew) and [`overprint`](Self::overprint).
+    pub depth: SampleDepth,
+
     /// Cancellation flag polled while each page renders; default `None`.
     ///
     /// Once it is raised, the page in progress stops before its next
@@ -510,6 +518,7 @@ impl Default for RasterOptions {
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             transparent_background: false,
+            depth: SampleDepth::Eight,
             cancel: None,
         }
     }
@@ -527,16 +536,91 @@ pub enum PixelFormat {
     /// Three bytes per pixel, `[R, G, B]` in sRGB.  Written by
     /// [`PageBuffer::render_rgb_into`]; a [`RenderedPage`] is never in it.
     Rgb8,
+    /// One 16-bit sample of gray per pixel, 0 black.
+    Gray16,
+    /// Three 16-bit samples per pixel, `[R, G, B]` in sRGB.
+    Rgb16,
+    /// Four 16-bit samples per pixel, `[R, G, B, A]` in sRGB, alpha not
+    /// premultiplied.
+    Rgba16,
 }
 
 impl PixelFormat {
     /// Bytes per pixel.
     #[must_use]
     pub const fn bytes_per_pixel(self) -> usize {
+        self.samples_per_pixel() * self.depth().bytes() as usize
+    }
+
+    /// Samples per pixel.
+    #[must_use]
+    pub const fn samples_per_pixel(self) -> usize {
         match self {
-            Self::Gray8 => 1,
-            Self::Rgb8 => 3,
-            Self::Rgba8 => 4,
+            Self::Gray8 | Self::Gray16 => 1,
+            Self::Rgb8 | Self::Rgb16 => 3,
+            Self::Rgba8 | Self::Rgba16 => 4,
+        }
+    }
+
+    /// The depth of the samples.
+    #[must_use]
+    pub const fn depth(self) -> SampleDepth {
+        match self {
+            Self::Gray8 | Self::Rgb8 | Self::Rgba8 => SampleDepth::Eight,
+            Self::Gray16 | Self::Rgb16 | Self::Rgba16 => SampleDepth::Sixteen,
+        }
+    }
+}
+
+/// The samples of a [`RenderedPage`], of its format's depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pixels {
+    /// 8-bit samples.
+    U8(Vec<u8>),
+    /// 16-bit samples, native-endian in memory.
+    U16(Vec<u16>),
+}
+
+impl Pixels {
+    /// The 8-bit samples; `None` for 16-bit ones.
+    #[must_use]
+    pub fn as_u8(&self) -> Option<&[u8]> {
+        match self {
+            Self::U8(v) => Some(v),
+            Self::U16(_) => None,
+        }
+    }
+
+    /// The 16-bit samples; `None` for 8-bit ones.
+    #[must_use]
+    pub fn as_u16(&self) -> Option<&[u16]> {
+        match self {
+            Self::U16(v) => Some(v),
+            Self::U8(_) => None,
+        }
+    }
+
+    /// The number of samples.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::U8(v) => v.len(),
+            Self::U16(v) => v.len(),
+        }
+    }
+
+    /// Whether there are no samples.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes the samples occupy.
+    #[must_use]
+    pub const fn byte_len(&self) -> usize {
+        match self {
+            Self::U8(v) => v.len(),
+            Self::U16(v) => v.len() * 2,
         }
     }
 }
@@ -552,13 +636,16 @@ pub struct RenderedPage {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// Raw pixel bytes in [`format`](Self::format), tightly packed
-    /// (`stride == width * format.bytes_per_pixel()`), top-to-bottom,
-    /// left-to-right.  Length is `width * height * format.bytes_per_pixel()`:
-    /// `width * height` for the default gray pages.
-    pub pixels: Vec<u8>,
+    /// The samples in [`format`](Self::format), tightly packed
+    /// (`width * format.samples_per_pixel()` a row), top-to-bottom,
+    /// left-to-right: [`Pixels::U8`] for an 8-bit format, [`Pixels::U16`]
+    /// for a 16-bit one.  Holds `width * height * format.samples_per_pixel()`
+    /// samples: `width * height` for the default gray pages.
+    pub pixels: Pixels,
     /// The layout of [`pixels`](Self::pixels): [`PixelFormat::Gray8`], or
-    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`].
+    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`];
+    /// [`PixelFormat::Gray16`] and [`PixelFormat::Rgba16`] at
+    /// [`RasterOptions::depth`] 16.
     pub format: PixelFormat,
     /// Physical resolution of the bitmap in pixels per inch (`opts.dpi`).
     ///

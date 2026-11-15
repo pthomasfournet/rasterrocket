@@ -8,7 +8,7 @@ use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas};
 use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
-use crate::gray::rgb_into_gray;
+use crate::gray::{rgb_into_gray, rgb16_to_gray16};
 use crate::{RasterError, RasterOptions, RasterSession, RenderParams, RenderRegion, RenderedPage};
 
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
@@ -66,15 +66,55 @@ pub fn render_page_rgb_with(
 ///
 /// # Errors
 ///
-/// As [`render_page_rgb_with`].
+/// As [`render_page_rgb_with`], and [`RasterError::InvalidOptions`] for
+/// [`RenderParams::depth`] 16, which [`render_page_canvas`] renders.
 pub fn render_page_rgb_with_diagnostics(
     session: &RasterSession,
     page_num: u32,
     params: &RenderParams,
 ) -> Result<(Bitmap<Rgb8>, crate::PageDiagnostics), RasterError> {
+    if params.depth != SampleDepth::Eight {
+        return Err(RasterError::InvalidOptions(
+            "render_page_rgb returns 8-bit RGB: render 16-bit samples with render_page_canvas"
+                .to_owned(),
+        ));
+    }
+    let (canvas, diag) = render_page_canvas_with_diagnostics(session, page_num, params)?;
+    Ok((rgb8(canvas)?, diag))
+}
+
+/// Render page `page_num` (1-based) as `params` describes, at the depth of
+/// [`RenderParams::depth`]: [`FinishedCanvas::Rgb8`] at 8 bits, the bitmap
+/// [`render_page_rgb_with`] returns, and [`FinishedCanvas::Rgb16`] at 16.
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`], and [`RasterError::InvalidOptions`] for a
+/// 16-bit render of a session that simulates overprint.
+pub fn render_page_canvas(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+) -> Result<FinishedCanvas, RasterError> {
+    render_page_canvas_with_diagnostics(session, page_num, params).map(|(canvas, _)| canvas)
+}
+
+/// [`render_page_canvas`], also returning the [`PageDiagnostics`] the
+/// render collected.
+///
+/// [`PageDiagnostics`]: crate::PageDiagnostics
+///
+/// # Errors
+///
+/// As [`render_page_canvas`].
+pub fn render_page_canvas_with_diagnostics(
+    session: &RasterSession,
+    page_num: u32,
+    params: &RenderParams,
+) -> Result<(FinishedCanvas, crate::PageDiagnostics), RasterError> {
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
-    render_page_rgb_with_geom(
+    render_page_canvas_with_geom(
         session,
         page_num,
         page_id,
@@ -84,11 +124,28 @@ pub fn render_page_rgb_with_diagnostics(
     )
 }
 
+/// The 8-bit bitmap of `canvas`, rendered at 8 bits.
+///
+/// # Errors
+///
+/// [`RasterError::InvalidOptions`] for a 16-bit bitmap: the renderer
+/// returns a bitmap of the depth it is asked for, so only a caller that
+/// asked for 16 bits receives one.
+pub(crate) fn rgb8(canvas: FinishedCanvas) -> Result<Bitmap<Rgb8>, RasterError> {
+    match canvas {
+        FinishedCanvas::Rgb8(bitmap) => Ok(bitmap),
+        FinishedCanvas::Rgb16(_) => Err(RasterError::InvalidOptions(
+            "a 16-bit page where an 8-bit one was rendered".to_owned(),
+        )),
+    }
+}
+
 /// Render page `page_num` (1-based) of `session` to the grayscale
 /// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
 ///
 /// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
-/// [`deskew`](RasterOptions::deskew) and [`cancel`](RasterOptions::cancel);
+/// [`depth`](RasterOptions::depth), [`deskew`](RasterOptions::deskew) and
+/// [`cancel`](RasterOptions::cancel);
 /// [`transparent_background`](RasterOptions::transparent_background) is
 /// [`render_page_rgba`]'s.
 /// The page selection fields are the caller's, and the fields mirrored on
@@ -100,18 +157,25 @@ pub fn render_page_rgb_with_diagnostics(
 /// As [`render_page_rgb_with`], plus [`RasterError::Deskew`] when deskew
 /// is asked of a page larger than
 /// [`DESKEW_MAX_SIDE`](crate::deskew::DESKEW_MAX_SIDE) (see
-/// [`deskew::apply`](crate::deskew::apply)).
+/// [`deskew::apply`](crate::deskew::apply)), and
+/// [`RasterError::InvalidOptions`] when deskew is asked of a 16-bit page:
+/// deskew operates on 8-bit gray.
 pub fn render_page_gray(
     session: &RasterSession,
     page_num: u32,
     opts: &RasterOptions,
 ) -> Result<RenderedPage, RasterError> {
+    if opts.deskew && opts.depth != SampleDepth::Eight {
+        return Err(RasterError::InvalidOptions(
+            "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
+        ));
+    }
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
-    let mut params = RenderParams::new(f64::from(dpi) / 72.0);
+    let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_depth(opts.depth);
     params.cancel.clone_from(&opts.cancel);
-    let (rgb, diagnostics) = render_page_rgb_with_geom(
+    let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
         page_id,
@@ -119,6 +183,17 @@ pub fn render_page_gray(
         &params,
         &mut CanvasBuffers::default(),
     )?;
+    let rgb = match canvas {
+        FinishedCanvas::Rgb8(rgb) => rgb,
+        FinishedCanvas::Rgb16(rgb) => {
+            return Ok(crate::page::gray16_into_rendered_page(
+                &rgb16_to_gray16(&rgb),
+                page_num,
+                dpi,
+                diagnostics,
+            ));
+        }
+    };
     let mut gray = rgb_into_gray(rgb);
 
     if opts.deskew {
@@ -139,10 +214,12 @@ pub fn render_page_gray(
 /// The page is the one [`raster_pdf`](crate::raster_pdf) yields when
 /// [`RasterOptions::transparent_background`] is set:
 /// [`PixelFormat::Rgba8`](crate::PixelFormat::Rgba8), alpha not
-/// premultiplied.
+/// premultiplied, or [`PixelFormat::Rgba16`](crate::PixelFormat::Rgba16)
+/// at [`RasterOptions::depth`] 16.
 ///
-/// Of `opts`, only [`dpi`](RasterOptions::dpi) and
-/// [`cancel`](RasterOptions::cancel) apply.
+/// Of `opts`, only [`dpi`](RasterOptions::dpi),
+/// [`depth`](RasterOptions::depth) and [`cancel`](RasterOptions::cancel)
+/// apply.
 ///
 /// # Errors
 ///
@@ -159,9 +236,11 @@ pub fn render_page_rgba(
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
-    let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_transparent_background();
+    let mut params = RenderParams::new(f64::from(dpi) / 72.0)
+        .with_transparent_background()
+        .with_depth(opts.depth);
     params.cancel.clone_from(&opts.cancel);
-    let (rgb, diagnostics) = render_page_rgb_with_geom(
+    let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
         page_id,
@@ -169,12 +248,14 @@ pub fn render_page_rgba(
         &params,
         &mut CanvasBuffers::default(),
     )?;
-    Ok(crate::page::rgb8_to_rgba_rendered_page(
-        &rgb,
-        page_num,
-        dpi,
-        diagnostics,
-    ))
+    Ok(match canvas {
+        FinishedCanvas::Rgb8(rgb) => {
+            crate::page::rgb8_to_rgba_rendered_page(&rgb, page_num, dpi, diagnostics)
+        }
+        FinishedCanvas::Rgb16(rgb) => {
+            crate::page::rgb16_to_rgba16_rendered_page(&rgb, page_num, dpi, diagnostics)
+        }
+    })
 }
 
 /// The view a render of `geom` at `scales` (horizontal, vertical) draws: the
@@ -265,14 +346,14 @@ pub(crate) const fn allocation_failed(e: raster::BitmapAllocError) -> RasterErro
 ///
 /// `params.policy` overrides `session.policy` for GPU decoder selection only.
 /// All other session state (CUDA context, Vulkan backend, VA-API queue) is unaffected.
-pub(crate) fn render_page_rgb_with_geom(
+pub(crate) fn render_page_canvas_with_geom(
     session: &RasterSession,
     page_num: u32,
     page_id: pdf::ObjectId,
     geom: pdf_interp::PageGeometry,
     params: &RenderParams,
     buffers: &mut CanvasBuffers,
-) -> Result<(Bitmap<Rgb8>, pdf_interp::renderer::PageDiagnostics), RasterError> {
+) -> Result<(FinishedCanvas, pdf_interp::renderer::PageDiagnostics), RasterError> {
     let effective_policy = begin(session, params)?;
     let doc = &session.doc;
     let view = page_view(
@@ -312,11 +393,10 @@ pub(crate) fn render_page_rgb_with_geom(
     check_strict_images(session, renderer.image_failures())?;
     log_failures(page_num, renderer.image_failures());
 
-    let (canvas, mut diag, spare) = renderer
+    let (bitmap, mut diag, spare) = renderer
         .try_finish_keeping(params.transparent_background)
         .map_err(allocation_failed)?;
     *buffers = spare;
-    let bitmap = rgb8(canvas)?;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     #[cfg(feature = "vulkan")]
@@ -324,22 +404,6 @@ pub(crate) fn render_page_rgb_with_geom(
         diag.device_page = device_page;
     }
     Ok((bitmap, diag))
-}
-
-/// The 8-bit bitmap of `canvas`, rendered at 8 bits.
-///
-/// # Errors
-///
-/// [`RasterError::InvalidOptions`] for a 16-bit bitmap: the renderer
-/// returns a bitmap of the depth it is asked for, and these renders ask
-/// for 8 bits.
-pub(crate) fn rgb8(canvas: FinishedCanvas) -> Result<Bitmap<Rgb8>, RasterError> {
-    match canvas {
-        FinishedCanvas::Rgb8(bitmap) => Ok(bitmap),
-        FinishedCanvas::Rgb16(_) => Err(RasterError::InvalidOptions(
-            "a 16-bit page where an 8-bit one was rendered".to_owned(),
-        )),
-    }
 }
 
 /// The error of a render that `renderer` stopped early: cancelled, out of
@@ -401,15 +465,22 @@ impl PartialFailure for pdf_interp::renderer::ContentFailure {
     }
 }
 
-/// The checks every render makes before it parses the page: the scales
-/// and the cancellation token; returns the backend policy of its image
-/// decoders.
+/// The checks every render makes before it parses the page: the scales,
+/// the depth and the cancellation token; returns the backend policy of
+/// its image decoders.
 pub(crate) fn begin(
     session: &RasterSession,
     params: &RenderParams,
 ) -> Result<crate::BackendPolicy, RasterError> {
     check_scale(params.scale_x)?;
     check_scale(params.scale_y)?;
+    if params.depth != SampleDepth::Eight && session.overprint {
+        return Err(RasterError::InvalidOptions(
+            "overprint simulation paints 8-bit ink: render at depth 8, or without overprint, \
+             for 16-bit samples"
+                .to_owned(),
+        ));
+    }
     if params
         .cancel
         .as_ref()
@@ -450,7 +521,7 @@ pub(crate) struct PageJob<'a> {
     pub(crate) group: Option<pdf_interp::resources::TransparencyGroupParams>,
     /// Whether the page is painted on an ink canvas.
     pub(crate) ink: bool,
-    params: &'a RenderParams,
+    pub(crate) params: &'a RenderParams,
     /// The backend policy for GPU decoder selection.
     policy: crate::BackendPolicy,
 }
@@ -497,7 +568,7 @@ impl<'a> PageJob<'a> {
             self.page_id,
             self.group,
             self.ink,
-            SampleDepth::Eight,
+            self.params.depth,
             buffers,
         )
         .map_err(allocation_failed)?;

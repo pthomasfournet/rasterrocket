@@ -70,6 +70,20 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
     if opts.deskew && opts.transparent_background {
         return Some(RasterError::deskew_needs_gray());
     }
+    if opts.depth != color::SampleDepth::Eight {
+        if opts.deskew {
+            return Some(RasterError::InvalidOptions(
+                "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
+            ));
+        }
+        if opts.overprint {
+            return Some(RasterError::InvalidOptions(
+                "overprint simulation paints 8-bit ink: render at depth 8, or without \
+                 overprint, for 16-bit samples"
+                    .to_owned(),
+            ));
+        }
+    }
     if opts.pages.is_none() {
         if opts.first_page == 0 {
             return Some(RasterError::InvalidOptions(
@@ -568,7 +582,7 @@ mod channel_tests {
             page_num: 3,
             width: 1,
             height: 1,
-            pixels: vec![128u8],
+            pixels: crate::Pixels::U8(vec![128u8]),
             format: crate::PixelFormat::Gray8,
             dpi: 72.0,
             diagnostics: crate::PageDiagnostics::default(),
@@ -593,7 +607,7 @@ mod channel_tests {
                     page_num,
                     width: 1,
                     height: 1,
-                    pixels: vec![0u8],
+                    pixels: crate::Pixels::U8(vec![0u8]),
                     format: crate::PixelFormat::Gray8,
                     dpi: 72.0,
                     diagnostics: crate::PageDiagnostics::default(),
@@ -860,8 +874,8 @@ startxref\n180\n%%EOF"
             page.height
         );
         assert_eq!(
-            page.pixels.len() as u64,
-            u64::from(page.width) * u64::from(page.height),
+            page.pixels.as_u8().map(<[u8]>::len),
+            usize::try_from(u64::from(page.width) * u64::from(page.height)).ok(),
             "grayscale buffer must be exactly width × height bytes"
         );
     }

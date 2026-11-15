@@ -57,7 +57,7 @@ fn page_gray(p: &RenderedPage) -> Gray {
     Gray {
         w: p.width as usize,
         h: p.height as usize,
-        px: p.pixels.clone(),
+        px: p.pixels.as_u8().unwrap().to_vec(),
     }
 }
 
@@ -232,7 +232,8 @@ fn flatbed_pages_pass_through_unchanged() {
             continue;
         };
         for page in &plain {
-            let view = GrayView::packed(&page.pixels, page.width as usize, page.height as usize);
+            let pixels = page.pixels.as_u8().unwrap();
+            let view = GrayView::packed(pixels, page.width as usize, page.height as usize);
             let out = camera::process(view, &CameraOptions::all()).expect("valid page");
             let n = page.page_num;
             assert_eq!(out.pages.len(), 1, "{name} page {n}: split");
@@ -242,7 +243,7 @@ fn flatbed_pages_pass_through_unchanged() {
                 (view.width, view.height),
                 "{name} page {n}: resized"
             );
-            assert!(got.data == page.pixels, "{name} page {n}: pixels changed");
+            assert!(got.data == pixels, "{name} page {n}: pixels changed");
             checked += 1;
         }
     }

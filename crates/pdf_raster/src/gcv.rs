@@ -189,9 +189,9 @@ fn encode_jpeg(pixels: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, Gc
 /// limit even downscaled. Never returns an over-budget or > 75 MP payload.
 /// [`GcvError::NotGray`] for a page that is not [`PixelFormat::Gray8`].
 pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImage, GcvError> {
-    if page.format != PixelFormat::Gray8 {
+    let (PixelFormat::Gray8, Some(pixels)) = (page.format, page.pixels.as_u8()) else {
         return Err(GcvError::NotGray(page.format));
-    }
+    };
     // A degenerate (zero-area) page has no valid payload.
     if page.width == 0 || page.height == 0 {
         return Err(GcvError::Unfittable {
@@ -238,15 +238,9 @@ pub fn encode_for_gcv(page: &RenderedPage, budget: &GcvBudget) -> Result<GcvImag
 
     for (di, &(dw, dh)) in dims.iter().enumerate() {
         let buf: Cow<[u8]> = if di == 0 {
-            Cow::Borrowed(&page.pixels)
+            Cow::Borrowed(pixels)
         } else {
-            Cow::Owned(downscale_gray(
-                &page.pixels,
-                page.width,
-                page.height,
-                dw,
-                dh,
-            ))
+            Cow::Owned(downscale_gray(pixels, page.width, page.height, dw, dh))
         };
 
         let hi_jpeg = encode_jpeg(buf.as_ref(), dw, dh, hi_q)?;
@@ -372,7 +366,7 @@ mod tests {
             page_num: 1,
             width: w,
             height: h,
-            pixels,
+            pixels: crate::Pixels::U8(pixels),
             format: PixelFormat::Gray8,
             dpi: 300.0,
             diagnostics: crate::PageDiagnostics::default(),
@@ -383,7 +377,7 @@ mod tests {
     fn an_rgba_page_is_refused() {
         let mut page = noisy_page(4, 4);
         page.format = PixelFormat::Rgba8;
-        page.pixels.resize(4 * 4 * 4, 0);
+        page.pixels = crate::Pixels::U8(vec![0; 4 * 4 * 4]);
         assert!(matches!(
             encode_for_gcv(&page, &GcvBudget::default()),
             Err(GcvError::NotGray(PixelFormat::Rgba8))

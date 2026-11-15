@@ -15,7 +15,7 @@
 //! the dot product directly and a single shift replaces the decimal
 //! divide (the parity test is exhaustive over all 2²⁴ inputs).
 
-use color::{Gray8, Rgb8};
+use color::{Gray8, Gray16, Rgb8, Rgb16};
 use raster::Bitmap;
 
 /// `DeviceRGB` → `DeviceGray` weights in 1.15 fixed point; they sum to
@@ -74,6 +74,35 @@ pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8> {
     }
     data.truncate(w * height as usize);
     Bitmap::from_packed(width, height, data)
+}
+
+/// [`rgb_to_gray`] at 16 bits: the same 1.15 weights applied to 16-bit
+/// samples, whose weighted sum `32768 · 65535 + 16384` fits `u32`.
+#[must_use]
+pub fn rgb16_to_gray16(src: &Bitmap<Rgb16>) -> Bitmap<Gray16> {
+    let mut dst = Bitmap::<Gray16>::new(src.width, src.height, 1, false);
+    let w = src.width as usize;
+    for y in 0..src.height {
+        convert_row16(
+            &src.row_samples(y)[..w * 3],
+            &mut dst.row_samples_mut(y)[..w],
+        );
+    }
+    dst
+}
+
+/// One row of [`rgb16_to_gray16`].
+fn convert_row16(src_row: &[u16], dst_row: &mut [u16]) {
+    for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.as_chunks::<3>().0) {
+        let (r, g, b) = (u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "sum ≤ 65535 by the coefficient-sum identity"
+        )]
+        {
+            *dst_px = ((LUMA_R * r + LUMA_G * g + LUMA_B * b + LUMA_BIAS) >> LUMA_SHIFT) as u16;
+        }
+    }
 }
 
 /// Per-row dispatch.
@@ -277,6 +306,32 @@ unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    /// The 16-bit converter is the 8-bit one on widened samples to within
+    /// rounding, and maps neutrals to themselves.
+    #[test]
+    fn sixteen_bit_gray_matches_the_8_bit_weights() {
+        use color::Sample;
+        let mut rgb = Bitmap::<Rgb16>::new(4, 1, 1, false);
+        let px = [[0u8, 0, 0], [255, 255, 255], [200, 30, 60], [17, 140, 251]];
+        for (out, p) in rgb
+            .row_samples_mut(0)
+            .as_chunks_mut::<3>()
+            .0
+            .iter_mut()
+            .zip(px)
+        {
+            out.copy_from_slice(&p.map(u16::from_u8));
+        }
+        let gray = rgb16_to_gray16(&rgb);
+        let mut rgb8 = Bitmap::<Rgb8>::new(4, 1, 1, false);
+        rgb8.row_bytes_mut(0).copy_from_slice(px.as_flattened());
+        let gray8 = rgb_to_gray(&rgb8);
+        for (wide, narrow) in gray.row_samples(0).iter().zip(gray8.row_bytes(0)) {
+            assert!(wide.to_u8().abs_diff(*narrow) <= 1, "{wide} {narrow}");
+        }
+        assert_eq!(gray.row_samples(0)[..2], [0, u16::MAX]);
+    }
+
     use super::*;
 
     fn bitmap_from_pixels(pixels: &[[u8; 3]], w: u32, h: u32) -> Bitmap<Rgb8> {

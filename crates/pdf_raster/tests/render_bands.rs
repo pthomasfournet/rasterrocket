@@ -57,10 +57,13 @@ fn banded(
     let (mut out, mut alpha, mut next_y, mut width) = (Vec::new(), Vec::new(), 0, 0);
     let diag = render_page_bands(session, 1, &params, |band| {
         assert_eq!(band.y, next_y, "bands arrive in order");
-        assert!(band.bitmap.height <= rows);
-        width = band.bitmap.width;
-        next_y += band.bitmap.height;
-        pixels_of(band.bitmap, &mut out, &mut alpha);
+        let rasterrocket::BandBitmap::Rgb8(bitmap) = band.bitmap else {
+            panic!("an 8-bit render yields 8-bit bands");
+        };
+        assert!(bitmap.height <= rows);
+        width = bitmap.width;
+        next_y += bitmap.height;
+        pixels_of(bitmap, &mut out, &mut alpha);
         Ok::<(), std::convert::Infallible>(())
     })
     .unwrap_or_else(|e| panic!("bands of {rows} rows: {e}"));

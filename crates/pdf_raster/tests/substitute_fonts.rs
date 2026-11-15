@@ -66,7 +66,10 @@ fn missing_font_resource_draws_helvetica() {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         "(AB)",
     ));
-    assert!(helvetica.pixels.iter().any(|&v| v < 128), "Helvetica draws");
+    assert!(
+        helvetica.pixels.as_u8().unwrap().iter().any(|&v| v < 128),
+        "Helvetica draws"
+    );
     assert!(page.pixels == helvetica.pixels, "/F9 draws as Helvetica");
     assert_eq!(page.diagnostics.missing_fonts, ["F9"]);
 }

@@ -127,13 +127,21 @@ fn rgb(session: &RasterSession, scale: f64) -> Image {
 fn gray(session: &RasterSession, dpi: f32) -> Image {
     let page = render_page_gray(session, 1, &RasterOptions::new(dpi)).expect("renders");
     assert_eq!(page.format, PixelFormat::Gray8);
-    (page.width, page.height, page.pixels)
+    (
+        page.width,
+        page.height,
+        page.pixels.as_u8().unwrap().to_vec(),
+    )
 }
 
 fn rgba(session: &RasterSession, dpi: f32) -> Image {
     let page = render_page_rgba(session, 1, &RasterOptions::new(dpi)).expect("renders");
     assert_eq!(page.format, PixelFormat::Rgba8);
-    (page.width, page.height, page.pixels)
+    (
+        page.width,
+        page.height,
+        page.pixels.as_u8().unwrap().to_vec(),
+    )
 }
 
 #[test]
@@ -305,12 +313,16 @@ fn raster_options_turn_the_pages_of_the_one_call_entry_points() {
     let mut opts = RasterOptions::new(72.0);
     assert_eq!(opts.rotation, Rotation::None, "the default");
     let base = render_one(page(90, EXACT), &opts).expect("renders");
-    let base = (base.width, base.height, base.pixels);
+    let base = (
+        base.width,
+        base.height,
+        base.pixels.as_u8().unwrap().to_vec(),
+    );
     for rotation in ROTATIONS {
         opts.rotation = rotation;
         let got = render_one(page(90, EXACT), &opts).expect("renders");
         assert_same(
-            &(got.width, got.height, got.pixels),
+            &(got.width, got.height, got.pixels.as_u8().unwrap().to_vec()),
             &turn(&base, 1, rotation),
             &format!("{rotation:?}"),
         );

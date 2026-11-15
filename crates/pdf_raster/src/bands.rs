@@ -11,25 +11,68 @@
 
 use std::num::NonZeroU32;
 
-use color::Rgb8;
-use pdf_interp::renderer::{CanvasBuffers, PageDiagnostics, PageState};
+use color::{Rgb8, Rgb16};
+use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageState};
 use raster::Bitmap;
 
 use crate::render::{
     PageJob, allocation_failed, begin, check_aborted, check_strict_images, log_failures,
-    page_content, page_view, render_page_rgb_with_geom, rgb8, warn_unsupported,
+    page_content, page_view, render_page_canvas_with_geom, warn_unsupported,
 };
 use crate::{RasterError, RasterSession, RenderParams};
 
-/// One band of a page render: rows `y .. y + bitmap.height` of the view
+/// One band of a page render: rows `y .. y + bitmap.height()` of the view
 /// drawn (the page, or the region of [`RenderParams::region`]), the full
 /// width of the view.
 #[derive(Clone, Copy)]
 pub struct Band<'a> {
     /// The first row of the band, counted from the top of the view.
     pub y: u32,
-    /// The band's pixels, with an alpha plane over a transparent backdrop.
-    pub bitmap: &'a Bitmap<Rgb8>,
+    /// The band's pixels, at the render's depth, with an alpha plane over
+    /// a transparent backdrop.
+    pub bitmap: BandBitmap<'a>,
+}
+
+/// The pixels of a [`Band`], of the depth of [`RenderParams::depth`].
+#[derive(Clone, Copy)]
+pub enum BandBitmap<'a> {
+    /// 8-bit RGB.
+    Rgb8(&'a Bitmap<Rgb8>),
+    /// 16-bit RGB.
+    Rgb16(&'a Bitmap<Rgb16>),
+}
+
+impl<'a> BandBitmap<'a> {
+    /// The band of `canvas`.
+    const fn of(canvas: &'a FinishedCanvas) -> Self {
+        match canvas {
+            FinishedCanvas::Rgb8(b) => Self::Rgb8(b),
+            FinishedCanvas::Rgb16(b) => Self::Rgb16(b),
+        }
+    }
+
+    /// The bitmap's `(width, height)` in pixels.
+    #[must_use]
+    pub const fn dims(self) -> (u32, u32) {
+        match self {
+            Self::Rgb8(b) => (b.width, b.height),
+            Self::Rgb16(b) => (b.width, b.height),
+        }
+    }
+
+    /// Rows of the band.
+    #[must_use]
+    pub const fn height(self) -> u32 {
+        self.dims().1
+    }
+}
+
+/// Return the storage of `canvas` to `buffers` for the next band.
+fn reclaim(buffers: &mut CanvasBuffers, canvas: FinishedCanvas) {
+    match canvas {
+        FinishedCanvas::Rgb8(b) => buffers.rgb.reclaim(b),
+        FinishedCanvas::Rgb16(b) => buffers.rgb16.reclaim(b),
+    }
 }
 
 /// The error of [`render_page_bands`]: the render's, or the sink's.
@@ -84,7 +127,7 @@ fn band_rows(session: &RasterSession, params: &RenderParams, width: u32, bytes_p
 /// whole rows from the top, handing each band to `sink` in order; returns
 /// the page's diagnostics.
 ///
-/// The bands, stacked, are the bitmap [`render_page_rgb_with`] returns for
+/// The bands, stacked, are the bitmap [`render_page_canvas`] returns for
 /// the same `params`, byte for byte.  Memory is one band (sized by
 /// [`RenderParams::band_rows`] or the session's
 /// [`band_bytes`](crate::SessionConfig::band_bytes)) and the page's decoded
@@ -106,6 +149,7 @@ fn band_rows(session: &RasterSession, params: &RenderParams, width: u32, bytes_p
 /// error of `sink`.
 ///
 /// [`render_page_rgb_with`]: crate::render_page_rgb_with
+/// [`render_page_canvas`]: crate::render_page_canvas
 pub fn render_page_bands<E>(
     session: &RasterSession,
     page_num: u32,
@@ -125,7 +169,7 @@ pub fn render_page_bands<E>(
     )?;
     let rows = band_rows(session, params, view.width, bytes_per_px);
     if rows >= view.height {
-        let (bitmap, diag) = render_page_rgb_with_geom(
+        let (bitmap, diag) = render_page_canvas_with_geom(
             session,
             page_num,
             page_id,
@@ -135,7 +179,7 @@ pub fn render_page_bands<E>(
         )?;
         sink(Band {
             y: 0,
-            bitmap: &bitmap,
+            bitmap: BandBitmap::of(&bitmap),
         })
         .map_err(BandError::Sink)?;
         return Ok(diag);
@@ -160,13 +204,16 @@ pub fn render_page_bands<E>(
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
         check_strict_images(session, renderer.image_failures())?;
-        let (canvas, next, spare) = renderer
+        let (bitmap, next, spare) = renderer
             .try_finish_band(params.transparent_background)
             .map_err(allocation_failed)?;
-        let bitmap = rgb8(canvas)?;
-        sink(Band { y, bitmap: &bitmap }).map_err(BandError::Sink)?;
+        sink(Band {
+            y,
+            bitmap: BandBitmap::of(&bitmap),
+        })
+        .map_err(BandError::Sink)?;
         buffers = spare;
-        buffers.rgb.reclaim(bitmap);
+        reclaim(&mut buffers, bitmap);
         state = Some(next);
         y += height;
     }

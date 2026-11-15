@@ -51,7 +51,7 @@ fn page(n: u8, profile: &[u8], inline: bool) -> Vec<u8> {
 
 /// The page's centre pixel; the image covers the whole page.
 fn centre(page: &RenderedPage) -> u8 {
-    page.pixels[(page.height / 2 * page.width + page.width / 2) as usize]
+    page.pixels.as_u8().unwrap()[(page.height / 2 * page.width + page.width / 2) as usize]
 }
 
 #[test]

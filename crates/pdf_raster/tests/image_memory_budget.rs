@@ -55,7 +55,7 @@ fn an_image_over_the_decode_budget_is_refused_and_reported() {
             "{name}: reported as {failure:?}"
         );
         assert!(
-            page.pixels.iter().all(|&p| p == 255),
+            page.pixels.as_u8().unwrap().iter().all(|&p| p == 255),
             "{name}: the page stays white"
         );
     }
@@ -75,6 +75,6 @@ fn a_wide_image_within_the_budget_decodes() {
         "{:?}",
         page.diagnostics.image_failures
     );
-    let centre = page.pixels[(50 * page.width + 50) as usize];
+    let centre = page.pixels.as_u8().unwrap()[(50 * page.width + 50) as usize];
     assert_eq!(centre, 0x40);
 }

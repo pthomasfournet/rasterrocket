@@ -61,7 +61,9 @@ fn rgba(pdf: Vec<u8>) -> RenderedPage {
 /// RGBA of `page` at `(x, y)`, counted from the bottom-left corner.
 fn at(page: &RenderedPage, x: u32, y: u32) -> [u8; 4] {
     let i = (((page.height - 1 - y) * page.width + x) * 4) as usize;
-    page.pixels[i..i + 4].try_into().expect("four bytes")
+    page.pixels.as_u8().unwrap()[i..i + 4]
+        .try_into()
+        .expect("four bytes")
 }
 
 #[test]
@@ -82,6 +84,8 @@ fn partial_coverage_at_the_edges_is_alpha_not_premultiplied_colour() {
     assert_eq!(at(&page, 70, 70), [0, 0, 0, 0], "outside");
     let edge: Vec<[u8; 4]> = page
         .pixels
+        .as_u8()
+        .unwrap()
         .as_chunks::<4>()
         .0
         .iter()

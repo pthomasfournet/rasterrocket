@@ -49,8 +49,8 @@ fn a_repeated_inline_image_decodes_once_per_page() {
     // bottom half the zero padding.
     for i in 0..10u32 {
         let x = i * 10 + 5;
-        let top = page.pixels[(2 * page.width + x) as usize];
-        let bottom = page.pixels[(7 * page.width + x) as usize];
+        let top = page.pixels.as_u8().unwrap()[(2 * page.width + x) as usize];
+        let bottom = page.pixels.as_u8().unwrap()[(7 * page.width + x) as usize];
         assert_eq!((top, bottom), (0x40, 0x00), "draw {i}");
     }
 }

@@ -106,7 +106,7 @@ fn truncated_raw_images_keep_their_decoded_rows() {
             failure.partial && failure.name.as_deref() == Some("Im0"),
             "{name}: reported as {failure:?}"
         );
-        let gray = |row: u32| page.pixels[(row * page.width + SIDE / 2) as usize];
+        let gray = |row: u32| page.pixels.as_u8().unwrap()[(row * page.width + SIDE / 2) as usize];
         assert!(
             gray(2).abs_diff(present) <= 30,
             "{name}: present row gray {} (expected {present})",

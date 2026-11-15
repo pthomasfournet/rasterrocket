@@ -8,7 +8,7 @@ use raster::Bitmap;
 use crate::CanvasLayout;
 use crate::gray::{rgb_into_gray, rgb_rows_to_gray};
 use crate::page::{rgb_rows_copy, rgb_rows_to_rgba};
-use crate::render::{check_scale, page_view, render_page_rgb_with_geom};
+use crate::render::{check_scale, page_view, render_page_canvas_with_geom, rgb8};
 use crate::{
     PageDiagnostics, PixelFormat, RasterError, RasterOptions, RasterSession, RenderParams,
 };
@@ -233,6 +233,13 @@ impl PageBuffer {
         out_len: usize,
         stride: usize,
     ) -> Result<(Bitmap<Rgb8>, PageDiagnostics), RasterError> {
+        if opts.depth != color::SampleDepth::Eight {
+            return Err(RasterError::InvalidOptions(
+                "a page buffer holds 8-bit pixels: render 16-bit samples with \
+                 render_page_canvas"
+                    .to_owned(),
+            ));
+        }
         let scale = f64::from(opts.dpi) / 72.0;
         check_scale(scale)?;
         let page_id = session.resolve_page(page_num)?;
@@ -250,7 +257,15 @@ impl PageBuffer {
             params = params.with_transparent_background();
         }
         params.cancel.clone_from(&opts.cancel);
-        render_page_rgb_with_geom(session, page_num, page_id, geom, &params, &mut self.canvas)
+        let (canvas, diag) = render_page_canvas_with_geom(
+            session,
+            page_num,
+            page_id,
+            geom,
+            &params,
+            &mut self.canvas,
+        )?;
+        Ok((rgb8(canvas)?, diag))
     }
 }
 

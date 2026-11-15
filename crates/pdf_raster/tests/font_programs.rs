@@ -92,7 +92,7 @@ fn cid_type1_page(program: &[u8]) -> Vec<u8> {
 /// Inclusive column runs that contain a pixel darker than mid-gray.
 fn ink_columns(page: &RenderedPage) -> Vec<(u32, u32)> {
     let (w, h) = (page.width, page.height);
-    let inked = |x: u32| (0..h).any(|y| page.pixels[(y * w + x) as usize] < 128);
+    let inked = |x: u32| (0..h).any(|y| page.pixels.as_u8().unwrap()[(y * w + x) as usize] < 128);
     let mut runs = Vec::new();
     let mut start = None;
     for x in 0..=w {

@@ -5,6 +5,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use color::SampleDepth;
+
 use crate::BackendPolicy;
 
 #[cfg(doc)]
@@ -113,6 +115,13 @@ pub struct RenderParams {
     /// [`band_bytes`](crate::SessionConfig::band_bytes).  Other entry
     /// points render the page whole and ignore it.
     pub band_rows: Option<NonZeroU32>,
+    /// The depth of the samples the page is rendered at: 8 bits (the
+    /// default), or 16, which [`render_page_canvas`](crate::render_page_canvas)
+    /// and [`render_page_bands`](crate::render_page_bands) return as
+    /// 16-bit RGB.  A 16-bit render costs twice the bytes of an 8-bit one
+    /// against the byte budget, and does not simulate overprint: a session
+    /// that does refuses it.
+    pub depth: SampleDepth,
 }
 
 impl RenderParams {
@@ -135,6 +144,7 @@ impl RenderParams {
             cancel: None,
             transparent_background: false,
             band_rows: None,
+            depth: SampleDepth::Eight,
         }
     }
 
@@ -160,10 +170,17 @@ impl RenderParams {
         self
     }
 
+    /// Render at samples of `depth` (see [`depth`](Self::depth)).
+    #[must_use]
+    pub const fn with_depth(mut self, depth: SampleDepth) -> Self {
+        self.depth = depth;
+        self
+    }
+
     /// The layout of the canvas the render allocates.
     #[must_use]
     pub const fn canvas_layout(&self) -> crate::CanvasLayout {
-        crate::CanvasLayout::new(color::SampleDepth::Eight, self.transparent_background)
+        crate::CanvasLayout::new(self.depth, self.transparent_background)
     }
 
     /// Render bands of `rows` rows (see [`band_rows`](Self::band_rows)).
@@ -203,7 +220,10 @@ mod tests {
             .with_policy(BackendPolicy::CpuOnly)
             .with_cancel(token)
             .with_transparent_background()
-            .with_band_rows(NonZeroU32::new(7).unwrap());
+            .with_band_rows(NonZeroU32::new(7).unwrap())
+            .with_depth(SampleDepth::Sixteen);
+        assert_eq!(params.depth, SampleDepth::Sixteen);
+        assert_eq!(params.canvas_layout().bytes_per_px(), 8);
         assert_eq!(params.band_rows.map(NonZeroU32::get), Some(7));
         assert!((params.scale_x - 2.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 2.0).abs() < f64::EPSILON);
@@ -214,6 +234,7 @@ mod tests {
         let params = RenderParams::new_xy(3.0, 1.5);
         assert!(!params.transparent_background);
         assert_eq!(params.band_rows, None);
+        assert_eq!(params.depth, SampleDepth::Eight);
         assert!((params.scale_x - 3.0).abs() < f64::EPSILON);
         assert!((params.scale_y - 1.5).abs() < f64::EPSILON);
     }

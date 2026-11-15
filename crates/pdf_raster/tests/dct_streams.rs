@@ -73,7 +73,7 @@ fn every_scan_layout_of_an_image_renders_alike() {
     let reference = render(ONE_SCAN, 43, 37);
     assert_eq!(reference.diagnostics.image_failures, []);
     assert!(
-        reference.pixels.iter().any(|&p| p < 200),
+        reference.pixels.as_u8().unwrap().iter().any(|&p| p < 200),
         "the image is drawn"
     );
     for (name, data) in [
@@ -105,8 +105,10 @@ fn an_arithmetic_coded_image_renders_as_its_huffman_coded_twin() {
         assert_eq!(page.diagnostics.image_failures, [], "{name}");
         let worst = page
             .pixels
+            .as_u8()
+            .unwrap()
             .iter()
-            .zip(&reference.pixels)
+            .zip(reference.pixels.as_u8().unwrap())
             .map(|(a, b)| a.abs_diff(*b))
             .max()
             .expect("a rendered page");
@@ -168,7 +170,7 @@ fn a_stream_that_stops_short_is_drawn_and_reported_partial() {
                     "{what}: reported as {failure:?}"
                 );
                 assert!(
-                    page.pixels.iter().any(|&p| p < 200),
+                    page.pixels.as_u8().unwrap().iter().any(|&p| p < 200),
                     "{what}: what decoded is drawn"
                 );
             }

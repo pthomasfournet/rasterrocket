@@ -70,7 +70,7 @@ fn assert_matches_owned(session: &RasterSession, pages: &[u32], dpi: f32) {
                 assert_eq!(info.format, PixelFormat::Gray8);
                 assert_eq!(info.page_num, page);
                 assert!(
-                    rows(&out, height, width as usize, stride) == want.pixels,
+                    rows(&out, height, width as usize, stride) == want.pixels.as_u8().unwrap(),
                     "page {page}: gray differs (deskew {deskew}, stride {stride})"
                 );
             }
@@ -101,7 +101,7 @@ fn assert_matches_owned(session: &RasterSession, pages: &[u32], dpi: f32) {
                 .expect("rgba into");
             assert_eq!(info.format, PixelFormat::Rgba8);
             assert!(
-                rows(&out, height, row, stride) == want.pixels,
+                rows(&out, height, row, stride) == want.pixels.as_u8().unwrap(),
                 "page {page}: rgba differs (stride {stride})"
             );
         }
