@@ -11,7 +11,7 @@ use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
 /// Decode a `JPXDecode` (JPEG 2000) stream.
 ///
 /// When the `nvjpeg2k` feature is active and `gpu` is `Some`, large images
-/// (pixel area ≥ `GPU_JPEG2K_THRESHOLD_PX`) are decoded on the GPU via
+/// (pixel area ≥ `jpx_threshold()`) are decoded on the GPU via
 /// nvJPEG2000.  All other images, and any image for which the GPU path fails
 /// (unsupported component count, CUDA error, etc.), fall through to the CPU path.
 ///
@@ -74,7 +74,7 @@ pub(in crate::resources::image) fn decode_jpx(
     #[cfg(feature = "nvjpeg2k")]
     if let Some(dec) = gpu.filter(|_| !opts.colour_key && !wide) {
         let area = pdf_w.saturating_mul(pdf_h);
-        if area >= crate::resources::image::GPU_JPEG2K_THRESHOLD_PX {
+        if area >= crate::resources::image::jpx_threshold() {
             if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
                 samples.embedded_profile = embedded_profile;
                 return Ok(samples);

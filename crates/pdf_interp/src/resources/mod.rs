@@ -716,7 +716,7 @@ impl<'doc> PageResources<'doc> {
 
     /// Whether the GPU JPEG 2000 decoder is worth offering the `XObject`
     /// resource `name` drawn at `draw_size`: an image with terminal filter
-    /// `JPXDecode` and at least [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels by
+    /// `JPXDecode` and at least [`image::jpx_threshold`] pixels by
     /// its dictionary, whose CPU decode would not skip a resolution level
     /// (see `jpx_draw_reduces`) at the size its masks let it reduce to
     /// (see `reduced_draw_size`).
@@ -941,7 +941,7 @@ impl<'doc> PageResources<'doc> {
 
 /// The dimensions of the image dictionary `dict` when the GPU JPEG 2000
 /// decoder takes it: terminal filter `JPXDecode` and at least
-/// [`image::GPU_JPEG2K_THRESHOLD_PX`] pixels.
+/// [`image::jpx_threshold`] pixels.
 #[cfg(feature = "nvjpeg2k")]
 fn device_jpx_size(dict: &Dictionary) -> Option<(u32, u32)> {
     let chain = image::image_filter_chain(dict.get(b"Filter")?);
@@ -950,7 +950,7 @@ fn device_jpx_size(dict: &Dictionary) -> Option<(u32, u32)> {
     }
     let dim = |key: &[u8]| dict.get_i64(key).and_then(|v| u32::try_from(v).ok());
     let (w, h) = (dim(b"Width")?, dim(b"Height")?);
-    (w.saturating_mul(h) >= image::GPU_JPEG2K_THRESHOLD_PX).then_some((w, h))
+    (w.saturating_mul(h) >= image::jpx_threshold()).then_some((w, h))
 }
 
 /// Convert a [`pdf::Object`] (Real or Integer) to `f64`.

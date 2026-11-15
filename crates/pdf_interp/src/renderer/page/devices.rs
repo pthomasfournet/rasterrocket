@@ -101,7 +101,7 @@ impl PageRenderer<'_> {
     /// Attach a GPU JPEG 2000 decoder to this renderer.
     ///
     /// When set, `JPXDecode` image streams with pixel area ≥
-    /// [`crate::resources::image::GPU_JPEG2K_THRESHOLD_PX`] are decoded on the
+    /// [`crate::resources::image::jpx_threshold`] are decoded on the
     /// GPU via nvJPEG2000 rather than the CPU JPEG 2000 decoder.
     ///
     /// Call with `None` to revert to CPU-only JPEG 2000 decode.
@@ -113,7 +113,7 @@ impl PageRenderer<'_> {
     /// Obtain the GPU JPEG 2000 decoder from `source` on demand.  With a
     /// source set, an image `XObject` is offered the decoder only when it
     /// is one the decoder takes (`JPXDecode`, at least
-    /// [`crate::resources::image::GPU_JPEG2K_THRESHOLD_PX`] pixels) and the
+    /// [`crate::resources::image::jpx_threshold`] pixels) and the
     /// draw does not reduce it to half its size or less on both axes (such
     /// a draw decodes on the CPU at a reduced resolution level); the first
     /// such image obtains the decoder from `source` when none is attached.

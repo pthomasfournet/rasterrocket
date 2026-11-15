@@ -157,16 +157,7 @@ fn icc_clut_threshold() -> usize {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<usize> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
-        let Ok(value) = std::env::var("PDF_RASTER_ICC_CLUT_THRESHOLD") else {
-            return gpu::GPU_ICC_CLUT_THRESHOLD;
-        };
-        value.trim().parse().unwrap_or_else(|_| {
-            log::warn!(
-                "PDF_RASTER_ICC_CLUT_THRESHOLD={value:?} is not a pixel count \
-                 (a non-negative integer); using the default"
-            );
-            gpu::GPU_ICC_CLUT_THRESHOLD
-        })
+        super::threshold_from_env("PDF_RASTER_ICC_CLUT_THRESHOLD", gpu::GPU_ICC_CLUT_THRESHOLD)
     })
 }
 

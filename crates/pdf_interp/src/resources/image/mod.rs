@@ -102,17 +102,10 @@ pub(crate) fn huffman_threshold() -> u32 {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<u32> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
-        let Ok(value) = std::env::var("PDF_RASTER_HUFFMAN_THRESHOLD") else {
-            return GPU_JPEG_HUFFMAN_THRESHOLD_PX;
-        };
-        value.trim().parse().unwrap_or_else(|_| {
-            log::warn!(
-                "PDF_RASTER_HUFFMAN_THRESHOLD={value:?} is not a pixel area (0..={}); \
-                 using the default",
-                u32::MAX
-            );
-            GPU_JPEG_HUFFMAN_THRESHOLD_PX
-        })
+        threshold_from_env(
+            "PDF_RASTER_HUFFMAN_THRESHOLD",
+            GPU_JPEG_HUFFMAN_THRESHOLD_PX,
+        )
     })
 }
 
@@ -123,6 +116,42 @@ pub(crate) fn huffman_threshold() -> u32 {
 /// decode is CPU-bound at similar pixel counts.
 #[cfg(feature = "nvjpeg2k")]
 pub(crate) const GPU_JPEG2K_THRESHOLD_PX: u32 = 262_144;
+
+/// Returns the effective `JPXDecode` dispatch threshold:
+/// [`GPU_JPEG2K_THRESHOLD_PX`] unless `PDF_RASTER_JPX_THRESHOLD` holds a
+/// decimal pixel area (`0` = every eligible image on the device,
+/// `4294967295` = none).  Read once, on first use.
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) fn jpx_threshold() -> u32 {
+    use std::sync::OnceLock;
+    static THRESHOLD: OnceLock<u32> = OnceLock::new();
+    *THRESHOLD
+        .get_or_init(|| threshold_from_env("PDF_RASTER_JPX_THRESHOLD", GPU_JPEG2K_THRESHOLD_PX))
+}
+
+/// The pixel count the environment variable `var` holds in decimal, or
+/// `default` when it is unset; a value that does not parse is reported at
+/// warn and yields `default`.
+#[cfg(any(
+    feature = "gpu-jpeg-huffman",
+    feature = "nvjpeg2k",
+    feature = "gpu-icc"
+))]
+pub(super) fn threshold_from_env<T>(var: &str, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+{
+    let Ok(value) = std::env::var(var) else {
+        return default;
+    };
+    value.trim().parse().unwrap_or_else(|_| {
+        log::warn!(
+            "{var}={value:?} is not a pixel count (a non-negative integer); \
+             using the default {default}"
+        );
+        default
+    })
+}
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
