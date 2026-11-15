@@ -175,6 +175,36 @@ pub trait Sample:
     /// The bytes `s` as samples when the sample is `u8`; `None` for any
     /// wider sample, whose values need [`Self::from_u8`].
     fn from_u8_slice(s: &[u8]) -> Option<&[Self]>;
+
+    /// The samples of `s` as `u16` when the sample is `u16`; `None`
+    /// otherwise.
+    fn as_u16(s: &[Self]) -> Option<&[u16]>;
+
+    /// The 16-bit samples `s` as samples when the sample is `u16`; `None`
+    /// otherwise.
+    fn from_u16_slice(s: &[u16]) -> Option<&[Self]>;
+
+    /// The sample of type `T` on this sample's scale: the value itself at
+    /// the same depth, else its nearest 8-bit value ([`Self::to_u8`]) on
+    /// this scale, which is exact when widening.
+    #[inline]
+    #[must_use]
+    fn from_sample<T: Sample>(v: T) -> Self {
+        if T::DEPTH == Self::DEPTH {
+            Self::from_signed(v.signed())
+        } else {
+            Self::from_u8(v.to_u8())
+        }
+    }
+
+    /// `s` as samples of this type when they are of the same depth.
+    #[inline]
+    #[must_use]
+    fn same_depth<T: Sample>(s: &[T]) -> Option<&[Self]> {
+        T::as_u8(s)
+            .and_then(Self::from_u8_slice)
+            .or_else(|| T::as_u16(s).and_then(Self::from_u16_slice))
+    }
 }
 
 /// Every byte, in order.
@@ -288,6 +318,16 @@ impl Sample for u8 {
     fn from_u8_slice(s: &[u8]) -> Option<&[Self]> {
         Some(s)
     }
+
+    #[inline]
+    fn as_u16(_: &[Self]) -> Option<&[u16]> {
+        None
+    }
+
+    #[inline]
+    fn from_u16_slice(_: &[u16]) -> Option<&[Self]> {
+        None
+    }
 }
 
 impl Sample for u16 {
@@ -394,6 +434,16 @@ impl Sample for u16 {
     fn from_u8_slice(_: &[u8]) -> Option<&[Self]> {
         None
     }
+
+    #[inline]
+    fn as_u16(s: &[Self]) -> Option<&[u16]> {
+        Some(s)
+    }
+
+    #[inline]
+    fn from_u16_slice(s: &[u16]) -> Option<&[Self]> {
+        Some(s)
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +469,21 @@ mod tests {
             let exact = (2 * x + max) / (2 * max);
             assert_eq!(u64::from(<u16 as Sample>::div_max(x)), exact, "x={x}");
         }
+    }
+
+    #[test]
+    fn a_sample_of_another_depth_rescales() {
+        for v in 0..=255u8 {
+            assert_eq!(u16::from_sample(v), u16::from_u8(v));
+            assert_eq!(u8::from_sample(v), v);
+        }
+        for v in [0u16, 1, 128, 32_767, 65_535] {
+            assert_eq!(u8::from_sample(v), v.to_u8());
+            assert_eq!(u16::from_sample(v), v);
+        }
+        assert_eq!(u16::same_depth(&[3u16, 4]), Some(&[3u16, 4][..]));
+        assert_eq!(u16::same_depth(&[3u8]), None);
+        assert_eq!(u8::same_depth(&[3u8]), Some(&[3u8][..]));
     }
 
     #[test]
