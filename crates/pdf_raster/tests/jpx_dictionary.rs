@@ -103,6 +103,32 @@ fn codestream_alpha_follows_smask_in_data() {
     );
 }
 
+/// Under `/SMaskInData 2` the colour is premultiplied against the image
+/// dictionary's `/Matte` (§11.6.5.3): c = m + (c' − m)/α, clamped, then
+/// composited.
+#[test]
+fn smask_in_data_2_unmattes_against_the_dictionarys_matte() {
+    let rgb = "/ColorSpace /DeviceRGB /SMaskInData 2";
+    // c' = (200, 100, 50) at α 127: against m = (0, 1, 0) the colour is
+    // (255, 0, 100), over white (255, 128, 178).
+    assert_near(
+        "Matte [0 1 0]",
+        pixel(&format!("{rgb} /Matte [0 1 0]"), RGBA8, 6, 4),
+        [255, 128, 178],
+    );
+    assert_near(
+        "Matte [0 0 0]",
+        pixel(&format!("{rgb} /Matte [0 0 0]"), RGBA8, 6, 4),
+        [255, 228, 178],
+    );
+    // A matte that does not match the colour channels is 0.
+    assert_near(
+        "Matte [1]",
+        pixel(&format!("{rgb} /Matte [1]"), RGBA8, 6, 4),
+        [255, 228, 178],
+    );
+}
+
 /// 8 × 8 RGB raw codestream: a 16-colour gradient (see `rgb8.rgb` beside it).
 const RGB8_J2K: &[u8] = include_bytes!("../../pdf_interp/src/resources/image/testdata/rgb8.j2k");
 

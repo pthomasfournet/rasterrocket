@@ -29,7 +29,7 @@ pub(in crate::resources::image) fn decode_jpx(
     pdf_w: u32,
     pdf_h: u32,
     draw_size: Option<(u32, u32)>,
-    opts: JpxOptions,
+    opts: &JpxOptions,
     #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
 ) -> Result<Samples, String> {
     if opts.indices {
@@ -119,14 +119,14 @@ pub(in crate::resources::image) fn decode_jpx(
         let mut samples = if wide {
             let wide = wide_samples(&decoded);
             check_len(wide.len(), expected, (jw, jh, stride))?;
-            let (colour, alpha) = split_alpha(wide, channels, has_alpha, opts.smask_in_data);
+            let (colour, alpha) = split_alpha(wide, channels, has_alpha, opts);
             let mut samples = Samples::cpu16(jw, jh, layout, colour);
             samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new16(jw, jh, a));
             samples
         } else {
             let bytes = decoded.data_u8();
             check_len(bytes.len(), expected, (jw, jh, stride))?;
-            let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts.smask_in_data);
+            let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts);
             let mut samples = Samples::cpu(jw, jh, layout, colour);
             samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
             samples
@@ -136,7 +136,7 @@ pub(in crate::resources::image) fn decode_jpx(
     } else {
         let bytes = img.decode_u8(&mut ctx).map_err(|e| e.to_string())?;
         check_len(bytes.len(), expected, (jw, jh, stride))?;
-        let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts.smask_in_data);
+        let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts);
         let mut samples = Samples::cpu(jw, jh, layout, colour);
         samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
         samples
@@ -161,16 +161,17 @@ fn check_len(
 
 /// The colour samples of interleaved `samples` of `channels` colours and,
 /// when `has_alpha`, an alpha channel last, and the alpha.  The alpha is
-/// the image's soft mask only when `/SMaskInData` (`smask_in_data`) is
-/// nonzero (§8.9.5); with 2 the colour channels are premultiplied by it,
-/// which is the matte relation with every matte component 0, inverted in
-/// the codestream's own colour space.
+/// the image's soft mask only when `/SMaskInData` (`opts.smask_in_data`)
+/// is nonzero (§8.9.5); with 2 the colour channels are premultiplied by
+/// it against the matte ([`matte_samples`]), a relation inverted in the
+/// codestream's own colour space.
 fn split_alpha<S: color::Sample>(
     samples: Vec<S>,
     channels: usize,
     has_alpha: bool,
-    smask_in_data: i64,
+    opts: &JpxOptions,
 ) -> (Vec<S>, Option<Vec<S>>) {
+    let smask_in_data = opts.smask_in_data;
     if !has_alpha {
         return (samples, None);
     }
@@ -185,11 +186,31 @@ fn split_alpha<S: color::Sample>(
             .map(|px| px[channels])
             .collect();
         if smask_in_data == 2 {
-            crate::resources::image::smask::unmatte(&mut colour, &alpha, &vec![S::ZERO; channels]);
+            let matte = matte_samples(opts.matte.as_deref(), channels);
+            crate::resources::image::smask::unmatte(&mut colour, &alpha, &matte);
         }
         alpha
     });
     (colour, alpha)
+}
+
+/// The matte `matte` of a codestream of `channels` colour channels as
+/// samples: each component, in 0..1, scaled to the sample range.  A matte
+/// of another length, which §11.6.5.3 does not define, is 0 in every
+/// component, with a warning, as is an absent one.
+fn matte_samples<S: color::Sample>(matte: Option<&[f64]>, channels: usize) -> Vec<S> {
+    match matte {
+        Some(m) if m.len() == channels => m.iter().map(|&v| S::from_unit(v)).collect(),
+        Some(m) => {
+            log::warn!(
+                "image: JPXDecode: /Matte has {} components, the codestream {channels} colour \
+                 channels; matte 0 assumed",
+                m.len()
+            );
+            vec![S::ZERO; channels]
+        }
+        None => vec![S::ZERO; channels],
+    }
 }
 
 /// Every component of `decoded`, interleaved, each scaled from its own
@@ -315,7 +336,7 @@ fn jpx_budget(img: &hayro_jpeg2000::Image<'_>, bytes: usize) -> Result<(), Strin
 }
 
 /// What the image dictionary decides about a JPEG 2000 codestream.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(in crate::resources::image) struct JpxOptions {
     /// The PDF colour space is `/Indexed`: decode the codestream's samples
     /// as palette indices for the caller to expand.
@@ -323,6 +344,11 @@ pub(in crate::resources::image) struct JpxOptions {
     /// `/SMaskInData` (§8.9.5): 0 ignores an alpha channel, 1 makes it the
     /// soft mask, 2 makes it the soft mask of colour premultiplied by it.
     pub smask_in_data: i64,
+    /// The image dictionary's `/Matte` under `/SMaskInData 2`: the colour
+    /// the samples are premultiplied against, one component in 0..1 per
+    /// colour channel of the codestream (§11.6.5.3).  `None` is a matte of
+    /// 0 in every component.
+    pub matte: Option<Vec<f64>>,
     /// A colour-key `/Mask` compares the samples: a codestream of any
     /// component precision other than 8 bits keeps them at that precision
     /// as well ([`Samples::key_source`]).
@@ -386,10 +412,10 @@ mod tests {
     // ── JPXDecode ─────────────────────────────────────────────────────────────
 
     /// Colour samples as stored, no alpha.
-    #[cfg(not(feature = "nvjpeg2k"))]
     const PLAIN: JpxOptions = JpxOptions {
         indices: false,
         smask_in_data: 0,
+        matte: None,
         colour_key: false,
         wide: false,
         channels: None,
@@ -400,6 +426,7 @@ mod tests {
     const WITH_ALPHA: JpxOptions = JpxOptions {
         indices: false,
         smask_in_data: 1,
+        matte: None,
         colour_key: false,
         wide: false,
         channels: None,
@@ -408,7 +435,7 @@ mod tests {
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
     #[cfg(not(feature = "nvjpeg2k"))]
     fn jpx_fixture(bytes: &[u8]) -> Samples {
-        decode_jpx(bytes, 8, 8, None, WITH_ALPHA).expect("decodes")
+        decode_jpx(bytes, 8, 8, None, &WITH_ALPHA).expect("decodes")
     }
 
     // Fixtures are lossless (reversible 5/3) encodes; the `.gray`, `.rgb`,
@@ -419,15 +446,15 @@ mod tests {
     #[test]
     fn jpx_draw_size_skips_levels_without_going_below_it() {
         let gray = include_bytes!("../testdata/gray8.jp2");
-        let full = decode_jpx(gray, 8, 8, None, PLAIN).expect("decodes");
+        let full = decode_jpx(gray, 8, 8, None, &PLAIN).expect("decodes");
         assert_eq!((full.width, full.height), (8, 8));
 
-        let half = decode_jpx(gray, 8, 8, Some((4, 4)), PLAIN).expect("decodes");
+        let half = decode_jpx(gray, 8, 8, Some((4, 4)), &PLAIN).expect("decodes");
         assert_eq!((half.width, half.height), (4, 4));
         assert_eq!(half.data.as_cpu().map(<[u8]>::len), Some(16));
 
         // 4 × 4 would be smaller than the drawn size, so no level is skipped.
-        let five = decode_jpx(gray, 8, 8, Some((5, 5)), PLAIN).expect("decodes");
+        let five = decode_jpx(gray, 8, 8, Some((5, 5)), &PLAIN).expect("decodes");
         assert_eq!((five.width, five.height), (8, 8));
     }
 
@@ -495,7 +522,7 @@ mod tests {
             channels: Some(channels),
             ..PLAIN
         };
-        decode_jpx(bytes, 32, 32, None, opts).expect("decodes")
+        decode_jpx(bytes, 32, 32, None, &opts).expect("decodes")
     }
 
     /// The `n` components at the centre of each 8 × 8 cell of a 32 × 32
@@ -567,23 +594,24 @@ mod tests {
         let opts = JpxOptions {
             indices: false,
             smask_in_data: 0,
+            matte: None,
             colour_key: false,
             wide: false,
             channels: None,
         };
         #[cfg(feature = "nvjpeg2k")]
-        let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the limit");
+        let err = decode_jpx(&j2k, 8, 8, None, &opts, None).expect_err("over the limit");
         #[cfg(not(feature = "nvjpeg2k"))]
-        let err = decode_jpx(&j2k, 8, 8, None, opts).expect_err("over the limit");
+        let err = decode_jpx(&j2k, 8, 8, None, &opts).expect_err("over the limit");
         assert!(err.contains("too large"), "{err}");
         let indexed = JpxOptions {
             indices: true,
             ..opts
         };
         #[cfg(feature = "nvjpeg2k")]
-        let err = decode_jpx(&j2k, 8, 8, None, indexed, None).expect_err("over the limit");
+        let err = decode_jpx(&j2k, 8, 8, None, &indexed, None).expect_err("over the limit");
         #[cfg(not(feature = "nvjpeg2k"))]
-        let err = decode_jpx(&j2k, 8, 8, None, indexed).expect_err("over the limit");
+        let err = decode_jpx(&j2k, 8, 8, None, &indexed).expect_err("over the limit");
         assert!(err.contains("too large"), "{err}");
     }
 
@@ -610,17 +638,47 @@ mod tests {
     #[test]
     fn split_alpha_follows_smask_in_data_at_16_bits() {
         let samples = vec![10_000u16, 20_000, 16_384, 65_535, 0, 65_535];
-        let (colour, alpha) = split_alpha(samples.clone(), 2, true, 0);
+        let smask_in_data = |smask_in_data| JpxOptions {
+            smask_in_data,
+            ..PLAIN
+        };
+        let (colour, alpha) = split_alpha(samples.clone(), 2, true, &smask_in_data(0));
         assert_eq!((colour, alpha), (vec![10_000, 20_000, 65_535, 0], None));
-        let (colour, alpha) = split_alpha(samples.clone(), 2, true, 1);
+        let (colour, alpha) = split_alpha(samples.clone(), 2, true, &smask_in_data(1));
         assert_eq!(colour, [10_000, 20_000, 65_535, 0]);
         assert_eq!(alpha.as_deref(), Some(&[16_384, 65_535][..]));
-        let (colour, alpha) = split_alpha(samples, 2, true, 2);
+        let (colour, alpha) = split_alpha(samples, 2, true, &smask_in_data(2));
         assert_eq!(alpha.as_deref(), Some(&[16_384, 65_535][..]));
         assert!(
             colour[0].abs_diff(40_000) <= 1 && colour[1].abs_diff(65_535) <= 1,
             "{colour:?}"
         );
         assert_eq!(colour[2..], [65_535, 0]);
+    }
+
+    /// Under `/SMaskInData 2` the colour is un-premultiplied against the
+    /// dictionary's `/Matte`, 0 in every component when it is absent or
+    /// of a length other than the colour channels'.
+    #[test]
+    fn split_alpha_unmattes_against_the_dictionarys_matte() {
+        // One RGB pixel stored as m + α·(c − m) with c = (0, 0, 0),
+        // m = (0, 1, 0) and α = 0.2: (0, 204, 0) at alpha 51.
+        let samples = vec![0u8, 204, 0, 51];
+        let with_matte = |matte: Option<Vec<f64>>| JpxOptions {
+            smask_in_data: 2,
+            matte,
+            ..PLAIN
+        };
+        let (colour, _) = split_alpha(
+            samples.clone(),
+            3,
+            true,
+            &with_matte(Some(vec![0.0, 1.0, 0.0])),
+        );
+        assert_eq!(colour, [0, 0, 0]);
+        let (colour, _) = split_alpha(samples.clone(), 3, true, &with_matte(None));
+        assert_eq!(colour, [0, 255, 0]);
+        let (colour, _) = split_alpha(samples, 3, true, &with_matte(Some(vec![1.0])));
+        assert_eq!(colour, [0, 255, 0]);
     }
 }

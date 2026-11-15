@@ -8,7 +8,7 @@
 //! image was decoded at.
 
 use color::Sample;
-use pdf::{Document, Object, ObjectId, Stream};
+use pdf::{Dictionary, Document, Object, ObjectId, Stream};
 
 use super::colorspace::ImageColour;
 use super::dispatch::{ImageStream, decode_image_stream};
@@ -411,8 +411,13 @@ pub(super) fn colour_key_mask_with(
 /// number.
 pub(super) fn matte(doc: &Document, id: ObjectId) -> Option<Vec<f64>> {
     let obj_arc = doc.get_object(id).ok()?;
-    let stream = obj_arc.as_ref().as_stream()?;
-    let Object::Array(arr) = stream.dict.get(b"Matte")? else {
+    dict_matte(&obj_arc.as_ref().as_stream()?.dict)
+}
+
+/// The `/Matte` array of `dict` as numbers; `None` when absent, not an
+/// array or holding a non-number.
+pub(super) fn dict_matte(dict: &Dictionary) -> Option<Vec<f64>> {
+    let Object::Array(arr) = dict.get(b"Matte")? else {
         return None;
     };
     arr.iter().map(Object::as_f64).collect()

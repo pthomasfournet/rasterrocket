@@ -170,9 +170,9 @@ pub(super) fn decode_image_stream<
         Some("JPXDecode") => {
             let opts = jpx_options(src, wide);
             #[cfg(feature = "nvjpeg2k")]
-            let samples = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
+            let samples = decode_jpx(&input, w, h, draw_size, &opts, ctx.nvjpeg2k.as_deref_mut());
             #[cfg(not(feature = "nvjpeg2k"))]
-            let samples = decode_jpx(&input, w, h, draw_size, opts);
+            let samples = decode_jpx(&input, w, h, draw_size, &opts);
             Some(samples.map_err(|e| format!("JPXDecode: {e}"))?)
         }
         Some(other) => return Err(format!("unsupported filter {other:?}")),
@@ -248,9 +248,19 @@ fn kept_tints(
 fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
     let dict = &src.stream.dict;
     let indices = !src.is_mask && src.colour.indexed();
+    let smask_in_data = dict.get_i64(b"SMaskInData").unwrap_or(0);
+    let matte = (smask_in_data == 2 && dict.get(b"Matte").is_some())
+        .then(|| {
+            super::smask::dict_matte(dict).or_else(|| {
+                log::warn!("image: JPXDecode: /Matte is not an array of numbers; matte 0 assumed");
+                None
+            })
+        })
+        .flatten();
     JpxOptions {
         indices,
-        smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
+        smask_in_data,
+        matte,
         colour_key: !src.is_mask && matches!(dict.get(b"Mask"), Some(Object::Array(_))),
         wide: wide && !indices,
         channels: (!src.is_mask && !indices)
