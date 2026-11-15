@@ -50,6 +50,9 @@ pub(super) struct InkMap {
     /// The inks reproducing each sRGB colour from the given inks already
     /// solved on the page (see [`Self::ink_reproducing`]).
     reproduced: Reproduced,
+    /// The same for the process equivalents of the slots' tints, which
+    /// would otherwise fill the table of the page's colours.
+    spot_reproduced: Reproduced,
 }
 
 /// The results of [`color::cmyk::ink_reproducing_at`], keyed by its
@@ -106,9 +109,9 @@ impl InkMap {
         if self.slots.len() == SLOTS {
             return None;
         }
-        let lut = Box::new(spot_lut(doc, name, space, &mut self.reproduced));
+        let lut = Box::new(spot_lut(doc, name, space, &mut self.spot_reproduced));
         let lut16 = (self.depth == SampleDepth::Sixteen)
-            .then(|| spot_lut16(doc, name, space, &mut self.reproduced));
+            .then(|| spot_lut16(doc, name, space, &mut self.spot_reproduced));
         self.slots.push(Slot {
             name: Arc::from(name),
             lut,
@@ -381,6 +384,28 @@ mod tests {
         assert_eq!(map.reproduced.0.len(), 1);
         let _ = map.ink_reproducing([90u8, 140, 61], given);
         assert_eq!(map.reproduced.0.len(), 2);
+    }
+
+    /// The solves of a slot's table are kept apart from the page's
+    /// colours: building one leaves the page's table as it was.
+    #[test]
+    fn spot_tables_keep_their_solves_apart() {
+        let doc = crate::test_helpers::make_doc_with_stream(
+            &moxcms::ColorProfile::new_lab().encode().unwrap(),
+            " /N 4",
+        );
+        let spot = space(
+            &doc,
+            "[/Separation /Spot [/ICCBased 2 0 R] \
+             << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0.2 0.7 0.1 0] /N 1 >>]",
+        );
+        let mut map = InkMap::default();
+        assert_eq!(map.slot(&doc, b"Spot", &spot), Some(0));
+        assert!(
+            !map.spot_reproduced.0.is_empty(),
+            "the table solves through the ICC space"
+        );
+        assert!(map.reproduced.0.is_empty());
     }
 
     #[test]
