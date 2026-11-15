@@ -183,3 +183,19 @@ On 2026-11-03 it was reviewed through `3f3825c3e` (2026-11-02, crates.io
 0.4.0). Nothing is brought over: #1731 adapts the MMR region decoder to
 an upstream `hayro-ccitt` API change that the ccitt fork leaves out, and
 #1732 is a version bump and changelog.
+
+On 2026-11-14 it was reviewed through `064a610b9` (2026-11-14, crates.io
+0.4.0). Brought over: #1773, #1774, #1776, #1778, #1780, #1781, #1785,
+#1797 and #1372, as listed above. Covered by this fork: #1775 and #1777
+(the clipped combine and the shared symbol lookup of "Changes in this
+fork"), #1789 and #1825 (upstream's memory limit on what a page and the
+globals may hold; this fork's decode budget bounds every allocation of
+a page and of the globals, cumulatively, and the work besides). Upstream's
+relaxed side limit of #1789 (sides up to 2^22 for every bitmap, bounded
+by area) is left out: sides above 65 535 stay refused. Not applicable:
+#1761 and #1798 (cancellation; no caller decodes under a cancellation
+signal), #1783 (`Page::decode` returning the page bitmap instead of
+pushing pixels to a `Decoder`: an API change, and the renderer consumes
+the pushed pixels), #1786 and #1787 (the public decoder contexts made
+private: API changes with no decoding change), #1850 (comments and docs
+trimmed).
