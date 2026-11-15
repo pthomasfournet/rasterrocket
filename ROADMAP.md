@@ -2944,6 +2944,20 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: JPEG 2000 device threshold and prefetch scale.**
+`GPU_JPEG2K_THRESHOLD_PX` rises from 262 144 to 2 097 152 px, from an
+end-to-end sweep of real archive codestreams by area and bytes per pixel
+(RTX 5070, 24 threads, whole-process wall time, cold decoder build
+included): from 0.45 to 1.35 MP the device lost 3-8× on one page and tied
+(0.92×) or lost up to 4× on 24 pages; above 2.6 MP results are mixed: it
+won on 24-page runs of scans (qsj-1798 0.69×, Halbwachs 0.60×) and on a
+24 MP image (0.67×), and lost on a single page (qsj-0616 p. 10 1.5×) and
+on some 24-copy cells (up to 1.46×); bytes per pixel did not order the
+outcome. `PDF_RASTER_JPX_THRESHOLD`
+overrides the area. `--prefetch` at a fixed resolution no longer decodes a
+JPEG every draw of which on its page is smaller than the image
+(`SessionConfig::prefetch_scale`).
+
 **Unreleased on master: GPU-session fallbacks and Windows RAM output.**
 In a session holding a GPU backend, an ICC-based CMYK image the device does
 not convert (below `GPU_ICC_CLUT_THRESHOLD`, or declined) now takes the

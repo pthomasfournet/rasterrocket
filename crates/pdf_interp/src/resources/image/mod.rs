@@ -109,13 +109,18 @@ pub(crate) fn huffman_threshold() -> u32 {
     })
 }
 
-/// Minimum pixel area (width × height) for GPU-accelerated `JPXDecode`.
+/// Minimum pixel area (width × height) for GPU-accelerated `JPXDecode`:
+/// 2²¹ pixels, about 1448 × 1448.
 ///
-/// Below this threshold `PCIe` transfer overhead dominates and the CPU decoder
-/// is faster.  512 × 512 = 262 144 pixels — same crossover as nvJPEG; JPEG 2000
-/// decode is CPU-bound at similar pixel counts.
+/// Below it the multithreaded CPU decoder finishes an image in less time
+/// than a thread's nvJPEG2000 decoder takes to build and transfer it, over
+/// a single page and over a run of pages alike.  Above it neither side
+/// wins throughout: the device is faster over runs of scanned pages and on
+/// the largest images, and slower on a single page, whose time the decoder
+/// build dominates.  The encoded size per pixel does not order the outcome
+/// at a given area.  Measurements are kept with the project's benchmarks.
 #[cfg(feature = "nvjpeg2k")]
-pub(crate) const GPU_JPEG2K_THRESHOLD_PX: u32 = 262_144;
+pub(crate) const GPU_JPEG2K_THRESHOLD_PX: u32 = 2_097_152;
 
 /// Returns the effective `JPXDecode` dispatch threshold:
 /// [`GPU_JPEG2K_THRESHOLD_PX`] unless `PDF_RASTER_JPX_THRESHOLD` holds a

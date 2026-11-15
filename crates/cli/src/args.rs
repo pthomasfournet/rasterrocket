@@ -508,7 +508,7 @@ pub(crate) struct Args {
     ///            Vulkan if compiled in
     ///            and present, else CUDA, else CPU (silent fallback at every
     ///            step).  Independently, a binary built with `nvjpeg2k`
-    ///            decodes a JPEG 2000 image of at least 262 144 pixels on
+    ///            decodes a JPEG 2000 image of at least 2 097 152 pixels on
     ///            the GPU when it is drawn at more than half its size, and
     ///            --gpu-pages opens a Vulkan device.  This is the default.
     /// `cpu`    — CPU only; all GPU init is skipped.

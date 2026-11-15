@@ -850,7 +850,8 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
 - DCTDecode: `gpu::NvJpegDecoder::decode_sync()` if pixels ≥
   `GPU_JPEG_THRESHOLD_PX` (dormant: `u32::MAX`)
 - JPXDecode: `gpu::NvJpeg2kDecoder::decode_sync()` if pixels ≥
-  `GPU_JPEG2K_THRESHOLD_PX` (262 144); under `Auto` only when the draw
+  `GPU_JPEG2K_THRESHOLD_PX` (2 097 152; `PDF_RASTER_JPX_THRESHOLD`
+  overrides it); under `Auto` only when the draw
   does not reduce the image to half its size or less on both axes, and the
   thread's decoder is then built on demand
 - ICC CMYK→RGB: with a GPU backend in the session, an image of at least
