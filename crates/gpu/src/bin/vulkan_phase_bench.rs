@@ -192,11 +192,11 @@ impl Slot {
         out.copy_from_slice(&src[..out.len()]);
     }
 
-    fn record_upload(&self, backend: &VulkanBackend, len: usize) {
+    fn record_upload(&mut self, backend: &VulkanBackend, len: usize) {
         if let Some(h) = &self.host {
             // SAFETY: the page is waited on before the slot is reused.
             ok(
-                unsafe { backend.record_copy_to_device(h, &self.device, len) },
+                unsafe { backend.record_copy_to_device(h, &mut self.device, len) },
                 "copy up",
             );
         }
@@ -306,11 +306,11 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
             let mut rgb = vec![0; n * 3];
             let mut split = |repeats: u32| {
                 let t = Instant::now();
-                let c = ok(backend.alloc_device(cmyk.len()), "alloc");
-                let l = ok(backend.alloc_device(table.len()), "alloc");
+                let mut c = ok(backend.alloc_device(cmyk.len()), "alloc");
+                let mut l = ok(backend.alloc_device(table.len()), "alloc");
                 let mut r = ok(backend.alloc_device_readback(n * 3), "alloc");
-                ok(backend.upload(&c, &cmyk), "upload");
-                ok(backend.upload(&l, &table), "upload");
+                ok(backend.upload(&mut c, &cmyk), "upload");
+                ok(backend.upload(&mut l, &table), "upload");
                 let prep = ns(t);
                 let s = page(backend, |b| {
                     for _ in 0..repeats {
@@ -361,8 +361,8 @@ fn bench_blit(backend: &VulkanBackend, cfg: &Config) {
     header("blit_image_box split (prep = table writes, read = box copy-out)");
     let (sw, sh) = (2550_u32, 3300_u32);
     let image = noise((sw * sh * 3) as usize, 3);
-    let src_buf = ok(backend.alloc_device(image.len()), "alloc src");
-    ok(backend.upload(&src_buf, &image), "upload src");
+    let mut src_buf = ok(backend.alloc_device(image.len()), "alloc src");
+    ok(backend.upload(&mut src_buf, &image), "upload src");
     for (bw, bh) in [(256_u32, 256_u32), (850, 1100), (1275, 1650), (2550, 3300)] {
         let cols = table(bw, sw, true);
         let rows = table(bh, sh, false);
@@ -388,7 +388,7 @@ fn bench_blit(backend: &VulkanBackend, cfg: &Config) {
                 if copies {
                     d_c.record_upload(b, cb.len());
                     d_r.record_upload(b, rb.len());
-                    ok(b.record_zero_buffer(&tgt.device, target_len), "zero");
+                    ok(b.record_zero_buffer(&mut tgt.device, target_len), "zero");
                 }
                 for _ in 0..kernels {
                     ok(
@@ -440,8 +440,8 @@ fn bench_lock(backend: &VulkanBackend, cfg: &Config) {
     println!("\n== concurrent blit_image_box: wall ms for 96 blits (median) ==");
     let (sw, sh) = (1700_u32, 2200_u32);
     let image = noise((sw * sh * 3) as usize, 5);
-    let src_buf = ok(backend.alloc_device(image.len()), "alloc src");
-    ok(backend.upload(&src_buf, &image), "upload src");
+    let mut src_buf = ok(backend.alloc_device(image.len()), "alloc src");
+    ok(backend.upload(&mut src_buf, &image), "upload src");
     let src = BlitSource::<VulkanBackend> {
         pixels: &src_buf,
         width: sw,
@@ -505,10 +505,10 @@ fn bench_readback(backend: &VulkanBackend, cfg: &Config) {
     for len in [1_usize << 20, 8_700_000, 25_000_000] {
         let data = noise(len, 9);
         let mut out = vec![0; len];
-        let written = ok(backend.alloc_device(len), "alloc");
-        let read_buf = ok(backend.alloc_device_readback(len), "alloc");
-        ok(backend.upload(&written, &data), "upload");
-        ok(backend.upload(&read_buf, &data), "upload");
+        let mut written = ok(backend.alloc_device(len), "alloc");
+        let mut read_buf = ok(backend.alloc_device_readback(len), "alloc");
+        ok(backend.upload(&mut written, &data), "upload");
+        ok(backend.upload(&mut read_buf, &data), "upload");
         let time = |f: &mut dyn FnMut()| {
             median_steps(cfg, || {
                 let t = Instant::now();
@@ -520,7 +520,7 @@ fn bench_readback(backend: &VulkanBackend, cfg: &Config) {
             })
             .read
         };
-        let upload = time(&mut || ok(backend.upload(&written, &data), "upload"));
+        let upload = time(&mut || ok(backend.upload(&mut written, &data), "upload"));
         let plain = time(&mut || ok(backend.download(&written, &mut out), "download"));
         let readback = time(&mut || ok(backend.download(&read_buf, &mut out), "download"));
         assert_eq!(out, data);

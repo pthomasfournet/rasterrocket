@@ -73,13 +73,13 @@ impl<'a, B: GpuBackend> SyntheticDispatchSetup<'a, B> {
         let codebook_flat = build_gpu_codebook(codebooks);
         let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
 
-        let bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-        let codebook = DeviceBufferGuard::alloc(backend, codebook_flat.len() * 4)?;
+        let mut bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
+        let mut codebook = DeviceBufferGuard::alloc(backend, codebook_flat.len() * 4)?;
         let s_info = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
         let s_info_scratch = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
 
-        backend.upload(bitstream.as_ref(), bytemuck::cast_slice(&stream.words))?;
-        backend.upload(codebook.as_ref(), bytemuck::cast_slice(&codebook_flat))?;
+        backend.upload(bitstream.as_mut(), bytemuck::cast_slice(&stream.words))?;
+        backend.upload(codebook.as_mut(), bytemuck::cast_slice(&codebook_flat))?;
 
         Ok(Self {
             bitstream,
@@ -294,8 +294,8 @@ pub(super) fn dispatch_phase1_through_phase4<B: GpuBackend>(
         return Ok(Vec::new());
     }
 
-    let offsets = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
-    backend.upload(offsets.as_ref(), bytemuck::cast_slice(&offsets_host))?;
+    let mut offsets = DeviceBufferGuard::alloc(backend, per_subseq_bytes)?;
+    backend.upload(offsets.as_mut(), bytemuck::cast_slice(&offsets_host))?;
     let mut symbols =
         DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;
     // Zero-init = Phase4FailureKind::Ok, so a subsequence the kernel

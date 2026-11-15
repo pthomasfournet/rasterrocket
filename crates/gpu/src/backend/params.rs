@@ -1199,7 +1199,7 @@ mod tests {
         }
         fn record_zero_buffer(
             &self,
-            _buf: &Self::DeviceBuffer,
+            _buf: &mut Self::DeviceBuffer,
             _len: usize,
         ) -> super::super::Result<()> {
             unreachable!()
@@ -1207,7 +1207,7 @@ mod tests {
         unsafe fn record_copy_to_device(
             &self,
             _src: &Self::HostBuffer,
-            _dst: &Self::DeviceBuffer,
+            _dst: &mut Self::DeviceBuffer,
             _len: usize,
         ) -> super::super::Result<()> {
             unreachable!()
@@ -1250,7 +1250,7 @@ mod tests {
         fn wait_page(&self, _fence: Self::PageFence) -> super::super::Result<()> {
             Ok(())
         }
-        fn upload(&self, _dst: &Self::DeviceBuffer, _src: &[u8]) -> super::super::Result<()> {
+        fn upload(&self, _dst: &mut Self::DeviceBuffer, _src: &[u8]) -> super::super::Result<()> {
             unreachable!()
         }
         fn alloc_device_zeroed(&self, _size: usize) -> super::super::Result<Self::DeviceBuffer> {

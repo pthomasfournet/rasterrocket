@@ -284,15 +284,19 @@ fn run_blit_vulkan(
     let dst_bytes = (page_w * page_h * 4) as usize;
     let cols_bytes: &[u8] = bytemuck::cast_slice(cols);
     let rows_bytes: &[u8] = bytemuck::cast_slice(rows);
-    let d_src = backend.alloc_device(src.len()).expect("alloc src");
+    let mut d_src = backend.alloc_device(src.len()).expect("alloc src");
     let mut d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
-    let d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
-    let d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
-    backend.upload(&d_src, src).expect("upload src");
+    let mut d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
+    let mut d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
+    backend.upload(&mut d_src, src).expect("upload src");
     let zeros = vec![0u8; dst_bytes];
-    backend.upload(&d_dst, &zeros).expect("zero dst");
-    backend.upload(&d_cols, cols_bytes).expect("upload cols");
-    backend.upload(&d_rows, rows_bytes).expect("upload rows");
+    backend.upload(&mut d_dst, &zeros).expect("zero dst");
+    backend
+        .upload(&mut d_cols, cols_bytes)
+        .expect("upload cols");
+    backend
+        .upload(&mut d_rows, rows_bytes)
+        .expect("upload rows");
 
     backend.begin_page().expect("begin_page");
     backend

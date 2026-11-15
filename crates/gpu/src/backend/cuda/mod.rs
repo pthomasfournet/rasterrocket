@@ -189,7 +189,7 @@ impl GpuBackend for CudaBackend {
         ))
     }
 
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()> {
+    fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {
         self.recorder.check_recording("record_zero_buffer")?;
         self.recorder.record_zero_buffer(buf, len)
     }
@@ -200,7 +200,7 @@ impl GpuBackend for CudaBackend {
     unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
-        dst: &Self::DeviceBuffer,
+        dst: &mut Self::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
         self.recorder.check_recording("record_copy_to_device")?;
@@ -265,7 +265,7 @@ impl GpuBackend for CudaBackend {
         self.recorder.wait_page(fence)
     }
 
-    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
+    fn upload(&self, dst: &mut Self::DeviceBuffer, src: &[u8]) -> Result<()> {
         transfer::upload(&self.ctx, dst, src)
     }
 

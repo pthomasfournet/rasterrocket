@@ -126,7 +126,7 @@ impl VulkanBackend {
             } else {
                 bytes
             };
-            staged.push((&*stage(self, slot, bytes)?, bytes.len()));
+            staged.push((stage(self, slot, bytes)?, bytes.len()));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
 
@@ -137,7 +137,8 @@ impl VulkanBackend {
         self.run_page(|backend| {
             let mut handles = Vec::with_capacity(staged.len() + 1);
             let mut sizes = Vec::with_capacity(staged.len() + 1);
-            for &(input, len) in &staged {
+            for (input, len) in &mut staged {
+                let len = *len;
                 unsafe { record_upload(backend, input, len) }?;
                 handles.push(input.device.handle());
                 sizes.push(device_size(len));

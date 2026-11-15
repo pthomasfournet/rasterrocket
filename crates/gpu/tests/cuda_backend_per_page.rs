@@ -23,26 +23,26 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
         .map(|i| u8::try_from(i * 11 % 256).expect("below 256"))
         .collect();
 
-    let cmyk = backend
+    let mut cmyk = backend
         .alloc_device(cmyk_host.len())
         .expect("alloc_device(cmyk) failed — VRAM exhausted or driver error");
-    let clut = backend
+    let mut clut = backend
         .alloc_device(clut_host.len())
         .expect("alloc_device(clut) failed — VRAM exhausted or driver error");
     let mut rgb = backend
         .alloc_device(n * 3)
         .expect("alloc_device(rgb) failed — VRAM exhausted or driver error");
-    backend.upload(&cmyk, &cmyk_host).expect("upload(cmyk)");
-    backend.upload(&clut, &clut_host).expect("upload(clut)");
+    backend.upload(&mut cmyk, &cmyk_host).expect("upload(cmyk)");
+    backend.upload(&mut clut, &clut_host).expect("upload(clut)");
     backend
-        .upload(&rgb, &vec![0xAB; n * 3])
+        .upload(&mut rgb, &vec![0xAB; n * 3])
         .expect("upload(rgb)");
 
     backend
         .begin_page()
         .expect("begin_page failed — recorder did not enter page-recording state");
     backend
-        .record_zero_buffer(&rgb, n * 3)
+        .record_zero_buffer(&mut rgb, n * 3)
         .expect("record_zero_buffer failed — memset launch error");
     backend
         .record_icc_clut(params::IccClutParams {
@@ -98,11 +98,11 @@ fn cuda_backend_record_zero_buffer_round_trip() {
 
     const SIZE: usize = 4096;
     let backend = CudaBackend::new().expect("CudaBackend::new");
-    let buf = backend.alloc_device(SIZE).expect("alloc_device");
+    let mut buf = backend.alloc_device(SIZE).expect("alloc_device");
 
     backend.begin_page().expect("begin_page");
     backend
-        .record_zero_buffer(&buf, SIZE)
+        .record_zero_buffer(&mut buf, SIZE)
         .expect("record_zero_buffer");
     let fence = backend.submit_page().expect("submit_page");
     backend.wait_page(fence).expect("wait_page");

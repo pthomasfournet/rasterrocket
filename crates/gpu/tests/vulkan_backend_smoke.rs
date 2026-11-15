@@ -252,13 +252,15 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
     // submit + vkQueueWaitIdle in alloc_device_zeroed.
     const SIZE: usize = 4096;
     let (backend, _serial) = shared_backend();
-    let buf = backend.alloc_device(SIZE).expect("alloc_device");
+    let mut buf = backend.alloc_device(SIZE).expect("alloc_device");
     let sentinel = vec![0xCDu8; SIZE];
-    backend.upload(&buf, &sentinel).expect("upload sentinel");
+    backend
+        .upload(&mut buf, &sentinel)
+        .expect("upload sentinel");
 
     backend.begin_page().expect("begin_page");
     backend
-        .record_zero_buffer(&buf, SIZE)
+        .record_zero_buffer(&mut buf, SIZE)
         .expect("record_zero_buffer");
     let fence = backend.submit_page().expect("submit_page");
     backend.wait_page(fence).expect("wait_page");
@@ -280,12 +282,12 @@ fn vulkan_backend_record_zero_buffer_zeros_dirty_alloc() {
 fn vulkan_backend_record_zero_buffer_fills_only_the_prefix() {
     const SIZE: usize = 4096;
     let (backend, _serial) = shared_backend();
-    let buf = backend.alloc_device(SIZE).expect("alloc_device");
+    let mut buf = backend.alloc_device(SIZE).expect("alloc_device");
     backend
-        .upload(&buf, &[0xCD; SIZE])
+        .upload(&mut buf, &[0xCD; SIZE])
         .expect("upload sentinel");
     backend
-        .run_page(|b| b.record_zero_buffer(&buf, 1024))
+        .run_page(|b| b.record_zero_buffer(&mut buf, 1024))
         .expect("prefix fill");
     let mut readback = vec![0xAA; SIZE];
     backend.download(&buf, &mut readback).expect("download");
@@ -298,7 +300,7 @@ fn vulkan_backend_record_zero_buffer_fills_only_the_prefix() {
         "the rest is intact"
     );
     let err = backend
-        .run_page(|b| b.record_zero_buffer(&buf, SIZE + 4))
+        .run_page(|b| b.record_zero_buffer(&mut buf, SIZE + 4))
         .expect_err("a fill past the buffer is rejected");
     assert!(err.to_string().contains("exceeds"), "{err}");
     backend.free_device(buf);
@@ -310,9 +312,9 @@ fn vulkan_backend_record_zero_buffer_rejects_outside_recording_state() {
     // begin_page and submit_page.  Calling it from Idle must error,
     // not record into a stale command buffer.
     let (backend, _serial) = shared_backend();
-    let buf = backend.alloc_device(64).expect("alloc_device");
+    let mut buf = backend.alloc_device(64).expect("alloc_device");
     let err = backend
-        .record_zero_buffer(&buf, 64)
+        .record_zero_buffer(&mut buf, 64)
         .expect_err("record_zero_buffer outside Recording must be rejected");
     let msg = err.to_string();
     assert!(
@@ -328,10 +330,10 @@ fn vulkan_backend_record_zero_buffer_rejects_unaligned_size() {
     // surfaces this loudly via BackendError::UnalignedFill instead of
     // silently leaving 1–3 trailing bytes non-zero.
     let (backend, _serial) = shared_backend();
-    let buf = backend.alloc_device(17).expect("alloc_device(17)");
+    let mut buf = backend.alloc_device(17).expect("alloc_device(17)");
     backend.begin_page().expect("begin_page");
     let err = backend
-        .record_zero_buffer(&buf, 17)
+        .record_zero_buffer(&mut buf, 17)
         .expect_err("record_zero_buffer on 17-byte buf must be rejected");
     assert!(
         matches!(
@@ -430,9 +432,9 @@ fn shared_memory_upload_waits_for_the_page_reading_the_buffer() {
         eprintln!("skipping: no integrated GPU");
         return;
     };
-    let buf = backend.alloc_device(LEN).expect("alloc_device");
+    let mut buf = backend.alloc_device(LEN).expect("alloc_device");
     backend
-        .upload(&buf, &vec![0x11; LEN])
+        .upload(&mut buf, &vec![0x11; LEN])
         .expect("first upload");
     let mut first = backend.alloc_host_readback(LEN).expect("readback");
     let mut second = backend.alloc_host_readback(LEN).expect("readback");
@@ -443,7 +445,7 @@ fn shared_memory_upload_waits_for_the_page_reading_the_buffer() {
     let fence = backend.submit_page().expect("submit_page");
     let before = backend.submits();
     backend
-        .upload(&buf, &vec![0x22; LEN])
+        .upload(&mut buf, &vec![0x22; LEN])
         .expect("second upload");
     assert_eq!(
         backend.submits(),
@@ -489,14 +491,14 @@ fn backends_are_created_and_dropped_on_several_threads() {
 fn a_copy_after_a_zero_fill_in_one_page_reads_zeros() {
     const LEN: usize = 1 << 16;
     let (backend, _serial) = shared_backend();
-    let buf = backend.alloc_device(LEN).expect("alloc_device");
+    let mut buf = backend.alloc_device(LEN).expect("alloc_device");
     backend
-        .upload(&buf, &vec![0xA5; LEN])
+        .upload(&mut buf, &vec![0xA5; LEN])
         .expect("dirty upload");
     let mut out = backend.alloc_host_readback(LEN).expect("readback");
     backend
         .run_page(|b| {
-            b.record_zero_buffer(&buf, LEN)?;
+            b.record_zero_buffer(&mut buf, LEN)?;
             // SAFETY: `run_page` waits for the page before `out` is read.
             unsafe { b.record_copy_to_host(&buf, &mut out, LEN) }
         })
@@ -527,8 +529,10 @@ fn a_panicking_page_leaves_the_backend_usable() {
 #[test]
 fn oversize_transfers_fail_alike_on_every_device() {
     fn errors(backend: &VulkanBackend) -> (String, String) {
-        let buf = backend.alloc_device(4).expect("alloc_device");
-        let up = backend.upload(&buf, &[0; 8]).expect_err("oversize upload");
+        let mut buf = backend.alloc_device(4).expect("alloc_device");
+        let up = backend
+            .upload(&mut buf, &[0; 8])
+            .expect_err("oversize upload");
         let down = backend
             .download(&buf, &mut [0; 8])
             .expect_err("oversize download");

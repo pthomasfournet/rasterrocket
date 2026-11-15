@@ -56,7 +56,7 @@ pub(crate) fn dispatch_blelloch_scan<B: GpuBackend>(
     let mut block_sums = DeviceBufferGuard::alloc(backend, block_sums_bytes)?;
 
     let input_bytes = bytemuck::cast_slice::<u32, u8>(input);
-    backend.upload(data.as_ref(), input_bytes)?;
+    backend.upload(data.as_mut(), input_bytes)?;
 
     backend.run_page(|backend| {
         for phase in [

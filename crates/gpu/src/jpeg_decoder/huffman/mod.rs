@@ -210,10 +210,10 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         let s_info_bytes = (num_subsequences as usize) * std::mem::size_of::<SubsequenceState>();
         let flags_bytes = (num_subsequences as usize) * 4;
 
-        let bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
-        let codebook = DeviceBufferGuard::alloc(backend, ac_flat.len() * 4)?;
-        let dc_codebook = DeviceBufferGuard::alloc(backend, dc_flat.len() * 4)?;
-        let mcu_schedule = DeviceBufferGuard::alloc(backend, mcu_sched_host.len() * 4)?;
+        let mut bitstream = DeviceBufferGuard::alloc_zeroed(backend, bitstream_bytes)?;
+        let mut codebook = DeviceBufferGuard::alloc(backend, ac_flat.len() * 4)?;
+        let mut dc_codebook = DeviceBufferGuard::alloc(backend, dc_flat.len() * 4)?;
+        let mut mcu_schedule = DeviceBufferGuard::alloc(backend, mcu_sched_host.len() * 4)?;
         // `s_info` and `s_info_scratch` swap roles between passes; the host
         // reads back both.
         let s_info = DeviceBufferGuard::alloc_readback(backend, s_info_bytes)?;
@@ -229,12 +229,12 @@ impl<'a, B: GpuBackend> JpegDispatchSetup<'a, B> {
         let sync_flags = DeviceBufferGuard::alloc_readback_zeroed(backend, flags_bytes)?;
 
         backend.upload(
-            bitstream.as_ref(),
+            bitstream.as_mut(),
             bytemuck::cast_slice(&prep.bitstream.words),
         )?;
-        backend.upload(codebook.as_ref(), bytemuck::cast_slice(&ac_flat))?;
-        backend.upload(dc_codebook.as_ref(), bytemuck::cast_slice(&dc_flat))?;
-        backend.upload(mcu_schedule.as_ref(), bytemuck::cast_slice(&mcu_sched_host))?;
+        backend.upload(codebook.as_mut(), bytemuck::cast_slice(&ac_flat))?;
+        backend.upload(dc_codebook.as_mut(), bytemuck::cast_slice(&dc_flat))?;
+        backend.upload(mcu_schedule.as_mut(), bytemuck::cast_slice(&mcu_sched_host))?;
 
         Ok(Self {
             bitstream,
@@ -614,8 +614,8 @@ pub(in crate::jpeg_decoder) fn decode_jpeg_symbols_within<B: GpuBackend>(
     }
 
     let flags_bytes = (setup.num_subsequences as usize) * 4;
-    let offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
-    backend.upload(offsets_buf.as_ref(), bytemuck::cast_slice(&offsets_host))?;
+    let mut offsets_buf = DeviceBufferGuard::alloc(backend, flags_bytes)?;
+    backend.upload(offsets_buf.as_mut(), bytemuck::cast_slice(&offsets_host))?;
 
     let mut symbols_buf =
         DeviceBufferGuard::alloc_readback_zeroed(backend, (total_symbols as usize) * 4)?;

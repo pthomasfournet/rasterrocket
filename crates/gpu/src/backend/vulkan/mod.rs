@@ -330,14 +330,14 @@ impl GpuBackend for VulkanBackend {
         ))
     }
 
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()> {
+    fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {
         self.recorder.record_zero_buffer(buf, len)
     }
 
     unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
-        dst: &Self::DeviceBuffer,
+        dst: &mut Self::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
         recorded_copy_len(len, src.size(), dst.size(), "record_copy_to_device")?
@@ -408,7 +408,7 @@ impl GpuBackend for VulkanBackend {
     /// A mapped buffer (integrated GPU) is written in place under
     /// [`recorder::PageRecorder::with_quiescent`]: earlier pages read the old
     /// bytes, later ones the new, as with the staged copy.
-    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()> {
+    fn upload(&self, dst: &mut Self::DeviceBuffer, src: &[u8]) -> Result<()> {
         if !dst.is_mapped() {
             return self.transfer.upload(&self.memory, dst, src);
         }
@@ -541,13 +541,13 @@ mod tests {
     #[test]
     fn vulkan_shared_memory_download_of_an_uncached_buffer_is_staged() {
         let Some(backend) = integrated() else { return };
-        let buf = backend.alloc_device(4096).expect("alloc_device");
+        let mut buf = backend.alloc_device(4096).expect("alloc_device");
         if buf.host_reads_cached() {
             eprintln!("skipping: the written buffer is in host-cached memory");
             return;
         }
         let data: Vec<u8> = (0..=u8::MAX).cycle().take(4096).collect();
-        backend.upload(&buf, &data).expect("upload");
+        backend.upload(&mut buf, &data).expect("upload");
         let mut out = vec![0; 4096];
         backend.download(&buf, &mut out).expect("download");
         assert_eq!(out, data);

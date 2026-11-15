@@ -181,20 +181,20 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
                 JpegGpuError::Dispatch("image too large: width × height × 4 overflows".into())
             })?;
 
-        let coef_buf = DeviceBufferGuard::alloc(&self.backend, coef_bytes).map_err(be)?;
-        let qt_buf = DeviceBufferGuard::alloc(&self.backend, qt_bytes).map_err(be)?;
-        let dc_buf = DeviceBufferGuard::alloc(&self.backend, dc_bytes).map_err(be)?;
+        let mut coef_buf = DeviceBufferGuard::alloc(&self.backend, coef_bytes).map_err(be)?;
+        let mut qt_buf = DeviceBufferGuard::alloc(&self.backend, qt_bytes).map_err(be)?;
+        let mut dc_buf = DeviceBufferGuard::alloc(&self.backend, dc_bytes).map_err(be)?;
         let mut px_buf =
             DeviceBufferGuard::alloc_readback_zeroed(&self.backend, px_bytes).map_err(be)?;
 
         self.backend
-            .upload(coef_buf.as_ref(), bytemuck::cast_slice(coefficients))
+            .upload(coef_buf.as_mut(), bytemuck::cast_slice(coefficients))
             .map_err(be)?;
         self.backend
-            .upload(qt_buf.as_ref(), bytemuck::cast_slice(qtables))
+            .upload(qt_buf.as_mut(), bytemuck::cast_slice(qtables))
             .map_err(be)?;
         self.backend
-            .upload(dc_buf.as_ref(), bytemuck::cast_slice(dc_values))
+            .upload(dc_buf.as_mut(), bytemuck::cast_slice(dc_values))
             .map_err(be)?;
 
         self.backend

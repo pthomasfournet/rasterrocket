@@ -273,6 +273,10 @@ impl VramBudget {
 /// and is safe from several threads; the individual calls require external
 /// synchronisation even though the trait is `Send + Sync`.
 ///
+/// Every operation takes a device buffer it writes by `&mut` and one it
+/// only reads by `&`, so a backend that orders work across queues by
+/// recorded reads and writes sees every write.
+///
 /// # Stability — closed implementation set
 ///
 /// The trait is `pub` for callers (`rasterrocket`, `rasterrocket-interp`) but the
@@ -469,7 +473,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// `len` beyond the buffer's length is an error.  Vulkan's
     /// `vkCmdFillBuffer` requires the size to be a multiple of 4; non-aligned
     /// sizes return [`BackendError::UnalignedFill`].
-    fn record_zero_buffer(&self, buf: &Self::DeviceBuffer, len: usize) -> Result<()>;
+    fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()>;
     /// Record a copy of `src[..len]` into `dst[..len]` into the current
     /// page's command list.
     ///
@@ -491,7 +495,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     unsafe fn record_copy_to_device(
         &self,
         src: &Self::HostBuffer,
-        dst: &Self::DeviceBuffer,
+        dst: &mut Self::DeviceBuffer,
         len: usize,
     ) -> Result<()>;
 
@@ -618,7 +622,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// # Errors
     /// Returns `BackendError` if the copy fails, or if `src.len()`
     /// exceeds `dst`'s device capacity.
-    fn upload(&self, dst: &Self::DeviceBuffer, src: &[u8]) -> Result<()>;
+    fn upload(&self, dst: &mut Self::DeviceBuffer, src: &[u8]) -> Result<()>;
 
     /// Copy `dst.len()` bytes from the start of `src` into `dst`.
     ///

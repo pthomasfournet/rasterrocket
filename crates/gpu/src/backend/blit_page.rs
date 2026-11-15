@@ -142,7 +142,7 @@ pub fn blit_image_box<'s, B: GpuBackend>(
     backend.run_page(|backend| {
         unsafe { record_upload(backend, d_cols, col_bytes.len()) }?;
         unsafe { record_upload(backend, d_rows, row_bytes.len()) }?;
-        backend.record_zero_buffer(&target.device, target_len)?;
+        backend.record_zero_buffer(&mut target.device, target_len)?;
         backend.record_blit_image(BlitParams {
             src: src.pixels,
             dst: &mut target.device,
@@ -181,8 +181,8 @@ mod tests {
     /// earlier blit wrote beyond the box's length.
     fn check_box_blit<B: GpuBackend>(backend: &B) {
         let image: Vec<u8> = (0..3 * 2 * 3).map(|i| 10 + i).collect();
-        let src_buf = backend.alloc_device(image.len()).expect("alloc");
-        backend.upload(&src_buf, &image).expect("upload");
+        let mut src_buf = backend.alloc_device(image.len()).expect("alloc");
+        backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {
             pixels: &src_buf,
             width: 3,
@@ -232,8 +232,8 @@ mod tests {
     /// to the backend's pool, buffers kept.
     fn check_pooled_blit<B: GpuBackend>(backend: &B) {
         let image = [7_u8, 8, 9];
-        let src_buf = backend.alloc_device(image.len()).expect("alloc");
-        backend.upload(&src_buf, &image).expect("upload");
+        let mut src_buf = backend.alloc_device(image.len()).expect("alloc");
+        backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {
             pixels: &src_buf,
             width: 1,

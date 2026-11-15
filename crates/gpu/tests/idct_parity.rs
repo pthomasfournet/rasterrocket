@@ -181,8 +181,8 @@ impl Case {
         let out_bytes = (w * h * 4) as usize;
         let upload = |data: &[i32]| {
             let bytes: &[u8] = bytemuck::cast_slice(data);
-            let buf = backend.alloc_device(bytes.len()).expect("alloc");
-            backend.upload(&buf, bytes).expect("upload");
+            let mut buf = backend.alloc_device(bytes.len()).expect("alloc");
+            backend.upload(&mut buf, bytes).expect("upload");
             buf
         };
         let coefficients = upload(&self.coefficients);

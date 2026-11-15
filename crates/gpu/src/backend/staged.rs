@@ -197,12 +197,12 @@ pub(crate) fn stage_exact<'a, B: GpuBackend>(
 /// or dropped.
 pub(crate) unsafe fn record_upload<B: GpuBackend>(
     backend: &B,
-    staged: &Staged<B>,
+    staged: &mut Staged<B>,
     len: usize,
 ) -> Result<()> {
     staged.host.as_ref().map_or(Ok(()), |host| {
         // SAFETY: forwarded from this function's contract.
-        unsafe { backend.record_copy_to_device(host, &staged.device, len) }
+        unsafe { backend.record_copy_to_device(host, &mut staged.device, len) }
     })
 }
 

@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DriverError, HostSlice, PinnedHostSlice};
+use cudarc::driver::{
+    CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DriverError, HostSlice, PinnedHostSlice,
+};
 
 use crate::GpuCtx;
 use crate::backend::{Result, copy_len, recorded_copy_len};
@@ -28,13 +30,13 @@ use super::be;
 
 /// Copy `src` into `dst` and return once the copy has completed.  Empty
 /// `src` is a no-op, since cudarc rejects zero-byte transfers.
-pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &CudaSlice<u8>, src: &[u8]) -> Result<()> {
+pub(super) fn upload(ctx: &Arc<GpuCtx>, dst: &mut CudaSlice<u8>, src: &[u8]) -> Result<()> {
     copy_len(src.len(), dst.len() as u64, "upload", "destination").map(drop)?;
     if src.is_empty() {
         return Ok(());
     }
     let stream = ctx.stream();
-    let (dptr, _sync) = dst.device_ptr(&stream);
+    let (dptr, _sync) = dst.device_ptr_mut(&stream);
     // SAFETY: `dptr` addresses `dst` on `stream` and `src.len()` does
     // not exceed `dst.len()` (checked above).  `src` is borrowed for the
     // whole call, and `finish_copy` returns only once the stream, and
@@ -72,7 +74,7 @@ pub(super) fn queue_htod(
     ctx: &Arc<GpuCtx>,
     src: &PinnedHostSlice<u8>,
     len: usize,
-    dst: &CudaSlice<u8>,
+    dst: &mut CudaSlice<u8>,
 ) -> Result<()> {
     if recorded_copy_len(
         len,
@@ -85,7 +87,7 @@ pub(super) fn queue_htod(
         return Ok(());
     }
     let stream = ctx.stream();
-    let (dptr, _dst_sync) = dst.device_ptr(&stream);
+    let (dptr, _dst_sync) = dst.device_ptr_mut(&stream);
     // SAFETY: the slice is used only by the copy queued on `stream` below,
     // and its guard, dropped after the copy is queued, records `src`'s event
     // behind the copy.
@@ -158,8 +160,8 @@ mod tests {
             return;
         };
         let payload: Vec<u8> = (0u8..=255).collect();
-        let dst = b.alloc_device(payload.len()).expect("alloc");
-        b.upload(&dst, &payload).expect("upload");
+        let mut dst = b.alloc_device(payload.len()).expect("alloc");
+        b.upload(&mut dst, &payload).expect("upload");
 
         let mut readback = vec![0u8; payload.len()];
         b.download(&dst, &mut readback).expect("download");
@@ -172,8 +174,10 @@ mod tests {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        let dst = b.alloc_device(4).expect("alloc");
-        let err = b.upload(&dst, &[0u8; 8]).expect_err("oversize must fail");
+        let mut dst = b.alloc_device(4).expect("alloc");
+        let err = b
+            .upload(&mut dst, &[0u8; 8])
+            .expect_err("oversize must fail");
         let msg = err.to_string();
         assert!(
             msg.starts_with("upload:") && msg.contains("exceeds"),
@@ -207,8 +211,8 @@ mod tests {
         };
         // A zero-byte device buffer cannot be allocated; the empty source
         // is checked against a non-empty destination instead.
-        let dst = b.alloc_device(4).expect("alloc");
-        b.upload(&dst, &[]).expect("empty upload ok");
+        let mut dst = b.alloc_device(4).expect("alloc");
+        b.upload(&mut dst, &[]).expect("empty upload ok");
     }
 
     /// A page-locked source is read by DMA after `cuMemcpyHtoDAsync`
@@ -223,8 +227,8 @@ mod tests {
         let mut pinned = b.alloc_host_pinned(LEN).expect("pinned");
         let host = pinned.as_mut_slice().expect("host view");
         host.fill(0x5A);
-        let dst = b.alloc_device(LEN).expect("alloc");
-        b.upload(&dst, host).expect("upload");
+        let mut dst = b.alloc_device(LEN).expect("alloc");
+        b.upload(&mut dst, host).expect("upload");
         host.fill(0xC3);
         let mut readback = vec![0u8; LEN];
         b.download(&dst, &mut readback).expect("download");
@@ -240,8 +244,8 @@ mod tests {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        let device = b.alloc_device(LEN).expect("alloc");
-        b.upload(&device, &vec![0x5A; LEN]).expect("upload");
+        let mut device = b.alloc_device(LEN).expect("alloc");
+        b.upload(&mut device, &vec![0x5A; LEN]).expect("upload");
         let mut readback = b.alloc_host_readback(LEN).expect("readback");
         b.begin_page().expect("begin_page");
         // SAFETY: the buffer's event orders the host view below after the
@@ -256,7 +260,7 @@ mod tests {
         b.host_bytes_mut(&mut staged).expect("host view").fill(0xC3);
         b.begin_page().expect("begin_page");
         // SAFETY: as above.
-        unsafe { b.record_copy_to_device(&staged, &device, LEN) }.expect("record");
+        unsafe { b.record_copy_to_device(&staged, &mut device, LEN) }.expect("record");
         b.host_bytes_mut(&mut staged).expect("host view").fill(0x11);
         let fence = b.submit_page().expect("submit_page");
         b.wait_page(fence).expect("wait_page");
