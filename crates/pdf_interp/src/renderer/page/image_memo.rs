@@ -22,6 +22,7 @@ use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use color::SampleDepth;
 use pdf::ObjectId;
 
 use crate::renderer::document_images::{self, DocumentImages, ImageKey, host_bytes};
@@ -94,12 +95,19 @@ impl ImageMemo {
         &self.document
     }
 
-    /// The key of an inline image: `spaces` (the object identifying the
-    /// `/ColorSpace` dictionary its colour-space names resolve in, `None`
-    /// when there is none), its parameters and its data.
-    pub(super) fn inline_key(spaces: Option<ObjectId>, params: &[u8], data: &[u8]) -> Box<[u8]> {
-        let mut key = Vec::with_capacity(17 + params.len() + data.len());
+    /// The key of an inline image: the sample depth of the canvas it is
+    /// decoded for, `spaces` (the object identifying the `/ColorSpace`
+    /// dictionary its colour-space names resolve in, `None` when there is
+    /// none), its parameters and its data.
+    pub(super) fn inline_key(
+        depth: SampleDepth,
+        spaces: Option<ObjectId>,
+        params: &[u8],
+        data: &[u8],
+    ) -> Box<[u8]> {
+        let mut key = Vec::with_capacity(18 + params.len() + data.len());
         let (tag, (num, generation)) = spaces.map_or((0u8, (0, 0)), |id| (1, id));
+        key.push(depth.bits());
         key.push(tag);
         key.extend_from_slice(&num.to_le_bytes());
         key.extend_from_slice(&generation.to_le_bytes());
@@ -336,5 +344,17 @@ mod tests {
         );
         assert!(memo.get(other, None, false).is_none());
         assert_eq!(memo.bytes, 30);
+    }
+
+    /// An inline image decoded for a canvas of one depth is not served to
+    /// a canvas of the other: their keys differ by depth alone.
+    #[test]
+    fn the_inline_key_holds_the_depth() {
+        let key = |depth| ImageMemo::inline_key(depth, Some((3, 0)), b"/W 1 /H 1", b"\x80");
+        assert_ne!(key(SampleDepth::Eight), key(SampleDepth::Sixteen));
+        let mut memo = memo(1 << 20);
+        let _ = memo.insert_inline(key(SampleDepth::Eight), decoded(ImageFilter::Raw, 1));
+        assert!(memo.get_inline(&key(SampleDepth::Eight), false).is_some());
+        assert!(memo.get_inline(&key(SampleDepth::Sixteen), false).is_none());
     }
 }
