@@ -469,7 +469,7 @@ pub(crate) fn render_page_canvas_with_geom(
         &geom,
         (params.scale_x, params.scale_y),
         params.region,
-        page_layout(session, page_id, params).bytes_per_px(),
+        page_layout(session, page_id, params)?.bytes_per_px(),
         session.max_page_bytes,
     )?;
     let unsupported_features = pdf_interp::page_unsupported_features(doc, page_id);
@@ -488,7 +488,7 @@ pub(crate) fn render_page_canvas_with_geom(
         &ops,
         params,
         effective_policy,
-    );
+    )?;
     #[cfg(feature = "vulkan")]
     let (mut renderer, device_page) = crate::device_pages::render(&job, std::mem::take(buffers))?;
     #[cfg(not(feature = "vulkan"))]
@@ -642,6 +642,10 @@ impl<'a> PageJob<'a> {
     /// as `params` asks.  The page is painted on an ink canvas, which
     /// simulates overprint, when the session simulates it and some
     /// graphics state the page draws with sets it (see [`canvas_request`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`canvas_request`].
     pub(crate) fn new(
         session: &'a RasterSession,
         page_num: u32,
@@ -650,19 +654,19 @@ impl<'a> PageJob<'a> {
         ops: &'a [pdf_interp::content::Operator<'a>],
         params: &'a RenderParams,
         policy: crate::BackendPolicy,
-    ) -> Self {
+    ) -> Result<Self, RasterError> {
         let doc = &session.doc;
-        Self {
+        Ok(Self {
             session,
             page_num,
             page_id,
             view,
             ops,
             group: page_group(doc, page_id, params.transparent_background),
-            canvas: canvas_request(session, page_id, params),
+            canvas: canvas_request(session, page_id, params)?,
             params,
             policy,
-        }
+        })
     }
 
     /// A renderer of the page, configured from the session, its bitmap
@@ -743,37 +747,61 @@ impl<'a> PageJob<'a> {
 /// when the session does; otherwise the overprint preview when the session
 /// simulates overprint and some graphics state the page draws with sets
 /// it, sRGB otherwise.
+///
+/// A CMYK page separates the colours that are not CMYK through the
+/// session's CMYK output profile, under `params.intent`, else relative
+/// colorimetry, and its black-point compensation; without a profile, by
+/// the device conversion.
+///
+/// # Errors
+///
+/// [`RasterError::OutputProfile`] when the profile's separation cannot be
+/// built.
 fn canvas_request(
     session: &RasterSession,
     page_id: pdf::ObjectId,
     params: &RenderParams,
-) -> pdf_interp::CanvasRequest {
+) -> Result<pdf_interp::CanvasRequest, RasterError> {
     if params.color == crate::ColorModel::Cmyk {
-        return pdf_interp::CanvasRequest::Cmyk {
-            overprint: session.overprint,
-            separation: pdf_interp::Separation::Device,
+        let separation = match &session.output_profile {
+            Some(profile) => profile
+                .separation(
+                    crate::output::cmyk_intent(params),
+                    params.black_point_compensation,
+                )
+                .map_err(RasterError::OutputProfile)?,
+            None => pdf_interp::Separation::Device,
         };
+        return Ok(pdf_interp::CanvasRequest::Cmyk {
+            overprint: session.overprint,
+            separation,
+        });
     }
-    if session.overprint
-        && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations)
-    {
-        pdf_interp::CanvasRequest::OverprintPreview
-    } else {
-        pdf_interp::CanvasRequest::Rgb
-    }
+    Ok(
+        if session.overprint
+            && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations)
+        {
+            pdf_interp::CanvasRequest::OverprintPreview
+        } else {
+            pdf_interp::CanvasRequest::Rgb
+        },
+    )
 }
 
 /// The layout of the canvas page `page_id` of `session` is painted on
 /// under `params`, which the byte budget counts: of ink for a page
 /// painted on an ink canvas (see [`canvas_request`]).
+///
+/// # Errors
+///
+/// As [`canvas_request`].
 pub(crate) fn page_layout(
     session: &RasterSession,
     page_id: pdf::ObjectId,
     params: &RenderParams,
-) -> crate::CanvasLayout {
-    params
-        .canvas_layout()
-        .with_ink(canvas_request(session, page_id, params).is_ink())
+) -> Result<crate::CanvasLayout, RasterError> {
+    let ink = canvas_request(session, page_id, params)?.is_ink();
+    Ok(params.canvas_layout().with_ink(ink))
 }
 
 /// Warn about the first page found to carry JavaScript and the first

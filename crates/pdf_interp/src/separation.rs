@@ -10,8 +10,11 @@
 //! `Separation` or `DeviceN` space — paints its own ink on either.  Any
 //! other colour is converted from its sRGB value by a [`Separator`]: the
 //! inverse of the process-ink model for the preview, so that the preview
-//! reproduces the colour, and the device conversion of ISO 32000-2
-//! §10.4.2.3 for CMYK output.
+//! reproduces the colour, and for CMYK output the conversion of the
+//! output profile ([`ProfileSeparation`]) or, without one, the device
+//! conversion of ISO 32000-2 §10.4.2.3.
+
+use std::sync::Arc;
 
 use color::Sample;
 
@@ -50,7 +53,7 @@ impl CanvasRequest {
     }
 
     /// The ink-canvas settings of the request.
-    pub(crate) const fn ink_setup(&self) -> InkSetup {
+    pub(crate) fn ink_setup(&self) -> InkSetup {
         match self {
             Self::Rgb | Self::OverprintPreview => InkSetup::PREVIEW,
             Self::Cmyk {
@@ -74,14 +77,105 @@ pub enum Separation {
     /// black ink alone, and RGB loses its gray component to black.
     #[default]
     Device,
+    /// The conversion of a CMYK output profile from the working space
+    /// (see [`OutputProfile::separation`](crate::OutputProfile::separation)).
+    Profile(Arc<ProfileSeparation>),
 }
 
 impl Separation {
     /// The separator of the separation.
-    const fn separator(&self) -> Separator {
+    fn separator(&self) -> Separator {
         match self {
             Self::Device => Separator::Device,
+            Self::Profile(table) => Separator::Profile(Arc::clone(table)),
         }
+    }
+}
+
+/// The number of nodes along each axis of a [`ProfileSeparation`].
+pub(crate) const PROFILE_GRID: usize = 65;
+
+/// The CMYK of a profile's conversion from sRGB, tabulated on a
+/// `65 × 65 × 65` grid over the sRGB cube and interpolated trilinearly.
+///
+/// Node `(r, g, b)` holds the 16-bit CMYK of the sRGB colour of channels
+/// `v · 65535 / 64`, rounded, for `v` = `r`, `g`, `b`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProfileSeparation {
+    /// The nodes, `r` slowest, `b` fastest.
+    nodes: Box<[[u16; 4]]>,
+}
+
+impl std::fmt::Debug for ProfileSeparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileSeparation")
+            .field("grid", &PROFILE_GRID)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProfileSeparation {
+    /// The sRGB channel value of node index `i` along an axis.
+    pub(crate) fn node_value(i: usize) -> u16 {
+        let span = PROFILE_GRID as u64 - 1;
+        u16::try_from((i as u64 * u64::from(u16::MAX) + span / 2) / span)
+            .expect("a node value lies within the sample range")
+    }
+
+    /// The table of `nodes`, `PROFILE_GRID³` of them, `r` slowest; `None`
+    /// for another count.
+    pub(crate) fn from_nodes(nodes: Vec<[u16; 4]>) -> Option<Self> {
+        (nodes.len() == PROFILE_GRID.pow(3)).then(|| Self {
+            nodes: nodes.into_boxed_slice(),
+        })
+    }
+
+    /// The CMYK of the sRGB colour `rgb`, at its depth: the trilinear
+    /// interpolation of the eight nodes around it.
+    #[must_use]
+    pub fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the grid's span, 64, is exact in f64"
+        )]
+        let span = (PROFILE_GRID - 1) as f64;
+        let pos = rgb.map(|v| v.to_unit() * span);
+        let lo = pos.map(|p| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "p lies in [0, 64], so its floor is a node index"
+            )]
+            let i = p.floor() as usize;
+            i.min(PROFILE_GRID - 2)
+        });
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "node indices are below 64, exact in f64"
+        )]
+        let frac = [0, 1, 2].map(|i| pos[i] - lo[i] as f64);
+        let mut ink = [0.0f64; 4];
+        for corner in 0..8usize {
+            let bit = |axis: usize| (corner >> (2 - axis)) & 1;
+            let weight: f64 = (0..3)
+                .map(|axis| {
+                    if bit(axis) == 1 {
+                        frac[axis]
+                    } else {
+                        1.0 - frac[axis]
+                    }
+                })
+                .product();
+            if weight == 0.0 {
+                continue;
+            }
+            let [r, g, b] = [0, 1, 2].map(|axis| lo[axis] + bit(axis));
+            let node = self.nodes[(r * PROFILE_GRID + g) * PROFILE_GRID + b];
+            for (o, &v) in ink.iter_mut().zip(&node) {
+                *o = weight.mul_add(f64::from(v), *o);
+            }
+        }
+        ink.map(|v| S::from_unit(v / f64::from(u16::MAX)))
     }
 }
 
@@ -96,6 +190,8 @@ pub(crate) enum Separator {
     Model,
     /// [`color::cmyk::rgb_to_device_cmyk`].
     Device,
+    /// An output profile's conversion.
+    Profile(Arc<ProfileSeparation>),
 }
 
 impl Separator {
@@ -116,6 +212,7 @@ impl Separator {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
             Self::Device => color::cmyk::rgb_to_device_cmyk(rgb),
+            Self::Profile(table) => table.ink(rgb),
         }
     }
 }
@@ -171,5 +268,32 @@ mod tests {
             Separator::Model.ink([0u8; 3]),
             color::cmyk::rgb_to_ink([0; 3])
         );
+    }
+
+    /// A table of the device conversion of each node reproduces the
+    /// conversion at the nodes and interpolates it between them, where it
+    /// is piecewise linear in the channels.
+    #[test]
+    fn a_profile_separation_interpolates_its_nodes() {
+        let mut nodes = Vec::new();
+        for r in 0..PROFILE_GRID {
+            for g in 0..PROFILE_GRID {
+                for b in 0..PROFILE_GRID {
+                    let rgb = [r, g, b].map(ProfileSeparation::node_value);
+                    nodes.push(color::cmyk::rgb_to_device_cmyk(rgb));
+                }
+            }
+        }
+        let table = ProfileSeparation::from_nodes(nodes).expect("a whole grid");
+        assert_eq!(ProfileSeparation::node_value(PROFILE_GRID - 1), u16::MAX);
+        for rgb in [[0u8; 3], [255; 3], [255, 0, 0], [12, 200, 77], [128; 3]] {
+            let want = color::cmyk::rgb_to_device_cmyk(rgb);
+            let got = table.ink(rgb);
+            for (g, w) in got.iter().zip(want) {
+                assert!(g.abs_diff(w) <= 1, "{rgb:?}: {got:?} for {want:?}");
+            }
+        }
+        assert_eq!(table.ink([u16::MAX; 3]), [0; 4]);
+        assert!(ProfileSeparation::from_nodes(vec![[0; 4]; 8]).is_none());
     }
 }

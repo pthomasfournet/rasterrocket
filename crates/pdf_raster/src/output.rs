@@ -4,20 +4,31 @@
 use std::sync::atomic::Ordering;
 
 use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas};
-use pdf_interp::{IntentSet, RenderingIntent};
+use pdf_interp::{IntentSet, OutputSpace, RenderingIntent};
 
 use crate::{RasterError, RasterSession, RenderParams};
 
 /// Refuse `params` asking for a conversion that `session` cannot make: an
 /// intent or black-point compensation without an output profile, or
 /// compensation under absolute colorimetry; and a CMYK page over a
-/// transparent backdrop, or under an output profile that is not CMYK.
+/// transparent backdrop, or under an output profile that is not CMYK, and
+/// an sRGB page under a CMYK one.
 pub(crate) fn check_params(
     session: &RasterSession,
     params: &RenderParams,
 ) -> Result<(), RasterError> {
     if params.color == crate::ColorModel::Cmyk {
         check_cmyk(session, params)?;
+    } else if session
+        .output_profile
+        .as_ref()
+        .is_some_and(|p| p.space() == OutputSpace::Cmyk)
+    {
+        return Err(RasterError::InvalidOptions(
+            "the session's output profile is CMYK, which separates CMYK pages: render the \
+             pages as CMYK (RenderParams::with_cmyk, ColorModel::Cmyk)"
+                .to_owned(),
+        ));
     }
     if session.output_profile.is_none()
         && (params.intent.is_some() || params.black_point_compensation)
@@ -48,13 +59,27 @@ fn check_cmyk(session: &RasterSession, params: &RenderParams) -> Result<(), Rast
             "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
         ));
     }
-    if session.output_profile.is_some() {
+    if session
+        .output_profile
+        .as_ref()
+        .is_some_and(|p| p.space() != OutputSpace::Cmyk)
+    {
         return Err(RasterError::InvalidOptions(
-            "the session's output profile converts sRGB pages; a CMYK page is rendered without              an output profile"
+            "the session's output profile is RGB or gray, which converts sRGB pages: a CMYK \
+             page takes a CMYK output profile or none"
                 .to_owned(),
         ));
     }
     Ok(())
+}
+
+/// The intent a CMYK page separates under: `params.intent`, else relative
+/// colorimetry.  The separation is made as the page is painted, before
+/// its content's intents are known.
+pub(crate) fn cmyk_intent(params: &RenderParams) -> RenderingIntent {
+    params
+        .intent
+        .unwrap_or(RenderingIntent::RelativeColorimetric)
 }
 
 /// The intent a page whose marking operators used `content` converts
@@ -91,6 +116,9 @@ pub(crate) fn convert(
     let Some(profile) = &session.output_profile else {
         return Ok((canvas, None));
     };
+    if canvas.is_cmyk() {
+        return Ok((canvas, Some(cmyk_intent(params))));
+    }
     let (intent, mixed) = page_intent(params.intent, content);
     if mixed && !session.mixed_intents_warned.swap(true, Ordering::Relaxed) {
         log::warn!(

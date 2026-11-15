@@ -1,9 +1,9 @@
 //! Conversion of a finished page from the working space to an output ICC
 //! profile.
 //!
-//! An [`OutputProfile`] is an RGB or gray profile of the output, display
-//! or colour-space class whose PCS is XYZ or Lab; matrix/TRC and table
-//! (`BToA`) destinations alike are converted through `moxcms`.  A
+//! An [`OutputProfile`] is an RGB, gray or CMYK profile of the output,
+//! display or colour-space class whose PCS is XYZ or Lab; matrix/TRC and
+//! table (`BToA`) destinations alike are converted through `moxcms`.  A
 //! conversion is compiled once per rendering intent and black-point
 //! compensation, on first use, and shared by every page of the profile.
 //! It runs on 16-bit samples at both depths: an 8-bit sample is widened
@@ -17,6 +17,12 @@
 //! alpha plane carried unchanged; colour beside alpha is unassociated, so
 //! a pixel converts independently of its alpha.  A pixel of alpha 0
 //! keeps colour 0.
+//!
+//! A CMYK profile does not convert finished pages: a page rendered as CMYK
+//! paints its process colours as they are, a CMYK device's values, and
+//! separates every other colour as it is painted, through the profile's
+//! conversion of the working space tabulated by
+//! [`OutputProfile::separation`].
 
 mod working_space;
 
@@ -31,6 +37,7 @@ use raster::Bitmap;
 
 use crate::RenderingIntent;
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
+use crate::separation::{PROFILE_GRID, ProfileSeparation, Separation};
 
 /// The colour space of an output profile's device values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,8 @@ pub enum OutputSpace {
     Rgb,
     /// One channel, 0 black.
     Gray,
+    /// Four channels, cyan, magenta, yellow and black ink, 0 no ink.
+    Cmyk,
 }
 
 impl OutputSpace {
@@ -48,6 +57,7 @@ impl OutputSpace {
         match self {
             Self::Rgb => 3,
             Self::Gray => 1,
+            Self::Cmyk => 4,
         }
     }
 }
@@ -62,8 +72,6 @@ pub enum OutputProfileError {
     /// A profile class that does not describe an output: device link,
     /// abstract, named colour or input.
     Class(&'static str),
-    /// A CMYK profile: CMYK device values are not an output.
-    Cmyk,
     /// A data colour space other than RGB, gray and CMYK, named.
     ColorSpace(String),
     /// A profile connection space other than XYZ and Lab.
@@ -77,6 +85,9 @@ pub enum OutputProfileError {
     },
     /// A conversion failed on a page's pixels.
     Conversion(String),
+    /// The profile's colour space is not that of the page: a CMYK profile
+    /// for an sRGB page, an RGB or gray one for a page rendered as CMYK.
+    Mismatch(OutputSpace),
 }
 
 impl std::fmt::Display for OutputProfileError {
@@ -88,19 +99,22 @@ impl std::fmt::Display for OutputProfileError {
                 "a {class} profile; an output profile is of the output, display \
                  or colour-space class"
             ),
-            Self::Cmyk => f.write_str(
-                "a CMYK profile; CMYK raster output is not written, give an RGB or \
-                 gray output profile",
-            ),
             Self::ColorSpace(space) => write!(
                 f,
-                "a profile of {space} device values; an output profile is RGB or gray"
+                "a profile of {space} device values; an output profile is RGB, gray or CMYK"
             ),
             Self::Pcs => f.write_str("a profile connection space other than XYZ and Lab"),
             Self::Transform { intent, reason } => {
                 write!(f, "no {} conversion: {reason}", intent.pdf_name())
             }
             Self::Conversion(e) => write!(f, "the conversion failed: {e}"),
+            Self::Mismatch(OutputSpace::Cmyk) => f.write_str(
+                "a CMYK profile separates pages rendered as CMYK; it converts no sRGB page",
+            ),
+            Self::Mismatch(_) => f.write_str(
+                "an RGB or gray profile converts sRGB pages; a page rendered as CMYK takes a \
+                 CMYK profile",
+            ),
         }
     }
 }
@@ -117,12 +131,16 @@ const SLOTS: usize = RenderingIntent::ALL.len() * 2;
 /// A compiled conversion, or why it could not be compiled.
 type Compiled = Result<Executor, OutputProfileError>;
 
+/// A tabulated separation, or why it could not be built.
+type Tabulated = Result<Arc<ProfileSeparation>, OutputProfileError>;
+
 /// An ICC profile pages are converted to and tagged with.
 pub struct OutputProfile {
     bytes: Arc<[u8]>,
     profile: ColorProfile,
     space: OutputSpace,
     conversions: [OnceLock<Compiled>; SLOTS],
+    separations: [OnceLock<Tabulated>; SLOTS],
 }
 
 impl std::fmt::Debug for OutputProfile {
@@ -159,7 +177,7 @@ impl OutputProfile {
     /// # Errors
     ///
     /// [`OutputProfileError`] for bytes that are not a profile, or a
-    /// profile not of RGB or gray device values, not of the output,
+    /// profile not of RGB, gray or CMYK device values, not of the output,
     /// display or colour-space class, or whose PCS is neither XYZ nor Lab,
     /// checked in that order.
     pub fn from_bytes(bytes: impl Into<Arc<[u8]>>) -> Result<Self, OutputProfileError> {
@@ -169,7 +187,7 @@ impl OutputProfile {
         let space = match profile.color_space {
             DataColorSpace::Rgb => OutputSpace::Rgb,
             DataColorSpace::Gray => OutputSpace::Gray,
-            DataColorSpace::Cmyk => return Err(OutputProfileError::Cmyk),
+            DataColorSpace::Cmyk => OutputSpace::Cmyk,
             other => return Err(OutputProfileError::ColorSpace(format!("{other:?}"))),
         };
         match profile.profile_class {
@@ -188,6 +206,7 @@ impl OutputProfile {
             profile,
             space,
             conversions: std::array::from_fn(|_| OnceLock::new()),
+            separations: std::array::from_fn(|_| OnceLock::new()),
         })
     }
 
@@ -236,6 +255,7 @@ impl OutputProfile {
         let layout = match self.space {
             OutputSpace::Rgb => Layout::Rgb,
             OutputSpace::Gray => Layout::Gray,
+            OutputSpace::Cmyk => Layout::Rgba,
         };
         source.create_transform_16bit(
             Layout::Rgb,
@@ -249,24 +269,57 @@ impl OutputProfile {
         )
     }
 
+    /// The separation of colours from the working space to the CMYK of the
+    /// profile under `intent`, with black-point compensation when `bpc`,
+    /// tabulated on first use: [`PROFILE_GRID`]³ nodes, each a 16-bit
+    /// conversion.
+    ///
+    /// # Errors
+    ///
+    /// [`OutputProfileError::Mismatch`] for a profile that is not CMYK;
+    /// [`OutputProfileError::Transform`] or
+    /// [`OutputProfileError::Conversion`] when the conversion cannot be
+    /// built or run, kept and returned again on every later call.
+    pub fn separation(
+        &self,
+        intent: RenderingIntent,
+        bpc: bool,
+    ) -> Result<Separation, OutputProfileError> {
+        if self.space != OutputSpace::Cmyk {
+            return Err(OutputProfileError::Mismatch(self.space));
+        }
+        self.separations[slot(intent, bpc)]
+            .get_or_init(|| {
+                let xform = self.executor(intent, bpc)?;
+                tabulate(&*xform).map(Arc::new)
+            })
+            .clone()
+            .map(Separation::Profile)
+    }
+
     /// `canvas`, a working-space canvas, converted to the profile's device
     /// values under `intent`, with black-point compensation when `bpc`: in
     /// place for an RGB profile, into a gray canvas built in `buffers` for
     /// a gray one, the working-space storage then reclaimed into
-    /// `buffers`.  A canvas already in a gray space is returned as it is,
-    /// and so is a CMYK canvas, which holds device values.
+    /// `buffers`.  A canvas already in a gray space is returned as it is.
+    /// A CMYK canvas holds device values, separated as it was painted, and
+    /// is returned as it is under a CMYK profile.
     ///
     /// # Errors
     ///
     /// The conversion could not be built ([`OutputProfileError::Transform`]),
     /// or failed, or a gray canvas could not be allocated
-    /// ([`OutputProfileError::Conversion`]).
+    /// ([`OutputProfileError::Conversion`]); the canvas and the profile are
+    /// not both CMYK or both not ([`OutputProfileError::Mismatch`]).
     pub fn convert(
         &self,
         canvas: FinishedCanvas,
         (intent, bpc): (RenderingIntent, bool),
         buffers: &mut CanvasBuffers,
     ) -> Result<FinishedCanvas, OutputProfileError> {
+        if canvas.is_cmyk() && self.space != OutputSpace::Cmyk {
+            return Err(OutputProfileError::Mismatch(self.space));
+        }
         if matches!(
             canvas,
             FinishedCanvas::Gray8(_)
@@ -306,8 +359,35 @@ impl OutputProfile {
                 | FinishedCanvas::Cmyk16(_)),
                 _,
             ) => canvas,
+            (FinishedCanvas::Rgb8(_) | FinishedCanvas::Rgb16(_), OutputSpace::Cmyk) => {
+                return Err(OutputProfileError::Mismatch(OutputSpace::Cmyk));
+            }
         })
     }
+}
+
+/// The [`ProfileSeparation`] of `xform`, a conversion of 16-bit sRGB to
+/// CMYK: its value at every node, a row of nodes converted at a time.
+fn tabulate(
+    xform: &(dyn TransformExecutor<u16> + Send + Sync),
+) -> Result<ProfileSeparation, OutputProfileError> {
+    let mut nodes = Vec::with_capacity(PROFILE_GRID.pow(3));
+    let mut src = Vec::with_capacity(PROFILE_GRID * 3);
+    let mut dst = vec![0u16; PROFILE_GRID * 4];
+    for r in 0..PROFILE_GRID {
+        for g in 0..PROFILE_GRID {
+            src.clear();
+            src.extend(
+                (0..PROFILE_GRID).flat_map(|b| [r, g, b].map(ProfileSeparation::node_value)),
+            );
+            xform
+                .transform(&src, &mut dst)
+                .map_err(|e| OutputProfileError::Conversion(e.to_string()))?;
+            nodes.extend(dst.as_chunks::<4>().0.iter().copied());
+        }
+    }
+    ProfileSeparation::from_nodes(nodes)
+        .ok_or_else(|| OutputProfileError::Conversion("an incomplete grid".to_owned()))
 }
 
 /// A row converter: the 16-bit working rows of a conversion.

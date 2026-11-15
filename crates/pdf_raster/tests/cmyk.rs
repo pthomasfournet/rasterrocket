@@ -229,3 +229,52 @@ fn the_byte_budget_counts_the_ink_canvas() {
         Err(RasterError::PageTooLarge { bytes: 800, .. })
     ));
 }
+
+/// A session of [`page`] converting to the test profile `name`.
+fn profiled(name: &str) -> RasterSession {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/icc")
+        .join(name);
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.output_profile = Some(std::sync::Arc::new(
+        rasterrocket::OutputProfile::from_bytes(std::fs::read(path).expect("read profile"))
+            .expect("an output profile"),
+    ));
+    open_session_from_bytes(page(), &config).expect("open session")
+}
+
+/// Under a CMYK output profile the page's `DeviceCMYK` colours keep
+/// their values and its other colours separate through the profile: the
+/// gray to nearly black ink alone, as the profile replaces gray components.
+#[test]
+fn a_cmyk_output_profile_separates_what_is_not_cmyk() {
+    let session = profiled("printer-cmyk-v4.icc");
+    let params = RenderParams::new(1.0).with_cmyk();
+    let canvas = render_page_canvas(&session, 1, &params).expect("render");
+    let page = samples(BandBitmap::of(&canvas));
+    assert_eq!(at(&page, 2, 5), [0, 0, 0, 255]);
+    assert_eq!(at(&page, 7, 5), [255, 0, 0, 0]);
+    let [c, m, y, k] = at(&page, 9, 1);
+    assert!(k > 100 && c.max(m).max(y) < 12, "gray: {:?}", [c, m, y, k]);
+    let (_, diag) =
+        rasterrocket::render_page_canvas_with_diagnostics(&session, 1, &params).expect("render");
+    assert_eq!(
+        diag.output_intent,
+        Some(rasterrocket::RenderingIntent::RelativeColorimetric)
+    );
+    assert!(
+        matches!(
+            render_page_canvas(&session, 1, &RenderParams::new(1.0)),
+            Err(RasterError::InvalidOptions(_))
+        ),
+        "an sRGB page under a CMYK profile"
+    );
+    let rgb = profiled("printer-rgb-v4.icc");
+    assert!(
+        matches!(
+            render_page_canvas(&rgb, 1, &params),
+            Err(RasterError::InvalidOptions(_))
+        ),
+        "a CMYK page under an RGB profile"
+    );
+}

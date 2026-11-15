@@ -221,6 +221,7 @@ fn round_trip_ramp(
 ) -> Result<Vec<(f64, f64)>, moxcms::CmsError> {
     let (layout, channels) = match dest.color_space {
         DataColorSpace::Gray => (Layout::Gray, 1),
+        DataColorSpace::Cmyk => (Layout::Rgba, 4),
         _ => (Layout::Rgb, 3),
     };
     let pcs = as_version_2(&pcs_lightness())?;
@@ -333,12 +334,18 @@ fn y_to_lab_l(y: f64) -> f64 {
     116.0f64.mul_add(f, -16.0)
 }
 
-/// The PCS luminance `Y` of `dest`'s device 0 under `intent`, relative
-/// to the D50 white, through [`pcs_lightness`].
+/// The PCS luminance `Y` of `dest`'s darkest colorant under `intent`,
+/// relative to the D50 white, through [`pcs_lightness`]: device 0 of an
+/// additive space; for CMYK, whose darkest ink the profile's separation
+/// limits, the PCS black's round trip through the device
+/// ([`round_trip_ramp`]).
 fn darkest_colorant_y(
     dest: &ColorProfile,
     intent: RenderingIntent,
 ) -> Result<f64, moxcms::CmsError> {
+    if dest.color_space == DataColorSpace::Cmyk {
+        return Ok(lab_l_to_y(round_trip_ramp(dest, intent)?[0].1));
+    }
     let (layout, black): (Layout, &[f64]) = match dest.color_space {
         DataColorSpace::Gray => (Layout::Gray, &[0.0]),
         _ => (Layout::Rgb, &[0.0, 0.0, 0.0]),

@@ -42,7 +42,7 @@ const PATCHES: [[u8; 3]; 6] = [
 ];
 
 #[test]
-fn profiles_that_are_not_rgb_or_gray_outputs_are_refused() {
+fn profiles_that_are_not_rgb_gray_or_cmyk_outputs_are_refused() {
     assert_eq!(
         OutputProfile::from_bytes(srgb_bytes()).unwrap().space(),
         OutputSpace::Rgb
@@ -55,7 +55,7 @@ fn profiles_that_are_not_rgb_or_gray_outputs_are_refused() {
     let cmyk = std::fs::read(format!("{assets}CGATS001Compat-v2-micro.icc")).unwrap();
     assert_eq!(
         OutputProfile::from_bytes(cmyk).unwrap_err(),
-        OutputProfileError::Cmyk
+        OutputProfileError::Class("input")
     );
     let lab = std::fs::read(format!("{assets}LAB.icc")).unwrap();
     assert!(OutputProfile::from_bytes(lab).is_err());
@@ -157,4 +157,87 @@ fn conversions_are_compiled_once_and_slots_are_distinct() {
         }
     }
     assert_eq!(seen.len(), SLOTS);
+}
+
+/// The synthetic CMYK printer of `tests/fixtures/icc`.
+fn cmyk_printer() -> OutputProfile {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/icc/printer-cmyk-v4.icc"
+    );
+    OutputProfile::from_bytes(std::fs::read(path).expect("the fixture is present"))
+        .expect("a CMYK output profile")
+}
+
+/// The separation of sRGB colours to the CMYK printer under relative
+/// colorimetry agrees with Little CMS's `transicc -t 1` within 1.5 % of
+/// each ink; gray separates to black ink alone, as the profile's tables
+/// replace the gray component.
+#[test]
+fn a_cmyk_profile_separates_like_transicc() {
+    let profile = cmyk_printer();
+    assert_eq!(profile.space(), OutputSpace::Cmyk);
+    assert_eq!(profile.space().channels(), 4);
+    let Separation::Profile(table) = profile
+        .separation(RenderingIntent::RelativeColorimetric, false)
+        .expect("separates")
+    else {
+        panic!("a profile separation")
+    };
+    // transicc -n -i '*sRGB' -o printer-cmyk-v4.icc -t 1, in percent.
+    let reference: [([u8; 3], [f64; 4]); 4] = [
+        ([255, 0, 0], [0.0, 100.0, 100.0, 0.0]),
+        ([128, 128, 128], [1.8067, 1.5991, 1.6236, 50.0679]),
+        ([0, 0, 0], [0.0, 4.7059, 4.7059, 99.8672]),
+        ([255, 255, 255], [0.6226, 0.1862, 0.4593, 0.0]),
+    ];
+    for (rgb, want) in reference {
+        let got = table.ink(rgb.map(u16::from_u8));
+        for (g, w) in got.iter().zip(want) {
+            let g = f64::from(*g) / 655.35;
+            assert!((g - w).abs() <= 1.5, "{rgb:?}: {got:?} for {want:?} %");
+        }
+    }
+    let again = profile
+        .separation(RenderingIntent::RelativeColorimetric, false)
+        .expect("separates");
+    assert!(
+        matches!(&again, Separation::Profile(t) if Arc::ptr_eq(t, &table)),
+        "the table is built once"
+    );
+}
+
+/// A CMYK profile separates CMYK pages and converts no sRGB page; an RGB
+/// one has no separation and converts no CMYK page.
+#[test]
+fn profiles_and_pages_of_other_colour_spaces_are_refused() {
+    let cmyk = cmyk_printer();
+    let rgb = OutputProfile::from_bytes(srgb_bytes()).unwrap();
+    let relative = (RenderingIntent::RelativeColorimetric, false);
+    let mut buffers = CanvasBuffers::default();
+    assert_eq!(
+        rgb.separation(relative.0, relative.1).unwrap_err(),
+        OutputProfileError::Mismatch(OutputSpace::Rgb)
+    );
+    let page = FinishedCanvas::Rgb8(rgb8(&PATCHES, None));
+    assert_eq!(
+        cmyk.convert(page, relative, &mut buffers).unwrap_err(),
+        OutputProfileError::Mismatch(OutputSpace::Cmyk)
+    );
+    let mut ink = Bitmap::<color::Cmyk8>::new(2, 1, 1, false);
+    ink.row_samples_mut(0)
+        .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let FinishedCanvas::Cmyk8(same) = cmyk
+        .convert(FinishedCanvas::Cmyk8(ink), relative, &mut buffers)
+        .unwrap()
+    else {
+        panic!("CMYK")
+    };
+    assert_eq!(same.row_samples(0), [1, 2, 3, 4, 5, 6, 7, 8]);
+    let ink = Bitmap::<color::Cmyk8>::new(2, 1, 1, false);
+    assert_eq!(
+        rgb.convert(FinishedCanvas::Cmyk8(ink), relative, &mut buffers)
+            .unwrap_err(),
+        OutputProfileError::Mismatch(OutputSpace::Rgb)
+    );
 }

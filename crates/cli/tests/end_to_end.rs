@@ -1241,7 +1241,7 @@ fn output_profile_refusals_name_the_conflict() {
         ),
         (
             vec!["--output-profile", cmyk.to_str().unwrap()],
-            "CMYK raster output is not written",
+            "input profile",
         ),
     ] {
         let out = rrocket(dir.path(), &input, &args);

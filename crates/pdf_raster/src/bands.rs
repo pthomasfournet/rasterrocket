@@ -171,7 +171,7 @@ pub fn render_page_bands<E>(
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
     let policy = begin(session, params)?;
-    let bytes_per_px = crate::render::page_layout(session, page_id, params).bytes_per_px();
+    let bytes_per_px = crate::render::page_layout(session, page_id, params)?.bytes_per_px();
     let view = page_view(
         &geom,
         (params.scale_x, params.scale_y),
@@ -209,7 +209,7 @@ pub fn render_page_bands<E>(
     while y < view.height {
         let height = rows.min(view.height - y);
         let band_view = view.window(view.x, view.y + y, view.width, height);
-        let job = PageJob::new(session, page_num, page_id, &band_view, &ops, params, policy);
+        let job = PageJob::new(session, page_num, page_id, &band_view, &ops, params, policy)?;
         let mut renderer = job.renderer(std::mem::take(&mut buffers))?;
         if let Some(state) = state.take() {
             renderer.adopt_page_state(state);

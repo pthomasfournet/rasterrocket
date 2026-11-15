@@ -19,6 +19,11 @@ table is the inverse of its PCS -> device one.
     printer-rgb-v4.icc  output class, v4.3, Lab PCS, lutAtoBType / lutBtoAType
     printer-rgb-v2.icc  the same as v2.4, lut16Type
     printer-gray-v4.icc output class, v4.3, gray TRC with the same black lift
+    printer-cmyk-v4.icc output class, v4.3, Lab PCS, a CMYK printer of the
+                        same model: the inks filter the device RGB,
+                        rgb = (1 - cmy) * (1 - k), and the PCS -> device
+                        tables separate with full gray-component
+                        replacement, k = 1 - max(rgb)
 
 Run from the repository root:  python3 scripts/make_test_icc.py
 Needs liblcms2 (liblcms2-2).  The output is committed; the tests never run this.
@@ -46,6 +51,7 @@ L_BLACK = 8.0
 PAPER = (0.93, 0.965, 0.76)
 B2A_GRID = 25
 A2B_GRID = 17
+CMYK_A2B_GRID = 11
 
 
 def lab_to_y(l):
@@ -124,6 +130,18 @@ def lab_to_lin(lab, chroma, rescale):
     return tuple(min(1.0, max(0.0, v)) for v in lin)
 
 
+def cmyk_to_rgb(ink):
+    c, m, y, k = ink
+    return tuple((1 - v) * (1 - k) for v in (c, m, y))
+
+
+def rgb_to_cmyk(rgb):
+    k = 1 - max(rgb)
+    if k >= 1:
+        return (0.0, 0.0, 0.0, 1.0)
+    return tuple(1 - v / (1 - k) for v in rgb) + (k,)
+
+
 SAMPLER16 = ctypes.CFUNCTYPE(
     ctypes.c_int,
     ctypes.POINTER(ctypes.c_uint16),
@@ -153,6 +171,29 @@ def b2a_sampler(chroma, rescale):
         lin = lab_to_lin(lab, chroma, rescale)
         for i in range(3):
             out[i] = clamp16(lin[i])
+        return 1
+
+    return SAMPLER16(sample)
+
+
+def cmyk_a2b_sampler(chroma, rescale):
+    def sample(inp, out, _):
+        rgb = cmyk_to_rgb([inp[i] / 65535 for i in range(4)])
+        lab = device_to_lab(rgb, chroma, rescale)
+        out[0] = clamp16(lab[0] / 100)
+        out[1] = clamp16((lab[1] + 128) / 255)
+        out[2] = clamp16((lab[2] + 128) / 255)
+        return 1
+
+    return SAMPLER16(sample)
+
+
+def cmyk_b2a_sampler(chroma, rescale):
+    def sample(inp, out, _):
+        lab = (inp[0] / 65535 * 100, inp[1] / 65535 * 255 - 128, inp[2] / 65535 * 255 - 128)
+        ink = rgb_to_cmyk(lab_to_device(lab, chroma, rescale))
+        for i in range(4):
+            out[i] = clamp16(ink[i])
         return 1
 
     return SAMPLER16(sample)
@@ -200,24 +241,25 @@ class XYZ(ctypes.Structure):
     _fields_ = [("X", ctypes.c_double), ("Y", ctypes.c_double), ("Z", ctypes.c_double)]
 
 
-def gamma_curves(gamma):
-    """Three tone curves `x ** gamma`."""
+def gamma_curves(gamma, n=3):
+    """`n` tone curves `x ** gamma`."""
     LCMS.cmsBuildGamma.restype = ctypes.c_void_p
     LCMS.cmsBuildGamma.argtypes = [ctypes.c_void_p, ctypes.c_double]
     curve = LCMS.cmsBuildGamma(None, gamma)
-    curves = (ctypes.c_void_p * 3)(curve, curve, curve)
-    return LCMS.cmsStageAllocToneCurves(None, 3, curves)
+    curves = (ctypes.c_void_p * n)(*([curve] * n))
+    return LCMS.cmsStageAllocToneCurves(None, n, curves)
 
 
-def clut(grid, sampler, before, after):
-    """A pipeline of the curves `before`, a CLUT sampled by `sampler`, the
-    curves `after`: the curves on the device side carry the device's gamma,
-    so the CLUT holds linear values, as printer profiles do."""
-    stage = LCMS.cmsStageAllocCLut16bit(None, grid, 3, 3, None)
+def clut(grid, sampler, before, after, channels=(3, 3)):
+    """A pipeline of the curves `before`, a CLUT of `channels` (in, out)
+    sampled by `sampler`, the curves `after`: the curves on the device side
+    carry the device's gamma, so the CLUT holds linear values, as printer
+    profiles do."""
+    stage = LCMS.cmsStageAllocCLut16bit(None, grid, channels[0], channels[1], None)
     keep.append(sampler)
     if not LCMS.cmsStageSampleCLut16bit(stage, sampler, None, 0):
         sys.exit("sampling failed")
-    pipe = LCMS.cmsPipelineAlloc(None, 3, 3)
+    pipe = LCMS.cmsPipelineAlloc(None, channels[0], channels[1])
     # lutAtoBType and lutBtoAType store a CLUT between A and B curves.
     LCMS.cmsPipelineInsertStage(pipe, 1, before)
     LCMS.cmsPipelineInsertStage(pipe, 1, stage)
@@ -256,6 +298,31 @@ def rgb_printer(path, version):
     LCMS.cmsCloseProfile(profile)
 
 
+def cmyk_printer(path):
+    profile = LCMS.cmsCreateProfilePlaceholder(None)
+    common(profile, 4.3, "CMYK", "Lab ", "rasterrocket test CMYK printer")
+    for n, chroma, rescale in ((0, 1 / 0.85, True), (1, 1.0, False), (2, 1.1, True)):
+        a2b = clut(
+            CMYK_A2B_GRID,
+            cmyk_a2b_sampler(chroma, rescale),
+            gamma_curves(1.0, 4),
+            gamma_curves(1.0),
+            (4, 3),
+        )
+        b2a = clut(
+            B2A_GRID,
+            cmyk_b2a_sampler(chroma, rescale),
+            gamma_curves(1.0),
+            gamma_curves(1.0, 4),
+            (3, 4),
+        )
+        LCMS.cmsWriteTag(profile, sig(f"A2B{n}"), a2b)
+        LCMS.cmsWriteTag(profile, sig(f"B2A{n}"), b2a)
+    if not LCMS.cmsSaveProfileToFile(profile, path.encode()):
+        sys.exit(f"cannot write {path}")
+    LCMS.cmsCloseProfile(profile)
+
+
 def gray_printer(path):
     profile = LCMS.cmsCreateProfilePlaceholder(None)
     common(profile, 4.3, "GRAY", "XYZ ", "rasterrocket test gray printer")
@@ -273,6 +340,10 @@ def main():
     rgb_printer(os.path.join(OUT, "printer-rgb-v4.icc"), 4.3)
     rgb_printer(os.path.join(OUT, "printer-rgb-v2.icc"), 2.4)
     gray_printer(os.path.join(OUT, "printer-gray-v4.icc"))
+    cmyk_printer(os.path.join(OUT, "printer-cmyk-v4.icc"))
+    ink = (0.2, 0.5, 0.0, 0.3)
+    back = rgb_to_cmyk(cmyk_to_rgb(ink))
+    assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(back, ink))
     assert math.isclose(lab_to_device(device_to_lab((0.3, 0.6, 0.9), 1.0), 1.0)[1], 0.6, rel_tol=1e-9)
 
 
