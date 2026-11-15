@@ -325,7 +325,7 @@ impl PageRenderer<'_> {
             return Err("path clip");
         }
         let rgb = colour
-            .bytes_for(color::PixelMode::Rgb8)
+            .bytes_for(color::PixelMode::Rgb8, &self.ink.separator)
             .try_into()
             .map_err(|_| "colour")?;
         Ok(SolidPaint {

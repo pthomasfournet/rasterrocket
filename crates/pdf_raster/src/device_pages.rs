@@ -21,9 +21,7 @@ use std::thread::JoinHandle;
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
-use pdf_interp::renderer::{
-    CanvasBuffers, DevicePage, DeviceRecording, FinishedCanvas, PageRenderer,
-};
+use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRenderer};
 
 use crate::RasterError;
 use crate::render::PageJob;
