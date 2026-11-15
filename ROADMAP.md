@@ -2944,6 +2944,19 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: 16-bit DeviceCMYK corners and an ink-solve
+stall.** At 16 bits the DeviceCMYK model interpolates `color::cmyk::CORNERS16`,
+the sixteen corners converted at 16 bits from the same characterisation
+(FOGRA39 as ISO Coated v2 300 %, media-relative colorimetric with black
+point compensation, to sRGB, solid K neutral), instead of the 8-bit corners
+widened; solids and overprints move by up to 127 of 65 535 levels, and
+the 8-bit table, unchanged, is the 16-bit one rounded (tested).  16-bit
+renders still narrow to the 8-bit render within the same bounds.  The
+overprint ink solve (`ink_reproducing`), which stopped short of its minimum
+when an ink sat just inside a bound (13 of 40 000 random cases), now sets
+such an ink to the bound and continues; results change only where it had
+stalled, each to a lower cost.
+
 **Unreleased on master: reviewed expected-failures registry.** The
 comparison harness judges a page by its worst per-channel tile delta
 (≤ 12, so colour errors a gray metric hid now count) and judges RMSE only

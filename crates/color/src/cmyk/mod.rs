@@ -60,8 +60,8 @@ use crate::sample::{Sample, SampleDepth};
 ///
 /// The values are the FOGRA39 characterisation data set (ISO 12647-2:2004
 /// Amd 1, offset printing on paper types 1/2, gloss- and matte-coated) in
-/// the form of the ECI *ISO Coated v2* output profile, evaluated at the
-/// sixteen corners and converted to sRGB (IEC 61966-2-1) with the ICC
+/// the form of the *ISO Coated v2 300%* output profile (its separation
+/// limited to 300 % total area coverage), evaluated at the sixteen corners and converted to sRGB (IEC 61966-2-1) with the ICC
 /// media-relative colorimetric intent and black point compensation.  Paper
 /// white therefore maps to sRGB white and the four-colour solid to sRGB
 /// black, while solid K alone keeps the slight lift of printed black.
@@ -71,6 +71,8 @@ use crate::sample::{Sample, SampleDepth};
 /// `a* = b* = 0`; the warm cast is the media-relative mapping of the bluish
 /// paper white, not a property of the ink.  A neutral corner keeps the whole
 /// K axis achromatic: K-only content converts to exact greys.
+///
+/// Each entry is the [`CORNERS16`] entry rounded to 8 bits.
 pub const CORNERS: [[u8; 3]; 16] = [
     // K = 0
     [255, 255, 255], // paper
@@ -91,6 +93,44 @@ pub const CORNERS: [[u8; 3]; 16] = [
     [0, 0, 0],    // C + M + K
     [0, 0, 0],    // C + M + Y + K
 ];
+
+/// [`CORNERS`] at 16 bits: the same conversion of the same sixteen corners,
+/// quantised to `[0, 65535]` instead of `[0, 255]`.
+///
+/// Solid K is the neutral grey of the converted corner's relative luminance
+/// (the conversion gives `[6048, 5902, 5502]`, of luminance 0.008556,
+/// encoded as 5905).  Paper white is sRGB white, as the media-relative
+/// intent defines it.
+pub const CORNERS16: [[u16; 3]; 16] = [
+    // K = 0
+    [65535, 65535, 65535], // paper
+    [65535, 60994, 0],     // Y
+    [58961, 0, 32078],     // M
+    [58349, 0, 2700],      // M + Y
+    [0, 40666, 58431],     // C
+    [0, 38457, 16018],     // C + Y
+    [11718, 9019, 33576],  // C + M
+    [12171, 12038, 11683], // C + M + Y
+    // K = 1
+    [5905, 5905, 5905], // K
+    [5761, 6128, 0],    // Y + K
+    [8635, 0, 0],       // M + K
+    [7623, 0, 0],       // M + Y + K
+    [0, 678, 6602],     // C + K
+    [0, 2927, 0],       // C + Y + K
+    [0, 0, 0],          // C + M + K
+    [0, 0, 0],          // C + M + Y + K
+];
+
+/// Channel `channel` of corner `j` on the scale of `S`: [`CORNERS`] at 8
+/// bits, [`CORNERS16`] at 16.
+#[inline]
+pub(crate) fn corner_at<S: Sample>(j: usize, channel: usize) -> u16 {
+    match S::DEPTH {
+        SampleDepth::Eight => u16::from(CORNERS[j][channel]),
+        SampleDepth::Sixteen => CORNERS16[j][channel],
+    }
+}
 
 /// [`CORNERS`] flattened to 48 bytes: the 2⁴-node CLUT handed to GPU kernels.
 pub const CORNER_TABLE: [u8; 48] = {
@@ -240,15 +280,15 @@ pub fn cmyk_f64_to_rgb(c: f64, m: f64, y: f64, k: f64) -> [u8; 3] {
 }
 
 /// The model at any sample depth: one output channel from the ink weights
-/// `[c, m, y, k]` on `[0, 2^BITS]`, the corners [`CORNERS`] on the sample's
-/// scale (`v·257` at 16 bits).  The stages are those of the 8-bit
+/// `[c, m, y, k]` on `[0, 2^BITS]`, the corners those of the sample's depth
+/// ([`corner_at`]).  The stages are those of the 8-bit
 /// evaluation with `BITS` fractional bits in place of 8: after the M and C
 /// stages the product is rounded back to `BITS` fractional bits, and the K
 /// stage rounds to an integer.  Every intermediate is a convex combination
 /// of corner values times at most `2^(2·BITS)`, below `2^48` at 16 bits.
 fn channel_at<S: Sample>(channel: usize, w: [i64; 4]) -> S {
     let bits = S::BITS;
-    let corner = |j: usize| S::from_u8(CORNERS[j][channel]).signed();
+    let corner = |j: usize| i64::from(corner_at::<S>(j, channel));
     let lerp = |a: i64, b: i64, w: i64| (a << bits) + (b - a) * w;
     let round = |v: i64| (v + (1 << (bits - 1))) >> bits;
     let [wc, wm, wy, wk] = w;
@@ -287,7 +327,8 @@ fn unit_weight_at<S: Sample>(t: f64) -> i64 {
 }
 
 /// [`cmyk_to_rgb`] at the depth of `S`: the 8-bit evaluation itself for
-/// `u8`, the model evaluated with 16-bit weights and corners for `u16`.
+/// `u8`, the model evaluated with 16-bit weights and [`CORNERS16`] for
+/// `u16`.
 #[must_use]
 pub fn cmyk_to_rgb_at<S: Sample>(c: S, m: S, y: S, k: S) -> [S; 3] {
     S::by_depth(

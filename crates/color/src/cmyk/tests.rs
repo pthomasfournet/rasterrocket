@@ -3,8 +3,8 @@ use super::{
     rgb_to_ink,
 };
 use super::{
-    CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
-    convert_scalar, unit_weight, weight,
+    CORNER_TABLE, CORNERS, CORNERS16, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row,
+    cmyk_to_rgb_vec, convert_scalar, unit_weight, weight,
 };
 use super::{
     SPOT_TINTS16, SpotLut16, cmyk_to_rgb_at, ink_reproducing, ink_reproducing_at, ink_to_rgb_row16,
@@ -104,6 +104,17 @@ fn corner_table_is_flattened_corners() {
     for (i, corner) in CORNERS.iter().enumerate() {
         assert_eq!(&CORNER_TABLE[i * 3..i * 3 + 3], corner);
     }
+}
+
+/// The 8-bit corners are the 16-bit corners rounded to the nearest level,
+/// and solid K is neutral at either depth.
+#[test]
+fn byte_corners_are_the_16_bit_corners_rounded() {
+    for (i, (narrow, wide)) in CORNERS.iter().zip(&CORNERS16).enumerate() {
+        assert_eq!(wide.map(u16::to_u8), *narrow, "corner {i}");
+    }
+    assert_eq!(CORNERS16[0], [u16::MAX; 3]);
+    assert_eq!(CORNERS16[8], [CORNERS16[8][0]; 3]);
 }
 
 #[test]
@@ -741,15 +752,18 @@ fn generic_model_at_8_bits_is_the_8_bit_model() {
     }
 }
 
-/// At 16 bits the corners are exact, and the model narrowed to 8 bits lies
-/// within one level of the 8-bit model on a 17⁴ grid.
+/// At 16 bits solids select the 16-bit corners exactly, and the model
+/// narrowed to 8 bits lies within one level of the 8-bit model on a 17⁴
+/// grid.
 #[test]
 fn sixteen_bit_model_narrows_to_the_8_bit_model() {
-    for (i, corner) in CORNERS.iter().enumerate() {
+    for (i, corner) in CORNERS16.iter().enumerate() {
         let [c, m, y, k] = corner_inks(i).map(u16::from_u8);
+        assert_eq!(super::cmyk_to_rgb_at(c, m, y, k), *corner, "corner {i}");
+        let [c, m, y, k] = corner_inks(i).map(|v| f64::from(v) / 255.0);
         assert_eq!(
-            super::cmyk_to_rgb_at(c, m, y, k),
-            corner.map(u16::from_u8),
+            super::cmyk_f64_to_rgb_at::<u16>(c, m, y, k),
+            *corner,
             "corner {i}"
         );
     }
@@ -790,7 +804,7 @@ fn unit_conversion_at_either_depth() {
     }
     assert_eq!(
         super::cmyk_f64_to_rgb_at::<u16>(0.0, 0.0, 0.0, 1.0),
-        CORNERS[8].map(u16::from_u8)
+        CORNERS16[8]
     );
     assert_eq!(
         super::cmyk_f64_to_rgb_at::<u16>(0.0, 0.0, 0.0, 0.0),

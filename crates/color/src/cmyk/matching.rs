@@ -124,6 +124,12 @@ pub fn ink_reproducing(rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
 /// [`ink_reproducing`] at the depth of `S`: the 8-bit solve itself for
 /// `u8`; for `u16`, the same solve towards the 16-bit colour, its inks
 /// quantised to 16 bits.
+///
+/// Both depths solve the model of [`CORNERS`](super::CORNERS).  The 16-bit
+/// model's corners ([`CORNERS16`](super::CORNERS16)) lie within half a
+/// count of those, below the solve's tolerance of [`PRINTS`] counts, and a
+/// common model keeps the 16-bit inks within a level of the 8-bit ones
+/// where the cost is flat along the inks reproducing a colour.
 #[must_use]
 pub fn ink_reproducing_at<S: Sample>(rgb: [S; 3], given: [f64; 4]) -> [S; 4] {
     S::by_depth(
