@@ -229,6 +229,88 @@ const SCRIPT_NAMES: &[(Script, &[&str])] = &[
     ),
 ];
 
+/// Style words a family name may end in without a separator
+/// (`ArialBold`), lower case, longest first: cut from the family key when
+/// the whole key names no installed family.
+const STYLE_SUFFIXES: &[&str] = &[
+    "bolditalic",
+    "boldoblique",
+    "semibold",
+    "demibold",
+    "regular",
+    "italic",
+    "oblique",
+    "bold",
+];
+
+/// The installed face a font without a program names, by its `BaseFont`
+/// (else its descriptor's `FontName`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FaceName {
+    /// The name without its subset tag, as written: compared, case
+    /// included, with installed faces' PostScript names (`Carlito-Bold`).
+    pub postscript: String,
+    /// The family key: the part of the name before its style suffix (the
+    /// first `,` or `-`: `Carlito,Bold`, `Carlito-BoldItalic`), lower
+    /// case, without spaces, hyphens or underscores (`carlito`); compared
+    /// with installed family names normalised by [`family_key`].
+    pub family: String,
+    /// [`Self::family`] without trailing style words ([`STYLE_SUFFIXES`]):
+    /// `carlito` of `CarlitoBold`; equal to it when it has none.
+    pub stem: String,
+}
+
+impl FaceName {
+    /// The name of the font `font_dict` whose resolved descriptor is
+    /// `fd`; `None` when neither names a family.
+    #[must_use]
+    pub(crate) fn of(font_dict: &Dictionary, fd: Option<&Dictionary>) -> Option<Self> {
+        let name = font_dict
+            .get_name(b"BaseFont")
+            .or_else(|| fd.and_then(|d| d.get_name(b"FontName")))?;
+        Self::parse(&String::from_utf8_lossy(name))
+    }
+
+    /// The name `name`, normalised; `None` when it has no family part.
+    fn parse(name: &str) -> Option<Self> {
+        let postscript = without_subset_tag(name);
+        let family = family_key(postscript.split([',', '-']).next().unwrap_or_default());
+        if family.is_empty() {
+            return None;
+        }
+        let mut stem = family.as_str();
+        while let Some(rest) = STYLE_SUFFIXES
+            .iter()
+            .find_map(|suffix| stem.strip_suffix(suffix).filter(|r| !r.is_empty()))
+        {
+            stem = rest;
+        }
+        Some(Self {
+            postscript: postscript.to_owned(),
+            stem: stem.to_owned(),
+            family,
+        })
+    }
+}
+
+/// The family key of the family name `family`: lower case, without
+/// spaces, hyphens or underscores, so that `Myriad Pro`, `MyriadPro` and
+/// `Myriad_Pro` share one key.
+#[must_use]
+pub(crate) fn family_key(family: &str) -> String {
+    family
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// `name` without its subset tag: everything up to its first `+`
+/// (`ABCDEF+Carlito`), which carries no family or style.
+fn without_subset_tag(name: &str) -> &str {
+    name.split_once('+').map_or(name, |(_, rest)| rest)
+}
+
 /// Classify the substitute for the font described by `font_dict`, whose
 /// resolved font descriptor is `fd` (that of the font dictionary itself
 /// for a simple font, of the descendant `CIDFont` for a Type 0 font).
@@ -237,8 +319,7 @@ pub(crate) fn substitute_style(font_dict: &Dictionary, fd: Option<&Dictionary>) 
     let name = font_dict
         .get_name(b"BaseFont")
         .map_or_default(|n| String::from_utf8_lossy(n).to_ascii_lowercase());
-    // A subset tag (`ABCDEF+`) carries no style information.
-    let name = name.split_once('+').map_or(name.as_str(), |(_, rest)| rest);
+    let name = without_subset_tag(&name);
 
     let flags = descriptor_flags(fd);
     let weight = fd
@@ -388,6 +469,33 @@ mod tests {
         ] {
             assert!(!classify(name, 0, 0.0, 0.0).standard, "{name}");
         }
+    }
+
+    /// A name normalises to its PostScript form without the subset tag
+    /// and to a family key without style suffix, case or separators.
+    #[test]
+    fn face_names_normalise_to_a_family_key() {
+        let name = |n: &str| FaceName::parse(n).expect("a family");
+        let carlito = name("ABCDEF+Carlito-BoldItalic");
+        assert_eq!(carlito.postscript, "Carlito-BoldItalic");
+        assert_eq!(
+            (carlito.family.as_str(), carlito.stem.as_str()),
+            ("carlito", "carlito")
+        );
+        assert_eq!(name("Carlito,Bold").family, "carlito");
+        assert_eq!(name("Myriad Pro,Italic").family, "myriadpro");
+        assert_eq!(name("Myriad_Pro").family, "myriadpro");
+        let run_on = name("CarlitoBoldItalic");
+        assert_eq!(
+            (run_on.family.as_str(), run_on.stem.as_str()),
+            ("carlitobolditalic", "carlito")
+        );
+        assert_eq!(
+            name("Bold").stem,
+            "bold",
+            "a style word alone stays the family"
+        );
+        assert!(FaceName::parse("ABCDEF+,Bold").is_none());
     }
 
     #[test]

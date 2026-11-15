@@ -63,6 +63,7 @@ pub(crate) fn simple(
         cid_encoding: None,
         type3: None,
         substitute: SubstituteStyle::default(),
+        face_name: None,
         symbolic: false,
     }
 }
@@ -93,6 +94,7 @@ pub(crate) fn composite_substitute(
         }),
         type3: None,
         substitute,
+        face_name: None,
         symbolic: false,
     }
 }

@@ -31,7 +31,7 @@ use pdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::resources::dict_ext::DictExt;
 use crate::resources::font_substitute::{
-    SubstituteFamily, SubstituteStyle, differences_script, substitute_style,
+    FaceName, SubstituteFamily, SubstituteStyle, differences_script, substitute_style,
 };
 
 mod cid;
@@ -124,6 +124,9 @@ pub struct FontDescriptor {
     pub type3: Option<Type3Data>,
     /// Typeface class of the substitute drawn when `program` is `None`.
     pub substitute: SubstituteStyle,
+    /// The installed face the font names, drawn in place of the class
+    /// substitute when installed; `None` for a font with a program.
+    pub face_name: Option<FaceName>,
     /// The `Symbolic` flag (bit 3) of a simple font's font descriptor
     /// (PDF §9.8.2): its codes select glyphs of the program's own
     /// encoding.  `false` for composite and Type 3 fonts.
@@ -220,7 +223,6 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
 
     FontDescriptor {
         kind,
-        program,
         widths,
         first_char,
         missing_width,
@@ -228,6 +230,11 @@ pub fn resolve_font(doc: &Document, dict: &Dictionary, id: Option<ObjectId>) -> 
         base_encoding,
         cid_encoding: None,
         type3: None,
+        face_name: program
+            .is_none()
+            .then(|| FaceName::of(dict, fd.as_ref()))
+            .flatten(),
+        program,
         substitute,
         symbolic,
     }
@@ -574,6 +581,7 @@ mod tests {
             cid_encoding: None,
             type3: None,
             substitute: SubstituteStyle::default(),
+            face_name: None,
             symbolic: false,
         }
     }

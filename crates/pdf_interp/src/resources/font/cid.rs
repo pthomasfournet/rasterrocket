@@ -12,7 +12,7 @@ use super::{
 use crate::resources::cmap::{CMap, DecodedCode, parse_cmap};
 use crate::resources::cmap_predefined::predefined_cmap;
 use crate::resources::dict_ext::DictExt;
-use crate::resources::font_substitute::{Script, ordering_script, substitute_style};
+use crate::resources::font_substitute::{FaceName, Script, ordering_script, substitute_style};
 
 /// CID encoding information for Type 0 composite fonts.
 ///
@@ -265,7 +265,6 @@ pub(super) fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescr
 
     FontDescriptor {
         kind,
-        program,
         widths: vec![],
         first_char: 0,
         // Type 0 fonts use `CidEncoding::width_for_cid` exclusively;
@@ -285,6 +284,11 @@ pub(super) fn resolve_type0_font(doc: &Document, dict: &Dictionary) -> FontDescr
             to_unicode,
         }),
         type3: None,
+        face_name: program
+            .is_none()
+            .then(|| FaceName::of(descendant.as_ref().unwrap_or(dict), fd.as_ref()))
+            .flatten(),
+        program,
         substitute,
         symbolic: false,
     }

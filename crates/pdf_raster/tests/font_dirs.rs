@@ -56,3 +56,32 @@ fn font_dirs_supply_fallback_glyphs() {
     let dark = ink(page(font, "(A)"), vec![dir]);
     assert!(dark > 20, "the symbol draws ({dark} dark pixels)");
 }
+
+/// A font the document does not embed draws with the installed face its
+/// name names, matched by the face's own family name whatever the file is
+/// called, through a subset tag and a style suffix; a name no installed
+/// face carries draws the class substitute.
+#[test]
+fn font_dirs_supply_the_face_a_font_names() {
+    let dir = font_dir(
+        "font-dirs-named",
+        &[(
+            "renamed.ttf",
+            include_bytes!("../../font_test_data/test_data/ttf/ahem.ttf"),
+        )],
+    );
+    let font = |name: &str| {
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /{name} \
+             /Encoding /WinAnsiEncoding >>"
+        )
+    };
+    let substitute = ink(page(&font("Ahemless"), "(AB)"), vec![dir.clone()]);
+    for name in ["Ahem", "ABCDEF+Ahem,Bold", "Ahem-Italic"] {
+        let named = ink(page(&font(name), "(AB)"), vec![dir.clone()]);
+        assert!(
+            named > 2 * substitute,
+            "{name}: Ahem squares ({named} dark pixels) against the substitute ({substitute})"
+        );
+    }
+}

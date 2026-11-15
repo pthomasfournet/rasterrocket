@@ -25,6 +25,9 @@ pub struct FaceInfo {
     /// carries an English record (see `family_name`), as the file spells
     /// it.
     pub family: String,
+    /// PostScript name (`name` ID 6), English where the face carries an
+    /// English record; `None` when the face has none.
+    pub postscript: Option<String>,
     /// `OS/2` `ulCodePageRange1` and `ulCodePageRange2`; zero when the
     /// table predates them.
     pub code_page_ranges: [u32; 2],
@@ -206,6 +209,7 @@ fn face_info(file: &mut File, offset: u32) -> Option<FaceInfo> {
     Some(FaceInfo {
         index: 0,
         family: family_name(&name)?,
+        postscript: name_string(&name, &[6]),
         code_page_ranges: [
             os2.ul_code_page_range_1().unwrap_or(0),
             os2.ul_code_page_range_2().unwrap_or(0),
@@ -219,16 +223,21 @@ fn face_info(file: &mut File, offset: u32) -> Option<FaceInfo> {
 }
 
 /// The typographic family name (ID 16) of `name`, else its family name
-/// (ID 1): the first non-empty one from an English record (the
-/// language-neutral Unicode platform, a Windows language whose primary
-/// language is English, or Macintosh Roman English), then from a Unicode
-/// record of any language.
+/// (ID 1), by [`name_string`].
+fn family_name(name: &Name<'_>) -> Option<String> {
+    name_string(name, &[16, 1])
+}
+
+/// The first non-empty string of `name` among the name IDs `ids`, in
+/// their order, from an English record (the language-neutral Unicode
+/// platform, a Windows language whose primary language is English, or
+/// Macintosh Roman English), then from a Unicode record of any language.
 ///
 /// Records are sorted by platform, encoding and language ID, so a
 /// localised Windows name (zh-TW `0x0404`) precedes the en-US one
 /// (`0x0409`); some faces carry their English name in a Macintosh record
 /// only.
-fn family_name(name: &Name<'_>) -> Option<String> {
+fn name_string(name: &Name<'_>, ids: &[u16]) -> Option<String> {
     /// Windows LANGID primary-language bits and the primary language
     /// English.
     const PRIMARY_LANGUAGE: u16 = 0x3FF;
@@ -256,10 +265,9 @@ fn family_name(name: &Name<'_>) -> Option<String> {
                 (!text.is_empty()).then_some(text)
             })
     };
-    record_named(16, true)
-        .or_else(|| record_named(1, true))
-        .or_else(|| record_named(16, false))
-        .or_else(|| record_named(1, false))
+    [true, false]
+        .into_iter()
+        .find_map(|english_only| ids.iter().find_map(|&id| record_named(id, english_only)))
 }
 
 /// Read `len` bytes at `at` into a new buffer; `None` for an empty table
@@ -373,6 +381,19 @@ mod tests {
             Some("Typographic"),
             "an empty record does not end the search",
         );
+    }
+
+    /// A face lists its family and PostScript names.
+    #[test]
+    fn face_infos_read_the_family_and_postscript_names() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../font_test_data/test_data/ttf/ahem.ttf"
+        ));
+        let faces = face_infos(path);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].family, "Ahem");
+        assert_eq!(faces[0].postscript.as_deref(), Some("Ahem"));
     }
 
     /// The coverage of a test face is the set of code points its Unicode

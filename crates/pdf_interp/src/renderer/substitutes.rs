@@ -1,6 +1,8 @@
 //! Substitute font programs for fonts without an embedded program.
 //!
-//! A font without a program is drawn with a substitute of its family class
+//! A font without a program is drawn with the installed face its name
+//! names ([`FaceName`]), unless it is one of the standard 14 or their
+//! metric-compatible aliases; else with a substitute of its family class
 //! and variant ([`SubstituteStyle`]): the installed metric-compatible face
 //! (Liberation, Arial, Times New Roman, Courier New) when one is found in
 //! an extra directory of the [`FontLibrary`] or on the fixed search path,
@@ -16,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use font::program::FontProgram;
 
 use super::system_fonts::FontLibrary;
-use crate::resources::font_substitute::{SubstituteFamily, SubstituteStyle};
+use crate::resources::font_substitute::{FaceName, SubstituteFamily, SubstituteStyle};
 
 /// Number of rows of [`INSTALLED`]: the three Latin family classes in
 /// their four variants.
@@ -169,16 +171,29 @@ fn embedded_program(bytes: &'static [u8]) -> Option<Arc<FontProgram>> {
         .map(Arc::new)
 }
 
-/// The substitute program for `style` from `library`: an installed face
-/// of its script ([`FontLibrary::system_program`]) when it has one, else
-/// the installed metric-compatible face of that exact family and variant,
+/// The substitute program for a font of `style` named `name` from
+/// `library`: the installed face the name names
+/// ([`FontLibrary::named_program`]), unless the font is one of the
+/// standard 14 or their metric-compatible aliases, or of the Symbol or
+/// Dingbats family, which the rows below serve; else an installed face of
+/// its script ([`FontLibrary::system_program`]) when it has one, else the
+/// installed metric-compatible face of that exact family and variant,
 /// else the compiled-in base-14 face.
 pub(crate) fn substitute_program(
     style: SubstituteStyle,
+    name: Option<&FaceName>,
     library: &FontLibrary,
 ) -> Option<Arc<FontProgram>> {
     static EMBEDDED_CACHE: [OnceLock<Option<Arc<FontProgram>>>; EMBEDDED.len()] =
         [const { OnceLock::new() }; EMBEDDED.len()];
+    let by_name = !style.standard
+        && matches!(
+            style.family,
+            SubstituteFamily::Sans | SubstituteFamily::Serif | SubstituteFamily::Mono
+        );
+    if by_name && let Some(program) = name.and_then(|name| library.named_program(name, style)) {
+        return Some(program);
+    }
     if style.script.is_some()
         && let Some(program) = library.system_program(style)
     {
@@ -202,7 +217,7 @@ mod tests {
 
     /// [`substitute_program`] from the library of the standard directories.
     fn substitute_program_default(style: SubstituteStyle) -> Option<Arc<FontProgram>> {
-        substitute_program(style, &FontLibrary::shared(&[], true))
+        substitute_program(style, None, &FontLibrary::shared(&[], true))
     }
 
     /// The Latin family classes in every variant.
@@ -263,7 +278,7 @@ mod tests {
         crate::test_helpers::backdate_dir(&dir);
         let style = SubstituteStyle::default();
         let before = FontLibrary::shared(std::slice::from_ref(&dir), false);
-        let compiled_in = substitute_program(style, &before).expect("compiled-in face");
+        let compiled_in = substitute_program(style, None, &before).expect("compiled-in face");
         assert_eq!(compiled_in.name_index("glyph243"), 0);
         let ahem = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -271,7 +286,7 @@ mod tests {
         );
         let _bytes = std::fs::copy(ahem, dir.join("LiberationSans-Regular.ttf")).expect("install");
         let after = FontLibrary::shared(std::slice::from_ref(&dir), false);
-        let installed = substitute_program(style, &after);
+        let installed = substitute_program(style, None, &after);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!Arc::ptr_eq(&before, &after), "the library was replaced");
         let installed = installed.expect("installed face");

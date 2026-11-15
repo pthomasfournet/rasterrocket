@@ -670,7 +670,10 @@ impl FallbackLoader<'_> {
 /// program.  `None` when no substitute is available either.
 fn resolve_program(desc: &FontDescriptor, library: &FontLibrary) -> Option<ResolvedProgram> {
     desc.program.clone().map_or_else(
-        || substitute_program(desc.substitute, library).map(|program| (program, true)),
+        || {
+            substitute_program(desc.substitute, desc.face_name.as_ref(), library)
+                .map(|program| (program, true))
+        },
         |program| Some((program, false)),
     )
 }

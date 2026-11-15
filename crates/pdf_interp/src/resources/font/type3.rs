@@ -148,6 +148,7 @@ pub(super) fn resolve_type3_font(
             resources,
         }),
         substitute: SubstituteStyle::default(),
+        face_name: None,
         symbolic: false,
     }
 }
