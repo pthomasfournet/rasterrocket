@@ -222,3 +222,21 @@ fn d1_glyphs_skip_colour_images() {
     let (font, extra) = type3(&d0, "<< >>");
     assert_eq!(pixel(&render(&font, &extra, SHOW_A), 16, 16), [255, 0, 0]);
 }
+
+/// A Type 3 font without `/FontMatrix` maps glyph space to text space
+/// unscaled, its glyph without `d0` or `d1` included: at `/F1 16 Tf` the
+/// unit square glyph `A` covers device pixels x 8..24, y 8..24, and the
+/// next glyph starts one text-space unit (16 pt) on.
+#[test]
+fn a_type3_font_without_font_matrix_is_unscaled() {
+    let font = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] \
+                /CharProcs << /square 6 0 R >> \
+                /Encoding << /Type /Encoding /Differences [65 /square] >> \
+                /FirstChar 65 /LastChar 65 /Widths [1] >>";
+    let extra = [stream_object("", b"0 0 1 1 re f")];
+    let page = render(font, &extra, "BT 0 0 1 rg /F1 16 Tf 8 8 Td (AA) Tj ET");
+    assert_eq!(pixel(&page, 16, 16), [0, 0, 255]);
+    assert_eq!(pixel(&page, 32, 16), [0, 0, 255]);
+    assert_eq!(pixel(&page, 44, 16), [255, 255, 255]);
+    assert_eq!(ink(&page), 2 * 16 * 16);
+}

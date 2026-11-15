@@ -38,8 +38,9 @@ pub struct Type3Data {
     /// valued: under a unit `FontMatrix` a width is a fraction of a
     /// text-space unit.
     pub widths: Vec<f64>,
-    /// `FontMatrix`, mapping glyph space to text space; `[0.001 0 0
-    /// 0.001 0 0]` when absent or malformed.
+    /// `FontMatrix`, mapping glyph space to text space; the identity when
+    /// absent or malformed, the entry being required and without a
+    /// default.
     pub font_matrix: [f64; 6],
     /// The font dictionary, when it is an indirect object carrying its own
     /// `/Resources`: the `CharProcs` resolve their named resources there
@@ -64,6 +65,9 @@ impl Type3Data {
     }
 }
 
+/// The identity matrix, the `FontMatrix` of a Type 3 font that has none.
+const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 /// Greatest decompressed size of one `CharProc` stream.
 const MAX_CHARPROC_BYTES: usize = 4 << 20;
 
@@ -85,8 +89,14 @@ pub(super) fn resolve_type3_font(
     id: Option<ObjectId>,
 ) -> FontDescriptor {
     let (first_char, real_widths) = extract_widths(doc, dict);
-    let font_matrix =
-        extract_matrix(doc, dict, b"FontMatrix").unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+    let font_matrix = extract_matrix(doc, dict, b"FontMatrix").unwrap_or_else(|| {
+        let font = id.map_or_else(|| "(direct)".to_owned(), |(n, g)| format!("({n}, {g})"));
+        log::warn!(
+            "font/type3: font {font} has no /FontMatrix of six numbers — glyph space taken as \
+             text space"
+        );
+        IDENTITY
+    });
     let (differences, base_encoding) = extract_encoding(doc, dict);
     let glyphs = dict
         .get(b"CharProcs")
@@ -284,5 +294,20 @@ mod tests {
         assert!((t3.width(65) - 0.5).abs() < 1e-6);
         assert!((t3.width(66) - 0.25).abs() < 1e-6);
         assert!(t3.width(67).abs() < f64::EPSILON);
+    }
+
+    /// A Type 3 font without a well-formed `FontMatrix` maps glyph space
+    /// to text space unscaled.
+    #[test]
+    fn a_missing_or_malformed_font_matrix_is_the_identity() {
+        let doc = empty_doc();
+        for matrix in [None, Some(Object::Array(vec![Object::Integer(1)]))] {
+            let mut entries = vec![(b"Subtype".as_slice(), Object::Name(b"Type3".to_vec()))];
+            entries.extend(matrix.map(|m| (b"FontMatrix".as_slice(), m)));
+            let t3 = resolve_font(&doc, &make_dict(&entries), None)
+                .type3
+                .expect("Type 3 data");
+            assert_eq!(t3.font_matrix, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        }
     }
 }
