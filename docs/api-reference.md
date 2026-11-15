@@ -4,7 +4,7 @@
 
 The `rasterrocket` crate is the integration entry point. It wraps `rasterrocket-interp` and `rasterrocket-render` behind a simple, stable API.
 
-**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `DevicePage`, `ImageFilter`, `PixelFormat`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageInfo`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle, `Rotation` a closed set of quarter turns and `InvalidRotation` carries the rejected degrees; all three stay exhaustive. `BackendPolicy::name()` is the inverse of its `FromStr`.
+**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `DevicePage`, `ImageFilter`, `PixelFormat`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageInfo`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `GlyphCounts` (an output); `ColorModel` and `OutputProfileError` (match them with a `_` arm); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle, `Rotation` a closed set of quarter turns and `InvalidRotation` carries the rejected degrees; all three stay exhaustive, as do `Pixels`, `SampleDepth`, `FinishedCanvas`, `BandBitmap`, `Band`, `BandError`, `CanvasLayout`, `RenderingIntent`, `IntentSet` and `OutputSpace`. `BackendPolicy::name()` is the inverse of its `FromStr`.
 
 ---
 
@@ -92,7 +92,7 @@ If the `Receiver` is dropped before the producer finishes, the producer exits cl
 
 ### Session API
 
-Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `render_page_rgb_with_diagnostics`, `render_page_rgba`, `render_page_cmyk`, `render_page_canvas`, `render_page_bands`, `rgb_to_gray` and `rgb_into_gray`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
+Lower-level functions at the crate root for explicit control over PDF opening and per-page rendering: `open_session`, `open_session_from_bytes`, `open_session_from_shared`, `open_session_from_reader`, `prescan_session`, `render_page_gray`, `render_page_rgb`, `render_page_rgb_with`, `render_page_rgb_with_diagnostics`, `render_page_rgba`, `render_page_cmyk`, `render_page_canvas`, `render_page_canvas_with_diagnostics`, `render_page_bands`, `rgb_to_gray`, `rgb_into_gray` and `rgb16_to_gray16`; and [`PageBuffer`](#pagebuffer) for rendering into buffers the caller owns.
 
 ```rust
 pub fn open_session(path: &Path, config: &SessionConfig) -> Result<RasterSession, RasterError>
@@ -190,6 +190,7 @@ impl RenderParams {
     pub const fn with_intent(self, intent: RenderingIntent) -> Self
     pub const fn with_black_point_compensation(self) -> Self
     pub const fn with_cmyk(self) -> Self
+    pub const fn with_band_rows(self, rows: NonZeroU32) -> Self
     pub const fn canvas_layout(&self) -> CanvasLayout  // bytes a canvas pixel holds
 }
 
@@ -232,8 +233,45 @@ pub fn render_page_bands<E>(
     sink: impl FnMut(Band<'_>) -> Result<(), E>,
 ) -> Result<PageDiagnostics, BandError<E>>
 
-pub struct Band<'a> { pub y: u32, pub bitmap: &'a Bitmap<Rgb8> }
+pub struct Band<'a> { pub y: u32, pub bitmap: BandBitmap<'a> }
+pub enum BandBitmap<'a> {
+    Rgb8(&'a Bitmap<Rgb8>), Rgb16(&'a Bitmap<Rgb16>),
+    Gray8(&'a Bitmap<Gray8>), Gray16(&'a Bitmap<Gray16>),    // a gray output profile
+    Cmyk8(&'a Bitmap<Cmyk8>), Cmyk16(&'a Bitmap<Cmyk16>),    // ColorModel::Cmyk
+}
+impl BandBitmap<'_> {
+    pub const fn of(canvas: &FinishedCanvas) -> BandBitmap<'_>  // a whole canvas as one band
+    pub const fn dims(self) -> (u32, u32)
+    pub const fn height(self) -> u32
+}
 pub enum BandError<E> { Raster(RasterError), Sink(E) }
+
+pub fn render_page_canvas(session: &RasterSession, page_num: u32, params: &RenderParams)
+    -> Result<FinishedCanvas, RasterError>
+pub fn render_page_canvas_with_diagnostics(session: &RasterSession, page_num: u32, params: &RenderParams)
+    -> Result<(FinishedCanvas, PageDiagnostics), RasterError>
+pub enum FinishedCanvas {                                     // re-exported from rasterrocket-interp
+    Rgb8(Bitmap<Rgb8>), Rgb16(Bitmap<Rgb16>), Gray8(Bitmap<Gray8>),
+    Gray16(Bitmap<Gray16>), Cmyk8(Bitmap<Cmyk8>), Cmyk16(Bitmap<Cmyk16>),
+}
+impl FinishedCanvas {
+    pub const fn dims(&self) -> (u32, u32)
+    pub const fn depth(&self) -> SampleDepth
+    pub const fn is_cmyk(&self) -> bool
+}
+
+pub struct OutputProfile { /* the ICC bytes, their space and compiled conversions */ }
+impl OutputProfile {
+    pub fn from_bytes(bytes: impl Into<Arc<[u8]>>) -> Result<Self, OutputProfileError>
+    pub const fn bytes(&self) -> &Arc<[u8]>
+    pub const fn space(&self) -> OutputSpace                 // Rgb, Gray or Cmyk
+    pub fn prepare(&self, intent: RenderingIntent, bpc: bool) -> Result<(), OutputProfileError>
+}
+#[non_exhaustive]
+pub enum OutputProfileError { Unreadable(String), Class(&'static str), ColorSpace(String), Pcs,
+    Transform { .. }, Conversion(String), Mismatch(OutputSpace) }
+pub enum RenderingIntent { RelativeColorimetric, AbsoluteColorimetric, Perceptual, Saturation }
+pub struct IntentSet { /* a set of RenderingIntent */ }      // contains, is_empty, single, iter, union
 ```
 
 Renders the page (or `params.region`) as horizontal bands of whole rows from the top, handing each to `sink` in order, so a page larger than memory is drawn a band at a time. Stacked, the bands are the bitmap `render_page_rgb_with` returns for the same `params`, byte for byte. A band holds `params.band_rows` rows (`RenderParams::with_band_rows`), else as many as `SessionConfig::band_bytes` hold. The content is parsed once and executed per band; the bands share the page's decoded images, forms, shadings and tiling cells, its tint budget, its spot-ink slots and its diagnostics, and each has its own operator budget and deadline. A page of one band renders as `render_page_rgb_with` does (on the GPU page device when the session has one); several bands render on the CPU. The byte budget bounds the page the bands make up. Errors are `render_page_rgb_with`'s as `BandError::Raster` (under `strict`, an image failure fails the band where it is met), or the sink's as `BandError::Sink`, after which no band is rendered.
@@ -341,6 +379,7 @@ impl RasterSession {
     pub const fn policy(&self) -> BackendPolicy
     pub const fn form_type(&self) -> FormType
     pub fn unsupported_features(&self) -> &[UnsupportedFeature]
+    pub const fn output_profile(&self) -> Option<&Arc<OutputProfile>>
     pub fn page_geometry(&self, page_num: u32) -> Result<PageGeometry, RasterError>
     pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError>
     #[cfg(feature = "cache")]
@@ -384,6 +423,11 @@ pub struct RasterOptions {
     pub page_box: PageBox,
     pub rotation: Rotation,
     pub transparent_background: bool,
+    pub depth: SampleDepth,
+    pub output_profile: Option<Arc<OutputProfile>>,
+    pub intent: Option<RenderingIntent>,
+    pub black_point_compensation: bool,
+    pub color: ColorModel,
     pub cancel: Option<CancelToken>,
 }
 ```
@@ -408,7 +452,7 @@ pub struct RasterOptions {
 | `font_dirs` | — | Extra directories of installed fonts, searched before those `RROCKET_FONT_DIR` names and the standard ones; see [`SessionConfig`](#sessionconfig). |
 | `system_fonts` | — | When `false`, the standard font directories are not searched; see [`SessionConfig`](#sessionconfig). |
 | `image_budget` | — | Host bytes of decoded images kept for reuse by later pages; 0 keeps none. See [`SessionConfig`](#sessionconfig). |
-| `max_page_bytes` | — | The most bytes one page bitmap may hold; see [`SessionConfig`](#sessionconfig). |
+| `max_page_bytes` | — | The most bytes one page canvas may hold (`CanvasLayout::bytes_per_px` per pixel); see [`SessionConfig`](#sessionconfig). |
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
 | `rotation` | — | A clockwise quarter-turn rotation added to each page's `/Rotate`; see [`Rotation`](#rotation). |
 | `depth` | not `Sixteen` with `deskew` | `SampleDepth::Eight` (default) or `SampleDepth::Sixteen`, which renders at 16 bits per channel and yields `PixelFormat::Gray16` pages, or `Rgba16` with `transparent_background`, of `Pixels::U16`. |
@@ -495,6 +539,9 @@ pub enum Pixels { U8(Vec<u8>), U16(Vec<u16>) }   // U16: native-endian samples
 impl Pixels {
     pub fn as_u8(&self) -> Option<&[u8]>
     pub fn as_u16(&self) -> Option<&[u16]>
+    pub const fn len(&self) -> usize        // samples
+    pub const fn is_empty(&self) -> bool
+    pub const fn byte_len(&self) -> usize   // bytes the samples occupy
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +550,7 @@ pub enum PixelFormat { Gray8, Rgba8, Rgb8, Gray16, Rgb16, Rgba16, Cmyk8, Cmyk16 
 impl PixelFormat {
     pub const fn bytes_per_pixel(self) -> usize    // 1, 4, 3, 2, 6, 8, 4 or 8
     pub const fn samples_per_pixel(self) -> usize  // 1, 3 or 4
+    pub const fn depth(self) -> SampleDepth
 }
 
 pub enum SampleDepth { Eight, Sixteen }            // re-exported from rasterrocket-color
@@ -887,9 +935,12 @@ pub const DEFAULT_BAND_BYTES: u64 = 64 << 20;
 pub fn validate_page_bytes(width: u32, height: u32, bytes_per_px: u32, max_bytes: u64) -> Result<(), RasterError>;
 ```
 
-A render's bitmap holds at most `SessionConfig::max_page_bytes` (default
+A render's canvas holds at most `SessionConfig::max_page_bytes` (default
 `DEFAULT_MAX_PAGE_BYTES`, 1.8 GB: a 600 MP page of 8-bit RGB): width × height
-× 3, or × 4 over a transparent backdrop, computed in `u64`. Over it the render
+× `CanvasLayout::bytes_per_px`, computed in `u64`: 3 bytes a pixel for 8-bit
+RGB, 4 over a transparent backdrop, 8 on the ink canvas of a CMYK page or of
+a page on the overprint preview (9 with alpha), and twice as many at 16
+bits. Over it the render
 is `PageTooLarge`. No page is more than `MAX_PX_SIDE` pixels on a side
 (`PageExceedsCeiling`), whatever the budget: every pixel coordinate is then
 exact in `f32` and coordinate sums stay inside `i32`.
@@ -914,6 +965,8 @@ under [Size limits](cli-reference.md#size-limits) in the CLI reference.
 ### Re-exports
 
 ```rust
+pub use rasterrocket_color::SampleDepth;
+pub use rasterrocket_interp::renderer::FinishedCanvas;
 pub use rasterrocket_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, GlyphCounts, ImageFailure,
     PageDiagnostics,
@@ -1281,7 +1334,6 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A). No runtime detection needed.
-- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
 - `cargo check --target aarch64-unknown-linux-gnu` is clean; no Apple Metal native backend yet (Vulkan via `MoltenVK` covers Apple).
 
 ### GPU
