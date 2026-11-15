@@ -207,11 +207,12 @@ pub(crate) const fn is_number_byte(b: u8) -> bool {
 ///
 /// A word is a number token when it starts with a digit, sign or decimal
 /// point and consists of digits, signs, decimal points and the exponent
-/// markers `e`/`E` only.  A well-formed token
-/// has its exact value; a malformed one (`--5`, `.5.`, `5-`, `34.5-6`) has
-/// the value of its longest prefix of the form `[+-]digits[.digits]`, or 0
-/// when that prefix holds no digit.  Values are clamped to the
-/// single-precision range of ISO 32000-2 Annex C, so the result is finite.
+/// markers `e`/`E` only.  A run of leading signs counts as its last sign, so
+/// `--5` is `-5` and `-+5` is `5`.  A well-formed token has its exact value;
+/// a malformed one (`.5.`, `5-`, `34.5-6`) has the value of its longest
+/// prefix of the form `[+-]digits[.digits]`, or 0 when that prefix holds no
+/// digit.  Values are clamped to the single-precision range of ISO 32000-2
+/// Annex C, so the result is finite.
 #[must_use]
 pub fn parse_number(word: &[u8]) -> Option<f64> {
     let first = *word.first()?;
@@ -220,6 +221,18 @@ pub fn parse_number(word: &[u8]) -> Option<f64> {
     {
         return None;
     }
+    let signs = word
+        .iter()
+        .take_while(|&&b| matches!(b, b'+' | b'-'))
+        .count();
+    if signs > 1 {
+        log::debug!(
+            "number token {:?} has {signs} leading signs; its last one applies",
+            String::from_utf8_lossy(word)
+        );
+    }
+    let word = &word[signs.saturating_sub(1)..];
+    let first = word[0];
     // The bytes are ASCII, so every prefix is UTF-8.
     let parse = |w: &[u8]| std::str::from_utf8(w).ok()?.parse::<f64>().ok();
     let value = parse(word).unwrap_or_else(|| {
@@ -294,14 +307,29 @@ mod tests {
     #[test]
     fn malformed_numbers_take_their_longest_valid_prefix() {
         for (word, value) in [
-            (&b"--5"[..], 0.0),
-            (b".5.", 0.5),
+            (&b".5."[..], 0.5),
             (b"5-", 5.0),
             (b"34.5-6", 34.5),
             (b"-", 0.0),
             (b".", 0.0),
             (b"1e", 1.0),
             (b"1.2.3", 1.2),
+        ] {
+            assert_eq!(parse_number(word), Some(value), "{word:?}");
+        }
+    }
+
+    /// A run of leading signs counts as its last sign.
+    #[test]
+    fn a_run_of_leading_signs_counts_as_its_last_sign() {
+        for (word, value) in [
+            (&b"--10.12"[..], -10.12),
+            (b"--40", -40.0),
+            (b"+-5", -5.0),
+            (b"-+5", 5.0),
+            (b"++.5", 0.5),
+            (b"---", 0.0),
+            (b"--5-", -5.0),
         ] {
             assert_eq!(parse_number(word), Some(value), "{word:?}");
         }
