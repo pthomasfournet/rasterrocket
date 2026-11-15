@@ -4,7 +4,7 @@ rasterrocket converts PDF pages to pixel buffers in pure Rust. No subprocesses, 
 
 ## What it does
 
-Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in memory. The primary use case is feeding pages directly into Tesseract OCR without writing any intermediate files.
+Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in memory. The primary use case is feeding pages directly into Tesseract OCR without writing any intermediate files. The same pages can also be rendered as RGB, RGBA over a transparent backdrop or CMYK, at 8 or 16 bits per sample, and converted to an output ICC profile; see [Colour, depth and CMYK](#colour-depth-and-cmyk).
 
 ## Hardware requirements
 
@@ -19,7 +19,6 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
-- SVE2 (`svcnt_u8_z` popcount tier) is available behind the `nightly-sve2` feature of `rasterrocket-render` on nightly Rust (`rasterrocket` and `rasterrocket-cli` do not forward it). Gives up to 4× NEON throughput on wide-SVE2 server chips (Graviton4 full width).
 - CI runs clippy and the NEON tests on arm64 Linux, and clippy with the renderer, interpreter and library suites on macOS (Apple silicon); no Apple Metal GPU backend.
 
 ### GPU (optional)
@@ -61,15 +60,14 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 | Operating system | CPU | GPU | Status | Guide |
 |---|---|---|---|---|
 | Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; CI runs the test suite | [Linux](platforms/linux.md) |
-| Linux aarch64 | NEON (+ SVE2 on nightly) | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests | [Linux](platforms/linux.md) |
+| Linux aarch64 | NEON | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests | [Linux](platforms/linux.md) |
 | macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU); no Metal backend | **Supported**; CI runs clippy and the renderer, interpreter and library suites | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
 | Windows x86-64 | AVX-512 / AVX2 | untested | CI builds and runs clippy and the CPU test suites | [BSD and Windows](platforms/other.md) |
 
 AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
-Radeon GPUs.  SVE2 requires the `rasterrocket-render` feature `nightly-sve2`
-and nightly Rust.
+Radeon GPUs.
 
 ## Installation
 
@@ -116,8 +114,8 @@ let opts = RasterOptions::new(300.0);
 for (page_num, result) in raster_pdf(Path::new("document.pdf"), &opts) {
     match result {
         Ok(page) => {
-            // page.pixels: Vec<u8>, 8-bit grayscale
-            // length = page.width * page.height
+            // page.pixels: Pixels::U8 under these options, 8-bit grayscale;
+            // page.pixels.as_u8() is the &[u8], of length page.width * page.height
             // layout: top-to-bottom, left-to-right, no padding (stride == width)
             println!("page {page_num}: {}×{} px", page.width, page.height);
         }
@@ -145,7 +143,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
         Err(e) => { eprintln!("page {page_num}: {e}"); continue; }
     };
     // Hand Tesseract:
-    //   data            = &page.pixels
+    //   data            = page.pixels.as_u8().expect("8-bit page")
     //   width, height   = page.width, page.height
     //   bytes per pixel = 1 (8-bit grayscale)
     //   bytes per line  = page.width (stride == width, no padding)
@@ -203,7 +201,7 @@ let rx = render_channel(Path::new("scan.pdf"), &opts, 4);
 
 for (page_num, result) in rx {
     match result {
-        Ok(page) => { /* OCR page.pixels */ }
+        Ok(page) => { /* OCR page.pixels.as_u8() */ }
         Err(e)   => eprintln!("page {page_num}: {e}"),
     }
 }
@@ -298,6 +296,30 @@ fn top_left_tile(path: &Path) -> Result<(), RasterError> {
 A region holds exactly the pixels the whole-page render puts there, so tiles
 stitch into the whole page. A cancelled render returns `RasterError::Cancelled`
 before its next content-stream operator.
+
+## Colour, depth and CMYK
+
+`raster_pdf` and `render_channel` yield `PixelFormat::Gray8` pages by
+default. `RasterOptions` selects the others:
+
+- `transparent_background`: `Rgba8`, straight alpha over a transparent
+  backdrop.
+- `depth = SampleDepth::Sixteen`: `Gray16` (or `Rgba16`) pages whose samples
+  are `Pixels::U16` (`page.pixels.as_u16()`); shadings, soft masks, colour
+  conversions and images of more than 8 bits keep their levels.
+- `color = ColorModel::Cmyk`: `Cmyk8` (or `Cmyk16`) pages of process inks,
+  `[C, M, Y, K]`, 0 no ink.
+- `output_profile`, with `intent` and `black_point_compensation`: every page
+  is converted to an ICC output profile (RGB, gray or CMYK).
+
+The session API returns the same pages as bitmaps through
+`render_page_canvas` (`FinishedCanvas`) and, a band of rows at a time for a
+page larger than memory, `render_page_bands`. Each canvas pixel counts
+against `max_page_bytes`: 3 bytes for 8-bit RGB, 4 with alpha, 8 on the ink
+canvas of a CMYK or overprint page, twice as many at 16 bits. See the
+[API reference](api-reference.md#session-api) for the details and the
+[CLI reference](cli-reference.md#cmyk-output) for `--depth`, `--cmyk`,
+`--output-profile` and `--band-mib`.
 
 ## Annotations, form fields and layers
 

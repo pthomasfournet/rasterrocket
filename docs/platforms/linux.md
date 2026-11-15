@@ -11,8 +11,7 @@ is developed and tested on it.
   a workflow artifact.
 - **CPU:** x86-64 uses AVX2, or AVX-512 when built with
   `-C target-cpu=native` on a CPU that has it, with a scalar fallback.
-  aarch64 uses NEON, plus SVE2 behind the nightly-only `nightly-sve2`
-  feature.
+  aarch64 uses NEON.
 
 ## Install
 
