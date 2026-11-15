@@ -35,7 +35,7 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
-## Unreleased on master
+## What's new in v2.3.0
 
 **Exact-area antialiasing, large-format pages, 16 bits per sample, output
 ICC profiles and CMYK output; the API breaks.** `RenderedPage::pixels` is a

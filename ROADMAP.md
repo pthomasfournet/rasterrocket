@@ -15,9 +15,10 @@ The caller's Tesseract step becomes a single in-process call — no subprocess, 
 ```rust
 for (page_num, result) in rasterrocket::raster_pdf(path, &opts) {
     let page = result?;
-    // page.pixels is 8-bit grayscale, tightly packed, top-to-bottom
+    // 8-bit grayscale at the default depth, tightly packed, top-to-bottom
+    let gray = page.pixels.as_u8().expect("8-bit render");
     tess = tess
-        .set_frame(&page.pixels, page.width as i32, page.height as i32, 1, page.width as i32)?
+        .set_frame(gray, page.width as i32, page.height as i32, 1, page.width as i32)?
         .set_source_resolution(page.effective_dpi as i32);
     let text = tess.get_text()?;
 }
@@ -29,9 +30,10 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**CMYK JPEG output is not implemented.** `--jpegcmyk` is refused at
-startup, before the document is opened; PPM, PGM, PBM, PNG, JPEG (`--jpeg`)
-and TIFF (`--tiff`) work, the last also fax-coded.
+**CMYK output has gaps.** `--cmyk` / `--jpegcmyk` ignore `BG`/`UCR`, do
+not convert ICC-based CMYK content to a different CMYK output profile, and
+separate indexed images over a CMYK base through sRGB; see
+[Current status](#current-status-2026-11-15).
 
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
@@ -40,7 +42,7 @@ dispatches to it.
 
 **Overprint simulation has one gap.** Under `--overprint`, transparency
 groups as a whole knock out instead of overprinting; see
-[Current status](#current-status-2026-11-14).
+[Current status](#current-status-2026-11-15).
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -55,6 +57,99 @@ v1.2.0 and exists only as a pixel-diff reference baseline.
 ---
 
 ## Release history
+
+### v2.3.0 (November 2026)
+
+**Exact-area antialiasing, large-format, 16-bit, ICC-managed and CMYK output,
+and a visible-text diagnostic; the `rasterrocket` API changes in several
+places.** Every antialiased path, clip and glyph is drawn from one exact-area
+rasteriser, so antialiased output changes on nearly every page. Pages are
+bounded by a byte budget instead of pixel caps and can be rendered and
+written in bands, at 8 or 16 bits per channel, converted to an output ICC
+profile under a chosen rendering intent, or separated into CMYK. The API
+changes are listed below as they are, without compatibility shims; a
+caller of `raster_pdf` / `render_channel` that reads 8-bit pages needs
+only follow the `RenderedPage::pixels` change.
+
+**Rendering.**
+- **Exact-area coverage.** `raster::coverage` replaces the 4×4
+  supersampled scanner and its gamma-1.5 table for fills, strokes, clips
+  and glyphs. The old scanner was about 0.25 px heavy on +y and banded in
+  16 levels. Against pdfium's corpus (260 scored pages) the median RMSE
+  falls from 4.39 to 1.45, and the fill bench runs 6.34 → 4.70 ms. The
+  `--gpu-pages` raster composites the CPU's coverage and stays
+  byte-identical to `--backend cpu`. The dormant device AA fill and the
+  `gpu-aa` feature are removed.
+- **Fixes.** The top row of a flat-top Gouraud triangle was dropped. A
+  Gouraud mesh under an empty rectangular clip panicked in thin bands. A
+  non-isolated group's union colour could wrap to black. A scanner table
+  past `u32` intersections aborted. A Type 3 glyph box far off the page
+  overflowed `i32`. Region renders differed from the page in shadings,
+  tiling lattices, image sample grids and group bounds.
+
+**Large format.**
+- A page byte budget (`max_page_bytes`, `--max-page-mib`, default 1.8 GB)
+  replaces the pixel caps (`MAX_PX_DIMENSION`, `MAX_PX_AREA`), under a
+  hard side ceiling of 2²⁴ px.
+- `render_page_bands` renders a page as horizontal bands that stack byte
+  for byte into the whole page. The CLI writes PPM, PNG, TIFF (BigTIFF
+  past 4 GiB) and `--print` pages band by band (`--band-mib`, default 64).
+  A 44 × 120 in roll at 360 dpi renders in 428 MiB of peak memory.
+- `--print` without a resolution flag prints pages larger than A0 at
+  360 dpi.
+
+**Colour and depth.**
+- **16 bits per channel.** `--depth 16` (`RasterOptions::depth`)
+  renders, composites and writes 16-bit PNG, PPM/PGM, TIFF and `--print`
+  spools; overprint simulation works at 16 bits. 8-bit output is
+  byte-identical to v2.2.0's arithmetic.
+- **Output ICC profiles.** `--output-profile FILE`, `--intent` and `--bpc`
+  convert finished pages to an RGB, gray or CMYK printer, display or
+  colour-space profile and embed it in PNG, TIFF, JPEG and the `--print`
+  spool. Worst ΔE00 against Little CMS is 0.93 over every intent, with and
+  without black-point compensation, at both depths. The interpreter tracks
+  each page's content rendering intents.
+- **CMYK output.** `--cmyk` with `--tiff` or `--jpeg`, and `--jpegcmyk`,
+  render pages in process inks and write Separated TIFF (8 or 16 bits) or
+  Adobe CMYK JPEG. DeviceCMYK content keeps its values; other colours
+  separate through a CMYK output profile or the ISO 32000-2 device
+  conversion, so black text is black ink alone. DeviceCMYK images and
+  shadings now also paint their own inks under `--overprint`.
+- **JPEG decoding.** The zune-jpeg fork rounds its IDCT and YCbCr
+  conversion as libjpeg's accurate decode; gray, CMYK and 4:4:4 images now
+  match it exactly, and JPEG-heavy pages move by one or two levels.
+
+**Diagnostics.** `PageDiagnostics::glyphs` (`GlyphCounts`) counts a page's
+glyphs by text rendering mode and why a glyph cannot mark the page;
+`PageDiagnostics::has_visible_text()` says whether a page has native
+visible text, so a caller can skip OCR on it.
+
+**Vendored forks.** Each fork is reviewed against upstream again and takes
+its fixes: harfrust's shaping budget and AAT bounds, read-fonts' MVAR and
+Type 1 numbers, skrifa's MIRP twilight points, jbig2's region and
+dictionary bounds and faster halftones, ccitt's truncated Group 4 rows, and
+JPEG 2000 raw codestreams that honour the image dictionary's `/ColorSpace`.
+
+**API changes** (breaking, in `rasterrocket` and the lower crates; the
+Current status section below lists every item).
+- `RenderedPage::pixels` is `Pixels::{U8, U16}`; `PixelFormat` gains
+  `Gray16`, `Rgb16`, `Rgba16`, `Cmyk8`, `Cmyk16`.
+- `RasterError::PageTooLarge` is `{ bytes, limit }` and
+  `PageExceedsCeiling` replaces `PageAreaTooLarge`;
+  `RasterError::OutputProfile` is new.
+- `RasterOptions` gains `max_page_bytes`, `depth`, `output_profile`,
+  `intent`, `black_point_compensation` and `color`; `SessionConfig` gains
+  `max_page_bytes`, `band_bytes` and `output_profile`;
+  `RenderParams` gains `with_depth`, `with_intent`,
+  `with_black_point_compensation` and `with_cmyk`.
+- `PageRenderer::with_page_group` and `try_with_page_group(_in)` take a
+  `&CanvasRequest` in place of `ink: bool`; `render_page_canvas` returns a
+  `FinishedCanvas`; `Band::bitmap` is a `BandBitmap`.
+- `rasterrocket-render`'s `Bitmap`, pipe and pattern types take a sample
+  parameter; `XPathScanner::new` returns `Result`.
+- `rasterrocket-encode`'s writers are row-streamed (`PnmWriter`,
+  `PngWriter`, `TiffStream`, `PdfPageEncoder`, `RowImage`) and take an
+  optional ICC profile.
 
 ### v2.2.0 (November 2026)
 
@@ -2634,7 +2729,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-14)
+## Current status (2026-11-15)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
@@ -2669,7 +2764,7 @@ embedded PDF opens with), `rgb_into_gray`, `gray8_into_rendered_page`,
 `huffman_threshold` (`gpu-jpeg-huffman`) in `rasterrocket-interp`. The
 canvas kind is fixed when the renderer is built; there is no setter.
 
-**Unreleased on master.** Antialiased paths, clips and glyphs take exact-area
+**Released in v2.3.0: exact-area coverage.** Antialiased paths, clips and glyphs take exact-area
 coverage from one integer rasteriser (`raster::coverage`) in place of the 4×4
 supersampled scanner and its gamma-1.5 table. The scanner's inclusive bottom row
 made fills about 0.25 px heavy on +y, and its coverage was nonlinear and banded
@@ -2685,7 +2780,7 @@ The dormant device AA fill (CUDA and Vulkan kernels, `GPU_AA_FILL_THRESHOLD`,
 `PDF_RASTER_AA_FILL_THRESHOLD`) and the `gpu-aa` feature are removed. Glyph
 edges may move by one level, since glyphs use the same rasteriser.
 
-**Unreleased on master: large-format pages.** The pixel caps
+**Released in v2.3.0: large-format pages.** The pixel caps
 (`MAX_PX_DIMENSION` 32 768, `MAX_PX_AREA` 600 Mpx) are replaced by a byte
 budget, `SessionConfig::max_page_bytes` / `RasterOptions::max_page_bytes` /
 `--max-page-mib` (default 1.8 GB, the old bound at 8-bit RGB; transparent
@@ -2714,7 +2809,7 @@ dropped with a warning), and a Type 3 glyph box far off the page overflowed
 `Mesh::meeting` take the window origin, PNG files are written through the
 stream writer (different IDAT chunking, same pixels).
 
-**Unreleased on master: 16 bits per channel.** `--depth 16` (library:
+**Released in v2.3.0: 16 bits per channel.** `--depth 16` (library:
 `RenderParams::with_depth`, `RasterOptions::depth`, `SampleDepth`) renders,
 composites and writes 16 bits per channel, so gradients, soft-mask vignettes
 and colour conversions no longer quantise to 256 levels before a printer's own
@@ -2743,7 +2838,7 @@ array), `ColorRamp` and the shading patterns take a sample parameter;
 `PdfWriter::new` takes the deepest page's `SampleDepth`; `AnyColor` holds 16
 bytes.
 
-**Unreleased on master: output ICC profiles.** `--output-profile FILE`
+**Released in v2.3.0: output ICC profiles.** `--output-profile FILE`
 (library: `SessionConfig::output_profile`, `RasterOptions::output_profile`,
 `OutputProfile`) converts every page, band by band and at both depths, from the
 sRGB working space to an RGB or gray printer, display or colour-space profile,
@@ -2781,7 +2876,7 @@ proofing, a wider-than-sRGB working space. API changes: `FinishedCanvas` /
 `TiffStream::new`, `TiffPageEncoder::new` and `PdfWriter::new` take an
 `Option<&IccProfile>`.
 
-**Unreleased on master: CMYK raster output.** `--cmyk` with `--tiff` or
+**Released in v2.3.0: CMYK raster output.** `--cmyk` with `--tiff` or
 `--jpeg`, and `--jpegcmyk` (= `--jpeg --cmyk`, as `pdftoppm -jpegcmyk`),
 render pages in process inks (library: `ColorModel::Cmyk`,
 `RenderParams::with_cmyk`, `RasterOptions::color`, `render_page_cmyk`,
@@ -2829,7 +2924,7 @@ intents of the separation.  API changes: `PageRenderer::with_page_group`,
 `RowLayout::Cmyk`/`Cmyk16` and CMYK `write_jpeg`/`IccProfile` in
 `rasterrocket-encode`.
 
-**Unreleased on master: visible-text diagnostic.** `PageDiagnostics::glyphs`
+**Released in v2.3.0: visible-text diagnostic.** `PageDiagnostics::glyphs`
 (`GlyphCounts`) counts the glyphs a page shows, one per character code, by
 text rendering mode (`fill`, `stroke`, `fill_stroke`, `invisible` for
 `3 Tr`, `clip_painted` for 4–6, `clip_only` for 7) when the glyph can mark

@@ -2,6 +2,152 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.3.0] - 2026-11-15
+
+### Bug Fixes
+
+- Antialiased fills, clips and strokes take exact-area coverage
+- An antialiased fill draws its zero-area subpaths as faint lines
+- Stroke pieces no longer overlap at joints or on retraced lines
+- An antialiased fill draws the spikes of its outline as faint lines
+- Clippy-clean the GPU deskew and CUDA-only test builds
+- Refuse a scanner table past u32 intersections
+- Keep a cached Type 3 glyph's frame inside i32
+- A window of a page draws the page's pixels
+- Keep a non-isolated group's union colour from wrapping
+- Compare a JPEG 2000 colour key in the samples' own range
+- Keep 16-bit images within the budget and their colour keys exact
+- Keep spot images and their soft masks at 16 bits on the 16-bit ink canvas
+- Key inline images by the depth they are decoded for
+- Keep spot-table solves out of the page's reproducing cache
+- Correct three comments of the 16-bit work
+- Subdivide mesh shadings to a tolerance of the render's depth
+- Bound the 16-bit mesh tolerance at a quarter of an 8-bit level
+- Set the 16-bit mesh tolerance at one 8-bit level
+- An empty clip of inverted bounds meets no mesh triangle
+- Drop the stale refusal of 16-bit overprint from a test and a doc
+- Keep the decoded prefix of a truncated Group 4 row (upstream #1770)
+- Bound symbol dictionary export runs and empty height classes (upstream #1773, #1774, #1776, #1778)
+- Limit wide collective bitmaps to 2^22 pixels across (upstream #1797)
+- Stop text regions at exhausted data instead of capping instances (upstream #1372)
+- Use a 2.14 multiply for MIRP twilight points (upstream #2452)
+- Read a doubled sign in a Type 1 number as zero (upstream #2402)
+- Stride MVAR value records by valueRecordSize (upstream #2430)
+- Bound lookup variations and merge duplicate stage lookups (upstream #583)
+- Charge cluster-merge walks and loop over live items only (upstream #584)
+- Bound syllable look-ahead and fix shaper edge cases (upstream #587)
+- Iterative cursive chains and charged GPOS walks (upstream #582)
+- Charge AAT subtable passes and bound state-machine inputs (upstream #588)
+- Charge skipping, rule and ligature walks to the operation limit (upstream #589)
+- Leave a buffer reusable after an unwound shape (upstream #585)
+- Do not truncate wide glyph ids in legacy kern classes (upstream #595)
+- Merge equal-flag AAT feature ranges and budget map compilation (upstream #598)
+- Ignore AAT tables with more than 1024 subtables (upstream #599)
+- Charge the shaping budget per lookup pass (upstream #601)
+- Zero-context matching for new-spec Indic scripts (upstream #606)
+- Charge skip, skipped-record and ligature walks to the shaping budget (upstream #604)
+- Syllable-bounded matching, kerx mark offsets, trak and Arabic PUA (upstream #610)
+- Language matching, scaled-integer overflow and vertical advance fallbacks (upstream #611)
+- Resolve negative legacy AAT state indices (upstream #602, #2455)
+- Decode raw codestreams with the image dictionary's channels (upstream #1821)
+- Paint the top row of a flat-top Gouraud triangle
+- Round the IDCT and YCbCr conversion as libjpeg's accurate decode
+
+### Chores
+
+- Record the upstream review through 064a610b9
+- Record the upstream review through 73fab6938
+- Record the upstream review through 26f5a7682
+
+### Documentation
+
+- Exact-area coverage under Unreleased on master
+- Large-format pages, the page budget and banded rendering
+- --depth 16 combines with --overprint
+- 16 bits per channel
+- Output ICC profiles and rendering intents
+- GlyphCounts and PageDiagnostics::has_visible_text
+- Exact-area coverage, 16-bit and ink canvases, CMYK, output profiles, bands
+- Describe the unreleased work on master
+- The missing fields and items of the new API
+- The ink canvas in the page budget, the 16-bit print resolution
+- Getting started with colour, depth and CMYK; no SVE2 tier
+- Crate READMEs for 16-bit, CMYK, output profiles and bands
+- Pixels in the OCR examples, has_visible_text, no gpu-aa
+- CMYK JPEG and TIFF, 16-bit TIFF, BigTIFF, CMYK profiles
+- Crate docs for the new outputs, Pixels, backend order
+- Misplaced and stale doc comments
+
+### Features
+
+- Exact-area coverage rasteriser
+- The page raster composites the CPU's exact-area coverage
+- The page_gpu bench composites the CPU's exact-area coverage
+- **breaking** A page byte budget replaces the pixel caps
+- Render a page in bands
+- **breaking** Row-streamed image writers
+- Write BigTIFF past the 4 GiB of classic TIFF
+- Render and write large pages in bands
+- --print picks each page's resolution from its size
+- Composite at 8 or 16 bits per sample
+- Write 16-bit PNG, Netpbm, TIFF and PDF page images
+- The CMYK model and luminosity at 16 bits
+- Render pages on 16-bit canvases
+- **breaking** Render pages at 16 bits per sample
+- --depth 8|16
+- Convert samples between depths
+- Decode images of more than 8 bits at 16 bits for a 16-bit render
+- **breaking** 16-bit ink pixels and the ink model at 16 bits
+- Paint the ink canvas at 16 bits
+- Overprint simulation at 16 bits
+- **breaking** Embed an ICC profile in PNG, TIFF, JPEG and the PDF spool
+- Track the rendering intent of marking operators
+- **breaking** Convert finished pages to an output ICC profile
+- --output-profile, --intent and --bpc
+- Cmyk16 pixels, ink-to-CMYK rows and the ISO device CMYK conversion
+- CMYK JPEG and CMYK TIFF at 8 and 16 bits
+- **breaking** Canvas requests, CMYK finish of the ink canvas, device separation
+- DeviceCMYK images and shadings paint their ink on an ink canvas
+- **breaking** CMYK pages through RenderParams and RasterOptions, the byte budget counts ink
+- Separate CMYK pages through a CMYK output profile
+- --cmyk and --jpegcmyk write CMYK TIFF and CMYK JPEG
+- Per-render-mode glyph counts in PageDiagnostics
+
+### Performance
+
+- Cheaper exact-area rows
+- Shift halftone patterns while drawing them (upstream #1780)
+- Keep halftone gray-scale images as bit planes (upstream #1785)
+- Share exported symbols instead of copying them (upstream #1781)
+- Count only new bits in IntSet::insert_range (upstream 1dacd72c)
+- Cut syllables only when one reaches the length limit (upstream #603)
+
+### Refactor
+
+- Rasterise glyph coverage with the shared exact-area rasteriser
+- Retire the dormant device AA fill
+- Delete the 4x4 supersampled antialiasing
+- One canvas layout for the page byte budget
+- Convert 16-bit image pixels without a heap buffer each
+- Dispatch the per-depth conversions through Sample::by_depth
+- Share the ink-to-sRGB and Gouraud span code of the canvas kinds
+- Outline AAT state-machine action handlers (upstream #596)
+
+### Testing
+
+- The blit tests run their cache, page and blit on one stream
+- Register the pdfium corpus under exact-area coverage
+- Pin digests of the 8-bit compositing results
+- Check the compositor at 16 bits against 8 bits
+- 16-bit gradients, consistency with 8 bits and the CLI outputs
+- 16-bit images and soft masks keep their levels
+- The ink canvas at 16 bits
+- The 16-bit paths left without unit tests
+- The output profile conversion within ΔE00 1 of transicc
+- Pdfium's bug_1258968 renders
+- Expect pattern colours at the pixel's top-left corner
+- Tighten the registry limits of three mesh pages
+
 ## [2.2.0] - 2026-11-14
 
 ### Bug Fixes
@@ -94,6 +240,7 @@ All notable changes to this project will be documented in this file.
 - Require Rust 1.100; state the forks' empty lint tables
 - Vendor zune-jpeg 0.5.15 as a local fork
 - Move the fork's base to upstream 9706202c
+- Release v2.2.0
 
 ### Documentation
 
@@ -137,6 +284,7 @@ All notable changes to this project will be documented in this file.
 - Describe the v2.2.0 structure
 - Correct help text and doc comments that disagree with the code
 - Prep v2.2.0 release notes
+- Refresh the v2.2.0 changelog
 
 ### Features
 
