@@ -8,7 +8,7 @@ use pdf::Dictionary;
 use raster::shading::gouraud::GouraudVertex;
 
 use super::mesh::{
-    COLOR_DELTA, Corner, CornerSource, MIN_SUBDIVISION_EXTENT, TriangleSink, extent,
+    Corner, CornerSource, MIN_SUBDIVISION_EXTENT, TriangleSink, color_delta, extent,
 };
 use super::stream::{BitReader, VertexFormat, parse_bits_per_flag};
 
@@ -52,7 +52,7 @@ pub(super) const fn mid2(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 
 /// Maximum per-component colour difference across all 4 corner pairs of the patch.
 /// Used as the subdivision-stop criterion.
-pub(super) fn color_delta<C: Corner>(p: &Patch<C>) -> f64 {
+pub(super) fn corner_spread<C: Corner>(p: &Patch<C>) -> f64 {
     let corners = [p.color[0][0], p.color[0][1], p.color[1][0], p.color[1][1]];
     let mut max_d = 0.0_f64;
     for i in 0..4 {
@@ -155,9 +155,10 @@ pub(super) fn corner_vertex<const N: usize, S: CornerSource<N>>(
 
 /// Adaptively subdivide `patch` into Gouraud triangles and append them to `out`.
 ///
-/// Subdivision stops when all corner colours are within [`COLOR_DELTA`] of each
-/// other, the control points span at most [`MIN_SUBDIVISION_EXTENT`] pixels
-/// (the patch lies in their convex hull), or [`MAX_PATCH_DEPTH`] is reached.
+/// Subdivision stops when all corner colours are within [`color_delta`] of
+/// each other, levels of the pixels' samples, the control points span at
+/// most [`MIN_SUBDIVISION_EXTENT`] pixels (the patch lies in their convex
+/// hull), or [`MAX_PATCH_DEPTH`] is reached.
 /// The work stack is explicit, so the native stack depth is constant.
 pub(super) fn tessellate_patch<const N: usize, S: CornerSource<N>>(
     source: &S,
@@ -171,12 +172,13 @@ pub(super) fn tessellate_patch<const N: usize, S: CornerSource<N>>(
     let mut stack: Vec<(Patch<S::Corner>, u8)> =
         Vec::with_capacity(3 * MAX_PATCH_DEPTH as usize + 1);
     stack.push((patch, 0));
+    let limit = color_delta::<S::Sample>();
 
     while !out.is_full()
         && let Some((p, depth)) = stack.pop()
     {
         if depth >= MAX_PATCH_DEPTH
-            || color_delta(&p) <= COLOR_DELTA
+            || corner_spread(&p) <= limit
             || extent(p.xy.into_iter().flatten()) <= MIN_SUBDIVISION_EXTENT
         {
             // Leaf: emit 2 triangles covering the patch quad from its 4 corners.
@@ -551,24 +553,24 @@ mod tests {
     }
 
     #[test]
-    fn color_delta_uniform_is_zero() {
+    fn corner_spread_uniform_is_zero() {
         let mut p = Patch::zero();
         let c = [128u8, 64, 32];
         p.color[0][0] = c;
         p.color[0][1] = c;
         p.color[1][0] = c;
         p.color[1][1] = c;
-        assert_eq!(color_delta(&p), 0.0);
+        assert_eq!(corner_spread(&p), 0.0);
     }
 
     #[test]
-    fn color_delta_max_diff_is_one() {
+    fn corner_spread_max_diff_is_one() {
         let mut p = Patch::<[u8; 3]>::zero();
         p.color[0][0] = [0, 0, 0];
         p.color[0][1] = [255, 0, 0];
         p.color[1][0] = [0, 0, 0];
         p.color[1][1] = [0, 0, 0];
-        let d = color_delta(&p);
+        let d = corner_spread(&p);
         assert!((d - 1.0).abs() < 1e-9, "expected 1.0, got {d}");
     }
 
@@ -620,6 +622,64 @@ mod tests {
         let mut sink = TriangleSink::new();
         tessellate_patch(&source, p, &mut sink);
         assert_eq!(sink.finish().len(), 2);
+    }
+
+    /// The subdivision tolerance is three levels of the pixels' samples:
+    /// at 8 bits the 8-bit threshold itself, at 16 bits 257 times finer.
+    #[test]
+    fn the_tolerance_is_three_levels_of_the_depth() {
+        assert_eq!(color_delta::<u8>().to_bits(), (3.0f64 / 255.0).to_bits());
+        assert_eq!(
+            color_delta::<u16>().to_bits(),
+            (3.0f64 / 65_535.0).to_bits()
+        );
+    }
+
+    /// A 64-pixel patch whose corners differ by twelve 8-bit levels stops
+    /// subdividing at 8 bits once they differ by three, and subdivides
+    /// further at 16 bits, within the `2 · 4^6` triangles one patch can
+    /// make.
+    #[test]
+    fn a_16_bit_patch_subdivides_to_its_finer_tolerance() {
+        let p = flat_patch(
+            0.0,
+            0.0,
+            64.0,
+            64.0,
+            [100, 100, 100],
+            [112, 100, 100],
+            [100, 112, 100],
+            [100, 100, 112],
+        );
+        let doc = crate::test_helpers::empty_doc();
+        let cs = super::super::ShadingCs {
+            doc: &doc,
+            space: &super::super::ColorSpace::DeviceRgb,
+        };
+        let mut narrow = TriangleSink::new();
+        tessellate_patch(
+            &super::super::mesh::DirectColors::<_, u8>::new(cs),
+            p,
+            &mut narrow,
+        );
+        let wide_patch = Patch {
+            xy: p.xy,
+            color: p
+                .color
+                .map(|row| row.map(|c| c.map(<u16 as color::Sample>::from_u8))),
+        };
+        let mut wide = TriangleSink::new();
+        tessellate_patch(
+            &super::super::mesh::DirectColors::<_, u16>::new(cs),
+            wide_patch,
+            &mut wide,
+        );
+        let (narrow, wide) = (narrow.finish().len(), wide.finish().len());
+        eprintln!("64-pixel patch: {narrow} triangles at 8 bits, {wide} at 16");
+        assert!(
+            narrow < wide && wide <= 2 * 4usize.pow(6),
+            "{narrow} and {wide}"
+        );
     }
 
     /// The boundary of the square `[x0, x0 + 3] × [y0, y0 + 3]` in stream

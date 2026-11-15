@@ -17,8 +17,19 @@ use color::Sample;
 use super::ShadingColour;
 
 /// Subdivision stops once every pair of corner colours differs by at most
-/// this much per component (each component normalised to `[0, 1]`).
-pub(super) const COLOR_DELTA: f64 = 3.0 / 255.0;
+/// this many levels of the pixels' samples per component.
+const COLOR_LEVELS: f64 = 3.0;
+
+/// [`COLOR_LEVELS`] of samples of type `S`, on the `[0, 1]` scale of a
+/// normalised component: `3 / 255` at 8 bits, `3 / 65535` at 16.
+pub(super) fn color_delta<S: Sample>() -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the largest sample is below 2^16, exact in f64"
+    )]
+    let max = S::MAX.signed() as f64;
+    COLOR_LEVELS / max
+}
 
 /// Maximum subdivision depth of one mesh triangle.
 const MAX_TRIANGLE_DEPTH: u8 = 6;
@@ -155,7 +166,7 @@ pub(super) trait CornerSource<const N: usize = 3> {
     type Sample: Sample;
 
     /// Whether a mesh triangle is subdivided until its corners are within
-    /// [`COLOR_DELTA`] before it is emitted.
+    /// [`color_delta`] before it is emitted.
     const SUBDIVIDE_TRIANGLES: bool;
 
     /// Number of colour fields each vertex carries in the stream.
@@ -252,7 +263,7 @@ impl<C: Corner> MeshVertex<C> {
 /// Append triangle `tri` to `out` as Gouraud triangles.
 ///
 /// With [`CornerSource::SUBDIVIDE_TRIANGLES`] the triangle splits at its
-/// edge midpoints into four until its corners are within [`COLOR_DELTA`],
+/// edge midpoints into four until its corners are within [`color_delta`],
 /// it spans at most [`MIN_SUBDIVISION_EXTENT`] pixels, or
 /// [`MAX_TRIANGLE_DEPTH`] is reached; the corner values interpolate linearly
 /// across the triangle, so the midpoints are exact.
@@ -261,6 +272,7 @@ pub(super) fn emit_triangle<const N: usize, S: CornerSource<N>>(
     tri: [MeshVertex<S::Corner>; 3],
     out: &mut TriangleSink<N, S::Sample>,
 ) {
+    let limit = color_delta::<S::Sample>();
     let mut stack = vec![(tri, 0u8)];
     while !out.is_full()
         && let Some(([a, b, c], depth)) = stack.pop()
@@ -270,7 +282,7 @@ pub(super) fn emit_triangle<const N: usize, S: CornerSource<N>>(
             .max(S::Corner::delta(c.corner, a.corner));
         if !S::SUBDIVIDE_TRIANGLES
             || depth >= MAX_TRIANGLE_DEPTH
-            || spread <= COLOR_DELTA
+            || spread <= limit
             || extent([a, b, c].map(|v| [v.x, v.y])) <= MIN_SUBDIVISION_EXTENT
         {
             out.push([a, b, c].map(|v| GouraudVertex {
