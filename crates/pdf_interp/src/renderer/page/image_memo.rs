@@ -239,6 +239,7 @@ mod tests {
     use crate::resources::image::ImageFilter;
 
     const KEY: ImageKey = ImageKey {
+        depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
     };

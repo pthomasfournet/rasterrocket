@@ -1591,6 +1591,7 @@ name = "rasterrocket"
 version = "2.2.0"
 dependencies = [
  "base64",
+ "flate2",
  "jpeg-encoder",
  "log",
  "rasterrocket-camera",

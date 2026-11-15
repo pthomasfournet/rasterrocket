@@ -379,6 +379,7 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "cache")]
                     doc_id: None,
                     keep_tints,
+                    depth: self.canvas.kind().depth(),
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).
                 #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]

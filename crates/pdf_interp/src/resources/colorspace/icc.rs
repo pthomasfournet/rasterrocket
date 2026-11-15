@@ -192,46 +192,74 @@ impl IccConversion {
                 (comps.len() == space.ncomponents()).then(|| space.convert(doc, comps))
             }
             Self::Shaper(shaper) => shaper.convert_components_at(comps),
-            Self::Transform {
-                n,
-                xform,
-                profile,
-                xform16,
-                ..
-            } => {
+            Self::Transform { n, xform, .. } => {
                 if comps.len() != usize::from(*n) {
                     return None;
                 }
                 if S::DEPTH == color::SampleDepth::Eight {
                     return run(&**xform, comps).map(|rgb| rgb.map(S::from_u8));
                 }
-                let xform16 = xform16.get_or_init(|| {
-                    let layout = match n {
-                        1 => Layout::Gray,
-                        3 => Layout::Rgb,
-                        _ => Layout::Rgba,
-                    };
-                    profile
-                        .create_transform_16bit(
-                            layout,
-                            &ColorProfile::new_srgb(),
-                            Layout::Rgb,
-                            TransformOptions::default(),
-                        )
-                        .map_err(|e| {
-                            log::warn!(
-                                "colorspace: 16-bit ICC transform creation failed, \
-                                 converting at 8 bits: {e}"
-                            );
-                        })
-                        .ok()
-                });
-                xform16.as_ref().map_or_else(
+                self.xform16().map_or_else(
                     || run(&**xform, comps).map(|rgb| rgb.map(S::from_u8)),
                     |x| run(&**x, comps).map(|rgb| rgb.map(|v| S::from_unit(v.to_unit()))),
                 )
             }
         }
+    }
+
+    /// The 16-bit transform of a [`Self::Transform`], created on first
+    /// use; `None` for another conversion, or when moxcms refuses it, which
+    /// is logged once.
+    fn xform16(&self) -> Option<&Arc<Transform16BitExecutor>> {
+        let Self::Transform {
+            n,
+            profile,
+            xform16,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        xform16
+            .get_or_init(|| {
+                let layout = match n {
+                    1 => Layout::Gray,
+                    3 => Layout::Rgb,
+                    _ => Layout::Rgba,
+                };
+                profile
+                    .create_transform_16bit(
+                        layout,
+                        &ColorProfile::new_srgb(),
+                        Layout::Rgb,
+                        TransformOptions::default(),
+                    )
+                    .map_err(|e| {
+                        log::warn!(
+                            "colorspace: 16-bit ICC transform creation failed, \
+                             converting at 8 bits: {e}"
+                        );
+                    })
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    /// [`Self::transform_pixels`] at 16 bits, through the 16-bit transform.
+    /// `None` for a conversion that is not a transform, a length mismatch,
+    /// or a transform that is refused or fails.
+    pub(crate) fn transform_pixels16(&self, src: &[u16], dst: &mut [u16]) -> Option<()> {
+        let Self::Transform { n, .. } = self else {
+            return None;
+        };
+        let n = usize::from(*n);
+        if !src.len().is_multiple_of(n) || dst.len() != src.len() / n * 3 {
+            return None;
+        }
+        self.xform16()?
+            .transform(src, dst)
+            .map_err(|e| log::debug!("colorspace: ICC transform execution failed: {e}"))
+            .ok()
     }
 }
 

@@ -369,6 +369,10 @@ pub(crate) fn dominant_filter(counts: &[u32; IMAGE_FILTER_COUNT]) -> Option<Imag
 pub enum ImageData {
     /// Host-resident pixel bytes — layout defined by [`ImageColorSpace`].
     Cpu(Vec<u8>),
+    /// Host-resident 16-bit samples, in the layout of [`ImageColorSpace`]:
+    /// the samples of a stream of more than 8 bits a sample, decoded for a
+    /// 16-bit render ([`ImageDecodeCtx::depth`]).
+    Cpu16(Vec<u16>),
     /// Device-resident image, owned by the device image cache.  The handle
     /// keeps the slab alive past in-flight kernel reads even if the
     /// cache evicts; see `gpu::cache::CachedDeviceImage` docs.
@@ -380,18 +384,27 @@ impl ImageData {
     /// Borrow the host-resident pixel bytes if this is a CPU-backed image.
     /// Returns `None` for variants whose pixels live in device memory.
     #[must_use]
-    #[cfg_attr(
-        not(feature = "cache"),
-        expect(
-            clippy::unnecessary_wraps,
-            reason = "without the cache feature only the CPU variant exists; keep one signature"
-        )
-    )]
     pub const fn as_cpu(&self) -> Option<&[u8]> {
         match self {
             Self::Cpu(bytes) => Some(bytes.as_slice()),
+            Self::Cpu16(_) => None,
             #[cfg(feature = "cache")]
             Self::Gpu(_) => None,
+        }
+    }
+
+    /// Whether the samples are host-resident, of either depth.
+    #[must_use]
+    pub const fn is_host(&self) -> bool {
+        matches!(self, Self::Cpu(_) | Self::Cpu16(_))
+    }
+
+    /// Borrow the host-resident 16-bit samples of a [`Self::Cpu16`] image.
+    #[must_use]
+    pub const fn as_cpu16(&self) -> Option<&[u16]> {
+        match self {
+            Self::Cpu16(samples) => Some(samples.as_slice()),
+            _ => None,
         }
     }
 
@@ -408,6 +421,7 @@ impl ImageData {
     pub fn len(&self) -> usize {
         match self {
             Self::Cpu(bytes) => bytes.len(),
+            Self::Cpu16(samples) => samples.len() * 2,
             #[cfg(feature = "cache")]
             Self::Gpu(cached) => usize::try_from(cached.vram_bytes()).unwrap_or(usize::MAX),
         }
@@ -779,8 +793,9 @@ fn own_mask(
 /// Largest `/Width` or `/Height` an image may declare.
 pub(crate) const MAX_IMAGE_SIDE: i64 = 131_071;
 
-/// Largest number of 8-bit samples (`width × height × components`) an
-/// image is stored or converted to: 1 GiB.  A larger image is refused before any
+/// Largest number of bytes of samples (`width × height × components`, two
+/// bytes a sample kept at 16 bits) an image is stored or converted to:
+/// 1 GiB.  A larger image is refused before any
 /// allocation and reported as a decode failure.  A JPEG decode whose
 /// decoder holds the frame's coefficients whole fits them in what the
 /// samples leave of it.
@@ -887,6 +902,11 @@ pub struct ImageDecodeCtx<'a> {
     /// Keep the colorant tints of an image in a `Separation` or `DeviceN`
     /// space beside its colours ([`DecodedImage::tints`]).
     pub keep_tints: bool,
+    /// The depth of the render the image is drawn in.  At 16 bits a stream
+    /// of more than 8 bits a sample keeps its samples at 16 bits
+    /// ([`ImageData::Cpu16`]); every other stream decodes to 8-bit samples
+    /// at either depth.
+    pub depth: color::SampleDepth,
 }
 
 impl<'a> ImageDecodeCtx<'a> {
@@ -911,6 +931,7 @@ impl<'a> ImageDecodeCtx<'a> {
             #[cfg(feature = "cache")]
             doc_id: None,
             keep_tints: false,
+            depth: color::SampleDepth::Eight,
         }
     }
 }

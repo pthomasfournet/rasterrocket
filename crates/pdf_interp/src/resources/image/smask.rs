@@ -7,6 +7,7 @@
 //! own grid, so its resolution is independent of the resolution the parent
 //! image was decoded at.
 
+use color::Sample;
 use pdf::{Document, Object, ObjectId, Stream};
 
 use super::colorspace::ImageColour;
@@ -22,12 +23,15 @@ use crate::resources::colorspace::ColorSpace;
 /// `alpha` holds exactly `width × height` bytes in row-major order, top row
 /// first: `0x00` = fully transparent, `0xFF` = fully opaque.  The grid may
 /// differ from the parent image's; both span the same unit square, so the
-/// blit maps each device pixel into each grid separately.
+/// blit maps each device pixel into each grid separately.  A mask decoded
+/// from more than 8 bits a sample for a 16-bit render also keeps its
+/// 16-bit alpha ([`Self::alpha16`]), of which `alpha` is the nearest bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SoftMask {
     width: u32,
     height: u32,
     alpha: Vec<u8>,
+    alpha16: Option<Vec<u16>>,
     /// The mask asks to be interpolated when magnified (its own
     /// `/Interpolate`, PDF §8.9.5.3).
     interpolate: bool,
@@ -44,8 +48,26 @@ impl SoftMask {
             width,
             height,
             alpha,
+            alpha16: None,
             interpolate: false,
         })
+    }
+
+    /// Wrap the 16-bit `alpha` as a `width × height` mask, its 8-bit alpha
+    /// the nearest byte of each value; `None` as for [`Self::new`].
+    #[must_use]
+    pub fn new16(width: u32, height: u32, alpha: Vec<u16>) -> Option<Self> {
+        let bytes = alpha.iter().map(|&a| color::Sample::to_u8(a)).collect();
+        let mut mask = Self::new(width, height, bytes)?;
+        mask.alpha16 = Some(alpha);
+        Some(mask)
+    }
+
+    /// The 16-bit alpha, `width × height`, row-major, of a mask decoded at
+    /// 16 bits.
+    #[must_use]
+    pub fn alpha16(&self) -> Option<&[u16]> {
+        self.alpha16.as_deref()
     }
 
     /// The same mask, interpolated when magnified if `interpolate`.
@@ -102,6 +124,28 @@ pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Result
     let obj_arc = ctx.doc.get_object(id).map_err(|e| e.to_string())?;
     let stream = obj_arc.as_ref().as_stream().ok_or("not a stream")?;
     let desc = decode_mask_stream(ctx, stream, false)?;
+    let interpolate = stream.dict.get_bool(b"Interpolate").unwrap_or(false);
+    if let Some(wide) = desc.data.as_cpu16() {
+        let alpha: Vec<u16> = match desc.color_space {
+            ImageColorSpace::Gray => wide.to_vec(),
+            ImageColorSpace::Rgb => wide
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[r, g, b]| color::convert::luminosity_at(r, g, b))
+                .collect(),
+            ImageColorSpace::Mask => return Err("decoded as a stencil".to_owned()),
+        };
+        let got = alpha.len();
+        return SoftMask::new16(desc.width, desc.height, alpha)
+            .map(|m| m.interpolated(interpolate))
+            .ok_or_else(|| {
+                format!(
+                    "{got} alpha samples for a {}×{} mask",
+                    desc.width, desc.height
+                )
+            });
+    }
     let alpha = match desc.color_space {
         ImageColorSpace::Gray => alpha_from_decoded(&desc)?,
         ImageColorSpace::Rgb => {
@@ -122,7 +166,6 @@ pub(super) fn decode_smask(ctx: &mut ImageDecodeCtx<'_>, id: ObjectId) -> Result
         }
         ImageColorSpace::Mask => return Err("decoded as a stencil".to_owned()),
     };
-    let interpolate = stream.dict.get_bool(b"Interpolate").unwrap_or(false);
     Ok(soft_mask(&desc, alpha)?.interpolated(interpolate))
 }
 
@@ -388,10 +431,9 @@ pub(super) fn remove_matte(
         );
         return;
     }
-    let rgb = cs.convert_to_rgb(doc, matte);
-    let device: &[u8] = match img.color_space {
-        ImageColorSpace::Rgb => &rgb,
-        ImageColorSpace::Gray => &rgb[..1],
+    let channels = match img.color_space {
+        ImageColorSpace::Rgb => 3,
+        ImageColorSpace::Gray => 1,
         ImageColorSpace::Mask => return,
     };
     let Some(mask) = &img.smask else { return };
@@ -405,45 +447,55 @@ pub(super) fn remove_matte(
         );
         return;
     }
-    #[cfg_attr(
-        not(feature = "cache"),
-        expect(
-            clippy::infallible_destructuring_match,
-            reason = "the cache-feature build adds a device-resident arm; keep one shape"
-        )
-    )]
-    let data = match &mut img.data {
-        ImageData::Cpu(bytes) => bytes,
+    match &mut img.data {
+        ImageData::Cpu(bytes) => {
+            let rgb = cs.convert_to_rgb(doc, matte);
+            unmatte(bytes, mask.alpha(), &rgb[..channels]);
+        }
+        ImageData::Cpu16(samples) => {
+            let rgb = cs.convert::<u16>(doc, matte);
+            let widened: Vec<u16>;
+            let alpha = if let Some(alpha) = mask.alpha16() {
+                alpha
+            } else {
+                widened = mask.alpha().iter().map(|&a| u16::from_u8(a)).collect();
+                &widened
+            };
+            unmatte(samples, alpha, &rgb[..channels]);
+        }
         #[cfg(feature = "cache")]
         ImageData::Gpu(_) => {
             log::warn!("image: /Matte needs host-resident samples; drawing as stored");
-            return;
         }
-    };
-    unmatte(data, mask.alpha(), device);
+    }
 }
 
-/// Invert `c' = m + α·(c − m)` (§11.6.5.3) over interleaved 8-bit
-/// `samples`, `matte.len()` components per pixel, with `alpha` holding one
-/// byte per pixel: `c = m + (c' − m)/α`, rounded and clamped to 0..=255.
-/// Pixels of alpha 0 are left as stored.
-pub(super) fn unmatte(samples: &mut [u8], alpha: &[u8], matte: &[u8]) {
+/// Invert `c' = m + α·(c − m)` (§11.6.5.3) over interleaved `samples`,
+/// `matte.len()` components per pixel, with `alpha` holding one sample per
+/// pixel: `c = m + (c' − m)·MAX/α` in `f32`, rounded and clamped to the
+/// sample range.  Pixels of alpha 0 are left as stored.
+pub(super) fn unmatte<S: Sample>(samples: &mut [S], alpha: &[S], matte: &[S]) {
     if matte.is_empty() {
         return;
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a sample of at most 16 bits is exact in f32"
+    )]
+    let level = |v: S| v.signed() as f32;
+    let max = level(S::MAX);
     for (px, &a) in samples.chunks_exact_mut(matte.len()).zip(alpha) {
-        if a == 0 {
+        if a == S::ZERO {
             continue;
         }
         for (c, &m) in px.iter_mut().zip(matte) {
-            let v = f32::from(m) + (f32::from(*c) - f32::from(m)) * 255.0 / f32::from(a);
+            let v = level(m) + (level(*c) - level(m)) * max / level(a);
             #[expect(
                 clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "clamped to 0..=255 before the cast"
+                reason = "rounded; from_signed clamps to the sample range"
             )]
             {
-                *c = v.round().clamp(0.0, 255.0) as u8;
+                *c = S::from_signed(v.round() as i64);
             }
         }
     }

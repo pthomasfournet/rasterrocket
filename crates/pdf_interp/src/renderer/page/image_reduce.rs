@@ -35,8 +35,11 @@
 //! exactly 65 536 per output sample, rounded cumulatively so that each
 //! partial sum is within half a count of exact; the vertical pass keeps 8
 //! fraction bits, so the result is the exact mean to within one count.
-//! Every intermediate fits `u32`: a vertical sum is at most `255 · 2¹⁶` and
-//! a horizontal one at most `(255 · 2⁸) · 2¹⁶`.
+//! Every intermediate of 8-bit samples fits `u32`: a vertical sum is at
+//! most `255 · 2¹⁶` and a horizontal one at most `(255 · 2⁸) · 2¹⁶`; those
+//! of 16-bit samples, 256 times as large, fit `u64` ([`color::Wide`]).
+
+use color::{Sample, Wide};
 
 use crate::renderer::gstate::Ctm;
 use crate::resources::SoftMask;
@@ -111,14 +114,17 @@ pub(super) fn reduce_for_draw(
     img: &ImageDescriptor,
     plan: &Plan,
 ) -> Option<(ImageDescriptor, Ctm)> {
-    let src = img.data.as_cpu()?;
-    let out = plan.resample(src, img.color_space.bytes_per_pixel())?;
+    let bpp = img.color_space.bytes_per_pixel();
+    let data = match &img.data {
+        ImageData::Cpu16(src) => ImageData::Cpu16(plan.resample(src, bpp)?),
+        data => ImageData::Cpu(plan.resample(data.as_cpu()?, bpp)?),
+    };
     Some((
         ImageDescriptor {
             width: plan.out_w,
             height: plan.out_h,
             color_space: img.color_space,
-            data: ImageData::Cpu(out),
+            data,
             smask: None,
             filter: ImageFilter::Raw,
         },
@@ -135,8 +141,11 @@ pub(super) fn reduce_mask_for_draw(
     window: &DeviceWindow,
 ) -> Option<(SoftMask, Ctm)> {
     let plan = Plan::new(ctm, mask.width(), mask.height(), window)?;
-    let out = plan.resample(mask.alpha(), 1)?;
-    let reduced = SoftMask::new(plan.out_w, plan.out_h, out)?.interpolated(mask.interpolate());
+    let reduced = match mask.alpha16() {
+        Some(alpha) => SoftMask::new16(plan.out_w, plan.out_h, plan.resample(alpha, 1)?)?,
+        None => SoftMask::new(plan.out_w, plan.out_h, plan.resample(mask.alpha(), 1)?)?,
+    }
+    .interpolated(mask.interpolate());
     Some((reduced, plan.ctm))
 }
 
@@ -446,9 +455,9 @@ impl Plan {
         })
     }
 
-    /// Resample `src`, `src_w × src_h` pixels of `bpp` bytes, into
+    /// Resample `src`, `src_w × src_h` pixels of `bpp` samples, into
     /// `out_w × out_h`.  `None` when `src` is not exactly that size.
-    pub(super) fn resample(&self, src: &[u8], bpp: usize) -> Option<Vec<u8>> {
+    pub(super) fn resample<S: Sample>(&self, src: &[S], bpp: usize) -> Option<Vec<S>> {
         let (w, h) = (self.src_w as usize, self.src_h as usize);
         let row_len = w.checked_mul(bpp)?;
         if src.len() != row_len.checked_mul(h)? {
@@ -459,16 +468,17 @@ impl Plan {
             return Some(Vec::new());
         }
         let out_row_len = out_w * bpp;
-        let mut out = vec![0u8; out_row_len.checked_mul(out_h)?];
+        let w = <S::Wide as Wide>::of;
+        let mut out = vec![S::ZERO; out_row_len.checked_mul(out_h)?];
         // `acc` holds the vertical pass's row carrying `frac` fraction bits;
-        // only its bytes `span` (the columns the output reads) are computed.
-        let mut acc = vec![0u32; row_len];
+        // only its samples `span` (the columns the output reads) are computed.
+        let mut acc = vec![w(0); row_len];
         let span = self.col_span.0 as usize * bpp..self.col_span.1 as usize * bpp;
 
         for (oy, out_row) in out.chunks_exact_mut(out_row_len).enumerate() {
             let window = &mut acc[span.clone()];
             let frac = if let Some(rows) = &self.rows {
-                window.fill(0);
+                window.fill(w(0));
                 let (first, weights) = rows.taps(oy);
                 for (j, &wt) in weights.iter().enumerate() {
                     if wt != 0 {
@@ -478,7 +488,7 @@ impl Plan {
                 WEIGHT_BITS
             } else {
                 for (a, &v) in window.iter_mut().zip(&src[oy * row_len..][span.clone()]) {
-                    *a = u32::from(v);
+                    *a = v.wide();
                 }
                 0
             };
@@ -488,7 +498,7 @@ impl Plan {
                     let shift = frac.saturating_sub(MID_BITS);
                     if shift > 0 {
                         for a in window {
-                            *a = (*a + (1 << (shift - 1))) >> shift;
+                            *a = (*a + w(1 << (shift - 1))) >> shift;
                         }
                     }
                     reduce_row(&acc, cols, bpp, out_row, frac - shift + WEIGHT_BITS);
@@ -506,17 +516,19 @@ impl Plan {
 
 /// `acc[x] += weight * row[x]` over a whole row.
 #[inline]
-fn accumulate_row(acc: &mut [u32], row: &[u8], weight: u32) {
+fn accumulate_row<S: Sample>(acc: &mut [S::Wide], row: &[S], weight: u32) {
+    let weight = <S::Wide as Wide>::of(weight);
     for (a, &v) in acc.iter_mut().zip(row) {
-        *a += weight * u32::from(v);
+        *a = *a + weight * v.wide();
     }
 }
 
-/// `round(v / 2^shift)` as a byte; the filter's sums never exceed
-/// `255 << shift`.
+/// `round(v / 2^shift)` as a sample; the filter's sums never exceed
+/// `MAX << shift`.
 #[inline]
-fn round_shift(v: u32, shift: u32) -> u8 {
-    ((v + (1 << (shift - 1))) >> shift).min(255) as u8
+fn round_shift<S: Sample>(v: S::Wide, shift: u32) -> S {
+    let w = <S::Wide as Wide>::of;
+    S::from_wide(((v + w(1 << (shift - 1))) >> shift).min(S::max_wide()))
 }
 
 /// Reduce one row of `bpp`-channel samples carrying `shift − WEIGHT_BITS`
@@ -524,11 +536,17 @@ fn round_shift(v: u32, shift: u32) -> u8 {
 ///
 /// The common shapes — one channel up to twelve taps, three channels up to
 /// eight — run a fully unrolled loop.
-fn reduce_row(row: &[u32], cols: &AxisFilter, bpp: usize, out: &mut [u8], shift: u32) {
+fn reduce_row<S: Sample>(
+    row: &[S::Wide],
+    cols: &AxisFilter,
+    bpp: usize,
+    out: &mut [S],
+    shift: u32,
+) {
     macro_rules! fixed {
         ($($n:literal: [$($t:literal),*]),*) => {
             match (bpp, cols.width) {
-                $($(($n, $t) => return reduce_row_fixed::<$n, $t>(row, cols, out, shift),)*)*
+                $($(($n, $t) => return reduce_row_fixed::<S, $n, $t>(row, cols, out, shift),)*)*
                 _ => {}
             }
         };
@@ -539,35 +557,36 @@ fn reduce_row(row: &[u32], cols: &AxisFilter, bpp: usize, out: &mut [u8], shift:
     for ((px, &start), weights) in pixels.zip(cols.weights.chunks_exact(width)) {
         let src = &row[start as usize * bpp..][..width * bpp];
         for (ch, o) in px.iter_mut().enumerate() {
-            let sum: u32 = weights
+            let sum = weights
                 .iter()
                 .zip(src.chunks_exact(bpp))
-                .map(|(&wt, s)| wt * s[ch])
-                .sum();
-            *o = round_shift(sum, shift);
+                .fold(<S::Wide as Wide>::ZERO, |acc, (&wt, s)| {
+                    acc + <S::Wide as Wide>::of(wt) * s[ch]
+                });
+            *o = round_shift::<S>(sum, shift);
         }
     }
 }
 
 /// [`reduce_row`] for `N` channels and a filter `T` taps wide.
 #[inline]
-fn reduce_row_fixed<const N: usize, const T: usize>(
-    row: &[u32],
+fn reduce_row_fixed<S: Sample, const N: usize, const T: usize>(
+    row: &[S::Wide],
     cols: &AxisFilter,
-    out: &mut [u8],
+    out: &mut [S],
     shift: u32,
 ) {
     let pixels = out.as_chunks_mut::<N>().0.iter_mut().zip(&cols.start);
     for ((px, &start), weights) in pixels.zip(cols.weights.as_chunks::<T>().0) {
         let src = &row[start as usize * N..][..T * N];
-        let mut sum = [0u32; N];
+        let mut sum = [<S::Wide as Wide>::ZERO; N];
         for t in 0..T {
             for ch in 0..N {
-                sum[ch] += weights[t] * src[t * N + ch];
+                sum[ch] = sum[ch] + <S::Wide as Wide>::of(weights[t]) * src[t * N + ch];
             }
         }
         for (o, s) in px.iter_mut().zip(sum) {
-            *o = round_shift(s, shift);
+            *o = round_shift::<S>(s, shift);
         }
     }
 }

@@ -79,6 +79,7 @@ impl PageRenderer<'_> {
         let key = self.resources.xobject_id(name).map(|id| ImageKey {
             id,
             context: self.default_spaces_context(),
+            depth: self.canvas.kind().depth(),
         });
         let Some(key) = key else {
             let (resolution, _) = self.decode_image_xobject(name, draw_size);
@@ -137,7 +138,7 @@ impl PageRenderer<'_> {
                     local = Some(resolution);
                     Outcome::Local
                 }
-                (ImageResolution::Ok(decoded), true) if decoded.image.data.as_cpu().is_none() => {
+                (ImageResolution::Ok(decoded), true) if !decoded.image.data.is_host() => {
                     local = Some(ImageResolution::Ok(decoded));
                     Outcome::Local
                 }
@@ -242,6 +243,7 @@ impl PageRenderer<'_> {
             #[cfg(feature = "cache")]
             doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
             keep_tints,
+            depth: self.canvas.kind().depth(),
         };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).
         // Each branch is a separately monomorphised call; no decoder is wasted.

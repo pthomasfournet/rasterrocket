@@ -40,6 +40,7 @@
 //! grid maps every pixel through the inverse matrix in `f64` instead, and only
 //! the CPU sampler draws it.
 
+use color::{Sample, SampleDepth, Wide};
 use raster::{Clip, ClipResult, ClipRows, RowClip};
 
 use super::image_reduce::{AXIS_TOLERANCE, REDUCTION_MARGIN};
@@ -173,7 +174,10 @@ impl Taps {
     /// The weighted mean over the taps of each of the `N` channels
     /// `fetch(x, y)` returns, rounded to nearest; each tap is fetched once.
     #[inline]
-    pub(super) fn blend_px<const N: usize>(&self, fetch: impl Fn(u32, u32) -> [u8; N]) -> [u8; N] {
+    pub(super) fn blend_px<S: Sample, const N: usize>(
+        &self,
+        fetch: impl Fn(u32, u32) -> [S; N],
+    ) -> [S; N] {
         if self.wx == 0 && self.wy == 0 {
             return fetch(self.x[0], self.y[0]);
         }
@@ -183,25 +187,33 @@ impl Taps {
 }
 
 /// `left × (1 − wx) + right × wx` per channel, in units of `2^-WEIGHT_BITS`:
-/// a row's horizontal blend before the vertical one.
+/// a row's horizontal blend before the vertical one.  The sums are formed
+/// in [`Sample::Wide`], which holds a sample times `2^(2·WEIGHT_BITS)`.
 #[inline]
-fn horizontal_blend<const N: usize>(left: [u8; N], right: [u8; N], wx: u32) -> [u32; N] {
+fn horizontal_blend<S: Sample, const N: usize>(
+    left: [S; N],
+    right: [S; N],
+    wx: u32,
+) -> [S::Wide; N] {
+    let w = <S::Wide as Wide>::of;
     let one = 1 << WEIGHT_BITS;
-    std::array::from_fn(|ch| u32::from(left[ch]) * (one - wx) + u32::from(right[ch]) * wx)
+    std::array::from_fn(|ch| left[ch].wide() * w(one - wx) + right[ch].wide() * w(wx))
 }
 
 /// The blend of two horizontal blends `top` and `bottom` with `bottom`
-/// weighted `wy`, rounded to nearest.
+/// weighted `wy`, rounded to nearest: a weighted mean of samples with
+/// weights summing to `2^(2·WEIGHT_BITS)`, so a sample after the shift.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a weighted mean of u8 values with weights summing to 2^16 is at most 255 after the shift"
-)]
-fn vertical_blend<const N: usize>(top: &[u32; N], bottom: &[u32; N], wy: u32) -> [u8; N] {
+fn vertical_blend<S: Sample, const N: usize>(
+    top: &[S::Wide; N],
+    bottom: &[S::Wide; N],
+    wy: u32,
+) -> [S; N] {
+    let w = <S::Wide as Wide>::of;
     let one = 1 << WEIGHT_BITS;
     std::array::from_fn(|ch| {
-        let sum = top[ch] * (one - wy) + bottom[ch] * wy;
-        ((sum + (1 << (2 * WEIGHT_BITS - 1))) >> (2 * WEIGHT_BITS)) as u8
+        let sum = top[ch] * w(one - wy) + bottom[ch] * w(wy);
+        S::from_wide((sum + w(1 << (2 * WEIGHT_BITS - 1))) >> (2 * WEIGHT_BITS))
     })
 }
 
@@ -213,23 +225,23 @@ fn on_axis(i: i32, n: u32) -> bool {
     u32::try_from(i).is_ok_and(|i| i < n)
 }
 
-/// The first `N` bytes of sample `(x, y)` of an image `width` samples wide
-/// stored at `bpp` bytes per sample, or `u8::MAX` in every channel when the
-/// sample lies past the end of `bytes`.
+/// The first `N` samples of pixel `(x, y)` of an image `width` pixels wide
+/// stored at `bpp` samples per pixel, or the largest sample in every
+/// channel when the pixel lies past the end of `samples`.
 #[inline]
-pub(super) fn sample_bytes<const N: usize>(
-    bytes: &[u8],
+pub(super) fn sample_bytes<S: Sample, const N: usize>(
+    samples: &[S],
     width: usize,
     bpp: usize,
     x: u32,
     y: u32,
-) -> [u8; N] {
+) -> [S; N] {
     let at = (y as usize * width + x as usize) * bpp;
-    bytes
+    samples
         .get(at..)
-        .and_then(<[u8]>::first_chunk::<N>)
+        .and_then(<[S]>::first_chunk::<N>)
         .copied()
-        .unwrap_or([u8::MAX; N])
+        .unwrap_or([S::MAX; N])
 }
 
 /// The taps of a [`SampleGrid`] whose source x depends on the device column
@@ -242,27 +254,31 @@ pub(super) struct SeparableTaps {
     cols: Vec<Option<AxisTaps>>,
 }
 
+/// A source row blended horizontally at every bounding-box column.
+type HorizontalRow<const N: usize, S> = Vec<[<S as Sample>::Wide; N]>;
+
 /// [`Taps::blend_px`] of a whole row of a separable grid, in two passes:
 /// each source row is blended horizontally once, at every bounding-box
 /// column, and kept while the device rows that read it are produced; each
 /// device row is then the vertical blend of its two source rows.  The
 /// arithmetic is [`Taps::blend_px`]'s, so the samples are identical.
-pub(super) struct BlendedRows<'a, const N: usize> {
+pub(super) struct BlendedRows<'a, const N: usize, S: Sample = u8> {
     cols: &'a SeparableTaps,
     /// Two horizontally blended source rows, each with its row index;
     /// `None` before the slot is first filled.
-    slots: [(Option<u32>, Vec<[u32; N]>); 2],
+    slots: [(Option<u32>, HorizontalRow<N, S>); 2],
     /// The samples of the last device row blended.
-    out: Vec<[u8; N]>,
+    out: Vec<[S; N]>,
 }
 
-impl<'a, const N: usize> BlendedRows<'a, N> {
+impl<'a, const N: usize, S: Sample> BlendedRows<'a, N, S> {
     pub(super) fn new(cols: &'a SeparableTaps) -> Self {
         let n = cols.cols.len();
+        let zero = [<S::Wide as Wide>::ZERO; N];
         Self {
             cols,
-            slots: [(None, vec![[0; N]; n]), (None, vec![[0; N]; n])],
-            out: vec![[0; N]; n],
+            slots: [(None, vec![zero; n]), (None, vec![zero; n])],
+            out: vec![[S::ZERO; N]; n],
         }
     }
 
@@ -272,8 +288,8 @@ impl<'a, const N: usize> BlendedRows<'a, N> {
     pub(super) fn blend_row(
         &mut self,
         row: AxisTaps,
-        fetch: impl Fn(u32, u32) -> [u8; N],
-    ) -> &[[u8; N]] {
+        fetch: impl Fn(u32, u32) -> [S; N],
+    ) -> &[[S; N]] {
         let ([upper, lower], wy) = row;
         // Slot 0 holds the upper row and, when it is weighted, slot 1 the
         // lower; a slot already holding either row is kept, so a draw
@@ -300,7 +316,7 @@ impl<'a, const N: usize> BlendedRows<'a, N> {
     }
 
     /// Blend source row `y` horizontally into slot `slot`.
-    fn fill(&mut self, slot: usize, y: u32, fetch: &impl Fn(u32, u32) -> [u8; N]) {
+    fn fill(&mut self, slot: usize, y: u32, fetch: &impl Fn(u32, u32) -> [S; N]) {
         let (held, blended) = &mut self.slots[slot];
         for (h, col) in blended.iter_mut().zip(&self.cols.cols) {
             *h = match *col {
@@ -309,7 +325,7 @@ impl<'a, const N: usize> BlendedRows<'a, N> {
                     let r = if wx == 0 { l } else { fetch(right, y) };
                     horizontal_blend(l, r, wx)
                 }
-                None => [0; N],
+                None => [<S::Wide as Wide>::ZERO; N],
             };
         }
         *held = Some(y);
@@ -742,6 +758,8 @@ impl SampleGrid {
 /// places just off the mask, the nearest mask pixel is used.
 pub(super) struct MaskSampler<'a> {
     alpha: &'a [u8],
+    /// The mask's 16-bit alpha, when it was decoded at 16 bits.
+    alpha16: Option<&'a [u16]>,
     width: usize,
     /// `None` when the mask shares the image's grid.
     grid: Option<SampleGrid>,
@@ -779,6 +797,7 @@ impl<'a> MaskSampler<'a> {
         };
         Some(Self {
             alpha: mask.alpha(),
+            alpha16: mask.alpha16(),
             width: mask.width() as usize,
             grid,
         })
@@ -789,12 +808,25 @@ impl<'a> MaskSampler<'a> {
     /// `dx`/`dy` must lie inside the bounding box.
     #[inline]
     pub(super) fn alpha(&self, dx: u32, dy: u32, image: &Taps) -> u8 {
+        self.alpha_at(dx, dy, image)
+    }
+
+    /// [`Self::alpha`] as a sample of type `S`: from the 16-bit alpha of a
+    /// mask that has one for a 16-bit sample, else the 8-bit alpha on the
+    /// sample's scale.
+    #[inline]
+    pub(super) fn alpha_at<S: Sample>(&self, dx: u32, dy: u32, image: &Taps) -> S {
         let taps = self
             .grid
             .as_ref()
             .map_or(*image, |g| g.sample_clamped(dx, dy));
-        let [alpha] = taps.blend_px(|x, y| sample_bytes::<1>(self.alpha, self.width, 1, x, y));
-        alpha
+        if let Some(alpha16) = self.alpha16.filter(|_| S::DEPTH == SampleDepth::Sixteen) {
+            let [alpha] =
+                taps.blend_px(|x, y| sample_bytes::<u16, 1>(alpha16, self.width, 1, x, y));
+            return S::from_sample(alpha);
+        }
+        let [alpha] = taps.blend_px(|x, y| sample_bytes::<u8, 1>(self.alpha, self.width, 1, x, y));
+        S::from_u8(alpha)
     }
 }
 
@@ -1314,7 +1346,7 @@ mod tests {
             wx: 128,
             wy: 0,
         };
-        assert_eq!(taps.blend_px(|x, _| [[0, 255][x as usize]]), [128]);
+        assert_eq!(taps.blend_px(|x, _| [[0u8, 255][x as usize]]), [128]);
         let corner = Taps {
             x: [0, 1],
             y: [0, 1],
@@ -1322,7 +1354,7 @@ mod tests {
             wy: 192,
         };
         // 0.25 · 0.75 of the (1, 1) sample.
-        let [v] = corner.blend_px(|x, y| [if (x, y) == (1, 1) { 255 } else { 0 }]);
+        let [v] = corner.blend_px(|x, y| [if (x, y) == (1, 1) { 255u8 } else { 0 }]);
         assert_eq!(v, 48);
     }
 

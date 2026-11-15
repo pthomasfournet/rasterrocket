@@ -147,6 +147,33 @@ pub(super) fn downsample_16bpp(
     Some(out)
 }
 
+/// The 16-bit big-endian samples of `data` as native `u16`, for a
+/// `width × height` image of `components` samples per pixel; samples past
+/// the end of short data are 0.  `None` when the count overflows or the
+/// buffer cannot be allocated.
+pub(super) fn expand_16bpp(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    components: usize,
+) -> Option<Vec<u16>> {
+    let n_samples = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(components)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(n_samples).ok()?;
+    out.extend(
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .take(n_samples)
+            .map(|&pair| u16::from_be_bytes(pair)),
+    );
+    out.resize(n_samples, 0);
+    Some(out)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -245,6 +272,14 @@ mod tests {
         let data = [0xFFu8, 0xFF, 0x00, 0x00];
         let out = downsample_16bpp(&data, 2, 1, 1).unwrap();
         assert_eq!(out, [0xFF, 0x00]);
+    }
+
+    #[test]
+    fn expand_16bpp_keeps_every_bit_and_zero_extends() {
+        let out = expand_16bpp(&[0xAB, 0xCD, 0x12, 0x34, 0x56], 1, 1, 3).unwrap();
+        assert_eq!(out, [0xABCD, 0x1234, 0x0000]);
+        let high = downsample_16bpp(&[0xAB, 0xCD], 1, 1, 1).unwrap();
+        assert_eq!(high[0], (0xABCD_u16 >> 8) as u8);
     }
 
     #[test]

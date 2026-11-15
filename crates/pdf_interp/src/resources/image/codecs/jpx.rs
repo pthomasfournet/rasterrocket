@@ -45,7 +45,7 @@ pub(in crate::resources::image) fn decode_jpx(
         ..Default::default()
     };
     let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
-    jpx_budget(&img)?;
+    jpx_budget(&img, 1)?;
     let embedded_profile = match img.color_space() {
         hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
         _ => None,
@@ -53,12 +53,18 @@ pub(in crate::resources::image) fn decode_jpx(
 
     // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
     // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
-    // never needs `/SMaskInData`.
-    // A colour key compared at more than 8 bits needs the samples the
-    // 8-bit device decode does not keep.
-    let precise_key = opts.colour_key && img.original_bit_depth() > 8;
+    // never needs `/SMaskInData`.  Its samples are 8-bit: a codestream of
+    // more than 8 bits kept at 16, or whose colour key compares more than 8
+    // bits, decodes on the CPU.
+    let deep = img.original_bit_depth() > 8;
+    let precise_key = opts.colour_key && deep;
+    let wide = opts.wide && deep;
+    if wide {
+        // Each sample kept at 16 bits takes two bytes.
+        jpx_budget(&img, 2)?;
+    }
     #[cfg(feature = "nvjpeg2k")]
-    if let Some(dec) = gpu.filter(|_| !precise_key) {
+    if let Some(dec) = gpu.filter(|_| !precise_key && !wide) {
         let area = pdf_w.saturating_mul(pdf_h);
         if area >= crate::resources::image::GPU_JPEG2K_THRESHOLD_PX {
             if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
@@ -82,48 +88,6 @@ pub(in crate::resources::image) fn decode_jpx(
 
     let channels = usize::from(img.color_space().num_channels());
     let has_alpha = img.has_alpha();
-    let mut ctx = hayro_jpeg2000::DecoderContext::default();
-    let (samples, key_source) = if precise_key {
-        let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
-        let key = source_samples(&decoded, channels);
-        (decoded.data_u8(), Some(key))
-    } else {
-        (img.decode_u8(&mut ctx).map_err(|e| e.to_string())?, None)
-    };
-
-    let stride = channels + usize::from(has_alpha);
-    let expected = (jw as usize)
-        .checked_mul(jh as usize)
-        .and_then(|npx| npx.checked_mul(stride));
-    if expected != Some(samples.len()) {
-        return Err(format!("{} samples for {jw}×{jh}×{stride}", samples.len()));
-    }
-
-    // The alpha channel, when present, is the last sample of each pixel.
-    // It is the image's soft mask only when `/SMaskInData` is nonzero
-    // (§8.9.5); with 2 the colour channels are premultiplied by it, which
-    // is the matte relation with every matte component 0, inverted in the
-    // codestream's own colour space.
-    let (colour, alpha) = if has_alpha {
-        let mut colour: Vec<u8> = samples
-            .chunks_exact(stride)
-            .flat_map(|px| px[..channels].iter().copied())
-            .collect();
-        let alpha = (opts.smask_in_data != 0).then(|| {
-            let alpha: Vec<u8> = samples
-                .chunks_exact(stride)
-                .map(|px| px[channels])
-                .collect();
-            if opts.smask_in_data == 2 {
-                crate::resources::image::smask::unmatte(&mut colour, &alpha, &vec![0; channels]);
-            }
-            alpha
-        });
-        (colour, alpha)
-    } else {
-        (samples, None)
-    };
-
     // The samples are read by channel count; CMYK samples are ink
     // densities (0 = no ink).
     let layout = match channels {
@@ -132,11 +96,115 @@ pub(in crate::resources::image) fn decode_jpx(
         4 => Layout::Color(4),
         n => return Err(format!("unsupported {n}-channel colour space")),
     };
-    let mut samples = Samples::cpu(jw, jh, layout, colour);
-    samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
+    let stride = channels + usize::from(has_alpha);
+    let expected = (jw as usize)
+        .checked_mul(jh as usize)
+        .and_then(|npx| npx.checked_mul(stride));
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let mut samples = if precise_key || wide {
+        let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
+        let key_source = precise_key.then(|| source_samples(&decoded, channels));
+        let mut samples = if wide {
+            let wide = wide_samples(&decoded);
+            check_len(wide.len(), expected, (jw, jh, stride))?;
+            let (colour, alpha) = split_alpha(wide, channels, has_alpha, opts.smask_in_data);
+            let mut samples = Samples::cpu16(jw, jh, layout, colour);
+            samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new16(jw, jh, a));
+            samples
+        } else {
+            let bytes = decoded.data_u8();
+            check_len(bytes.len(), expected, (jw, jh, stride))?;
+            let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts.smask_in_data);
+            let mut samples = Samples::cpu(jw, jh, layout, colour);
+            samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
+            samples
+        };
+        samples.key_source = key_source;
+        samples
+    } else {
+        let bytes = img.decode_u8(&mut ctx).map_err(|e| e.to_string())?;
+        check_len(bytes.len(), expected, (jw, jh, stride))?;
+        let (colour, alpha) = split_alpha(bytes, channels, has_alpha, opts.smask_in_data);
+        let mut samples = Samples::cpu(jw, jh, layout, colour);
+        samples.smask = alpha.and_then(|a| crate::resources::image::SoftMask::new(jw, jh, a));
+        samples
+    };
     samples.embedded_profile = embedded_profile;
-    samples.key_source = key_source;
     Ok(samples)
+}
+
+/// `Err` naming the counts when `got` samples are not the `expected` of a
+/// `w × h` image of `stride` samples a pixel.
+fn check_len(
+    got: usize,
+    expected: Option<usize>,
+    (w, h, stride): (u32, u32, usize),
+) -> Result<(), String> {
+    if expected == Some(got) {
+        Ok(())
+    } else {
+        Err(format!("{got} samples for {w}×{h}×{stride}"))
+    }
+}
+
+/// The colour samples of interleaved `samples` of `channels` colours and,
+/// when `has_alpha`, an alpha channel last, and the alpha.  The alpha is
+/// the image's soft mask only when `/SMaskInData` (`smask_in_data`) is
+/// nonzero (§8.9.5); with 2 the colour channels are premultiplied by it,
+/// which is the matte relation with every matte component 0, inverted in
+/// the codestream's own colour space.
+fn split_alpha<S: color::Sample>(
+    samples: Vec<S>,
+    channels: usize,
+    has_alpha: bool,
+    smask_in_data: i64,
+) -> (Vec<S>, Option<Vec<S>>) {
+    if !has_alpha {
+        return (samples, None);
+    }
+    let stride = channels + 1;
+    let mut colour: Vec<S> = samples
+        .chunks_exact(stride)
+        .flat_map(|px| px[..channels].iter().copied())
+        .collect();
+    let alpha = (smask_in_data != 0).then(|| {
+        let alpha: Vec<S> = samples
+            .chunks_exact(stride)
+            .map(|px| px[channels])
+            .collect();
+        if smask_in_data == 2 {
+            crate::resources::image::smask::unmatte(&mut colour, &alpha, &vec![S::ZERO; channels]);
+        }
+        alpha
+    });
+    (colour, alpha)
+}
+
+/// Every component of `decoded`, interleaved, each scaled from its own
+/// precision to 16 bits: `round(v · 65535 / (2^bits − 1))`.
+fn wide_samples(decoded: &hayro_jpeg2000::DecodedImage<'_>) -> Vec<u16> {
+    let components = decoded.components();
+    let len = components.first().map_or(0, |c| c.samples().len());
+    let scales: Vec<f64> = components
+        .iter()
+        .map(|c| 65_535.0 / f64::from(u32::MAX >> (32 - u32::from(c.bit_depth()).clamp(1, 32))))
+        .collect();
+    let mut out = Vec::with_capacity(len * components.len());
+    for i in 0..len {
+        for (c, scale) in components.iter().zip(&scales) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0..=65535 before the cast"
+            )]
+            out.push(
+                (f64::from(c.samples()[i]) * scale)
+                    .round()
+                    .clamp(0.0, 65_535.0) as u16,
+            );
+        }
+    }
+    out
 }
 
 /// The first `channels` components of `decoded` interleaved at their own
@@ -170,7 +238,7 @@ fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
         ..Default::default()
     };
     let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
-    jpx_budget(&img)?;
+    jpx_budget(&img, 1)?;
     let (jw, jh) = (img.width(), img.height());
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = img.decode(&mut ctx).map_err(|e| e.to_string())?;
@@ -198,10 +266,10 @@ fn decode_jpx_indices(data: &[u8]) -> Result<Samples, String> {
 /// The decode budget ([`crate::resources::image::decode_budget`]) applied to the
 /// dimensions and channel count a JPEG 2000 codestream declares, which
 /// govern the decoder's allocations and may differ from the image
-/// dictionary's.
-fn jpx_budget(img: &hayro_jpeg2000::Image<'_>) -> Result<(), String> {
+/// dictionary's, at `bytes` bytes a sample.
+fn jpx_budget(img: &hayro_jpeg2000::Image<'_>, bytes: usize) -> Result<(), String> {
     let channels = usize::from(img.color_space().num_channels()) + usize::from(img.has_alpha());
-    crate::resources::image::decode_budget(img.width(), img.height(), channels)
+    crate::resources::image::decode_budget(img.width(), img.height(), channels * bytes)
         .map_err(|e| format!("codestream {e}"))
 }
 
@@ -218,6 +286,8 @@ pub(in crate::resources::image) struct JpxOptions {
     /// 8 bits keeps them at its own precision as well
     /// ([`Samples::key_source`]).
     pub colour_key: bool,
+    /// Keep the samples of a codestream of more than 8 bits at 16 bits.
+    pub wide: bool,
 }
 
 /// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
@@ -275,6 +345,7 @@ mod tests {
         indices: false,
         smask_in_data: 0,
         colour_key: false,
+        wide: false,
     };
 
     /// Colour samples as stored, an alpha channel as the soft mask.
@@ -283,6 +354,7 @@ mod tests {
         indices: false,
         smask_in_data: 1,
         colour_key: false,
+        wide: false,
     };
 
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
@@ -384,6 +456,7 @@ mod tests {
             indices: false,
             smask_in_data: 0,
             colour_key: false,
+            wide: false,
         };
         #[cfg(feature = "nvjpeg2k")]
         let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the limit");

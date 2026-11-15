@@ -33,6 +33,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use color::Sample;
 use pdf::{Dictionary, Document, Object};
 
 use super::{ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask};
@@ -91,6 +92,14 @@ impl Samples {
             embedded_profile: None,
             partial: None,
             key_source: None,
+        }
+    }
+
+    /// Host-resident 16-bit samples of `layout`.
+    pub(super) fn cpu16(width: u32, height: u32, layout: Layout, data: Vec<u16>) -> Self {
+        Self {
+            data: ImageData::Cpu16(data),
+            ..Self::cpu(width, height, layout, Vec::new())
         }
     }
 
@@ -264,6 +273,24 @@ impl ImageColour {
         Some((device, DEVICE_DECODE[..n].as_ref()))
     }
 
+    /// Whether 16-bit samples of the image convert at 16 bits (see
+    /// [`convert16`]): those of a device, CIE-based or ICC-based space, and
+    /// of an image naming no space.  Samples in any other space decode to 8
+    /// bits at every depth.
+    pub(super) fn converts_wide(&self) -> bool {
+        self.space.as_ref().is_none_or(|space| {
+            matches!(
+                space,
+                ColorSpace::DeviceGray
+                    | ColorSpace::DeviceRgb
+                    | ColorSpace::DeviceCmyk
+                    | ColorSpace::Cal(_)
+                    | ColorSpace::Lab(_)
+                    | ColorSpace::IccBased { .. }
+            )
+        })
+    }
+
     /// Convert `samples` to the gray or RGB descriptor the blit draws.
     ///
     /// A conversion through tint transforms spends from `budget`, the
@@ -314,15 +341,12 @@ impl ImageColour {
             255.0
         };
         let decoded = Decoded::new(doc, space, decode, max_sample, profile, budget);
-        #[cfg_attr(
-            not(feature = "cache"),
-            expect(
-                clippy::infallible_destructuring_match,
-                reason = "the cache-feature build adds a device-resident arm; keep one shape"
-            )
-        )]
         let bytes = match data {
             ImageData::Cpu(bytes) => bytes,
+            ImageData::Cpu16(wide) => {
+                let (cs, wide) = convert16(&decoded, n, wide)?;
+                return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
+            }
             #[cfg(feature = "cache")]
             ImageData::Gpu(cached) => {
                 let identity = match n {
@@ -408,6 +432,96 @@ impl ImageColour {
             data,
         })
     }
+}
+
+/// Convert `samples`, 16-bit samples of `n` components, through
+/// `decoded`'s space, profile and `/Decode` at 16 bits: each component's
+/// value is `dmin + s · (dmax − dmin) / 65535`, and the colour that of
+/// [`ColorSpace::convert`] at 16 bits.  Device gray and RGB map their
+/// components alone; an ICC transform converts the whole image at once.
+/// `None` when the converted samples cannot be allocated.
+fn convert16(
+    decoded: &Decoded<'_>,
+    n: usize,
+    samples: Vec<u16>,
+) -> Option<(ImageColorSpace, Vec<u16>)> {
+    let value = |s: u16, (dmin, dmax): (f64, f64)| s.to_unit().mul_add(dmax - dmin, dmin);
+    let identity = decoded.identity_decode();
+    let device = decoded.profile.is_none();
+    match (decoded.space, n) {
+        (ColorSpace::DeviceGray | ColorSpace::DeviceRgb, 1 | 3) if device && identity => {
+            let cs = if n == 1 {
+                ImageColorSpace::Gray
+            } else {
+                ImageColorSpace::Rgb
+            };
+            return Some((cs, samples));
+        }
+        (ColorSpace::DeviceGray | ColorSpace::DeviceRgb, 1 | 3) if device => {
+            let mut samples = samples;
+            for px in samples.chunks_exact_mut(n) {
+                for (s, &pair) in px.iter_mut().zip(decoded.decode) {
+                    *s = u16::from_unit(value(*s, pair));
+                }
+            }
+            let cs = if n == 1 {
+                ImageColorSpace::Gray
+            } else {
+                ImageColorSpace::Rgb
+            };
+            return Some((cs, samples));
+        }
+        _ => {}
+    }
+    let mut out: Vec<u16> = Vec::new();
+    out.try_reserve_exact(samples.len() / n * 3).ok()?;
+    let mut comps = Vec::with_capacity(n);
+    let icc = decoded.profile.clone().or_else(|| match decoded.space {
+        ColorSpace::IccBased {
+            n: k,
+            stream_id: Some(id),
+        } => IccConversion::load(decoded.doc, *id, *k),
+        _ => None,
+    });
+    let to_inputs = |px: &[u16], comps: &mut Vec<f64>| {
+        comps.clear();
+        comps.extend(
+            px.iter()
+                .zip(decoded.decode)
+                .map(|(&s, &pair)| value(s, pair)),
+        );
+    };
+    // A transform converts every pixel at once.
+    if let Some(conv) = icc.as_deref() {
+        let mut inputs = Vec::new();
+        inputs.try_reserve_exact(samples.len()).ok()?;
+        for px in samples.chunks_exact(n) {
+            to_inputs(px, &mut comps);
+            inputs.extend(comps.iter().map(|&v| u16::from_unit(v)));
+        }
+        out.resize(samples.len() / n * 3, 0);
+        if conv.transform_pixels16(&inputs, &mut out).is_some() {
+            return Some((ImageColorSpace::Rgb, out));
+        }
+        out.clear();
+    }
+    let mut last: Option<(Vec<u16>, [u16; 3])> = None;
+    for px in samples.chunks_exact(n) {
+        let rgb = match &last {
+            Some((seen, rgb)) if seen.as_slice() == px => *rgb,
+            _ => {
+                to_inputs(px, &mut comps);
+                let rgb = icc
+                    .as_deref()
+                    .and_then(|conv| conv.convert::<u16>(decoded.doc, &comps))
+                    .unwrap_or_else(|| decoded.space.convert::<u16>(decoded.doc, &comps));
+                last = Some((px.to_vec(), rgb));
+                rgb
+            }
+        };
+        out.extend_from_slice(&rgb);
+    }
+    Some((ImageColorSpace::Rgb, out))
 }
 
 /// `(0, 1)` for each of up to four components: the default `/Decode` of a

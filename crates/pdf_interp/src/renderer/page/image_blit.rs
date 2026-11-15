@@ -10,6 +10,7 @@ use super::super::color::{ColorantPlan, PROCESS_CHANNELS};
 use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend, with_canvas};
+use super::depth::CanvasSample;
 #[cfg(feature = "cache")]
 use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
@@ -287,7 +288,7 @@ impl PageRenderer<'_> {
         compositor.transfer = transfer.as_deref();
         compositor.ink_samples = Some(ink.paints);
         let img_w = img.width as usize;
-        let at = |x, y| sample_bytes::<8>(&ink.data, img_w, 8, x, y);
+        let at = |x, y| sample_bytes::<_, 8>(&ink.data, img_w, 8, x, y);
         let span = (grid.x1 - grid.x0) as usize;
         let mut colours = vec![0u8; span * 8];
         let mut shape = vec![0u8; span];
@@ -385,7 +386,7 @@ impl PageRenderer<'_> {
             .flat_map(|dy| (rect.x0..rect.x1).map(move |dx| (dx, dy)))
             .map(|(dx, dy)| {
                 grid.sample(dx, dy).map_or(0, |taps| {
-                    u8::MAX - taps.blend_px(|x, y| sample_bytes::<1>(bytes, img_w, 1, x, y))[0]
+                    u8::MAX - taps.blend_px(|x, y| sample_bytes::<_, 1>(bytes, img_w, 1, x, y))[0]
                 })
             })
             .collect();
@@ -400,10 +401,6 @@ impl PageRenderer<'_> {
     /// channel for `None`; a stencil writes those of the fill colour.
     /// `Err` carries the reason a decoded image cannot be drawn, for the
     /// caller to record against the image's name.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "GPU dispatch, decoder-contract checks, the mask sampler and the per-pixel loop share the grid and CTM state"
-    )]
     pub(super) fn composite_image(
         &mut self,
         img: &crate::resources::ImageDescriptor,
@@ -454,16 +451,18 @@ impl PageRenderer<'_> {
         }
 
         // CPU path: needs host-resident pixels.
-        let Some(img_bytes) = img.data.as_cpu() else {
+        let wide = img.data.as_cpu16();
+        let bytes = img.data.as_cpu();
+        let len = match (wide, bytes) {
+            (Some(wide), _) => wide.len(),
+            (None, Some(bytes)) => bytes.len(),
             // Decoded pixels exist but are device-resident with no GPU
             // dispatch available to blit them — unrenderable, not absent.
-            return Err("pixels device-resident but GPU dispatch unavailable".to_owned());
+            (None, None) => {
+                return Err("pixels device-resident but GPU dispatch unavailable".to_owned());
+            }
         };
-        verify_sample_len(img, img_bytes.len())?;
-        let bpp = img.color_space.bytes_per_pixel();
-
-        let painted_fill = self.gstate.current().painted_fill_color();
-        let fill_color = painted_fill.bytes();
+        verify_sample_len(img, len)?;
         let mask = match mask {
             Some((m, mask_ctm)) => {
                 let Some(sampler) = MaskSampler::new(
@@ -481,6 +480,49 @@ impl PageRenderer<'_> {
             }
             None => None,
         };
+        // The shape is taken at the canvas's depth, so a 16-bit mask keeps
+        // its levels whatever the depth of the image's samples.
+        let deep = self.canvas.kind().depth() == color::SampleDepth::Sixteen;
+        let mask = mask.as_ref();
+        match (wide, bytes, deep) {
+            (Some(s), _, true) => {
+                self.composite_host::<_, u16>(img, s, mask, grid, grid_clip, overprint);
+            }
+            (Some(s), _, false) => {
+                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, overprint);
+            }
+            (None, Some(s), true) => {
+                self.composite_host::<_, u16>(img, s, mask, grid, grid_clip, overprint);
+            }
+            (None, Some(s), false) => {
+                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, overprint);
+            }
+            (None, None, _) => {}
+        }
+        Ok(())
+    }
+
+    /// Composite the host-resident `samples` of `img`, of type `T`, as
+    /// [`Self::composite_image`] does: the sampling and the transfer
+    /// function of an 8-bit RGB canvas at the depth of the samples, the
+    /// alpha as samples of type `A`, the compositing at the canvas's depth
+    /// (see [`ImageCompositor::paint_row`]).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the compositor set-up, the mask sampler and the per-pixel loop share the grid and the sample buffers"
+    )]
+    fn composite_host<T: CanvasSample, A: CanvasSample>(
+        &mut self,
+        img: &crate::resources::ImageDescriptor,
+        samples_of: &[T],
+        mask: Option<&MaskSampler<'_>>,
+        grid: &SampleGrid,
+        grid_clip: &mut GridClip<'_>,
+        overprint: Option<ChannelMask>,
+    ) {
+        let bpp = img.color_space.bytes_per_pixel();
+        let painted_fill = self.gstate.current().painted_fill_color();
+        let fill_color = painted_fill.bytes().map(T::from_u8);
         let img_w = img.width as usize;
         // A stencil paints the fill colour under the fill's overprint; an
         // image's samples write the channels `overprint`.
@@ -496,14 +538,19 @@ impl PageRenderer<'_> {
         };
         // Taps lie on the image, so every sample is inside the buffer by
         // the length check above.
-        let gray = |x, y| sample_bytes::<1>(img_bytes, img_w, bpp, x, y);
-        let rgb = |x, y| sample_bytes::<3>(img_bytes, img_w, bpp, x, y);
+        let gray = |x, y| sample_bytes::<T, 1>(samples_of, img_w, bpp, x, y);
+        let rgb = |x, y| sample_bytes::<T, 3>(samples_of, img_w, bpp, x, y);
         // On an RGB canvas the samples map through the transfer function
         // here; on an ink canvas the compositor maps their ink.
         let gs_transfer = self.gstate.current().transfer.clone();
         let kind = self.canvas.kind();
         let rgb_transfer = gs_transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
-        let transfer = |px: [u8; 3]| rgb_transfer.map_or(px, |t| t.apply(px));
+        let transfer = |px: [T; 3]| {
+            rgb_transfer.map_or(px, |t| {
+                let tables = T::rgb_tables(t);
+                std::array::from_fn(|c| T::lookup(tables[c], px[c]))
+            })
+        };
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint));
         // On an ink canvas a stencil paints the fill colour as its ink, on
         // a 16-bit canvas as its 16-bit colour; there the samples map
@@ -527,8 +574,8 @@ impl PageRenderer<'_> {
         // Each row's samples and their coverage are gathered first and
         // composited as one row (see `ImageCompositor::paint_row`).
         let span = (grid.x1 - grid.x0) as usize;
-        let mut colours = vec![0u8; span * 3];
-        let mut shape = vec![0u8; span];
+        let mut colours = vec![T::ZERO; span * 3];
+        let mut shape = vec![A::ZERO; span];
         // A separable draw's taps are built once per column and once per
         // row instead of once per pixel.  Without a soft mask, which reads
         // each pixel's taps, its samples are also blended a row at a time.
@@ -559,7 +606,7 @@ impl PageRenderer<'_> {
                 }
                 _ => RowSamples::PerPixel,
             };
-            shape.fill(0);
+            shape.fill(A::ZERO);
             for (((col, dx), out), shape) in (0..)
                 .zip(grid.x0..grid.x1)
                 .zip(colours.as_chunks_mut::<3>().0)
@@ -577,28 +624,28 @@ impl PageRenderer<'_> {
                     continue;
                 };
                 let gray_at = || match samples {
-                    RowSamples::Gray(row) => row.get(col).map_or(u8::MAX, |p| p[0]),
+                    RowSamples::Gray(row) => row.get(col).map_or(T::MAX, |p| p[0]),
                     _ => taps.blend_px(gray)[0],
                 };
                 // Stencil masks paint the fill colour with coverage
-                // `255 − sample` and carry no soft mask (asserted at entry).
+                // `MAX − sample` and carry no soft mask (asserted at entry).
+                let coverage = A::from_u8(coverage).wide();
                 let alpha = match img.color_space {
                     ImageColorSpace::Mask => {
-                        div255(u32::from(u8::MAX - gray_at()) * u32::from(coverage))
+                        A::div_max((A::max_wide() - A::from_sample(gray_at()).wide()) * coverage)
                     }
-                    ImageColorSpace::Rgb | ImageColorSpace::Gray => div255(
-                        u32::from(mask.as_ref().map_or(u8::MAX, |m| m.alpha(dx, dy, &taps)))
-                            * u32::from(coverage),
+                    ImageColorSpace::Rgb | ImageColorSpace::Gray => A::div_max(
+                        mask.map_or(A::MAX, |m| m.alpha_at(dx, dy, &taps)).wide() * coverage,
                     ),
                 };
-                if alpha == 0 {
+                if alpha == A::ZERO {
                     continue;
                 }
                 // Image samples map through the transfer function; the
                 // stencil colour is already the painted fill colour.
                 let src = match img.color_space {
                     ImageColorSpace::Rgb => transfer(match samples {
-                        RowSamples::Rgb(row) => row.get(col).copied().unwrap_or([u8::MAX; 3]),
+                        RowSamples::Rgb(row) => row.get(col).copied().unwrap_or([T::MAX; 3]),
                         _ => taps.blend_px(rgb),
                     }),
                     ImageColorSpace::Gray => transfer([gray_at(); 3]),
@@ -610,22 +657,21 @@ impl PageRenderer<'_> {
             with_canvas!(&mut self.canvas, |b| compositor
                 .paint_row(b, grid.x0, dy, &colours, &shape));
         }
-        Ok(())
     }
 }
 
 /// The per-row sample cache of a separable image draw, by channel count.
-enum RowBlend<'a> {
-    Rgb(BlendedRows<'a, 3>),
-    Gray(BlendedRows<'a, 1>),
+enum RowBlend<'a, T: Sample> {
+    Rgb(BlendedRows<'a, 3, T>),
+    Gray(BlendedRows<'a, 1, T>),
 }
 
 /// The samples of one device row: blended a row at a time, or left to each
 /// pixel's own taps.
 #[derive(Clone, Copy)]
-enum RowSamples<'a> {
-    Rgb(&'a [[u8; 3]]),
-    Gray(&'a [[u8; 1]]),
+enum RowSamples<'a, T> {
+    Rgb(&'a [[T; 3]]),
+    Gray(&'a [[T; 1]]),
     PerPixel,
 }
 

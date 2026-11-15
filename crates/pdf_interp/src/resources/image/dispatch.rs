@@ -143,9 +143,12 @@ pub(super) fn decode_image_stream<
     };
     let parms = terminal_decode_parms(dict, chain_len);
 
+    let wide = keeps_wide(ctx, src)?;
     let decoded = match filter {
-        None => decode_raw(&input, w, h, is_mask, dict, &src.colour),
-        Some(f) if is_transport_filter(f) => decode_raw(&input, w, h, is_mask, dict, &src.colour),
+        None => decode_raw(&input, w, h, is_mask, dict, &src.colour, wide),
+        Some(f) if is_transport_filter(f) => {
+            decode_raw(&input, w, h, is_mask, dict, &src.colour, wide)
+        }
         Some("CCITTFaxDecode") => decode_ccitt(&input, w, h, is_mask, parms).map(|mut s| {
             apply_stencil_decode(&mut s, dict);
             s
@@ -165,13 +168,7 @@ pub(super) fn decode_image_stream<
             dct_cache,
         ),
         Some("JPXDecode") => {
-            // An `/Indexed` space maps the codestream's samples through the
-            // PDF palette (§8.6.6.3); any other space reads them as colour.
-            let opts = JpxOptions {
-                indices: !is_mask && src.colour.indexed(),
-                smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
-                colour_key: !is_mask && matches!(dict.get(b"Mask"), Some(Object::Array(_))),
-            };
+            let opts = jpx_options(src, wide);
             #[cfg(feature = "nvjpeg2k")]
             let samples = decode_jpx(&input, w, h, draw_size, opts, ctx.nvjpeg2k.as_deref_mut());
             #[cfg(not(feature = "nvjpeg2k"))]
@@ -226,6 +223,37 @@ pub(super) fn decode_image_stream<
         partial,
         tints,
     })
+}
+
+/// What the dictionary of `src` decides about its JPEG 2000 codestream,
+/// whose samples of more than 8 bits are kept when `wide`.  An `/Indexed`
+/// space maps the codestream's samples through the PDF palette
+/// (§8.6.6.3); any other space reads them as colour.
+fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
+    let dict = &src.stream.dict;
+    let indices = !src.is_mask && src.colour.indexed();
+    JpxOptions {
+        indices,
+        smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
+        colour_key: !src.is_mask && matches!(dict.get(b"Mask"), Some(Object::Array(_))),
+        wide: wide && !indices,
+    }
+}
+
+/// Whether the samples of `src` of more than 8 bits are kept at 16 bits:
+/// for a 16-bit render, in a space that converts at 16 bits
+/// ([`ImageColour::converts_wide`]).
+///
+/// # Errors
+/// The budget's reason, when 16-bit raw samples, at two bytes each,
+/// exceed it ([`decode_budget`]).
+fn keeps_wide(ctx: &ImageDecodeCtx<'_>, src: &ImageStream<'_>) -> Result<bool, String> {
+    let wide =
+        ctx.depth == color::SampleDepth::Sixteen && !src.is_mask && src.colour.converts_wide();
+    if wide && src.stream.dict.get_i64(b"BitsPerComponent") == Some(16) {
+        decode_budget(src.width, src.height, 2 * src.colour.budget_components())?;
+    }
+    Ok(wide)
 }
 
 /// The colour-key mask (§8.9.6.4) of a codec's host-resident samples,

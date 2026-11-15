@@ -37,13 +37,15 @@ use crate::resources::image::ImageFilter;
 /// Host bytes of decoded pixels and masks a session's store holds at most.
 pub const DOCUMENT_IMAGE_BUDGET_BYTES: usize = 256 << 20;
 
-/// The identity of a decode: the image stream and the resource context
+/// The identity of a decode: the image stream, the resource context
 /// whose default colour spaces replace its device space, `None` when the
-/// resources in effect define none.
+/// resources in effect define none, and the depth of the render, which
+/// decides whether samples of more than 8 bits keep them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ImageKey {
     pub(crate) id: ObjectId,
     pub(crate) context: Option<ObjectId>,
+    pub(crate) depth: color::SampleDepth,
 }
 
 /// What decoding an image `XObject` produced, as kept for other pages.
@@ -192,7 +194,7 @@ impl DocumentImages {
         image: &Arc<DecodedImage>,
         draw_size: Option<(u32, u32)>,
     ) {
-        if image.image.data.as_cpu().is_none() {
+        if !image.image.data.is_host() {
             return;
         }
         if let Some(Slot::Seen {
@@ -300,8 +302,11 @@ impl State {
 /// Host bytes of `image`'s pixels and mask; device-resident pixels count
 /// nothing.
 pub(crate) fn host_bytes(image: &DecodedImage) -> usize {
-    let pixels = image.image.data.as_cpu().map_or(0, <[u8]>::len);
-    let mask = image.image.smask.as_ref().map_or(0, |m| m.alpha().len());
+    let data = &image.image.data;
+    let pixels = if data.is_host() { data.len() } else { 0 };
+    let mask = image.image.smask.as_ref().map_or(0, |m| {
+        m.alpha().len() + m.alpha16().map_or(0, |a| a.len() * 2)
+    });
     let tints = image.tints.as_ref().map_or(0, |t| t.data.len());
     pixels + mask + tints
 }
@@ -334,6 +339,7 @@ pub(crate) mod tests {
     }
 
     const KEY: ImageKey = ImageKey {
+        depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
     };

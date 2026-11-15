@@ -9,7 +9,9 @@ use std::borrow::Cow;
 
 use pdf::{Dictionary, Object};
 
-use super::bitpack::{downsample_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits};
+use super::bitpack::{
+    downsample_16bpp, expand_16bpp, expand_nbpp, expand_nbpp_indexed, unpack_packed_bits,
+};
 use super::colorspace::{ImageColour, Layout, Samples};
 use super::smask::{SoftMask, colour_key_mask_with};
 use crate::resources::dict_ext::DictExt as _;
@@ -23,7 +25,8 @@ use crate::resources::dict_ext::DictExt as _;
 /// - 2  — 4 levels, scaled to 0x00/0x55/0xAA/0xFF
 /// - 4  — 16 levels, scaled to 0x00…0xFF (value × 17)
 /// - 8  — direct (common case)
-/// - 16 — big-endian, high byte taken (linear 0–65535 → 0–255)
+/// - 16 — big-endian, high byte taken (linear 0–65535 → 0–255); kept at
+///   16 bits ([`super::ImageData::Cpu16`]) when `wide`
 ///
 /// The palette indices of an `Indexed` image at 1, 2 or 4 bits are
 /// unpacked without scaling.  A stencil (`is_mask`) decodes to
@@ -40,6 +43,7 @@ pub(super) fn decode_raw(
     is_mask: bool,
     dict: &Dictionary,
     colour: &ImageColour,
+    wide: bool,
 ) -> Option<Samples> {
     // `BitsPerComponent` is optional for an image mask, which is 1 bit per
     // sample (§8.9.6.2); other images default to 8.
@@ -61,6 +65,14 @@ pub(super) fn decode_raw(
     }
 
     let components = colour.components();
+    let layout = Layout::Color(u8::try_from(components).ok()?);
+    if wide && bpc == 16 && !colour.indexed() {
+        let samples = expand_16bpp(data, width, height, components)?;
+        let mut out = Samples::cpu16(width, height, layout, samples);
+        out.partial = short_stream(data, width, height, bpc, components);
+        out.smask = colour_key(data, width, height, bpc, components, dict);
+        return Some(out);
+    }
     let mut samples = if colour.indexed() {
         expand_indices(data, width, height, bpc)?
     } else {
@@ -72,22 +84,31 @@ pub(super) fn decode_raw(
             .checked_mul(height as usize)?
             .checked_mul(components)?,
     );
-    let mut out = Samples::cpu(
-        width,
-        height,
-        Layout::Color(u8::try_from(components).ok()?),
-        samples,
-    );
+    let mut out = Samples::cpu(width, height, layout, samples);
     out.partial = short_stream(data, width, height, bpc, components);
-    if let Some(Object::Array(ranges)) = dict.get(b"Mask") {
-        out.smask = raw_colour_key_mask(data, width, height, bpc, components, ranges);
-        if out.smask.is_none() {
-            log::warn!(
-                "image: colour-key /Mask malformed or mismatched — blitting image without mask"
-            );
-        }
-    }
+    out.smask = colour_key(data, width, height, bpc, components, dict);
     Some(out)
+}
+
+/// The colour-key mask of a raw image whose dictionary `dict` has a
+/// `/Mask` array (see [`raw_colour_key_mask`]), with a warning when the
+/// array does not apply; `None` without one.
+fn colour_key(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    bpc: i64,
+    components: usize,
+    dict: &Dictionary,
+) -> Option<SoftMask> {
+    let Some(Object::Array(ranges)) = dict.get(b"Mask") else {
+        return None;
+    };
+    let mask = raw_colour_key_mask(data, width, height, bpc, components, ranges);
+    if mask.is_none() {
+        log::warn!("image: colour-key /Mask malformed or mismatched — blitting image without mask");
+    }
+    mask
 }
 
 /// The colour-key mask (§8.9.6.4) of a raw image with key ranges `ranges`.
@@ -252,15 +273,9 @@ pub(super) fn apply_stencil_decode(samples: &mut Samples, dict: &Dictionary) {
     if samples.layout != Layout::Mask || !is_mask_inverted(dict) {
         return;
     }
-    #[cfg_attr(
-        not(feature = "cache"),
-        expect(
-            clippy::infallible_destructuring_match,
-            reason = "the cache-feature build adds a device-resident arm; keep one shape"
-        )
-    )]
     let bytes = match &mut samples.data {
         super::ImageData::Cpu(bytes) => bytes,
+        super::ImageData::Cpu16(_) => return,
         #[cfg(feature = "cache")]
         super::ImageData::Gpu(_) => return,
     };
@@ -390,7 +405,7 @@ mod tests {
         );
         dict.set("BitsPerComponent", Object::Integer(bpc));
         let colour = ImageColour::resolve(&doc, &dict, None);
-        decode_raw(data, w, h, false, &dict, &colour).expect("decodes")
+        decode_raw(data, w, h, false, &dict, &colour, false).expect("decodes")
     }
 
     #[test]
@@ -498,7 +513,7 @@ mod tests {
             Object::Array(vec![Object::Integer(15), Object::Integer(15)]),
         );
         let colour = ImageColour::resolve(&doc, &dict, None);
-        let s = decode_raw(&[0xF0], 2, 1, false, &dict, &colour).unwrap();
+        let s = decode_raw(&[0xF0], 2, 1, false, &dict, &colour, false).unwrap();
         assert_eq!(s.data.as_cpu().unwrap(), &[0xFF, 0x00]);
         assert_eq!(s.smask.unwrap().alpha(), &[0x00, 0xFF]);
     }
@@ -521,7 +536,7 @@ mod tests {
                 Object::Array(vec![Object::Integer(0), Object::Integer(0)]),
             );
             let colour = ImageColour::resolve(&doc, &dict, None);
-            let s = decode_raw(&[], 3, 2, false, &dict, &colour).expect("decodes");
+            let s = decode_raw(&[], 3, 2, false, &dict, &colour, false).expect("decodes");
             assert_eq!(s.smask.expect("mask").alpha(), &[0; 6], "{bpc} bpc");
         }
     }
@@ -544,7 +559,7 @@ mod tests {
         let mut dict = decode_dict(&[1, 0]);
         dict.set("BitsPerComponent", Object::Integer(8));
         let colour = ImageColour::resolve(&doc, &dict, None);
-        let s = decode_raw(&[0u8, 255], 2, 1, true, &dict, &colour).unwrap();
+        let s = decode_raw(&[0u8, 255], 2, 1, true, &dict, &colour, false).unwrap();
         assert_eq!(s.layout, Layout::Mask);
         assert_eq!(s.data.as_cpu().unwrap(), &[0xFF, 0x00]);
     }
@@ -562,7 +577,7 @@ mod tests {
     fn decode_stencil(dict: &Dictionary, data: &[u8], w: u32, h: u32) -> Vec<u8> {
         let doc = empty_doc();
         let colour = ImageColour::resolve(&doc, dict, None);
-        decode_raw(data, w, h, true, dict, &colour)
+        decode_raw(data, w, h, true, dict, &colour, false)
             .expect("stencil decode should succeed")
             .data
             .as_cpu()

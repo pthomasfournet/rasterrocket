@@ -126,26 +126,28 @@ impl<'a> ImageCompositor<'a> {
     /// Paint the samples of row `y` of `bitmap` from column `x0`: `colours`
     /// holds the RGB of each sample, or its ink under
     /// [`Self::ink_samples`], and `shape` its coverage, `0` where the
-    /// sample paints nothing.  Columns past the row's end paint nothing.
+    /// sample paints nothing, at the depth of the image's samples, taken
+    /// to the bitmap's depth by [`Sample::from_sample`].  Columns past the
+    /// row's end paint nothing.
     ///
     /// Through the pipe, each run of painted samples composites as one span
     /// whose shape is the coverage: the pipe takes the source alpha as
     /// `div_max(a_input × shape)`, the alpha a sample painted alone with
     /// that constant alpha would have.
-    pub(super) fn paint_row<P: Pixel>(
+    pub(super) fn paint_row<P: Pixel, T: Sample, A: Sample>(
         &self,
         bitmap: &mut Bitmap<P>,
         x0: u32,
         y: u32,
-        colours: &[u8],
-        shape: &[u8],
+        colours: &[T],
+        shape: &[A],
     ) where
         P::Sample: CanvasSample,
     {
-        if let (Some(colours), Some(shape)) = (
-            P::Sample::from_u8_slice(colours),
-            P::Sample::from_u8_slice(shape),
-        ) {
+        if self.wide_transfer.is_none()
+            && let (Some(colours), Some(shape)) =
+                (P::Sample::same_depth(colours), P::Sample::same_depth(shape))
+        {
             self.paint_samples(bitmap, x0, y, colours, shape);
             return;
         }
@@ -154,11 +156,11 @@ impl<'a> ImageCompositor<'a> {
             .iter()
             .enumerate()
             .map(|(i, &v)| {
-                let v = P::Sample::from_u8(v);
+                let v = P::Sample::from_sample(v);
                 tables.map_or(v, |t| P::Sample::lookup(t[i % 3], v))
             })
             .collect();
-        let wide_shape: Vec<P::Sample> = shape.iter().map(|&c| P::Sample::from_u8(c)).collect();
+        let wide_shape: Vec<P::Sample> = shape.iter().map(|&c| P::Sample::from_sample(c)).collect();
         self.paint_samples(bitmap, x0, y, &wide_colours, &wide_shape);
     }
 
