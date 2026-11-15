@@ -1123,7 +1123,10 @@ Cleanup of camera-captured pages, measured on 8-bit grayscale images and
 replayed at 8 or 16 bits: page crop, perspective rectification, double-page
 spread splitting and (experimental) dewarp. Independent of PDF: it depends on `std` alone, runs on the calling
 thread with no global state, and returns on any input without panicking.
-Deskew is not part of it (see the `deskew` module above).
+Deskew is not part of it (see the `deskew` module above). Three
+OCR-preparation operations for scanned pages sit beside the pipeline:
+background normalisation, binarisation and scan border cleanup (see
+[OCR preparation](#ocr-preparation)).
 
 Each stage is a detector followed by a resampler. A detector that is not
 confident declines and the page passes through unchanged, with the reason in
@@ -1224,13 +1227,58 @@ pub enum Detected<T> { Found(T), Declined(String) }   // Detected::found() -> Op
 foreshortened near a spine stay narrow. Validated on synthetic curls of real
 pages, not yet on real captures.
 
+### OCR preparation
+
+```rust
+pub struct Background { /* per-pixel gain; private */ }
+pub const fn background_tile_px(dpi: u32) -> usize;   // dpi / 8, at least 8
+pub fn measure_background(img: GrayView<'_>, tile_px: usize) -> Result<Detected<Background>, CameraError>;
+impl Background {
+    pub fn normalize<S: Sample>(&self, img: GrayView<'_, S>) -> Result<GrayPage<S>, CameraError>;
+}
+
+pub enum Threshold { Fixed(u8), Sauvola { window_px: u32, k_per_mille: u16 } }
+impl Threshold { pub const fn sauvola_at(dpi: u32) -> Self; }   // window 0.33 × dpi, k = 0.34
+pub fn binarize(img: GrayView<'_>, method: Threshold) -> Result<GrayPage, CameraError>;   // 0 or 255
+
+pub struct BorderMask { /* column runs per row, source pixels; private */ }
+pub fn find_border_junk(img: GrayView<'_>) -> Result<Detected<BorderMask>, CameraError>;
+impl BorderMask {
+    pub fn whiten<S: Sample>(&self, img: &mut GrayPage<S>) -> Result<(), CameraError>;
+}
+```
+
+Each operation is measured on an 8-bit luma view. `Background::normalize` and
+`BorderMask::whiten` apply the measurement to any image of the same size, at
+its own depth: the luma itself, each channel of the colour image it was taken
+from, or a 16-bit version (`SizeMismatch` otherwise, as for `Report::replay`).
+The arithmetic is integer throughout, so output is identical on every
+platform. Sizes are given in pixels; `background_tile_px` and
+`Threshold::sauvola_at` derive them from a resolution.
+
+| Operation | Method | Declines when |
+|---|---|---|
+| `measure_background` | Per tile of `tile_px`², the mean of the samples above a floor (the larger of luma 80 and 7/8 of the tile's mean above 80, which keeps anti-aliased glyph edges out); a tile with under a third of its samples above the floor is a hole, filled from its neighbours. The map is smoothed by a box two tiles wide on each side, centred, so a linear illumination is kept exactly, interpolated bilinearly at every pixel and inverted into a gain. `normalize` writes `min(MAX, v · 255 · 16 / (15 · bg))`: a sample at or above 15/16 of its local background becomes white, and ink keeps its tone relative to the paper. | The page spans fewer than 4 × 4 tiles; more than half the tiles are holes; the background is already white (5th percentile of the map ≥ 250), as on a born-digital or already normalised page. |
+| `binarize` | `Fixed(t)`: samples below `t` are black. `Sauvola`: black when `v < m · (1 + k · (s / 128 − 1))`, `m` and `s` the mean and standard deviation over the window centred on the pixel (side `window_px`, rounded up to odd, at most 2047), truncated at the image edges to the samples it covers. Window sums come from `u64` integral images; the comparison is exact in integers. Samples below 32 are always black, so a solid area stays solid. Raising `k` never adds black. | Never; a zero window is `ZeroSize`. |
+| `find_border_junk` | On a plane downsampled to at most 1600 px a side, every dark (luma < 128) 4-connected region that touches the image edge and lies wholly within a band 6 % of the shorter side deep along the edges it touches. The mask is dilated by one analysis pixel and kept as runs at source resolution; `whiten` sets them to white, keeping the page size. | More than half the plane is dark (a reversed-out or full-bleed page); no dark region touches the edge; every one reaches past the band (a bar or rule running into the page). |
+
+**Limits.** Background normalisation reads a light photograph or tint as
+background and loses its gradual shading; a paper tint survives in colour,
+since one gain scales every channel. Apply it to scans, not to pages with a
+text layer (`PageDiagnostics::has_visible_text`). Sauvola assumes dark ink on
+light paper: invert a reversed-out page first. It thresholds a halftoned
+photograph dot by dot. Border cleanup leaves punch holes, which do not reach
+the edge, and soft gray gutter shadows, which are not dark.
+
 ### `CameraError`
 
 Implements `std::error::Error` and `Display`; each message names the bad
 value and the requirement. Variants: `ZeroDimension`, `TooLarge` (a side above
 `MAX_DIMENSION` = 2³⁰), `StrideTooSmall`, `BufferTooShort` (fewer than
 `stride · (height − 1) + width` bytes), `Overflow`, `RectOutOfBounds` (`crop`),
-`SplitOutOfRange` (`split_at`), `SizeMismatch` (`Report::replay`).
+`SplitOutOfRange` (`split_at`), `SizeMismatch` (`Report::replay`,
+`Background::normalize`, `BorderMask::whiten`), `ZeroSize` (a zero
+`tile_px` or `window_px`).
 
 ### Timing
 

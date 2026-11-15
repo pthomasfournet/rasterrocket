@@ -497,8 +497,8 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 |---|---|
 | `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
 | `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt`/`.cbr` comic-archive input |
-| `rasterrocket-camera` | Library — camera-capture page cleanup measured on 8-bit grayscale and replayed at 8 or 16 bits: crop, rectify, spread split, dewarp; no dependencies |
-| `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with `pdftoppm`-style flags; also reads comic archives |
+| `rasterrocket-camera` | Library — camera-capture page cleanup measured on 8-bit grayscale and replayed at 8 or 16 bits: crop, rectify, spread split, dewarp; OCR preparation of scans: background normalisation, Sauvola binarisation, border cleanup; no dependencies |
+| `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with `pdftoppm`-style flags; also reads comic archives; prepares scans for OCR (`--deskew`, `--clean-borders`, `--clean-background`, `--threshold sauvola`) |
 
 All four are built from this repository. Nothing here is maintained on
 crates.io (see the note at the top).

@@ -2944,6 +2944,31 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: OCR preparation of scans.**  `rasterrocket-camera`
+gains three operations measured on 8-bit luma, in integer arithmetic so
+their output is identical on every platform.  `measure_background` /
+`Background::normalize` divide out uneven lighting so paper becomes white
+and ink keeps its tone relative to it, applied to every channel at 8 or 16
+bits; it declines on a background already white, so born-digital pages
+pass unchanged.  `binarize` thresholds at a fixed level or by Sauvola's
+local threshold over `u64` integral images, decided exactly in integers.
+`find_border_junk` / `BorderMask::whiten` whiten dark regions joined to
+the page edge within a band 6 % of the shorter side deep, keeping the page
+size, and decline on a dark ground.  New public API: `Background`,
+`background_tile_px`, `measure_background`, `Threshold`, `binarize`,
+`BorderMask`, `find_border_junk`, `CameraError::ZeroSize`, and
+`Sample::to_u32` / `Sample::saturate_u32` (the trait is sealed).
+`rrocket` exposes them as `--clean-borders`, `--clean-background` and
+`--threshold fixed|sauvola` (with `--mono` or `--fax`, not with
+`--dither halftone`), run after deskew and before `--invert` and the
+threshold; the first two are refused with `--cmyk` and `--transparent`.
+Without the flags, output is unchanged.
+
+Not planned (OCR prep): orientation detection, Otsu/tiled-Otsu thresholds,
+error-diffusion dither, packed 1-bpp morphology, text-or-photo detection,
+2× upscale before threshold, despeckle, PDF output with G4/DCT, and dewarp
+model sharing.
+
 **Unreleased on master: deskew confidence, `--deskew`, resolution in
 PNG and JPEG, 1-bit mono PNG.**  Deskew now declines a page without a
 confident angle: the ratio of the best to the worst score of its angle

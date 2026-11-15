@@ -149,8 +149,9 @@ so memory holds a band per render thread rather than the page: a 44 × 120 in
 roll at 360 dpi (15 840 × 43 200 px, 2 GB of RGB) prints or writes in well
 under 1 GB. PPM, PNG, TIFF and `--print` output stream this way, and the file
 is byte for byte the one a single band writes. JPEG output, `--fax`,
-`--invert=auto` and the camera stages need the whole page and render it in
-one band, under the page budget. A TIFF whose data would pass 4 GiB is written
+`--invert=auto`, the camera stages, `--deskew`, `--clean-borders`,
+`--clean-background` and `--threshold sauvola` need the whole page and render
+it in one band, under the page budget. A TIFF whose data would pass 4 GiB is written
 as BigTIFF. Every band executes the page's content, so a page of many bands
 takes longer to interpret than one of few.
 
@@ -186,7 +187,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 |---|---|---|
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
 | `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B), or by a gray `--output-profile` (see [Colour management](#colour-management)). The page is rendered in RGB and converted in place, so peak memory is that of the RGB render. Can combine with `--png`, `--jpeg` and `--tiff`. |
-| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
+| `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, black by a local threshold with `--threshold sauvola`, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` for grayscale PNG, `--mono` for a PNG of bit depth 1, or `--transparent` for RGBA. A `pHYs` chunk records `-r` / `--rx` / `--ry` in pixels per metre. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. The JFIF density records `-r` / `--rx` / `--ry` in whole dots per inch; a resolution that does not round to 1–65 535 dpi fails the page. |
 | `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg` or `--jpegcmyk`. |
@@ -194,7 +195,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--cmyk` | | Render CMYK pages (see [CMYK output](#cmyk-output)) and write them as CMYK TIFF (with `--tiff`) or CMYK JPEG (with `--jpeg`). |
 | `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB (RGBA with `--transparent`), gray with `--gray`, or 1 bit per pixel with `--mono` (`WhiteIsZero`, the fax interpretation). The resolution tags carry `-r` / `--rx` / `--ry`. |
 | `--depth 8\|16` | | Bits per sample of the rendered pages, default `8`. `--depth 16` renders at 16 bits per channel throughout: colour conversions, shadings (evaluated straight to 16 bits), soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels, so smooth gradients do not band at 256 levels. Written as 16-bit PPM/PGM (maxval 65535, big-endian), PNG (bit depth 16), TIFF (`BitsPerSample` 16) or, with `--print`, a PDF 1.5 spool of `/BitsPerComponent 16` images. Combines with `--gray`, `--transparent`, `--invert`, `--overprint` and the band and size flags; a 16-bit page costs twice the memory (see [Size limits](#size-limits)). Combines with `--cmyk --tiff` for 16-bit CMYK TIFF, with the camera-capture flags (`--crop`, `--rectify`, `--split-spreads`, `--dewarp`; measured on the page's 8-bit levels, resampled at 16 bits) and with comic-archive input, whose images of more than 8 bits a sample keep their levels. Refused at startup with `--mono`, `--dither`, `--fax`, `--jpeg`/`--jpegopt`/`--jpegcmyk` and `--gpu-pages` ("--depth 16 is refused with --mono: it writes 1-bit pages; use --gray for 16-bit gray"), exit status 1. GPU decode and conversion paths are bypassed for the CPU's, which they match. |
-| `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, as `pdftocairo -transp`: RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2). Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--gray`, `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
+| `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, as `pdftocairo -transp`: RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2). Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--gray`, `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--deskew`, `--clean-borders`, `--clean-background`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
 | `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 | `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the page budget at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
 | `--fax-resolution fine\|standard` | `fine` | Fax lines per inch: 196 (`fine`) or 98 (`standard`). Needs `--fax`. |
@@ -260,7 +261,8 @@ Refused at start-up, exit status 1, nothing rendered: PNG and PPM, which hold
 no CMYK ("--cmyk needs an output that holds CMYK: PPM has none; add --tiff or
 --jpeg"); `--print`, `--fax`, `--mono`, `--gray`, `--dither`,
 `--transparent`, `--invert`, `--crop`, `--rectify`, `--split-spreads`,
-`--dewarp`, `--gpu-pages` and comic-archive input ("--cmyk is refused with
+`--dewarp`, `--deskew`, `--clean-borders`, `--clean-background`, `--gpu-pages`
+and comic-archive input ("--cmyk is refused with
 --gray: it writes gray pages"); `--jpegcmyk` with `--depth 16`; an RGB or gray
 `--output-profile` with CMYK output, and a CMYK one without it.
 
@@ -389,6 +391,38 @@ rrocket --crop --split-spreads --gray --png -r 300 book.pdf out
 
 # Captures at an angle: rectify, split and straighten each page
 rrocket --rectify --split-spreads --dewarp --gray --png -r 300 book.pdf out
+```
+
+---
+
+## Scans for OCR
+
+These flags prepare scanned pages for text recognition, through the
+[OCR-preparation operations](api-reference.md#ocr-preparation) of
+`rasterrocket-camera`. Each measures the page and leaves it unchanged when the
+measurement declines, so born-digital pages are written exactly as without the
+flags. The arithmetic is integer, so output is identical on every platform.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--clean-borders` | off | Whiten the dark strips and wedges a scanner leaves along the edges of a smaller or askew page: dark regions (luma below 128) joined to the edge that lie wholly within a band 6 % of the shorter side deep. The page keeps its size and resolution. A bar or rule running further into the page is kept whole; a page with no such region, or on a dark ground (more than half of it dark, as a reversed-out or full-bleed page), is written unchanged. Punch holes and soft gray gutter shadows are left. |
+| `--clean-background` | off | Make the paper white under uneven lighting: the paper level is measured in tiles of 1/8 inch and divided out, so a sample at or above 15/16 of the paper around it becomes white and ink keeps its tone relative to the paper. A page whose background is already white (a born-digital page) is written unchanged. A light photograph loses its gradual shading, and a paper tint survives in colour output, since one gain scales every channel: meant for scans, not for pages with a text layer. |
+| `--threshold METHOD` | `fixed` | How `--mono` and `--fax` choose black: `fixed`, luma below 128, or `sauvola`, black where a pixel is darker than `m · (1 − 0.34 · (1 − s / 128))`, `m` and `s` the mean and standard deviation of the 0.33-inch square around it; luma below 32 is always black. It follows paper whose brightness varies across the page where a fixed threshold blackens the dim parts. Needs `--mono` or `--fax` ("--threshold sauvola applies to bilevel output only: add --mono or --fax, or drop --threshold") and is refused with `--dither halftone`, exit status 1. A reversed-out page needs `--invert`, which runs first; a halftoned photograph is thresholded dot by dot. |
+
+`--clean-borders` and `--clean-background` measure on the page's luma (its
+nearest 8-bit levels under `--depth 16`) and apply to every colour channel at
+the page's depth; with `--gray`, `--mono` or `--fax` they process the luma.
+They work with colour, gray, mono and fax output at 8 or 16 bits, and are
+refused with `--cmyk` and `--transparent`. All three render the page whole.
+Windows are sized by the smaller output resolution; for comic-archive input,
+whose pages carry none, by the long side over 11 inches.
+
+The stages run crop or rectify → split → dewarp → deskew → `--clean-borders`
+→ `--clean-background` → `--invert` → the threshold.
+
+```bash
+# A batch of unevenly lit flatbed scans, bilevel for OCR
+rrocket --deskew --clean-borders --clean-background --mono --threshold sauvola --tiff -r 300 scans.pdf out
 ```
 
 ---
