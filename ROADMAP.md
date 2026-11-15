@@ -2743,6 +2743,44 @@ array), `ColorRamp` and the shading patterns take a sample parameter;
 `PdfWriter::new` takes the deepest page's `SampleDepth`; `AnyColor` holds 16
 bytes.
 
+**Unreleased on master: output ICC profiles.** `--output-profile FILE`
+(library: `SessionConfig::output_profile`, `RasterOptions::output_profile`,
+`OutputProfile`) converts every page, band by band and at both depths, from the
+sRGB working space to an RGB or gray printer, display or colour-space profile,
+table-based (`AToB`/`BToA`, the kind paper profiles are) or matrix/TRC, and
+tags the output with it: PNG `iCCP`, TIFF tag 34675, JPEG `APP2` and the
+`--print` spool's `ICCBased` images (PPM/PGM warn, untagged).
+`--intent perceptual|relative|saturation|absolute` (`RenderParams::with_intent`)
+picks the intent, default the one intent a page's content paints with — the
+interpreter now tracks `ri`, `ExtGState` `/RI` and image `/Intent`
+(`PageDiagnostics::content_intents`) — else relative colorimetric, a page of
+mixed intents converting relative with one warning; `--bpc`
+(`with_black_point_compensation`) compensates the black point as ISO 18619
+detects it, and perceptual or saturation conversions to v4 profiles always
+compensate. Absolute colorimetry and compensation are folded into the
+working-space source profile, so the printer's tables run unchanged through
+moxcms at 16 bits. Against Little CMS's `transicc` on a 793-patch chart the
+worst ΔE00 over every intent, with and without compensation, at 8 and 16
+bits, is 0.93 (synthetic v4 and v2 table-based RGB printers and a gray
+printer, `tests/fixtures/icc`, built by `scripts/make_test_icc.py`; CI runs
+it on Linux). A gray profile writes gray pages. Refused: CMYK profiles
+(CMYK raster output is a separate item), device-link, abstract, named and
+input profiles, `--mono`/`--dither`/`--fax`, comic input, `--bpc` with
+`--intent absolute`, an RGB profile with `--gray`, a gray one with
+`--transparent`. Without a profile output is byte-identical (ab_render over
+the fixtures at 8 and 16 bits: 0 of 344 differ). Also fixed: a Gouraud mesh
+under a rectangular clip, rendered in bands of a few rows, panicked on the
+inverted bounds of an empty clip. Not done: per-object intents (input-side conversions still use
+perceptual tables for table-based `ICCBased` content), `/OutputIntents` soft
+proofing, a wider-than-sRGB working space. API changes: `FinishedCanvas` /
+`BandBitmap` gain `Gray8`/`Gray16`, `CanvasBuffers` gray buffers,
+`RasterError::OutputProfile`, `RenderParams::intent` /
+`black_point_compensation`, `RasterOptions::intent` /
+`black_point_compensation`, `PageDiagnostics::content_intents` /
+`output_intent`; `write_png`, `write_jpeg`, `PngWriter::new`,
+`TiffStream::new`, `TiffPageEncoder::new` and `PdfWriter::new` take an
+`Option<&IccProfile>`.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in

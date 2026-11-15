@@ -181,7 +181,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | Flag | Extension | Description |
 |---|---|---|
 | _(default)_ | `.ppm` | RGB PPM (Netpbm P6). |
-| `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B). The page is rendered in RGB and converted in place, so peak memory is that of the RGB render. Can combine with `--png`, `--jpeg` and `--tiff`. |
+| `--gray` | `.pgm` | Grayscale PGM (Netpbm P5), converted with the PDF `DeviceRGB` → `DeviceGray` weights (0.30 R + 0.59 G + 0.11 B), or by a gray `--output-profile` (see [Colour management](#colour-management)). The page is rendered in RGB and converted in place, so peak memory is that of the RGB render. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` / `--mono` for grayscale/mono PNG, or with `--transparent` for RGBA. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. |
@@ -209,6 +209,37 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--png` | `.png` | `.png` | `.png` |
 | `--jpeg` | `.jpg` | `.jpg` | `.jpg` |
 | `--tiff` | `.tif` | `.tif` | `.tif` |
+
+A gray `--output-profile` writes gray pages and names them as `--gray` does.
+
+---
+
+## Colour management
+
+Pages are composited in sRGB.  With an output profile each page is then
+converted, once composited and band by band, to the profile's device values,
+and the output is tagged with the profile so that a colour-managed RIP or
+viewer reads the values for what they are.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output-profile FILE` | | Convert every page to the ICC profile `FILE` and tag the output with it: a PNG `iCCP` chunk, TIFF tag 34675 (`InterColorProfile`), JPEG `APP2` `ICC_PROFILE` segments, and with `--print` an `ICCBased` colour space on every image of the spool (PDF 1.5, 1.6 or 1.7 as the profile's ICC version needs). PPM and PGM cannot carry a profile: their pixels are still converted, and a warning says so at start-up. The profile is an RGB or gray profile of the output (`prtr`), display (`mntr`) or colour-space (`spac`) class, with an XYZ or Lab connection space; table-based (`AToB`/`BToA`) printer profiles, the kind paper profiles are, and matrix/TRC profiles alike. A gray profile writes gray pages (PGM, gray PNG, JPEG or TIFF, gray spool pages), the gray coming from the profile rather than the luma weights of `--gray`. Works at both `--depth`s (the conversion runs on 16-bit samples either way) and with `--transparent` (an RGB profile; the alpha is unchanged). `--invert` complements the converted device values. Refused at start-up, exit status 1, nothing rendered: an unreadable file, a file that is not an ICC profile, a CMYK profile ("CMYK raster output is not written"), a device-link, abstract, named-colour or input profile, an RGB profile with `--gray`, a gray one with `--transparent`, and `--mono`, `--dither`, `--fax` and comic-archive input. |
+| `--intent INTENT` | the content's, else `relative` | The rendering intent of the conversion: `perceptual`, `relative` (relative colorimetric), `saturation` or `absolute` (absolute colorimetric: the source white is reproduced on the paper, its tint simulated). Without it, a page converts under the one intent its content paints with (`ri`, an `ExtGState` `/RI`, an image's `/Intent`; relative colorimetric where it sets none), and a page that mixes intents converts relative colorimetric, with one warning naming the intents seen. With it, the conversion is compiled at start-up, so a profile that cannot convert under it fails before anything renders. Needs `--output-profile`. |
+| `--bpc` | off | Black-point compensation (ISO 18619): the page's black maps to the profile's darkest neutral, so shadow detail is kept on a paper whose black is lighter than the page's. A perceptual or saturation conversion to an ICC v4 profile always compensates, as the v4 perceptual connection space requires. Needs `--output-profile`; refused with `--intent absolute`. |
+
+The conversion matches Little CMS (`transicc`) within ΔE00 1 on every patch
+of a test chart, for every intent with and without `--bpc`, at 8 and 16 bits.
+A page's colours outside sRGB are clipped to it before the conversion, and a
+page converts under a single intent: objects of different intents on one page
+share it.
+
+```bash
+# A fine-art print file: 16-bit TIFF for the paper profile, perceptual
+rrocket --depth 16 --tiff --output-profile paper.icc --intent perceptual -r 360 art.pdf out
+
+# Print through the profile, with black-point compensation
+rrocket --print --output-profile paper.icc --bpc art.pdf
+```
 
 ---
 
