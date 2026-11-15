@@ -74,11 +74,13 @@ impl TiffCompression {
 const PHOTOMETRIC_WHITE_IS_ZERO: u16 = 0;
 const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
 const PHOTOMETRIC_RGB: u16 = 2;
+const PHOTOMETRIC_SEPARATED: u16 = 5;
 
 /// Samples per pixel, bits per sample and photometric interpretation of
 /// rows stored as `layout`.  RGBA's alpha is unassociated (`ExtraSamples`
 /// 2); a bilevel page is `WhiteIsZero`, a 1 bit black, the interpretation
-/// the fax profile of TIFF (RFC 2306) prescribes.
+/// the fax profile of TIFF (RFC 2306) prescribes.  CMYK is `Separated`,
+/// its ink set CMYK (`InkSet` 1).
 const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
     match layout {
         RowLayout::Rgba => (4, 8, PHOTOMETRIC_RGB),
@@ -88,6 +90,8 @@ const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
         RowLayout::Rgba16 => (4, 16, PHOTOMETRIC_RGB),
         RowLayout::Rgb16 => (3, 16, PHOTOMETRIC_RGB),
         RowLayout::Gray16 => (1, 16, PHOTOMETRIC_BLACK_IS_ZERO),
+        RowLayout::Cmyk => (4, 8, PHOTOMETRIC_SEPARATED),
+        RowLayout::Cmyk16 => (4, 16, PHOTOMETRIC_SEPARATED),
     }
 }
 
@@ -886,6 +890,10 @@ fn entries(
     if photometric == PHOTOMETRIC_RGB && samples == 4 {
         entries.push(shorts(338, &[2]));
     }
+    // InkSet: the four samples of a separated page are C, M, Y and K.
+    if photometric == PHOTOMETRIC_SEPARATED {
+        entries.push(shorts(332, &[1]));
+    }
     if let Some((tag, options)) = page.compression.options_tag() {
         entries.push(longs(tag, &[options]));
     }
@@ -1048,6 +1056,137 @@ mod tests {
                 .collect();
             assert_eq!(pixels, want, "rgb, {compression:?}");
         }
+    }
+
+    /// A header-only CMYK ICC profile, as far as [`IccProfile::new`] reads.
+    fn cmyk_profile() -> crate::IccProfile {
+        let mut bytes = vec![0u8; 128];
+        bytes[..4].copy_from_slice(&128u32.to_be_bytes());
+        bytes[8] = 4;
+        bytes[12..16].copy_from_slice(b"prtr");
+        bytes[16..20].copy_from_slice(b"CMYK");
+        bytes[20..24].copy_from_slice(b"Lab ");
+        bytes[36..40].copy_from_slice(b"acsp");
+        crate::IccProfile::new(bytes).expect("valid")
+    }
+
+    #[test]
+    fn cmyk_pages_are_separated_and_read_back_at_both_depths() {
+        let (w, h) = (13u32, 40u32);
+        let mut narrow = Bitmap::<color::Cmyk8>::new(w, h, 4, false);
+        let mut wide = Bitmap::<color::Cmyk16>::new(w, h, 1, false);
+        for y in 0..h {
+            for (i, v) in narrow.row_bytes_mut(y)[..w as usize * 4]
+                .iter_mut()
+                .enumerate()
+            {
+                *v = (i * 11 + y as usize * 5).to_le_bytes()[0];
+            }
+            for (i, v) in wide.row_samples_mut(y)[..w as usize * 4]
+                .iter_mut()
+                .enumerate()
+            {
+                *v = u16::try_from((i * 3001 + y as usize * 17) % 65_536).expect("in range");
+            }
+        }
+        let icc = cmyk_profile();
+        for compression in ALL {
+            for sixteen in [false, true] {
+                let (image, layout) = if sixteen {
+                    (RowImage::Cmyk16(&wide), RowLayout::Cmyk16)
+                } else {
+                    (RowImage::Cmyk(&narrow), RowLayout::Cmyk)
+                };
+                let mut out = Cursor::new(Vec::new());
+                let mut stream = super::TiffStream::new(
+                    &mut out,
+                    (w, h),
+                    layout,
+                    (300.0, 300.0),
+                    compression,
+                    Some(&icc),
+                )
+                .unwrap();
+                stream.push(image).unwrap();
+                let _ = stream.finish().unwrap();
+                let bytes = out.into_inner();
+                let mut decoder = decode(&bytes);
+                let bits = if sixteen { 16 } else { 8 };
+                assert_eq!(
+                    decoder.colortype().unwrap(),
+                    ::tiff::ColorType::CMYK(bits),
+                    "{compression:?}"
+                );
+                assert_eq!(
+                    decoder.get_tag_u32(Tag::PhotometricInterpretation).unwrap(),
+                    5
+                );
+                assert_eq!(decoder.get_tag_u32(Tag::Unknown(332)).unwrap(), 1, "InkSet");
+                assert!(decoder.find_tag(Tag::ExtraSamples).unwrap().is_none());
+                let profile = decoder.get_tag_u8_vec(Tag::Unknown(34675)).unwrap();
+                assert_eq!(profile, icc.bytes());
+                match decoder.read_image().unwrap() {
+                    DecodingResult::U8(v) => {
+                        let want: Vec<u8> = (0..h)
+                            .flat_map(|y| narrow.row_bytes(y)[..w as usize * 4].to_vec())
+                            .collect();
+                        assert_eq!(v, want, "{compression:?}");
+                    }
+                    DecodingResult::U16(v) => {
+                        let want: Vec<u16> = (0..h)
+                            .flat_map(|y| wide.row_samples(y)[..w as usize * 4].to_vec())
+                            .collect();
+                        assert_eq!(v, want, "{compression:?}");
+                    }
+                    _ => panic!("8- or 16-bit samples expected"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cmyk_band_is_refused_by_an_rgb_page_and_the_reverse() {
+        let cmyk = Bitmap::<color::Cmyk8>::new(4, 2, 1, false);
+        let c = rgb(4, 2);
+        let mut out = Cursor::new(Vec::new());
+        let mut stream = super::TiffStream::new(
+            &mut out,
+            (4, 2),
+            RowLayout::Rgb,
+            (72.0, 72.0),
+            TiffCompression::None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            stream.push(RowImage::Cmyk(&cmyk)),
+            Err(EncodeError::InvalidInput(_))
+        ));
+        let mut out = Cursor::new(Vec::new());
+        let mut stream = super::TiffStream::new(
+            &mut out,
+            (4, 2),
+            RowLayout::Cmyk,
+            (72.0, 72.0),
+            TiffCompression::None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            stream.push(RowImage::Rgb(&c)),
+            Err(EncodeError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            super::TiffStream::new(
+                Cursor::new(Vec::new()),
+                (4, 2),
+                RowLayout::Rgb,
+                (72.0, 72.0),
+                TiffCompression::None,
+                Some(&cmyk_profile()),
+            ),
+            Err(EncodeError::InvalidInput(_))
+        ));
     }
 
     #[test]

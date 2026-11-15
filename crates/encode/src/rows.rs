@@ -6,7 +6,7 @@
 //! is written.  A whole image is a single band, so writing an image whole
 //! and writing it band by band produce the same bytes.
 
-use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
+use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
 use crate::{EncodeError, pack_bilevel_row, push_rgba};
@@ -27,6 +27,10 @@ pub enum RowImage<'a> {
     Rgb16(&'a Bitmap<Rgb16>),
     /// 16-bit gray, 0 black.
     Gray16(&'a Bitmap<Gray16>),
+    /// 8-bit CMYK, 0 no ink.
+    Cmyk(&'a Bitmap<Cmyk8>),
+    /// 16-bit CMYK, 0 no ink.
+    Cmyk16(&'a Bitmap<Cmyk16>),
 }
 
 /// The byte order a writer stores 16-bit samples in.
@@ -68,6 +72,10 @@ pub enum RowLayout {
     Rgba16,
     /// One 16-bit sample a pixel.
     Gray16,
+    /// Four bytes a pixel, C, M, Y and K, 0 no ink.
+    Cmyk,
+    /// Four 16-bit samples a pixel, C, M, Y and K, 0 no ink.
+    Cmyk16,
 }
 
 impl RowLayout {
@@ -77,11 +85,11 @@ impl RowLayout {
         let w = width as usize;
         match self {
             Self::Rgb => w * 3,
-            Self::Rgba => w * 4,
+            Self::Rgba | Self::Cmyk => w * 4,
             Self::Gray => w,
             Self::Bilevel => w.div_ceil(8),
             Self::Rgb16 => w * 6,
-            Self::Rgba16 => w * 8,
+            Self::Rgba16 | Self::Cmyk16 => w * 8,
             Self::Gray16 => w * 2,
         }
     }
@@ -91,13 +99,13 @@ impl RowLayout {
     pub const fn bits_per_sample(self) -> u8 {
         match self {
             Self::Bilevel => 1,
-            Self::Rgb | Self::Rgba | Self::Gray => 8,
-            Self::Rgb16 | Self::Rgba16 | Self::Gray16 => 16,
+            Self::Rgb | Self::Rgba | Self::Gray | Self::Cmyk => 8,
+            Self::Rgb16 | Self::Rgba16 | Self::Gray16 | Self::Cmyk16 => 16,
         }
     }
 
     /// The layout of samples of `depth` with the colour model of `self`:
-    /// RGB, RGBA or gray; a bilevel layout is itself at either depth.
+    /// RGB, RGBA, gray or CMYK; a bilevel layout is itself at either depth.
     #[must_use]
     pub const fn at_depth(self, depth: SampleDepth) -> Self {
         match (self, depth) {
@@ -107,6 +115,8 @@ impl RowLayout {
             (Self::Rgb | Self::Rgb16, SampleDepth::Sixteen) => Self::Rgb16,
             (Self::Rgba | Self::Rgba16, SampleDepth::Sixteen) => Self::Rgba16,
             (Self::Gray | Self::Gray16, SampleDepth::Sixteen) => Self::Gray16,
+            (Self::Cmyk | Self::Cmyk16, SampleDepth::Eight) => Self::Cmyk,
+            (Self::Cmyk | Self::Cmyk16, SampleDepth::Sixteen) => Self::Cmyk16,
             (Self::Bilevel, _) => Self::Bilevel,
         }
     }
@@ -121,6 +131,8 @@ impl RowImage<'_> {
             Self::Gray(b) | Self::Bilevel(b) => (b.width, b.height),
             Self::Rgb16(b) => (b.width, b.height),
             Self::Gray16(b) => (b.width, b.height),
+            Self::Cmyk(b) => (b.width, b.height),
+            Self::Cmyk16(b) => (b.width, b.height),
         }
     }
 
@@ -136,6 +148,8 @@ impl RowImage<'_> {
             Self::Rgb16(b) if b.has_alpha() => RowLayout::Rgba16,
             Self::Rgb16(_) => RowLayout::Rgb16,
             Self::Gray16(_) => RowLayout::Gray16,
+            Self::Cmyk(_) => RowLayout::Cmyk,
+            Self::Cmyk16(_) => RowLayout::Cmyk16,
         }
     }
 
@@ -188,6 +202,12 @@ impl RowImage<'_> {
             (Self::Gray16(b), RowLayout::Gray16) => {
                 order.push(&b.row_samples(y)[..b.width as usize], out);
             }
+            (Self::Cmyk(b), RowLayout::Cmyk) => {
+                out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 4]);
+            }
+            (Self::Cmyk16(b), RowLayout::Cmyk16) => {
+                order.push(&b.row_samples(y)[..b.width as usize * 4], out);
+            }
             _ => panic!("RowImage::row: layout {layout:?} does not store this band"),
         }
     }
@@ -198,7 +218,8 @@ impl RowImage<'_> {
     /// # Errors
     ///
     /// [`EncodeError::InvalidInput`] for a band of another width, of more
-    /// rows than are left, or of colour for a gray image or the reverse.
+    /// rows than are left, or of another colour model or depth than the
+    /// image's.
     pub(crate) const fn check(
         &self,
         width: u32,
@@ -225,6 +246,8 @@ impl RowImage<'_> {
                 )
                 | (Self::Rgb16(_), RowLayout::Rgb16 | RowLayout::Rgba16)
                 | (Self::Gray16(_), RowLayout::Gray16)
+                | (Self::Cmyk(_), RowLayout::Cmyk)
+                | (Self::Cmyk16(_), RowLayout::Cmyk16)
         );
         if !fits {
             return Err(EncodeError::InvalidInput(

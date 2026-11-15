@@ -4,7 +4,7 @@
 
 use std::io::Cursor;
 
-use color::{Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
+use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 use rasterrocket_encode::{
     PdfPage, PdfPageEncoder, PdfWriter, PngColor, PngWriter, PnmKind, PnmWriter, RowImage,
@@ -221,6 +221,112 @@ fn streamed_tiff_is_the_whole_page() {
             });
         }
     }
+}
+
+// ── CMYK images ───────────────────────────────────────────────────────────────
+
+fn cmyk() -> Bitmap<Cmyk8> {
+    let mut bmp = Bitmap::new(W, H, 4, false);
+    for y in 0..H {
+        for (i, v) in bmp.row_bytes_mut(y)[..W as usize * 4]
+            .iter_mut()
+            .enumerate()
+        {
+            *v = if i % 16 < 8 {
+                0
+            } else {
+                (i * 5 + y as usize * 9).to_le_bytes()[0]
+            };
+        }
+    }
+    bmp
+}
+
+fn cmyk16() -> Bitmap<Cmyk16> {
+    let mut bmp = Bitmap::new(W, H, 1, false);
+    for y in 0..H {
+        for (i, v) in bmp.row_samples_mut(y)[..W as usize * 4]
+            .iter_mut()
+            .enumerate()
+        {
+            *v = u16::try_from((i * 4099 + y as usize * 31) % 65_536).expect("in range");
+        }
+    }
+    bmp
+}
+
+#[test]
+fn a_streamed_cmyk_tiff_is_the_whole_page_at_both_depths() {
+    let stream = |layout, compression, images: &[RowImage<'_>]| {
+        let mut w = TiffStream::new(
+            Cursor::new(Vec::new()),
+            (W, H),
+            layout,
+            (150.0, 75.0),
+            compression,
+            None,
+        )
+        .unwrap();
+        for &image in images {
+            w.push(image).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    };
+    let (narrow, wide) = (cmyk(), cmyk16());
+    for compression in [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ] {
+        let mut want = Vec::new();
+        write_tiff(
+            RowImage::Cmyk(&narrow),
+            (150.0, 75.0),
+            compression,
+            &mut want,
+        )
+        .unwrap();
+        same_for_every_band_height(&narrow, &want, &format!("CMYK {compression:?}"), |b| {
+            stream(
+                RowLayout::Cmyk,
+                compression,
+                &b.iter().map(RowImage::Cmyk).collect::<Vec<_>>(),
+            )
+        });
+        let mut want = Vec::new();
+        write_tiff(
+            RowImage::Cmyk16(&wide),
+            (150.0, 75.0),
+            compression,
+            &mut want,
+        )
+        .unwrap();
+        same_for_every_band_height(&wide, &want, &format!("CMYK16 {compression:?}"), |b| {
+            stream(
+                RowLayout::Cmyk16,
+                compression,
+                &b.iter().map(RowImage::Cmyk16).collect::<Vec<_>>(),
+            )
+        });
+    }
+}
+
+#[test]
+fn cmyk_bands_are_refused_by_the_formats_without_cmyk() {
+    let c = cmyk();
+    let mut pnm = PnmWriter::new(Vec::new(), (W, H), PnmKind::Ppm).unwrap();
+    assert!(pnm.push(RowImage::Cmyk(&c)).is_err(), "PPM");
+    let mut png = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb, None).unwrap();
+    assert!(png.push(RowImage::Cmyk(&c)).is_err(), "PNG");
+    assert!(
+        PdfPageEncoder::new((W, H), RowLayout::Cmyk, (72.0, 72.0), None).is_err(),
+        "a PDF page"
+    );
+    assert!(
+        PdfPage::encode(RowImage::Cmyk(&c), (72.0, 72.0)).is_err(),
+        "a PDF page"
+    );
 }
 
 /// The document holding `page` alone.

@@ -1,4 +1,11 @@
-//! Baseline and progressive JPEG encoding of 8-bit gray and RGB bitmaps.
+//! Baseline and progressive JPEG encoding of 8-bit gray, RGB and CMYK
+//! bitmaps.
+//!
+//! A CMYK image is written as the Adobe `APP14` marker describes it, with
+//! colour transform 2 (YCCK) and its samples in the inverted sense that
+//! marker implies, so a reader of Adobe CMYK JPEGs recovers the ink
+//! amounts: C, M and Y are coded as the R, G and B of a YCbCr image and K
+//! as `255 − k`.
 
 use std::io::Write;
 
@@ -35,8 +42,9 @@ impl Default for JpegOptions {
     }
 }
 
-/// Encode a gray (`Gray8`/`Mono8`), `Rgb8` or `Bgr8` bitmap as JPEG into
-/// `out`, tagged with `icc` (`APP2` `ICC_PROFILE` segments) when given.
+/// Encode a gray (`Gray8`/`Mono8`), `Rgb8`, `Bgr8` or `Cmyk8` bitmap as
+/// JPEG into `out`, tagged with `icc` (`APP2` `ICC_PROFILE` segments) when
+/// given.  A CMYK image is coded as YCCK (see the module documentation).
 ///
 /// Stride padding is excluded: only the live `width` pixels of each row
 /// are encoded.
@@ -61,16 +69,16 @@ pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
         PixelMode::Mono8 => (ColorType::Luma, RowLayout::Gray),
         PixelMode::Rgb8 => (ColorType::Rgb, RowLayout::Rgb),
         PixelMode::Bgr8 => (ColorType::Bgr, RowLayout::Rgb),
+        PixelMode::Cmyk8 => (ColorType::CmykAsYcck, RowLayout::Cmyk),
         PixelMode::Mono1
         | PixelMode::Xbgr8
-        | PixelMode::Cmyk8
         | PixelMode::DeviceN8
         | PixelMode::DeviceN16
         | PixelMode::Cmyk16
         | PixelMode::Mono16
         | PixelMode::Rgb16 => {
             return Err(EncodeError::UnsupportedMode(
-                "JPEG accepts Gray8, Rgb8 and Bgr8: convert other modes to Rgb8 first",
+                "JPEG accepts Gray8, Rgb8, Bgr8 and Cmyk8: convert other modes to Rgb8 first",
             ));
         }
     };
@@ -188,9 +196,88 @@ mod tests {
         );
     }
 
+    /// The ink of each pixel of a CMYK JPEG, decoded as YCCK and inverted
+    /// as its Adobe marker prescribes.
+    fn decode_cmyk(bytes: &[u8]) -> Vec<[u8; 4]> {
+        use zune_jpeg::zune_core::colorspace::ColorSpace;
+        use zune_jpeg::zune_core::options::DecoderOptions;
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::YCCK);
+        let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+            zune_jpeg::zune_core::bytestream::ZCursor::new(bytes),
+            options,
+        );
+        let samples = decoder.decode().expect("decodes");
+        assert_eq!(decoder.input_colorspace(), Some(ColorSpace::YCCK));
+        samples
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&[y, cb, cr, k]| {
+                let (y, cb, cr) = (f64::from(y), f64::from(cb) - 128.0, f64::from(cr) - 128.0);
+                let rgb = [
+                    1.402f64.mul_add(cr, y),
+                    0.714_136f64.mul_add(-cr, 0.344_136f64.mul_add(-cb, y)),
+                    1.772f64.mul_add(cb, y),
+                ];
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped to 0..=255 first"
+                )]
+                let [c, m, y] = rgb.map(|v| v.round().clamp(0.0, 255.0) as u8);
+                [c, m, y, 255 - k]
+            })
+            .collect()
+    }
+
     #[test]
-    fn cmyk_bitmaps_are_refused() {
-        let bmp: Bitmap<color::Cmyk8> = Bitmap::new(8, 1, 1, false);
+    fn cmyk_is_written_as_adobe_ycck_and_decodes_to_its_ink() {
+        let inks = [
+            [222u8, 3, 0, 0],
+            [255, 117, 13, 46],
+            [0, 0, 0, 255],
+            [128, 128, 128, 0],
+        ];
+        let mut bmp: Bitmap<color::Cmyk8> = Bitmap::new(32, 8, 1, false);
+        for y in 0..8 {
+            for (x, px) in bmp
+                .row_bytes_mut(y)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                *px = inks[x / 8];
+            }
+        }
+        let options = JpegOptions {
+            quality: 100,
+            ..JpegOptions::default()
+        };
+        let mut bytes = Vec::new();
+        write_jpeg(&bmp, options, &mut bytes, None).expect("encodes");
+        // APP14 "Adobe", version 100, flags 0 and 0, transform 2.
+        let app14 = bytes
+            .windows(2)
+            .position(|w| w == [0xFF, 0xEE])
+            .expect("an APP14 marker");
+        assert_eq!(&bytes[app14 + 4..app14 + 9], b"Adobe");
+        assert_eq!(bytes[app14 + 15], 2, "colour transform YCCK");
+        let decoded = decode_cmyk(&bytes);
+        for (i, got) in decoded.iter().enumerate() {
+            let want = inks[i % 32 / 8];
+            // Away from the 8-pixel block edges between swatches.
+            if (2..6).contains(&(i % 8)) {
+                for (g, w) in got.iter().zip(want) {
+                    assert!(g.abs_diff(w) <= 2, "pixel {i}: {got:?} for {want:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn device_n_bitmaps_are_refused() {
+        let bmp: Bitmap<color::DeviceN8> = Bitmap::new(8, 1, 1, false);
         let result = write_jpeg(&bmp, JpegOptions::default(), Vec::new(), None);
         assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
     }

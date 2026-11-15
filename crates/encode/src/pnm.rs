@@ -95,6 +95,9 @@ impl<W: Write> PnmWriter<W> {
                 }
             }
             (RowImage::Gray(b) | RowImage::Bilevel(b), _) => write_live_rows(b, &mut self.out)?,
+            (RowImage::Cmyk(_) | RowImage::Cmyk16(_), _) => {
+                unreachable!("RowCount::take refuses a CMYK band for a Netpbm image")
+            }
             (RowImage::Rgb16(_) | RowImage::Gray16(_), _) => {
                 let layout = self.kind.layout();
                 for y in 0..band.size().1 {

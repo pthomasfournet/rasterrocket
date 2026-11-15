@@ -95,6 +95,8 @@ impl PdfPage {
             RowImage::Gray(_) | RowImage::Bilevel(_) => RowLayout::Gray,
             RowImage::Rgb16(_) => RowLayout::Rgb16,
             RowImage::Gray16(_) => RowLayout::Gray16,
+            RowImage::Cmyk(_) => RowLayout::Cmyk,
+            RowImage::Cmyk16(_) => RowLayout::Cmyk16,
         };
         let mut encoder = PdfPageEncoder::new(image.size(), layout, dpi, None)?;
         encoder.push(image)?;
