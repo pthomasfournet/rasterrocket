@@ -80,6 +80,11 @@ pub(crate) fn decode(
         }
     };
 
+    // A height class without symbols does not advance the loop; at most
+    // `num_new_symbols` of them are admitted, so that a stream of them
+    // fails instead of looping without end.
+    let mut remaining_empty_height_classes = num_new_symbols;
+
     while ctx.symbols_decoded_count < num_new_symbols {
         let height_class_delta =
             read_height_class_delta(&mut ctx)?.ok_or(SymbolError::UnexpectedOob)?;
@@ -141,6 +146,12 @@ pub(crate) fn decode(
             }
 
             ctx.symbols_decoded_count += 1;
+        }
+
+        if ctx.symbols_decoded_count == ctx.height_class_first_symbol {
+            remaining_empty_height_classes = remaining_empty_height_classes
+                .checked_sub(1)
+                .ok_or(SymbolError::Invalid)?;
         }
 
         if ctx.header.flags.use_huffman && !ctx.header.flags.use_refagg {
@@ -632,16 +643,18 @@ fn decode_height_class_collective_bitmap(ctx: &mut SymbolDecodeContext<'_>) -> R
     let collective_bitmap = if bitmap_size == 0 {
         // Bitmap is stored uncompressed, so we basically just copy-paste
         // each byte. Rows are padded to the byte boundary.
-        let row_bytes = ctx.total_width.div_ceil(8);
+        // The data is read before the bitmap is allocated, so a declared size
+        // that the segment cannot hold allocates nothing.
+        let row_bytes = ctx.total_width.div_ceil(8) as usize;
+        let data = row_bytes
+            .checked_mul(ctx.height_class_height as usize)
+            .and_then(|len| ctx.h_ctx.reader.read_bytes(len))
+            .ok_or(ParseError::UnexpectedEof)?;
 
         let mut bitmap = Bitmap::new_wide(ctx.total_width, ctx.height_class_height, ctx.budget)?;
         for y in 0..ctx.height_class_height {
-            for byte_x in 0..row_bytes {
-                let byte = ctx
-                    .h_ctx
-                    .reader
-                    .read_byte()
-                    .ok_or(ParseError::UnexpectedEof)?;
+            let row = &data[y as usize * row_bytes..][..row_bytes];
+            for (byte_x, byte) in (0_u32..).zip(row) {
                 for bit in 0..8 {
                     let x = byte_x * 8 + bit;
                     if x < ctx.total_width {
@@ -724,13 +737,19 @@ fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Bitmap>> {
 
         u32::try_from(value).map_err(|_| HuffmanError::InvalidCode.into())
     };
-    let mut exported = ctx
-        .budget
-        .vec_with_capacity(ctx.header.num_exported_symbols as usize)?;
+    // At most `total_symbols` can be exported, and no more than declared,
+    // so the charged reservation is never outgrown.
+    let num_exported = ctx.header.num_exported_symbols.min(total_symbols) as usize;
+    let mut exported = ctx.budget.vec_with_capacity(num_exported)?;
     let mut index: u32 = 0;
     let mut should_export = false;
+    // A zero-length run does not advance `index`.  The run count is bounded
+    // by 2 * total_symbols + 2, so that a stream of zero-length runs fails
+    // instead of looping without end.
+    let mut remaining_runs = total_symbols.saturating_mul(2).saturating_add(2);
 
     while index < total_symbols {
+        remaining_runs = remaining_runs.checked_sub(1).ok_or(SymbolError::Invalid)?;
         let run_length = read_run_length()?;
 
         let end_index = index.checked_add(run_length).ok_or(OverflowError::Index)?;
@@ -739,6 +758,10 @@ fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Bitmap>> {
         }
 
         if should_export {
+            if (end_index - index) as usize > num_exported - exported.len() {
+                bail!(SymbolError::NoSymbols);
+            }
+
             for symbol_idx in index..end_index {
                 let symbol = ctx
                     .symbols

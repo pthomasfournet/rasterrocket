@@ -126,6 +126,21 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   rejected when its page information segment is parsed, before any
   region is decoded. Test (this fork):
   `page::page_larger_than_bitmap_limit_is_rejected`.
+- `90e1a3a96` (#1773) A symbol dictionary's export table has at most
+  2 × symbols + 2 runs, and `ec28315a6` (#1774) at most as many empty
+  height classes as new symbols; a stream of zero-length runs or of
+  empty height classes, which looped without end, fails with
+  `SymbolError::Invalid`. Tests: the two `symbol_dictionary_empty_*`
+  streams of `tests/malformed.rs`.
+- `9214724ae` (#1776) An uncompressed height-class collective bitmap is
+  read from the segment before it is allocated.
+- `14fe0d9c6` (#1778), adapted: the exported-symbol list reserves (and
+  charges to the budget) no more than the dictionary's symbol count, and
+  an export table that exports more symbols than declared fails at the
+  run that overshoots instead of after the copies, so the charged
+  reservation is never outgrown. The new-symbol lists keep their
+  reservation by the declared count, charged to the budget, which
+  bounds it; reserving less would let them grow uncharged.
 
 ## Upstream review (2026-10-30)
 
