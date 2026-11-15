@@ -3004,6 +3004,37 @@ error-diffusion dither, packed 1-bpp morphology, text-or-photo detection,
 2× upscale before threshold, despeckle, PDF output with G4/DCT, and dewarp
 model sharing.
 
+**Unreleased on master: soft proofing against the output intent.**
+`rrocket --proof[=relative|absolute]` (`SessionConfig::proof`,
+`RasterOptions::proof`, `ProofIntent`) shows how a document prints on the
+press its `/OutputIntents` names: the page's own (PDF 2.0), else the
+catalog's; the first `GTS_PDFX` intent that embeds a profile, else the first
+of any subtype that does, whose profile must be CMYK. A document without one,
+an intent without an embedded profile, and a non-CMYK profile (the sRGB intent
+of a PDF/A file describes a display: nothing to proof against) are loud errors
+at session open (`RasterError::OutputIntent`). Every page is painted on the
+ink canvas as a `--cmyk` page is, its colours that are not ink separated
+through the press profile under `--intent` / `--bpc`, `--overprint`
+simulating overprint, and the ink is then converted to sRGB or to an RGB or
+gray `--output-profile`: relative colorimetry maps the paper to white,
+absolute reproduces the paper's white and the press's black (sRGB or a
+matrix/TRC display profile). The ink-to-display conversion is tabulated on a
+33⁴ grid (7.1 MB per press and proof intent, built on the first proofed page)
+and matches Little CMS's `transicc -p` within ΔE00 1 at 16 bits and 1.2 at 8
+bits (two 8-bit roundings against its floating-point output; colours below the
+press black, where the two CMMs' separations differ, are left out of the 8-bit
+chart). Of the 1 168 archive PDFs, 433 carry output intents: 428 PDF/A sRGB
+ones, which `--proof` refuses, and 5 PDF/X CMYK presses (US Web Coated SWOP
+v2 ×3, ISO Coated v2 300 % ECI, GWG Generic CMYK). Also: black-point
+compensation to a CMYK profile now maps the page's black to the black the
+profile reaches as a conversion source, the round trip of its perceptual black
+(ISO 18619, as Little CMS detects it), instead of its darkest colorant, so
+`--cmyk --bpc` shadows get lighter: the compensated black moves from L* 16.50
+to 16.61 on US Web Coated (SWOP) v2 (inks within 0.3 %), from L* 11.3 to 12.9
+on ISO Coated v2 (up to 4.4 % ink, about 11 levels of an 8-bit channel, at
+black), and from L* 8.0 to 11.1 on the synthetic test press; `--cmyk` without
+`--bpc`, and RGB and gray output profiles, are unchanged.
+
 **Unreleased on master: a clip takes effect after the paint that ends its
 path.** A `W`/`W*` followed by a painting operator (`W f`, `W S`, `W B`,
 `W b` and their even-odd forms) now paints the path unclipped by it, then
