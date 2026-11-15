@@ -145,7 +145,7 @@ pub fn blit_image_box<'s, B: GpuBackend>(
         backend.record_zero_buffer(&target.device, target_len)?;
         backend.record_blit_image(BlitParams {
             src: src.pixels,
-            dst: &target.device,
+            dst: &mut target.device,
             cols: &d_cols.device,
             rows: &d_rows.device,
             src_w: src.width,

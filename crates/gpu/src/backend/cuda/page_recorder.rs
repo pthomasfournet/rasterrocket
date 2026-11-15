@@ -11,13 +11,12 @@
 //!
 //! ## Concurrency note
 //!
-//! All buffer references in `params::*Params` are `&CudaSlice<u8>`
-//! (immutable), even for read-modify-write operands like the
-//! blit destination page buffer.  At the cudarc layer the kernel receives a
-//! raw `CUdeviceptr`, so the &-vs-&mut distinction has no effect on
-//! the launch.  In-place writes are race-free because launches queued
-//! by one thread execute in order on its stream, and cudarc orders a
-//! launch on another stream after the buffer's last recorded write.
+//! cudarc records a write event on a kernel argument only when the
+//! argument is a `&mut CudaSlice`; a `&CudaSlice` argument records a read.
+//! The blit destination is `&mut`, so a read of the page on another stream
+//! waits for the blit.  Buffers the other kernels write are still passed
+//! by `&`: their writes are ordered only against later work on the
+//! recording thread's stream, which is where every caller reads them.
 
 #![expect(
     clippy::needless_pass_by_value,

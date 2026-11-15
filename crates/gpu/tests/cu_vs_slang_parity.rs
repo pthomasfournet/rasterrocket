@@ -285,7 +285,7 @@ fn run_blit_vulkan(
     let cols_bytes: &[u8] = bytemuck::cast_slice(cols);
     let rows_bytes: &[u8] = bytemuck::cast_slice(rows);
     let d_src = backend.alloc_device(src.len()).expect("alloc src");
-    let d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
+    let mut d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
     let d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
     let d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
     backend.upload(&d_src, src).expect("upload src");
@@ -298,7 +298,7 @@ fn run_blit_vulkan(
     backend
         .record_blit_image(BlitParams {
             src: &d_src,
-            dst: &d_dst,
+            dst: &mut d_dst,
             cols: &d_cols,
             rows: &d_rows,
             src_w,

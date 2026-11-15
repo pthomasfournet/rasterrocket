@@ -89,10 +89,10 @@ impl DevicePageBuffer {
     /// The CUDA stream this buffer is bound to.
     ///
     /// [`Self::download_rows_with`] copies on this stream, so it observes
-    /// every kernel write queued here before the call.  A kernel writing
-    /// [`Self::rgba`] through a shared reference records no write event,
-    /// so such a kernel on a *different* stream is not ordered before the
-    /// download; the blit path queues its kernels on this stream.
+    /// every kernel write queued here before the call.  A kernel on another
+    /// stream is ordered before the download only through the write event
+    /// it records on [`Self::rgba`], which it records when it takes the
+    /// buffer by `&mut`, as the blit does.
     #[must_use]
     pub fn stream(&self) -> &CudaStream {
         &self.stream

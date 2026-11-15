@@ -394,7 +394,7 @@ fn bench_blit(backend: &VulkanBackend, cfg: &Config) {
                     ok(
                         b.record_blit_image(BlitParams {
                             src: &src_buf,
-                            dst: &tgt.device,
+                            dst: &mut tgt.device,
                             cols: &d_c.device,
                             rows: &d_r.device,
                             src_w: sw,

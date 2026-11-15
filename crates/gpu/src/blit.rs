@@ -138,7 +138,7 @@ impl GpuCtx {
             &src.device_ptr,
             (src.width, src.height),
             layout_code,
-            &dst.rgba,
+            &mut dst.rgba,
             (dst.width, dst.height),
             bbox,
             &d_cols,
@@ -161,6 +161,10 @@ impl GpuCtx {
     /// until the stream has executed the launch.  cudarc frees a dropped
     /// `CudaSlice` in stream order, so dropping a table buffer right after
     /// this call is safe on the same stream.
+    ///
+    /// `d_dst` is taken by `&mut`, so the launch records a write event on
+    /// it: a read of the page on any stream of a tracking context handle
+    /// waits for the blit.
     ///
     /// `layout_code` is the kernel's enum value: `0 = Rgb`, `1 = Gray`.
     /// Mask layout is rejected by the public wrapper before this
@@ -187,7 +191,7 @@ impl GpuCtx {
         d_src: &CudaSlice<u8>,
         src_dims: (u32, u32),
         layout_code: i32,
-        d_dst: &CudaSlice<u8>,
+        d_dst: &mut CudaSlice<u8>,
         dst_dims: (u32, u32),
         bbox: BlitBbox,
         d_cols: &CudaSlice<u8>,
@@ -638,5 +642,68 @@ mod tests {
             .blit_image_to_buffer(&cached, &mut page, bbox, &[0; 8], &[0; 16], 0)
             .unwrap_err();
         assert!(matches!(err, BlitError::TableSize), "{err}");
+    }
+
+    /// The blit records a write on its destination: a read of the page on
+    /// the stream of another context handle that tracks events waits for
+    /// the blit, even while the blit's stream is still busy with earlier
+    /// work.
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn blit_orders_a_page_read_on_another_tracking_handle() {
+        use crate::cache::{DeviceImageCache, ImageLayout, InsertRequest};
+        use crate::cache::{DocId, HostBudget, ObjId, VramBudget};
+        use std::sync::Arc;
+
+        let gpu = GpuCtx::init().expect("gpu init");
+        let other = cudarc::driver::CudaContext::new(0).expect("CUDA device 0");
+        // Event tracking on a handle starts with its first created stream.
+        let _tracking = other.new_stream().expect("stream");
+        let reader = other.default_stream();
+
+        let pixels = vec![9u8; 4 * 4 * 3];
+        let cache = DeviceImageCache::new(
+            Arc::clone(&reader),
+            VramBudget {
+                vram_bytes: 1 << 16,
+            },
+            HostBudget { host_bytes: 0 },
+        );
+        let cached = cache
+            .insert(InsertRequest {
+                doc: DocId([0; 32]),
+                obj: ObjId(1),
+                hash: crate::cache::ContentHash::of(&pixels),
+                width: 4,
+                height: 4,
+                layout: ImageLayout::Rgb,
+                pixels: &pixels,
+            })
+            .expect("insert");
+        let mut page = DevicePageBuffer::new(Arc::clone(&reader), 6, 6).expect("page");
+
+        // Work queued ahead of the blit holds its stream for milliseconds,
+        // so an unordered read of the page runs before the blit.
+        let stream = gpu.stream();
+        let mut busy = stream.alloc_zeros::<u8>(256 << 20).expect("busy buffer");
+        for _ in 0..20 {
+            stream.memset_zeros(&mut busy).expect("memset");
+        }
+        let bbox = BlitBbox {
+            x0: 0,
+            y0: 0,
+            x1: 6,
+            y1: 6,
+        };
+        let (cols, rows) = build_tables(bbox, |px| (px, 0.0), |py| (0.0, py));
+        gpu.blit_image_to_buffer(&cached, &mut page, bbox, &cols, &rows, 0)
+            .expect("blit");
+        let host = page.download().expect("download");
+        stream.synchronize().expect("sync");
+        assert_eq!(
+            host[..4],
+            [9, 9, 9, 255],
+            "page (0,0) read before the blit wrote it: the blit records no write event",
+        );
     }
 }

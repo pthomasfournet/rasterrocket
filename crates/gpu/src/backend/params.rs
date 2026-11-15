@@ -57,7 +57,7 @@ pub struct BlitParams<'a, B: GpuBackend + ?Sized> {
     /// Source image in device memory.
     pub src: &'a B::DeviceBuffer,
     /// Destination page buffer in device memory.
-    pub dst: &'a B::DeviceBuffer,
+    pub dst: &'a mut B::DeviceBuffer,
     /// Per-column sampling table in device memory (`bbox` width entries).
     pub cols: &'a B::DeviceBuffer,
     /// Per-row sampling table in device memory (`bbox` height entries).
@@ -1298,13 +1298,19 @@ mod tests {
     /// The numeric value is only consulted by `device_buffer_len`.
     static FAKE_BUF: usize = usize::MAX;
 
+    /// A "large enough" fake buffer a kernel writes: a leaked unique
+    /// reference, as the parameter structs take written buffers by `&mut`.
+    fn fake_out() -> &'static mut usize {
+        Box::leak(Box::new(FAKE_BUF))
+    }
+
     /// Sampling tables sized exactly for `ok_blit`'s 100×100 bbox.
     static BLIT_TABLE: usize = 100 * 16;
 
     fn ok_blit() -> BlitParams<'static, FakeBackend> {
         BlitParams {
             src: &FAKE_BUF,
-            dst: &FAKE_BUF,
+            dst: fake_out(),
             cols: &BLIT_TABLE,
             rows: &BLIT_TABLE,
             src_w: 100,
@@ -1417,7 +1423,7 @@ mod tests {
     #[test]
     fn validate_rejects_short_src_and_dst_buffers() {
         static SRC_SHORT: usize = 100 * 100 * 3 - 1;
-        static DST_SHORT: usize = 200 * 200 * 4 - 1;
+        let mut dst_short: usize = 200 * 200 * 4 - 1;
         let err = BlitParams {
             src: &SRC_SHORT,
             ..ok_blit()
@@ -1427,7 +1433,7 @@ mod tests {
         .to_string();
         assert!(err.contains("src buffer"), "{err}");
         let err = BlitParams {
-            dst: &DST_SHORT,
+            dst: &mut dst_short,
             ..ok_blit()
         }
         .validate(&FakeBackend)
