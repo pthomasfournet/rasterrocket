@@ -14,6 +14,15 @@
 //! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8` and `Rgb16` (RGBA with an alpha plane), `Gray8`, `Gray16`, bilevel from `Gray8` |
 //! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8`, `Rgb16`, `Gray16` |
 //!
+//! # ICC profiles
+//!
+//! An [`IccProfile`] of RGB or gray tags the image's colour: an `iCCP`
+//! chunk in a PNG ([`write_png`], [`PngWriter`]), tag 34675 in a TIFF
+//! ([`TiffStream`], [`TiffPageEncoder`]), `APP2` segments in a JPEG
+//! ([`write_jpeg`]), and an `ICCBased` colour space for every page image of
+//! a [`PdfWriter`].  A writer refuses a profile of another colour space
+//! than its image's.  Netpbm has no place for one.
+//!
 //! [`PnmWriter`] and [`PngWriter`] also write 16-bit images (`Rgb16`,
 //! `Gray16`): Netpbm of maxval 65535 and PNG of bit depth 16, samples
 //! most significant byte first; a TIFF stores them least significant
@@ -37,6 +46,7 @@
 //! the profile-free process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
 //! `Rgb8` before encoding.
 
+pub(crate) mod icc;
 pub(crate) mod jpeg;
 pub(crate) mod pbm;
 pub(crate) mod pdf;
@@ -47,6 +57,7 @@ pub(crate) mod ppm;
 pub(crate) mod rows;
 pub(crate) mod tiff;
 
+pub use icc::IccProfile;
 pub use jpeg::{JpegOptions, jpeg_gray, write_jpeg};
 pub use pbm::write_pbm;
 pub use pdf::{PdfPage, PdfPageEncoder, PdfWriter};

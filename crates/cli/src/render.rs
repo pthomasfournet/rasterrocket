@@ -359,11 +359,11 @@ fn encode_page<W: Write>(
         (OutputFormat::Ppm, Page::Rgb(rgb)) => write_ppm(rgb, out),
         (OutputFormat::Ppm, Page::Gray(luma)) => write_pgm(luma, out),
         (OutputFormat::Ppm, Page::Mono(luma)) => write_pbm(luma, out),
-        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out),
-        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out),
-        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out),
+        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out, None),
+        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out, None),
+        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out, None),
         (OutputFormat::Jpeg(options), Page::Gray(luma) | Page::Mono(luma)) => {
-            write_jpeg(luma, options, out)
+            write_jpeg(luma, options, out, None)
         }
         (OutputFormat::Tiff(compression), page) => {
             let image = match page {

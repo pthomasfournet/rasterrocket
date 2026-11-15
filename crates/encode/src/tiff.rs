@@ -16,6 +16,7 @@ use std::num::NonZeroU32;
 use hayro_ccitt::{EncodeScheme, Encoder};
 
 use crate::EncodeError;
+use crate::icc::{self, IccProfile};
 use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 
 /// The compression of a TIFF's strips.
@@ -179,7 +180,7 @@ impl Format {
 const STRIP_BYTES: usize = 64 * 1024;
 
 /// What the directory of a page records besides its strips.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PageMeta {
     width: u32,
     height: u32,
@@ -189,6 +190,8 @@ struct PageMeta {
     rows_per_strip: u32,
     /// Resolution in pixels per inch, as rationals.
     resolution: [(u32, u32); 2],
+    /// The ICC profile of the page's colour, tag 34675.
+    icc: Option<IccProfile>,
 }
 
 /// A page encoded into strips, waiting for its directory: encoded on its
@@ -213,7 +216,8 @@ impl TiffPage {
         compression: TiffCompression,
     ) -> Result<Self, EncodeError> {
         let (width, height) = image.size();
-        let mut encoder = TiffPageEncoder::new(width, height, image.layout(), dpi, compression)?;
+        let mut encoder =
+            TiffPageEncoder::new(width, height, image.layout(), dpi, compression, None)?;
         encoder.push(image)?;
         encoder.finish()
     }
@@ -238,19 +242,22 @@ pub struct TiffPageEncoder {
 impl TiffPageEncoder {
     /// An encoder of a `width × height` page stored as `layout`, at `dpi`
     /// (horizontal, vertical) pixels per inch, compressed with
-    /// `compression`.
+    /// `compression`, its colour tagged with `icc` (tag 34675,
+    /// `InterColorProfile`) when given.
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidInput`] for an empty page or a resolution
-    /// outside what a TIFF rational holds; [`EncodeError::UnsupportedMode`]
-    /// for CCITT compression of a page that is not bilevel.
+    /// [`EncodeError::InvalidInput`] for an empty page, a resolution
+    /// outside what a TIFF rational holds, or a profile of another colour
+    /// space than `layout`'s; [`EncodeError::UnsupportedMode`] for CCITT
+    /// compression of a page that is not bilevel.
     pub fn new(
         width: u32,
         height: u32,
         layout: RowLayout,
         dpi: (f64, f64),
         compression: TiffCompression,
+        icc: Option<&IccProfile>,
     ) -> Result<Self, EncodeError> {
         let rows = RowCount::new(width, height).map_err(|_| {
             EncodeError::InvalidInput(
@@ -267,6 +274,7 @@ impl TiffPageEncoder {
             ));
         }
         let resolution = [rational(dpi.0)?, rational(dpi.1)?];
+        icc::check(icc, layout)?;
         let row_bytes = layout.row_bytes(width);
         // A CCITT page is one strip, as the fax profile of TIFF (RFC 2306)
         // recommends; each strip would restart the coding's reference row.
@@ -304,6 +312,7 @@ impl TiffPageEncoder {
                 compression,
                 rows_per_strip,
                 resolution,
+                icc: icc.cloned(),
             },
             rows,
             layout,
@@ -598,7 +607,8 @@ impl<W: Write + Seek> StripFile<W> {
 impl<W: Write + Seek> TiffStream<W> {
     /// Begin a `width × height` page stored as `layout` at `dpi`
     /// (horizontal, vertical) pixels per inch, compressed with
-    /// `compression`, on `out` from its position: write the header.  The
+    /// `compression` and tagged with `icc` when given, on `out` from its
+    /// position: write the header.  The
     /// file is `BigTIFF` when the most its compressed strips can hold would
     /// pass the 4 GiB of classic TIFF.
     ///
@@ -612,8 +622,9 @@ impl<W: Write + Seek> TiffStream<W> {
         layout: RowLayout,
         dpi: (f64, f64),
         compression: TiffCompression,
+        icc: Option<&IccProfile>,
     ) -> Result<Self, EncodeError> {
-        let encoder = TiffPageEncoder::new(width, height, layout, dpi, compression)?;
+        let encoder = TiffPageEncoder::new(width, height, layout, dpi, compression, icc)?;
         let format = Format::for_len(encoder.file_bound());
         Self::with_format(out, encoder, format)
     }
@@ -669,7 +680,8 @@ impl<W: Write + Seek> TiffStream<W> {
     }
 }
 
-/// Write `image` as a one-page TIFF to `out`.
+/// Write `image` as a one-page TIFF to `out`, without an ICC profile
+/// ([`TiffStream`] writes the same file tagged with one).
 ///
 /// # Errors
 ///
@@ -795,6 +807,7 @@ struct Entry {
 const SHORT: u16 = 3;
 const LONG: u16 = 4;
 const RATIONAL: u16 = 5;
+const UNDEFINED: u16 = 7;
 const LONG8: u16 = 16;
 
 fn shorts(tag: u16, values: &[u16]) -> Entry {
@@ -875,6 +888,14 @@ fn entries(
     }
     if let Some((tag, options)) = page.compression.options_tag() {
         entries.push(longs(tag, &[options]));
+    }
+    if let Some(icc) = &page.icc {
+        entries.push(Entry {
+            tag: 34675,
+            kind: UNDEFINED,
+            count: u32::try_from(icc.bytes().len()).expect("an ICC profile's size is a u32"),
+            bytes: icc.bytes().to_vec(),
+        });
     }
     entries.sort_by_key(|e| e.tag);
     entries
@@ -1393,7 +1414,7 @@ mod tests {
                 (RowImage::Rgb(&c), RowLayout::Rgb, 21, 50),
             ] {
                 let encoder =
-                    TiffPageEncoder::new(w, h, layout, (150.0, 150.0), compression).unwrap();
+                    TiffPageEncoder::new(w, h, layout, (150.0, 150.0), compression, None).unwrap();
                 let mut stream =
                     TiffStream::with_format(Cursor::new(Vec::new()), encoder, Format::Big).unwrap();
                 stream.push(image).unwrap();
@@ -1437,7 +1458,7 @@ mod tests {
             } else {
                 RowLayout::Gray
             };
-            let bound = TiffPageEncoder::new(255, 64, layout, (72.0, 72.0), compression)
+            let bound = TiffPageEncoder::new(255, 64, layout, (72.0, 72.0), compression, None)
                 .unwrap()
                 .file_bound();
             let mut stream = TiffStream::new(
@@ -1446,6 +1467,7 @@ mod tests {
                 layout,
                 (72.0, 72.0),
                 compression,
+                None,
             )
             .unwrap();
             stream.push(RowImage::Gray(&noise)).unwrap();

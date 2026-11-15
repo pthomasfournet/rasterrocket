@@ -129,7 +129,7 @@ fn netpbm_bands_are_the_whole_image() {
 #[test]
 fn png_bands_are_the_whole_image() {
     let png = |color, images: &[RowImage<'_>]| {
-        let mut w = PngWriter::new(Vec::new(), (W, H), color).unwrap();
+        let mut w = PngWriter::new(Vec::new(), (W, H), color, None).unwrap();
         for &image in images {
             w.push(image).unwrap();
         }
@@ -174,6 +174,7 @@ fn streamed_tiff_is_the_whole_page() {
             layout,
             (150.0, 75.0),
             compression,
+            None,
         )
         .unwrap();
         for &image in images {
@@ -229,7 +230,7 @@ fn document(page: &PdfPage) -> Vec<u8> {
 
 /// The document of pages up to `depth` deep holding `page` alone.
 fn document_of(page: &PdfPage, depth: SampleDepth) -> Vec<u8> {
-    let mut writer = PdfWriter::new(Vec::new(), depth).unwrap();
+    let mut writer = PdfWriter::new(Vec::new(), depth, None).unwrap();
     writer.write_page(page).unwrap();
     writer.finish().unwrap()
 }
@@ -272,12 +273,13 @@ fn bands_that_do_not_continue_the_image_are_refused() {
         RowLayout::Gray,
         (72.0, 72.0),
         TiffCompression::Lzw,
+        None,
     )
     .unwrap();
     t.push(RowImage::Gray(&band(&g, 0, 50))).unwrap();
     assert!(t.finish().is_err(), "rows missing");
     assert!(
-        PngWriter::new(Vec::new(), (0, H), PngColor::Gray).is_err(),
+        PngWriter::new(Vec::new(), (0, H), PngColor::Gray, None).is_err(),
         "an empty image"
     );
 }
@@ -371,7 +373,7 @@ fn a_16_bit_netpbm_image_has_maxval_65535_and_big_endian_samples() {
 #[test]
 fn a_16_bit_png_decodes_to_its_samples() {
     let png = |color, images: &[RowImage<'_>]| {
-        let mut w = PngWriter::new(Vec::new(), (W, H), color).unwrap();
+        let mut w = PngWriter::new(Vec::new(), (W, H), color, None).unwrap();
         for &image in images {
             w.push(image).unwrap();
         }
@@ -413,6 +415,7 @@ fn a_16_bit_tiff_reads_back_as_its_samples() {
             layout,
             (300.0, 300.0),
             compression,
+            None,
         )
         .unwrap();
         for &image in images {
@@ -483,7 +486,7 @@ fn a_16_bit_pdf_page_is_pdf_1_5_of_16_bits_per_component() {
     )
     .unwrap();
     assert_eq!(data, be_samples(&c, false));
-    let mut eight = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
+    let mut eight = PdfWriter::new(Vec::new(), SampleDepth::Eight, None).unwrap();
     assert!(
         eight.write_page(&page).is_err(),
         "a 16-bit page in a PDF 1.4 file"
@@ -505,12 +508,12 @@ fn a_16_bit_pdf_page_is_pdf_1_5_of_16_bits_per_component() {
 #[test]
 fn bands_of_the_other_depth_are_refused() {
     let (c8, c16) = (rgb(false), rgb16(false));
-    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb16).unwrap();
+    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb16, None).unwrap();
     assert!(
         w.push(RowImage::Rgb(&c8)).is_err(),
         "8-bit rows into a 16-bit image"
     );
-    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb).unwrap();
+    let mut w = PngWriter::new(Vec::new(), (W, H), PngColor::Rgb, None).unwrap();
     assert!(
         w.push(RowImage::Rgb16(&c16)).is_err(),
         "16-bit rows into an 8-bit image"

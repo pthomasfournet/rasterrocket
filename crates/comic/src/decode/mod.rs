@@ -253,7 +253,7 @@ pub(crate) mod tests {
             }
         }
         let mut out = Vec::new();
-        encode::write_png(&bmp, &mut out).unwrap();
+        encode::write_png(&bmp, &mut out, None).unwrap();
         out
     }
 

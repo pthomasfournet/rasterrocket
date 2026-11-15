@@ -1,7 +1,11 @@
 //! Raster pages as a PDF: each page one 8- or 16-bit image,
 //! Flate-compressed, spanning a media box of the image's size at its
 //! resolution.  A file of 16-bit pages is PDF 1.5, the first version
-//! whose images take 16 bits per component.
+//! whose images take 16 bits per component.  A file tagged with an ICC
+//! profile holds it once, as object 3, and every page image's colour space
+//! is `[/ICCBased 3 0 R]`; the file's version is then at least the one
+//! that admits the profile's (PDF 1.7, Table 66: ICC 4.0 from PDF 1.5,
+//! 4.1 from 1.6, 4.2 from 1.7).
 //!
 //! The file is written as it goes: a page's image, content stream and page
 //! object when the page is added, the page tree, catalogue and
@@ -16,6 +20,7 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::EncodeError;
+use crate::icc::IccProfile;
 use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 use color::SampleDepth;
 
@@ -249,31 +254,66 @@ pub struct PdfWriter<W: Write> {
     pages: Vec<usize>,
     /// The deepest page image the file's version admits.
     depth: SampleDepth,
+    /// The colour channels of the profile every page image is tagged
+    /// with, object 3.
+    icc_channels: Option<u8>,
 }
 
 impl<W: Write> PdfWriter<W> {
-    /// Begin a PDF on `out` whose page images are at most `depth` deep:
-    /// write its header, of PDF 1.4 for 8-bit pages and of PDF 1.5 for
-    /// 16-bit ones.
+    /// Begin a PDF on `out` whose page images are at most `depth` deep
+    /// and, when `icc` is given, are all of its colour space and tagged
+    /// with it: write its header, of PDF 1.4 for 8-bit pages and of PDF
+    /// 1.5 for 16-bit ones, or later for the profile's version, and the
+    /// profile.
     ///
     /// # Errors
     ///
     /// [`EncodeError::Io`] on a write failure.
-    pub fn new(out: W, depth: SampleDepth) -> Result<Self, EncodeError> {
+    pub fn new(out: W, depth: SampleDepth, icc: Option<&IccProfile>) -> Result<Self, EncodeError> {
         let mut out = Counting { out, written: 0 };
-        let version: &[u8] = match depth {
-            SampleDepth::Eight => b"%PDF-1.4",
-            SampleDepth::Sixteen => b"%PDF-1.5",
+        let minor = match depth {
+            SampleDepth::Eight => 4,
+            SampleDepth::Sixteen => 5,
         };
-        out.write_all(version)?;
+        let minor = icc.map_or(minor, |icc| match icc.version() {
+            (4, 0) => minor.max(5),
+            (4, 1) => minor.max(6),
+            (4, _) => 7,
+            _ => minor,
+        });
+        write!(out, "%PDF-1.{minor}")?;
         out.write_all(b"\n%\xE2\xE3\xCF\xD3\n")?;
-        Ok(Self {
+        let mut writer = Self {
             out,
             // The catalogue and the page tree, placed when written.
             offsets: vec![0, 0],
             pages: Vec::new(),
             depth,
-        })
+            icc_channels: icc.map(IccProfile::channels),
+        };
+        if let Some(icc) = icc {
+            writer.write_profile(icc)?;
+        }
+        Ok(writer)
+    }
+
+    /// Write `icc` as object 3, Flate-compressed, its alternate space the
+    /// device space of its channels.
+    fn write_profile(&mut self, icc: &IccProfile) -> Result<(), EncodeError> {
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(icc.bytes())?;
+        let data = z.finish()?;
+        self.begin(3)?;
+        write!(
+            self.out,
+            "<</N {}/Alternate/{}/Filter/FlateDecode/Length {}>>\nstream\n",
+            icc.channels(),
+            device_space(icc.channels() == 3),
+            data.len()
+        )?;
+        self.out.write_all(&data)?;
+        self.out.write_all(b"\nendstream\nendobj\n")?;
+        Ok(())
     }
 
     /// Append `page`.
@@ -281,24 +321,33 @@ impl<W: Write> PdfWriter<W> {
     /// # Errors
     ///
     /// [`EncodeError::InvalidInput`] for a 16-bit page in a writer made for
-    /// 8-bit pages; [`EncodeError::Io`] on a write failure.
+    /// 8-bit pages, or a page of another colour space than the writer's
+    /// profile; [`EncodeError::Io`] on a write failure.
     pub fn write_page(&mut self, page: &PdfPage) -> Result<(), EncodeError> {
         if page.depth == SampleDepth::Sixteen && self.depth == SampleDepth::Eight {
             return Err(EncodeError::InvalidInput(
                 "a 16-bit page image needs a PDF 1.5 file: make the writer for 16-bit pages",
             ));
         }
+        let space = match self.icc_channels {
+            None => format!("/{}", device_space(page.rgb)),
+            Some(channels) if (channels == 3) == page.rgb => "[/ICCBased 3 0 R]".to_owned(),
+            Some(_) => {
+                return Err(EncodeError::InvalidInput(
+                    "a page image of another colour space than the PDF's ICC profile",
+                ));
+            }
+        };
         let image = self.offsets.len() + 1;
         let (w, h) = (fmt_num(page.size_pts.0), fmt_num(page.size_pts.1));
 
         self.begin(image)?;
         write!(
             self.out,
-            "<</Type/XObject/Subtype/Image/Width {}/Height {}/ColorSpace/{}\
+            "<</Type/XObject/Subtype/Image/Width {}/Height {}/ColorSpace{space}\
              /BitsPerComponent {}/Filter/FlateDecode/Length {}>>\nstream\n",
             page.width,
             page.height,
-            if page.rgb { "DeviceRGB" } else { "DeviceGray" },
             page.depth.bits(),
             page.data.len()
         )?;
@@ -395,6 +444,11 @@ impl std::fmt::Debug for PdfPage {
     }
 }
 
+/// The device colour space of an RGB image, or of a gray one.
+const fn device_space(rgb: bool) -> &'static str {
+    if rgb { "DeviceRGB" } else { "DeviceGray" }
+}
+
 /// A number as a PDF real: at most four decimals, trailing zeros dropped.
 fn fmt_num(v: f64) -> String {
     let s = format!("{v:.4}");
@@ -457,7 +511,7 @@ mod tests {
         // Letter at 100 dpi.
         let bmp = gray(850, 1100, |x, y| u8::try_from((x + y) % 256).unwrap());
         let page = PdfPage::encode(RowImage::Gray(&bmp), (100.0, 100.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight, None).unwrap();
         writer.write_page(&page).unwrap();
         let pdf = writer.finish().unwrap();
         let text = String::from_utf8_lossy(&pdf);
@@ -480,7 +534,7 @@ mod tests {
         let mut rgb: Bitmap<Rgb8> = Bitmap::new(3, 2, 4, false);
         rgb.row_bytes_mut(1)[..9].copy_from_slice(&[9; 9]);
         let page = PdfPage::encode(RowImage::Rgb(&rgb), (72.0, 144.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight, None).unwrap();
         writer.write_page(&page).unwrap();
         writer.write_page(&page).unwrap();
         let pdf = writer.finish().unwrap();
@@ -518,7 +572,7 @@ mod tests {
     #[test]
     fn offsets_past_ten_digits_are_refused() {
         let page = PdfPage::encode(RowImage::Gray(&gray(1, 1, |_, _| 0)), (72.0, 72.0)).unwrap();
-        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight).unwrap();
+        let mut writer = PdfWriter::new(Vec::new(), SampleDepth::Eight, None).unwrap();
         writer.out.written = super::MAX_XREF_OFFSET + 1;
         assert!(writer.write_page(&page).is_err());
     }
@@ -526,7 +580,7 @@ mod tests {
     #[test]
     fn empty_documents_images_and_resolutions_are_refused() {
         assert!(
-            PdfWriter::new(Vec::new(), SampleDepth::Eight)
+            PdfWriter::new(Vec::new(), SampleDepth::Eight, None)
                 .unwrap()
                 .finish()
                 .is_err()

@@ -6,6 +6,8 @@ use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
 use crate::EncodeError;
+use crate::icc::{self, IccProfile};
+use crate::rows::RowLayout;
 
 use jpeg_encoder::{ColorType, Encoder};
 
@@ -33,7 +35,8 @@ impl Default for JpegOptions {
     }
 }
 
-/// Encode a gray (`Gray8`/`Mono8`), `Rgb8` or `Bgr8` bitmap as JPEG into `out`.
+/// Encode a gray (`Gray8`/`Mono8`), `Rgb8` or `Bgr8` bitmap as JPEG into
+/// `out`, tagged with `icc` (`APP2` `ICC_PROFILE` segments) when given.
 ///
 /// Stride padding is excluded: only the live `width` pixels of each row
 /// are encoded.
@@ -43,18 +46,21 @@ impl Default for JpegOptions {
 /// - [`EncodeError::UnsupportedMode`] for other pixel modes.
 /// - [`EncodeError::InvalidInput`] for a zero-width or zero-height bitmap
 ///   (JPEG has no empty-image encoding), or when a dimension exceeds
-///   `u16::MAX` (the JPEG format ceiling, 65535 px/side).
+///   `u16::MAX` (the JPEG format ceiling, 65535 px/side), or for a profile
+///   of another colour space than the image's.
 /// - [`EncodeError::Io`] when writing or flushing `out` fails.
-/// - [`EncodeError::Jpeg`] on another encoder failure.
+/// - [`EncodeError::Jpeg`] on another encoder failure, a profile too large
+///   for the 255 segments it can span among them.
 pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     options: JpegOptions,
     mut out: W,
+    icc: Option<&IccProfile>,
 ) -> Result<(), EncodeError> {
-    let color = match P::MODE {
-        PixelMode::Mono8 => ColorType::Luma,
-        PixelMode::Rgb8 => ColorType::Rgb,
-        PixelMode::Bgr8 => ColorType::Bgr,
+    let (color, layout) = match P::MODE {
+        PixelMode::Mono8 => (ColorType::Luma, RowLayout::Gray),
+        PixelMode::Rgb8 => (ColorType::Rgb, RowLayout::Rgb),
+        PixelMode::Bgr8 => (ColorType::Bgr, RowLayout::Rgb),
         PixelMode::Mono1
         | PixelMode::Xbgr8
         | PixelMode::Cmyk8
@@ -77,7 +83,11 @@ pub fn write_jpeg<P: Pixel<Sample = u8>, W: Write>(
     let height = u16::try_from(bitmap.height)
         .map_err(|_| EncodeError::InvalidInput("height exceeds the JPEG limit of 65535 px"))?;
 
+    icc::check(icc, layout)?;
     let mut encoder = Encoder::new(&mut out, options.quality.clamp(1, 100));
+    if let Some(icc) = icc {
+        encoder.add_icc_profile(icc.bytes())?;
+    }
     encoder.set_progressive(options.progressive);
     encoder.set_optimized_huffman_tables(options.optimize);
     encoder.encode(&crate::live_bytes(bitmap), width, height, color)?;
@@ -108,6 +118,7 @@ pub fn jpeg_gray<P: Pixel<Sample = u8>>(
             ..JpegOptions::default()
         },
         &mut out,
+        None,
     )?;
     Ok(out)
 }
@@ -139,7 +150,7 @@ mod tests {
 
     fn encode(bmp: &Bitmap<Rgb8>, options: JpegOptions) -> Vec<u8> {
         let mut out = Vec::new();
-        write_jpeg(bmp, options, &mut out).expect("encodes");
+        write_jpeg(bmp, options, &mut out, None).expect("encodes");
         out
     }
 
@@ -179,7 +190,7 @@ mod tests {
     #[test]
     fn cmyk_bitmaps_are_refused() {
         let bmp: Bitmap<color::Cmyk8> = Bitmap::new(8, 1, 1, false);
-        let result = write_jpeg(&bmp, JpegOptions::default(), Vec::new());
+        let result = write_jpeg(&bmp, JpegOptions::default(), Vec::new(), None);
         assert!(matches!(result, Err(EncodeError::UnsupportedMode(_))));
     }
 
@@ -261,7 +272,7 @@ mod tests {
     #[test]
     fn a_failing_sink_is_an_io_error() {
         let bmp = make_gray_bitmap(16, 16, 200);
-        let result = write_jpeg(&bmp, JpegOptions::default(), Full);
+        let result = write_jpeg(&bmp, JpegOptions::default(), Full, None);
         assert!(
             matches!(&result, Err(EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::StorageFull),
             "{result:?}"

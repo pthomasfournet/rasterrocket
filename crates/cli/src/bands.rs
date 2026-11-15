@@ -136,7 +136,7 @@ impl FileWriter {
                     (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
                     (Model::Gray | Model::Mono, true) => PngColor::Gray16,
                 };
-                Self::Png(PngWriter::new(out, size, color)?)
+                Self::Png(PngWriter::new(out, size, color, None)?)
             }
             FileFormat::Tiff(compression) => {
                 let layout = match model {
@@ -151,6 +151,7 @@ impl FileWriter {
                     layout.at_depth(depth),
                     dpi,
                     compression,
+                    None,
                 )?)
             }
         })

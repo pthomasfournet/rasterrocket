@@ -8,6 +8,7 @@
 //! PNG is lossless and carries transparency; prefer it to PPM when the bitmap
 //! has an alpha plane.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::io::{self, Write};
 use std::rc::Rc;
@@ -16,10 +17,12 @@ use color::{Pixel, PixelMode};
 use raster::Bitmap;
 
 use crate::EncodeError;
+use crate::icc::{self, IccProfile};
 use crate::ppm::RgbSource;
 use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 
-/// Write `bitmap` to `out` as a PNG image.
+/// Write `bitmap` to `out` as a PNG image, tagged with `icc` (an `iCCP`
+/// chunk) when given.
 ///
 /// The sink `out` is consumed; wrap in `std::io::BufWriter` if buffering is
 /// needed.
@@ -32,30 +35,37 @@ use crate::rows::{ByteOrder, RowCount, RowImage, RowLayout};
 /// # Errors
 ///
 /// Returns [`EncodeError::UnsupportedMode`] for `Mono1` bitmaps, or when the
-/// pixel buffer size overflows `usize`.
+/// pixel buffer size overflows `usize`; [`EncodeError::InvalidInput`] for a
+/// profile of another colour space than the image's.
 /// Returns [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure.
 pub fn write_png<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     out: W,
+    icc: Option<&IccProfile>,
 ) -> Result<(), EncodeError> {
     if P::MODE == PixelMode::Mono8 {
-        return write_png_gray(bitmap, out);
+        icc::check(icc, RowLayout::Gray)?;
+        return write_png_gray(bitmap, out, icc);
     }
     let source = RgbSource::of(P::MODE).ok_or(EncodeError::UnsupportedMode(
         "1-bit bitmap: PNG output takes Mono8 or a colour mode",
     ))?;
-    write_png_rgb(bitmap, source, out)
+    icc::check(icc, RowLayout::Rgb)?;
+    write_png_rgb(bitmap, source, out, icc)
 }
 
-/// Build a configured [`png::Writer`] ready to accept image data.
+/// Build a configured [`png::Writer`] ready to accept image data, its
+/// header chunks written, `icc` among them as an `iCCP` chunk when given.
 fn png_encoder<W: Write>(
     out: W,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
     color: ::png::ColorType,
     depth: ::png::BitDepth,
+    icc: Option<&IccProfile>,
 ) -> Result<::png::Writer<W>, EncodeError> {
-    let mut encoder = ::png::Encoder::new(out, width, height);
+    let mut info = ::png::Info::with_size(width, height);
+    info.icc_profile = icc.map(|p| Cow::Owned(p.bytes().to_vec()));
+    let mut encoder = ::png::Encoder::with_info(out, info)?;
     encoder.set_color(color);
     encoder.set_depth(depth);
     // Deflate level 1 keeps encode time low across hundreds of pages.  Set
@@ -91,6 +101,7 @@ fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     source: RgbSource,
     out: W,
+    icc: Option<&IccProfile>,
 ) -> Result<(), EncodeError> {
     let w = bitmap.width as usize;
     let (channels, color_type) = if bitmap.has_alpha() {
@@ -109,10 +120,10 @@ fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
     }
     let mut writer = png_encoder(
         out,
-        bitmap.width,
-        bitmap.height,
+        (bitmap.width, bitmap.height),
         color_type,
         ::png::BitDepth::Eight,
+        icc,
     )?;
     writer.write_image_data(&buf)?;
     Ok(())
@@ -122,13 +133,14 @@ fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
 fn write_png_gray<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     out: W,
+    icc: Option<&IccProfile>,
 ) -> Result<(), EncodeError> {
     let mut writer = png_encoder(
         out,
-        bitmap.width,
-        bitmap.height,
+        (bitmap.width, bitmap.height),
         ::png::ColorType::Grayscale,
         ::png::BitDepth::Eight,
+        icc,
     )?;
     writer.write_image_data(&crate::live_bytes(bitmap))?;
     Ok(())
@@ -225,22 +237,29 @@ impl<W: Write> Write for Recording<W> {
 }
 
 impl<W: Write + 'static> PngWriter<W> {
-    /// Begin a `width × height` image of `color` on `out`: write the
-    /// header chunks.
+    /// Begin a `width × height` image of `color` on `out`, tagged with
+    /// `icc` when given: write the header chunks.
     ///
     /// # Errors
     ///
-    /// [`EncodeError::InvalidInput`] for an empty image;
-    /// [`EncodeError::Io`] or [`EncodeError::PngEncoder`] on failure.
-    pub fn new(out: W, (width, height): (u32, u32), color: PngColor) -> Result<Self, EncodeError> {
+    /// [`EncodeError::InvalidInput`] for an empty image or a profile of
+    /// another colour space than `color`'s; [`EncodeError::Io`] or
+    /// [`EncodeError::PngEncoder`] on failure.
+    pub fn new(
+        out: W,
+        (width, height): (u32, u32),
+        color: PngColor,
+        icc: Option<&IccProfile>,
+    ) -> Result<Self, EncodeError> {
         let rows = RowCount::new(width, height)?;
+        icc::check(icc, color.layout())?;
         let sink = Rc::new(RefCell::new(Sink { out, error: None }));
         let writer = png_encoder(
             Recording(Rc::clone(&sink)),
-            width,
-            height,
+            (width, height),
             color.color_type(),
             color.bit_depth(),
+            icc,
         )?;
         Ok(Self {
             stream: writer.into_stream_writer()?,
@@ -333,7 +352,7 @@ mod tests {
     fn rgb_png_roundtrip() {
         let bmp = make_rgb_bitmap(4, 2, [100, 150, 200]);
         let mut out = Vec::new();
-        write_png::<Rgb8, _>(&bmp, &mut out).unwrap();
+        write_png::<Rgb8, _>(&bmp, &mut out, None).unwrap();
 
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (4, 2));
@@ -347,7 +366,7 @@ mod tests {
     fn gray_png_roundtrip() {
         let bmp = make_gray_bitmap(3, 3, 77);
         let mut out = Vec::new();
-        write_png::<Gray8, _>(&bmp, &mut out).unwrap();
+        write_png::<Gray8, _>(&bmp, &mut out, None).unwrap();
 
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (3, 3));
@@ -365,7 +384,7 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        write_png::<Rgb8, _>(&bmp, &mut out).unwrap();
+        write_png::<Rgb8, _>(&bmp, &mut out, None).unwrap();
 
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (2, 1));
@@ -379,7 +398,7 @@ mod tests {
         // width=3 with pad=4 → stride=4 for Gray8.
         let bmp: Bitmap<Gray8> = Bitmap::new(3, 1, 4, false);
         let mut out = Vec::new();
-        write_png::<Gray8, _>(&bmp, &mut out).unwrap();
+        write_png::<Gray8, _>(&bmp, &mut out, None).unwrap();
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (3, 1));
         assert_eq!(
@@ -404,7 +423,7 @@ mod tests {
         alpha.copy_from_slice(&[200, 210, 220, 230]);
 
         let mut out = Vec::new();
-        write_png::<Rgb8, _>(&bmp, &mut out).unwrap();
+        write_png::<Rgb8, _>(&bmp, &mut out, None).unwrap();
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (2, 2));
         assert_eq!(pixels.len(), 16);
@@ -421,7 +440,7 @@ mod tests {
         bmp.row_bytes_mut(0)
             .copy_from_slice(&[0, 0, 0, 0, 10, 20, 30, 40]);
         let mut out = Vec::new();
-        write_png::<Cmyk8, _>(&bmp, &mut out).unwrap();
+        write_png::<Cmyk8, _>(&bmp, &mut out, None).unwrap();
         let (w, h, pixels) = decode_png(&out);
         assert_eq!((w, h), (2, 1));
         let mut want = vec![255, 255, 255];
