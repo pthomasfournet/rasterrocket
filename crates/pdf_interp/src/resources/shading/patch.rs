@@ -624,15 +624,12 @@ mod tests {
         assert_eq!(sink.finish().len(), 2);
     }
 
-    /// The subdivision tolerance is three levels of the pixels' samples:
-    /// at 8 bits the 8-bit threshold itself, at 16 bits 257 times finer.
+    /// The subdivision tolerance is three 8-bit levels at 8 bits and a
+    /// quarter of one 8-bit level at 16 bits.
     #[test]
-    fn the_tolerance_is_three_levels_of_the_depth() {
+    fn the_tolerance_follows_the_depth() {
         assert_eq!(color_delta::<u8>().to_bits(), (3.0f64 / 255.0).to_bits());
-        assert_eq!(
-            color_delta::<u16>().to_bits(),
-            (3.0f64 / 65_535.0).to_bits()
-        );
+        assert_eq!(color_delta::<u16>().to_bits(), (1.0f64 / 1020.0).to_bits());
     }
 
     /// A 64-pixel patch whose corners differ by twelve 8-bit levels stops

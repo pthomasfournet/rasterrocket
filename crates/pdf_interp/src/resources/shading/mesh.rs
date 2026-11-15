@@ -16,19 +16,26 @@ use color::Sample;
 
 use super::ShadingColour;
 
-/// Subdivision stops once every pair of corner colours differs by at most
-/// this many levels of the pixels' samples per component.
-const COLOR_LEVELS: f64 = 3.0;
+/// Subdivision tolerance on 8-bit canvases: three 8-bit levels.
+const COLOR_DELTA_8: f64 = 3.0 / 255.0;
 
-/// [`COLOR_LEVELS`] of samples of type `S`, on the `[0, 1]` scale of a
-/// normalised component: `3 / 255` at 8 bits, `3 / 65535` at 16.
+/// Subdivision tolerance on 16-bit canvases: a quarter of one 8-bit level
+/// (about 64 sixteen-bit levels).  The linear interpolation inside a
+/// triangle then deviates from the patch colour by less than the 8-bit
+/// quantum, while the triangle count of a patch grows about twelvefold over
+/// the 8-bit tolerance rather than reaching the per-patch subdivision limit.
+const COLOR_DELTA_16: f64 = 1.0 / 1020.0;
+
+/// Subdivision stops once every pair of corner colours differs by at most
+/// this much per component, on the `[0, 1]` scale of a normalised
+/// component: [`COLOR_DELTA_8`] for samples of up to 8 bits,
+/// [`COLOR_DELTA_16`] for wider ones.
 pub(super) fn color_delta<S: Sample>() -> f64 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the largest sample is below 2^16, exact in f64"
-    )]
-    let max = S::MAX.signed() as f64;
-    COLOR_LEVELS / max
+    if S::MAX.signed() > 255 {
+        COLOR_DELTA_16
+    } else {
+        COLOR_DELTA_8
+    }
 }
 
 /// Maximum subdivision depth of one mesh triangle.
