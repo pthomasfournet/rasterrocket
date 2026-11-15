@@ -289,10 +289,11 @@ fn unit_weight_at<S: Sample>(t: f64) -> i64 {
 /// `u8`, the model evaluated with 16-bit weights and corners for `u16`.
 #[must_use]
 pub fn cmyk_to_rgb_at<S: Sample>(c: S, m: S, y: S, k: S) -> [S; 3] {
-    match S::as_u8(&[c, m, y, k]) {
-        Some(&[c, m, y, k]) => cmyk_to_rgb(c, m, y, k).map(S::from_u8),
-        _ => from_weights_at([weight_at(c), weight_at(m), weight_at(y), weight_at(k)]),
-    }
+    S::by_depth(
+        [c, m, y, k],
+        |[c, m, y, k]| cmyk_to_rgb(c, m, y, k),
+        |w| from_weights_at(w.map(weight_at)),
+    )
 }
 
 /// [`cmyk_f64_to_rgb`] at the depth of `S`: the 8-bit conversion itself for

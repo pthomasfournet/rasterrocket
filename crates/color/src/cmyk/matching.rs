@@ -117,10 +117,11 @@ pub fn ink_reproducing(rgb: [u8; 3], given: [f64; 4]) -> [u8; 4] {
 /// quantised to 16 bits.
 #[must_use]
 pub fn ink_reproducing_at<S: Sample>(rgb: [S; 3], given: [f64; 4]) -> [S; 4] {
-    match S::as_u8(&rgb) {
-        Some(&[r, g, b]) => ink_reproducing([r, g, b], given).map(S::from_u8),
-        _ => reproduce(rgb.map(|v| v.to_unit() * 255.0), given).map(S::from_unit),
-    }
+    S::by_depth(
+        rgb,
+        |rgb| ink_reproducing(rgb, given),
+        |rgb| reproduce(rgb.map(|v| v.to_unit() * 255.0), given).map(u16::from_unit),
+    )
 }
 
 /// The `[0, 1]` inks of [`ink_reproducing`] for the colour `target`, on

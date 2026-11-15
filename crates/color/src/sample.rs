@@ -184,6 +184,16 @@ pub trait Sample:
     /// otherwise.
     fn from_u16_slice(s: &[u16]) -> Option<&[Self]>;
 
+    /// The samples `v` mapped by the function of this sample's depth:
+    /// `narrow` for `u8`, `wide` for `u16`.  A conversion defined at each
+    /// depth by its own function is written once over the sample through
+    /// this.
+    fn by_depth<const N: usize, const M: usize>(
+        v: [Self; N],
+        narrow: impl FnOnce([u8; N]) -> [u8; M],
+        wide: impl FnOnce([u16; N]) -> [u16; M],
+    ) -> [Self; M];
+
     /// The sample of type `T` on this sample's scale: the value itself at
     /// the same depth, else its nearest 8-bit value ([`Self::to_u8`]) on
     /// this scale, which is exact when widening.
@@ -325,6 +335,15 @@ impl Sample for u8 {
     }
 
     #[inline]
+    fn by_depth<const N: usize, const M: usize>(
+        v: [Self; N],
+        narrow: impl FnOnce([Self; N]) -> [Self; M],
+        _wide: impl FnOnce([u16; N]) -> [u16; M],
+    ) -> [Self; M] {
+        narrow(v)
+    }
+
+    #[inline]
     fn from_u16_slice(_: &[u16]) -> Option<&[Self]> {
         None
     }
@@ -441,6 +460,15 @@ impl Sample for u16 {
     }
 
     #[inline]
+    fn by_depth<const N: usize, const M: usize>(
+        v: [Self; N],
+        _narrow: impl FnOnce([u8; N]) -> [u8; M],
+        wide: impl FnOnce([Self; N]) -> [Self; M],
+    ) -> [Self; M] {
+        wide(v)
+    }
+
+    #[inline]
     fn from_u16_slice(s: &[u16]) -> Option<&[Self]> {
         Some(s)
     }
@@ -469,6 +497,15 @@ mod tests {
             let exact = (2 * x + max) / (2 * max);
             assert_eq!(u64::from(<u16 as Sample>::div_max(x)), exact, "x={x}");
         }
+    }
+
+    /// Each depth takes its own function.
+    #[test]
+    fn by_depth_takes_the_function_of_the_depth() {
+        let narrow = |[v]: [u8; 1]| [v, v / 2];
+        let wide = |[v]: [u16; 1]| [v, v / 4];
+        assert_eq!(u8::by_depth([200], narrow, wide), [200, 100]);
+        assert_eq!(u16::by_depth([200], narrow, wide), [200, 50]);
     }
 
     #[test]

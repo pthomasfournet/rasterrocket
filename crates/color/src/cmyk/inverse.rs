@@ -619,12 +619,7 @@ pub fn rgb_to_ink16(rgb: [u16; 3]) -> [u16; 4] {
 /// [`rgb_to_ink16`] for `u16`.
 #[must_use]
 pub fn rgb_to_ink_at<S: Sample>(rgb: [S; 3]) -> [S; 4] {
-    if let Some(&[r, g, b]) = S::as_u8(&rgb) {
-        return rgb_to_ink([r, g, b]).map(S::from_u8);
-    }
-    let wide: [u16; 3] = std::array::from_fn(|i| S::as_u16(&rgb).map_or(0, |w| w[i]));
-    let ink = rgb_to_ink16(wide);
-    std::array::from_fn(|i| S::from_u16_slice(&ink).map_or(S::ZERO, |s| s[i]))
+    S::by_depth(rgb, rgb_to_ink, rgb_to_ink16)
 }
 
 /// The trilinear interpolation of the inverse table's eight nodes around
