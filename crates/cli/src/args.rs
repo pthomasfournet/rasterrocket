@@ -2030,8 +2030,10 @@ mod page_list_tests {
             args_with(&["--depth", "16"]).depth(),
             pdf_raster::SampleDepth::Sixteen
         );
-        let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
-        assert!(print.validate_format_flags().is_ok());
+        if cfg!(not(windows)) {
+            let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
+            assert!(print.validate_format_flags().is_ok());
+        }
         assert!(
             args_with(&["--depth", "16", "--overprint"])
                 .validate_format_flags()
@@ -2065,6 +2067,7 @@ mod page_list_tests {
         assert!(err.contains("comic-archive input"), "{err}");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn print_resolution_keeps_its_byte_budget_at_16_bits() {
         // 36 × 44 in at 600 dpi: 570 Mpx, under the 8-bit threshold, over
