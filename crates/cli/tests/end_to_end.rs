@@ -17,6 +17,7 @@ extern crate pdf_raster as rasterrocket;
 )]
 mod common;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -1636,6 +1637,166 @@ fn deskew_straightens_gray_pages_and_refuses_colour() {
         &["--deskew", "--gray", "--depth", "16", "--png"],
     ] {
         let mut args = vec!["-r", "72", "-l", "1"];
+        args.extend_from_slice(flags);
+        assert_success(&rrocket(dir.path(), &input, &args));
+    }
+}
+
+/// A born-digital letter page: lines of Helvetica text on white paper.
+fn letter_text_pdf() -> Vec<u8> {
+    let mut lines = String::new();
+    for line in 0..30 {
+        let _ = write!(
+            lines,
+            "BT /F1 11 Tf 72 {} Td (Line {line}: the quick brown fox jumps over the lazy dog.) Tj ET ",
+            720 - line * 20
+        );
+    }
+    with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+           /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", lines.as_bytes()),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ])
+}
+
+/// A page as a scanner delivers it, 300 × 400 pt: paper lit from the left,
+/// its gray falling from 0.92 to 0.45 across the page, bars of dark text,
+/// and a strip of dark scanner bed 12 pt wide along the left edge.
+fn uneven_scan_pdf() -> Vec<u8> {
+    let mut paper = String::new();
+    for i in 0..60 {
+        let gray = 0.47f64.mul_add(-f64::from(i) / 59.0, 0.92);
+        let _ = write!(paper, "{gray:.4} g {} 0 5 400 re f ", i * 5);
+    }
+    let text: String = (0..14)
+        .flat_map(|line| {
+            (0..5).map(move |word| format!("{} {} 38 7 re ", 40 + word * 48, 330 - line * 20))
+        })
+        .collect();
+    let content = format!("{paper}0.05 g {text}f 0.08 g 0 0 12 400 re f");
+    with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>".to_vec(),
+        stream_object("", content.as_bytes()),
+    ])
+}
+
+/// `--clean-borders` and `--clean-background` leave a born-digital page
+/// byte-identical, in gray, colour and bilevel output.
+#[test]
+fn ocr_prep_leaves_born_digital_pages_as_they_are() {
+    let (dir, input) = workdir(&letter_text_pdf());
+    let file = |extra: &[&str], name: &str| {
+        let mut args = vec!["-r", "150"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        std::fs::read(dir.path().join(name)).expect("read output")
+    };
+    for (output, name) in [
+        (&["--gray"][..], "out-1.pgm"),
+        (&[], "out-1.ppm"),
+        (&["--mono"], "out-1.pbm"),
+    ] {
+        let plain = file(output, name);
+        for flags in [
+            &["--clean-borders"][..],
+            &["--clean-background"],
+            &["--clean-borders", "--clean-background"],
+        ] {
+            let with = file(&[output, flags].concat(), name);
+            assert!(with == plain, "{output:?} {flags:?} changed the page");
+        }
+    }
+}
+
+/// On an unevenly lit scan, `--clean-borders` whitens the scanner bed,
+/// `--clean-background` whitens the dim paper, and `--threshold sauvola`
+/// keeps dim paper white where the fixed threshold blackens it.
+#[test]
+fn ocr_prep_cleans_an_uneven_scan() {
+    let (dir, input) = workdir(&uneven_scan_pdf());
+    let page = |extra: &[&str]| {
+        let mut args = vec!["-r", "150"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        let name = if extra.contains(&"--mono") {
+            "out-1.pbm"
+        } else {
+            "out-1.pgm"
+        };
+        read_pnm(&dir.path().join(name))
+    };
+    let at = |p: &(String, u32, u32, Vec<u8>), x: u32, y: u32| p.3[(y * p.1 + x) as usize];
+    let plain = page(&["--gray"]);
+    // Pixel (10, 10) is scanner bed; (590, 10) is the dimmest paper.
+    assert!(at(&plain, 10, 10) < 64 && at(&plain, 590, 10) < 128);
+    let borders = page(&["--gray", "--clean-borders"]);
+    assert_eq!(at(&borders, 10, 10), 255);
+    assert_eq!(at(&borders, 590, 10), at(&plain, 590, 10));
+    let both = page(&["--gray", "--clean-borders", "--clean-background"]);
+    assert_eq!(at(&both, 590, 10), 255);
+
+    let is_black = |p: &(String, u32, u32, Vec<u8>), x: u32, y: u32| {
+        p.3[(y * p.1.div_ceil(8) + x / 8) as usize] & (0x80 >> (x % 8)) != 0
+    };
+    let (fixed, sauvola) = (
+        page(&["--mono"]),
+        page(&["--mono", "--threshold", "sauvola"]),
+    );
+    assert!(is_black(&fixed, 590, 10) && !is_black(&sauvola, 590, 10));
+    // Text stays black: (100, 133) lies in the first line's first word.
+    assert!(is_black(&fixed, 100, 133) && is_black(&sauvola, 100, 133));
+}
+
+/// The OCR-preparation flags are refused where they cannot apply.
+#[test]
+fn ocr_prep_flags_are_refused_where_they_cannot_apply() {
+    for (flags, needle) in [
+        (&["--threshold", "sauvola"][..], "bilevel output only"),
+        (&["--threshold", "sauvola", "--gray"], "add --mono or --fax"),
+        (
+            &["--threshold", "sauvola", "--mono", "--dither", "halftone"],
+            "drop one",
+        ),
+        (
+            &["--clean-borders", "--cmyk", "--tiff"],
+            "--cmyk is refused with --clean-borders",
+        ),
+        (
+            &["--clean-background", "--cmyk", "--tiff"],
+            "--cmyk is refused with --clean-background",
+        ),
+        (
+            &["--clean-borders", "--transparent", "--png"],
+            "drop --clean-borders",
+        ),
+        (
+            &["--clean-background", "--transparent", "--png"],
+            "drop --clean-background",
+        ),
+    ] {
+        let (dir, input) = workdir(&two_page_pdf());
+        let out = rrocket(dir.path(), &input, flags);
+        assert!(!out.status.success(), "{flags:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{flags:?}: {stderr}");
+        assert_eq!(outputs(dir.path()), Vec::<String>::new(), "{flags:?}");
+    }
+    let (dir, input) = workdir(&two_page_pdf());
+    for flags in [
+        &["--threshold", "sauvola", "--fax"][..],
+        &[
+            "--clean-background",
+            "--clean-borders",
+            "--gray",
+            "--depth",
+            "16",
+            "--png",
+        ],
+        &["--clean-background", "--clean-borders", "--fax"],
+    ] {
+        let mut args = vec!["-l", "1"];
         args.extend_from_slice(flags);
         assert_success(&rrocket(dir.path(), &input, &args));
     }

@@ -215,7 +215,8 @@ pub(crate) struct Args {
     /// --output-profile, else as ISO 32000 §10.4.2 converts them (gray is
     /// black ink alone).  Overprint is simulated with --overprint.  Not
     /// with PNG, PPM, --print, --fax, --mono, --gray, --transparent,
-    /// --invert, the camera cleanup flags, --gpu-pages or comic input.
+    /// --invert, the camera cleanup flags, --deskew, --clean-borders,
+    /// --clean-background, --gpu-pages or comic input.
     #[arg(long)]
     pub cmyk: bool,
 
@@ -495,8 +496,9 @@ pub(crate) struct Args {
     /// (default 64; 1 to 65536).  A page larger than one band renders in
     /// horizontal bands written to the output as each completes, so memory
     /// holds one band per worker thread, not the page; PPM, PNG, TIFF and
-    /// --print output stream.  JPEG output, --fax, --invert auto, --deskew
-    /// and the camera stages need the whole page and render it in one band.
+    /// --print output stream.  JPEG output, --fax, --invert auto, --deskew,
+    /// --clean-borders, --clean-background, --threshold sauvola and the
+    /// camera stages need the whole page and render it in one band.
     #[arg(long = "band-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_BAND_MIB))]
     pub band_mib: Option<u64>,
 
@@ -618,6 +620,37 @@ pub(crate) struct Args {
     /// detected as spreads keep their usual name.
     #[arg(long = "split-spreads")]
     pub split_spreads: bool,
+
+    // ── OCR preparation ─────────────────────────────────────────────────────
+    /// Whiten the dark strips a scanner leaves along the page edges: dark
+    /// regions joined to the edge and lying within 6% of the shorter side
+    /// of it.  The page keeps its size.
+    ///
+    /// Pages without such regions (born-digital pages, pages on a dark
+    /// ground) are written unchanged.
+    #[arg(long = "clean-borders")]
+    pub clean_borders: bool,
+
+    /// Make the paper white under uneven lighting; ink keeps its tone
+    /// relative to the paper around it.
+    ///
+    /// Pages whose background is already white (born-digital pages) are
+    /// written unchanged.  A light photograph loses its gradual shading
+    /// and a paper tint survives in colour: meant for scans.
+    #[arg(long = "clean-background")]
+    pub clean_background: bool,
+
+    /// How --mono and --fax choose black: `fixed` (default), luma below
+    /// 128, or `sauvola`, a threshold from the mean and spread of the
+    /// 0.33-inch square around each pixel, which follows paper whose
+    /// brightness varies across the page.  Not with --dither halftone.
+    #[arg(
+        long = "threshold",
+        value_name = "METHOD",
+        value_enum,
+        default_value = "fixed"
+    )]
+    pub threshold: ThresholdArg,
 
     /// Prefetch image `XObject`s into the device-resident image cache at
     /// session open.  Has no effect on a session without an image cache,
@@ -745,6 +778,15 @@ pub(crate) enum DitherArg {
     None,
     /// Halftone screen.
     Halftone,
+}
+
+/// `--threshold` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ThresholdArg {
+    /// Luma below 128 is black.
+    Fixed,
+    /// Sauvola's local threshold.
+    Sauvola,
 }
 
 /// `--invert` argument value.
@@ -907,6 +949,7 @@ impl Args {
         self.validate_fax_flags()?;
         self.validate_print_flags()?;
         self.validate_deskew_flags()?;
+        self.validate_threshold_flags()?;
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
@@ -1000,6 +1043,8 @@ impl Args {
             (self.split_spreads, "--split-spreads", camera),
             (self.dewarp, "--dewarp", camera),
             (self.deskew, "--deskew", "it straightens gray pages"),
+            (self.clean_borders, "--clean-borders", colour),
+            (self.clean_background, "--clean-background", colour),
             (
                 self.gpu_pages,
                 "--gpu-pages",
@@ -1075,6 +1120,8 @@ impl Args {
             (self.dewarp, "--dewarp"),
             (self.split_spreads, "--split-spreads"),
             (self.deskew, "--deskew"),
+            (self.clean_borders, "--clean-borders"),
+            (self.clean_background, "--clean-background"),
             (self.faxing(), "--fax"),
             (self.printing(), "--print"),
         ];
@@ -1234,6 +1281,48 @@ impl Args {
             );
         }
         Ok(())
+    }
+
+    /// Refuse `--threshold sauvola` without bilevel output and with
+    /// `--dither halftone`, which chooses black by its screen.
+    fn validate_threshold_flags(&self) -> Result<(), String> {
+        if self.threshold == ThresholdArg::Fixed {
+            return Ok(());
+        }
+        if !(self.mono || self.faxing()) {
+            return Err(
+                "--threshold sauvola applies to bilevel output only: add --mono or --fax, \
+                 or drop --threshold"
+                    .to_owned(),
+            );
+        }
+        if self.dither == DitherArg::Halftone {
+            return Err(
+                "--threshold sauvola and --dither halftone both choose which pixels are black; \
+                 drop one"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The resolution, in dots per inch, that sizes the OCR-preparation
+    /// windows of a `width × height` page: the smaller of the output
+    /// resolutions, or for comic input, whose pages carry none, the long
+    /// side over 11 inches.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the value is clamped to [1, u32::MAX] before the cast"
+    )]
+    pub(crate) fn ocr_dpi(&self, width: u32, height: u32) -> u32 {
+        if self.is_comic_input() {
+            return (width.max(height) / 11).max(1);
+        }
+        self.x_dpi()
+            .min(self.y_dpi())
+            .round()
+            .clamp(1.0, f64::from(u32::MAX)) as u32
     }
 
     /// Whether a fax document is written: `--fax`, or `--fax-to`, which
@@ -1797,6 +1886,19 @@ mod page_list_tests {
         args.single_file = true;
         let (pages, _) = args.build_page_list(10).unwrap();
         assert_eq!(pages, vec![1]);
+    }
+
+    #[test]
+    fn ocr_windows_follow_the_resolution_or_the_comic_page_size() {
+        assert_eq!(args_with(&["-r", "300"]).ocr_dpi(2550, 3300), 300);
+        assert_eq!(
+            args_with(&["--rx", "200", "--ry", "100"]).ocr_dpi(10, 10),
+            100
+        );
+        assert_eq!(args_with(&[]).ocr_dpi(10, 10), 150);
+        let comic = Args::parse_from(["rrocket", "book.cbz", "out"]);
+        assert_eq!(comic.ocr_dpi(2200, 3300), 300);
+        assert_eq!(comic.ocr_dpi(5, 3), 1);
     }
 
     #[test]

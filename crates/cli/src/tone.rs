@@ -7,8 +7,9 @@ use encode::BLACK_BELOW;
 use pdf_raster::{rgb_to_gray, rgb16_to_gray16};
 use raster::{Bitmap, HalftoneScreen, ScreenParams};
 
-use crate::args::{Args, InvertWhen};
-use crate::cleanup::Page;
+use crate::args::{Args, InvertWhen, ThresholdArg};
+use crate::cleanup::{Page, gray_bitmap, view};
+use crate::render::RenderError;
 
 /// A page is reversed out when more than `GROUND_NUMERATOR /
 /// GROUND_DENOMINATOR` of its pixels share one dark tone band: a luma range
@@ -26,8 +27,12 @@ const GROUND_BAND: usize = 32;
 /// `page` made ready for encoding under `args`: in the colour model of the
 /// output (luma for `--gray` and `--mono`, colour otherwise), inverted as
 /// `--invert` selects, and for `--mono` reduced to two levels (see
-/// [`two_levels`]).
-pub(crate) fn prepare(page: Page, args: &Args) -> Page {
+/// [`two_levels`], and [`sauvola_levels`] under `--threshold sauvola`).
+///
+/// # Errors
+///
+/// The Sauvola binarisation refused the page.
+pub(crate) fn prepare(page: Page, args: &Args) -> Result<Page, RenderError> {
     let page = if args.luma_output() {
         page.into_luma_model()
     } else {
@@ -43,7 +48,17 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
             Page::Gray16(luma) => is_reversed_out(luma),
         },
     };
-    finish(page, invert, args, 0)
+    if args.mono && args.threshold == ThresholdArg::Sauvola {
+        return sauvola_levels(&inverted(page, invert).into_luma(), args).map(Page::Mono);
+    }
+    Ok(finish(page, invert, args, 0))
+}
+
+/// `luma` reduced to two levels by Sauvola's local threshold, its window
+/// sized for the page's resolution ([`Args::ocr_dpi`]).
+fn sauvola_levels(luma: &Bitmap<Gray8>, args: &Args) -> Result<Bitmap<Gray8>, RenderError> {
+    let method = camera::Threshold::sauvola_at(args.ocr_dpi(luma.width, luma.height));
+    gray_bitmap(&camera::binarize(view(luma), method)?)
 }
 
 /// [`prepare`] for `band`, the rows of a page from row `y0` on, inverted
@@ -125,7 +140,17 @@ fn copy_of<P: Pixel>(band: &Bitmap<P>) -> Bitmap<P> {
 
 /// `page`, in the output's colour model, inverted when `invert`, and for
 /// `--mono` reduced to two levels as rows from `y0` of the page.
-fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
+fn finish(page: Page, invert: bool, args: &Args, y0: u32) -> Page {
+    let page = inverted(page, invert);
+    if args.mono {
+        Page::Mono(two_levels(page.into_luma(), args.screen(), y0))
+    } else {
+        page
+    }
+}
+
+/// `page`, complemented when `invert`.
+fn inverted(mut page: Page, invert: bool) -> Page {
     if invert {
         match &mut page {
             Page::Rgb(rgb) => complement(rgb),
@@ -134,11 +159,7 @@ fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
             Page::Gray16(luma) => complement(luma),
         }
     }
-    if args.mono {
-        Page::Mono(two_levels(page.into_luma(), args.screen(), y0))
-    } else {
-        page
-    }
+    page
 }
 
 /// Whether `luma` is light content on a flat dark ground: see
@@ -212,7 +233,7 @@ mod tests {
     use color::{Gray8, Rgb8};
     use raster::Bitmap;
 
-    use super::{prepare, two_levels};
+    use super::two_levels;
     use crate::args::args_with as args;
     use crate::cleanup::Page;
 
@@ -252,6 +273,10 @@ mod tests {
     }
 
     /// A gray page of ten pixels, `dark` of them black and the rest white.
+    fn prepare(page: Page, args: &crate::args::Args) -> Page {
+        super::prepare(page, args).expect("the page is prepared")
+    }
+
     fn page(dark: usize) -> Page {
         let mut gray: Bitmap<Gray8> = Bitmap::new(10, 1, 4, false);
         for (i, px) in gray.row_bytes_mut(0)[..10].iter_mut().enumerate() {

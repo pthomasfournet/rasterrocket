@@ -7,6 +7,7 @@ mod deliver;
 mod diagnostics;
 mod fax;
 mod naming;
+mod ocr_prep;
 mod print;
 mod ram;
 mod render;

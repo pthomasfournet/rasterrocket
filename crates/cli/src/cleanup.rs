@@ -235,7 +235,7 @@ fn changed(report: &Report) -> bool {
         || report.dewarp.iter().any(Outcome::applied)
 }
 
-fn view(bmp: &Bitmap<Gray8>) -> GrayView<'_> {
+pub(crate) fn view(bmp: &Bitmap<Gray8>) -> GrayView<'_> {
     GrayView {
         data: bmp.data(),
         width: bmp.width as usize,
@@ -245,7 +245,7 @@ fn view(bmp: &Bitmap<Gray8>) -> GrayView<'_> {
 }
 
 /// The samples of `luma`'s rows, packed.
-fn packed_samples<G: Pixel>(luma: &Bitmap<G>) -> Vec<G::Sample> {
+pub(crate) fn packed_samples<G: Pixel>(luma: &Bitmap<G>) -> Vec<G::Sample> {
     let w = luma.width as usize * G::NCOMPS;
     let mut samples = Vec::with_capacity(w * luma.height as usize);
     for y in 0..luma.height {
@@ -255,7 +255,7 @@ fn packed_samples<G: Pixel>(luma: &Bitmap<G>) -> Vec<G::Sample> {
 }
 
 /// The R, G and B planes of `rgb`, each tightly packed.
-fn split_channels<C: Pixel>(rgb: &Bitmap<C>) -> [Vec<C::Sample>; 3] {
+pub(crate) fn split_channels<C: Pixel>(rgb: &Bitmap<C>) -> [Vec<C::Sample>; 3] {
     let w = rgb.width as usize;
     let n = w * rgb.height as usize;
     let mut planes = [
@@ -287,7 +287,7 @@ fn dims<S: camera::Sample>(page: &GrayPage<S>) -> Result<(u32, u32), RenderError
     ))
 }
 
-fn gray_bitmap<G: Pixel>(page: &GrayPage<G::Sample>) -> Result<Bitmap<G>, RenderError>
+pub(crate) fn gray_bitmap<G: Pixel>(page: &GrayPage<G::Sample>) -> Result<Bitmap<G>, RenderError>
 where
     G::Sample: camera::Sample,
 {
@@ -300,7 +300,7 @@ where
 }
 
 /// Interleave three same-sized planes into an RGB bitmap.
-fn rgb_bitmap<C: Pixel>(
+pub(crate) fn rgb_bitmap<C: Pixel>(
     red: &GrayPage<C::Sample>,
     green: &GrayPage<C::Sample>,
     blue: &GrayPage<C::Sample>,
@@ -450,7 +450,7 @@ mod tests {
                         Page::Gray(g) | Page::Mono(g) => Page::Gray(gray_copy(g)),
                         _ => unreachable!("8-bit pages"),
                     };
-                    let out = crate::tone::prepare(copy, &crate::args::args_with(argv));
+                    let out = crate::tone::prepare(copy, &crate::args::args_with(argv)).unwrap();
                     let bytes: Vec<u8> = match &out {
                         Page::Rgb(rgb) => (0..rgb.height)
                             .flat_map(|y| rgb.row_bytes(y)[..rgb.width as usize * 3].to_vec())

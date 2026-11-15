@@ -19,7 +19,7 @@ use crate::fax::{self, FaxDocument};
 use crate::naming::output_path_with_prefix;
 use crate::print::PageSink;
 use crate::ram::SpillPolicy;
-use crate::tone;
+use crate::{ocr_prep, tone};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -271,8 +271,9 @@ pub(crate) enum Sink<'a> {
 }
 
 /// Run the camera stages selected on the command line on `page` (see
-/// [`cleanup::clean`]), deskew under `--deskew` (see [`cleanup::deskewed`])
-/// and the tone operations (see [`tone::prepare`]),
+/// [`cleanup::clean`]), deskew under `--deskew` (see [`cleanup::deskewed`]),
+/// the OCR preparation of `--clean-borders` and `--clean-background` (see
+/// [`ocr_prep::prepare`]) and the tone operations (see [`tone::prepare`]),
 /// then hand each resulting page, one or the `a`/`b` halves of a split
 /// spread, to `sink`: a file each (see [`output_path_with_prefix`]), the
 /// fax document or the print job.
@@ -292,7 +293,8 @@ pub(crate) fn write_cleaned(
         } else {
             page
         };
-        let page = tone::prepare(page, args);
+        let page = ocr_prep::prepare(page, args)?;
+        let page = tone::prepare(page, args)?;
         let (spill, format) = match sink {
             Sink::Files { spill, format } => (spill, format),
             Sink::Fax { document, turn } => {
