@@ -507,6 +507,25 @@ impl<P: Pixel> Bitmap<P> {
             _marker: PhantomData,
         }
     }
+
+    /// The bitmap's pixels with every sample on the scale of `Q`'s samples
+    /// ([`Sample::from_sample`]): the same values at the same depth,
+    /// widened exactly from 8 bits, narrowed to the nearest 8-bit level.
+    /// Packed, without the alpha plane.  `Q` has the components of `P`.
+    #[must_use]
+    pub fn converted<Q: Pixel>(&self) -> Bitmap<Q> {
+        const { assert!(P::NCOMPS == Q::NCOMPS, "a conversion keeps the components") };
+        let live = u32_to_usize(self.width) * P::NCOMPS;
+        let mut data = Vec::with_capacity(live * u32_to_usize(self.height));
+        for y in 0..self.height {
+            data.extend(
+                self.row_samples(y)[..live]
+                    .iter()
+                    .map(|&v| Q::Sample::from_sample(v)),
+            );
+        }
+        Bitmap::from_packed(self.width, self.height, data)
+    }
 }
 
 // ── Row interleaving ──────────────────────────────────────────────────────────
@@ -679,5 +698,21 @@ mod tests {
         let mut short = [0; 4];
         interleave_rgba(&rgb, Some(&[7, 8]), &mut short);
         assert_eq!(short, [1, 2, 3, 7]);
+    }
+
+    #[test]
+    fn conversion_widens_exactly_and_narrows_to_the_nearest_level() {
+        use color::{Gray8, Gray16};
+        let mut eight = Bitmap::<Gray8>::new(3, 2, 4, true);
+        eight.row_samples_mut(0)[..3].copy_from_slice(&[0, 1, 255]);
+        eight.row_samples_mut(1)[..3].copy_from_slice(&[128, 7, 9]);
+        let wide: Bitmap<Gray16> = eight.converted();
+        assert_eq!((wide.width, wide.height, wide.stride), (3, 2, 3));
+        assert!(wide.alpha_plane().is_none());
+        assert_eq!(wide.data(), [0, 257, 65_535, 32_896, 1799, 2313]);
+        let back: Bitmap<Gray8> = wide.converted();
+        assert_eq!(back.data(), [0, 1, 255, 128, 7, 9]);
+        let narrow: Bitmap<Gray8> = Bitmap::<Gray16>::from_packed(2, 1, vec![128, 129]).converted();
+        assert_eq!(narrow.data(), [0, 1]);
     }
 }

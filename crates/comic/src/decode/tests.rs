@@ -1,7 +1,7 @@
 //! Tests of the decode front door and the codecs it dispatches to.
 
 use super::*;
-use color::{Gray8, Rgb8};
+use color::{Gray8, Rgb8, Sample};
 use raster::Bitmap;
 
 /// The 8-bit page `page` of `bytes` decoded for `target`, of 8 bits.

@@ -17,7 +17,7 @@ mod png;
 mod tiff;
 mod webp;
 
-use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, Sample, SampleDepth};
+use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
 /// The most samples (pixels × channels, every plane and frame counted) a
@@ -82,26 +82,11 @@ impl PageImage {
     /// nearest 8-bit level.
     fn at(self, depth: SampleDepth) -> Self {
         match (self, depth) {
-            (Self::Eight(g), SampleDepth::Sixteen) => Self::Sixteen(resampled(&g)),
-            (Self::Sixteen(g), SampleDepth::Eight) => Self::Eight(resampled(&g)),
+            (Self::Eight(g), SampleDepth::Sixteen) => Self::Sixteen(g.converted()),
+            (Self::Sixteen(g), SampleDepth::Eight) => Self::Eight(g.converted()),
             (page, _) => page,
         }
     }
-}
-
-/// The packed bitmap of `src`'s samples on the scale of `Q`'s samples
-/// ([`Sample::from_sample`]).
-fn resampled<P: Pixel, Q: Pixel>(src: &Bitmap<P>) -> Bitmap<Q> {
-    let live = src.width as usize * P::NCOMPS;
-    let mut data = Vec::with_capacity(live * src.height as usize);
-    for y in 0..src.height {
-        data.extend(
-            src.row_samples(y)[..live]
-                .iter()
-                .map(|&v| Q::Sample::from_sample(v)),
-        );
-    }
-    Bitmap::from_packed(src.width, src.height, data)
 }
 
 /// Recognised container formats.
