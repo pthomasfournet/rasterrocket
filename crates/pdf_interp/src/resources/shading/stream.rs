@@ -162,7 +162,9 @@ impl<'a> VertexFormat<'a> {
     }
 
     /// Read one colour of `source.components()` fields as `source`'s corner
-    /// value.  `fields` is scratch space of that length.
+    /// value.  `fields` is scratch space of that length.  `None` when the
+    /// stream ends or `source` declines the vertex (see
+    /// [`CornerSource::corner`]).
     pub(super) fn read_corner<const N: usize, S: CornerSource<N>>(
         &self,
         reader: &mut BitReader<'_>,
@@ -181,7 +183,7 @@ impl<'a> VertexFormat<'a> {
                 v.mul_add(hi - lo, lo)
             })
             .collect();
-        Some(source.corner(&components, fields))
+        source.corner(&components, fields)
     }
 
     /// Read one vertex: a coordinate pair, then a colour.

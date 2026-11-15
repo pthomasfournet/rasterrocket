@@ -8,13 +8,20 @@
 //! [`ParamColors`] carries the parametric value through interpolation and
 //! subdivision and converts it last, so the colour between vertices follows
 //! the function rather than the chord of its end values.
+//!
+//! A [`DirectColors`] source converts at most [`EXACT_WORK_BUDGET`] work of
+//! vertex colours, in the units of [`ShadingColour::conversion_cost`]; past
+//! it no further vertex is read and the mesh keeps the triangles formed so
+//! far.  A [`ParamColors`] source converts only the fixed sample count of
+//! its ramp, and subdivision of either kind interpolates corner values
+//! without converting.
 
 use raster::shading::ColorRamp;
 use raster::shading::gouraud::GouraudVertex;
 
 use color::Sample;
 
-use super::ShadingColour;
+use super::{EXACT_WORK_BUDGET, ShadingColour};
 
 /// Subdivision tolerance on 8-bit canvases: three 8-bit levels.
 const COLOR_DELTA_8: f64 = 3.0 / 255.0;
@@ -183,17 +190,22 @@ pub(super) trait CornerSource<const N: usize = 3> {
 
     /// The corner value of a vertex whose colour fields decode to
     /// `components` (each mapped through its `Decode` range) and whose raw
-    /// fields, divided by their maximum, are `normalised`.
-    fn corner(&self, components: &[f64], normalised: &[f64]) -> Self::Corner;
+    /// fields, divided by their maximum, are `normalised`; `None`, logged,
+    /// when the source's conversion work budget does not cover it, after
+    /// which the decoder reads no further vertex.
+    fn corner(&self, components: &[f64], normalised: &[f64]) -> Option<Self::Corner>;
 
     /// The pixel samples of `corner`.
     fn color(&self, corner: Self::Corner) -> [Self::Sample; N];
 }
 
 /// Vertices carrying the colour space's components, converted at the vertex
-/// through `cs` to samples of type `S`.
+/// through `cs` to samples of type `S`, within a conversion work budget of
+/// [`EXACT_WORK_BUDGET`].
 pub(super) struct DirectColors<C, S> {
     pub(super) cs: C,
+    /// The conversion work the remaining vertices may spend.
+    remaining: std::cell::Cell<u64>,
     pub(super) sample: std::marker::PhantomData<fn() -> S>,
 }
 
@@ -202,6 +214,7 @@ impl<C, S> DirectColors<C, S> {
     pub(super) const fn new(cs: C) -> Self {
         Self {
             cs,
+            remaining: std::cell::Cell::new(EXACT_WORK_BUDGET),
             sample: std::marker::PhantomData,
         }
     }
@@ -216,8 +229,19 @@ impl<const N: usize, S: Sample, C: ShadingColour<N, S>> CornerSource<N> for Dire
         self.cs.channels()
     }
 
-    fn corner(&self, components: &[f64], _normalised: &[f64]) -> [S; N] {
-        self.cs.convert(components)
+    fn corner(&self, components: &[f64], _normalised: &[f64]) -> Option<[S; N]> {
+        let cost = self.cs.conversion_cost().max(1);
+        let Some(remaining) = self.remaining.get().checked_sub(cost) else {
+            log::warn!(
+                "shading: mesh vertex colours exceed the conversion budget of \
+                 {EXACT_WORK_BUDGET} at {cost} per vertex, {} vertices — the remainder is \
+                 not painted",
+                EXACT_WORK_BUDGET / cost
+            );
+            return None;
+        };
+        self.remaining.set(remaining);
+        Some(self.cs.convert(components))
     }
 
     fn color(&self, corner: [S; N]) -> [S; N] {
@@ -240,8 +264,8 @@ impl<const N: usize, S: Sample> CornerSource<N> for ParamColors<N, S> {
         1
     }
 
-    fn corner(&self, _components: &[f64], normalised: &[f64]) -> Param {
-        Param(normalised.first().copied().unwrap_or(0.0))
+    fn corner(&self, _components: &[f64], normalised: &[f64]) -> Option<Param> {
+        Some(Param(normalised.first().copied().unwrap_or(0.0)))
     }
 
     fn color(&self, corner: Param) -> [S; N] {
@@ -395,6 +419,100 @@ mod tests {
         );
         assert!(sink.is_full());
         assert_eq!(sink.finish().len(), 10);
+    }
+
+    /// Vertex conversions the budget affords a [`Counting`] colour.
+    const AFFORDED: usize = 64;
+
+    /// A gray colour costing an [`AFFORDED`]-th of the budget per
+    /// conversion, counting its conversions.
+    #[derive(Clone, Copy)]
+    struct Counting<'a>(&'a std::cell::Cell<usize>);
+
+    impl ShadingColour<3, u8> for Counting<'_> {
+        fn channels(self) -> usize {
+            1
+        }
+
+        fn convert(self, _comps: &[f64]) -> [u8; 3] {
+            self.0.set(self.0.get() + 1);
+            [0; 3]
+        }
+
+        fn conversion_cost(self) -> u64 {
+            EXACT_WORK_BUDGET / AFFORDED as u64
+        }
+    }
+
+    /// Decode `records` copies of the mesh record `record` as shading type
+    /// `shading_type` in a one-component space, returning the conversions
+    /// spent and the triangles formed.
+    fn decode_hostile(
+        shading_type: u8,
+        record: &[u8],
+        records: usize,
+        extra: &[(&str, i64)],
+    ) -> (usize, usize) {
+        let mut sh = pdf::Dictionary::new();
+        for (k, v) in [
+            ("BitsPerCoordinate", 8),
+            ("BitsPerComponent", 8),
+            ("BitsPerFlag", 8),
+        ]
+        .iter()
+        .chain(extra)
+        {
+            sh.set(*k, pdf::Object::Integer(*v));
+        }
+        let data = record.repeat(records);
+        let count = std::cell::Cell::new(0);
+        let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let triangles = super::super::decode_mesh(
+            shading_type,
+            &sh,
+            &data,
+            &DirectColors::new(Counting(&count)),
+            &super::super::stream::default_decode(1),
+            &identity,
+            256.0,
+        );
+        (count.get(), triangles.len())
+    }
+
+    /// A patch record of flag 0 whose `points` control points all lie at
+    /// the origin, with four corner colours of 0.
+    fn flat_patch_record(points: usize) -> Vec<u8> {
+        let mut record = vec![0u8; 1 + 2 * points];
+        record.extend([0; 4]);
+        record
+    }
+
+    #[test]
+    fn free_form_vertices_stop_at_the_conversion_budget() {
+        // Flag 0, (0, 0), colour 0: every three vertices open a triangle.
+        let (conversions, triangles) = decode_hostile(4, &[0, 0, 0, 0], 300_000, &[]);
+        assert_eq!(conversions, AFFORDED);
+        assert_eq!(triangles, AFFORDED / 3);
+    }
+
+    #[test]
+    fn lattice_vertices_stop_at_the_conversion_budget() {
+        let (conversions, triangles) =
+            decode_hostile(5, &[0, 0, 0], 300_000, &[("VerticesPerRow", 8)]);
+        assert_eq!(conversions, AFFORDED);
+        // The 64 vertices complete 8 rows of 8: 7 strips of 7 cells.
+        assert_eq!(triangles, 2 * 7 * 7);
+    }
+
+    #[test]
+    fn patch_corners_stop_at_the_conversion_budget() {
+        for (shading_type, points) in [(6, 12), (7, 16)] {
+            let record = flat_patch_record(points);
+            let (conversions, triangles) = decode_hostile(shading_type, &record, 100_000, &[]);
+            assert_eq!(conversions, AFFORDED, "type {shading_type}");
+            // Four corners per patch; a flat patch is two triangles.
+            assert_eq!(triangles, 2 * AFFORDED / 4, "type {shading_type}");
+        }
     }
 
     #[test]
