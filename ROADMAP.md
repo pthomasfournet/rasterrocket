@@ -2602,7 +2602,7 @@ The 10 GB archive run completed; `bench/v11/results.md` is written and the relea
 
 - **Banded rendering as an OOM escape valve.**  Satisfied by region rendering: `RenderRegion` tiles bound a page's memory and stitch byte for byte.
 - **Multi-resolution image cache** (`(content_hash, l2factor)` keys).  Dropped: it pays off only when one corpus is rendered at several DPIs in sequence, and no consumer does that.
-- **Display-list intermediate.**  Dropped as a render path.  A page trace survives only as a pixel-independent regression oracle, tracked as its own work item.
+- **Display-list intermediate.**  Dropped as a render path.  A page trace survives only as a pixel-independent regression oracle: the paint trace (see Current status).
 
 **Out of scope (re-affirming from the original):**
 
@@ -2943,6 +2943,30 @@ codes the trace expands to several characters, and by 61 glyphs of two
 running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
+
+**Unreleased on master: paint trace.** A pixel-independent regression
+oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
+`rasterrocket::dev::paint_trace`) records one line of text per painting
+operation of a page, in its device space: path fills and strokes with
+their rule, stroke parameters and device width, clips named by a hash
+chained from the clip they narrow, source colours, text objects and the
+pen of each glyph, images, shadings, patterns as paint, forms and groups,
+soft masks with their group's content, annotations and hidden optional
+content.  Coordinates round to the nearest 1/256 px (the coverage
+rasteriser's grid), colour components and matrices to six decimals; a
+path prints its counts, bounding box and hash, and its points up to
+eight.  Only the first window records, as the glyph census counts, and
+nothing window-, memo- or canvas-dependent is recorded, so the trace is
+the page's whether rendered whole, in bands or as a region (tested).  Off,
+each hook is one branch on an `Option`.  Goldens of twelve synthetic pages
+(`crates/pdf_raster/tests/traces/`, `UPDATE_TRACES=1` rewrites them) run
+on every CI leg; an ignored case compares the corpus fixtures' first three
+pages with local goldens in `tests/fixtures/traces/` (gitignored).  The
+`paint_trace` dev binary (`crates/bench`) dumps, diffs (aligned by
+operation, one-quantum moves marked) and blames: it attributes the pixels
+two renders differ at to the operation that paints them
+(`tests/compare/trace_blame.sh`).  No pixel changes (ab_render: 0 of 215
+fixture outputs).
 
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
