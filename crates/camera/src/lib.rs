@@ -54,6 +54,11 @@
 //!   threshold from the mean and deviation of a window around each pixel,
 //!   which follows paper whose level varies across the page.  Never
 //!   declines; a reversed-out page needs inverting first.
+//! - **Border cleanup** ([`find_border_junk`], [`BorderMask::whiten`]):
+//!   dark regions joined to the image edge and confined to a band along it,
+//!   as a scanner leaves outside a smaller or askew page, are whitened.
+//!   Page geometry is unchanged.  Declines on a dark ground and when no
+//!   such region exists.
 //!
 //! Every function runs on the calling thread, keeps no global state and
 //! returns on any input without panicking; the crate has no dependencies
@@ -64,6 +69,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 mod background;
+mod border;
 mod dewarp;
 mod error;
 mod homography;
@@ -72,6 +78,7 @@ mod linalg;
 mod num;
 mod pipeline;
 mod quad;
+mod region;
 mod sample;
 mod spread;
 mod stats;
@@ -81,6 +88,7 @@ mod textlines;
 mod threshold;
 
 pub use background::{Background, background_tile_px, measure_background};
+pub use border::{BorderMask, find_border_junk};
 pub use error::{CameraError, MAX_DIMENSION};
 pub use image::{GrayPage, GrayView, Rect};
 pub use pipeline::{Gutter, Outcome, Processed, Report, Timings, process};

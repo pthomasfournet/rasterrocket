@@ -5,6 +5,14 @@ perspective rectification, double-page spread splitting and an experimental
 dewarp. It has no dependencies beyond `std`, runs on the calling thread, keeps
 no global state and returns on any input without panicking (MSRV 1.100).
 
+Three OCR-preparation operations work on scanned pages outside that
+pipeline, in integer arithmetic so their output is identical on every
+platform: `measure_background` and `Background::normalize` divide out uneven
+illumination so paper becomes white; `binarize` thresholds at a fixed level or
+by Sauvola's local threshold; `find_border_junk` and `BorderMask::whiten`
+whiten the dark strips a scanner leaves along the page edges. Each measures on
+8-bit luma and applies to any channel at 8 or 16 bits.
+
 Each stage detects before it resamples; a stage that is not confident leaves
 the page unchanged and records why in the `Report`, so flatbed scans and
 born-digital pages come back as given. Only malformed input is an error.

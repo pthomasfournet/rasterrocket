@@ -8,7 +8,7 @@ authors.workspace    = true
 license              = "MIT"
 repository.workspace = true
 readme               = "README.md"
-description          = "Camera-capture page cleanup measured on 8-bit grayscale images and replayed at 8 or 16 bits: page crop, perspective rectification, spread splitting and dewarp"
+description          = "Camera-capture page cleanup measured on 8-bit grayscale images and replayed at 8 or 16 bits: page crop, perspective rectification, spread splitting and dewarp; background normalisation, Sauvola binarisation and scan border cleanup"
 keywords             = ["camera", "scan", "perspective", "dewarp", "book"]
 categories           = ["multimedia::images", "computer-vision"]
 

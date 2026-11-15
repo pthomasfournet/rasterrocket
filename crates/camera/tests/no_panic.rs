@@ -6,8 +6,8 @@
 
 use rasterrocket_camera::{
     CameraError, CameraOptions, Detected, GrayPage, GrayView, Outcome, Quad, Rect, Threshold,
-    binarize, crop, detect_page_quad, dewarp, find_gutter, measure_background, process, rectify,
-    split_at,
+    binarize, crop, detect_page_quad, dewarp, find_border_junk, find_gutter, measure_background,
+    process, rectify, split_at,
 };
 
 /// 64-bit linear congruential generator (Knuth's MMIX constants).
@@ -348,6 +348,56 @@ fn check_binarize(img: GrayView<'_>, ctx: &str) {
     ));
 }
 
+/// A found border mask whitens the image at 8 and 16 bits, changing no
+/// sample to anything but white, and rejects an image of another size.
+/// Returns whether a mask was found.
+fn check_border(img: GrayView<'_>, ctx: &str) -> bool {
+    let Detected::Found(mask) = find_border_junk(img).unwrap_or_else(|e| panic!("{ctx}: {e}"))
+    else {
+        return false;
+    };
+    let packed: Vec<u8> = (0..img.height)
+        .flat_map(|y| {
+            img.data[y * img.stride..y * img.stride + img.width]
+                .iter()
+                .copied()
+        })
+        .collect();
+    let mut page = GrayPage {
+        width: img.width,
+        height: img.height,
+        data: packed.clone(),
+    };
+    mask.whiten(&mut page)
+        .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+    for (&before, &after) in packed.iter().zip(&page.data) {
+        assert!(
+            after == before || after == 255,
+            "{ctx}: {before} became {after}"
+        );
+    }
+    let mut deep = GrayPage {
+        width: img.width,
+        height: img.height,
+        data: packed.iter().map(|&v| u16::from(v) * 257).collect(),
+    };
+    mask.whiten(&mut deep)
+        .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+    let mut other = GrayPage {
+        width: img.width + 1,
+        height: 1,
+        data: vec![0u8; img.width + 1],
+    };
+    assert!(
+        matches!(
+            mask.whiten(&mut other),
+            Err(CameraError::SizeMismatch { .. })
+        ),
+        "{ctx}"
+    );
+    true
+}
+
 #[test]
 fn small_and_odd_sizes_under_every_option_set() {
     let sizes = [
@@ -370,7 +420,7 @@ fn small_and_odd_sizes_under_every_option_set() {
     let mut rng = Lcg(0x5EED);
     let mut runs = 0;
     let mut applied = [0usize; 4];
-    let mut measured = 0;
+    let (mut measured, mut bordered) = (0, 0);
     for (w, h) in sizes {
         for p in PATTERNS {
             for pad in [0, 3] {
@@ -392,6 +442,7 @@ fn small_and_odd_sizes_under_every_option_set() {
                 check_stages(img, &mut rng, &ctx);
                 measured += check_background(img, &ctx);
                 check_binarize(img, &ctx);
+                bordered += usize::from(check_border(img, &ctx));
             }
         }
     }
@@ -400,6 +451,7 @@ fn small_and_odd_sizes_under_every_option_set() {
     // declines.
     assert!(applied.iter().all(|&n| n > 0), "{applied:?}");
     assert!(measured > 0, "no background was measured");
+    assert!(bordered > 0, "no border mask was found");
 }
 
 #[test]
@@ -425,6 +477,7 @@ fn large_and_elongated_sizes() {
         let _ = check_process(img, crop_split, &ctx);
         let _ = check_background(img, &ctx);
         check_binarize(img, &ctx);
+        let _ = check_border(img, &ctx);
     }
 }
 
@@ -454,6 +507,7 @@ fn malformed_views_are_errors() {
             dewarp(img).err(),
             measure_background(img, 8).err(),
             binarize(img, Threshold::sauvola_at(300)).err(),
+            find_border_junk(img).err(),
             split_at(img, 1).err(),
             crop(
                 img,

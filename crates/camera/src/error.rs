@@ -71,9 +71,10 @@ pub enum CameraError {
         /// Image width in pixels.
         width: usize,
     },
-    /// An image passed to [`Report::replay`](crate::Report::replay) or
-    /// [`Background::normalize`](crate::Background::normalize) differs in
-    /// size from the image the measurement was taken on.
+    /// An image passed to [`Report::replay`](crate::Report::replay),
+    /// [`Background::normalize`](crate::Background::normalize) or
+    /// [`BorderMask::whiten`](crate::BorderMask::whiten) differs in size
+    /// from the image the measurement was taken on.
     SizeMismatch {
         /// `(width, height)` of the processed image.
         expected: (usize, usize),
