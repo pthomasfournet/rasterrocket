@@ -569,7 +569,9 @@ tests/compare/compare.sh -r 150 -f 1 -l 5 document.pdf
 
 ## Pixel-diff comparison
 
-`tests/compare/compare.sh` compares rrocket output page by page against a reference renderer (pdftoppm, run with `-cropbox`, by default; pdfium through a `pypdfium2` virtualenv with `-R pdfium`). A page fails when its RMSE exceeds `-t`, when the largest difference in mean luminance over 32 × 32 px tiles exceeds `-k` (this catches missing content that barely moves the page-wide RMSE), or when the two renders differ in size by more than 1 px in either dimension; renders within 1 px of each other are cropped to their common size before scoring. A document fails as a whole when rrocket exits non-zero.
+`tests/compare/compare.sh` compares rrocket output page by page against a reference renderer (pdftoppm, run with `-cropbox`, by default; pdfium through a `pypdfium2` virtualenv with `-R pdfium`). A page fails when its tile delta exceeds `-k`, when its RMSE exceeds `-t` (if `-t` is a number), or when the two renders differ in size by more than 1 px in either dimension; renders within 1 px of each other are cropped to their common size before scoring. A document fails as a whole when rrocket exits non-zero.
+
+The tile delta is the largest difference in the mean of one channel (R, G or B) over 32 × 32 px tiles. Antialiasing and hinting move coverage within a tile and barely change its mean (text pages score 4–8 against pdftoppm at 150 dpi), while content missing from one render changes it wholesale (one dropped word scores about 26), and a change of hue at equal luminance counts in full. RMSE is reported but not judged by default: glyph-edge coverage alone puts a correct text page at RMSE 15–33 against pdftoppm at 150 dpi. Renders go to a work directory below `COMPARE_WORK_ROOT` (default `target/compare`), on disk.
 
 **Requirements:** the reference renderer, `rrocket` built in release mode at `target/release/rrocket` (`RROCKET_BIN` names another binary), ImageMagick (`compare`, `identify`, `convert`), `bc`, `python3`. The pdfium virtualenv is `tests/compare/.venv` unless `PDFIUM_VENV` names another; `PDF_OXIDE_BIN` locates the `oxide` reference.
 
@@ -580,7 +582,7 @@ tests/compare/compare.sh [OPTIONS] <DIR>   # every *.pdf under DIR, one summary 
   -r DPI          Render resolution, a positive integer (default: 150)
   -f PAGE         First page (default: 1)
   -l PAGE         Last page (default: all)
-  -t THRESHOLD    Max RMSE per page, 0–255 scale (default: 2.0)
+  -t THRESHOLD    Max RMSE per page, 0–255 scale, or none (default: none)
   -k TILE_DELTA   Max tile delta per page, 0–255 scale (default: 12)
   -R RENDERER     Reference renderer: pdftoppm (default), pdfium or oxide
   -v              Verbose: print per-page stats even when passing
@@ -607,7 +609,7 @@ The `-s` row, and each row of directory mode, holds the tab-separated columns `s
   Avg RMSE:   0.8432 / 255
   Max RMSE:   1.2100 / 255  (page-3)
   Max tile:   5.1200 / 255  (page-3)
-  Thresholds: RMSE 2.0 / 255, tile 12.0 / 255
+  Thresholds: tile 12.0 / 255 (RMSE not judged)
   rrocket stderr: 0 lines
   Verdicts:   0 unexpected failures, 0 expected failures, 0 surprise passes
   Registry:   tests/compare/expectations.json
@@ -617,11 +619,11 @@ PASSED
 
 ### Expected results
 
-`compare.sh` and `tests/compare/pdfium_corpus.py` (rrocket on pdfium's own test corpus, scored against its expected images) share an expectations registry, `tests/compare/expectations.json`, so that known, accepted differences do not hide a new one. The registry holds one list of entries per suite: the harness with the settings that decide what passes (reference renderer, resolution, RMSE and tile limits). An entry names a document, or one of its pages, the failure expected (`differs`, `size`, `missing`, `unreadable` for a page; `error`, `strict`, `panic`, … for a document), a mandatory `reason`, and for `differs` optional `rmse` / `tile` limits that replace the suite's for that page; a limit is a finite, non-negative number, and a registry with any other value is malformed:
+`compare.sh` and `tests/compare/pdfium_corpus.py` (rrocket on pdfium's own test corpus, scored against its expected images) share an expectations registry, `tests/compare/expectations.json`, so that known, accepted differences do not hide a new one. The registry holds one list of entries per suite: the harness with the settings that decide what passes (reference renderer, resolution, tile limit and, when judged, RMSE limit; `compare.sh` judges the tile delta alone by default, `pdfium_corpus.py` both, with RMSE at most 2). An entry names a document, or one of its pages, the failure expected (`differs`, `size`, `missing`, `unreadable` for a page; `error`, `strict`, `panic`, … for a document), a mandatory `reason`, and for `differs` optional `rmse` / `tile` limits that replace the suite's for that page; a limit is a finite, non-negative number, and a registry with any other value is malformed:
 
 ```json
-{"file": "tests/fixtures/corpus-01-native-text-small.pdf", "page": 3,
- "outcome": "differs", "rmse": 15.32, "reason": "unclassified (seeded 2026-11-13)"}
+{"file": "tests/fixtures/corpus-06-modern-layout-dct.pdf", "page": 64,
+ "outcome": "differs", "tile": 14.05, "reason": "divergence: image extent; ..."}
 ```
 
 Each document and page is classified; a document that renders is an observed pass, so a document entry for a failure that no longer occurs is a surprise pass:
@@ -635,7 +637,7 @@ Each document and page is classified; a document that renders is an observed pas
 
 Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
 
-`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL`, or one with an outcome other than the registered one, becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values over the suite's limits, rounded up to 0.01; a `FAIL` worse than registered, of the registered outcome, gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` `differs` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in, and a registered limit at or above the suite's own is dropped once its metric is within the suite's limit; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause once it is known.
+`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL`, or one with an outcome other than the registered one, becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values over the suite's limits, rounded up to 0.01; a `FAIL` worse than registered, of the registered outcome, gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` `differs` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in, and a registered limit at or above the suite's own is dropped once its metric is within the suite's limit; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause: `aa: …` (edge coverage only), `divergence: <cause>; <evidence>` (a reference behaviour not followed, with the arithmetic or a second reference that agrees with this render), or `defect: audit/<file>` (a bug with its own ticket).
 
 ```bash
 # Seed or refresh the entries for the corpus fixtures
