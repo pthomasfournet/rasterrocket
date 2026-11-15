@@ -1104,3 +1104,150 @@ fn depth_16_inverts_a_reversed_out_page() {
         assert_eq!(at(5 * 100 + 50), outside, "{flag}: the ground");
     }
 }
+
+/// The test profile `name` of `tests/fixtures/icc`.
+fn icc_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/icc")
+        .join(name)
+}
+
+/// The samples of page 1 of [`two_page_pdf`] at 72 dpi converted to the
+/// profile `name`, as the library renders them.
+fn library_converted(name: &str) -> Vec<u8> {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    let bytes = std::fs::read(icc_fixture(name)).expect("read profile");
+    config.output_profile = Some(std::sync::Arc::new(
+        rasterrocket::OutputProfile::from_bytes(bytes).expect("an output profile"),
+    ));
+    let session = open_session_from_bytes(two_page_pdf(), &config).expect("open session");
+    match render_page_canvas(&session, 1, &RenderParams::new(1.0)).expect("renders") {
+        FinishedCanvas::Rgb8(b) => b.data().to_vec(),
+        FinishedCanvas::Gray8(b) => b.data().to_vec(),
+        other => panic!("an 8-bit canvas, not {other:?}"),
+    }
+}
+
+/// A TIFF's ICC profile (tag 34675) and its 8-bit samples.
+fn tiff_profile_and_samples(path: &Path) -> (Vec<u8>, Vec<u8>) {
+    let file = std::fs::read(path).expect("read TIFF");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    let icc = decoder
+        .get_tag_u8_vec(tiff::tags::Tag::IccProfile)
+        .expect("an ICC profile tag");
+    let tiff::decoder::DecodingResult::U8(samples) = decoder.read_image().expect("decodes") else {
+        panic!("8-bit samples");
+    };
+    (icc, samples)
+}
+
+#[test]
+fn output_profile_converts_the_pages_and_tags_the_files() {
+    let (dir, input) = workdir(&two_page_pdf());
+    for (name, gray) in [("printer-rgb-v4.icc", false), ("printer-gray-v4.icc", true)] {
+        let profile = icc_fixture(name);
+        let profile_arg = profile.to_str().unwrap();
+        let profile_bytes = std::fs::read(&profile).unwrap();
+        let want = library_converted(name);
+        let base = ["-r", "72", "-l", "1", "--output-profile", profile_arg];
+
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &[&base[..], &["--tiff"]].concat(),
+        ));
+        let (icc, samples) = tiff_profile_and_samples(&dir.path().join("out-1.tif"));
+        assert_eq!(icc, profile_bytes, "{name}: the TIFF's profile");
+        assert_eq!(samples, want, "{name}: the TIFF's samples");
+
+        // --invert auto renders the page whole and writes it through the
+        // whole-page encoders.
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &[&base[..], &["--png", "--invert=auto"]].concat(),
+        ));
+        let png = std::fs::read(dir.path().join("out-1.png")).unwrap();
+        assert!(
+            png.windows(4).any(|w| w == b"iCCP"),
+            "{name}: the PNG's iCCP"
+        );
+        assert_eq!(
+            png[25],
+            if gray { 0 } else { 2 },
+            "{name}: the PNG colour type"
+        );
+
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &[&base[..], &["--jpeg"]].concat(),
+        ));
+        let jpeg = std::fs::read(dir.path().join("out-1.jpg")).unwrap();
+        assert!(
+            jpeg.windows(11).any(|w| w == b"ICC_PROFILE"),
+            "{name}: the JPEG's APP2"
+        );
+
+        let out = rrocket(dir.path(), &input, &base);
+        assert_success(&out);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("cannot carry an ICC profile"),
+            "{name}: Netpbm output warns"
+        );
+        let (magic, _, _, pixels) =
+            read_pnm(
+                &dir.path()
+                    .join(if gray { "out-1.pgm" } else { "out-1.ppm" }),
+            );
+        assert_eq!(magic, if gray { "P5" } else { "P6" });
+        assert_eq!(pixels, want, "{name}: the Netpbm samples");
+    }
+}
+
+#[test]
+fn output_profile_refusals_name_the_conflict() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let rgb = icc_fixture("printer-rgb-v4.icc");
+    let gray = icc_fixture("printer-gray-v4.icc");
+    let (rgb, gray) = (rgb.to_str().unwrap(), gray.to_str().unwrap());
+    let cmyk = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+    for (args, message) in [
+        (
+            vec!["--intent", "perceptual"],
+            "--intent applies to --output-profile only",
+        ),
+        (vec!["--bpc"], "--bpc applies to --output-profile only"),
+        (
+            vec!["--output-profile", rgb, "--bpc", "--intent", "absolute"],
+            "--bpc does not apply to --intent absolute",
+        ),
+        (
+            vec!["--output-profile", rgb, "--mono"],
+            "refused with --mono",
+        ),
+        (
+            vec!["--output-profile", rgb, "--gray"],
+            "is an RGB profile and --gray",
+        ),
+        (
+            vec!["--output-profile", gray, "--transparent", "--png"],
+            "is a gray profile and --transparent",
+        ),
+        (
+            vec!["--output-profile", "/nonexistent.icc"],
+            "cannot read the output profile",
+        ),
+        (
+            vec!["--output-profile", cmyk.to_str().unwrap()],
+            "CMYK raster output is not written",
+        ),
+    ] {
+        let out = rrocket(dir.path(), &input, &args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+        assert!(outputs(dir.path()).is_empty(), "{args:?} wrote files");
+    }
+}

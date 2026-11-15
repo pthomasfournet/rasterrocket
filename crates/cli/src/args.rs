@@ -242,6 +242,33 @@ pub(crate) struct Args {
     #[arg(long = "mono")]
     pub mono: bool,
 
+    /// Convert every page to the ICC profile FILE once composited and tag
+    /// the output with it (PNG iCCP, TIFF tag 34675, JPEG APP2, the
+    /// --print spool's page images; PPM and PGM cannot carry it).  An
+    /// RGB or gray output, display or colour-space profile; a gray one
+    /// writes gray pages.  Not with --mono, --dither, --fax or comic input.
+    #[arg(long = "output-profile", value_name = "FILE")]
+    pub output_profile: Option<std::path::PathBuf>,
+
+    /// The rendering intent of the conversion to --output-profile:
+    /// `perceptual`, `relative` (relative colorimetric), `saturation` or
+    /// `absolute` (absolute colorimetric).  Default: the one intent a
+    /// page's content uses (`ri`, `/RI`, an image's `/Intent`), else
+    /// relative colorimetric.
+    #[arg(long = "intent", value_name = "INTENT", value_enum)]
+    pub intent: Option<IntentArg>,
+
+    /// Black-point compensation in the conversion to --output-profile:
+    /// the page's black maps to the profile's darkest neutral.  Not with
+    /// --intent absolute.
+    #[arg(long = "bpc")]
+    pub bpc: bool,
+
+    /// The ICC profile the output is tagged with: --output-profile's,
+    /// set from the session's profile once it is read.
+    #[arg(skip)]
+    pub output_icc: Option<encode::IccProfile>,
+
     /// Write a fax document: one TIFF Class F file, `OUTPUT_PREFIX.tif`,
     /// every page 1728 pixels wide (landscape pages turned), bilevel, at
     /// the --fax-resolution, coded as --tiffcompression `g3` (default),
@@ -665,6 +692,30 @@ impl From<DepthArg> for pdf_raster::SampleDepth {
     }
 }
 
+/// `--intent` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum IntentArg {
+    /// Perceptual.
+    Perceptual,
+    /// Relative colorimetric.
+    Relative,
+    /// Saturation.
+    Saturation,
+    /// Absolute colorimetric.
+    Absolute,
+}
+
+impl From<IntentArg> for pdf_raster::RenderingIntent {
+    fn from(intent: IntentArg) -> Self {
+        match intent {
+            IntentArg::Perceptual => Self::Perceptual,
+            IntentArg::Relative => Self::RelativeColorimetric,
+            IntentArg::Saturation => Self::Saturation,
+            IntentArg::Absolute => Self::AbsoluteColorimetric,
+        }
+    }
+}
+
 /// `--dither` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DitherArg {
@@ -822,6 +873,7 @@ impl Args {
             );
         }
         self.validate_transparent_flags()?;
+        self.validate_output_profile_flags()?;
         self.validate_fax_flags()?;
         self.validate_print_flags()?;
         if self.mono && self.gray {
@@ -948,6 +1000,88 @@ impl Args {
         ))
     }
 
+    /// Refuse `--intent` and `--bpc` without `--output-profile`, `--bpc`
+    /// under absolute colorimetry, and `--output-profile` with the bilevel
+    /// outputs and comic input.
+    fn validate_output_profile_flags(&self) -> Result<(), String> {
+        if self.output_profile.is_none() {
+            return match (self.intent.is_some(), self.bpc) {
+                (true, _) => Err("--intent applies to --output-profile only".to_owned()),
+                (_, true) => Err("--bpc applies to --output-profile only".to_owned()),
+                _ => Ok(()),
+            };
+        }
+        if self.bpc && self.intent == Some(IntentArg::Absolute) {
+            return Err(
+                "--bpc does not apply to --intent absolute, which reproduces measured colour: \
+                 drop --bpc or choose another intent"
+                    .to_owned(),
+            );
+        }
+        let bilevel = "bilevel output carries no colour to convert; drop --output-profile";
+        let refused = [
+            (self.mono, "--mono", bilevel),
+            (self.dither != DitherArg::None, "--dither", bilevel),
+            (self.faxing(), "--fax", bilevel),
+            (
+                self.is_comic_input(),
+                "comic-archive input",
+                "its pages are decoded images, not rendered PDF pages",
+            ),
+        ];
+        match refused.iter().find(|(set, _, _)| *set) {
+            Some((_, what, why)) => Err(format!("--output-profile is refused with {what}: {why}")),
+            None => Ok(()),
+        }
+    }
+
+    /// The session's output profile, read from `--output-profile` and
+    /// checked against the output: an RGB profile refuses `--gray`, a
+    /// gray one `--transparent`; with `--intent`, its conversion is
+    /// compiled.  `None` without the flag.
+    fn output_profile(&self) -> Result<Option<std::sync::Arc<pdf_raster::OutputProfile>>, String> {
+        let Some(path) = &self.output_profile else {
+            return Ok(None);
+        };
+        let shown = path.display();
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("cannot read the output profile {shown}: {e}"))?;
+        let profile = pdf_raster::OutputProfile::from_bytes(bytes)
+            .map_err(|e| format!("--output-profile {shown}: {e}"))?;
+        match profile.space() {
+            pdf_raster::OutputSpace::Rgb if self.gray => {
+                return Err(format!(
+                    "--output-profile {shown} is an RGB profile and --gray writes gray pages: \
+                     give a gray output profile, or drop --gray"
+                ));
+            }
+            pdf_raster::OutputSpace::Gray if self.transparent => {
+                return Err(format!(
+                    "--output-profile {shown} is a gray profile and --transparent writes colour \
+                     pages with alpha: give an RGB output profile, or drop --transparent"
+                ));
+            }
+            _ => {}
+        }
+        if let Some(intent) = self.intent {
+            profile
+                .prepare(intent.into(), self.bpc)
+                .map_err(|e| format!("--output-profile {shown}: {e}"))?;
+        }
+        Ok(Some(std::sync::Arc::new(profile)))
+    }
+
+    /// The warning of an output that cannot carry the output profile:
+    /// PPM and PGM files, whose pixels are still converted.
+    pub(crate) fn untagged_output_warning(&self) -> Option<String> {
+        let netpbm = !(self.png || self.jpeg || self.tiff || self.printing() || self.faxing());
+        (self.output_profile.is_some() && netpbm).then(|| {
+            "PPM and PGM files cannot carry an ICC profile: the pages hold --output-profile's \
+             device values untagged; add --png or --tiff to embed the profile"
+                .to_owned()
+        })
+    }
+
     /// The input path, `-` for standard input; empty only under
     /// `--list-printers`, which clap admits without an input and which
     /// renders nothing.
@@ -967,9 +1101,15 @@ impl Args {
             })
     }
 
-    /// Whether pages are written in luma: `--gray` or `--mono`.
-    pub(crate) const fn luma_output(&self) -> bool {
-        self.gray || self.mono
+    /// Whether pages are written in luma: `--gray`, `--mono`, or a gray
+    /// output profile.
+    pub(crate) fn luma_output(&self) -> bool {
+        self.gray
+            || self.mono
+            || self
+                .output_icc
+                .as_ref()
+                .is_some_and(|icc| icc.channels() == 1)
     }
 
     /// Whether a fax document is written: `--fax`, or `--fax-to`, which
@@ -1377,6 +1517,7 @@ impl Args {
             config.max_page_bytes = mib << 20;
         }
         config.band_bytes = self.band_bytes();
+        config.output_profile = self.output_profile()?;
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;

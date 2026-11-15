@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
 use color::SampleDepth;
-use encode::{PdfPage, PdfPageEncoder, PdfWriter, RowImage, RowLayout};
+use encode::{IccProfile, PdfPage, PdfPageEncoder, PdfWriter, RowImage, RowLayout};
 
 use crate::cleanup::{Page, SpreadHalf};
 use crate::deliver;
@@ -267,12 +267,16 @@ pub(crate) struct Spool {
 
 impl Spool {
     /// Open an anonymous temporary file in [`spool_dir`] and begin the PDF,
-    /// whose pages hold images of samples of `depth`.
+    /// whose pages hold images of samples of `depth`, each tagged with
+    /// `icc` when given.
     ///
     /// # Errors
     ///
     /// The file could not be created or its first bytes written.
-    pub(crate) fn create(depth: SampleDepth) -> Result<Self, RenderError> {
+    pub(crate) fn create(
+        depth: SampleDepth,
+        icc: Option<&IccProfile>,
+    ) -> Result<Self, RenderError> {
         let dir = spool_dir();
         let file = tempfile::tempfile_in(&dir).map_err(|e| {
             std::io::Error::new(
@@ -283,7 +287,7 @@ impl Spool {
         let writer = PdfWriter::new(
             BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file),
             depth,
-            None,
+            icc,
         )?;
         Ok(Self { writer })
     }
@@ -683,7 +687,7 @@ mod tests {
     #[test]
     fn pages_spool_in_page_order() {
         let sink = PageSink::new();
-        let mut spool = Spool::create(SampleDepth::Eight).unwrap();
+        let mut spool = Spool::create(SampleDepth::Eight, None).unwrap();
         sink.add((2, None), &gray(4, 6), (72.0, 72.0)).unwrap();
         sink.add((1, Some(SpreadHalf::Right)), &gray(3, 5), (72.0, 72.0))
             .unwrap();
@@ -696,6 +700,28 @@ mod tests {
         let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
         assert_eq!(n, pdf.len());
         assert_eq!(image_sizes(&pdf), [(2, 5), (3, 5), (4, 6), (8, 5)]);
+    }
+
+    /// A spool made with an output profile holds it once and tags every
+    /// page image with it.
+    #[test]
+    fn a_spool_tags_its_pages_with_the_output_profile() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/icc/printer-gray-v4.icc"
+        );
+        let icc = encode::IccProfile::new(std::fs::read(path).unwrap()).unwrap();
+        let sink = PageSink::new();
+        let mut spool = Spool::create(SampleDepth::Eight, Some(&icc)).unwrap();
+        sink.add((1, None), &gray(4, 6), (72.0, 72.0)).unwrap();
+        sink.add((2, None), &gray(3, 5), (72.0, 72.0)).unwrap();
+        spool.write_through(&sink, 2).unwrap();
+        let mut pdf = Vec::new();
+        let _ = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.starts_with("%PDF-1.7"), "a v4.3 profile needs PDF 1.7");
+        assert_eq!(text.matches("/N 1/Alternate/DeviceGray").count(), 1);
+        assert_eq!(text.matches("/ColorSpace[/ICCBased 3 0 R]").count(), 2);
     }
 
     /// What [`render_pages`] observed.
@@ -721,7 +747,7 @@ mod tests {
             .build()
             .unwrap();
         let sink = PageSink::new();
-        let mut spool = Spool::create(SampleDepth::Eight).unwrap();
+        let mut spool = Spool::create(SampleDepth::Eight, None).unwrap();
         let pages: Vec<i32> = (1..=n).collect();
         let (peak, renders) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let render = |&page: &i32| {
@@ -791,7 +817,12 @@ mod tests {
 
     #[test]
     fn an_empty_document_is_refused() {
-        assert!(Spool::create(SampleDepth::Eight).unwrap().finish().is_err());
+        assert!(
+            Spool::create(SampleDepth::Eight, None)
+                .unwrap()
+                .finish()
+                .is_err()
+        );
     }
 
     /// A page larger than A0 prints at 360 dpi without a resolution flag;

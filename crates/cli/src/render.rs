@@ -1,17 +1,16 @@
 //! Per-page rendering: call `rasterrocket` library → apply colour mode → write file.
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, Write};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use color::Rgb8;
 use encode::{
-    EncodeError, RowImage, write_jpeg, write_pbm, write_pgm, write_png, write_ppm, write_tiff,
+    EncodeError, RowImage, TiffStream, write_jpeg, write_pbm, write_pgm, write_png, write_ppm,
+    write_tiff,
 };
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi"))]
 use pdf_raster::{BackendPolicy, ImageFilter};
-use pdf_raster::{RasterError, RasterSession, RenderParams, render_page_rgb_with};
-use raster::Bitmap;
+use pdf_raster::{FinishedCanvas, RasterError, RasterSession, RenderParams, render_page_canvas};
 
 use crate::args::{Args, OutputFormat};
 use crate::bands::{self, BandOutput};
@@ -133,6 +132,12 @@ pub(crate) fn render_page(
     let mut params = RenderParams::new_xy(scale_x, scale_y)
         .with_policy(effective_policy)
         .with_depth(args.depth());
+    if let Some(intent) = args.intent {
+        params = params.with_intent(intent.into());
+    }
+    if args.bpc {
+        params = params.with_black_point_compensation();
+    }
     if args.transparent {
         params = params.with_transparent_background();
     }
@@ -162,7 +167,16 @@ pub(crate) fn render_page(
         }
         _ => {}
     }
-    let rgb: Bitmap<Rgb8> = render_page_rgb_with(session, page_num, &params)?;
+    let page = match render_page_canvas(session, page_num, &params)? {
+        FinishedCanvas::Rgb8(rgb) => Page::Rgb(rgb),
+        FinishedCanvas::Gray8(gray) => Page::Gray(gray),
+        FinishedCanvas::Rgb16(_) | FinishedCanvas::Gray16(_) => {
+            return Err(RasterError::InvalidOptions(
+                "a 16-bit page is written band by band; this output takes 8-bit pages".to_owned(),
+            )
+            .into());
+        }
+    };
     let sink = match (document, fax_layout) {
         (Document::Fax(document), Some(layout)) => Sink::Fax {
             document,
@@ -182,13 +196,7 @@ pub(crate) fn render_page(
         clippy::cast_possible_wrap,
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
-    write_cleaned(
-        Page::Rgb(rgb),
-        args,
-        sink,
-        page_num as i32,
-        total_pages as i32,
-    )
+    write_cleaned(page, args, sink, page_num as i32, total_pages as i32)
 }
 
 /// Where a cleaned page goes.
@@ -257,7 +265,7 @@ pub(crate) fn write_cleaned(
         // Pages are written in place, not renamed into place, so that no
         // per-page rename waits on the file system's flush of the data.
         write_output(&out_path, |mut out| {
-            encode_page(&page, format, args.dpi(), &mut out)?;
+            encode_page(&page, format, args, &mut out)?;
             Ok(out)
         })?;
     }
@@ -347,23 +355,25 @@ pub(crate) fn write_output(
 }
 
 /// Encode `page` in `format` to `out`: colour, gray or bilevel as the
-/// page is, Netpbm choosing PPM, PGM or PBM by it.  `dpi` is recorded by
-/// the formats that carry a resolution.
-fn encode_page<W: Write>(
+/// page is, Netpbm choosing PPM, PGM or PBM by it, tagged with the output
+/// profile by the formats that carry one.  The resolution is recorded by
+/// the formats that carry it.
+fn encode_page<W: Write + Seek>(
     page: &Page,
     format: OutputFormat,
-    dpi: (f64, f64),
+    args: &Args,
     out: W,
 ) -> Result<(), EncodeError> {
+    let icc = args.output_icc.as_ref();
     match (format, page) {
         (OutputFormat::Ppm, Page::Rgb(rgb)) => write_ppm(rgb, out),
         (OutputFormat::Ppm, Page::Gray(luma)) => write_pgm(luma, out),
         (OutputFormat::Ppm, Page::Mono(luma)) => write_pbm(luma, out),
-        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out, None),
-        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out, None),
-        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out, None),
+        (OutputFormat::Png, Page::Rgb(rgb)) => write_png(rgb, out, icc),
+        (OutputFormat::Png, Page::Gray(luma) | Page::Mono(luma)) => write_png(luma, out, icc),
+        (OutputFormat::Jpeg(options), Page::Rgb(rgb)) => write_jpeg(rgb, options, out, icc),
         (OutputFormat::Jpeg(options), Page::Gray(luma) | Page::Mono(luma)) => {
-            write_jpeg(luma, options, out, None)
+            write_jpeg(luma, options, out, icc)
         }
         (OutputFormat::Tiff(compression), page) => {
             let image = match page {
@@ -371,7 +381,21 @@ fn encode_page<W: Write>(
                 Page::Gray(luma) => RowImage::Gray(luma),
                 Page::Mono(luma) => RowImage::Bilevel(luma),
             };
-            write_tiff(image, dpi, compression, out)
+            match icc {
+                None => write_tiff(image, args.dpi(), compression, out),
+                Some(icc) => {
+                    let mut tiff = TiffStream::new(
+                        out,
+                        image.size(),
+                        image.layout(),
+                        args.dpi(),
+                        compression,
+                        Some(icc),
+                    )?;
+                    tiff.push(image)?;
+                    tiff.finish().map(drop)
+                }
+            }
         }
     }
 }

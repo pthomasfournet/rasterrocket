@@ -44,7 +44,7 @@ pub(crate) fn output_path_with_prefix(
     half: Option<SpreadHalf>,
 ) -> String {
     let sep = args.separator;
-    let ext = format.extension_with_mode(args.gray, args.mono);
+    let ext = format.extension_with_mode(args.luma_output(), args.mono);
     let suffix = match half {
         None => "",
         Some(SpreadHalf::Left) => "a",

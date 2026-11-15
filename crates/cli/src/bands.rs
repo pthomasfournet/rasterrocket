@@ -10,7 +10,8 @@ use std::io::BufWriter;
 
 use color::{Rgb8, SampleDepth};
 use encode::{
-    PngColor, PngWriter, PnmKind, PnmWriter, RowImage, RowLayout, TiffCompression, TiffStream,
+    IccProfile, PngColor, PngWriter, PnmKind, PnmWriter, RowImage, RowLayout, TiffCompression,
+    TiffStream,
 };
 use pdf_raster::{
     BandBitmap, BandError, FinishedCanvas, RasterSession, RenderParams, render_page_bands,
@@ -85,7 +86,7 @@ enum Model {
 }
 
 impl Model {
-    const fn of(args: &Args) -> Self {
+    fn of(args: &Args) -> Self {
         if args.mono {
             Self::Mono
         } else if args.luma_output() {
@@ -107,13 +108,14 @@ enum FileWriter {
 
 impl FileWriter {
     /// The writer of a `size` page in `model`, of samples of `depth`, to
-    /// `out` in `format`, at `dpi` for the formats that record it.
+    /// `out` in `format`, at `dpi` for the formats that record it, tagged
+    /// with `icc` by the formats that carry a profile.
     fn new(
         out: BufWriter<File>,
         format: FileFormat,
         (model, depth): (Model, SampleDepth),
-        size: (u32, u32),
-        dpi: (f64, f64),
+        (size, dpi): ((u32, u32), (f64, f64)),
+        icc: Option<&IccProfile>,
     ) -> Result<Self, RenderError> {
         let wide = depth == SampleDepth::Sixteen;
         Ok(match format {
@@ -136,7 +138,7 @@ impl FileWriter {
                     (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
                     (Model::Gray | Model::Mono, true) => PngColor::Gray16,
                 };
-                Self::Png(PngWriter::new(out, size, color, None)?)
+                Self::Png(PngWriter::new(out, size, color, icc)?)
             }
             FileFormat::Tiff(compression) => {
                 let layout = match model {
@@ -151,7 +153,7 @@ impl FileWriter {
                     layout.at_depth(depth),
                     dpi,
                     compression,
-                    None,
+                    icc,
                 )?)
             }
         })
@@ -286,7 +288,13 @@ pub(crate) fn write_page_banded(
     );
     write_output(&path, |out| {
         let model = (Model::of(args), args.depth());
-        let mut writer = FileWriter::new(out, format, model, size, args.dpi())?;
+        let mut writer = FileWriter::new(
+            out,
+            format,
+            model,
+            (size, args.dpi()),
+            args.output_icc.as_ref(),
+        )?;
         render_into(session, page_num, params, args, |band| writer.push(band))?;
         writer.finish()
     })

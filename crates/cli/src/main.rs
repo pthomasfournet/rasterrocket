@@ -101,6 +101,15 @@ fn main() -> ExitCode {
         Ok(config) => config,
         Err(e) => return fail(e),
     };
+    if let Some(profile) = &session_config.output_profile {
+        match encode::IccProfile::new(std::sync::Arc::clone(profile.bytes())) {
+            Ok(icc) => args.output_icc = Some(icc),
+            Err(e) => return fail(format_args!("--output-profile cannot be embedded: {e}")),
+        }
+    }
+    if let Some(warning) = args.untagged_output_warning() {
+        eprintln!("rrocket: warning: {warning}");
+    }
 
     // The password is an input to decryption, not an authorisation: it is
     // passed whether or not the gate ran, and does nothing without it.
@@ -214,7 +223,7 @@ fn main() -> ExitCode {
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
     let mut spool = if args.print {
-        match print::Spool::create(args.depth()) {
+        match print::Spool::create(args.depth(), args.output_icc.as_ref()) {
             Ok(spool) => Some(spool),
             Err(e) => return fail(format_args!("nothing printed: {e}")),
         }
