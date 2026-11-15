@@ -894,11 +894,6 @@ impl Args {
             (self.split_spreads, "--split-spreads", camera),
             (self.dewarp, "--dewarp", camera),
             (
-                self.overprint,
-                "--overprint",
-                "overprint is simulated in 8-bit ink; drop --overprint for 16-bit pages",
-            ),
-            (
                 self.gpu_pages,
                 "--gpu-pages",
                 "the GPU page raster composites 8-bit pages; drop --gpu-pages for 16-bit pages",
@@ -1799,6 +1794,11 @@ mod page_list_tests {
         );
         let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
         assert!(print.validate_format_flags().is_ok());
+        assert!(
+            args_with(&["--depth", "16", "--overprint"])
+                .validate_format_flags()
+                .is_ok()
+        );
         assert!(Args::try_parse_from(["rrocket", "--depth", "12", "in.pdf", "out"]).is_err());
         for (flags, needle) in [
             (&["--mono"][..], "use --gray"),
@@ -1812,7 +1812,6 @@ mod page_list_tests {
             (&["--rectify"], "--rectify"),
             (&["--split-spreads"], "--split-spreads"),
             (&["--dewarp"], "--dewarp"),
-            (&["--overprint"], "drop --overprint"),
             (&["--gpu-pages"], "drop --gpu-pages"),
         ] {
             let mut argv = vec!["--depth", "16"];

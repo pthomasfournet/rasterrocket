@@ -70,19 +70,10 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
     if opts.deskew && opts.transparent_background {
         return Some(RasterError::deskew_needs_gray());
     }
-    if opts.depth != color::SampleDepth::Eight {
-        if opts.deskew {
-            return Some(RasterError::InvalidOptions(
-                "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
-            ));
-        }
-        if opts.overprint {
-            return Some(RasterError::InvalidOptions(
-                "overprint simulation paints 8-bit ink: render at depth 8, or without \
-                 overprint, for 16-bit samples"
-                    .to_owned(),
-            ));
-        }
+    if opts.depth != color::SampleDepth::Eight && opts.deskew {
+        return Some(RasterError::InvalidOptions(
+            "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
+        ));
     }
     if opts.pages.is_none() {
         if opts.first_page == 0 {

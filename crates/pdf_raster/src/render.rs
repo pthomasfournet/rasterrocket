@@ -89,8 +89,7 @@ pub fn render_page_rgb_with_diagnostics(
 ///
 /// # Errors
 ///
-/// As [`render_page_rgb_with`], and [`RasterError::InvalidOptions`] for a
-/// 16-bit render of a session that simulates overprint.
+/// As [`render_page_rgb_with`].
 pub fn render_page_canvas(
     session: &RasterSession,
     page_num: u32,
@@ -474,13 +473,6 @@ pub(crate) fn begin(
 ) -> Result<crate::BackendPolicy, RasterError> {
     check_scale(params.scale_x)?;
     check_scale(params.scale_y)?;
-    if params.depth != SampleDepth::Eight && session.overprint {
-        return Err(RasterError::InvalidOptions(
-            "overprint simulation paints 8-bit ink: render at depth 8, or without overprint, \
-             for 16-bit samples"
-                .to_owned(),
-        ));
-    }
     if params
         .cancel
         .as_ref()
