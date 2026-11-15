@@ -84,11 +84,15 @@ fn halftone_within_the_budget_decodes() {
     assert!(decode(&halftone_page(1, 64, 64), true).is_ok());
 }
 
-/// Global segments have a budget of their own: 65 535 patterns of 1 × 32
-/// pixels, with their 32 pre-shifted copies, need 2^32 bits.
+/// Global segments have a budget of their own, shared by every global
+/// dictionary: one of 65 535 patterns of 1 × 255 pixels, each row a 32-bit
+/// word, needs over 2^29 bits, so the fourth exceeds the 2^31 bits of the
+/// globals.
 #[test]
 fn globals_beyond_the_memory_budget_are_refused() {
-    let data = pattern_dictionary(1, 1, 32, 65_535);
+    let data: Vec<u8> = (1..=4)
+        .flat_map(|number| pattern_dictionary(number, 1, 255, 65_535))
+        .collect();
 
     assert_eq!(
         Globals::new(&data, &DecodeSettings::default()).err(),

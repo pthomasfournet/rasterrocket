@@ -47,7 +47,7 @@ is opened with `Page::new_embedded`.
   in lenient mode. Output changes only when an allocation fails. Tests:
   `decode::generic::tests`.
 - Decode budget (`src/budget.rs`). Every bitmap, symbol copy, pattern
-  table, halftone gray-scale image and skip mask is charged, before it
+  list, halftone gray-scale image and skip mask is charged, before it
   is allocated, to a cumulative memory budget, and the allocation itself
   is fallible (`DecodeError::OutOfMemory`). A page may allocate 16 times
   its area plus 2^26 bits besides the page bitmap, at most 2^33 bits (1
@@ -146,6 +146,13 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   2^22 pixels wide (and 65 535 high), which keeps its coordinates plus
   offsets within `i32`. Every other bitmap keeps the 65 535-pixel side
   limit, tighter than upstream's 2^22. Test: `bitmap::tests`.
+- `eff76aacb` (#1780) A pattern at most one word wide is shifted into
+  place while it is drawn, instead of from a table of its 32 shifted
+  copies built with the dictionary; patterns taller than 32 rows take the
+  same row blit. The dictionary's memory drops by the table, 64 words
+  per pattern row. Output is unchanged. The globals test of
+  `tests/budget.rs`, which the table alone used to exhaust, now spends
+  the budget over four dictionaries.
 
 ## Upstream review (2026-10-30)
 
