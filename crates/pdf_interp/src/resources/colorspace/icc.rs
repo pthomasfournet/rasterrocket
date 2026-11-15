@@ -185,6 +185,15 @@ impl IccProfile {
                 return Some(IccConversion::Shaper(shaper));
             }
         }
+        if model == Model::Matrix as usize
+            && absolute
+            && self.n == 1
+            && let Some(gray) = self
+                .absolute
+                .and_then(|scale| absolute_gray(profile, scale))
+        {
+            return Some(IccConversion::GrayAbsolute(gray));
+        }
         let layout = layout(self.n)?;
         let dest = self
             .absolute
@@ -222,6 +231,26 @@ impl IccProfile {
     }
 }
 
+/// The ICC-absolute conversion of the gray matrix/TRC `profile`, whose
+/// PCS scale is `scale` (`D50 / w`): the RGB matrix/TRC profile with the
+/// gray tone curve on every channel and the sRGB colorants scaled by
+/// `w / D50`, which maps the gray `v` on every channel to the absolute PCS
+/// `w · TRC(v)` of `v`.  `None` for a profile that is not a gray TRC one.
+fn absolute_gray(profile: &ColorProfile, scale: [f64; 3]) -> Option<ProfileConversion> {
+    let trc = profile
+        .gray_trc
+        .as_ref()
+        .filter(|_| profile.pcs == moxcms::DataColorSpace::Xyz)?;
+    let mut rgb = ColorProfile::new_srgb();
+    rgb.cicp = None;
+    rgb.red_trc = Some(trc.clone());
+    rgb.green_trc = Some(trc.clone());
+    rgb.blue_trc = Some(trc.clone());
+    crate::pcs::scale_colorants(&mut rgb, scale.map(f64::recip));
+    let conversion = ProfileConversion::from_profile(&rgb);
+    matches!(conversion, ProfileConversion::Rgb(_)).then_some(conversion)
+}
+
 /// The source layout of `n`-channel colour values.
 const fn layout(n: u8) -> Option<Layout> {
     match n {
@@ -237,6 +266,12 @@ const fn layout(n: u8) -> Option<Layout> {
 pub(crate) enum IccConversion {
     /// A gray (`n = 1`) or RGB (`n = 3`) matrix/TRC profile.
     Shaper(ProfileConversion),
+    /// A gray matrix/TRC profile under ICC-absolute colorimetry: an RGB
+    /// shaper evaluated at the gray value on every channel (see
+    /// [`absolute_gray`]).  The converter maps a gray source to a neutral,
+    /// whatever the media white, so the tint of that white is carried by
+    /// the colorants of this shaper instead.
+    GrayAbsolute(ProfileConversion),
     /// Any other profile with `n` of 1, 3 or 4: an 8-bit transform whose
     /// source pixel holds `n` channels.
     Transform {
@@ -403,6 +438,10 @@ impl IccConversion {
                     .then(|| space.convert(doc, RenderingIntent::default(), comps))
             }
             Self::Shaper(shaper) => shaper.convert_components_at(comps),
+            Self::GrayAbsolute(shaper) => match *comps {
+                [v] => shaper.convert_components_at(&[v, v, v]),
+                _ => None,
+            },
             Self::Transform { n, xform, .. } => {
                 if comps.len() != usize::from(*n) {
                     return None;
@@ -619,6 +658,25 @@ mod tests {
             .convert::<u16>(&doc, &paper)
             .unwrap();
         assert_eq!(wide.map(|v| u8::from_unit(v.to_unit())), [r, g, b]);
+    }
+
+    /// A gray TRC profile under absolute colorimetry reproduces its tinted
+    /// paper white, which an independent converter gives as
+    /// (252.9, 250.9, 245.1); under relative colorimetry the paper is white.
+    #[test]
+    fn absolute_gray_reproduces_the_paper_white() {
+        let doc = make_doc_with_stream(&fixture("printer-gray-v4"), " /N 1");
+        let at = |intent| {
+            let conv = IccConversion::load(&doc, (2, 0), 1, intent).expect("compiles");
+            conv.convert::<u8>(&doc, &[1.0]).expect("converts")
+        };
+        assert_eq!(at(RenderingIntent::RelativeColorimetric), [255; 3]);
+        let [r, g, b] = at(RenderingIntent::AbsoluteColorimetric);
+        assert!(
+            r.abs_diff(253) <= 1 && g.abs_diff(251) <= 1 && b.abs_diff(245) <= 1,
+            "absolute paper {:?}",
+            [r, g, b]
+        );
     }
 
     /// A matrix/TRC profile has one model: every intent but an
