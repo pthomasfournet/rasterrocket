@@ -351,14 +351,22 @@ pub(crate) enum ProfileConversion {
 
 impl ProfileConversion {
     /// Evaluate `bytes` without consulting the cache.
+    #[cfg(test)]
     pub(super) fn from_profile_bytes(bytes: &[u8]) -> Self {
-        let profile = match ColorProfile::new_from_slice(bytes) {
-            Ok(p) => p,
+        match ColorProfile::new_from_slice(bytes) {
+            Ok(p) => Self::from_profile(&p),
             Err(e) => {
                 log::debug!("icc: profile parse failed: {e}");
-                return Self::Unsupported;
+                Self::Unsupported
             }
-        };
+        }
+    }
+
+    /// Evaluate the parsed `profile`: its gray or RGB matrix/TRC model,
+    /// [`Self::Unsupported`] for any other profile.  The model is read
+    /// whatever other tags the profile holds; a caller that honours a
+    /// device-to-PCS table in its place checks for one first.
+    pub(super) fn from_profile(profile: &ColorProfile) -> Self {
         if profile.pcs != DataColorSpace::Xyz {
             return Self::Unsupported;
         }
@@ -367,7 +375,7 @@ impl ProfileConversion {
                 .gray_trc
                 .as_ref()
                 .map_or(Self::Unsupported, gray_conversion),
-            DataColorSpace::Rgb => rgb_conversion(&profile),
+            DataColorSpace::Rgb => rgb_conversion(profile),
             _ => Self::Unsupported,
         }
     }

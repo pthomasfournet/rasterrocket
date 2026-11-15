@@ -48,6 +48,7 @@ use color::Sample;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::shading::function::Function;
+use crate::RenderingIntent;
 use crate::renderer::color::Srgb;
 use crate::resources::dict_ext::DictExt as _;
 use crate::separation::Separator;
@@ -466,7 +467,7 @@ impl ColorSpace {
             Self::Cal(cal) => cal.convert(comps),
             Self::Lab(lab) => lab.convert(comps),
             Self::IccBased { n, stream_id } => stream_id
-                .and_then(|id| IccConversion::load(doc, id, *n))
+                .and_then(|id| IccConversion::load(doc, id, *n, RenderingIntent::default()))
                 .and_then(|conv| conv.convert(doc, comps))
                 .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
             Self::Indexed { .. } => self.indexed_base_components(comps).map_or_else(
@@ -748,7 +749,7 @@ pub(crate) fn default_space(
         n,
         stream_id: Some(id),
     } = space
-        && IccConversion::load(doc, id, n).is_some_and(|conv| conv.is_device_equivalent())
+        && IccConversion::is_device_equivalent_stream(doc, id, n)
     {
         return None;
     }

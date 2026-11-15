@@ -154,21 +154,7 @@ impl std::fmt::Debug for OutputProfile {
 
 /// The index of the conversion of `intent`, with compensation when `bpc`.
 fn slot(intent: RenderingIntent, bpc: bool) -> usize {
-    let intent = RenderingIntent::ALL
-        .iter()
-        .position(|&i| i == intent)
-        .expect("ALL lists every intent");
-    intent * 2 + usize::from(bpc)
-}
-
-/// The converter's form of `intent`.
-const fn cms_intent(intent: RenderingIntent) -> moxcms::RenderingIntent {
-    match intent {
-        RenderingIntent::RelativeColorimetric => moxcms::RenderingIntent::RelativeColorimetric,
-        RenderingIntent::AbsoluteColorimetric => moxcms::RenderingIntent::AbsoluteColorimetric,
-        RenderingIntent::Perceptual => moxcms::RenderingIntent::Perceptual,
-        RenderingIntent::Saturation => moxcms::RenderingIntent::Saturation,
-    }
+    intent.index() * 2 + usize::from(bpc)
 }
 
 impl OutputProfile {
@@ -249,7 +235,7 @@ impl OutputProfile {
 
     /// Build the conversion of `intent` and `bpc`.
     fn compile(&self, intent: RenderingIntent, bpc: bool) -> Result<Executor, CmsError> {
-        let intent = cms_intent(intent);
+        let intent = intent.cms();
         let black = working_space::black_lift(&self.profile, intent, bpc)?;
         let source = working_space::source_profile(&self.profile, intent, black)?;
         let layout = match self.space {

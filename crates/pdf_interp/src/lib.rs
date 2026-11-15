@@ -19,6 +19,7 @@ pub mod intent;
 pub(crate) mod optional_content;
 pub mod output_profile;
 pub mod page_group;
+mod pcs;
 pub(crate) mod prescan;
 pub mod renderer;
 pub mod resources;

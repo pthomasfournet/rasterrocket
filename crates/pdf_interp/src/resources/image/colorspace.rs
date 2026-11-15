@@ -39,6 +39,7 @@ use pdf::{Dictionary, Document, Object};
 use super::{
     ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask, TintData,
 };
+use crate::RenderingIntent;
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{
     ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
@@ -361,8 +362,9 @@ impl ImageColour {
         let profile = embedded_profile
             .as_deref()
             .filter(|_| self.space.is_none())
-            .and_then(|bytes| IccConversion::compile(bytes, u8::try_from(n).ok()?))
-            .map(Arc::new);
+            .and_then(|bytes| {
+                IccConversion::compile(bytes, u8::try_from(n).ok()?, RenderingIntent::default())
+            });
         let max_sample = if n == self.components() {
             self.max_sample
         } else {
@@ -521,7 +523,7 @@ fn convert16(
         ColorSpace::IccBased {
             n: k,
             stream_id: Some(id),
-        } => IccConversion::load(decoded.doc, *id, *k),
+        } => IccConversion::load(decoded.doc, *id, *k, RenderingIntent::default()),
         _ => None,
     });
     let to_inputs = |px: &[u16], comps: &mut [f64; MAX_WIDE_COMPONENTS]| {
@@ -602,9 +604,11 @@ fn default_decode(doc: &Document, space: &ColorSpace) -> Vec<(f64, f64)> {
         (vals.len() == usize::from(*n) * 2 && vals.iter().all(|v| v.is_finite()))
             .then(|| vals.as_chunks::<2>().0.iter().map(|&p| p.into()).collect())
     });
-    range.unwrap_or_else(|| match IccConversion::load(doc, *id, *n).as_deref() {
-        Some(IccConversion::Alternate(alt)) => alt.default_decode(8),
-        _ => space.default_decode(8),
+    range.unwrap_or_else(|| {
+        match IccConversion::load(doc, *id, *n, RenderingIntent::default()).as_deref() {
+            Some(IccConversion::Alternate(alt)) => alt.default_decode(8),
+            _ => space.default_decode(8),
+        }
     })
 }
 
@@ -986,7 +990,8 @@ impl<'a> Decoded<'a> {
                 stream_id: Some(id),
                 ..
             } => {
-                let Some(conv) = IccConversion::load(self.doc, *id, 3) else {
+                let Some(conv) = IccConversion::load(self.doc, *id, 3, RenderingIntent::default())
+                else {
                     return RgbConvert::Identity;
                 };
                 match &*conv {
@@ -1041,7 +1046,7 @@ impl<'a> Decoded<'a> {
             ColorSpace::IccBased {
                 stream_id: Some(id),
                 ..
-            } => match IccConversion::load(self.doc, *id, 4) {
+            } => match IccConversion::load(self.doc, *id, 4, RenderingIntent::default()) {
                 Some(conv) if matches!(*conv, IccConversion::Transform { .. }) => {
                     CmykConvert::Icc(conv)
                 }
@@ -2234,7 +2239,13 @@ mod tests {
         let profile = moxcms::ColorProfile::new_lab().encode().unwrap();
         let doc = make_doc_with_stream(&profile, " /N 3");
         assert!(matches!(
-            crate::resources::colorspace::icc::IccConversion::load(&doc, (2, 0), 3).as_deref(),
+            crate::resources::colorspace::icc::IccConversion::load(
+                &doc,
+                (2, 0),
+                3,
+                crate::RenderingIntent::default()
+            )
+            .as_deref(),
             Some(crate::resources::colorspace::icc::IccConversion::Transform { .. })
         ));
         let bytes = [128, 128, 128, 200, 90, 160, 40, 170, 60];

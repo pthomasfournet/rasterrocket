@@ -25,8 +25,7 @@ use moxcms::{
     TransformOptions, Xyzd,
 };
 
-/// The D50 illuminant of the PCS, the media white of the working space.
-const D50: [f64; 3] = [0.964_2, 1.0, 0.824_9];
+use crate::pcs::D50;
 
 /// The luminance `Y` of the perceptual reference medium's black
 /// (ICC.1:2022 §6.3.4.4), the black of a version 4 profile's perceptual
@@ -58,17 +57,7 @@ pub(super) fn source_profile(
     {
         let scale = [D50[0] / white.x, D50[1] / white.y, D50[2] / white.z];
         if scale.iter().all(|s| s.is_finite() && *s > 0.0) {
-            for colorant in [
-                &mut source.red_colorant,
-                &mut source.green_colorant,
-                &mut source.blue_colorant,
-            ] {
-                *colorant = Xyzd {
-                    x: colorant.x * scale[0],
-                    y: colorant.y * scale[1],
-                    z: colorant.z * scale[2],
-                };
-            }
+            crate::pcs::scale_colorants(&mut source, scale);
         }
     }
     if let Some(k) = black.filter(|&k| k > 0.0) {

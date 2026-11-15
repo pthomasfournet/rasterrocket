@@ -50,6 +50,26 @@ impl RenderingIntent {
         }
     }
 
+    /// The position of the intent in [`Self::ALL`].
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::RelativeColorimetric => 0,
+            Self::AbsoluteColorimetric => 1,
+            Self::Perceptual => 2,
+            Self::Saturation => 3,
+        }
+    }
+
+    /// The colour-management module's form of the intent.
+    pub(crate) const fn cms(self) -> moxcms::RenderingIntent {
+        match self {
+            Self::RelativeColorimetric => moxcms::RenderingIntent::RelativeColorimetric,
+            Self::AbsoluteColorimetric => moxcms::RenderingIntent::AbsoluteColorimetric,
+            Self::Perceptual => moxcms::RenderingIntent::Perceptual,
+            Self::Saturation => moxcms::RenderingIntent::Saturation,
+        }
+    }
+
     /// The intent's bit in an [`IntentSet`].
     const fn bit(self) -> u8 {
         match self {
@@ -133,7 +153,8 @@ mod tests {
 
     #[test]
     fn names_map_to_intents_and_unknown_ones_to_relative() {
-        for intent in RenderingIntent::ALL {
+        for (i, intent) in RenderingIntent::ALL.into_iter().enumerate() {
+            assert_eq!(intent.index(), i);
             assert_eq!(
                 RenderingIntent::from_pdf_name(intent.pdf_name().as_bytes()),
                 intent
