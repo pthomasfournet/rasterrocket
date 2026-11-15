@@ -1,4 +1,7 @@
-use super::{BLACK_FLOOR, SpotLut, ink_to_rgb_row, rgb_to_ink};
+use super::{
+    BLACK_FLOOR, SpotLut, ink_to_cmyk_row, ink_to_cmyk_row16, ink_to_rgb_row, rgb_to_device_cmyk,
+    rgb_to_ink,
+};
 use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
@@ -409,6 +412,55 @@ fn ink_to_rgb_row_spans_multiple_chunks() {
 #[should_panic(expected = "multiple of 8")]
 fn ink_to_rgb_row_rejects_ragged_input() {
     ink_to_rgb_row(&[0; 9], &[None; 4], &mut [0; 3]);
+}
+
+#[test]
+fn ink_to_cmyk_row_keeps_process_ink_and_folds_spots() {
+    let mut lut: SpotLut = [[0; 4]; 256];
+    lut[255] = [0, 255, 0, 0];
+    lut[128] = [0, 0, 100, 0];
+    let ink = [
+        10, 200, 30, 40, 0, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 50, 0, 60, 60, 128, 0, 0, 0,
+    ];
+    let mut out = [0; 12];
+    ink_to_cmyk_row(&ink, &[Some(&lut), None, None, None], &mut out);
+    // Yellow: 60 + 100 − 60·100/255, rounded, is 136.
+    assert_eq!(out, [10, 200, 30, 40, 255, 255, 0, 0, 50, 0, 136, 60]);
+    let mut rgb = [0; 9];
+    ink_to_rgb_row(&ink, &[Some(&lut), None, None, None], &mut rgb);
+    for (quad, rgb) in out.as_chunks::<4>().0.iter().zip(rgb.as_chunks::<3>().0) {
+        assert_eq!(*rgb, cmyk_to_rgb(quad[0], quad[1], quad[2], quad[3]));
+    }
+}
+
+#[test]
+fn ink_to_cmyk_row16_keeps_process_ink_and_folds_spots() {
+    let lut = SpotLut16::from_fn(|t| [0, u16::from_unit(t), 0, 0]);
+    let ink = [1, 2, 3, 4, 0, 0, 0, 0, 65_535, 0, 0, 0, 65_535, 0, 0, 0];
+    let mut out = [0; 8];
+    ink_to_cmyk_row16(&ink, &[Some(&lut), None, None, None], &mut out);
+    assert_eq!(out, [1, 2, 3, 4, 65_535, 65_535, 0, 0]);
+}
+
+#[test]
+#[should_panic(expected = "4 samples per ink pixel")]
+fn ink_to_cmyk_row_rejects_a_short_output() {
+    ink_to_cmyk_row(&[0; 8], &[None; 4], &mut [0; 3]);
+}
+
+#[test]
+fn device_cmyk_is_the_iso_32000_conversion() {
+    assert_eq!(rgb_to_device_cmyk([0u8; 3]), [0, 0, 0, 255]);
+    assert_eq!(rgb_to_device_cmyk([255u8; 3]), [0, 0, 0, 0]);
+    assert_eq!(rgb_to_device_cmyk([128u8; 3]), [0, 0, 0, 127]);
+    assert_eq!(rgb_to_device_cmyk([255u8, 0, 0]), [0, 255, 255, 0]);
+    // c, m, y = 155, 55, 235; k = 55.
+    assert_eq!(rgb_to_device_cmyk([100u8, 200, 20]), [100, 0, 180, 55]);
+    assert_eq!(
+        rgb_to_device_cmyk([0u16, 65_535, 1000]),
+        [65_535, 0, 64_535, 0]
+    );
+    assert_eq!(rgb_to_device_cmyk([300u16; 3]), [0, 0, 0, 65_235]);
 }
 
 /// Euclidean distance between the unrounded forward image of `ink` and `rgb`.

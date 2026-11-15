@@ -639,13 +639,62 @@ fn interpolate(table: &Inverse, lo: [usize; 3], frac: [f64; 3]) -> [f64; 4] {
     inks
 }
 
+/// The process ink of the ink pixel `px`, `[C, M, Y, K, S0, S1, S2, S3]`.
+///
+/// Each process channel is combined, by [`ink_union`], with the process
+/// equivalent of every spot that has a table, read at the spot's tint;
+/// spots without a table are ignored.
+#[must_use]
+pub fn fold_spots(px: &[u8; 8], spots: &[Option<&SpotLut>; 4]) -> [u8; 4] {
+    let mut quad = [px[0], px[1], px[2], px[3]];
+    for (lut, &tint) in spots.iter().zip(&px[4..]) {
+        if let Some(lut) = lut {
+            for (c, &q) in quad.iter_mut().zip(&lut[usize::from(tint)]) {
+                *c = ink_union(*c, q);
+            }
+        }
+    }
+    quad
+}
+
+/// [`fold_spots`] of a 16-bit ink pixel: each spot's process equivalent
+/// read from its [`SpotLut16`], the union taken by [`ink_union16`].
+#[must_use]
+pub fn fold_spots16(px: &[u16; 8], spots: &[Option<&SpotLut16>; 4]) -> [u16; 4] {
+    let mut quad = [px[0], px[1], px[2], px[3]];
+    for (lut, &tint) in spots.iter().zip(&px[4..]) {
+        if let Some(lut) = lut {
+            for (c, q) in quad.iter_mut().zip(lut.at(tint)) {
+                *c = ink_union16(*c, q);
+            }
+        }
+    }
+    quad
+}
+
+/// Check that `out` holds `channels` samples for each eight-sample ink
+/// pixel of `ink`.
+///
+/// # Panics
+///
+/// When `ink.len()` is not a multiple of 8 or `out` is of another length.
+fn check_ink_row(what: &str, ink: usize, out: usize, channels: usize) {
+    assert!(
+        ink.is_multiple_of(8),
+        "{what}: ink length {ink} is not a multiple of 8"
+    );
+    assert_eq!(
+        out,
+        ink / 8 * channels,
+        "{what}: output length must be {channels} samples per ink pixel ({ink} ink samples)"
+    );
+}
+
 /// Convert an ink canvas row to sRGB.
 ///
 /// `ink` holds 8 bytes per pixel `[C, M, Y, K, S0, S1, S2, S3]` (0 = no
-/// ink).  Each spot with a [`SpotLut`] contributes its process equivalent at
-/// the pixel's tint, combined with the running process value as a
-/// probabilistic union ([`ink_union`]) per channel; spots
-/// without a table are ignored.  The combined CMYK row is converted by
+/// ink).  Each pixel's spots are folded into its process ink
+/// ([`fold_spots`]) and the combined CMYK row is converted by
 /// [`cmyk_to_rgb_row`] in stack-buffered chunks.
 ///
 /// # Panics
@@ -653,44 +702,19 @@ fn interpolate(table: &Inverse, lo: [usize; 3], frac: [f64; 3]) -> [f64; 4] {
 /// Panics if `ink.len()` is not a multiple of 8 or
 /// `out.len() != ink.len() / 8 * 3`.
 pub fn ink_to_rgb_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8]) {
-    assert!(
-        ink.len().is_multiple_of(8),
-        "ink_to_rgb_row: ink length {} is not a multiple of 8",
-        ink.len()
-    );
-    assert_eq!(
-        out.len(),
-        ink.len() / 8 * 3,
-        "ink_to_rgb_row: output length must be 3 bytes per ink pixel ({} ink bytes)",
-        ink.len()
-    );
+    check_ink_row("ink_to_rgb_row", ink.len(), out.len(), 3);
     let mut cmyk = [0u8; CHUNK * 4];
     for (src, dst) in ink.chunks(CHUNK * 8).zip(out.chunks_mut(CHUNK * 3)) {
         let n = src.len() / 8;
-        for (px, quad) in src
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .zip(cmyk.as_chunks_mut::<4>().0)
-        {
-            quad.copy_from_slice(&px[..4]);
-            for (lut, &tint) in spots.iter().zip(&px[4..]) {
-                if let Some(lut) = lut {
-                    for (c, &q) in quad.iter_mut().zip(&lut[usize::from(tint)]) {
-                        *c = ink_union(*c, q);
-                    }
-                }
-            }
-        }
+        ink_to_cmyk_row(src, spots, &mut cmyk[..n * 4]);
         cmyk_to_rgb_row(&cmyk[..n * 4], dst);
     }
 }
 
 /// Convert a 16-bit ink canvas row to 16-bit sRGB.
 ///
-/// This is [`ink_to_rgb_row`] at 16 bits: each spot's process equivalent
-/// is read from its [`SpotLut16`], the union taken at 16 bits
-/// ([`ink_union16`]) and the model evaluated at 16 bits
+/// This is [`ink_to_rgb_row`] at 16 bits: each pixel's spots are folded
+/// by [`fold_spots16`] and the model evaluated at 16 bits
 /// ([`cmyk_to_rgb_at`]).
 ///
 /// # Panics
@@ -698,34 +722,68 @@ pub fn ink_to_rgb_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8])
 /// Panics if `ink.len()` is not a multiple of 8 or
 /// `out.len() != ink.len() / 8 * 3`.
 pub fn ink_to_rgb_row16(ink: &[u16], spots: &[Option<&SpotLut16>; 4], out: &mut [u16]) {
-    assert!(
-        ink.len().is_multiple_of(8),
-        "ink_to_rgb_row16: ink length {} is not a multiple of 8",
-        ink.len()
-    );
-    assert_eq!(
-        out.len(),
-        ink.len() / 8 * 3,
-        "ink_to_rgb_row16: output length must be 3 samples per ink pixel ({} ink samples)",
-        ink.len()
-    );
+    check_ink_row("ink_to_rgb_row16", ink.len(), out.len(), 3);
     for (px, rgb) in ink
         .as_chunks::<8>()
         .0
         .iter()
         .zip(out.as_chunks_mut::<3>().0)
     {
-        let mut quad = [px[0], px[1], px[2], px[3]];
-        for (lut, &tint) in spots.iter().zip(&px[4..]) {
-            if let Some(lut) = lut {
-                for (c, q) in quad.iter_mut().zip(lut.at(tint)) {
-                    *c = ink_union16(*c, q);
-                }
-            }
-        }
-        let [c, m, y, k] = quad;
+        let [c, m, y, k] = fold_spots16(px, spots);
         *rgb = cmyk_to_rgb_at(c, m, y, k);
     }
+}
+
+/// Convert an ink canvas row to CMYK: four bytes a pixel, each pixel's
+/// spots folded into its process ink ([`fold_spots`]).
+///
+/// # Panics
+///
+/// Panics if `ink.len()` is not a multiple of 8 or
+/// `out.len() != ink.len() / 8 * 4`.
+pub fn ink_to_cmyk_row(ink: &[u8], spots: &[Option<&SpotLut>; 4], out: &mut [u8]) {
+    check_ink_row("ink_to_cmyk_row", ink.len(), out.len(), 4);
+    for (px, quad) in ink
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<4>().0)
+    {
+        *quad = fold_spots(px, spots);
+    }
+}
+
+/// [`ink_to_cmyk_row`] at 16 bits ([`fold_spots16`]).
+///
+/// # Panics
+///
+/// Panics if `ink.len()` is not a multiple of 8 or
+/// `out.len() != ink.len() / 8 * 4`.
+pub fn ink_to_cmyk_row16(ink: &[u16], spots: &[Option<&SpotLut16>; 4], out: &mut [u16]) {
+    check_ink_row("ink_to_cmyk_row16", ink.len(), out.len(), 4);
+    for (px, quad) in ink
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<4>().0)
+    {
+        *quad = fold_spots16(px, spots);
+    }
+}
+
+/// The device CMYK of an sRGB colour.
+///
+/// The conversion is the one ISO 32000-2 §10.4.2.3 defines for a device
+/// without a colour profile, with identity black generation and
+/// undercolour removal: `c = 1 − r`, `m = 1 − g`,
+/// `y = 1 − b`, `k = min(c, m, y)`, then `k` removed from each of `c`,
+/// `m` and `y`.  A neutral is black ink alone, `k = 1 − r`.  Exact in
+/// integers at either depth.
+#[must_use]
+pub fn rgb_to_device_cmyk<S: Sample>(rgb: [S; 3]) -> [S; 4] {
+    let [c, m, y] = rgb.map(|v| S::MAX.signed() - v.signed());
+    let k = c.min(m).min(y);
+    [c - k, m - k, y - k, k].map(S::from_signed)
 }
 
 /// [`ink_union`] of 16-bit coverages: `a + b − a·b/65535`, rounded to

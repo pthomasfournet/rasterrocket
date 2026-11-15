@@ -35,6 +35,7 @@ pub fn write_pgm<P: Pixel<Sample = u8>, W: Write>(
         | PixelMode::Cmyk8
         | PixelMode::DeviceN8
         | PixelMode::DeviceN16
+        | PixelMode::Cmyk16
         | PixelMode::Mono16
         | PixelMode::Rgb16 => {
             return Err(EncodeError::UnsupportedMode(

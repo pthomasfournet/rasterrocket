@@ -11,8 +11,8 @@
 //!
 //! ## Module layout
 //! - `mode` — [`PixelMode`] enum + bytes-per-pixel table
-//! - `pixel` — [`Pixel`] trait and concrete types: [`Rgb8`], [`Gray8`], [`Cmyk8`], [`DeviceN8`],
-//!   [`DeviceN16`], [`Rgb16`], [`Gray16`]
+//! - `pixel` — [`Pixel`] trait and concrete types: [`Rgb8`], [`Gray8`], [`Cmyk8`], [`Cmyk16`],
+//!   [`DeviceN8`], [`DeviceN16`], [`Rgb16`], [`Gray16`]
 //! - `sample` — [`Sample`]: the 8- and 16-bit channel types and their compositing arithmetic
 //! - [`cmyk`] — `DeviceCMYK` → sRGB conversion (scalar reference + SIMD rows)
 //! - [`convert`] — all shared math (div255, lerp, Porter-Duff, color conversion, floor/ceil/round)
@@ -26,6 +26,6 @@ pub(crate) mod sample;
 pub(crate) mod transfer;
 
 pub use mode::{NCOMPS, PixelMode};
-pub use pixel::{AnyColor, Cmyk8, DeviceN8, DeviceN16, Gray8, Gray16, Pixel, Rgb8, Rgb16};
+pub use pixel::{AnyColor, Cmyk8, Cmyk16, DeviceN8, DeviceN16, Gray8, Gray16, Pixel, Rgb8, Rgb16};
 pub use sample::{Sample, SampleDepth, Wide};
 pub use transfer::TransferLut;

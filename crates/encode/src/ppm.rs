@@ -97,7 +97,8 @@ impl RgbSource {
             | PixelMode::Mono8
             | PixelMode::Mono16
             | PixelMode::Rgb16
-            | PixelMode::DeviceN16 => None,
+            | PixelMode::DeviceN16
+            | PixelMode::Cmyk16 => None,
         }
     }
 

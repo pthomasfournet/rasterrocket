@@ -42,7 +42,8 @@ mod model;
 mod tests;
 
 pub use inverse::{
-    BLACK_FLOOR, SPOT_TINTS16, SpotLut, SpotLut16, ink_to_rgb_row, ink_to_rgb_row16, rgb_to_ink,
+    BLACK_FLOOR, SPOT_TINTS16, SpotLut, SpotLut16, fold_spots, fold_spots16, ink_to_cmyk_row,
+    ink_to_cmyk_row16, ink_to_rgb_row, ink_to_rgb_row16, rgb_to_device_cmyk, rgb_to_ink,
     rgb_to_ink_at, rgb_to_ink16,
 };
 pub use matching::{INK_REPRODUCING_COST, ink_reproducing, ink_reproducing_at};
