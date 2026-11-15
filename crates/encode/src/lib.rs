@@ -9,14 +9,14 @@
 //! | [`write_pgm`] | Netpbm P5 binary | `Gray8` |
 //! | [`write_pbm`] | Netpbm P4 binary | `Gray8` (luma below 128 = black) |
 //! | [`write_png`] | PNG | `Gray8` and the colour modes of [`write_ppm`] |
-//! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8` |
+//! | [`write_jpeg`] | JPEG (baseline or progressive) | `Gray8`, `Rgb8`, `Bgr8`, `Cmyk8` (Adobe YCCK) |
 //! | [`jpeg_gray`] | JPEG (baseline), to a byte vector | `Gray8` |
-//! | [`write_tiff`], [`TiffWriter`] | TIFF, one or more pages | `Rgb8` and `Rgb16` (RGBA with an alpha plane), `Gray8`, `Gray16`, bilevel from `Gray8` |
+//! | [`write_tiff`], [`TiffWriter`], [`TiffStream`] | TIFF (`BigTIFF` past 4 GiB), one or more pages | `Rgb8` and `Rgb16` (RGBA with an alpha plane), `Gray8`, `Gray16`, `Cmyk8`, `Cmyk16`, bilevel from `Gray8` |
 //! | [`PdfWriter`] | PDF of raster pages, one image each | `Rgb8`, `Gray8`, `Rgb16`, `Gray16` |
 //!
 //! # ICC profiles
 //!
-//! An [`IccProfile`] of RGB or gray tags the image's colour: an `iCCP`
+//! An [`IccProfile`] of RGB, gray or CMYK tags the image's colour: an `iCCP`
 //! chunk in a PNG ([`write_png`], [`PngWriter`]), tag 34675 in a TIFF
 //! ([`TiffStream`], [`TiffPageEncoder`]), `APP2` segments in a JPEG
 //! ([`write_jpeg`]), and an `ICCBased` colour space for every page image of
@@ -41,10 +41,13 @@
 //!
 //! # CMYK handling
 //!
-//! Neither PPM nor PNG natively supports CMYK.  [`write_ppm`] and
-//! [`write_png`] convert CMYK/`DeviceN` (process channels only) to RGB with
-//! the profile-free process-ink model of `color::cmyk`.  For ICC-accurate colour, convert to
-//! `Rgb8` before encoding.
+//! TIFF and JPEG hold CMYK: [`RowImage::Cmyk`] and [`RowImage::Cmyk16`]
+//! are written as `Separated` TIFF (`InkSet` 1), and [`write_jpeg`] codes a
+//! `Cmyk8` bitmap as Adobe YCCK (`APP14` transform 2).  Neither PPM nor PNG
+//! supports CMYK: [`write_ppm`] and [`write_png`] convert CMYK/`DeviceN`
+//! (process channels only) to RGB with the profile-free process-ink model
+//! of `color::cmyk`.  For ICC-accurate colour, convert to `Rgb8` before
+//! encoding.
 
 pub(crate) mod icc;
 pub(crate) mod jpeg;

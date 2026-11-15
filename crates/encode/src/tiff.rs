@@ -1,14 +1,16 @@
 //! Baseline TIFF 6.0 writer: one or more pages of RGB (with unassociated
-//! alpha when the bitmap has an alpha plane), gray or bilevel pixels, each
-//! in strips, uncompressed or compressed with `PackBits`, LZW or Deflate,
-//! and bilevel pages also with CCITT Group 3 or Group 4 fax coding.
+//! alpha when the bitmap has an alpha plane), gray, CMYK (`Separated`) or
+//! bilevel pixels, 8 or 16 bits per sample (bilevel 1), each in strips,
+//! uncompressed or compressed with `PackBits`, LZW or Deflate, and bilevel
+//! pages also with CCITT Group 3 or Group 4 fax coding.
 //!
 //! The file is little-endian.  Each page's strips are followed by its image
 //! file directory (IFD), whose values that do not fit in an entry follow
-//! the directory.  Pages are encoded when they are added; the file is laid
-//! out when it is written, every offset computed and the size checked
-//! against the 4 GiB a TIFF addresses before the first byte goes out, then
-//! streamed to the sink.
+//! the directory.  [`TiffWriter`] encodes pages when they are added and
+//! lays the file out when it is written, every offset computed before the
+//! first byte goes out, then streams it to the sink; [`TiffStream`] writes
+//! one page band by band on a seekable sink, the directory last.  A file
+//! whose offsets pass the 4 GiB of classic TIFF is written as `BigTIFF`.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU32;
