@@ -51,6 +51,8 @@ siz = "siz"
 # TrueType `loca` table; Type 1 `ND` (noaccess def) procedure, also the
 # n-dimensional sampled-function evaluator and a subdivision depth.
 loca = "loca"
+# AAT `trak` (tracking) table.
+trak = "trak"
 nd = "nd"
 # Prefix in hyphenated compounds (mis-maps, mis-decodes).
 mis = "mis"
