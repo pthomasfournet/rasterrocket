@@ -3056,6 +3056,28 @@ expected image; `jpxdecode_smask_in_data_2` is reclassified as a divergence
 (its references draw the colour opaque, ignoring alpha) and `bug_1128284`
 now draws two of its three marks.
 
+**Unreleased on master: Link borders, `/MaxLen`, installed faces by name,
+curved patches.**  A Link annotation without an appearance stream draws its
+border: `/Rect` inset by half the width (`/BS /W`, else `/Border`, default
+1) and stroked in `/C` with its dash, the bottom side alone for `/BS /S /U`;
+without `/C`, or at width 0, it stays invisible. A synthesised text-field
+appearance shows at most `/MaxLen` characters of its value, comb or not. A
+font without an embedded program draws with the installed face its name
+names (PostScript name first, then the family key: subset tag dropped,
+style suffix after `,` or `-` cut, case, spaces, hyphens and underscores
+ignored), in the nearest weight and slant, unless it is one of the standard
+14, their metric-compatible aliases, Symbol or Dingbats; the choice is
+logged at info level. `FaceInfo` gains `postscript`, `FontDescriptor`
+gains `face_name`. A Coons or tensor patch is subdivided until it is also
+flat to 0.25 px, so a single-colour patch with curved sides keeps its
+curves instead of being drawn as its corner quadrilateral. Fixtures
+corpus-08 and corpus-09 now draw their non-embedded Carlito as Carlito and
+pass against pdftoppm; pdfium corpus: `bug_41010502_1` matches its
+expected image, `bug_1072440`, `bug_846`, `bug_41010502_2` and
+`type3_xobject` are reclassified as divergences, and `shade-tensor` draws
+its curved patches (tile 161 to 98); patches whose sides loop from a shared
+corner still paint their surface where both references fill the outline.
+
 **Unreleased on master: a clip takes effect after the paint that ends its
 path.** A `W`/`W*` followed by a painting operator (`W f`, `W S`, `W B`,
 `W b` and their even-odd forms) now paints the path unclipped by it, then
