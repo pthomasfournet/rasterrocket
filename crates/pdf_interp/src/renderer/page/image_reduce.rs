@@ -879,6 +879,61 @@ mod tests {
         assert_eq!(out.alpha(), &[85, 255]);
     }
 
+    /// A 16-bit mask reduces in its 16-bit alpha, which it keeps, its
+    /// 8-bit alpha the nearest bytes of that.
+    #[test]
+    fn a_16_bit_mask_reduces_keeping_its_16_bit_alpha() {
+        let row = [u16::MAX, 0, 0, u16::MAX, u16::MAX, u16::MAX];
+        let mask = SoftMask::new16(6, 3, row.repeat(3)).unwrap();
+        let (out, _) = reduce_mask_for_draw(
+            &mask,
+            &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &DeviceWindow::UNBOUNDED,
+        )
+        .expect("reduced");
+        assert_eq!((out.width(), out.height()), (2, 1));
+        assert_eq!(out.alpha16(), Some(&[21_845, u16::MAX][..]));
+        assert_eq!(out.alpha(), &[85, 255]);
+    }
+
+    /// 16-bit samples at full scale reduce without overflow to their exact
+    /// means: a 256 × 256 image of full samples to one full sample, and
+    /// a row of full and empty samples to their means, to within a count;
+    /// widened 8-bit samples reduce to the 8-bit reduction widened, to
+    /// within one 8-bit level.
+    #[test]
+    fn a_16_bit_image_at_full_scale_reduces_to_its_means() {
+        let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let plan = Plan::new(&ctm, 256, 256, &DeviceWindow::UNBOUNDED).expect("reduces");
+        let full = plan
+            .resample(&vec![u16::MAX; 256 * 256], 1)
+            .expect("resampled");
+        assert_eq!(full, [u16::MAX]);
+        let row = [u16::MAX, u16::MAX, 0, u16::MAX];
+        let half = [2.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let plan = Plan::new(&half, 4, 1, &DeviceWindow::UNBOUNDED).expect("reduces");
+        let means = plan.resample(&row, 1).expect("resampled");
+        assert_eq!(means[0], u16::MAX);
+        assert!(means[1].abs_diff(32_768) <= 1, "{means:?}");
+        let bytes: Vec<u8> = (0..64u8).map(|v| v.wrapping_mul(37)).collect();
+        let plan = Plan::new(
+            &[3.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            16,
+            4,
+            &DeviceWindow::UNBOUNDED,
+        )
+        .expect("reduces");
+        let narrow = plan.resample(&bytes, 1).expect("resampled");
+        let wide: Vec<u16> = bytes.iter().map(|&v| u16::from_u8(v)).collect();
+        let wide = plan.resample(&wide, 1).expect("resampled");
+        for (w, n) in wide.iter().zip(&narrow) {
+            assert!(
+                w.abs_diff(u16::from_u8(*n)) <= 257,
+                "{wide:?} vs {narrow:?}"
+            );
+        }
+    }
+
     /// The sample of a `w × h` gray image drawn through `ctm` whose area
     /// holds the centre of device pixel `(px, py)`, if any.
     #[expect(

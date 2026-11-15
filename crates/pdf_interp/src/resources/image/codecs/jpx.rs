@@ -523,4 +523,24 @@ mod tests {
             );
         }
     }
+
+    /// At 16 bits an alpha channel is dropped under `/SMaskInData 0`,
+    /// split off as the soft mask under 1, and under 2 also divided out of
+    /// the colour premultiplied by it.
+    #[test]
+    fn split_alpha_follows_smask_in_data_at_16_bits() {
+        let samples = vec![10_000u16, 20_000, 16_384, 65_535, 0, 65_535];
+        let (colour, alpha) = split_alpha(samples.clone(), 2, true, 0);
+        assert_eq!((colour, alpha), (vec![10_000, 20_000, 65_535, 0], None));
+        let (colour, alpha) = split_alpha(samples.clone(), 2, true, 1);
+        assert_eq!(colour, [10_000, 20_000, 65_535, 0]);
+        assert_eq!(alpha.as_deref(), Some(&[16_384, 65_535][..]));
+        let (colour, alpha) = split_alpha(samples, 2, true, 2);
+        assert_eq!(alpha.as_deref(), Some(&[16_384, 65_535][..]));
+        assert!(
+            colour[0].abs_diff(40_000) <= 1 && colour[1].abs_diff(65_535) <= 1,
+            "{colour:?}"
+        );
+        assert_eq!(colour[2..], [65_535, 0]);
+    }
 }

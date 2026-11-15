@@ -820,4 +820,48 @@ mod tests {
         );
         assert!(explicit_of(&doc).is_err());
     }
+
+    /// At 16 bits the matte relation inverts in the samples' own range: a
+    /// sample premultiplied over a black matte returns to within a count
+    /// of its value, an opaque one is unchanged and a transparent one is
+    /// left as stored.
+    #[test]
+    fn unmatte_inverts_16_bit_samples() {
+        let mut samples = [10_000u16, 1_234, 5];
+        unmatte(&mut samples, &[16_384, u16::MAX, 0], &[0]);
+        assert!(samples[0].abs_diff(40_000) <= 1, "{samples:?}");
+        assert_eq!(samples[1..], [1_234, 5]);
+    }
+
+    /// A 16-bit gray image `[10000, 5]`, matted over black under `mask`.
+    fn matted16(mask: SoftMask) -> ImageDescriptor {
+        ImageDescriptor {
+            width: 2,
+            height: 1,
+            color_space: ImageColorSpace::Gray,
+            data: ImageData::Cpu16(vec![10_000, 5]),
+            smask: Some(mask),
+            filter: crate::resources::image::ImageFilter::Raw,
+        }
+    }
+
+    /// The matte of 16-bit samples is removed with the mask's 16-bit alpha
+    /// when it has one, else with its 8-bit alpha widened.
+    #[test]
+    fn remove_matte_reads_the_alpha_of_16_bit_samples() {
+        let doc = crate::test_helpers::empty_doc();
+        let mut img = matted16(SoftMask::new16(2, 1, vec![16_384, 0]).expect("a mask"));
+        remove_matte(&doc, None, &[0.0], &mut img);
+        let data = img.data.as_cpu16().expect("16-bit samples");
+        assert!(data[0].abs_diff(40_000) <= 1 && data[1] == 5, "{data:?}");
+        let mut img = matted16(SoftMask::new(2, 1, vec![64, 0]).expect("a mask"));
+        remove_matte(&doc, None, &[0.0], &mut img);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the quotient lies within 0..=65535"
+        )]
+        let want = (10_000.0f64 * 65_535.0 / f64::from(u16::from_u8(64))).round() as u16;
+        assert_eq!(img.data.as_cpu16().expect("16-bit samples"), [want, 5]);
+    }
 }

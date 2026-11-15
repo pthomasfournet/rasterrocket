@@ -1167,6 +1167,32 @@ mod tests {
         );
     }
 
+    /// A 16-bit sample of a mask with a 16-bit alpha is that alpha; of a
+    /// mask without one, its 8-bit alpha widened; an 8-bit sample is the
+    /// 8-bit alpha either way.
+    #[test]
+    fn mask_sampler_reads_the_alpha_of_the_sample_depth() {
+        let ctm = [40.0, 0.0, 0.0, 30.0, 10.0, 20.0];
+        let filter = Filter::for_draw(&ctm, 40, 30, false);
+        let wide: Vec<u16> = (0..1200u32)
+            .map(|i| u16::try_from(i * 53 % 65_536).unwrap())
+            .collect();
+        let deep = SoftMask::new16(40, 30, wide.clone()).expect("40×30 mask");
+        let narrow = SoftMask::new(40, 30, deep.alpha().to_vec()).expect("40×30 mask");
+        let at = Taps::point(3, 2);
+        let i = 2 * 40 + 3;
+        let sampler = |mask| {
+            MaskSampler::new(mask, &ctm, &ctm, filter, GridView::whole(100, 100), 40, 30)
+                .expect("sampler")
+        };
+        assert_eq!(sampler(&deep).alpha_at::<u16>(0, 0, &at), wide[i]);
+        assert_eq!(sampler(&deep).alpha_at::<u8>(0, 0, &at), deep.alpha()[i]);
+        assert_eq!(
+            sampler(&narrow).alpha_at::<u16>(0, 0, &at),
+            u16::from_u8(narrow.alpha()[i])
+        );
+    }
+
     /// Clamping keeps a rounding-edge centre on the nearest mask pixel.
     #[test]
     fn sample_clamped_stays_on_the_image() {

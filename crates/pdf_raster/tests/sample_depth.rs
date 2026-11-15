@@ -537,6 +537,52 @@ fn spot_images_on_the_ink_canvas_keep_16_bits() {
     assert!(table.iter().all(|&(max, _)| max <= 2), "{table:?}");
 }
 
+/// A 1024 × 4 point page under overprint simulation: in the lower half
+/// the 16-bit RGB ramp of [`flate_ramp`], in the upper half an axial
+/// shading from red to blue across the page.
+fn rgb_on_ink_page() -> Vec<u8> {
+    common::with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1024 4] \
+          /Resources << /ExtGState << /GS0 << /OP true /op true /OPM 1 >> >> \
+          /XObject << /Ramp 5 0 R >> /Shading << /Sh 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        common::stream_object(
+            "",
+            b"q /GS0 gs q 1024 0 0 2 0 0 cm /Ramp Do Q 0 2 1024 2 re W n /Sh sh Q",
+        ),
+        flate_ramp(),
+        b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1024 0] \
+          /Extend [true true] \
+          /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>"
+            .to_vec(),
+    ])
+}
+
+/// On the ink canvas 16-bit sRGB sources convert to ink at 16 bits: a
+/// 16-bit RGB image and an RGB shading each show more than 256 levels in
+/// their red channel at depth 16 and at most 256 at depth 8, the 16-bit
+/// render narrowing to the 8-bit one within two levels (the 8-bit inverse
+/// and model each rounded to a byte).
+#[test]
+fn rgb_sources_on_the_ink_canvas_keep_16_bits() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = true;
+    let session = open_session_from_bytes(rgb_on_ink_page(), &config).expect("open session");
+    let wide = rgb16(render(&session, SampleDepth::Sixteen));
+    let narrow = rgb8(render(&session, SampleDepth::Eight));
+    for (name, row) in [("16-bit RGB image", 3), ("RGB shading", 0)] {
+        let (l16, l8) = (
+            levels(wide.row_samples(row), 0),
+            levels(narrow.row_samples(row), 0),
+        );
+        eprintln!("{name}: {l16} levels at 16 bits, {l8} at 8");
+        assert!(l16 > 256 && l8 <= 256, "{name}: {l16} and {l8} levels");
+    }
+    let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+    eprintln!("RGB on the ink canvas: {table:?}");
+    assert!(table.iter().all(|&(max, _)| max <= 2), "{table:?}");
+}
+
 /// The 16-vs-8 table of the corpus fixtures and the gradient page: each
 /// page rendered at 150 dpi at both depths, the 16-bit render narrowed, the
 /// largest difference and the differing samples per channel printed.  Run
