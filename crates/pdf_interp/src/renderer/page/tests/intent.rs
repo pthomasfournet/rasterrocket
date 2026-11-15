@@ -72,10 +72,11 @@ fn an_image_marks_under_its_own_intent() {
 
 /// Page `(4, 0)` whose `/ColorSpace` resource `/P` is `[/ICCBased 5 0 R]`,
 /// stream 5 the synthetic CMYK printer of `tests/fixtures/icc`, whose
-/// tables differ by intent; its `/ExtGState` resource `/Perc` sets the
-/// perceptual intent.  The image `/Im` (6) is one pixel of the ink
-/// `0 1 1 0` in that space, `/ImP` (7) the same with its own `/Intent
-/// /Perceptual`; the shading `/Sh` (8) is that ink throughout.
+/// tables differ by intent; its `/ExtGState` resources `/Perc` set the
+/// perceptual intent and `/NoBpc` black-point compensation off.  The
+/// image `/Im` (6) is one pixel of the ink `0 1 1 0` in that space, `/ImP`
+/// (7) the same with its own `/Intent /Perceptual`; the shading `/Sh` (8)
+/// is that ink throughout.
 fn icc_doc() -> Document {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -95,7 +96,7 @@ fn icc_doc() -> Document {
         (
             4,
             b"<< /Type /Page /Resources << /ColorSpace << /P [/ICCBased 5 0 R] >> \
-              /ExtGState << /Perc << /RI /Perceptual >> >> \
+              /ExtGState << /Perc << /RI /Perceptual >> /NoBpc << /UseBlackPtComp /OFF >> >> \
               /XObject << /Im 6 0 R /ImP 7 0 R >> /Shading << /Sh 8 0 R >> >> >>"
                 .to_vec(),
         ),
@@ -208,6 +209,27 @@ fn a_shading_converts_under_the_intent_in_effect() {
         assert!(
             got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 1),
             "{got:?} against {want:?}"
+        );
+    }
+}
+
+/// Black-point compensation is on by default and `/UseBlackPtComp /OFF`
+/// turns it off, converting the colour in effect again: the printer's
+/// black, `L* = 8` (sRGB 24), paints black with it.
+#[test]
+fn use_black_pt_comp_switches_compensation() {
+    let d = icc_doc();
+    let black = "/P cs 0 0 0 1 sc";
+    let on = first_pixel(&d, &format!("{black} 0 0 10 10 re f"));
+    assert!(on.iter().all(|&c| c <= 1), "{on:?}");
+    for content in [
+        format!("{black} /NoBpc gs 0 0 10 10 re f"),
+        format!("/NoBpc gs {black} 0 0 10 10 re f"),
+    ] {
+        let off = first_pixel(&d, &content);
+        assert!(
+            off.iter().all(|&c| c.abs_diff(24) <= 1),
+            "{content}: {off:?}"
         );
     }
 }

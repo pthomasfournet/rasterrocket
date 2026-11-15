@@ -48,7 +48,7 @@ pub(super) struct PlacedKey {
     matrix: [u64; 6],
     canvas: [u64; 2],
     /// The rendering intent the colours convert under.
-    intent: crate::RenderingIntent,
+    intent: crate::ColourIntent,
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
     /// The canvas the object is resolved for.
@@ -372,7 +372,7 @@ impl PageRenderer<'_> {
             width: f64::from(self.page_width),
             height: f64::from(self.page_height),
             depth: self.canvas.kind().depth(),
-            intent: self.gstate.current().rendering_intent,
+            intent: self.gstate.current().colour_intent,
         }
     }
 
@@ -474,7 +474,7 @@ mod tests {
             width: 100.0,
             height: page_h,
             depth: color::SampleDepth::Eight,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         };
         PlacedKey::new(
             ResourceKey::Object(id),

@@ -39,7 +39,7 @@ use pdf::{Dictionary, Document, Object};
 use super::{
     ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask, TintData,
 };
-use crate::RenderingIntent;
+use crate::ColourIntent;
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{
     ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
@@ -333,7 +333,7 @@ impl ImageColour {
     pub(super) fn convert(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         samples: Samples,
         budget: Option<&TintBudget>,
         #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
@@ -611,7 +611,7 @@ fn default_decode(doc: &Document, space: &ColorSpace) -> Vec<(f64, f64)> {
     // The `/Alternate` space stands in for a profile that converts under no
     // intent; the initial intent's conversion answers for every intent.
     range.unwrap_or_else(|| {
-        match IccConversion::load(doc, *id, *n, RenderingIntent::default()).as_deref() {
+        match IccConversion::load(doc, *id, *n, ColourIntent::INITIAL).as_deref() {
             Some(IccConversion::Alternate(alt)) => alt.default_decode(8),
             _ => space.default_decode(8),
         }
@@ -805,7 +805,7 @@ impl Lattice {
 struct Decoded<'a> {
     doc: &'a Document,
     /// The rendering intent the samples convert under.
-    intent: RenderingIntent,
+    intent: ColourIntent,
     space: &'a ColorSpace,
     decode: &'a [(f64, f64)],
     max_sample: f64,
@@ -865,7 +865,7 @@ impl<'a> Decoded<'a> {
     /// [`TintBudget`]).
     fn new(
         doc: &'a Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         space: &'a ColorSpace,
         decode: &'a [(f64, f64)],
         max_sample: f64,
@@ -1396,7 +1396,7 @@ mod tests {
         let width = u32::try_from(data.len() / layout_components(layout)).unwrap();
         colour.convert(
             doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             Samples::cpu(width, 1, layout, data.to_vec()),
             budget,
             #[cfg(feature = "gpu-icc")]
@@ -1412,7 +1412,7 @@ mod tests {
     fn unit_decoded<'a>(doc: &'a Document, space: &'a ColorSpace, n: usize) -> Decoded<'a> {
         Decoded::new(
             doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             space,
             &UNIT_DECODE[..n],
             255.0,
@@ -1634,7 +1634,7 @@ mod tests {
         let img = colour
             .convert(
                 &doc,
-                RenderingIntent::default(),
+                ColourIntent::INITIAL,
                 Samples::cpu(1, 1, Layout::Color(3), vec![1, 2, 3]),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -1673,7 +1673,7 @@ mod tests {
         let doc = empty_doc();
         let rgb_space = resolve(&doc, &cal("CalRGB", "[1.8 1.8 1.8]"));
         let want =
-            rgb_space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0; 3]);
+            rgb_space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0; 3]);
         let img = convert(
             &doc,
             cal("CalRGB", "[1.8 1.8 1.8]"),
@@ -1687,8 +1687,7 @@ mod tests {
             "got {got:?}, fill path {want:?}"
         );
         let gray_space = resolve(&doc, &cal("CalGray", "1.8"));
-        let want =
-            gray_space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0]);
+        let want = gray_space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0]);
         let img = convert(&doc, cal("CalGray", "1.8"), &[], Layout::Color(1), &[128]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
@@ -1875,7 +1874,7 @@ mod tests {
             .iter()
             .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
             .collect();
-        space.convert_to_rgb(doc, crate::RenderingIntent::default(), &comps)
+        space.convert_to_rgb(doc, crate::ColourIntent::INITIAL, &comps)
     }
 
     /// A program of `n` inputs and four outputs, smooth in each, padded
@@ -2155,7 +2154,7 @@ mod tests {
         colour
             .convert(
                 doc,
-                RenderingIntent::default(),
+                ColourIntent::INITIAL,
                 Samples::cpu16(width, 1, layout, data.to_vec()),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -2215,7 +2214,7 @@ mod tests {
             .flat_map(|px| {
                 ColorSpace::DeviceCmyk.convert::<u16>(
                     &doc,
-                    crate::RenderingIntent::default(),
+                    crate::ColourIntent::INITIAL,
                     &px.map(u16::to_unit),
                 )
             })
@@ -2271,7 +2270,7 @@ mod tests {
                 &doc,
                 (2, 0),
                 3,
-                crate::RenderingIntent::default()
+                crate::ColourIntent::INITIAL
             )
             .as_deref(),
             Some(crate::resources::colorspace::icc::IccConversion::Transform { .. })
@@ -2319,7 +2318,7 @@ mod tests {
         let img = convert(&doc, icc_cs(), &[], Layout::Color(1), &[128]);
         let want = resolve(&doc, &cal("CalGray", "1.8")).convert_to_rgb(
             &doc,
-            crate::RenderingIntent::default(),
+            crate::ColourIntent::INITIAL,
             &[128.0 / 255.0],
         );
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
@@ -2436,8 +2435,7 @@ mod tests {
     fn lut_based_profile_converts_through_moxcms() {
         let doc = make_doc_with_stream(&lut_rgb_profile(), " /N 3");
         let space = resolve(&doc, &icc_cs());
-        let want =
-            space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0; 3]);
+        let want = space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0; 3]);
         assert!(
             want.iter().all(|&c| c.abs_diff(146) <= 3),
             "the fill path lightens mid-gray through the table, got {want:?}"

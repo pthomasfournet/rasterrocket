@@ -7,15 +7,17 @@
 //! `tests/fixtures/icc`: table-based CMYK and RGB printers whose tables
 //! differ by intent and whose paper white is tinted, and a gray TRC one.
 //!
-//! Asserted, within [`MAX_DELTA_E_8`] at 8 bits and [`MAX_DELTA_E_16`] at
-//! 16: the CMYK and gray profiles under relative and absolute
-//! colorimetry.  Printed only:
+//! Each intent but absolute colorimetry renders with black-point
+//! compensation on (`/UseBlackPtComp /ON`, against `transicc -b`) and
+//! off; absolute colorimetry, which is never compensated, once.
 //!
-//! - perceptual and saturation, where Little CMS compensates the black
-//!   point of a version 4 profile and the ICC definition this renderer
-//!   follows does not: its dark end lies about 4 ΔE00 below ours;
-//! - the RGB printers, whose table-based conversion the CMS evaluates
-//!   with a red cast at dark neutrals under every intent (about 2 ΔE00).
+//! Asserted, within [`MAX_DELTA_E_8`] at 8 bits and [`MAX_DELTA_E_16`] at
+//! 16: the CMYK and gray profiles under every compensated intent and under
+//! absolute colorimetry.  Printed only: the intents without compensation,
+//! where Little CMS compensates the black of version 4 perceptual tables
+//! regardless, and the RGB printers, whose table-based conversion the CMS
+//! evaluates with a red cast at dark neutrals under every intent (about
+//! 2 ΔE00).
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket --test input_profile_transicc -- --ignored`.
@@ -75,9 +77,16 @@ fn patches(n: usize) -> Vec<Vec<f64>> {
 }
 
 /// A one-point-high page with one patch a point, each filled with its
-/// components in `[/ICCBased profile]` under `intent`.
-fn patch_page(profile: &[u8], n: usize, intent: &str, patches: &[Vec<f64>]) -> Vec<u8> {
-    let mut content = format!("/{intent} ri /P cs\n");
+/// components in `[/ICCBased profile]` under `intent`, black-point
+/// compensation `bpc`.
+fn patch_page(
+    profile: &[u8],
+    n: usize,
+    (intent, bpc): (&str, bool),
+    patches: &[Vec<f64>],
+) -> Vec<u8> {
+    let bpc = if bpc { "ON" } else { "OFF" };
+    let mut content = format!("/B gs /{intent} ri /P cs\n");
     for (x, p) in patches.iter().enumerate() {
         for v in p {
             let _ = write!(content, "{v} ");
@@ -86,7 +95,8 @@ fn patch_page(profile: &[u8], n: usize, intent: &str, patches: &[Vec<f64>]) -> V
     }
     let page = format!(
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} 1] \
-         /Resources << /ColorSpace << /P [/ICCBased 4 0 R] >> >> /Contents 5 0 R >>",
+         /Resources << /ColorSpace << /P [/ICCBased 4 0 R] >> \
+         /ExtGState << /B << /UseBlackPtComp /{bpc} >> >> >> /Contents 5 0 R >>",
         patches.len()
     );
     one_page(
@@ -214,21 +224,26 @@ fn delta_e00(a: &[f64], b: &[f64]) -> f64 {
 
 /// Our rendering of the patches of profile `name` (`n` components)
 /// against `transicc` under every intent at both depths, asserted within
-/// the bound of the depth under the intents of `asserted`.
-fn agrees(name: &str, n: usize, asserted: &[&str]) {
+/// the bound of the depth when `asserted` and the case is compensated or
+/// absolute.
+fn agrees(name: &str, n: usize, asserted: bool) {
     let path = profile_path(name);
     let profile = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let chart = patches(n);
     // transicc reads CMYK in percent and gray or RGB in 0 to 255.
     let full = if n == 4 { 100.0 } else { 255.0 };
     let mut failures = Vec::new();
-    for (code, intent) in [
-        ("0", "Perceptual"),
-        ("1", "RelativeColorimetric"),
-        ("2", "Saturation"),
-        ("3", "AbsoluteColorimetric"),
+    for (code, intent, bpc) in [
+        ("0", "Perceptual", true),
+        ("1", "RelativeColorimetric", true),
+        ("2", "Saturation", true),
+        ("3", "AbsoluteColorimetric", false),
+        ("0", "Perceptual", false),
+        ("1", "RelativeColorimetric", false),
+        ("2", "Saturation", false),
     ] {
-        let pdf = patch_page(&profile, n, intent, &chart);
+        let claimed = asserted && (bpc || code == "3");
+        let pdf = patch_page(&profile, n, (intent, bpc), &chart);
         for (depth, quantum, bound) in [
             (SampleDepth::Eight, 255.0, MAX_DELTA_E_8),
             (SampleDepth::Sixteen, 65535.0, MAX_DELTA_E_16),
@@ -244,18 +259,24 @@ fn agrees(name: &str, n: usize, asserted: &[&str]) {
                         + "\n"
                 })
                 .collect();
-            let theirs: Vec<[f64; 3]> = transicc(
-                &[&format!("-i{path}"), "-o*sRGB", &format!("-t{code}")],
-                &input,
-            )
-            .iter()
-            .map(|v| [v[0], v[1], v[2]].map(|c| c.clamp(0.0, 255.0)))
-            .collect();
+            let mut args = vec![
+                format!("-i{path}"),
+                "-o*sRGB".to_owned(),
+                format!("-t{code}"),
+            ];
+            if bpc {
+                args.push("-b".to_owned());
+            }
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let theirs: Vec<[f64; 3]> = transicc(&args, &input)
+                .iter()
+                .map(|v| [v[0], v[1], v[2]].map(|c| c.clamp(0.0, 255.0)))
+                .collect();
             let ours = ours(pdf.clone(), depth);
             assert_eq!(
                 ours.len(),
                 chart.len(),
-                "{name} {intent}: one pixel a patch"
+                "{name} {intent} bpc {bpc}: one pixel a patch"
             );
             let (lab_ours, lab_theirs) = (lab(&ours), lab(&theirs));
             let (mut worst, mut sum) = (0.0f64, 0.0);
@@ -273,36 +294,33 @@ fn agrees(name: &str, n: usize, asserted: &[&str]) {
             )]
             let mean = sum / chart.len() as f64;
             eprintln!(
-                "{name} {intent} {depth:?}: mean ΔE00 {mean:.3}, max {worst:.3} at {:?} \
+                "{name} {intent} bpc {bpc} {depth:?}: mean ΔE00 {mean:.3}, max {worst:.3} at {:?} \
                  (ours {:?}, transicc {:?})",
                 chart[worst_at], ours[worst_at], theirs[worst_at]
             );
-            if asserted.contains(&intent) && worst > bound {
-                failures.push(format!("{intent} {depth:?}: max ΔE00 {worst:.3}"));
+            if claimed && worst > bound {
+                failures.push(format!("{intent} bpc {bpc} {depth:?}: max ΔE00 {worst:.3}"));
             }
         }
     }
     assert!(failures.is_empty(), "{name}: {failures:?}");
 }
 
-/// The intents whose conversions are asserted (see the module comment).
-const COLORIMETRIC: &[&str] = &["RelativeColorimetric", "AbsoluteColorimetric"];
-
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn cmyk_printer_agrees_with_little_cms() {
-    agrees("printer-cmyk-v4", 4, COLORIMETRIC);
+    agrees("printer-cmyk-v4", 4, true);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn gray_printer_agrees_with_little_cms() {
-    agrees("printer-gray-v4", 1, COLORIMETRIC);
+    agrees("printer-gray-v4", 1, true);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn rgb_printers_against_little_cms() {
-    agrees("printer-rgb-v4", 3, &[]);
-    agrees("printer-rgb-v2", 3, &[]);
+    agrees("printer-rgb-v4", 3, false);
+    agrees("printer-rgb-v2", 3, false);
 }

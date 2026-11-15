@@ -12,6 +12,8 @@
 
 use moxcms::{ColorProfile, ProfileClass, ProfileVersion, Xyzd};
 
+pub(crate) mod black;
+
 /// The D50 illuminant of the PCS.
 pub(crate) const D50: [f64; 3] = [0.964_2, 1.0, 0.824_9];
 

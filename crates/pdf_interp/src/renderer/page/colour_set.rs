@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use super::PageRenderer;
-use crate::RenderingIntent;
+use crate::ColourIntent;
 use crate::renderer::gstate::{ColourMut, InterpGState};
 use crate::resources::ColorSpace;
 
@@ -55,13 +55,13 @@ impl PageRenderer<'_> {
         *slot.components = components;
     }
 
-    /// `ri`, `gs /RI`: put `intent` into effect.  The fill and stroke
-    /// colours whose spaces convert differently under `intent` than under
-    /// the intent replaced convert again from their components, unless a
-    /// `d1` glyph description has locked them.
-    pub(super) fn set_rendering_intent(&mut self, intent: RenderingIntent) {
+    /// `ri`, `gs /RI /UseBlackPtComp`: put `intent` into effect.  The fill
+    /// and stroke colours whose spaces convert differently under `intent`
+    /// than under the intent replaced convert again from their components,
+    /// unless a `d1` glyph description has locked them.
+    pub(super) fn set_colour_intent(&mut self, intent: ColourIntent) {
         let gs = self.gstate.current_mut();
-        let replaced = std::mem::replace(&mut gs.rendering_intent, intent);
+        let replaced = std::mem::replace(&mut gs.colour_intent, intent);
         if replaced == intent || gs.colour_locked {
             return;
         }

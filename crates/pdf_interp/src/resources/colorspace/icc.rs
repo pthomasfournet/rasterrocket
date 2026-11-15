@@ -29,14 +29,14 @@ use moxcms::{
 use pdf::{Document, ObjectId};
 
 use super::ColorSpace;
-use crate::RenderingIntent;
 use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
+use crate::{ColourIntent, RenderingIntent};
 
 #[cfg(feature = "gpu-icc")]
 pub(crate) mod clut;
 
 /// The device-to-PCS model of a profile: its matrix/TRC model, or one of
-/// its `AToB` tables.  The discriminant indexes [`IccProfile::conversions`].
+/// its `AToB` tables.  The discriminant indexes the slots of a [`Form`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Model {
     /// The matrix/TRC model of a profile without `AToB` tables.
@@ -79,6 +79,16 @@ impl Model {
         }
     }
 
+    /// The rendering intent whose table the model is.  The matrix/TRC
+    /// model, of every intent, is taken as media-relative.
+    const fn intent(self) -> moxcms::RenderingIntent {
+        match self {
+            Self::Matrix | Self::AToB1 => moxcms::RenderingIntent::RelativeColorimetric,
+            Self::AToB0 => moxcms::RenderingIntent::Perceptual,
+            Self::AToB2 => moxcms::RenderingIntent::Saturation,
+        }
+    }
+
     /// The converter intent that evaluates the model.  The matrix/TRC
     /// model is intent-independent and evaluates under the converter's
     /// default intent.
@@ -91,13 +101,31 @@ impl Model {
     }
 }
 
-/// Number of conversions an [`IccProfile`] holds: every [`Model`],
-/// media-relative and ICC-absolute.
-const SLOTS: usize = 8;
+/// The forms in which an [`IccProfile`] compiles each [`Model`]: plain,
+/// ICC-absolute, and with black-point compensation.  The conversion of
+/// model `m` in form `f` is held in slot `f · MODELS + m`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// Media-relative, the model's PCS converted as it is.
+    Plain = 0,
+    /// ICC-absolute: the PCS scaled by the media white.
+    Absolute = 1,
+    /// Media-relative with the model's black point mapped to sRGB black.
+    Compensated = 2,
+}
 
-/// The slot of the ICC-absolute conversion of a model: the model's own
-/// slot offset by this.
-const ABSOLUTE: usize = 4;
+/// Number of models.
+const MODELS: usize = 4;
+
+/// Number of conversions an [`IccProfile`] holds: every [`Model`] in
+/// every [`Form`].
+const SLOTS: usize = 3 * MODELS;
+
+/// The largest black-point luminance compensation leaves alone, that of
+/// `L* = 0.1`: the resolution at which a black point is found, so a black
+/// within it is the PCS origin and the compensated conversion the plain
+/// one.
+const BLACK_EPSILON: f64 = 0.1 / 903.3;
 
 /// One ICC profile stream, parsed, and the conversions of its colour
 /// values compiled for the rendering intents that use it.
@@ -111,9 +139,11 @@ pub(crate) struct IccProfile {
     /// [`crate::pcs::scale_from_white`]); `None` when the media white is
     /// D50, under which ICC-absolute is media-relative colorimetry.
     absolute: Option<[f64; 3]>,
-    /// The slot in [`Self::conversions`] of each intent, by
-    /// [`RenderingIntent::index`].
-    slots: [usize; 4],
+    /// The model each intent selects, by [`RenderingIntent::index`].
+    models: [Model; 4],
+    /// The black-point luminance of each model as a conversion source (see
+    /// [`crate::pcs::black::source_black`]), detected on first use.
+    blacks: [OnceLock<f64>; MODELS],
     /// The conversion of each slot, compiled on first use; `None` when
     /// neither the profile nor the `/Alternate` space converts.
     conversions: [OnceLock<Option<Arc<IccConversion>>>; SLOTS],
@@ -131,24 +161,53 @@ impl IccProfile {
         let absolute = profile
             .as_ref()
             .and_then(|p| crate::pcs::scale_from_white(crate::pcs::media_white(p)));
-        let slots = RenderingIntent::ALL.map(|intent| {
-            let Some(profile) = &profile else {
-                return 0;
-            };
-            let model = Model::of(profile, intent) as usize;
-            if intent == RenderingIntent::AbsoluteColorimetric && absolute.is_some() {
-                model + ABSOLUTE
-            } else {
-                model
-            }
+        let models = RenderingIntent::ALL.map(|intent| {
+            profile
+                .as_ref()
+                .map_or(Model::Matrix, |p| Model::of(p, intent))
         });
         Self {
             n,
             profile: profile.map(Arc::new),
             absolute,
-            slots,
+            models,
+            blacks: Default::default(),
             conversions: Default::default(),
         }
+    }
+
+    /// The slot of the conversion under `intent`: the model the rendering
+    /// intent selects, ICC-absolute when the intent is and the media white
+    /// is not D50, compensated when compensation is on, the intent is not
+    /// absolute and the model's black is not the PCS origin, else plain.
+    fn slot(&self, intent: ColourIntent) -> usize {
+        let model = self.models[intent.intent.index()];
+        let form = match intent.intent {
+            RenderingIntent::AbsoluteColorimetric if self.absolute.is_some() => Form::Absolute,
+            RenderingIntent::AbsoluteColorimetric => Form::Plain,
+            _ if intent.bpc && self.black(model) > BLACK_EPSILON => Form::Compensated,
+            _ => Form::Plain,
+        };
+        form as usize * MODELS + model as usize
+    }
+
+    /// The black-point luminance of `model` as a conversion source,
+    /// detected on first use; 0 without a profile, or when detection fails,
+    /// which is logged.
+    fn black(&self, model: Model) -> f64 {
+        *self.blacks[model as usize].get_or_init(|| {
+            let Some(profile) = &self.profile else {
+                return 0.0;
+            };
+            crate::pcs::black::source_black(profile, model.intent())
+                .map_err(|e| {
+                    log::warn!(
+                        "colorspace: ICC black point not found, converting without \
+                         black-point compensation: {e}"
+                    );
+                })
+                .unwrap_or(0.0)
+        })
     }
 
     /// The conversion of the profile's colour values under `intent`,
@@ -156,10 +215,10 @@ impl IccProfile {
     /// a profile without a conversion of its own converts through.
     fn conversion(
         &self,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         alternate: impl FnOnce() -> Option<ColorSpace>,
     ) -> Option<Arc<IccConversion>> {
-        let slot = self.slots[intent.index()];
+        let slot = self.slot(intent);
         self.conversions[slot]
             .get_or_init(|| {
                 self.compile(slot)
@@ -174,33 +233,40 @@ impl IccProfile {
     /// transform.
     fn compile(&self, slot: usize) -> Option<IccConversion> {
         let profile = self.profile.as_ref()?;
-        let absolute = slot >= ABSOLUTE;
-        let model = slot % ABSOLUTE;
-        if model == Model::Matrix as usize && !absolute {
-            let shaper = ProfileConversion::from_profile(profile);
-            if matches!(
-                (&shaper, self.n),
-                (ProfileConversion::Gray(_), 1) | (ProfileConversion::Rgb(_), 3)
-            ) {
-                return Some(IccConversion::Shaper(shaper));
+        let model = Model::ALL[slot % MODELS];
+        let form = [Form::Plain, Form::Absolute, Form::Compensated][slot / MODELS];
+        let dest = match form {
+            Form::Plain => {
+                if model == Model::Matrix {
+                    let shaper = ProfileConversion::from_profile(profile);
+                    if matches!(
+                        (&shaper, self.n),
+                        (ProfileConversion::Gray(_), 1) | (ProfileConversion::Rgb(_), 3)
+                    ) {
+                        return Some(IccConversion::Shaper(shaper));
+                    }
+                }
+                ColorProfile::new_srgb()
             }
-        }
-        if model == Model::Matrix as usize
-            && absolute
-            && self.n == 1
-            && let Some(gray) = self
-                .absolute
-                .and_then(|scale| absolute_gray(profile, scale))
-        {
-            return Some(IccConversion::GrayAbsolute(gray));
-        }
+            Form::Absolute => {
+                let scale = self.absolute?;
+                if model == Model::Matrix
+                    && self.n == 1
+                    && let Some(gray) = absolute_gray(profile, scale)
+                {
+                    return Some(IccConversion::GrayAbsolute(gray));
+                }
+                crate::pcs::scaled_srgb(scale)
+            }
+            Form::Compensated => crate::pcs::black::compensating_srgb(self.black(model)),
+        };
         let layout = layout(self.n)?;
-        let dest = self
-            .absolute
-            .filter(|_| absolute)
-            .map_or_else(ColorProfile::new_srgb, crate::pcs::scaled_srgb);
+        // Floating-point table evaluation: the fixed-point one misses by up
+        // to two levels at 8 bits in the shadows, which compensation
+        // stretches.
         let options = TransformOptions {
-            rendering_intent: Model::ALL[model].cms(),
+            rendering_intent: model.cms(),
+            prefer_fixed_point: false,
             ..TransformOptions::default()
         };
         let xform = profile
@@ -221,13 +287,18 @@ impl IccProfile {
 
     /// Whether the profile's colour values convert as those of the device
     /// space of the same component count under every intent: one
-    /// conversion serves every intent, and it is device-equivalent (see
-    /// [`IccConversion::is_device_equivalent`]).
+    /// conversion serves every intent, with compensation on or off, and it
+    /// is device-equivalent (see [`IccConversion::is_device_equivalent`]).
     fn is_device_equivalent(&self, alternate: impl FnOnce() -> Option<ColorSpace>) -> bool {
-        self.slots.iter().all(|&s| s == self.slots[0])
-            && self
-                .conversion(RenderingIntent::RelativeColorimetric, alternate)
-                .is_some_and(|conv| conv.is_device_equivalent())
+        let first = ColourIntent::INITIAL;
+        let one = RenderingIntent::ALL.iter().all(|&intent| {
+            [false, true]
+                .iter()
+                .all(|&bpc| self.slot(ColourIntent::new(intent, bpc)) == self.slot(first))
+        });
+        one && self
+            .conversion(first, alternate)
+            .is_some_and(|conv| conv.is_device_equivalent())
     }
 }
 
@@ -305,7 +376,7 @@ impl IccConversion {
         doc: &Document,
         id: ObjectId,
         n: u8,
-        intent: RenderingIntent,
+        intent: ColourIntent,
     ) -> Option<Arc<Self>> {
         Self::profile(doc, id, n)?.conversion(intent, || Self::alternate(doc, id, n))
     }
@@ -324,10 +395,10 @@ impl IccConversion {
         doc: &Document,
         id: ObjectId,
         n: u8,
-        a: RenderingIntent,
-        b: RenderingIntent,
+        a: ColourIntent,
+        b: ColourIntent,
     ) -> bool {
-        Self::profile(doc, id, n).is_none_or(|p| p.slots[a.index()] == p.slots[b.index()])
+        Self::profile(doc, id, n).is_none_or(|p| p.slot(a) == p.slot(b))
     }
 
     /// The parsed profile stream `id`, shared for the lifetime of `doc`.
@@ -363,7 +434,7 @@ impl IccConversion {
 
     /// Compile profile `bytes` for `n`-component values under `intent`
     /// without consulting a cache.
-    pub(crate) fn compile(bytes: &[u8], n: u8, intent: RenderingIntent) -> Option<Arc<Self>> {
+    pub(crate) fn compile(bytes: &[u8], n: u8, intent: ColourIntent) -> Option<Arc<Self>> {
         IccProfile::new(Some(bytes), n).conversion(intent, || None)
     }
 
@@ -435,7 +506,7 @@ impl IccConversion {
                 // An alternate is a device or CIE-based space, whose conversion
                 // is independent of the intent.
                 (comps.len() == space.ncomponents())
-                    .then(|| space.convert(doc, RenderingIntent::default(), comps))
+                    .then(|| space.convert(doc, ColourIntent::INITIAL, comps))
             }
             Self::Shaper(shaper) => shaper.convert_components_at(comps),
             Self::GrayAbsolute(shaper) => match *comps {
@@ -542,7 +613,7 @@ mod tests {
     #[test]
     fn srgb_default_space_keeps_the_device_space() {
         let doc = srgb_doc();
-        let conv = IccConversion::load(&doc, (2, 0), 3, RenderingIntent::default())
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
             .expect("sRGB profile compiles");
         assert!(conv.is_device_equivalent());
         let mut dict = pdf::Dictionary::new();
@@ -562,9 +633,9 @@ mod tests {
     #[test]
     fn profile_stream_is_compiled_once_per_document() {
         let doc = srgb_doc();
-        let first = IccConversion::load(&doc, (2, 0), 3, RenderingIntent::default())
+        let first = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
             .expect("sRGB profile compiles");
-        let second = IccConversion::load(&doc, (2, 0), 3, RenderingIntent::default())
+        let second = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
             .expect("sRGB profile compiles");
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -572,7 +643,7 @@ mod tests {
     #[test]
     fn matrix_trc_profile_compiles_to_the_shaper() {
         let doc = srgb_doc();
-        let conv = IccConversion::load(&doc, (2, 0), 3, RenderingIntent::default())
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
             .expect("sRGB profile compiles");
         assert!(matches!(*conv, IccConversion::Shaper(_)));
         assert_eq!(
@@ -585,7 +656,7 @@ mod tests {
     #[test]
     fn unusable_profiles_do_not_compile() {
         let bytes = ColorProfile::new_srgb().encode().expect("encodes");
-        let intent = RenderingIntent::default();
+        let intent = ColourIntent::INITIAL;
         assert!(IccConversion::compile(&bytes, 1, intent).is_none());
         assert!(IccConversion::compile(b"not a profile", 3, intent).is_none());
     }
@@ -604,8 +675,10 @@ mod tests {
     /// `[/ICCBased <printer-cmyk-v4>]` and the conversion of every intent.
     fn cmyk_printer() -> (Document, [Arc<IccConversion>; 4]) {
         let doc = make_doc_with_stream(&fixture("printer-cmyk-v4"), " /N 4");
-        let conv = RenderingIntent::ALL
-            .map(|intent| IccConversion::load(&doc, (2, 0), 4, intent).expect("compiles"));
+        let conv = RenderingIntent::ALL.map(|intent| {
+            IccConversion::load(&doc, (2, 0), 4, ColourIntent::new(intent, false))
+                .expect("compiles")
+        });
         (doc, conv)
     }
 
@@ -629,7 +702,13 @@ mod tests {
         let perceptual = at(Perceptual).convert::<u8>(&doc, &ink).unwrap();
         assert_ne!(relative, perceptual);
         // Repeated loads return the compiled conversion.
-        let again = IccConversion::load(&doc, (2, 0), 4, RelativeColorimetric).unwrap();
+        let again = IccConversion::load(
+            &doc,
+            (2, 0),
+            4,
+            ColourIntent::new(RelativeColorimetric, false),
+        )
+        .unwrap();
         assert!(Arc::ptr_eq(&again, at(RelativeColorimetric)));
     }
 
@@ -660,6 +739,48 @@ mod tests {
         assert_eq!(wide.map(|v| u8::from_unit(v.to_unit())), [r, g, b]);
     }
 
+    /// Black-point compensation maps the printer's black, `L* = 8` under
+    /// relative colorimetry, to sRGB black, as an independent converter
+    /// does (`-t1` gives 23.5, `-t1 -b` 0), and keeps white.
+    #[test]
+    fn compensation_maps_the_source_black_to_srgb_black() {
+        let doc = make_doc_with_stream(&fixture("printer-cmyk-v4"), " /N 4");
+        let at = |bpc, ink: &[f64]| {
+            let intent = ColourIntent::new(RenderingIntent::RelativeColorimetric, bpc);
+            let conv = IccConversion::load(&doc, (2, 0), 4, intent).expect("compiles");
+            conv.convert::<u8>(&doc, ink).expect("converts")
+        };
+        let black = [0.0, 0.0, 0.0, 1.0];
+        assert!(at(false, &black).iter().all(|&c| c.abs_diff(24) <= 1));
+        assert!(
+            at(true, &black).iter().all(|&c| c <= 1),
+            "{:?}",
+            at(true, &black)
+        );
+        assert!(at(true, &[0.0; 4]).iter().all(|&c| c >= 254));
+        // Compensation selects another conversion; absolute never compensates.
+        let alike = |a, b| IccConversion::converts_alike(&doc, (2, 0), 4, a, b);
+        let relative = |bpc| ColourIntent::new(RenderingIntent::RelativeColorimetric, bpc);
+        let absolute = |bpc| ColourIntent::new(RenderingIntent::AbsoluteColorimetric, bpc);
+        assert!(!alike(relative(true), relative(false)));
+        assert!(alike(absolute(true), absolute(false)));
+    }
+
+    /// A matrix profile whose black is the PCS origin compiles one
+    /// conversion with compensation on or off.
+    #[test]
+    fn compensation_of_a_black_origin_is_the_plain_conversion() {
+        let doc = srgb_doc();
+        let relative = |bpc| ColourIntent::new(RenderingIntent::RelativeColorimetric, bpc);
+        assert!(IccConversion::converts_alike(
+            &doc,
+            (2, 0),
+            3,
+            relative(true),
+            relative(false)
+        ));
+    }
+
     /// A gray TRC profile under absolute colorimetry reproduces its tinted
     /// paper white, which an independent converter gives as
     /// (252.9, 250.9, 245.1); under relative colorimetry the paper is white.
@@ -667,7 +788,8 @@ mod tests {
     fn absolute_gray_reproduces_the_paper_white() {
         let doc = make_doc_with_stream(&fixture("printer-gray-v4"), " /N 1");
         let at = |intent| {
-            let conv = IccConversion::load(&doc, (2, 0), 1, intent).expect("compiles");
+            let conv = IccConversion::load(&doc, (2, 0), 1, ColourIntent::new(intent, false))
+                .expect("compiles");
             conv.convert::<u8>(&doc, &[1.0]).expect("converts")
         };
         assert_eq!(at(RenderingIntent::RelativeColorimetric), [255; 3]);
@@ -684,8 +806,9 @@ mod tests {
     #[test]
     fn a_matrix_profile_shares_one_conversion() {
         let doc = srgb_doc();
-        let conv = RenderingIntent::ALL
-            .map(|intent| IccConversion::load(&doc, (2, 0), 3, intent).expect("compiles"));
+        let conv = RenderingIntent::ALL.map(|intent| {
+            IccConversion::load(&doc, (2, 0), 3, ColourIntent::new(intent, true)).expect("compiles")
+        });
         assert!(conv.iter().all(|c| Arc::ptr_eq(c, &conv[0])));
         assert!(matches!(*conv[0], IccConversion::Shaper(_)));
     }
@@ -699,7 +822,7 @@ mod tests {
         both.lut_a_to_b_perceptual = printer.lut_a_to_b_perceptual;
         let bytes = both.encode().expect("encodes");
         let doc = make_doc_with_stream(&bytes, " /N 3");
-        let conv = IccConversion::load(&doc, (2, 0), 3, RenderingIntent::default()).unwrap();
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL).unwrap();
         assert!(matches!(*conv, IccConversion::Transform { .. }));
     }
 
@@ -718,8 +841,7 @@ mod tests {
     #[test]
     fn unusable_profile_converts_through_its_alternate() {
         let doc = garbage_doc(3, "[/Lab << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray =
-            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[50.0, 0.0, 0.0]);
+        let gray = icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[50.0, 0.0, 0.0]);
         assert!(gray.iter().all(|&c| c.abs_diff(119) <= 1), "got {gray:?}");
     }
 
@@ -727,7 +849,7 @@ mod tests {
     fn alternate_with_another_component_count_is_ignored() {
         let doc = garbage_doc(3, "/DeviceGray");
         assert_eq!(
-            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0, 0.0, 0.0]),
+            icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0, 0.0, 0.0]),
             [255, 0, 0]
         );
     }
@@ -736,7 +858,7 @@ mod tests {
     fn derived_alternates_are_ignored() {
         let doc = garbage_doc(3, "[/ICCBased 2 0 R]");
         assert_eq!(
-            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0, 0.0, 0.0]),
+            icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0, 0.0, 0.0]),
             [255, 0, 0]
         );
         // A Separation alternate whose own alternate is this profile.
@@ -745,7 +867,7 @@ mod tests {
             "[/Separation /Spot [/ICCBased 2 0 R] << /FunctionType 2 /Domain [0 1] /N 1 >>]",
         );
         assert_eq!(
-            icc(1).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0]),
+            icc(1).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0]),
             [255; 3]
         );
     }
@@ -754,7 +876,7 @@ mod tests {
     fn cal_alternate_converts_through_its_parameters() {
         // CalGray with the default Gamma 1: 0.5 is linear light, sRGB 188.
         let doc = garbage_doc(1, "[/CalGray << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray = icc(1).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[0.5]);
+        let gray = icc(1).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[0.5]);
         assert!(gray.iter().all(|&c| c.abs_diff(188) <= 1), "got {gray:?}");
     }
 }

@@ -6,7 +6,7 @@ use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey, cell_raster_bytes};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
-use crate::RenderingIntent;
+use crate::ColourIntent;
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
@@ -25,7 +25,7 @@ use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern, XPath};
 /// 1 grey, 3 RGB, 4 CMYK.
 fn resolve_pattern_tint(
     doc: &Document,
-    intent: RenderingIntent,
+    intent: ColourIntent,
     fill_cs: &ColorSpace,
     components: &[f64],
     depth: SampleDepth,
@@ -485,7 +485,7 @@ impl PageRenderer<'_> {
         {
             Some(resolve_pattern_tint(
                 self.resources.doc(),
-                gs.rendering_intent,
+                gs.colour_intent,
                 &gs.fill_color_space,
                 &gs.fill_pattern_components,
                 self.canvas.kind().depth(),
@@ -915,7 +915,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[1.0, 0.0, 0.0],
             SampleDepth::Eight,
@@ -937,7 +937,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[50.0, 0.0, 0.0],
             SampleDepth::Eight,
@@ -959,7 +959,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern { base: None };
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[0.5, 0.5, 0.5],
             SampleDepth::Eight,
@@ -977,7 +977,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[0.5],
             SampleDepth::Eight,
@@ -994,7 +994,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[1.0],
             SampleDepth::Eight,
@@ -1011,7 +1011,7 @@ mod tests {
         // (0,0,0,1) = solid K: all four components reach the CMYK conversion.
         let tint = resolve_pattern_tint(
             &doc,
-            RenderingIntent::default(),
+            ColourIntent::INITIAL,
             &fill_cs,
             &[0.0, 0.0, 0.0, 1.0],
             SampleDepth::Eight,

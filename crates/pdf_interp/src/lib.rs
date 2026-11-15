@@ -30,7 +30,7 @@ mod test_helpers;
 pub mod unsupported;
 
 pub use form_type::{FormType, form_type};
-pub use intent::{IntentSet, RenderingIntent};
+pub use intent::{ColourIntent, IntentSet, RenderingIntent};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use output_profile::{OutputProfile, OutputProfileError, OutputSpace};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};

@@ -48,7 +48,7 @@ use color::Sample;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::shading::function::Function;
-use crate::RenderingIntent;
+use crate::ColourIntent;
 use crate::renderer::color::Srgb;
 use crate::resources::dict_ext::DictExt as _;
 use crate::separation::Separator;
@@ -322,12 +322,7 @@ impl ColorSpace {
     /// and `b`: every ICC-based space it converts through selects the same
     /// conversion under both (see [`Self::depends_on_intent`]).
     #[must_use]
-    pub(crate) fn converts_alike(
-        &self,
-        doc: &Document,
-        a: RenderingIntent,
-        b: RenderingIntent,
-    ) -> bool {
+    pub(crate) fn converts_alike(&self, doc: &Document, a: ColourIntent, b: ColourIntent) -> bool {
         match self {
             Self::IccBased {
                 n,
@@ -383,7 +378,7 @@ impl ColorSpace {
     pub(crate) fn process_ink<S: Sample>(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         comps: &[f64],
         separator: &Separator,
     ) -> [S; 4] {
@@ -403,7 +398,7 @@ impl ColorSpace {
     pub(crate) fn process_ink_with<S: Sample>(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         comps: &[f64],
         separator: &Separator,
         reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
@@ -485,12 +480,7 @@ impl ColorSpace {
     ///   function and converts the result via the alternate colour space.
     ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
-    pub fn convert_to_rgb(
-        &self,
-        doc: &Document,
-        intent: RenderingIntent,
-        comps: &[f64],
-    ) -> [u8; 3] {
+    pub fn convert_to_rgb(&self, doc: &Document, intent: ColourIntent, comps: &[f64]) -> [u8; 3] {
         self.convert::<u8>(doc, intent, comps)
     }
 
@@ -501,7 +491,7 @@ impl ColorSpace {
     pub(crate) fn convert_to_srgb(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         comps: &[f64],
         depth: color::SampleDepth,
     ) -> Srgb {
@@ -522,7 +512,7 @@ impl ColorSpace {
     pub(crate) fn convert<S: Sample>(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         comps: &[f64],
     ) -> [S; 3] {
         if comps.len() != self.ncomponents() {
@@ -616,7 +606,7 @@ impl TintTransform {
     fn to_rgb<S: Sample>(
         &self,
         doc: &Document,
-        intent: RenderingIntent,
+        intent: ColourIntent,
         alternate: &ColorSpace,
         tints: &[f64],
     ) -> Option<[S; 3]> {
@@ -990,7 +980,7 @@ mod tests {
     use crate::test_helpers::empty_doc;
 
     /// The intent of the conversions under test, the initial one.
-    const RI: RenderingIntent = RenderingIntent::RelativeColorimetric;
+    const RI: ColourIntent = ColourIntent::new(crate::RenderingIntent::RelativeColorimetric, true);
 
     fn name_obj(s: &[u8]) -> Object {
         Object::Name(s.to_vec())

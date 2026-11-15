@@ -979,7 +979,7 @@ pub struct ImageDecodeCtx<'a> {
     pub keep_tints: bool,
     /// The rendering intent the image's colours convert under: its own
     /// `/Intent`, else the graphics state's (PDF §8.6.5.8).
-    pub intent: crate::RenderingIntent,
+    pub intent: crate::ColourIntent,
     /// The depth of the render the image is drawn in.  At 16 bits a stream
     /// of more than 8 bits a sample keeps its samples at 16 bits
     /// ([`ImageData::Cpu16`]); every other stream decodes to 8-bit samples
@@ -1009,7 +1009,7 @@ impl<'a> ImageDecodeCtx<'a> {
             #[cfg(feature = "cache")]
             doc_id: None,
             keep_tints: false,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
             depth: color::SampleDepth::Eight,
         }
     }

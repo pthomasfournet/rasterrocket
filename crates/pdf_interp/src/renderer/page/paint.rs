@@ -134,7 +134,7 @@ impl PageRenderer<'_> {
     pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
         let doc = self.resources.doc();
         let depth = self.canvas.kind().depth();
-        let intent = self.gstate.current().rendering_intent;
+        let intent = self.gstate.current().colour_intent;
         let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, intent, comps, depth);
         match cs {
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {

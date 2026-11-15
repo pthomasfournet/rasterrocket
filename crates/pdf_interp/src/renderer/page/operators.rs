@@ -103,17 +103,19 @@ impl PageRenderer<'_> {
     /// any clipping to the window drawn, so every band of a page records
     /// the same set.
     pub(super) fn record_intent(&mut self, own: Option<crate::RenderingIntent>) {
-        let intent = self.painting_intent(own);
+        let intent = self.painting_intent(own).intent;
         self.diag.content_intents.insert(intent);
     }
 
     /// The intent an object paints under: `own`, an image's own intent,
-    /// else the graphics state's.
+    /// else the graphics state's, with the graphics state's black-point
+    /// compensation.
     pub(super) fn painting_intent(
         &self,
         own: Option<crate::RenderingIntent>,
-    ) -> crate::RenderingIntent {
-        own.unwrap_or_else(|| self.gstate.current().rendering_intent)
+    ) -> crate::ColourIntent {
+        let gs = self.gstate.current().colour_intent;
+        crate::ColourIntent::new(own.unwrap_or(gs.intent), gs.bpc)
     }
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
@@ -469,7 +471,11 @@ impl PageRenderer<'_> {
             Operator::Unknown(kw) => self.warn_unknown_operator(kw),
 
             Operator::SetRenderingIntent(name) => {
-                self.set_rendering_intent(crate::RenderingIntent::from_pdf_name(name));
+                let bpc = self.gstate.current().colour_intent.bpc;
+                self.set_colour_intent(crate::ColourIntent::new(
+                    crate::RenderingIntent::from_pdf_name(name),
+                    bpc,
+                ));
             }
 
             // Operators without effect on the pixels.  `d0` declares an advance, taken from the font's
@@ -546,8 +552,12 @@ impl PageRenderer<'_> {
             Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),
             None => {}
         }
-        if let Some(i) = params.rendering_intent {
-            self.set_rendering_intent(i);
+        if params.rendering_intent.is_some() || params.black_point_compensation.is_some() {
+            let current = self.gstate.current().colour_intent;
+            self.set_colour_intent(crate::ColourIntent::new(
+                params.rendering_intent.unwrap_or(current.intent),
+                params.black_point_compensation.unwrap_or(current.bpc),
+            ));
         }
         if let Some(sm) = &params.soft_mask {
             self.set_soft_mask(sm);

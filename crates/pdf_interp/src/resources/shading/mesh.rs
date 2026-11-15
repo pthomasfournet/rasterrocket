@@ -403,7 +403,7 @@ mod tests {
         let source = DirectColors::new(super::super::ShadingCs {
             doc: &doc,
             space: &super::super::ColorSpace::DeviceRgb,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         });
         let v = |x, color| MeshVertex {
             x,

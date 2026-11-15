@@ -14,7 +14,7 @@ use raster::types::{BlendMode, LineCap, LineJoin};
 
 use super::color::RasterColor;
 use super::text::TextState;
-use crate::RenderingIntent;
+use crate::ColourIntent;
 use crate::resources::OverprintMode;
 use crate::resources::colorspace::ColorSpace;
 use crate::resources::transfer::Transfer;
@@ -128,8 +128,9 @@ pub(crate) struct InterpGState {
     pub overprint_fill: bool,
     /// Overprint mode (PDF `OPM`).
     pub overprint_mode: OverprintMode,
-    /// Colour rendering intent (PDF `ri`, `RI`).
-    pub rendering_intent: RenderingIntent,
+    /// Colour rendering intent (PDF `ri`, `RI`) and black-point
+    /// compensation (PDF 2.0 `UseBlackPtComp`, `/Default` on).
+    pub colour_intent: ColourIntent,
     /// Line width in user-space units.
     pub line_width: f64,
     /// Line cap style.
@@ -225,7 +226,7 @@ impl Clone for InterpGState {
             overprint_stroke: self.overprint_stroke,
             overprint_fill: self.overprint_fill,
             overprint_mode: self.overprint_mode,
-            rendering_intent: self.rendering_intent,
+            colour_intent: self.colour_intent,
             line_width: self.line_width,
             line_cap: self.line_cap,
             line_join: self.line_join,
@@ -304,7 +305,7 @@ impl InterpGState {
             overprint_stroke: false,
             overprint_fill: false,
             overprint_mode: OverprintMode::Zero,
-            rendering_intent: RenderingIntent::RelativeColorimetric,
+            colour_intent: ColourIntent::INITIAL,
             line_width: 1.0,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,

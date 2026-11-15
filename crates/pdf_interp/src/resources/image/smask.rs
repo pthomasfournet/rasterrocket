@@ -419,7 +419,7 @@ pub(super) fn matte(doc: &Document, id: ObjectId) -> Option<Vec<f64>> {
 /// component count, the image is left as stored.
 pub(super) fn remove_matte(
     doc: &Document,
-    intent: crate::RenderingIntent,
+    intent: crate::ColourIntent,
     cs: Option<&ColorSpace>,
     matte: &[f64],
     img: &mut ImageDescriptor,
@@ -853,23 +853,11 @@ mod tests {
     fn remove_matte_reads_the_alpha_of_16_bit_samples() {
         let doc = crate::test_helpers::empty_doc();
         let mut img = matted16(SoftMask::new16(2, 1, vec![16_384, 0]).expect("a mask"));
-        remove_matte(
-            &doc,
-            crate::RenderingIntent::default(),
-            None,
-            &[0.0],
-            &mut img,
-        );
+        remove_matte(&doc, crate::ColourIntent::INITIAL, None, &[0.0], &mut img);
         let data = img.data.as_cpu16().expect("16-bit samples");
         assert!(data[0].abs_diff(40_000) <= 1 && data[1] == 5, "{data:?}");
         let mut img = matted16(SoftMask::new(2, 1, vec![64, 0]).expect("a mask"));
-        remove_matte(
-            &doc,
-            crate::RenderingIntent::default(),
-            None,
-            &[0.0],
-            &mut img,
-        );
+        remove_matte(&doc, crate::ColourIntent::INITIAL, None, &[0.0], &mut img);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,

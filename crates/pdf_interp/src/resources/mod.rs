@@ -80,6 +80,10 @@ pub struct ExtGStateParams {
     pub overprint_mode: Option<OverprintMode>,
     /// Rendering intent `RI`.  `None` = unchanged.
     pub rendering_intent: Option<crate::RenderingIntent>,
+    /// Black-point compensation `UseBlackPtComp` (ISO 32000-2 §8.4.5):
+    /// `/ON` and `/Default` on, `/OFF` off.  `None` = unchanged, also for
+    /// another value.
+    pub black_point_compensation: Option<bool>,
 }
 
 /// The overprint mode `OPM` (ISO 32000-1 §8.6.7).
@@ -153,6 +157,13 @@ impl ExtGStateParams {
                 .get(b"RI")
                 .and_then(Object::as_name)
                 .map(crate::RenderingIntent::from_pdf_name),
+            black_point_compensation: d.get(b"UseBlackPtComp").and_then(Object::as_name).and_then(
+                |name| match name {
+                    b"ON" | b"Default" => Some(true),
+                    b"OFF" => Some(false),
+                    _ => None,
+                },
+            ),
         }
     }
 }
@@ -1092,6 +1103,17 @@ mod tests {
         let doc = crate::test_helpers::make_doc_with_object(body);
         let d = doc.get_dictionary((2, 0)).expect("dictionary");
         ExtGStateParams::from_dict(&doc, &d)
+    }
+
+    #[test]
+    fn use_black_pt_comp_reads_on_off_and_default() {
+        let bpc =
+            |v: &str| ext_gstate(&format!("<< /UseBlackPtComp {v} >>")).black_point_compensation;
+        assert_eq!(bpc("/ON"), Some(true));
+        assert_eq!(bpc("/Default"), Some(true));
+        assert_eq!(bpc("/OFF"), Some(false));
+        assert_eq!(bpc("/Maybe"), None);
+        assert_eq!(ext_gstate("<< >>").black_point_compensation, None);
     }
 
     #[test]

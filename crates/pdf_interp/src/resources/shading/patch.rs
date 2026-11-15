@@ -591,7 +591,7 @@ mod tests {
         let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
             doc: &doc,
             space: &super::super::ColorSpace::DeviceRgb,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         });
         let mut sink = TriangleSink::new();
         tessellate_patch(&source, p, &mut sink);
@@ -619,7 +619,7 @@ mod tests {
         let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
             doc: &doc,
             space: &super::super::ColorSpace::DeviceRgb,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         });
         let mut sink = TriangleSink::new();
         tessellate_patch(&source, p, &mut sink);
@@ -653,7 +653,7 @@ mod tests {
         let cs = super::super::ShadingCs {
             doc: &doc,
             space: &super::super::ColorSpace::DeviceRgb,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         };
         let mut narrow = TriangleSink::new();
         tessellate_patch(
@@ -790,7 +790,7 @@ mod tests {
         let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
             doc: &doc,
             space: &super::super::ColorSpace::DeviceGray,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         });
         let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
         // page_h = 0: device y is the negated shading y.

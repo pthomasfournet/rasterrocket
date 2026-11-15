@@ -171,7 +171,7 @@ mod tests {
         include_bytes!("../../../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
 
     fn cmyk_transform() -> Arc<IccConversion> {
-        IccConversion::compile(CMYK_PROFILE, 4, crate::RenderingIntent::default())
+        IccConversion::compile(CMYK_PROFILE, 4, crate::ColourIntent::INITIAL)
             .expect("CMYK profile compiles")
     }
 
@@ -226,8 +226,8 @@ mod tests {
             &first[k..k + 3]
         );
         let srgb = moxcms::ColorProfile::new_srgb().encode().unwrap();
-        let rgb = IccConversion::compile(&srgb, 3, crate::RenderingIntent::default())
-            .expect("sRGB compiles");
+        let rgb =
+            IccConversion::compile(&srgb, 3, crate::ColourIntent::INITIAL).expect("sRGB compiles");
         assert!(
             rgb.cmyk_clut().is_none(),
             "no table for a three-channel profile"

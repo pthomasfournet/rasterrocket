@@ -85,7 +85,7 @@ pub(crate) struct Canvas {
     pub width: f64,
     pub height: f64,
     pub depth: SampleDepth,
-    pub intent: crate::RenderingIntent,
+    pub intent: crate::ColourIntent,
 }
 
 /// The colour source of a resolved shading.
@@ -946,7 +946,7 @@ pub(super) struct ShadingCs<'a> {
     doc: &'a Document,
     space: &'a ColorSpace,
     /// The rendering intent the colours convert under.
-    intent: crate::RenderingIntent,
+    intent: crate::ColourIntent,
 }
 
 impl ShadingCs<'_> {
@@ -1097,7 +1097,7 @@ mod tests {
         let cs = ShadingCs {
             doc: &doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         assert!(resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, CANVAS, None).is_none());
@@ -1105,7 +1105,7 @@ mod tests {
 
     /// A 100 × 100 pixel canvas.
     const CANVAS: Canvas = Canvas {
-        intent: crate::RenderingIntent::RelativeColorimetric,
+        intent: crate::ColourIntent::INITIAL,
         width: 100.0,
         height: 100.0,
         depth: SampleDepth::Eight,
@@ -1137,7 +1137,7 @@ mod tests {
         let cs = ShadingCs {
             doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         resolve_function_based(doc, &sh, cs, 1, &ctm, CANVAS, None)
@@ -1163,7 +1163,7 @@ mod tests {
             cs: ShadingCs {
                 doc: &doc,
                 space: &ColorSpace::DeviceGray,
-                intent: crate::RenderingIntent::RelativeColorimetric,
+                intent: crate::ColourIntent::INITIAL,
             },
             n: 1,
             domain: [0.0, 1.0, 0.0, 1.0],
@@ -1227,7 +1227,7 @@ mod tests {
         let cs = ShadingCs {
             doc: &doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         };
         let ramp: ColorRamp<3, u16> = sample_ramp(&doc, &obj, cs, 1, 0.0, 1.0).expect("a ramp");
         let exact = Function::load(&doc, &obj);
@@ -1274,7 +1274,7 @@ mod tests {
         ShadingCs {
             doc: &doc,
             space,
-            intent: crate::RenderingIntent::RelativeColorimetric,
+            intent: crate::ColourIntent::INITIAL,
         }
         .to_rgb(channels)
     }

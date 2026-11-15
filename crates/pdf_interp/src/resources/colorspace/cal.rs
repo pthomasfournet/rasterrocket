@@ -232,7 +232,7 @@ mod tests {
     ];
 
     fn rgb(space: &ColorSpace, c: [f64; 3]) -> [u8; 3] {
-        space.convert_to_rgb(&empty_doc(), crate::RenderingIntent::default(), &c)
+        space.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &c)
     }
 
     fn close(got: [u8; 3], want: [u8; 3], tol: u8) {
@@ -264,7 +264,7 @@ mod tests {
                 rgb(&space, c),
                 ColorSpace::DeviceRgb.convert_to_rgb(
                     &empty_doc(),
-                    crate::RenderingIntent::default(),
+                    crate::ColourIntent::INITIAL,
                     &c,
                 ),
                 3,
@@ -317,14 +317,14 @@ mod tests {
         );
         assert_eq!(space.ncomponents(), 1);
         close(
-            space.convert_to_rgb(&empty_doc(), crate::RenderingIntent::default(), &[0.5]),
+            space.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &[0.5]),
             [128; 3],
             2,
         );
         // Gamma 1 is linear light: 0.5 → sRGB 0.735 → 188.
         let linear = cal("CalGray", &[("WhitePoint", reals(&D65_WP))]);
         close(
-            linear.convert_to_rgb(&empty_doc(), crate::RenderingIntent::default(), &[0.5]),
+            linear.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &[0.5]),
             [188; 3],
             1,
         );

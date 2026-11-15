@@ -81,6 +81,44 @@ impl RenderingIntent {
     }
 }
 
+/// How a colour converts to the working space: its rendering intent and
+/// black-point compensation.
+///
+/// Compensation (ISO 32000-2 §8.6.5.8, the `ExtGState` entry
+/// `/UseBlackPtComp`) maps the black of the source profile to the working
+/// space's black; it never applies under absolute colorimetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColourIntent {
+    /// The rendering intent.
+    pub intent: RenderingIntent,
+    /// Whether black-point compensation is on.
+    pub bpc: bool,
+}
+
+impl ColourIntent {
+    /// The initial graphics state's: relative colorimetric, compensation
+    /// `/Default`, which is on.
+    pub const INITIAL: Self = Self::new(RenderingIntent::RelativeColorimetric, true);
+
+    /// `intent` with black-point compensation `bpc`.
+    #[must_use]
+    pub const fn new(intent: RenderingIntent, bpc: bool) -> Self {
+        Self { intent, bpc }
+    }
+
+    /// A distinct byte for each value.
+    pub(crate) const fn bits(self) -> u8 {
+        self.intent.bit() | if self.bpc { 0x10 } else { 0 }
+    }
+}
+
+impl Default for ColourIntent {
+    /// [`Self::INITIAL`].
+    fn default() -> Self {
+        Self::INITIAL
+    }
+}
+
 impl std::fmt::Display for RenderingIntent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.pdf_name())

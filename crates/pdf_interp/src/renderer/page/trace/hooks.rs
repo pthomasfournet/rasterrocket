@@ -158,8 +158,11 @@ impl PageRenderer<'_> {
         if gs.transfer.is_some() {
             out.push_str(" transfer");
         }
-        if gs.rendering_intent != RenderingIntent::RelativeColorimetric {
-            let _ = write!(out, " ri={:?}", gs.rendering_intent);
+        if gs.colour_intent.intent != RenderingIntent::RelativeColorimetric {
+            let _ = write!(out, " ri={:?}", gs.colour_intent.intent);
+        }
+        if !gs.colour_intent.bpc {
+            out.push_str(" bpc=off");
         }
         let _ = write!(out, " clip={:016x}", gs.trace_clip);
     }

@@ -102,7 +102,7 @@ impl ImageMemo {
     /// parameters and its data.
     pub(super) fn inline_key(
         depth: SampleDepth,
-        intent: crate::RenderingIntent,
+        intent: crate::ColourIntent,
         spaces: Option<ObjectId>,
         params: &[u8],
         data: &[u8],
@@ -110,7 +110,7 @@ impl ImageMemo {
         let mut key = Vec::with_capacity(19 + params.len() + data.len());
         let (tag, (num, generation)) = spaces.map_or((0u8, (0, 0)), |id| (1, id));
         key.push(depth.bits());
-        key.push(intent.bit());
+        key.push(intent.bits());
         key.push(tag);
         key.extend_from_slice(&num.to_le_bytes());
         key.extend_from_slice(&generation.to_le_bytes());
@@ -253,7 +253,7 @@ mod tests {
         depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
-        intent: crate::RenderingIntent::RelativeColorimetric,
+        intent: crate::ColourIntent::INITIAL,
     };
 
     fn memo(budget: usize) -> ImageMemo {
@@ -357,7 +357,7 @@ mod tests {
         let key = |depth| {
             ImageMemo::inline_key(
                 depth,
-                crate::RenderingIntent::RelativeColorimetric,
+                crate::ColourIntent::INITIAL,
                 Some((3, 0)),
                 b"/W 1 /H 1",
                 b"\x80",
@@ -370,14 +370,17 @@ mod tests {
         assert!(memo.get_inline(&key(SampleDepth::Sixteen), false).is_none());
     }
 
-    /// An inline image decoded under one rendering intent is not served
-    /// under another.
+    /// An inline image decoded under one rendering intent or black-point
+    /// compensation is not served under another.
     #[test]
     fn the_inline_key_holds_the_intent() {
-        let key = |intent: crate::RenderingIntent| {
+        let key = |intent: crate::ColourIntent| {
             ImageMemo::inline_key(SampleDepth::Eight, intent, None, b"/W 1 /H 1", b"\x80")
         };
-        let keys = crate::RenderingIntent::ALL.map(key);
+        let keys: Vec<_> = crate::RenderingIntent::ALL
+            .into_iter()
+            .flat_map(|i| [false, true].map(|bpc| key(crate::ColourIntent::new(i, bpc))))
+            .collect();
         for (i, a) in keys.iter().enumerate() {
             assert!(keys[i + 1..].iter().all(|b| a != b));
         }

@@ -88,7 +88,7 @@ impl ColorantPlan {
     pub(crate) fn ink<S: Sample>(
         &self,
         doc: &pdf::Document,
-        intent: crate::RenderingIntent,
+        intent: crate::ColourIntent,
         space: &crate::resources::ColorSpace,
         comps: &[f64],
     ) -> [S; 8] {
