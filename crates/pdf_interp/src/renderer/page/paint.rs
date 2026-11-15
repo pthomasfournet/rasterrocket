@@ -116,36 +116,6 @@ pub(super) fn stroke_reach(device: &[f64; 6], line_width: f64, miter_limit: f64)
 impl PageRenderer<'_> {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    pub(super) fn set_fill(&mut self, c: RasterColor) {
-        let gs = self.gstate.current_mut();
-        gs.fill_color = c;
-        gs.fill_pattern = None;
-    }
-
-    pub(super) fn set_stroke(&mut self, c: RasterColor) {
-        let gs = self.gstate.current_mut();
-        gs.stroke_color = c;
-        gs.stroke_pattern = None;
-    }
-
-    /// `g`, `rg`, `k`: select the device space `device`, or the default
-    /// space that replaces it (PDF §8.6.5.6), for fill operations and set
-    /// the fill colour to `comps` in that space (PDF §8.6.8).
-    pub(super) fn set_fill_device(&mut self, device: ColorSpace, comps: &[f64]) {
-        let space = self.resources.device_space(device);
-        let c = self.color_for_components(&space, comps);
-        self.set_fill(c);
-        self.gstate.current_mut().fill_color_space = space;
-    }
-
-    /// `G`, `RG`, `K`: the stroking counterpart of [`Self::set_fill_device`].
-    pub(super) fn set_stroke_device(&mut self, device: ColorSpace, comps: &[f64]) {
-        let space = self.resources.device_space(device);
-        let c = self.color_for_components(&space, comps);
-        self.set_stroke(c);
-        self.gstate.current_mut().stroke_color_space = space;
-    }
-
     /// Resolve `sc`/`scn` (or `SC`/`SCN`) component operands against an
     /// already-selected colour space.
     ///
@@ -164,7 +134,8 @@ impl PageRenderer<'_> {
     pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
         let doc = self.resources.doc();
         let depth = self.canvas.kind().depth();
-        let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, comps, depth);
+        let intent = self.gstate.current().rendering_intent;
+        let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, intent, comps, depth);
         match cs {
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
                 components_to_color(comps)
@@ -202,11 +173,11 @@ impl PageRenderer<'_> {
                 let mut map = self.ink_map.borrow_mut();
                 let (ink, paints) = match depth {
                     SampleDepth::Eight => {
-                        let (ink, paints) = map.colorant_ink::<u8>(doc, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u8>(doc, intent, cs, comps);
                         (Inks::of(ink), paints)
                     }
                     SampleDepth::Sixteen => {
-                        let (ink, paints) = map.colorant_ink::<u16>(doc, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u16>(doc, intent, cs, comps);
                         (Inks::of(ink), paints)
                     }
                 };

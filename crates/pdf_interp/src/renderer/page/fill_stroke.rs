@@ -136,6 +136,7 @@ impl PageRenderer<'_> {
             gs.fill_pattern_components
                 .clone_from(&gs.stroke_pattern_components);
             gs.fill_color_space = gs.stroke_color_space.clone();
+            gs.fill_components.clone_from(&gs.stroke_components);
             gs.fill_alpha = gs.stroke_alpha;
             gs.overprint_fill = gs.overprint_stroke;
         }

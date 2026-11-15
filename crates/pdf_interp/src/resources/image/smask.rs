@@ -449,11 +449,11 @@ pub(super) fn remove_matte(
     }
     match &mut img.data {
         ImageData::Cpu(bytes) => {
-            let rgb = cs.convert_to_rgb(doc, matte);
+            let rgb = cs.convert_to_rgb(doc, crate::RenderingIntent::default(), matte);
             unmatte(bytes, mask.alpha(), &rgb[..channels]);
         }
         ImageData::Cpu16(samples) => {
-            let rgb = cs.convert::<u16>(doc, matte);
+            let rgb = cs.convert::<u16>(doc, crate::RenderingIntent::default(), matte);
             let widened: Vec<u16>;
             let alpha = if let Some(alpha) = mask.alpha16() {
                 alpha

@@ -22,6 +22,7 @@ use pdf::Document;
 use raster::pipe::ChannelMask;
 
 use super::super::color::{ColorantPlan, PROCESS_CHANNELS, no_spots, paint_tint};
+use crate::RenderingIntent;
 use crate::resources::ColorSpace;
 use crate::resources::colorspace::Colorant;
 use crate::separation::Separator;
@@ -206,20 +207,22 @@ impl InkMap {
     /// the colorant's channel — a repeated channel keeps the larger tint —
     /// `/All` in every channel, `/None` in none.  When the colour's spot
     /// colorants do not all fit the slots, none of them takes one: the
-    /// colour is instead the process ink of its alternate colour and
-    /// paints the process channels.
+    /// colour is instead the process ink of its alternate colour,
+    /// converted under `intent`, and paints the process channels.
     pub(super) fn colorant_ink<S: Sample>(
         &mut self,
         doc: &Document,
+        intent: RenderingIntent,
         space: &ColorSpace,
         comps: &[f64],
     ) -> ([S; 8], ChannelMask) {
         let process_fallback = |map: &mut Self| {
             map.report_overflow(space);
             let reproduced = &mut map.reproduced;
-            let cmyk = space.process_ink_with(doc, comps, &map.separator, &mut |rgb, given| {
-                reproduced.get(rgb, given)
-            });
+            let cmyk =
+                space.process_ink_with(doc, intent, comps, &map.separator, &mut |rgb, given| {
+                    reproduced.get(rgb, given)
+                });
             (no_spots(cmyk), PROCESS_CHANNELS)
         };
         if !self.fits(space) {
@@ -310,7 +313,10 @@ pub(super) struct SpotTables<'a> {
 /// The process ink of the tints of one spot colorant, alone — every other
 /// component of its space at 0 — through the space's tint transform and
 /// alternate space ([`ColorSpace::process_ink_with`]), the inks
-/// reproducing an ICC colour taken from a page's [`Reproduced`].
+/// reproducing an ICC colour taken from a page's [`Reproduced`].  A
+/// colorant's table belongs to its slot for the whole page, whatever the
+/// intent of the operators painting it, and converts under the initial
+/// intent, relative colorimetric.
 struct SpotTint<'a> {
     doc: &'a Document,
     space: &'a ColorSpace,
@@ -327,10 +333,13 @@ impl SpotTint<'_> {
             *c = t;
         }
         let reproduced = &mut *self.reproduced;
-        self.space
-            .process_ink_with(self.doc, &self.comps, self.separator, &mut |rgb, given| {
-                reproduced.get(rgb, given)
-            })
+        self.space.process_ink_with(
+            self.doc,
+            RenderingIntent::default(),
+            &self.comps,
+            self.separator,
+            &mut |rgb, given| reproduced.get(rgb, given),
+        )
     }
 }
 
@@ -528,22 +537,22 @@ mod tests {
         let mut map = InkMap::default();
         let cyan = separation(&doc, "Cyan", "1 0 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, &cyan, &[0.6]),
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &cyan, &[0.6]),
             ([153, 0, 0, 0, 0, 0, 0, 0], ChannelMask::new(0b0001))
         );
         let all = separation(&doc, "All", "1 1 1 1");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, &all, &[0.6]),
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &all, &[0.6]),
             ([153; 8], ChannelMask::ALL)
         );
         let none = separation(&doc, "None", "0 0 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, &none, &[0.6]),
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &none, &[0.6]),
             ([0; 8], ChannelMask::new(0))
         );
         let spot = separation(&doc, "Spot", "0 1 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, &spot, &[1.0]),
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &spot, &[1.0]),
             ([0, 0, 0, 0, 255, 0, 0, 0], ChannelMask::new(0b1_0000))
         );
     }
@@ -553,13 +562,17 @@ mod tests {
         let doc = empty_doc();
         let mut map = InkMap::default();
         for (slot, name) in ["S0", "S1", "S2", "S3"].into_iter().enumerate() {
-            let (_, paints) =
-                map.colorant_ink::<u8>(&doc, &separation(&doc, name, "0 0 0 1"), &[1.0]);
+            let (_, paints) = map.colorant_ink::<u8>(
+                &doc,
+                RenderingIntent::default(),
+                &separation(&doc, name, "0 0 0 1"),
+                &[1.0],
+            );
             assert_eq!(paints, ChannelMask::new(1 << (SPOT_CHANNEL + slot)));
         }
         let fifth = separation(&doc, "S4", "0 0.5 1 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, &fifth, &[1.0]),
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &fifth, &[1.0]),
             ([0, 128, 255, 0, 0, 0, 0, 0], PROCESS_CHANNELS)
         );
     }
@@ -578,15 +591,20 @@ mod tests {
             "[/DeviceN [/New1 /New2] /DeviceCMYK \
              << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>]",
         );
-        let (ink, paints) = map.colorant_ink::<u8>(&doc, &dn, &[1.0, 1.0]);
+        let (ink, paints) =
+            map.colorant_ink::<u8>(&doc, RenderingIntent::default(), &dn, &[1.0, 1.0]);
         assert_eq!(paints, PROCESS_CHANNELS);
         assert_eq!(ink[4..], [0; 4]);
         assert!(map.luts().narrow[3].is_none(), "the last slot stays free");
         let fourth = separation(&doc, "S3", "1 0 0 0");
         assert_eq!(map.slot(&doc, b"S3", &fourth), Some(3));
         // A colour whose spots are all seen fits whatever the free slots.
-        let (ink, paints) =
-            map.colorant_ink::<u8>(&doc, &separation(&doc, "S1", "0 0 0 1"), &[0.5]);
+        let (ink, paints) = map.colorant_ink::<u8>(
+            &doc,
+            RenderingIntent::default(),
+            &separation(&doc, "S1", "0 0 0 1"),
+            &[0.5],
+        );
         assert_eq!((ink[5], paints), (128, ChannelMask::new(0b10_0000)));
     }
 
@@ -643,7 +661,8 @@ mod tests {
         let doc = empty_doc();
         let teal = separation(&doc, "Teal", "1 0 0.5 0");
         let mut map = InkMap::new(SampleDepth::Sixteen, Separator::Model);
-        let (ink, paints) = map.colorant_ink::<u16>(&doc, &teal, &[0.25]);
+        let (ink, paints) =
+            map.colorant_ink::<u16>(&doc, RenderingIntent::default(), &teal, &[0.25]);
         assert_eq!(
             (ink, paints),
             ([0, 0, 0, 0, 16_384, 0, 0, 0], ChannelMask::new(0b1_0000))

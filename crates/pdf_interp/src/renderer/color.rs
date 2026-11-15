@@ -83,10 +83,12 @@ impl ColorantPlan {
     }
 
     /// The ink of the colour `comps` ([0, 1] each) of `space`, the space
-    /// the plan was made for, at the depth of `S`.
+    /// the plan was made for, converted under `intent`, at the depth of
+    /// `S`.
     pub(crate) fn ink<S: Sample>(
         &self,
         doc: &pdf::Document,
+        intent: crate::RenderingIntent,
         space: &crate::resources::ColorSpace,
         comps: &[f64],
     ) -> [S; 8] {
@@ -98,7 +100,9 @@ impl ColorantPlan {
                 }
                 ink
             }
-            Self::Process(separator) => no_spots(space.process_ink::<S>(doc, comps, separator)),
+            Self::Process(separator) => {
+                no_spots(space.process_ink::<S>(doc, intent, comps, separator))
+            }
         }
     }
 

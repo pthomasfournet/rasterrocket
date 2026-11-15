@@ -282,6 +282,19 @@ impl IccConversion {
             .is_some_and(|p| p.is_device_equivalent(|| Self::alternate(doc, id, n)))
     }
 
+    /// Whether profile stream `id` converts `n`-component values through
+    /// the same conversion under the intents `a` and `b`: both select the
+    /// same model, media-relative or ICC-absolute alike.
+    pub(super) fn converts_alike(
+        doc: &Document,
+        id: ObjectId,
+        n: u8,
+        a: RenderingIntent,
+        b: RenderingIntent,
+    ) -> bool {
+        Self::profile(doc, id, n).is_none_or(|p| p.slots[a.index()] == p.slots[b.index()])
+    }
+
     /// The parsed profile stream `id`, shared for the lifetime of `doc`.
     fn profile(doc: &Document, id: ObjectId, n: u8) -> Option<Arc<IccProfile>> {
         doc.derived(id, || {
@@ -384,7 +397,10 @@ impl IccConversion {
     pub(crate) fn convert<S: Sample>(&self, doc: &Document, comps: &[f64]) -> Option<[S; 3]> {
         match self {
             Self::Alternate(space) => {
-                (comps.len() == space.ncomponents()).then(|| space.convert(doc, comps))
+                // An alternate is a device or CIE-based space, whose conversion
+                // is independent of the intent.
+                (comps.len() == space.ncomponents())
+                    .then(|| space.convert(doc, RenderingIntent::default(), comps))
             }
             Self::Shaper(shaper) => shaper.convert_components_at(comps),
             Self::Transform { n, xform, .. } => {
@@ -644,33 +660,43 @@ mod tests {
     #[test]
     fn unusable_profile_converts_through_its_alternate() {
         let doc = garbage_doc(3, "[/Lab << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray = icc(3).convert_to_rgb(&doc, &[50.0, 0.0, 0.0]);
+        let gray =
+            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[50.0, 0.0, 0.0]);
         assert!(gray.iter().all(|&c| c.abs_diff(119) <= 1), "got {gray:?}");
     }
 
     #[test]
     fn alternate_with_another_component_count_is_ignored() {
         let doc = garbage_doc(3, "/DeviceGray");
-        assert_eq!(icc(3).convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+        assert_eq!(
+            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0, 0.0, 0.0]),
+            [255, 0, 0]
+        );
     }
 
     #[test]
     fn derived_alternates_are_ignored() {
         let doc = garbage_doc(3, "[/ICCBased 2 0 R]");
-        assert_eq!(icc(3).convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+        assert_eq!(
+            icc(3).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0, 0.0, 0.0]),
+            [255, 0, 0]
+        );
         // A Separation alternate whose own alternate is this profile.
         let doc = garbage_doc(
             1,
             "[/Separation /Spot [/ICCBased 2 0 R] << /FunctionType 2 /Domain [0 1] /N 1 >>]",
         );
-        assert_eq!(icc(1).convert_to_rgb(&doc, &[1.0]), [255; 3]);
+        assert_eq!(
+            icc(1).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[1.0]),
+            [255; 3]
+        );
     }
 
     #[test]
     fn cal_alternate_converts_through_its_parameters() {
         // CalGray with the default Gamma 1: 0.5 is linear light, sRGB 188.
         let doc = garbage_doc(1, "[/CalGray << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray = icc(1).convert_to_rgb(&doc, &[0.5]);
+        let gray = icc(1).convert_to_rgb(&doc, crate::RenderingIntent::default(), &[0.5]);
         assert!(gray.iter().all(|&c| c.abs_diff(188) <= 1), "got {gray:?}");
     }
 }

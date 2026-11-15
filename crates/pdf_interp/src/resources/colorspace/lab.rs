@@ -141,7 +141,7 @@ mod tests {
     }
 
     fn rgb(space: &ColorSpace, c: [f64; 3]) -> [u8; 3] {
-        space.convert_to_rgb(&empty_doc(), &c)
+        space.convert_to_rgb(&empty_doc(), crate::RenderingIntent::default(), &c)
     }
 
     const D65_LAB: &str = "[/Lab << /WhitePoint [0.9505 1 1.089] >>]";

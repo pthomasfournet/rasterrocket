@@ -140,7 +140,8 @@ impl PageRenderer<'_> {
         });
         match space {
             Some(space) if !bc.is_empty() && space.ncomponents() == bc.len() => {
-                space.convert_to_srgb(doc, bc, self.canvas.kind().depth())
+                let intent = self.gstate.current().rendering_intent;
+                space.convert_to_srgb(doc, intent, bc, self.canvas.kind().depth())
             }
             _ => backdrop_rgb(bc),
         }

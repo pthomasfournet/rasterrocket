@@ -6,6 +6,7 @@ use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey, cell_raster_bytes};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
+use crate::RenderingIntent;
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
@@ -19,18 +20,19 @@ use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern, XPath};
 ///
 /// The tint components of `scn /Name c1 … cn` are colour values in the
 /// underlying colour space of the fill's `[/Pattern base]` space
-/// (PDF §8.7.3.3), and convert through `base`.  A bare `/Pattern` space,
+/// (PDF §8.7.3.3), and convert through `base` under `intent`.  A bare `/Pattern` space,
 /// or a component count `base` does not take, is read by its count:
 /// 1 grey, 3 RGB, 4 CMYK.
 fn resolve_pattern_tint(
     doc: &Document,
+    intent: RenderingIntent,
     fill_cs: &ColorSpace,
     components: &[f64],
     depth: SampleDepth,
 ) -> RasterColor {
     if let ColorSpace::Pattern { base: Some(base) } = fill_cs {
         if components.len() == base.ncomponents() {
-            return RasterColor::from_srgb(base.convert_to_srgb(doc, components, depth));
+            return RasterColor::from_srgb(base.convert_to_srgb(doc, intent, components, depth));
         }
         log::debug!(
             "rasterrocket-interp: pattern tint comp count {} mismatches base CS expected {} — using heuristic",
@@ -483,6 +485,7 @@ impl PageRenderer<'_> {
         {
             Some(resolve_pattern_tint(
                 self.resources.doc(),
+                gs.rendering_intent,
                 &gs.fill_color_space,
                 &gs.fill_pattern_components,
                 self.canvas.kind().depth(),
@@ -910,7 +913,13 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceRgb)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0, 0.0, 0.0], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[1.0, 0.0, 0.0],
+            SampleDepth::Eight,
+        );
         assert_eq!(tint.as_slice(), &[255, 0, 0]);
     }
 
@@ -926,7 +935,13 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(lab)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[50.0, 0.0, 0.0], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[50.0, 0.0, 0.0],
+            SampleDepth::Eight,
+        );
         // sRGB-encoded mid-grey from L*=50 is ~119 (gamma-correct).
         let &[r, g, b] = tint.as_slice() else {
             panic!("RasterColor must produce a 3-byte slice");
@@ -942,7 +957,13 @@ mod tests {
         // No base on the Pattern (malformed PDF) → heuristic path.
         let doc = empty_doc();
         let fill_cs = ColorSpace::Pattern { base: None };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5, 0.5, 0.5], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[0.5, 0.5, 0.5],
+            SampleDepth::Eight,
+        );
         // components_to_color heuristic: 3 components → RGB(0.5, 0.5, 0.5).
         assert_eq!(tint.as_slice(), &[128, 128, 128]);
     }
@@ -954,7 +975,13 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceRgb)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.5], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[0.5],
+            SampleDepth::Eight,
+        );
         // Heuristic: 1 component → Gray(0.5) = mid-grey.
         assert_eq!(tint.as_slice(), &[128, 128, 128]);
     }
@@ -965,7 +992,13 @@ mod tests {
         let fill_cs = ColorSpace::Pattern {
             base: Some(Box::new(ColorSpace::DeviceGray)),
         };
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[1.0], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[1.0],
+            SampleDepth::Eight,
+        );
         assert_eq!(tint.as_slice(), &[255, 255, 255]);
     }
 
@@ -976,7 +1009,13 @@ mod tests {
             base: Some(Box::new(ColorSpace::DeviceCmyk)),
         };
         // (0,0,0,1) = solid K: all four components reach the CMYK conversion.
-        let tint = resolve_pattern_tint(&doc, &fill_cs, &[0.0, 0.0, 0.0, 1.0], SampleDepth::Eight);
+        let tint = resolve_pattern_tint(
+            &doc,
+            RenderingIntent::default(),
+            &fill_cs,
+            &[0.0, 0.0, 0.0, 1.0],
+            SampleDepth::Eight,
+        );
         assert_eq!(tint.as_slice(), &color::cmyk::cmyk_to_rgb(0, 0, 0, 255));
     }
 }

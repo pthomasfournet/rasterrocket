@@ -152,8 +152,7 @@ impl PageRenderer<'_> {
             }
             Operator::SetFillColor(comps) => {
                 let cs = self.gstate.current().fill_color_space.clone();
-                let c = self.color_for_components(&cs, comps);
-                self.set_fill(c);
+                self.set_fill_colour(cs, comps);
             }
             Operator::SetFillColorSpace(name) => {
                 // PDF §8.6.8: selecting a colour space sets the current
@@ -161,12 +160,8 @@ impl PageRenderer<'_> {
                 // pattern.  The declared space interprets later `sc`/`scn`
                 // operands and an uncoloured pattern's tint (§8.7.3.3).
                 let cs = self.resources.color_space(name);
-                let c = self.color_for_components(&cs, &cs.initial_components());
-                let gs = self.gstate.current_mut();
-                gs.fill_color = c;
-                gs.fill_pattern = None;
-                gs.fill_pattern_components.clear();
-                gs.fill_color_space = cs;
+                let initial = cs.initial_components();
+                self.set_fill_colour(cs, &initial);
             }
             Operator::SetFillPattern { name, components } => {
                 let gs = self.gstate.current_mut();
@@ -185,18 +180,13 @@ impl PageRenderer<'_> {
             }
             Operator::SetStrokeColor(comps) => {
                 let cs = self.gstate.current().stroke_color_space.clone();
-                let c = self.color_for_components(&cs, comps);
-                self.set_stroke(c);
+                self.set_stroke_colour(cs, comps);
             }
             Operator::SetStrokeColorSpace(name) => {
                 // Mirror of SetFillColorSpace; see comment above.
                 let cs = self.resources.color_space(name);
-                let c = self.color_for_components(&cs, &cs.initial_components());
-                let gs = self.gstate.current_mut();
-                gs.stroke_color = c;
-                gs.stroke_pattern = None;
-                gs.stroke_pattern_components.clear();
-                gs.stroke_color_space = cs;
+                let initial = cs.initial_components();
+                self.set_stroke_colour(cs, &initial);
             }
             Operator::SetStrokePattern { name, components } => {
                 let gs = self.gstate.current_mut();
@@ -459,6 +449,7 @@ impl PageRenderer<'_> {
                 gs.stroke_pattern_components
                     .clone_from(&gs.fill_pattern_components);
                 gs.stroke_color_space.clone_from(&gs.fill_color_space);
+                gs.stroke_components.clone_from(&gs.fill_components);
                 gs.stroke_alpha = gs.fill_alpha;
                 gs.colour_locked = true;
             }
@@ -466,8 +457,7 @@ impl PageRenderer<'_> {
             Operator::Unknown(kw) => self.warn_unknown_operator(kw),
 
             Operator::SetRenderingIntent(name) => {
-                self.gstate.current_mut().rendering_intent =
-                    crate::RenderingIntent::from_pdf_name(name);
+                self.set_rendering_intent(crate::RenderingIntent::from_pdf_name(name));
             }
 
             // Operators without effect on the pixels.  `d0` declares an advance, taken from the font's
@@ -539,13 +529,13 @@ impl PageRenderer<'_> {
         if let Some(m) = params.overprint_mode {
             gs.overprint_mode = m;
         }
-        if let Some(i) = params.rendering_intent {
-            gs.rendering_intent = i;
-        }
         match &params.transfer {
             Some(TransferSetting::Identity) => gs.transfer = None,
             Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),
             None => {}
+        }
+        if let Some(i) = params.rendering_intent {
+            self.set_rendering_intent(i);
         }
         if let Some(sm) = &params.soft_mask {
             self.set_soft_mask(sm);

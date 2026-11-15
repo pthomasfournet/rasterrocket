@@ -299,6 +299,58 @@ impl ColorSpace {
         }
     }
 
+    /// Whether a conversion of this space depends on the rendering intent:
+    /// an ICC-based space, or a space converting through one (an `Indexed`
+    /// base, a `Separation` or `DeviceN` alternate, an uncoloured-pattern
+    /// base).
+    #[must_use]
+    pub(crate) fn depends_on_intent(&self) -> bool {
+        match self {
+            Self::IccBased { .. } => true,
+            Self::Indexed { base, .. } => base.depends_on_intent(),
+            Self::Separation { alternate, .. } | Self::DeviceN { alternate, .. } => {
+                alternate.depends_on_intent()
+            }
+            Self::Pattern { base } => base.as_deref().is_some_and(Self::depends_on_intent),
+            Self::DeviceGray | Self::DeviceRgb | Self::DeviceCmyk | Self::Cal(_) | Self::Lab(_) => {
+                false
+            }
+        }
+    }
+
+    /// Whether this space converts its colours alike under the intents `a`
+    /// and `b`: every ICC-based space it converts through selects the same
+    /// conversion under both (see [`Self::depends_on_intent`]).
+    #[must_use]
+    pub(crate) fn converts_alike(
+        &self,
+        doc: &Document,
+        a: RenderingIntent,
+        b: RenderingIntent,
+    ) -> bool {
+        match self {
+            Self::IccBased {
+                n,
+                stream_id: Some(id),
+            } => IccConversion::converts_alike(doc, *id, *n, a, b),
+            Self::Indexed { base, .. } => base.converts_alike(doc, a, b),
+            Self::Separation { alternate, .. } | Self::DeviceN { alternate, .. } => {
+                alternate.converts_alike(doc, a, b)
+            }
+            Self::Pattern { base } => base
+                .as_deref()
+                .is_none_or(|base| base.converts_alike(doc, a, b)),
+            Self::IccBased {
+                stream_id: None, ..
+            }
+            | Self::DeviceGray
+            | Self::DeviceRgb
+            | Self::DeviceCmyk
+            | Self::Cal(_)
+            | Self::Lab(_) => true,
+        }
+    }
+
     /// Whether painting in this space produces no output: a `Separation`
     /// space or a `DeviceN` space whose colorants are all `/None`
     /// (PDF §8.6.6.4, §8.6.6.5), or an uncoloured-pattern space over one.
@@ -331,10 +383,17 @@ impl ColorSpace {
     pub(crate) fn process_ink<S: Sample>(
         &self,
         doc: &Document,
+        intent: RenderingIntent,
         comps: &[f64],
         separator: &Separator,
     ) -> [S; 4] {
-        self.process_ink_with(doc, comps, separator, &mut color::cmyk::ink_reproducing_at)
+        self.process_ink_with(
+            doc,
+            intent,
+            comps,
+            separator,
+            &mut color::cmyk::ink_reproducing_at,
+        )
     }
 
     /// [`process_ink`](Self::process_ink) with the inks reproducing the
@@ -344,6 +403,7 @@ impl ColorSpace {
     pub(crate) fn process_ink_with<S: Sample>(
         &self,
         doc: &Document,
+        intent: RenderingIntent,
         comps: &[f64],
         separator: &Separator,
         reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
@@ -359,7 +419,7 @@ impl ColorSpace {
                     if !separator.reproduces_process_colour() {
                         return [c, m, y, k].map(S::from_unit);
                     }
-                    return reproduce(self.convert::<S>(doc, comps), [c, m, y, k]);
+                    return reproduce(self.convert::<S>(doc, intent, comps), [c, m, y, k]);
                 }
             }
             Self::Separation {
@@ -373,12 +433,12 @@ impl ColorSpace {
                 ..
             } if comps.len() == self.ncomponents() => {
                 if let Some(alt) = tint.alternate_components(alternate, comps) {
-                    return alternate.process_ink_with(doc, &alt, separator, reproduce);
+                    return alternate.process_ink_with(doc, intent, &alt, separator, reproduce);
                 }
             }
             _ => {}
         }
-        separator.ink(self.convert::<S>(doc, comps))
+        separator.ink(self.convert::<S>(doc, intent, comps))
     }
 
     /// Convert a tint-component slice to an sRGB byte triple per PDF §8.6.
@@ -390,6 +450,11 @@ impl ColorSpace {
     /// `ObjectId` fields on parameterised variants (ICC profile streams,
     /// Separation/DeviceN tint functions, Indexed palette lookups).
     /// Pass the page's document; the borrow is read-only.
+    ///
+    /// `intent` is the rendering intent of the conversion (PDF §8.6.5.8):
+    /// it selects the profile table of an ICC-based space, also one
+    /// reached as an `Indexed` base or a `Separation`/`DeviceN` alternate.
+    /// Every other conversion is independent of it.
     ///
     /// # Variant behaviour
     ///
@@ -420,8 +485,13 @@ impl ColorSpace {
     ///   function and converts the result via the alternate colour space.
     ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
-    pub fn convert_to_rgb(&self, doc: &Document, comps: &[f64]) -> [u8; 3] {
-        self.convert::<u8>(doc, comps)
+    pub fn convert_to_rgb(
+        &self,
+        doc: &Document,
+        intent: RenderingIntent,
+        comps: &[f64],
+    ) -> [u8; 3] {
+        self.convert::<u8>(doc, intent, comps)
     }
 
     /// [`Self::convert_to_rgb`] at both depths for a render at `depth`:
@@ -431,15 +501,16 @@ impl ColorSpace {
     pub(crate) fn convert_to_srgb(
         &self,
         doc: &Document,
+        intent: RenderingIntent,
         comps: &[f64],
         depth: color::SampleDepth,
     ) -> Srgb {
-        let bytes = self.convert::<u8>(doc, comps);
+        let bytes = self.convert::<u8>(doc, intent, comps);
         match depth {
             color::SampleDepth::Eight => Srgb::of_bytes(bytes),
             color::SampleDepth::Sixteen => Srgb {
                 bytes,
-                wide: self.convert::<u16>(doc, comps),
+                wide: self.convert::<u16>(doc, intent, comps),
             },
         }
     }
@@ -448,7 +519,12 @@ impl ColorSpace {
     /// evaluates at that depth and quantises its result once, so the 8-bit
     /// instance is the 8-bit conversion.
     #[must_use]
-    pub(crate) fn convert<S: Sample>(&self, doc: &Document, comps: &[f64]) -> [S; 3] {
+    pub(crate) fn convert<S: Sample>(
+        &self,
+        doc: &Document,
+        intent: RenderingIntent,
+        comps: &[f64],
+    ) -> [S; 3] {
         if comps.len() != self.ncomponents() {
             log::debug!(
                 "colorspace: {:?} expects {} components, got {}",
@@ -467,12 +543,12 @@ impl ColorSpace {
             Self::Cal(cal) => cal.convert(comps),
             Self::Lab(lab) => lab.convert(comps),
             Self::IccBased { n, stream_id } => stream_id
-                .and_then(|id| IccConversion::load(doc, id, *n, RenderingIntent::default()))
+                .and_then(|id| IccConversion::load(doc, id, *n, intent))
                 .and_then(|conv| conv.convert(doc, comps))
                 .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
             Self::Indexed { .. } => self.indexed_base_components(comps).map_or_else(
                 || [S::default(); 3],
-                |(base, entry)| base.convert(doc, &entry),
+                |(base, entry)| base.convert(doc, intent, &entry),
             ),
             Self::Pattern { .. } => [S::default(); 3],
             Self::Separation {
@@ -484,7 +560,7 @@ impl ColorSpace {
                 // failure (no function, or evaluation fails), use the
                 // `1 - tint` gray approximation.
                 if let Some(tint) = tint
-                    && let Some(rgb) = tint.to_rgb(doc, alternate, comps)
+                    && let Some(rgb) = tint.to_rgb(doc, intent, alternate, comps)
                 {
                     return rgb;
                 }
@@ -496,7 +572,7 @@ impl ColorSpace {
                 // PDF §8.6.6.5: like Separation, with one tint input per
                 // colorant.
                 if let Some(tint) = tint
-                    && let Some(rgb) = tint.to_rgb(doc, alternate, comps)
+                    && let Some(rgb) = tint.to_rgb(doc, intent, alternate, comps)
                 {
                     return rgb;
                 }
@@ -540,11 +616,12 @@ impl TintTransform {
     fn to_rgb<S: Sample>(
         &self,
         doc: &Document,
+        intent: RenderingIntent,
         alternate: &ColorSpace,
         tints: &[f64],
     ) -> Option<[S; 3]> {
         let outputs = self.alternate_components(alternate, tints)?;
-        Some(alternate.convert(doc, &outputs))
+        Some(alternate.convert(doc, intent, &outputs))
     }
 }
 
@@ -912,6 +989,9 @@ mod tests {
     use super::*;
     use crate::test_helpers::empty_doc;
 
+    /// The intent of the conversions under test, the initial one.
+    const RI: RenderingIntent = RenderingIntent::RelativeColorimetric;
+
     fn name_obj(s: &[u8]) -> Object {
         Object::Name(s.to_vec())
     }
@@ -1192,15 +1272,15 @@ mod tests {
     fn convert_devicegray_full_range() {
         let doc = empty_doc();
         assert_eq!(
-            ColorSpace::DeviceGray.convert_to_rgb(&doc, &[0.0]),
+            ColorSpace::DeviceGray.convert_to_rgb(&doc, RI, &[0.0]),
             [0, 0, 0]
         );
         assert_eq!(
-            ColorSpace::DeviceGray.convert_to_rgb(&doc, &[1.0]),
+            ColorSpace::DeviceGray.convert_to_rgb(&doc, RI, &[1.0]),
             [255, 255, 255],
         );
         assert_eq!(
-            ColorSpace::DeviceGray.convert_to_rgb(&doc, &[0.5]),
+            ColorSpace::DeviceGray.convert_to_rgb(&doc, RI, &[0.5]),
             [128, 128, 128], // gray_to_u8 rounds 0.5*255 = 127.5 → 128
         );
     }
@@ -1209,11 +1289,11 @@ mod tests {
     fn convert_devicergb_passes_through() {
         let doc = empty_doc();
         assert_eq!(
-            ColorSpace::DeviceRgb.convert_to_rgb(&doc, &[1.0, 0.0, 0.0]),
+            ColorSpace::DeviceRgb.convert_to_rgb(&doc, RI, &[1.0, 0.0, 0.0]),
             [255, 0, 0],
         );
         assert_eq!(
-            ColorSpace::DeviceRgb.convert_to_rgb(&doc, &[0.0, 1.0, 0.0]),
+            ColorSpace::DeviceRgb.convert_to_rgb(&doc, RI, &[0.0, 1.0, 0.0]),
             [0, 255, 0],
         );
     }
@@ -1223,17 +1303,17 @@ mod tests {
         let doc = empty_doc();
         // (0, 0, 0, 0) = paper white.
         assert_eq!(
-            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 0.0]),
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[0.0, 0.0, 0.0, 0.0]),
             [255, 255, 255],
         );
         // (1, 1, 1, 1) = four-colour solid = black.
         assert_eq!(
-            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 1.0, 1.0, 1.0]),
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[1.0, 1.0, 1.0, 1.0]),
             [0, 0, 0],
         );
         // Solid cyan is the printed process cyan, not the ideal (0, 255, 255).
         assert_eq!(
-            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.0, 0.0, 0.0]),
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[1.0, 0.0, 0.0, 0.0]),
             color::cmyk::CORNERS[4],
         );
     }
@@ -1242,7 +1322,7 @@ mod tests {
     fn convert_lab_black_is_black() {
         let doc = empty_doc();
         // L*=0 ≡ black; a*/b* irrelevant.
-        let black = lab_d65().convert_to_rgb(&doc, &[0.0, 0.0, 0.0]);
+        let black = lab_d65().convert_to_rgb(&doc, RI, &[0.0, 0.0, 0.0]);
         assert_eq!(black, [0, 0, 0]);
     }
 
@@ -1251,7 +1331,7 @@ mod tests {
         let doc = empty_doc();
         // L*=100, a*=b*=0 ≡ D65 white.  sRGB encoding may not be exactly 255
         // due to floating-point rounding; allow ±2 LSB.
-        let [r, g, b] = lab_d65().convert_to_rgb(&doc, &[100.0, 0.0, 0.0]);
+        let [r, g, b] = lab_d65().convert_to_rgb(&doc, RI, &[100.0, 0.0, 0.0]);
         assert!(
             r >= 253 && g >= 253 && b >= 253,
             "expected ~white, got [{r},{g},{b}]"
@@ -1274,10 +1354,10 @@ mod tests {
             stream_id: None,
         };
         // No stream_id → skip moxcms, use device-by-N fallback directly.
-        assert_eq!(icc1.convert_to_rgb(&doc, &[1.0]), [255, 255, 255]);
-        assert_eq!(icc3.convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+        assert_eq!(icc1.convert_to_rgb(&doc, RI, &[1.0]), [255, 255, 255]);
+        assert_eq!(icc3.convert_to_rgb(&doc, RI, &[1.0, 0.0, 0.0]), [255, 0, 0]);
         assert_eq!(
-            icc4.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 1.0]),
+            icc4.convert_to_rgb(&doc, RI, &[0.0, 0.0, 0.0, 1.0]),
             color::cmyk::CORNERS[8]
         );
     }
@@ -1291,7 +1371,7 @@ mod tests {
             n: 3,
             stream_id: Some((999, 0)),
         };
-        assert_eq!(icc.convert_to_rgb(&doc, &[1.0, 0.0, 0.0]), [255, 0, 0]);
+        assert_eq!(icc.convert_to_rgb(&doc, RI, &[1.0, 0.0, 0.0]), [255, 0, 0]);
     }
 
     #[test]
@@ -1302,7 +1382,7 @@ mod tests {
             n: 1,
             stream_id: Some((1, 0)),
         };
-        assert_eq!(icc.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
+        assert_eq!(icc.convert_to_rgb(&doc, RI, &[0.5]), [128, 128, 128]);
     }
 
     /// Every conversion at 16 bits, narrowed to 8, lies within one level of
@@ -1333,8 +1413,8 @@ mod tests {
             (&empty, icc, vec![0.3, 0.3, 0.3]),
         ];
         for (doc, space, comps) in cases {
-            let narrow = space.convert::<u8>(doc, &comps);
-            let wide = space.convert::<u16>(doc, &comps);
+            let narrow = space.convert::<u8>(doc, RI, &comps);
+            let wide = space.convert::<u16>(doc, RI, &comps);
             for (w, n) in wide.iter().zip(narrow) {
                 assert!(
                     w.to_u8().abs_diff(n) <= 1,
@@ -1343,7 +1423,7 @@ mod tests {
             }
             assert_eq!(
                 space
-                    .convert_to_srgb(doc, &comps, color::SampleDepth::Sixteen)
+                    .convert_to_srgb(doc, RI, &comps, color::SampleDepth::Sixteen)
                     .wide,
                 wide
             );
@@ -1361,7 +1441,7 @@ mod tests {
             n: 1,
             stream_id: Some((2, 0)),
         };
-        assert_eq!(icc.convert_to_rgb(&doc, &[128.0 / 255.0]), [146; 3]);
+        assert_eq!(icc.convert_to_rgb(&doc, RI, &[128.0 / 255.0]), [146; 3]);
 
         let mut rgb = moxcms::ColorProfile::new_srgb();
         rgb.cicp = None;
@@ -1374,7 +1454,7 @@ mod tests {
             stream_id: Some((2, 0)),
         };
         let half = 128.0 / 255.0;
-        assert_eq!(icc.convert_to_rgb(&doc, &[half, half, half]), [146; 3]);
+        assert_eq!(icc.convert_to_rgb(&doc, RI, &[half, half, half]), [146; 3]);
     }
 
     #[test]
@@ -1411,17 +1491,17 @@ mod tests {
 
         // Primary colours round-trip through sRGB→sRGB as near-identity.
         channels_match(
-            icc.convert_to_rgb(&doc, &[1.0, 0.0, 0.0]),
+            icc.convert_to_rgb(&doc, RI, &[1.0, 0.0, 0.0]),
             [255, 0, 0],
             "pure red",
         );
         channels_match(
-            icc.convert_to_rgb(&doc, &[0.0, 1.0, 0.0]),
+            icc.convert_to_rgb(&doc, RI, &[0.0, 1.0, 0.0]),
             [0, 255, 0],
             "pure green",
         );
         channels_match(
-            icc.convert_to_rgb(&doc, &[0.0, 0.0, 1.0]),
+            icc.convert_to_rgb(&doc, RI, &[0.0, 0.0, 1.0]),
             [0, 0, 255],
             "pure blue",
         );
@@ -1429,7 +1509,7 @@ mod tests {
         // input is *already* sRGB-encoded; identity should keep it at
         // ~128 modulo transform rounding.  Additionally assert neutrality
         // — moxcms shouldn't introduce a colour cast on grey inputs.
-        let grey = icc.convert_to_rgb(&doc, &[0.5, 0.5, 0.5]);
+        let grey = icc.convert_to_rgb(&doc, RI, &[0.5, 0.5, 0.5]);
         channels_match(grey, [128, 128, 128], "mid grey");
         assert!(
             grey[0] == grey[1] && grey[1] == grey[2],
@@ -1446,8 +1526,8 @@ mod tests {
             tint: None,
             colorant: spot(),
         };
-        assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]); // no ink
-        assert_eq!(sep.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]); // full ink
+        assert_eq!(sep.convert_to_rgb(&doc, RI, &[0.0]), [255, 255, 255]); // no ink
+        assert_eq!(sep.convert_to_rgb(&doc, RI, &[1.0]), [0, 0, 0]); // full ink
     }
 
     #[test]
@@ -1460,7 +1540,7 @@ mod tests {
             tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
             colorant: spot(),
         };
-        assert_eq!(sep.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
+        assert_eq!(sep.convert_to_rgb(&doc, RI, &[0.5]), [128, 128, 128]);
     }
 
     /// Type 4 tint transform of a two-colorant `[/Black /Spot]` space into
@@ -1487,17 +1567,17 @@ mod tests {
             tint: Some(TintTransform::load(&doc, &Object::Reference((4, 0)))),
         };
         // Full spot, no black: the teal CMYK, not the gray of comps[0].
-        let teal = dn.convert_to_rgb(&doc, &[0.0, 1.0]);
-        let want = ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.08, 0.26, 0.38]);
+        let teal = dn.convert_to_rgb(&doc, RI, &[0.0, 1.0]);
+        let want = ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[1.0, 0.08, 0.26, 0.38]);
         assert_eq!(teal, want);
         assert!(teal[2] > teal[0] + 40, "teal, got {teal:?}");
         // Full black on top saturates K.
         assert_eq!(
-            dn.convert_to_rgb(&doc, &[1.0, 1.0]),
-            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[1.0, 0.08, 0.26, 1.0])
+            dn.convert_to_rgb(&doc, RI, &[1.0, 1.0]),
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[1.0, 0.08, 0.26, 1.0])
         );
         // No ink at all is paper white.
-        assert_eq!(dn.convert_to_rgb(&doc, &[0.0, 0.0]), [255, 255, 255]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[0.0, 0.0]), [255, 255, 255]);
     }
 
     /// A tint space converts through its alternate, so its cost counts the
@@ -1561,10 +1641,10 @@ mod tests {
             hival: 1,
             lookup: indexed_lookup(&doc, &Object::Reference((4, 0))),
         };
-        assert_eq!(idx.convert_to_rgb(&doc, &[0.0]), [255, 0, 0]);
-        assert_eq!(idx.convert_to_rgb(&doc, &[1.0]), [0, 0, 255]);
+        assert_eq!(idx.convert_to_rgb(&doc, RI, &[0.0]), [255, 0, 0]);
+        assert_eq!(idx.convert_to_rgb(&doc, RI, &[1.0]), [0, 0, 255]);
         // An out-of-range index clamps to hival.
-        assert_eq!(idx.convert_to_rgb(&doc, &[7.0]), [0, 0, 255]);
+        assert_eq!(idx.convert_to_rgb(&doc, RI, &[7.0]), [0, 0, 255]);
     }
 
     /// The colour space of the PDF object source `src`.
@@ -1578,18 +1658,18 @@ mod tests {
         let doc = empty_doc();
         let tint = "<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>";
         let sep = parse_space(&doc, &format!("[/Separation /Spot /DeviceRGB {tint}]"));
-        assert_eq!(sep.convert_to_rgb(&doc, &[1.0]), [255, 0, 0]);
-        assert_eq!(sep.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]);
+        assert_eq!(sep.convert_to_rgb(&doc, RI, &[1.0]), [255, 0, 0]);
+        assert_eq!(sep.convert_to_rgb(&doc, RI, &[0.0]), [255, 255, 255]);
         let dn = parse_space(&doc, &format!("[/DeviceN [/Spot] /DeviceRGB {tint}]"));
-        assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [255, 0, 0]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[1.0]), [255, 0, 0]);
     }
 
     #[test]
     fn inline_indexed_palette_is_looked_up() {
         let doc = empty_doc();
         let idx = parse_space(&doc, "[/Indexed /DeviceRGB 1 <ff000000ff00>]");
-        assert_eq!(idx.convert_to_rgb(&doc, &[0.0]), [255, 0, 0]);
-        assert_eq!(idx.convert_to_rgb(&doc, &[1.0]), [0, 255, 0]);
+        assert_eq!(idx.convert_to_rgb(&doc, RI, &[0.0]), [255, 0, 0]);
+        assert_eq!(idx.convert_to_rgb(&doc, RI, &[1.0]), [0, 255, 0]);
     }
 
     #[test]
@@ -1608,7 +1688,7 @@ mod tests {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: None,
         };
-        assert_eq!(dn.convert_to_rgb(&doc, &[1.0, 0.5, 0.5]), [0, 0, 0]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[1.0, 0.5, 0.5]), [0, 0, 0]);
     }
 
     #[test]
@@ -1621,8 +1701,8 @@ mod tests {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: None,
         };
-        assert_eq!(dn.convert_to_rgb(&doc, &[1.0]), [0, 0, 0]);
-        assert_eq!(dn.convert_to_rgb(&doc, &[0.0]), [255, 255, 255]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[1.0]), [0, 0, 0]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[0.0]), [255, 255, 255]);
     }
 
     #[test]
@@ -1635,7 +1715,7 @@ mod tests {
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: Some(TintTransform::load(&doc, &Object::Reference((999, 0)))),
         };
-        assert_eq!(dn.convert_to_rgb(&doc, &[0.5]), [128, 128, 128]);
+        assert_eq!(dn.convert_to_rgb(&doc, RI, &[0.5]), [128, 128, 128]);
     }
 
     #[test]
@@ -1657,7 +1737,7 @@ mod tests {
             colorant: spot(),
         };
         // No infinite loop, deterministic byte triple.
-        let result = outer.convert_to_rgb(&doc, &[0.5]);
+        let result = outer.convert_to_rgb(&doc, RI, &[0.5]);
         assert_eq!(result.len(), 3);
     }
 
@@ -1666,12 +1746,15 @@ mod tests {
         let doc = empty_doc();
         // DeviceRgb wants 3 components; passing 1 must not panic.
         assert_eq!(
-            ColorSpace::DeviceRgb.convert_to_rgb(&doc, &[0.5]),
+            ColorSpace::DeviceRgb.convert_to_rgb(&doc, RI, &[0.5]),
             [0, 0, 0]
         );
-        assert_eq!(ColorSpace::DeviceGray.convert_to_rgb(&doc, &[]), [0, 0, 0]);
         assert_eq!(
-            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, &[0.5, 0.5]),
+            ColorSpace::DeviceGray.convert_to_rgb(&doc, RI, &[]),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            ColorSpace::DeviceCmyk.convert_to_rgb(&doc, RI, &[0.5, 0.5]),
             [0, 0, 0],
         );
     }
@@ -1681,7 +1764,7 @@ mod tests {
         let doc = empty_doc();
         // Pattern is never directly convertible to RGB.
         assert_eq!(
-            ColorSpace::Pattern { base: None }.convert_to_rgb(&doc, &[]),
+            ColorSpace::Pattern { base: None }.convert_to_rgb(&doc, RI, &[]),
             [0, 0, 0],
         );
     }

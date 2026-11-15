@@ -57,6 +57,7 @@
 mod annotations;
 mod band;
 mod canvas;
+mod colour_set;
 pub(crate) mod depth;
 mod device_blit;
 #[cfg(feature = "vulkan")]

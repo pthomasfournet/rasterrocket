@@ -959,11 +959,14 @@ impl ShadingCs<'_> {
     pub(super) fn to_rgb<S: Sample>(self, channels: &[f64]) -> [S; 3] {
         let n = self.channels();
         if channels.len() == n {
-            return self.space.convert(self.doc, channels);
+            return self
+                .space
+                .convert(self.doc, crate::RenderingIntent::default(), channels);
         }
         let mut fitted = channels[..channels.len().min(n)].to_vec();
         fitted.resize(n, 0.0);
-        self.space.convert(self.doc, &fitted)
+        self.space
+            .convert(self.doc, crate::RenderingIntent::default(), &fitted)
     }
 
     /// [`Self::to_rgb`] at both depths for a canvas of `depth` (see
@@ -1026,11 +1029,14 @@ impl<S: Sample> ShadingColour<8, S> for InkCs<'_> {
         let (doc, space) = (self.cs.doc, self.cs.space);
         let n = self.cs.channels();
         if comps.len() == n {
-            return self.plan.ink(doc, space, comps);
+            return self
+                .plan
+                .ink(doc, crate::RenderingIntent::default(), space, comps);
         }
         let mut fitted = comps[..comps.len().min(n)].to_vec();
         fitted.resize(n, 0.0);
-        self.plan.ink(doc, space, &fitted)
+        self.plan
+            .ink(doc, crate::RenderingIntent::default(), space, &fitted)
     }
 
     fn conversion_cost(self) -> u64 {

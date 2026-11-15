@@ -812,7 +812,11 @@ fn icc_cmyk_prints_the_profiles_colour_with_its_own_inks() {
         a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= tolerance)
     };
 
-    let black = space.convert_to_rgb(&doc, &[0.0, 0.0, 0.0, 1.0]);
+    let black = space.convert_to_rgb(
+        &doc,
+        crate::RenderingIntent::default(),
+        &[0.0, 0.0, 0.0, 1.0],
+    );
     let content = format!("{CYAN_PAGE} /GS gs /ICC cs 0 0 0 1 sc 0 0 5 10 re f");
     let ink = render_ink(&doc, content.as_bytes());
     let k = ink_at(&ink, 2, 5);
@@ -828,7 +832,11 @@ fn icc_cmyk_prints_the_profiles_colour_with_its_own_inks() {
         "{alone:?} for {black:?}"
     );
 
-    let blue = space.convert_to_rgb(&doc, &[0.6, 0.3, 0.0, 0.0]);
+    let blue = space.convert_to_rgb(
+        &doc,
+        crate::RenderingIntent::default(),
+        &[0.6, 0.3, 0.0, 0.0],
+    );
     let ink = render_ink(&doc, b"/ICC cs 0.6 0.3 0 0 sc 0 0 10 10 re f");
     let cm = ink_at(&ink, 5, 5);
     assert_eq!((cm[2], cm[3]), (0, 0), "{cm:?}");

@@ -561,7 +561,13 @@ fn convert16(
                     let comps = &comps[..n];
                     icc.as_deref()
                         .and_then(|conv| conv.convert::<u16>(decoded.doc, comps))
-                        .unwrap_or_else(|| decoded.space.convert::<u16>(decoded.doc, comps))
+                        .unwrap_or_else(|| {
+                            decoded.space.convert::<u16>(
+                                decoded.doc,
+                                RenderingIntent::default(),
+                                comps,
+                            )
+                        })
                 };
                 let mut seen = [0; MAX_WIDE_COMPONENTS];
                 seen[..n].copy_from_slice(px);
@@ -908,7 +914,10 @@ impl<'a> Decoded<'a> {
         self.profile
             .as_ref()
             .and_then(|p| p.convert(self.doc, comps))
-            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, comps))
+            .unwrap_or_else(|| {
+                self.space
+                    .convert_to_rgb(self.doc, RenderingIntent::default(), comps)
+            })
     }
 
     /// The table of the space's conversion of every one-component sample:
@@ -1653,7 +1662,8 @@ mod tests {
     fn cal_images_convert_as_the_fill_path_does() {
         let doc = empty_doc();
         let rgb_space = resolve(&doc, &cal("CalRGB", "[1.8 1.8 1.8]"));
-        let want = rgb_space.convert_to_rgb(&doc, &[128.0 / 255.0; 3]);
+        let want =
+            rgb_space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0; 3]);
         let img = convert(
             &doc,
             cal("CalRGB", "[1.8 1.8 1.8]"),
@@ -1667,7 +1677,8 @@ mod tests {
             "got {got:?}, fill path {want:?}"
         );
         let gray_space = resolve(&doc, &cal("CalGray", "1.8"));
-        let want = gray_space.convert_to_rgb(&doc, &[128.0 / 255.0]);
+        let want =
+            gray_space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0]);
         let img = convert(&doc, cal("CalGray", "1.8"), &[], Layout::Color(1), &[128]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
@@ -1854,7 +1865,7 @@ mod tests {
             .iter()
             .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
             .collect();
-        space.convert_to_rgb(doc, &comps)
+        space.convert_to_rgb(doc, crate::RenderingIntent::default(), &comps)
     }
 
     /// A program of `n` inputs and four outputs, smooth in each, padded
@@ -2190,7 +2201,13 @@ mod tests {
             .as_chunks::<4>()
             .0
             .iter()
-            .flat_map(|px| ColorSpace::DeviceCmyk.convert::<u16>(&doc, &px.map(u16::to_unit)))
+            .flat_map(|px| {
+                ColorSpace::DeviceCmyk.convert::<u16>(
+                    &doc,
+                    crate::RenderingIntent::default(),
+                    &px.map(u16::to_unit),
+                )
+            })
             .collect();
         assert_eq!(img.data.as_cpu16().unwrap(), want.as_slice());
         let bytes = [0, 120, 255, 4, 156, 156, 8, 0, 17, 17, 17, 17];
@@ -2289,7 +2306,11 @@ mod tests {
             " /N 1 /Alternate [/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 1.8 >>]",
         );
         let img = convert(&doc, icc_cs(), &[], Layout::Color(1), &[128]);
-        let want = resolve(&doc, &cal("CalGray", "1.8")).convert_to_rgb(&doc, &[128.0 / 255.0]);
+        let want = resolve(&doc, &cal("CalGray", "1.8")).convert_to_rgb(
+            &doc,
+            crate::RenderingIntent::default(),
+            &[128.0 / 255.0],
+        );
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
     }
 
@@ -2404,7 +2425,8 @@ mod tests {
     fn lut_based_profile_converts_through_moxcms() {
         let doc = make_doc_with_stream(&lut_rgb_profile(), " /N 3");
         let space = resolve(&doc, &icc_cs());
-        let want = space.convert_to_rgb(&doc, &[128.0 / 255.0; 3]);
+        let want =
+            space.convert_to_rgb(&doc, crate::RenderingIntent::default(), &[128.0 / 255.0; 3]);
         assert!(
             want.iter().all(|&c| c.abs_diff(146) <= 3),
             "the fill path lightens mid-gray through the table, got {want:?}"

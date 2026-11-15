@@ -168,6 +168,13 @@ pub(crate) struct InterpGState {
     /// Declared colour space for stroke operations (PDF §8.6).  Mirrors
     /// `fill_color_space`; set by `CS /Name` and `G`/`RG`/`K`.
     pub stroke_color_space: ColorSpace,
+    /// The components in `fill_color_space` of `fill_color` when the
+    /// space's conversion depends on the rendering intent (see
+    /// `ColorSpace::depends_on_intent`), from which a change of intent
+    /// converts the colour again; `None` otherwise.
+    pub fill_components: Option<Arc<[f64]>>,
+    /// The stroking counterpart of `fill_components`.
+    pub stroke_components: Option<Arc<[f64]>>,
     /// Soft mask in effect (PDF `SMask`), resolved to device pixels when
     /// `gs` installed it.  `None` = no soft mask.
     pub soft_mask: Option<Arc<SoftMaskPlane>>,
@@ -232,6 +239,8 @@ impl Clone for InterpGState {
             stroke_pattern_components: self.stroke_pattern_components.clone(),
             fill_color_space: self.fill_color_space.clone(),
             stroke_color_space: self.stroke_color_space.clone(),
+            fill_components: self.fill_components.clone(),
+            stroke_components: self.stroke_components.clone(),
             soft_mask: self.soft_mask.clone(),
             transfer: self.transfer.clone(),
             colour_locked: self.colour_locked,
@@ -243,7 +252,44 @@ impl Clone for InterpGState {
     }
 }
 
+/// The colour of one kind of painting, fill or stroke, of an
+/// [`InterpGState`], borrowed for an update.
+pub(crate) struct ColourMut<'a> {
+    /// `fill_color` or `stroke_color`.
+    pub colour: &'a mut RasterColor,
+    /// `fill_pattern` or `stroke_pattern`.
+    pub pattern: &'a mut Option<Arc<[u8]>>,
+    /// `fill_pattern_components` or `stroke_pattern_components`.
+    pub pattern_components: &'a mut Vec<f64>,
+    /// `fill_color_space` or `stroke_color_space`.
+    pub space: &'a mut ColorSpace,
+    /// `fill_components` or `stroke_components`.
+    pub components: &'a mut Option<Arc<[f64]>>,
+}
+
 impl InterpGState {
+    /// The fill colour and the state it is set from.
+    pub(crate) const fn fill_mut(&mut self) -> ColourMut<'_> {
+        ColourMut {
+            colour: &mut self.fill_color,
+            pattern: &mut self.fill_pattern,
+            pattern_components: &mut self.fill_pattern_components,
+            space: &mut self.fill_color_space,
+            components: &mut self.fill_components,
+        }
+    }
+
+    /// The stroke colour and the state it is set from.
+    pub(crate) const fn stroke_mut(&mut self) -> ColourMut<'_> {
+        ColourMut {
+            colour: &mut self.stroke_color,
+            pattern: &mut self.stroke_pattern,
+            pattern_components: &mut self.stroke_pattern_components,
+            space: &mut self.stroke_color_space,
+            components: &mut self.stroke_components,
+        }
+    }
+
     /// Create the initial graphics state for a page of `width × height` device pixels.
     #[must_use]
     pub(crate) fn initial(width: u32, height: u32) -> Self {
@@ -274,6 +320,8 @@ impl InterpGState {
             // stroking and non-stroking operations until the first `cs`/`CS`.
             fill_color_space: ColorSpace::DeviceGray,
             stroke_color_space: ColorSpace::DeviceGray,
+            fill_components: None,
+            stroke_components: None,
             soft_mask: None,
             transfer: None,
             colour_locked: false,

@@ -69,3 +69,75 @@ fn an_image_marks_under_its_own_intent() {
         set(&[AbsoluteColorimetric])
     );
 }
+
+/// Page `(4, 0)` whose `/ColorSpace` resource `/P` is `[/ICCBased 5 0 R]`,
+/// stream 5 the synthetic CMYK printer of `tests/fixtures/icc`, whose
+/// tables differ by intent, and whose `/ExtGState` resource `/Perc` sets
+/// the perceptual intent.
+fn icc_doc() -> Document {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/icc/printer-cmyk-v4.icc"
+    );
+    let profile = std::fs::read(path).expect("the test profile is present");
+    let mut stream = format!("<< /N 4 /Length {} >>\nstream\n", profile.len()).into_bytes();
+    stream.extend_from_slice(&profile);
+    stream.extend_from_slice(b"\nendstream");
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /ColorSpace << /P [/ICCBased 5 0 R] >> \
+              /ExtGState << /Perc << /RI /Perceptual >> >> >> >>"
+                .to_vec(),
+        ),
+        (5, stream),
+    ])
+}
+
+/// The colour of the first pixel of `content` rendered on a page of `doc`.
+fn first_pixel(doc: &Document, content: &str) -> [u8; 3] {
+    let mut renderer = PageRenderer::new(10, 10, doc, (4, 0));
+    renderer.execute(&crate::content::parse(content.as_bytes()));
+    let bitmap = renderer.finish().0;
+    let data = bitmap.data();
+    [data[0], data[1], data[2]]
+}
+
+/// A colour converts under the intent in effect when it is painted, set
+/// before or after the colour.
+#[test]
+fn a_colour_paints_under_the_intent_in_effect_at_the_paint() {
+    let d = icc_doc();
+    let fill = "/P cs 0 1 1 0 sc 0 0 10 10 re f";
+    let relative = first_pixel(&d, fill);
+    let perceptual = first_pixel(&d, &format!("/Perceptual ri {fill}"));
+    assert_ne!(relative, perceptual, "the tables differ");
+    assert_eq!(
+        first_pixel(&d, "/P cs 0 1 1 0 sc /Perceptual ri 0 0 10 10 re f"),
+        perceptual,
+        "ri after the colour"
+    );
+    assert_eq!(
+        first_pixel(&d, "/P cs 0 1 1 0 sc /Perc gs 0 0 10 10 re f"),
+        perceptual,
+        "gs /RI after the colour"
+    );
+    assert_eq!(
+        first_pixel(&d, "/P CS 0 1 1 0 SC /Perceptual ri 2 w 0 9.5 m 10 9.5 l S"),
+        first_pixel(&d, "/Perceptual ri /P CS 0 1 1 0 SC 2 w 0 9.5 m 10 9.5 l S"),
+        "the stroke colour alike"
+    );
+    assert_eq!(
+        first_pixel(&d, "/P CS 0 1 1 0 SC 2 w 0 9.5 m 10 9.5 l S"),
+        relative,
+        "the stroke of the fill's colour"
+    );
+    assert_eq!(
+        first_pixel(
+            &d,
+            "/Perceptual ri /P cs 0 1 1 0 sc /RelativeColorimetric ri 0 0 10 10 re f"
+        ),
+        relative,
+        "back to relative"
+    );
+}
