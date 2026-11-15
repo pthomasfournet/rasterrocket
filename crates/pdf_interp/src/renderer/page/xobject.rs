@@ -75,6 +75,7 @@ impl PageRenderer<'_> {
                 return;
             }
         }
+        self.record_intent(self.resources.xobject_intent(name));
         let draw_size = image_draw_size(&self.gstate.current().ctm);
         let key = self.resources.xobject_id(name).map(|id| ImageKey {
             id,

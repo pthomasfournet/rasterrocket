@@ -85,8 +85,20 @@ impl PageRenderer<'_> {
         if op.sets_colour() && self.gstate.current().colour_locked {
             return;
         }
+        if marks_in_gstate_intent(op) {
+            self.record_intent(None);
+        }
 
         self.dispatch(op, rest);
+    }
+
+    /// Record that a marking operator paints under `own`, an image's own
+    /// intent, else the graphics state's.  Recorded at dispatch, before
+    /// any clipping to the window drawn, so every band of a page records
+    /// the same set.
+    pub(super) fn record_intent(&mut self, own: Option<crate::RenderingIntent>) {
+        let intent = own.unwrap_or_else(|| self.gstate.current().rendering_intent);
+        self.diag.content_intents.insert(intent);
     }
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
@@ -338,6 +350,7 @@ impl PageRenderer<'_> {
                 self.do_xobject(name);
             }
             Operator::InlineImage { params, data } => {
+                self.record_intent(inline_intent(params));
                 // The same block in a form or pattern cell drawn repeatedly
                 // decodes once per page.
                 let key = super::image_memo::ImageMemo::inline_key(
@@ -445,14 +458,17 @@ impl PageRenderer<'_> {
 
             Operator::Unknown(kw) => self.warn_unknown_operator(kw),
 
-            // Operators without effect on the pixels.  `ri` selects an
-            // output intent; `d0` declares an advance, taken from the font's
+            Operator::SetRenderingIntent(name) => {
+                self.gstate.current_mut().rendering_intent =
+                    crate::RenderingIntent::from_pdf_name(name);
+            }
+
+            // Operators without effect on the pixels.  `d0` declares an advance, taken from the font's
             // `Widths`; `MP`/`DP` mark a point and `BX`/`EX` a compatibility
             // section.
             // The marked-content sequence operators are handled by
             // `execute_one` before dispatch.
-            Operator::SetRenderingIntent(_)
-            | Operator::Type3GlyphWidth(..)
+            Operator::Type3GlyphWidth(..)
             | Operator::MarkedContentPoint
             | Operator::CompatibilitySection
             | Operator::BeginOptionalContent(_)
@@ -516,6 +532,9 @@ impl PageRenderer<'_> {
         if let Some(m) = params.overprint_mode {
             gs.overprint_mode = m;
         }
+        if let Some(i) = params.rendering_intent {
+            gs.rendering_intent = i;
+        }
         match &params.transfer {
             Some(TransferSetting::Identity) => gs.transfer = None,
             Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),
@@ -565,6 +584,39 @@ impl PageRenderer<'_> {
             );
         }
     }
+}
+
+/// Whether `op` paints under the graphics state's rendering intent: the
+/// path-painting, text-showing and shading operators.  Images, which may
+/// carry an intent of their own, record theirs where they are drawn.
+const fn marks_in_gstate_intent(op: &Operator) -> bool {
+    matches!(
+        op,
+        Operator::Fill
+            | Operator::FillEvenOdd
+            | Operator::Stroke
+            | Operator::CloseStroke
+            | Operator::CloseFillStroke
+            | Operator::CloseFillStrokeEvenOdd
+            | Operator::FillStroke
+            | Operator::FillStrokeEvenOdd
+            | Operator::ShowText(_)
+            | Operator::ShowTextArray(_)
+            | Operator::MoveNextLineShow(_)
+            | Operator::MoveNextLineShowSpaced { .. }
+            | Operator::PaintShading(_)
+    )
+}
+
+/// The `Intent` of the inline image whose parameters are `params`; `None`
+/// when absent.
+fn inline_intent(params: &[u8]) -> Option<crate::RenderingIntent> {
+    if !params.windows(6).any(|w| w == b"Intent") {
+        return None;
+    }
+    let dict = crate::resources::image::inline::parse_inline_params(params);
+    let name = dict.get(b"Intent")?.as_name()?;
+    Some(crate::RenderingIntent::from_pdf_name(name))
 }
 
 #[cfg(test)]

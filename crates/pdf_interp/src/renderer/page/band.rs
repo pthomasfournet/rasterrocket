@@ -49,6 +49,13 @@ impl PageState {
         diag.unslotted_spots = self.ink_map.borrow().unslotted().to_vec();
         diag
     }
+    /// The rendering intents of the marking operators executed so far
+    /// (see [`PageDiagnostics::content_intents`]): every window executes
+    /// the whole content stream, so the first window's set is the page's.
+    #[must_use]
+    pub const fn content_intents(&self) -> crate::IntentSet {
+        self.diag.content_intents
+    }
 }
 
 impl PageRenderer<'_> {

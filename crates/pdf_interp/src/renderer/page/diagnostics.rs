@@ -107,6 +107,11 @@ pub struct PageDiagnostics {
     /// Whether the page was rendered whole on a GPU from its recorded
     /// paint commands, and why not when it was offered and declined.
     pub device_page: DevicePage,
+    /// The rendering intents in force at the page's marking operators:
+    /// the graphics state's (`ri`, `ExtGState` `RI`) for paths, text and
+    /// shadings, an image's own `Intent` where it has one.  Empty on a
+    /// page that marks nothing.
+    pub content_intents: crate::IntentSet,
 }
 
 /// How a page used the whole-page GPU raster.

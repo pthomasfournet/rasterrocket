@@ -78,6 +78,8 @@ pub struct ExtGStateParams {
     /// Overprint mode `OPM`.  `None` = unchanged, also for a value other
     /// than 0 and 1, the only defined ones.
     pub overprint_mode: Option<OverprintMode>,
+    /// Rendering intent `RI`.  `None` = unchanged.
+    pub rendering_intent: Option<crate::RenderingIntent>,
 }
 
 /// The overprint mode `OPM` (ISO 32000-1 §8.6.7).
@@ -147,6 +149,10 @@ impl ExtGStateParams {
                 1 => Some(OverprintMode::NonZero),
                 _ => None,
             }),
+            rendering_intent: d
+                .get(b"RI")
+                .and_then(Object::as_name)
+                .map(crate::RenderingIntent::from_pdf_name),
         }
     }
 }
@@ -921,6 +927,15 @@ impl<'doc> PageResources<'doc> {
     pub fn xobject_optional_content(&self, name: &[u8]) -> Option<Object> {
         let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
         stream.as_stream()?.dict.get(b"OC").cloned()
+    }
+
+    /// The `Intent` of the `XObject` resource `name`: an image's own
+    /// rendering intent (§8.9.5.1).  `None` when absent.
+    #[must_use]
+    pub fn xobject_intent(&self, name: &[u8]) -> Option<crate::RenderingIntent> {
+        let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
+        let name = stream.as_stream()?.dict.get(b"Intent")?.as_name()?;
+        Some(crate::RenderingIntent::from_pdf_name(name))
     }
 }
 

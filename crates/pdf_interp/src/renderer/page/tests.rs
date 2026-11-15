@@ -2501,4 +2501,5 @@ fn cmyk_colour_paints_process_inks_and_is_opm_eligible() {
 }
 
 mod allocation;
+mod intent;
 mod overprint;

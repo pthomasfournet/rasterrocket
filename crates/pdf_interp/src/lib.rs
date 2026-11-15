@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod content;
 pub mod form_type;
+pub mod intent;
 pub(crate) mod optional_content;
 pub mod page_group;
 pub(crate) mod prescan;
@@ -26,6 +27,7 @@ mod test_helpers;
 pub mod unsupported;
 
 pub use form_type::{FormType, form_type};
+pub use intent::{IntentSet, RenderingIntent};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
