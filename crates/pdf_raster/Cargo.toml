@@ -50,6 +50,8 @@ camera       = { package = "rasterrocket-camera", path = "../camera" }
 jpeg-encoder = "0.7"
 # Holds the qpdf-encrypted fixtures of the encryption test.
 tempfile     = { workspace = true }
+# Compresses the 16-bit Flate image fixtures of the sample-depth test.
+flate2       = { workspace = true }
 
 [lints.rust]
 # The SIMD kernels in gray.rs and deskew/rotate.rs use raw-pointer loads,

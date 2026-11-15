@@ -200,6 +200,126 @@ fn every_paint_narrows_to_its_8_bit_render() {
     assert!(table.iter().all(|&(max, _)| max <= 2), "{table:?}");
 }
 
+/// A one-page PDF drawing the image `image` (a stream object body) over the
+/// whole of its `w × h` point page.
+fn image_page(w: u32, h: u32, image: Vec<u8>) -> Vec<u8> {
+    common::with_page_tree(&[
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] \
+             /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        common::stream_object("", format!("q {w} 0 0 {h} 0 0 cm /Im Do Q").as_bytes()),
+        image,
+    ])
+}
+
+/// A 16-bit `DeviceRGB` Flate image of 1024 × 2 pixels, red rising from 0
+/// to 65535 across it, green falling, blue at a third of red.
+fn flate_ramp() -> Vec<u8> {
+    use std::io::Write as _;
+    let mut raw = Vec::new();
+    for _ in 0..2 {
+        for x in 0..1024u32 {
+            let r = u16::try_from(x * 65_535 / 1023).unwrap();
+            for v in [r, u16::MAX - r, r / 3] {
+                raw.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&raw).unwrap();
+    common::stream_object(
+        "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace /DeviceRGB \
+         /BitsPerComponent 16 /Filter /FlateDecode",
+        &z.finish().unwrap(),
+    )
+}
+
+/// The 16-bit gray JPEG 2000 ramp of `tests/data/ramp16.jp2`, 1024 × 4,
+/// lossless, as an image `XObject`.
+fn jpx_ramp() -> Vec<u8> {
+    common::stream_object(
+        "/Type /XObject /Subtype /Image /Width 1024 /Height 4 /ColorSpace /DeviceGray \
+         /BitsPerComponent 16 /Filter /JPXDecode",
+        include_bytes!("data/ramp16.jp2"),
+    )
+}
+
+/// A black 8-bit image of 1024 × 2 pixels under a 16-bit Flate soft mask
+/// rising from transparent to opaque across it.
+fn masked_page() -> Vec<u8> {
+    use std::io::Write as _;
+    let mut alpha = Vec::new();
+    for _ in 0..2 {
+        for x in 0..1024u32 {
+            alpha.extend_from_slice(&u16::try_from(x * 65_535 / 1023).unwrap().to_be_bytes());
+        }
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&alpha).unwrap();
+    let mut pdf_objects = vec![
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1024 2] \
+           /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        common::stream_object("", b"q 1024 0 0 2 0 0 cm /Im Do Q"),
+        common::stream_object(
+            "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /SMask 6 0 R",
+            &vec![0u8; 1024 * 2 * 3],
+        ),
+    ];
+    pdf_objects.push(common::stream_object(
+        "/Type /XObject /Subtype /Image /Width 1024 /Height 2 /ColorSpace /DeviceGray \
+         /BitsPerComponent 16 /Filter /FlateDecode",
+        &z.finish().unwrap(),
+    ));
+    common::with_page_tree(&pdf_objects)
+}
+
+/// A 16-bit soft mask keeps its levels at 16 bits: the black image it
+/// masks fades over the white page through more than 256 levels.
+#[test]
+fn a_16_bit_soft_mask_keeps_its_levels() {
+    let session = session(masked_page());
+    let wide = rgb16(render(&session, SampleDepth::Sixteen));
+    let narrow = rgb8(render(&session, SampleDepth::Eight));
+    let (l16, l8) = (
+        levels(wide.row_samples(1), 0),
+        levels(narrow.row_samples(1), 0),
+    );
+    eprintln!("soft-masked image: {l16} levels at 16 bits, {l8} at 8");
+    assert!(l16 > 256 && l8 <= 256, "{l16} levels at 16 bits, {l8} at 8");
+    let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+    assert!(table.iter().all(|&(max, _)| max <= 1), "{table:?}");
+}
+
+/// Images of 16 bits a sample keep their levels at 16 bits — a Flate RGB
+/// ramp and a JPEG 2000 gray ramp, drawn one pixel a sample, show more
+/// than 256 levels in every channel — and at 8 bits draw their high bytes
+/// as before, at most 256.
+#[test]
+fn sixteen_bit_images_keep_their_levels() {
+    for (name, pdf) in [
+        ("Flate", image_page(1024, 2, flate_ramp())),
+        ("JPX", image_page(1024, 4, jpx_ramp())),
+    ] {
+        let session = session(pdf);
+        let wide = rgb16(render(&session, SampleDepth::Sixteen));
+        let narrow = rgb8(render(&session, SampleDepth::Eight));
+        for c in 0..3 {
+            let l16 = levels(wide.row_samples(1), c);
+            let l8 = levels(narrow.row_samples(1), c);
+            eprintln!("{name} image, channel {c}: {l16} levels at 16 bits, {l8} at 8");
+            assert!(l16 > 256, "{name}, channel {c}: {l16} levels at 16 bits");
+            assert!(l8 <= 256, "{name}, channel {c}: {l8} levels at 8 bits");
+        }
+        let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+        eprintln!("{name} image narrowed: {table:?}");
+        assert!(table.iter().all(|&(max, _)| max <= 1), "{name}: {table:?}");
+    }
+}
+
 /// The batch pages of a 16-bit render: 16-bit gray, and 16-bit RGBA over
 /// a transparent backdrop.
 #[test]
