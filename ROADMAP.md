@@ -2944,6 +2944,19 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: GPU-session fallbacks and Windows RAM output.**
+In a session holding a GPU backend, an ICC-based CMYK image the device does
+not convert (below `GPU_ICC_CLUT_THRESHOLD`, or declined) now takes the
+profile transform a CPU-only session uses instead of the scalar CPU table
+evaluator (about 3× faster on the A18 Pro); a page with
+`PageDiagnostics::device_icc_conversions == 0` is byte-identical to a
+CPU-only render, and a device-converted image stays within ±4 of it. The
+dormant parallel-Huffman JPEG decoder refuses subsampled, non-standard and
+restart-coded streams from their headers, before its entropy pre-pass. On
+Windows, `--ram-path` works (available memory is read through
+`GlobalMemoryStatusEx`); `--ram` alone is still refused there, having no
+`/dev/shm`.
+
 **Unreleased on master: paint trace.** A pixel-independent regression
 oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
 `rasterrocket::dev::paint_trace`) records one line of text per painting
