@@ -113,9 +113,11 @@ impl<const N: usize, S: Sample> Mesh<N, S> {
             f64::from(clip.x_max_i) + 2.0 + ox,
             f64::from(clip.y_max_i) + 2.0 + oy,
         );
+        // A clip whose rectangle is empty may hold inverted bounds (the
+        // intersection of disjoint rectangles): its band range is empty.
         let range = band_range(y0, y1 - 1.0)
             .map(|(first, last)| (first, last.min(self.bands.len().saturating_sub(1))))
-            .filter(|(first, _)| *first < self.bands.len());
+            .filter(|&(first, last)| first <= last && first < self.bands.len());
         // Non-finite bounds are NaN throughout.
         let meets = |&i: &u32| {
             let b = self.bounds[i as usize];
@@ -208,6 +210,17 @@ mod tests {
             .collect();
         assert_eq!(window, [1.0]);
         assert_eq!(ids(&mesh, &clip(0.0, 12.0, 100.0, 20.0)), []);
+    }
+
+    /// The intersection of disjoint rectangles leaves the clip's bounds
+    /// inverted: a query of it meets nothing.
+    #[test]
+    fn an_empty_clip_of_inverted_bounds_meets_nothing() {
+        let mesh = Mesh::new(vec![tri(1.0, 0.0, 50.0, 150.0)]);
+        let mut empty = clip(0.0, 0.0, 100.0, 7.0);
+        empty.clip_to_rect(0.0, 120.0, 100.0, 200.0);
+        assert!(empty.y_min_i > empty.y_max_i);
+        assert_eq!(ids(&mesh, &empty), []);
     }
 
     #[test]
