@@ -503,9 +503,13 @@ fn convert16(
         }
         _ => {}
     }
+    // The components of a pixel are held on the stack: the spaces that
+    // convert at 16 bits have at most an ICC profile's fifteen.
+    if n == 0 || n > MAX_WIDE_COMPONENTS {
+        return None;
+    }
     let mut out: Vec<u16> = Vec::new();
     out.try_reserve_exact(samples.len() / n * 3).ok()?;
-    let mut comps = Vec::with_capacity(n);
     let icc = decoded.profile.clone().or_else(|| match decoded.space {
         ColorSpace::IccBased {
             n: k,
@@ -513,21 +517,19 @@ fn convert16(
         } => IccConversion::load(decoded.doc, *id, *k),
         _ => None,
     });
-    let to_inputs = |px: &[u16], comps: &mut Vec<f64>| {
-        comps.clear();
-        comps.extend(
-            px.iter()
-                .zip(decoded.decode)
-                .map(|(&s, &pair)| value(s, pair)),
-        );
+    let to_inputs = |px: &[u16], comps: &mut [f64; MAX_WIDE_COMPONENTS]| {
+        for ((c, &s), &pair) in comps.iter_mut().zip(px).zip(decoded.decode) {
+            *c = value(s, pair);
+        }
     };
+    let mut comps = [0.0; MAX_WIDE_COMPONENTS];
     // A transform converts every pixel at once.
     if let Some(conv) = icc.as_deref() {
         let mut inputs = Vec::new();
         inputs.try_reserve_exact(samples.len()).ok()?;
         for px in samples.chunks_exact(n) {
             to_inputs(px, &mut comps);
-            inputs.extend(comps.iter().map(|&v| u16::from_unit(v)));
+            inputs.extend(comps[..n].iter().map(|&v| u16::from_unit(v)));
         }
         out.resize(samples.len() / n * 3, 0);
         if conv.transform_pixels16(&inputs, &mut out).is_some() {
@@ -535,17 +537,26 @@ fn convert16(
         }
         out.clear();
     }
-    let mut last: Option<(Vec<u16>, [u16; 3])> = None;
+    // Each pixel converts alone, a run of equal pixels once; device CMYK
+    // through the process-ink model directly.
+    let cmyk = matches!(decoded.space, ColorSpace::DeviceCmyk) && n == 4 && icc.is_none();
+    let mut last: Option<([u16; MAX_WIDE_COMPONENTS], [u16; 3])> = None;
     for px in samples.chunks_exact(n) {
         let rgb = match &last {
-            Some((seen, rgb)) if seen.as_slice() == px => *rgb,
+            Some((seen, rgb)) if seen[..n] == *px => *rgb,
             _ => {
                 to_inputs(px, &mut comps);
-                let rgb = icc
-                    .as_deref()
-                    .and_then(|conv| conv.convert::<u16>(decoded.doc, &comps))
-                    .unwrap_or_else(|| decoded.space.convert::<u16>(decoded.doc, &comps));
-                last = Some((px.to_vec(), rgb));
+                let rgb = if cmyk {
+                    color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3])
+                } else {
+                    let comps = &comps[..n];
+                    icc.as_deref()
+                        .and_then(|conv| conv.convert::<u16>(decoded.doc, comps))
+                        .unwrap_or_else(|| decoded.space.convert::<u16>(decoded.doc, comps))
+                };
+                let mut seen = [0; MAX_WIDE_COMPONENTS];
+                seen[..n].copy_from_slice(px);
+                last = Some((seen, rgb));
                 rgb
             }
         };
@@ -553,6 +564,10 @@ fn convert16(
     }
     Some((ImageColorSpace::Rgb, out))
 }
+
+/// The most components a pixel converted at 16 bits has: those of an ICC
+/// profile's colour space.
+const MAX_WIDE_COMPONENTS: usize = 15;
 
 /// `(0, 1)` for each of up to four components: the default `/Decode` of a
 /// device space.
@@ -2086,6 +2101,137 @@ mod tests {
         let img = convert(&doc, icc_cs(), &[], Layout::Color(1), &[0, 128, 255]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         assert_eq!(img.data.as_cpu().unwrap(), &[0, 146, 255]);
+    }
+
+    /// Convert the 16-bit `data` of `layout` as an image whose dictionary
+    /// holds `/ColorSpace cs` and `extras`.
+    fn convert16_of(
+        doc: &Document,
+        cs: Object,
+        extras: &[(&str, Object)],
+        layout: Layout,
+        data: &[u16],
+    ) -> ImageDescriptor {
+        let mut dict = Dictionary::new();
+        dict.set("ColorSpace", cs);
+        for (k, v) in extras {
+            dict.set(*k, v.clone());
+        }
+        let colour = ImageColour::resolve(doc, &dict, None);
+        let width = u32::try_from(data.len() / layout_components(layout)).unwrap();
+        colour
+            .convert(
+                doc,
+                Samples::cpu16(width, 1, layout, data.to_vec()),
+                None,
+                #[cfg(feature = "gpu-icc")]
+                &super::super::IccHandles::none(),
+            )
+            .expect("converts")
+    }
+
+    /// The 16-bit conversion of 8-bit samples widened, narrowed to bytes,
+    /// is the 8-bit conversion of those samples to within `bound`.
+    fn assert_follows_8_bits(doc: &Document, cs: &Object, layout: Layout, bytes: &[u8], bound: u8) {
+        let wide: Vec<u16> = bytes.iter().map(|&v| u16::from_u8(v)).collect();
+        let at16 = convert16_of(doc, cs.clone(), &[], layout, &wide);
+        let at8 = convert(doc, cs.clone(), &[], layout, bytes);
+        assert_eq!(at16.color_space, at8.color_space);
+        let (w, n) = (at16.data.as_cpu16().unwrap(), at8.data.as_cpu().unwrap());
+        assert_eq!(w.len(), n.len());
+        for (a, b) in w.iter().zip(n) {
+            assert!(a.to_u8().abs_diff(*b) <= bound, "{w:?} vs {n:?}");
+        }
+    }
+
+    /// An inverted `/Decode` maps each 16-bit sample to its complement at
+    /// 16 bits.
+    #[test]
+    fn a_16_bit_inverted_decode_is_the_complement() {
+        let doc = empty_doc();
+        let img = convert16_of(
+            &doc,
+            name_obj(b"DeviceGray"),
+            &[("Decode", decode_arr(&[1, 0]))],
+            Layout::Color(1),
+            &[0, 1000, 65_535],
+        );
+        assert_eq!(img.color_space, ImageColorSpace::Gray);
+        assert_eq!(img.data.as_cpu16().unwrap(), &[65_535, 64_535, 0]);
+    }
+
+    /// 16-bit device CMYK converts through the process-ink model at 16
+    /// bits, as a colour of the space does, and follows the 8-bit
+    /// conversion within a level.
+    #[test]
+    fn a_16_bit_cmyk_image_converts_through_the_model_at_16_bits() {
+        let doc = empty_doc();
+        let samples = [0, 30_000, 65_535, 1_000, 40_000, 40_000, 2_000, 0];
+        let img = convert16_of(
+            &doc,
+            name_obj(b"DeviceCMYK"),
+            &[],
+            Layout::Color(4),
+            &samples,
+        );
+        let want: Vec<u16> = samples
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| ColorSpace::DeviceCmyk.convert::<u16>(&doc, &px.map(u16::to_unit)))
+            .collect();
+        assert_eq!(img.data.as_cpu16().unwrap(), want.as_slice());
+        let bytes = [0, 120, 255, 4, 156, 156, 8, 0, 17, 17, 17, 17];
+        assert_follows_8_bits(&doc, &name_obj(b"DeviceCMYK"), Layout::Color(4), &bytes, 1);
+    }
+
+    /// A 16-bit Lab image converts at 16 bits and follows the 8-bit
+    /// conversion within a level.
+    #[test]
+    fn a_16_bit_lab_image_follows_its_8_bit_conversion() {
+        let doc = empty_doc();
+        let lab = Object::Array(vec![
+            name_obj(b"Lab"),
+            Object::Dictionary({
+                let mut d = Dictionary::new();
+                d.set(
+                    "WhitePoint",
+                    Object::Array(vec![
+                        Object::Real(0.9505),
+                        Object::Integer(1),
+                        Object::Real(1.089),
+                    ]),
+                );
+                d
+            }),
+        ]);
+        let bytes = [128, 128, 128, 200, 90, 160, 40, 170, 60];
+        assert_follows_8_bits(&doc, &lab, Layout::Color(3), &bytes, 1);
+    }
+
+    /// A profile compiled to shaper tables has no 16-bit transform: its
+    /// 16-bit samples convert one pixel at a time through the tables, and
+    /// follow the 8-bit conversion within a level.
+    #[test]
+    fn a_16_bit_shaper_profile_converts_each_pixel() {
+        let doc = gamma_1_8_doc(3);
+        let bytes = [0, 128, 255, 150, 118, 80];
+        assert_follows_8_bits(&doc, &icc_cs(), Layout::Color(3), &bytes, 1);
+    }
+
+    /// A profile compiled to a transform converts the 16-bit samples
+    /// through its 16-bit transform, which follows the 8-bit one within
+    /// two levels.
+    #[test]
+    fn a_16_bit_transform_profile_converts_the_image_at_once() {
+        let profile = moxcms::ColorProfile::new_lab().encode().unwrap();
+        let doc = make_doc_with_stream(&profile, " /N 3");
+        assert!(matches!(
+            crate::resources::colorspace::icc::IccConversion::load(&doc, (2, 0), 3).as_deref(),
+            Some(crate::resources::colorspace::icc::IccConversion::Transform { .. })
+        ));
+        let bytes = [128, 128, 128, 200, 90, 160, 40, 170, 60];
+        assert_follows_8_bits(&doc, &icc_cs(), Layout::Color(3), &bytes, 2);
     }
 
     #[test]
