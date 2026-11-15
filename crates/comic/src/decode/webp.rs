@@ -1,20 +1,22 @@
 //! WebP decode for comic pages, via the pure-Rust `image-webp` crate.
 
-use super::{CodecPixels, DecodeError, guard_dimensions, keep_leading_samples, rgb_from_tight};
+use super::{
+    CodecPixels, DecodeError, Target, guard_dimensions, keep_leading_samples, rgb_from_tight,
+};
 
 /// Decode WebP bytes (lossy or lossless) to an `Rgb8` bitmap, dropping alpha.
 ///
 /// # Errors
 ///
 /// [`DecodeError::Codec`] on malformed/unsupported streams.
-pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], target: Target) -> Result<CodecPixels, DecodeError> {
     let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Codec(format!("webp: {e}")))?;
     let (w, h) = dec.dimensions();
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("webp: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h, max_bytes)?;
+    guard_dimensions(w, h, target)?;
     // Size the buffer with the decoder's own contract (w*h*channels, where
     // channels follows has_alpha) rather than recomputing the channel rule here.
     let buf_len = dec

@@ -24,9 +24,9 @@ const ALL: [&[u8]; 6] = [RGB, GRAY, LOSSY, DEEP, GRID, TURN];
 
 /// The decoded RGB pixels of `bytes` as (width, height, tight data).
 fn rgb(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
-    match decode(bytes, pdf_raster::DEFAULT_MAX_PAGE_BYTES) {
+    match decode(bytes, crate::decode::EIGHT) {
         Ok(CodecPixels::Rgb(bmp)) => (bmp.width, bmp.height, bmp.data().to_vec()),
-        Ok(CodecPixels::Gray(_)) => panic!("a colour image decodes to RGB"),
+        Ok(_) => panic!("a colour image decodes to 8-bit RGB"),
         Err(e) => panic!("decode failed: {e}"),
     }
 }
@@ -106,7 +106,7 @@ fn a_lossless_identity_image_decodes_exactly() {
 
 #[test]
 fn a_monochrome_image_in_idat_decodes_exactly_to_gray() {
-    let Ok(CodecPixels::Gray(bmp)) = decode(GRAY, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
+    let Ok(CodecPixels::Gray(bmp)) = decode(GRAY, crate::decode::EIGHT) else {
         panic!("a monochrome image decodes to gray")
     };
     assert_eq!((bmp.width, bmp.height), (16, 8));
@@ -200,12 +200,9 @@ fn unknown_properties_fail_only_when_essential() {
     // identity matrix applies.
     let (_, _, data) = rgb(&patched(RGB, b"colr", b"zzzz"));
     assert_eq!(data, pattern(8, 4, |x, y| [x * 30, y * 60, 255 - x * 30]));
-    let err = decode(
-        &patched(TURN, b"clap", b"zzzz"),
-        pdf_raster::DEFAULT_MAX_PAGE_BYTES,
-    )
-    .err()
-    .unwrap();
+    let err = decode(&patched(TURN, b"clap", b"zzzz"), crate::decode::EIGHT)
+        .err()
+        .unwrap();
     assert!(
         err.to_string().contains("essential property 'zzzz'"),
         "{err}"
@@ -217,10 +214,7 @@ fn files_without_a_still_image_are_codec_errors() {
     for (find, replace) in [(b"pitm", b"free"), (b"meta", b"free"), (b"pict", b"vide")] {
         assert!(
             matches!(
-                decode(
-                    &patched(RGB, find, replace),
-                    pdf_raster::DEFAULT_MAX_PAGE_BYTES
-                ),
+                decode(&patched(RGB, find, replace), crate::decode::EIGHT),
                 Err(DecodeError::Codec(_))
             ),
             "{}",
@@ -228,13 +222,7 @@ fn files_without_a_still_image_are_codec_errors() {
         );
     }
     // An item type that is not a coded picture or a grid.
-    assert!(
-        decode(
-            &patched(RGB, b"av01", b"hvc1"),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
-        )
-        .is_err()
-    );
+    assert!(decode(&patched(RGB, b"av01", b"hvc1"), crate::decode::EIGHT).is_err());
 }
 
 #[test]
@@ -242,7 +230,7 @@ fn every_truncation_is_an_error() {
     for file in ALL {
         for cut in 0..file.len() {
             assert!(
-                decode(&file[..cut], pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
+                decode(&file[..cut], crate::decode::EIGHT).is_err(),
                 "cut at {cut} of {}",
                 file.len()
             );
@@ -259,7 +247,7 @@ fn item_extents_outside_the_file_are_errors() {
         let file = with_box_bytes(RGB, b"iloc", skip, &value.to_be_bytes());
         assert!(
             matches!(
-                decode(&file, pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+                decode(&file, crate::decode::EIGHT),
                 Err(DecodeError::Codec(_))
             ),
             "{skip} {value}"
@@ -274,17 +262,14 @@ fn absurd_or_wrong_sizes_are_refused() {
         with_box_bytes(&file, b"ispe", 8, &h.to_be_bytes())
     };
     assert!(matches!(
-        decode(
-            &ispe(RGB, 100_000, 100_000),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
-        ),
+        decode(&ispe(RGB, 100_000, 100_000), crate::decode::EIGHT),
         Err(DecodeError::TooLarge {
             width: 100_000,
             height: 100_000
         })
     ));
     assert!(matches!(
-        decode(&ispe(RGB, u32::MAX, 1), pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+        decode(&ispe(RGB, u32::MAX, 1), crate::decode::EIGHT),
         Err(DecodeError::TooLarge { .. })
     ));
     // A picture larger than declared stops at the decoder's frame size
@@ -292,7 +277,7 @@ fn absurd_or_wrong_sizes_are_refused() {
     for (w, h) in [(4, 2), (16, 8), (0, 4)] {
         assert!(
             matches!(
-                decode(&ispe(RGB, w, h), pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+                decode(&ispe(RGB, w, h), crate::decode::EIGHT),
                 Err(DecodeError::Codec(_))
             ),
             "{w}x{h}"
@@ -304,32 +289,20 @@ fn absurd_or_wrong_sizes_are_refused() {
     assert!(matches!(
         decode(
             &grid(&[0, 0, 1, 1, 0xFF, 0xFF, 0xFF, 0xFF]),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
+            crate::decode::EIGHT
         ),
         Err(DecodeError::TooLarge { .. })
     ));
     assert!(matches!(
         decode(
             &grid(&[0, 0, 255, 255, 0, 120, 0, 100]),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
+            crate::decode::EIGHT
         ),
         Err(DecodeError::Codec(_))
     ));
-    assert!(
-        decode(
-            &grid(&[0, 0, 1, 1, 0, 0, 0, 100]),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
-        )
-        .is_err()
-    );
+    assert!(decode(&grid(&[0, 0, 1, 1, 0, 0, 0, 100]), crate::decode::EIGHT).is_err());
     // 32-bit sizes need four more bytes than the item has.
-    assert!(
-        decode(
-            &grid(&[0, 1, 1, 1, 0, 120, 0, 100]),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES
-        )
-        .is_err()
-    );
+    assert!(decode(&grid(&[0, 1, 1, 1, 0, 120, 0, 100]), crate::decode::EIGHT).is_err());
 }
 
 /// A box of type `kind` around `payload`.
@@ -432,19 +405,19 @@ fn the_sample_budget_follows_the_stream_not_the_codec_configuration() {
     for file in [ispe(RGB), ispe(&lying)] {
         assert!(
             matches!(
-                decode(&file, pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+                decode(&file, crate::decode::EIGHT),
                 Err(DecodeError::TooLarge {
                     width: 20_000,
                     height: 20_000
                 })
             ),
             "{:?}",
-            decode(&file, pdf_raster::DEFAULT_MAX_PAGE_BYTES).err()
+            decode(&file, crate::decode::EIGHT).err()
         );
     }
     // The monochrome stream of the same size is within it.
     assert!(matches!(
-        decode(&ispe(GRAY), pdf_raster::DEFAULT_MAX_PAGE_BYTES),
+        decode(&ispe(GRAY), crate::decode::EIGHT),
         Err(DecodeError::Codec(_))
     ));
 }
@@ -459,7 +432,7 @@ fn flipped_bytes_never_panic() {
             damaged[at] = file[at] ^ [0x01, 0x80, 0xFF][at % 3];
             // Either outcome is acceptable; reaching the next iteration
             // is the assertion.
-            drop(decode(&damaged, pdf_raster::DEFAULT_MAX_PAGE_BYTES));
+            drop(decode(&damaged, crate::decode::EIGHT));
             damaged[at] = file[at];
         }
     }
@@ -477,7 +450,7 @@ fn avif_decode_time() {
     let mut times: Vec<_> = (0..runs)
         .map(|_| {
             let start = std::time::Instant::now();
-            let decoded = decode(&file, pdf_raster::DEFAULT_MAX_PAGE_BYTES);
+            let decoded = decode(&file, crate::decode::EIGHT);
             let elapsed = start.elapsed();
             assert!(decoded.is_ok());
             elapsed
@@ -489,4 +462,27 @@ fn avif_decode_time() {
         times[times.len() / 2],
         times[0]
     );
+}
+
+/// A picture of more than 8 bits keeps 16-bit output on a 16-bit target:
+/// the same conversion at 65 535 levels, within one 8-bit level of the
+/// 8-bit decode and finer than it; transforms apply as at 8 bits.
+#[test]
+fn a_deep_picture_converts_to_16_bits_on_a_16_bit_target() {
+    use color::Sample;
+    let (_, _, eight) = rgb(DEEP);
+    let Ok(CodecPixels::Rgb16(bmp)) = decode(DEEP, crate::decode::SIXTEEN) else {
+        panic!("a 10-bit colour picture decodes to Rgb16");
+    };
+    assert_eq!((bmp.width, bmp.height), (32, 16));
+    assert_eq!(bmp.data().len(), eight.len());
+    for (&deep, &narrow) in bmp.data().iter().zip(&eight) {
+        assert!(deep.to_u8().abs_diff(narrow) <= 1, "{deep} vs {narrow}");
+    }
+    assert!(bmp.data().iter().any(|v| !v.is_multiple_of(257)));
+    // An 8-bit picture stays 8-bit, widened later by the front door.
+    assert!(matches!(
+        decode(RGB, crate::decode::SIXTEEN),
+        Ok(CodecPixels::Rgb(_))
+    ));
 }

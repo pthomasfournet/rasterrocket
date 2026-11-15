@@ -1,13 +1,13 @@
 //! Quarter-turn rotation of a decoded page image.
 
-use color::Gray8;
+use color::Pixel;
 use pdf_raster::Rotation;
 use raster::Bitmap;
 
 /// `src` turned clockwise by `rotation`; `src` itself when the rotation is
 /// [`Rotation::None`].  Every pixel is moved, none resampled, so turning by
 /// a rotation and back restores `src` exactly.
-pub(crate) fn turn(src: Bitmap<Gray8>, rotation: Rotation) -> Bitmap<Gray8> {
+pub(crate) fn turn<P: Pixel>(src: Bitmap<P>, rotation: Rotation) -> Bitmap<P> {
     match rotation {
         Rotation::None => src,
         Rotation::Cw90 => src.turned_cw(1),
@@ -54,5 +54,13 @@ mod tests {
         ] {
             assert_eq!(pixels(&turn(numbered(), rotation)), want, "{rotation:?}");
         }
+    }
+
+    #[test]
+    fn a_16_bit_image_turns_sample_for_sample() {
+        let b = Bitmap::<color::Gray16>::from_packed(3, 2, vec![0, 1000, 2000, 3000, 4000, 65_535]);
+        let turned = turn(b, Rotation::Cw90);
+        assert_eq!((turned.width, turned.height), (2, 3));
+        assert_eq!(turned.data(), [3000, 0, 4000, 1000, 65_535, 2000]);
     }
 }

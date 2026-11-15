@@ -10,7 +10,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
-use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_from_tight};
+use super::{CodecPixels, DecodeError, Target, gray_from_tight, guard_dimensions, rgb_from_tight};
 
 /// Decode baseline/progressive JPEG bytes: a single-component stream to a
 /// `Gray8` bitmap, any other to an `Rgb8` bitmap.
@@ -28,8 +28,8 @@ use super::{CodecPixels, DecodeError, gray_from_tight, guard_dimensions, rgb_fro
 /// [`DecodeError::TooLarge`] when the frame exceeds the rendered-page
 /// limits; [`DecodeError::Codec`] if the stream is not decodable or reports
 /// zero dimensions.
-pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
-    let (pixels, intact_rows, height) = decode_counting_rows(bytes, max_bytes)?;
+pub(super) fn decode(bytes: &[u8], target: Target) -> Result<CodecPixels, DecodeError> {
+    let (pixels, intact_rows, height) = decode_counting_rows(bytes, target)?;
     if intact_rows < height {
         log::warn!(
             "jpeg: the scan data is incomplete or damaged ({intact_rows} of {height} rows are \
@@ -43,7 +43,7 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
 /// was present and well formed, and the frame height.
 fn decode_counting_rows(
     bytes: &[u8],
-    max_bytes: u64,
+    target: Target,
 ) -> Result<(CodecPixels, u32, u32), DecodeError> {
     let side_cap = pdf_raster::MAX_PX_SIDE as usize;
     // Not strict: the rows a damaged stream still holds are drawn, and the
@@ -63,7 +63,7 @@ fn decode_counting_rows(
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("jpeg: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h, max_bytes)?;
+    guard_dimensions(w, h, target)?;
     let gray = dec.input_colorspace() == Some(ColorSpace::Luma);
     if gray {
         dec.set_options(dec.options().jpeg_set_out_colorspace(ColorSpace::Luma));
@@ -91,31 +91,31 @@ mod tests {
     fn rgb(pixels: CodecPixels) -> Vec<u8> {
         match pixels {
             CodecPixels::Rgb(bitmap) => bitmap.data().to_vec(),
-            CodecPixels::Gray(_) => panic!("a colour frame decodes to RGB"),
+            _ => panic!("a colour frame decodes to 8-bit RGB"),
         }
     }
 
     #[test]
     fn a_complete_stream_is_whole() {
         let (pixels, intact_rows, height) =
-            decode_counting_rows(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
+            decode_counting_rows(NOISE, crate::decode::EIGHT).expect("decodes");
         assert_eq!(intact_rows, height);
         assert_eq!(
             rgb(pixels),
-            rgb(decode(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes"))
+            rgb(decode(NOISE, crate::decode::EIGHT).expect("decodes"))
         );
     }
 
     #[test]
     fn a_stream_cut_short_is_drawn_and_counted() {
         let (whole, _, height) =
-            decode_counting_rows(NOISE, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
+            decode_counting_rows(NOISE, crate::decode::EIGHT).expect("decodes");
         let whole = rgb(whole);
         let width = whole.len() / 3 / height as usize;
 
         let cut = &NOISE[..NOISE.len() * 2 / 3];
         let (pixels, intact_rows, cut_height) =
-            decode_counting_rows(cut, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("decodes");
+            decode_counting_rows(cut, crate::decode::EIGHT).expect("decodes");
         assert_eq!(cut_height, height);
         assert!(
             0 < intact_rows && intact_rows < height,

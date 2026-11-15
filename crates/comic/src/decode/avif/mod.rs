@@ -27,7 +27,8 @@ use rav1d::{StillLimits, StillPicture, StillSamples};
 use self::color::{ColorSpec, Frame, Pixels, Plane, Sample, chroma_size, to_pixels};
 use self::container::{Container, Grid, ItemInfo, Nclx};
 use super::{
-    CodecPixels, DecodeError, MAX_SAMPLES, gray_from_tight, guard_dimensions, rgb_from_tight,
+    CodecPixels, DecodeError, MAX_SAMPLES, Target, gray_from_tight, gray16_from_tight,
+    guard_dimensions, rgb_from_tight, rgb16_from_tight,
 };
 
 pub(in crate::decode) use self::container::is_avif;
@@ -205,7 +206,7 @@ fn decode_coded(
     item: ItemInfo,
     props: &ItemProps<'_>,
     file_len: usize,
-    max_bytes: u64,
+    target: Target,
 ) -> Result<StillPicture, DecodeError> {
     if item.kind != *b"av01" {
         return Err(codec(format_args!(
@@ -222,7 +223,7 @@ fn decode_coded(
     if w == 0 || h == 0 {
         return Err(codec(format_args!("zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h, max_bytes)?;
+    guard_dimensions(w, h, target)?;
     let too_large = DecodeError::TooLarge {
         width: w,
         height: h,
@@ -295,7 +296,7 @@ fn decode_grid(
     container: &Container<'_>,
     id: u32,
     file_len: usize,
-    max_bytes: u64,
+    target: Target,
 ) -> Result<(AnyFrame<'static>, ColorSpec, Option<Nclx>), DecodeError> {
     let Grid {
         rows,
@@ -306,7 +307,7 @@ fn decode_grid(
     if width == 0 || height == 0 {
         return Err(codec(format_args!("zero dimensions {width}x{height}")));
     }
-    guard_dimensions(width, height, max_bytes)?;
+    guard_dimensions(width, height, target)?;
     let tiles = container.references(id, *b"dimg");
     if rows * columns > MAX_TILES || tiles.len() != (rows * columns) as usize {
         return Err(codec(format_args!(
@@ -351,7 +352,7 @@ fn decode_grid(
             container.item(tile_id)?,
             &props,
             file_len,
-            max_bytes,
+            target,
         )?;
         let color = stream_color(&picture);
         let tile = frame_view(&picture)?;
@@ -378,15 +379,15 @@ fn decode_grid(
     canvas.ok_or_else(|| codec("a grid without tiles"))
 }
 
-/// Tight 8-bit pixels of `channels` bytes each.
-struct Packed {
+/// Tight pixels of `channels` samples `O` each.
+struct Packed<O> {
     width: u32,
     height: u32,
     channels: usize,
-    data: Vec<u8>,
+    data: Vec<O>,
 }
 
-impl Packed {
+impl<O: Copy> Packed<O> {
     /// Rebuild the image as `width × height`, output pixel (x, y) taken
     /// from source pixel `source(x, y)`.
     fn remap(&mut self, width: u32, height: u32, source: impl Fn(usize, usize) -> (usize, usize)) {
@@ -400,6 +401,18 @@ impl Packed {
             }
         }
         (self.width, self.height, self.data) = (width, height, data);
+    }
+
+    /// The image after `transforms`, in order: its width, height, whether
+    /// it is gray, and its samples.
+    fn transformed(
+        mut self,
+        transforms: &[Transform<'_>],
+    ) -> Result<(u32, u32, bool, Vec<O>), DecodeError> {
+        for &transform in transforms {
+            self.apply(transform)?;
+        }
+        Ok((self.width, self.height, self.channels == 1, self.data))
     }
 
     fn apply(&mut self, transform: Transform<'_>) -> Result<(), DecodeError> {
@@ -426,23 +439,24 @@ impl Packed {
     }
 }
 
-/// Decode the primary item of an AVIF file to a `Gray8` or `Rgb8` bitmap.
+/// Decode the primary item of an AVIF file to a gray or RGB bitmap: 16-bit
+/// for a picture of more than 8 bits on a 16-bit target, 8-bit otherwise.
 ///
 /// # Errors
 ///
 /// [`DecodeError::TooLarge`] when the declared size of the page or of a
 /// tile exceeds the page limits; [`DecodeError::Codec`] on a malformed,
 /// truncated or unsupported container or AV1 stream.
-pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], target: Target) -> Result<CodecPixels, DecodeError> {
     let container = Container::parse(bytes)?;
     let primary = container.primary()?;
     let props = ItemProps::read(&container, primary.id)?;
     // The frame of a coded picture borrows the decoder's planes.
     let picture;
     let (frame, stream, tile_nclx) = if primary.kind == *b"grid" {
-        decode_grid(&container, primary.id, bytes.len(), max_bytes)?
+        decode_grid(&container, primary.id, bytes.len(), target)?
     } else {
-        picture = decode_coded(&container, primary, &props, bytes.len(), max_bytes)?;
+        picture = decode_coded(&container, primary, &props, bytes.len(), target)?;
         (frame_view(&picture)?, stream_color(&picture), None)
     };
     let spec = props.nclx.or(tile_nclx).map_or(stream, |nclx| ColorSpec {
@@ -450,33 +464,43 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
         matrix: nclx.matrix,
         full_range: nclx.full_range,
     });
-    let (width, height, pixels) = match frame {
-        AnyFrame::U8(f) => (f.width, f.height, to_pixels(&f, spec)?),
-        AnyFrame::U16(f) => (f.width, f.height, to_pixels(&f, spec)?),
-    };
-    let (gray, data) = match pixels {
-        Pixels::Gray(data) => (true, data),
-        Pixels::Rgb(data) => (false, data),
+    match frame {
+        AnyFrame::U16(f) if target.deep() => {
+            let packed = packed(f.width, f.height, to_pixels::<_, u16>(&f, spec)?)?;
+            let (width, height, gray, data) = packed.transformed(&props.transforms)?;
+            if gray {
+                gray16_from_tight(width, height, data)
+            } else {
+                rgb16_from_tight(width, height, data)
+            }
+        }
+        frame => {
+            let (width, height, pixels) = match frame {
+                AnyFrame::U8(f) => (f.width, f.height, to_pixels::<_, u8>(&f, spec)?),
+                AnyFrame::U16(f) => (f.width, f.height, to_pixels::<_, u8>(&f, spec)?),
+            };
+            let (width, height, gray, data) =
+                packed(width, height, pixels)?.transformed(&props.transforms)?;
+            if gray {
+                gray_from_tight(width, height, data)
+            } else {
+                rgb_from_tight(width, height, data)
+            }
+        }
+    }
+}
+
+/// The `width × height` pixels as a [`Packed`] image.
+fn packed<O>(width: usize, height: usize, pixels: Pixels<O>) -> Result<Packed<O>, DecodeError> {
+    let (channels, data) = match pixels {
+        Pixels::Gray(data) => (1, data),
+        Pixels::Rgb(data) => (3, data),
     };
     let side = |v: usize| u32::try_from(v).map_err(|_| codec("side over 32 bits"));
-    let mut packed = Packed {
+    Ok(Packed {
         width: side(width)?,
         height: side(height)?,
-        channels: if gray { 1 } else { 3 },
+        channels,
         data,
-    };
-    for &transform in &props.transforms {
-        packed.apply(transform)?;
-    }
-    let Packed {
-        width,
-        height,
-        data,
-        ..
-    } = packed;
-    if gray {
-        gray_from_tight(width, height, data)
-    } else {
-        rgb_from_tight(width, height, data)
-    }
+    })
 }

@@ -1,17 +1,19 @@
-//! Decoded AV1 planes to 8-bit gray or RGB.
+//! Decoded AV1 planes to 8- or 16-bit gray or RGB.
 //!
-//! The conversion is integer arithmetic throughout.  With `d` the bit depth
-//! and `S = 6 + d`, a sample triple (Y, U, V) maps to
+//! The conversion is integer arithmetic throughout.  With `d` the bit depth,
+//! `S = 6 + d` and `M` the output maximum (255, or 65 535 for 16-bit
+//! output), a sample triple (Y, U, V) maps to
 //!
 //! ```text
-//! C = clamp((cy·(Y − y0) + cu·(U − 2^(d−1)) + cv·(V − 2^(d−1)) + 2^(S−1)) >> S, 0, 255)
+//! C = clamp((cy·(Y − y0) + cu·(U − 2^(d−1)) + cv·(V − 2^(d−1)) + 2^(S−1)) >> S, 0, M)
 //! ```
 //!
 //! per output channel `C`, where `cy`, `cu`, `cv` are the matrix
-//! coefficients scaled by `255 · 2^S` over the luma or chroma range, rounded
-//! to nearest.  The reduction from 10 or 12 bits to 8 is part of the same
-//! rounding, never a separate truncation.  Full-range 8-bit luma has
-//! `cy = 2^14` exactly, so a pixel without chroma keeps its value.
+//! coefficients scaled by `M · 2^S` over the luma or chroma range, rounded
+//! to nearest, and the sums are formed in `i64`.  The reduction from 10 or
+//! 12 bits to 8 is part of the same rounding, never a separate truncation.
+//! Full-range 8-bit luma has `cy = 2^14` exactly at 8-bit output, so a
+//! pixel without chroma keeps its value.
 //!
 //! Subsampled chroma is brought to luma resolution by bilinear
 //! interpolation with chroma sited between luma samples: weights 3:1 along
@@ -19,6 +21,7 @@
 
 use std::borrow::Cow;
 
+use color::Sample as OutSample;
 use rav1d::StillLayout;
 
 use super::DecodeError;
@@ -104,11 +107,11 @@ pub(super) struct ColorSpec {
     pub(super) full_range: bool,
 }
 
-/// Tight 8-bit output.
+/// Tight output of samples `O`.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Pixels {
-    Gray(Vec<u8>),
-    Rgb(Vec<u8>),
+pub(super) enum Pixels<O> {
+    Gray(Vec<O>),
+    Rgb(Vec<O>),
 }
 
 /// The luma weights (Kr, Kb) of matrix code point `matrix`, `None` for the
@@ -135,39 +138,44 @@ const fn luma_weights(matrix: u16, primaries: u16) -> (f64, f64) {
     }
 }
 
-/// Fixed-point conversion constants for one bit depth, range and matrix.
+/// Fixed-point conversion constants for one bit depth, range, matrix and
+/// output maximum.
 #[derive(Clone, Copy, Debug)]
 struct Matrix {
     /// Luma black level.
-    y0: i32,
+    y0: i64,
     /// Chroma zero level, `2^(d−1)`.
-    c0: i32,
+    c0: i64,
     /// Luma gain.
-    cy: i32,
+    cy: i64,
     /// Per output channel (R, G, B): the gains of U and V.
-    c: [[i32; 2]; 3],
+    c: [[i64; 2]; 3],
     /// `2^(S−1)`.
-    round: i32,
+    round: i64,
     /// `S`.
     shift: u32,
 }
 
 impl Matrix {
-    fn new(depth: u8, spec: ColorSpec) -> Self {
+    /// The constants of `depth`-bit samples under `spec`, for output samples
+    /// of maximum `out_max`.
+    fn new(depth: u8, spec: ColorSpec, out_max: u16) -> Self {
         let up = u32::from(depth) - 8;
         let shift = 14 + up;
-        let max = (1i32 << depth) - 1;
+        let max = (1i64 << depth) - 1;
         let (y0, y_range, c_range) = if spec.full_range {
             (0, max, max)
         } else {
             (16 << up, 219 << up, 224 << up)
         };
-        let one = f64::from(1u32 << shift) * 255.0;
+        let one = f64::from(1u32 << shift) * f64::from(out_max);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "gains are below 2^17: |k| ≤ 2, 255 / range ≤ 2^(8−d) · 1.17, scale 2^(6+d)"
+            clippy::cast_precision_loss,
+            reason = "gains are below 2^25: |k| ≤ 2, M / range ≤ 2^(16−d) · 1.17, scale 2^(6+d); \
+                      ranges are below 2^12, exact in f64"
         )]
-        let fixed = |k: f64, range: i32| (k * one / f64::from(range)).round() as i32;
+        let fixed = |k: f64, range: i64| (k * one / range as f64).round() as i64;
         let chroma = if spec.matrix == 8 {
             // YCgCo: U carries Cg and V carries Co.
             [[-1.0, 1.0], [1.0, 0.0], [-1.0, -1.0]]
@@ -193,34 +201,41 @@ impl Matrix {
     /// A luma-scaled sample alone: gray, or one channel of an identity
     /// matrix picture.
     #[inline]
-    fn level<T: Sample>(&self, v: T) -> u8 {
-        clamp((self.cy * (Into::<i32>::into(v) - self.y0) + self.round) >> self.shift)
+    fn level<T: Sample, O: OutSample>(&self, v: T) -> O {
+        O::from_signed((self.cy * (wide(v) - self.y0) + self.round) >> self.shift)
     }
 
-    /// Whether [`Self::level`] is the identity on 8-bit samples.
+    /// Whether [`Self::level`] is the identity: 8-bit full-range samples
+    /// at unit gain.
     const fn level_is_identity(&self) -> bool {
-        self.shift == 14 && self.y0 == 0
+        self.shift == 14 && self.y0 == 0 && self.cy == 1 << 14
     }
 
     /// One row of Y′CbCr to interleaved RGB; `u` and `v` are at luma
     /// resolution.
-    fn rgb_row<Y: Sample, C: Sample>(&self, y: &[Y], u: &[C], v: &[C], out: &mut [u8]) {
+    fn rgb_row<Y: Sample, C: Sample, O: OutSample>(
+        &self,
+        y: &[Y],
+        u: &[C],
+        v: &[C],
+        out: &mut [O],
+    ) {
         let (out, _) = out.as_chunks_mut::<3>();
         for (((px, &y), &u), &v) in out.iter_mut().zip(y).zip(u).zip(v) {
-            let luma = self.cy * (Into::<i32>::into(y) - self.y0) + self.round;
-            let cb = Into::<i32>::into(u) - self.c0;
-            let cr = Into::<i32>::into(v) - self.c0;
+            let luma = self.cy * (wide(y) - self.y0) + self.round;
+            let cb = wide(u) - self.c0;
+            let cr = wide(v) - self.c0;
             for (channel, gains) in px.iter_mut().zip(&self.c) {
-                *channel = clamp((luma + gains[0] * cb + gains[1] * cr) >> self.shift);
+                *channel = O::from_signed((luma + gains[0] * cb + gains[1] * cr) >> self.shift);
             }
         }
     }
 }
 
-/// `v` saturated to `0..=255`.
+/// `v` as `i64`.
 #[inline]
-fn clamp(v: i32) -> u8 {
-    u8::try_from(v.clamp(0, 255)).unwrap_or(u8::MAX)
+fn wide<T: Sample>(v: T) -> i64 {
+    i64::from(Into::<i32>::into(v))
 }
 
 /// Interpolate one chroma row to `out.len()` luma columns.
@@ -272,28 +287,29 @@ fn upsample_row<T: Sample>(near: &[T], far: Option<&[T]>, mix: &mut [u16], out: 
     }
 }
 
-/// Convert `frame` to 8-bit pixels: gray for a monochrome picture, RGB
-/// otherwise.
+/// Convert `frame` to pixels of samples `O`: gray for a monochrome
+/// picture, RGB otherwise.
 ///
 /// # Errors
 ///
 /// [`DecodeError::Codec`] for an identity (GBR) matrix on subsampled
 /// chroma, and for the reversible `YCgCo` matrices (code points 16 and 17),
 /// which are not implemented.
-pub(super) fn to_pixels<T: Sample>(
+pub(super) fn to_pixels<T: Sample, O: OutSample>(
     frame: &Frame<'_, T>,
     spec: ColorSpec,
-) -> Result<Pixels, DecodeError> {
-    let matrix = Matrix::new(frame.depth, spec);
+) -> Result<Pixels<O>, DecodeError> {
+    let out_max = u16::try_from(O::MAX.signed()).unwrap_or(u16::MAX);
+    let matrix = Matrix::new(frame.depth, spec, out_max);
     let (w, h) = (frame.width, frame.height);
     let [luma, u, v] = &frame.planes;
     if frame.layout == StillLayout::Mono {
         let mut gray = Vec::with_capacity(w * h);
         for y in 0..h {
             let row = luma.row(y);
-            match T::as_bytes(row) {
-                Some(bytes) if matrix.level_is_identity() => gray.extend_from_slice(bytes),
-                _ => gray.extend(row.iter().map(|&s| matrix.level(s))),
+            match T::as_bytes(row).and_then(O::from_u8_slice) {
+                Some(same) if matrix.level_is_identity() => gray.extend_from_slice(same),
+                _ => gray.extend(row.iter().map(|&s| matrix.level::<T, O>(s))),
             }
         }
         return Ok(Pixels::Gray(gray));
@@ -304,7 +320,7 @@ pub(super) fn to_pixels<T: Sample>(
             spec.matrix
         )));
     }
-    let mut out = vec![0u8; w * h * 3];
+    let mut out = vec![O::ZERO; w * h * 3];
     let rows = out.chunks_exact_mut((w * 3).max(1));
     if spec.matrix == 0 {
         if frame.layout != StillLayout::I444 {
@@ -390,7 +406,7 @@ mod tests {
     }
 
     fn rgb<T: Sample>(f: &Frame<'_, T>, spec: ColorSpec) -> Vec<u8> {
-        match to_pixels(f, spec).unwrap() {
+        match to_pixels::<_, u8>(f, spec).unwrap() {
             Pixels::Rgb(v) => v,
             Pixels::Gray(_) => panic!("a colour frame converts to RGB"),
         }
@@ -459,7 +475,7 @@ mod tests {
             [vec![1023, 512, 2, 3], vec![], vec![]],
         );
         assert_eq!(
-            to_pixels(&f, spec(2, true)).unwrap(),
+            to_pixels::<_, u8>(&f, spec(2, true)).unwrap(),
             Pixels::Gray(vec![255, 128, 0, 1])
         );
         // 12-bit limited range: black 256, white 3760.
@@ -470,7 +486,7 @@ mod tests {
             [vec![256, 3760, 2010], vec![], vec![]],
         );
         assert_eq!(
-            to_pixels(&f, spec(2, false)).unwrap(),
+            to_pixels::<_, u8>(&f, spec(2, false)).unwrap(),
             Pixels::Gray(vec![0, 255, 128])
         );
     }
@@ -485,7 +501,7 @@ mod tests {
         );
         assert_eq!(rgb(&f, spec(0, true)), [50, 10, 30, 60, 20, 40]);
         let f = frame::<u8>(StillLayout::I420, 8, (2, 2), [vec![0; 4], vec![0], vec![0]]);
-        assert!(to_pixels(&f, spec(0, true)).is_err());
+        assert!(to_pixels::<_, u8>(&f, spec(0, true)).is_err());
     }
 
     #[test]

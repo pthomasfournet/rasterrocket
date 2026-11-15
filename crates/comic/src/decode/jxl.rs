@@ -2,27 +2,29 @@
 //! JPEG XL project.
 //!
 //! The first frame is the page: an animation yields its first frame.  The
-//! decoder's output is 8-bit gray for a gray image and 8-bit RGB otherwise,
-//! in its default output colour space; extra channels (alpha among them) are
-//! not read.
+//! decoder's output is gray for a gray image and RGB otherwise, in its
+//! default output colour space: 16-bit for an image of more than 8 bits
+//! per sample on a 16-bit target, 8-bit otherwise.  Extra channels (alpha
+//! among them) are not read.
 
 use jxl::api::{
-    Event, JxlColorType, JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer,
+    Endianness, Event, JxlColorType, JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer,
     JxlPixelFormat,
 };
 
 use super::{
-    CodecPixels, DecodeError, MAX_SAMPLES, gray_from_tight, guard_dimensions, rgb_from_tight,
+    CodecPixels, DecodeError, MAX_SAMPLES, Target, be_samples, gray_from_tight, gray16_from_tight,
+    guard_dimensions, rgb_from_tight, rgb16_from_tight,
 };
 
-/// Decode a JPEG XL codestream or container to a `Gray8` or `Rgb8` bitmap.
+/// Decode a JPEG XL codestream or container to a gray or RGB bitmap.
 ///
 /// # Errors
 ///
 /// [`DecodeError::TooLarge`] when the header dimensions exceed the page
 /// limits; [`DecodeError::Codec`] on malformed, truncated or unsupported
 /// streams.
-pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, DecodeError> {
+pub(super) fn decode(bytes: &[u8], target: Target) -> Result<CodecPixels, DecodeError> {
     let codec = |e: jxl::error::Error| DecodeError::Codec(format!("jxl: {e}"));
     let truncated = || DecodeError::Codec("jxl: the stream ends before the image".to_owned());
     let mut options = JxlDecoderOptions::default();
@@ -40,6 +42,7 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
     let info = dec.basic_info().ok_or_else(truncated)?;
     let (w, h) = info.size;
     let extra_channels = info.extra_channels.len();
+    let deep = target.deep() && info.bit_depth.bits_per_sample() > 8;
     let side = |v: usize| {
         u32::try_from(v).map_err(|_| DecodeError::Codec(format!("jxl: side of {v} pixels")))
     };
@@ -47,7 +50,7 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("jxl: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h, max_bytes)?;
+    guard_dimensions(w, h, target)?;
     let gray = dec
         .current_pixel_format()
         .is_some_and(|format| format.color_type.is_grayscale());
@@ -56,14 +59,23 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
     } else {
         (JxlColorType::Rgb, 3)
     };
+    let (format, sample_bytes) = if deep {
+        let format = JxlDataFormat::U16 {
+            endianness: Endianness::BigEndian,
+            bit_depth: 16,
+        };
+        (format, 2)
+    } else {
+        (JxlDataFormat::U8 { bit_depth: 8 }, 1)
+    };
     dec.set_pixel_format(JxlPixelFormat {
         color_type,
-        color_data_format: Some(JxlDataFormat::U8 { bit_depth: 8 }),
+        color_data_format: Some(format),
         extra_channel_format: vec![None; extra_channels],
     })
     .map_err(codec)?;
 
-    let row_bytes = w as usize * channels;
+    let row_bytes = w as usize * channels * sample_bytes;
     let mut pixels = vec![0u8; row_bytes * h as usize];
     loop {
         let mut out = [JxlOutputBuffer::new(&mut pixels, h as usize, row_bytes)];
@@ -75,6 +87,14 @@ pub(super) fn decode(bytes: &[u8], max_bytes: u64) -> Result<CodecPixels, Decode
             Event::NeedMoreInput { .. } | Event::Complete => return Err(truncated()),
             Event::BasicInfo | Event::FrameHeader => {}
         }
+    }
+    if deep {
+        let samples = be_samples(&pixels);
+        return if gray {
+            gray16_from_tight(w, h, samples)
+        } else {
+            rgb16_from_tight(w, h, samples)
+        };
     }
     if gray {
         gray_from_tight(w, h, pixels)
@@ -95,7 +115,7 @@ mod tests {
 
     #[test]
     fn a_lossless_gray_image_decodes_exactly() {
-        let Ok(CodecPixels::Gray(bmp)) = decode(GRAY, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
+        let Ok(CodecPixels::Gray(bmp)) = decode(GRAY, crate::decode::EIGHT) else {
             panic!("a gray image decodes to gray")
         };
         assert_eq!((bmp.width, bmp.height), (16, 8));
@@ -109,7 +129,7 @@ mod tests {
 
     #[test]
     fn a_lossless_rgb_image_decodes_exactly() {
-        let Ok(CodecPixels::Rgb(bmp)) = decode(RGB, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
+        let Ok(CodecPixels::Rgb(bmp)) = decode(RGB, crate::decode::EIGHT) else {
             panic!("an RGB image decodes to RGB")
         };
         assert_eq!((bmp.width, bmp.height), (8, 4));
@@ -129,7 +149,7 @@ mod tests {
         // 1.1 levels, where reading the output as linear light would put the
         // constant blue channel near 56 instead of 128.
         let lossy: &[u8] = include_bytes!("../../tests/data/lossy-32x16.jxl");
-        let Ok(CodecPixels::Rgb(bmp)) = decode(lossy, pdf_raster::DEFAULT_MAX_PAGE_BYTES) else {
+        let Ok(CodecPixels::Rgb(bmp)) = decode(lossy, crate::decode::EIGHT) else {
             panic!("a colour image decodes to RGB")
         };
         assert_eq!((bmp.width, bmp.height), (32, 16));
@@ -153,16 +173,35 @@ mod tests {
     fn truncated_or_foreign_bytes_are_codec_errors() {
         for cut in [2, GRAY.len() / 2, GRAY.len() - 1] {
             assert!(
-                decode(&GRAY[..cut], pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
+                decode(&GRAY[..cut], crate::decode::EIGHT).is_err(),
                 "cut at {cut}"
             );
         }
-        assert!(
-            decode(
-                b"\xFF\x0Anot a codestream",
-                pdf_raster::DEFAULT_MAX_PAGE_BYTES
-            )
-            .is_err()
-        );
+        assert!(decode(b"\xFF\x0Anot a codestream", crate::decode::EIGHT).is_err());
+    }
+
+    #[test]
+    fn a_lossless_16_bit_image_keeps_its_samples_on_a_16_bit_target() {
+        // 16 × 8 lossless 16-bit gray, sample `(4099x + 8191y) mod 65536`.
+        const DEEP: &[u8] = include_bytes!("../../tests/data/gray16-16x8.jxl");
+        let Ok(CodecPixels::Gray16(bmp)) = decode(DEEP, crate::decode::SIXTEEN) else {
+            panic!("a 16-bit gray image decodes to Gray16")
+        };
+        assert_eq!((bmp.width, bmp.height), (16, 8));
+        for y in 0..8u32 {
+            let row: Vec<u16> = (0..16u32)
+                .map(|x| u16::try_from((x * 4099 + y * 8191) % 65_536).unwrap())
+                .collect();
+            assert_eq!(&bmp.row_samples(y)[..16], row.as_slice(), "row {y}");
+        }
+        // At 8 bits the same image is reduced; an 8-bit image stays 8-bit.
+        assert!(matches!(
+            decode(DEEP, crate::decode::EIGHT),
+            Ok(CodecPixels::Gray(_))
+        ));
+        assert!(matches!(
+            decode(GRAY, crate::decode::SIXTEEN),
+            Ok(CodecPixels::Gray(_))
+        ));
     }
 }

@@ -1,11 +1,14 @@
 //! Loose-image decode front door.
 //!
 //! One place that sniffs an image's format by magic bytes, dispatches to the
-//! per-codec wrapper, and normalises the result to grayscale — the single
-//! decode→bitmap→gray sequence shared by every format.  Every codec checks
-//! the header dimensions against the rendered-page limits before it
-//! allocates pixels ([`guard_dimensions`]); the caller names the archive entry
-//! in the resulting [`DecodeError::TooLarge`].
+//! per-codec wrapper, and normalises the result to grayscale at the depth
+//! of the [`Target`] — the single decode→bitmap→gray sequence shared by
+//! every format.  A codec keeps 16-bit samples only for a 16-bit target and
+//! a source of more than 8 bits; an 8-bit source on a 16-bit target is its
+//! 8-bit page widened exactly (`v · 257`).  Every codec checks the header
+//! dimensions against the rendered-page limits before it allocates pixels
+//! ([`guard_dimensions`]); the caller names the archive entry in the
+//! resulting [`DecodeError::TooLarge`].
 
 mod avif;
 mod jpeg;
@@ -14,7 +17,7 @@ mod png;
 mod tiff;
 mod webp;
 
-use color::{Gray8, Pixel, Rgb8};
+use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, Sample, SampleDepth};
 use raster::Bitmap;
 
 /// The most samples (pixels × channels, every plane and frame counted) a
@@ -22,12 +25,83 @@ use raster::Bitmap;
 /// of the deep formats, the planes of an image stay within 2 GiB.
 const MAX_SAMPLES: usize = 1 << 30;
 
+/// The page a decode produces: the byte budget of its pixels and the
+/// depth of its samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Target {
+    /// The page byte budget, counted as [`guard_dimensions`] does.
+    pub(crate) max_bytes: u64,
+    /// The depth of the page's samples.
+    pub(crate) depth: SampleDepth,
+}
+
+impl Target {
+    /// Pages of samples of `depth` within `max_bytes`.
+    pub(crate) const fn new(max_bytes: u64, depth: SampleDepth) -> Self {
+        Self { max_bytes, depth }
+    }
+
+    /// Whether a codec keeps the samples of a deep source at 16 bits.
+    const fn deep(self) -> bool {
+        matches!(self.depth, SampleDepth::Sixteen)
+    }
+}
+
+/// [`Target`] of the default budget at 8 bits.
+#[cfg(test)]
+pub(crate) const EIGHT: Target =
+    Target::new(pdf_raster::DEFAULT_MAX_PAGE_BYTES, SampleDepth::Eight);
+
+/// [`Target`] of the default budget at 16 bits.
+#[cfg(test)]
+pub(crate) const SIXTEEN: Target =
+    Target::new(pdf_raster::DEFAULT_MAX_PAGE_BYTES, SampleDepth::Sixteen);
+
 /// A codec's output in the colour model the stream carries.
 enum CodecPixels {
     /// Single-channel luma.
     Gray(Bitmap<Gray8>),
     /// Interleaved RGB.
     Rgb(Bitmap<Rgb8>),
+    /// Single-channel 16-bit luma, from a deep source on a 16-bit target.
+    Gray16(Bitmap<Gray16>),
+    /// Interleaved 16-bit RGB, from a deep source on a 16-bit target.
+    Rgb16(Bitmap<Rgb16>),
+}
+
+/// A decoded page: luma at the depth of its [`Target`].
+pub(crate) enum PageImage {
+    /// 8-bit luma.
+    Eight(Bitmap<Gray8>),
+    /// 16-bit luma.
+    Sixteen(Bitmap<Gray16>),
+}
+
+impl PageImage {
+    /// The page at `depth`: as it is, widened exactly, or narrowed to the
+    /// nearest 8-bit level.
+    fn at(self, depth: SampleDepth) -> Self {
+        match (self, depth) {
+            (Self::Eight(g), SampleDepth::Sixteen) => Self::Sixteen(resampled(&g)),
+            (Self::Sixteen(g), SampleDepth::Eight) => Self::Eight(resampled(&g)),
+            (page, _) => page,
+        }
+    }
+}
+
+/// The packed bitmap of `src`'s samples on the scale of `Q`'s samples
+/// ([`Sample::from_sample`]).
+fn resampled<P: Pixel, Q: Pixel>(src: &Bitmap<P>) -> Bitmap<Q> {
+    let live = src.width as usize * P::NCOMPS;
+    let mut data = Vec::with_capacity(live * src.height as usize);
+    for y in 0..src.height {
+        data.extend(
+            src.row_samples(y)[..live]
+                .iter()
+                .map(|&v| Q::Sample::from_sample(v)),
+        );
+    }
+    Bitmap::from_packed(src.width, src.height, data)
 }
 
 /// Recognised container formats.
@@ -119,9 +193,11 @@ pub(crate) fn image_pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 }
 
 /// Decode page `page` (a key [`image_pages`] lists) of arbitrary image
-/// bytes to a packed grayscale bitmap, sniffing the format first. Gray
-/// streams are returned as decoded; RGB streams are converted in their own
-/// allocation by [`pdf_raster::rgb_into_gray`].
+/// bytes to a packed grayscale bitmap at the depth of `target`, sniffing the
+/// format first. Gray streams are returned as decoded; RGB streams are
+/// converted in their own allocation by [`pdf_raster::rgb_into_gray`] or
+/// [`pdf_raster::rgb16_into_gray16`]; an 8-bit page on a 16-bit target is
+/// then widened exactly.
 ///
 /// # Errors
 ///
@@ -130,31 +206,36 @@ pub(crate) fn image_pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 pub(crate) fn decode_image(
     bytes: &[u8],
     page: usize,
-    max_bytes: u64,
-) -> Result<Bitmap<Gray8>, DecodeError> {
+    target: Target,
+) -> Result<PageImage, DecodeError> {
     let pixels = match sniff(bytes).ok_or(DecodeError::Unsupported)? {
-        ImageFormat::Jpeg => jpeg::decode(bytes, max_bytes)?,
-        ImageFormat::Png => png::decode(bytes, max_bytes)?,
-        ImageFormat::WebP => webp::decode(bytes, max_bytes)?,
-        ImageFormat::Tiff => tiff::decode(bytes, page, max_bytes)?,
-        ImageFormat::Jxl => jxl::decode(bytes, max_bytes)?,
-        ImageFormat::Avif => avif::decode(bytes, max_bytes)?,
+        ImageFormat::Jpeg => jpeg::decode(bytes, target)?,
+        ImageFormat::Png => png::decode(bytes, target)?,
+        ImageFormat::WebP => webp::decode(bytes, target)?,
+        ImageFormat::Tiff => tiff::decode(bytes, page, target)?,
+        ImageFormat::Jxl => jxl::decode(bytes, target)?,
+        ImageFormat::Avif => avif::decode(bytes, target)?,
     };
-    Ok(match pixels {
-        CodecPixels::Gray(gray) => gray,
-        CodecPixels::Rgb(rgb) => pdf_raster::rgb_into_gray(rgb),
-    })
+    let page = match pixels {
+        CodecPixels::Gray(gray) => PageImage::Eight(gray),
+        CodecPixels::Rgb(rgb) => PageImage::Eight(pdf_raster::rgb_into_gray(rgb)),
+        CodecPixels::Gray16(gray) => PageImage::Sixteen(gray),
+        CodecPixels::Rgb16(rgb) => PageImage::Sixteen(pdf_raster::rgb16_into_gray16(rgb)),
+    };
+    Ok(page.at(target.depth))
 }
 
-/// Reject an image whose header dimensions exceed the page byte budget
-/// `max_bytes` at 3 bytes per pixel (the RGB buffer a colour decode
-/// allocates), or the side ceiling, before the codec allocates its pixel
-/// buffer.
-fn guard_dimensions(w: u32, h: u32, max_bytes: u64) -> Result<(), DecodeError> {
-    pdf_raster::validate_page_bytes(w, h, 3, max_bytes).map_err(|_| DecodeError::TooLarge {
-        width: w,
-        height: h,
-    })
+/// Reject an image whose header dimensions exceed the page byte budget of
+/// `target` at 3 samples per pixel (the RGB buffer a colour decode
+/// allocates) of the target's depth, or the side ceiling, before the codec
+/// allocates its pixel buffer.
+fn guard_dimensions(w: u32, h: u32, target: Target) -> Result<(), DecodeError> {
+    pdf_raster::validate_page_bytes(w, h, 3 * target.depth.bytes(), target.max_bytes).map_err(
+        |_| DecodeError::TooLarge {
+            width: w,
+            height: h,
+        },
+    )
 }
 
 /// Unpack gray samples of `bits` (1, 2 or 4) bits, most significant first
@@ -200,31 +281,52 @@ fn gray_from_tight(w: u32, h: u32, gray: Vec<u8>) -> Result<CodecPixels, DecodeE
     packed_from_tight(w, h, gray).map(CodecPixels::Gray)
 }
 
-/// Take over a tight `w·h·P::BYTES` buffer as a packed bitmap, rejecting a
-/// buffer whose length disagrees with the dimensions.
-fn packed_from_tight<P: Pixel<Sample = u8>>(
+/// [`rgb_from_tight`] of 16-bit samples.
+fn rgb16_from_tight(w: u32, h: u32, rgb: Vec<u16>) -> Result<CodecPixels, DecodeError> {
+    packed_from_tight(w, h, rgb).map(CodecPixels::Rgb16)
+}
+
+/// [`gray_from_tight`] of 16-bit samples.
+fn gray16_from_tight(w: u32, h: u32, gray: Vec<u16>) -> Result<CodecPixels, DecodeError> {
+    packed_from_tight(w, h, gray).map(CodecPixels::Gray16)
+}
+
+/// Take over a tight `w·h·P::NCOMPS`-sample buffer as a packed bitmap,
+/// rejecting a buffer whose length disagrees with the dimensions.
+fn packed_from_tight<P: Pixel>(
     w: u32,
     h: u32,
-    data: Vec<u8>,
+    data: Vec<P::Sample>,
 ) -> Result<Bitmap<P>, DecodeError> {
     let expected = (w as usize)
         .checked_mul(h as usize)
-        .and_then(|n| n.checked_mul(P::BYTES));
+        .and_then(|n| n.checked_mul(P::NCOMPS));
     if expected != Some(data.len()) {
         return Err(DecodeError::Codec(format!(
-            "pixel buffer {} bytes inconsistent with {w}x{h}x{}",
+            "pixel buffer of {} samples inconsistent with {w}x{h}x{}",
             data.len(),
-            P::BYTES
+            P::NCOMPS
         )));
     }
     Ok(Bitmap::from_packed(w, h, data))
 }
 
-/// Keep the first `keep` of every `channels`-byte pixel in place, dropping
-/// the rest (an alpha channel, or a gray image's extra samples).  Byte `c` of
-/// pixel `i` moves from `i·channels + c` to `i·keep + c`, never past its
-/// source, so a forward pass reads each byte before it is overwritten.
-fn keep_leading_samples(buf: &mut Vec<u8>, channels: usize, keep: usize) {
+/// Big-endian 16-bit samples of `bytes`, two bytes each; a trailing odd
+/// byte is dropped.
+fn be_samples(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_be_bytes(pair))
+        .collect()
+}
+
+/// Keep the first `keep` of every `channels`-sample pixel in place, dropping
+/// the rest (an alpha channel, or a gray image's extra samples).  Sample `c`
+/// of pixel `i` moves from `i·channels + c` to `i·keep + c`, never past its
+/// source, so a forward pass reads each sample before it is overwritten.
+fn keep_leading_samples<T: Copy>(buf: &mut Vec<T>, channels: usize, keep: usize) {
     debug_assert!(
         0 < keep && keep < channels,
         "keep {keep} of {channels} samples"
@@ -239,457 +341,4 @@ fn keep_leading_samples(buf: &mut Vec<u8>, channels: usize, keep: usize) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use color::{Gray8, Rgb8};
-    use raster::Bitmap;
-
-    fn solid_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
-        let mut bmp = Bitmap::<Rgb8>::new(w, h, 1, false);
-        for y in 0..h {
-            let row = bmp.row_bytes_mut(y);
-            for x in 0..w as usize {
-                row[x * 3..x * 3 + 3].copy_from_slice(&rgb);
-            }
-        }
-        let mut out = Vec::new();
-        encode::write_png(&bmp, &mut out, None).unwrap();
-        out
-    }
-
-    fn solid_jpeg_gray(w: u32, h: u32, v: u8) -> Vec<u8> {
-        let mut bmp = Bitmap::<Gray8>::new(w, h, 1, false);
-        for y in 0..h {
-            for x in 0..w as usize {
-                bmp.row_bytes_mut(y)[x] = v;
-            }
-        }
-        encode::jpeg_gray::<Gray8>(&bmp, 90).unwrap()
-    }
-
-    /// A solid 8-bit grayscale TIFF, written with the `tiff` crate's own
-    /// encoder so the decode path (`DecodingResult::U8` + `ColorType::Gray`)
-    /// is exercised end-to-end without a checked-in binary fixture.
-    fn solid_tiff_gray(w: u32, h: u32, v: u8) -> Vec<u8> {
-        // `::tiff` (the external crate), not the local `tiff` submodule which
-        // shadows the crate name inside this module.
-        use ::tiff::encoder::{TiffEncoder, colortype};
-        let pixels = vec![v; (w * h) as usize];
-        let mut out = std::io::Cursor::new(Vec::new());
-        TiffEncoder::new(&mut out)
-            .unwrap()
-            .write_image::<colortype::Gray8>(w, h, &pixels)
-            .unwrap();
-        out.into_inner()
-    }
-
-    /// A TIFF of solid 8-bit gray images, one per `(value, subfile)`: each
-    /// `w × h` of `value`, its `NewSubfileType` set to `subfile`.
-    pub(crate) fn multi_tiff_gray(w: u32, h: u32, images: &[(u8, u32)]) -> Vec<u8> {
-        use ::tiff::encoder::{TiffEncoder, colortype};
-        use ::tiff::tags::Tag;
-        let mut out = std::io::Cursor::new(Vec::new());
-        let mut enc = TiffEncoder::new(&mut out).unwrap();
-        for &(value, subfile) in images {
-            let mut image = enc.new_image::<colortype::Gray8>(w, h).unwrap();
-            image
-                .encoder()
-                .write_tag(Tag::NewSubfileType, subfile)
-                .unwrap();
-            image.write_data(&vec![value; (w * h) as usize]).unwrap();
-        }
-        out.into_inner()
-    }
-
-    #[test]
-    fn tiff_pages_skip_thumbnails_and_masks_and_decode_by_directory() {
-        let tif = multi_tiff_gray(2, 2, &[(10, 0), (99, 1), (77, 4), (30, 2)]);
-        let pages = image_pages(&tif).unwrap();
-        assert_eq!(pages.len(), 2);
-        assert_eq!(
-            decode_image(&tif, pages[0], pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-                .unwrap()
-                .data()[0],
-            10
-        );
-        assert_eq!(
-            decode_image(&tif, pages[1], pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-                .unwrap()
-                .data()[0],
-            30
-        );
-        // A file of nothing but thumbnails still shows its first image.
-        assert_eq!(image_pages(&multi_tiff_gray(2, 2, &[(5, 1)])).unwrap(), [0]);
-        assert_eq!(image_pages(&solid_jpeg_gray(2, 2, 9)).unwrap(), [0]);
-    }
-
-    /// An uncompressed little-endian TIFF of one strip per plane:
-    /// `bits` per sample, `samples` per pixel (photometric `BlackIsZero` for
-    /// one or two, RGB for three or four), chunky or `planar`, over `data`.
-    fn raw_tiff(w: u32, h: u32, bits: u16, samples: u16, planar: bool, data: &[u8]) -> Vec<u8> {
-        let planes = if planar { u32::from(samples) } else { 1 };
-        let plane_len = u32::try_from(data.len()).unwrap() / planes;
-        let photometric = if samples >= 3 { 2 } else { 1 };
-        // Header, then the pixel data, then the arrays, then the directory.
-        let mut out = b"II*\0\0\0\0\0".to_vec();
-        let data_at = u32::try_from(out.len()).unwrap();
-        out.extend_from_slice(data);
-        let array = |out: &mut Vec<u8>, values: &[u32], short: bool| {
-            let at = u32::try_from(out.len()).unwrap();
-            for &v in values {
-                if short {
-                    out.extend_from_slice(&u16::try_from(v).unwrap().to_le_bytes());
-                } else {
-                    out.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-            at
-        };
-        let bits_at = array(&mut out, &vec![u32::from(bits); usize::from(samples)], true);
-        let offsets: Vec<u32> = (0..planes).map(|p| data_at + p * plane_len).collect();
-        let offsets_at = array(&mut out, &offsets, false);
-        let counts_at = array(&mut out, &vec![plane_len; planes as usize], false);
-        if out.len() % 2 == 1 {
-            out.push(0);
-        }
-        let ifd = u32::try_from(out.len()).unwrap();
-        out[4..8].copy_from_slice(&ifd.to_le_bytes());
-        // (tag, type, count, value-or-offset); type 3 SHORT, 4 LONG.
-        let inline = |v: u32, n: u32, at: u32| if n == 1 { v } else { at };
-        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
-            (256, 4, 1, w),
-            (257, 4, 1, h),
-            (
-                258,
-                3,
-                u32::from(samples),
-                if samples <= 2 {
-                    u32::from(bits) | ((u32::from(bits) << 16) * u32::from(samples - 1))
-                } else {
-                    bits_at
-                },
-            ),
-            (259, 3, 1, 1),
-            (262, 3, 1, photometric),
-            (273, 4, planes, inline(data_at, planes, offsets_at)),
-            (277, 3, 1, u32::from(samples)),
-            (278, 4, 1, h),
-            (279, 4, planes, inline(plane_len, planes, counts_at)),
-            (284, 3, 1, if planar { 2 } else { 1 }),
-        ];
-        if samples.is_multiple_of(2) {
-            // ExtraSamples: the last sample is unassociated alpha.
-            entries.push((338, 3, 1, 2));
-        }
-        out.extend_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
-        for (tag, kind, count, value) in entries {
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&kind.to_le_bytes());
-            out.extend_from_slice(&count.to_le_bytes());
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out
-    }
-
-    #[test]
-    fn low_bit_gray_tiffs_unpack_to_luma() {
-        // 1 bit, 10 px wide: rows of two bytes, the second padded.
-        let tif = raw_tiff(10, 2, 1, 1, false, &[0b1010_0000, 0b1100_0000, 0xFF, 0x00]);
-        let img =
-            decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("1-bit tiff decodes");
-        assert_eq!(
-            img.data(),
-            [
-                255, 0, 255, 0, 0, 0, 0, 0, 255, 255, //
-                255, 255, 255, 255, 255, 255, 255, 255, 0, 0
-            ]
-        );
-        // 4 bits: samples 0, 5 and 15 scale to 0, 85 and 255.
-        let tif = raw_tiff(3, 1, 4, 1, false, &[0x05, 0xF0]);
-        assert_eq!(
-            decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-                .unwrap()
-                .data(),
-            [0, 85, 255]
-        );
-    }
-
-    #[test]
-    fn gray_alpha_and_planar_rgb_tiffs_decode() {
-        let tif = raw_tiff(2, 1, 8, 2, false, &[10, 255, 200, 0]);
-        let Ok(CodecPixels::Gray(bmp)) = tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-        else {
-            panic!("a gray+alpha TIFF must decode to Gray8");
-        };
-        assert_eq!(bmp.data(), [10, 200]);
-        // Planes R, G, B of two pixels.
-        let tif = raw_tiff(2, 1, 8, 3, true, &[1, 2, 10, 20, 100, 200]);
-        let Ok(CodecPixels::Rgb(bmp)) = tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-        else {
-            panic!("a planar RGB TIFF must decode to Rgb8");
-        };
-        assert_eq!(bmp.data(), [1, 10, 100, 2, 20, 200]);
-    }
-
-    #[test]
-    fn rgb_tiffs_with_a_non_alpha_extra_sample_decode() {
-        // RGB plus one extra sample of unspecified meaning (ExtraSamples 0):
-        // the tiff decoder drops samples past the colour type's own, in
-        // chunky and planar images alike.
-        let unspecified = |tif: Vec<u8>| {
-            let alpha = [
-                &338u16.to_le_bytes()[..],
-                &3u16.to_le_bytes(),
-                &1u32.to_le_bytes(),
-                &2u32.to_le_bytes(),
-            ]
-            .concat();
-            let at = tif
-                .windows(alpha.len())
-                .position(|w| w == alpha)
-                .expect("ExtraSamples entry");
-            let mut tif = tif;
-            tif[at + 8] = 0;
-            tif
-        };
-        let chunky = unspecified(raw_tiff(2, 1, 8, 4, false, &[1, 2, 3, 99, 4, 5, 6, 99]));
-        let planar = unspecified(raw_tiff(2, 1, 8, 4, true, &[1, 4, 2, 5, 3, 6, 99, 99]));
-        for tif in [chunky, planar] {
-            let Ok(CodecPixels::Rgb(bmp)) =
-                tiff::decode(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-            else {
-                panic!("an RGB TIFF with an extra sample must decode to Rgb8");
-            };
-            assert_eq!(bmp.data(), [1, 2, 3, 4, 5, 6]);
-        }
-    }
-
-    #[test]
-    fn a_gray_jpeg_decodes_to_gray() {
-        let jpg = solid_jpeg_gray(8, 8, 90);
-        assert!(matches!(
-            jpeg::decode(&jpg, pdf_raster::DEFAULT_MAX_PAGE_BYTES),
-            Ok(CodecPixels::Gray(_))
-        ));
-    }
-
-    #[test]
-    fn sniff_detects_by_magic_not_extension() {
-        let png = solid_png(2, 2, [255, 0, 0]);
-        assert_eq!(sniff(&png), Some(ImageFormat::Png));
-        let jpg = solid_jpeg_gray(2, 2, 128);
-        assert_eq!(sniff(&jpg), Some(ImageFormat::Jpeg));
-        assert_eq!(sniff(b"II*\0and more"), Some(ImageFormat::Tiff));
-        assert_eq!(sniff(b"MM\0*and more"), Some(ImageFormat::Tiff));
-        let tif = solid_tiff_gray(2, 2, 80);
-        assert_eq!(sniff(&tif), Some(ImageFormat::Tiff));
-        assert_eq!(sniff(b"not an image"), None);
-    }
-
-    #[test]
-    fn decode_png_to_expected_pixels() {
-        let png = solid_png(2, 2, [10, 200, 30]);
-        let img = decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("png decodes");
-        assert_eq!((img.width, img.height), (2, 2));
-        assert_eq!(img.data().len(), 4);
-        assert!(
-            img.data().iter().all(|&p| p == img.data()[0]),
-            "solid stays solid"
-        );
-        assert!(img.data()[0] > 30 && img.data()[0] < 200);
-    }
-
-    #[test]
-    fn decode_jpeg_to_gray() {
-        let jpg = solid_jpeg_gray(4, 4, 137);
-        let img = decode_image(&jpg, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("jpeg decodes");
-        assert_eq!((img.width, img.height), (4, 4));
-        assert!(img.data().iter().all(|&p| (i16::from(p) - 137).abs() <= 4));
-    }
-
-    #[test]
-    fn decode_tiff_gray_to_expected_pixels() {
-        // Exercises the TIFF wrapper's DecodingResult::U8 + ColorType::Gray
-        // path end-to-end (the most logic-heavy codec match).
-        let tif = solid_tiff_gray(3, 2, 90);
-        let img = decode_image(&tif, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).expect("tiff decodes");
-        assert_eq!((img.width, img.height), (3, 2));
-        assert_eq!(img.data().len(), 6);
-        assert!(
-            img.data().iter().all(|&p| p == 90),
-            "solid gray 90 must round-trip exactly (lossless), got {:?}",
-            img.data()
-        );
-    }
-
-    /// A PNG of colour type `color` over the raw interleaved `samples`.
-    fn raw_png(w: u32, h: u32, color: ::png::ColorType, samples: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut enc = ::png::Encoder::new(&mut out, w, h);
-        enc.set_color(color);
-        enc.set_depth(::png::BitDepth::Eight);
-        let mut writer = enc.write_header().unwrap();
-        writer.write_image_data(samples).unwrap();
-        writer.finish().unwrap();
-        out
-    }
-
-    #[test]
-    fn png_gray_decodes_straight_to_gray() {
-        let luma = [0u8, 7, 128, 255, 33, 90];
-        let png = raw_png(3, 2, ::png::ColorType::Grayscale, &luma);
-        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-        else {
-            panic!("a grayscale PNG must decode to a Gray8 bitmap");
-        };
-        assert_eq!((bmp.width, bmp.height), (3, 2));
-        assert_eq!(bmp.data(), luma);
-        assert_eq!(
-            decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-                .unwrap()
-                .data(),
-            luma
-        );
-    }
-
-    #[test]
-    fn png_gray_alpha_keeps_luma_drops_alpha() {
-        let samples = [10u8, 255, 20, 0, 30, 128, 40, 1];
-        let png = raw_png(2, 2, ::png::ColorType::GrayscaleAlpha, &samples);
-        let Ok(CodecPixels::Gray(bmp)) = png::decode(&png, pdf_raster::DEFAULT_MAX_PAGE_BYTES)
-        else {
-            panic!("a gray+alpha PNG must decode to a Gray8 bitmap");
-        };
-        assert_eq!(bmp.data(), [10, 20, 30, 40]);
-    }
-
-    #[test]
-    fn leading_samples_compact_in_place() {
-        let mut rgba = vec![1, 2, 3, 9, 4, 5, 6, 9, 7, 8, 9, 9];
-        keep_leading_samples(&mut rgba, 4, 3);
-        assert_eq!(rgba, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let mut ga = vec![1, 9, 2, 9, 3, 9];
-        keep_leading_samples(&mut ga, 2, 1);
-        assert_eq!(ga, [1, 2, 3]);
-    }
-
-    #[test]
-    fn truncated_bytes_error_not_panic() {
-        let mut png = solid_png(8, 8, [1, 2, 3]);
-        png.truncate(png.len() / 2);
-        assert!(
-            decode_image(&png, 0, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
-            "must return Err, not panic"
-        );
-    }
-
-    #[test]
-    fn unknown_format_is_unsupported() {
-        assert!(matches!(
-            decode_image(
-                b"xxxx not an image xxxx",
-                0,
-                pdf_raster::DEFAULT_MAX_PAGE_BYTES
-            ),
-            Err(DecodeError::Unsupported)
-        ));
-    }
-
-    /// Standard IEEE CRC-32 (the polynomial PNG chunks use), computed without a
-    /// dependency so the bomb test can re-checksum a patched IHDR chunk.
-    fn crc32(bytes: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &b in bytes {
-            crc ^= u32::from(b);
-            for _ in 0..8 {
-                let mask = (crc & 1).wrapping_neg();
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            }
-        }
-        !crc
-    }
-
-    /// Patch the IHDR width/height of a valid PNG to enormous values and fix the
-    /// IHDR CRC, yielding a small file that *claims* a huge canvas — a decode
-    /// bomb. PNG layout: 8-byte signature, then the IHDR chunk as
-    /// length(4) + "IHDR"(4) + data(13) + crc(4); the CRC covers type+data.
-    fn png_bomb(claim_w: u32, claim_h: u32) -> Vec<u8> {
-        // IHDR data starts after sig(8) + length(4) + type(4) = offset 16.
-        const IHDR_DATA: usize = 16;
-        let mut png = solid_png(1, 1, [0, 0, 0]);
-        png[IHDR_DATA..IHDR_DATA + 4].copy_from_slice(&claim_w.to_be_bytes());
-        png[IHDR_DATA + 4..IHDR_DATA + 8].copy_from_slice(&claim_h.to_be_bytes());
-        // Re-CRC over "IHDR" + the 13 data bytes (offsets 12..29).
-        let crc = crc32(&png[12..29]);
-        png[29..33].copy_from_slice(&crc.to_be_bytes());
-        png
-    }
-
-    /// Patch the SOF0 frame size of a valid baseline JPEG, yielding a small
-    /// file whose header claims `claim_w`×`claim_h`.  SOF0 is `FF C0`, then
-    /// length(2), precision(1), height(2), width(2).
-    fn jpeg_bomb(claim_w: u16, claim_h: u16) -> Vec<u8> {
-        let mut jpg = solid_jpeg_gray(8, 8, 0);
-        let sof = jpg
-            .windows(2)
-            .position(|m| m == [0xFF, 0xC0])
-            .expect("baseline JPEG has an SOF0 marker");
-        jpg[sof + 5..sof + 7].copy_from_slice(&claim_h.to_be_bytes());
-        jpg[sof + 7..sof + 9].copy_from_slice(&claim_w.to_be_bytes());
-        jpg
-    }
-
-    #[test]
-    fn jpeg_decode_bomb_rejected_before_allocation() {
-        // 30000×30000 = 9e8 px exceeds the area cap; at 3 B/px the decode would
-        // allocate ~2.7 GB.  The guard fires on the SOF dims first.
-        match jpeg::decode(
-            &jpeg_bomb(30_000, 30_000),
-            pdf_raster::DEFAULT_MAX_PAGE_BYTES,
-        ) {
-            Err(DecodeError::TooLarge { width, height }) => {
-                assert_eq!((width, height), (30_000, 30_000));
-            }
-            Err(other) => panic!("expected TooLarge, got {other:?}"),
-            Ok(_) => panic!("decode bomb was not rejected"),
-        }
-    }
-
-    #[test]
-    fn guard_dimensions_rejects_huge_accepts_small() {
-        assert!(
-            guard_dimensions(100_000, 100_000, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_err(),
-            "100000x100000 must be rejected"
-        );
-        assert!(
-            guard_dimensions(1024, 768, pdf_raster::DEFAULT_MAX_PAGE_BYTES).is_ok(),
-            "ordinary page size must pass"
-        );
-        assert!(guard_dimensions(1000, 1000, 3_000_000).is_ok());
-        assert!(
-            guard_dimensions(1000, 1000, 2_999_999).is_err(),
-            "the budget is the caller's, at 3 bytes per pixel"
-        );
-    }
-
-    #[test]
-    fn png_decode_bomb_rejected_before_allocation() {
-        // A ~70-byte file claiming 100000x100000 (≈30 GB at 3 B/px). The guard
-        // must fire on the IHDR dims and return Err before output_buffer_size()
-        // is ever allocated, so this completes instantly without an OOM.
-        let bomb = png_bomb(100_000, 100_000);
-        assert!(
-            bomb.len() < 1024,
-            "bomb file stays tiny: {} bytes",
-            bomb.len()
-        );
-        match png::decode(&bomb, pdf_raster::DEFAULT_MAX_PAGE_BYTES) {
-            Err(DecodeError::TooLarge { width, height }) => {
-                assert_eq!((width, height), (100_000, 100_000));
-            }
-            Err(other) => panic!("expected TooLarge, got {other:?}"),
-            Ok(_) => panic!("decode bomb was not rejected"),
-        }
-    }
-}
+pub(crate) mod tests;

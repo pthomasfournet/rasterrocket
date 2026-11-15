@@ -17,8 +17,8 @@ use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
 use super::{
-    CodecPixels, DecodeError, gray_from_tight, guard_dimensions, keep_leading_samples,
-    rgb_from_tight, unpack_gray_bits,
+    CodecPixels, DecodeError, Target, gray_from_tight, gray16_from_tight, guard_dimensions,
+    keep_leading_samples, rgb_from_tight, rgb16_from_tight, unpack_gray_bits,
 };
 
 /// `PlanarConfiguration` value of an image stored one plane per component.
@@ -104,9 +104,11 @@ pub(super) fn pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 }
 
 /// Decode the page whose directory is `page` (a key [`pages`] lists): the
-/// file is read as if its header named that directory first.  A gray page of 1 to 16 bits per sample yields a `Gray8` bitmap of
-/// its first sample, an RGB page an `Rgb8` bitmap with any alpha channel
-/// dropped.
+/// file is read as if its header named that directory first.  A gray page
+/// of 1 to 16 bits per sample yields a gray bitmap of its first sample, an
+/// RGB page an RGB bitmap with any alpha channel dropped; 16-bit samples
+/// are kept on a 16-bit target (`Gray16`, `Rgb16`) and reduced to their
+/// high byte otherwise.
 ///
 /// # Errors
 ///
@@ -115,17 +117,17 @@ pub(super) fn pages(bytes: &[u8]) -> Result<Vec<usize>, DecodeError> {
 pub(super) fn decode(
     bytes: &[u8],
     page: usize,
-    max_bytes: u64,
+    target: Target,
 ) -> Result<CodecPixels, DecodeError> {
     if page == FIRST_DIRECTORY {
         decode_first(
             Decoder::new(std::io::Cursor::new(bytes)).map_err(codec)?,
-            max_bytes,
+            target,
         )
     } else {
         decode_first(
             Decoder::new(Rebased::new(bytes, page as u64)?).map_err(codec)?,
-            max_bytes,
+            target,
         )
     }
 }
@@ -133,22 +135,23 @@ pub(super) fn decode(
 /// Decode the current (first) image of `dec`.
 fn decode_first<R: Read + Seek>(
     mut dec: Decoder<R>,
-    max_bytes: u64,
+    target: Target,
 ) -> Result<CodecPixels, DecodeError> {
     let (w, h) = dec.dimensions().map_err(codec)?;
     if w == 0 || h == 0 {
         return Err(DecodeError::Codec(format!("tiff: zero dimensions {w}x{h}")));
     }
-    guard_dimensions(w, h, max_bytes)?;
+    guard_dimensions(w, h, target)?;
     let color = dec.colortype().map_err(codec)?;
     let planar = dec.get_tag_u32(Tag::PlanarConfiguration).ok() == Some(PLANAR);
 
     let mut img = DecodingResult::U8(Vec::new());
     let layout = dec.read_image_to_buffer(&mut img).map_err(codec)?;
-    let mut u8s: Vec<u8> = match img {
-        DecodingResult::U8(v) => v,
+    let samples = match img {
+        DecodingResult::U8(v) => Samples::U8(v),
+        DecodingResult::U16(v) if target.deep() => Samples::U16(v),
         // 16-bit → 8-bit: keep the high byte (the standard sample reduction).
-        DecodingResult::U16(v) => v.iter().map(|&x| (x >> 8) as u8).collect(),
+        DecodingResult::U16(v) => Samples::U8(v.iter().map(|&x| (x >> 8) as u8).collect()),
         _ => {
             return Err(DecodeError::Codec(
                 "tiff: unsupported sample format (expected 8/16-bit integer)".to_owned(),
@@ -170,15 +173,32 @@ fn decode_first<R: Read + Seek>(
             )));
         }
     };
-    if planar && channels > 1 {
-        let complete = layout.complete_len / usize::from(bits.div_ceil(8));
-        if u8s.len() < complete {
-            return Err(DecodeError::Codec(format!(
-                "tiff: planar image of {complete} samples exceeds the decoding buffer limit"
-            )));
+    let planar = planar && channels > 1;
+    let complete = layout.complete_len / usize::from(bits.div_ceil(8));
+    let unsupported = || {
+        DecodeError::Codec(format!(
+            "tiff: unsupported color type {color:?} at {bits} bits per sample"
+        ))
+    };
+    let mut u8s = match samples {
+        Samples::U8(v) => chunky(v, channels, planar, complete)?,
+        Samples::U16(v) => {
+            let mut v = chunky(v, channels, planar, complete)?;
+            return match (color, bits) {
+                (ColorType::Gray(_), 16) => gray16_from_tight(w, h, v),
+                (ColorType::Multiband { .. }, 16) => {
+                    keep_leading_samples(&mut v, channels, 1);
+                    gray16_from_tight(w, h, v)
+                }
+                (ColorType::RGB(_), 16) => rgb16_from_tight(w, h, v),
+                (ColorType::RGBA(_), 16) => {
+                    keep_leading_samples(&mut v, 4, 3);
+                    rgb16_from_tight(w, h, v)
+                }
+                _ => Err(unsupported()),
+            };
         }
-        u8s = interleave_planes(&u8s, channels);
-    }
+    };
     match (color, bits) {
         (ColorType::Gray(_), 1 | 2 | 4) => {
             gray_from_tight(w, h, unpack_gray_bits(&u8s, w, h, bits)?)
@@ -193,10 +213,35 @@ fn decode_first<R: Read + Seek>(
             keep_leading_samples(&mut u8s, 4, 3);
             rgb_from_tight(w, h, u8s)
         }
-        (other, bits) => Err(DecodeError::Codec(format!(
-            "tiff: unsupported color type {other:?} at {bits} bits per sample"
-        ))),
+        _ => Err(unsupported()),
     }
+}
+
+/// The decoded samples of an image: 8-bit, or 16-bit kept for a 16-bit
+/// target.
+enum Samples {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
+
+/// `samples` in chunky order: as they are, or for a `planar` image of
+/// `channels` planes interleaved, after checking that the decoding buffer
+/// held all `complete` samples.
+fn chunky<T: Copy + Default>(
+    samples: Vec<T>,
+    channels: usize,
+    planar: bool,
+    complete: usize,
+) -> Result<Vec<T>, DecodeError> {
+    if !planar {
+        return Ok(samples);
+    }
+    if samples.len() < complete {
+        return Err(DecodeError::Codec(format!(
+            "tiff: planar image of {complete} samples exceeds the decoding buffer limit"
+        )));
+    }
+    Ok(interleave_planes(&samples, channels))
 }
 
 /// A TIFF file read with the first-directory offset of its header replaced,
@@ -296,9 +341,9 @@ impl Seek for Rebased<'_> {
 
 /// Interleave `channels` equal planes stored one after another into
 /// chunky pixels.
-fn interleave_planes(planes: &[u8], channels: usize) -> Vec<u8> {
+fn interleave_planes<T: Copy + Default>(planes: &[T], channels: usize) -> Vec<T> {
     let plane = planes.len() / channels;
-    let mut out = vec![0; plane * channels];
+    let mut out = vec![T::default(); plane * channels];
     for (c, src) in planes.chunks_exact(plane).enumerate() {
         for (dst, &s) in out[c..].iter_mut().step_by(channels).zip(src) {
             *dst = s;
@@ -354,9 +399,9 @@ mod tests {
 
     /// The sample of the 1 × 1 gray page `page` of `file`.
     fn sample(file: &[u8], page: usize) -> u8 {
-        match decode(file, page, pdf_raster::DEFAULT_MAX_PAGE_BYTES) {
+        match decode(file, page, crate::decode::EIGHT) {
             Ok(CodecPixels::Gray(bmp)) => bmp.data()[0],
-            Ok(CodecPixels::Rgb(_)) => panic!("a gray page decodes to gray"),
+            Ok(_) => panic!("a gray page decodes to 8-bit gray"),
             Err(e) => panic!("page {page}: {e}"),
         }
     }
