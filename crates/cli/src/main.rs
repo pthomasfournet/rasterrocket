@@ -214,7 +214,7 @@ fn main() -> ExitCode {
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
     let mut spool = if args.print {
-        match print::Spool::create() {
+        match print::Spool::create(args.depth()) {
             Ok(spool) => Some(spool),
             Err(e) => return fail(format_args!("nothing printed: {e}")),
         }

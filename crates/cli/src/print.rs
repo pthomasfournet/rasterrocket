@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
+use color::SampleDepth;
 use encode::{PdfPage, PdfPageEncoder, PdfWriter, RowImage, RowLayout};
 
 use crate::cleanup::{Page, SpreadHalf};
@@ -34,16 +35,24 @@ pub(crate) const PRINT_DPI: f64 = 600.0;
 /// photo printers' drivers.
 pub(crate) const LARGE_FORMAT_DPI: f64 = 360.0;
 
-/// The pixels at [`PRINT_DPI`] past which a printed page takes
-/// [`LARGE_FORMAT_DPI`]: 600 Mpx, about 1 667 square inches, larger than
-/// A0 (1 550) and than 36 × 44 in.
+/// The pixels of 8-bit RGB at [`PRINT_DPI`] past which a printed page
+/// takes [`LARGE_FORMAT_DPI`]: 600 Mpx, about 1 667 square inches, larger
+/// than A0 (1 550) and than 36 × 44 in.  A canvas of more bytes a pixel
+/// takes it past proportionally fewer pixels, so that the bytes of the
+/// canvas it renders are bounded alike.
 pub(crate) const LARGE_FORMAT_PX: f64 = 600e6;
 
-/// The resolution of a printed page of `width_pts × height_pts` when no
-/// resolution flag is given.
-pub(crate) fn default_dpi((width_pts, height_pts): (f64, f64)) -> f64 {
+/// The bytes a pixel of 8-bit RGB holds, in which [`LARGE_FORMAT_PX`] is
+/// counted.
+const LARGE_FORMAT_BYTES_PER_PX: f64 = 3.0;
+
+/// The resolution of a printed page of `width_pts × height_pts`, rendered
+/// on a canvas of `bytes_per_px` bytes a pixel, when no resolution flag is
+/// given.
+pub(crate) fn default_dpi((width_pts, height_pts): (f64, f64), bytes_per_px: u32) -> f64 {
     let px_per_pt = PRINT_DPI / 72.0;
-    if width_pts * px_per_pt * height_pts * px_per_pt > LARGE_FORMAT_PX {
+    let px = width_pts * px_per_pt * height_pts * px_per_pt;
+    if px * f64::from(bytes_per_px) > LARGE_FORMAT_PX * LARGE_FORMAT_BYTES_PER_PX {
         LARGE_FORMAT_DPI
     } else {
         PRINT_DPI
@@ -172,15 +181,15 @@ impl PageSink {
 }
 
 /// An encoder of a page of `size` pixels at `dpi`, colour when `rgb`
-/// and gray otherwise, its compressed image held in a file of its own
-/// in the spool's directory when `spill`.
+/// and gray otherwise, of samples of `depth`, its compressed image held in
+/// a file of its own in the spool's directory when `spill`.
 ///
 /// # Errors
 ///
 /// The file could not be created, or the encoder refused the page.
 pub(crate) fn page_encoder(
     (size, dpi): ((u32, u32), (f64, f64)),
-    rgb: bool,
+    (rgb, depth): (bool, SampleDepth),
     spill: bool,
 ) -> Result<PdfPageEncoder, RenderError> {
     let file = if spill {
@@ -194,7 +203,7 @@ pub(crate) fn page_encoder(
     } else {
         None
     };
-    let layout = if rgb { RowLayout::Rgb } else { RowLayout::Gray };
+    let layout = if rgb { RowLayout::Rgb } else { RowLayout::Gray }.at_depth(depth);
     Ok(PdfPageEncoder::new(size, layout, dpi, file)?)
 }
 
@@ -257,12 +266,13 @@ pub(crate) struct Spool {
 }
 
 impl Spool {
-    /// Open an anonymous temporary file in [`spool_dir`] and begin the PDF.
+    /// Open an anonymous temporary file in [`spool_dir`] and begin the PDF,
+    /// whose pages hold images of samples of `depth`.
     ///
     /// # Errors
     ///
     /// The file could not be created or its first bytes written.
-    pub(crate) fn create() -> Result<Self, RenderError> {
+    pub(crate) fn create(depth: SampleDepth) -> Result<Self, RenderError> {
         let dir = spool_dir();
         let file = tempfile::tempfile_in(&dir).map_err(|e| {
             std::io::Error::new(
@@ -270,10 +280,7 @@ impl Spool {
                 format!("cannot create a spool file in {}: {e}", dir.display()),
             )
         })?;
-        let writer = PdfWriter::new(
-            BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file),
-            color::SampleDepth::Eight,
-        )?;
+        let writer = PdfWriter::new(BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file), depth)?;
         Ok(Self { writer })
     }
 
@@ -510,7 +517,7 @@ fn printer_list(queues: &[&str], default: Option<&str>) -> String {
 mod tests {
     use std::io::{self, Read};
 
-    use color::Gray8;
+    use color::{Gray8, SampleDepth};
     use raster::Bitmap;
 
     use super::{
@@ -672,7 +679,7 @@ mod tests {
     #[test]
     fn pages_spool_in_page_order() {
         let sink = PageSink::new();
-        let mut spool = Spool::create().unwrap();
+        let mut spool = Spool::create(SampleDepth::Eight).unwrap();
         sink.add((2, None), &gray(4, 6), (72.0, 72.0)).unwrap();
         sink.add((1, Some(SpreadHalf::Right)), &gray(3, 5), (72.0, 72.0))
             .unwrap();
@@ -710,7 +717,7 @@ mod tests {
             .build()
             .unwrap();
         let sink = PageSink::new();
-        let mut spool = Spool::create().unwrap();
+        let mut spool = Spool::create(SampleDepth::Eight).unwrap();
         let pages: Vec<i32> = (1..=n).collect();
         let (peak, renders) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let render = |&page: &i32| {
@@ -780,7 +787,7 @@ mod tests {
 
     #[test]
     fn an_empty_document_is_refused() {
-        assert!(Spool::create().unwrap().finish().is_err());
+        assert!(Spool::create(SampleDepth::Eight).unwrap().finish().is_err());
     }
 
     /// A page larger than A0 prints at 360 dpi without a resolution flag;
@@ -796,7 +803,7 @@ mod tests {
             ((44.0, 120.0), 360.0),
         ] {
             assert_eq!(
-                super::default_dpi((w * inch, h * inch)),
+                super::default_dpi((w * inch, h * inch), 3),
                 dpi,
                 "{w} × {h} in"
             );

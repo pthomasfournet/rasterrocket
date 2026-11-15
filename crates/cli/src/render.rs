@@ -130,7 +130,9 @@ pub(crate) fn render_page(
     };
     let (scale_x, scale_y) =
         fax_layout.map_or_else(|| args.scales(dims), |l| (l.scale_x, l.scale_y));
-    let mut params = RenderParams::new_xy(scale_x, scale_y).with_policy(effective_policy);
+    let mut params = RenderParams::new_xy(scale_x, scale_y)
+        .with_policy(effective_policy)
+        .with_depth(args.depth());
     if args.transparent {
         params = params.with_transparent_background();
     }

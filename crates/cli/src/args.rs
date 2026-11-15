@@ -229,6 +229,15 @@ pub(crate) struct Args {
     #[arg(long = "gray")]
     pub gray: bool,
 
+    /// Bits per sample of the rendered pages: `8` (default) or `16`.
+    /// 16-bit pages are rendered at 16 bits per sample (shadings, soft
+    /// masks and colour conversions keep their levels) and written as
+    /// 16-bit PPM and PGM (maxval 65535), PNG and TIFF, or into the
+    /// --print spool; not with --mono, --dither, --fax, --jpeg, the camera
+    /// cleanup flags, --overprint or --gpu-pages, nor for comic archives.
+    #[arg(long = "depth", value_name = "BITS", value_enum, default_value = "8")]
+    pub depth: DepthArg,
+
     /// Output 1-bit mono: PBM, or a two-level PNG, JPEG or TIFF.
     #[arg(long = "mono")]
     pub mono: bool,
@@ -427,12 +436,13 @@ pub(crate) struct Args {
     #[arg(long = "max-archive-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=(u64::MAX >> 20)))]
     pub max_archive_mib: Option<u64>,
 
-    /// The most a page's bitmap may hold, in MiB of 8-bit RGB (3 bytes a
-    /// pixel; default 1716, i.e. 1.8 GB, a 600 Mpx page).  A larger page is
-    /// refused before anything is allocated; raise it for a genuinely large
-    /// page (a poster or a roll banner), or lower the resolution.  Comic
-    /// pages are held to it as decoded.  At most 2^30 MiB (1 PiB), the RGBA
-    /// bitmap of the largest page the renderer accepts at any budget.
+    /// The most a page's bitmap may hold, in MiB of canvas: 3 bytes a pixel
+    /// for 8-bit RGB, 6 for 16-bit (default 1716, i.e. 1.8 GB, a 600 Mpx
+    /// page of 8-bit RGB).  A larger page is refused before anything is
+    /// allocated; raise it for a genuinely large page (a poster or a roll
+    /// banner), or lower the resolution.  Comic pages are held to it as
+    /// decoded.  At most 2^31 MiB (2 PiB), the 16-bit RGBA bitmap of the
+    /// largest page the renderer accepts at any budget.
     #[arg(long = "max-page-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_PAGE_MIB))]
     pub max_page_mib: Option<u64>,
 
@@ -635,6 +645,26 @@ impl FaxResolution {
     }
 }
 
+/// `--depth` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DepthArg {
+    /// 8 bits per sample.
+    #[value(name = "8")]
+    Eight,
+    /// 16 bits per sample.
+    #[value(name = "16")]
+    Sixteen,
+}
+
+impl From<DepthArg> for pdf_raster::SampleDepth {
+    fn from(depth: DepthArg) -> Self {
+        match depth {
+            DepthArg::Eight => Self::Eight,
+            DepthArg::Sixteen => Self::Sixteen,
+        }
+    }
+}
+
 /// `--dither` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DitherArg {
@@ -705,6 +735,11 @@ impl Args {
 
     pub(crate) fn invert_when(&self) -> InvertWhen {
         self.invert.unwrap_or(InvertWhen::Never)
+    }
+
+    /// The depth of the rendered pages' samples.
+    pub(crate) fn depth(&self) -> pdf_raster::SampleDepth {
+        self.depth.into()
     }
 
     /// Effective horizontal DPI.
@@ -779,6 +814,7 @@ impl Args {
     /// Returns `Err` with a human-readable message naming the alternative.
     /// Call this once at startup, before any page is rendered.
     pub(crate) fn validate_format_flags(&self) -> Result<(), String> {
+        self.validate_depth_flags()?;
         if self.jpegcmyk {
             return Err(
                 "--jpegcmyk output is not implemented; use --jpeg, --png or the default PPM output"
@@ -823,6 +859,59 @@ impl Args {
                 ))
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Refuse `--depth 16` with the flags and input whose pages are 8-bit
+    /// or bilevel.
+    fn validate_depth_flags(&self) -> Result<(), String> {
+        if self.depth == DepthArg::Eight {
+            return Ok(());
+        }
+        let jpeg = "baseline JPEG is 8-bit; use --png or --tiff for 16-bit pages";
+        let camera = "the camera cleanup works on 8-bit pages; drop it for 16-bit pages";
+        let refused = [
+            (
+                self.mono,
+                "--mono",
+                "it writes 1-bit pages; use --gray for 16-bit gray",
+            ),
+            (
+                self.dither != DitherArg::None,
+                "--dither",
+                "it renders 1-bit pages; drop it for 16-bit pages",
+            ),
+            (
+                self.faxing(),
+                "--fax",
+                "a fax holds bilevel G3/G4 pages; drop --depth 16",
+            ),
+            (self.jpeg, "--jpeg", jpeg),
+            (self.jpegopt.is_some(), "--jpegopt", jpeg),
+            (self.jpegcmyk, "--jpegcmyk", jpeg),
+            (self.crop, "--crop", camera),
+            (self.rectify, "--rectify", camera),
+            (self.split_spreads, "--split-spreads", camera),
+            (self.dewarp, "--dewarp", camera),
+            (
+                self.overprint,
+                "--overprint",
+                "overprint is simulated in 8-bit ink; drop --overprint for 16-bit pages",
+            ),
+            (
+                self.gpu_pages,
+                "--gpu-pages",
+                "the GPU page raster composites 8-bit pages; drop --gpu-pages for 16-bit pages",
+            ),
+            (
+                self.is_comic_input(),
+                "comic-archive input",
+                "its pages are 8-bit images; drop --depth 16",
+            ),
+        ];
+        match refused.iter().find(|(set, _, _)| *set) {
+            Some((_, what, why)) => Err(format!("--depth 16 is refused with {what}: {why}")),
+            None => Ok(()),
         }
     }
 
@@ -977,7 +1066,8 @@ impl Args {
     /// flag, else the run's ([`Self::dpi`]).
     pub(crate) fn page_dpi(&self, page_pts: (f64, f64)) -> (f64, f64) {
         if self.print_resolution_per_page {
-            let dpi = crate::print::default_dpi(page_pts);
+            let layout = pdf_raster::CanvasLayout::new(self.depth(), false);
+            let dpi = crate::print::default_dpi(page_pts, layout.bytes_per_px());
             (dpi, dpi)
         } else {
             self.dpi()
@@ -1091,9 +1181,9 @@ impl Args {
 /// Largest `--band-mib`: 64 GiB.
 const MAX_BAND_MIB: u64 = 1 << 16;
 
-/// Largest `--max-page-mib`: the RGBA bitmap of a page whose sides are both
-/// [`pdf_raster::MAX_PX_SIDE`].
-const MAX_PAGE_MIB: u64 = 1 << 30;
+/// Largest `--max-page-mib`: the 16-bit RGBA bitmap of a page whose sides
+/// are both [`pdf_raster::MAX_PX_SIDE`].
+const MAX_PAGE_MIB: u64 = 1 << 31;
 
 const K_FINE: NonZeroU32 = NonZeroU32::new(4).expect("4 is not zero");
 const K_STANDARD: NonZeroU32 = NonZeroU32::new(2).expect("2 is not zero");
@@ -1550,7 +1640,7 @@ mod page_list_tests {
             Args::try_parse_from(["rrocket", "--max-page-mib", mib, "in.pdf", "out"]).is_err()
         };
         let side = u64::from(pdf_raster::MAX_PX_SIDE);
-        assert_eq!(MAX_PAGE_MIB, (side * side * 4) >> 20);
+        assert_eq!(MAX_PAGE_MIB, (side * side * 8) >> 20);
         assert!(refused("0"));
         assert!(refused(&(MAX_PAGE_MIB + 1).to_string()));
         assert!(!refused(&MAX_PAGE_MIB.to_string()));
@@ -1687,6 +1777,73 @@ mod page_list_tests {
         assert!(!config.text_antialias && config.vector_antialias);
         let config = args_with(&["--aaVector", "no"]).session_config().unwrap();
         assert!(config.text_antialias && !config.vector_antialias);
+    }
+
+    #[test]
+    fn depth_sixteen_takes_the_16_bit_outputs_and_refuses_8_bit_ones() {
+        assert_eq!(base_args().depth(), pdf_raster::SampleDepth::Eight);
+        for flags in [
+            &["--depth", "16"][..],
+            &["--depth", "16", "--png"],
+            &["--depth", "16", "--tiff", "--gray"],
+            &["--depth", "16", "--png", "--transparent"],
+            &["--depth", "16", "--invert=auto"],
+            &["--depth", "8", "--mono"],
+        ] {
+            let args = args_with(flags);
+            assert!(args.validate_format_flags().is_ok(), "{flags:?}");
+        }
+        assert_eq!(
+            args_with(&["--depth", "16"]).depth(),
+            pdf_raster::SampleDepth::Sixteen
+        );
+        let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
+        assert!(print.validate_format_flags().is_ok());
+        assert!(Args::try_parse_from(["rrocket", "--depth", "12", "in.pdf", "out"]).is_err());
+        for (flags, needle) in [
+            (&["--mono"][..], "use --gray"),
+            (&["--dither", "halftone"], "--dither"),
+            (&["--fax"], "--fax"),
+            (&["--fax-to", "5551234"], "--fax"),
+            (&["--jpeg"], "use --png or --tiff"),
+            (&["--jpeg", "--jpegopt", "quality=90"], "--jpeg"),
+            (&["--jpegcmyk"], "--jpegcmyk"),
+            (&["--crop"], "drop it"),
+            (&["--rectify"], "--rectify"),
+            (&["--split-spreads"], "--split-spreads"),
+            (&["--dewarp"], "--dewarp"),
+            (&["--overprint"], "drop --overprint"),
+            (&["--gpu-pages"], "drop --gpu-pages"),
+        ] {
+            let mut argv = vec!["--depth", "16"];
+            argv.extend_from_slice(flags);
+            let err = args_with(&argv).validate_format_flags().unwrap_err();
+            assert!(
+                err.starts_with("--depth 16 is refused") && err.contains(needle),
+                "{flags:?}: {err}"
+            );
+        }
+        let comic = Args::parse_from(["rrocket", "--depth", "16", "book.cbz", "out"]);
+        let err = comic.validate_format_flags().unwrap_err();
+        assert!(err.contains("comic-archive input"), "{err}");
+    }
+
+    #[test]
+    fn print_resolution_keeps_its_byte_budget_at_16_bits() {
+        // 36 × 44 in at 600 dpi: 570 Mpx, under the 8-bit threshold, over
+        // the 16-bit one.
+        let page = (36.0 * 72.0, 44.0 * 72.0);
+        let mut eight = Args::parse_from(["rrocket", "--print", "in.pdf"]);
+        let mut sixteen = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
+        let (eight_ok, sixteen_ok) = (
+            eight.validate_format_flags(),
+            sixteen.validate_format_flags(),
+        );
+        assert!(eight_ok.is_ok() && sixteen_ok.is_ok());
+        eight.apply_print_preset();
+        sixteen.apply_print_preset();
+        assert_eq!(eight.page_dpi(page).0, crate::print::PRINT_DPI);
+        assert_eq!(sixteen.page_dpi(page).0, crate::print::LARGE_FORMAT_DPI);
     }
 
     #[test]

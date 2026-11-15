@@ -2,17 +2,21 @@
 //! brought to the output's colour model ([`tone::prepare_band`]) and handed
 //! to a row-streamed writer, so memory holds a band, not the page.  A page
 //! of one band takes the same writers, so the bytes of a file do not
-//! depend on the band height.
+//! depend on the band height.  A 16-bit page is always written by these
+//! writers: as one band of the whole page when `--invert auto` measures it.
 
 use std::fs::File;
 use std::io::BufWriter;
 
+use color::{Rgb8, SampleDepth};
 use encode::{
     PngColor, PngWriter, PnmKind, PnmWriter, RowImage, RowLayout, TiffCompression, TiffStream,
 };
 use pdf_raster::{
-    BandBitmap, BandError, RasterError, RasterSession, RenderParams, render_page_bands,
+    BandBitmap, BandError, FinishedCanvas, RasterSession, RenderParams, render_page_bands,
+    render_page_canvas,
 };
+use raster::Bitmap;
 
 use crate::args::{Args, InvertWhen, OutputFormat};
 use crate::cleanup::Page;
@@ -20,7 +24,7 @@ use crate::naming::output_path_with_prefix;
 use crate::print::{PageSink, page_encoder};
 use crate::ram::SpillPolicy;
 use crate::render::{RenderError, write_output};
-use crate::tone;
+use crate::tone::{self, WidePage};
 
 /// Where a page written band by band goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +46,9 @@ pub(crate) enum FileFormat {
 impl BandOutput {
     /// The output of `args` when its pages are written band by band: a
     /// PPM, PNG or TIFF file or the print spool, under no stage that needs
-    /// the whole page (the camera stages, `--invert auto`), outside a fax
-    /// document.  `None` renders pages whole.
+    /// the whole page (the camera stages, `--invert auto` at 8 bits),
+    /// outside a fax document.  `None` renders pages whole.  Every 16-bit
+    /// output is one of these.
     pub(crate) fn of(args: &Args) -> Option<Self> {
         let camera = args.camera_options();
         if args.faxing()
@@ -51,7 +56,7 @@ impl BandOutput {
             || camera.rectify
             || camera.dewarp
             || camera.split_spreads
-            || args.invert_when() == InvertWhen::Auto
+            || (args.invert_when() == InvertWhen::Auto && args.depth() == SampleDepth::Eight)
         {
             return None;
         }
@@ -101,29 +106,35 @@ enum FileWriter {
 }
 
 impl FileWriter {
-    /// The writer of a `size` page in `model` to `out` in `format`, at
-    /// `dpi` for the formats that record it.
+    /// The writer of a `size` page in `model`, of samples of `depth`, to
+    /// `out` in `format`, at `dpi` for the formats that record it.
     fn new(
         out: BufWriter<File>,
         format: FileFormat,
-        model: Model,
+        (model, depth): (Model, SampleDepth),
         size: (u32, u32),
         dpi: (f64, f64),
     ) -> Result<Self, RenderError> {
+        let wide = depth == SampleDepth::Sixteen;
         Ok(match format {
             FileFormat::Ppm => {
-                let kind = match model {
-                    Model::Rgb { .. } => PnmKind::Ppm,
-                    Model::Gray => PnmKind::Pgm,
-                    Model::Mono => PnmKind::Pbm,
+                let kind = match (model, wide) {
+                    (Model::Rgb { .. }, false) => PnmKind::Ppm,
+                    (Model::Rgb { .. }, true) => PnmKind::Ppm16,
+                    (Model::Gray, false) => PnmKind::Pgm,
+                    (Model::Gray, true) => PnmKind::Pgm16,
+                    (Model::Mono, _) => PnmKind::Pbm,
                 };
                 Self::Pnm(PnmWriter::new(out, size, kind)?)
             }
             FileFormat::Png => {
-                let color = match model {
-                    Model::Rgb { alpha: false } => PngColor::Rgb,
-                    Model::Rgb { alpha: true } => PngColor::Rgba,
-                    Model::Gray | Model::Mono => PngColor::Gray,
+                let color = match (model, wide) {
+                    (Model::Rgb { alpha: false }, false) => PngColor::Rgb,
+                    (Model::Rgb { alpha: true }, false) => PngColor::Rgba,
+                    (Model::Gray | Model::Mono, false) => PngColor::Gray,
+                    (Model::Rgb { alpha: false }, true) => PngColor::Rgb16,
+                    (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
+                    (Model::Gray | Model::Mono, true) => PngColor::Gray16,
                 };
                 Self::Png(PngWriter::new(out, size, color)?)
             }
@@ -134,7 +145,13 @@ impl FileWriter {
                     Model::Gray => RowLayout::Gray,
                     Model::Mono => RowLayout::Bilevel,
                 };
-                Self::Tiff(TiffStream::new(out, size, layout, dpi, compression)?)
+                Self::Tiff(TiffStream::new(
+                    out,
+                    size,
+                    layout.at_depth(depth),
+                    dpi,
+                    compression,
+                )?)
             }
         })
     }
@@ -159,7 +176,9 @@ impl FileWriter {
 
 /// Render page `page_num` under `params`, a page of `size` pixels, in
 /// bands written to `output` as each completes: brought to the output's
-/// colour model, `push`ed, then the page finished.
+/// colour model, `push`ed, then the page finished.  Under `--invert auto`,
+/// which measures the whole page, the page is rendered whole and pushed
+/// as one band.
 fn render_into(
     session: &RasterSession,
     page_num: u32,
@@ -167,8 +186,21 @@ fn render_into(
     args: &Args,
     mut push: impl FnMut(RowImage<'_>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {
+    if args.invert_when() == InvertWhen::Auto {
+        let canvas = render_page_canvas(session, page_num, params)?;
+        let invert = match &canvas {
+            FinishedCanvas::Rgb8(rgb) => tone::is_reversed_out8(rgb),
+            FinishedCanvas::Rgb16(rgb) => tone::is_reversed_out16(rgb),
+        };
+        let band = match &canvas {
+            FinishedCanvas::Rgb8(rgb) => BandBitmap::Rgb8(rgb),
+            FinishedCanvas::Rgb16(rgb) => BandBitmap::Rgb16(rgb),
+        };
+        return prepared(band, 0, args, invert, &mut push);
+    }
+    let invert = args.invert_when() == InvertWhen::Always;
     render_page_bands(session, page_num, params, |band| {
-        prepared(band.bitmap, band.y, args, &mut push)
+        prepared(band.bitmap, band.y, args, invert, &mut push)
     })
     .map(drop)
     .map_err(|e| match e {
@@ -177,20 +209,34 @@ fn render_into(
     })
 }
 
-/// Bring `band`, rows from `y` of the page, to the output's colour model
-/// and hand it to `push`.
+/// Bring `band`, rows from `y` of the page, to the output's colour model,
+/// inverted when `invert`, and hand it to `push`.
 fn prepared(
     band: BandBitmap<'_>,
     y: u32,
     args: &Args,
+    invert: bool,
     push: &mut impl FnMut(RowImage<'_>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {
-    let BandBitmap::Rgb8(band) = band else {
-        return Err(RenderError::Raster(RasterError::InvalidOptions(
-            "a 16-bit band of an 8-bit render".to_owned(),
-        )));
-    };
-    match tone::prepare_band(band, y, args) {
+    match band {
+        BandBitmap::Rgb8(band) => prepared8(band, y, args, invert, push),
+        BandBitmap::Rgb16(band) => match tone::prepare_band16(band, invert, args) {
+            None => push(RowImage::Rgb16(band)),
+            Some(WidePage::Rgb(rgb)) => push(RowImage::Rgb16(&rgb)),
+            Some(WidePage::Gray(luma)) => push(RowImage::Gray16(&luma)),
+        },
+    }
+}
+
+/// [`prepared`] for an 8-bit band.
+fn prepared8(
+    band: &Bitmap<Rgb8>,
+    y: u32,
+    args: &Args,
+    invert: bool,
+    push: &mut impl FnMut(RowImage<'_>) -> Result<(), RenderError>,
+) -> Result<(), RenderError> {
+    match tone::prepare_band(band, y, args, invert) {
         None => push(RowImage::Rgb(band)),
         Some(Page::Rgb(rgb)) => push(RowImage::Rgb(&rgb)),
         Some(Page::Gray(luma) | Page::Mono(luma)) => push(RowImage::Gray(&luma)),
@@ -226,7 +272,8 @@ pub(crate) fn write_page_banded(
         None,
     );
     write_output(&path, |out| {
-        let mut writer = FileWriter::new(out, format, Model::of(args), size, args.dpi())?;
+        let model = (Model::of(args), args.depth());
+        let mut writer = FileWriter::new(out, format, model, size, args.dpi())?;
         render_into(session, page_num, params, args, |band| writer.push(band))?;
         writer.finish()
     })
@@ -254,7 +301,11 @@ pub(crate) fn print_page_banded(
     let page_bytes =
         u64::from(size.0) * u64::from(size.1) * u64::from(params.canvas_layout().bytes_per_px());
     let rgb = matches!(model, Model::Rgb { .. });
-    let mut encoder = page_encoder((size, dpi), rgb, page_bytes > args.band_bytes())?;
+    let mut encoder = page_encoder(
+        (size, dpi),
+        (rgb, args.depth()),
+        page_bytes > args.band_bytes(),
+    )?;
     render_into(session, page_num, params, args, |band| {
         Ok(encoder.push(band)?)
     })?;

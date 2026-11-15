@@ -2,9 +2,9 @@
 //! the colour model of the output, inversion, and the reduction to two
 //! levels.
 
-use color::{Gray8, Pixel, Rgb8};
+use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, Sample};
 use encode::BLACK_BELOW;
-use pdf_raster::rgb_to_gray;
+use pdf_raster::{rgb_to_gray, rgb16_to_gray16};
 use raster::{Bitmap, HalftoneScreen, ScreenParams};
 
 use crate::args::{Args, InvertWhen};
@@ -41,33 +41,78 @@ pub(crate) fn prepare(page: Page, args: &Args) -> Page {
     finish(page, invert, args, 0)
 }
 
-/// [`prepare`] for `band`, the rows of a page from row `y0` on, under
-/// `args` whose `--invert` does not depend on the whole page
-/// ([`InvertWhen::Auto`] measures it): `None` when the band is written as
-/// it is, colour not inverted.
-pub(crate) fn prepare_band(band: &Bitmap<Rgb8>, y0: u32, args: &Args) -> Option<Page> {
-    debug_assert!(
-        args.invert_when() != InvertWhen::Auto,
-        "an automatic inversion measures the whole page"
-    );
-    let invert = args.invert_when() == InvertWhen::Always;
+/// [`prepare`] for `band`, the rows of a page from row `y0` on, inverted
+/// when `invert`: `None` when the band is written as it is, colour not
+/// inverted.
+pub(crate) fn prepare_band(
+    band: &Bitmap<Rgb8>,
+    y0: u32,
+    args: &Args,
+    invert: bool,
+) -> Option<Page> {
     if !args.luma_output() && !invert {
         return None;
     }
     let page = if args.luma_output() {
         Page::Gray(rgb_to_gray(band))
     } else {
-        let mut rgb = Bitmap::<Rgb8>::new(band.width, band.height, 1, band.has_alpha());
-        let live = band.width as usize * 3;
-        for y in 0..band.height {
-            rgb.row_bytes_mut(y)[..live].copy_from_slice(&band.row_bytes(y)[..live]);
-        }
-        if let (Some(src), Some(dst)) = (band.alpha_plane(), rgb.alpha_plane_mut()) {
-            dst.copy_from_slice(src);
-        }
-        Page::Rgb(rgb)
+        Page::Rgb(copy_of(band))
     };
     Some(finish(page, invert, args, y0))
+}
+
+/// A page of 16-bit samples in the colour model of the output.
+pub(crate) enum WidePage {
+    /// Colour pixels.
+    Rgb(Bitmap<Rgb16>),
+    /// Luma pixels.
+    Gray(Bitmap<Gray16>),
+}
+
+/// [`prepare_band`] for `band`, of 16-bit samples, inverted when `invert`:
+/// `None` when the band is written as it is.
+pub(crate) fn prepare_band16(band: &Bitmap<Rgb16>, invert: bool, args: &Args) -> Option<WidePage> {
+    if !args.luma_output() && !invert {
+        return None;
+    }
+    Some(if args.luma_output() {
+        let mut luma = rgb16_to_gray16(band);
+        if invert {
+            complement(&mut luma);
+        }
+        WidePage::Gray(luma)
+    } else {
+        let mut rgb = copy_of(band);
+        if invert {
+            complement(&mut rgb);
+        }
+        WidePage::Rgb(rgb)
+    })
+}
+
+/// Whether `rgb`, an 8-bit page, is reversed out (see [`is_reversed_out`]):
+/// measured on its luma.
+pub(crate) fn is_reversed_out8(rgb: &Bitmap<Rgb8>) -> bool {
+    is_reversed_out(&rgb_to_gray(rgb))
+}
+
+/// Whether `rgb`, a page of 16-bit samples, is reversed out (see
+/// [`is_reversed_out`]): measured on its luma.
+pub(crate) fn is_reversed_out16(rgb: &Bitmap<Rgb16>) -> bool {
+    is_reversed_out(&rgb16_to_gray16(rgb))
+}
+
+/// A packed copy of `band`, with its alpha plane.
+fn copy_of<P: Pixel>(band: &Bitmap<P>) -> Bitmap<P> {
+    let mut copy = Bitmap::<P>::new(band.width, band.height, 1, band.has_alpha());
+    let live = band.width as usize * P::NCOMPS;
+    for y in 0..band.height {
+        copy.row_samples_mut(y)[..live].copy_from_slice(&band.row_samples(y)[..live]);
+    }
+    if let (Some(src), Some(dst)) = (band.alpha_plane(), copy.alpha_plane_mut()) {
+        dst.copy_from_slice(src);
+    }
+    copy
 }
 
 /// `page`, in the output's colour model, inverted when `invert`, and for
@@ -87,13 +132,15 @@ fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
 }
 
 /// Whether `luma` is light content on a flat dark ground: see
-/// [`GROUND_NUMERATOR`].  An empty page is not.
-fn is_reversed_out(luma: &Bitmap<Gray8>) -> bool {
+/// [`GROUND_NUMERATOR`].  The tone bands are counted on the 8-bit level of
+/// each sample, its high byte at 16 bits.  An empty page is not.
+fn is_reversed_out<P: Pixel>(luma: &Bitmap<P>) -> bool {
     let w = luma.width as usize;
     let mut histogram = [0u64; 256];
     for y in 0..luma.height {
-        for &level in &luma.row_bytes(y)[..w] {
-            histogram[usize::from(level)] += 1;
+        for &level in &luma.row_samples(y)[..w] {
+            let level = usize::try_from(level.signed() >> (P::Sample::BITS - 8)).unwrap_or(0);
+            histogram[level] += 1;
         }
     }
     let ground = histogram[..usize::from(BLACK_BELOW)]
