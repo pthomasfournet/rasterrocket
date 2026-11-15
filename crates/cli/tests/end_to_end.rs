@@ -1212,9 +1212,12 @@ fn output_profile_refusals_name_the_conflict() {
     for (args, message) in [
         (
             vec!["--intent", "perceptual"],
-            "--intent applies to --output-profile only",
+            "--intent applies to --output-profile and --proof only",
         ),
-        (vec!["--bpc"], "--bpc applies to --output-profile only"),
+        (
+            vec!["--bpc"],
+            "--bpc applies to --output-profile and --proof only",
+        ),
         (
             vec!["--output-profile", rgb, "--bpc", "--intent", "absolute"],
             "--bpc does not apply to --intent absolute",
@@ -1247,6 +1250,88 @@ fn output_profile_refusals_name_the_conflict() {
             vec!["--output-profile", rgb, "--cmyk", "--tiff"],
             "give a CMYK output profile",
         ),
+    ] {
+        let out = rrocket(dir.path(), &input, &args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+        assert!(outputs(dir.path()).is_empty(), "{args:?} wrote files");
+    }
+}
+
+/// A 30 × 10 pt PDF/X page on the synthetic CMYK press: paper, sRGB red
+/// and `DeviceCMYK` black, 10 pt each.
+fn pdfx_swatch_pdf() -> Vec<u8> {
+    let press = std::fs::read(icc_fixture("printer-cmyk-v4.icc")).expect("read profile");
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFX \
+          /OutputConditionIdentifier (Test press) /DestOutputProfile 5 0 R >>] >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 30 10] /Contents 4 0 R >>".to_vec(),
+        stream_object("", b"1 0 0 rg 10 0 10 10 re f 0 0 0 1 k 20 0 10 10 re f"),
+        stream_object("/N 4", &press),
+    ])
+}
+
+/// `--proof` shows the page on the press: the paper white, the red dulled
+/// to the press's, black ink as the press's black; `--proof=absolute`
+/// tints the paper.
+#[test]
+fn proof_shows_the_page_on_the_press() {
+    let (dir, input) = workdir(&pdfx_swatch_pdf());
+    let pixel = |args: &[&str], x: usize| {
+        let out = rrocket(dir.path(), &input, args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (magic, width, height, pixels) = read_pnm(&dir.path().join("out-1.ppm"));
+        assert_eq!((magic.as_str(), width, height), ("P6", 30, 10));
+        let at = (5 * 30 + x) * 3;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    };
+    let plain = ["-r", "72"];
+    assert_eq!(pixel(&plain, 15), [255, 0, 0]);
+    let relative = ["-r", "72", "--proof"];
+    let paper = pixel(&relative, 5);
+    assert!(paper.iter().all(|&c| c >= 252), "paper {paper:?}");
+    let red = pixel(&relative, 15);
+    assert!(red[0] < 245 && red[1] > 60, "red on the press {red:?}");
+    let black = pixel(&relative, 25);
+    assert!(
+        black.iter().all(|&c| (18..=30).contains(&c)),
+        "black ink {black:?}"
+    );
+    let tinted = pixel(&["-r", "72", "--proof=absolute"], 5);
+    assert!(tinted[2] + 5 <= tinted[0], "paper tint {tinted:?}");
+}
+
+#[test]
+fn proof_refusals_name_the_conflict() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let cmyk_printer = icc_fixture("printer-cmyk-v4.icc");
+    for (args, message) in [
+        (vec!["--proof"], "carries no /OutputIntents"),
+        (
+            vec!["--proof", "--cmyk", "--tiff"],
+            "--proof shows the press on a display",
+        ),
+        (
+            vec!["--proof", "--transparent", "--png"],
+            "drop --transparent",
+        ),
+        (vec!["--proof", "--mono"], "--proof is refused with --mono"),
+        (
+            vec![
+                "--proof",
+                "--output-profile",
+                cmyk_printer.to_str().unwrap(),
+            ],
+            "is a CMYK profile and --proof",
+        ),
+        (vec!["--proof=perceptual"], "invalid value"),
     ] {
         let out = rrocket(dir.path(), &input, &args);
         assert!(!out.status.success(), "{args:?} succeeded");

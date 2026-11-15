@@ -269,14 +269,37 @@ pub(crate) struct Args {
     /// `absolute` (absolute colorimetric).  Default: the one intent a
     /// page's content uses (`ri`, `/RI`, an image's `/Intent`), else
     /// relative colorimetric; for a CMYK profile, relative colorimetric.
+    /// Under --proof, the intent of the separation to the press, default
+    /// relative colorimetric.
     #[arg(long = "intent", value_name = "INTENT", value_enum)]
     pub intent: Option<IntentArg>,
 
-    /// Black-point compensation in the conversion to --output-profile:
-    /// the page's black maps to the profile's darkest neutral.  Not with
-    /// --intent absolute.
+    /// Black-point compensation in the conversion to --output-profile
+    /// (under --proof, in the separation to the press): the page's black
+    /// maps to the profile's darkest neutral.  Not with --intent absolute.
     #[arg(long = "bpc")]
     pub bpc: bool,
+
+    /// Soft-proof the pages: show on screen how they print on the press
+    /// the document's PDF/X output intent names.  Each page is painted as
+    /// that press's process ink (`DeviceCMYK` and process colorants as
+    /// given, other colours separated through the intent's profile under
+    /// --intent and --bpc, overprint simulated with --overprint), then
+    /// converted to sRGB, or to an RGB or gray --output-profile.
+    /// `relative` (the bare flag) maps the paper to white; `absolute`
+    /// simulates the paper's white and the press's black as measured.  The
+    /// document (or the page) must carry `/OutputIntents` with an embedded
+    /// CMYK profile.  Not with --cmyk, --jpegcmyk, --transparent, a CMYK
+    /// --output-profile, --mono, --dither, --fax or comic input.
+    #[arg(
+        long = "proof",
+        value_name = "INTENT",
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "relative"
+    )]
+    pub proof: Option<ProofArg>,
 
     /// The ICC profile the output is tagged with: --output-profile's,
     /// set from the session's profile once it is read.
@@ -771,6 +794,25 @@ impl From<IntentArg> for pdf_raster::RenderingIntent {
     }
 }
 
+/// `--proof` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ProofArg {
+    /// Relative colorimetric: the paper maps to white.
+    Relative,
+    /// Absolute colorimetric: the paper's white and the press's black as
+    /// measured.
+    Absolute,
+}
+
+impl From<ProofArg> for pdf_raster::ProofIntent {
+    fn from(intent: ProofArg) -> Self {
+        match intent {
+            ProofArg::Relative => Self::RelativeColorimetric,
+            ProofArg::Absolute => Self::AbsoluteColorimetric,
+        }
+    }
+}
+
 /// `--dither` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DitherArg {
@@ -1146,14 +1188,18 @@ impl Args {
         ))
     }
 
-    /// Refuse `--intent` and `--bpc` without `--output-profile`, `--bpc`
-    /// under absolute colorimetry, and `--output-profile` with the bilevel
-    /// outputs and comic input.
+    /// Refuse `--intent` and `--bpc` without `--output-profile` or
+    /// `--proof`, `--bpc` under absolute colorimetry, and `--output-profile`
+    /// and `--proof` with the bilevel outputs and comic input, `--proof`
+    /// with CMYK and transparent output.
     fn validate_output_profile_flags(&self) -> Result<(), String> {
-        if self.output_profile.is_none() {
+        self.validate_proof_flags()?;
+        if self.output_profile.is_none() && self.proof.is_none() {
             return match (self.intent.is_some(), self.bpc) {
-                (true, _) => Err("--intent applies to --output-profile only".to_owned()),
-                (_, true) => Err("--bpc applies to --output-profile only".to_owned()),
+                (true, _) => {
+                    Err("--intent applies to --output-profile and --proof only".to_owned())
+                }
+                (_, true) => Err("--bpc applies to --output-profile and --proof only".to_owned()),
                 _ => Ok(()),
             };
         }
@@ -1164,7 +1210,13 @@ impl Args {
                     .to_owned(),
             );
         }
-        let bilevel = "bilevel output carries no colour to convert; drop --output-profile";
+        let flag = if self.output_profile.is_some() {
+            "--output-profile"
+        } else {
+            "--proof"
+        };
+        let bilevel = format!("bilevel output carries no colour to convert; drop {flag}");
+        let bilevel = bilevel.as_str();
         let refused = [
             (self.mono, "--mono", bilevel),
             (self.dither != DitherArg::None, "--dither", bilevel),
@@ -1176,9 +1228,31 @@ impl Args {
             ),
         ];
         match refused.iter().find(|(set, _, _)| *set) {
-            Some((_, what, why)) => Err(format!("--output-profile is refused with {what}: {why}")),
+            Some((_, what, why)) => Err(format!("{flag} is refused with {what}: {why}")),
             None => Ok(()),
         }
+    }
+
+    /// Refuse `--proof` with CMYK and transparent output.
+    fn validate_proof_flags(&self) -> Result<(), String> {
+        if self.proof.is_none() {
+            return Ok(());
+        }
+        if self.cmyk() {
+            let flag = if self.cmyk { "--cmyk" } else { "--jpegcmyk" };
+            return Err(format!(
+                "--proof shows the press on a display and writes RGB or gray pages, and {flag} \
+                 writes CMYK: drop one (for the press's own ink, use {flag} with the output \
+                 intent's profile as --output-profile)"
+            ));
+        }
+        if self.transparent {
+            return Err(
+                "--proof paints the pages on the press's opaque paper: drop --transparent"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// The session's output profile, read from `--output-profile` and
@@ -1195,6 +1269,12 @@ impl Args {
         let profile = pdf_raster::OutputProfile::from_bytes(bytes)
             .map_err(|e| format!("--output-profile {shown}: {e}"))?;
         match profile.space() {
+            pdf_raster::OutputSpace::Cmyk if self.proof.is_some() => {
+                return Err(format!(
+                    "--output-profile {shown} is a CMYK profile and --proof shows the press on a \
+                     display: give an RGB or gray display profile, or drop it for sRGB"
+                ));
+            }
             pdf_raster::OutputSpace::Cmyk if !self.cmyk() => {
                 return Err(format!(
                     "--output-profile {shown} is a CMYK profile, which separates CMYK pages: \
@@ -1221,7 +1301,9 @@ impl Args {
             }
             _ => {}
         }
-        if let Some(intent) = self.intent {
+        if let Some(intent) = self.intent
+            && self.proof.is_none()
+        {
             profile
                 .prepare(intent.into(), self.bpc)
                 .map_err(|e| format!("--output-profile {shown}: {e}"))?;
@@ -1737,6 +1819,7 @@ impl Args {
         }
         config.band_bytes = self.band_bytes();
         config.output_profile = self.output_profile()?;
+        config.proof = self.proof.map(Into::into);
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;
