@@ -238,10 +238,30 @@ impl InkMap {
         (ink, ChannelMask::new(bits))
     }
 
-    /// The plan by which every colour of the `Separation` or `DeviceN`
-    /// space `space` paints on the page (see [`Self::colorant_ink`]),
-    /// assigning the space's spot colorants their slots.
-    pub(super) fn plan(&mut self, doc: &Document, space: &ColorSpace) -> ColorantPlan {
+    /// The plan by which every colour of `space` paints on the page as
+    /// ink, `None` for a space whose colours paint their sRGB conversion.
+    ///
+    /// The colours of a `Separation` or `DeviceN` space paint their
+    /// colorants (see [`Self::colorant_ink`]), the space's spot colorants
+    /// taking their slots.  Those of `DeviceCMYK` paint their components as
+    /// process ink, and so do those of a four-component ICC space unless
+    /// the separator reproduces such a colour from its profile
+    /// ([`Separator::reproduces_process_colour`]).
+    pub(super) fn plan(&mut self, doc: &Document, space: &ColorSpace) -> Option<ColorantPlan> {
+        match space {
+            ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
+                Some(self.colorant_plan(doc, space))
+            }
+            ColorSpace::DeviceCmyk => Some(process_plan()),
+            ColorSpace::IccBased { n: 4, .. } => {
+                (!self.separator.reproduces_process_colour()).then(process_plan)
+            }
+            _ => None,
+        }
+    }
+
+    /// [`Self::plan`] of a `Separation` or `DeviceN` space.
+    fn colorant_plan(&mut self, doc: &Document, space: &ColorSpace) -> ColorantPlan {
         if !self.fits(space) {
             self.report_overflow(space);
             return ColorantPlan::Process(self.separator.clone());
@@ -271,6 +291,12 @@ impl InkMap {
             Colorant::Spot(name) => 1 << (SPOT_CHANNEL + self.slot(doc, name, space)?),
         })
     }
+}
+
+/// The plan of a process colour: its four components paint the process
+/// channels C, M, Y and K in turn.
+fn process_plan() -> ColorantPlan {
+    ColorantPlan::Channels(Box::new(std::array::from_fn::<u8, 4, _>(|i| 1 << i)))
 }
 
 /// The spot-colorant tables of a page's slots, by depth.

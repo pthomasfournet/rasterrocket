@@ -218,8 +218,8 @@ pub struct DecodedImage {
     /// dictionary declares, or a codec that stopped short): the image is
     /// drawn, and the page is incomplete.
     pub partial: Option<String>,
-    /// The colorant tints of an image in a `Separation` or `DeviceN` space,
-    /// kept when the decode was asked to keep them.
+    /// The ink amounts of an image in a `Separation`, `DeviceN` or process
+    /// CMYK space, kept when the decode was asked to keep them.
     pub tints: Option<ImageTints>,
     /// Whether the decode was asked to keep tints
     /// ([`ImageDecodeCtx::keep_tints`]): `tints` is then present for every
@@ -227,8 +227,9 @@ pub struct DecodedImage {
     pub kept_tints: bool,
 }
 
-/// The colorant tints of an image in a `Separation` or `DeviceN` space, on
-/// the grid of its decoded samples, for drawing on an ink canvas.
+/// The ink amounts of an image — the colorant tints of a `Separation` or
+/// `DeviceN` space, the components of a process CMYK space — on the grid
+/// of its decoded samples, for drawing on an ink canvas.
 #[derive(Debug)]
 pub struct ImageTints {
     /// The image's colour space.
@@ -939,8 +940,8 @@ pub struct ImageDecodeCtx<'a> {
     /// Identity of the document within the cache.
     #[cfg(feature = "cache")]
     pub doc_id: Option<gpu::cache::DocId>,
-    /// Keep the colorant tints of an image in a `Separation` or `DeviceN`
-    /// space beside its colours ([`DecodedImage::tints`]).
+    /// Keep the ink amounts of an image in a `Separation`, `DeviceN` or
+    /// process CMYK space beside its colours ([`DecodedImage::tints`]).
     pub keep_tints: bool,
     /// The depth of the render the image is drawn in.  At 16 bits a stream
     /// of more than 8 bits a sample keeps its samples at 16 bits

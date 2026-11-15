@@ -232,3 +232,141 @@ fn the_overprint_preview_still_finishes_as_srgb() {
     let (finished, _, _) = renderer.try_finish_keeping(false).expect("finishes");
     assert!(matches!(finished, FinishedCanvas::Rgb8(_)), "{finished:?}");
 }
+
+/// Page `(4, 0)` drawing the image `Im`, object 5, of dictionary entries
+/// `dict` and samples `samples`.
+fn image_doc(dict: &str, samples: &[u8]) -> Document {
+    let mut image = format!(
+        "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 {dict} /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(samples);
+    image.extend_from_slice(b"\nendstream");
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /XObject << /Im 5 0 R >> >> >>".to_vec(),
+        ),
+        (5, image),
+    ])
+}
+
+#[test]
+fn device_cmyk_images_paint_their_samples() {
+    let doc = image_doc(
+        "/ColorSpace /DeviceCMYK /BitsPerComponent 8",
+        &[10, 100, 50, 0],
+    );
+    for depth in DEPTHS {
+        let page = render(&doc, (10, depth), &cmyk(false), b"10 0 0 10 0 0 cm /Im Do");
+        let want = [10u8, 100, 50, 0].map(|v| match depth {
+            SampleDepth::Eight => u16::from(v),
+            SampleDepth::Sixteen => u16::from_u8(v),
+        });
+        assert_eq!(at(&page, 5, 5), want, "{depth:?}");
+    }
+    let wide = image_doc(
+        "/ColorSpace /DeviceCMYK /BitsPerComponent 16",
+        &[0x12, 0x34, 0x56, 0x78, 0, 0, 0x7f, 0x01],
+    );
+    let page = render(
+        &wide,
+        (10, SampleDepth::Sixteen),
+        &cmyk(false),
+        b"10 0 0 10 0 0 cm /Im Do",
+    );
+    assert_eq!(at(&page, 5, 5), [0x1234, 0x5678, 0, 0x7f01]);
+    let inverted = image_doc(
+        "/ColorSpace /DeviceCMYK /BitsPerComponent 8 /Decode [1 0 1 0 1 0 1 0]",
+        &[255, 155, 205, 255],
+    );
+    let page = render(
+        &inverted,
+        (10, SampleDepth::Eight),
+        &cmyk(false),
+        b"10 0 0 10 0 0 cm /Im Do",
+    );
+    assert_eq!(at(&page, 5, 5), [0, 100, 50, 0], "/Decode applies");
+}
+
+/// On the overprint preview a `DeviceCMYK` image paints its samples as
+/// ink too, so that it overprints with its own channels.
+#[test]
+fn device_cmyk_images_paint_their_samples_on_the_preview() {
+    let doc = image_doc(
+        "/ColorSpace /DeviceCMYK /BitsPerComponent 8",
+        &[10, 100, 50, 0],
+    );
+    let mut renderer = PageRenderer::new_ink(10, 10, &doc, (4, 0));
+    renderer.execute(&crate::content::parse(b"10 0 0 10 0 0 cm /Im Do"));
+    let PageCanvas::Ink(ink) = &renderer.canvas else {
+        panic!("an ink canvas");
+    };
+    let i = (5 * 10 + 5) * 8;
+    assert_eq!(ink.data()[i..i + 8], [10, 100, 50, 0, 0, 0, 0, 0]);
+}
+
+/// A shading in `DeviceCMYK` paints its colours as ink: no black enters
+/// a cyan-to-black ramp's magenta and yellow, and a constant colour keeps
+/// its value exactly.
+#[test]
+fn device_cmyk_shadings_paint_their_colours() {
+    let shading = |c0: &str, c1: &str| {
+        crate::test_helpers::make_doc_with_objects(&[(
+            4,
+            format!(
+                "<< /Type /Page /Resources << /Shading << /Sh << /ShadingType 2 \
+                 /ColorSpace /DeviceCMYK /Coords [0 0 10 0] /Extend [true true] \
+                 /Function << /FunctionType 2 /Domain [0 1] /C0 [{c0}] /C1 [{c1}] /N 1 >> \
+                 >> >> >> >>"
+            ),
+        )])
+    };
+    for depth in DEPTHS {
+        let flat = shading("0.87 0.01 0 0", "0.87 0.01 0 0");
+        let page = render(&flat, (10, depth), &cmyk(false), b"/Sh sh");
+        assert_eq!(at(&page, 5, 5), of_unit(SWATCHES[0], depth), "{depth:?}");
+        let ramp = shading("1 0 0 0", "0 0 0 1");
+        let page = render(&ramp, (10, depth), &cmyk(false), b"/Sh sh");
+        for x in 0..10 {
+            let [c, m, y, k] = at(&page, x, 5);
+            assert_eq!((m, y), (0, 0), "{depth:?} x {x}: {c} {m} {y} {k}");
+            assert!(
+                c > 0 && (k > 0) == (x > 0),
+                "{depth:?} x {x}: {c} {m} {y} {k}"
+            );
+        }
+    }
+}
+
+/// An `ICCBased` CMYK image paints its samples on a CMYK page and its
+/// sRGB conversion on the preview.
+#[test]
+fn icc_cmyk_images_paint_their_samples_on_a_cmyk_page() {
+    const PROFILE: &[u8] =
+        include_bytes!("../../../../../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
+    let mut profile = format!("<< /N 4 /Length {} >>\nstream\n", PROFILE.len()).into_bytes();
+    profile.extend_from_slice(PROFILE);
+    profile.extend_from_slice(b"\nendstream");
+    let mut image = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+        /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8 /Length 4 >>\nstream\n"
+        .to_vec();
+    image.extend_from_slice(&[10, 100, 50, 0]);
+    image.extend_from_slice(b"\nendstream");
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /XObject << /Im 5 0 R >> >> >>".to_vec(),
+        ),
+        (5, image),
+        (6, profile),
+    ]);
+    let page = render(
+        &doc,
+        (10, SampleDepth::Eight),
+        &cmyk(false),
+        b"10 0 0 10 0 0 cm /Im Do",
+    );
+    assert_eq!(at(&page, 5, 5), [10, 100, 50, 0]);
+}

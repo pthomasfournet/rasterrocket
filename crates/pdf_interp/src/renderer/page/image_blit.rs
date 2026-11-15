@@ -232,18 +232,17 @@ impl PageRenderer<'_> {
     }
 
     /// The plan by which the colorant tints of `decoded` paint on the ink
-    /// canvas, assigning their spot colorants slots.  `None` on an RGB
-    /// canvas, for an image without tints, and in a shape-only glyph.
+    /// canvas (see `InkMap::plan`), assigning their spot colorants slots.
+    /// `None` on an RGB canvas, for an image without tints or whose space
+    /// paints its sRGB samples, and in a shape-only glyph.
     fn tint_plan(&self, decoded: &crate::resources::DecodedImage) -> Option<ColorantPlan> {
         if !self.canvas.kind().is_ink() || self.gstate.current().colour_locked {
             return None;
         }
         let tints = decoded.tints.as_ref()?;
-        Some(
-            self.ink_map
-                .borrow_mut()
-                .plan(self.resources.doc(), &tints.space),
-        )
+        self.ink_map
+            .borrow_mut()
+            .plan(self.resources.doc(), &tints.space)
     }
 
     /// Composite the ink samples `ink`, on the grid of `img`, which they

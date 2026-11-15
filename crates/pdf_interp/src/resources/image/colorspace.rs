@@ -303,12 +303,19 @@ impl ImageColour {
         })
     }
 
-    /// Whether the image is in a `Separation` or `DeviceN` space, whose
-    /// samples are colorant tints ([`Self::tints`]).
+    /// Whether the image's samples are amounts of ink an ink canvas can
+    /// paint ([`Self::tints`]): colorant tints in a `Separation` or
+    /// `DeviceN` space, process inks in `DeviceCMYK` or a four-component
+    /// ICC space.
     pub(super) const fn has_tints(&self) -> bool {
         matches!(
             self.space,
-            Some(ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. })
+            Some(
+                ColorSpace::Separation { .. }
+                    | ColorSpace::DeviceN { .. }
+                    | ColorSpace::DeviceCmyk
+                    | ColorSpace::IccBased { n: 4, .. }
+            )
         )
     }
 
@@ -416,10 +423,10 @@ impl ImageColour {
 }
 
 impl ImageColour {
-    /// The colorant tints of `samples` in the image's `Separation` or
-    /// `DeviceN` space: each component mapped through its `/Decode` pair to
-    /// a sample of the samples' depth, 0 no colorant and the maximum the
-    /// full tint.  `None` for any other space, for samples whose channel
+    /// The ink amounts of `samples` in the image's `Separation`, `DeviceN`
+    /// or process CMYK space ([`Self::has_tints`]): each component mapped
+    /// through its `/Decode` pair to a sample of the samples' depth, 0 no
+    /// ink and the maximum the full tint.  `None` for any other space, for samples whose channel
     /// count is not the space's, and for samples that are not
     /// host-resident.
     pub(super) fn tints(&self, samples: &Samples) -> Option<ImageTints> {

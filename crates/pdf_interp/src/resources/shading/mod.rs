@@ -167,10 +167,10 @@ impl ResolvedShading {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// The plan by which the colours of a `Separation` or `DeviceN` space
-/// paint on the ink canvas a shading is resolved for (see
-/// [`resolve_shading_object`]).
-pub(crate) type PlanColorants<'a> = &'a mut dyn FnMut(&ColorSpace) -> ColorantPlan;
+/// The plan by which the colours of a space paint as ink on the ink canvas
+/// a shading is resolved for, `None` for a space whose colours paint their
+/// sRGB conversion (see [`resolve_shading_object`]).
+pub(crate) type PlanColorants<'a> = &'a mut dyn FnMut(&ColorSpace) -> Option<ColorantPlan>;
 
 /// Resolve the named shading from `shadings`, the `/Shading` resource
 /// sub-dictionary in effect, whose default colour spaces `resources`
@@ -196,8 +196,9 @@ pub(crate) fn resolve_shading(
 /// colour spaces of `resources`.
 ///
 /// With `ink`, the shading is resolved for an ink canvas: a shading in a
-/// `Separation` or `DeviceN` space converts its colours to the ink of the
-/// plan `ink` gives its space, and paints that plan's channels.
+/// space `ink` gives a plan — a `Separation` or `DeviceN` space, process
+/// CMYK — converts its colours to the ink of that plan, and paints that
+/// plan's channels.
 ///
 /// Returns `None` if the type is unsupported or any required key is missing.
 #[must_use]
@@ -233,14 +234,7 @@ pub(crate) fn resolve_shading_object(
         log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
         return None;
     }
-    let plan = ink
-        .filter(|_| {
-            matches!(
-                cs_space,
-                ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
-            )
-        })
-        .map(|plan| plan(&cs_space));
+    let plan = ink.and_then(|plan| plan(&cs_space));
     let paints = match &plan {
         Some(plan) => plan.paints(),
         None if cs_space.is_process_cmyk() => PROCESS_CHANNELS,
@@ -1015,8 +1009,8 @@ impl<S: Sample> ShadingColour<3, S> for ShadingCs<'_> {
     }
 }
 
-/// A `Separation` or `DeviceN` shading space converting to the ink of
-/// `plan`.
+/// A shading space of ink — `Separation`, `DeviceN`, process CMYK —
+/// converting to the ink of `plan`.
 #[derive(Clone, Copy)]
 struct InkCs<'a> {
     cs: ShadingCs<'a>,
