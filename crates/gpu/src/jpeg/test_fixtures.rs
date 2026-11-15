@@ -47,3 +47,36 @@ pub(crate) const PROGRESSIVE_MINIMAL: &[u8] = &[
     0x03, 0x11, 0x01,                               // comp 3
     0xFF, 0xD9,                                     // EOI
 ];
+
+/// Build a JPEG byte stream with a DRI marker injected before the SOS.
+///
+/// `GRAY_16X16_JPEG` has its SOS at offset 147.  Inserting 6 bytes of
+/// DRI segment (`FF DD 00 04 hi lo`) at that point produces a valid
+/// JPEG stream that `prepare_jpeg` must accept — the scan data is
+/// unchanged, so the only difference is that `restart_interval` is set.
+pub(crate) fn gray_16x16_with_dri(interval: u16) -> Vec<u8> {
+    const SOS_OFFSET: usize = 147;
+    let base = GRAY_16X16_JPEG;
+    // Assert that the fixture starts a SOS marker at SOS_OFFSET so a
+    // regenerated fixture with a different layout causes a test compile
+    // failure rather than silently producing a malformed JPEG.
+    assert_eq!(
+        base[SOS_OFFSET..SOS_OFFSET + 2],
+        [0xFF, 0xDA],
+        "GRAY_16X16_JPEG SOS marker not at expected offset {SOS_OFFSET}; \
+         update SOS_OFFSET if the fixture was regenerated"
+    );
+    let dri = [
+        0xFF,
+        0xDD, // DRI marker
+        0x00,
+        0x04, // length = 4
+        (interval >> 8) as u8,
+        (interval & 0xFF) as u8,
+    ];
+    let mut out = Vec::with_capacity(base.len() + dri.len());
+    out.extend_from_slice(&base[..SOS_OFFSET]);
+    out.extend_from_slice(&dri);
+    out.extend_from_slice(&base[SOS_OFFSET..]);
+    out
+}

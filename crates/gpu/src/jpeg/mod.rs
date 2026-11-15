@@ -60,5 +60,7 @@ pub(crate) use dc_chain::DcValues;
 pub(crate) use headers::JpegHuffmanTable;
 #[cfg(feature = "gpu-jpeg-huffman")]
 pub(crate) use headers::{DhtClass, JpegHeaderError, JpegQuantTable};
+#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
+pub(crate) use prepass::run_cpu_prepass;
 #[cfg(feature = "gpu-jpeg-huffman")]
-pub(crate) use prepass::{CpuPrepassError, CpuPrepassOutput, run_cpu_prepass};
+pub(crate) use prepass::{CpuPrepassError, CpuPrepassOutput, run_cpu_prepass_on};

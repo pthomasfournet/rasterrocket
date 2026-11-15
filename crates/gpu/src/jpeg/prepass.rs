@@ -183,10 +183,30 @@ impl From<DcChainError> for CpuPrepassError {
 /// Returns [`CpuPrepassError`] on any submodule failure.  The caller is
 /// expected to fall back to a CPU JPEG decoder (zune-jpeg) on failure rather
 /// than treating the image as fatal.
+#[cfg(test)]
 #[must_use = "discarding the prepass output discards all the decoded headers + DC values"]
 pub(crate) fn run_cpu_prepass(data: &[u8]) -> Result<CpuPrepassOutput, CpuPrepassError> {
-    let headers = JpegHeaders::parse(data)?;
+    run_cpu_prepass_on(&JpegHeaders::parse(data)?)
+}
 
+#[cfg(test)]
+thread_local! {
+    /// Entropy pre-passes run on this thread by [`run_cpu_prepass_on`].
+    pub(crate) static ENTROPY_PREPASSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Phase 0 on already parsed headers: unstuffing, codebook construction
+/// and the DC chain, all of which walk the entropy-coded segment.
+///
+/// # Errors
+///
+/// Returns [`CpuPrepassError`] on any submodule failure.
+#[must_use = "discarding the prepass output discards all the decoded headers + DC values"]
+pub(crate) fn run_cpu_prepass_on(
+    headers: &JpegHeaders<'_>,
+) -> Result<CpuPrepassOutput, CpuPrepassError> {
+    #[cfg(test)]
+    ENTROPY_PREPASSES.with(|n| n.set(n.get() + 1));
     let mut unstuffed = Vec::with_capacity(headers.scan_data.len());
     let mut rst_positions = Vec::new();
     unstuff::unstuff_into(headers.scan_data, &mut unstuffed, &mut rst_positions)?;
@@ -195,10 +215,10 @@ pub(crate) fn run_cpu_prepass(data: &[u8]) -> Result<CpuPrepassOutput, CpuPrepas
     // walker, then keep both in CpuPrepassOutput so the parallel-Huffman
     // kernel can reuse them without rebuilding (DC is needed to skip past
     // the DC symbol in each block; AC is the body of the kernel's work).
-    let (dc_codebooks, ac_codebooks) = build_scan_codebooks(&headers)?;
+    let (dc_codebooks, ac_codebooks) = build_scan_codebooks(headers)?;
 
     let dc_values = dc_chain::resolve_dc_chain(
-        &headers,
+        headers,
         &unstuffed,
         &rst_positions,
         &dc_codebooks,

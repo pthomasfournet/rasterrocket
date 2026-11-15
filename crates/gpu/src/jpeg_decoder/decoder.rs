@@ -1,6 +1,6 @@
 //! `JpegGpuDecoder` — end-to-end JPEG → RGBA8 device image.
 //!
-//! CPU pre-pass (`prepare_jpeg`) + GPU Phases 1–4 (parallel Huffman) +
+//! Header screening and CPU pre-pass (`prepare_supported`) + GPU Phases 1–4 (parallel Huffman) +
 //! CPU magnitude-bit extraction (`symbols_to_coefficients`) +
 //! GPU Phase 5 (IDCT + dequant + colour conversion).
 //!
@@ -13,8 +13,9 @@
 use crate::backend::params::IdctParams;
 use crate::backend::{BackendError as BackendErr, GpuBackend};
 use crate::jpeg::bitreader::BitReader;
+use crate::jpeg::headers::JpegHeaders;
 use crate::jpeg::headers::mcu_count;
-use crate::jpeg_decoder::cpu_prepass::{JpegPreparedInput, prepare_jpeg};
+use crate::jpeg_decoder::cpu_prepass::{JpegPreparedInput, parse_headers, prepare_parsed};
 use crate::jpeg_decoder::device_image::DeviceImage;
 use crate::jpeg_decoder::dispatch_util::DeviceBufferGuard;
 use crate::jpeg_decoder::error::JpegGpuError;
@@ -45,72 +46,15 @@ impl<B: GpuBackend> JpegGpuDecoder<B> {
     /// # Errors
     /// Returns `JpegGpuError` if the input is not a supported baseline JPEG,
     /// if coefficient extraction fails, or if any GPU operation fails.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "GPU Huffman dispatch + CPU fallback + IDCT launch; splitting obscures the linear flow"
-    )]
     pub fn decode(&self, jpeg_bytes: &[u8]) -> std::result::Result<DeviceImage<B>, JpegGpuError> {
-        let prep = prepare_jpeg(jpeg_bytes)?;
-
-        // Validate component count before any allocation.
+        let prep = prepare_supported(jpeg_bytes)?;
         let nc = prep.components.len();
-        if nc != 1 && nc != 3 {
-            return Err(JpegGpuError::UnsupportedComponents(
-                u8::try_from(nc).unwrap_or(u8::MAX),
-            ));
-        }
-
-        // Reject subsampled input: the IDCT kernel assumes 4:4:4 (all components
-        // share the same 8×8 block grid). Non-unity sampling factors produce the
-        // wrong chroma block layout and corrupt output silently.
-        for comp in &prep.components {
-            if comp.h_sampling != 1 || comp.v_sampling != 1 {
-                return Err(JpegGpuError::UnsupportedSubsampling {
-                    component: comp.id,
-                    h: comp.h_sampling,
-                    v: comp.v_sampling,
-                });
-            }
-        }
-
-        // For 3-component images, validate that quantisation tables are
-        // assigned in JFIF slot order (slot 0 = luma, slot 1 = chroma):
-        // the kernel hardcodes qt_sel=0 for the Y component and qt_sel=1
-        // for Cb/Cr, so a reversed or non-standard assignment would
-        // silently use the wrong tables. A grayscale component may
-        // reference any defined slot — pack_qtables resolves it to packed
-        // index 0.
-        if nc == 3 {
-            for (ci, comp) in prep.components.iter().enumerate() {
-                let expected_slot = u8::from(ci != 0);
-                if comp.quant_selector != expected_slot {
-                    return Err(JpegGpuError::HeaderParse(format!(
-                        "component {ci} uses quantisation table slot {} but kernel expects slot \
-                         {expected_slot}; only JFIF-standard slot assignment (0=luma, 1=chroma) \
-                         is supported",
-                        comp.quant_selector
-                    )));
-                }
-            }
-        }
-
-        // Neither coefficient walker realigns at restart boundaries;
-        // refuse RST-bearing streams up front so the caller falls back
-        // to a restart-aware CPU decoder instead of receiving desynced
-        // garbage. A DRI header without emitted markers is fine.
-        if prep.rst_marker_count > 0 {
-            return Err(JpegGpuError::Dispatch(format!(
-                "entropy stream contains {} restart marker(s); RST-aware decoding \
-                 is not implemented",
-                prep.rst_marker_count,
-            )));
-        }
 
         let width = u32::from(prep.width);
         let height = u32::from(prep.height);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "nc is 1 or 3 (checked above); trivially fits in u32"
+            reason = "nc is 1 or 3 (prepare_supported refuses any other count)"
         )]
         let num_components = nc as u32;
         let blocks_wide = width.div_ceil(8);
@@ -344,6 +288,67 @@ fn pack_qtables(prep: &JpegPreparedInput) -> std::result::Result<(Vec<i32>, u32)
     )]
     let num_qtables = (qt_flat.len() / 64) as u32;
     Ok((qt_flat, num_qtables))
+}
+
+/// The pre-pass output of `jpeg_bytes`, or the refusal of a stream the
+/// decoder does not take.
+///
+/// Everything the frame and restart headers decide is refused before the
+/// entropy pre-pass walks the scan: a component count other than 1 or 3,
+/// subsampling (the IDCT kernel assumes every component on one 8×8 block
+/// grid), a non-JFIF quantisation-table assignment, and a restart interval
+/// shorter than the scan, which obliges the encoder to emit RST markers.
+/// RST markers the pre-pass finds despite the headers are refused after it.
+fn prepare_supported(jpeg_bytes: &[u8]) -> std::result::Result<JpegPreparedInput, JpegGpuError> {
+    let headers = parse_headers(jpeg_bytes)?;
+    refuse_unsupported_frame(&headers)?;
+    let prep = prepare_parsed(&headers)?;
+    reject_restart_markers(&prep).map_err(JpegGpuError::Dispatch)?;
+    Ok(prep)
+}
+
+/// Refuse, from the SOF and DRI headers alone, a stream the decoder does
+/// not take (see [`prepare_supported`]).
+fn refuse_unsupported_frame(headers: &JpegHeaders<'_>) -> std::result::Result<(), JpegGpuError> {
+    let components = &headers.frame_components[..usize::from(headers.components)];
+    if !matches!(components.len(), 1 | 3) {
+        return Err(JpegGpuError::UnsupportedComponents(headers.components));
+    }
+    if let Some(comp) = components
+        .iter()
+        .find(|c| c.h_sampling != 1 || c.v_sampling != 1)
+    {
+        return Err(JpegGpuError::UnsupportedSubsampling {
+            component: comp.id,
+            h: comp.h_sampling,
+            v: comp.v_sampling,
+        });
+    }
+    // The kernel reads table slot 0 for the Y component and slot 1 for
+    // Cb/Cr; a grayscale component may reference any defined slot, which
+    // `pack_qtables` resolves to packed index 0.
+    if components.len() == 3 {
+        for (ci, comp) in components.iter().enumerate() {
+            let expected_slot = u8::from(ci != 0);
+            if comp.quant_selector != expected_slot {
+                return Err(JpegGpuError::HeaderParse(format!(
+                    "component {ci} uses quantisation table slot {} but kernel expects slot \
+                     {expected_slot}; only JFIF-standard slot assignment (0=luma, 1=chroma) \
+                     is supported",
+                    comp.quant_selector
+                )));
+            }
+        }
+    }
+    let interval = headers.restart_interval;
+    if interval > 0 && headers.num_mcus() > u32::from(interval) {
+        return Err(JpegGpuError::Dispatch(format!(
+            "restart interval {interval} MCUs is shorter than the scan's {} MCUs, so the \
+             stream carries restart markers; RST-aware decoding is not implemented",
+            headers.num_mcus(),
+        )));
+    }
+    Ok(())
 }
 
 /// Refuse entropy streams whose scan contained real RST markers.
@@ -851,6 +856,73 @@ mod symbol_coefficient_tests {
                 super::extract_coefficients(&prep).expect("reference extract");
             assert_eq!(dc_sym, dc_ref, "{name}: DC values differ");
             assert_eq!(coef_sym, coef_ref, "{name}: coefficients differ");
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_refusal_tests {
+    use crate::jpeg::prepass::ENTROPY_PREPASSES;
+    use crate::jpeg::test_fixtures::{GRAY_16X16_JPEG, gray_16x16_with_dri};
+    use crate::jpeg_decoder::JpegGpuError;
+
+    /// Entropy pre-passes [`super::prepare_supported`] runs on `bytes`,
+    /// with its result.
+    fn prepasses(bytes: &[u8]) -> (u32, Result<(), JpegGpuError>) {
+        let before = ENTROPY_PREPASSES.with(std::cell::Cell::get);
+        let result = super::prepare_supported(bytes).map(drop);
+        (
+            ENTROPY_PREPASSES.with(std::cell::Cell::get) - before,
+            result,
+        )
+    }
+
+    /// `GRAY_16X16_JPEG` with its component's sampling factors set to
+    /// 2 × 2.
+    fn gray_16x16_subsampled() -> Vec<u8> {
+        let mut bytes = GRAY_16X16_JPEG.to_vec();
+        let sof = bytes
+            .windows(2)
+            .position(|w| w == [0xff, 0xc0])
+            .expect("fixture must contain an SOF0 marker");
+        // SOF0: marker(2) length(2) precision dims(4) nc, then (id, HV, Tq).
+        let hv = sof + 11;
+        assert_eq!(bytes[hv], 0x11, "fixture component must be 1 × 1");
+        bytes[hv] = 0x22;
+        bytes
+    }
+
+    #[test]
+    fn subsampled_stream_is_refused_before_the_prepass() {
+        let (runs, result) = prepasses(&gray_16x16_subsampled());
+        assert!(
+            matches!(
+                result,
+                Err(JpegGpuError::UnsupportedSubsampling { h: 2, v: 2, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(runs, 0, "the entropy pre-pass ran on a refused stream");
+    }
+
+    #[test]
+    fn restart_interval_shorter_than_the_scan_is_refused_before_the_prepass() {
+        // 4 MCUs: an interval of 1 obliges three RST markers.
+        let (runs, result) = prepasses(&gray_16x16_with_dri(1));
+        assert!(
+            matches!(&result, Err(JpegGpuError::Dispatch(m)) if m.contains("restart")),
+            "{result:?}"
+        );
+        assert_eq!(runs, 0, "the entropy pre-pass ran on a refused stream");
+    }
+
+    #[test]
+    fn supported_streams_reach_the_prepass() {
+        // An interval covering the whole scan obliges no RST marker.
+        for bytes in [GRAY_16X16_JPEG.to_vec(), gray_16x16_with_dri(4)] {
+            let (runs, result) = prepasses(&bytes);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(runs, 1);
         }
     }
 }

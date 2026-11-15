@@ -11,14 +11,14 @@
 //! to consume later.
 //!
 //! Non-baseline JPEGs (progressive / lossless / hierarchical) are detected
-//! by [`crate::jpeg::run_cpu_prepass`] and surfaced here as the typed
+//! by the header parser ([`parse_headers`]) and surfaced here as the typed
 //! [`JpegGpuError::Progressive`] so the caller can fall back to a CPU
 //! decoder without parsing the error string.
 
-use crate::jpeg::headers::JpegFrameComponent;
+use crate::jpeg::headers::{JpegFrameComponent, JpegHeaders};
 use crate::jpeg::{
     CanonicalCodebook, CpuPrepassError, CpuPrepassOutput, DcValues, DhtClass, JpegHeaderError,
-    JpegQuantTable, run_cpu_prepass,
+    JpegQuantTable, run_cpu_prepass_on,
 };
 use crate::jpeg_decoder::{JpegGpuError, PackedBitstream, pack_be_words};
 
@@ -127,12 +127,46 @@ fn materialise_codebook_slice<'a>(
         .collect()
 }
 
-/// Run the CPU pre-pass and lift its output into the on-GPU input shape.
+/// [`parse_headers`] then [`prepare_parsed`] on `jpeg_bytes`.
 ///
 /// # Errors
 ///
-/// * [`JpegGpuError::Progressive`] — the JPEG is not baseline DCT (SOF2
-///   progressive, SOF3 lossless, or other non-baseline variants).
+/// As the two.
+#[cfg(test)]
+pub(crate) fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError> {
+    prepare_parsed(&parse_headers(jpeg_bytes)?)
+}
+
+/// Parse the headers of `jpeg_bytes` without touching the entropy-coded
+/// segment.
+///
+/// # Errors
+///
+/// [`JpegGpuError::Progressive`] for a non-baseline frame (SOF2
+/// progressive, SOF3 lossless, or another non-baseline variant),
+/// [`JpegGpuError::HeaderParse`] for any other header failure.
+pub(crate) fn parse_headers(jpeg_bytes: &[u8]) -> Result<JpegHeaders<'_>, JpegGpuError> {
+    JpegHeaders::parse(jpeg_bytes).map_err(|e| prepass_error(&e.into()))
+}
+
+/// The typed decoder error of a pre-pass failure.
+fn prepass_error(e: &CpuPrepassError) -> JpegGpuError {
+    match e {
+        CpuPrepassError::Header(JpegHeaderError::NotBaseline) => JpegGpuError::Progressive,
+        // Codebook / missing-table failures map to the typed Huffman
+        // variant so callers don't have to substring-match.
+        CpuPrepassError::Codebook { .. } | CpuPrepassError::MissingHuffmanTable { .. } => {
+            JpegGpuError::InvalidHuffmanTables(e.to_string())
+        }
+        _ => JpegGpuError::HeaderParse(e.to_string()),
+    }
+}
+
+/// Run the CPU pre-pass on headers parsed by [`parse_headers`] and lift
+/// its output into the on-GPU input shape.
+///
+/// # Errors
+///
 /// * [`JpegGpuError::UnsupportedComponents`] — the SOF declared a
 ///   component count outside `{1, 3}`.  Valid JPEG covers 1 (grayscale),
 ///   2 (rare two-component), 3 (YCbCr / RGB), and 4 (CMYK); the GPU path
@@ -143,25 +177,12 @@ fn materialise_codebook_slice<'a>(
 ///   or AC selector for which no DHT was loaded, or the DHT itself was
 ///   structurally invalid (code-space overflow, length mismatch).
 /// * [`JpegGpuError::HeaderParse`] — any other pre-pass failure
-///   (malformed headers, byte-unstuffing aborted on unexpected marker,
+///   (byte-unstuffing aborted on unexpected marker,
 ///   DC chain corrupt, unstuffed segment too long to address in u32
 ///   bits). The display of the underlying error is preserved in the
 ///   message so the caller can log it.
-pub(crate) fn prepare_jpeg(jpeg_bytes: &[u8]) -> Result<JpegPreparedInput, JpegGpuError> {
-    let prep = match run_cpu_prepass(jpeg_bytes) {
-        Ok(out) => out,
-        Err(CpuPrepassError::Header(JpegHeaderError::NotBaseline)) => {
-            return Err(JpegGpuError::Progressive);
-        }
-        Err(
-            e @ (CpuPrepassError::Codebook { .. } | CpuPrepassError::MissingHuffmanTable { .. }),
-        ) => {
-            // Codebook / missing-table failures map to the typed Huffman
-            // variant so callers don't have to substring-match.
-            return Err(JpegGpuError::InvalidHuffmanTables(e.to_string()));
-        }
-        Err(e) => return Err(JpegGpuError::HeaderParse(e.to_string())),
-    };
+pub(crate) fn prepare_parsed(headers: &JpegHeaders<'_>) -> Result<JpegPreparedInput, JpegGpuError> {
+    let prep = run_cpu_prepass_on(headers).map_err(|e| prepass_error(&e))?;
 
     if prep.components != 1 && prep.components != 3 {
         return Err(JpegGpuError::UnsupportedComponents(prep.components));
@@ -320,7 +341,8 @@ fn collect_scan_selectors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jpeg::test_fixtures::{GRAY_16X16_JPEG, PROGRESSIVE_MINIMAL};
+    use crate::jpeg::run_cpu_prepass;
+    use crate::jpeg::test_fixtures::{GRAY_16X16_JPEG, PROGRESSIVE_MINIMAL, gray_16x16_with_dri};
 
     #[test]
     fn prepare_baseline_grayscale_produces_one_codebook() {
@@ -619,39 +641,6 @@ mod tests {
     }
 
     // ── DRI (restart interval) tests ─────────────────────────────────────
-
-    /// Build a JPEG byte stream with a DRI marker injected before the SOS.
-    ///
-    /// `GRAY_16X16_JPEG` has its SOS at offset 147.  Inserting 6 bytes of
-    /// DRI segment (`FF DD 00 04 hi lo`) at that point produces a valid
-    /// JPEG stream that `prepare_jpeg` must accept — the scan data is
-    /// unchanged, so the only difference is that `restart_interval` is set.
-    fn gray_16x16_with_dri(interval: u16) -> Vec<u8> {
-        const SOS_OFFSET: usize = 147;
-        let base = GRAY_16X16_JPEG;
-        // Assert that the fixture starts a SOS marker at SOS_OFFSET so a
-        // regenerated fixture with a different layout causes a test compile
-        // failure rather than silently producing a malformed JPEG.
-        assert_eq!(
-            base[SOS_OFFSET..SOS_OFFSET + 2],
-            [0xFF, 0xDA],
-            "GRAY_16X16_JPEG SOS marker not at expected offset {SOS_OFFSET}; \
-             update SOS_OFFSET if the fixture was regenerated"
-        );
-        let dri = [
-            0xFF,
-            0xDD, // DRI marker
-            0x00,
-            0x04, // length = 4
-            (interval >> 8) as u8,
-            (interval & 0xFF) as u8,
-        ];
-        let mut out = Vec::with_capacity(base.len() + dri.len());
-        out.extend_from_slice(&base[..SOS_OFFSET]);
-        out.extend_from_slice(&dri);
-        out.extend_from_slice(&base[SOS_OFFSET..]);
-        out
-    }
 
     #[test]
     fn prepare_jpeg_reads_dri_1() {
