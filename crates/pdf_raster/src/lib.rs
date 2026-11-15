@@ -119,6 +119,7 @@ pub(crate) mod gcv;
 pub(crate) mod gpu_init;
 mod gray;
 mod open;
+mod output;
 pub(crate) mod page;
 mod page_buffer;
 mod render;
@@ -155,6 +156,7 @@ pub use pdf_interp::{
     FormType, InvalidRotation, MediaKind, PageBox, PageGeometry, RenderPurpose, Rotation,
     ScriptLocation, UnsupportedFeature,
 };
+pub use pdf_interp::{IntentSet, OutputProfile, OutputProfileError, OutputSpace, RenderingIntent};
 pub use render::{
     render_page_canvas, render_page_canvas_with_diagnostics, render_page_gray, render_page_rgb,
     render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
@@ -471,6 +473,22 @@ pub struct RasterOptions {
     /// [`deskew`](Self::deskew).
     pub depth: SampleDepth,
 
+    /// The ICC profile the pages are converted to; see
+    /// [`SessionConfig::output_profile`].  Default `None`.  The gray pages
+    /// take a gray profile, the RGBA pages of
+    /// [`transparent_background`](Self::transparent_background) an RGB one.
+    pub output_profile: Option<std::sync::Arc<OutputProfile>>,
+
+    /// The rendering intent of the conversion to
+    /// [`output_profile`](Self::output_profile); see
+    /// [`RenderParams::intent`].  Default `None`.
+    pub intent: Option<RenderingIntent>,
+
+    /// Whether the conversion to [`output_profile`](Self::output_profile)
+    /// compensates the black point; see
+    /// [`RenderParams::black_point_compensation`].  Default `false`.
+    pub black_point_compensation: bool,
+
     /// Cancellation flag polled while each page renders; default `None`.
     ///
     /// Once it is raised, the page in progress stops before its next
@@ -519,6 +537,9 @@ impl Default for RasterOptions {
             rotation: Rotation::None,
             transparent_background: false,
             depth: SampleDepth::Eight,
+            output_profile: None,
+            intent: None,
+            black_point_compensation: false,
             cancel: None,
         }
     }

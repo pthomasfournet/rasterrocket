@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use color::SampleDepth;
 
 use crate::BackendPolicy;
+use pdf_interp::RenderingIntent;
 
 #[cfg(doc)]
 use crate::{RasterError, RasterSession, render_page_rgb, render_page_rgb_with};
@@ -122,6 +123,16 @@ pub struct RenderParams {
     /// against the byte budget, and does not simulate overprint: a session
     /// that does refuses it.
     pub depth: SampleDepth,
+    /// The rendering intent of the conversion to the session's
+    /// [`output_profile`](crate::SessionConfig::output_profile); `None`
+    /// takes the one intent the page's marking operators used, else
+    /// relative colorimetric.  Refused without an output profile.
+    pub intent: Option<RenderingIntent>,
+    /// Whether the conversion to the output profile compensates the black
+    /// point (ISO 18619): the working space's black maps to the profile's
+    /// darkest neutral.  Refused without an output profile, and under
+    /// absolute colorimetry, which reproduces measured colour.
+    pub black_point_compensation: bool,
 }
 
 impl RenderParams {
@@ -145,6 +156,8 @@ impl RenderParams {
             transparent_background: false,
             band_rows: None,
             depth: SampleDepth::Eight,
+            intent: None,
+            black_point_compensation: false,
         }
     }
 
@@ -174,6 +187,22 @@ impl RenderParams {
     #[must_use]
     pub const fn with_depth(mut self, depth: SampleDepth) -> Self {
         self.depth = depth;
+        self
+    }
+
+    /// Convert to the output profile under `intent` (see
+    /// [`intent`](Self::intent)).
+    #[must_use]
+    pub const fn with_intent(mut self, intent: RenderingIntent) -> Self {
+        self.intent = Some(intent);
+        self
+    }
+
+    /// Compensate the black point in the conversion to the output profile
+    /// (see [`black_point_compensation`](Self::black_point_compensation)).
+    #[must_use]
+    pub const fn with_black_point_compensation(mut self) -> Self {
+        self.black_point_compensation = true;
         self
     }
 

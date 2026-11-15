@@ -4,6 +4,7 @@
 use crate::{PageDiagnostics, RasterSession, open_session, open_session_from_bytes};
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 
@@ -411,6 +412,17 @@ pub struct SessionConfig {
     /// [`open_session`] returns [`RasterError::InvalidOptions`] (see
     /// [`check_gpu_pages`](Self::check_gpu_pages)).
     pub gpu_pages: bool,
+    /// The ICC profile every page is converted to once composited, its
+    /// device values the pages' pixels.
+    ///
+    /// Default `None`: pages are sRGB.  An RGB profile yields RGB pages of
+    /// its device values, a gray one gray pages
+    /// ([`FinishedCanvas::Gray8`](crate::FinishedCanvas::Gray8),
+    /// [`Gray16`](crate::FinishedCanvas::Gray16)).  Each page converts under
+    /// [`RenderParams::intent`](crate::RenderParams::intent), else the one
+    /// intent its marking operators used, else relative colorimetric (see
+    /// [`PageDiagnostics::output_intent`](crate::PageDiagnostics::output_intent)).
+    pub output_profile: Option<Arc<pdf_interp::OutputProfile>>,
 }
 
 impl SessionConfig {
@@ -448,6 +460,7 @@ impl SessionConfig {
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             gpu_pages: false,
+            output_profile: None,
         }
     }
 

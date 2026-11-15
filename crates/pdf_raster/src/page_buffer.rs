@@ -240,6 +240,13 @@ impl PageBuffer {
                     .to_owned(),
             ));
         }
+        if session.output_profile.is_some() {
+            return Err(RasterError::InvalidOptions(
+                "a page buffer holds sRGB pixels: render the pages of a session with an \
+                 output profile with render_page_canvas or render_page_bands"
+                    .to_owned(),
+            ));
+        }
         let scale = f64::from(opts.dpi) / 72.0;
         check_scale(scale)?;
         let page_id = session.resolve_page(page_num)?;

@@ -307,10 +307,7 @@ pub(crate) fn render<'a>(
     let buffers = renderer.try_finish_keeping(false).map_or_else(
         |_| CanvasBuffers::default(),
         |(canvas, _, mut spare)| {
-            match canvas {
-                FinishedCanvas::Rgb8(bitmap) => spare.rgb.reclaim(bitmap),
-                FinishedCanvas::Rgb16(bitmap) => spare.rgb16.reclaim(bitmap),
-            }
+            canvas.reclaim_into(&mut spare);
             spare
         },
     );

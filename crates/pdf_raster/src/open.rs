@@ -65,6 +65,10 @@ pub struct RasterSession {
     /// Set once a rendered page has been found to carry a 3D or multimedia
     /// annotation, so the warning is emitted once per document.
     pub(crate) media_warned: AtomicBool,
+    /// The output profile ([`crate::SessionConfig::output_profile`]).
+    pub(crate) output_profile: Option<Arc<pdf_interp::OutputProfile>>,
+    /// Whether a page of mixed rendering intents has been reported.
+    pub(crate) mixed_intents_warned: AtomicBool,
     /// The document-level features the renderer ignores.
     pub(crate) unsupported_features: Vec<pdf_interp::UnsupportedFeature>,
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
@@ -205,6 +209,13 @@ impl RasterSession {
     #[must_use]
     pub fn unsupported_features(&self) -> &[UnsupportedFeature] {
         &self.unsupported_features
+    }
+
+    /// The profile every page is converted to
+    /// ([`SessionConfig::output_profile`]).
+    #[must_use]
+    pub const fn output_profile(&self) -> Option<&Arc<pdf_interp::OutputProfile>> {
+        self.output_profile.as_ref()
     }
 
     /// The backend policy this session was opened with.
@@ -568,6 +579,8 @@ fn open_session_with_doc(
         form_type,
         javascript_warned: AtomicBool::new(false),
         media_warned: AtomicBool::new(false),
+        output_profile: config.output_profile.clone(),
+        mixed_intents_warned: AtomicBool::new(false),
         unsupported_features,
         #[cfg(any(feature = "gpu-icc", feature = "cache"))]
         gpu_ctx,

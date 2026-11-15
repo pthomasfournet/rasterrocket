@@ -90,6 +90,16 @@ pub(crate) fn prepare_band16(band: &Bitmap<Rgb16>, invert: bool, args: &Args) ->
     })
 }
 
+/// `band`, gray device values of an output profile, inverted when
+/// `invert`: `None` when it is written as it is.
+pub(crate) fn prepare_gray_band<P: Pixel>(band: &Bitmap<P>, invert: bool) -> Option<Bitmap<P>> {
+    invert.then(|| {
+        let mut gray = copy_of(band);
+        complement(&mut gray);
+        gray
+    })
+}
+
 /// Whether `rgb`, an 8-bit page, is reversed out (see [`is_reversed_out`]):
 /// measured on its luma.
 pub(crate) fn is_reversed_out8(rgb: &Bitmap<Rgb8>) -> bool {
@@ -134,7 +144,7 @@ fn finish(mut page: Page, invert: bool, args: &Args, y0: u32) -> Page {
 /// Whether `luma` is light content on a flat dark ground: see
 /// [`GROUND_NUMERATOR`].  The tone bands are counted on the 8-bit level of
 /// each sample, its high byte at 16 bits.  An empty page is not.
-fn is_reversed_out<P: Pixel>(luma: &Bitmap<P>) -> bool {
+pub(crate) fn is_reversed_out<P: Pixel>(luma: &Bitmap<P>) -> bool {
     let w = luma.width as usize;
     let mut histogram = [0u64; 256];
     for y in 0..luma.height {

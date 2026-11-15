@@ -14,7 +14,9 @@
 //! an ink canvas through [`InkPattern`], which converts each span to ink.
 
 use color::cmyk::{ink_to_rgb_row, ink_to_rgb_row16};
-use color::{DeviceN8, DeviceN16, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth};
+use color::{
+    DeviceN8, DeviceN16, Gray8, Gray16, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth,
+};
 use raster::clip::Clip;
 use raster::pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
@@ -112,12 +114,19 @@ pub(super) enum PageCanvas {
     Ink16(Bitmap<DeviceN16>),
 }
 
-/// A finished page: the canvas as sRGB pixels at its depth.
+/// A finished page: the canvas as sRGB pixels at its depth, or, once
+/// converted to an output profile
+/// ([`OutputProfile::convert`](crate::OutputProfile::convert)), as the
+/// profile's RGB or gray device values.
 pub enum FinishedCanvas {
-    /// 8-bit sRGB.
+    /// 8-bit RGB.
     Rgb8(Bitmap<Rgb8>),
-    /// 16-bit sRGB.
+    /// 16-bit RGB.
     Rgb16(Bitmap<Rgb16>),
+    /// 8-bit gray, 0 black: the device values of a gray output profile.
+    Gray8(Bitmap<Gray8>),
+    /// 16-bit gray, 0 black: the device values of a gray output profile.
+    Gray16(Bitmap<Gray16>),
 }
 
 impl std::fmt::Debug for FinishedCanvas {
@@ -138,6 +147,8 @@ impl FinishedCanvas {
         match self {
             Self::Rgb8(b) => (b.width, b.height),
             Self::Rgb16(b) => (b.width, b.height),
+            Self::Gray8(b) => (b.width, b.height),
+            Self::Gray16(b) => (b.width, b.height),
         }
     }
 
@@ -145,8 +156,19 @@ impl FinishedCanvas {
     #[must_use]
     pub const fn depth(&self) -> SampleDepth {
         match self {
-            Self::Rgb8(_) => SampleDepth::Eight,
-            Self::Rgb16(_) => SampleDepth::Sixteen,
+            Self::Rgb8(_) | Self::Gray8(_) => SampleDepth::Eight,
+            Self::Rgb16(_) | Self::Gray16(_) => SampleDepth::Sixteen,
+        }
+    }
+
+    /// Return the canvas's storage to `buffers` for the next canvas of its
+    /// kind.
+    pub fn reclaim_into(self, buffers: &mut CanvasBuffers) {
+        match self {
+            Self::Rgb8(b) => buffers.rgb.reclaim(b),
+            Self::Rgb16(b) => buffers.rgb16.reclaim(b),
+            Self::Gray8(b) => buffers.gray.reclaim(b),
+            Self::Gray16(b) => buffers.gray16.reclaim(b),
         }
     }
 
@@ -156,6 +178,8 @@ impl FinishedCanvas {
         match self {
             Self::Rgb8(b) => zero_transparent_colour(b),
             Self::Rgb16(b) => zero_transparent_colour(b),
+            Self::Gray8(b) => zero_transparent_colour(b),
+            Self::Gray16(b) => zero_transparent_colour(b),
         }
     }
 }
@@ -1101,7 +1125,7 @@ mod tests {
         };
         match canvas.into_finished(&spots) {
             FinishedCanvas::Rgb8(b) => b,
-            FinishedCanvas::Rgb16(_) => panic!("an 8-bit canvas"),
+            other => panic!("an 8-bit RGB canvas, not {other:?}"),
         }
     }
 

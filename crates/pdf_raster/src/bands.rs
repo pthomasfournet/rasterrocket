@@ -11,7 +11,7 @@
 
 use std::num::NonZeroU32;
 
-use color::{Rgb8, Rgb16};
+use color::{Gray8, Gray16, Rgb8, Rgb16};
 use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, PageDiagnostics, PageState};
 use raster::Bitmap;
 
@@ -33,13 +33,19 @@ pub struct Band<'a> {
     pub bitmap: BandBitmap<'a>,
 }
 
-/// The pixels of a [`Band`], of the depth of [`RenderParams::depth`].
+/// The pixels of a [`Band`], of the depth of [`RenderParams::depth`]:
+/// sRGB, or the device values of the session's
+/// [`output_profile`](crate::SessionConfig::output_profile).
 #[derive(Clone, Copy)]
 pub enum BandBitmap<'a> {
     /// 8-bit RGB.
     Rgb8(&'a Bitmap<Rgb8>),
     /// 16-bit RGB.
     Rgb16(&'a Bitmap<Rgb16>),
+    /// 8-bit gray, of a gray output profile.
+    Gray8(&'a Bitmap<Gray8>),
+    /// 16-bit gray, of a gray output profile.
+    Gray16(&'a Bitmap<Gray16>),
 }
 
 impl<'a> BandBitmap<'a> {
@@ -48,6 +54,8 @@ impl<'a> BandBitmap<'a> {
         match canvas {
             FinishedCanvas::Rgb8(b) => Self::Rgb8(b),
             FinishedCanvas::Rgb16(b) => Self::Rgb16(b),
+            FinishedCanvas::Gray8(b) => Self::Gray8(b),
+            FinishedCanvas::Gray16(b) => Self::Gray16(b),
         }
     }
 
@@ -57,6 +65,8 @@ impl<'a> BandBitmap<'a> {
         match self {
             Self::Rgb8(b) => (b.width, b.height),
             Self::Rgb16(b) => (b.width, b.height),
+            Self::Gray8(b) => (b.width, b.height),
+            Self::Gray16(b) => (b.width, b.height),
         }
     }
 
@@ -64,14 +74,6 @@ impl<'a> BandBitmap<'a> {
     #[must_use]
     pub const fn height(self) -> u32 {
         self.dims().1
-    }
-}
-
-/// Return the storage of `canvas` to `buffers` for the next band.
-fn reclaim(buffers: &mut CanvasBuffers, canvas: FinishedCanvas) {
-    match canvas {
-        FinishedCanvas::Rgb8(b) => buffers.rgb.reclaim(b),
-        FinishedCanvas::Rgb16(b) => buffers.rgb16.reclaim(b),
     }
 }
 
@@ -192,6 +194,7 @@ pub fn render_page_bands<E>(
 
     let mut buffers = CanvasBuffers::default();
     let mut state: Option<PageState> = None;
+    let mut intent = None;
     let mut y = 0;
     while y < view.height {
         let height = rows.min(view.height - y);
@@ -204,16 +207,24 @@ pub fn render_page_bands<E>(
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
         check_strict_images(session, renderer.image_failures())?;
-        let (bitmap, next, spare) = renderer
+        let (bitmap, next, mut spare) = renderer
             .try_finish_band(params.transparent_background)
             .map_err(allocation_failed)?;
+        let (bitmap, output_intent) = crate::output::convert(
+            session,
+            params,
+            page_num,
+            (bitmap, next.content_intents()),
+            &mut spare,
+        )?;
         sink(Band {
             y,
             bitmap: BandBitmap::of(&bitmap),
         })
         .map_err(BandError::Sink)?;
         buffers = spare;
-        reclaim(&mut buffers, bitmap);
+        bitmap.reclaim_into(&mut buffers);
+        intent = output_intent;
         state = Some(next);
         y += height;
     }
@@ -225,5 +236,6 @@ pub fn render_page_bands<E>(
     log_failures(page_num, &diag.image_failures);
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
+    diag.output_intent = intent;
     Ok(diag)
 }

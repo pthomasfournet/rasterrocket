@@ -112,6 +112,9 @@ pub struct PageDiagnostics {
     /// shadings, an image's own `Intent` where it has one.  Empty on a
     /// page that marks nothing.
     pub content_intents: crate::IntentSet,
+    /// The rendering intent the page was converted to its output profile
+    /// under; `None` when it was not converted.
+    pub output_intent: Option<crate::RenderingIntent>,
 }
 
 /// How a page used the whole-page GPU raster.

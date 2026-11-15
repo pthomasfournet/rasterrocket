@@ -43,14 +43,14 @@ fn levels<S: Sample>(samples: &[S], c: usize) -> usize {
 fn rgb16(canvas: FinishedCanvas) -> Bitmap<Rgb16> {
     match canvas {
         FinishedCanvas::Rgb16(b) => b,
-        FinishedCanvas::Rgb8(_) => panic!("a 16-bit render"),
+        other => panic!("a 16-bit RGB render, not {other:?}"),
     }
 }
 
 fn rgb8(canvas: FinishedCanvas) -> Bitmap<Rgb8> {
     match canvas {
         FinishedCanvas::Rgb8(b) => b,
-        FinishedCanvas::Rgb16(_) => panic!("an 8-bit render"),
+        other => panic!("an 8-bit RGB render, not {other:?}"),
     }
 }
 

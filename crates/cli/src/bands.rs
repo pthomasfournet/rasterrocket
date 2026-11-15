@@ -192,10 +192,14 @@ fn render_into(
         let invert = match &canvas {
             FinishedCanvas::Rgb8(rgb) => tone::is_reversed_out8(rgb),
             FinishedCanvas::Rgb16(rgb) => tone::is_reversed_out16(rgb),
+            FinishedCanvas::Gray8(gray) => tone::is_reversed_out(gray),
+            FinishedCanvas::Gray16(gray) => tone::is_reversed_out(gray),
         };
         let band = match &canvas {
             FinishedCanvas::Rgb8(rgb) => BandBitmap::Rgb8(rgb),
             FinishedCanvas::Rgb16(rgb) => BandBitmap::Rgb16(rgb),
+            FinishedCanvas::Gray8(gray) => BandBitmap::Gray8(gray),
+            FinishedCanvas::Gray16(gray) => BandBitmap::Gray16(gray),
         };
         return prepared(band, 0, args, invert, &mut push);
     }
@@ -225,6 +229,14 @@ fn prepared(
             None => push(RowImage::Rgb16(band)),
             Some(WidePage::Rgb(rgb)) => push(RowImage::Rgb16(&rgb)),
             Some(WidePage::Gray(luma)) => push(RowImage::Gray16(&luma)),
+        },
+        BandBitmap::Gray8(band) => match tone::prepare_gray_band(band, invert) {
+            None => push(RowImage::Gray(band)),
+            Some(gray) => push(RowImage::Gray(&gray)),
+        },
+        BandBitmap::Gray16(band) => match tone::prepare_gray_band(band, invert) {
+            None => push(RowImage::Gray16(band)),
+            Some(gray) => push(RowImage::Gray16(&gray)),
         },
     }
 }

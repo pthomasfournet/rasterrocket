@@ -103,6 +103,9 @@ pub enum RasterError {
     /// The render was stopped through its [`CancelToken`](crate::CancelToken).
     /// The rendered bitmap is partial and is discarded.
     Cancelled,
+    /// The output profile admits no conversion for the page, or the
+    /// conversion failed.
+    OutputProfile(pdf_interp::OutputProfileError),
     /// The per-page render function panicked.
     ///
     /// Caught only under `panic = "unwind"` builds (e.g. test profiles).
@@ -173,6 +176,7 @@ impl std::fmt::Display for RasterError {
             }
             Self::PageBudgetExceeded(msg) => write!(f, "page render budget exceeded: {msg}"),
             Self::Cancelled => f.write_str("page render cancelled"),
+            Self::OutputProfile(e) => write!(f, "output profile: {e}"),
             Self::RenderPanic { page, message } => {
                 write!(f, "page {page} render panicked: {message}")
             }
@@ -195,6 +199,7 @@ impl std::error::Error for RasterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Pdf(e) => Some(e),
+            Self::OutputProfile(e) => Some(e),
             _ => None,
         }
     }

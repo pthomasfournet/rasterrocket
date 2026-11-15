@@ -227,6 +227,11 @@ pub struct CanvasBuffers {
     pub ink: raster::BitmapBuffers,
     /// The 16-bit ink canvas's colour buffer and alpha plane.
     pub ink16: raster::BitmapBuffers<u16>,
+    /// The gray bitmap's colour buffer and alpha plane, of a canvas
+    /// converted to a gray output profile.
+    pub gray: raster::BitmapBuffers,
+    /// The 16-bit gray bitmap's colour buffer and alpha plane.
+    pub gray16: raster::BitmapBuffers<u16>,
 }
 
 /// The ink map of a page, shared by the renderers of its pattern cells
@@ -446,8 +451,8 @@ pub struct PageRenderer<'doc> {
 fn rgb8(finished: FinishedCanvas) -> Bitmap<Rgb8> {
     match finished {
         FinishedCanvas::Rgb8(rgb) => rgb,
-        FinishedCanvas::Rgb16(_) => {
-            panic!("an 8-bit finish of a renderer of 16-bit samples")
+        other => {
+            panic!("an 8-bit RGB finish, not {other:?}: a renderer's canvas is RGB of its depth")
         }
     }
 }

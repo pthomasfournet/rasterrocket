@@ -118,6 +118,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         max_page_bytes: opts.max_page_bytes,
         page_box: opts.page_box,
         rotation: opts.rotation,
+        output_profile: opts.output_profile.clone(),
         ..defaults
     }
 }

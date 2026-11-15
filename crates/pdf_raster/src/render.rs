@@ -129,14 +129,26 @@ pub fn render_page_canvas_with_diagnostics(
 ///
 /// [`RasterError::InvalidOptions`] for a 16-bit bitmap: the renderer
 /// returns a bitmap of the depth it is asked for, so only a caller that
-/// asked for 16 bits receives one.
+/// asked for 16 bits receives one; and for a gray bitmap, which a gray
+/// output profile converts every page to.
 pub(crate) fn rgb8(canvas: FinishedCanvas) -> Result<Bitmap<Rgb8>, RasterError> {
     match canvas {
         FinishedCanvas::Rgb8(bitmap) => Ok(bitmap),
         FinishedCanvas::Rgb16(_) => Err(RasterError::InvalidOptions(
             "a 16-bit page where an 8-bit one was rendered".to_owned(),
         )),
+        FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_) => Err(gray_output()),
     }
+}
+
+/// The refusal of an RGB result for a page a gray output profile converts
+/// to gray.
+pub(crate) fn gray_output() -> RasterError {
+    RasterError::InvalidOptions(
+        "the session's output profile is gray, so its pages are gray: render them with \
+         render_page_canvas, render_page_bands or render_page_gray"
+            .to_owned(),
+    )
 }
 
 /// Render page `page_num` (1-based) of `session` to the grayscale
@@ -169,11 +181,24 @@ pub fn render_page_gray(
             "deskew operates on 8-bit gray: render at depth 8 to deskew".to_owned(),
         ));
     }
+    let rgb_profile = session
+        .output_profile
+        .as_ref()
+        .is_some_and(|p| p.space() == pdf_interp::OutputSpace::Rgb);
+    if rgb_profile {
+        return Err(RasterError::InvalidOptions(
+            "a gray page of an RGB output profile's device values has no meaning: give the \
+             session a gray output profile, or render the page in colour"
+                .to_owned(),
+        ));
+    }
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
     let mut params = RenderParams::new(f64::from(dpi) / 72.0).with_depth(opts.depth);
     params.cancel.clone_from(&opts.cancel);
+    params.intent = opts.intent;
+    params.black_point_compensation = opts.black_point_compensation;
     let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
@@ -182,8 +207,9 @@ pub fn render_page_gray(
         &params,
         &mut CanvasBuffers::default(),
     )?;
-    let rgb = match canvas {
-        FinishedCanvas::Rgb8(rgb) => rgb,
+    let mut gray = match canvas {
+        FinishedCanvas::Rgb8(rgb) => rgb_into_gray(rgb),
+        FinishedCanvas::Gray8(gray) => gray,
         FinishedCanvas::Rgb16(rgb) => {
             return Ok(crate::page::gray16_into_rendered_page(
                 &rgb16_to_gray16(&rgb),
@@ -192,8 +218,15 @@ pub fn render_page_gray(
                 diagnostics,
             ));
         }
+        FinishedCanvas::Gray16(gray) => {
+            return Ok(crate::page::gray16_into_rendered_page(
+                &gray,
+                page_num,
+                dpi,
+                diagnostics,
+            ));
+        }
     };
-    let mut gray = rgb_into_gray(rgb);
 
     if opts.deskew {
         crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
@@ -239,6 +272,8 @@ pub fn render_page_rgba(
         .with_transparent_background()
         .with_depth(opts.depth);
     params.cancel.clone_from(&opts.cancel);
+    params.intent = opts.intent;
+    params.black_point_compensation = opts.black_point_compensation;
     let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
@@ -254,6 +289,7 @@ pub fn render_page_rgba(
         FinishedCanvas::Rgb16(rgb) => {
             crate::page::rgb16_to_rgba16_rendered_page(&rgb, page_num, dpi, diagnostics)
         }
+        FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_) => return Err(gray_output()),
     })
 }
 
@@ -396,6 +432,14 @@ pub(crate) fn render_page_canvas_with_geom(
         .try_finish_keeping(params.transparent_background)
         .map_err(allocation_failed)?;
     *buffers = spare;
+    let (bitmap, output_intent) = crate::output::convert(
+        session,
+        params,
+        page_num,
+        (bitmap, diag.content_intents),
+        buffers,
+    )?;
+    diag.output_intent = output_intent;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     #[cfg(feature = "vulkan")]
@@ -473,6 +517,7 @@ pub(crate) fn begin(
 ) -> Result<crate::BackendPolicy, RasterError> {
     check_scale(params.scale_x)?;
     check_scale(params.scale_y)?;
+    crate::output::check_params(session, params)?;
     if params
         .cancel
         .as_ref()
