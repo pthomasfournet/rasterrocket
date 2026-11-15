@@ -2938,8 +2938,6 @@
       {"file": "pixel/bug_1236805.in", "outcome": "strict", "reason": "unclassified (seeded 2026-11-13)"},
       {"file": "pixel/bug_1258634.in", "outcome": "strict", "reason": "unclassified (seeded 2026-11-13)"},
       {"file": "pixel/bug_1258634.in", "page": 1, "outcome": "differs", "rmse": 14.7, "tile": 251.43, "reason": "unclassified (seeded 2026-11-13)"},
-      {"file": "pixel/bug_1258968.in", "outcome": "abort", "reason": "unclassified (seeded 2026-11-13)"},
-      {"file": "pixel/bug_1258968.in", "page": 1, "outcome": "missing", "reason": "unclassified (seeded 2026-11-13)"},
       {"file": "pixel/bug_1296.in", "page": 1, "outcome": "differs", "rmse": 5.83, "reason": "unclassified (seeded 2026-11-13)"},
       {"file": "pixel/bug_1308_1.in", "page": 1, "outcome": "differs", "rmse": 7.03, "reason": "unclassified (seeded 2026-11-13)"},
       {"file": "pixel/bug_1314.in", "page": 2, "outcome": "differs", "rmse": 22.32, "tile": 93.38, "reason": "unclassified (seeded 2026-11-13)"},
