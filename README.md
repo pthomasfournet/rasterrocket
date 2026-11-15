@@ -558,7 +558,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
 | `gpu-icc` | GPU CMYK→RGB ICC transform through the profile's lookup table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU table evaluator | CUDA, or Vulkan with `vulkan` |
-| `gpu-deskew` | GPU deskew rotation via NPP | CUDA + NPP |
+| `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend (cross-vendor) for whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |

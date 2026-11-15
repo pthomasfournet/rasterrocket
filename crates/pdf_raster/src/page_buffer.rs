@@ -109,7 +109,7 @@ impl PageBuffer {
         let (width, height) = (rgb.width, rgb.height);
         if opts.deskew {
             let gray = rgb_into_gray(rgb);
-            let deskewed = crate::deskew::apply_into(&gray, out, stride);
+            let deskewed = crate::deskew::apply_into(&gray, out, stride, session.policy);
             self.canvas.rgb.reclaim(gray);
             deskewed.map_err(|e| RasterError::Deskew(e.to_string()))?;
         } else {

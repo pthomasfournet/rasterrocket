@@ -449,7 +449,8 @@ fn render_one(
     bmp = turn::turn(bmp, opts.session.rotation);
 
     if opts.deskew {
-        pdf_raster::deskew::apply(&mut bmp).map_err(|e| ComicError::Deskew(e.to_string()))?;
+        pdf_raster::deskew::apply(&mut bmp, opts.session.policy)
+            .map_err(|e| ComicError::Deskew(e.to_string()))?;
     }
 
     Ok(pdf_raster::gray8_into_rendered_page(

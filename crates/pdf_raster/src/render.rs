@@ -239,7 +239,8 @@ pub fn render_page_gray(
     };
 
     if opts.deskew {
-        crate::deskew::apply(&mut gray).map_err(|e| RasterError::Deskew(e.to_string()))?;
+        crate::deskew::apply(&mut gray, session.policy)
+            .map_err(|e| RasterError::Deskew(e.to_string()))?;
     }
 
     Ok(crate::page::gray8_into_rendered_page(

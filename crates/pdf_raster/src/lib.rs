@@ -410,8 +410,9 @@ pub struct RasterOptions {
     pub last_page: u32,
 
     /// Uses an intensity-weighted projection-profile sweep (no binarisation
-    /// threshold) with GPU bilinear rotation via CUDA NPP (`gpu-deskew` feature)
-    /// or CPU bilinear fallback.  Corrects skew up to ±7° with sub-0.05°
+    /// threshold) with bilinear rotation, on the GPU via CUDA NPP under
+    /// [`BackendPolicy::ForceCuda`] in a build with the `gpu-deskew` feature,
+    /// on the CPU otherwise.  Corrects skew up to ±7° with sub-0.05°
     /// accuracy.  Disable for native-text PDFs that are never physically skewed.
     pub deskew: bool,
 

@@ -11,8 +11,9 @@
 //!    to 0.01° convergence.
 //!
 //! 2. **Rotation** (`rotate` module) — bilinear rotation by the detected angle.
-//!    GPU path (CUDA NPP `nppiRotate`) when the `gpu-deskew` feature is enabled
-//!    and a CUDA device is available; CPU bilinear fallback otherwise.
+//!    GPU path (CUDA NPP `nppiRotate`) when the `gpu-deskew` feature is enabled,
+//!    the backend policy is [`BackendPolicy::ForceCuda`] and a CUDA device is
+//!    available; CPU bilinear rotation otherwise.
 //!    Rotation is clockwise-positive: a detected CCW tilt of +θ° is corrected
 //!    by passing +θ° to `rotate_inplace` (CW rotation by θ°).
 //!
@@ -21,10 +22,10 @@
 //! ```rust,no_run
 //! use color::Gray8;
 //! use raster::Bitmap;
-//! use rasterrocket::deskew;
+//! use rasterrocket::{BackendPolicy, deskew};
 //!
 //! let mut page: Bitmap<Gray8> = todo!();
-//! deskew::apply(&mut page).expect("deskew failed");
+//! deskew::apply(&mut page, BackendPolicy::default()).expect("deskew failed");
 //! ```
 
 pub(crate) mod detect;
@@ -32,6 +33,8 @@ pub(crate) mod rotate;
 
 use color::Gray8;
 use raster::Bitmap;
+
+use crate::BackendPolicy;
 
 /// Minimum skew magnitude that triggers rotation.
 ///
@@ -65,7 +68,9 @@ impl std::fmt::Display for DeskewError {
 
 impl std::error::Error for DeskewError {}
 
-/// Detect the skew angle of `img` and rotate it in-place to correct it.
+/// Detect the skew angle of `img` and rotate it in-place to correct it,
+/// on the GPU only under [`BackendPolicy::ForceCuda`] in a build with the
+/// `gpu-deskew` feature, on the CPU otherwise.
 ///
 /// Does nothing if the detected angle is below `MIN_CORRECT_DEG`.  A
 /// failed detection counts as zero skew, and leaves the image as it is.
@@ -75,11 +80,11 @@ impl std::error::Error for DeskewError {}
 /// [`DeskewError`] when a side of `img` exceeds [`DESKEW_MAX_SIDE`]; `img`
 /// is then left as it is.  A GPU rotation that fails falls back to the CPU
 /// rotation, which cannot fail.
-pub fn apply(img: &mut Bitmap<Gray8>) -> Result<(), DeskewError> {
+pub fn apply(img: &mut Bitmap<Gray8>, policy: BackendPolicy) -> Result<(), DeskewError> {
     check_size(img)?;
     let angle_deg = detect::find_skew_deg(img);
     if angle_deg.abs() >= MIN_CORRECT_DEG {
-        rotate::rotate_inplace(img, angle_deg);
+        rotate::rotate_inplace(img, angle_deg, policy);
     }
     Ok(())
 }
@@ -98,6 +103,7 @@ pub(crate) fn apply_into(
     img: &Bitmap<Gray8>,
     out: &mut [u8],
     stride: usize,
+    policy: BackendPolicy,
 ) -> Result<(), DeskewError> {
     check_size(img)?;
     let angle_deg = detect::find_skew_deg(img);
@@ -105,7 +111,7 @@ pub(crate) fn apply_into(
         copy_rows(img, out, stride);
         return Ok(());
     }
-    match rotate::rotated_on_gpu(img, angle_deg) {
+    match rotate::rotated_on_gpu(img, angle_deg, policy) {
         Some(rotated) => copy_rows(&rotated, out, stride),
         None => rotate::rotate_cpu_into(img, angle_deg, out, stride),
     }
@@ -140,14 +146,14 @@ mod tests {
     fn a_page_past_the_deskew_bound_is_refused_and_left_as_it_is() {
         for (w, h) in [(DESKEW_MAX_SIDE + 1, 2), (2, DESKEW_MAX_SIDE + 1)] {
             let mut img = Bitmap::<Gray8>::new_filled(w, h, 1, false, 7);
-            let err = apply(&mut img).expect_err("over the bound");
+            let err = apply(&mut img, BackendPolicy::CpuOnly).expect_err("over the bound");
             assert!(err.to_string().contains("32768 px a side"), "{err}");
             assert!(img.data().iter().all(|&v| v == 7));
             let mut out = vec![1u8; img.data().len()];
-            assert!(apply_into(&img, &mut out, w as usize).is_err());
+            assert!(apply_into(&img, &mut out, w as usize, BackendPolicy::CpuOnly).is_err());
             assert!(out.iter().all(|&v| v == 1), "out is untouched");
         }
         let mut img = Bitmap::<Gray8>::new_filled(DESKEW_MAX_SIDE, 2, 1, false, 255);
-        assert!(apply(&mut img).is_ok());
+        assert!(apply(&mut img, BackendPolicy::CpuOnly).is_ok());
     }
 }
