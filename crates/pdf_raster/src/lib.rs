@@ -410,11 +410,15 @@ pub struct RasterOptions {
     /// [`pages`](Self::pages) is `Some`.
     pub last_page: u32,
 
-    /// Uses an intensity-weighted projection-profile sweep (no binarisation
-    /// threshold) with bilinear rotation, on the GPU via CUDA NPP under
-    /// [`BackendPolicy::ForceCuda`] in a build with the `gpu-deskew` feature,
-    /// on the CPU otherwise.  Corrects skew up to ±7° with sub-0.05°
-    /// accuracy.  Disable for native-text PDFs that are never physically skewed.
+    /// Straighten gray pages: measure the skew of each by an
+    /// intensity-weighted projection-profile sweep (no binarisation
+    /// threshold) and rotate it bilinearly, on the GPU via CUDA NPP under
+    /// [`BackendPolicy::ForceCuda`] in a build with the `gpu-deskew`
+    /// feature, on the CPU otherwise.  Measures skew within ±6.75° to about
+    /// `2 / W` radians on a page `W` pixels wide (0.045° for A4 at
+    /// 300 dpi); a page without a confident angle, such as a photograph or
+    /// a blank page, is left as it is.  The measurement is reported in
+    /// [`RenderedPage::skew`].  See [`deskew`] for the method and limits.
     pub deskew: bool,
 
     /// Sparse page selection.  When `Some`, only the pages in the [`PageSet`]
@@ -731,6 +735,10 @@ pub struct RenderedPage {
     /// on `has_vector_text = true` pages, or send only the pages without
     /// [`PageDiagnostics::has_visible_text`] to OCR.
     pub diagnostics: PageDiagnostics,
+    /// The skew [`RasterOptions::deskew`] measured and, when at least
+    /// [`deskew::MIN_CORRECT_DEG`], corrected.  `None` when deskew is off or
+    /// the page has no confident angle, which leaves the page as rendered.
+    pub skew: Option<deskew::Skew>,
 }
 
 // ── Top-level render entry points ─────────────────────────────────────────────

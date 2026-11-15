@@ -218,12 +218,14 @@ pub fn render_page_gray(
     };
     Ok(match gray {
         GrayCanvas::Eight(mut gray) => {
-            deskewed(&mut gray, opts.deskew, session.policy)?;
-            crate::page::gray8_into_rendered_page(gray, page_num, dpi, diagnostics)
+            let skew = deskewed(&mut gray, opts.deskew, session.policy)?;
+            let page = crate::page::gray8_into_rendered_page(gray, page_num, dpi, diagnostics);
+            RenderedPage { skew, ..page }
         }
         GrayCanvas::Sixteen(mut gray) => {
-            deskewed(&mut gray, opts.deskew, session.policy)?;
-            crate::page::gray16_into_rendered_page(gray, page_num, dpi, diagnostics)
+            let skew = deskewed(&mut gray, opts.deskew, session.policy)?;
+            let page = crate::page::gray16_into_rendered_page(gray, page_num, dpi, diagnostics);
+            RenderedPage { skew, ..page }
         }
     })
 }
@@ -234,16 +236,16 @@ enum GrayCanvas {
     Sixteen(Bitmap<color::Gray16>),
 }
 
-/// Deskew `gray` under `policy` when `deskew`.
+/// Deskew `gray` under `policy` when `deskew`; the skew measured.
 fn deskewed<P: crate::deskew::DeskewPixel>(
     gray: &mut Bitmap<P>,
     deskew: bool,
     policy: crate::BackendPolicy,
-) -> Result<(), RasterError> {
-    if deskew {
-        crate::deskew::apply(gray, policy).map_err(|e| RasterError::Deskew(e.to_string()))?;
+) -> Result<Option<crate::deskew::Skew>, RasterError> {
+    if !deskew {
+        return Ok(None);
     }
-    Ok(())
+    crate::deskew::apply(gray, policy).map_err(|e| RasterError::Deskew(e.to_string()))
 }
 
 /// Render page `page_num` (1-based) of `session` over a transparent

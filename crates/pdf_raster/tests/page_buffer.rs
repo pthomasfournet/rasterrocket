@@ -137,6 +137,14 @@ fn deskew_rotates_the_skewed_page() {
     let plain = render_page_gray(&session, 3, &opts).expect("plain");
     opts.deskew = true;
     let deskewed = render_page_gray(&session, 3, &opts).expect("deskewed");
+    assert_eq!(plain.skew, None, "deskew off measures nothing");
+    let skew = deskewed
+        .skew
+        .expect("the skewed page has a confident angle");
+    assert!(
+        skew.angle_deg.abs() >= rasterrocket::deskew::MIN_CORRECT_DEG,
+        "{skew:?}"
+    );
     assert_ne!(
         plain.pixels, deskewed.pixels,
         "the fixture exercises rotation"

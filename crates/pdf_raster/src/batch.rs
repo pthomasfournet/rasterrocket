@@ -585,6 +585,7 @@ mod channel_tests {
             format: crate::PixelFormat::Gray8,
             dpi: 72.0,
             diagnostics: crate::PageDiagnostics::default(),
+            skew: None,
         };
         let (pn, res) = catch_page_panic(3u32, move || -> Result<RenderedPage, RasterError> {
             Ok(dummy)
@@ -610,6 +611,7 @@ mod channel_tests {
                     format: crate::PixelFormat::Gray8,
                     dpi: 72.0,
                     diagnostics: crate::PageDiagnostics::default(),
+                    skew: None,
                 })
             });
             results.push(item);

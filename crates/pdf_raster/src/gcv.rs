@@ -370,6 +370,7 @@ mod tests {
             format: PixelFormat::Gray8,
             dpi: 300.0,
             diagnostics: crate::PageDiagnostics::default(),
+            skew: None,
         }
     }
 

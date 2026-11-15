@@ -108,8 +108,9 @@ fn render_capture(img: &Gray, opts: CameraOptions, deskew: bool) -> Vec<Gray> {
             let page = Gray::from_page(p);
             if deskew {
                 let mut bmp = page.to_bitmap();
-                rasterrocket::deskew::apply(&mut bmp, rasterrocket::BackendPolicy::CpuOnly)
-                    .expect("deskew");
+                let _skew =
+                    rasterrocket::deskew::apply(&mut bmp, rasterrocket::BackendPolicy::CpuOnly)
+                        .expect("deskew");
                 Gray::from_bitmap(&bmp)
             } else {
                 page

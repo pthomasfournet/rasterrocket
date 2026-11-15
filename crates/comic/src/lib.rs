@@ -137,7 +137,8 @@ pub struct ComicOptions {
     /// Last page (1-based, inclusive). Must be ≥ `first_page`. Clamped to the
     /// image count when it exceeds the number of pages.
     pub last_page: u32,
-    /// Run deskew on each decoded page before producing the `RenderedPage`.
+    /// Run deskew on each decoded page before producing the `RenderedPage`,
+    /// which carries the skew measured in `RenderedPage::skew`.
     pub deskew: bool,
     /// The depth of the pages' samples.  Default [`SampleDepth::Eight`]:
     /// [`PixelFormat::Gray8`](pdf_raster::PixelFormat::Gray8) pages.
@@ -460,29 +461,36 @@ fn render_one(
         },
     })?;
     let diagnostics = pdf_raster::PageDiagnostics::default();
-    Ok(match page {
+    let (mut page, skew) = match page {
         decode::PageImage::Eight(bmp) => {
-            let bmp = prepared(bmp, opts)?;
-            pdf_raster::gray8_into_rendered_page(bmp, page_num, opts.dpi, diagnostics)
+            let (bmp, skew) = prepared(bmp, opts)?;
+            let page = pdf_raster::gray8_into_rendered_page(bmp, page_num, opts.dpi, diagnostics);
+            (page, skew)
         }
         decode::PageImage::Sixteen(bmp) => {
-            let bmp = prepared(bmp, opts)?;
-            pdf_raster::gray16_into_rendered_page(bmp, page_num, opts.dpi, diagnostics)
+            let (bmp, skew) = prepared(bmp, opts)?;
+            let page = pdf_raster::gray16_into_rendered_page(bmp, page_num, opts.dpi, diagnostics);
+            (page, skew)
         }
-    })
+    };
+    page.skew = skew;
+    Ok(page)
 }
 
-/// `bmp` turned by the session's rotation, then deskewed when asked.
+/// `bmp` turned by the session's rotation, then deskewed when asked; the
+/// skew deskew measured.
 fn prepared<P: pdf_raster::deskew::DeskewPixel>(
     bmp: Bitmap<P>,
     opts: &ComicOptions,
-) -> Result<Bitmap<P>, ComicError> {
+) -> Result<(Bitmap<P>, Option<pdf_raster::deskew::Skew>), ComicError> {
     let mut bmp = turn::turn(bmp, opts.session.rotation);
-    if opts.deskew {
+    let skew = if opts.deskew {
         pdf_raster::deskew::apply(&mut bmp, opts.session.policy)
-            .map_err(|e| ComicError::Deskew(e.to_string()))?;
-    }
-    Ok(bmp)
+            .map_err(|e| ComicError::Deskew(e.to_string()))?
+    } else {
+        None
+    };
+    Ok((bmp, skew))
 }
 
 /// Open a single PDF entry as a session whose pages [`ComicPages`] renders

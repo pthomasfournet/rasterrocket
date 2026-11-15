@@ -139,6 +139,7 @@ pub fn gray8_to_rendered_page(
         format: PixelFormat::Gray8,
         dpi,
         diagnostics,
+        skew: None,
     }
 }
 
@@ -169,6 +170,7 @@ pub fn gray8_into_rendered_page(
         format: PixelFormat::Gray8,
         dpi,
         diagnostics,
+        skew: None,
     }
 }
 
@@ -193,6 +195,7 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
         format: PixelFormat::Rgba8,
         dpi,
         diagnostics,
+        skew: None,
     }
 }
 
@@ -222,6 +225,7 @@ fn rendered_page(
         format,
         dpi,
         diagnostics,
+        skew: None,
     }
 }
 
@@ -309,6 +313,7 @@ pub(crate) fn rgb16_to_rgba16_rendered_page(
         format: PixelFormat::Rgba16,
         dpi,
         diagnostics,
+        skew: None,
     }
 }
 

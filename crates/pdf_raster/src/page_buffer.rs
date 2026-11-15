@@ -72,6 +72,9 @@ pub struct PageInfo {
     /// Metadata collected during the render; see
     /// [`RenderedPage::diagnostics`](crate::RenderedPage::diagnostics).
     pub diagnostics: PageDiagnostics,
+    /// The skew deskew measured; see
+    /// [`RenderedPage::skew`](crate::RenderedPage::skew).
+    pub skew: Option<crate::deskew::Skew>,
 }
 
 impl PageBuffer {
@@ -107,15 +110,16 @@ impl PageBuffer {
         let (rgb, diagnostics) =
             self.render_canvas(session, page_num, opts, format, false, out.len(), stride)?;
         let (width, height) = (rgb.width, rgb.height);
-        if opts.deskew {
+        let skew = if opts.deskew {
             let gray = rgb_into_gray(rgb);
             let deskewed = crate::deskew::apply_into(&gray, out, stride, session.policy);
             self.canvas.rgb.reclaim(gray);
-            deskewed.map_err(|e| RasterError::Deskew(e.to_string()))?;
+            deskewed.map_err(|e| RasterError::Deskew(e.to_string()))?
         } else {
             rgb_rows_to_gray(&rgb, out, stride);
             self.canvas.rgb.reclaim(rgb);
-        }
+            None
+        };
         Ok(PageInfo {
             page_num,
             width,
@@ -123,6 +127,7 @@ impl PageBuffer {
             format,
             dpi: opts.dpi,
             diagnostics,
+            skew,
         })
     }
 
@@ -212,6 +217,7 @@ impl PageBuffer {
             format,
             dpi: opts.dpi,
             diagnostics,
+            skew: None,
         })
     }
 
