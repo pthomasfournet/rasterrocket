@@ -21,8 +21,13 @@
 //!
 //! Declines when more than half the analysis plane is dark (a dark ground:
 //! a reversed-out or full-bleed page), when no dark region touches the
-//! edge, when every such region extends past the band, or when the junk
-//! covers more than a quarter of the page.
+//! edge, or when every such region extends past the band.
+//!
+//! The band bounds the junk.  On a `w × h` plane with band depth
+//! `b = ⌈0.06 · min(w, h)⌉ ≤ 0.06 · min(w, h) + 1`, junk covers at most
+//! `1 − (1 − 2b/w)(1 − 2b/h)` of the page: under 25 % once the shorter
+//! side reaches 200 analysis pixels, and more only on thumbnail-sized
+//! images, where the rounding of `b` dominates.
 //!
 //! # Limits
 //!
@@ -43,8 +48,6 @@ const DARK_BELOW: u8 = 128;
 const BAND_PER_CENT: usize = 6;
 /// A dark ground covers more than `num / den` of the analysis plane.
 const DARK_GROUND: (usize, usize) = (1, 2);
-/// Junk may cover at most `num / den` of the analysis plane.
-const MAX_JUNK: (usize, usize) = (1, 4);
 
 /// Dark border regions to whiten, as runs of source pixels.
 ///
@@ -67,9 +70,9 @@ struct RunRow {
 /// Find the dark regions along the edges of the 8-bit luma `img` that a
 /// scanner leaves outside the page.
 ///
-/// Declines on a dark ground, when no dark region touches the edge, when
-/// every one reaches past the border band, or when the regions found cover
-/// more than a quarter of the page.
+/// Declines on a dark ground, when no dark region touches the edge, or
+/// when every one reaches past the border band, 6 % of the shorter side
+/// deep.
 ///
 /// # Errors
 ///
@@ -133,7 +136,7 @@ fn detect(img: &GrayView<'_>) -> Result<BorderMask, String> {
     let band = (w.min(h) * BAND_PER_CENT).div_ceil(100).max(1);
     let mut seen = vec![false; w * h];
     let mut junk = vec![false; w * h];
-    let (mut candidates, mut junk_area) = (0usize, 0usize);
+    let (mut candidates, mut junk_found) = (0usize, false);
     let (mut stack, mut region) = (Vec::new(), Vec::new());
     for start in border_indices(w, h) {
         if !dark[start] || seen[start] {
@@ -151,7 +154,7 @@ fn detect(img: &GrayView<'_>) -> Result<BorderMask, String> {
         });
         candidates += 1;
         if within_band(&region, w, h, band) {
-            junk_area += region.len();
+            junk_found = true;
             for &i in &region {
                 junk[i] = true;
             }
@@ -160,18 +163,11 @@ fn detect(img: &GrayView<'_>) -> Result<BorderMask, String> {
     if candidates == 0 {
         return Err("no dark region touches the image edge".to_owned());
     }
-    if junk_area == 0 {
+    if !junk_found {
         return Err(format!(
             "{candidates} dark region(s) touch the image edge, each reaching past the \
              {} px border band",
             band * factor
-        ));
-    }
-    if junk_area * MAX_JUNK.1 > w * h * MAX_JUNK.0 {
-        return Err(format!(
-            "dark border regions cover {} % of the page, more than {} %",
-            junk_area * 100 / (w * h),
-            100 * MAX_JUNK.0 / MAX_JUNK.1
         ));
     }
     Ok(BorderMask {
@@ -388,23 +384,6 @@ mod tests {
         assert!(declined(&reversed).contains("dark ground"));
         let dark = plane(900, 1200, |_, _| 15);
         assert!(declined(&dark).contains("dark ground"));
-    }
-
-    #[test]
-    fn junk_over_a_quarter_of_the_page_declines() {
-        // The band holds at most 1 − 0.88² ≈ 23 % of a large page; on a
-        // 20 × 20 page it is rounded up to 2 px, and a frame that deep
-        // covers 36 %.
-        let (w, h) = (20, 20);
-        let img = plane(w, h, |x, y| {
-            if x < 2 || x >= w - 2 || y < 2 || y >= h - 2 {
-                20
-            } else {
-                235
-            }
-        });
-        let reason = declined(&img);
-        assert!(reason.contains("cover"), "{reason}");
     }
 
     #[test]
