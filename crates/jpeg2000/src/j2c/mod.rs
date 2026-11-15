@@ -15,7 +15,7 @@ mod tile;
 
 use super::jp2::ImageBoxes;
 use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
-use crate::error::{FormatError, MarkerError, Result, bail};
+use crate::error::{FormatError, MarkerError, Result, ValidationError, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
@@ -60,42 +60,67 @@ impl ComponentData {
     }
 }
 
-pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<Image<'a>> {
+/// Parse a raw codestream.  With `color_channels`, the image has that many
+/// colour channels, in the colour space of that channel count (gray, RGB,
+/// CMYK or unknown), and an alpha channel when the codestream has one more
+/// component; the codestream must have `color_channels` components or one
+/// more.  Without, the colour space is inferred from the components.
+pub(crate) fn parse<'a>(
+    stream: &'a [u8],
+    settings: &DecodeSettings,
+    color_channels: Option<u8>,
+) -> Result<Image<'a>> {
     let parsed_codestream = parse_raw(stream, settings)?;
     let header = &parsed_codestream.header;
     let mut boxes = ImageBoxes::default();
 
-    // If we are just decoding a raw codestream, we assume greyscale or
-    // RGB. The exception are three components where the last two are
-    // subsampled relative to the first one, since that's practically only
-    // done for YCbCr.
-    let subsampling = |c: &codestream::ComponentInfo| {
-        (
-            c.size_info.horizontal_resolution,
-            c.size_info.vertical_resolution,
-        )
-    };
-    let has_subsampled_chroma = matches!(
-        header.component_infos.as_slice(),
-        [y, cb, cr] if {
-            let (y, cb, cr) = (subsampling(y), subsampling(cb), subsampling(cr));
-
-            cb == cr && cb != y && cb.0 >= y.0 && cb.1 >= y.1
+    let (color_space, has_alpha) = if let Some(channels) = color_channels {
+        let components = header.component_infos.len();
+        let has_alpha = components == usize::from(channels) + 1;
+        if channels == 0 || (components != usize::from(channels) && !has_alpha) {
+            bail!(ValidationError::InvalidComponentMetadata);
         }
-    );
 
-    let cs = if header.component_infos.len() < 3 {
-        ColorSpace::Enumerated(EnumeratedColorspace::Greyscale)
-    } else if has_subsampled_chroma {
-        ColorSpace::Enumerated(EnumeratedColorspace::Sycc)
+        let color_space = match channels {
+            1 => crate::ColorSpace::Gray,
+            3 => crate::ColorSpace::RGB,
+            4 => crate::ColorSpace::CMYK,
+            num_channels => crate::ColorSpace::Unknown { num_channels },
+        };
+
+        (color_space, has_alpha)
     } else {
-        ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
+        // If we are just decoding a raw codestream, we assume greyscale or
+        // RGB. The exception are three components where the last two are
+        // subsampled relative to the first one, since that's practically only
+        // done for YCbCr.
+        let subsampling = |c: &codestream::ComponentInfo| {
+            (
+                c.size_info.horizontal_resolution,
+                c.size_info.vertical_resolution,
+            )
+        };
+        let has_subsampled_chroma = matches!(
+            header.component_infos.as_slice(),
+            [y, cb, cr] if {
+                let (y, cb, cr) = (subsampling(y), subsampling(cb), subsampling(cr));
+
+                cb == cr && cb != y && cb.0 >= y.0 && cb.1 >= y.1
+            }
+        );
+
+        let cs = if header.component_infos.len() < 3 {
+            ColorSpace::Enumerated(EnumeratedColorspace::Greyscale)
+        } else if has_subsampled_chroma {
+            ColorSpace::Enumerated(EnumeratedColorspace::Sycc)
+        } else {
+            ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
+        };
+
+        boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
+
+        resolve_alpha_and_color_space(&boxes, &parsed_codestream.header, settings)?
     };
-
-    boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
-
-    let (color_space, has_alpha) =
-        resolve_alpha_and_color_space(&boxes, &parsed_codestream.header, settings)?;
 
     Ok(Image {
         codestream: parsed_codestream.data,

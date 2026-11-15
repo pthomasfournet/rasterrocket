@@ -162,6 +162,16 @@ how far upstream history was examined.
 - `a553afcb4` (#1648): the `logging` feature, its optional `log`
   dependency and the warnings behind it are removed. The fork never
   enabled the feature, so no build changes behaviour.
+- `8a6dbf19b` (#1821), adapted: `Image::from_codestream` opens a raw
+  codestream with a colour channel count known from outside it (a PDF
+  image dictionary's colour space): gray, RGB or CMYK for one, three or
+  four channels, an unknown space otherwise, alpha for one more
+  component, and no colour transform inferred from the components (the
+  YCbCr reading of subsampled chroma). Unlike upstream, a codestream
+  whose component count is neither the channel count nor one more, or a
+  count of zero, is refused with `ValidationError::InvalidComponentMetadata`
+  instead of describing samples the decode does not produce. Test:
+  `codestream::from_codestream_takes_the_given_channels`.
 
 ## Upstream review (2026-10-30)
 
@@ -174,6 +184,11 @@ carry).
 On 2026-11-03 it was reviewed through `3f3825c3e` (2026-11-02, crates.io
 0.5.0). Nothing is brought over: #1732 is a version bump and a changelog
 of changes already reviewed above.
+
+On 2026-11-14 it was reviewed through `3449e54b9` (2026-11-14, crates.io
+0.5.0). Brought over: #1821, above. Not applicable: #1762 and #1800
+(cancellation; no caller decodes under a cancellation signal) and #1851
+(comments and docs trimmed).
 
 ## Hardening
 

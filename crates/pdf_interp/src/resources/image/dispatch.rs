@@ -252,6 +252,10 @@ fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
         smask_in_data: dict.get_i64(b"SMaskInData").unwrap_or(0),
         colour_key: !src.is_mask && matches!(dict.get(b"Mask"), Some(Object::Array(_))),
         wide: wide && !indices,
+        channels: (!src.is_mask && !indices)
+            .then(|| src.colour.space())
+            .flatten()
+            .and_then(|space| u8::try_from(space.ncomponents()).ok()),
     }
 }
 

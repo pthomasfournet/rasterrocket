@@ -44,7 +44,14 @@ pub(in crate::resources::image) fn decode_jpx(
         target_resolution: draw_size,
         ..Default::default()
     };
-    let img = hayro_jpeg2000::Image::new(data, &settings).map_err(|e| e.to_string())?;
+    // The image dictionary's colour space, when it names one, gives a raw
+    // codestream's colour channels; a codestream that does not match them
+    // (or a JP2 file) is read with its own colour specification.
+    let img = opts
+        .channels
+        .and_then(|n| hayro_jpeg2000::Image::from_codestream(data, n, &settings).ok())
+        .map_or_else(|| hayro_jpeg2000::Image::new(data, &settings), Ok)
+        .map_err(|e| e.to_string())?;
     jpx_budget(&img, 1)?;
     let embedded_profile = match img.color_space() {
         hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
@@ -87,14 +94,15 @@ pub(in crate::resources::image) fn decode_jpx(
         );
     }
 
-    let channels = usize::from(img.color_space().num_channels());
+    let colour_channels = img.color_space().num_channels();
+    let channels = usize::from(colour_channels);
     let has_alpha = img.has_alpha();
     // The samples are read by channel count; CMYK samples are ink
-    // densities (0 = no ink).
-    let layout = match channels {
-        1 => Layout::Color(1),
-        3 => Layout::Color(3),
-        4 => Layout::Color(4),
+    // densities (0 = no ink).  Other counts are those of the image
+    // dictionary's colour space.
+    let layout = match colour_channels {
+        n @ (1 | 3 | 4) => Layout::Color(n),
+        n if opts.channels == Some(n) => Layout::Color(n),
         n => return Err(format!("unsupported {n}-channel colour space")),
     };
     let stride = channels + usize::from(has_alpha);
@@ -321,6 +329,11 @@ pub(in crate::resources::image) struct JpxOptions {
     pub colour_key: bool,
     /// Keep the samples of a codestream of more than 8 bits at 16 bits.
     pub wide: bool,
+    /// The components of the image dictionary's colour space, when it names
+    /// one other than `/Indexed`: a raw codestream is decoded with that many
+    /// colour channels, plus alpha when it has one more component, rather
+    /// than with a colour space inferred from its components.
+    pub channels: Option<u8>,
 }
 
 /// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
@@ -379,6 +392,7 @@ mod tests {
         smask_in_data: 0,
         colour_key: false,
         wide: false,
+        channels: None,
     };
 
     /// Colour samples as stored, an alpha channel as the soft mask.
@@ -388,6 +402,7 @@ mod tests {
         smask_in_data: 1,
         colour_key: false,
         wide: false,
+        channels: None,
     };
 
     /// Decode a JPEG 2000 fixture (8 × 8) through `decode_jpx`.
@@ -472,6 +487,70 @@ mod tests {
         );
     }
 
+    /// Decode a 32 × 32 raw codestream under a dictionary whose colour space
+    /// has `channels` components.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    fn raw_codestream(bytes: &[u8], channels: u8) -> Samples {
+        let opts = JpxOptions {
+            channels: Some(channels),
+            ..PLAIN
+        };
+        decode_jpx(bytes, 32, 32, None, opts).expect("decodes")
+    }
+
+    /// The `n` components at the centre of each 8 × 8 cell of a 32 × 32
+    /// image, by cell row.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    fn cell_centres(samples: &Samples, n: usize) -> Vec<Vec<u8>> {
+        let data = samples.data.as_cpu().expect("host samples");
+        assert_eq!(data.len(), 32 * 32 * n);
+        (0..4)
+            .flat_map(|j| (0..4).map(move |i| (4 + 8 * i, 4 + 8 * j)))
+            .map(|(x, y)| data[(y * 32 + x) * n..][..n].to_vec())
+            .collect()
+    }
+
+    /// Whether every component of `got` is within 8 of `want`.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    fn near(got: &[u8], want: &[u8]) -> bool {
+        got.iter().zip(want).all(|(&g, &w)| g.abs_diff(w) <= 8)
+    }
+
+    /// A raw codestream under a two-component `DeviceN` space decodes as two
+    /// colour channels, not as gray with alpha: a cyan ramp across and a
+    /// magenta ramp down, cross-checked with a `mutool draw` render of the
+    /// page.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_raw_codestream_takes_the_dictionary_channels() {
+        let img = raw_codestream(include_bytes!("../testdata/devicen2.j2k"), 2);
+        assert_eq!(img.layout, Layout::Color(2));
+        assert!(img.smask.is_none());
+        let ramp = [29, 95, 162, 228];
+        for (cell, got) in cell_centres(&img, 2).iter().enumerate() {
+            let want = [ramp[cell % 4], ramp[cell / 4]];
+            assert!(near(got, &want), "cell {cell}: {got:?} vs {want:?}");
+        }
+    }
+
+    /// A raw codestream with subsampled second and third components under
+    /// `DeviceRGB` keeps its samples as RGB, without the YCbCr reading of
+    /// subsampled chroma: red across, green down, blue a checkerboard, as
+    /// `mutool draw` renders the page.
+    #[cfg(not(feature = "nvjpeg2k"))]
+    #[test]
+    fn jpx_raw_codestream_with_subsampled_rgb_is_not_ycbcr() {
+        let img = raw_codestream(include_bytes!("../testdata/subsampled_rgb.j2k"), 3);
+        assert_eq!(img.layout, Layout::Color(3));
+        let (red, green) = ([28, 94, 160, 226], [26, 94, 162, 230]);
+        for (cell, got) in cell_centres(&img, 3).iter().enumerate() {
+            let (i, j) = (cell % 4, cell / 4);
+            let blue = if (i + j) % 2 == 0 { 0 } else { 255 };
+            let want = [red[i], green[j], blue];
+            assert!(near(got, &want), "cell {cell}: {got:?} vs {want:?}");
+        }
+    }
+
     /// A codestream whose SIZ declares 30 000 × 30 000 RGB samples, under a
     /// dictionary that declares 8 × 8, is refused before the decoder
     /// allocates its component buffers.  The decoder's own sample limit
@@ -490,6 +569,7 @@ mod tests {
             smask_in_data: 0,
             colour_key: false,
             wide: false,
+            channels: None,
         };
         #[cfg(feature = "nvjpeg2k")]
         let err = decode_jpx(&j2k, 8, 8, None, opts, None).expect_err("over the limit");

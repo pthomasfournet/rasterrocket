@@ -357,3 +357,48 @@ fn coc_wavelet_per_component() {
         reference("main_rgb").tolerance(1),
     );
 }
+
+/// A raw codestream opened with known colour channels takes the colour
+/// space of that count, plus alpha for one more component; other counts,
+/// and data that is not a raw codestream, are refused.
+#[test]
+fn from_codestream_takes_the_given_channels() {
+    use hayro_jpeg2000::{ColorSpace, DecodeError, FormatError, ValidationError};
+
+    let settings = DecodeSettings::default();
+    let gray = read_stream("codestream_gray");
+    let rgb = read_stream("mct_rct");
+
+    let image = Image::from_codestream(&gray, 1, &settings).unwrap();
+    assert!(matches!(image.color_space(), ColorSpace::Gray));
+    assert!(!image.has_alpha());
+
+    let image = Image::from_codestream(&rgb, 3, &settings).unwrap();
+    assert!(matches!(image.color_space(), ColorSpace::RGB));
+    assert!(!image.has_alpha());
+
+    let image = Image::from_codestream(&rgb, 2, &settings).unwrap();
+    assert!(matches!(
+        image.color_space(),
+        ColorSpace::Unknown { num_channels: 2 }
+    ));
+    assert!(image.has_alpha());
+
+    let mismatch = DecodeError::Validation(ValidationError::InvalidComponentMetadata);
+    for channels in [0, 4] {
+        assert_eq!(
+            Image::from_codestream(&rgb, channels, &settings).err(),
+            Some(mismatch)
+        );
+    }
+    assert_eq!(
+        Image::from_codestream(&gray, 3, &settings).err(),
+        Some(mismatch)
+    );
+
+    let jp2 = read_stream("jp2_rgba");
+    assert_eq!(
+        Image::from_codestream(&jp2, 4, &settings).err(),
+        Some(DecodeError::Format(FormatError::InvalidSignature))
+    );
+}

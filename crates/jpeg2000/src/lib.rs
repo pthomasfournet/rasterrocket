@@ -167,7 +167,31 @@ impl<'a> Image<'a> {
         if data.starts_with(JP2_MAGIC) {
             jp2::parse(data, *settings)
         } else if data.starts_with(CODESTREAM_MAGIC) {
-            j2c::parse(data, settings)
+            j2c::parse(data, settings, None)
+        } else {
+            err!(FormatError::InvalidSignature)
+        }
+    }
+
+    /// Try to create a new image from a raw codestream whose colour
+    /// channels are known from outside it: `color_channels` channels, gray,
+    /// RGB or CMYK for one, three or four and an unknown space otherwise,
+    /// plus an alpha channel when the codestream has one more component.
+    ///
+    /// No colour transform is inferred from the components, such as the
+    /// YCbCr reading of subsampled chroma that [`Image::new`] applies.  Data
+    /// that is not a raw codestream fails with
+    /// [`FormatError::InvalidSignature`], and a codestream whose component
+    /// count is neither `color_channels` nor one more with
+    /// [`ValidationError::InvalidComponentMetadata`]; the limits of
+    /// [`Image::new`] apply.
+    pub fn from_codestream(
+        data: &'a [u8],
+        color_channels: u8,
+        settings: &DecodeSettings,
+    ) -> Result<Self> {
+        if data.starts_with(CODESTREAM_MAGIC) {
+            j2c::parse(data, settings, Some(color_channels))
         } else {
             err!(FormatError::InvalidSignature)
         }
