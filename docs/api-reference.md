@@ -161,6 +161,8 @@ pub struct RenderParams {
     pub policy: Option<BackendPolicy>,   // None = the session's
     pub cancel: Option<CancelToken>,     // None = render to completion
     pub transparent_background: bool,    // false = composited onto white
+    pub band_rows: Option<NonZeroU32>,   // None = as SessionConfig::band_bytes hold
+    pub depth: SampleDepth,              // Eight (default) or Sixteen
 }
 impl RenderParams {
     pub const fn new(scale: f64) -> Self                     // same scale on both axes
@@ -169,6 +171,8 @@ impl RenderParams {
     pub const fn with_policy(self, policy: BackendPolicy) -> Self
     pub fn with_cancel(self, cancel: CancelToken) -> Self
     pub const fn with_transparent_background(self) -> Self
+    pub const fn with_depth(self, depth: SampleDepth) -> Self
+    pub const fn canvas_layout(&self) -> CanvasLayout  // bytes a canvas pixel holds
 }
 
 pub struct RenderRegion { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
@@ -215,6 +219,8 @@ pub enum BandError<E> { Raster(RasterError), Sink(E) }
 ```
 
 Renders the page (or `params.region`) as horizontal bands of whole rows from the top, handing each to `sink` in order, so a page larger than memory is drawn a band at a time. Stacked, the bands are the bitmap `render_page_rgb_with` returns for the same `params`, byte for byte. A band holds `params.band_rows` rows (`RenderParams::with_band_rows`), else as many as `SessionConfig::band_bytes` hold. The content is parsed once and executed per band; the bands share the page's decoded images, forms, shadings and tiling cells, its tint budget, its spot-ink slots and its diagnostics, and each has its own operator budget and deadline. A page of one band renders as `render_page_rgb_with` does (on the GPU page device when the session has one); several bands render on the CPU. The byte budget bounds the page the bands make up. Errors are `render_page_rgb_with`'s as `BandError::Raster` (under `strict`, an image failure fails the band where it is met), or the sink's as `BandError::Sink`, after which no band is rendered.
+
+**16 bits per sample.** `RenderParams::with_depth(SampleDepth::Sixteen)` renders the page at 16 bits per channel: colour conversions, shadings, soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels. `render_page_canvas(session, page_num, &params) -> Result<FinishedCanvas, RasterError>` (and `render_page_canvas_with_diagnostics`) returns the page at the depth asked for, `FinishedCanvas::Rgb8(Bitmap<Rgb8>)` or `FinishedCanvas::Rgb16(Bitmap<Rgb16>)`; `render_page_rgb*` serve 8-bit renders and refuse a 16-bit one with `RasterError::InvalidOptions` naming `render_page_canvas`. `render_page_bands` hands each band as `Band { y, bitmap: BandBitmap::Rgb8(..) | BandBitmap::Rgb16(..) }`. A 16-bit canvas pixel holds 6 bytes (8 over a transparent backdrop) of the page budget (`CanvasLayout::bytes_per_px`). The 8-bit path is unchanged, byte for byte. `PageBuffer` and deskew are 8-bit only (`InvalidOptions` at depth 16).
 
 ```rust
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
@@ -383,6 +389,7 @@ pub struct RasterOptions {
 | `max_page_bytes` | — | The most bytes one page bitmap may hold; see [`SessionConfig`](#sessionconfig). |
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
 | `rotation` | — | A clockwise quarter-turn rotation added to each page's `/Rotate`; see [`Rotation`](#rotation). |
+| `depth` | not `Sixteen` with `deskew` | `SampleDepth::Eight` (default) or `SampleDepth::Sixteen`, which renders at 16 bits per channel and yields `PixelFormat::Gray16` pages, or `Rgba16` with `transparent_background`, of `Pixels::U16`. |
 | `transparent_background` | not with `deskew` | When `true`, pages are rendered over a transparent backdrop instead of white paper and yielded as `PixelFormat::Rgba8`: `[R, G, B, A]`, alpha the page's coverage × opacity, colour not premultiplied, `[0, 0, 0, 0]` where nothing paints. The page is painted as an isolated transparency group (knockout when its `/Group` says so). With `deskew` the options are `RasterError::InvalidOptions`. |
 
 `RasterOptions` implements `Default` and is `#[non_exhaustive]`: build it with `RasterOptions::new(dpi)` (every other field at its default) or `RasterOptions::default()`, then assign fields; struct literals and `..Default::default()` updates do not compile outside the crate.
@@ -452,26 +459,37 @@ pub struct RenderedPage {
     pub page_num: u32,
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u8>,
+    pub pixels: Pixels,
     pub format: PixelFormat,
     pub dpi: f32,
     pub diagnostics: PageDiagnostics,
 }
 
+pub enum Pixels { U8(Vec<u8>), U16(Vec<u16>) }   // U16: native-endian samples
+impl Pixels {
+    pub fn as_u8(&self) -> Option<&[u8]>
+    pub fn as_u16(&self) -> Option<&[u16]>
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PixelFormat { Gray8, Rgba8, Rgb8 }
+pub enum PixelFormat { Gray8, Rgba8, Rgb8, Gray16, Rgb16, Rgba16 }
 impl PixelFormat {
-    pub const fn bytes_per_pixel(self) -> usize   // 1, 4 or 3
+    pub const fn bytes_per_pixel(self) -> usize    // 1, 4, 3, 2, 6 or 8
+    pub const fn samples_per_pixel(self) -> usize  // 1, 3 or 4
 }
+
+pub enum SampleDepth { Eight, Sixteen }            // re-exported from rasterrocket-color
+pub struct CanvasLayout { pub depth: SampleDepth, pub alpha: bool }
+impl CanvasLayout { pub const fn bytes_per_px(self) -> u32 }  // 3, 4, 6 or 8
 ```
 
 | Field | Notes |
 |---|---|
 | `page_num` | 1-based page number. |
 | `width`, `height` | Output bitmap dimensions in pixels. |
-| `pixels` | In `format`, tightly packed, top-to-bottom. Length is exactly `width * height * format.bytes_per_pixel()`: `width * height` for the default 8-bit grayscale pages. |
-| `format` | `PixelFormat::Gray8` (one byte per pixel, 0 black), or `PixelFormat::Rgba8` (`[R, G, B, A]`, straight alpha) under `RasterOptions::transparent_background`. `PixelFormat::Rgb8` is only written by `PageBuffer::render_rgb_into`. |
+| `pixels` | In `format`, tightly packed, top-to-bottom: `Pixels::U8` for the 8-bit formats, `Pixels::U16` (native-endian `u16`) for the 16-bit ones. It holds exactly `width * height * format.samples_per_pixel()` samples: `width * height` for the default 8-bit grayscale pages. |
+| `format` | `PixelFormat::Gray8` (one byte per pixel, 0 black), or `PixelFormat::Rgba8` (`[R, G, B, A]`, straight alpha) under `RasterOptions::transparent_background`; `Gray16` / `Rgba16` under `RasterOptions::depth = SampleDepth::Sixteen`. `PixelFormat::Rgb8` is only written by `PageBuffer::render_rgb_into`. |
 | `dpi` | Pixels per physical inch (`opts.dpi`). The page size includes its `/UserUnit`, so this holds for any unit. Pass it to `tesseract::set_source_resolution`. |
 | `diagnostics` | Lightweight rendering metadata — see `PageDiagnostics`. |
 

@@ -2714,6 +2714,35 @@ dropped with a warning), and a Type 3 glyph box far off the page overflowed
 `Mesh::meeting` take the window origin, PNG files are written through the
 stream writer (different IDAT chunking, same pixels).
 
+**Unreleased on master: 16 bits per channel.** `--depth 16` (library:
+`RenderParams::with_depth`, `RasterOptions::depth`, `SampleDepth`) renders,
+composites and writes 16 bits per channel, so gradients, soft-mask vignettes
+and colour conversions no longer quantise to 256 levels before a printer's own
+conversion. One compositor serves both depths: `rasterrocket-color` gains the
+`Sample` trait (u8, u16) and `Rgb16`/`Gray16`/`DeviceN16`, and the pipe, fills,
+glyphs, groups, tiling, blend modes and shadings are generic over the sample,
+their 8-bit instance the previous arithmetic (8-bit output byte-identical over
+the fixtures and the archive sample, pinned by digests; timing within noise).
+Shadings are sampled straight to 16 bits (1 024 ramp samples), transfer
+functions get 65 536-entry tables, ICC colours use a 16-bit transform,
+DeviceCMYK the same model at 16 bits, images of more than 8 bits (Flate/raw,
+JPEG 2000) keep their depth, and overprint simulation runs on a 16-bit ink
+canvas. Writers: 16-bit PNG, PPM/PGM (maxval 65535), TIFF (`BitsPerSample`
+16) and a PDF 1.5 `--print` spool of `/BitsPerComponent 16` images. Refused
+with `--mono`, `--dither`, `--fax`, `--jpeg`, the camera stages, `--gpu-pages`
+and comic input; the GPU decode/convert paths fall back to the CPU. A 16-bit
+canvas costs 6 bytes a pixel (8 with alpha) of the byte budget
+(`CanvasLayout`). Also fixed: a non-isolated group's union colour wrapped to
+black where the rounded union alpha fell below the exact one; a JPEG 2000
+colour key above 8 bits was compared against narrowed samples. API changes:
+`RenderedPage::pixels` is a `Pixels::{U8, U16}` enum; `PixelFormat` gains
+`Gray16`/`Rgb16`/`Rgba16`; `render_page_canvas` returns a `FinishedCanvas`;
+`Band::bitmap` is a `BandBitmap`; `Bitmap` stores typed samples (stride in
+samples); `Pattern`, `PipeState`, `PipeSrc`, `TransferSet` (DeviceN tables an
+array), `ColorRamp` and the shading patterns take a sample parameter;
+`PdfWriter::new` takes the deepest page's `SampleDepth`; `AnyColor` holds 16
+bytes.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
