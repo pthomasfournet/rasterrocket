@@ -495,8 +495,8 @@ pub(crate) struct Args {
     /// (default 64; 1 to 65536).  A page larger than one band renders in
     /// horizontal bands written to the output as each completes, so memory
     /// holds one band per worker thread, not the page; PPM, PNG, TIFF and
-    /// --print output stream.  JPEG output, --fax, --invert auto and the
-    /// camera stages need the whole page and render it in one band.
+    /// --print output stream.  JPEG output, --fax, --invert auto, --deskew
+    /// and the camera stages need the whole page and render it in one band.
     #[arg(long = "band-mib", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=MAX_BAND_MIB))]
     pub band_mib: Option<u64>,
 
@@ -601,6 +601,15 @@ pub(crate) struct Args {
     /// than five lines of text, are written unchanged.
     #[arg(long = "dewarp")]
     pub dewarp: bool,
+
+    /// Straighten pages scanned at a slant: measure the tilt of each page's
+    /// lines, up to ±6.75°, and rotate the page to correct it.  Gray output
+    /// only (`--gray`, `--mono` or `--fax`).
+    ///
+    /// Pages without a confident angle (photographs, blank pages, pages
+    /// without lines of text) are written unchanged.
+    #[arg(long = "deskew")]
+    pub deskew: bool,
 
     /// Split a double-page spread at its gutter into two output files.
     ///
@@ -897,6 +906,7 @@ impl Args {
         self.validate_output_profile_flags()?;
         self.validate_fax_flags()?;
         self.validate_print_flags()?;
+        self.validate_deskew_flags()?;
         if self.mono && self.gray {
             return Err("--mono and --gray are mutually exclusive".to_owned());
         }
@@ -989,6 +999,7 @@ impl Args {
             (self.rectify, "--rectify", camera),
             (self.split_spreads, "--split-spreads", camera),
             (self.dewarp, "--dewarp", camera),
+            (self.deskew, "--deskew", "it straightens gray pages"),
             (
                 self.gpu_pages,
                 "--gpu-pages",
@@ -1063,6 +1074,7 @@ impl Args {
             (self.rectify, "--rectify"),
             (self.dewarp, "--dewarp"),
             (self.split_spreads, "--split-spreads"),
+            (self.deskew, "--deskew"),
             (self.faxing(), "--fax"),
             (self.printing(), "--print"),
         ];
@@ -1210,6 +1222,18 @@ impl Args {
                 .output_icc
                 .as_ref()
                 .is_some_and(|icc| icc.channels() == 1)
+    }
+
+    /// Refuse `--deskew` with colour output: deskew straightens gray pages.
+    fn validate_deskew_flags(&self) -> Result<(), String> {
+        if self.deskew && !(self.luma_output() || self.faxing()) {
+            return Err(
+                "--deskew applies to gray pages only: add --gray, --mono or --fax, \
+                        or drop --deskew"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// Whether a fax document is written: `--fax`, or `--fax-to`, which
@@ -1532,6 +1556,20 @@ pub(crate) enum BackendArg {
 }
 
 impl Args {
+    /// The backend policy: `--backend` when given, else the one
+    /// `PDF_RASTER_BACKEND` names, else [`BackendPolicy::Auto`].
+    pub(crate) fn policy(&self) -> BackendPolicy {
+        match self.backend {
+            Some(BackendArg::Auto) => BackendPolicy::Auto,
+            Some(BackendArg::Cpu) => BackendPolicy::CpuOnly,
+            Some(BackendArg::Cuda) => BackendPolicy::ForceCuda,
+            #[cfg(feature = "vaapi")]
+            Some(BackendArg::Vaapi) => BackendPolicy::ForceVaapi,
+            Some(BackendArg::Vulkan) => BackendPolicy::ForceVulkan,
+            None => BackendPolicy::from_env(),
+        }
+    }
+
     /// Build a [`SessionConfig`] from the `--backend` / `--vaapi-device` /
     /// `--vulkan-device` flags.
     ///
@@ -1552,15 +1590,7 @@ impl Args {
         // `Option<BackendArg>` rather than a clap `default_value` — with
         // a default value the two cases are indistinguishable and the env
         // var would never get a chance to override.
-        let policy = match self.backend {
-            Some(BackendArg::Auto) => BackendPolicy::Auto,
-            Some(BackendArg::Cpu) => BackendPolicy::CpuOnly,
-            Some(BackendArg::Cuda) => BackendPolicy::ForceCuda,
-            #[cfg(feature = "vaapi")]
-            Some(BackendArg::Vaapi) => BackendPolicy::ForceVaapi,
-            Some(BackendArg::Vulkan) => BackendPolicy::ForceVulkan,
-            None => BackendPolicy::from_env(),
-        };
+        let policy = self.policy();
 
         if self.vaapi_device.is_some()
             && matches!(

@@ -48,8 +48,8 @@ pub(crate) enum FileFormat {
 impl BandOutput {
     /// The output of `args` when its pages are written band by band: a
     /// PPM, PNG or TIFF file or the print spool, under no stage that needs
-    /// the whole page (the camera stages, `--invert auto` at 8 bits),
-    /// outside a fax document.  `None` renders pages whole.
+    /// the whole page (the camera stages, `--deskew`, `--invert auto` at 8
+    /// bits), outside a fax document.  `None` renders pages whole.
     pub(crate) fn of(args: &Args) -> Option<Self> {
         let camera = args.camera_options();
         if args.faxing()
@@ -57,6 +57,7 @@ impl BandOutput {
             || camera.rectify
             || camera.dewarp
             || camera.split_spreads
+            || args.deskew
             || (args.invert_when() == InvertWhen::Auto && args.depth() == SampleDepth::Eight)
         {
             return None;
@@ -420,6 +421,7 @@ mod tests {
             &["--invert=auto"],
             &["--crop"],
             &["--split-spreads"],
+            &["--deskew", "--gray"],
         ] {
             assert_eq!(BandOutput::of(&args_with(argv)), None, "{argv:?}");
         }

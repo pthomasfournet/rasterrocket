@@ -271,7 +271,8 @@ pub(crate) enum Sink<'a> {
 }
 
 /// Run the camera stages selected on the command line on `page` (see
-/// [`cleanup::clean`]) and the tone operations (see [`tone::prepare`]),
+/// [`cleanup::clean`]), deskew under `--deskew` (see [`cleanup::deskewed`])
+/// and the tone operations (see [`tone::prepare`]),
 /// then hand each resulting page, one or the `a`/`b` halves of a split
 /// spread, to `sink`: a file each (see [`output_path_with_prefix`]), the
 /// fax document or the print job.
@@ -286,6 +287,11 @@ pub(crate) fn write_cleaned(
 ) -> Result<(), RenderError> {
     let pages = cleanup::clean(page, args.camera_options(), args.luma_output())?;
     for (page, half) in pages {
+        let page = if args.deskew {
+            cleanup::deskewed(page, args.policy())?
+        } else {
+            page
+        };
         let page = tone::prepare(page, args);
         let (spill, format) = match sink {
             Sink::Files { spill, format } => (spill, format),

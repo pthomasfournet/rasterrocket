@@ -1556,3 +1556,87 @@ fn png_and_jpeg_record_the_resolution_and_mono_png_is_one_bit() {
     // Units 1 (dots per inch), then the horizontal and vertical density.
     assert_eq!(&jpeg[at + 7..at + 12], &[1, 0, 150, 0, 150]);
 }
+
+/// A page of text-like bars tilted by 3°, 300 × 200 pt.
+fn tilted_bars_pdf() -> Vec<u8> {
+    let (sin, cos) = 3f64.to_radians().sin_cos();
+    let words: String = (0..12)
+        .flat_map(|line| {
+            (0..6).map(move |word| {
+                let (x, y) = (-125 + word * 42 + (line * 7) % 11, -66 + line * 12);
+                format!("{x} {y} {} 5 re ", 24 + (line + word) % 9)
+            })
+        })
+        .collect();
+    let content = format!(
+        "q {cos:.6} {sin:.6} {:.6} {cos:.6} 150 100 cm 0 g {words}f Q",
+        -sin
+    );
+    with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R >>".to_vec(),
+        stream_object("", content.as_bytes()),
+    ])
+}
+
+/// `--deskew` straightens a tilted gray page, leaves a page without a
+/// confident angle as it is, and is refused with colour output as the
+/// library refuses it.
+#[test]
+fn deskew_straightens_gray_pages_and_refuses_colour() {
+    let (dir, input) = workdir(&tilted_bars_pdf());
+    let page = |extra: &[&str]| {
+        let mut args = vec!["-r", "150", "--gray"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        read_pnm(&dir.path().join("out-1.pgm"))
+    };
+    let (plain, straight) = (page(&[]), page(&["--deskew"]));
+    assert_eq!(
+        (straight.1, straight.2),
+        (plain.1, plain.2),
+        "the size is kept"
+    );
+    assert_ne!(straight.3, plain.3, "the tilted page is rotated");
+
+    let (dir, input) = workdir(&two_page_pdf());
+    let blank = |extra: &[&str]| {
+        let mut args = vec!["-r", "72", "-l", "1", "--gray"];
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+        read_pnm(&dir.path().join("out-1.pgm")).3
+    };
+    assert_eq!(
+        blank(&["--deskew"]),
+        blank(&[]),
+        "a page without lines is kept"
+    );
+
+    for (flags, needle) in [
+        (&["--deskew"][..], "--deskew applies to gray pages only"),
+        (
+            &["--deskew", "--png"],
+            "--deskew applies to gray pages only",
+        ),
+        (
+            &["--deskew", "--cmyk", "--tiff"],
+            "--cmyk is refused with --deskew",
+        ),
+        (&["--deskew", "--transparent", "--png"], "drop --deskew"),
+    ] {
+        let (dir, input) = workdir(&two_page_pdf());
+        let out = rrocket(dir.path(), &input, flags);
+        assert!(!out.status.success(), "{flags:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{flags:?}: {stderr}");
+        assert_eq!(outputs(dir.path()), Vec::<String>::new(), "{flags:?}");
+    }
+    let (dir, input) = workdir(&two_page_pdf());
+    for flags in [
+        &["--deskew", "--mono", "--png"][..],
+        &["--deskew", "--gray", "--depth", "16", "--png"],
+    ] {
+        let mut args = vec!["-r", "72", "-l", "1"];
+        args.extend_from_slice(flags);
+        assert_success(&rrocket(dir.path(), &input, &args));
+    }
+}

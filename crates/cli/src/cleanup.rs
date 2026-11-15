@@ -1,5 +1,6 @@
 //! Camera-capture cleanup of rendered pages (`--crop`, `--rectify`,
-//! `--split-spreads`, `--dewarp`) through `rasterrocket-camera`.
+//! `--split-spreads`, `--dewarp`) through `rasterrocket-camera`, and
+//! deskew (`--deskew`) through `rasterrocket`.
 //!
 //! The stages measure on the 8-bit luma of the rendered page: the page's
 //! own at 8 bits, its nearest 8-bit levels at 16.  Grayscale output of an
@@ -10,7 +11,9 @@
 
 use camera::{CameraOptions, GrayPage, GrayView, Outcome, Report};
 use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16};
-use pdf_raster::{rgb_into_gray, rgb_to_gray, rgb16_into_gray16, rgb16_to_gray16};
+use pdf_raster::{
+    BackendPolicy, RasterError, rgb_into_gray, rgb_to_gray, rgb16_into_gray16, rgb16_to_gray16,
+};
 use raster::Bitmap;
 
 use crate::render::RenderError;
@@ -176,6 +179,25 @@ pub(crate) fn clean(
         },
     };
     Ok(halves(pages))
+}
+
+/// `page` as luma at its depth, deskewed under `policy`
+/// ([`pdf_raster::deskew::apply`]): rotated to correct the skew of its
+/// lines, or unchanged when it has no confident angle.
+pub(crate) fn deskewed(page: Page, policy: BackendPolicy) -> Result<Page, RenderError> {
+    let deskew_error = |e: pdf_raster::deskew::DeskewError| RasterError::Deskew(e.to_string());
+    Ok(match page.into_luma_model() {
+        Page::Gray(mut luma) => {
+            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(deskew_error)?;
+            Page::Gray(luma)
+        }
+        Page::Gray16(mut luma) => {
+            let _skew = pdf_raster::deskew::apply(&mut luma, policy).map_err(deskew_error)?;
+            Page::Gray16(luma)
+        }
+        // `into_luma_model` yields gray pages only.
+        page @ (Page::Rgb(_) | Page::Rgb16(_) | Page::Mono(_)) => page,
+    })
 }
 
 /// `pages` with the half of a split spread each holds: none for one page.
