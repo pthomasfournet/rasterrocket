@@ -56,6 +56,26 @@ release). It is not published and changes are not sent upstream.
   as `GlyphNames::get` gives it. Test:
   `glyph_name::tests::post_iter_matches_table_lookup`.
 
+## Upstream changes brought over
+
+- `6be151af9` (#2452): MIRP into the twilight zone places the point's
+  original position at the CVT distance along the freedom vector with the
+  2.14 multiply (`math::mul14`), as MIAP does; the 16.16 multiply put it at
+  a quarter of the distance. Changes output only for hinted glyphs of
+  hint-reliant fonts whose programs use MIRP with `zp1` in the twilight
+  zone. Test: `mirp_twilight`.
+
+Upstream history through `73fab6938` (2026-11-10, skrifa 0.50.0) was
+reviewed on 2026-11-14. Left out:
+
+- #2457 (Type 1 support behind a `type1` feature, off by default): not
+  applicable; this workspace always reads Type 1 programs, and the
+  read-fonts fork keeps the support unconditional.
+- #2458 (CID-keyed Type 1 in read-fonts; skrifa gains only scaler tests
+  for it): covered; the read-fonts fork has its own CID-keyed Type 1
+  reader, which the renderer uses.
+- #2459 (release version bumps): not applicable.
+
 ## Rebase history
 
 - 2026-11-04: rebased from fontations `b373cdbc6` (skrifa 0.44.0) onto
