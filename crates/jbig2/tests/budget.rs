@@ -45,11 +45,11 @@ fn decode(data: &[u8], strict: bool) -> Result<Collector, DecodeError> {
     Ok(collector)
 }
 
-/// The gray-scale image of a 4096 × 4096 halftone grid holds 2^24 32-bit
-/// values, far more than a 1 × 1 page may allocate.
+/// The gray-scale image of a 16 384 × 16 384 halftone grid holds a bit
+/// plane of 2^28 bits, far more than a 1 × 1 page may allocate.
 #[test]
 fn halftone_grid_beyond_the_memory_budget_is_refused() {
-    let data = halftone_page(1, 4096, 4096);
+    let data = halftone_page(1, 16_384, 16_384);
 
     assert_eq!(
         decode(&data, true).err(),

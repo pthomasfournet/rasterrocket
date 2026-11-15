@@ -9,7 +9,7 @@ use crate::ScratchBuffers;
 use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
 use crate::budget::Budget;
 use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
-use crate::gray_scale::{GrayScaleParams, decode_gray_scale_image};
+use crate::gray_scale::{GrayScaleImage, GrayScaleParams, decode_gray_scale_image};
 use crate::reader::Reader;
 
 /// Decode a halftone region segment (7.4.5.2, 6.6).
@@ -81,10 +81,13 @@ pub(crate) fn decode_into(
         strict: header.strict,
     };
     let gi = decode_gray_scale_image(header.data, &gs_params, ctx)?;
+    let mut gray_values = ctx
+        .budget
+        .filled_vec(header.grid_position_and_size.width as usize, 0_u32)?;
 
     // "5) Place sequentially the patterns corresponding to the values in GI into
     // HTREG by the procedure described in 6.6.5.2." (6.6.5)
-    render_patterns(htreg, &gi, header, pattern_dict)?;
+    render_patterns(htreg, &gi, &mut gray_values, header, pattern_dict)?;
 
     Ok(())
 }
@@ -271,7 +274,8 @@ fn compute_skip_bitmap(
 /// Render patterns into the target region (6.6.5.2).
 fn render_patterns(
     region: &mut Bitmap,
-    gi: &[u32],
+    gi: &GrayScaleImage,
+    gray_values: &mut [u32],
     header: &HalftoneRegionHeader<'_>,
     pattern_dict: &PatternDictionary,
 ) -> Result<()> {
@@ -319,14 +323,13 @@ fn render_patterns(
     }
 
     let mut coords = GridCoords::new(grid, &header.grid_vector);
-    let mut gi_idx = 0;
 
-    for _ in 0..grid.height {
-        for _ in 0..grid.width {
+    for m_g in 0..grid.height {
+        gi.row_values(m_g, gray_values);
+
+        for &gray_value in &*gray_values {
             let (x, y) = coords.get();
-
-            let gray_value = gi[gi_idx] as usize;
-            gi_idx += 1;
+            let gray_value = gray_value as usize;
 
             if header.strict && gray_value >= num_patterns {
                 bail!(RegionError::GrayScaleOutOfRange);

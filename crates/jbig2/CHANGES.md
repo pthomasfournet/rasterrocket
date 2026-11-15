@@ -153,6 +153,12 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   per pattern row. Output is unchanged. The globals test of
   `tests/budget.rs`, which the table alone used to exhaust, now spends
   the budget over four dictionaries.
+- `a6197dbd5` (#1785) A halftone region's gray-scale image is kept as
+  its HBPP bit planes and read one grid row at a time, instead of as a
+  32-bit value per grid cell: HBPP bits per cell instead of 32 plus two
+  planes. Output is unchanged. The halftone-grid test of
+  `tests/budget.rs` uses a 16 384² grid, whose single plane still exceeds
+  the budget of a 1 × 1 page.
 
 ## Upstream review (2026-10-30)
 
