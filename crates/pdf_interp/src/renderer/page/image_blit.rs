@@ -788,9 +788,10 @@ fn tint_ink<S: color::Sample>(
     Some(ink)
 }
 
-/// Checks the decoder contract that `len` bytes hold `img`'s samples, so
-/// that a truncated buffer (a stream declaring larger dimensions than its
-/// data) fails the image instead of painting a partly blank one.
+/// Checks the decoder contract that `len` samples, of 8 or 16 bits, hold
+/// `img`'s pixels, so that a truncated buffer (a stream declaring larger
+/// dimensions than its data) fails the image instead of painting a partly
+/// blank one.
 ///
 /// # Errors
 /// The reason, when the dimensions overflow `usize` or `len` is short.
@@ -803,7 +804,7 @@ fn verify_sample_len(img: &crate::resources::ImageDescriptor, len: usize) -> Res
             img.width, img.height,
         )),
         Err(ImageLenError::ShortBuffer { expected }) => Err(format!(
-            "decoder produced short buffer ({len} bytes, expected {expected})"
+            "decoder produced short buffer ({len} samples, expected {expected})"
         )),
     }
 }

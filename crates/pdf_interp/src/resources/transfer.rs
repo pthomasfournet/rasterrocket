@@ -391,9 +391,6 @@ mod tests {
         assert_eq!(t.apply([0, 51, 255]), [255, 51, 0]);
     }
 
-    /// On ink a function maps the complement: the inverting function maps
-    /// no ink to full ink.  The gray function of an array maps black and
-    /// the spots; a gray function alone is not the identity.
     /// At 16 bits the ink maps through the functions themselves, as the
     /// 8-bit tables do: the inverting gray function takes a 16-bit ink to
     /// its 16-bit complement on the black and spot channels, and the
@@ -420,6 +417,9 @@ mod tests {
         }
     }
 
+    /// On ink a function maps the complement: the inverting function maps
+    /// no ink to full ink.  The gray function of an array maps black and
+    /// the spots; a gray function alone is not the identity.
     #[test]
     fn ink_tables_map_the_complement_per_colorant() {
         let doc = invert_doc();

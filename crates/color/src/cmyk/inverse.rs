@@ -90,8 +90,9 @@ pub const SPOT_TINTS16: usize = 1024;
 /// them linearly ([`Self::at`]).
 ///
 /// Entries lie 64 counts apart; a tint transform smooth on that scale
-/// interpolates to within a count, and the table is a quarter of the size
-/// of one entry per 16-bit tint over a sixty-fourth of the evaluations.
+/// interpolates to within a count, and the table holds a sixty-fourth of
+/// the entries, and takes a sixty-fourth of the evaluations, of one entry
+/// per 16-bit tint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpotLut16(Box<[[u16; 4]]>);
 
