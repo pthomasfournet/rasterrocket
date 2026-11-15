@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use color::{PixelMode, Sample};
-use raster::pipe::Pattern;
+use raster::pipe::{ChannelMask, Pattern};
 use raster::transparency::Backdrop;
 
 use super::super::color::RasterColor;
@@ -59,12 +59,34 @@ pub(super) trait CanvasSample: Sample {
     fn into_backdrop(b: Backdrop<Self>) -> CanvasBackdrop;
 
     /// The samples of the solid colour `colour` for a pixel of `mode`:
-    /// its bytes for an 8-bit pixel ([`RasterColor::bytes_for`]), its
-    /// 16-bit sRGB for a 16-bit one.
+    /// its bytes for an 8-bit pixel ([`RasterColor::bytes_for`]); for a
+    /// 16-bit one its 16-bit ink on an ink pixel, its 16-bit sRGB
+    /// otherwise.
     fn solid(colour: &RasterColor, mode: PixelMode) -> &[Self];
 
     /// The red, green and blue tables of `transfer` at this depth.
     fn rgb_tables(transfer: &Transfer) -> [&Self::Table; 3];
+
+    /// The channels `channels` of the ink `ink` mapped through the ink
+    /// tables of `transfer` at this depth.
+    fn map_ink(transfer: &Transfer, ink: [Self; 8], channels: ChannelMask) -> [Self; 8];
+
+    /// Run `f` on a span of `len` samples of this type held by the thread
+    /// for an sRGB span converted to ink; its contents are unspecified.
+    ///
+    /// # Panics
+    ///
+    /// When called again from within `f`.
+    fn with_rgb_span<R>(len: usize, f: impl FnOnce(&mut [Self]) -> R) -> R;
+}
+
+thread_local! {
+    /// The 8-bit sRGB span of [`CanvasSample::with_rgb_span`].  Separate
+    /// from the pipe's own span buffers, which are held while a pattern
+    /// fills a span.  Grow-never-shrink.
+    static RGB_SPAN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The 16-bit sRGB span of [`CanvasSample::with_rgb_span`].
+    static RGB_SPAN16: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
 
 impl CanvasSample for u8 {
@@ -105,6 +127,17 @@ impl CanvasSample for u8 {
     fn rgb_tables(transfer: &Transfer) -> [&Self::Table; 3] {
         transfer.tables()
     }
+
+    fn map_ink(transfer: &Transfer, ink: [Self; 8], channels: ChannelMask) -> [Self; 8] {
+        transfer.apply_ink(ink, channels)
+    }
+
+    fn with_rgb_span<R>(len: usize, f: impl FnOnce(&mut [Self]) -> R) -> R {
+        RGB_SPAN.with_borrow_mut(|span| {
+            span.resize(len, 0);
+            f(span)
+        })
+    }
 }
 
 impl CanvasSample for u16 {
@@ -138,12 +171,34 @@ impl CanvasSample for u16 {
         CanvasBackdrop::U16(b)
     }
 
-    fn solid(colour: &RasterColor, _mode: PixelMode) -> &[Self] {
-        colour.rgb16()
+    fn solid(colour: &RasterColor, mode: PixelMode) -> &[Self] {
+        if mode == PixelMode::DeviceN16 {
+            colour.ink16()
+        } else {
+            colour.rgb16()
+        }
     }
 
     fn rgb_tables(transfer: &Transfer) -> [&Self::Table; 3] {
         transfer.tables16()
+    }
+
+    fn map_ink(transfer: &Transfer, ink: [Self; 8], channels: ChannelMask) -> [Self; 8] {
+        let tables = transfer.ink_tables16();
+        std::array::from_fn(|i| {
+            if channels.paints(i) {
+                tables[i][usize::from(ink[i])]
+            } else {
+                ink[i]
+            }
+        })
+    }
+
+    fn with_rgb_span<R>(len: usize, f: impl FnOnce(&mut [Self]) -> R) -> R {
+        RGB_SPAN16.with_borrow_mut(|span| {
+            span.resize(len, 0);
+            f(span)
+        })
     }
 }
 

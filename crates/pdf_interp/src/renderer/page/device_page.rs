@@ -189,7 +189,7 @@ impl PageRenderer<'_> {
     /// simulates overprint on an ink canvas, paints as a page group, or
     /// fills without antialiasing.  The renderer is unchanged then.
     pub fn record_for_device(&mut self) -> Result<(), &'static str> {
-        if self.canvas.kind() == CanvasKind::Rgb16 {
+        if self.canvas.kind().depth() == color::SampleDepth::Sixteen {
             return Err("16-bit samples");
         }
         if let Some(reason) = ineligible_canvas(

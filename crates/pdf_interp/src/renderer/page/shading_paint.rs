@@ -63,8 +63,10 @@ fn background(
     let bg = shading.background?;
     Some(match (kind, shading.background_ink) {
         (CanvasKind::Rgb | CanvasKind::Rgb16, _) => RasterColor::from_srgb(bg),
-        (CanvasKind::Ink, None) => RasterColor::from_srgb(bg).transferred(transfer),
-        (CanvasKind::Ink, Some(ink)) => {
+        (CanvasKind::Ink | CanvasKind::Ink16, None) => {
+            RasterColor::from_srgb(bg).transferred(transfer)
+        }
+        (CanvasKind::Ink | CanvasKind::Ink16, Some(ink)) => {
             RasterColor::with_ink(bg, ink, shading.paints).transferred(transfer)
         }
     })
@@ -88,11 +90,14 @@ fn window_pattern(shading: &ResolvedShading, origin: (i32, i32)) -> Option<Windo
             let inner: &dyn Pattern = p.as_ref();
             Some(WindowPattern::U8(Shifted { inner, origin }))
         }
-        ShadingResult::Pattern16(p) => {
+        ShadingResult::Pattern16(p) | ShadingResult::InkPattern16(p) => {
             let inner: &dyn Pattern<u16> = p.as_ref();
             Some(WindowPattern::U16(Shifted { inner, origin }))
         }
-        ShadingResult::Mesh(_) | ShadingResult::Mesh16(_) | ShadingResult::InkMesh(_) => None,
+        ShadingResult::Mesh(_)
+        | ShadingResult::Mesh16(_)
+        | ShadingResult::InkMesh(_)
+        | ShadingResult::InkMesh16(_) => None,
     }
 }
 
@@ -113,8 +118,13 @@ fn smooth_pattern<'a>(
         (WindowPattern::U8(window), ShadingResult::InkPattern(_), CanvasKind::Ink) => {
             Some(CanvasPattern::ink(window, transfer, shading.carries()))
         }
-        (WindowPattern::U16(window), ShadingResult::Pattern16(_), CanvasKind::Rgb16) => {
-            Some(CanvasPattern::Rgb16(window))
+        (
+            WindowPattern::U16(window),
+            ShadingResult::Pattern16(_),
+            CanvasKind::Rgb16 | CanvasKind::Ink16,
+        ) => Some(CanvasPattern::wide(kind, window, transfer)),
+        (WindowPattern::U16(window), ShadingResult::InkPattern16(_), CanvasKind::Ink16) => {
+            Some(CanvasPattern::ink16(window, transfer, shading.carries()))
         }
         _ => None,
     }
@@ -237,7 +247,8 @@ impl PageRenderer<'_> {
         self.paint_object(region, state.paint.alpha, |r| match &shading.result {
             ShadingResult::Pattern(_)
             | ShadingResult::Pattern16(_)
-            | ShadingResult::InkPattern(_) => {
+            | ShadingResult::InkPattern(_)
+            | ShadingResult::InkPattern16(_) => {
                 let area = polygon(&[
                     (clip.x_min, clip.y_min),
                     (clip.x_max, clip.y_min),
@@ -268,7 +279,10 @@ impl PageRenderer<'_> {
                     );
                 });
             }
-            ShadingResult::Mesh(_) | ShadingResult::Mesh16(_) | ShadingResult::InkMesh(_) => {
+            ShadingResult::Mesh(_)
+            | ShadingResult::Mesh16(_)
+            | ShadingResult::InkMesh(_)
+            | ShadingResult::InkMesh16(_) => {
                 r.paint_mesh(&shading, &clip, &pipe, transfer);
             }
         });
@@ -334,7 +348,8 @@ impl PageRenderer<'_> {
             }
             ShadingResult::Mesh16(mesh) => {
                 for tri in mesh.meeting(clip, origin) {
-                    self.canvas.gouraud_triangle16(origin, clip, pipe, tri);
+                    self.canvas
+                        .gouraud_triangle16(origin, clip, pipe, transfer, tri);
                 }
             }
             ShadingResult::InkMesh(mesh) => {
@@ -349,9 +364,22 @@ impl PageRenderer<'_> {
                     );
                 }
             }
+            ShadingResult::InkMesh16(mesh) => {
+                for tri in mesh.meeting(clip, origin) {
+                    self.canvas.gouraud_ink_triangle16(
+                        origin,
+                        clip,
+                        pipe,
+                        transfer,
+                        shading.carries(),
+                        tri,
+                    );
+                }
+            }
             ShadingResult::Pattern(_)
             | ShadingResult::Pattern16(_)
-            | ShadingResult::InkPattern(_) => {}
+            | ShadingResult::InkPattern(_)
+            | ShadingResult::InkPattern16(_) => {}
         }
     }
 

@@ -9,7 +9,7 @@ use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, compone
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
-use color::{DeviceN8, Pixel, Rgb8, Rgb16, Sample, SampleDepth};
+use color::{DeviceN8, DeviceN16, Pixel, Rgb8, Rgb16, Sample, SampleDepth};
 use pdf::Document;
 use raster::path::PathBuilder;
 use raster::pipe::ChannelMask;
@@ -120,6 +120,12 @@ pub(super) enum Tile {
         pattern: TiledPattern<DeviceN8>,
         channels: InkChannels,
     },
+    /// A tile of 16-bit ink, for a 16-bit ink canvas, with the channels
+    /// as for [`Self::Ink`].
+    Ink16 {
+        pattern: TiledPattern<DeviceN16>,
+        channels: InkChannels,
+    },
 }
 
 impl Tile {
@@ -128,7 +134,7 @@ impl Tile {
     pub(super) const fn paints(&self) -> ChannelMask {
         match self {
             Self::Rgb(_) | Self::Rgb16(_) => ChannelMask::ALL,
-            Self::Ink { channels, .. } => channels.paints,
+            Self::Ink { channels, .. } | Self::Ink16 { channels, .. } => channels.paints,
         }
     }
 
@@ -138,7 +144,7 @@ impl Tile {
     pub(super) const fn carries(&self) -> ChannelMask {
         match self {
             Self::Rgb(_) | Self::Rgb16(_) => ChannelMask::ALL,
-            Self::Ink { channels, .. } => channels.carries,
+            Self::Ink { channels, .. } | Self::Ink16 { channels, .. } => channels.carries,
         }
     }
 }
@@ -179,7 +185,7 @@ impl CellPixel for Rgb8 {
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
         match canvas {
             PageCanvas::Rgb(b) => Some(b),
-            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => None,
+            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) | PageCanvas::Ink16(_) => None,
         }
     }
 
@@ -214,7 +220,7 @@ impl CellPixel for Rgb16 {
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
         match canvas {
             PageCanvas::Rgb16(b) => Some(b),
-            PageCanvas::Rgb(_) | PageCanvas::Ink(_) => None,
+            PageCanvas::Rgb(_) | PageCanvas::Ink(_) | PageCanvas::Ink16(_) => None,
         }
     }
 
@@ -249,7 +255,7 @@ impl CellPixel for DeviceN8 {
     fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
         match canvas {
             PageCanvas::Ink(b) => Some(b),
-            PageCanvas::Rgb(_) | PageCanvas::Rgb16(_) => None,
+            PageCanvas::Rgb(_) | PageCanvas::Rgb16(_) | PageCanvas::Ink16(_) => None,
         }
     }
 
@@ -273,6 +279,43 @@ impl CellPixel for DeviceN8 {
     fn as_mean(raster: &CellRaster) -> Option<(&[u8], u8, InkChannels)> {
         match raster {
             CellRaster::InkMean(colour, coverage, channels) => Some((colour, *coverage, *channels)),
+            _ => None,
+        }
+    }
+}
+
+impl CellPixel for DeviceN16 {
+    const KIND: CanvasKind = CanvasKind::Ink16;
+
+    fn bitmap(canvas: PageCanvas) -> Option<Bitmap<Self>> {
+        match canvas {
+            PageCanvas::Ink16(b) => Some(b),
+            PageCanvas::Rgb(_) | PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => None,
+        }
+    }
+
+    fn cell(bitmap: Rc<Bitmap<Self>>, channels: InkChannels) -> CellRaster {
+        CellRaster::InkCell16(bitmap, channels)
+    }
+
+    fn mean(colour: &[u16], coverage: u16, channels: InkChannels) -> CellRaster {
+        let mut ink = [0; 8];
+        ink.copy_from_slice(colour);
+        CellRaster::InkMean16(ink, coverage, channels)
+    }
+
+    fn as_cell(raster: CellRaster) -> Option<(Rc<Bitmap<Self>>, InkChannels)> {
+        match raster {
+            CellRaster::InkCell16(bitmap, channels) => Some((bitmap, channels)),
+            _ => None,
+        }
+    }
+
+    fn as_mean(raster: &CellRaster) -> Option<(&[u16], u16, InkChannels)> {
+        match raster {
+            CellRaster::InkMean16(colour, coverage, channels) => {
+                Some((colour, *coverage, *channels))
+            }
             _ => None,
         }
     }
@@ -488,6 +531,9 @@ impl PageRenderer<'_> {
             CanvasKind::Ink => self
                 .tile::<DeviceN8>(name, &cell, &geometry, (region, extent), key)
                 .map(|(pattern, channels)| Tile::Ink { pattern, channels }),
+            CanvasKind::Ink16 => self
+                .tile::<DeviceN16>(name, &cell, &geometry, (region, extent), key)
+                .map(|(pattern, channels)| Tile::Ink16 { pattern, channels }),
         }
     }
 

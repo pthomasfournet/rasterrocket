@@ -81,25 +81,22 @@ impl ColorantPlan {
     }
 
     /// The ink of the colour `comps` ([0, 1] each) of `space`, the space
-    /// the plan was made for.
-    pub(crate) fn ink(
+    /// the plan was made for, at the depth of `S`.
+    pub(crate) fn ink<S: Sample>(
         &self,
         doc: &pdf::Document,
         space: &crate::resources::ColorSpace,
         comps: &[f64],
-    ) -> [u8; 8] {
+    ) -> [S; 8] {
         match self {
             Self::Channels(channels) => {
-                let mut ink = [0u8; 8];
+                let mut ink = [S::ZERO; 8];
                 for (&bits, &tint) in channels.iter().zip(comps) {
-                    paint_tint(&mut ink, bits, gray_to_u8(tint));
+                    paint_tint(&mut ink, bits, S::from_unit(tint));
                 }
                 ink
             }
-            Self::Process => {
-                let [c, m, y, k] = space.process_ink(doc, comps);
-                [c, m, y, k, 0, 0, 0, 0]
-            }
+            Self::Process => no_spots(space.process_ink::<S>(doc, comps)),
         }
     }
 
@@ -117,8 +114,14 @@ impl ColorantPlan {
     }
 }
 
+/// The process ink `cmyk` as the ink `[C, M, Y, K, S0, S1, S2, S3]`, no
+/// spot ink.
+pub(crate) fn no_spots<S: Sample>(cmyk: [S; 4]) -> [S; 8] {
+    std::array::from_fn(|channel| cmyk.get(channel).copied().unwrap_or(S::ZERO))
+}
+
 /// Raise each channel of `ink` in the bit mask `bits` to at least `tint`.
-pub(crate) fn paint_tint(ink: &mut [u8; 8], bits: u8, tint: u8) {
+pub(crate) fn paint_tint<S: Sample>(ink: &mut [S; 8], bits: u8, tint: S) {
     for (i, v) in ink.iter_mut().enumerate() {
         if bits & 1 << i != 0 {
             *v = (*v).max(tint);
@@ -149,10 +152,15 @@ pub(crate) fn paint_tint(ink: &mut [u8; 8], bits: u8, tint: u8) {
 /// Beside its 8-bit bytes the colour carries its sRGB value at 16 bits,
 /// quantised from the same conversion, for a 16-bit canvas; a transfer
 /// function maps it through the function itself, evaluated on first use.
+/// Its ink is held at 16 bits too ([`Inks`]): a given ink as the same
+/// tints rounded at 16 bits, or the 16-bit solve of a 16-bit page; a
+/// derived ink converts from the 16-bit sRGB value
+/// ([`color::cmyk::rgb_to_ink16`]) on first use.
 ///
 /// `PipeSrc::Solid` takes the pixel's samples and asserts their count
 /// equals the pixel's channel count; [`Self::bytes_for`] returns them for
-/// an 8-bit mode, [`Self::rgb16`] for a 16-bit RGB pixel.
+/// an 8-bit mode, [`Self::rgb16`] for a 16-bit RGB pixel and
+/// [`Self::ink16`] for a 16-bit ink pixel.
 #[derive(Debug, Clone)]
 pub(crate) struct RasterColor {
     bytes: [u8; 3],
@@ -165,15 +173,18 @@ pub(crate) struct RasterColor {
     /// `wide_transfer`, computed on first use.
     wide: OnceLock<[u16; 3]>,
     /// The ink the colour was given in, if any.
-    given: Option<[u8; 8]>,
-    /// The sRGB bytes a derived ink converts from: `bytes` before any
+    given: Option<Inks>,
+    /// The sRGB colour a derived ink converts from: the colour before any
     /// transfer function.
-    source: [u8; 3],
+    source: Srgb,
     /// The transfer function a derived ink maps through after conversion.
     ink_transfer: Option<Arc<Transfer>>,
     /// The ink amounts: `given`, otherwise derived from `source` on first
     /// use.
     ink: OnceLock<[u8; 8]>,
+    /// The 16-bit ink amounts: `given`, otherwise derived from the 16-bit
+    /// `source` on first use.
+    ink16: OnceLock<[u16; 8]>,
     /// The channels the colour paints on an ink canvas.
     paints: ChannelMask,
     /// Whether nonzero overprint mode (ISO 32000-1 §8.6.7) applies to the
@@ -231,16 +242,16 @@ impl RasterColor {
     /// A colour of sRGB `rgb` whose ink derives from its bytes; it paints
     /// every channel.
     const fn derived(rgb: Srgb) -> Self {
-        let bytes = rgb.bytes;
         Self {
-            bytes,
+            bytes: rgb.bytes,
             wide_source: rgb.wide,
             wide_transfer: None,
             wide: OnceLock::new(),
             given: None,
-            source: bytes,
+            source: rgb,
             ink_transfer: None,
             ink: OnceLock::new(),
+            ink16: OnceLock::new(),
             paints: ChannelMask::ALL,
             opm_eligible: false,
             zero_components: 0,
@@ -277,17 +288,17 @@ impl RasterColor {
     /// unpainted.
     #[must_use]
     pub(crate) fn with_process_inks(rgb: Srgb, cmyk: [f64; 4]) -> Self {
-        Self::with_process_ink_of(rgb, cmyk, cmyk.map(gray_to_u8))
+        let [c, m, y, k] = cmyk;
+        Self::with_process_ink_of(rgb, cmyk, Inks::from_unit([c, m, y, k, 0.0, 0.0, 0.0, 0.0]))
     }
 
     /// The colour of sRGB `rgb` given in a process space as the components
-    /// `cmyk`, printed as the ink bytes `ink`: like
-    /// [`Self::with_process_inks`], with the ink in place of the
-    /// components.  The channels it paints, under either overprint mode,
-    /// follow the components.
+    /// `cmyk`, printed as the process ink `ink`, whose spot channels hold
+    /// no ink: like [`Self::with_process_inks`], with the ink in place of
+    /// the components.  The channels it paints, under either overprint
+    /// mode, follow the components.
     #[must_use]
-    pub(crate) fn with_process_ink_of(rgb: Srgb, cmyk: [f64; 4], ink: [u8; 4]) -> Self {
-        let [c, m, y, k] = ink;
+    pub(crate) fn with_process_ink_of(rgb: Srgb, cmyk: [f64; 4], ink: Inks) -> Self {
         let zero_components = cmyk
             .iter()
             .enumerate()
@@ -296,7 +307,7 @@ impl RasterColor {
         Self {
             opm_eligible: true,
             zero_components,
-            ..Self::with_ink(rgb, [c, m, y, k, 0, 0, 0, 0], PROCESS_CHANNELS)
+            ..Self::with_ink(rgb, ink, PROCESS_CHANNELS)
         }
     }
 
@@ -304,16 +315,17 @@ impl RasterColor {
     /// channels `paints`: a `Separation` or `DeviceN` colour, given as its
     /// colorants' tints.
     #[must_use]
-    pub(crate) fn with_ink(rgb: Srgb, ink: [u8; 8], paints: ChannelMask) -> Self {
+    pub(crate) fn with_ink(rgb: Srgb, ink: Inks, paints: ChannelMask) -> Self {
         Self {
             bytes: rgb.bytes,
             wide_source: rgb.wide,
             wide_transfer: None,
             wide: OnceLock::new(),
             given: Some(ink),
-            source: rgb.bytes,
+            source: rgb,
             ink_transfer: None,
-            ink: OnceLock::from(ink),
+            ink: OnceLock::from(ink.bytes),
+            ink16: OnceLock::from(ink.wide),
             paints,
             opm_eligible: false,
             zero_components: 0,
@@ -355,11 +367,25 @@ impl RasterColor {
     #[must_use]
     pub(crate) fn ink(&self) -> &[u8; 8] {
         self.ink.get_or_init(|| {
-            let [c, m, y, k] = color::cmyk::rgb_to_ink(self.source);
+            let [c, m, y, k] = color::cmyk::rgb_to_ink(self.source.bytes);
             let ink = [c, m, y, k, 0, 0, 0, 0];
             self.ink_transfer
                 .as_ref()
                 .map_or(ink, |t| t.apply_ink(ink, PROCESS_CHANNELS))
+        })
+    }
+
+    /// The 16-bit ink amounts `[C, M, Y, K, S0, S1, S2, S3]`: a derived
+    /// ink converts from the 16-bit colour ([`color::cmyk::rgb_to_ink16`])
+    /// and maps through the transfer function at 16 bits.
+    #[must_use]
+    pub(crate) fn ink16(&self) -> &[u16; 8] {
+        self.ink16.get_or_init(|| {
+            let [c, m, y, k] = color::cmyk::rgb_to_ink16(self.source.wide);
+            let ink = [c, m, y, k, 0, 0, 0, 0];
+            self.ink_transfer
+                .as_ref()
+                .map_or(ink, |t| t.apply_ink16(ink, PROCESS_CHANNELS))
         })
     }
 
@@ -436,15 +462,23 @@ impl RasterColor {
                 source: self.source,
                 ink_transfer: Some(Arc::clone(t)),
                 ink: OnceLock::new(),
+                ink16: OnceLock::new(),
                 ..wide
             };
         };
-        let ink = t.apply_ink(given, self.carries());
+        let ink = Inks {
+            bytes: t.apply_ink(given.bytes, self.carries()),
+            wide: t.apply_ink16(given.wide, self.carries()),
+        };
         Self {
             given: Some(ink),
-            source: bytes,
+            source: Srgb {
+                bytes,
+                wide: *wide.rgb16(),
+            },
             ink_transfer: None,
-            ink: OnceLock::from(ink),
+            ink: OnceLock::from(ink.bytes),
+            ink16: OnceLock::from(ink.wide),
             ..wide
         }
     }
@@ -467,6 +501,46 @@ pub struct Srgb {
     pub bytes: [u8; 3],
     /// The 16-bit value.
     pub wide: [u16; 3],
+}
+
+/// Ink amounts `[C, M, Y, K, S0, S1, S2, S3]` (0 = no ink) at both sample
+/// depths: each quantised from the same tints, or one depth's own and the
+/// other's taken from it ([`Self::of`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Inks {
+    /// The 8-bit amounts.
+    pub bytes: [u8; 8],
+    /// The 16-bit amounts.
+    pub wide: [u16; 8],
+}
+
+impl Inks {
+    /// The tints `inks` ([0, 1] each, clamped; NaN is no ink), rounded at
+    /// either depth.
+    #[must_use]
+    pub(crate) fn from_unit(inks: [f64; 8]) -> Self {
+        Self {
+            bytes: inks.map(gray_to_u8),
+            wide: inks.map(u16::from_unit),
+        }
+    }
+
+    /// The process ink `cmyk` at the depth of `S`, no spot ink, as
+    /// [`Self::of`] takes it.
+    #[must_use]
+    pub(crate) fn process<S: Sample>(cmyk: [S; 4]) -> Self {
+        Self::of(no_spots(cmyk))
+    }
+
+    /// The amounts `ink` at the depth of `S`, the other depth's the exact
+    /// widening of 8-bit amounts or the nearest bytes to 16-bit ones.
+    #[must_use]
+    pub(crate) fn of<S: Sample>(ink: [S; 8]) -> Self {
+        Self {
+            bytes: ink.map(S::to_u8),
+            wide: ink.map(u16::from_sample),
+        }
+    }
 }
 
 impl Srgb {
@@ -576,7 +650,7 @@ mod tests {
         assert!(process.opm_eligible());
         let spot = RasterColor::with_ink(
             Srgb::of_bytes([200, 30, 60]),
-            [0, 0, 0, 0, 153, 0, 0, 0],
+            Inks::of::<u8>([0, 0, 0, 0, 153, 0, 0, 0]),
             ChannelMask::new(0b1_0000),
         );
         assert_eq!(spot.paints(), ChannelMask::new(0b1_0000));
@@ -587,7 +661,7 @@ mod tests {
             spot,
             RasterColor::with_ink(
                 Srgb::of_bytes([200, 30, 60]),
-                [0, 0, 0, 0, 153, 0, 0, 0],
+                Inks::of::<u8>([0, 0, 0, 0, 153, 0, 0, 0]),
                 ChannelMask::new(0b1_0001)
             )
         );
@@ -628,7 +702,7 @@ mod tests {
         // Only a process colour is eligible.
         let spot = RasterColor::with_ink(
             Srgb::of_bytes([200, 30, 60]),
-            [0; 8],
+            Inks::of::<u8>([0; 8]),
             ChannelMask::new(0b1_0000),
         );
         assert_eq!(
@@ -660,7 +734,7 @@ mod tests {
         };
         let spot = RasterColor::with_ink(
             Srgb::of_bytes([200, 30, 60]),
-            [0, 0, 0, 0, 153, 0, 0, 0],
+            Inks::of::<u8>([0, 0, 0, 0, 153, 0, 0, 0]),
             ChannelMask::new(0b1_0000),
         );
         let mapped = spot.transferred(Some(&transfer));

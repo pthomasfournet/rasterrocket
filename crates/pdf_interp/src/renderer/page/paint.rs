@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use color::SampleDepth;
+
 use raster::{
     eo_fill, fill, fill_area,
     path::PathBuilder,
@@ -13,7 +15,7 @@ use raster::{
     xpath::XPath,
 };
 
-use super::super::color::RasterColor;
+use super::super::color::{Inks, RasterColor};
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, CanvasPipe, CanvasSource, with_canvas};
 use super::depth::{CanvasBackdrop, CanvasSample};
@@ -177,19 +179,32 @@ impl PageRenderer<'_> {
                 &[c, m, y, k] => {
                     let rgb = srgb(cs);
                     let cmyk = [c, m, y, k];
-                    if self.canvas.kind() == CanvasKind::Ink {
-                        let ink = self.ink_map.borrow_mut().ink_reproducing(rgb.bytes, cmyk);
-                        RasterColor::with_process_ink_of(rgb, cmyk, ink)
-                    } else {
-                        RasterColor::with_process_inks(rgb, cmyk)
-                    }
+                    let mut map = self.ink_map.borrow_mut();
+                    let ink = match self.canvas.kind() {
+                        CanvasKind::Ink => Inks::process(map.ink_reproducing(rgb.bytes, cmyk)),
+                        CanvasKind::Ink16 => Inks::process(map.ink_reproducing(rgb.wide, cmyk)),
+                        CanvasKind::Rgb | CanvasKind::Rgb16 => {
+                            return RasterColor::with_process_inks(rgb, cmyk);
+                        }
+                    };
+                    RasterColor::with_process_ink_of(rgb, cmyk, ink)
                 }
                 _ => RasterColor::from_srgb(srgb(cs)),
             },
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
-                if self.canvas.kind() == CanvasKind::Ink =>
+                if self.canvas.kind().is_ink() =>
             {
-                let (ink, paints) = self.ink_map.borrow_mut().colorant_ink(doc, cs, comps);
+                let mut map = self.ink_map.borrow_mut();
+                let (ink, paints) = match depth {
+                    SampleDepth::Eight => {
+                        let (ink, paints) = map.colorant_ink::<u8>(doc, cs, comps);
+                        (Inks::of(ink), paints)
+                    }
+                    SampleDepth::Sixteen => {
+                        let (ink, paints) = map.colorant_ink::<u16>(doc, cs, comps);
+                        (Inks::of(ink), paints)
+                    }
+                };
                 RasterColor::with_ink(srgb(cs), ink, paints)
             }
             // An indexed colour is its palette entry's colour in the base
@@ -339,7 +354,7 @@ impl PageRenderer<'_> {
         stroke: bool,
         paints: ChannelMask,
     ) -> Option<ChannelMask> {
-        if self.canvas.kind() != CanvasKind::Ink {
+        if !self.canvas.kind().is_ink() {
             return None;
         }
         let gs = self.gstate.current();
@@ -357,7 +372,7 @@ impl PageRenderer<'_> {
     /// state of the paint that uses the pattern.
     pub(super) fn tile_overprint(&self, tile: &Tile) -> Option<ChannelMask> {
         let paints = tile.paints();
-        (self.canvas.kind() == CanvasKind::Ink && paints != ChannelMask::ALL).then_some(paints)
+        (self.canvas.kind().is_ink() && paints != ChannelMask::ALL).then_some(paints)
     }
 
     /// The channels a fill or stroke of the solid colour `colour` writes
@@ -766,9 +781,12 @@ impl<'a> PaintSource<'a> {
         Self {
             pattern: tiled.map(|tile| match tile {
                 Tile::Rgb(p) => CanvasPattern::new(kind, p as &dyn Pattern, transfer),
-                Tile::Rgb16(p) => CanvasPattern::Rgb16(p),
+                Tile::Rgb16(p) => CanvasPattern::wide(kind, p, transfer),
                 Tile::Ink { pattern, channels } => {
                     CanvasPattern::ink(pattern, transfer, channels.carries)
+                }
+                Tile::Ink16 { pattern, channels } => {
+                    CanvasPattern::ink16(pattern, transfer, channels.carries)
                 }
             }),
             solid,

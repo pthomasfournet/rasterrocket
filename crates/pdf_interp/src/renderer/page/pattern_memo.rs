@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use color::{DeviceN8, Pixel, Rgb8, Rgb16};
+use color::{DeviceN8, DeviceN16, Pixel, Rgb8, Rgb16};
 use pdf::ObjectId;
 use raster::{Bitmap, CellPhase};
 
@@ -138,6 +138,12 @@ pub(super) enum CellRaster {
     /// The cell bitmap of ink, with the channels its content painted and
     /// carried.
     InkCell(Rc<Bitmap<DeviceN8>>, InkChannels),
+    /// The mean 16-bit ink and coverage of a cell below one pixel in area,
+    /// with the channels the cell's content painted and carried.
+    InkMean16([u16; 8], u16, InkChannels),
+    /// The cell bitmap of 16-bit ink, with the channels its content
+    /// painted and carried.
+    InkCell16(Rc<Bitmap<DeviceN16>>, InkChannels),
 }
 
 /// Resolved shadings and tiling cells keyed by object.  A `None` value
@@ -271,10 +277,14 @@ impl PatternMemo {
     /// kept stays.
     pub(super) fn insert_raster(&mut self, key: RasterKey, raster: CellRaster) {
         let bytes = match &raster {
-            CellRaster::Mean(..) | CellRaster::Mean16(..) | CellRaster::InkMean(..) => 0,
+            CellRaster::Mean(..)
+            | CellRaster::Mean16(..)
+            | CellRaster::InkMean(..)
+            | CellRaster::InkMean16(..) => 0,
             CellRaster::Cell(bitmap) => bitmap_bytes(bitmap),
             CellRaster::Cell16(bitmap) => bitmap_bytes(bitmap),
             CellRaster::InkCell(bitmap, _) => bitmap_bytes(bitmap),
+            CellRaster::InkCell16(bitmap, _) => bitmap_bytes(bitmap),
         };
         if !self.rasters.contains_key(&key) && self.budget.reserve(bytes) {
             let _ = self.rasters.insert(key, raster);
@@ -321,7 +331,7 @@ impl PageRenderer<'_> {
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             let doc = resources.doc();
             let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
-            let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
+            let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
             resources
                 .shading_pattern(name, &pattern_ctm, canvas, ink)
                 .map(Rc::new)
@@ -344,7 +354,7 @@ impl PageRenderer<'_> {
         self.pattern_memo.borrow_mut().shading(key, || {
             let doc = resources.doc();
             let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
-            let ink: Option<PlanColorants<'_>> = (kind == CanvasKind::Ink).then_some(&mut plan);
+            let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
             resources.shading(name, ctm, canvas, ink).map(Rc::new)
         })
     }

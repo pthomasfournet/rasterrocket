@@ -1888,9 +1888,9 @@ fn render_forms<'a>(doc: &'a Document, content: &[u8]) -> PageRenderer<'a> {
 fn rgb_bytes(renderer: &PageRenderer<'_>) -> Vec<u8> {
     match &renderer.canvas {
         super::canvas::PageCanvas::Rgb(bitmap) => bitmap.data().to_vec(),
-        super::canvas::PageCanvas::Rgb16(_) | super::canvas::PageCanvas::Ink(_) => {
-            panic!("an RGB canvas was expected")
-        }
+        super::canvas::PageCanvas::Rgb16(_)
+        | super::canvas::PageCanvas::Ink(_)
+        | super::canvas::PageCanvas::Ink16(_) => panic!("an RGB canvas was expected"),
     }
 }
 

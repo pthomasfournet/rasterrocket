@@ -321,31 +321,33 @@ impl ColorSpace {
     /// transform evaluates; otherwise [`color::cmyk::rgb_to_ink`] of the
     /// sRGB conversion.  A component count other
     /// than [`ncomponents`](Self::ncomponents) converts as
-    /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.
+    /// [`convert_to_rgb`](Self::convert_to_rgb) does, to black.  The ink
+    /// and the colours it is found from are at the depth of `S`
+    /// ([`Self::convert`], [`color::cmyk::rgb_to_ink_at`]).
     #[must_use]
-    pub(crate) fn process_ink(&self, doc: &Document, comps: &[f64]) -> [u8; 4] {
-        self.process_ink_with(doc, comps, &mut color::cmyk::ink_reproducing)
+    pub(crate) fn process_ink<S: Sample>(&self, doc: &Document, comps: &[f64]) -> [S; 4] {
+        self.process_ink_with(doc, comps, &mut color::cmyk::ink_reproducing_at)
     }
 
     /// [`process_ink`](Self::process_ink) with the inks reproducing the
     /// sRGB colour of a four-component ICC colour from its components
     /// found by `reproduce`, which returns what
-    /// [`color::cmyk::ink_reproducing`] does for the same arguments.
-    pub(crate) fn process_ink_with(
+    /// [`color::cmyk::ink_reproducing_at`] does for the same arguments.
+    pub(crate) fn process_ink_with<S: Sample>(
         &self,
         doc: &Document,
         comps: &[f64],
-        reproduce: &mut dyn FnMut([u8; 3], [f64; 4]) -> [u8; 4],
-    ) -> [u8; 4] {
+        reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
+    ) -> [S; 4] {
         match self {
             Self::DeviceCmyk => {
                 if let &[c, m, y, k] = comps {
-                    return [c, m, y, k].map(color::convert::gray_to_u8);
+                    return [c, m, y, k].map(S::from_unit);
                 }
             }
             Self::IccBased { n: 4, .. } => {
                 if let &[c, m, y, k] = comps {
-                    return reproduce(self.convert_to_rgb(doc, comps), [c, m, y, k]);
+                    return reproduce(self.convert::<S>(doc, comps), [c, m, y, k]);
                 }
             }
             Self::Separation {
@@ -364,7 +366,7 @@ impl ColorSpace {
             }
             _ => {}
         }
-        color::cmyk::rgb_to_ink(self.convert_to_rgb(doc, comps))
+        color::cmyk::rgb_to_ink_at(self.convert::<S>(doc, comps))
     }
 
     /// Convert a tint-component slice to an sRGB byte triple per PDF §8.6.

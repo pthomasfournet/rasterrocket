@@ -146,7 +146,7 @@ impl PageRenderer<'_> {
             match kind {
                 CanvasKind::Rgb => {}
                 CanvasKind::Rgb16 => compositor.wide_transfer = transfer.as_deref(),
-                CanvasKind::Ink => compositor.transfer = transfer.as_deref(),
+                CanvasKind::Ink | CanvasKind::Ink16 => compositor.transfer = transfer.as_deref(),
             }
             let composite = |rows: RgbaRows<'_>| {
                 composite_rgba_rows(bitmap, rows, grid, grid_clip, compositor, rgb_transfer);

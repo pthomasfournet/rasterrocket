@@ -225,6 +225,8 @@ pub struct CanvasBuffers {
     pub rgb16: raster::BitmapBuffers<u16>,
     /// The ink canvas's colour buffer and alpha plane.
     pub ink: raster::BitmapBuffers,
+    /// The 16-bit ink canvas's colour buffer and alpha plane.
+    pub ink16: raster::BitmapBuffers<u16>,
 }
 
 /// The ink map of a page, shared by the renderers of its pattern cells
@@ -596,7 +598,7 @@ impl<'doc> PageRenderer<'doc> {
         let alpha = group.is_some();
         let mut spare = buffers;
         let kind = if ink {
-            CanvasKind::Ink
+            CanvasKind::ink(depth)
         } else {
             CanvasKind::rgb(depth)
         };
@@ -641,6 +643,7 @@ impl<'doc> PageRenderer<'doc> {
 
         let font_cache = FontCache::new(Arc::default(), true);
         let resources = PageResources::new(doc, page_id);
+        let ink_map = ink_map::InkMap::new(canvas.kind().depth());
 
         Self {
             canvas,
@@ -672,7 +675,7 @@ impl<'doc> PageRenderer<'doc> {
             },
             page_group: group,
             group_pool: Vec::new(),
-            ink_map: Rc::default(),
+            ink_map: Rc::new(RefCell::new(ink_map)),
             painted: Cell::new(InkChannels::NONE),
             diag: PageDiagnostics::default(),
             image_memo: image_memo::ImageMemo::shared(page_id, Arc::default()),

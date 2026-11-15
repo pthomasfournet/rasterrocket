@@ -234,7 +234,7 @@ impl PageRenderer<'_> {
         // The coverage is the alpha plane of the child's 8-bit RGB canvas.
         let data = match child.finish_canvas() {
             PageCanvas::Rgb(bitmap) => bitmap.alpha_plane().map_or_default(<[u8]>::to_vec),
-            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) => {
+            PageCanvas::Rgb16(_) | PageCanvas::Ink(_) | PageCanvas::Ink16(_) => {
                 debug_assert!(false, "a Type 3 coverage canvas is 8-bit RGB");
                 Vec::new()
             }

@@ -69,12 +69,16 @@ pub struct Transfer {
     /// Ink channel `i`'s table: `255 − f(255 − v)` for the function `f`
     /// of the channel's colorant.
     ink: [[u8; 256]; 8],
-    /// The red, green and blue functions; `None` for the identity.
-    functions: [Option<Arc<Function>>; 3],
+    /// The red, green, blue and gray functions; `None` for the identity.
+    functions: [Option<Arc<Function>>; 4],
     /// The red, green and blue functions at every 16-bit value, one table
     /// after the other, tabulated on first use; an identity function takes
     /// the identity table.
     rgb16: OnceLock<Box<[u16]>>,
+    /// The ink tables at 16 bits of the cyan, magenta, yellow and black
+    /// channels, one after the other, tabulated on first use; the spot
+    /// channels take the black table.
+    ink16: OnceLock<Box<[u16]>>,
 }
 
 impl PartialEq for Transfer {
@@ -98,9 +102,8 @@ impl Eq for Transfer {}
 
 impl Transfer {
     /// The tables of the red, green, blue and gray functions, in that
-    /// order, and the red, green and blue functions themselves, `None`
-    /// for the identity.
-    fn new(tables: &[[u8; 256]; 4], functions: [Option<Arc<Function>>; 3]) -> Self {
+    /// order, and the functions themselves, `None` for the identity.
+    fn new(tables: &[[u8; 256]; 4], functions: [Option<Arc<Function>>; 4]) -> Self {
         let [red, green, blue, _] = *tables;
         let [cyan, magenta, yellow, black]: [[u8; 256]; 4] = std::array::from_fn(|i| {
             std::array::from_fn(|v| u8::MAX - tables[i][usize::from(u8::MAX) - v])
@@ -110,7 +113,57 @@ impl Transfer {
             ink: [cyan, magenta, yellow, black, black, black, black, black],
             functions,
             rgb16: OnceLock::new(),
+            ink16: OnceLock::new(),
         }
+    }
+
+    /// The function of ink channel `channel`: red, green and blue for
+    /// cyan, magenta and yellow, gray for black and the spots.
+    fn ink_function(&self, channel: usize) -> Option<&Arc<Function>> {
+        self.functions[channel.min(3)].as_ref()
+    }
+
+    /// The 16-bit ink value `v` of channel `channel` mapped through its
+    /// function: `MAX − f(MAX − v)`, the function evaluated at the
+    /// complement.  A function that fails maps the complement to 0.
+    fn ink16_at(&self, channel: usize, v: u16) -> u16 {
+        self.ink_function(channel).map_or(v, |f| {
+            u16::MAX - evaluate::<u16>(f, (u16::MAX - v).to_unit()).unwrap_or(0)
+        })
+    }
+
+    /// [`Self::apply_ink`] at 16 bits: each channel of `channels` mapped
+    /// through its function at the 16-bit value ([`Self::ink_tables16`]
+    /// holds the same values).
+    #[must_use]
+    pub fn apply_ink16(&self, ink: [u16; 8], channels: ChannelMask) -> [u16; 8] {
+        std::array::from_fn(|i| {
+            if channels.paints(i) {
+                self.ink16_at(i, ink[i])
+            } else {
+                ink[i]
+            }
+        })
+    }
+
+    /// The ink tables at 16 bits of the eight ink channels: entry `v` of
+    /// table `i` is channel `i`'s value `v` mapped through its function;
+    /// tabulated on first use.
+    #[must_use]
+    pub fn ink_tables16(&self) -> [&[u16; 65_536]; 8] {
+        let tables = self.ink16.get_or_init(|| {
+            let mut tables = vec![0u16; 4 * 65_536].into_boxed_slice();
+            for (channel, table) in tables.as_chunks_mut::<65_536>().0.iter_mut().enumerate() {
+                for (v, out) in (0..=u16::MAX).zip(table.iter_mut()) {
+                    *out = self.ink16_at(channel, v);
+                }
+            }
+            tables
+        });
+        let [c, m, y, k] = tables.as_chunks::<65_536>().0 else {
+            unreachable!("four tables of 65 536 entries");
+        };
+        [c, m, y, k, k, k, k, k]
     }
 
     /// Map the channels `channels` of the ink `[C, M, Y, K, S0, S1, S2,
@@ -144,7 +197,7 @@ impl Transfer {
         let tables = self.rgb16.get_or_init(|| {
             let mut tables = vec![0u16; 3 * 65_536].into_boxed_slice();
             let chunks = tables.as_chunks_mut::<65_536>().0;
-            for (table, function) in chunks.iter_mut().zip(&self.functions) {
+            for (table, function) in chunks.iter_mut().zip(&self.functions[..3]) {
                 match function {
                     Some(f) => {
                         for (v, out) in (0..=u16::MAX).zip(table.iter_mut()) {
@@ -252,9 +305,9 @@ fn setting_of(doc: &Document, obj: &Object) -> Option<TransferSetting> {
     Some(if tables.iter().all(|lut| *lut == IDENTITY) {
         TransferSetting::Identity
     } else {
-        let [r, g, b, _] =
+        let functions =
             components.map(|(lut, function)| (lut != IDENTITY).then_some(function).flatten());
-        TransferSetting::Functions(Arc::new(Transfer::new(&tables, [r, g, b])))
+        TransferSetting::Functions(Arc::new(Transfer::new(&tables, functions)))
     })
 }
 
@@ -341,6 +394,32 @@ mod tests {
     /// On ink a function maps the complement: the inverting function maps
     /// no ink to full ink.  The gray function of an array maps black and
     /// the spots; a gray function alone is not the identity.
+    /// At 16 bits the ink maps through the functions themselves, as the
+    /// 8-bit tables do: the inverting gray function takes a 16-bit ink to
+    /// its 16-bit complement on the black and spot channels, and the
+    /// tables hold the same values.
+    #[test]
+    fn ink_maps_at_16_bits_through_the_functions() {
+        let doc = invert_doc();
+        let Some(TransferSetting::Functions(t)) =
+            ext_gstate_transfer(&doc, &gs("<< /TR [/Identity /Identity /Identity 4 0 R] >>"))
+        else {
+            panic!("a gray function alone maps ink");
+        };
+        let ink = [10, 20, 30, 1000, 50_000, 0, 7, 65_535];
+        assert_eq!(
+            t.apply_ink16(ink, ChannelMask::new(0b0111_1111)),
+            [10, 20, 30, 64_535, 15_535, 65_535, 65_528, 65_535]
+        );
+        let tables = t.ink_tables16();
+        for (i, &v) in ink.iter().enumerate() {
+            assert_eq!(
+                tables[i][usize::from(v)],
+                t.apply_ink16(ink, ChannelMask::ALL)[i]
+            );
+        }
+    }
+
     #[test]
     fn ink_tables_map_the_complement_per_colorant() {
         let doc = invert_doc();

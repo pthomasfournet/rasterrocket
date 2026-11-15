@@ -25,8 +25,8 @@ impl PageRenderer<'_> {
     /// Whether image decodes keep their colorant tints: on an ink canvas,
     /// which draws an image in a `Separation` or `DeviceN` space as the
     /// ink of its tints.
-    pub(super) fn keeps_tints(&self) -> bool {
-        self.canvas.kind() == CanvasKind::Ink
+    pub(super) const fn keeps_tints(&self) -> bool {
+        self.canvas.kind().is_ink()
     }
 
     /// Count the drawn image in the page diagnostics (presence, filter) and
@@ -236,7 +236,7 @@ impl PageRenderer<'_> {
     /// canvas, assigning their spot colorants slots.  `None` on an RGB
     /// canvas, for an image without tints, and in a shape-only glyph.
     fn tint_plan(&self, decoded: &crate::resources::DecodedImage) -> Option<ColorantPlan> {
-        if self.canvas.kind() != CanvasKind::Ink || self.gstate.current().colour_locked {
+        if !self.canvas.kind().is_ink() || self.gstate.current().colour_locked {
             return None;
         }
         let tints = decoded.tints.as_ref()?;
@@ -421,7 +421,7 @@ impl PageRenderer<'_> {
         // The device blit composites 8-bit samples: a 16-bit canvas takes
         // the host copy through the CPU path.
         #[cfg(feature = "cache")]
-        if self.canvas.kind() == CanvasKind::Rgb16
+        if self.canvas.kind().depth() == color::SampleDepth::Sixteen
             && let Some(host) = self.host_copy(img, "a 16-bit canvas")
         {
             return self.composite_image(&host, ctm, mask, grid, grid_clip, overprint);
@@ -563,7 +563,7 @@ impl PageRenderer<'_> {
                 }
                 compositor.wide_transfer = gs_transfer.as_deref();
             }
-            CanvasKind::Ink => {
+            CanvasKind::Ink | CanvasKind::Ink16 => {
                 if stencil {
                     compositor.solid = Some(&painted_fill);
                 }

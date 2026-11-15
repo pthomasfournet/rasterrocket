@@ -103,7 +103,7 @@ impl PageRenderer<'_> {
         let values = match canvas {
             PageCanvas::Rgb(b) => mask_values(&b, reduce, function.as_deref()),
             PageCanvas::Rgb16(b) => mask_values(&b, reduce, function.as_deref()),
-            PageCanvas::Ink(_) => {
+            PageCanvas::Ink(_) | PageCanvas::Ink16(_) => {
                 debug_assert!(false, "a soft mask group is painted on an RGB canvas");
                 return None;
             }

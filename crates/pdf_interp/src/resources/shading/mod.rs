@@ -66,7 +66,7 @@ use super::colorspace::{self, ColorSpace, EXACT_WORK_BUDGET};
 use super::dict_ext::DictExt;
 use super::lattice::{Axis, for_each_corner};
 use super::{PageResources, read_matrix, resolve_dict};
-use crate::renderer::color::{ColorantPlan, PROCESS_CHANNELS, Srgb};
+use crate::renderer::color::{ColorantPlan, Inks, PROCESS_CHANNELS, Srgb};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform, invert_affine};
 use function::{Function, read_f64_array, read_fn_domain};
 use mesh::{CornerSource, DirectColors, ParamColors, TriangleSink};
@@ -109,6 +109,10 @@ pub enum ShadingResult {
     InkPattern(Box<dyn Pattern + Send + Sync>),
     /// Gouraud triangles of ink, indexed by device row.
     InkMesh(Mesh<8>),
+    /// Smooth gradient of 16-bit ink.
+    InkPattern16(Box<dyn Pattern<u16> + Send + Sync>),
+    /// Gouraud triangles of 16-bit ink, indexed by device row.
+    InkMesh16(Mesh<8, u16>),
 }
 
 /// A shading's colours of `N` samples of type `S`: a pattern or a mesh.
@@ -128,8 +132,9 @@ pub struct ResolvedShading {
     /// for a 16-bit canvas.  It applies only when the shading is painted as
     /// a shading pattern, never through the `sh` operator.
     pub background: Option<Srgb>,
-    /// `Background` as ink, for a shading whose colours are ink.
-    pub background_ink: Option<[u8; 8]>,
+    /// `Background` as ink, for a shading whose colours are ink, at the
+    /// depth the shading was resolved at.
+    pub background_ink: Option<Inks>,
     /// The channels the shading paints on an ink canvas: the process
     /// channels for a shading in a process CMYK space, the channels of its
     /// [`ColorantPlan`] for a shading of ink, every channel otherwise.  The
@@ -148,7 +153,10 @@ impl ResolvedShading {
     #[must_use]
     pub(crate) const fn carries(&self) -> ChannelMask {
         match self.result {
-            ShadingResult::InkPattern(_) | ShadingResult::InkMesh(_) => self.paints,
+            ShadingResult::InkPattern(_)
+            | ShadingResult::InkMesh(_)
+            | ShadingResult::InkPattern16(_)
+            | ShadingResult::InkMesh16(_) => self.paints,
             ShadingResult::Pattern(_)
             | ShadingResult::Mesh(_)
             | ShadingResult::Pattern16(_)
@@ -264,7 +272,28 @@ pub(crate) fn resolve_shading_object(
         bbox: bbox.as_ref(),
     };
     let background = read_background(&sh_dict, cs.channels());
-    let (result, held_bytes, background_ink) = match (&plan, canvas.depth) {
+    let (result, held_bytes, background_ink) =
+        shading_colours(&source, cs, plan.as_ref(), background.as_deref())?;
+    Some(ResolvedShading {
+        result,
+        bbox,
+        background: background.as_deref().map(|c| cs.to_srgb(c, canvas.depth)),
+        background_ink,
+        paints,
+        held_bytes,
+    })
+}
+
+/// The colours of the shading `source` in `cs`, at the depth of its
+/// canvas — the ink of `plan` when the shading is of ink — with the heap
+/// bytes they hold and its `background`, as ink, for a shading of ink.
+fn shading_colours(
+    source: &Source<'_>,
+    cs: ShadingCs<'_>,
+    plan: Option<&ColorantPlan>,
+    background: Option<&[f64]>,
+) -> Option<(ShadingResult, usize, Option<Inks>)> {
+    Some(match (plan, source.canvas.depth) {
         (None, SampleDepth::Eight) => {
             let (colours, held) = source.colours::<3, u8, _>(cs)?;
             let result = match colours {
@@ -281,24 +310,32 @@ pub(crate) fn resolve_shading_object(
             };
             (result, held, None)
         }
-        (Some(plan), _) => {
+        (Some(plan), SampleDepth::Eight) => {
             let ink = InkCs { cs, plan };
-            let (colours, held) = source.colours(ink)?;
+            let (colours, held) = source.colours::<8, u8, _>(ink)?;
             let result = match colours {
                 Colours::Pattern(p) => ShadingResult::InkPattern(p),
                 Colours::Mesh(m) => ShadingResult::InkMesh(m),
             };
-            (result, held, background.as_deref().map(|c| ink.convert(c)))
+            (
+                result,
+                held,
+                background.map(|c| Inks::of::<u8>(ink.convert(c))),
+            )
         }
-    };
-
-    Some(ResolvedShading {
-        result,
-        bbox,
-        background: background.as_deref().map(|c| cs.to_srgb(c, canvas.depth)),
-        background_ink,
-        paints,
-        held_bytes,
+        (Some(plan), SampleDepth::Sixteen) => {
+            let ink = InkCs { cs, plan };
+            let (colours, held) = source.colours::<8, u16, _>(ink)?;
+            let result = match colours {
+                Colours::Pattern(p) => ShadingResult::InkPattern16(p),
+                Colours::Mesh(m) => ShadingResult::InkMesh16(m),
+            };
+            (
+                result,
+                held,
+                background.map(|c| Inks::of::<u16>(ink.convert(c))),
+            )
+        }
     })
 }
 
@@ -986,12 +1023,12 @@ struct InkCs<'a> {
     plan: &'a ColorantPlan,
 }
 
-impl ShadingColour<8, u8> for InkCs<'_> {
+impl<S: Sample> ShadingColour<8, S> for InkCs<'_> {
     fn channels(self) -> usize {
         self.cs.channels()
     }
 
-    fn convert(self, comps: &[f64]) -> [u8; 8] {
+    fn convert(self, comps: &[f64]) -> [S; 8] {
         let (doc, space) = (self.cs.doc, self.cs.space);
         let n = self.cs.channels();
         if comps.len() == n {

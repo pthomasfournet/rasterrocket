@@ -84,8 +84,9 @@ pub(super) fn composite_rgba_rows<P: Pixel>(
 /// `Normal`), a sample is blended onto the destination by its coverage
 /// alone; otherwise every sample runs through the raster pipe that fills
 /// use, the samples converted to ink on an ink bitmap.  The samples and
-/// their coverage are 8-bit; on a 16-bit bitmap they are widened exactly
-/// and the samples then mapped through the 16-bit transfer tables.
+/// their coverage are taken to the bitmap's depth, 8-bit ones widened
+/// exactly, and on a 16-bit RGB bitmap the samples then mapped through the
+/// 16-bit transfer tables.
 #[derive(Clone, Copy)]
 pub(super) struct ImageCompositor<'a> {
     /// The parameters of the pipe; `None` selects the direct coverage
@@ -101,8 +102,8 @@ pub(super) struct ImageCompositor<'a> {
     /// once widened.
     pub(super) wide_transfer: Option<&'a Transfer>,
     /// The channels that carry the samples' colorants when the samples
-    /// are ink, eight bytes each, for an ink bitmap; `None` when they are
-    /// RGB, three bytes each.  Set only with a pipe.
+    /// are ink, eight samples each, for an ink bitmap; `None` when they
+    /// are RGB, three samples each.  Set only with a pipe.
     pub(super) ink_samples: Option<ChannelMask>,
 }
 
@@ -176,6 +177,7 @@ impl<'a> ImageCompositor<'a> {
         P::Sample: CanvasSample,
     {
         let n = P::NCOMPS;
+        let ink_bitmap = matches!(P::MODE, PixelMode::DeviceN8 | PixelMode::DeviceN16);
         let sample_n = if self.ink_samples.is_some() { 8 } else { 3 };
         let zero = P::Sample::default();
         let solid = self.solid.map(|c| P::Sample::solid(c, P::MODE));
@@ -184,7 +186,7 @@ impl<'a> ImageCompositor<'a> {
         let columns = (row.len() / n).saturating_sub(x0).min(shape.len());
         let (colours, shape) = (&colours[..columns * sample_n], &shape[..columns]);
         let Some(paint) = self.paint else {
-            debug_assert_ne!(P::MODE, PixelMode::DeviceN8, "the direct blend writes RGB");
+            debug_assert!(!ink_bitmap, "the direct blend writes RGB");
             let dst = &mut row[x0 * 3..(x0 + columns) * 3];
             for ((dst, src), &coverage) in dst
                 .as_chunks_mut::<3>()
@@ -210,40 +212,31 @@ impl<'a> ImageCompositor<'a> {
             let (c0, c1) = (x0 + a, x0 + b);
             let data = &colours[a * sample_n..b * sample_n];
             let samples = RowPattern { data };
-            // Ink is 8-bit: an ink bitmap's samples are bytes.
-            let bytes = P::Sample::as_u8(data).map(|data| RowPattern { data });
-            let ink = bytes
-                .as_ref()
-                .map(|row| InkPattern::new(row, self.transfer));
-            let native = bytes
-                .as_ref()
-                .zip(self.ink_samples)
-                .map(|(row, channels)| TransferredInk::new(row, self.transfer, channels));
-            let src = match (solid, &native, &ink) {
-                (Some(solid), _, _) => Some(PipeSrc::Solid(solid)),
-                (None, Some(native), _) => P::Sample::pattern_u8(native).map(PipeSrc::Pattern),
-                (None, None, Some(ink)) if P::MODE == PixelMode::DeviceN8 => {
-                    P::Sample::pattern_u8(ink).map(PipeSrc::Pattern)
-                }
-                (None, _, _) => Some(PipeSrc::Pattern(&samples as &dyn Pattern<P::Sample>)),
+            let ink = InkPattern::new(&samples, self.transfer);
+            let native = self
+                .ink_samples
+                .map(|channels| TransferredInk::new(&samples, self.transfer, channels));
+            let src = match (solid, &native) {
+                (Some(solid), _) => PipeSrc::Solid(solid),
+                (None, Some(native)) => PipeSrc::Pattern(native),
+                (None, None) if ink_bitmap => PipeSrc::Pattern(&ink),
+                (None, None) => PipeSrc::Pattern(&samples as &dyn Pattern<P::Sample>),
             };
-            if let Some(src) = src {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    clippy::cast_possible_truncation,
-                    reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
-                )]
-                raster::pipe::render_span::<P>(
-                    &pipe,
-                    &src,
-                    &mut row[c0 * n..c1 * n],
-                    alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
-                    Some(&shape[a..b]),
-                    c0 as i32,
-                    (c1 - 1) as i32,
-                    y as i32,
-                );
-            }
+            #[expect(
+                clippy::cast_possible_wrap,
+                clippy::cast_possible_truncation,
+                reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
+            )]
+            raster::pipe::render_span::<P>(
+                &pipe,
+                &src,
+                &mut row[c0 * n..c1 * n],
+                alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
+                Some(&shape[a..b]),
+                c0 as i32,
+                (c1 - 1) as i32,
+                y as i32,
+            );
             start = b;
         }
     }
