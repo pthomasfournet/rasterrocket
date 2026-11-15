@@ -252,7 +252,7 @@ pub(super) fn content(
                 .then(|| rich_shown(doc, field))
                 .flatten();
             let text = || {
-                let text = display_text(doc, field);
+                let text = limited(field, display_text(doc, field));
                 if field.flags & PASSWORD != 0 {
                     "*".repeat(text.chars().count())
                 } else {
@@ -263,7 +263,10 @@ pub(super) fn content(
                 styled(&mut s, field, text_area, rich, ts);
             } else if field.flags & MULTILINE != 0 && field.kind == Kind::Text {
                 multiline(&mut s, field, text_area, &text(), ts);
-            } else if field.flags & COMB != 0 && field.max_len.is_some_and(|m| m > 0) {
+            } else if field.kind == Kind::Text
+                && field.flags & COMB != 0
+                && field.max_len.is_some_and(|m| m > 0)
+            {
                 comb(&mut s, field, text_area, &text(), ts);
             } else {
                 single_line(&mut s, field, field.quadding, text_area, &text(), ts);
@@ -358,6 +361,15 @@ fn display_text(doc: &Document, field: &Field) -> String {
         .find(|(export, _)| *export == raw)
         .map_or(raw, |(_, display)| display.clone());
     decode_text_string(&raw)
+}
+
+/// `text` cut to the first `/MaxLen` characters of a text field whose
+/// `/MaxLen` is positive; whole otherwise.
+fn limited(field: &Field, text: String) -> String {
+    match field.max_len.and_then(|m| usize::try_from(m).ok()) {
+        Some(max) if max > 0 && field.kind == Kind::Text => text.chars().take(max).collect(),
+        _ => text,
+    }
 }
 
 /// The font size of a single line of `text` in `area`: the `/DA` size, or
@@ -460,16 +472,15 @@ fn comb(s: &mut String, field: &Field, area: [f64; 4], text: &str, ts: &mut dyn 
         ts.width(font, "W"),
     );
     let y = 0.35f64.mul_add(-size, f64::midpoint(area[1], area[3]));
-    // The value's characters in visual order, one per cell from the left;
-    // a right-to-left value fills the cells from the right.
-    let shown: String = text
-        .chars()
-        .take(usize::try_from(cells).unwrap_or(usize::MAX))
-        .collect();
-    let rtl = right_to_left(&shown);
-    let visual = visual_chars(&shown, rtl);
+    // The value's characters, at most one per cell, in visual order, one
+    // per cell from the left; a right-to-left value fills the cells from
+    // the right.
+    let rtl = right_to_left(text);
+    let visual = visual_chars(text, rtl);
     let first = if rtl {
-        usize::try_from(cells).unwrap_or(usize::MAX) - visual.len()
+        usize::try_from(cells)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(visual.len())
     } else {
         0
     };

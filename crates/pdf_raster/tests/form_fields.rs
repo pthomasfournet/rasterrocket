@@ -451,3 +451,25 @@ fn a_comb_field_fills_its_cells_in_the_value_s_direction() {
     assert!(hebrew[3] > 0 && hebrew[4] > 0, "{hebrew:?}");
     assert!(hebrew[0] == 0 && hebrew[1] == 0, "{hebrew:?}");
 }
+
+/// A text field shows at most `/MaxLen` characters of its value, whether
+/// or not it is a comb: `/Ff` 8388608 is `DoNotScroll`, not the comb flag.
+#[test]
+fn a_text_field_shows_at_most_max_len_characters() {
+    let field = |value: &str, max_len: &str| {
+        let widget = format!(
+            "/FT /Tx /T (zip) /Ff 8388608 {max_len} /Rect [10 30 190 70] /V ({value}) \
+             /DA (/Helv 20 Tf 0 g)"
+        );
+        dark_bounds(document("", &[&widget], vec![]))
+    };
+    let limited = field("11111", "/MaxLen 2");
+    assert!(limited.is_some(), "the first characters are drawn");
+    assert_eq!(limited, field("11", ""), "two characters drawn");
+    assert_ne!(limited, field("11111", ""), "the value is cut");
+    assert_eq!(
+        field("11111", "/MaxLen 0"),
+        field("11111", ""),
+        "a zero /MaxLen sets no limit"
+    );
+}
