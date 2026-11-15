@@ -118,11 +118,15 @@ fn xy_function(outputs: usize, program: &str) -> Vec<u8> {
     )
 }
 
-/// Points of the Domain square `[0, 1]²` mapped by `Matrix [100 0 0 50 50 25]`
-/// onto the page, at shading-space `(0.1, 0.1)`, `(0.9, 0.1)`, `(0.1, 0.9)`
-/// and `(0.9, 0.9)` (pixel centres sit half a point further in).
+/// Pixels of the Domain square `[0, 1]²` mapped by `Matrix [100 0 0 50 50 25]`
+/// onto the page.  A pattern is evaluated at a pixel's top-left device
+/// corner, as the reference renderers do: probe `(x, y)` (y up) is device
+/// pixel `(x, 99 − y)`, whose corner is the point `(x, y + 1)`, at
+/// shading-space `(0.1, 0.12)`, `(0.9, 0.12)`, `(0.1, 0.92)` and
+/// `(0.9, 0.92)`: 255 × 0.1 = 25.5, 255 × 0.12 = 30.6, 255 × 0.9 = 229.5,
+/// 255 × 0.92 = 234.6.
 const TYPE1_PROBES: [(u32, u32); 4] = [(60, 30), (140, 30), (60, 70), (140, 70)];
-const TYPE1_EXPECTED: [[u8; 3]; 4] = [[27, 28, 0], [231, 28, 0], [27, 232, 0], [231, 232, 0]];
+const TYPE1_EXPECTED: [[u8; 3]; 4] = [[26, 31, 0], [230, 31, 0], [26, 235, 0], [230, 235, 0]];
 
 #[test]
 fn function_based_shading_reads_both_coordinates_through_its_matrix() {
@@ -138,7 +142,7 @@ fn function_based_shading_reads_both_coordinates_through_its_matrix() {
         &TYPE1_PROBES,
     );
     for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
-        assert_rgb_near(got, want, 4, "Function(x, y) = (x, y, 0)");
+        assert_rgb_near(got, want, 1, "Function(x, y) = (x, y, 0)");
     }
 }
 
@@ -194,14 +198,14 @@ fn function_based_shading_takes_an_array_of_two_input_functions() {
         &TYPE1_PROBES,
     );
     for (got, want) in px.into_iter().zip(TYPE1_EXPECTED) {
-        assert_rgb_near(got, want, 4, "Function = [x, y, 0]");
+        assert_rgb_near(got, want, 1, "Function = [x, y, 0]");
     }
 }
 
 /// Probes along y = 50 where a mesh coloured with `t = x / 200` takes
-/// `RED_GREEN_BLUE` at t = 0.2, 0.5 and 0.8 (pixel centres add 0.0025).
+/// `RED_GREEN_BLUE` at t = 0.2, 0.5 and 0.8, at each pixel's left edge.
 const MESH_PROBES: [(u32, u32); 3] = [(40, 50), (100, 50), (160, 50)];
-const MESH_EXPECTED: [[u8; 3]; 3] = [[152, 103, 0], [0, 254, 1], [0, 101, 154]];
+const MESH_EXPECTED: [[u8; 3]; 3] = [[153, 102, 0], [0, 255, 0], [0, 102, 153]];
 
 #[test]
 fn lattice_mesh_with_function_interpolates_t_through_every_stop() {
@@ -217,7 +221,7 @@ fn lattice_mesh_with_function_interpolates_t_through_every_stop() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_rgb_near(got, want, 6, "type 5 mesh, t = x / 200");
+        assert_rgb_near(got, want, 1, "type 5 mesh, t = x / 200");
     }
 }
 
@@ -268,7 +272,7 @@ fn coons_mesh_with_function_interpolates_t_through_every_stop() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_rgb_near(got, want, 6, "type 6 mesh, t = x / 200");
+        assert_rgb_near(got, want, 1, "type 6 mesh, t = x / 200");
     }
 }
 
@@ -342,7 +346,7 @@ fn free_form_mesh_reads_a_flag_on_every_byte_aligned_vertex() {
     );
     let px = rgb_at(page_with("/Sh0 sh", &shading, &[]), &MESH_PROBES);
     for (got, want) in px.into_iter().zip(MESH_EXPECTED) {
-        assert_rgb_near(got, want, 6, "type 4 mesh, t = x / 200");
+        assert_rgb_near(got, want, 1, "type 4 mesh, t = x / 200");
     }
 }
 

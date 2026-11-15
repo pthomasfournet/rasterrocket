@@ -6,6 +6,14 @@
 //! - `function` — [`crate::FunctionPattern`]: PDF function sampled per pixel
 //! - `gouraud`  — `gouraud_triangle_fill`: vertex-coloured triangle scan
 //!
+//! # Sampling point
+//!
+//! Device pixel `(x, y)` takes the shading's colour at the device point
+//! `(x, y)`, its top-left corner, for every pattern and at every sample
+//! depth; a Gouraud triangle's vertices round to the same integer lattice.
+//! A banded or windowed render passes the page's device coordinates, so
+//! every window samples the points the whole page does.
+//!
 //! # Entry point
 //!
 //! [`shaded_fill`] is a thin wrapper around [`fill::fill`] / [`fill::eo_fill`]
