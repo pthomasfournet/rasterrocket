@@ -15,7 +15,6 @@ categories           = ["rendering", "multimedia::images"]
 [features]
 default     = ["simd-avx2"]
 simd-avx2   = []                   # AVX2 blend / fill paths
-nightly-sve2 = []                  # SVE2 popcount tier (aarch64 only; requires nightly + stdarch_aarch64_sve)
 
 [dependencies]
 color    = { package = "rasterrocket-color", path = "../color", version = "2.3" }

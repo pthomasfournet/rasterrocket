@@ -143,22 +143,14 @@ jobs:
   # NEON paths and cfg gates honest.  Uses `cargo check` only — no GPU features,
   # no CUDA, no execution.  A `cargo check` failure here means an aarch64
   # regression was introduced on x86-64.
-  #
-  # The `nightly-sve2` feature is also checked on nightly to keep the SVE2
-  # intrinsic code compilable as the nightly stdarch evolves.
   aarch64-check:
-    name: aarch64 cross-check (NEON + SVE2 nightly)
+    name: aarch64 cross-check (NEON)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Install stable toolchain + aarch64 target
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Install nightly toolchain + aarch64 target
-        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: aarch64-unknown-linux-gnu
 
@@ -175,9 +167,6 @@ jobs:
 
       - name: Check rasterrocket-render (stable, NEON)
         run: cargo check -p rasterrocket-render --target aarch64-unknown-linux-gnu
-
-      - name: Check rasterrocket-render (nightly, NEON + SVE2)
-        run: cargo +nightly check -p rasterrocket-render --target aarch64-unknown-linux-gnu --features nightly-sve2
 
       - name: Check rasterrocket-gpu (stable, NEON CMYK path)
         run: cargo check -p rasterrocket-gpu --target aarch64-unknown-linux-gnu

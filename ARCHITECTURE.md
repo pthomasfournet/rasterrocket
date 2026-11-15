@@ -1322,8 +1322,6 @@ bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
 
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
-  nightly-sve2     aarch64 only, nightly Rust; enables the stdarch SVE
-                   feature gate and no kernel (no SVE2 tier exists)
 
 AVX-512 tiers are selected at runtime via `is_x86_feature_detected!`, so they
 need no feature flag.
