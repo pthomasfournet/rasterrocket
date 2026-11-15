@@ -133,10 +133,6 @@ pub(crate) fn decode_with(
 ) -> Result<()> {
     let strip_size = header.strip_size();
 
-    if header.num_instances as usize > header.max_instances {
-        bail!(SymbolError::TooManyInstances);
-    }
-
     let mut strip_t = ctx
         .read_strip_delta_t(strip_size)?
         .checked_neg()
@@ -144,7 +140,7 @@ pub(crate) fn decode_with(
     let mut first_s: i32 = 0;
     let mut instance_count = 0;
 
-    while instance_count < header.num_instances {
+    'instances: while instance_count < header.num_instances {
         let delta_t = ctx.read_strip_delta_t(strip_size)?;
         strip_t = strip_t
             .checked_add(delta_t)
@@ -154,6 +150,12 @@ pub(crate) fn decode_with(
         let mut current_s = 0;
 
         loop {
+            // Past this point the decoded instances no longer depend on the
+            // data, so the region keeps the instances placed so far.
+            if ctx.is_exhausted() {
+                break 'instances;
+            }
+
             if first_symbol_in_strip {
                 let delta_first_s = ctx.read_first_s()?;
                 first_s = first_s
@@ -334,6 +336,16 @@ pub(crate) enum DecodeContext<'a, 'b> {
 }
 
 impl<'a, 'b> DecodeContext<'a, 'b> {
+    /// Whether the arithmetic decoder is exhausted (see
+    /// [`ArithmeticDecoder::is_exhausted`]). Huffman-coded data fails with an
+    /// error at its end instead.
+    fn is_exhausted(&self) -> bool {
+        match self {
+            Self::Huffman { .. } => false,
+            Self::Arithmetic { decoder, .. } => decoder.is_exhausted(),
+        }
+    }
+
     pub(crate) fn new_huffman(
         reader: &'a mut Reader<'b>,
         header: &'a TextRegionHeader<'_>,
@@ -862,8 +874,6 @@ pub(crate) struct TextRegionHeader<'a> {
     pub(crate) refinement_at_pixels: Vec<AdaptiveTemplatePixel>,
     pub(crate) num_instances: u32,
     pub(crate) symbol_id_table: Option<HuffmanTable>,
-    /// The most instances the region may declare.
-    pub(crate) max_instances: usize,
     pub(crate) data: &'a [u8],
     pub(crate) strict: bool,
 }
@@ -932,20 +942,12 @@ fn parse_text_region_huffman_flags(reader: &mut Reader<'_>) -> Result<TextRegion
     })
 }
 
-/// The most symbol instances that `data_len` bytes of segment data may
-/// declare: 32 per byte, the same bound for a text region and, summed over
-/// its aggregates, for a symbol dictionary.
-pub(crate) fn instance_allowance(data_len: usize) -> usize {
-    data_len.saturating_mul(32)
-}
-
 /// Parse a text region segment header (7.4.3.1).
 pub(crate) fn parse<'a>(
     reader: &mut Reader<'a>,
     num_symbols: u32,
     strict: bool,
 ) -> Result<TextRegionHeader<'a>> {
-    let max_instances = instance_allowance(reader.tail().ok_or(ParseError::UnexpectedEof)?.len());
     let region_info = parse_region_segment_info(reader)?;
     let flags = parse_text_region_flags(reader)?;
     let huffman_flags = if flags.use_huffman {
@@ -978,7 +980,6 @@ pub(crate) fn parse<'a>(
         refinement_at_pixels,
         num_instances,
         symbol_id_table,
-        max_instances,
         data,
         strict,
     })
@@ -1027,15 +1028,26 @@ mod tests {
     }
 
     /// Instances that reference no symbol write no pixels, yet each one is
-    /// decoded; every instance is charged to the work budget.
+    /// decoded; every instance is charged to the work budget.  The coded
+    /// data outlasts the budget, so the decoder is not exhausted first.
     #[test]
     fn placements_that_write_nothing_are_charged() {
-        let data = text_region_data(1, 1, 3200, 100, 0xfc);
+        let data = text_region_data(1, 1, 3200, 100_000, 0xfc);
 
         assert_eq!(
             decode_region(&data, &[], Budget::with_limits(1 << 20, 64 * 1000)).err(),
             Some(DecodeError::Overflow(OverflowError::WorkBudget))
         );
+    }
+
+    /// An arithmetic decoder exhausted before the declared instances are
+    /// decoded ends the region without an error, keeping the instances
+    /// placed so far, and charges no further instances.
+    #[test]
+    fn exhausted_data_ends_the_region() {
+        let data = text_region_data(1, 1, u32::MAX, 100, 0xfc);
+
+        assert!(decode_region(&data, &[], Budget::with_limits(1 << 20, 1 << 20)).is_ok());
     }
 
     /// Placed symbols charge the pixels they cover on top of the cost of

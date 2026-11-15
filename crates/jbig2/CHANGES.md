@@ -81,12 +81,6 @@ is opened with `Page::new_embedded`.
   starts with an empty budget that each page replaces with its own, so a
   decode path that skipped that step would fail with a budget error
   rather than run under the globals limits.
-- The limit of 32 symbol instances per byte of segment data applies to a
-  symbol dictionary as a whole: its aggregate symbols (6.5.8.2) draw on
-  one allowance of 32 per byte of the dictionary's data, where upstream
-  gave each aggregate the whole allowance. A dictionary whose aggregates
-  declare more instances in total fails with
-  `SymbolError::TooManyInstances`. Tests: `decode::symbol::tests`.
 - `Bitmap::combine` iterates only the source rows that fall inside the
   destination (`Bitmap::clipped_span`, which also clips the columns
   counted by `Bitmap::clipped_area`), so a symbol placed far outside its
@@ -165,6 +159,19 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   exports its symbols, new or inherited, by sharing them instead of
   copying each bitmap; `Bitmap::try_clone` is gone. Output is unchanged.
   Test: `decode::symbol::tests::dictionary_charges_every_allocation`.
+- `343e72083` (#1372), adapted: the limit of 32 symbol instances per byte
+  of segment data is gone, from text regions and from the aggregate
+  symbols of a symbol dictionary (where this fork had applied it to the
+  dictionary as a whole); it refused valid streams, such as upstream's
+  `text_many_instances`. Instead a text region, or an aggregate, stops
+  decoding instances once its arithmetic decoder is exhausted, keeping
+  the instances placed so far, as generic and refinement regions already
+  stop decoding rows; upstream fails the region with an error there.
+  Every instance stays charged to the compositing budget. Upstream's
+  exhaustion rule (65 536 end markers) is not taken: this fork's decoder
+  counts as exhausted after 64 bytes past its data. Tests:
+  `text::many_instances`, `malformed::symbol_dictionary_garbage_data`,
+  `decode::text::tests::exhausted_data_ends_the_region`.
 
 ## Upstream review (2026-10-30)
 

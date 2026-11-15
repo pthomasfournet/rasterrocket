@@ -32,6 +32,11 @@ fn symbol_dictionary_empty_height_classes() {
     check_malformed("malformed_symbol_dictionary_empty_height_classes");
 }
 
+#[test]
+fn symbol_dictionary_garbage_data() {
+    check_malformed("malformed_symbol_dictionary_garbage_data");
+}
+
 /// A generic region whose header declares as large a bitmap as the budget
 /// of a 4096 × 4096 page allows, but whose segment carries no coded data,
 /// stops decoding once the arithmetic decoder is exhausted, instead of
