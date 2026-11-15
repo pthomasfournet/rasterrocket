@@ -319,27 +319,28 @@ const MAX_NESTING: usize = 256;
 /// the exact regression the indirect-`/Length` fix exists to prevent.
 ///
 /// A well-formed indirect object always closes `…data EOL endstream EOL
-/// endobj` (PDF §7.3.8 / §7.3.10), so the terminator is the `endstream` that
-/// is **EOL-preceded and followed — after whitespace — by `endobj`**.  A
-/// false `endstream` embedded in compressed data essentially never satisfies
-/// both.  Preference order:
-///   1. first EOL-preceded `endstream` immediately followed by `endobj`
-///      (the strong terminator — every well-formed object has exactly this,
-///      so stop at the first to keep the scan O(stream) not O(file));
-///   2. else last EOL-preceded `endstream` (writers always EOL-precede it; a
-///      stray in-body hit is followed by more data then the real terminator,
-///      so the *last* such hit is the safer pick);
+/// endobj` (PDF §7.3.8 / §7.3.10), so the terminator is the `endstream`
+/// **followed — after whitespace — by `endobj`**.  A false `endstream`
+/// embedded in compressed data essentially never satisfies that.
+/// Preference order:
+///   1. first `endstream` keyword followed by `endobj`, whatever byte
+///      precedes it (the strong terminator — every well-formed object has
+///      exactly this, so stop at the first to keep the scan O(stream) not
+///      O(file));
+///   2. else last EOL-preceded `endstream` keyword (writers always
+///      EOL-precede it; a stray in-body hit is followed by more data then
+///      the real terminator, so the *last* such hit is the safer pick);
 ///   3. else first `endstream` keyword;
-///   4. else the first `endstream` bytes in any context (degenerate input —
+///   4. else, when no `endstream` keyword precedes it, the object's own
+///      `endobj` between whitespace, before the `obj` of another object:
+///      the object closes without the stream's terminator;
+///   5. else the first `endstream` bytes in any context (degenerate input —
 ///      recover *something* rather than dropping the whole page).
 ///
 /// `endstream` is a keyword when a whitespace or delimiter byte, or the end
-/// of the data, follows it (`endstream.` is body data), and no delimiter
-/// precedes it (`(endstream` opens a string; `ETendstream` ends a body that
-/// omits the EOL).  An `endobj`
-/// between whitespace, met before any `endstream` and before the `obj` of
-/// another object, ends the body: the object closes without the stream's
-/// terminator.
+/// of the data, follows it (`endstream.` is body data).  Outside rule 1 it
+/// also needs a byte other than a delimiter before it (`(endstream` opens a
+/// string; `ETendstream` ends a body that omits the EOL).
 ///
 /// Once a candidate is known, the scan ends at the next `endobj` or
 /// `stream` keyword: past it lies another object, whose `endstream` cannot
@@ -405,22 +406,12 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
         if first_bytes.is_none() {
             first_bytes = Some(kw);
         }
-        // `endstream` right after a delimiter is text, as in a string
-        // `(endstream is …)`; after data glued to it, as in `ETendstream`, a
-        // terminator.
-        if byte_before(rel).is_some_and(is_delim) || !keyword_at_rel(rel, KW) {
+        if !keyword_at_rel(rel, KW) {
             continue;
         }
-        if first_raw.is_none() {
-            first_raw = Some(kw);
-        }
-        // A delimiter EOL must sit immediately before a terminating keyword.
-        if kw == start || !matches!(data[kw - 1], b'\r' | b'\n') {
-            continue;
-        }
-        last_eol_preceded = Some(kw);
-        // …and the object must continue with `endobj` after the keyword and
-        // any intervening whitespace, or this only looks like a terminator.
+        // A keyword the object's `endobj` follows after whitespace is the
+        // terminator, whatever byte of the body precedes it: done, with no
+        // need to scan the rest of the file.
         let mut p = kw + KW.len();
         while matches!(
             data.get(p),
@@ -429,8 +420,20 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
             p += 1;
         }
         if data[p..].starts_with(b"endobj") {
-            // Strong terminator — done; no need to scan the rest of the file.
             return Some(trim_eol_before(data, start, kw));
+        }
+        // Otherwise `endstream` right after a delimiter is text, as in a
+        // string `(endstream is …)`; after data glued to it, as in
+        // `ETendstream`, a candidate.
+        if byte_before(rel).is_some_and(is_delim) {
+            continue;
+        }
+        if first_raw.is_none() {
+            first_raw = Some(kw);
+        }
+        // A delimiter EOL before the keyword makes it the likelier one.
+        if kw > start && matches!(data[kw - 1], b'\r' | b'\n') {
+            last_eol_preceded = Some(kw);
         }
     }
 
@@ -1064,6 +1067,16 @@ mod tests {
         let body = both("endstream");
         let src = format!("{body}endstream\nendobj\n");
         assert_eq!(stream_content(body.len(), " \n", &src), body.as_bytes());
+    }
+
+    /// A body ending in a delimiter byte glued to `endstream` (compressed
+    /// data under an indirect /Length) ends there when `endobj` follows,
+    /// also past an earlier EOL-preceded `endstream` in the data.
+    #[test]
+    fn endobj_anchored_terminator_after_a_delimiter_byte() {
+        let data = b"x\x9c/(\nendstream z/endstream\nendobj\n";
+        let end = find_endstream(data, 0).expect("found");
+        assert_eq!(&data[..end], b"x\x9c/(\nendstream z/");
     }
 
     /// An `endobj` ends a body without `endstream` only as a whole word and
