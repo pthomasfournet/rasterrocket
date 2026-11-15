@@ -127,6 +127,7 @@ mod open;
 mod output;
 pub(crate) mod page;
 mod page_buffer;
+mod proof;
 mod render;
 mod request;
 #[cfg(test)]
@@ -188,7 +189,10 @@ pub use pdf_interp::{
     FormType, InvalidRotation, MediaKind, PageBox, PageGeometry, RenderPurpose, Rotation,
     ScriptLocation, UnsupportedFeature,
 };
-pub use pdf_interp::{IntentSet, OutputProfile, OutputProfileError, OutputSpace, RenderingIntent};
+pub use pdf_interp::{
+    IntentSet, OutputIntentError, OutputProfile, OutputProfileError, OutputSpace, ProofIntent,
+    RenderingIntent,
+};
 pub use render::{
     render_page_canvas, render_page_canvas_with_diagnostics, render_page_cmyk, render_page_gray,
     render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
@@ -527,6 +531,12 @@ pub struct RasterOptions {
     /// [`RenderParams::black_point_compensation`].  Default `false`.
     pub black_point_compensation: bool,
 
+    /// Soft-proof every page against its output intent; see
+    /// [`SessionConfig::proof`].  Default `None`.  Incompatible with
+    /// [`transparent_background`](Self::transparent_background) and CMYK
+    /// [`color`](Self::color).
+    pub proof: Option<ProofIntent>,
+
     /// The colour model of the pages (see [`RenderParams::color`]).
     /// Default [`ColorModel::Rgb`]: gray pages, or RGBA over a transparent
     /// backdrop; [`ColorModel::Cmyk`] yields [`PixelFormat::Cmyk8`] pages,
@@ -586,6 +596,7 @@ impl Default for RasterOptions {
             output_profile: None,
             intent: None,
             black_point_compensation: false,
+            proof: None,
             color: ColorModel::Rgb,
             cancel: None,
         }

@@ -270,6 +270,8 @@ impl PageBuffer {
             params = params.with_transparent_background();
         }
         params.cancel.clone_from(&opts.cancel);
+        params.intent = opts.intent;
+        params.black_point_compensation = opts.black_point_compensation;
         let (canvas, diag) = render_page_canvas_with_geom(
             session,
             page_num,

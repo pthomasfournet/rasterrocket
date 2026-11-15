@@ -124,6 +124,7 @@ fn session_config_for(opts: &RasterOptions) -> SessionConfig {
         page_box: opts.page_box,
         rotation: opts.rotation,
         output_profile: opts.output_profile.clone(),
+        proof: opts.proof,
         ..defaults
     }
 }

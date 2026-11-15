@@ -297,7 +297,7 @@ fn draw_bands<E>(
         let (bitmap, output_intent) = crate::output::convert(
             session,
             params,
-            page_num,
+            (page_num, page_id),
             (bitmap, next.content_intents()),
             &mut spare,
         )?;

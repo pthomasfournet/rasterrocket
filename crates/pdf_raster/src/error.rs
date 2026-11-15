@@ -106,6 +106,9 @@ pub enum RasterError {
     /// The output profile admits no conversion for the page, or the
     /// conversion failed.
     OutputProfile(pdf_interp::OutputProfileError),
+    /// A soft proof ([`SessionConfig::proof`](crate::SessionConfig::proof))
+    /// found no output intent of a CMYK press for the document or page.
+    OutputIntent(pdf_interp::OutputIntentError),
     /// The per-page render function panicked.
     ///
     /// Caught only under `panic = "unwind"` builds (e.g. test profiles).
@@ -177,6 +180,7 @@ impl std::fmt::Display for RasterError {
             Self::PageBudgetExceeded(msg) => write!(f, "page render budget exceeded: {msg}"),
             Self::Cancelled => f.write_str("page render cancelled"),
             Self::OutputProfile(e) => write!(f, "output profile: {e}"),
+            Self::OutputIntent(e) => write!(f, "soft proof: {e}"),
             Self::RenderPanic { page, message } => {
                 write!(f, "page {page} render panicked: {message}")
             }
@@ -200,6 +204,7 @@ impl std::error::Error for RasterError {
         match self {
             Self::Pdf(e) => Some(e),
             Self::OutputProfile(e) => Some(e),
+            Self::OutputIntent(e) => Some(e),
             _ => None,
         }
     }

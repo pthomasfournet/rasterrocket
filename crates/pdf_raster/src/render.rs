@@ -507,7 +507,7 @@ pub(crate) fn render_page_canvas_with_geom(
     let (bitmap, output_intent) = crate::output::convert(
         session,
         params,
-        page_num,
+        (page_num, page_id),
         (bitmap, diag.content_intents),
         buffers,
     )?;
@@ -749,19 +749,25 @@ impl<'a> PageJob<'a> {
 /// A CMYK page separates the colours that are not CMYK through the
 /// session's CMYK output profile, under `params.intent`, else relative
 /// colorimetry, and its black-point compensation; without a profile, by
-/// the device conversion.
+/// the device conversion.  Under a soft proof every page is a CMYK page
+/// whose profile is the page's press.
 ///
 /// # Errors
 ///
 /// [`RasterError::OutputProfile`] when the profile's separation cannot be
-/// built.
+/// built; [`RasterError::OutputIntent`] when the page has no press.
 fn canvas_request(
     session: &RasterSession,
     page_id: pdf::ObjectId,
     params: &RenderParams,
 ) -> Result<pdf_interp::CanvasRequest, RasterError> {
-    if params.color == crate::ColorModel::Cmyk {
-        let separation = match &session.output_profile {
+    let press = match &session.proof {
+        Some(proof) => Some(Arc::clone(proof.for_page(&session.doc, page_id)?.press())),
+        None if params.color == crate::ColorModel::Cmyk => session.output_profile.clone(),
+        None => None,
+    };
+    if session.proof.is_some() || params.color == crate::ColorModel::Cmyk {
+        let separation = match press {
             Some(profile) => profile
                 .separation(
                     crate::output::cmyk_intent(params),

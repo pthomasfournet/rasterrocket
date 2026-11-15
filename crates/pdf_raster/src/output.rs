@@ -1,5 +1,7 @@
 //! The conversion of a finished page, or band, to the session's output
-//! profile (see [`SessionConfig::output_profile`](crate::SessionConfig::output_profile)).
+//! profile (see [`SessionConfig::output_profile`](crate::SessionConfig::output_profile)),
+//! or from the press's ink to the display under a soft proof (see
+//! [`SessionConfig::proof`](crate::SessionConfig::proof)).
 
 use std::sync::atomic::Ordering;
 
@@ -12,11 +14,15 @@ use crate::{RasterError, RasterSession, RenderParams};
 /// intent or black-point compensation without an output profile, or
 /// compensation under absolute colorimetry; and a CMYK page over a
 /// transparent backdrop, or under an output profile that is not CMYK, and
-/// an sRGB page under a CMYK one.
+/// an sRGB page under a CMYK one; under a soft proof, a CMYK page or a
+/// transparent backdrop.
 pub(crate) fn check_params(
     session: &RasterSession,
     params: &RenderParams,
 ) -> Result<(), RasterError> {
+    if session.proof.is_some() {
+        return check_proof(params);
+    }
     if params.color == crate::ColorModel::Cmyk {
         check_cmyk(session, params)?;
     } else if session
@@ -40,6 +46,31 @@ pub(crate) fn check_params(
                 .to_owned(),
         ));
     }
+    check_compensation(params)
+}
+
+/// Refuse `params` that a soft proof cannot render: CMYK pages, a
+/// transparent backdrop, and compensation under absolute colorimetry.
+fn check_proof(params: &RenderParams) -> Result<(), RasterError> {
+    if params.color == crate::ColorModel::Cmyk {
+        return Err(RasterError::InvalidOptions(
+            "a soft proof converts the press's ink to the display: render RGB or gray pages, \
+             or drop the proof for CMYK output"
+                .to_owned(),
+        ));
+    }
+    if params.transparent_background {
+        return Err(RasterError::InvalidOptions(
+            "a soft proof is painted on the press's opaque paper: render it without a \
+             transparent backdrop"
+                .to_owned(),
+        ));
+    }
+    check_compensation(params)
+}
+
+/// Refuse black-point compensation under absolute colorimetry.
+fn check_compensation(params: &RenderParams) -> Result<(), RasterError> {
     if params.black_point_compensation
         && params.intent == Some(RenderingIntent::AbsoluteColorimetric)
     {
@@ -96,23 +127,33 @@ pub(crate) fn page_intent(
     }
 }
 
-/// `canvas`, rows of page `page_num` drawn under `params`, converted to the
-/// session's output profile under the page's intent (see [`page_intent`])
-/// given its marking operators' `content` intents; returned with the
-/// intent, or as it is with `None` without a profile.  The first page of
-/// mixed intents in the session logs a warning.
+/// `canvas`, rows of page `page_num` (object `page_id`) drawn under
+/// `params`, converted to the session's output profile under the page's
+/// intent (see [`page_intent`]) given its marking operators' `content`
+/// intents; returned with the intent, or as it is with `None` without a
+/// profile.  The first page of mixed intents in the session logs a
+/// warning.  Under a soft proof the canvas is the press's ink, converted
+/// to the display; the intent returned is the one its colours separated
+/// under ([`cmyk_intent`]).
 ///
 /// # Errors
 ///
 /// [`RasterError::OutputProfile`] when the conversion cannot be built or
-/// fails.
+/// fails; [`RasterError::OutputIntent`] when the page has no press.
 pub(crate) fn convert(
     session: &RasterSession,
     params: &RenderParams,
-    page_num: u32,
+    (page_num, page_id): (u32, pdf::ObjectId),
     (canvas, content): (FinishedCanvas, IntentSet),
     buffers: &mut CanvasBuffers,
 ) -> Result<(FinishedCanvas, Option<RenderingIntent>), RasterError> {
+    if let Some(proof) = &session.proof {
+        let canvas = proof
+            .for_page(&session.doc, page_id)?
+            .convert(canvas, proof.intent, buffers)
+            .map_err(RasterError::OutputProfile)?;
+        return Ok((canvas, Some(cmyk_intent(params))));
+    }
     let Some(profile) = &session.output_profile else {
         return Ok((canvas, None));
     };

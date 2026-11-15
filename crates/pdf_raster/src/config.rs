@@ -433,6 +433,27 @@ pub struct SessionConfig {
     /// intent its marking operators used, else relative colorimetric (see
     /// [`PageDiagnostics::output_intent`](crate::PageDiagnostics::output_intent)).
     pub output_profile: Option<Arc<pdf_interp::OutputProfile>>,
+    /// Soft-proof every page against its output intent: paint it as the
+    /// process ink of the press the document's (or page's)
+    /// `/OutputIntents` names, then convert that ink to the display, the
+    /// working space or [`output_profile`](Self::output_profile), under
+    /// the [`ProofIntent`](pdf_interp::ProofIntent):
+    /// [`AbsoluteColorimetric`](pdf_interp::ProofIntent::AbsoluteColorimetric)
+    /// simulates the paper white.
+    ///
+    /// Default `None`.  The output intent is the first of subtype
+    /// `GTS_PDFX` that embeds a profile, else the first of any subtype
+    /// that does, and its profile must be CMYK; [`open_session`] returns
+    /// [`RasterError::OutputIntent`] otherwise.  Colours not given as ink
+    /// separate to the press under [`RenderParams::intent`](crate::RenderParams::intent)
+    /// (else relative colorimetric) and
+    /// [`RenderParams::black_point_compensation`](crate::RenderParams::black_point_compensation);
+    /// overprint is simulated when [`overprint`](Self::overprint) is set.
+    /// Incompatible with a CMYK [`output_profile`](Self::output_profile),
+    /// and per page with CMYK output and a transparent backdrop.
+    ///
+    /// [`open_session`]: crate::open_session
+    pub proof: Option<pdf_interp::ProofIntent>,
 }
 
 impl SessionConfig {
@@ -473,7 +494,39 @@ impl SessionConfig {
             rotation: Rotation::None,
             gpu_pages: false,
             output_profile: None,
+            proof: None,
         }
+    }
+
+    /// The soft proof of `doc` this config asks for, its document-level
+    /// press read and tabulated; `None` without [`proof`](Self::proof).
+    ///
+    /// # Errors
+    ///
+    /// [`RasterError::InvalidOptions`] for a CMYK
+    /// [`output_profile`](Self::output_profile); the errors of the
+    /// document's output intent ([`RasterError::OutputIntent`]) and of
+    /// its proof ([`RasterError::OutputProfile`]).
+    pub(crate) fn proof_session(
+        &self,
+        doc: &pdf::Document,
+    ) -> Result<Option<crate::proof::SessionProof>, RasterError> {
+        let Some(intent) = self.proof else {
+            return Ok(None);
+        };
+        if self
+            .output_profile
+            .as_ref()
+            .is_some_and(|p| p.space() == pdf_interp::OutputSpace::Cmyk)
+        {
+            return Err(RasterError::InvalidOptions(
+                "a soft proof shows the press on a display: its output profile is RGB or gray, \
+                 not CMYK (for the press's own ink, render CMYK pages with the press profile \
+                 as the output profile instead)"
+                    .to_owned(),
+            ));
+        }
+        crate::proof::SessionProof::open(doc, intent, self.output_profile.clone()).map(Some)
     }
 
     /// Check that this config can render GPU pages when it asks for them

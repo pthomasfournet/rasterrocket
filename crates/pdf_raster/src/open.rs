@@ -67,6 +67,8 @@ pub struct RasterSession {
     pub(crate) media_warned: AtomicBool,
     /// The output profile ([`crate::SessionConfig::output_profile`]).
     pub(crate) output_profile: Option<Arc<pdf_interp::OutputProfile>>,
+    /// The soft proof of the pages ([`crate::SessionConfig::proof`]).
+    pub(crate) proof: Option<crate::proof::SessionProof>,
     /// Whether a page of mixed rendering intents has been reported.
     pub(crate) mixed_intents_warned: AtomicBool,
     /// The document-level features the renderer ignores.
@@ -550,6 +552,7 @@ fn open_session_with_doc(
         None
     };
 
+    let proof = config.proof_session(&doc)?;
     let optional_content = Arc::new(pdf_interp::OptionalContent::new(&doc, config.purpose));
     let form_type = pdf_interp::form_type(&doc);
     let unsupported_features = pdf_interp::document_unsupported_features(&doc);
@@ -578,6 +581,7 @@ fn open_session_with_doc(
         javascript_warned: AtomicBool::new(false),
         media_warned: AtomicBool::new(false),
         output_profile: config.output_profile.clone(),
+        proof,
         mixed_intents_warned: AtomicBool::new(false),
         unsupported_features,
         #[cfg(any(feature = "gpu-icc", feature = "cache"))]
