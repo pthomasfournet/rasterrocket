@@ -3004,6 +3004,17 @@ error-diffusion dither, packed 1-bpp morphology, text-or-photo detection,
 2× upscale before threshold, despeckle, PDF output with G4/DCT, and dewarp
 model sharing.
 
+**Unreleased on master: a clip takes effect after the paint that ends its
+path.** A `W`/`W*` followed by a painting operator (`W f`, `W S`, `W B`,
+`W b` and their even-odd forms) now paints the path unclipped by it, then
+intersects it into the clip (ISO 32000-1 §8.5.4). Previously the clip was
+intersected first: `re W S` lost the outer half of its stroke, and an
+antialiased `W f` applied its edge coverage twice (a pixel two-thirds
+covered painted at four-ninths). `W n` is unchanged. The paint trace now
+lists such a paint before its clip. No pixel changes on the repository
+fixtures (all 3,824 pages at 50 dpi gray, and
+ab_render's 215 outputs, byte for byte as before).
+
 **Unreleased on master: deskew confidence, `--deskew`, resolution in
 PNG and JPEG, 1-bit mono PNG.**  Deskew now declines a page without a
 confident angle: the ratio of the best to the worst score of its angle
