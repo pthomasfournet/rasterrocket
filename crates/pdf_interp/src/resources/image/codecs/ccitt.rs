@@ -76,12 +76,17 @@ pub(in crate::resources::image) fn decode_ccitt(
     };
 
     // Group 4 streams that declare `EncodedByteAlign` exist both aligned and
-    // unaligned.  The unaligned reading is tried first; when it stops short,
-    // the aligned reading is tried and whichever decodes more rows is kept.
+    // unaligned.  The unaligned reading is tried first; when it fails or
+    // stops short of `rows`, the aligned reading is tried.  The reading with
+    // more rows is kept, and of two with equally many the one without an
+    // error: a row cut short by an error still counts as decoded, its
+    // undecoded remainder white.
     let (mut collector, mut result) = run(k >= 0 && declared_aligned)?;
-    if k < 0 && declared_aligned && result.is_err() && collector.rows_decoded() < rows {
+    if k < 0 && declared_aligned && (result.is_err() || collector.rows_decoded() < rows) {
         let (aligned, aligned_result) = run(true)?;
-        if aligned.rows_decoded() > collector.rows_decoded() {
+        if (aligned.rows_decoded(), aligned_result.is_ok())
+            > (collector.rows_decoded(), result.is_ok())
+        {
             collector = aligned;
             result = aligned_result;
         }

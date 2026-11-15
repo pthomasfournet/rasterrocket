@@ -35,6 +35,24 @@ Upstream history through `4f7d16fab` (2026-11-02) was reviewed on
 exhaustive: an API change with no decoding change) and #1732 (version
 bumps and changelogs).
 
+- `99bdcb77c` (#1770): outside strict mode, a Group 4 row that ends in an
+  error keeps its decoded prefix, padded white, and an unexpected end of
+  data inside a row ends decoding without an error.  Changes output: a
+  truncated stream yields one more row.
+
+Upstream history through `67349f02e` (2026-11-14) was reviewed on
+2026-11-14. Left out:
+
+- #1761, #1800 (cancellation, `CancelCheck`/`CancelHandle` in
+  `DecodeSettings`): not applicable, no consumer; no caller decodes under
+  a cancellation signal.
+- #1772 (reverts #1733's fallible push): rejected; the `OutOfMemory`
+  error stays, an allocation failure being reported instead of aborting.
+- #1786 (the public `DecoderContext` removed, the context made
+  internal): not applicable, an API change with no decoding change, and
+  the renderer and the encoder tests construct the context.
+- #1849 (comments and docs trimmed): not applicable, no code change.
+
 ## Vendoring
 
 - `UPSTREAM.toml` records the base (repository, path, commit, date,
