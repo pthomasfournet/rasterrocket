@@ -6,7 +6,8 @@
 //! identity form matrix, not fitted to `/Rect`.  [`markup`] covers the
 //! subtypes whose appearance follows from their geometry alone: `Square`,
 //! `Circle`, `Polygon`, `PolyLine`, `Ink`, the text markups `Highlight`,
-//! `Underline`, `StrikeOut` and `Squiggly`, and the `Text` note icon.  A
+//! `Underline`, `StrikeOut` and `Squiggly`, the `Text` note icon and the
+//! `Link` border.  A
 //! `Line`, which may carry a caption, is synthesised by its own module.
 
 use std::fmt::Write as _;
@@ -54,6 +55,7 @@ pub(super) fn markup(doc: &Document, annot: &Dictionary, rect: [f64; 4]) -> Opti
         b"Highlight" | b"Underline" | b"StrikeOut" | b"Squiggly" => {
             text_markup(doc, annot, subtype, rect)?
         }
+        b"Link" => (link_border(doc, annot, rect)?, rect, BlendMode::Normal),
         b"Text" => {
             let fill = colour_or(doc, annot.get(b"C"), false, "1 1 0 rg")?;
             let icon = [rect[0], rect[3] - NOTE_SIZE, rect[0] + NOTE_SIZE, rect[3]];
@@ -103,6 +105,36 @@ fn closed_shape(
         ellipse(&mut s, r);
     }
     s.push_str(paint_op(fill.is_some(), stroke.is_some()));
+    Some(s)
+}
+
+/// The border of a `Link` (§12.5.6.5): `/Rect` inset by half the border
+/// width and stroked with `/C`, or, in the underline style, its bottom side
+/// alone.  `None` when the width is 0 or `/C` is absent or empty, since
+/// a link has no default border colour.
+fn link_border(doc: &Document, annot: &Dictionary, rect: [f64; 4]) -> Option<String> {
+    let border = Border::of(doc, annot);
+    if border.width <= 0.0 {
+        return None;
+    }
+    let stroke = colour(doc, annot.get(b"C"), true)?;
+    let mut s = String::new();
+    border.write(&mut s);
+    let _ = writeln!(s, "{stroke}");
+    let r = inset(rect, &[border.width / 2.0; 4]);
+    if border.underline {
+        let _ = writeln!(
+            s,
+            "{} {} m {} {} l",
+            n(rect[0]),
+            n(r[1]),
+            n(rect[2]),
+            n(r[1])
+        );
+    } else {
+        rectangle(&mut s, r);
+    }
+    s.push_str("S\n");
     Some(s)
 }
 
@@ -388,7 +420,39 @@ mod tests {
     }
 
     #[test]
-    fn unknown_subtypes_have_no_synthesised_appearance() {
+    fn a_link_border_is_stroked_inside_its_rect_in_its_colour() {
+        let c = content("<< /Subtype /Link /Rect [100 100 200 120] /Border [0 0 1] /C [0 1 1] >>")
+            .expect("an appearance");
+        assert!(c.contains("1 w") && c.contains("0 1 1 RG"), "{c}");
+        assert!(c.contains("100.5 100.5 99 19 re"), "{c}");
+        assert!(c.trim_end().ends_with('S'), "{c}");
+    }
+
+    #[test]
+    fn a_link_border_takes_the_border_style_width_dash_and_underline() {
+        let c = content(
+            "<< /Subtype /Link /Rect [0 0 50 20] /Border [0 0 1] /C [1 0 0] \
+             /BS << /W 4 /S /D /D [3 2] >> >>",
+        )
+        .expect("an appearance");
+        assert!(c.contains("4 w") && c.contains("[3 2] 0 d"), "{c}");
+        assert!(c.contains("2 2 46 16 re"), "{c}");
+        let c = content("<< /Subtype /Link /Rect [0 0 50 20] /C [1 0 0] /BS << /W 2 /S /U >> >>")
+            .expect("an appearance");
+        assert!(c.contains("0 1 m 50 1 l") && !c.contains(" re"), "{c}");
+    }
+
+    #[test]
+    fn a_link_without_a_colour_or_width_has_no_border() {
         assert!(content("<< /Subtype /Link /Rect [0 0 20 20] >>").is_none());
+        assert!(content("<< /Subtype /Link /Rect [0 0 20 20] /C [] /Border [0 0 1] >>").is_none());
+        assert!(
+            content("<< /Subtype /Link /Rect [0 0 20 20] /C [0 0 1] /Border [0 0 0] >>").is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_subtypes_have_no_synthesised_appearance() {
+        assert!(content("<< /Subtype /Widget /Rect [0 0 20 20] >>").is_none());
     }
 }

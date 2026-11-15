@@ -170,10 +170,12 @@ pub(super) fn inset(r: [f64; 4], d: &[f64]) -> [f64; 4] {
 
 /// The border of an annotation (§12.5.4): its width from `/BS /W`, else the
 /// third element of `/Border`, else 1; and its dash array from `/BS /D` when
-/// `/BS /S` is `/D`, else the fourth element of `/Border`.
+/// `/BS /S` is `/D`, else the fourth element of `/Border`; `underline`
+/// when `/BS /S` is `/U`, a single line along the bottom of the rectangle.
 pub(super) struct Border {
     pub width: f64,
     pub dash: Vec<f64>,
+    pub underline: bool,
 }
 
 impl Border {
@@ -196,7 +198,14 @@ impl Border {
             Some(_) => Vec::new(),
             None => border.get(3).map_or_default(|d| numbers(doc, Some(d))),
         };
-        Self { width, dash }
+        let underline = bs
+            .as_ref()
+            .is_some_and(|bs| bs.get_name(b"S") == Some(b"U"));
+        Self {
+            width,
+            dash,
+            underline,
+        }
     }
 
     /// Write the line width and, when dashed, the dash pattern.

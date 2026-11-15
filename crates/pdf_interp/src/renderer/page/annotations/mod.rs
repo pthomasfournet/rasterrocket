@@ -54,12 +54,11 @@ const NO_VIEW: i64 = 1 << 5;
 /// Render all annotations on the page (PDF §12.5).
 ///
 /// Each entry of `/Annots`, an annotation dictionary or a reference to one,
-/// that is shown for the renderer's purpose and has a normal appearance
-/// (`/AP /N`) is drawn after the page content stream, in array order.
-/// Rollover (`/R`) and down (`/D`) appearances are not used.
-///
-/// Annotations with no appearance stream are skipped; many annotation types
-/// (e.g. `Link`) have no visible appearance by default.
+/// that is shown for the renderer's purpose is drawn after the page content
+/// stream, in array order, from its normal appearance (`/AP /N`) or, without
+/// one, from an appearance synthesised for its subtype; a subtype without a
+/// synthesised appearance draws nothing.  Rollover (`/R`) and down (`/D`)
+/// appearances are not used.
 ///
 /// Call this after `execute` and before `finish`.
 pub(super) fn render_annotations(renderer: &mut PageRenderer<'_>, page_id: ObjectId) {
@@ -208,8 +207,6 @@ fn render_one_annotation(
         return;
     }
 
-    // Check for AP/N before Rect — annotations with no AP stream have no visible
-    // appearance (e.g. Link) and are expected to be absent silently.
     let Some(stream_id) = normal_appearance(doc, annot) else {
         return;
     };
@@ -580,6 +577,32 @@ mod tests {
             m[0].mul_add(x, m[2] * y) + m[4],
             m[1].mul_add(x, m[3] * y) + m[5],
         )
+    }
+
+    /// A link without an appearance stream is drawn with its border: the
+    /// rectangle stroked in `/C` at the border width inside `/Rect`.
+    #[test]
+    fn a_link_without_an_appearance_draws_its_border() {
+        let doc = make_doc_with_objects(&[
+            (4, "<< /Type /Page /MediaBox [0 0 30 30] /Annots [5 0 R] >>"),
+            (
+                5,
+                "<< /Type /Annot /Subtype /Link /Rect [5 5 25 15] /Border [0 0 1] \
+                 /C [0 1 1] /H /I /A << /S /URI /URI (x) >> >>",
+            ),
+        ]);
+        let mut renderer = super::PageRenderer::new(30, 30, &doc, (4, 0));
+        renderer.render_annotations((4, 0));
+        let (bitmap, _) = renderer.finish();
+        let px = |x: usize, y: usize| {
+            let i = (y * 30 + x) * 3;
+            bitmap.data()[i..i + 3].to_vec()
+        };
+        // Row 20 is user y 9..10; the left side covers x 5..6, the right 24..25.
+        assert_eq!(px(5, 20), [0, 255, 255], "left side");
+        assert_eq!(px(24, 20), [0, 255, 255], "right side");
+        assert_eq!(px(15, 20), [255, 255, 255], "interior");
+        assert_eq!(px(3, 20), [255, 255, 255], "outside");
     }
 
     #[test]
