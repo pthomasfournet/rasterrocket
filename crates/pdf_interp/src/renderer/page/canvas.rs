@@ -13,7 +13,7 @@
 //! in sRGB — shadings, tiling cells, image samples, mesh triangles — reach
 //! an ink canvas through [`InkPattern`], which converts each span to ink.
 
-use color::cmyk::{SpotLut, SpotLut16, ink_to_rgb_row, ink_to_rgb_row16};
+use color::cmyk::{ink_to_rgb_row, ink_to_rgb_row16};
 use color::{DeviceN8, DeviceN16, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth};
 use raster::clip::Clip;
 use raster::pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
@@ -179,15 +179,20 @@ fn initial_fill<P: Pixel>(alpha: bool) -> P::Sample {
     }
 }
 
-/// Convert the ink canvas `ink` into `rgb`, of its size, through
-/// [`ink_to_rgb_row`] with the spot colourants `spots`, copying its alpha.
-fn ink_into_rgb(ink: &Bitmap<DeviceN8>, spots: &[Option<&SpotLut>; 4], rgb: &mut Bitmap<Rgb8>) {
+/// Convert the ink canvas `ink` into `rgb`, of its size and depth, one
+/// row at a time through `row` (eight ink samples a pixel to three sRGB
+/// samples: [`ink_to_rgb_row`] or [`ink_to_rgb_row16`]), copying its
+/// alpha.
+fn ink_into_rgb<P: Pixel, Q: Pixel<Sample = P::Sample>>(
+    ink: &Bitmap<P>,
+    rgb: &mut Bitmap<Q>,
+    row: impl Fn(&[P::Sample], &mut [P::Sample]),
+) {
     let n = ink.width as usize;
     for y in 0..ink.height {
-        ink_to_rgb_row(
-            &ink.row_bytes(y)[..n * 8],
-            spots,
-            &mut rgb.row_bytes_mut(y)[..n * 3],
+        row(
+            &ink.row_samples(y)[..n * 8],
+            &mut rgb.row_samples_mut(y)[..n * 3],
         );
     }
     if let (Some(src), Some(dst)) = (ink.alpha_plane(), rgb.alpha_plane_mut()) {
@@ -195,23 +200,27 @@ fn ink_into_rgb(ink: &Bitmap<DeviceN8>, spots: &[Option<&SpotLut>; 4], rgb: &mut
     }
 }
 
-/// [`ink_into_rgb`] at 16 bits, through [`ink_to_rgb_row16`].
-fn ink16_into_rgb16(
-    ink: &Bitmap<DeviceN16>,
-    spots: &[Option<&SpotLut16>; 4],
-    rgb: &mut Bitmap<Rgb16>,
-) {
-    let n = ink.width as usize;
-    for y in 0..ink.height {
-        ink_to_rgb_row16(
-            &ink.row_samples(y)[..n * 8],
-            spots,
-            &mut rgb.row_samples_mut(y)[..n * 3],
-        );
-    }
-    if let (Some(src), Some(dst)) = (ink.alpha_plane(), rgb.alpha_plane_mut()) {
-        dst.copy_from_slice(src);
-    }
+/// Fill one Gouraud-shaded triangle `tri` of vertices of `N` samples of
+/// type `V` onto `b` through `pipe`, clipped to `clip`: each span of the
+/// interpolated vertex colours is handed to `span`, which runs its second
+/// argument on the span as the canvas takes it.
+fn gouraud_spans<P: Pixel, const N: usize, V: Sample>(
+    b: &mut Bitmap<P>,
+    origin: (i32, i32),
+    clip: &Clip,
+    pipe: &CanvasPipe<'_>,
+    tri: [GouraudVertex<N, V>; 3],
+    span: impl Fn(&dyn Pattern<V>, &mut dyn FnMut(&dyn Pattern<P::Sample>)),
+) where
+    P::Sample: CanvasSample,
+{
+    let (width, height) = (b.width, b.height);
+    let pipe = pipe.at();
+    gouraud_triangle_spans(width, height, origin, clip, tri, |data, x0, x1, y| {
+        span(&RowPattern { data }, &mut |source| {
+            render_bitmap_span::<P>(b, &pipe, &PipeSrc::Pattern(source), None, x0, x1, y);
+        });
+    });
 }
 
 impl PageCanvas {
@@ -292,12 +301,12 @@ impl PageCanvas {
             Self::Rgb16(bitmap) => FinishedCanvas::Rgb16(bitmap),
             Self::Ink(ink) => {
                 let mut rgb = Bitmap::<Rgb8>::new(ink.width, ink.height, 1, ink.has_alpha());
-                ink_into_rgb(&ink, &spots.narrow, &mut rgb);
+                ink_into_rgb(&ink, &mut rgb, |i, o| ink_to_rgb_row(i, &spots.narrow, o));
                 FinishedCanvas::Rgb8(rgb)
             }
             Self::Ink16(ink) => {
                 let mut rgb = Bitmap::<Rgb16>::new(ink.width, ink.height, 1, ink.has_alpha());
-                ink16_into_rgb16(&ink, &spots.wide, &mut rgb);
+                ink_into_rgb(&ink, &mut rgb, |i, o| ink_to_rgb_row16(i, &spots.wide, o));
                 FinishedCanvas::Rgb16(rgb)
             }
         }
@@ -327,7 +336,7 @@ impl PageCanvas {
                     ink.has_alpha(),
                     0,
                 )?;
-                ink_into_rgb(&ink, &spots.narrow, &mut rgb);
+                ink_into_rgb(&ink, &mut rgb, |i, o| ink_to_rgb_row(i, &spots.narrow, o));
                 buffers.ink.reclaim(ink);
                 Ok(FinishedCanvas::Rgb8(rgb))
             }
@@ -340,7 +349,7 @@ impl PageCanvas {
                     ink.has_alpha(),
                     0,
                 )?;
-                ink16_into_rgb16(&ink, &spots.wide, &mut rgb);
+                ink_into_rgb(&ink, &mut rgb, |i, o| ink_to_rgb_row16(i, &spots.wide, o));
                 buffers.ink16.reclaim(ink);
                 Ok(FinishedCanvas::Rgb16(rgb))
             }
@@ -395,56 +404,15 @@ impl PageCanvas {
     ) {
         match self {
             Self::Rgb(b) => gouraud_triangle_fill(b, origin, clip, &pipe.at(), tri),
-            Self::Rgb16(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
-                    let row = RowPattern { data: rgb };
-                    let source = SourcePattern::<u16>::of_u8(&row);
-                    render_bitmap_span::<Rgb16>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(source.as_dyn()),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
-            Self::Ink(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
-                    let row = RowPattern { data: rgb };
-                    render_bitmap_span::<DeviceN8>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(&InkPattern::new(&row, transfer)),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
-            Self::Ink16(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
-                    let row = RowPattern { data: rgb };
-                    let ink = InkPattern::new(&row, transfer);
-                    render_bitmap_span::<DeviceN16>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(&Widened::new(&ink)),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
+            Self::Rgb16(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(SourcePattern::<u16>::of_u8(row).as_dyn());
+            }),
+            Self::Ink(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(&InkPattern::new(row, transfer));
+            }),
+            Self::Ink16(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(&Widened::new(&InkPattern::new(row, transfer)));
+            }),
         }
     }
 
@@ -462,22 +430,9 @@ impl PageCanvas {
     ) {
         match self {
             Self::Rgb16(b) => gouraud_triangle_fill(b, origin, clip, &pipe.at(), tri),
-            Self::Ink16(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |rgb, x0, x1, y| {
-                    let row = RowPattern { data: rgb };
-                    render_bitmap_span::<DeviceN16>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(&InkPattern::new(&row, transfer)),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
+            Self::Ink16(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(&InkPattern::new(row, transfer));
+            }),
             Self::Rgb(_) | Self::Ink(_) => {
                 debug_assert!(false, "a 16-bit triangle on an 8-bit canvas");
             }
@@ -498,39 +453,12 @@ impl PageCanvas {
         tri: [GouraudVertex<8>; 3],
     ) {
         match self {
-            Self::Ink(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |ink, x0, x1, y| {
-                    let row = RowPattern { data: ink };
-                    render_bitmap_span::<DeviceN8>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(&TransferredInk::new(&row, transfer, channels)),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
-            Self::Ink16(b) => {
-                let (width, height) = (b.width, b.height);
-                let pipe = pipe.at();
-                gouraud_triangle_spans(width, height, origin, clip, tri, |ink, x0, x1, y| {
-                    let row = RowPattern { data: ink };
-                    let wide = Widened::new(&row);
-                    render_bitmap_span::<DeviceN16>(
-                        b,
-                        &pipe,
-                        &PipeSrc::Pattern(&TransferredInk::new(&wide, transfer, channels)),
-                        None,
-                        x0,
-                        x1,
-                        y,
-                    );
-                });
-            }
+            Self::Ink(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(&TransferredInk::new(row, transfer, channels));
+            }),
+            Self::Ink16(b) => gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+                paint(&TransferredInk::new(&Widened::new(row), transfer, channels));
+            }),
             Self::Rgb(_) | Self::Rgb16(_) => {
                 debug_assert!(false, "an ink triangle on an RGB canvas");
             }
@@ -554,19 +482,8 @@ impl PageCanvas {
             debug_assert!(false, "a 16-bit ink triangle on another canvas");
             return;
         };
-        let (width, height) = (b.width, b.height);
-        let pipe = pipe.at();
-        gouraud_triangle_spans(width, height, origin, clip, tri, |ink, x0, x1, y| {
-            let row = RowPattern { data: ink };
-            render_bitmap_span::<DeviceN16>(
-                b,
-                &pipe,
-                &PipeSrc::Pattern(&TransferredInk::new(&row, transfer, channels)),
-                None,
-                x0,
-                x1,
-                y,
-            );
+        gouraud_spans(b, origin, clip, pipe, tri, |row, paint| {
+            paint(&TransferredInk::new(row, transfer, channels));
         });
     }
 
