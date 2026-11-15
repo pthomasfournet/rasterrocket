@@ -22,8 +22,8 @@ use std::process::{Command, Output};
 
 use common::{assemble_pdf, stream_object, with_page_tree};
 use rasterrocket::{
-    BackendPolicy, RenderParams, SessionConfig, open_session_from_bytes, render_page_rgb,
-    render_page_rgb_with,
+    BackendPolicy, FinishedCanvas, RenderParams, SampleDepth, SessionConfig,
+    open_session_from_bytes, render_page_canvas, render_page_rgb, render_page_rgb_with,
 };
 
 /// Page 1: 100 × 50 pt, a black square at (10, 10) of side 20.
@@ -877,6 +877,9 @@ fn a_page_in_bands_writes_the_file_of_the_whole_page() {
         &["--png", "--gray", "--invert=always"],
         &["--mono", "--dither", "halftone"],
         &["--tiff", "--mono"],
+        &["--depth", "16"],
+        &["--png", "--depth", "16", "--gray"],
+        &["--tiff", "--depth", "16", "--invert=always"],
     ] {
         let mut files = Vec::new();
         for band_mib in ["1", "64"] {
@@ -893,5 +896,212 @@ fn a_page_in_bands_writes_the_file_of_the_whole_page() {
             files[0] == files[1],
             "{format:?}: bands of 1 MiB differ from one band"
         );
+    }
+}
+
+/// The header fields of a binary PNM file: magic, width, height and, but
+/// for a P4 bitmap, the maximum value.
+fn pnm_header(path: &Path) -> Vec<String> {
+    let bytes = std::fs::read(path).expect("read PNM");
+    String::from_utf8_lossy(&bytes[..bytes.len().min(32)])
+        .split_ascii_whitespace()
+        .take(4)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `--depth 16` writes 16-bit files: a PNG of bit depth 16, a TIFF of 16
+/// bits a sample carrying the library's 16-bit samples, PPM and PGM of
+/// maximum value 65535.
+#[test]
+fn depth_16_writes_16_bit_files() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let base = ["-r", "72", "-l", "1", "--depth", "16"];
+    let run = |extra: &[&str]| {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        assert_success(&rrocket(dir.path(), &input, &args));
+    };
+    for (extra, colour_type) in [
+        (&["--png"][..], 2),
+        (&["--png", "--gray"], 0),
+        (&["--png", "--transparent"], 6),
+    ] {
+        run(extra);
+        let png = std::fs::read(dir.path().join("out-1.png")).expect("read PNG");
+        // IHDR: bit depth and colour type at bytes 24 and 25.
+        assert_eq!(&png[24..26], &[16, colour_type], "{extra:?}");
+    }
+    run(&[]);
+    assert_eq!(
+        pnm_header(&dir.path().join("out-1.ppm")),
+        ["P6", "100", "50", "65535"]
+    );
+    run(&["--gray"]);
+    assert_eq!(
+        pnm_header(&dir.path().join("out-1.pgm")),
+        ["P5", "100", "50", "65535"]
+    );
+
+    let session = open_session_from_bytes(
+        two_page_pdf(),
+        &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+    )
+    .expect("open session");
+    let params = RenderParams::new(1.0).with_depth(SampleDepth::Sixteen);
+    let FinishedCanvas::Rgb16(want) = render_page_canvas(&session, 1, &params).expect("renders")
+    else {
+        panic!("a 16-bit render");
+    };
+    for method in ["none", "deflate"] {
+        run(&["--tiff", "--tiffcompression", method]);
+        let file = std::fs::read(dir.path().join("out-1.tif")).expect("read TIFF");
+        let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+        assert_eq!(
+            decoder.colortype().expect("colour type"),
+            tiff::ColorType::RGB(16)
+        );
+        let tiff::decoder::DecodingResult::U16(rgb) = decoder.read_image().expect("decodes") else {
+            panic!("16-bit samples");
+        };
+        assert_eq!(rgb, want.data(), "{method}");
+    }
+}
+
+/// `--print --depth 16` hands `lp` a PDF 1.5 spool of 16-bit page images:
+/// here a stand-in `lp` on `PATH` that keeps what it is given.
+#[cfg(unix)]
+#[test]
+fn depth_16_prints_a_spool_of_16_bit_images() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (dir, input) = workdir(&two_page_pdf());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("create bin dir");
+    let script = bin.join("lp");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncat > \"{}/spool.pdf\"\n", dir.path().display()),
+    )
+    .expect("write lp");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make lp executable");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .env("PATH", &path)
+        .args(["--backend", "cpu", "--print", "-r", "72", "--depth", "16"])
+        .arg(&input)
+        .output()
+        .expect("run rrocket");
+    assert_success(&out);
+    let spool = std::fs::read(dir.path().join("spool.pdf")).expect("lp was given the spool");
+    assert!(spool.starts_with(b"%PDF-1.5"), "the spool is PDF 1.5");
+    let text = String::from_utf8_lossy(&spool);
+    assert_eq!(
+        text.matches("/BitsPerComponent 16").count(),
+        2,
+        "two 16-bit pages"
+    );
+}
+
+/// `--depth 16` is refused, at startup and writing nothing, with the flags
+/// and input whose pages are 8-bit or bilevel.
+#[test]
+fn depth_16_refuses_8_bit_and_bilevel_outputs() {
+    for (flags, needle) in [
+        (&["--mono"][..], "use --gray"),
+        (&["--dither", "halftone"], "--dither"),
+        (&["--fax"], "--fax"),
+        (&["--jpeg"], "use --png or --tiff"),
+        (&["--crop"], "--crop"),
+        (&["--split-spreads"], "--split-spreads"),
+        (&["--overprint"], "drop --overprint"),
+        (&["--gpu-pages"], "drop --gpu-pages"),
+    ] {
+        let (dir, input) = workdir(&two_page_pdf());
+        let mut args = vec!["--depth", "16"];
+        args.extend_from_slice(flags);
+        let out = rrocket(dir.path(), &input, &args);
+        assert!(!out.status.success(), "{flags:?} succeeded");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--depth 16 is refused") && stderr.contains(needle),
+            "{flags:?}: {stderr}"
+        );
+        assert_eq!(outputs(dir.path()), Vec::<String>::new(), "{flags:?}");
+    }
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let input = dir.path().join("in.cbt");
+    std::fs::write(&input, tar_of("book.pdf", &annotated_pdf())).expect("write archive");
+    let out = rrocket(dir.path(), &input, &["--depth", "16"]);
+    assert!(
+        !out.status.success(),
+        "a comic archive at 16 bits succeeded"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("comic-archive input"));
+}
+
+/// The levels of the gradient page's axial ramp at each depth, read back
+/// from PPM files: 2048 at 16 bits, at most 256 at 8.
+#[test]
+fn depth_16_keeps_the_levels_of_a_ramp_end_to_end() {
+    let (dir, input) = workdir(&common::gradients::gradient_page());
+    let levels = |depth: &str| {
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &["-r", "72", "--depth", depth],
+        ));
+        let bytes = std::fs::read(dir.path().join("out-1.ppm")).expect("read PPM");
+        let header: usize = String::from_utf8_lossy(&bytes[..32])
+            .split_ascii_whitespace()
+            .take(4)
+            .map(str::len)
+            .sum::<usize>()
+            + 4;
+        let data = &bytes[header..];
+        let width = common::gradients::WIDTH as usize;
+        let y = common::gradients::BANDS[0].1 as usize;
+        let sample = if depth == "16" { 2 } else { 1 };
+        let row = &data[y * width * 3 * sample..][..width * 3 * sample];
+        row.chunks_exact(3 * sample)
+            .map(|px| &px[..sample])
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
+    let (wide, narrow) = (levels("16"), levels("8"));
+    assert!(
+        wide >= 2000 && narrow <= 256,
+        "{wide} levels at 16 bits, {narrow} at 8"
+    );
+}
+
+/// `--invert=auto` at 16 bits measures the whole page and inverts a
+/// reversed-out one, as at 8 bits.
+#[test]
+fn depth_16_inverts_a_reversed_out_page() {
+    let pdf = with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] /Contents 4 0 R >>".to_vec(),
+        stream_object("", b"0 g 0 0 100 50 re f 1 g 10 10 20 20 re f"),
+    ]);
+    let (dir, input) = workdir(&pdf);
+    for (flag, inside, outside) in [
+        ("--invert=never", u16::MAX, 0),
+        ("--invert=auto", 0, u16::MAX),
+    ] {
+        assert_success(&rrocket(
+            dir.path(),
+            &input,
+            &["-r", "72", "--gray", "--depth", "16", flag],
+        ));
+        let bytes = std::fs::read(dir.path().join("out-1.pgm")).expect("read PGM");
+        let data = &bytes[bytes.len() - 100 * 50 * 2..];
+        let at = |i: usize| u16::from_be_bytes([data[2 * i], data[2 * i + 1]]);
+        assert_eq!(at(25 * 100 + 15), inside, "{flag}: inside the square");
+        assert_eq!(at(5 * 100 + 50), outside, "{flag}: the ground");
     }
 }

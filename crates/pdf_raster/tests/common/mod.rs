@@ -11,6 +11,7 @@
     )
 )]
 
+pub mod gradients;
 pub mod icc;
 pub mod seams;
 
