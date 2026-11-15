@@ -624,18 +624,17 @@ mod tests {
         assert_eq!(sink.finish().len(), 2);
     }
 
-    /// The subdivision tolerance is three 8-bit levels at 8 bits and a
-    /// quarter of one 8-bit level at 16 bits.
+    /// The subdivision tolerance is three 8-bit levels at 8 bits and one
+    /// 8-bit level at 16 bits.
     #[test]
     fn the_tolerance_follows_the_depth() {
         assert_eq!(color_delta::<u8>().to_bits(), (3.0f64 / 255.0).to_bits());
-        assert_eq!(color_delta::<u16>().to_bits(), (1.0f64 / 1020.0).to_bits());
+        assert_eq!(color_delta::<u16>().to_bits(), (1.0f64 / 255.0).to_bits());
     }
 
     /// A 64-pixel patch whose corners differ by twelve 8-bit levels stops
     /// subdividing at 8 bits once they differ by three, and subdivides
-    /// further at 16 bits, within the `2 · 4^6` triangles one patch can
-    /// make.
+    /// further at 16 bits, to at most sixteen times as many triangles.
     #[test]
     fn a_16_bit_patch_subdivides_to_its_finer_tolerance() {
         let p = flat_patch(
@@ -673,10 +672,7 @@ mod tests {
         );
         let (narrow, wide) = (narrow.finish().len(), wide.finish().len());
         eprintln!("64-pixel patch: {narrow} triangles at 8 bits, {wide} at 16");
-        assert!(
-            narrow < wide && wide <= 2 * 4usize.pow(6),
-            "{narrow} and {wide}"
-        );
+        assert!(narrow < wide && wide <= 16 * narrow, "{narrow} and {wide}");
     }
 
     /// The boundary of the square `[x0, x0 + 3] × [y0, y0 + 3]` in stream

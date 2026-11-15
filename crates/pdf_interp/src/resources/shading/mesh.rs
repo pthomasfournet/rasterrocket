@@ -19,12 +19,14 @@ use super::ShadingColour;
 /// Subdivision tolerance on 8-bit canvases: three 8-bit levels.
 const COLOR_DELTA_8: f64 = 3.0 / 255.0;
 
-/// Subdivision tolerance on 16-bit canvases: a quarter of one 8-bit level
-/// (about 64 sixteen-bit levels).  The linear interpolation inside a
-/// triangle then deviates from the patch colour by less than the 8-bit
-/// quantum, while the triangle count of a patch grows about twelvefold over
-/// the 8-bit tolerance rather than reaching the per-patch subdivision limit.
-const COLOR_DELTA_16: f64 = 1.0 / 1020.0;
+/// Subdivision tolerance on 16-bit canvases: one 8-bit level.  The
+/// tolerance bounds the spread of a leaf's corner colours, and the leaf's
+/// triangles interpolate at 16 bits, so the colour is continuous at any
+/// tolerance; a tighter one buys only fidelity to the patch's colour
+/// function, at a triangle count growing with the inverse square of the
+/// tolerance.  One 8-bit level keeps the deviation below the 8-bit step at
+/// about an order of magnitude more triangles than [`COLOR_DELTA_8`].
+const COLOR_DELTA_16: f64 = 1.0 / 255.0;
 
 /// Subdivision stops once every pair of corner colours differs by at most
 /// this much per component, on the `[0, 1]` scale of a normalised
