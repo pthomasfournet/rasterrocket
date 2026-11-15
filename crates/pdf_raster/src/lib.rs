@@ -468,7 +468,7 @@ pub struct RasterOptions {
     /// Default [`SampleDepth::Eight`]; [`SampleDepth::Sixteen`] yields
     /// [`PixelFormat::Gray16`] pages, or [`PixelFormat::Rgba16`] over a
     /// transparent backdrop, of [`Pixels::U16`].  Incompatible with
-    /// [`deskew`](Self::deskew) and [`overprint`](Self::overprint).
+    /// [`deskew`](Self::deskew).
     pub depth: SampleDepth,
 
     /// Cancellation flag polled while each page renders; default `None`.

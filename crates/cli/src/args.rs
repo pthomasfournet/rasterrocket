@@ -234,7 +234,7 @@ pub(crate) struct Args {
     /// masks and colour conversions keep their levels) and written as
     /// 16-bit PPM and PGM (maxval 65535), PNG and TIFF, or into the
     /// --print spool; not with --mono, --dither, --fax, --jpeg, the camera
-    /// cleanup flags, --overprint or --gpu-pages, nor for comic archives.
+    /// cleanup flags or --gpu-pages, nor for comic archives.
     #[arg(long = "depth", value_name = "BITS", value_enum, default_value = "8")]
     pub depth: DepthArg,
 
