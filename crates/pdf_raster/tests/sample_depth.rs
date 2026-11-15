@@ -342,7 +342,7 @@ fn batch_pages_carry_16_bit_samples() {
 }
 
 /// A 16-bit render is refused where it cannot hold: by the 8-bit entry
-/// points, under overprint simulation, and with deskew.
+/// points and with deskew.
 #[test]
 fn a_16_bit_render_is_refused_where_it_cannot_hold() {
     let params = RenderParams::new(1.0).with_depth(SampleDepth::Sixteen);
@@ -351,16 +351,117 @@ fn a_16_bit_render_is_refused_where_it_cannot_hold() {
         panic!("an 8-bit entry point renders 16-bit samples");
     };
     assert!(err.to_string().contains("render_page_canvas"), "{err}");
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.overprint = true;
-    let overprint = open_session_from_bytes(gradient_page(), &config).expect("open session");
-    let err = render_page_canvas(&overprint, 1, &params).unwrap_err();
-    assert!(err.to_string().contains("overprint"), "{err}");
     let mut opts = RasterOptions::new(72.0);
     opts.depth = SampleDepth::Sixteen;
     opts.deskew = true;
     let err = render_page_gray(&plain, 1, &opts).unwrap_err();
     assert!(err.to_string().contains("deskew"), "{err}");
+}
+
+/// The spot colorant of [`overprint_page`]: teal, printing cyan and half
+/// yellow.
+const TEAL: &str = "[/Separation /Teal /DeviceCMYK \
+    << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0.5 0] /N 1 >>]";
+
+/// A page painted on the ink canvas under overprint simulation, 512 × 80
+/// points: a process background; over its lower half, overprinted yellow
+/// under nonzero overprint mode and a solid of the spot; over its upper
+/// half, an axial shading of the spot's tint from 0 to 1 across the page,
+/// overprinted.
+fn overprint_page() -> Vec<u8> {
+    let content = b"q /GS0 gs 0.2 0.5 0 0 k 0 0 512 80 re f \
+        0 0 0.7 0 k 0 0 256 40 re f /Teal cs 0.6 scn 256 0 256 40 re f \
+        0 40 512 40 re W n /Sh sh Q";
+    common::with_page_tree(&[
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 512 80] \
+             /Resources << /ExtGState << /GS0 << /OP true /op true /OPM 1 >> >> \
+             /ColorSpace << /Teal {TEAL} >> /Shading << /Sh 5 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        common::stream_object("", content),
+        format!(
+            "<< /ShadingType 2 /ColorSpace {TEAL} /Coords [0 0 512 0] /Extend [true true] \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>"
+        )
+        .into_bytes(),
+    ])
+}
+
+/// On the ink canvas a 16-bit render keeps the levels of a spot shading,
+/// more than 256 in every channel across its 1024 pixels where an 8-bit
+/// render has at most 256, and narrowed to 8 bits it is the 8-bit render
+/// to within two levels: the inks are the same tints at either depth, and
+/// the 8-bit conversion rounds the spot's process equivalent, its union
+/// with the process inks and the model, each to a byte.
+#[test]
+fn the_ink_canvas_keeps_its_levels_at_16_bits() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = true;
+    let session = open_session_from_bytes(overprint_page(), &config).expect("open session");
+    let params = RenderParams::new(2.0);
+    let wide = rgb16(
+        render_page_canvas(
+            &session,
+            1,
+            &params.clone().with_depth(SampleDepth::Sixteen),
+        )
+        .expect("16-bit render"),
+    );
+    let narrow = rgb8(render_page_canvas(&session, 1, &params).expect("8-bit render"));
+    for c in 0..3 {
+        let (l16, l8) = (
+            levels(wide.row_samples(20), c),
+            levels(narrow.row_samples(20), c),
+        );
+        eprintln!("spot shading, channel {c}: {l16} levels at 16 bits, {l8} at 8");
+        assert!(l16 > 256 && l8 <= 256, "channel {c}: {l16} and {l8} levels");
+    }
+    let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+    eprintln!("overprint page: {table:?}");
+    assert!(table.iter().all(|&(max, _)| max <= 2), "{table:?}");
+}
+
+/// The six process swatches of the `corpus-11` fixture, 60 points square,
+/// painted under overprint simulation, with a band of 40 % yellow
+/// overprinted across their upper half under nonzero overprint mode.
+fn swatch_page() -> Vec<u8> {
+    let content = b"q /GS0 gs \
+        0.87 0.01 0 0 k 0 0 60 60 re f 1 0.46 0.05 0.18 k 60 0 60 60 re f \
+        0 0 0 1 k 120 0 60 60 re f 1 1 0 0 k 180 0 60 60 re f \
+        0 1 1 0 k 240 0 60 60 re f 0.5 0.5 0.5 0 k 300 0 60 60 re f \
+        0 0 0.4 0 k 0 30 360 30 re f Q";
+    common::with_page_tree(&[
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 360 60] \
+           /Resources << /ExtGState << /GS0 << /OP true /op true /OPM 1 >> >> >> \
+           /Contents 4 0 R >>"
+            .to_vec(),
+        common::stream_object("", content),
+    ])
+}
+
+/// The swatches of [`swatch_page`] on the ink canvas at 16 bits, narrowed
+/// to 8, are the 8-bit render's to within a level: their inks are the
+/// components at either depth, and the model at 16 bits narrows to the
+/// 8-bit one within a level.
+#[test]
+fn process_swatches_on_the_ink_canvas_narrow_to_their_8_bit_render() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+    config.overprint = true;
+    let session = open_session_from_bytes(swatch_page(), &config).expect("open session");
+    let params = RenderParams::new(150.0 / 72.0);
+    let wide = rgb16(
+        render_page_canvas(
+            &session,
+            1,
+            &params.clone().with_depth(SampleDepth::Sixteen),
+        )
+        .expect("16-bit render"),
+    );
+    let narrow = rgb8(render_page_canvas(&session, 1, &params).expect("8-bit render"));
+    let table = narrowed_difference(&wide, &narrow, 0..wide.height);
+    eprintln!("process swatches under overprint: {table:?}");
+    assert!(table.iter().all(|&(max, _)| max <= 1), "{table:?}");
 }
 
 /// The 16-vs-8 table of the corpus fixtures and the gradient page: each
@@ -387,8 +488,15 @@ fn report_16_bit_against_8_bit() {
         let name = entry.file_name().unwrap().to_string_lossy().into_owned();
         pages.push((name, std::fs::read(&entry).expect("read fixture")));
     }
-    for (name, pdf) in pages {
-        let session = session(pdf);
+    for ((name, pdf), overprint) in pages.iter().flat_map(|page| [(page, false), (page, true)]) {
+        let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        config.overprint = overprint;
+        let session = open_session_from_bytes(pdf.clone(), &config).expect("open session");
+        let name = if overprint {
+            format!("{name} (overprint)")
+        } else {
+            name.clone()
+        };
         for page in 1..=session.total_pages().min(3) {
             let at = |depth| {
                 render_page_canvas(
