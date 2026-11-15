@@ -113,6 +113,45 @@ release). It is not published and changes are not sent upstream.
   `data_len` / `cvt_len` helpers for both the comparison and the full
   identity.
 
+## Upstream changes brought over
+
+- `78e1734da` (#2402): a Type 1 number with a doubled sign (`--100`,
+  `+-5`) reads as zero instead of as a signed value. Changes output only
+  for fonts with such numbers. Tests: `parse_fixed_double_sign`,
+  `font_bbox_double_sign`.
+- `0093cd84b` (#2430): `MVAR` value records are strided by the table's
+  `valueRecordSize`, which may exceed the eight bytes a record defines;
+  a smaller size is malformed. `Mvar::value_records` returns a
+  `ComputedArray`. Before, every record after the first of a table with
+  larger records was read at the wrong offset. Changes only varied
+  metrics of such fonts.
+- `1dacd72c`: `BitPage::insert_range` counts only the
+  newly set bits, and `U32Set::insert_range` tries the page of the
+  previous lookup before a binary search. The set's contents are
+  unchanged.
+
+Upstream history through `73fab6938` (2026-11-10, read-fonts 0.47.0) was
+reviewed on 2026-11-14. Left out:
+
+- #2455 (AAT legacy state tables resolve a `newState` before the state
+  array to a negative state index; `StateEntry::new_state` and
+  `StateTable::entry` take `i32`): brought over together with the
+  harfrust fork's port of harfrust #602, which adapts the shaper to the
+  signed state (see that fork's `CHANGES.md`).
+- #2457 (Type 1 support behind a `type1` feature, off by default): not
+  applicable; the renderer always reads Type 1 programs, so the support
+  stays unconditional.
+- #2458 (CID-keyed Type 1 in `Type1Font`, with per-glyph subfonts):
+  covered; this fork's `ps::type1::cid::CidType1Font` reads the same
+  fonts and is the reader the renderer uses. The commit's other change,
+  advances no longer clamped at zero, is left out with it.
+- #2456 (colour API renames and docs): not applicable; the renderer
+  reads no colour glyphs.
+- `af24df98a`, `32238ac89`, `567b2b395`, `018b3fb82` (glyph closure and
+  `intersects` speed-ups): not applicable; the closure code serves
+  subsetting, which no crate of the workspace calls.
+- #2459 (release version bumps): not applicable.
+
 ## Rebase history
 
 - 2026-11-04: rebased from fontations `cd4aaef57` (read-fonts 0.41.0) onto
