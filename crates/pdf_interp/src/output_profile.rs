@@ -24,7 +24,10 @@
 //! conversion of the working space tabulated by
 //! [`OutputProfile::separation`].
 
+mod proof;
 mod working_space;
+
+pub use proof::{PROOF_GRID, SoftProof};
 
 use std::sync::{Arc, OnceLock};
 

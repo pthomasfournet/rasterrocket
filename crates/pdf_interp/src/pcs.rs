@@ -26,19 +26,36 @@ const WHITE_TOLERANCE: f64 = 1.0e-4;
 /// within [`WHITE_TOLERANCE`] or a component is not a positive finite
 /// number.
 pub(crate) fn scale_from_white(white: Xyzd) -> Option<[f64; 3]> {
-    let white = [white.x, white.y, white.z];
-    if white
+    absolute_scale(d50(), white)
+}
+
+/// The per-component scale `source / dest` of the relative PCS under
+/// ICC-absolute colorimetry from a profile of media white `source` to one
+/// of media white `dest`; `None` when the two whites agree within
+/// [`WHITE_TOLERANCE`] or a component is not a positive finite number.
+pub(crate) fn absolute_scale(source: Xyzd, dest: Xyzd) -> Option<[f64; 3]> {
+    let (source, dest) = ([source.x, source.y, source.z], [dest.x, dest.y, dest.z]);
+    if source
         .iter()
-        .zip(D50)
-        .all(|(w, d)| (w - d).abs() <= WHITE_TOLERANCE)
+        .zip(dest)
+        .all(|(s, d)| (s - d).abs() <= WHITE_TOLERANCE)
     {
         return None;
     }
-    let scale = std::array::from_fn(|i| D50[i] / white[i]);
+    let scale: [f64; 3] = std::array::from_fn(|i| source[i] / dest[i]);
     scale
         .iter()
-        .all(|s: &f64| s.is_finite() && *s > 0.0)
+        .all(|s| s.is_finite() && *s > 0.0)
         .then_some(scale)
+}
+
+/// The D50 illuminant as an XYZ value.
+pub(crate) const fn d50() -> Xyzd {
+    Xyzd {
+        x: D50[0],
+        y: D50[1],
+        z: D50[2],
+    }
 }
 
 /// The media white of `profile` that ICC-absolute colorimetry scales by:
@@ -46,11 +63,7 @@ pub(crate) fn scale_from_white(white: Xyzd) -> Option<[f64; 3]> {
 /// records the display's white before its adaptation to D50 and whose
 /// media white is therefore D50; D50 when the tag is absent.
 pub(crate) fn media_white(profile: &ColorProfile) -> Xyzd {
-    let d50 = Xyzd {
-        x: D50[0],
-        y: D50[1],
-        z: D50[2],
-    };
+    let d50 = d50();
     let v2_display = profile.profile_class == ProfileClass::DisplayDevice
         && profile.version() < ProfileVersion::V4_0;
     if v2_display {

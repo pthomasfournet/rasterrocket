@@ -125,6 +125,54 @@ impl std::fmt::Display for RenderingIntent {
     }
 }
 
+/// The rendering intent of a soft proof's conversion from the press's
+/// process ink to the display: whether the proof reproduces the press
+/// colours relative to the paper or as measured on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ProofIntent {
+    /// The paper white maps to the display white and the press's colours
+    /// are relative to it.
+    #[default]
+    RelativeColorimetric,
+    /// The press's colours as measured, the paper white among them: the
+    /// display shows the paper's colour and the darkness of its black.
+    AbsoluteColorimetric,
+}
+
+impl ProofIntent {
+    /// Both intents, in the order of [`Self::index`].
+    pub const ALL: [Self; 2] = [Self::RelativeColorimetric, Self::AbsoluteColorimetric];
+
+    /// The rendering intent of the conversion.
+    #[must_use]
+    pub const fn rendering_intent(self) -> RenderingIntent {
+        match self {
+            Self::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
+            Self::AbsoluteColorimetric => RenderingIntent::AbsoluteColorimetric,
+        }
+    }
+
+    /// Whether the proof simulates the paper white.
+    #[must_use]
+    pub const fn simulates_paper(self) -> bool {
+        matches!(self, Self::AbsoluteColorimetric)
+    }
+
+    /// The position of the intent in [`Self::ALL`].
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::RelativeColorimetric => 0,
+            Self::AbsoluteColorimetric => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ProofIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.rendering_intent().fmt(f)
+    }
+}
+
 /// A set of rendering intents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct IntentSet(u8);

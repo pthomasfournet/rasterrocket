@@ -109,7 +109,7 @@ fn round_trip(
 }
 
 /// The layout and channel count of `profile`'s device values.
-const fn layout_of(profile: &ColorProfile) -> (Layout, usize) {
+pub(crate) const fn layout_of(profile: &ColorProfile) -> (Layout, usize) {
     match profile.color_space {
         DataColorSpace::Gray => (Layout::Gray, 1),
         DataColorSpace::Cmyk => (Layout::Rgba, 4),
@@ -186,7 +186,7 @@ pub(crate) fn darkest_colorant_y(
 /// colorants along the axes and the tone curve `t ↦ Y(L* = 100 t)`.  The
 /// encoding spaces the device values evenly in lightness, so a conversion
 /// sampled on them resolves the shadows as finely as the highlights.
-fn pcs_lightness() -> ColorProfile {
+pub(crate) fn pcs_lightness() -> ColorProfile {
     let mut profile = ColorProfile::new_srgb();
     profile.cicp = None;
     profile.red_colorant = Xyzd {
