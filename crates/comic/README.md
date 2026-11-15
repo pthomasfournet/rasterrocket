@@ -16,7 +16,7 @@ fn ocr_archive(path: &Path) -> Result<(), ComicError> {
     opts.dpi = 300.0; // recorded on each page for OCR; images keep their pixel size
     for (page_num, result) in open_comic(path, &opts)? {
         match result {
-            Ok(page) => { /* page.pixels, page.width, page.height */ }
+            Ok(page) => { /* page.pixels.as_u8(), page.width, page.height */ }
             Err(e) => eprintln!("page {page_num}: {e}"),
         }
     }

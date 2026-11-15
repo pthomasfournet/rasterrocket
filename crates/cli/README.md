@@ -3,7 +3,11 @@
 The command-line renderer: PDF pages, and comic archives (`.cbz`, `.cb7`,
 `.cbt`, `.cbr`), to PPM, PGM, PBM, PNG, JPEG or TIFF files, to one fax document
 (`--fax`, sent with `--fax-to`), or to a printer through CUPS (`--print`), with
-`pdftoppm`-style flags.
+`pdftoppm`-style flags. Pages render at 8 or 16 bits per sample (`--depth`),
+as CMYK TIFF or JPEG (`--cmyk`, `--jpegcmyk`), and through an output ICC
+profile (`--output-profile`, `--intent`, `--bpc`) that is embedded in the
+files. A page larger than memory renders and is written in bands
+(`--band-mib`), within a page budget (`--max-page-mib`).
 
 ```bash
 cargo build --release -p rasterrocket-cli            # CPU only

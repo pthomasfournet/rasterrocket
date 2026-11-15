@@ -1,8 +1,8 @@
 # rasterrocket
 
 The library entry point of the rasterrocket workspace: PDF pages to 8-bit
-grayscale pixel buffers (or RGB bitmaps through the session API), in process
-and in pure Rust, ready for Tesseract or any other OCR engine.
+grayscale pixel buffers (or RGB, RGBA and CMYK, at 8 or 16 bits per sample),
+in process and in pure Rust, ready for Tesseract or any other OCR engine.
 
 ```rust
 use std::path::Path;
@@ -12,7 +12,7 @@ let mut opts = RasterOptions::new(300.0); // every other option at its default
 opts.deskew = true;
 for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     match result {
-        Ok(page) => { /* page.pixels: width × height bytes; page.dpi */ }
+        Ok(page) => { /* page.pixels.as_u8(): width × height bytes; page.dpi */ }
         Err(e) => eprintln!("page {page_num}: {e}"),
     }
 }
@@ -50,8 +50,23 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - Encrypted documents are decrypted in process when `decrypt_authorized` is set.
 - `overprint` (off by default) simulates overprint and spot inks on pages
   that set it; see the [API reference](../../docs/api-reference.md#sessionconfig).
-- `rgb_to_gray` / `rgb_into_gray` (in place, no second buffer) and
-  `gray8_into_rendered_page` for callers that build their own gray pages.
+- `depth` (`SampleDepth::Sixteen`) renders at 16 bits per sample:
+  `Pixels::U16` pages from the batch entry points, `FinishedCanvas` bitmaps
+  from `render_page_canvas`.
+- `color` (`ColorModel::Cmyk`) renders CMYK pages of process inks
+  (`PixelFormat::Cmyk8` / `Cmyk16`, `render_page_cmyk`).
+- `output_profile` (an `OutputProfile` read from ICC bytes), `intent` and
+  `black_point_compensation` convert every page to an RGB, gray or CMYK
+  output profile.
+- `max_page_bytes` bounds the bitmap of a page (default 1.8 GB), and
+  `render_page_bands` renders a larger page as bands of rows, byte-identical
+  to a whole-page render.
+- `PageDiagnostics::glyphs` counts the glyphs shown by text rendering mode,
+  and `has_visible_text()` tells a page of native text from a scan with an
+  invisible OCR layer.
+- `rgb_to_gray` / `rgb_into_gray` (in place, no second buffer),
+  `rgb16_to_gray16` and `gray8_into_rendered_page` for callers that build
+  their own gray pages.
 
 Public types are `#[non_exhaustive]`: start from `RasterOptions::new(dpi)`,
 `SessionConfig::default()` or `RenderParams::new(scale)` and assign or chain.
