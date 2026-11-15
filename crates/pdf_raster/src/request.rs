@@ -120,8 +120,7 @@ pub struct RenderParams {
     /// default), or 16, which [`render_page_canvas`](crate::render_page_canvas)
     /// and [`render_page_bands`](crate::render_page_bands) return as
     /// 16-bit RGB.  A 16-bit render costs twice the bytes of an 8-bit one
-    /// against the byte budget, and does not simulate overprint: a session
-    /// that does refuses it.
+    /// against the byte budget.
     pub depth: SampleDepth,
     /// The rendering intent of the conversion to the session's
     /// [`output_profile`](crate::SessionConfig::output_profile); `None`
