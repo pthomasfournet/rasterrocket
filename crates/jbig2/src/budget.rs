@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use crate::error::{DecodeError, OverflowError, Result, bail};
+use crate::sync::Arc;
 
 /// Upper bound on the memory budget, in bits (1 GiB).
 const MEMORY_CAP: u64 = 1 << 33;
@@ -133,6 +134,15 @@ impl Budget {
         try_reserve(&mut vec, len)?;
 
         Ok(vec)
+    }
+
+    /// `value` behind a shared pointer, whose allocation (the value and two
+    /// reference counts) is charged to the memory budget.
+    pub(crate) fn shared<T>(&self, value: T) -> Result<Arc<T>> {
+        let bytes = core::mem::size_of::<T>() + 2 * core::mem::size_of::<usize>();
+        self.charge_memory(bytes as u64 * 8)?;
+
+        Ok(Arc::new(value))
     }
 }
 

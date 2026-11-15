@@ -23,6 +23,7 @@ use core::ops::ControlFlow;
 
 use crate::arithmetic_decoder::ArithmeticDecoderContext;
 use crate::budget::Budget;
+use crate::sync::Arc;
 
 // A context can move to another thread, and the global segments it may
 // refer to can be shared between threads. A context is not `Sync`: its
@@ -971,7 +972,7 @@ impl Dictionaries {
         referred_segments: &[u32],
         globals: Option<&'a Globals>,
         strict: bool,
-    ) -> Result<(Vec<&'a Bitmap>, Vec<HuffmanTable>)> {
+    ) -> Result<(Vec<&'a Arc<Bitmap>>, Vec<HuffmanTable>)> {
         let mut symbols = Vec::new();
         let mut tables = Vec::new();
 

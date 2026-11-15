@@ -17,11 +17,12 @@ use crate::huffman_table::{HuffmanTable, StandardHuffmanTables, TableLine};
 use crate::integer_decoder::IntegerDecoder;
 use crate::reader::Reader;
 use crate::symbol_id_decoder::SymbolIdDecoder;
+use crate::sync::Arc;
 
 /// Decode a text region segment (6.4).
 pub(crate) fn decode(
     header: &TextRegionHeader<'_>,
-    symbols: &[&Bitmap],
+    symbols: &[&Arc<Bitmap>],
     referred_tables: &[HuffmanTable],
     standard_tables: &StandardHuffmanTables,
     scratch: &mut ScratchBuffers,
@@ -52,7 +53,7 @@ pub(crate) fn decode(
 
 pub(crate) fn decode_into(
     header: &TextRegionHeader<'_>,
-    symbols: &[&Bitmap],
+    symbols: &[&Arc<Bitmap>],
     referred_tables: &[HuffmanTable],
     standard_tables: &StandardHuffmanTables,
     bitmap: &mut Bitmap,
@@ -92,13 +93,13 @@ pub(crate) fn decode_into(
 /// `input` followed by those of `new`.
 #[derive(Clone, Copy)]
 pub(crate) struct SymbolSet<'a> {
-    pub(crate) input: &'a [&'a Bitmap],
-    pub(crate) new: &'a [Bitmap],
+    pub(crate) input: &'a [&'a Arc<Bitmap>],
+    pub(crate) new: &'a [Arc<Bitmap>],
 }
 
 impl<'a> SymbolSet<'a> {
     /// The set consisting of `symbols`.
-    pub(crate) fn of(symbols: &'a [&'a Bitmap]) -> Self {
+    pub(crate) fn of(symbols: &'a [&'a Arc<Bitmap>]) -> Self {
         Self {
             input: symbols,
             new: &[],
@@ -106,6 +107,12 @@ impl<'a> SymbolSet<'a> {
     }
 
     pub(crate) fn get(&self, index: usize) -> Option<&'a Bitmap> {
+        self.get_shared(index).map(|symbol| &**symbol)
+    }
+
+    /// The shared pointer to symbol `index`, which a symbol dictionary
+    /// exports without copying the symbol.
+    pub(crate) fn get_shared(&self, index: usize) -> Option<&'a Arc<Bitmap>> {
         match index.checked_sub(self.input.len()) {
             None => Some(self.input[index]),
             Some(new_index) => self.new.get(new_index),
@@ -1003,7 +1010,11 @@ mod tests {
         data
     }
 
-    fn decode_region(data: &[u8], symbols: &[&Bitmap], budget: Budget) -> Result<RegionBitmap> {
+    fn decode_region(
+        data: &[u8],
+        symbols: &[&Arc<Bitmap>],
+        budget: Budget,
+    ) -> Result<RegionBitmap> {
         let header = parse(&mut Reader::new(data), symbols.len() as u32, false)?;
         let mut scratch = ScratchBuffers::new(budget);
         decode(
@@ -1032,7 +1043,7 @@ mod tests {
     #[test]
     fn placed_pixels_are_charged() {
         let unlimited = Budget::with_limits(1 << 20, 1 << 20);
-        let symbol = Bitmap::new_with(32, 32, 0, 0, true, &unlimited).unwrap();
+        let symbol = Arc::new(Bitmap::new_with(32, 32, 0, 0, true, &unlimited).unwrap());
         // Ten instances, which this coded data places inside the region.
         let data = text_region_data(32, 32, 10, 100, 0x18);
 

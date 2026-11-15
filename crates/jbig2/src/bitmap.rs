@@ -113,21 +113,6 @@ impl Bitmap {
         Ok(bitmap)
     }
 
-    /// A copy of the bitmap, charged to `budget`.
-    pub(crate) fn try_clone(&self, budget: &Budget) -> Result<Self> {
-        let mut data = budget.vec_with_capacity(self.data.len())?;
-        data.extend_from_slice(&self.data);
-
-        Ok(Self {
-            width: self.width,
-            height: self.height,
-            stride: self.stride,
-            data,
-            x_location: self.x_location,
-            y_location: self.y_location,
-        })
-    }
-
     pub(crate) fn reinitialize(
         &mut self,
         width: u32,

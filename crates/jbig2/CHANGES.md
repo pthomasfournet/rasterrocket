@@ -94,8 +94,9 @@ is opened with `Page::new_embedded`.
   looks its referenced symbols up in the input and new symbol lists
   (`SymbolSet`) instead of copying both into a new list per symbol,
   which was quadratic in the dictionary size. `Bitmap` is no longer
-  `Clone`, so every copy goes through the charged `Bitmap::try_clone`.
-  Output is unchanged.
+  `Clone`; symbols are shared, not copied (#1781 below). Output is
+  unchanged. Upstream later made both changes as #1775 and #1777, which
+  this covers.
 - The first adaptive template pixel of a pattern dictionary's collective
   bitmap is placed at x = -HDPW (6.7.5) for every pattern width: the AT
   pixel x offset is an `i16`. Upstream negated `HDPW as i8`, which
@@ -159,6 +160,11 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   planes. Output is unchanged. The halftone-grid test of
   `tests/budget.rs` uses a 16 384² grid, whose single plane still exceeds
   the budget of a 1 × 1 page.
+- `1cbf1aeef` (#1781) A decoded symbol is held behind a shared pointer
+  (`Budget::shared`, which charges the allocation), and a dictionary
+  exports its symbols, new or inherited, by sharing them instead of
+  copying each bitmap; `Bitmap::try_clone` is gone. Output is unchanged.
+  Test: `decode::symbol::tests::dictionary_charges_every_allocation`.
 
 ## Upstream review (2026-10-30)
 

@@ -22,13 +22,14 @@ use crate::error::{
 use crate::huffman_table::{HuffmanTable, StandardHuffmanTables};
 use crate::integer_decoder::IntegerDecoder;
 use crate::reader::Reader;
+use crate::sync::Arc;
 
 pub(crate) const MAX_SYMBOLS: u32 = 1 << 20;
 
 /// Decode a symbol dictionary segment (7.4.2, 6.5).
 pub(crate) fn decode(
     header: &SymbolDictionaryHeader<'_>,
-    input_symbols: &[&Bitmap],
+    input_symbols: &[&Arc<Bitmap>],
     referred_tables: &[HuffmanTable],
     standard_tables: &StandardHuffmanTables,
     input_contexts: Option<&RetainedContexts>,
@@ -129,7 +130,7 @@ pub(crate) fn decode(
                         &ctx.header.adaptive_template_pixels,
                     )?;
 
-                    ctx.symbols.new.push(region);
+                    ctx.symbols.new.push(ctx.budget.shared(region)?);
                 }
                 (true, false) => {
                     // Decode a single symbol width. We don't actually decode the symbols
@@ -141,7 +142,7 @@ pub(crate) fn decode(
                     // In this case, we can have both, huffman and arithmetic coding.
                     let symbol = decode_refinement_aggregation_bitmap(&mut ctx, symbol_width)?;
 
-                    ctx.symbols.new.push(symbol);
+                    ctx.symbols.new.push(ctx.budget.shared(symbol)?);
                 }
             }
 
@@ -192,7 +193,7 @@ pub(crate) struct RetainedContexts {
 /// A decoded symbol dictionary segment.
 #[derive(Debug)]
 pub(crate) struct SymbolDictionary {
-    pub(crate) exported_symbols: Vec<Bitmap>,
+    pub(crate) exported_symbols: Vec<Arc<Bitmap>>,
     pub(crate) retained_contexts: Option<RetainedContexts>,
 }
 
@@ -444,8 +445,8 @@ fn decode_aggregation_bitmap(
 }
 
 struct Symbols<'a> {
-    input: &'a [&'a Bitmap],
-    new: Vec<Bitmap>,
+    input: &'a [&'a Arc<Bitmap>],
+    new: Vec<Arc<Bitmap>>,
 }
 
 impl Symbols<'_> {
@@ -710,7 +711,7 @@ fn decode_height_class_collective_bitmap(ctx: &mut SymbolDecodeContext<'_>) -> R
             }
         }
 
-        ctx.symbols.new.push(symbol);
+        ctx.symbols.new.push(ctx.budget.shared(symbol)?);
         x_offset = x_offset
             .checked_add(symbol_width)
             .ok_or(OverflowError::Index)?;
@@ -720,7 +721,7 @@ fn decode_height_class_collective_bitmap(ctx: &mut SymbolDecodeContext<'_>) -> R
 }
 
 /// Exported symbols (6.5.10).
-fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Bitmap>> {
+fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Arc<Bitmap>>> {
     let total_symbols = ctx.total_symbols();
 
     let mut read_run_length = || -> Result<u32> {
@@ -765,10 +766,10 @@ fn export_symbols(ctx: &mut SymbolDecodeContext<'_>) -> Result<Vec<Bitmap>> {
             for symbol_idx in index..end_index {
                 let symbol = ctx
                     .symbols
-                    .get(symbol_idx as usize)
-                    .ok_or(SymbolError::OutOfRange)?
-                    .try_clone(ctx.budget)?;
-                exported.push(symbol);
+                    .as_set()
+                    .get_shared(symbol_idx as usize)
+                    .ok_or(SymbolError::OutOfRange)?;
+                exported.push(Arc::clone(symbol));
             }
         }
 
@@ -979,15 +980,18 @@ mod tests {
     }
 
     /// The dictionary charges its symbol and width lists, the collective
-    /// bitmap, the symbol cut from it, and the export list with its copy of
-    /// the symbol; one bit less than their sum is refused.
+    /// bitmap, the symbol cut from it with its shared allocation, and the
+    /// export list, which shares the symbol instead of copying it; one bit
+    /// less than their sum is refused.
     #[test]
     fn dictionary_charges_every_allocation() {
         let data = one_symbol_dictionary(64);
         let bitmap_bits = 64 * 64;
-        let list_entry_bits = core::mem::size_of::<Bitmap>() as u64 * 8;
+        let list_entry_bits = core::mem::size_of::<Arc<Bitmap>>() as u64 * 8;
+        let shared_bits =
+            (core::mem::size_of::<Bitmap>() + 2 * core::mem::size_of::<usize>()) as u64 * 8;
         let total =
-            list_entry_bits + 32 + bitmap_bits + bitmap_bits + list_entry_bits + bitmap_bits;
+            list_entry_bits + 32 + bitmap_bits + bitmap_bits + shared_bits + list_entry_bits;
 
         let dictionary = decode_dictionary(&data, &Budget::with_limits(total, 0)).unwrap();
         assert_eq!(dictionary.exported_symbols.len(), 1);
