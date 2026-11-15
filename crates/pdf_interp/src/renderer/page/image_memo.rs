@@ -96,18 +96,21 @@ impl ImageMemo {
     }
 
     /// The key of an inline image: the sample depth of the canvas it is
-    /// decoded for, `spaces` (the object identifying the `/ColorSpace`
-    /// dictionary its colour-space names resolve in, `None` when there is
-    /// none), its parameters and its data.
+    /// decoded for, the rendering intent its colours convert under,
+    /// `spaces` (the object identifying the `/ColorSpace` dictionary its
+    /// colour-space names resolve in, `None` when there is none), its
+    /// parameters and its data.
     pub(super) fn inline_key(
         depth: SampleDepth,
+        intent: crate::RenderingIntent,
         spaces: Option<ObjectId>,
         params: &[u8],
         data: &[u8],
     ) -> Box<[u8]> {
-        let mut key = Vec::with_capacity(18 + params.len() + data.len());
+        let mut key = Vec::with_capacity(19 + params.len() + data.len());
         let (tag, (num, generation)) = spaces.map_or((0u8, (0, 0)), |id| (1, id));
         key.push(depth.bits());
+        key.push(intent.bit());
         key.push(tag);
         key.extend_from_slice(&num.to_le_bytes());
         key.extend_from_slice(&generation.to_le_bytes());
@@ -250,6 +253,7 @@ mod tests {
         depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
+        intent: crate::RenderingIntent::RelativeColorimetric,
     };
 
     fn memo(budget: usize) -> ImageMemo {
@@ -350,11 +354,32 @@ mod tests {
     /// a canvas of the other: their keys differ by depth alone.
     #[test]
     fn the_inline_key_holds_the_depth() {
-        let key = |depth| ImageMemo::inline_key(depth, Some((3, 0)), b"/W 1 /H 1", b"\x80");
+        let key = |depth| {
+            ImageMemo::inline_key(
+                depth,
+                crate::RenderingIntent::RelativeColorimetric,
+                Some((3, 0)),
+                b"/W 1 /H 1",
+                b"\x80",
+            )
+        };
         assert_ne!(key(SampleDepth::Eight), key(SampleDepth::Sixteen));
         let mut memo = memo(1 << 20);
         let _ = memo.insert_inline(key(SampleDepth::Eight), decoded(ImageFilter::Raw, 1));
         assert!(memo.get_inline(&key(SampleDepth::Eight), false).is_some());
         assert!(memo.get_inline(&key(SampleDepth::Sixteen), false).is_none());
+    }
+
+    /// An inline image decoded under one rendering intent is not served
+    /// under another.
+    #[test]
+    fn the_inline_key_holds_the_intent() {
+        let key = |intent: crate::RenderingIntent| {
+            ImageMemo::inline_key(SampleDepth::Eight, intent, None, b"/W 1 /H 1", b"\x80")
+        };
+        let keys = crate::RenderingIntent::ALL.map(key);
+        for (i, a) in keys.iter().enumerate() {
+            assert!(keys[i + 1..].iter().all(|b| a != b));
+        }
     }
 }

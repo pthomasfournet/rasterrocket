@@ -103,8 +103,17 @@ impl PageRenderer<'_> {
     /// any clipping to the window drawn, so every band of a page records
     /// the same set.
     pub(super) fn record_intent(&mut self, own: Option<crate::RenderingIntent>) {
-        let intent = own.unwrap_or_else(|| self.gstate.current().rendering_intent);
+        let intent = self.painting_intent(own);
         self.diag.content_intents.insert(intent);
+    }
+
+    /// The intent an object paints under: `own`, an image's own intent,
+    /// else the graphics state's.
+    pub(super) fn painting_intent(
+        &self,
+        own: Option<crate::RenderingIntent>,
+    ) -> crate::RenderingIntent {
+        own.unwrap_or_else(|| self.gstate.current().rendering_intent)
     }
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
@@ -350,8 +359,10 @@ impl PageRenderer<'_> {
                 self.trace_inline_image(params, data);
                 // The same block in a form or pattern cell drawn repeatedly
                 // decodes once per page.
+                let intent = self.painting_intent(inline_intent(params));
                 let key = super::image_memo::ImageMemo::inline_key(
                     self.canvas.kind().depth(),
+                    intent,
                     self.resources.color_space_source(),
                     params,
                     data,
@@ -390,6 +401,7 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "cache")]
                     doc_id: None,
                     keep_tints,
+                    intent,
                     depth: self.canvas.kind().depth(),
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).

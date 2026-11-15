@@ -71,7 +71,7 @@ impl RenderingIntent {
     }
 
     /// The intent's bit in an [`IntentSet`].
-    const fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         match self {
             Self::RelativeColorimetric => 1,
             Self::AbsoluteColorimetric => 2,

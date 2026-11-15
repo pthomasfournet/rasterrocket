@@ -83,6 +83,7 @@ impl PageRenderer<'_> {
             id,
             context: self.default_spaces_context(),
             depth: self.canvas.kind().depth(),
+            intent: self.painting_intent(self.resources.xobject_intent(name)),
         });
         let Some(key) = key else {
             let (resolution, _) = self.decode_image_xobject(name, draw_size);
@@ -246,6 +247,7 @@ impl PageRenderer<'_> {
             #[cfg(feature = "cache")]
             doc_id: self.cache_state.as_ref().map(|cs| cs.doc_id),
             keep_tints,
+            intent: self.painting_intent(self.resources.xobject_intent(name)),
             depth: self.canvas.kind().depth(),
         };
         // Route to whichever GPU JPEG decoder is active (only one is Some per render).

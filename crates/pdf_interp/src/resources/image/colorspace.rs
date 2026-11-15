@@ -329,9 +329,11 @@ impl ImageColour {
     /// be allocated, or the work left cannot convert them even
     /// approximately.  Device-resident samples are drawn as they are; they
     /// are only produced for an [`identity`](Self::identity) colour.
+    /// Colours convert under `intent` (see [`ColorSpace::convert_to_rgb`]).
     pub(super) fn convert(
         &self,
         doc: &Document,
+        intent: RenderingIntent,
         samples: Samples,
         budget: Option<&TintBudget>,
         #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
@@ -362,15 +364,13 @@ impl ImageColour {
         let profile = embedded_profile
             .as_deref()
             .filter(|_| self.space.is_none())
-            .and_then(|bytes| {
-                IccConversion::compile(bytes, u8::try_from(n).ok()?, RenderingIntent::default())
-            });
+            .and_then(|bytes| IccConversion::compile(bytes, u8::try_from(n).ok()?, intent));
         let max_sample = if n == self.components() {
             self.max_sample
         } else {
             255.0
         };
-        let decoded = Decoded::new(doc, space, decode, max_sample, profile, budget);
+        let decoded = Decoded::new(doc, intent, space, decode, max_sample, profile, budget);
         let bytes = match data {
             ImageData::Cpu(bytes) => bytes,
             ImageData::Cpu16(wide) => {
@@ -523,7 +523,7 @@ fn convert16(
         ColorSpace::IccBased {
             n: k,
             stream_id: Some(id),
-        } => IccConversion::load(decoded.doc, *id, *k, RenderingIntent::default()),
+        } => IccConversion::load(decoded.doc, *id, *k, decoded.intent),
         _ => None,
     });
     let to_inputs = |px: &[u16], comps: &mut [f64; MAX_WIDE_COMPONENTS]| {
@@ -562,11 +562,9 @@ fn convert16(
                     icc.as_deref()
                         .and_then(|conv| conv.convert::<u16>(decoded.doc, comps))
                         .unwrap_or_else(|| {
-                            decoded.space.convert::<u16>(
-                                decoded.doc,
-                                RenderingIntent::default(),
-                                comps,
-                            )
+                            decoded
+                                .space
+                                .convert::<u16>(decoded.doc, decoded.intent, comps)
                         })
                 };
                 let mut seen = [0; MAX_WIDE_COMPONENTS];
@@ -610,6 +608,8 @@ fn default_decode(doc: &Document, space: &ColorSpace) -> Vec<(f64, f64)> {
         (vals.len() == usize::from(*n) * 2 && vals.iter().all(|v| v.is_finite()))
             .then(|| vals.as_chunks::<2>().0.iter().map(|&p| p.into()).collect())
     });
+    // The `/Alternate` space stands in for a profile that converts under no
+    // intent; the initial intent's conversion answers for every intent.
     range.unwrap_or_else(|| {
         match IccConversion::load(doc, *id, *n, RenderingIntent::default()).as_deref() {
             Some(IccConversion::Alternate(alt)) => alt.default_decode(8),
@@ -804,6 +804,8 @@ impl Lattice {
 /// The conversion of samples in one space under one `/Decode`.
 struct Decoded<'a> {
     doc: &'a Document,
+    /// The rendering intent the samples convert under.
+    intent: RenderingIntent,
     space: &'a ColorSpace,
     decode: &'a [(f64, f64)],
     max_sample: f64,
@@ -863,6 +865,7 @@ impl<'a> Decoded<'a> {
     /// [`TintBudget`]).
     fn new(
         doc: &'a Document,
+        intent: RenderingIntent,
         space: &'a ColorSpace,
         decode: &'a [(f64, f64)],
         max_sample: f64,
@@ -878,6 +881,7 @@ impl<'a> Decoded<'a> {
         let allowance = limiting.map_or(EXACT_WORK_BUDGET, TintBudget::remaining);
         Self {
             doc,
+            intent,
             space,
             decode,
             max_sample,
@@ -914,10 +918,7 @@ impl<'a> Decoded<'a> {
         self.profile
             .as_ref()
             .and_then(|p| p.convert(self.doc, comps))
-            .unwrap_or_else(|| {
-                self.space
-                    .convert_to_rgb(self.doc, RenderingIntent::default(), comps)
-            })
+            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, self.intent, comps))
     }
 
     /// The table of the space's conversion of every one-component sample:
@@ -999,8 +1000,7 @@ impl<'a> Decoded<'a> {
                 stream_id: Some(id),
                 ..
             } => {
-                let Some(conv) = IccConversion::load(self.doc, *id, 3, RenderingIntent::default())
-                else {
+                let Some(conv) = IccConversion::load(self.doc, *id, 3, self.intent) else {
                     return RgbConvert::Identity;
                 };
                 match &*conv {
@@ -1055,7 +1055,7 @@ impl<'a> Decoded<'a> {
             ColorSpace::IccBased {
                 stream_id: Some(id),
                 ..
-            } => match IccConversion::load(self.doc, *id, 4, RenderingIntent::default()) {
+            } => match IccConversion::load(self.doc, *id, 4, self.intent) {
                 Some(conv) if matches!(*conv, IccConversion::Transform { .. }) => {
                     CmykConvert::Icc(conv)
                 }
@@ -1396,6 +1396,7 @@ mod tests {
         let width = u32::try_from(data.len() / layout_components(layout)).unwrap();
         colour.convert(
             doc,
+            RenderingIntent::default(),
             Samples::cpu(width, 1, layout, data.to_vec()),
             budget,
             #[cfg(feature = "gpu-icc")]
@@ -1409,7 +1410,15 @@ mod tests {
     /// The conversion of `n`-component samples in `space` under the unit
     /// `/Decode`, with no page budget.
     fn unit_decoded<'a>(doc: &'a Document, space: &'a ColorSpace, n: usize) -> Decoded<'a> {
-        Decoded::new(doc, space, &UNIT_DECODE[..n], 255.0, None, None)
+        Decoded::new(
+            doc,
+            RenderingIntent::default(),
+            space,
+            &UNIT_DECODE[..n],
+            255.0,
+            None,
+            None,
+        )
     }
 
     fn layout_components(layout: Layout) -> usize {
@@ -1625,6 +1634,7 @@ mod tests {
         let img = colour
             .convert(
                 &doc,
+                RenderingIntent::default(),
                 Samples::cpu(1, 1, Layout::Color(3), vec![1, 2, 3]),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -2145,6 +2155,7 @@ mod tests {
         colour
             .convert(
                 doc,
+                RenderingIntent::default(),
                 Samples::cpu16(width, 1, layout, data.to_vec()),
                 None,
                 #[cfg(feature = "gpu-icc")]

@@ -39,13 +39,15 @@ pub const DOCUMENT_IMAGE_BUDGET_BYTES: usize = 256 << 20;
 
 /// The identity of a decode: the image stream, the resource context
 /// whose default colour spaces replace its device space, `None` when the
-/// resources in effect define none, and the depth of the render, which
-/// decides whether samples of more than 8 bits keep them.
+/// resources in effect define none, the depth of the render, which
+/// decides whether samples of more than 8 bits keep them, and the
+/// rendering intent its colours convert under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ImageKey {
     pub(crate) id: ObjectId,
     pub(crate) context: Option<ObjectId>,
     pub(crate) depth: color::SampleDepth,
+    pub(crate) intent: crate::RenderingIntent,
 }
 
 /// What decoding an image `XObject` produced, as kept for other pages.
@@ -342,6 +344,7 @@ pub(crate) mod tests {
         depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
+        intent: crate::RenderingIntent::RelativeColorimetric,
     };
     const PAGE_1: ObjectId = (10, 0);
     const PAGE_2: ObjectId = (11, 0);

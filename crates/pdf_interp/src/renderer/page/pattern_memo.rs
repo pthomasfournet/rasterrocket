@@ -3,7 +3,8 @@
 //!
 //! A resolved shading is in device space: it is keyed by its resource (the
 //! object, or the resource context and name of a direct dictionary), the
-//! exact bits of the matrix that places it and of the page height, and, when
+//! exact bits of the matrix that places it and of the page height, the
+//! rendering intent its colours convert under, and, when
 //! the resources in effect replace a device colour space with a default
 //! space, the resource context, so every use sees what a fresh resolve under
 //! its own matrix and resources returns.  A tiling cell is keyed by its
@@ -46,6 +47,8 @@ pub(super) struct PlacedKey {
     id: ResourceKey,
     matrix: [u64; 6],
     canvas: [u64; 2],
+    /// The rendering intent the colours convert under.
+    intent: crate::RenderingIntent,
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
     /// The canvas the object is resolved for.
@@ -66,6 +69,7 @@ impl PlacedKey {
             id,
             matrix: matrix.map(f64::to_bits),
             canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
+            intent: canvas.intent,
             defaults,
             kind,
         }
@@ -368,6 +372,7 @@ impl PageRenderer<'_> {
             width: f64::from(self.page_width),
             height: f64::from(self.page_height),
             depth: self.canvas.kind().depth(),
+            intent: self.gstate.current().rendering_intent,
         }
     }
 
@@ -469,6 +474,7 @@ mod tests {
             width: 100.0,
             height: page_h,
             depth: color::SampleDepth::Eight,
+            intent: crate::RenderingIntent::RelativeColorimetric,
         };
         PlacedKey::new(
             ResourceKey::Object(id),

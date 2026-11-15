@@ -664,7 +664,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     }
 
     if let Some(matte) = &matte {
-        smask::remove_matte(doc, src.colour.space(), matte, &mut img);
+        smask::remove_matte(doc, ctx.intent, src.colour.space(), matte, &mut img);
     }
 
     ImageResolution::Ok(DecodedImage {
@@ -977,6 +977,9 @@ pub struct ImageDecodeCtx<'a> {
     /// Keep the ink amounts of an image in a `Separation`, `DeviceN` or
     /// process CMYK space beside its colours ([`DecodedImage::tints`]).
     pub keep_tints: bool,
+    /// The rendering intent the image's colours convert under: its own
+    /// `/Intent`, else the graphics state's (PDF §8.6.5.8).
+    pub intent: crate::RenderingIntent,
     /// The depth of the render the image is drawn in.  At 16 bits a stream
     /// of more than 8 bits a sample keeps its samples at 16 bits
     /// ([`ImageData::Cpu16`]); every other stream decodes to 8-bit samples
@@ -1006,6 +1009,7 @@ impl<'a> ImageDecodeCtx<'a> {
             #[cfg(feature = "cache")]
             doc_id: None,
             keep_tints: false,
+            intent: crate::RenderingIntent::RelativeColorimetric,
             depth: color::SampleDepth::Eight,
         }
     }
