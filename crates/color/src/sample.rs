@@ -103,6 +103,8 @@ impl Wide for u64 {
 pub trait Sample:
     Copy + Pod + Zeroable + Ord + Default + Debug + Hash + Send + Sync + 'static
 {
+    /// Zero: no intensity, no ink, transparent.
+    const ZERO: Self;
     /// The largest value: full intensity, full ink, opaque.
     const MAX: Self;
     /// Bits per sample.
@@ -152,6 +154,9 @@ pub trait Sample:
     /// `round(clamp(v, 0, 1) · MAX)`; NaN is `0`.
     fn from_unit(v: f64) -> Self;
 
+    /// The sample as a fraction of full intensity, `v / MAX`.
+    fn to_unit(self) -> f64;
+
     /// The 8-bit value `v` on this sample's scale, `v · MAX / 255`, which
     /// is exact: `v` for `u8`, `257 · v` for `u16`.
     fn from_u8(v: u8) -> Self;
@@ -195,6 +200,7 @@ static IDENTITY_U16: [u16; 65_536] = {
 };
 
 impl Sample for u8 {
+    const ZERO: Self = 0;
     const MAX: Self = Self::MAX;
     const BITS: u32 = 8;
     const DEPTH: SampleDepth = SampleDepth::Eight;
@@ -254,6 +260,11 @@ impl Sample for u8 {
     }
 
     #[inline]
+    fn to_unit(self) -> f64 {
+        f64::from(self) / 255.0
+    }
+
+    #[inline]
     fn from_u8(v: u8) -> Self {
         v
     }
@@ -280,6 +291,7 @@ impl Sample for u8 {
 }
 
 impl Sample for u16 {
+    const ZERO: Self = 0;
     const MAX: Self = Self::MAX;
     const BITS: u32 = 16;
     const DEPTH: SampleDepth = SampleDepth::Sixteen;
@@ -347,6 +359,11 @@ impl Sample for u16 {
     )]
     fn from_unit(v: f64) -> Self {
         (v.clamp(0.0, 1.0) * 65_535.0).round() as Self
+    }
+
+    #[inline]
+    fn to_unit(self) -> f64 {
+        f64::from(self) / 65_535.0
     }
 
     #[inline]

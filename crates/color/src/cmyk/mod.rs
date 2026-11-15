@@ -44,6 +44,8 @@ mod tests;
 pub use inverse::{BLACK_FLOOR, SpotLut, ink_to_rgb_row, rgb_to_ink};
 pub use matching::{INK_REPRODUCING_COST, ink_reproducing};
 
+use crate::sample::{Sample, SampleDepth};
+
 /// sRGB colour of each solid / overprint corner, indexed `k·8 + c·4 + m·2 + y`
 /// with every index in `{0, 1}` (0 = no ink, 1 = solid ink).
 ///
@@ -230,6 +232,78 @@ pub fn cmyk_f64_to_rgb(c: f64, m: f64, y: f64, k: f64) -> [u8; 3] {
         unit_weight(m),
         unit_weight(y),
         unit_weight(k),
+    ])
+}
+
+/// The model at any sample depth: one output channel from the ink weights
+/// `[c, m, y, k]` on `[0, 2^BITS]`, the corners [`CORNERS`] on the sample's
+/// scale (`v·257` at 16 bits).  The stages are those of the 8-bit
+/// evaluation with `BITS` fractional bits in place of 8: after the M and C
+/// stages the product is rounded back to `BITS` fractional bits, and the K
+/// stage rounds to an integer.  Every intermediate is a convex combination
+/// of corner values times at most `2^(2·BITS)`, below `2^48` at 16 bits.
+fn channel_at<S: Sample>(channel: usize, w: [i64; 4]) -> S {
+    let bits = S::BITS;
+    let corner = |j: usize| S::from_u8(CORNERS[j][channel]).signed();
+    let lerp = |a: i64, b: i64, w: i64| (a << bits) + (b - a) * w;
+    let round = |v: i64| (v + (1 << (bits - 1))) >> bits;
+    let [wc, wm, wy, wk] = w;
+    let y: [i64; 8] =
+        std::array::from_fn(|j| (corner(2 * j) << bits) + (corner(2 * j + 1) - corner(2 * j)) * wy);
+    let m: [i64; 4] = std::array::from_fn(|j| round(lerp(y[2 * j], y[2 * j + 1], wm)));
+    let c0 = round(lerp(m[0], m[1], wc));
+    let c1 = round(lerp(m[2], m[3], wc));
+    S::from_signed((lerp(c0, c1, wk) + (1 << (2 * bits - 1))) >> (2 * bits))
+}
+
+/// sRGB of the ink weights `w` on `[0, 2^BITS]` at the depth of `S` (see
+/// [`channel_at`]).
+fn from_weights_at<S: Sample>(w: [i64; 4]) -> [S; 3] {
+    [channel_at(0, w), channel_at(1, w), channel_at(2, w)]
+}
+
+/// The weight on `[0, 2^BITS]` of an ink sample: `x + (x >> (BITS − 1))`,
+/// so that no ink weighs 0 and solid ink `2^BITS`.
+fn weight_at<S: Sample>(x: S) -> i64 {
+    let x = x.signed();
+    x + (x >> (S::BITS - 1))
+}
+
+/// The weight on `[0, 2^BITS]` of a normalised ink amount; NaN counts as no
+/// ink.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the clamped product lies in [0, 2^16] and is rounded first"
+)]
+fn unit_weight_at<S: Sample>(t: f64) -> i64 {
+    if t.is_nan() {
+        return 0;
+    }
+    (t.clamp(0.0, 1.0) * f64::from(S::LERP_ONE)).round() as i64
+}
+
+/// [`cmyk_to_rgb`] at the depth of `S`: the 8-bit evaluation itself for
+/// `u8`, the model evaluated with 16-bit weights and corners for `u16`.
+#[must_use]
+pub fn cmyk_to_rgb_at<S: Sample>(c: S, m: S, y: S, k: S) -> [S; 3] {
+    match S::as_u8(&[c, m, y, k]) {
+        Some(&[c, m, y, k]) => cmyk_to_rgb(c, m, y, k).map(S::from_u8),
+        _ => from_weights_at([weight_at(c), weight_at(m), weight_at(y), weight_at(k)]),
+    }
+}
+
+/// [`cmyk_f64_to_rgb`] at the depth of `S`: the 8-bit conversion itself for
+/// `u8`; for `u16`, the components quantised to weights on `[0, 65536]`.
+#[must_use]
+pub fn cmyk_f64_to_rgb_at<S: Sample>(c: f64, m: f64, y: f64, k: f64) -> [S; 3] {
+    if S::DEPTH == SampleDepth::Eight {
+        return cmyk_f64_to_rgb(c, m, y, k).map(S::from_u8);
+    }
+    from_weights_at::<S>([
+        unit_weight_at::<S>(c),
+        unit_weight_at::<S>(m),
+        unit_weight_at::<S>(y),
+        unit_weight_at::<S>(k),
     ])
 }
 

@@ -18,6 +18,8 @@
 //! - [`ceil_i32`] — ceil toward +∞, returns i32
 //! - [`round_half_up_i32`] — round half-integers toward +∞
 
+use crate::sample::{Sample, Wide};
+
 // ── Integer blend math ────────────────────────────────────────────────────────
 
 /// Division by 255, rounded to nearest, clamped to a byte.
@@ -129,12 +131,17 @@ pub fn rgb_to_bytes(r: f64, g: f64, b: f64) -> [u8; 3] {
 /// rounded to the nearest level (PDF §11.3.5.3).
 #[inline]
 #[must_use]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a weighted mean of u8 values is at most 255"
-)]
 pub fn luminosity(r: u8, g: u8, b: u8) -> u8 {
-    ((30 * u32::from(r) + 59 * u32::from(g) + 11 * u32::from(b) + 50) / 100) as u8
+    luminosity_at(r, g, b)
+}
+
+/// [`luminosity`] at the depth of `S`: `(30 R + 59 G + 11 B + 50) / 100`,
+/// formed in [`Sample::Wide`].
+#[inline]
+#[must_use]
+pub fn luminosity_at<S: Sample>(r: S, g: S, b: S) -> S {
+    let w = <S::Wide as Wide>::of;
+    S::from_wide((w(30) * r.wide() + w(59) * g.wide() + w(11) * b.wide() + w(50)) / w(100))
 }
 
 // ── Geometry rounding ─────────────────────────────────────────────────────────

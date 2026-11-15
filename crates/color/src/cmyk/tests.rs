@@ -3,6 +3,7 @@ use super::{
     CORNER_TABLE, CORNERS, cmyk_f64_to_rgb, cmyk_to_rgb, cmyk_to_rgb_row, cmyk_to_rgb_vec,
     convert_scalar, unit_weight, weight,
 };
+use crate::Sample;
 
 /// Corner index `k·8 + c·4 + m·2 + y` → ink bytes `[c, m, y, k]`.
 fn corner_inks(i: usize) -> [u8; 4] {
@@ -661,4 +662,82 @@ fn rgb_to_ink_timing() {
     }
     let per_call = start.elapsed() / 1_000_000;
     println!("rgb_to_ink: table {build:?}, {per_call:?} per call ({acc})");
+}
+
+/// The model evaluated at any depth is the 8-bit model when its weights and
+/// corners are 8-bit: the generic stages reduce to the fixed-point ones.
+#[test]
+fn generic_model_at_8_bits_is_the_8_bit_model() {
+    let grid = (0..=255u8).step_by(15);
+    for c in grid.clone() {
+        for m in grid.clone() {
+            for y in grid.clone() {
+                for k in grid.clone() {
+                    let w = [c, m, y, k].map(super::weight_at);
+                    assert_eq!(
+                        super::from_weights_at::<u8>(w),
+                        cmyk_to_rgb(c, m, y, k),
+                        "{c} {m} {y} {k}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// At 16 bits the corners are exact, and the model narrowed to 8 bits lies
+/// within one level of the 8-bit model on a 17⁴ grid.
+#[test]
+fn sixteen_bit_model_narrows_to_the_8_bit_model() {
+    for (i, corner) in CORNERS.iter().enumerate() {
+        let [c, m, y, k] = corner_inks(i).map(u16::from_u8);
+        assert_eq!(
+            super::cmyk_to_rgb_at(c, m, y, k),
+            corner.map(u16::from_u8),
+            "corner {i}"
+        );
+    }
+    let grid = (0..=256u32)
+        .step_by(16)
+        .map(|v| u8::try_from(v.min(255)).unwrap());
+    let mut worst = 0;
+    for c in grid.clone() {
+        for m in grid.clone() {
+            for y in grid.clone() {
+                for k in grid.clone() {
+                    let wide = super::cmyk_to_rgb_at(
+                        u16::from_u8(c),
+                        u16::from_u8(m),
+                        u16::from_u8(y),
+                        u16::from_u8(k),
+                    );
+                    let narrow = cmyk_to_rgb(c, m, y, k);
+                    for (w, n) in wide.iter().zip(narrow) {
+                        worst = worst.max(w.to_u8().abs_diff(n));
+                    }
+                }
+            }
+        }
+    }
+    assert!(worst <= 1, "16-bit model off the 8-bit model by {worst}");
+}
+
+/// Normalised components at 8 bits take the 8-bit conversion; at 16 bits
+/// solids select their corners exactly.
+#[test]
+fn unit_conversion_at_either_depth() {
+    for (c, m, y, k) in [(0.1, 0.5, 0.9, 0.3), (1.0, 0.0, f64::NAN, 2.0)] {
+        assert_eq!(
+            super::cmyk_f64_to_rgb_at::<u8>(c, m, y, k),
+            cmyk_f64_to_rgb(c, m, y, k)
+        );
+    }
+    assert_eq!(
+        super::cmyk_f64_to_rgb_at::<u16>(0.0, 0.0, 0.0, 1.0),
+        CORNERS[8].map(u16::from_u8)
+    );
+    assert_eq!(
+        super::cmyk_f64_to_rgb_at::<u16>(0.0, 0.0, 0.0, 0.0),
+        [u16::MAX; 3]
+    );
 }
