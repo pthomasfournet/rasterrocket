@@ -3067,6 +3067,27 @@ lists such a paint before its clip. No pixel changes on the repository
 fixtures (all 3,824 pages at 50 dpi gray, and
 ab_render's 215 outputs, byte for byte as before).
 
+**Unreleased on master: a more lenient parser.** Four damaged-file shapes
+that pdfium or pdftoppm read now parse. A number with a run of leading
+signs takes its last one (`--10.12` is -10.12; it was 0). A header of
+`%PDF` without a version is accepted with a warning, and an unclosed
+dictionary ends at the next object's `obj` or at `trailer`, so the
+object-scan repair keeps the objects and trailer after it. The page count
+is the page tree's: a root `/Count` is checked by one descent to its last
+index and, where the counts do not describe the tree (a `/Count` past the
+leaves, an interior node without one), replaced by the walked count with a
+warning; such pages resolve through the memoised walk, and a kid listed
+twice is a page twice. The walk is bounded at 2^22 node visits and `/Kids`
+entries, where shared nodes could describe 2^40 pages. A stream whose
+`/Length` misses its end is cut at an `endstream` that is a keyword
+(`endstream.` and `(endstream` are data, `ETendstream` is not), or at
+its object's `endobj`, and spaces after `stream` no longer shift the
+`/Length`. pdfium corpus: of the 11 documents registered as these
+defects, 10 now render pdfium's page up to glyph antialiasing, and
+`bug_828049` (a catalog with a direct `/Pages` dictionary) still fails;
+three documents pdfium refuses or draws no page for now open on one blank
+page; the full corpus shows no new failure.
+
 **Unreleased on master: deskew confidence, `--deskew`, resolution in
 PNG and JPEG, 1-bit mono PNG.**  Deskew now declines a page without a
 confident angle: the ratio of the best to the worst score of its angle
