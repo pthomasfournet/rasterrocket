@@ -32,6 +32,8 @@
 use std::sync::{Arc, OnceLock};
 
 use color::Sample;
+#[cfg(feature = "gpu-icc")]
+use color::grid::CmykGrid;
 use moxcms::{
     ColorProfile, Layout, Transform8BitExecutor, Transform16BitExecutor, TransformOptions,
 };
@@ -42,8 +44,6 @@ use crate::resources::icc_shaper::{ProfileConversion, eval_trc, fetch_profile_by
 use crate::working_space::{LinearRgb, wide_composite};
 use crate::{ColourIntent, ColourTarget, RenderingIntent, WorkingSpace};
 
-#[cfg(feature = "gpu-icc")]
-pub(crate) mod clut;
 mod table;
 
 use table::PcsAdjustment;
@@ -331,7 +331,7 @@ impl IccProfile {
             })),
             xform16: OnceLock::new(),
             #[cfg(feature = "gpu-icc")]
-            clut: OnceLock::new(),
+            device: DeviceGrid::default(),
         })
     }
 
@@ -367,13 +367,20 @@ fn tabulated<const N: usize>(
 ) -> Option<IccConversion> {
     let grid = Arc::new(table::tabulate::<N>(profile, intent, adjustment, space)?);
     let xform16: Arc<Transform16BitExecutor> = grid.clone();
+    #[cfg(feature = "gpu-icc")]
+    let device = DeviceGrid {
+        table: (Arc::clone(&grid) as Arc<dyn std::any::Any + Send + Sync>)
+            .downcast()
+            .ok(),
+        grid: OnceLock::new(),
+    };
     Some(IccConversion::Transform {
         n: u8::try_from(N).ok()?,
         xform: grid,
         recipe: None,
         xform16: OnceLock::from(Some(xform16)),
         #[cfg(feature = "gpu-icc")]
-        clut: OnceLock::new(),
+        device,
     })
 }
 
@@ -460,6 +467,17 @@ pub(crate) struct Recipe {
     options: TransformOptions,
 }
 
+/// The grid of a tabulated four-channel conversion and its [`CmykGrid`],
+/// made on first use.
+#[cfg(feature = "gpu-icc")]
+#[derive(Default)]
+pub(crate) struct DeviceGrid {
+    /// The conversion's table; `None` for a conversion not tabulated on
+    /// four inputs.
+    table: Option<Arc<crate::pcs::grid::GridTable<4>>>,
+    grid: OnceLock<Option<Arc<CmykGrid>>>,
+}
+
 /// The compiled conversion to a working space of one ICC profile stream
 /// for colour values of its declared component count under one
 /// device-to-PCS model.
@@ -490,10 +508,10 @@ pub(crate) enum IccConversion {
         /// The 16-bit transform, given or created on first use from
         /// `recipe`; `None` when moxcms refuses it.
         xform16: OnceLock<Option<Arc<Transform16BitExecutor>>>,
-        /// The CMYK → sRGB lookup table of a four-channel transform for the
-        /// device conversion, baked on first use (see [`Self::cmyk_clut`]).
+        /// The grid of a tabulated four-channel conversion, for the
+        /// device conversion (see [`Self::cmyk_grid`]).
         #[cfg(feature = "gpu-icc")]
-        clut: OnceLock<Option<Arc<[u8]>>>,
+        device: DeviceGrid,
     },
     /// A profile with no conversion of its own: the `/Alternate` space of
     /// the stream, a device or CIE-based space of the same component count,
@@ -585,30 +603,25 @@ impl IccConversion {
         IccProfile::new(Some(bytes), n).conversion(target, || None)
     }
 
-    /// The CMYK → sRGB table of a four-channel transform on the
-    /// `DEFAULT_GRID_N` lattice, baked once per conversion and shared;
-    /// `None` for any other conversion or when the bake fails.
+    /// The [`CmykGrid`] of a tabulated four-channel conversion, made on
+    /// first use and shared: the conversion of 8-bit samples of every
+    /// evaluator of the grid is this conversion's.  `None` for any other
+    /// conversion.
     #[cfg(feature = "gpu-icc")]
-    pub(crate) fn cmyk_clut(&self) -> Option<Arc<[u8]>> {
-        use clut::{DEFAULT_GRID_N, bake_cmyk_clut_with};
-
+    pub(crate) fn cmyk_grid(&self) -> Option<Arc<CmykGrid>> {
         let Self::Transform {
-            n: 4, xform, clut, ..
+            n: 4,
+            device:
+                DeviceGrid {
+                    table: Some(table),
+                    grid,
+                },
+            ..
         } = self
         else {
             return None;
         };
-        clut.get_or_init(|| {
-            bake_cmyk_clut_with(&**xform, DEFAULT_GRID_N)
-                .map_err(|e| {
-                    log::warn!(
-                        "colorspace: ICC CLUT bake failed, converting through the transform: {e}"
-                    );
-                })
-                .ok()
-                .map(Arc::from)
-        })
-        .clone()
+        grid.get_or_init(|| table.cmyk_grid().map(Arc::new)).clone()
     }
 
     /// Whether this conversion yields the device conversion of the same

@@ -107,9 +107,9 @@ PageRenderer::execute(ops)           dispatch loop:
     │                                 resolution (or gpu::NvJpeg2kDecoder)
     │   CCITT/JBIG2 ────────────────▶ hayro-ccitt / hayro-jbig2
     │   Flate    ───────────────────▶ libdeflate (default) / flate2 fallback
-    │   ICC CMYK ───────────────────▶ profile transform, or its lookup table
-    │                                 (gpu::backend::icc_clut on a session's
-    │                                 CUDA or Vulkan backend)
+    │   ICC CMYK ───────────────────▶ profile transform: its tabulated grid on
+    │                                 the CPU or (gpu::backend::icc_clut) on
+    │                                 a session's CUDA or Vulkan backend
     │                                 PageRenderer::blit_image
     ├── shading ops ────────────────▶ raster::shaded_fill / gouraud_triangle_fill
     ├── tiling ops  ────────────────▶ raster::TiledPattern
@@ -630,9 +630,6 @@ resources/
     cal.rs           — CalGray / CalRGB through WhitePoint, Gamma, Matrix
     icc.rs           — ICCBased compiled once per document: matrix/TRC
                        shaper or moxcms transform, else `/Alternate`
-    icc/clut.rs      — CMYK → sRGB lookup table baked from a moxcms
-                       transform for the GPU path, kept with the profile's
-                       per-document conversion
     lab.rs           — Lab through Range and WhitePoint, Bradford-adapted
                        to D65
   icc_shaper.rs      — matrix/TRC ICC input profiles evaluated to sRGB
@@ -858,15 +855,14 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   thread's decoder is then built on demand
 - ICC CMYK→RGB: with a GPU backend in the session, an image of at least
   `GPU_ICC_CLUT_THRESHOLD` pixels (128 000; `PDF_RASTER_ICC_CLUT_THRESHOLD`
-  overrides) converts through the profile's lookup table by
-  `gpu::backend::icc_clut` on the device, byte-identical to the CPU
-  evaluator `gpu::icc_cmyk_to_rgb_cpu`; the Vulkan backend when the
-  session holds one, otherwise CUDA. Smaller images, and those the device
-  declines or fails, convert through the profile transform as in a CPU
-  session, so the two sessions differ only in the images counted in
-  `PageDiagnostics::device_icc_conversions`. A Vulkan device that fails a
-  one-time exactness probe (`VulkanBackend::icc_clut_is_exact`) is not
-  used.
+  overrides) whose conversion is tabulated converts through the table's
+  grid (`color::grid::CmykGrid`) by `gpu::backend::icc_clut` on the
+  device, which interpolates it in the integer arithmetic of the CPU
+  conversion; the Vulkan backend when the session holds one, otherwise
+  CUDA. Smaller images, and those the device declines or fails, convert on
+  the CPU, so a GPU session's output is a CPU session's byte for byte. A
+  Vulkan device that fails a one-time exactness probe
+  (`VulkanBackend::icc_clut_is_exact`) is not used.
 - Image blit: an image held in the device image cache is sampled by the
   blit kernel of the cache's backend and composited on the host; a draw
   that reduces the image, or a blit that does not start, draws through the
@@ -943,7 +939,7 @@ shared by every session naming it; loads the Vulkan instance, picks a device
 integrated > virtual > CPU), creates a single compute queue, and lazy-loads
 SPIR-V → `VkPipeline` per kernel.  Persistent `VkPipelineCache` blob at
 `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin` across runs.  Shared
-via `Arc<VulkanBackend>`.  The renderer dispatches the ICC CLUT conversion
+via `Arc<VulkanBackend>`.  The renderer dispatches the ICC grid conversion
 and the cached-image blit through it, and `VulkanBackend::render_page`
 renders whole pages (*Page raster* below).
 
@@ -959,14 +955,14 @@ time, gated on the `vulkan` feature; `page_raster` exists in Slang only.
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
-| `icc_cmyk_clut` | icc_clut.cu | icc_clut.slang | ICC CMYK→RGB via 4D quadrilinear CLUT (byte-identical to `icc_cmyk_to_rgb_cpu`) | 128 000 px |
+| `icc_cmyk_clut` | icc_clut.cu | icc_clut.slang | ICC CMYK→RGB through a tabulated conversion's grid, in its simplices in integers (byte-identical to `CmykGrid::convert`) | 128 000 px |
 | `icc_cmyk_matrix` | icc_clut.cu | — | profile-free CMYK→RGB by the process-ink model; not dispatched by the renderer | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image sampling onto an RGBA target (`cache` feature) | always |
 | `page_raster` | — | page_raster.slang | Whole page from a `PageCommands` list, one workgroup per 16-px tile | `gpu_pages` |
 
-Five kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (ICC
-CLUT and blit) run the Vulkan kernel against the CUDA kernel or its CPU twin
-and require byte-equal output.
+Four kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (ICC
+grid and blit) run the Vulkan kernel against the CUDA kernel or the host
+evaluator and require byte-equal output.
 
 **Page raster** (`gpu::page`, `backend/vulkan/page.rs`, Vulkan only).  A
 `PageCommands` list holds a page as paint commands: one colour at a constant

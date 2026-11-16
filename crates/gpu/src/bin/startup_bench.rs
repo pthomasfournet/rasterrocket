@@ -25,12 +25,12 @@ fn step<T, E: std::fmt::Display>(label: &str, f: impl FnOnce() -> Result<T, E>) 
     v
 }
 
-/// A 64 × 64 conversion through a 17-node CLUT on `backend`: the first
-/// kernel launch of a session.
+/// A 64 × 64 conversion through a grid of 17⁴ nodes on `backend`: the
+/// first kernel launch of a session.
 fn first_clut<B: rasterrocket_gpu::backend::GpuBackend>(backend: &B) -> Result<Vec<u8>, String> {
-    let table = vec![128_u8; 17_usize.pow(4) * 3];
+    let grid = rasterrocket_gpu::backend::random_grid(1, [16; 4], color::grid::NodeRange::Unit);
     let cmyk = vec![64_u8; 64 * 64 * 4];
-    rasterrocket_gpu::backend::icc_clut(backend, &cmyk, &table).map_err(|e| e.to_string())
+    rasterrocket_gpu::backend::icc_clut(backend, &cmyk, &grid).map_err(|e| e.to_string())
 }
 
 fn cuda() {

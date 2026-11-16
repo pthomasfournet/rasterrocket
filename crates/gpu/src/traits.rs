@@ -1,7 +1,7 @@
-//! GPU decoder and compute abstraction traits.
+//! GPU decoder abstraction traits.
 //!
-//! These traits provide a stable interface over hardware-specific decoder and
-//! compute backends so that callers do not depend directly on the concrete CUDA,
+//! These traits provide a stable interface over hardware-specific decoder
+//! backends so that callers do not depend directly on the concrete CUDA,
 //! VA-API, or Metal types.
 //!
 //! # Design notes
@@ -23,15 +23,12 @@
 //! | [`GpuJpegDecoder`] | `NvJpegDecoder` | `nvjpeg` |
 //! | [`GpuJpegDecoder`] | `VapiJpegDecoder` | `vaapi` |
 //! | [`GpuJpeg2kDecoder`] | `NvJpeg2kDecoder` | `nvjpeg2k` |
-//! | [`GpuCompute`] | [`GpuCtx`](crate::GpuCtx) | `gpu-icc` |
-//!
-//! Metal (Apple Silicon) is planned — see `ROADMAP_INTEL.md` Phase F.
 
 use std::fmt;
 
 // ── Unified error type ────────────────────────────────────────────────────────
 
-/// Unified error returned by all GPU decoder and compute trait methods.
+/// Unified error returned by all GPU decoder trait methods.
 ///
 /// The inner `Box<dyn std::error::Error + Send + Sync>` carries the original
 /// backend-specific error.  [`Display`](fmt::Display) delegates to the inner
@@ -132,39 +129,6 @@ pub trait GpuJpeg2kDecoder: Send {
     fn decode_jpeg2k(&mut self, data: &[u8]) -> Result<DecodedImage, GpuDecodeError>;
 }
 
-// ── GpuCompute ────────────────────────────────────────────────────────────────
-
-/// General GPU compute operations: ICC CLUT lookup.
-///
-/// Unlike the decoder traits, `GpuCompute` does not mutate internal decoder
-/// state on each call, so implementations may be safely shared via
-/// `Arc<dyn GpuCompute + Send + Sync>` if they are `Sync`.  The CUDA
-/// implementation (`GpuCtx`) is `Sync` (all mutable state is inside CUDA
-/// streams that are not shared across calls).
-pub trait GpuCompute: Send + Sync {
-    /// Apply a CMYK→RGB ICC CLUT transform to `pixels` in place.
-    ///
-    /// `pixels` is a flat `C M Y K …` byte buffer (4 bytes/pixel).  On
-    /// success, the buffer is overwritten with interleaved `R G B …` bytes
-    /// (3 bytes/pixel) and the buffer is resized accordingly.
-    ///
-    /// `clut` is the baked lattice of `grid_n`⁴ RGB triples (`grid_n` points
-    /// per axis, typically 17), indexed by `(k·G³ + c·G² + m·G + y) · 3`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`GpuDecodeError`] on CUDA failure or if the output length
-    /// does not match `width × height × 3`.
-    fn icc_clut(
-        &self,
-        pixels: &mut Vec<u8>,
-        clut: &[u8],
-        grid_n: u8,
-        width: u32,
-        height: u32,
-    ) -> Result<(), GpuDecodeError>;
-}
-
 // ── NvJpegDecoder impl ────────────────────────────────────────────────────────
 
 /// Error for dimension mismatch between PDF dict and JPEG SOF markers.
@@ -237,52 +201,3 @@ impl GpuJpeg2kDecoder for crate::nvjpeg2k::NvJpeg2kDecoder {
         })
     }
 }
-
-// ── GpuCtx impl ──────────────────────────────────────────────────────────────
-
-impl GpuCompute for crate::GpuCtx {
-    fn icc_clut(
-        &self,
-        pixels: &mut Vec<u8>,
-        clut: &[u8],
-        grid_n: u8,
-        width: u32,
-        height: u32,
-    ) -> Result<(), GpuDecodeError> {
-        // grid_n is validated as ≤ 255 by the baking API; cast is safe.
-        let rgb = self
-            .icc_cmyk_to_rgb(pixels, Some((clut, u32::from(grid_n))))
-            .map_err(|e| GpuDecodeError::new(IccClutError(e.to_string())))?;
-        // icc_cmyk_to_rgb returns a new Vec; swap it in after validating length.
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|n| n.checked_mul(3))
-            .ok_or_else(|| {
-                GpuDecodeError::new(IccClutError(format!(
-                    "pixel count overflow: {width}×{height}×3 exceeds usize::MAX"
-                )))
-            })?;
-        if rgb.len() != expected {
-            return Err(GpuDecodeError::new(IccClutError(format!(
-                "ICC CLUT output length {got} ≠ {expected} (w={width} h={height})",
-                got = rgb.len(),
-            ))));
-        }
-        *pixels = rgb;
-        Ok(())
-    }
-}
-
-// ── Internal error helpers ────────────────────────────────────────────────────
-
-/// Error string wrapper for ICC CLUT transform failures.
-#[derive(Debug)]
-struct IccClutError(String);
-
-impl fmt::Display for IccClutError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ICC CLUT transform failed: {}", self.0)
-    }
-}
-
-impl std::error::Error for IccClutError {}

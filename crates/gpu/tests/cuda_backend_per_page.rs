@@ -10,7 +10,6 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     use rasterrocket_gpu::backend::cuda::CudaBackend;
     use rasterrocket_gpu::backend::{GpuBackend, params};
 
-    const GRID_N: u32 = 2;
     let backend = CudaBackend::new()
         .expect("CudaBackend::new failed — is a CUDA device available and the driver loaded?");
     let n_pixels: u32 = 1024;
@@ -19,9 +18,8 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     let cmyk_host: Vec<u8> = (0..n * 4)
         .map(|i| u8::try_from(i * 37 % 256).expect("below 256"))
         .collect();
-    let clut_host: Vec<u8> = (0..(GRID_N as usize).pow(4) * 3)
-        .map(|i| u8::try_from(i * 11 % 256).expect("below 256"))
-        .collect();
+    let grid = rasterrocket_gpu::backend::random_grid(5, [1; 4], color::grid::NodeRange::Extended);
+    let clut_host = grid.as_bytes();
 
     let mut cmyk = backend
         .alloc_device(cmyk_host.len())
@@ -33,7 +31,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
         .alloc_device(n * 3)
         .expect("alloc_device(rgb) failed — VRAM exhausted or driver error");
     backend.upload(&mut cmyk, &cmyk_host).expect("upload(cmyk)");
-    backend.upload(&mut clut, &clut_host).expect("upload(clut)");
+    backend.upload(&mut clut, clut_host).expect("upload(clut)");
     backend
         .upload(&mut rgb, &vec![0xAB; n * 3])
         .expect("upload(rgb)");
@@ -64,17 +62,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     // fill, so the buffer holds the transform's output.
     let mut got = vec![0u8; n * 3];
     backend.download(&rgb, &mut got).expect("download(rgb)");
-    let want = rasterrocket_gpu::icc_cmyk_to_rgb_cpu(&cmyk_host, Some((&clut_host, GRID_N)));
-    let max_delta = got
-        .iter()
-        .zip(&want)
-        .map(|(&g, &w)| g.abs_diff(w))
-        .max()
-        .unwrap_or(0);
-    assert!(
-        max_delta <= 1,
-        "GPU CLUT output differs from the CPU reference by {max_delta} LSB"
-    );
+    assert_eq!(got, grid.convert(&cmyk_host), "the grid's conversion");
     assert!(
         got.iter().any(|&b| b != 0),
         "output is all zero: the zero fill ran after the transform"

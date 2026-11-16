@@ -2,8 +2,8 @@
 //! and the CUDA and Vulkan (`vulkan` feature) backends of
 //! [`backend::GpuBackend`], which run the ICC CLUT and image blit kernels; the whole-page raster (`page`, `vulkan` feature); the
 //! device-resident image cache (`cache`, `cache` feature); and the nvJPEG,
-//! nvJPEG2000 and VA-API decoders.  The CPU reference implementation of the
-//! ICC kernel (`icc_cmyk_to_rgb_cpu`) is always built.
+//! nvJPEG2000 and VA-API decoders.  The ICC kernel's host evaluator is
+//! [`color::grid::CmykGrid::convert`].
 //!
 //! The interpreter depends on this crate through its `gpu-icc`,
 //! `cache`, `vulkan`, `nvjpeg`, `nvjpeg2k` and `vaapi` features.
@@ -28,7 +28,6 @@
 //!   and Intel iGPU/discrete hardware.  Requires `libva.so.2` and `libva-drm.so.2`
 //!   at link time.
 
-mod cmyk;
 pub(crate) mod cuda;
 
 pub mod backend;
@@ -50,11 +49,10 @@ pub mod page;
 mod staging;
 pub(crate) mod traits;
 
-pub use cmyk::icc_cmyk_to_rgb_cpu;
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub use decode_queue::{DecodeQueue, JpegQueueHandle};
 pub use jpeg_sof::{JpegSof, JpegVariant, jpeg_sof_info, jpeg_sof_type};
-pub use traits::{DecodedImage, GpuCompute, GpuDecodeError, GpuJpeg2kDecoder, GpuJpegDecoder};
+pub use traits::{DecodedImage, GpuDecodeError, GpuJpeg2kDecoder, GpuJpegDecoder};
 
 #[cfg(feature = "nvjpeg")]
 pub mod nvjpeg;
@@ -96,12 +94,12 @@ const PTX_BLIT_IMAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/blit_image.
 pub const RGBA_BPP: usize = 4;
 /// Minimum pixel count for the device ICC CMYK→RGB CLUT conversion.
 ///
-/// The device kernels reproduce [`icc_cmyk_to_rgb_cpu`] byte for byte;
-/// the renderer converts a smaller ICC CMYK image through the profile
+/// The device kernels reproduce [`color::grid::CmykGrid::convert`] byte for
+/// byte; the renderer converts a smaller ICC CMYK image through the profile
 /// transform, as without a GPU backend.
 ///
-/// Applies only when a full ICC CLUT is available (clut=Some).  The matrix path
-/// (clut=None) always uses the CPU AVX-512 fallback — `threshold_bench` showed the GPU
+/// Applies only when a grid is available (`grid` is `Some`).  The matrix path
+/// (`grid` is `None`) always uses the CPU AVX-512 fallback — `threshold_bench` showed the GPU
 /// matrix kernel never beats AVX-512 across 256–4M pixels on this machine (`PCIe`
 /// round-trip cost exceeds the cheap per-pixel computation at all measured sizes).
 ///

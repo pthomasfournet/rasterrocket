@@ -177,24 +177,27 @@ fn validate_per_pixel<B: GpuBackend + ?Sized>(
     Ok(())
 }
 
-/// Parameters for a GPU ICC CMYK→RGB CLUT lookup.
+/// Parameters for a GPU ICC CMYK→RGB conversion through a grid
+/// ([`color::grid::CmykGrid`]).
 ///
-/// The matrix fast-path is handled on the CPU (AVX-512); only the CLUT
+/// The matrix fast-path is handled on the CPU (AVX-512); only the grid
 /// kernel runs on the GPU, so `clut` is required.
 ///
 /// # Invariants enforced by `IccClutParams::validate`
 /// - `n_pixels` ≤ [`MAX_KERNEL_PIXELS`]
 /// - `cmyk` holds at least `n_pixels × 4` bytes and `rgb` at least
 ///   `n_pixels × 3`
-/// - `clut` is exactly `grid_n⁴ × 3` bytes for some `grid_n` in `[2, 255]`
-///   (see [`grid_n_from_clut_len`]) and at most `i32::MAX` bytes, the
-///   range of the kernels' 32-bit signed node index
+/// - `clut` is as long as a grid of some number of nodes
+///   ([`color::grid::CmykGrid::node_count`]), at most `i32::MAX` bytes;
+///   the kernels read no node beyond that number, whatever the buffer
+///   holds
 pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     /// Input CMYK pixels in device memory.
     pub cmyk: &'a B::DeviceBuffer,
     /// Output RGB pixels in device memory.
     pub rgb: &'a mut B::DeviceBuffer,
-    /// CLUT table in device memory.
+    /// The grid's bytes ([`color::grid::CmykGrid::as_bytes`]) in device
+    /// memory.
     pub clut: &'a B::DeviceBuffer,
     /// Number of pixels to transform.
     pub n_pixels: u32,
@@ -202,7 +205,7 @@ pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
 
 impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
     /// Check the invariants documented on `IccClutParams` and return the
-    /// CLUT's `grid_n`.
+    /// grid's node count.
     ///
     /// # Errors
     /// Returns a `BackendError` if any documented invariant is violated.
@@ -217,63 +220,12 @@ impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
                 (self.rgb, 3, "rgb buffer shorter than n_pixels × 3 bytes"),
             ],
         )?;
-        let clut_len = backend.device_buffer_len(self.clut);
-        let invariant =
-            |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
-        if i32::try_from(clut_len).is_err() {
-            return Err(invariant("clut exceeds i32::MAX bytes (32-bit node index)"));
-        }
-        grid_n_from_clut_len(clut_len)
-            .ok_or_else(|| invariant("clut length is not grid_n^4 × 3 for grid_n in [2, 255]"))
-    }
-}
-
-/// Recover `grid_n` such that `clut_byte_len == grid_n^4 * 3`, or `None`
-/// if the length is not a valid CLUT layout.
-///
-/// The CLUT layout is `(k * G^3 + c * G^2 + m * G + y) * 3` bytes —
-/// `grid_n^4` 3-byte RGB nodes.  Typical PDF profiles use `grid_n` of
-/// 17 or 33.  Shared between the CUDA and Vulkan backends; both
-/// recover `grid_n` from the buffer size at record time.
-#[must_use]
-pub fn grid_n_from_clut_len(len: usize) -> Option<u32> {
-    if !len.is_multiple_of(3) {
-        return None;
-    }
-    let nodes = len / 3;
-    // Integer 4th root by iteration: grid_n ≤ 255 in practice (PDF
-    // profiles rarely exceed 33; 255 is a generous upper bound).
-    for grid in 2u32..=255 {
-        let g = grid as usize;
-        let pow4 = g.checked_mul(g)?.checked_mul(g)?.checked_mul(g)?;
-        if pow4 == nodes {
-            return Some(grid);
-        }
-        if pow4 > nodes {
-            return None;
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod clut_helpers_tests {
-    use super::grid_n_from_clut_len;
-
-    #[test]
-    fn round_trips_typical_grids() {
-        assert_eq!(grid_n_from_clut_len(17 * 17 * 17 * 17 * 3), Some(17));
-        assert_eq!(grid_n_from_clut_len(33 * 33 * 33 * 33 * 3), Some(33));
-    }
-
-    #[test]
-    fn rejects_non_multiple_of_3() {
-        assert_eq!(grid_n_from_clut_len(83_521 * 3 + 1), None);
-    }
-
-    #[test]
-    fn rejects_non_4th_power() {
-        assert_eq!(grid_n_from_clut_len(100 * 3), None);
+        color::grid::CmykGrid::node_count(backend.device_buffer_len(self.clut)).ok_or(
+            super::BackendError::InvariantViolation {
+                kind: KIND,
+                detail: "clut length is not that of a grid of at most i32::MAX bytes",
+            },
+        )
     }
 }
 
@@ -602,13 +554,13 @@ mod tests {
     // --- per-pixel kernels ---
 
     #[test]
-    fn icc_clut_validate_returns_grid_and_checks_buffers() {
-        static CLUT17: usize = 17 * 17 * 17 * 17 * 3;
-        static ODD_CLUT: usize = 100 * 3;
+    fn icc_clut_validate_returns_the_node_count_and_checks_buffers() {
+        static GRID: usize = (color::grid::CmykGrid::NODES + 2 * 17) * 4;
+        static ODD_GRID: usize = (color::grid::CmykGrid::NODES + 2 * 17) * 4 + 4;
         let ok = || IccClutParams::<FakeBackend> {
             cmyk: &FAKE_BUF,
             rgb: fake_out(),
-            clut: &CLUT17,
+            clut: &GRID,
             n_pixels: 4,
         };
         assert_eq!(ok().validate(&FakeBackend).unwrap(), 17);
@@ -619,16 +571,10 @@ mod tests {
             ..ok()
         });
         assert!(e.contains("rgb buffer"), "{e}");
-        let e = err(IccClutParams {
-            clut: &ODD_CLUT,
-            ..ok()
-        });
-        assert!(e.contains("grid_n"), "{e}");
-        let e = err(IccClutParams {
-            clut: &FAKE_BUF,
-            ..ok()
-        });
-        assert!(e.contains("i32::MAX"), "{e}");
+        for clut in [&ODD_GRID, &FAKE_BUF] {
+            let e = err(IccClutParams { clut, ..ok() });
+            assert!(e.contains("clut length"), "{e}");
+        }
         let e = err(IccClutParams {
             n_pixels: MAX_KERNEL_PIXELS + 1,
             ..ok()

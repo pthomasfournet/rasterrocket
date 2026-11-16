@@ -356,18 +356,19 @@ impl PageRecorder {
 
     // ── record_* ─────────────────────────────────────────────────────
 
-    /// `grid_n` is the value `IccClutParams::validate` derived from the
-    /// CLUT length; the `VulkanBackend::record_icc_clut` wrapper runs it.
+    /// `n_nodes` is the node count `IccClutParams::validate` derived from
+    /// the grid's length; the `VulkanBackend::record_icc_clut` wrapper runs
+    /// it.
     pub(super) fn record_icc_clut(
         &self,
         p: params::IccClutParams<'_, super::VulkanBackend>,
-        grid_n: u32,
+        n_nodes: u32,
     ) -> Result<()> {
-        // Push: grid_n(u32), n(u32), scale(f32).
-        let mut push = [0u8; 12];
-        push[0..4].copy_from_slice(&grid_n.to_ne_bytes());
+        // Push: n_nodes(u32), n(u32), the order of icc_clut.slang's
+        // uniforms.
+        let mut push = [0u8; 8];
+        push[0..4].copy_from_slice(&n_nodes.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());
-        push[8..12].copy_from_slice(&crate::cmyk::clut_scale(grid_n).to_ne_bytes());
         self.dispatch_kernel(
             KernelId::IccClut,
             &[p.cmyk.handle(), p.rgb.handle(), p.clut.handle()],

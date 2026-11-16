@@ -191,8 +191,8 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
     const PER_PAGE_MAX: u32 = 64;
     const N_PIXELS: u32 = 4;
     const BUF_BYTES: usize = (N_PIXELS as usize) * 4;
-    // A 2-node grid: 2⁴ nodes × 3 bytes.
-    const CLUT_BYTES: usize = 16 * 3;
+    // A grid of one cell along each input: 2⁴ nodes.
+    const CLUT_BYTES: usize = (color::grid::CmykGrid::NODES + 2 * 16) * 4;
 
     let (backend, _serial) = shared_backend();
     let cmyk = backend.alloc_device_zeroed(BUF_BYTES).expect("alloc cmyk");

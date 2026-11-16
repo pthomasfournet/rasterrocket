@@ -1,55 +1,11 @@
 //! A conversion of `N` device channels tabulated over the device cube and
 //! interpolated in its simplices.
 
+#[cfg(any(test, feature = "gpu-icc"))]
+use color::grid::CmykGrid;
+pub(crate) use color::grid::NodeRange;
+use color::grid::{interpolate, locate, network, sort_decreasing, sort_key};
 use moxcms::{CmsError, TransformExecutor};
-
-/// The values a grid's nodes hold, and how an interpolated value maps to
-/// an output in `[0, 1]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NodeRange {
-    /// `[0, 1]`, the value `v` held as the 16-bit `v · 65 535`; an
-    /// interpolated value is the output.
-    Unit,
-    /// `[−1/2, 3/2]`, the value `v` held as the 16-bit `(v + 1/2) / 2 ·
-    /// 65 535`; an interpolated value is clamped to `[0, 1]`, so an output
-    /// that leaves `[0, 1]` within a cell is clamped at the point and not
-    /// at the cell's nodes.
-    Extended,
-}
-
-impl NodeRange {
-    /// The 16-bit node of the value `v`, clamped to the range.
-    fn node(self, v: f64) -> u16 {
-        match self {
-            Self::Unit => to_u16(v),
-            Self::Extended => to_u16(f64::midpoint(v, 0.5)),
-        }
-    }
-
-    /// The 16-bit output of the sum `acc` of nodes weighted by weights
-    /// summing to 65 535, `F`, rounded to nearest: for [`Self::Extended`],
-    /// `(4 · acc − F² + F) / 2F` clamped to `[0, F]`, computed as
-    /// `(2 (acc′ − L) + 1) / F` for `acc′` the sum clamped to
-    /// `[L, L + (F² − 1) / 2]`, `L = (F (F − 1) / 2 + 1) / 2`: every sum
-    /// up to `L` has output 0, every sum from the upper bound output `F`,
-    /// and `2 (acc′ − L) + 1` lies in `[1, F²]`.
-    #[inline]
-    fn output(self, acc: u32) -> u16 {
-        const FULL: u32 = u16::MAX as u32;
-        const LOW: u32 = (FULL * (FULL - 1) / 2).div_ceil(2);
-        const HIGH: u32 = LOW + (FULL * FULL - 1) / 2;
-        let v = match self {
-            Self::Unit => (acc + FULL / 2) / FULL,
-            Self::Extended => (2 * (acc.clamp(LOW, HIGH) - LOW) + 1) / FULL,
-        };
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a convex combination of u16 nodes divided by its weight sum, or clamped to [0, 65 535]"
-        )]
-        let v = v as u16;
-        v
-    }
-}
 
 /// A conversion of `N` device channels to at most four channels,
 /// tabulated at the nodes of a grid of `spans[i]` cells along input `i`,
@@ -188,6 +144,34 @@ impl<const N: usize> GridTable<N> {
         self.channels
     }
 
+    /// The grid of four inputs and three channels as a [`CmykGrid`], whose
+    /// conversion of 8-bit samples is this table's ([`Self::run`]);
+    /// `None` for a table of other inputs or channels, or one the layout
+    /// cannot hold.
+    #[cfg(any(test, feature = "gpu-icc"))]
+    pub(crate) fn cmyk_grid(&self) -> Option<CmykGrid> {
+        if N != 4 || self.channels != 3 {
+            return None;
+        }
+        let mut cells = [[0u32; 256]; 4];
+        for (i, axis) in cells.iter_mut().enumerate() {
+            for (v, cell) in (0u8..=u8::MAX).zip(axis.iter_mut()) {
+                *cell = self.shaper.as_ref().map_or_else(
+                    || {
+                        let (cell, frac) = locate(self.spans[i], u16::from(v) * 257);
+                        cell << 16 | frac
+                    },
+                    |shaper| shaper.packed_sample(i, v),
+                );
+            }
+        }
+        let strides = std::array::from_fn(|i| u32::try_from(self.strides[i]).ok());
+        let [Some(c), Some(m), Some(y), Some(k)] = strides else {
+            return None;
+        };
+        CmykGrid::new(&cells, [c, m, y, k], self.range, &self.nodes)
+    }
+
     /// The `M` values of the 16-bit device value `px`, `M` being
     /// [`Self::channels`]: the interpolation in the simplex of the grid
     /// cell around it whose vertices are visited in decreasing order of the
@@ -228,32 +212,15 @@ impl<const N: usize> GridTable<N> {
     const fn key(&self, i: usize, (cell, frac): (u32, u32)) -> (usize, u32) {
         #[expect(clippy::cast_possible_truncation, reason = "i is below N ≤ 8")]
         let index = i as u32;
-        (cell as usize * self.strides[i & 7], frac << 3 | index)
+        (cell as usize * self.strides[i & 7], sort_key(frac, index))
     }
 
     /// The node sums of the interpolation from node `base` along the
-    /// inputs of `key`, sorted in decreasing order ([`Self::key`]), each
-    /// the output's [`NodeRange::output`].
+    /// inputs of `key`, sorted in decreasing order ([`Self::key`],
+    /// [`interpolate`]).
     #[inline]
     fn interpolate<const M: usize>(&self, base: usize, key: [u32; N]) -> [u32; M] {
-        const FULL: u32 = u16::MAX as u32;
-        let nodes = &*self.nodes;
-        let mut acc = [0u32; 4];
-        let mut vertex = base;
-        let mut previous = FULL;
-        for &k in &key {
-            let f = k >> 3;
-            let weight = previous - f;
-            for (a, &v) in acc.iter_mut().zip(&nodes[vertex]) {
-                *a += weight * u32::from(v);
-            }
-            previous = f;
-            vertex += self.strides[(k & 7) as usize];
-        }
-        for (a, &v) in acc.iter_mut().zip(&nodes[vertex]) {
-            *a += previous * u32::from(v);
-        }
-        std::array::from_fn(|c| acc[c])
+        interpolate(&self.nodes, &self.strides, base, key)
     }
 
     /// The base node of each pixel of `block` into `base` and its keys
@@ -378,18 +345,6 @@ impl<const N: usize> GridTable<N> {
     }
 }
 
-/// The index of the cell of a grid of `span` cells holding the 16-bit
-/// value `v` along one input, and the position of `v` within it in
-/// `[0, 65 535]`.
-#[inline]
-const fn locate(span: u32, v: u16) -> (u32, u32) {
-    const FULL: u32 = u16::MAX as u32;
-    let scaled = v as u32 * span;
-    let cell = scaled / FULL;
-    let cell = if cell < span - 1 { cell } else { span - 1 };
-    (cell, scaled - cell * FULL)
-}
-
 /// The curve of each input of a shaped grid, tabulated at every 16-bit
 /// value as the cell of the grid its output lies in: the cell's index
 /// above 16 bits, the position within it in `[0, 65 535]` below, found
@@ -443,7 +398,7 @@ impl<const N: usize> Shaper<N> {
                     reason = "pos lies in [0, span] and span ≤ 65 536"
                 )]
                 let cell = (pos as u32).min(span - 1);
-                let frac = to_u16(pos - f64::from(cell));
+                let frac = NodeRange::Unit.node(pos - f64::from(cell));
                 cell << 16 | u32::from(frac)
             }));
         }
@@ -481,34 +436,8 @@ impl<const N: usize> Shaper<N> {
     }
 }
 
-/// `v` clamped to `[0, 1]` and scaled to the nearest 16-bit value.
-fn to_u16(v: f64) -> u16 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a value clamped to [0, 1] scaled to the u16 range"
-    )]
-    let v = (v.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
-    v
-}
-
 /// The number of pixels [`GridTable::run_into`] converts at a time.
 const BLOCK: usize = 64;
-
-/// The compare-exchanges of the optimal sorting network of `n` values for
-/// `n` of 3 or 4, of the exchange sort otherwise.
-fn network(n: usize) -> impl Iterator<Item = (usize, usize)> {
-    let fixed: &[(usize, usize)] = match n {
-        4 => &[(0, 1), (2, 3), (0, 2), (1, 3), (1, 2)],
-        3 => &[(0, 1), (1, 2), (0, 1)],
-        _ => &[],
-    };
-    let exchange = (!matches!(n, 3 | 4))
-        .then(|| (0..n).flat_map(move |i| (0..n - 1 - i).map(|j| (j, j + 1))))
-        .into_iter()
-        .flatten();
-    fixed.iter().copied().chain(exchange)
-}
 
 /// Each column of `key` sorted in decreasing order by the
 /// compare-exchanges of [`network`], free of branches.
@@ -520,17 +449,6 @@ fn sort_block_decreasing<const N: usize>(key: &mut [[u32; BLOCK]; N]) {
             key[i][p] = a.max(b);
             key[j][p] = a.min(b);
         }
-    }
-}
-
-/// `key` sorted in decreasing order by the compare-exchanges of
-/// [`network`], free of branches.
-#[inline]
-fn sort_decreasing<const N: usize>(key: &mut [u32; N]) {
-    for (i, j) in network(N) {
-        let (a, b) = (key[i], key[j]);
-        key[i] = a.max(b);
-        key[j] = a.min(b);
     }
 }
 
@@ -636,29 +554,6 @@ mod tests {
         assert!(table.transform(&[0u8; 4], &mut [0u8; 3]).is_err());
     }
 
-    /// The extended range's output is the rounded `(4 · acc − F² + F) /
-    /// 2F` clamped to `[0, F]` at every sum, those around both clamps and
-    /// the extremes included.
-    #[test]
-    fn the_extended_output_is_the_clamped_rescaled_sum() {
-        const F: u64 = u16::MAX as u64;
-        let want = |acc: u64| ((4 * acc).saturating_sub(F * F) + F) / (2 * F);
-        let low = (F * (F - 1) / 2).div_ceil(2);
-        let high = low + (F * F - 1) / 2;
-        let sums = (0..=F * F)
-            .step_by(9_973)
-            .chain(low - 70_000..low + 70_000)
-            .chain(high - 70_000..high + 70_000)
-            .chain(F * F - 70_000..=F * F);
-        for acc in sums {
-            let got = NodeRange::Extended.output(u32::try_from(acc).unwrap());
-            assert_eq!(u64::from(got), want(acc).min(F), "sum {acc}");
-        }
-        assert_eq!(NodeRange::Extended.node(-0.5), 0);
-        assert_eq!(NodeRange::Extended.node(1.5), u16::MAX);
-        assert_eq!(NodeRange::Extended.node(0.0), 16_384);
-    }
-
     /// A conversion leaving `[0, 1]` within a cell, tabulated in the
     /// extended range, is clamped where it leaves it, within two levels;
     /// in the unit range the cell interpolates between its nodes' clamped
@@ -755,6 +650,53 @@ mod tests {
                 assert_eq!(dst8[3 * p..3 * p + 3], want8, "{table:?} byte pixel {p}");
             }
         }
+    }
+
+    /// A table of four inputs and three channels converts 8-bit samples
+    /// as its [`CmykGrid`] does, over the device cube or its shaper, in
+    /// either range; a table of other channels has none.
+    #[test]
+    fn the_cmyk_grid_converts_as_the_table() {
+        let square = squares();
+        let overshoot = |i: &[f64], o: &mut [f64]| {
+            convert(i, o);
+            for v in o.iter_mut() {
+                *v = 1.8f64.mul_add(*v, -0.4);
+            }
+            Ok::<(), std::convert::Infallible>(())
+        };
+        let tables = [
+            GridTable::<4>::tabulate_shaped([16; 4], None, NodeRange::Unit, 3, overshoot),
+            GridTable::<4>::tabulate_shaped(
+                [20, 15, 16, 7],
+                Some([&*square; 4]),
+                NodeRange::Extended,
+                3,
+                overshoot,
+            ),
+            GridTable::<4>::tabulate_shaped([3, 32, 5, 8], None, NodeRange::Extended, 3, overshoot),
+        ];
+        let mut state = 0x2468_ace1_u32;
+        let mut src: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
+        src.extend((0..4 * 20_000).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state.to_be_bytes()[0]
+        }));
+        for table in tables {
+            let table = table.unwrap();
+            let mut want = vec![0u8; src.len() / 4 * 3];
+            TransformExecutor::<u8>::transform(&table, &src, &mut want).unwrap();
+            let grid = table.cmyk_grid().expect("a CMYK grid");
+            assert_eq!(grid.convert(&src), want, "{table:?}");
+        }
+        let one = GridTable::<4>::tabulate(4, 1, |_, o| {
+            o.fill(0.5);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+        assert!(one.cmyk_grid().is_none());
     }
 
     /// A grid over the outputs of its shaper interpolates a conversion

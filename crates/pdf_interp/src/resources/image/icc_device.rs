@@ -2,13 +2,12 @@
 //!
 //! An image in an ICC-based CMYK space of at least
 //! [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels converts on the session's GPU
-//! backend through the profile's `DEFAULT_GRID_N`⁴ lookup table, baked once
-//! per profile; the device kernels reproduce the CPU evaluator
-//! [`gpu::icc_cmyk_to_rgb_cpu`] byte for byte.  Every other image, and one
-//! the device declines or fails, converts through the profile transform,
-//! as in a session without a backend.  A GPU session's output therefore
-//! differs from a CPU session's only in the images counted in
-//! [`DeviceIccCounts::converted`], by the interpolation error of the table.
+//! backend through the grid of its tabulated conversion
+//! ([`IccConversion::cmyk_grid`]), which the device kernels interpolate
+//! in the integer arithmetic of the CPU conversion.  Every other image, and
+//! one the device declines or fails, converts on the CPU, as in a session
+//! without a backend.  A GPU session's output is therefore a CPU
+//! session's, byte for byte.
 //!
 //! The Vulkan backend is used when the session holds one, otherwise the
 //! CUDA context; both run [`gpu::backend::icc_clut`].  A Vulkan device
@@ -21,6 +20,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use color::grid::CmykGrid;
 use gpu::GpuCtx;
 use gpu::backend::GpuBackend;
 #[cfg(feature = "vulkan")]
@@ -104,10 +104,10 @@ enum DeviceIcc {
 }
 
 /// The RGB conversion of the CMYK pixels `cmyk` on the device, through
-/// the lookup table of `conv`; `None` when the caller converts through
-/// the profile transform instead: no backend is attached, the image is
-/// below [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, the table cannot be baked,
-/// or the device declines or fails.  A device failure is counted and
+/// the grid of `conv`; `None` when the caller converts through the profile
+/// transform instead: no backend is attached, the image is below
+/// [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, the conversion is not a
+/// tabulated one, or the device declines or fails.  A device failure is counted and
 /// logged (see [`report_failure`]).
 pub(super) fn cmyk_clut_to_rgb(
     icc: &IccHandles<'_>,
@@ -117,15 +117,15 @@ pub(super) fn cmyk_clut_to_rgb(
     if !icc.has_device() || cmyk.len() / 4 < icc_clut_threshold() {
         return None;
     }
-    let clut = conv.cmyk_clut()?;
-    let clut = &*clut;
+    let grid = conv.cmyk_grid()?;
+    let grid = &*grid;
     let outcome = 'device: {
         #[cfg(feature = "vulkan")]
         if let Some(vk) = icc.vk_backend {
             if !vk.icc_clut_is_exact() {
                 break 'device DeviceIcc::Declined;
             }
-            break 'device run(vk, cmyk, clut);
+            break 'device run(vk, cmyk, grid);
         }
         let Some(ctx) = icc.gpu_ctx else {
             break 'device DeviceIcc::Declined;
@@ -133,7 +133,7 @@ pub(super) fn cmyk_clut_to_rgb(
         run(
             &gpu::backend::cuda::CudaBackend::from_ctx(Arc::clone(ctx)),
             cmyk,
-            clut,
+            grid,
         )
     };
     match outcome {
@@ -162,8 +162,8 @@ fn icc_clut_threshold() -> usize {
 }
 
 /// Convert on `backend`; a failure is logged.
-fn run<B: GpuBackend>(backend: &B, cmyk: &[u8], clut: &[u8]) -> DeviceIcc {
-    match gpu::backend::icc_clut(backend, cmyk, clut) {
+fn run<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> DeviceIcc {
+    match gpu::backend::icc_clut(backend, cmyk, grid) {
         Ok(rgb) => DeviceIcc::Converted(rgb),
         Err(e) => {
             report_failure(B::NAME, &e);

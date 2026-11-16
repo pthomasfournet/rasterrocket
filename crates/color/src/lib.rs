@@ -16,10 +16,12 @@
 //! - `sample` — [`Sample`]: the 8- and 16-bit channel types and their compositing arithmetic
 //! - [`cmyk`] — `DeviceCMYK` → sRGB conversion (scalar reference + SIMD rows)
 //! - [`convert`] — all shared math (div255, lerp, Porter-Duff, color conversion, floor/ceil/round)
+//! - [`grid`] — integer interpolation in the simplices of a grid of 16-bit nodes
 //! - `transfer` — [`TransferLut`] newtype `([u8; 256])`
 
 pub mod cmyk;
 pub mod convert;
+pub mod grid;
 pub(crate) mod mode;
 pub(crate) mod pixel;
 pub(crate) mod sample;

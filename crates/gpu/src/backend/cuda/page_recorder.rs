@@ -181,15 +181,16 @@ impl PageRecorder {
         ))
     }
 
-    /// `grid_n` is the value `IccClutParams::validate` derived from the
-    /// CLUT length; the `CudaBackend::record_icc_clut` wrapper runs it.
+    /// `n_nodes` is the node count `IccClutParams::validate` derived from
+    /// the grid's length; the `CudaBackend::record_icc_clut` wrapper runs
+    /// it.
     pub(super) fn record_icc_clut(
         &self,
         p: params::IccClutParams<'_, super::CudaBackend>,
-        grid_n: u32,
+        n_nodes: u32,
     ) -> Result<()> {
         self.ctx
-            .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, grid_n, p.n_pixels)
+            .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, n_nodes, p.n_pixels)
             .map_err(be)
     }
 

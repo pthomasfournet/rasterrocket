@@ -20,7 +20,7 @@ mod staged;
 pub use blit_page::{BlitScratch, BlitSource, blit_image, blit_image_box};
 pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
-pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu};
+pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu, random_grid};
 pub mod cuda;
 pub mod params;
 #[cfg(feature = "vulkan")]

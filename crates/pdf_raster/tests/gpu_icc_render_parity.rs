@@ -1,16 +1,13 @@
 //! End-to-end check of the ICC CMYK → RGB dispatch of a GPU session: an
 //! image in an ICC-based CMYK space of at least `GPU_ICC_CLUT_THRESHOLD`
-//! pixels converts on the device through the profile's lookup table, and
-//! every smaller image converts through the profile transform, exactly as
-//! in a CPU session.
+//! pixels converts on the device through the grid of the profile's
+//! tabulated conversion, and every smaller image converts on the CPU; both
+//! are a CPU session's conversion byte for byte.
 //!
 //! Page 1 draws one 1000 × 600 image (600 000 pixels, converted on the
 //! device); page 2 draws the same samples as six 1000 × 100 images, each
 //! below the threshold.  Both pages are rendered at one pixel per sample in
-//! a GPU and a CPU session: page 2 must be byte-identical between them,
-//! page 1 within the interpolation error of the table.  The byte identity
-//! of the device kernels to the CPU evaluation of the table is checked in
-//! the gpu crate.
+//! a GPU and a CPU session and must be byte-identical between them.
 //!
 //! The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE` names, or
 //! the automatically ranked one, and is skipped when no Vulkan device
@@ -116,16 +113,8 @@ fn render(session: &RasterSession, page: u32) -> ((u32, u32, Vec<u8>), PageDiagn
     ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
 }
 
-/// Largest channel difference between the table interpolation and the
-/// profile transform on the fixture's samples: the device interpolates
-/// its 17⁴ nodes multilinearly, the transform interpolates its own grid
-/// in simplices, and the fixture's 6-node CLUT bends within the device's
-/// cells.
-const TABLE_TOLERANCE: u8 = 12;
-
 /// The device converts page 1's image and nothing on page 2, without a
-/// failure; page 2 is byte-identical to the CPU session's, page 1 within
-/// [`TABLE_TOLERANCE`] of it.
+/// failure; both pages are byte-identical to the CPU session's.
 fn assert_device_conversion_matches_cpu(gpu: &RasterSession, what: &str) {
     if std::env::var_os("PDF_RASTER_ICC_CLUT_THRESHOLD").is_some() {
         eprintln!(
@@ -147,17 +136,7 @@ fn assert_device_conversion_matches_cpu(gpu: &RasterSession, what: &str) {
         "{what}: the image rendered blank"
     );
     let (cpu, _) = render(&cpu_session, 1);
-    let max_delta = cpu
-        .2
-        .iter()
-        .zip(&device.2)
-        .map(|(a, b)| a.abs_diff(*b))
-        .max()
-        .unwrap_or(0);
-    assert!(
-        max_delta <= TABLE_TOLERANCE,
-        "{what}: the device conversion is {max_delta} from the profile transform"
-    );
+    assert_identical(&cpu, &device, what);
     let (strips, diag) = render(gpu, 2);
     assert_eq!(
         (diag.device_icc_conversions, diag.device_icc_failures),

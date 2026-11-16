@@ -49,8 +49,8 @@ pub struct VulkanBackend {
     scratch: crate::backend::DeviceScratch<Self>,
     /// Buffers of [`Self::render_page`], kept between pages.
     page_scratch: std::sync::Mutex<page::PageScratch>,
-    /// Whether the CLUT kernel reproduces the CPU evaluator on this
-    /// device; measured on first use ([`Self::icc_clut_is_exact`]).
+    /// Whether the ICC grid kernel reproduces the host on this device;
+    /// measured on first use ([`Self::icc_clut_is_exact`]).
     icc_clut_exact: std::sync::OnceLock<bool>,
     transfer: transfer::TransferContext,
     recorder: recorder::PageRecorder,
@@ -138,15 +138,16 @@ impl VulkanBackend {
         self.device.integrated
     }
 
-    /// Whether the ICC CLUT kernel reproduces
-    /// [`crate::icc_cmyk_to_rgb_cpu`] byte for byte on this device.
+    /// Whether the ICC grid kernel reproduces
+    /// [`color::grid::CmykGrid::convert`] byte for byte on this device.
     ///
-    /// The kernel interpolates with `fma`, which the Vulkan specification
-    /// does not require to round once; a device that splits it into a
-    /// rounded product and a rounded sum moves some output byte by one.
-    /// The first call runs [`crate::backend::icc_clut_matches_cpu`] and
-    /// logs a mismatch or a device error at `warn`; later calls return the
-    /// same answer.
+    /// The kernel interpolates in 32-bit integers, which every conformant
+    /// device evaluates exactly; it reads the pixels through 8-bit storage
+    /// and the grid through 32-bit storage.  The first call runs
+    /// [`crate::backend::icc_clut_matches_cpu`], which catches a device
+    /// whose storage access, integer arithmetic or shader compilation is
+    /// faulty, and logs a mismatch or a device error at `warn`; later calls
+    /// return the same answer.
     #[must_use]
     pub fn icc_clut_is_exact(&self) -> bool {
         *self
@@ -155,14 +156,14 @@ impl VulkanBackend {
                 Ok(true) => true,
                 Ok(false) => {
                     log::warn!(
-                        "vulkan: the ICC CLUT kernel does not reproduce the CPU evaluator on \
-                         this device; ICC CMYK images convert on the CPU"
+                        "vulkan: the ICC grid kernel does not reproduce the host on this \
+                         device; ICC CMYK images convert on the CPU"
                     );
                     false
                 }
                 Err(e) => {
                     log::warn!(
-                        "vulkan: the ICC CLUT kernel check failed: {e}; ICC CMYK images \
+                        "vulkan: the ICC grid kernel check failed: {e}; ICC CMYK images \
                          convert on the CPU"
                     );
                     false
@@ -286,8 +287,8 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
-        let grid_n = params.validate(self)?;
-        self.recorder.record_icc_clut(params, grid_n)
+        let n_nodes = params.validate(self)?;
+        self.recorder.record_icc_clut(params, n_nodes)
     }
 
     fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {

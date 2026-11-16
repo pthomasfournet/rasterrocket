@@ -1,7 +1,14 @@
-//! The ICC CMYK → RGB CLUT transform as one backend page, on either
-//! backend.
+//! The ICC CMYK → RGB conversion through a grid ([`CmykGrid`]) as one
+//! backend page, on either backend.
+//!
+//! The kernels interpolate the grid in integer arithmetic, the
+//! arithmetic of [`CmykGrid::convert`], so a device's conversion is the
+//! host's byte for byte; [`icc_clut_matches_cpu`] checks a device against
+//! it.
 
-use super::params::{IccClutParams, MAX_KERNEL_PIXELS, grid_n_from_clut_len};
+use color::grid::{CmykGrid, NodeRange};
+
+use super::params::{IccClutParams, MAX_KERNEL_PIXELS};
 use super::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage, stage_exact,
 };
@@ -10,8 +17,8 @@ use super::{BackendError, GpuBackend, Result};
 /// Reusable host and device buffers for [`icc_clut`].
 ///
 /// The CMYK input and the RGB output are grown to the largest conversion
-/// seen; the table is held at exactly its length, which the kernel reads
-/// its grid size from.  Lent by the backend's pool
+/// seen; the grid is held at exactly its length, which the kernel reads
+/// its node count from.  Lent by the backend's pool
 /// ([`GpuBackend::scratch`]).
 pub struct IccClutScratch<B: GpuBackend> {
     cmyk: Option<Staged<B>>,
@@ -30,12 +37,10 @@ impl<B: GpuBackend> Default for IccClutScratch<B> {
     }
 }
 
-/// The RGB conversion of the interleaved CMYK pixels `cmyk` through the
-/// CLUT `table`, computed on `backend`.
+/// The RGB conversion of the interleaved CMYK pixels `cmyk` through
+/// `grid`, computed on `backend`: [`CmykGrid::convert`] byte for byte.
 ///
-/// `table` holds `grid_n⁴` RGB nodes indexed `(k·G³ + c·G² + m·G + y) · 3`
-/// for some `grid_n` in `[2, 255]`; the result holds three bytes per pixel.
-/// The pixels and the table are written into the host buffers of a scratch
+/// The pixels and the grid are written into the host buffers of a scratch
 /// lent by `backend`'s pool, and their uploads, the kernel and the download
 /// of the result are recorded into one page ([`GpuBackend::run_page`]).  On
 /// a device whose buffers the host reaches in place there are no copies.
@@ -46,10 +51,9 @@ impl<B: GpuBackend> Default for IccClutScratch<B> {
 /// # Errors
 ///
 /// [`BackendError::InvariantViolation`] when `cmyk` does not hold whole
-/// pixels, or when the pixel count or `table` violates the
-/// [`IccClutParams`] invariants; the backend's error when an allocation, a
-/// transfer or the kernel fails.
-pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], table: &[u8]) -> Result<Vec<u8>> {
+/// pixels or the pixel count violates the [`IccClutParams`] invariants;
+/// the backend's error when an allocation, a transfer or the kernel fails.
+pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Result<Vec<u8>> {
     const KIND: &str = "IccClutInvariantViolation";
     let invariant = |detail| BackendError::InvariantViolation { kind: KIND, detail };
     if !cmyk.len().is_multiple_of(4) {
@@ -63,11 +67,7 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], table: &[u8]) -> Result
         .ok()
         .filter(|&n| n <= MAX_KERNEL_PIXELS)
         .ok_or_else(|| invariant("n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)"))?;
-    if i32::try_from(table.len()).is_err() || grid_n_from_clut_len(table.len()).is_none() {
-        return Err(invariant(
-            "clut length is not grid_n^4 × 3 for grid_n in [2, 255] within i32::MAX bytes",
-        ));
-    }
+    let table = grid.as_bytes();
     let rgb_len = n * 3;
     backend.scratch().icc_clut.with(|scratch| {
         let IccClutScratch {
@@ -97,183 +97,118 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], table: &[u8]) -> Result
     })
 }
 
-/// Nodes per axis of the [`probe_table`].
-const PROBE_GRID_N: u32 = 17;
-
-/// Pixels whose conversion through the [`probe_table`] changes by one
-/// level in some channel when every interpolation step rounds its product
-/// and its sum separately instead of once.
-const PROBE_PIXELS: [[u8; 4]; 24] = [
-    [164, 63, 41, 88],
-    [63, 146, 97, 80],
-    [157, 211, 147, 215],
-    [106, 136, 199, 30],
-    [50, 197, 115, 104],
-    [177, 27, 236, 121],
-    [248, 110, 241, 223],
-    [206, 188, 174, 185],
-    [80, 229, 183, 247],
-    [48, 38, 103, 39],
-    [224, 14, 204, 14],
-    [52, 203, 212, 16],
-    [233, 148, 28, 247],
-    [28, 69, 33, 244],
-    [111, 172, 196, 236],
-    [71, 158, 38, 50],
-    [43, 46, 37, 108],
-    [207, 32, 243, 72],
-    [55, 226, 254, 231],
-    [96, 204, 10, 42],
-    [63, 149, 45, 118],
-    [78, 2, 154, 29],
-    [158, 246, 9, 59],
-    [187, 18, 80, 52],
-];
-
-/// The pseudo-random `PROBE_GRID_N`⁴ table the [`PROBE_PIXELS`] are
-/// chosen for: neighbouring nodes differ arbitrarily, so every
-/// interpolation step carries a non-trivial difference.
-fn probe_table() -> Vec<u8> {
-    let mut state = 0x0bad_5eed_u32;
-    (0..(PROBE_GRID_N as usize).pow(4) * 3)
-        .map(|_| {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            state.to_be_bytes()[0]
-        })
-        .collect()
+/// A pseudo-random sequence of 32-bit values from `seed`.
+fn lcg(seed: u32) -> impl FnMut() -> u32 {
+    let mut state = seed;
+    move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    }
 }
 
-/// Whether [`icc_clut`] on `backend` reproduces
-/// [`crate::icc_cmyk_to_rgb_cpu`] byte for byte.
+/// A grid of `spans[i]` cells along input `i` in `range`, of pseudo-random
+/// nodes and pseudo-random cells of each sample, from `seed`.
 ///
-/// Converts every grey level and the [`PROBE_PIXELS`] through the
-/// [`probe_table`] on the device and on the CPU.  A device whose
-/// interpolation rounds twice per step differs at every probe pixel.
+/// Every order of the positions, every weight and, in the extended range,
+/// both clamps occur.
+///
+/// # Panics
+///
+/// For a span of 0.
+#[must_use]
+pub fn random_grid(seed: u32, spans: [u32; 4], range: NodeRange) -> CmykGrid {
+    let mut next = lcg(seed);
+    let mut cells = [[0u32; 256]; 4];
+    for (axis, span) in cells.iter_mut().zip(spans) {
+        for cell in axis.iter_mut() {
+            let index = (next() >> 16) % span;
+            *cell = (index << 16) | (next() >> 16);
+        }
+    }
+    let mut strides = [1u32; 4];
+    for i in (0..3).rev() {
+        strides[i] = strides[i + 1] * (spans[i + 1] + 1);
+    }
+    let count = strides[0] * (spans[0] + 1);
+    let mut value = || u16::try_from(next() >> 16).expect("the high 16 bits");
+    let nodes: Vec<[u16; 4]> = (0..count).map(|_| [value(), value(), value(), 0]).collect();
+    CmykGrid::new(&cells, strides, range, &nodes).expect("the cells lie within the grid")
+}
+
+/// Every grey level and 4 096 pseudo-random pixels.
+fn probe_pixels() -> Vec<u8> {
+    let mut next = lcg(0x0bad_5eed);
+    let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
+    cmyk.extend((0..4 * 4096).map(|_| next().to_be_bytes()[0]));
+    cmyk
+}
+
+/// Whether [`icc_clut`] on `backend` reproduces [`CmykGrid::convert`]
+/// byte for byte.
+///
+/// The check converts the [`probe_pixels`] through a [`random_grid`] of
+/// uneven spans in the extended range, whose outputs clamp at both ends.
+/// The interpolation is in integers, so a device differs only where its
+/// storage, integer arithmetic or kernel compilation is faulty.
 ///
 /// # Errors
 ///
 /// As [`icc_clut`].
 pub fn icc_clut_matches_cpu<B: GpuBackend>(backend: &B) -> Result<bool> {
-    let table = probe_table();
-    let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
-    cmyk.extend(PROBE_PIXELS.as_flattened());
-    let device = icc_clut(backend, &cmyk, &table)?;
-    Ok(device == crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, PROBE_GRID_N))))
+    let grid = random_grid(0x0dd_ba11, [7, 4, 5, 3], NodeRange::Extended);
+    let cmyk = probe_pixels();
+    Ok(icc_clut(backend, &cmyk, &grid)? == grid.convert(&cmyk))
 }
 
-#[cfg(test)]
-mod probe_tests {
-    use super::{PROBE_GRID_N, PROBE_PIXELS, probe_table};
+/// The grid shapes the device evaluators are checked on: one cell, uneven
+/// spans, the 17⁴ and 33⁴ node grids of the converter's CMYK tables.
+#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+const EXACTNESS_SPANS: [[u32; 4]; 4] = [[1; 4], [20, 15, 16, 7], [16; 4], [32; 4]];
 
-    /// The CPU evaluator's interpolation with the product and the sum of
-    /// each step rounded separately.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        clippy::many_single_char_names,
-        reason = "lattice coordinates lie in [0, 16], outputs are clamped to a byte, and \
-                  c/m/y/k/g name the channels and the grid as in the evaluator"
-    )]
-    fn eval_twice_rounded(table: &[u8], px: [u8; 4]) -> [u8; 3] {
-        let g = PROBE_GRID_N as usize;
-        let scale = (PROBE_GRID_N - 1) as f32 / 255.0;
-        let axis = |v: u8| {
-            let f = f32::from(v) * scale;
-            let i0 = (f as usize).min(g - 1);
-            (i0, (i0 + 1).min(g - 1), f - i0 as f32)
-        };
-        let node = |c: usize, m: usize, y: usize, k: usize| -> [f32; 3] {
-            let i = (((k * g + c) * g + m) * g + y) * 3;
-            std::array::from_fn(|ch| f32::from(table[i + ch]))
-        };
-        let lerp = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
-            std::array::from_fn(|ch| std::hint::black_box(t * (b[ch] - a[ch])) + a[ch])
-        };
-        let [c, m, y, k] = px.map(axis);
-        let pick = |a: (usize, usize, f32), hi: bool| if hi { a.1 } else { a.0 };
-        let face = |kk: bool| {
-            let ym = |cc: bool, mm: bool| {
-                let at = |yy| node(pick(c, cc), pick(m, mm), pick(y, yy), pick(k, kk));
-                lerp(at(false), at(true), y.2)
-            };
-            let c0 = lerp(ym(false, false), ym(false, true), m.2);
-            let c1 = lerp(ym(true, false), ym(true, true), m.2);
-            lerp(c0, c1, c.2)
-        };
-        lerp(face(false), face(true), k.2).map(|v| v.clamp(0.0, 255.0).round() as u8)
-    }
-
-    /// Every probe pixel tells single from double rounding apart.
-    #[test]
-    fn probe_pixels_detect_double_rounding() {
-        let table = probe_table();
-        for px in PROBE_PIXELS {
-            let once = crate::icc_cmyk_to_rgb_cpu(&px, Some((&table, PROBE_GRID_N)));
-            assert_ne!(once, eval_twice_rounded(&table, px), "{px:?}");
+/// Converts, on a grid of each of the [`EXACTNESS_SPANS`] in each range,
+/// every grey level and 65 536 pseudo-random pixels with `convert`, and
+/// asserts byte equality with [`CmykGrid::convert`].
+#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &CmykGrid) -> Vec<u8>) {
+    let mut next = lcg(0x1234_5678);
+    let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
+    cmyk.extend((0..65_536 * 4).map(|_| next().to_be_bytes()[0]));
+    for (seed, spans) in (1u32..).zip(EXACTNESS_SPANS) {
+        for range in [NodeRange::Unit, NodeRange::Extended] {
+            let grid = random_grid(seed, spans, range);
+            let cpu = grid.convert(&cmyk);
+            let device = convert(&cmyk, &grid);
+            let differing = cpu.iter().zip(&device).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                differing, 0,
+                "{label}: spans {spans:?} {range:?}: {differing} bytes differ from the host"
+            );
         }
     }
 }
 
-/// Grid sizes the device evaluators are checked on.  For several of them
-/// (`grid_n` 4, 8, 13, 16, 25) a reciprocal-based device division moves
-/// `(grid_n − 1) / 255` by one ULP away from the correctly rounded value.
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
-const EXACTNESS_GRIDS: [u32; 9] = [2, 3, 4, 8, 13, 16, 17, 25, 33];
-
-/// Converts, on each of the [`EXACTNESS_GRIDS`], every grey level and
-/// 65 536 pseudo-random pixels through a pseudo-random table with
-/// `convert(cmyk, table, grid_n)`, and asserts byte equality with
-/// [`crate::icc_cmyk_to_rgb_cpu`].
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
-fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &[u8], u32) -> Vec<u8>) {
-    let lcg = |seed: u32, n: usize| {
-        let mut state = seed;
-        (0..n)
-            .map(|_| {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                state.to_be_bytes()[0]
-            })
-            .collect::<Vec<u8>>()
-    };
-    let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
-    cmyk.extend(lcg(0x1234_5678, 65_536 * 4));
-    for grid_n in EXACTNESS_GRIDS {
-        let table = lcg(0x0dd_ba11 ^ grid_n, (grid_n as usize).pow(4) * 3);
-        let cpu = crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, grid_n)));
-        let device = convert(&cmyk, &table, grid_n);
-        let differing = cpu.iter().zip(&device).filter(|(a, b)| a != b).count();
-        assert_eq!(
-            differing, 0,
-            "{label}: grid_n {grid_n}: {differing} bytes differ from the CPU evaluator"
-        );
-    }
-}
-
-/// Conversions reuse one pooled scratch, whose table buffer follows the
-/// table's length down as well as up.
+/// Conversions reuse one pooled scratch, whose grid buffer follows the
+/// grid's length down as well as up.
 #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
 fn check_scratch_is_pooled<B: GpuBackend>(backend: &B) {
     let cmyk: Vec<u8> = (0..=u8::MAX)
         .flat_map(|v| [v, 255 - v, v / 2, v / 3])
         .collect();
-    for grid_n in [33, 17, 2] {
-        let table: Vec<u8> = (0..(grid_n as usize).pow(4) * 3)
-            .map(|i| u8::try_from(i % 241).expect("below 241"))
-            .collect();
-        let device = icc_clut(backend, &cmyk, &table).expect("icc_clut");
-        assert_eq!(
-            device,
-            crate::icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, grid_n)))
-        );
+    for spans in [[32; 4], [16; 4], [1; 4]] {
+        let grid = random_grid(7, spans, NodeRange::Unit);
+        let device = icc_clut(backend, &cmyk, &grid).expect("icc_clut");
+        assert_eq!(device, grid.convert(&cmyk));
         assert_eq!(
             backend.scratch().icc_clut.idle_len(),
             1,
             "the scratch is returned"
         );
         let scratch = backend.scratch().icc_clut.take_idle();
-        let clut = scratch.clut.as_ref().expect("the table slot is kept");
-        assert_eq!(backend.device_buffer_len(&clut.device), table.len());
+        let clut = scratch.clut.as_ref().expect("the grid slot is kept");
+        assert_eq!(
+            backend.device_buffer_len(&clut.device),
+            grid.as_bytes().len()
+        );
         backend.scratch().icc_clut.with(|s| *s = scratch);
     }
 }
@@ -283,18 +218,18 @@ mod vulkan_tests {
     use super::*;
 
     /// On a device that passes the exactness probe, the Vulkan kernel is
-    /// byte-identical to the CPU evaluator on every grid size.
+    /// byte-identical to the host on every grid.
     #[test]
     fn vulkan_icc_clut_exact_across_grids() {
         let Some(backend) = crate::backend::vulkan::test_backend() else {
             return;
         };
-        if !backend.icc_clut_is_exact() {
-            eprintln!("skipping: the device fails the exactness probe");
-            return;
-        }
-        assert_exact_across_grids("vulkan", |cmyk, table, _| {
-            icc_clut(&backend, cmyk, table).expect("icc_clut")
+        assert!(
+            backend.icc_clut_is_exact(),
+            "the device fails the exactness probe"
+        );
+        assert_exact_across_grids("vulkan", |cmyk, grid| {
+            icc_clut(&backend, cmyk, grid).expect("icc_clut")
         });
     }
 
@@ -303,9 +238,7 @@ mod vulkan_tests {
         let Some(backend) = crate::backend::vulkan::test_backend() else {
             return;
         };
-        if backend.icc_clut_is_exact() {
-            check_scratch_is_pooled(&backend);
-        }
+        check_scratch_is_pooled(&backend);
     }
 }
 
@@ -313,7 +246,7 @@ mod vulkan_tests {
 mod tests {
     use super::*;
 
-    /// The CUDA backend's page is byte-identical to the CPU evaluator.
+    /// The CUDA backend's page is byte-identical to the host.
     #[test]
     fn cuda_icc_clut_matches_cpu() {
         let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
@@ -324,19 +257,19 @@ mod tests {
     }
 
     /// The CUDA backend's page and the context's direct launch are
-    /// byte-identical to the CPU evaluator on every grid size.
+    /// byte-identical to the host on every grid.
     #[test]
     fn cuda_icc_clut_exact_across_grids() {
         let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        assert_exact_across_grids("cuda backend", |cmyk, table, _| {
-            icc_clut(&backend, cmyk, table).expect("icc_clut")
+        assert_exact_across_grids("cuda backend", |cmyk, grid| {
+            icc_clut(&backend, cmyk, grid).expect("icc_clut")
         });
         let gpu = crate::GpuCtx::init().expect("gpu init");
-        assert_exact_across_grids("cuda context", |cmyk, table, grid_n| {
-            gpu.icc_cmyk_to_rgb_gpu(cmyk, Some((table, grid_n)))
+        assert_exact_across_grids("cuda context", |cmyk, grid| {
+            gpu.icc_cmyk_to_rgb_gpu(cmyk, Some(grid))
                 .expect("icc_cmyk_to_rgb_gpu")
         });
     }
@@ -357,18 +290,12 @@ mod tests {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        let table = vec![0u8; 17usize.pow(4) * 3];
+        let grid = random_grid(3, [16; 4], NodeRange::Unit);
         let invariant =
             |r: Result<Vec<u8>>| matches!(r, Err(BackendError::InvariantViolation { .. }));
-        assert!(invariant(icc_clut(&backend, &[0; 3], &table)));
-        assert!(invariant(icc_clut(
-            &backend,
-            &[0; 4],
-            &table[..table.len() - 3]
-        )));
-        assert!(invariant(icc_clut(&backend, &[0; 4], &[])));
+        assert!(invariant(icc_clut(&backend, &[0; 3], &grid)));
         assert_eq!(
-            icc_clut(&backend, &[], &table).expect("empty"),
+            icc_clut(&backend, &[], &grid).expect("empty"),
             Vec::<u8>::new()
         );
     }

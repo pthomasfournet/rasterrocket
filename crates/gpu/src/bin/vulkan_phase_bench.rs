@@ -33,8 +33,9 @@ use std::time::Instant;
 use bench_common::smooth_cmyk;
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BlitParams, IccClutParams};
 use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
-use rasterrocket_gpu::backend::{BlitScratch, BlitSource, GpuBackend, blit_image_box, icc_clut};
-use rasterrocket_gpu::icc_cmyk_to_rgb_cpu;
+use rasterrocket_gpu::backend::{
+    BlitScratch, BlitSource, GpuBackend, blit_image_box, icc_clut, random_grid,
+};
 
 /// Dispatches of the long page the kernel's device time is derived from.
 const REPEATS: u32 = 5;
@@ -266,12 +267,12 @@ fn noise(len: usize, mut state: u32) -> Vec<u8> {
 }
 
 fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
-    // The renderer bakes every CLUT on a 17-node lattice.
-    let grid_n = 17_u32;
-    let table = noise((grid_n as usize).pow(4) * 3, 7);
+    // 16 cells along each input: the target span of a CMYK table.
+    let grid = random_grid(7, [16; 4], color::grid::NodeRange::Extended);
+    let table = grid.as_bytes();
     for smooth in [true, false] {
         header(&format!(
-            "icc_clut grid {grid_n}, {} pixels: one-shot buffers split (prep = alloc + 2 sync uploads, read = sync download + free)",
+            "icc_clut grid of 17⁴ nodes, {} pixels: one-shot buffers split (prep = alloc + 2 sync uploads, read = sync download + free)",
             if smooth { "smooth" } else { "random" }
         ));
         for mpx in [0.5_f64, 2.0, 8.0] {
@@ -285,8 +286,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                 let mut v = Vec::new();
                 for _ in 0..3 {
                     let t = Instant::now();
-                    let _ =
-                        std::hint::black_box(icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, grid_n))));
+                    let _ = std::hint::black_box(grid.convert(&cmyk));
                     v.push(ns(t));
                 }
                 median(v)
@@ -294,7 +294,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
             // The production entry point, timed whole.
             let whole = median_steps(cfg, || {
                 let t = Instant::now();
-                let _ = ok(icc_clut(backend, &cmyk, &table), "icc_clut");
+                let _ = ok(icc_clut(backend, &cmyk, &grid), "icc_clut");
                 Steps {
                     read: ns(t),
                     ..Steps::default()
@@ -310,7 +310,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                 let mut l = ok(backend.alloc_device(table.len()), "alloc");
                 let mut r = ok(backend.alloc_device_readback(n * 3), "alloc");
                 ok(backend.upload(&mut c, &cmyk), "upload");
-                ok(backend.upload(&mut l, &table), "upload");
+                ok(backend.upload(&mut l, table), "upload");
                 let prep = ns(t);
                 let s = page(backend, |b| {
                     for _ in 0..repeats {

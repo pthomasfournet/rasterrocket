@@ -7,11 +7,11 @@
 //     fixed-point arithmetic of the Rust `color::cmyk` module, so the output
 //     is byte-identical to the CPU conversion.
 //
-//   icc_cmyk_clut — full 4D CLUT path for A2B0 profiles.
-//     Evaluates the CLUT using manual quadrilinear interpolation with __ldg()
-//     (routes through L1 texture cache on SM 6.0+).  16 node lookups per pixel,
-//     no shared memory, no texture objects — the CLUT fits in L2 after the
-//     first wave of blocks and remains resident for the page lifetime.
+//   icc_cmyk_clut — the conversion of a tabulated ICC profile through its
+//     grid (`color::grid::CmykGrid`): interpolation in the simplex of the
+//     pixel's grid cell, five node lookups a pixel through __ldg(), in the
+//     32-bit integer arithmetic of `CmykGrid::convert`, so the output is
+//     byte-identical to the host's.
 //
 // Input layout:  `n_pixels` × 4 bytes, interleaved CMYK (PDF convention:
 //                0 = no ink, 255 = full ink for DeviceCMYK).
@@ -83,201 +83,109 @@ extern "C" __global__ void icc_cmyk_matrix(
     }
 }
 
-// ── CLUT kernel ───────────────────────────────────────────────────────────────
+// ── Grid kernel ───────────────────────────────────────────────────────────────
 
-// Fetch one node from the CLUT using __ldg (L1 texture cache path).
-//
-// `clut` is a flat u8 array of `grid_n^4 * 3` bytes, ordered:
-//   index = (k_idx * G^3 + c_idx * G^2 + m_idx * G + y_idx) * 3
-// where G = grid_n (typically 17).
-//
-// K is the outermost (major) axis to match the ICC/PDF CMYK LUT convention and
-// the layout produced by the Rust baking code in pdf_interp/src/resources/icc.rs.
-//
-// Returns the (R, G, B) triple at (ci, mi, yi, ki).
-__device__ __forceinline__ void clut_node(
-    const unsigned char* __restrict__ clut,
-    int ci, int mi, int yi, int ki,
-    int G,
-    float* r, float* g, float* b
+// The grid, 32-bit words (`color::grid::CmykGrid`):
+//   [0, 4)              node stride of each input
+//   4                   node range: 0 unit, 1 extended
+//   GRID_CELLS + 256i+v cell of input i at the sample v: index << 16 | position
+//   GRID_NODES + 2j     node j: value 0 | value 1 << 16, then value 2
+#define GRID_CELLS 8u
+#define GRID_NODES (GRID_CELLS + 4u * 256u)
+
+// The largest position within a cell and the sum of a pixel's weights.
+#define GRID_FULL 65535u
+
+// The values of node `j`, clamped to the last of `n_nodes`: a grid whose
+// cells reach beyond its nodes reads the last node instead.
+__device__ __forceinline__ void grid_node(
+    const unsigned int* __restrict__ grid, unsigned int j, unsigned int n_nodes,
+    unsigned int* v0, unsigned int* v1, unsigned int* v2
 ) {
-    // Clamp to [0, G-1] to prevent out-of-bounds CLUT access.
-    // FP rounding on normalised inputs and extreme channel values can push floor
-    // indices to G, so clamping is a mandatory safety guard, not a soft hint.
-    ci = max(0, min(ci, G - 1));
-    mi = max(0, min(mi, G - 1));
-    yi = max(0, min(yi, G - 1));
-    ki = max(0, min(ki, G - 1));
-
-    int idx = (ki * G * G * G + ci * G * G + mi * G + yi) * 3;
-    *r = (float)__ldg(&clut[idx]);
-    *g = (float)__ldg(&clut[idx + 1]);
-    *b = (float)__ldg(&clut[idx + 2]);
+    j = min(j, n_nodes - 1u);
+    unsigned int lo = __ldg(&grid[GRID_NODES + 2u * j]);
+    unsigned int hi = __ldg(&grid[GRID_NODES + 2u * j + 1u]);
+    *v0 = lo & 0xffffu;
+    *v1 = lo >> 16;
+    *v2 = hi & 0xffffu;
 }
 
-// Round-half-up of a value clamped to [0, 255], matching the CPU
-// fallback's clamp-then-round (half away from zero equals half up on a
-// non-negative range). Computed via the floor difference: adding 0.5f
-// first can round up to the next integer for inputs just below a half,
-// because the sum's f32 ulp is coarser than the input's. `c - fl` is
-// exact on this range (Sterbenz), so the comparison is exact.
-__device__ __forceinline__ unsigned char round_half_up_byte(float v) {
-    float c  = fminf(fmaxf(v, 0.0f), 255.0f);
-    float fl = floorf(c);
-    return (unsigned char)(int)(fl + ((c - fl) >= 0.5f ? 1.0f : 0.0f));
+// `NodeRange::output` of the node sum `acc`, then the nearest byte of the
+// 16-bit output.  Extended: (2 (acc' - L) + 1) / F with acc' clamped to
+// [L, L + (F^2 - 1) / 2], L = (F (F - 1) / 2 + 1) / 2.
+__device__ __forceinline__ unsigned char grid_output(unsigned int acc, unsigned int extended) {
+    const unsigned int low = (GRID_FULL * (GRID_FULL - 1u) / 2u + 1u) / 2u;
+    const unsigned int high = low + (GRID_FULL * GRID_FULL - 1u) / 2u;
+    unsigned int v;
+    if (extended) {
+        v = (2u * (min(max(acc, low), high) - low) + 1u) / GRID_FULL;
+    } else {
+        v = (acc + GRID_FULL / 2u) / GRID_FULL;
+    }
+    return (unsigned char)((v * 255u + 32767u) / 65535u);
 }
 
-// Quadrilinear interpolation in a 4D CLUT.
+// The larger of `*a` and `*b` into `*a`, the smaller into `*b`.
+__device__ __forceinline__ void exchange(unsigned int* a, unsigned int* b) {
+    unsigned int hi = max(*a, *b);
+    *b = min(*a, *b);
+    *a = hi;
+}
+
+// cmyk    : interleaved input,  4 bytes per pixel
+// rgb     : interleaved output, 3 bytes per pixel
+// grid    : the grid's words
+// n_nodes : the grid's node count
+// n       : total pixel count
 //
-// Each input channel is normalised to [0, G-1] and split into an integer
-// floor index and a fractional weight; the 16 corners of the 4D hypercube
-// cell are reduced along Y, M, C, then K with fused multiply-adds, the
-// arithmetic of the CPU fallback (`f32::mul_add`).
-//
-// cmyk  : interleaved input,  4 bytes per pixel (PDF convention)
-// rgb   : interleaved output, 3 bytes per pixel
-// clut  : flat u8 CLUT, grid_n^4 * 3 bytes
-//         index = (k*G^3 + c*G^2 + m*G + y)*3
-// grid_n: number of grid nodes per axis (typically 17)
-// n     : total pixel count
-// scale : (grid_n - 1) / 255 as the host's correctly rounded f32, the
-//         factor of the CPU evaluator; a device division need not round
-//         correctly, and __fmul_rn keeps the product from contracting
-//         into the weight's subtraction
+// Each input's cell gives the base node's offset and a sort key, the
+// position above the input's index; the keys, sorted in decreasing order
+// by the network (0,1)(2,3)(0,2)(1,3)(1,2), visit the simplex's vertices,
+// each weighted by the difference of successive positions.
 extern "C" __global__ void icc_cmyk_clut(
     const unsigned char* __restrict__ cmyk,
     unsigned char*       __restrict__ rgb,
-    const unsigned char* __restrict__ clut,
-    unsigned int grid_n,
-    unsigned int n,
-    float scale
+    const unsigned int*  __restrict__ grid,
+    unsigned int n_nodes,
+    unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    unsigned int ci_base = i * 4;
-    unsigned int ri_base = i * 3;
+    unsigned int key[4];
+    unsigned int base = 0u;
+    for (unsigned int c = 0u; c < 4u; ++c) {
+        unsigned int cell = __ldg(&grid[GRID_CELLS + 256u * c + (unsigned int)__ldg(&cmyk[i * 4u + c])]);
+        base += (cell >> 16) * __ldg(&grid[c]);
+        key[c] = (cell & 0xffffu) << 3 | c;
+    }
+    exchange(&key[0], &key[1]);
+    exchange(&key[2], &key[3]);
+    exchange(&key[0], &key[2]);
+    exchange(&key[1], &key[3]);
+    exchange(&key[1], &key[2]);
 
-    // Normalise each channel to [0, grid_n - 1].
-    float fc = __fmul_rn((float)__ldg(&cmyk[ci_base]), scale);
-    float fm = __fmul_rn((float)__ldg(&cmyk[ci_base + 1]), scale);
-    float fy = __fmul_rn((float)__ldg(&cmyk[ci_base + 2]), scale);
-    float fk = __fmul_rn((float)__ldg(&cmyk[ci_base + 3]), scale);
+    unsigned int acc0 = 0u, acc1 = 0u, acc2 = 0u;
+    unsigned int vertex = base;
+    unsigned int previous = GRID_FULL;
+    unsigned int v0, v1, v2;
+    for (int j = 0; j < 4; ++j) {
+        unsigned int f = key[j] >> 3;
+        unsigned int weight = previous - f;
+        grid_node(grid, vertex, n_nodes, &v0, &v1, &v2);
+        acc0 += weight * v0;
+        acc1 += weight * v1;
+        acc2 += weight * v2;
+        previous = f;
+        vertex += __ldg(&grid[key[j] & 3u]);
+    }
+    grid_node(grid, vertex, n_nodes, &v0, &v1, &v2);
+    acc0 += previous * v0;
+    acc1 += previous * v1;
+    acc2 += previous * v2;
 
-    int G = (int)grid_n;
-
-    // Floor indices.
-    int ic0 = (int)fc;
-    int im0 = (int)fm;
-    int iy0 = (int)fy;
-    int ik0 = (int)fk;
-
-    // Ceil indices (clamped).
-    int ic1 = min(ic0 + 1, G - 1);
-    int im1 = min(im0 + 1, G - 1);
-    int iy1 = min(iy0 + 1, G - 1);
-    int ik1 = min(ik0 + 1, G - 1);
-
-    // Fractional weights.
-    float wc = fc - (float)ic0;
-    float wm = fm - (float)im0;
-    float wy = fy - (float)iy0;
-    float wk = fk - (float)ik0;
-
-    // Quadrilinear: lerp across 16 CLUT nodes.
-    // Variable naming: r/g/b_<c><m><y><k> where each digit is 0 (floor) or 1 (ceil).
-    float r00, g00, b00;
-    float r01, g01, b01;
-    float r10, g10, b10;
-    float r11, g11, b11;
-
-    // Interpolate along Y axis first (innermost), then M, then C, then K.
-
-    // K=0 plane
-    float rc000, gc000, bc000, rc001, gc001, bc001;
-    float rc010, gc010, bc010, rc011, gc011, bc011;
-    float rc100, gc100, bc100, rc101, gc101, bc101;
-    float rc110, gc110, bc110, rc111, gc111, bc111;
-
-    clut_node(clut, ic0, im0, iy0, ik0, G, &rc000, &gc000, &bc000);
-    clut_node(clut, ic0, im0, iy1, ik0, G, &rc001, &gc001, &bc001);
-    clut_node(clut, ic0, im1, iy0, ik0, G, &rc010, &gc010, &bc010);
-    clut_node(clut, ic0, im1, iy1, ik0, G, &rc011, &gc011, &bc011);
-    clut_node(clut, ic1, im0, iy0, ik0, G, &rc100, &gc100, &bc100);
-    clut_node(clut, ic1, im0, iy1, ik0, G, &rc101, &gc101, &bc101);
-    clut_node(clut, ic1, im1, iy0, ik0, G, &rc110, &gc110, &bc110);
-    clut_node(clut, ic1, im1, iy1, ik0, G, &rc111, &gc111, &bc111);
-
-    // Lerp Y, then M, then C → gives the K=0 face result.
-    float r_c0m0 = __fmaf_rn(wy, rc001 - rc000, rc000);
-    float r_c0m1 = __fmaf_rn(wy, rc011 - rc010, rc010);
-    float r_c1m0 = __fmaf_rn(wy, rc101 - rc100, rc100);
-    float r_c1m1 = __fmaf_rn(wy, rc111 - rc110, rc110);
-    float g_c0m0 = __fmaf_rn(wy, gc001 - gc000, gc000);
-    float g_c0m1 = __fmaf_rn(wy, gc011 - gc010, gc010);
-    float g_c1m0 = __fmaf_rn(wy, gc101 - gc100, gc100);
-    float g_c1m1 = __fmaf_rn(wy, gc111 - gc110, gc110);
-    float b_c0m0 = __fmaf_rn(wy, bc001 - bc000, bc000);
-    float b_c0m1 = __fmaf_rn(wy, bc011 - bc010, bc010);
-    float b_c1m0 = __fmaf_rn(wy, bc101 - bc100, bc100);
-    float b_c1m1 = __fmaf_rn(wy, bc111 - bc110, bc110);
-
-    r00 = __fmaf_rn(wm, r_c0m1 - r_c0m0, r_c0m0);
-    r10 = __fmaf_rn(wm, r_c1m1 - r_c1m0, r_c1m0);
-    g00 = __fmaf_rn(wm, g_c0m1 - g_c0m0, g_c0m0);
-    g10 = __fmaf_rn(wm, g_c1m1 - g_c1m0, g_c1m0);
-    b00 = __fmaf_rn(wm, b_c0m1 - b_c0m0, b_c0m0);
-    b10 = __fmaf_rn(wm, b_c1m1 - b_c1m0, b_c1m0);
-
-    float rk0 = __fmaf_rn(wc, r10 - r00, r00);
-    float gk0 = __fmaf_rn(wc, g10 - g00, g00);
-    float bk0 = __fmaf_rn(wc, b10 - b00, b00);
-
-    // K=1 plane
-    float rc000k1, gc000k1, bc000k1, rc001k1, gc001k1, bc001k1;
-    float rc010k1, gc010k1, bc010k1, rc011k1, gc011k1, bc011k1;
-    float rc100k1, gc100k1, bc100k1, rc101k1, gc101k1, bc101k1;
-    float rc110k1, gc110k1, bc110k1, rc111k1, gc111k1, bc111k1;
-
-    clut_node(clut, ic0, im0, iy0, ik1, G, &rc000k1, &gc000k1, &bc000k1);
-    clut_node(clut, ic0, im0, iy1, ik1, G, &rc001k1, &gc001k1, &bc001k1);
-    clut_node(clut, ic0, im1, iy0, ik1, G, &rc010k1, &gc010k1, &bc010k1);
-    clut_node(clut, ic0, im1, iy1, ik1, G, &rc011k1, &gc011k1, &bc011k1);
-    clut_node(clut, ic1, im0, iy0, ik1, G, &rc100k1, &gc100k1, &bc100k1);
-    clut_node(clut, ic1, im0, iy1, ik1, G, &rc101k1, &gc101k1, &bc101k1);
-    clut_node(clut, ic1, im1, iy0, ik1, G, &rc110k1, &gc110k1, &bc110k1);
-    clut_node(clut, ic1, im1, iy1, ik1, G, &rc111k1, &gc111k1, &bc111k1);
-
-    float r_c0m0k1 = __fmaf_rn(wy, rc001k1 - rc000k1, rc000k1);
-    float r_c0m1k1 = __fmaf_rn(wy, rc011k1 - rc010k1, rc010k1);
-    float r_c1m0k1 = __fmaf_rn(wy, rc101k1 - rc100k1, rc100k1);
-    float r_c1m1k1 = __fmaf_rn(wy, rc111k1 - rc110k1, rc110k1);
-    float g_c0m0k1 = __fmaf_rn(wy, gc001k1 - gc000k1, gc000k1);
-    float g_c0m1k1 = __fmaf_rn(wy, gc011k1 - gc010k1, gc010k1);
-    float g_c1m0k1 = __fmaf_rn(wy, gc101k1 - gc100k1, gc100k1);
-    float g_c1m1k1 = __fmaf_rn(wy, gc111k1 - gc110k1, gc110k1);
-    float b_c0m0k1 = __fmaf_rn(wy, bc001k1 - bc000k1, bc000k1);
-    float b_c0m1k1 = __fmaf_rn(wy, bc011k1 - bc010k1, bc010k1);
-    float b_c1m0k1 = __fmaf_rn(wy, bc101k1 - bc100k1, bc100k1);
-    float b_c1m1k1 = __fmaf_rn(wy, bc111k1 - bc110k1, bc110k1);
-
-    r01 = __fmaf_rn(wm, r_c0m1k1 - r_c0m0k1, r_c0m0k1);
-    r11 = __fmaf_rn(wm, r_c1m1k1 - r_c1m0k1, r_c1m0k1);
-    g01 = __fmaf_rn(wm, g_c0m1k1 - g_c0m0k1, g_c0m0k1);
-    g11 = __fmaf_rn(wm, g_c1m1k1 - g_c1m0k1, g_c1m0k1);
-    b01 = __fmaf_rn(wm, b_c0m1k1 - b_c0m0k1, b_c0m0k1);
-    b11 = __fmaf_rn(wm, b_c1m1k1 - b_c1m0k1, b_c1m0k1);
-
-    float rk1 = __fmaf_rn(wc, r11 - r01, r01);
-    float gk1 = __fmaf_rn(wc, g11 - g01, g01);
-    float bk1 = __fmaf_rn(wc, b11 - b01, b01);
-
-    // Final lerp along K.
-    float out_r = __fmaf_rn(wk, rk1 - rk0, rk0);
-    float out_g = __fmaf_rn(wk, gk1 - gk0, gk0);
-    float out_b = __fmaf_rn(wk, bk1 - bk0, bk0);
-
-    rgb[ri_base]     = round_half_up_byte(out_r);
-    rgb[ri_base + 1] = round_half_up_byte(out_g);
-    rgb[ri_base + 2] = round_half_up_byte(out_b);
+    unsigned int extended = __ldg(&grid[4]);
+    rgb[i * 3u]      = grid_output(acc0, extended);
+    rgb[i * 3u + 1u] = grid_output(acc1, extended);
+    rgb[i * 3u + 2u] = grid_output(acc2, extended);
 }

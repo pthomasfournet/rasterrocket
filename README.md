@@ -99,8 +99,9 @@ backend-neutral cache. The full list is in
 - **GPU.** `--gpu-pages` / `SessionConfig::gpu_pages` renders pages made of
   solid fills and strokes whole on a Vulkan GPU beside the CPU workers,
   byte-identical to the CPU (`vulkan` build). The image cache and the ICC
-  CMYK lookup table run on Vulkan as well as CUDA; the device ICC
-  threshold is 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD`). `auto` renders
+  CMYK conversion run on Vulkan as well as CUDA, the latter byte-identical
+  to the CPU; the device ICC threshold is 128 000 px
+  (`PDF_RASTER_ICC_CLUT_THRESHOLD`). `auto` renders
   on the CPU unless a GPU kernel is enabled by its threshold.
 - **Library.** `PageBuffer` renders into buffers the caller owns and reuses;
   `open_session_from_shared` and `open_session_from_reader` open a document
@@ -559,7 +560,7 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 |---|---|---|
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
-| `gpu-icc` | GPU CMYK→RGB ICC transform through the profile's lookup table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU table evaluator | CUDA, or Vulkan with `vulkan` |
+| `gpu-icc` | GPU CMYK→RGB ICC transform through the grid of the profile's tabulated table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU conversion | CUDA, or Vulkan with `vulkan` |
 | `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |

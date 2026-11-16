@@ -2,7 +2,7 @@
 //! (`.slang`-via-`slangc`).
 //!
 //! Each test composes a small representative input, runs it through
-//! the Vulkan kernel and a reference (the CUDA kernel or its CPU twin),
+//! the Vulkan kernel and a reference (the CUDA kernel or the host evaluator),
 //! and asserts byte-equal output.
 //!
 //! Gated on the `vulkan` feature.  CUDA-side tests are additionally
@@ -31,45 +31,6 @@ use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams
 
 // ── icc_cmyk_clut ───────────────────────────────────────────────────
 
-/// Build a synthetic identity CLUT for `grid_n` so the parity test has
-/// a deterministic, hand-derivable input.  The kernel quadrilinear-
-/// interpolates over the table; with values C and M and Y stored as the
-/// node indices' RGB encoding, the result is a smooth ramp we can
-/// compare against the CPU path's output byte-for-byte.
-fn build_identity_clut(grid_n: u32) -> Vec<u8> {
-    let g = grid_n as usize;
-    let mut clut = vec![0u8; g * g * g * g * 3];
-    // Layout: index = (k * G^3 + c * G^2 + m * G + y) * 3 (matches Rust baker
-    // and CUDA kernel).
-    for k in 0..g {
-        for c in 0..g {
-            for m in 0..g {
-                for y in 0..g {
-                    let idx = (k * g * g * g + c * g * g + m * g + y) * 3;
-                    // R encodes C, G encodes M, B encodes Y; K modulates by 1-K/G.
-                    let scale = (g - 1 - k) as u32 * 255 / (g - 1).max(1) as u32;
-                    let r = (c as u32 * 255 / (g - 1).max(1) as u32) * scale / 255;
-                    let gv = (m as u32 * 255 / (g - 1).max(1) as u32) * scale / 255;
-                    let b = (y as u32 * 255 / (g - 1).max(1) as u32) * scale / 255;
-                    clut[idx] = r as u8;
-                    clut[idx + 1] = gv as u8;
-                    clut[idx + 2] = b as u8;
-                }
-            }
-        }
-    }
-    clut
-}
-
-fn run_icc_clut_vulkan(cmyk: &[u8], clut: &[u8]) -> Vec<u8> {
-    let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
-    rasterrocket_gpu::backend::icc_clut(&backend, cmyk, clut).expect("icc_clut")
-}
-
-fn run_icc_clut_cpu(cmyk: &[u8], clut: &[u8], grid_n: u32) -> Vec<u8> {
-    rasterrocket_gpu::icc_cmyk_to_rgb_cpu(cmyk, Some((clut, grid_n)))
-}
-
 /// `n` pseudo-random bytes from `seed`.
 fn pseudo_random(n: usize, seed: u32) -> Vec<u8> {
     let mut rng = seed;
@@ -81,55 +42,29 @@ fn pseudo_random(n: usize, seed: u32) -> Vec<u8> {
         .collect()
 }
 
+/// The 16 corners of the CMYK cube and pseudo-random pixels through a
+/// pseudo-random grid of uneven spans in either range: the Vulkan kernel
+/// interpolates in integers, so it matches the host byte for byte, and
+/// passes the backend's exactness probe.
 #[test]
-fn icc_clut_corners_only() {
-    // Pure C, M, Y, K corners — sample the 16 hypercube corners only.
-    let grid_n = 17u32;
-    let clut = build_identity_clut(grid_n);
-    let mut cmyk = Vec::new();
-    for c in [0u8, 255] {
-        for m in [0u8, 255] {
-            for y in [0u8, 255] {
-                for k in [0u8, 255] {
-                    cmyk.extend_from_slice(&[c, m, y, k]);
-                }
-            }
-        }
-    }
-    let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
-    let vk = run_icc_clut_vulkan(&cmyk, &clut);
-    assert_eq!(cpu, vk, "icc_clut corners");
-}
-
-/// Pseudo-random pixels through a pseudo-random table, whose nodes differ
-/// arbitrarily from their neighbours: every interpolation step carries a
-/// fractional weight and a non-trivial difference, where rounding the
-/// product and the sum separately would move some output byte.
-///
-/// A device that passes the backend's exactness check must match the CPU
-/// byte for byte.  One that fails it is never used for the conversion; its
-/// outputs must still lie within one level of the CPU's.
-#[test]
-fn icc_clut_random_inputs() {
-    let grid_n = 17u32;
-    let clut = pseudo_random((grid_n as usize).pow(4) * 3, 0x0dd_ba11);
-    let cmyk = pseudo_random(65_536 * 4, 0x1234_5678);
+fn icc_clut_matches_the_host() {
+    use color::grid::NodeRange;
     let backend = crate::common::vulkan_backend().expect("VulkanBackend::new");
-    let cpu = run_icc_clut_cpu(&cmyk, &clut, grid_n);
-    let vk = rasterrocket_gpu::backend::icc_clut(&backend, &cmyk, &clut).expect("icc_clut");
-    let differing = cpu.iter().zip(&vk).filter(|(a, b)| a != b).count();
-    let max_delta = cpu.iter().zip(&vk).map(|(a, b)| a.abs_diff(*b)).max();
-    if backend.icc_clut_is_exact() {
-        assert_eq!(differing, 0, "icc_clut random: {differing} bytes differ");
-    } else {
-        eprintln!(
-            "device fails the exactness check: {differing} bytes differ (max {max_delta:?}); \
-             the renderer converts on the CPU"
-        );
-        assert!(
-            max_delta <= Some(1),
-            "icc_clut random: max delta {max_delta:?}"
-        );
+    assert!(backend.icc_clut_is_exact(), "the exactness probe fails");
+    let mut cmyk: Vec<u8> = (0..16u8)
+        .flat_map(|i| [3, 2, 1, 0].map(|b| if i >> b & 1 == 1 { 255 } else { 0 }))
+        .collect();
+    cmyk.extend(pseudo_random(65_536 * 4, 0x1234_5678));
+    for range in [NodeRange::Unit, NodeRange::Extended] {
+        let grid = rasterrocket_gpu::backend::random_grid(0x0dd_ba11, [16, 9, 20, 5], range);
+        let vk = rasterrocket_gpu::backend::icc_clut(&backend, &cmyk, &grid).expect("icc_clut");
+        let differing = grid
+            .convert(&cmyk)
+            .iter()
+            .zip(&vk)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 0, "{range:?}: {differing} bytes differ");
     }
 }
 

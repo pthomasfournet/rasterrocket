@@ -140,8 +140,8 @@ impl GpuBackend for CudaBackend {
 
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
         self.recorder.check_recording("record_icc_clut")?;
-        let grid_n = params.validate(self)?;
-        self.recorder.record_icc_clut(params, grid_n)
+        let n_nodes = params.validate(self)?;
+        self.recorder.record_icc_clut(params, n_nodes)
     }
 
     fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {

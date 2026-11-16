@@ -29,9 +29,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bench_common::smooth_cmyk;
+use rasterrocket_gpu::GpuCtx;
 use rasterrocket_gpu::backend::cuda::CudaBackend;
-use rasterrocket_gpu::backend::{GpuBackend, icc_clut};
-use rasterrocket_gpu::{GpuCtx, icc_cmyk_to_rgb_cpu};
+use rasterrocket_gpu::backend::{GpuBackend, icc_clut, random_grid};
 
 /// Unwrap a GPU `Result`, printing the error with context and exiting with
 /// status 1.  Used inside timing closures where `?` is not available.
@@ -148,7 +148,7 @@ fn bench_icc_cmyk(ctx: &GpuCtx, cfg: &Config) {
 
         let cpu_ns = time_ns(
             || {
-                let _ = icc_cmyk_to_rgb_cpu(&cmyk, None);
+                let _ = color::cmyk::cmyk_to_rgb_vec(&cmyk);
             },
             cfg.warmup,
             cfg.iters,
@@ -198,22 +198,20 @@ fn bench_icc_cmyk(ctx: &GpuCtx, cfg: &Config) {
 // ── ICC CMYK→RGB CLUT benchmark ─────────────────────────────────────────────
 
 /// The production device conversion ([`icc_clut`]: staged uploads, kernel
-/// and download in one page) on `backend` against the CPU evaluator the renderer runs
-/// below the threshold, both on a 17-node CLUT, across image sizes.
+/// and download in one page) on `backend` against the host evaluator of the
+/// same grid ([`color::grid::CmykGrid::convert`], one pixel at a time; the
+/// renderer's CPU conversion of the grid runs in blocks and is faster), on
+/// a grid of 17⁴ nodes, across image sizes.
 fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
-    const GRID_N: u32 = 17;
     println!(
-        "\n══ icc_clut on {label}: device call vs CPU evaluator (grid {GRID_N}, smooth input) ══"
+        "\n══ icc_clut on {label}: device call vs host evaluator (17⁴ nodes, smooth input) ══"
     );
     println!(
         "{:>10}  {:>12}  {:>12}  {:>8}  winner",
         "pixels", "cpu", "device", "ratio"
     );
     println!("{}", "─".repeat(60));
-    #[expect(clippy::cast_possible_truncation, reason = "i % 251 is below 256")]
-    let table: Vec<u8> = (0..(GRID_N as usize).pow(4) * 3)
-        .map(|i| (i % 251) as u8)
-        .collect();
+    let grid = random_grid(1, [16; 4], color::grid::NodeRange::Extended);
     let mut crossover: Option<usize> = None;
     for n in [
         1_000, 4_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000, 2_000_000,
@@ -222,7 +220,7 @@ fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
         let cmyk = smooth_cmyk(n);
         let cpu_ns = time_ns(
             || {
-                let _ = std::hint::black_box(icc_cmyk_to_rgb_cpu(&cmyk, Some((&table, GRID_N))));
+                let _ = std::hint::black_box(grid.convert(&cmyk));
             },
             cfg.warmup.min(2),
             cfg.iters.min(7),
@@ -230,7 +228,7 @@ fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
         let dev_ns = time_ns(
             || {
                 let _ =
-                    std::hint::black_box(gpu_unwrap(icc_clut(backend, &cmyk, &table), "icc_clut"));
+                    std::hint::black_box(gpu_unwrap(icc_clut(backend, &cmyk, &grid), "icc_clut"));
             },
             cfg.warmup,
             cfg.iters,

@@ -143,7 +143,7 @@ impl KernelId {
     /// same order it builds the descriptor write list.
     const fn n_storage_buffers(self) -> u32 {
         match self {
-            // (cmyk, rgb, clut)
+            // (cmyk, rgb, grid)
             Self::IccClut => 3,
             // (src, dst_rgba, cols, rows) — dimensions and bbox travel as push constants
             Self::BlitImage => 4,
@@ -269,7 +269,7 @@ impl PipelineCache {
             .offset(0)
             // 128 bytes: Vulkan's guaranteed minimum max push-constant size.
             // Our largest kernel push struct is well under this (icc_clut
-            // pushes 12 bytes; blit_image pushes 40).
+            // pushes 8 bytes; blit_image pushes 40).
             .size(128)];
         let pl_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)

@@ -260,6 +260,26 @@ fn cmyk_tables_compile_to_the_grid() {
     }
 }
 
+/// A tabulated CMYK conversion's grid is made once and shared, and
+/// converts 8-bit samples as the conversion does; a three-channel
+/// conversion has none.
+#[cfg(feature = "gpu-icc")]
+#[test]
+fn the_cmyk_grid_is_made_once_and_converts_as_the_transform() {
+    let doc = make_doc_with_stream(&fixture("printer-cmyk-v2"), " /N 4");
+    let conv = IccConversion::load(&doc, (2, 0), 4, ColourTarget::SRGB).expect("compiles");
+    let first = conv.cmyk_grid().expect("a grid");
+    assert!(Arc::ptr_eq(&first, &conv.cmyk_grid().expect("a grid")));
+    let cmyk: Vec<u8> = (0..=u8::MAX)
+        .flat_map(|v| [v, v / 2, 255 - v, v / 3])
+        .collect();
+    let mut want = vec![0u8; cmyk.len() / 4 * 3];
+    conv.transform_pixels(&cmyk, &mut want).expect("converts");
+    assert_eq!(first.convert(&cmyk), want);
+    let rgb = IccConversion::load(&srgb_doc(), (2, 0), 3, ColourTarget::SRGB).expect("compiles");
+    assert!(rgb.cmyk_grid().is_none());
+}
+
 /// `[/ICCBased <unparseable profile, /N n, /Alternate alt>]`.
 fn garbage_doc(n: u8, alternate: &str) -> Document {
     make_doc_with_stream(b"not a profile", &format!(" /N {n} /Alternate {alternate}"))
