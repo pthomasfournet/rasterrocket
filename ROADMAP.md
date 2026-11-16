@@ -3787,6 +3787,22 @@ RGB ICC form groups are byte-identical at 50 dpi, as is the 34-PDF gate in
 `Icc(ObjectId)` and `Cal(CalSpace)`, and `GroupSpace::approximated` is
 removed.
 
+**Unreleased on master: a word split between strings or faces is fitted as
+the whole word.** A substitute fitted to a non-standard font's `/Widths`
+centred and condensed each shaped run alone, so a word split by a `TJ`
+adjustment, `Tf` or consecutive `Tj`s, or by a fallback face inside one
+string, was drawn shifted by half the width deficit and with a scale per
+part (`[<41> 0 <4243>] TJ` against `<414243> Tj` in a `/TraditionalArabic`
+with wide widths). Joined runs now form a chain fitted as one run: one
+scale and one centring offset, with the extent of the parts in the strings
+after read ahead (up to 16 strings). Marks that end a right-to-left string
+are part of the chain and are drawn over the next string's letter where
+its fitted glyph lies, not at that string's origin. The layout moves to
+`renderer/page/text_layout.rs`. All 1 154 rendered pages of the archive's
+right-to-left documents and three Latin ones are byte-identical at 100 dpi
+(their RTL text is embedded or in standard-named fonts); only synthetic
+documents change.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
