@@ -703,23 +703,14 @@ impl<'doc> PageResources<'doc> {
     /// `ctx` carries the GPU decoders, ICC handles and image cache the decode
     /// may use; `image::ImageDecodeCtx::cpu` decodes on the CPU only.
     #[must_use]
-    pub fn image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
+    pub fn image(
         &self,
         request: image::ImageRequest<'_>,
         ctx: &mut image::ImageDecodeCtx<'_>,
-        #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
-            &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
-        >,
     ) -> image::ImageResolution {
         let empty = Dictionary::new();
         let xobjects = self.resource_subdict(Category::XObject).unwrap_or(&empty);
-        image::resolve_image(
-            ctx,
-            xobjects,
-            request,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            jpeg_gpu,
-        )
+        image::resolve_image(ctx, xobjects, request)
     }
 
     /// Look up a named `ExtGState` resource and return selected parameters.

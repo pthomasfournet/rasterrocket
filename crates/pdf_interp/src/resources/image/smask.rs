@@ -264,8 +264,6 @@ fn decode_mask_stream(
         None,
         #[cfg(feature = "cache")]
         None,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
     )
     .map(|decoded| decoded.image)
 }

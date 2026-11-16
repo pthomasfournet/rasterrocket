@@ -21,9 +21,6 @@ use super::{
     is_transport_filter, terminal_decode_parms,
 };
 
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::jpeg_decoder::JpegGpuDecoder;
-
 /// An image stream and the geometry its dictionary declares.
 pub(super) struct ImageStream<'a> {
     /// The stream: its dictionary and its still-encoded bytes.
@@ -105,14 +102,11 @@ pub(super) struct DecodedStream {
 /// codec that can reconstruct at reduced resolution and for the device
 /// decoders that decline a reduced draw; `None` decodes in full.  `dct_cache` selects the device image cache entry of a
 /// `DCTDecode` stream.  The error string names the stage that failed.
-pub(super) fn decode_image_stream<
-    #[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend,
->(
+pub(super) fn decode_image_stream(
     ctx: &mut ImageDecodeCtx<'_>,
     src: &ImageStream<'_>,
     draw_size: Option<(u32, u32)>,
     #[cfg(feature = "cache")] dct_cache: Option<&super::codecs::DctCacheCtx<'_>>,
-    #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> Result<DecodedStream, String> {
     let doc = ctx.doc;
     let dict = &src.stream.dict;
@@ -162,10 +156,6 @@ pub(super) fn decode_image_stream<
             w,
             h,
             ctx,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            jpeg_gpu,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            draw_size,
             #[cfg(feature = "cache")]
             dct_cache,
         ),

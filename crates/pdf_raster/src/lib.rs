@@ -211,8 +211,7 @@ pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 /// drop(pool);
 /// ```
 ///
-/// This drops each thread's `NvJpegDecoder` / `NvJpeg2kDecoder` / Vulkan
-/// Huffman decoder while the CUDA driver is still fully alive.  Without
+/// This drops each thread's `NvJpegDecoder` / `NvJpeg2kDecoder` while the CUDA driver is still fully alive.  Without
 /// this call, all workers call their destructors concurrently at process
 /// exit into a driver that has already started its own `atexit` shutdown,
 /// causing undefined behaviour (typically a segfault or hang).
@@ -230,19 +229,14 @@ pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 ///
 /// # No-op builds
 ///
-/// When none of the GPU decoder features (`nvjpeg`, `nvjpeg2k`,
-/// `gpu-jpeg-huffman + vulkan`) are compiled in, this function is a
+/// When neither GPU decoder feature (`nvjpeg`, `nvjpeg2k`) is compiled in, this function is a
 /// no-op and can be omitted entirely.  It is always safe to call.
 ///
 /// # Panics
 ///
 /// Never panics.
 #[cfg_attr(
-    not(any(
-        feature = "nvjpeg",
-        feature = "nvjpeg2k",
-        all(feature = "gpu-jpeg-huffman", feature = "vulkan"),
-    )),
+    not(any(feature = "nvjpeg", feature = "nvjpeg2k")),
     expect(
         clippy::missing_const_for_fn,
         reason = "body collapses to empty when no GPU-decoder feature is on"
@@ -253,8 +247,6 @@ pub fn release_gpu_decoders() {
     gpu_init::release_nvjpeg_this_thread();
     #[cfg(feature = "nvjpeg2k")]
     gpu_init::release_nvjpeg2k_this_thread();
-    #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-    gpu_init::release_jpeg_vk_this_thread();
 }
 
 /// True when the PDF at `path` is encrypted (uses the PDF Standard

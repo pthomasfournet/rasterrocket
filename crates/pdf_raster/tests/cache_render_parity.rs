@@ -453,15 +453,10 @@ on_each_backend!(
     corpus_masked_flate_pages_render_identically_and_bypass_the_vulkan_cache
 );
 
-/// Under `Auto` with every device kernel dormant (the default thresholds)
-/// the session holds no image cache, as it holds no GPU backend, and
+/// An `Auto` session holds no image cache, as it holds no GPU backend, and
 /// renders as `CpuOnly` does.
 #[test]
-fn auto_session_holds_no_image_cache_while_kernels_are_dormant() {
-    if std::env::var_os("PDF_RASTER_HUFFMAN_THRESHOLD").is_some() {
-        eprintln!("skipping: the Huffman threshold is overridden");
-        return;
-    }
+fn auto_session_holds_no_image_cache() {
     let auto = session(fixture_pdf(), BackendPolicy::Auto);
     assert!(auto.image_cache().is_none(), "Auto built an image cache");
     let cpu = render(&session(fixture_pdf(), BackendPolicy::CpuOnly), 1);

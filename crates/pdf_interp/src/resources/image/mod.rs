@@ -61,11 +61,6 @@ pub(crate) use codecs::{DeviceJpx, Jpeg2kSource};
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
 
-// ── GPU parallel-Huffman JPEG decoder ────────────────────────────────────────
-
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::jpeg_decoder::JpegGpuDecoder;
-
 /// Minimum pixel area (width × height) for GPU-accelerated `DCTDecode`
 /// (nvJPEG or VA-API).
 ///
@@ -81,34 +76,6 @@ use gpu::jpeg_decoder::JpegGpuDecoder;
 /// `GPU_JPEG2K_THRESHOLD_PX` is independent of this value.
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub(crate) const GPU_JPEG_THRESHOLD_PX: u32 = u32::MAX;
-
-/// Minimum pixel area (width × height) for GPU parallel-Huffman JPEG decode.
-///
-/// Only 4:4:4 baseline JPEGs with 1 or 3 components are eligible.
-/// Images below this threshold always use the CPU path.
-///
-/// Set to `u32::MAX` until a corpus benchmark confirms a crossover point —
-/// mirrors the precedent set by `GPU_JPEG_THRESHOLD_PX` for nvJPEG.
-///
-/// Override at runtime for benchmarking: set the `PDF_RASTER_HUFFMAN_THRESHOLD`
-/// environment variable to a decimal pixel-area value (e.g. `0` = always GPU,
-/// `4294967295` = never GPU).  The env var is read once, lazily, on first use.
-#[cfg(feature = "gpu-jpeg-huffman")]
-pub(crate) const GPU_JPEG_HUFFMAN_THRESHOLD_PX: u32 = u32::MAX;
-
-/// Returns the effective parallel-Huffman dispatch threshold: `GPU_JPEG_HUFFMAN_THRESHOLD_PX`
-/// unless `PDF_RASTER_HUFFMAN_THRESHOLD` is set in the environment.
-#[cfg(feature = "gpu-jpeg-huffman")]
-pub(crate) fn huffman_threshold() -> u32 {
-    use std::sync::OnceLock;
-    static THRESHOLD: OnceLock<u32> = OnceLock::new();
-    *THRESHOLD.get_or_init(|| {
-        threshold_from_env(
-            "PDF_RASTER_HUFFMAN_THRESHOLD",
-            GPU_JPEG_HUFFMAN_THRESHOLD_PX,
-        )
-    })
-}
 
 /// Minimum pixel area (width × height) for GPU-accelerated `JPXDecode`:
 /// 2²¹ pixels, about 1448 × 1448.
@@ -138,11 +105,7 @@ pub(crate) fn jpx_threshold() -> u32 {
 /// The pixel count the environment variable `var` holds in decimal, or
 /// `default` when it is unset; a value that does not parse is reported at
 /// warn and yields `default`.
-#[cfg(any(
-    feature = "gpu-jpeg-huffman",
-    feature = "nvjpeg2k",
-    feature = "gpu-icc"
-))]
+#[cfg(any(feature = "nvjpeg2k", feature = "gpu-icc"))]
 pub(super) fn threshold_from_env<T>(var: &str, default: T) -> T
 where
     T: std::str::FromStr + std::fmt::Display + Copy,
@@ -566,11 +529,10 @@ pub struct ImageDescriptor {
 ///   codec fails on the image or on its `/SMask` or stencil `/Mask`
 ///   (content is lost — surface to the caller).
 #[must_use]
-pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend>(
+pub fn resolve_image(
     ctx: &mut ImageDecodeCtx<'_>,
     xobjects: &Dictionary,
     request: ImageRequest<'_>,
-    #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> ImageResolution {
     let doc = ctx.doc;
     let name = request.name;
@@ -656,8 +618,6 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         draw_size,
         #[cfg(feature = "cache")]
         dct_cache.as_ref(),
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        jpeg_gpu,
     ) {
         Ok(decoded) => (decoded.image, decoded.partial, decoded.tints),
         Err(msg) => {
@@ -801,11 +761,11 @@ pub(crate) fn reduced_draw_size(
 }
 
 /// Whether an image of `full` pixels drawn at `draw` is drawn at half its
-/// size or less along both axes.  The device decoders reconstruct at full
-/// resolution, and decline such a draw: its samples are resampled on the
+/// size or less along both axes.  The device JPEG 2000 decoder reconstructs
+/// at full resolution, and declines such a draw: its samples are resampled on the
 /// host to at most a quarter of their number, and the CPU JPEG 2000
 /// decoder skips at least one resolution level (each halves both axes).
-#[cfg(any(feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
+#[cfg(feature = "nvjpeg2k")]
 pub(crate) const fn draw_halves((w, h): (u32, u32), (dw, dh): (u32, u32)) -> bool {
     dw.saturating_mul(2) <= w && dh.saturating_mul(2) <= h
 }
@@ -951,8 +911,7 @@ pub(super) fn try_with_capacity(len: usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
-/// Everything an image decode reads besides the image's own bytes, apart
-/// from the backend-generic GPU Huffman decoder (a separate argument).
+/// Everything an image decode reads besides the image's own bytes.
 ///
 /// Holds the document, the `ColorSpace` resources an inline image's `/CS`
 /// name resolves through, the GPU decoders available to the image's filter
@@ -1145,8 +1104,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         ) else {
             panic!("the image decodes");
         };
@@ -1163,13 +1120,9 @@ mod tests {
         xobjects.set("Im1", Object::Reference((4, 0)));
         let mut ctx = ImageDecodeCtx::cpu(doc);
         ctx.depth = depth;
-        let ImageResolution::Ok(decoded) = resolve_image(
-            &mut ctx,
-            &xobjects,
-            ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
-        ) else {
+        let ImageResolution::Ok(decoded) =
+            resolve_image(&mut ctx, &xobjects, ImageRequest::full(b"Im1"))
+        else {
             panic!("the image decodes");
         };
         decoded
@@ -1270,8 +1223,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         );
         match resolution {
             ImageResolution::Ok(decoded) => decoded.image,
@@ -1336,8 +1287,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
     }
 
@@ -1372,8 +1321,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         )
     }
 
@@ -1434,8 +1381,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         ) {
             ImageResolution::Ok(decoded) => {
                 assert!(decoded.image.smask.is_none());
@@ -1494,8 +1439,6 @@ mod tests {
             &mut ImageDecodeCtx::cpu(&doc),
             &xobjects,
             ImageRequest::full(b"Im1"),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         ) {
             ImageResolution::Ok(decoded) => {
                 assert!(decoded.image.smask.is_none());

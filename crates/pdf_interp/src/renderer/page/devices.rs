@@ -7,14 +7,10 @@ use std::sync::Arc;
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::backend::cuda::CudaBackend;
 #[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
 #[cfg(feature = "cache")]
 use gpu::cache::{DevicePageBuffer, DocId, ImageCache};
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::jpeg_decoder::JpegGpuDecoder;
 #[cfg(feature = "nvjpeg")]
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
@@ -46,35 +42,9 @@ pub(super) struct CacheState {
 }
 
 impl PageRenderer<'_> {
-    /// Attach a GPU parallel-Huffman JPEG decoder to this renderer.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub fn set_jpeg_gpu(&mut self, dec: Option<JpegGpuDecoder<CudaBackend>>) {
-        self.jpeg_gpu = dec;
-    }
-
-    /// Detach and return the GPU parallel-Huffman JPEG decoder for reuse.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub const fn take_jpeg_gpu(&mut self) -> Option<JpegGpuDecoder<CudaBackend>> {
-        self.jpeg_gpu.take()
-    }
-
-    /// Attach a Vulkan parallel-Huffman JPEG decoder to this renderer.
-    ///
-    /// Mutually exclusive with [`set_jpeg_gpu`] — call one or the other per
-    /// render, never both.
-    #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-    pub fn set_jpeg_vk(&mut self, dec: Option<JpegGpuDecoder<VulkanBackend>>) {
-        self.jpeg_vk = dec;
-    }
-
-    /// Detach and return the Vulkan parallel-Huffman JPEG decoder for reuse.
-    #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-    pub const fn take_jpeg_vk(&mut self) -> Option<JpegGpuDecoder<VulkanBackend>> {
-        self.jpeg_vk.take()
-    }
-
-    /// [`crate::resources::image::GPU_JPEG_THRESHOLD_PX`] are decoded on the
-    /// GPU via nvJPEG rather than the CPU JPEG decoder.
+    /// Attach an nvJPEG decoder to this renderer.  `DCTDecode` streams with
+    /// pixel area ≥ [`crate::resources::image::GPU_JPEG_THRESHOLD_PX`] are
+    /// decoded on the GPU via nvJPEG rather than the CPU JPEG decoder.
     ///
     /// Calling this with `None` detaches any existing decoder (reverts to CPU).
     #[cfg(feature = "nvjpeg")]

@@ -29,10 +29,6 @@ use gpu::cache::{
 /// them: an Adobe JPEG that stores inverted ink carries `/Decode [1 0 1 0 1
 /// 0 1 0]`, which the colour conversion applies, so no inversion is implied
 /// by the JPEG itself.  A YCCK stream is converted to CMYK here.
-///
-/// `draw_size` is the device-pixel extent of the draw, when known; the GPU
-/// parallel-Huffman decoder is not used for a draw at half the frame's size
-/// or less (see [`frame_draw_halves`]).
 #[expect(
     clippy::too_many_lines,
     reason = "GPU dispatch paths (nvjpeg, vaapi) plus the CPU decode path are each short; \
@@ -45,9 +41,7 @@ use gpu::cache::{
         reason = "only the nvjpeg handle is borrowed mutably"
     )
 )]
-pub(in crate::resources::image) fn decode_dct<
-    #[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend,
->(
+pub(in crate::resources::image) fn decode_dct(
     data: &[u8],
     pdf_w: u32,
     pdf_h: u32,
@@ -59,10 +53,6 @@ pub(in crate::resources::image) fn decode_dct<
         )
     )]
     ctx: &mut crate::resources::image::ImageDecodeCtx<'_>,
-    #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
-        &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
-    >,
-    #[cfg(feature = "gpu-jpeg-huffman")] draw_size: Option<(u32, u32)>,
     #[cfg(feature = "cache")] cache_ctx: Option<&DctCacheCtx<'_>>,
 ) -> Option<Samples> {
     use zune_core::bytestream::ZCursor;
@@ -147,69 +137,6 @@ pub(in crate::resources::image) fn decode_dct<
         && let Some(img) = decode_dct_queue_path(data, pdf_w, pdf_h, handle)
     {
         return Some(img);
-    }
-
-    // ── GPU parallel-Huffman path ─────────────────────────────────────────────
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    if let Some(dec) = jpeg_gpu.filter(|_| !frame_draw_halves(data, draw_size)) {
-        let area = pdf_w.saturating_mul(pdf_h);
-        // The decoder sizes its device and host RGBA buffers from the frame
-        // header, so the header's dimensions must pass the decode budget
-        // before the decode starts; a stream that fails it takes the CPU path,
-        // which applies its own limit.
-        let within_budget = jpeg_sof(data).is_some_and(|sof| {
-            crate::resources::image::decode_budget(u32::from(sof.width), u32::from(sof.height), 4)
-                .is_ok()
-        });
-        if within_budget && area >= crate::resources::image::huffman_threshold() {
-            match dec.decode(data) {
-                Ok(img) => {
-                    let w = img.width;
-                    let h = img.height;
-                    if w == 0 || h == 0 {
-                        log::warn!(
-                            "GPU JPEG decoder returned zero-dimension image ({w}×{h}), skipping"
-                        );
-                    } else {
-                        let n = (w as usize) * (h as usize) * 4;
-                        let mut rgba = vec![0u8; n];
-                        let downloaded = dec.backend().download(&img.buffer, &mut rgba);
-                        match downloaded {
-                            Ok(()) => {
-                                // The IDCT kernel always writes RGBA8. For
-                                // grayscale (1-component) JPEGs it replicates
-                                // luma into R, G, and B. Strip alpha to get the
-                                // 3-byte-per-pixel RGB representation expected by
-                                // the blit path, and preserve the correct
-                                // color_space tag so downstream code branches
-                                // correctly.
-                                return Some(
-                                    if jpeg_sof(data).is_some_and(|sof| sof.components == 1) {
-                                        let gray: Vec<u8> = rgba
-                                            .as_chunks::<4>()
-                                            .0
-                                            .iter()
-                                            .map(|px| px[0])
-                                            .collect();
-                                        Samples::gray(w, h, gray)
-                                    } else {
-                                        let rgb: Vec<u8> = rgba
-                                            .as_chunks::<4>()
-                                            .0
-                                            .iter()
-                                            .flat_map(|&[r, g, b, _]| [r, g, b])
-                                            .collect();
-                                        Samples::cpu(w, h, Layout::Color(3), rgb)
-                                    },
-                                );
-                            }
-                            Err(e) => log::warn!("GPU JPEG download failed: {e}"),
-                        }
-                    }
-                }
-                Err(e) => log::debug!("GPU JPEG decode failed, falling back to CPU: {e}"),
-            }
-        }
     }
 
     // ── CPU path ──────────────────────────────────────────────────────────────
@@ -411,18 +338,6 @@ impl<'a> DctCacheCtx<'a> {
 fn frame_draw_reduces(data: &[u8], draw: Option<(u32, u32)>) -> bool {
     draw.zip(jpeg_sof(data)).is_some_and(|(draw, sof)| {
         crate::renderer::page::draw_reduces(u32::from(sof.width), u32::from(sof.height), draw)
-    })
-}
-
-/// Whether the JPEG `data`, at the dimensions of its frame header, is drawn
-/// over `draw` device pixels at half its size or less (see
-/// [`draw_halves`](crate::resources::image::draw_halves)); the GPU
-/// parallel-Huffman decoder declines such a draw.  A stream without a frame
-/// header is not.
-#[cfg(feature = "gpu-jpeg-huffman")]
-fn frame_draw_halves(data: &[u8], draw: Option<(u32, u32)>) -> bool {
-    draw.zip(jpeg_sof(data)).is_some_and(|(draw, sof)| {
-        crate::resources::image::draw_halves((u32::from(sof.width), u32::from(sof.height)), draw)
     })
 }
 
@@ -628,29 +543,9 @@ mod cache_tests {
     }
 }
 
-#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
-mod huffman_dispatch_tests {
-    use super::frame_draw_halves;
-
-    /// SOI and a baseline frame header of 64 × 48 samples.
-    const FRAME: &[u8] = &[
-        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x30, 0x00, 0x40, 0x01, 0x01, 0x11, 0x00,
-    ];
-
-    #[test]
-    fn the_gpu_huffman_decode_declines_a_draw_at_half_size_or_less() {
-        assert!(frame_draw_halves(FRAME, Some((32, 24))));
-        assert!(frame_draw_halves(FRAME, Some((8, 6))));
-        assert!(!frame_draw_halves(FRAME, Some((33, 24))));
-        assert!(!frame_draw_halves(FRAME, Some((32, 25))));
-        assert!(!frame_draw_halves(FRAME, Some((64, 48))));
-        assert!(!frame_draw_halves(FRAME, None));
-        assert!(!frame_draw_halves(b"not a jpeg", Some((1, 1))));
-    }
-}
-
 #[cfg(all(test, any(feature = "nvjpeg", feature = "vaapi")))]
 mod tests {
+    #[cfg(feature = "nvjpeg")]
     use super::*;
 
     fn minimal_baseline_jpeg() -> Vec<u8> {

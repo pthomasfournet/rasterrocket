@@ -79,21 +79,15 @@ pub struct RasterSession {
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     pub(crate) gpu_ctx: Option<Arc<gpu::GpuCtx>>,
     /// Vulkan compute backend.  `Some` when the `vulkan` feature is
-    /// enabled, the policy resolves to `Auto` or `ForceVulkan`, and
-    /// `VulkanBackend::new` succeeded.  Mutually exclusive with
-    /// `gpu_ctx` in practice — under `Auto` the caller skips CUDA
-    /// init when this is `Some`; under `ForceVulkan` `init_gpu_ctx`
-    /// returns `None` regardless.  Shared across all pages.
+    /// enabled, the policy is `ForceVulkan`, and the backend was
+    /// constructed.  Mutually exclusive with `gpu_ctx`: `init_gpu_ctx`
+    /// returns `None` under `ForceVulkan`.  Shared across all pages.
     #[cfg(feature = "vulkan")]
     pub(crate) vk_backend: Option<Arc<gpu::backend::vulkan::VulkanBackend>>,
     /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
     /// renders every page on the CPU.
     #[cfg(feature = "vulkan")]
     pub(crate) device_pages: Option<crate::device_pages::DevicePages>,
-    /// [`crate::SessionConfig::vulkan_device`], for the per-thread Vulkan
-    /// JPEG decoders, which open their own logical device.
-    #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
-    pub(crate) vulkan_device: Option<String>,
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
@@ -443,43 +437,6 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     }
 }
 
-/// Whether [`BackendPolicy::Auto`] initialises a GPU backend: only while a
-/// device kernel that its dispatch threshold leaves dormant by default is
-/// enabled, the parallel-Huffman JPEG decoder
-/// ([`pdf_interp::device_kernel_enabled`]).  Otherwise an `Auto` session
-/// renders on the CPU: no Vulkan device, CUDA context, image cache or
-/// nvJPEG decoder is created, and an nvJPEG2000 decoder only on a thread
-/// that meets an image it takes.
-#[cfg(any(
-    feature = "gpu-icc",
-    feature = "cache",
-    feature = "vulkan",
-    feature = "nvjpeg"
-))]
-pub(crate) fn auto_uses_device() -> bool {
-    use pdf_interp::{DeviceKernel, device_kernel_enabled};
-    device_kernel_enabled(DeviceKernel::HuffmanJpeg)
-}
-
-/// The CUDA context of a session under `policy`.  Under `Auto` a Vulkan
-/// backend wins (`vk_won_auto`) and CUDA is not initialised, which saves
-/// its ~240 ms start-up for a path the session will not use.
-#[cfg(any(feature = "gpu-icc", feature = "cache"))]
-fn session_gpu_ctx(
-    policy: BackendPolicy,
-    vk_won_auto: bool,
-) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
-    let ctx = if vk_won_auto {
-        None
-    } else {
-        init_gpu_ctx(policy)?
-    };
-    if matches!(policy, BackendPolicy::Auto) {
-        log_auto_resolution_once(vk_won_auto, ctx.is_some());
-    }
-    Ok(ctx)
-}
-
 /// Shared session assembly from an already-opened document — the backend init,
 /// image cache, doc id, prefetcher, and `RasterSession` construction common to
 /// both the path and in-memory entry points.
@@ -499,18 +456,10 @@ fn open_session_with_doc(
     #[cfg(feature = "vulkan")]
     let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
     #[cfg(feature = "vulkan")]
-    let vk_won_auto = vk_backend.is_some() && matches!(config.policy, BackendPolicy::Auto);
-    #[cfg(not(feature = "vulkan"))]
-    let vk_won_auto = false;
-    #[cfg(feature = "vulkan")]
     let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
 
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
-    let gpu_ctx = session_gpu_ctx(config.policy, vk_won_auto)?;
-    #[cfg(not(any(feature = "gpu-icc", feature = "cache")))]
-    if matches!(config.policy, BackendPolicy::Auto) {
-        log_auto_resolution_once(vk_won_auto, false);
-    }
+    let gpu_ctx = init_gpu_ctx(config.policy)?;
 
     #[cfg(feature = "vaapi")]
     let vaapi_queue = crate::decode_queue::build_vaapi_queue(&config.vaapi_device, config.policy)
@@ -594,8 +543,6 @@ fn open_session_with_doc(
         vk_backend,
         #[cfg(feature = "vulkan")]
         device_pages,
-        #[cfg(all(feature = "vulkan", feature = "gpu-jpeg-huffman"))]
-        vulkan_device: config.vulkan_device.clone(),
         #[cfg(feature = "vaapi")]
         vaapi_queue,
         #[cfg(feature = "cache")]
@@ -611,7 +558,7 @@ fn open_session_with_doc(
 /// resolved to: the Vulkan backend when it holds one, otherwise the CUDA
 /// context, otherwise none.  The two are not initialised together (see
 /// `open_session_with_doc`), so the cache follows the backend every other
-/// kernel of the session runs on, under `Auto` as under `Force*`.
+/// kernel of the session runs on.
 ///
 /// The disk tier is attached when `PDF_RASTER_CACHE_DIR` names its root
 /// ([`gpu::cache::DiskTier::try_new`]); otherwise the cache is in-process
@@ -678,35 +625,11 @@ fn new_vulkan_image_cache(
     gpu::cache::DeviceImageCache::new(Arc::clone(backend), vram, gpu::cache::HostBudget::DEFAULT)
 }
 
-/// Makes [`log_auto_resolution_once`] fire once per process;
-/// `open_session` may run once per page (comic archives).
-static AUTO_RESOLUTION_LOGGED: std::sync::Once = std::sync::Once::new();
-
-/// Log, once per process at `debug` level, which backend
-/// [`BackendPolicy::Auto`] resolved to.
-fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
-    AUTO_RESOLUTION_LOGGED.call_once(|| {
-        if vulkan_won {
-            log::debug!("rasterrocket: Auto backend resolution: Vulkan won, CUDA init skipped");
-        } else if cuda_available {
-            log::debug!("rasterrocket: Auto backend resolution: CUDA");
-        } else {
-            log::debug!("rasterrocket: Auto backend resolution: CPU (no GPU backend available)");
-        }
-    });
-}
-
 /// Initialise the CUDA GPU context for ICC colour transforms and image blits.
 ///
-/// Returns `None` on `CpuOnly` and `ForceVulkan`, and on `Auto` unless
-/// [`auto_uses_device`].  Errors loudly on
+/// Returns `None` on `Auto`, `CpuOnly` and `ForceVulkan`.  Errors loudly on
 /// `ForceCuda` if init fails; logs a warning and returns `None` on
-/// `Auto` / `ForceVaapi` if init fails.
-///
-/// The caller is expected to short-circuit *before* calling this when
-/// Vulkan already won under `Auto` (see `open_session`) — keeping that
-/// dispatch decision at the call site lets this function stay
-/// policy-pure.
+/// `ForceVaapi` if init fails.
 ///
 /// The CUDA context, stream, and 7 PTX modules cost ~240 ms warm /
 /// ~1100 ms cold to build, and are process-wide state — there is no
@@ -715,7 +638,7 @@ fn log_auto_resolution_once(vulkan_won: bool, cuda_available: bool) {
 /// sessions (e.g. one page per archive across 100 archives) pay the
 /// cost once instead of once per `open_session` call.
 ///
-/// Failures are also cached: on `Auto`/`ForceVaapi` we retain the
+/// Failures are also cached: on `ForceVaapi` we retain the
 /// fallback `None` so we don't re-attempt CUDA init every session and
 /// log the same warning hundreds of times.  `ForceCuda` still surfaces
 /// the cached error message verbatim because the caller asked us to
@@ -725,9 +648,10 @@ static GPU_CTX: std::sync::OnceLock<Result<Arc<gpu::GpuCtx>, String>> = std::syn
 
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
 fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
-    if matches!(policy, BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan)
-        || (matches!(policy, BackendPolicy::Auto) && !auto_uses_device())
-    {
+    if matches!(
+        policy,
+        BackendPolicy::Auto | BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan
+    ) {
         return Ok(None);
     }
 

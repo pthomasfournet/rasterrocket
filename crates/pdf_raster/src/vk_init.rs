@@ -10,7 +10,6 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::open::auto_uses_device;
 use crate::{BackendPolicy, RasterError};
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
@@ -44,15 +43,11 @@ static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
 /// Return the Vulkan backend for `selector` under `policy`.
 ///
-/// Policies other than `Auto` and `ForceVulkan` return `Ok(None)` without
-/// touching Vulkan, and so does `Auto` while every device kernel is dormant
-/// (see [`auto_uses_device`]).  An unavailable Vulkan is `Ok(None)` under `Auto` (the
-/// caller falls through to CUDA, then CPU) and an error under
-/// `ForceVulkan`.  A selector that does not resolve is an error whenever
-/// Vulkan is initialised, under either policy, since it is a configuration
-/// mistake rather than missing hardware; under `Auto` with every Vulkan
-/// kernel dormant it is still resolved against the enumerated devices, but
-/// no device is opened.
+/// Only `ForceVulkan` opens a device; every other policy returns `Ok(None)`
+/// without opening one.  A selector that does not resolve is an error under
+/// `ForceVulkan` and `Auto`, since it is a configuration mistake rather than
+/// missing hardware; under `Auto` it is resolved against the enumerated
+/// devices only.  An unavailable Vulkan is an error under `ForceVulkan`.
 ///
 /// # Errors
 ///
@@ -63,32 +58,25 @@ pub(crate) fn init_vk_backend(
     policy: BackendPolicy,
     selector: Option<&str>,
 ) -> Result<Option<Arc<VulkanBackend>>, RasterError> {
-    if !matches!(policy, BackendPolicy::Auto | BackendPolicy::ForceVulkan) {
-        return Ok(None);
-    }
-    if matches!(policy, BackendPolicy::Auto) && !auto_uses_device() {
-        log::debug!("rasterrocket: every device kernel is dormant; Auto leaves Vulkan idle");
-        if let Some(selector) = selector
-            && let Err(InitError::Selection(msg)) = checked_selector(selector)
-        {
-            return Err(RasterError::InvalidOptions(msg));
+    match policy {
+        BackendPolicy::ForceVulkan => {}
+        BackendPolicy::Auto => {
+            if let Some(selector) = selector
+                && let Err(InitError::Selection(msg)) = checked_selector(selector)
+            {
+                return Err(RasterError::InvalidOptions(msg));
+            }
+            return Ok(None);
         }
-        return Ok(None);
+        _ => return Ok(None),
     }
     match cached_backend(selector) {
         Ok(b) => Ok(Some(b)),
         Err(InitError::Selection(msg)) => Err(RasterError::InvalidOptions(msg)),
-        Err(InitError::Unavailable(e)) => {
-            if matches!(policy, BackendPolicy::ForceVulkan) {
-                Err(RasterError::BackendUnavailable(format!(
-                    "Vulkan backend required but unavailable: {e}. \
-                     Verify with `vulkaninfo` that a Vulkan 1.3+ device is present."
-                )))
-            } else {
-                log::debug!("rasterrocket: Vulkan unavailable under Auto ({e}); trying CUDA next");
-                Ok(None)
-            }
-        }
+        Err(InitError::Unavailable(e)) => Err(RasterError::BackendUnavailable(format!(
+            "Vulkan backend required but unavailable: {e}. \
+             Verify with `vulkaninfo` that a Vulkan 1.3+ device is present."
+        ))),
     }
 }
 
@@ -97,9 +85,7 @@ pub(crate) fn init_vk_backend(
 /// # Errors
 ///
 /// [`BackendError::DeviceSelection`] for an empty selector.
-pub(crate) fn parse_selector(
-    selector: Option<&str>,
-) -> Result<Option<DeviceSelector>, BackendError> {
+fn parse_selector(selector: Option<&str>) -> Result<Option<DeviceSelector>, BackendError> {
     selector.map(str::parse).transpose()
 }
 
@@ -164,9 +150,8 @@ mod tests {
     use super::init_vk_backend;
     use crate::{BackendPolicy, RasterError};
 
-    /// A selector naming no device is a configuration error under `Auto`
-    /// even while every device kernel is dormant (the default thresholds of
-    /// this test process) and no device is opened.
+    /// A selector naming no device is a configuration error under `Auto`,
+    /// which opens no device.
     #[test]
     fn auto_rejects_an_unresolvable_selector_while_vulkan_is_idle() {
         const SELECTOR: &str = "no-such-gpu-7f3c";

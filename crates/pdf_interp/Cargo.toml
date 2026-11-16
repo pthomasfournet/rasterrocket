@@ -25,7 +25,6 @@ vaapi            = ["dep:gpu", "gpu/vaapi"]
 gpu-icc          = ["dep:gpu"]
 cache            = ["dep:gpu", "gpu/cache"]
 vulkan           = ["dep:gpu", "gpu/vulkan"]
-gpu-jpeg-huffman = ["dep:gpu", "gpu/gpu-jpeg-huffman"]
 # Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai,
 # Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the
 # binary (fonts/noto/, ~0.75 MB), drawn when no installed face covers a

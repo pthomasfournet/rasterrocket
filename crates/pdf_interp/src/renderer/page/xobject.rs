@@ -201,12 +201,7 @@ impl PageRenderer<'_> {
     /// remaining tint-transform work curtailed its colours (see
     /// [`TintBudget::curtailments`](crate::resources::image::colorspace::TintBudget::curtailments)).
     #[cfg_attr(
-        not(any(
-            feature = "nvjpeg",
-            feature = "nvjpeg2k",
-            feature = "gpu-jpeg-huffman",
-            feature = "gpu-icc"
-        )),
+        not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-icc")),
         expect(
             clippy::needless_pass_by_ref_mut,
             reason = "the GPU decoders are borrowed mutably and the device ICC counts \
@@ -258,23 +253,7 @@ impl PageRenderer<'_> {
             target,
             depth: self.canvas.kind().depth(),
         };
-        // Route to whichever GPU JPEG decoder is active (only one is Some per render).
-        // Each branch is a separately monomorphised call; no decoder is wasted.
-        #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-        let resolution = if self.jpeg_vk.is_some() {
-            self.resources
-                .image(request, &mut ctx, self.jpeg_vk.as_mut())
-        } else {
-            self.resources
-                .image(request, &mut ctx, self.jpeg_gpu.as_mut())
-        };
-        #[cfg(not(all(feature = "gpu-jpeg-huffman", feature = "vulkan")))]
-        let resolution = self.resources.image(
-            request,
-            &mut ctx,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            self.jpeg_gpu.as_mut(),
-        );
+        let resolution = self.resources.image(request, &mut ctx);
         #[cfg(feature = "gpu-icc")]
         self.diag.add_device_icc(&icc_counts);
         (resolution, self.tint_budget.curtailments() == curtailed)

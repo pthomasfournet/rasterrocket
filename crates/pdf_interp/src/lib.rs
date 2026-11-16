@@ -50,22 +50,10 @@ pub use unsupported::{
 };
 pub use working_space::WorkingSpace;
 
-/// The effective parallel-Huffman JPEG dispatch threshold in pixels, unless
-/// `PDF_RASTER_HUFFMAN_THRESHOLD` overrides it.  `u32::MAX` means no JPEG
-/// decodes on a device.
-#[cfg(feature = "gpu-jpeg-huffman")]
-#[must_use]
-pub fn huffman_threshold() -> u32 {
-    resources::image::huffman_threshold()
-}
-
 /// A device kernel that a dispatch threshold can disable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeviceKernel {
-    /// The parallel-Huffman JPEG decoder (`huffman_threshold`, feature
-    /// `gpu-jpeg-huffman`).
-    HuffmanJpeg,
     /// The nvJPEG decoder (`GPU_JPEG_THRESHOLD_PX`, feature `nvjpeg`).
     NvJpeg,
 }
@@ -73,26 +61,9 @@ pub enum DeviceKernel {
 /// Whether `kernel` can dispatch at all.  A threshold equal to its type's
 /// maximum disables its kernel, and a kernel not compiled into this build
 /// is disabled.
-#[cfg_attr(
-    not(feature = "gpu-jpeg-huffman"),
-    expect(
-        clippy::missing_const_for_fn,
-        reason = "non-const only in builds that read a threshold"
-    )
-)]
 #[must_use]
-pub fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
+pub const fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
     match kernel {
-        DeviceKernel::HuffmanJpeg => {
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            {
-                huffman_threshold() != u32::MAX
-            }
-            #[cfg(not(feature = "gpu-jpeg-huffman"))]
-            {
-                false
-            }
-        }
         DeviceKernel::NvJpeg => {
             #[cfg(feature = "nvjpeg")]
             {
@@ -1311,11 +1282,6 @@ startxref\n180\n%%EOF"
     #[test]
     fn a_device_kernel_is_enabled_only_below_its_maximum_threshold() {
         use super::{DeviceKernel, device_kernel_enabled};
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        let huffman = super::huffman_threshold() != u32::MAX;
-        #[cfg(not(feature = "gpu-jpeg-huffman"))]
-        let huffman = false;
-        assert_eq!(device_kernel_enabled(DeviceKernel::HuffmanJpeg), huffman);
         #[cfg(feature = "nvjpeg")]
         let nvjpeg = crate::resources::image::GPU_JPEG_THRESHOLD_PX != u32::MAX;
         #[cfg(not(feature = "nvjpeg"))]

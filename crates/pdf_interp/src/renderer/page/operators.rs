@@ -414,31 +414,7 @@ impl PageRenderer<'_> {
                     target,
                     depth: self.canvas.kind().depth(),
                 };
-                // Route to whichever GPU JPEG decoder is active (only one is Some per render).
-                #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-                let decoded = if self.jpeg_vk.is_some() {
-                    crate::resources::image::decode_inline_image(
-                        &mut ctx,
-                        params,
-                        data,
-                        self.jpeg_vk.as_mut(),
-                    )
-                } else {
-                    crate::resources::image::decode_inline_image(
-                        &mut ctx,
-                        params,
-                        data,
-                        self.jpeg_gpu.as_mut(),
-                    )
-                };
-                #[cfg(not(all(feature = "gpu-jpeg-huffman", feature = "vulkan")))]
-                let decoded = crate::resources::image::decode_inline_image(
-                    &mut ctx,
-                    params,
-                    data,
-                    #[cfg(feature = "gpu-jpeg-huffman")]
-                    self.jpeg_gpu.as_mut(),
-                );
+                let decoded = crate::resources::image::decode_inline_image(&mut ctx, params, data);
                 #[cfg(feature = "gpu-icc")]
                 self.diag.add_device_icc(&icc_counts);
                 match decoded {

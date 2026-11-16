@@ -391,8 +391,6 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &ImageCache, job: &PrefetchJ
             name: NAME,
             draw_size: job.draw_size,
         },
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
     );
 }
 

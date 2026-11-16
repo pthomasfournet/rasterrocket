@@ -131,12 +131,8 @@ use crate::separation::{CanvasRequest, InkSetup};
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::backend::cuda::CudaBackend;
 #[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::jpeg_decoder::JpegGpuDecoder;
 #[cfg(feature = "nvjpeg")]
 use gpu::nvjpeg::NvJpegDecoder;
 #[cfg(feature = "nvjpeg2k")]
@@ -436,14 +432,6 @@ pub struct PageRenderer<'doc> {
     /// use unless [`set_optional_content`](Self::set_optional_content)
     /// supplied one.
     optional_content: std::cell::OnceCell<Arc<crate::OptionalContent>>,
-    /// GPU parallel-Huffman JPEG decoder via the CUDA backend.
-    /// `None` means the path is inactive.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    jpeg_gpu: Option<JpegGpuDecoder<CudaBackend>>,
-    /// GPU parallel-Huffman JPEG decoder via the Vulkan backend.
-    /// Mutually exclusive with `jpeg_gpu` — only one is `Some` per render call.
-    #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-    jpeg_vk: Option<JpegGpuDecoder<VulkanBackend>>,
     /// GPU-accelerated JPEG decoder, present when the `nvjpeg` feature is enabled
     /// and a CUDA device is available.  `None` means CPU-only JPEG decode.
     #[cfg(feature = "nvjpeg")]
@@ -763,10 +751,6 @@ impl<'doc> PageRenderer<'doc> {
             filter_counts: [0u32; IMAGE_FILTER_COUNT],
             marked_content: operators::MarkedContent::default(),
             optional_content: std::cell::OnceCell::new(),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            jpeg_gpu: None,
-            #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-            jpeg_vk: None,
             #[cfg(feature = "nvjpeg")]
             nvjpeg: None,
             #[cfg(feature = "vaapi")]

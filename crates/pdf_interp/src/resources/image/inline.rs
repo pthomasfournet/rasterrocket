@@ -6,9 +6,6 @@ use super::dispatch::{ImageStream, decode_image_stream};
 use super::{DecodedImage, ImageDecodeCtx, ImageResolution, validated_dims};
 use crate::resources::dict_ext::DictExt;
 
-#[cfg(feature = "gpu-jpeg-huffman")]
-use gpu::jpeg_decoder::JpegGpuDecoder;
-
 #[cfg(test)]
 use super::ImageColorSpace;
 
@@ -41,13 +38,10 @@ use super::ImageColorSpace;
 /// [`ImageResolution::Absent`] for an image whose colour space paints
 /// nothing.
 #[must_use]
-pub(crate) fn decode_inline_image<
-    #[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend,
->(
+pub(crate) fn decode_inline_image(
     ctx: &mut ImageDecodeCtx<'_>,
     params: &[u8],
     data: &[u8],
-    #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<&mut JpegGpuDecoder<B>>,
 ) -> ImageResolution {
     let failed = |what: String| {
         log::warn!("inline image: {what}");
@@ -86,8 +80,6 @@ pub(crate) fn decode_inline_image<
         None,
         #[cfg(feature = "cache")]
         None,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        jpeg_gpu,
     ) {
         Ok(decoded) => ImageResolution::Ok(DecodedImage {
             image: decoded.image,
@@ -375,8 +367,6 @@ mod tests {
             &mut ctx_with_color_spaces(&doc, Some(color_spaces)),
             params,
             data,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         );
         match resolution {
             ImageResolution::Ok(decoded) => Some(decoded.image),
@@ -448,8 +438,6 @@ mod tests {
             &mut ctx_with_color_spaces(&doc, Some(&cs)),
             b"/W 1 /H 1 /CS /CSn /BPC 8",
             &[255],
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
         );
         assert!(matches!(resolution, ImageResolution::Absent));
     }

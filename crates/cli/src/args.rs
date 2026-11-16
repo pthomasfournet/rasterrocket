@@ -544,13 +544,10 @@ pub(crate) struct Args {
     // ── Backend selection ─────────────────────────────────────────────────────
     /// Compute backend for image decoding and GPU kernels.
     ///
-    /// `auto`   — CPU, unless the GPU Huffman JPEG decoder is enabled by its
-    ///            threshold override (`PDF_RASTER_HUFFMAN_THRESHOLD`); then
-    ///            Vulkan if compiled in
-    ///            and present, else CUDA, else CPU (silent fallback at every
-    ///            step).  Independently, a binary built with `nvjpeg2k`
-    ///            decodes a JPEG 2000 image of at least 2 097 152 pixels on
-    ///            the GPU when it is drawn at more than half its size, and
+    /// `auto`   — CPU; no Vulkan device or CUDA context is opened at
+    ///            start-up.  A binary built with `nvjpeg2k` decodes a
+    ///            JPEG 2000 image of at least 2 097 152 pixels on the GPU
+    ///            when it is drawn at more than half its size, and
     ///            --gpu-pages opens a Vulkan device.  This is the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
     /// `cuda`   — Require CUDA (nvJPEG/ICC/image cache); exit with error if unavailable.

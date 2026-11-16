@@ -13,9 +13,8 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 /// Controls which compute backend is used for image decoding and GPU kernels.
 ///
 /// The default is [`Auto`](BackendPolicy::Auto), which renders on the CPU
-/// unless a device kernel is enabled by its threshold, and then prefers
-/// Vulkan when compiled in, falls through to CUDA, and finally to the CPU
-/// paths.  The `Force*` variants turn silent fallbacks into hard
+/// and opens no Vulkan device or CUDA context at start-up.  The `Force*`
+/// variants select a device backend and turn silent fallbacks into hard
 /// errors so you can tell immediately whether the expected hardware path is
 /// actually being taken.
 ///
@@ -26,10 +25,8 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    /// Auto: the CPU, unless the parallel-Huffman JPEG decoder is enabled
-    /// by its threshold, which it is not by default; then prefer Vulkan when present, fall through to
-    /// CUDA, then CPU.  Silent fallback at every step.  A CPU session
-    /// initialises no GPU backend, image cache or nvJPEG decoder; with the
+    /// Auto: the CPU.  The session initialises no Vulkan device, CUDA
+    /// context, image cache or nvJPEG decoder at start-up; with the
     /// `nvjpeg2k` feature a rendering thread builds its nvJPEG2000 decoder
     /// when it first draws a `JPXDecode` image the decoder takes at more
     /// than half its size on some axis; smaller draws decode on the CPU.
@@ -227,9 +224,8 @@ pub struct SessionConfig {
     /// that is not a valid index is matched as a name.  A value that does
     /// not resolve to exactly one usable device makes [`open_session`]
     /// return [`RasterError::InvalidOptions`] listing the enumerated
-    /// devices, under `Auto` as well as `ForceVulkan`; with every Vulkan kernel
-    /// dormant, `Auto` resolves it against the enumerated devices without
-    /// opening one.
+    /// devices, under `Auto` as well as `ForceVulkan`; `Auto` resolves it
+    /// against the enumerated devices without opening one.
     ///
     /// [`SessionConfig::with_policy`] sets `None`; [`SessionConfig::default`]
     /// reads `PDF_RASTER_VULKAN_DEVICE` (see

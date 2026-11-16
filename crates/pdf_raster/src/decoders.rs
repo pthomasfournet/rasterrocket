@@ -1,7 +1,7 @@
 //! Lending the calling thread's GPU image decoders to a page renderer and
 //! returning them afterwards.
 
-#[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
+#[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k"))]
 use crate::gpu_init;
 use crate::{BackendPolicy, RasterError, RasterSession};
 
@@ -18,19 +18,14 @@ use crate::{BackendPolicy, RasterError, RasterSession};
 /// failure is returned as `RasterError::BackendUnavailable` rather than
 /// silently falling back.
 #[cfg_attr(
-    not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
+    not(any(feature = "nvjpeg", feature = "nvjpeg2k")),
     expect(
         clippy::unnecessary_wraps,
         reason = "Result<()> only carries an error from the GPU-decoder init paths"
     )
 )]
 #[cfg_attr(
-    not(any(
-        feature = "nvjpeg",
-        feature = "nvjpeg2k",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman"
-    )),
+    not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi")),
     expect(
         clippy::missing_const_for_fn,
         reason = "body collapses to a single match when no GPU-decoder feature is on"
@@ -46,16 +41,8 @@ pub(crate) fn lend_decoders(
     }
     #[cfg(not(feature = "vaapi"))]
     let _ = session;
-    #[cfg(not(any(
-        feature = "nvjpeg",
-        feature = "nvjpeg2k",
-        feature = "vaapi",
-        feature = "gpu-jpeg-huffman"
-    )))]
+    #[cfg(not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "vaapi")))]
     let _ = renderer;
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    lend_huffman_decoder(session, renderer, effective_policy)?;
 
     #[cfg(feature = "nvjpeg")]
     if wants_nvjpeg_decoder(
@@ -140,87 +127,21 @@ const fn nvjpeg2k_supply(policy: BackendPolicy) -> Nvjpeg2kSupply {
     }
 }
 
-/// Whether `policy` builds this thread's parallel-Huffman JPEG decoder,
-/// `kernel_enabled` being [`pdf_interp::device_kernel_enabled`] for it.
-/// `Auto` builds it only while the kernel can dispatch; `ForceCuda` and
-/// `ForceVulkan` build it regardless, so a missing device fails the forced
-/// policy; `CpuOnly` and `ForceVaapi` never build it.
-#[cfg(feature = "gpu-jpeg-huffman")]
-const fn wants_huffman_decoder(policy: BackendPolicy, kernel_enabled: bool) -> bool {
-    match policy {
-        BackendPolicy::Auto => kernel_enabled,
-        BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan => true,
-        BackendPolicy::CpuOnly => false,
-        #[cfg(feature = "vaapi")]
-        BackendPolicy::ForceVaapi => false,
-    }
-}
-
-/// Lend this thread's parallel-Huffman JPEG decoder to `renderer`: the
-/// Vulkan one when Vulkan is the active backend, the CUDA one otherwise.
-/// Nothing is built or lent when [`wants_huffman_decoder`] says no.
-#[cfg(feature = "gpu-jpeg-huffman")]
-fn lend_huffman_decoder(
-    session: &RasterSession,
-    renderer: &mut pdf_interp::renderer::PageRenderer,
-    effective_policy: BackendPolicy,
-) -> Result<(), RasterError> {
-    let kernel_enabled = pdf_interp::device_kernel_enabled(pdf_interp::DeviceKernel::HuffmanJpeg);
-    if !wants_huffman_decoder(effective_policy, kernel_enabled) {
-        return Ok(());
-    }
-    // Vulkan wins Auto when a Vulkan backend is available.
-    #[cfg(feature = "vulkan")]
-    if matches!(effective_policy, BackendPolicy::ForceVulkan)
-        || (matches!(effective_policy, BackendPolicy::Auto) && session.vk_backend.is_some())
-    {
-        gpu_init::ensure_jpeg_vk_huffman(effective_policy, session.vulkan_device.as_deref())
-            .map_err(RasterError::BackendUnavailable)?;
-        gpu_init::JPEG_VK_DEC.with(|cell| {
-            if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-                renderer.set_jpeg_vk(slot.take());
-            }
-        });
-        return Ok(());
-    }
-    #[cfg(not(feature = "vulkan"))]
-    let _ = session;
-    gpu_init::ensure_jpeg_gpu_huffman(effective_policy).map_err(RasterError::BackendUnavailable)?;
-    gpu_init::JPEG_CUDA_DEC.with(|cell| {
-        if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-            renderer.set_jpeg_gpu(slot.take());
-        }
-    });
-    Ok(())
-}
-
 /// Return GPU JPEG decoders from the renderer back into TLS slots for reuse.
 ///
 /// The VA-API path is omitted here: `JpegQueueHandle` is cheaply cloneable and
 /// is simply dropped with the renderer — no reclaim step is needed.  The
 /// `Arc<DecodeQueue>` in `RasterSession` keeps the worker alive across pages.
 #[cfg_attr(
-    not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")),
+    not(any(feature = "nvjpeg", feature = "nvjpeg2k")),
     expect(
         clippy::missing_const_for_fn,
         reason = "non-const only in GPU-decoder builds"
     )
 )]
 fn reclaim_decoders(renderer: &mut pdf_interp::renderer::PageRenderer) {
-    #[cfg(not(any(feature = "nvjpeg", feature = "nvjpeg2k", feature = "gpu-jpeg-huffman")))]
+    #[cfg(not(any(feature = "nvjpeg", feature = "nvjpeg2k")))]
     let _ = renderer;
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    gpu_init::JPEG_CUDA_DEC.with(|cell| {
-        if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-            *slot = renderer.take_jpeg_gpu();
-        }
-    });
-    #[cfg(all(feature = "gpu-jpeg-huffman", feature = "vulkan"))]
-    gpu_init::JPEG_VK_DEC.with(|cell| {
-        if let gpu_init::JpegGpuInit::Ready(slot) = &mut *cell.borrow_mut() {
-            *slot = renderer.take_jpeg_vk();
-        }
-    });
     #[cfg(feature = "nvjpeg")]
     gpu_init::NVJPEG_DEC.with(|cell| {
         if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
@@ -263,24 +184,6 @@ pub(crate) struct DecoderReclaim<'r, 'doc>(pub &'r mut pdf_interp::renderer::Pag
 impl Drop for DecoderReclaim<'_, '_> {
     fn drop(&mut self) {
         reclaim_decoders(self.0);
-    }
-}
-
-#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
-mod tests {
-    use super::wants_huffman_decoder;
-    use crate::BackendPolicy;
-
-    #[test]
-    fn auto_builds_no_huffman_decoder_while_the_kernel_is_disabled() {
-        assert!(!wants_huffman_decoder(BackendPolicy::Auto, false));
-        assert!(wants_huffman_decoder(BackendPolicy::Auto, true));
-        for forced in [BackendPolicy::ForceCuda, BackendPolicy::ForceVulkan] {
-            assert!(wants_huffman_decoder(forced, false), "{forced:?}");
-        }
-        assert!(!wants_huffman_decoder(BackendPolicy::CpuOnly, true));
-        #[cfg(feature = "vaapi")]
-        assert!(!wants_huffman_decoder(BackendPolicy::ForceVaapi, true));
     }
 }
 
