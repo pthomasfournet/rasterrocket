@@ -785,7 +785,7 @@ pub enum BackendPolicy {
 
 Controls which compute backend is used. The `Force*` variants convert silent GPU fallbacks into hard `RasterError::BackendUnavailable` errors so you know immediately whether the expected hardware path is actually active. `ForceVaapi` is only present when the `vaapi` Cargo feature is enabled.
 
-`ForceVulkan` runs the session's GPU work on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel, Apple via `MoltenVK`).  In a build with the `cache` feature the device-resident image cache keeps its images in Vulkan device memory and draws them with the Vulkan blit kernel, byte-identical to the CPU render; with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device too.
+`ForceVulkan` runs the session's GPU work on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`; see [Tested hardware](../README.md#tested-hardware)).  In a build with the `cache` feature the device-resident image cache keeps its images in Vulkan device memory and draws them with the Vulkan blit kernel, byte-identical to the CPU render; with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device too.
 
 `BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`: `value()` returns the rejected input, and its `Display` names it and lists the accepted names (`unknown backend "cdua"; expected one of auto, cpu, cuda, vulkan`). `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
@@ -1396,20 +1396,20 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 
 ### CPU
 
-**Supported:** x86-64 (AMD and Intel) and `aarch64` (ARM / Apple Silicon).
+**Supported:** x86-64 (AMD and Intel) and `aarch64` (ARM / Apple Silicon). The hardware each claim was tested on is listed in the README's [Tested hardware](../README.md#tested-hardware); anything else is untested.
 
 **x86-64:**
 - AVX2 SIMD blend and fill paths are runtime-detected with a scalar fallback.
 - AVX-512 (`avx512f/bw/vl/dq/vnni/vpopcntdq` and related sub-extensions) is activated by building with `-C target-cpu=native` on a compatible CPU. Developed and benchmarked on an AMD Ryzen 9900X3D.
-- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only.
+- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only. Intel CPUs are untested since the i7-8700K testbench was retired (2026-07).
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A). No runtime detection needed.
-- `cargo check --target aarch64-unknown-linux-gnu` is clean; no Apple Metal native backend yet (Vulkan via `MoltenVK` covers Apple).
+- Tested on an Apple A18 Pro (macOS) and in CI on GitHub's arm64 Linux and Apple-silicon macOS runners (CPU only); untested on M-series hardware and on other aarch64 Linux machines. No Apple Metal native backend yet (Vulkan via `MoltenVK` covers Apple).
 
 ### GPU
 
-**NVIDIA (CUDA 13.0–13.3):**
+**NVIDIA (CUDA 13.0–13.3):** tested on an RTX 5070 (`sm_120`) only; other NVIDIA GPUs are untested.
 
 | Feature flag | Minimum requirement | Notes |
 |---|---|---|
@@ -1421,19 +1421,19 @@ Implements `std::error::Error`; `InterpError::Pdf(e)` has `e` as its `source()`.
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding; a CUDA 13.x driver is required.
 
-**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via `MoltenVK`):**
+**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`):**
 
 | Feature flag | Supported hardware | Libraries required |
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, NVIDIA driver); `slangc` from the LunarG Vulkan SDK at *build* time. |
 
-Vulkan covers whole-page rendering (`gpu_pages`).  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`; `nvjpeg` stays CUDA-only.
+Vulkan covers whole-page rendering (`gpu_pages`), tested on an RTX 5070, an AMD Raphael iGPU (RADV), llvmpipe and an A18 Pro's GPU (MoltenVK); Intel GPUs (ANV) and M-series Macs are untested.  With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`; `nvjpeg` stays CUDA-only.
 
-**VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
+**VA-API (Linux iGPU/dGPU — AMD VCN; Intel Quick Sync and Intel Arc untested):**
 
 | Feature flag | Supported hardware | Libraries required |
 |---|---|---|
-| `vaapi` | AMD VCN (Raphael+), Intel UHD 630+, Intel Arc | `libva.so.2`, `libva-drm.so.2` |
+| `vaapi` | AMD VCN (tested on Raphael, VCN 4.0); Intel UHD 630+ and Intel Arc (untested) | `libva.so.2`, `libva-drm.so.2` |
 
 VA-API provides hardware JPEG baseline decode; CMYK and progressive JPEGs fall through to the CPU. When both `nvjpeg` and `vaapi` are active, nvJPEG is tried first. Both share the `GPU_JPEG_THRESHOLD_PX` gate, which is `u32::MAX`, so in a default build neither decodes anything and every JPEG is decoded on the CPU (see [GPU dispatch thresholds](#gpu-dispatch-thresholds)).
 
@@ -1456,8 +1456,8 @@ and the guides for [Linux](platforms/linux.md), [macOS](platforms/macos.md) and
 | `gpu-icc` | CUDA 13, or `vulkan` | An image in an ICC-based CMYK space converts through the profile's 17⁴ lookup table on the session's GPU backend (Vulkan when attached, else CUDA) from 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it); the device output is byte-identical to the CPU evaluation of the table. Smaller images, those a Vulkan device whose kernel fails a one-time exactness check declines, and those a device conversion fails on convert through the profile transform, as without a backend; a GPU session therefore differs from a CPU session only in the images counted in `PageDiagnostics::device_icc_conversions`. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
 | `cache` | CUDA 13 | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. Runs on the session's backend: CUDA, or Vulkan under `--backend vulkan` with the `vulkan` feature; an `Auto` session has none. A JPEG drawn below its resolution (every scanned page rendered under its scan resolution) is neither looked up nor inserted: it is area-averaged on the host from host-resident samples. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
-| `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU; adds `BackendPolicy::ForceVaapi` and `--backend vaapi`. Shares the disabled `GPU_JPEG_THRESHOLD_PX` gate with `nvjpeg`, so JPEGs still decode on the CPU. |
-| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. | Vulkan compute backend. Whole-page rendering (`gpu_pages`; with `gpu-icc`, the ICC CMYK lookup) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). With `cache`, the device image cache and its blit kernel run on the Vulkan device. No nvJPEG under this backend. |
+| `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU (tested on an AMD iGPU; untested on Intel); adds `BackendPolicy::ForceVaapi` and `--backend vaapi`. Shares the disabled `GPU_JPEG_THRESHOLD_PX` gate with `nvjpeg`, so JPEGs still decode on the CPU. |
+| `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. | Vulkan compute backend. Whole-page rendering (`gpu_pages`; with `gpu-icc`, the ICC CMYK lookup) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`). With `cache`, the device image cache and its blit kernel run on the Vulkan device. No nvJPEG under this backend. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 | `bundled-fonts` | — (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the library (~0.75 MB, SIL OFL 1.1; provenance in `crates/pdf_interp/fonts/README.md`). A character of a non-embedded font that neither its substitute nor any installed face covers is drawn from them; an installed face is always preferred. Disable with `default-features = false` for a slim build. |
 

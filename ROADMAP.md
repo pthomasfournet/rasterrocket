@@ -2499,7 +2499,7 @@ Re-bench result: cold-render regression collapsed from 14× to 1.1–1.9× on lo
 
 **Why now (and why not before):**
 
-Vulkan compute on the dev machine (RTX 5070) was confirmed 2026-05-07 to expose Vulkan 1.4.312, conformance 1.4.1.3, full subgroup operations (the equivalent of CUDA warp intrinsics), tensor cores via `VK_KHR_cooperative_matrix`, and the same SM array CUDA uses. Cross-vendor portability is the real reason — the same SPIR-V kernel runs on AMD (RADV), Intel (ANV), Apple (MoltenVK→Metal), and Mesa lavapipe (CPU debug).
+Vulkan compute on the dev machine (RTX 5070) was confirmed 2026-05-07 to expose Vulkan 1.4.312, conformance 1.4.1.3, full subgroup operations (the equivalent of CUDA warp intrinsics), tensor cores via `VK_KHR_cooperative_matrix`, and the same SM array CUDA uses. Cross-vendor portability is the real reason — the same SPIR-V kernel is meant for AMD (RADV), Intel (ANV), Apple (MoltenVK→Metal), and Mesa's CPU drivers. It has run on RADV (AMD Raphael iGPU), llvmpipe and MoltenVK (A18 Pro); Intel ANV and M-series Macs are untested.
 
 What was missing before Phase 9 was *the abstraction layer to even consider a backend swap*. Phase 9 introduces backend-agnostic shapes (`ImageData::Gpu`, `CachedDeviceImage`, `DevicePageBuffer`); Phase 10 swaps the *implementation* behind those shapes from CUDA-specific to backend-trait-driven, with concrete CUDA and Vulkan backends.
 
@@ -2660,7 +2660,9 @@ not yet appended, so memory stays bounded. Verified through a CUPS `everywhere` 
 `ippeveprinter`: colour pages reach a gray-only printer as sGray at its
 resolution, landscape pages are turned, and the page images round-trip
 pixel-exact. `--list-printers` lists the CUPS queues (`lpstat -e`), the
-default one marked. **Not done:** the Win32 spooler, behind a feature, on Windows.
+default one marked. **Untested:** printing from macOS, and any physical printer
+(back-side orientation under `--duplex`, `--copies` on a printer without copy
+support). **Not done:** the Win32 spooler, behind a feature, on Windows.
 Parity gap: poppler's `pdftocairo` has `-print` / `-printer` on Windows,
 and pdfium renders into a Windows printer context.
 
@@ -2679,7 +2681,8 @@ and pdfium renders into a Windows printer context.
 4. **Done.** `--fax-to NUMBER [--fax-queue NAME]` hands the document to a
    CUPS fax queue (`lp -o phone=`) or to HylaFAX `sendfax`. On Windows it
    points to Windows Fax and Scan; driving the Windows Fax service API is
-   not done.
+   not done. Tested only against a stand-in `sendfax` and the `lp` command line
+   it builds: no fax has gone through a CUPS fax queue, HylaFAX or a fax modem.
 
 No modem code and no internet-fax services.
 
@@ -4493,7 +4496,7 @@ transfers are blocking by design.
 Deferred/blocked items, in full:
 
 - **Phase 8 B–D** — closed (2026-11-12). Phase A shipped as an OSS artifact (v1.0.0) and stays wired but dormant. The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap.
-- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and so does the archive-scale run (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe). The perf-only Task 3 follow-ups were measured and closed (2026-11-13). Fills on the device run only in the `--gpu-pages` page raster, which composites the CPU's exact-area coverage.
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and so does the archive-scale run (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe). The perf-only Task 3 follow-ups were measured and closed (2026-11-13). Fills on the device run only in the `--gpu-pages` page raster, which composites the CPU's exact-area coverage. MoltenVK renders byte-identically on an A18 Pro; Intel ANV and M-series Macs are untested, for want of hardware.
 - **Phase 11 deferred tasks** — closed (2026-11-12): banded rendering is satisfied by `RenderRegion` tiles; the multi-resolution cache and the display-list render path are dropped; a page trace survives only as a regression oracle.
 - **Banded / clip-restricted image decoding** — deferred by measurement (2026-11-04). Every codec decodes an image whole, and the page memo and document store share that one decode between draws and pages. Over the first 40 pages of the 1 125 fixture and archive PDFs (49 661 image draws), the largest decode is 81 MiB and only 3 draws of 16 MiB or more show less than half their image (one 25 MiB JPEG), so decoding just the visible rows would save 45 MiB in all. Hostile sizes are already bounded: the 1 GiB decode budget is checked before allocation and sample buffers are allocated fallibly. Revive for a workload of very large images drawn mostly clipped.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.

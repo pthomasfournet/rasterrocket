@@ -10,22 +10,22 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 ### CPU
 
-**Supported:** x86-64 (AMD and Intel) and `aarch64` (ARM / Apple Silicon).
+**Supported:** x86-64 (AMD and Intel) and `aarch64` (ARM / Apple Silicon). The hardware each claim was tested on is listed in the README's [Tested hardware](../README.md#tested-hardware); anything else is untested.
 
 **x86-64:**
 - AVX2 SIMD paths are runtime-detected with a scalar fallback.
 - AVX-512 (`avx512f/bw/vl/dq/vnni/vpopcntdq` and extensions) is active when built with `-C target-cpu=native` on a compatible CPU. Developed and benchmarked on an AMD Ryzen 9900X3D.
-- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only.
+- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only. Intel CPUs are untested since the i7-8700K testbench was retired (2026-07).
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
-- CI runs clippy and the NEON tests on arm64 Linux, and clippy with the renderer, interpreter and library suites on macOS (Apple silicon); no Apple Metal GPU backend.
+- Tested by hand on an Apple A18 Pro (macOS). CI runs clippy and the NEON tests on GitHub's arm64 Linux runner, and clippy with the renderer, interpreter and library suites on its Apple-silicon macOS runner (a virtual machine, CPU only). No M-series Mac and no aarch64 Linux machine beyond that runner has been tested; no Apple Metal GPU backend.
 
 ### GPU (optional)
 
 Three GPU backends are available on Linux:
 
-**NVIDIA (CUDA 13.0–13.3):**
+**NVIDIA (CUDA 13.0–13.3):** tested on an RTX 5070 (`sm_120`) only; other NVIDIA GPUs are untested.
 
 | Feature | Minimum GPU | Library required |
 |---|---|---|
@@ -37,19 +37,19 @@ Three GPU backends are available on Linux:
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
-**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via `MoltenVK`):**
+**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`):**
 
 | Feature | Supported hardware | Libraries required |
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages made only of solid fills and strokes under rectangular clips whole on the Vulkan device, beside the CPU workers and with the same bytes; it is off by default.  Runs on the RTX 5070, on AMD RADV and on an A-series Apple GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel ANV is untested.
+With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages made only of solid fills and strokes under rectangular clips whole on the Vulkan device, beside the CPU workers and with the same bytes; it is off by default.  Tested on the RTX 5070, on AMD RADV (a Raphael iGPU), on llvmpipe and on an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)); Intel GPUs (ANV) and M-series Macs are untested.
 
-**VA-API (Linux iGPU/dGPU — AMD VCN, Intel Quick Sync, Intel Arc):**
+**VA-API (Linux iGPU/dGPU — AMD VCN; Intel Quick Sync and Intel Arc untested):**
 
 | Feature | Supported hardware | Libraries required |
 |---|---|---|
-| `vaapi` | AMD VCN (Raphael+), Intel UHD 630+, Intel Arc | `libva.so.2`, `libva-drm.so.2` |
+| `vaapi` | AMD VCN (tested on Raphael, VCN 4.0); Intel UHD 630+ and Intel Arc (untested) | `libva.so.2`, `libva-drm.so.2` |
 
 VA-API provides hardware JPEG baseline decode; CMYK and progressive JPEGs fall through to the CPU. It shares the nvJPEG size gate (`GPU_JPEG_THRESHOLD_PX`), which is `u32::MAX`, so in a default build JPEGs are decoded on the CPU even with `vaapi` enabled.
 
@@ -59,12 +59,12 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 
 | Operating system | CPU | GPU | Status | Guide |
 |---|---|---|---|---|
-| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; CI runs the test suite | [Linux](platforms/linux.md) |
-| Linux aarch64 | NEON | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests | [Linux](platforms/linux.md) |
-| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU); no Metal backend | **Supported**; CI runs clippy and the renderer, interpreter and library suites | [macOS](platforms/macos.md) |
+| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; tested on a Ryzen 9 9900X3D with an RTX 5070 and its AMD iGPU; CI runs the test suite | [Linux](platforms/linux.md) |
+| Linux aarch64 | NEON | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests on GitHub's arm64 runner; no other hardware tested | [Linux](platforms/linux.md) |
+| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU; tested on the A18 Pro only); no Metal backend | **Supported**; tested on an A18 Pro; CI runs clippy and the renderer, interpreter and library suites; untested on M-series hardware | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
-| Windows x86-64 | AVX-512 / AVX2 | untested | CI builds and runs clippy and the CPU test suites | [BSD and Windows](platforms/other.md) |
+| Windows x86-64 | AVX-512 / AVX2 | untested | CI builds and runs clippy and the CPU test suites on GitHub's Windows runner; no other Windows machine tested | [BSD and Windows](platforms/other.md) |
 
 AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
 Radeon GPUs.
@@ -90,10 +90,10 @@ For GPU acceleration — NVIDIA (CUDA 13) + Vulkan (cross-vendor) + VA-API (Linu
 # CUDA GPU features (NVIDIA only; full feature set including the image cache):
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["nvjpeg", "nvjpeg2k", "gpu-icc", "gpu-deskew", "cache"] }
 
-# Vulkan compute (cross-vendor — NVIDIA, AMD, Intel, Apple via MoltenVK):
+# Vulkan compute (cross-vendor — NVIDIA, AMD, Intel (untested), Apple via MoltenVK):
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vulkan"] }
 
-# VA-API (AMD/Intel iGPU on Linux — libva required):
+# VA-API (AMD iGPU on Linux, Intel untested — libva required):
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
@@ -384,7 +384,7 @@ cargo build --release -p rasterrocket-cli --features vulkan
 
 The CLI crate forwards each of these feature names to the library.
 
-`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
+`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series; only `sm_120` is tested). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
 ### Dependencies
 

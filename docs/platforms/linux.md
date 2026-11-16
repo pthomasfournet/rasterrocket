@@ -1,11 +1,15 @@
 # rasterrocket on Linux
 
 Linux is the primary platform: every feature, including every GPU backend,
-is developed and tested on it.
+is developed and tested on it, on one x86-64 machine (Ryzen 9 9900X3D, RTX
+5070, the CPU's AMD Raphael iGPU). Other hardware is untested; see
+[Tested hardware](../../README.md#tested-hardware).
 
 - **CI:** each push runs the test suite on x86-64 (`ubuntu-latest`),
   except the GPU tests, which need a device. On arm64 (`ubuntu-24.04-arm`)
-  it runs clippy and the tests of the NEON code paths. A separate workflow
+  it runs clippy and the tests of the NEON code paths; that runner is the
+  only aarch64 Linux machine tested (no Raspberry Pi, Graviton or other
+  arm64 server). A separate workflow
   reports line coverage of the CPU-only suites, and each release tag builds
   a PGO + BOLT x86-64 binary (`scripts/release_pgo_build.sh`), uploaded as
   a workflow artifact.
@@ -33,11 +37,11 @@ kernels on any CPU.
 All GPU features are optional, and all of them fall back to the CPU when no
 device is present.
 
-| Backend | Feature flags | Needs |
-|---|---|---|
-| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver |
-| Vulkan compute | `vulkan` | the LunarG SDK (`slangc`) to build; a Vulkan 1.3 driver to run |
-| VA-API JPEG decode | `vaapi` | `libva` |
+| Backend | Feature flags | Needs | Tested on |
+|---|---|---|---|
+| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver | RTX 5070 (`sm_120`); other NVIDIA GPUs untested |
+| Vulkan compute | `vulkan` | the LunarG SDK (`slangc`) to build; a Vulkan 1.3 driver to run | RTX 5070 (NVIDIA driver), AMD Raphael iGPU (RADV), llvmpipe; Intel (ANV) untested |
+| VA-API JPEG decode | `vaapi` | `libva` | AMD Raphael iGPU (VCN 4.0, Mesa radeonsi); Intel untested |
 
 See [Getting Started](../getting-started.md#gpu-optional) for what each
 backend accelerates, and which kernels are wired in but off by default.
@@ -77,5 +81,7 @@ provides (`cups-client` on Debian and Ubuntu, `cups` on Fedora and Arch);
 `--printer NAME` picks a queue, one of those `rrocket --list-printers`
 lists, else the default destination (`lpstat -d`). The pages are spooled in an anonymous file under `$TMPDIR`,
 else `/var/tmp`. `--fax-to NUMBER` sends a `--fax` document through a CUPS
-fax queue (`--fax-queue NAME`) or, without one, HylaFAX's `sendfax`. See the
+fax queue (`--fax-queue NAME`) or, without one, HylaFAX's `sendfax`. Printing
+is tested through a virtual IPP printer (`ippeveprinter`) only; no physical
+printer, CUPS fax queue or HylaFAX server has been tested. See the
 [CLI reference](../cli-reference.md#printing).

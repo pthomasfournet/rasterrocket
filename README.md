@@ -111,7 +111,7 @@ backend-neutral cache. The full list is in
   ignores (JavaScript, XFA, portable collections, 3D and multimedia
   annotations).
 - **Fax.** A page longer than B4 is sent as A4-length pieces.
-- **Windows** builds and is tested in CI.
+- **Windows** builds and is tested in CI, on GitHub's Windows runner only.
 
 ## What's new in v2.1.0
 
@@ -128,7 +128,8 @@ substituted fonts; no API break.** The full list is in
   paints overprinting graphics on process and spot inks (default off).
 - **Text shaping.** Arabic, Devanagari and other complex scripts drawn with
   a substitute face are shaped; the bundled fallbacks cover more scripts.
-- **HTJ2K** images decode, and **Vulkan runs on macOS** through MoltenVK.
+- **HTJ2K** images decode, and **Vulkan runs on macOS** through MoltenVK
+  (tested on an A18 Pro; untested on M-series Macs).
 - **Faster and bounded.** An image shared by several pages decodes once per
   session; deep clips, synthetic-bold text and curve flattening are faster;
   tint transforms, Type 4 functions and JBIG2 decoding have work budgets,
@@ -460,7 +461,7 @@ and the page/annotation JavaScript-disclosure work).
 ## What's new in v1.0.0
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
-- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
+- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel (untested), or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed after v2.3.0: it lost to the multi-threaded CPU decoder on every measured workload.
@@ -507,12 +508,53 @@ crates.io (see the note at the top).
 
 ## Hardware compatibility
 
-**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux; clippy on x86-64 and arm64 Linux, macOS and Windows; the NEON tests on arm64 Linux; and the renderer, interpreter, library and font suites on macOS and Windows (on Windows also the CLI, parser, colour, encode and comic suites); see the platform guides above.
+### Tested hardware
+
+Current results in these docs come from the machines below (older benchmark
+records also name an i7-8700K + RTX 2080 SUPER testbench, retired 2026-07).
+Code for other hardware is written and built, but a target not listed here
+is **untested**: it is expected to work, nothing more.
+
+| Hardware | What runs on it |
+|---|---|
+| AMD Ryzen 9 9900X3D (Zen 5, AVX-512), Linux x86-64 | everything: the test suites, the AVX-512, AVX2 and scalar tiers, the benchmarks |
+| NVIDIA RTX 5070 (Blackwell, `sm_120`), same machine | CUDA 13 (nvJPEG, nvJPEG2000, ICC lookup table, NPP deskew, image cache) and Vulkan |
+| AMD Raphael iGPU (the 9900X3D's), same machine | Vulkan through RADV; VA-API JPEG decode (VCN 4.0, Mesa radeonsi) |
+| llvmpipe (Mesa's CPU Vulkan driver), same machine | Vulkan |
+| Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
+| GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
+| CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
+
+**Untested:**
+- **M-series Macs** (M1–M4 and later): no hands-on run; only CI's
+  virtualised runner, CPU suites only. MoltenVK has run on the A18 Pro's GPU
+  alone.
+- **Intel GPUs** (UHD/Iris iGPUs, Arc): Vulkan through ANV and VA-API on the
+  Intel media driver are untested.
+- **Intel CPUs:** untested since the i7-8700K testbench was retired
+  (2026-07); the AVX2 tiers still run on the Ryzen and on CI's x86-64
+  runners, whose CPU model GitHub does not fix.
+- **NVIDIA GPUs other than the RTX 5070**: other `CUDA_ARCH` targets
+  (see [the table](#picking-cuda_arch-for-your-gpu)) and datacenter cards
+  (A100, H100).
+- **Native Windows hardware:** Windows runs only in CI; GPU code is not
+  tested on Windows.
+- **aarch64 Linux hardware** other than CI's arm64 runner (Raspberry Pi,
+  Graviton, Ampere), and the SVE2 kernels of the AV1 decoder (the A18 Pro
+  has no SVE).
+- **Intel Macs, FreeBSD, OpenBSD, NetBSD.**
+- **Physical printers and fax:** no real printer (duplex back sides, copies)
+  and no fax modem, CUPS fax queue or HylaFAX server; `--fax-to` is tested
+  only against a stand-in `sendfax` and the `lp` command line it builds.
+
+### Support
+
+**CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. Tested on the hardware above; the platform guides list what each CI leg runs.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
-- **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
+- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070 only.
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. Tested on an RTX 5070, on an AMD integrated GPU (RADV), on llvmpipe and on an A18 Pro's GPU (MoltenVK); untested on Intel GPUs (ANV) and on M-series Macs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
 
@@ -543,16 +585,16 @@ The CLI crate forwards each feature name to the `rasterrocket` library.
 
 The `CUDA_ARCH` environment variable controls which Compute Capability the PTX kernels target. Mismatched arch flags produce kernels the GPU can't load at runtime. Set it to your card's CC (e.g. `sm_75`, `sm_86`, `sm_120`).
 
-| GPU generation | Architecture | `CUDA_ARCH` |
-|---|---|---|
-| GTX 10-series | Pascal | `sm_61` |
-| RTX 20-series, Quadro RTX | Turing | `sm_75` |
-| RTX 30-series, A100 | Ampere | `sm_80` / `sm_86` |
-| RTX 40-series | Ada Lovelace | `sm_89` |
-| H100 / Hopper | Hopper | `sm_90` |
-| RTX 50-series | Blackwell | `sm_120` |
+| GPU generation | Architecture | `CUDA_ARCH` | Tested |
+|---|---|---|---|
+| GTX 10-series | Pascal | `sm_61` | no; CUDA 13 no longer targets Pascal |
+| RTX 20-series, Quadro RTX | Turing | `sm_75` | no (v0.6.0 ran on an RTX 2080 SUPER under CUDA 12; not since) |
+| RTX 30-series, A100 | Ampere | `sm_80` / `sm_86` | no |
+| RTX 40-series | Ada Lovelace | `sm_89` | no |
+| H100 / Hopper | Hopper | `sm_90` | no |
+| RTX 50-series | Blackwell | `sm_120` | yes, RTX 5070 |
 
-Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). The build defaults to `sm_80` if `CUDA_ARCH` is unset; that's a reasonable fallback for any Ampere-or-later card thanks to PTX forward-compatibility, but matching your hardware exactly produces better-optimised code.
+Only `sm_120` is tested; the other rows are untested. Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). The build defaults to `sm_80` if `CUDA_ARCH` is unset; that's a reasonable fallback for any Ampere-or-later card thanks to PTX forward-compatibility, but matching your hardware exactly produces better-optimised code.
 
 ### Feature flags
 
@@ -563,8 +605,8 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `gpu-icc` | GPU CMYK→RGB ICC transform through the grid of the profile's tabulated table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU conversion | CUDA, or Vulkan with `vulkan` |
 | `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
-| `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
-| `vulkan` | Vulkan compute backend (cross-vendor) for whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `vaapi` | Linux iGPU/dGPU JPEG decode (tested on an AMD iGPU; untested on Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
+| `vulkan` | Vulkan compute backend (cross-vendor; see [Tested hardware](#tested-hardware)) for whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.

@@ -386,6 +386,13 @@ rrocket --print -l 4 document.pdf
 rrocket --printer Office --copies 2 --duplex long --gray document.pdf
 ```
 
+Printing is tested through a CUPS `everywhere` queue on `ippeveprinter`, a
+virtual IPP printer, on Linux; no physical printer has been tested, so
+`--duplex` back-side orientation and `--copies` on a printer without copy
+support are untested. `--fax-to` is tested only against a stand-in `sendfax` and by checking the
+`lp` command line it builds; no fax has been sent through a CUPS fax queue or
+HylaFAX.
+
 ---
 
 ## Rendering

@@ -2,12 +2,18 @@
 
 macOS is a supported platform. The whole render path is native code, and on
 Apple silicon it uses the NEON instructions of the M-series and A-series
-cores. It needs no Homebrew packages and no extra fonts.
+cores. It needs no Homebrew packages and no extra fonts. It has been tested
+on one A-series machine only; M-series Macs are untested (see
+[Tested hardware](../../README.md#tested-hardware)).
 
 - **Tested on:** macOS 27.2 on Apple silicon (A18 Pro, 8 GB).
-- **CI:** every push is linted with clippy on `macos-latest`, which also
+- **CI:** every push is linted with clippy on `macos-latest`, GitHub's
+  Apple-silicon runner (a virtual machine without GPU tests), which also
   runs the renderer, interpreter and library test suites, the font crate's
   (system font discovery) and the memory probe.
+- **M-series Macs:** untested by hand. The NEON code is the same on every
+  Apple core, and CI's virtualised runner runs the CPU suites above, but no
+  render, benchmark or GPU result here comes from an M-series chip.
 - **Intel Macs:** the x86-64 code paths (AVX2, with a scalar fallback) are
   the ones every Linux PC uses, but they are not tested on macOS. An Intel
   build also needs the `nasm` assembler (`brew install nasm`) for the AV1
@@ -107,9 +113,10 @@ readable by you alone, and removes it with its contents when it exits.
 ## GPU
 
 The CPU path is the supported one on macOS, and the release build needs no
-GPU features. The Apple GPU can run rrocket's Vulkan kernels through
+GPU features. The A18 Pro's GPU runs rrocket's Vulkan kernels through
 MoltenVK, with output byte-identical to the CPU, but it does not make
-rendering faster.
+rendering faster there. M-series GPUs, which have more cores and memory
+bandwidth, are untested.
 
 - **Metal:** there is no Metal backend.
 - **Vulkan through MoltenVK:** see below.
@@ -152,7 +159,8 @@ the device, beside the CPU workers. Under the default `--backend auto`, no
 Vulkan device is opened unless `--gpu-pages` is given.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
-byte-identically on the GPU and the CPU.
+byte-identically on the GPU and the CPU. MoltenVK on an M-series GPU is
+untested.
 
 ## Comparing against pdftoppm
 
@@ -169,7 +177,8 @@ bash takes precedence once installed. See
 
 ## Printing and fax
 
-macOS prints through CUPS, so `--print` works with the built-in `lp`;
+macOS prints through CUPS, so `--print` uses the built-in `lp` (the CUPS
+path is tested on Linux; printing from macOS is untested);
 `--printer NAME` takes a destination that `rrocket --list-printers` lists,
 else the default destination. The pages are spooled in an anonymous file under the per-user
 `$TMPDIR`. `--fax-to` needs a CUPS fax queue (`--fax-queue NAME`) or
@@ -178,7 +187,7 @@ and send it another way. See the [CLI reference](../cli-reference.md#printing).
 
 ## Known gaps
 
-- No GPU acceleration: the Vulkan kernels run on the Apple GPU but are
+- No GPU acceleration: the Vulkan kernels run on the A18 Pro's GPU but are
   slower than the CPU (see above).
 - Intel Macs are not tested, nor M-series Macs: every result here comes
   from one A-series machine (NEON, the Apple GPU of an A-series chip).

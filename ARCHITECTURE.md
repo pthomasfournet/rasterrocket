@@ -1004,7 +1004,7 @@ compile is gated on `CARGO_FEATURE_VULKAN`.
 - `nvjpeg` — `NvJpegDecoder`, TLS one-per-thread, primary `GPU_HYBRID`, fallback `DEFAULT`
 - `nvjpeg2k` — `NvJpeg2kDecoder`, same TLS pattern; C++ exception shim in `shim/nvjpeg2k_shim.cpp`
 - `gpu-deskew` — `npp_rotate::rotate_gray8()` via `nppiRotate_8u_C1R_Ctx`
-- `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, Intel Quick Sync, Intel Arc); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU.
+- `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, tested on Raphael VCN 4.0; Intel Quick Sync and Intel Arc untested); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU.
 
 **Device image cache** (`cache` feature, CUDA or Vulkan)
 - `DeviceImageCache<B: CacheBackend>` — three tiers: VRAM (refcount-pinned LRU), host RAM (demote-on-evict / promote-on-hit; `cuMemAllocHost` slabs on CUDA, ordinary memory on Vulkan), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files, shared by both backends; opt-in via `PDF_RASTER_CACHE_DIR`).  `CacheBackend` extends `GpuBackend` with the cache's transfers outside a page; a slab is the backend's `DeviceBuffer`.  `ImageCache` and `CachedImage` erase the backend: a session builds its cache on the Vulkan backend when it holds one, otherwise on the CUDA context.
@@ -1367,6 +1367,12 @@ platform.
 
 ### Key platform facts
 
+Tested on a Ryzen 9 9900X3D (AVX-512, and the AVX2 and scalar tiers) and an
+Apple A18 Pro (NEON), plus CI's GitHub-hosted runners; the "Intel consumer"
+column has not run on an Intel CPU since the i7-8700K testbench was retired
+(2026-07). See the
+README's [Tested hardware](README.md#tested-hardware).
+
 **x86-64 (Intel consumer)**
 - AVX2 is the ceiling on all Alder/Raptor/Arrow Lake. AVX-512 is architecturally
   disabled on Arrow Lake; disabled by microcode on Raptor. No current Intel consumer
@@ -1384,19 +1390,23 @@ platform.
 ### iGPU / integrated compute
 
 **Intel iGPU (UHD/Iris/Arc laptop) and AMD VCN**
-VA-API JPEG baseline decode is implemented (`vaapi` feature). Hardware handles
+VA-API JPEG baseline decode is implemented (`vaapi` feature), tested on an AMD
+Raphael iGPU (VCN 4.0, Mesa radeonsi); untested on Intel. Hardware handles
 YUV surface allocation and IDCT; the result is extracted to an `Rgb8` bitmap.
 Transfer overhead makes other compute (ICC, fill) not worth it on non-UMA x86.
 CMYK and progressive JPEGs fall through to CPU; the `nvjpeg` feature takes
 priority when both are active.
 
-**Apple Silicon (M1–M4)**
-No native Metal backend exists; the Vulkan backend runs through `MoltenVK`
-(untested). The CPU paths use NEON.
+**Apple Silicon**
+No native Metal backend exists; the Vulkan backend runs through `MoltenVK`,
+tested on an A18 Pro (MoltenVK 1.4.2, byte-identical to the CPU). The CPU
+paths use NEON. M-series chips (M1–M4) are untested, CPU and GPU alike,
+except for CI's virtualised Apple-silicon runner (CPU suites only).
 
 **Raspberry Pi 4/5**
 VideoCore GPU is not accessible as a general-purpose compute API via a stable
-userspace interface. NEON is the correct answer on Pi.
+userspace interface. NEON is the correct answer on Pi; untested on Pi
+hardware.
 
 ---
 
