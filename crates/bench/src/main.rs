@@ -238,6 +238,7 @@ fn bench_ours(cfg: &Config, params: &[(f64, f64, f64, f64, usize)]) -> f64 {
         transfer,
         backdrop: None,
         overprint: None,
+        gray: None,
     };
     let paths: Vec<Path> = params
         .iter()

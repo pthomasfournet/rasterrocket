@@ -583,6 +583,7 @@ fn image_rows_composite_like_single_samples() {
                 blend_mode: mode,
                 overprint: None,
                 backdrop: None,
+                gray: None,
             };
             let compositor = ImageCompositor::new(&base, &paint, &Separator::Model);
             let mut runs = make_base();

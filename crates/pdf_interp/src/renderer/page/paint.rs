@@ -1,6 +1,7 @@
 //! Path painting: colour selection, clipping and the fill and stroke of a
 //! path through the raster pipe.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use color::{Sample as _, SampleDepth};
@@ -8,7 +9,7 @@ use color::{Sample as _, SampleDepth};
 use raster::{
     eo_fill, fill, fill_area,
     path::PathBuilder,
-    pipe::{ChannelMask, Pattern, PipeSrc, PipeState, TransferSet},
+    pipe::{ChannelMask, GrayBlend, Pattern, PipeSrc, PipeState, TransferSet},
     stroke::{StrokeParams, stroke},
     transparency::Backdrop,
     types::{BlendMode, LineCap, LineJoin},
@@ -19,6 +20,7 @@ use super::super::color::{Inks, RasterColor, Srgb};
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, CanvasPipe, CanvasSource, with_canvas};
 use super::depth::{CanvasBackdrop, CanvasSample};
+use super::group_space::GrayReduction;
 use super::patterns::{PatternPaint, Tile};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
@@ -53,6 +55,8 @@ pub(super) struct PaintParams {
     pub(super) overprint: Option<ChannelMask>,
     /// The group backdrop the paint consults, if any.
     pub(super) backdrop: Option<Arc<CanvasBackdrop>>,
+    /// The gray blending space the paint's blend mode acts in, if any.
+    pub(super) gray: Option<Rc<GrayReduction>>,
 }
 
 impl PaintParams {
@@ -79,6 +83,7 @@ impl PaintParams {
                 .and_then(S::backdrop)
                 .map(Backdrop::as_pipe_backdrop),
             overprint: self.overprint,
+            gray: self.gray.as_deref().map(|g| g as &dyn GrayBlend<S>),
         }
     }
 }
@@ -309,6 +314,9 @@ impl PageRenderer<'_> {
             blend_mode,
             overprint,
             backdrop: self.paint_backdrop(blend_mode, overprint),
+            gray: (blend_mode != BlendMode::Normal)
+                .then(|| self.group.gray.clone())
+                .flatten(),
         }
     }
 

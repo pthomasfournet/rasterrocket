@@ -432,9 +432,11 @@ impl PageRenderer<'_> {
             // painted nowhere else and clearing the region restores it.
             gs.clip
                 .clip_to_rect(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1));
+            let space = form.transparency.and_then(|tg| tg.space);
             let context = GroupContext {
                 backdrop: g.take_backdrop().map(Arc::new),
                 knockout: form.transparency.is_some_and(|tg| tg.knockout),
+                gray: self.group_gray(target, space, self.group.gray.as_ref()),
             };
             std::mem::replace(&mut self.group, context)
         });

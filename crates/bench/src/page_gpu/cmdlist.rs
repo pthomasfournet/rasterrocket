@@ -179,6 +179,7 @@ pub fn render_cpu(stars: &[Star], scale: f64, width: u32, height: u32) -> Bitmap
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
         overprint: None,
+        gray: None,
     };
     for star in stars {
         let path = device_path(star, scale, height);

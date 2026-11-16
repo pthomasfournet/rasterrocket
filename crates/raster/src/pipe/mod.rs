@@ -187,6 +187,27 @@ pub struct PipeState<'bmp, S: Sample = u8> {
     /// unpainted channels then keep the premultiplied colour the group
     /// composites to over that backdrop.
     pub overprint: Option<ChannelMask>,
+
+    /// A blending space of one gray component for the blend function, when
+    /// the group painted into composites in gray on a canvas of more
+    /// components; `None` blends the destination's own components.
+    pub gray: Option<&'bmp dyn GrayBlend<S>>,
+}
+
+/// A blending space of one gray component on a destination of more.
+///
+/// The blend function acts on the gray of the source and of the pixel it
+/// blends with, and its result is written as a pixel of that gray (ISO
+/// 32000-2 §11.3.4).  The compositing formula is linear in the colours it
+/// mixes, so a destination whose colours are reduced to their gray
+/// afterwards holds the result of compositing in gray, provided
+/// [`gray`](Self::gray) is linear and the gray of the pixel
+/// [`neutral`](Self::neutral) writes for `g` is `g`.
+pub trait GrayBlend<S: Sample>: std::fmt::Debug {
+    /// The gray of the pixel `px`.
+    fn gray(&self, px: &[S]) -> S;
+    /// Write into `px` a pixel whose gray is `gray`.
+    fn neutral(&self, gray: S, px: &mut [S]);
 }
 
 /// The set of colour channels a paint operation writes.

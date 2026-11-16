@@ -527,6 +527,10 @@ struct GroupContext {
     /// composites with the group's initial backdrop (see the `knockout`
     /// module).
     knockout: bool,
+    /// The gray blending space of a group composited in gray, the space
+    /// blend modes inside it blend in; `None` for a group blending in the
+    /// components of its canvas.
+    gray: Option<Rc<group_space::GrayReduction>>,
 }
 
 impl<'doc> PageRenderer<'doc> {
@@ -714,7 +718,7 @@ impl<'doc> PageRenderer<'doc> {
         let resources = PageResources::new(doc, page_id);
         let ink_map = ink_map::InkMap::new(canvas.kind().depth(), ink.separator.clone());
 
-        Self {
+        let mut renderer = Self {
             canvas,
             space,
             buffers: CanvasBuffers::default(),
@@ -739,10 +743,7 @@ impl<'doc> PageRenderer<'doc> {
             pattern_depth: 0,
             initial_ctm,
             pattern_ctm: initial_ctm,
-            group: GroupContext {
-                knockout: group.is_some_and(|g| g.knockout),
-                ..GroupContext::default()
-            },
+            group: GroupContext::default(),
             page_group: group,
             group_pool: Vec::new(),
             ink_map: Rc::new(RefCell::new(ink_map)),
@@ -788,6 +789,25 @@ impl<'doc> PageRenderer<'doc> {
             cache_state: None,
             #[cfg(feature = "vulkan")]
             device_page: None,
+        };
+        renderer.group = renderer.page_group_context(group);
+        renderer
+    }
+
+    /// The group context of the page painted as the page group `group`: a
+    /// knockout group when it says so, and blending in gray when its space
+    /// is gray and its canvas holds RGB (ISO 32000-2 §11.4.7).  A page
+    /// painted in ink composites in ink whatever its group declares.
+    fn page_group_context(
+        &self,
+        group: Option<crate::resources::TransparencyGroupParams>,
+    ) -> GroupContext {
+        let gray = group.and_then(|g| g.space) == Some(crate::resources::GroupSpace::Gray)
+            && !self.canvas.kind().is_ink();
+        GroupContext {
+            knockout: group.is_some_and(|g| g.knockout),
+            gray: gray.then(|| self.gray_reduction()),
+            ..GroupContext::default()
         }
     }
 
@@ -881,7 +901,7 @@ impl<'doc> PageRenderer<'doc> {
             self.canvas = PageCanvas::try_new(kind, self.width, self.height, group.is_some())?;
         }
         self.page_group = group;
-        self.group.knockout = group.is_some_and(|g| g.knockout);
+        self.group = self.page_group_context(group);
         Ok(())
     }
 

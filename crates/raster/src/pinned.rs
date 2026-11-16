@@ -172,6 +172,7 @@ fn span_digest<P: Pixel<Sample = u8>>(spans: usize, seed: u64) -> u64 {
             transfer,
             backdrop,
             overprint,
+            gray: None,
         };
         let pattern = RowPattern { data: &row };
         let src = if rng.one_in(2) {

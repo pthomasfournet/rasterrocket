@@ -31,9 +31,9 @@ use crate::resources::{
 
 /// The page group of `page_id` when the page is to be painted as a group.
 ///
-/// Its `/Group` attributes, with `isolated` set and no space, the page's
-/// space being that of the canvas it is painted on (see
-/// [`page_group_space`]), when the page is a knockout
+/// Its `/Group` attributes, with `isolated` set and the space it declares
+/// (the canvas it is painted on is chosen from [`page_group_space`]), when
+/// the page is a knockout
 /// group or a blend mode other than `Normal` is reachable from its resources
 /// or annotations; `None` when painting onto opaque white gives the same
 /// result.
@@ -44,13 +44,13 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
     let blends = group.knockout || page_reaches(doc, page_id, &page, true, &sets_blend_mode);
     blends.then_some(TransparencyGroupParams {
         isolated: true,
-        knockout: group.knockout,
-        space: None,
+        ..group
     })
 }
 
 /// The page group of `page_id` for a render that keeps the page's alpha:
-/// isolated, and a knockout group when the page's `/Group` says so; see
+/// isolated, and a knockout group and of a space when the page's `/Group`
+/// says so; see
 /// [`PageRenderer::try_finish_transparent`].
 ///
 /// This is [`page_group`] whenever that is `Some`, read without its walk
@@ -60,13 +60,14 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
 /// [`PageRenderer::try_finish_transparent`]: crate::renderer::PageRenderer::try_finish_transparent
 #[must_use]
 pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> TransparencyGroupParams {
-    let knockout = doc.get_dictionary(page_id).is_ok_and(|page| {
-        crate::resources::read_transparency_group(doc, &page).is_some_and(|g| g.knockout)
-    });
+    let group = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|page| crate::resources::read_transparency_group(doc, &page))
+        .unwrap_or_default();
     TransparencyGroupParams {
         isolated: true,
-        knockout,
-        space: None,
+        ..group
     }
 }
 

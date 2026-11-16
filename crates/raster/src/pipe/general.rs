@@ -205,8 +205,8 @@ fn render_span_general_inner<'src, 'bd, S: Sample>(
                 // Blend function.
                 let mut c_blend = [S::default(); MAX_COMPS];
                 if pipe.blend_mode != BlendMode::Normal {
-                    apply_blend_fn(
-                        pipe.blend_mode,
+                    blend_in_space(
+                        pipe,
                         c_src,
                         c_blend_dst,
                         &mut c_blend[..ncomps],
@@ -267,8 +267,8 @@ fn render_span_general_inner<'src, 'bd, S: Sample>(
 
                 let mut c_blend = [S::default(); MAX_COMPS];
                 if pipe.blend_mode != BlendMode::Normal {
-                    apply_blend_fn(
-                        pipe.blend_mode,
+                    blend_in_space(
+                        pipe,
                         src_px,
                         dst_px,
                         &mut c_blend[..ncomps],
@@ -337,6 +337,41 @@ pub(crate) fn union_colour<S: Sample>(
         *o = S::from_wide((num / (max * a_union)).min(max));
     }
     a_union
+}
+
+/// Apply the blend function of `pipe` to `src` over `dst` and write into
+/// `c_blend`: in the components of the pixels, or in gray when `pipe`
+/// blends in a gray space ([`pipe::GrayBlend`]), the result written as a
+/// pixel of that gray.
+fn blend_in_space<S: Sample>(
+    pipe: &PipeState<'_, S>,
+    src: &[S],
+    dst: &[S],
+    c_blend: &mut [S],
+    is_cmyk_like: bool,
+    is_nonseparable: bool,
+) {
+    let Some(gray) = pipe.gray else {
+        apply_blend_fn(
+            pipe.blend_mode,
+            src,
+            dst,
+            c_blend,
+            is_cmyk_like,
+            is_nonseparable,
+        );
+        return;
+    };
+    let mut blended = [S::default()];
+    apply_blend_fn(
+        pipe.blend_mode,
+        &[gray.gray(src)],
+        &[gray.gray(dst)],
+        &mut blended,
+        false,
+        is_nonseparable,
+    );
+    gray.neutral(blended[0], c_blend);
 }
 
 /// Apply the blend function and write into `c_blend`.
@@ -451,6 +486,7 @@ mod tests {
             transfer: TransferSet::identity_rgb(),
             backdrop: None,
             overprint: None,
+            gray: None,
         }
     }
 
@@ -504,6 +540,41 @@ mod tests {
         //   = div255(128 * 200) ≈ 100.
         let v = dst[0];
         assert!((i32::from(v) - 100).abs() <= 1, "expected ~100, got {v}");
+    }
+
+    /// The gray of an RGB pixel by integer weights summing to 100.
+    #[derive(Debug)]
+    struct Luma;
+
+    impl crate::pipe::GrayBlend<u8> for Luma {
+        fn gray(&self, px: &[u8]) -> u8 {
+            let w = |i: usize, k: u32| u32::from(px[i]) * k;
+            u8::try_from((w(0, 30) + w(1, 59) + w(2, 11) + 50) / 100).expect("a mean of samples")
+        }
+        fn neutral(&self, gray: u8, px: &mut [u8]) {
+            px.fill(gray);
+        }
+    }
+
+    /// In a gray blending space the blend function sees the gray of the
+    /// source and of the destination: blue multiplied onto red gives the
+    /// product of their grays, where blending the components gives black;
+    /// `Difference` gives the difference of their grays.
+    #[test]
+    fn a_gray_blending_space_blends_the_grays() {
+        let luma = Luma;
+        for (mode, want) in [(BlendMode::Multiply, 8u8), (BlendMode::Difference, 49)] {
+            let pipe = PipeState {
+                blend_mode: mode,
+                gray: Some(&luma),
+                ..normal_pipe(255)
+            };
+            let src = PipeSrc::Solid(&[0u8, 0, 255]);
+            let mut dst = vec![255u8, 0, 0];
+            let mut alpha = vec![255u8];
+            render_span_general::<Rgb8>(&pipe, &src, &mut dst, Some(&mut alpha), None, 0, 0, 0);
+            assert_eq!(dst, [want; 3], "{mode:?}");
+        }
     }
 
     #[test]
@@ -612,6 +683,7 @@ mod tests {
             transfer,
             backdrop: None,
             overprint: None,
+            gray: None,
         };
 
         // Opaque gray source value 100; after inverting transfer: 155.

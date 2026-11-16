@@ -18,7 +18,11 @@
 //! A gray group is painted on its parent's canvas and its colour reduced
 //! to gray as it composites (see [`super::space_convert`]): the reduction
 //! is linear in the samples, so it equals compositing in gray for every
-//! object of the `Normal` blend mode.
+//! object of the `Normal` blend mode.  An object of another blend mode
+//! blends the gray of its colour with the gray of what it is painted over
+//! ([`GrayReduction`]), so the group's reduced result is that of
+//! compositing in gray.  A group without a space inherits its parent's,
+//! gray as well.
 //!
 //! The fill and stroke colours the group inherits convert again for its
 //! canvas, and the graphics state saved around the form restores them.  A
@@ -29,17 +33,58 @@
 
 use std::rc::Rc;
 
+use raster::GrayBlend;
 use raster::clip::Clip;
 use raster::transparency::GroupParams;
 
-use super::PageRenderer;
 use super::canvas::{CanvasGroup, CanvasKind, PageCanvas};
+use super::depth::CanvasSample;
 use super::pixel_rect::PixelRect;
-use super::space_convert::{CanvasSpace, SpaceConversion};
-use crate::WorkingSpace;
+use super::space_convert::{self, CanvasSpace, SpaceConversion};
+use super::{PageRenderer, SharedInkMap};
 use crate::renderer::color::PROCESS_CHANNELS;
 use crate::resources::{ColorSpace, GroupSpace, RgbGroupSpace};
 use crate::separation::{InkSetup, Separator};
+use crate::{WorkingSpace, working_space};
+
+/// The blending space of a group composited in gray on a canvas of RGB or
+/// ink: the gray of a pixel is that of its reduction to gray
+/// ([`space_convert::gray_of`]), and a gray is written as the pixel of the
+/// canvas whose reduction it is: a neutral RGB pixel, or black ink alone,
+/// whose conventional gray is exact.
+pub(super) struct GrayReduction {
+    /// The space of the canvas the group is painted on.
+    space: CanvasSpace,
+    /// The page's spot colorants, folded into an ink pixel's process ink.
+    ink_map: SharedInkMap,
+}
+
+impl std::fmt::Debug for GrayReduction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrayReduction")
+            .field("space", &self.space)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: CanvasSample> GrayBlend<S> for GrayReduction {
+    fn gray(&self, px: &[S]) -> S {
+        let map = self.ink_map.borrow();
+        space_convert::gray_of(self.space, px, &map.luts())
+    }
+
+    fn neutral(&self, gray: S, px: &mut [S]) {
+        match self.space {
+            CanvasSpace::Ink => {
+                px.fill(S::default());
+                px[3] = S::from_wide(S::max_wide() - gray.wide());
+            }
+            CanvasSpace::Rgb(space) => {
+                px.copy_from_slice(&working_space::from_srgb::<S, S>(space, [gray; 3]));
+            }
+        }
+    }
+}
 
 /// How a transparency group is painted relative to its parent's canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +175,34 @@ impl PageRenderer<'_> {
             self.reduce_group_to_gray(&mut group);
         }
         Some(group)
+    }
+
+    /// The gray blending space of a group painted for `target` and of
+    /// colour space `space`, entered on the current canvas: that of the
+    /// canvas for a gray group, and the parent's for a group without a
+    /// space, which inherits it; `None` for a group blending in the
+    /// components of its canvas.
+    pub(super) fn group_gray(
+        &self,
+        target: GroupTarget,
+        space: Option<GroupSpace>,
+        parent: Option<&Rc<GrayReduction>>,
+    ) -> Option<Rc<GrayReduction>> {
+        if target.gray {
+            Some(self.gray_reduction())
+        } else if space.is_none() {
+            parent.cloned()
+        } else {
+            None
+        }
+    }
+
+    /// The gray blending space of the current canvas.
+    pub(super) fn gray_reduction(&self) -> Rc<GrayReduction> {
+        Rc::new(GrayReduction {
+            space: self.canvas_space(),
+            ink_map: Rc::clone(&self.ink_map),
+        })
     }
 
     /// How a group of colour space `space` is painted over the current

@@ -143,6 +143,7 @@ fn source_over<S: Sample>() -> PipeState<'static, S> {
         transfer: TransferSet::identity_rgb(),
         backdrop: None,
         overprint: None,
+        gray: None,
     }
 }
 

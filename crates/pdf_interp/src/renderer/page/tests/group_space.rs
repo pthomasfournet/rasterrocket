@@ -20,12 +20,13 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 
 /// Page `(4, 0)`, 10 points square, whose form `/G` (5) is a transparency
 /// group of `group` entries drawing `content`; `/Half` is a fill alpha of
-/// one half, `/Mul` the `Multiply` blend mode and `/Spot` a `Separation`
+/// one half, `/Mul` the `Multiply` and `/Diff` the `Difference` blend mode
+/// and `/Spot` a `Separation`
 /// colour space, in the page's and the form's resources.  Object 6 is an
 /// RGB ICC profile that is not sRGB, object 7 a CMYK one (its data unused).
 fn doc(group: &str, content: &str) -> Document {
-    let res = "/ExtGState << /Half << /ca 0.5 >> /Mul << /BM /Multiply >> >> \
-               /ColorSpace << /Spot [/Separation /Spot /DeviceCMYK \
+    let res = "/ExtGState << /Half << /ca 0.5 >> /Mul << /BM /Multiply >> \
+               /Diff << /BM /Difference >> >> /ColorSpace << /Spot [/Separation /Spot /DeviceCMYK \
                << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.5 1 0] /N 1 >>] >>";
     let adobe = moxcms::ColorProfile::new_adobe_rgb()
         .encode()
@@ -262,6 +263,133 @@ fn a_gray_group_composites_the_gray_of_its_colours() {
     }
     let cmyk = grouped("/CS /DeviceGray /I true", red, &CMYK, SampleDepth::Eight);
     assert_eq!(&cmyk[..4], &[0, 0, 0, 255 - 76], "black ink alone");
+}
+
+/// Blue over red in a blend mode, in a gray group: the blend function
+/// acts on their grays, 76 and 28 by the `DeviceRGB` → `DeviceGray`
+/// weights.  Blending their components would give black for `Multiply`
+/// and magenta, gray 104, for `Difference`.
+const GRAY_BLENDS: [(&str, u16); 2] = [("/Mul", 8), ("/Diff", 48)];
+
+/// Red under blue in the blend mode of the `ExtGState` `mode`.
+fn blended(mode: &str) -> String {
+    format!("1 0 0 rg 0 0 10 10 re f {mode} gs 0 0 1 rg 0 0 10 10 re f")
+}
+
+#[test]
+fn a_gray_group_blends_the_gray_of_its_colours() {
+    for (mode, want) in GRAY_BLENDS {
+        let content = blended(mode);
+        for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
+            let rgb = grouped(
+                "/CS /DeviceGray /I true",
+                &content,
+                &CanvasRequest::Rgb,
+                depth,
+            );
+            let want = if depth == SampleDepth::Eight {
+                want
+            } else {
+                want * 257
+            };
+            assert!(
+                rgb[..3].iter().all(|v| v.abs_diff(want) <= 257 / 2),
+                "{mode} {depth:?}: {rgb:?}"
+            );
+        }
+        let cmyk = grouped(
+            "/CS /DeviceGray /I true",
+            &content,
+            &CMYK,
+            SampleDepth::Eight,
+        );
+        assert_eq!(
+            &cmyk[..4],
+            &[0, 0, 0, 255 - want],
+            "{mode}: black ink alone"
+        );
+    }
+}
+
+/// A non-isolated gray group blends with the gray of its backdrop.
+#[test]
+fn a_non_isolated_gray_group_blends_with_the_gray_of_its_backdrop() {
+    for (mode, want) in GRAY_BLENDS {
+        let doc = doc(
+            "/CS /DeviceGray",
+            &format!("{mode} gs 0 0 1 rg 0 0 10 10 re f"),
+        );
+        let page = "1 0 0 rg 0 0 10 10 re f /G Do";
+        let got = samples(&render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, page).0);
+        assert_eq!(&got[..3], &[want; 3], "{mode}");
+    }
+}
+
+/// Page `(4, 0)` of page group `page_group` drawing form 5, a group of
+/// `group` entries that draws form 6, a group without a space drawing
+/// `content`.
+fn nested_doc(page_group: &str, group: &str, content: &str) -> Document {
+    let res = "/ExtGState << /Mul << /BM /Multiply >> /Diff << /BM /Difference >> >>";
+    let form = |group: &str, xobjects: &str, content: &str| {
+        stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency {group} >> /Resources << {res} {xobjects} >>"
+            ),
+            content.as_bytes(),
+        )
+    };
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            format!(
+                "<< /Type /Page {page_group} /Resources << {res} /XObject << /G 5 0 R >> >> >>"
+            )
+            .into_bytes(),
+        ),
+        (5, form(group, "/XObject << /H 6 0 R >>", "/H Do")),
+        (6, form("/I true", "", content)),
+    ])
+}
+
+/// A group without a space inherits a gray group's, and blends in gray.
+#[test]
+fn a_group_without_a_space_inherits_gray_blending() {
+    for (mode, want) in GRAY_BLENDS {
+        let doc = nested_doc("", "/CS /DeviceGray /I true", &blended(mode));
+        let got = samples(&render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, "/G Do").0);
+        assert_eq!(&got[..3], &[want; 3], "{mode}");
+    }
+}
+
+/// A page whose group is gray blends in gray, as a gray form group does;
+/// a page painted in ink keeps blending in ink.
+#[test]
+fn a_gray_page_group_blends_in_gray() {
+    for (mode, want) in GRAY_BLENDS {
+        let doc = nested_doc("/Group << /S /Transparency /CS /DeviceGray >>", "", "");
+        let paint = |request: &CanvasRequest| {
+            let view = PageRenderer::unit_view(10, 10);
+            let mut renderer = PageRenderer::try_with_page_group_in(
+                &view,
+                &doc,
+                (4, 0),
+                crate::page_group(&doc, (4, 0)),
+                request,
+                SampleDepth::Eight,
+                super::super::CanvasBuffers::default(),
+            )
+            .expect("the canvas is allocated");
+            renderer.execute(&crate::content::parse(blended(mode).as_bytes()));
+            samples(&renderer.try_finish_keeping(false).expect("finishes").0)
+        };
+        assert_eq!(&paint(&CanvasRequest::Rgb)[..3], &[want; 3], "{mode}");
+        assert_eq!(
+            paint(&CMYK),
+            direct(&blended(mode), &CMYK, SampleDepth::Eight),
+            "{mode} on an ink page"
+        );
+    }
 }
 
 #[test]

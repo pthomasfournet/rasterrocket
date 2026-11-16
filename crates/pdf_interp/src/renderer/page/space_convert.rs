@@ -62,23 +62,12 @@ impl SpaceConversion<'_> {
     /// `dst` receives those of a pixel of `to`.
     pub(super) fn pixel<S: CanvasSample>(&self, src: &[S], dst: &mut [S]) {
         let srgb = match self.from {
+            _ if self.gray => [gray_of(self.from, src, self.spots); 3],
             CanvasSpace::Ink => {
-                let cmyk = fold_ink(src, self.spots);
-                if self.gray {
-                    [color::cmyk::device_gray_at(cmyk); 3]
-                } else {
-                    let [c, m, y, k] = cmyk;
-                    color::cmyk::cmyk_to_rgb_at(c, m, y, k)
-                }
+                let [c, m, y, k] = fold_ink(src, self.spots);
+                color::cmyk::cmyk_to_rgb_at(c, m, y, k)
             }
-            CanvasSpace::Rgb(space) => {
-                let rgb: [S; 3] = working_space::to_srgb(space, [src[0], src[1], src[2]]);
-                if self.gray {
-                    [color::convert::gray_at(rgb); 3]
-                } else {
-                    rgb
-                }
-            }
+            CanvasSpace::Rgb(space) => working_space::to_srgb(space, [src[0], src[1], src[2]]),
         };
         match self.to {
             CanvasSpace::Rgb(space) => {
@@ -148,6 +137,19 @@ impl SpaceConversion<'_> {
                 buf[..n].copy_from_slice(px);
                 self.pixel(&buf[..n], px);
             }
+        }
+    }
+}
+
+/// The gray of the pixel `px` of a canvas of `space`, as an sRGB gray: the
+/// `DeviceRGB` → `DeviceGray` weights of its sRGB value, or the
+/// conventional `DeviceCMYK` → `DeviceGray` conversion of its process ink,
+/// its spots folded in by `spots`.
+pub(super) fn gray_of<S: CanvasSample>(space: CanvasSpace, px: &[S], spots: &SpotTables<'_>) -> S {
+    match space {
+        CanvasSpace::Ink => color::cmyk::device_gray_at(fold_ink(px, spots)),
+        CanvasSpace::Rgb(space) => {
+            color::convert::gray_at(working_space::to_srgb(space, [px[0], px[1], px[2]]))
         }
     }
 }
