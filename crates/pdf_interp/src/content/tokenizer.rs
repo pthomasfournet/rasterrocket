@@ -875,16 +875,17 @@ mod tests {
         assert_eq!(n, 0, "all stray `>` are skipped, yielding no tokens");
     }
 
-    /// A malformed number is an operand with the value of its longest
-    /// well-formed prefix, never an operator that would clear the operands
-    /// before it; a word outside the number alphabet is an operator.
+    /// A malformed number is an operand, never an operator that would clear
+    /// the operands before it: a run of leading signs counts as its last
+    /// sign, and otherwise the value is that of the longest well-formed
+    /// prefix.  A word outside the number alphabet is an operator.
     #[test]
     fn malformed_numbers_are_operands() {
         assert_eq!(
             tokens(b"10 --5 80- .5. inf re"),
             vec![
                 Token::Number(10.0),
-                Token::Number(0.0),
+                Token::Number(-5.0),
                 Token::Number(80.0),
                 Token::Number(0.5),
                 Token::Op(b"inf"),
