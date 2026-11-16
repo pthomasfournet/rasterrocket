@@ -3889,6 +3889,36 @@ than the CPU's whole page (28 ms against 20 ms on the A18 Pro, 23 against
 GPUs. Output is byte-identical to before, plain and with `--gpu-pages`
 under `auto` and `--backend vulkan`, on the RTX 5070 and on RADV.
 
+**Unreleased on master: GPU pages compute exact-area coverage on the
+device.** A GPU page records each solid fill and stroke as the outline the
+CPU's exact-area rasteriser would rasterise, not as its coverage table.
+The host bins each outline into 16 × 16 tiles, each with the segments that
+may deposit a cell in it and a backdrop: the per-row cover of the
+segments wholly left of the tile. The page raster then deposits the cells
+with the rasteriser's own integer walk over each tile, and composites with
+the AA pipe's arithmetic. A pixel's exact-area coverage does not depend on
+the window it is rasterised over, so pages stay byte-identical to the CPU.
+An outline tile that covers its pixels fully and opaquely hides the items
+below it. Coordinates beyond 2^30 in fixed point, more than 2^14 − 1
+segments in a tile, and devices without `shaderInt64` fall back to coverage
+tables. Building those tables is also cheaper now, with block run searches
+and no row or span copies, and that is byte-identical as well.
+
+Star document (300 stars per page, 150 dpi), one page on one thread, CPU →
+GPU page: RTX 5070 24.8 → 4.8 ms (before 26.3), RADV 24.8 → 11.0 ms (39.5),
+A18 Pro 21.6 → 11.8 ms (48.4). Recording now takes 3.3–3.8 ms instead of
+23–28 ms, and a page's device inputs are 2.3 MB instead of 18.7 MB. Whole
+process, 40 pages on one thread, CPU / `--gpu-pages`: RTX 1031 / 393 ms,
+RADV 1031 / 544 ms, A18 Pro 1004 / 312 ms. Beside all CPU workers it is
+279 against 347 ms on the A18 Pro at six threads, and level on Linux at
+24. `--gpu-pages` and plain renders of the fixtures are byte-identical to
+before on the RTX 5070 and on RADV.
+
+The command format, binning and the kernel's host model
+(`gpu::page::reference`) do not depend on the backend, so a CUDA twin or
+a session holding several devices would reuse them. Neither exists, and
+none of this has been tested on datacenter hardware.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
