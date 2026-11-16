@@ -19,7 +19,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::coverage::{AreaRaster, BLOCK, CoverageTable, run_len, uniform};
+use crate::coverage::{AreaOutline, AreaRaster, BLOCK, CoverageTable, run_len, scale, uniform};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
@@ -28,7 +28,6 @@ use crate::stroke::{StrokeParams, stroke_outline};
 use crate::types::{LineCap, LineJoin, floor_i32};
 use crate::xpath::{PixelModel, XPath, XPathFlags};
 use color::Pixel;
-use color::convert::div255;
 
 /// Non-zero winding fill.
 #[expect(
@@ -231,19 +230,29 @@ fn fill_impl<P: Pixel>(
     }
 }
 
-/// The exact-area rasteriser of `xpath` over its pixels inside the clip
-/// rectangle and the `width × height` bitmap, its segments added; `None`
-/// when no such pixel exists.
-fn area_raster(xpath: &XPath, clip: &Clip, width: u32, height: u32) -> Option<AreaRaster> {
+/// The pixels of `xpath`'s bounding box inside the clip rectangle and the
+/// `width × height` bitmap, as an inclusive `(x0, y0, x1, y1)`; `None` when
+/// there is none.
+fn area_window(
+    xpath: &XPath,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+) -> Option<(i32, i32, i32, i32)> {
     let (lx, hx, ly, hy) = xpath.bounds()?;
     let last = |n: u32| i32::try_from(n).unwrap_or(i32::MAX).saturating_sub(1);
     let x0 = clip.x_min_i.max(0).max(floor_i32(lx));
     let y0 = clip.y_min_i.max(0).max(floor_i32(ly));
     let x1 = clip.x_max_i.min(last(width)).min(floor_i32(hx));
     let y1 = clip.y_max_i.min(last(height)).min(floor_i32(hy));
-    if x0 > x1 || y0 > y1 {
-        return None;
-    }
+    (x0 <= x1 && y0 <= y1).then_some((x0, y0, x1, y1))
+}
+
+/// The exact-area rasteriser of `xpath` over its pixels inside the clip
+/// rectangle and the `width × height` bitmap, its segments added; `None`
+/// when no such pixel exists.
+fn area_raster(xpath: &XPath, clip: &Clip, width: u32, height: u32) -> Option<AreaRaster> {
+    let (x0, y0, x1, y1) = area_window(xpath, clip, width, height)?;
     let mut raster = AreaRaster::new(x0, y0, x1, y1);
     raster.add_xpath(xpath);
     Some(raster)
@@ -298,22 +307,13 @@ fn area_rows(
         return;
     };
     raster.rows_mut(eo, |y, x, coverage| {
-        if weight != u8::MAX {
-            for c in coverage.iter_mut() {
-                *c = div255(u32::from(*c) * u32::from(weight));
-            }
-        }
+        scale(coverage, weight);
         emit(y, x, coverage);
     });
 }
 
-/// The coverage tables an antialiased fill of `path` composites, in order.
-///
-/// The fill is [`fill`] (or [`eo_fill`] when `eo`) under the rectangle of
-/// `clip` on a `width × height` bitmap: the area, then the lines of its
-/// zero-area subpaths when `with_lines` (only the area under
-/// [`fill_area`]).  Compositing each in turn, its coverage as the shape, paints what the
-/// fill paints where the clip is its rectangle.  Empty tables are left out.
+/// The coverage tables an antialiased fill of `path` composites, in order:
+/// the tables of [`aa_fill_outlines`], empty ones left out.
 #[expect(
     clippy::too_many_arguments,
     reason = "the geometry, clip, bitmap size and fill rule are independent inputs"
@@ -329,6 +329,36 @@ pub fn aa_fill_coverage(
     eo: bool,
     with_lines: bool,
 ) -> Vec<CoverageTable> {
+    aa_fill_outlines(path, matrix, flatness, clip, width, height, eo, with_lines)
+        .iter()
+        .map(AreaOutline::table)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The outlines an antialiased fill of `path` rasterises, in order.
+///
+/// The fill is [`fill`] (or [`eo_fill`] when `eo`) under the rectangle of
+/// `clip` on a `width × height` bitmap: the area, then the lines of its
+/// zero-area subpaths when `with_lines` (only the area under
+/// [`fill_area`]).  Compositing the coverage of each in turn as the shape
+/// paints what the fill paints where the clip is its rectangle.  An outline
+/// whose window holds no pixel is left out.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the geometry, clip, bitmap size and fill rule are independent inputs"
+)]
+#[must_use]
+pub fn aa_fill_outlines(
+    path: &Path,
+    matrix: &[f64; 6],
+    flatness: f64,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+    eo: bool,
+    with_lines: bool,
+) -> Vec<AreaOutline> {
     if path.pts.is_empty() || width == 0 {
         return Vec::new();
     }
@@ -337,35 +367,13 @@ pub fn aa_fill_coverage(
         .then(|| zero_area_lines(&xpath, flatness))
         .flatten();
     xpath.cull_subpaths_outside(clip.x_min_i, clip.x_max_i, clip.y_min_i, clip.y_max_i);
-    let mut layers = vec![table_of(&xpath, clip, width, height, eo, u8::MAX)];
-    if let Some(lines) = lines {
-        layers.push(table_of(
-            &lines,
-            clip,
-            width,
-            height,
-            false,
-            ZERO_AREA_WEIGHT,
-        ));
-    }
-    layers.retain(|t| !t.is_empty());
-    layers
-}
-
-/// The rows of [`area_rows`] as a table.
-fn table_of(
-    xpath: &XPath,
-    clip: &Clip,
-    width: u32,
-    height: u32,
-    eo: bool,
-    weight: u8,
-) -> CoverageTable {
-    let mut table = CoverageTable::empty();
-    area_rows(xpath, clip, width, height, eo, weight, |y, x, coverage| {
-        table.push_row(y, x, coverage);
-    });
-    table
+    let outline = |xpath: &XPath, eo: bool, weight: u8| {
+        area_window(xpath, clip, width, height)
+            .map(|window| AreaOutline::of(xpath, window, eo, weight))
+    };
+    let mut outlines: Vec<AreaOutline> = outline(&xpath, eo, u8::MAX).into_iter().collect();
+    outlines.extend(lines.and_then(|lines| outline(&lines, false, ZERO_AREA_WEIGHT)));
+    outlines
 }
 
 /// The outline, in device space, of a stroke one pixel wide with butt caps

@@ -36,8 +36,11 @@
 //! at its left side with no area; the cells right of it affect no pixel in
 //! it and are dropped.
 
+mod outline;
 mod table;
 
+pub use outline::AreaOutline;
+pub(crate) use outline::scale;
 pub use table::CoverageTable;
 
 use crate::xpath::{XPath, XPathFlags};
@@ -187,14 +190,21 @@ impl AreaRaster {
     /// Add the segment `(x0, y0) → (x1, y1)` (device space).  Segments with
     /// a NaN coordinate are skipped.
     pub fn add_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
-        if self.is_empty() || [x0, y0, x1, y1].iter().any(|v| v.is_nan()) {
+        if [x0, y0, x1, y1].iter().any(|v| v.is_nan()) {
+            return;
+        }
+        self.add_fixed(fixed(x0), fixed(y0), fixed(x1), fixed(y1));
+    }
+
+    /// Add the segment `(ax, ay) → (bx, by)`, device coordinates in fixed
+    /// point as [`fixed`] makes them.
+    pub(crate) fn add_fixed(&mut self, ax: i64, ay: i64, bx: i64, by: i64) {
+        if self.is_empty() {
             return;
         }
         let ox = i64::from(self.x0) * ONE;
         let oy = i64::from(self.y0) * ONE;
-        let (ax, ay) = (fixed(x0) - ox, fixed(y0) - oy);
-        let (bx, by) = (fixed(x1) - ox, fixed(y1) - oy);
-        self.walk(ax, ay, bx, by);
+        self.walk(ax - ox, ay - oy, bx - ox, by - oy);
     }
 
     /// Deposit the cells the window-relative segment `(x1, y1) → (x2, y2)`

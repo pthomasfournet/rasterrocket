@@ -14,8 +14,8 @@ use path::{MAX_DASHES, dash_count, dash_cycle, flatten_path, make_dashed_path, m
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::coverage::CoverageTable;
-use crate::fill::{aa_fill_coverage, fill_area};
+use crate::coverage::{AreaOutline, CoverageTable};
+use crate::fill::{aa_fill_outlines, fill_area};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{PipeSrc, PipeState, render_bitmap_span};
 use crate::types::{LineCap, LineJoin, floor_i32};
@@ -233,11 +233,9 @@ pub fn hairline_runs(
     narrow_runs(clip, &path, matrix, params.flatness, width, height, emit);
 }
 
-/// The coverage table an antialiased [`stroke`] of `path` composites.
-///
-/// The stroke has a positive line width and lies under the rectangle of
-/// `clip` on a `width × height` bitmap; `None` for a hairline (`line_width == 0`) and for a
-/// stroke that covers no pixel.
+/// The coverage table an antialiased [`stroke`] of `path` composites: the
+/// table of [`aa_stroke_outline`]; `None` for a hairline and for a stroke
+/// that covers no pixel.
 #[must_use]
 pub fn aa_stroke_coverage(
     path: &Path,
@@ -247,8 +245,27 @@ pub fn aa_stroke_coverage(
     width: u32,
     height: u32,
 ) -> Option<CoverageTable> {
+    aa_stroke_outline(path, matrix, params, clip, width, height)
+        .map(|outline| outline.table())
+        .filter(|t| !t.is_empty())
+}
+
+/// The outline an antialiased [`stroke`] of `path` rasterises.
+///
+/// The stroke has a positive line width and lies under the rectangle of
+/// `clip` on a `width × height` bitmap; `None` for a hairline
+/// (`line_width == 0`) and for a stroke whose window holds no pixel.
+#[must_use]
+pub fn aa_stroke_outline(
+    path: &Path,
+    matrix: &[f64; 6],
+    params: &StrokeParams<'_>,
+    clip: &Clip,
+    width: u32,
+    height: u32,
+) -> Option<AreaOutline> {
     let outline = stroke_outline_path(path, matrix, params)?;
-    aa_fill_coverage(
+    aa_fill_outlines(
         &outline,
         matrix,
         params.flatness,
