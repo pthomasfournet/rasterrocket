@@ -272,3 +272,90 @@ fn v2_lut16_rgb_printer_agrees_with_transicc() {
 fn gray_printer_agrees_with_transicc() {
     agrees("printer-gray-v4.icc");
 }
+
+/// The separation of the chart and of a dark neutral ramp through the CMYK
+/// printer prints, at 8 and 16 bits, within [`MAX_DELTA_E`] of the ink
+/// `transicc` separates it to, from either working space under every
+/// intent with and without compensation; also below the printer's black,
+/// where its relative colorimetric table moves the inks by percents for a
+/// few tenths of `a*` and inks of one colour differ widely.  Both inks are
+/// decoded to Lab through `transicc`.
+#[test]
+#[ignore = "needs transicc (liblcms2-utils)"]
+fn a_cmyk_separation_prints_as_transicc_s() {
+    let dir = tempfile_dir("separation");
+    let dst = fixture("printer-cmyk-v4.icc");
+    let profile = OutputProfile::from_bytes(std::fs::read(&dst).unwrap()).unwrap();
+    let dst = dst.to_str().unwrap();
+    let mut chart = patches();
+    chart.extend((0..=40).map(|i| [f64::from(i) / 255.0; 3]));
+    let rows: Vec<Vec<f64>> = chart.iter().map(|p| p.to_vec()).collect();
+    let decode =
+        |ink: &[Vec<f64>]| transicc(&[&format!("-i{dst}"), "-o*Lab", "-t1"], &lines(ink, 1.0));
+    let mut failures = Vec::new();
+    for space in WorkingSpace::ALL {
+        let src = working_space_file(&dir, space);
+        let src = src.to_str().unwrap();
+        for (code, intent) in [
+            ("0", RenderingIntent::Perceptual),
+            ("1", RenderingIntent::RelativeColorimetric),
+            ("2", RenderingIntent::Saturation),
+            ("3", RenderingIntent::AbsoluteColorimetric),
+        ] {
+            for bpc in [false, true] {
+                if bpc && intent == RenderingIntent::AbsoluteColorimetric {
+                    continue;
+                }
+                let table = profile
+                    .separation_table(space, intent, bpc)
+                    .expect("separates");
+                let mut args = vec![format!("-i{src}"), format!("-o{dst}"), format!("-t{code}")];
+                if bpc {
+                    args.push("-b".to_owned());
+                }
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let theirs = decode(&transicc(&args, &lines(&rows, 255.0)));
+                for bits in [8u8, 16] {
+                    let ours: Vec<Vec<f64>> = chart
+                        .iter()
+                        .map(|rgb| {
+                            if bits == 8 {
+                                table
+                                    .ink(rgb.map(u8::from_unit))
+                                    .map(|v| f64::from(v) / 2.55)
+                                    .to_vec()
+                            } else {
+                                table
+                                    .ink(rgb.map(u16::from_unit))
+                                    .map(|v| f64::from(v) / 655.35)
+                                    .to_vec()
+                            }
+                        })
+                        .collect();
+                    let ours = decode(&ours);
+                    let (worst, at) = ours
+                        .iter()
+                        .zip(&theirs)
+                        .map(|(a, b)| delta_e00(a, b))
+                        .enumerate()
+                        .fold(
+                            (0.0f64, 0),
+                            |(m, at), (i, d)| if d > m { (d, i) } else { (m, at) },
+                        );
+                    eprintln!(
+                        "{space:?} {intent} bpc {bpc} {bits}-bit: worst ΔE00 {worst:.3} at {:?}",
+                        chart[at]
+                    );
+                    if worst > MAX_DELTA_E {
+                        failures.push(format!(
+                            "{space:?} {intent} bpc {bpc} {bits}-bit: ΔE00 {worst:.3} at {:?}",
+                            chart[at]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

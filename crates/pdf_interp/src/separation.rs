@@ -166,7 +166,8 @@ impl ProfileInk {
 pub(crate) const PROFILE_GRID: usize = 65;
 
 /// The CMYK of a profile's conversion from a working space, tabulated on a
-/// `65 × 65 × 65` grid over the space's cube and interpolated trilinearly.
+/// `65 × 65 × 65` grid over the space's cube and interpolated in
+/// tetrahedra.
 ///
 /// Node `(r, g, b)` holds the 16-bit CMYK of the colour of channels
 /// `v · 65535 / 64`, rounded, for `v` = `r`, `g`, `b`.
@@ -203,8 +204,12 @@ impl ProfileSeparation {
         })
     }
 
-    /// The CMYK of the working-space colour `rgb`, at its depth: the trilinear
-    /// interpolation of the eight nodes around it.
+    /// The CMYK of the working-space colour `rgb`, at its depth: the
+    /// interpolation in the tetrahedron of its grid cell whose vertices are
+    /// visited in decreasing order of the colour's fractional positions
+    /// within the cell.  A neutral interpolates the nodes of the neutral
+    /// axis alone, so the gray-component replacement of a profile, which
+    /// changes its inks across that axis, is not blurred into the grays.
     #[must_use]
     pub fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         #[expect(
@@ -213,7 +218,7 @@ impl ProfileSeparation {
         )]
         let span = (PROFILE_GRID - 1) as f64;
         let pos = rgb.map(|v| v.to_unit() * span);
-        let lo = pos.map(|p| {
+        let mut vertex = pos.map(|p| {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -226,27 +231,24 @@ impl ProfileSeparation {
             clippy::cast_precision_loss,
             reason = "node indices are below 64, exact in f64"
         )]
-        let frac = [0, 1, 2].map(|i| pos[i] - lo[i] as f64);
+        let frac = [0, 1, 2].map(|i| pos[i] - vertex[i] as f64);
+        let mut axes = [0usize, 1, 2];
+        axes.sort_by(|&a, &b| frac[b].total_cmp(&frac[a]));
+        let node = |[r, g, b]: [usize; 3]| self.nodes[(r * PROFILE_GRID + g) * PROFILE_GRID + b];
         let mut ink = [0.0f64; 4];
-        for corner in 0..8usize {
-            let bit = |axis: usize| (corner >> (2 - axis)) & 1;
-            let weight: f64 = (0..3)
-                .map(|axis| {
-                    if bit(axis) == 1 {
-                        frac[axis]
-                    } else {
-                        1.0 - frac[axis]
-                    }
-                })
-                .product();
-            if weight == 0.0 {
-                continue;
+        let mut previous = 1.0;
+        for step in 0..=3 {
+            let f = axes.get(step).map_or(0.0, |&a| frac[a]);
+            let weight = previous - f;
+            if weight != 0.0 {
+                for (o, &v) in ink.iter_mut().zip(&node(vertex)) {
+                    *o = weight.mul_add(f64::from(v), *o);
+                }
             }
-            let [r, g, b] = [0, 1, 2].map(|axis| lo[axis] + bit(axis));
-            let node = self.nodes[(r * PROFILE_GRID + g) * PROFILE_GRID + b];
-            for (o, &v) in ink.iter_mut().zip(&node) {
-                *o = weight.mul_add(f64::from(v), *o);
+            if let Some(&a) = axes.get(step) {
+                vertex[a] += 1;
             }
+            previous = f;
         }
         ink.map(|v| S::from_unit(v / f64::from(u16::MAX)))
     }
@@ -371,8 +373,8 @@ mod tests {
     }
 
     /// A table of the device conversion of each node reproduces the
-    /// conversion at the nodes and interpolates it between them, where it
-    /// is piecewise linear in the channels.
+    /// conversion at the nodes and between them, where it is linear in each
+    /// tetrahedron of a cell.
     #[test]
     fn a_profile_separation_interpolates_its_nodes() {
         let mut nodes = Vec::new();
@@ -388,6 +390,19 @@ mod tests {
             ProfileSeparation::from_nodes(nodes, crate::WorkingSpace::Srgb).expect("a whole grid");
         assert_eq!(ProfileSeparation::node_value(PROFILE_GRID - 1), u16::MAX);
         for rgb in [[0u8; 3], [255; 3], [255, 0, 0], [12, 200, 77], [128; 3]] {
+            let want = color::cmyk::rgb_to_device_cmyk(rgb);
+            let got = table.ink(rgb);
+            for (g, w) in got.iter().zip(want) {
+                assert!(g.abs_diff(w) <= 1, "{rgb:?}: {got:?} for {want:?}");
+            }
+        }
+        // Off the nodes, near the neutral axis, where the black the
+        // conversion takes switches between the channels.
+        for rgb in [
+            [30_000u16, 30_100, 30_050],
+            [1_000, 900, 1_100],
+            [40_000, 40_000, 39_000],
+        ] {
             let want = color::cmyk::rgb_to_device_cmyk(rgb);
             let got = table.ink(rgb);
             for (g, w) in got.iter().zip(want) {

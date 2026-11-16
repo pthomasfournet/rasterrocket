@@ -264,6 +264,35 @@ fn a_cmyk_profile_separates_like_transicc() {
     );
 }
 
+/// Below the printer's black, where its relative colorimetric table is
+/// ill-conditioned (a few tenths of a* move the inks by percents), the
+/// separation evaluates the table at each colour's exact PCS value and
+/// agrees with Little CMS within 0.5 % of each ink.
+#[test]
+fn a_cmyk_separation_below_the_press_black_matches_transicc() {
+    let table = cmyk_printer()
+        .separation_table(
+            WorkingSpace::Srgb,
+            RenderingIntent::RelativeColorimetric,
+            false,
+        )
+        .expect("separates");
+    // transicc -n -i '*sRGB' -o printer-cmyk-v4.icc -t 1, in percent.
+    let reference: [(u8, [f64; 4]); 4] = [
+        (4, [0.0, 4.7059, 4.7059, 99.7894]),
+        (8, [0.0, 4.7059, 4.7059, 99.7116]),
+        (12, [0.0, 4.7059, 4.7059, 99.6307]),
+        (16, [11.1864, 7.0420, 5.1148, 99.0570]),
+    ];
+    for (gray, want) in reference {
+        let got = table.ink([u16::from_u8(gray); 3]);
+        for (g, w) in got.iter().zip(want) {
+            let g = f64::from(*g) / 655.35;
+            assert!((g - w).abs() <= 0.5, "gray {gray}: {got:?} for {want:?} %");
+        }
+    }
+}
+
 /// Without a fixed intent a paint separates through the table of its own
 /// intent; a fixed intent serves every paint.
 #[test]

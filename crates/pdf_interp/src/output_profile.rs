@@ -26,6 +26,7 @@
 //! tabulated by [`OutputProfile::separation_table`].
 
 mod proof;
+mod separate;
 mod source;
 
 pub use proof::{PROOF_GRID, SoftProof};
@@ -305,8 +306,10 @@ impl OutputProfile {
 
     /// The separation of colours from the working space `space` to the CMYK
     /// of the profile under `intent`, with black-point compensation when
-    /// `bpc`, tabulated on first use: [`PROFILE_GRID`]³ nodes, each a
-    /// 16-bit conversion.
+    /// `bpc`, tabulated on first use: [`PROFILE_GRID`]³ nodes, each the
+    /// profile's PCS → CMYK table evaluated in floating point at the node's
+    /// PCS value (see [`separate`]); a profile whose table that evaluation
+    /// does not read separates through the converter's 16-bit transform.
     ///
     /// # Errors
     ///
@@ -325,6 +328,14 @@ impl OutputProfile {
         }
         self.separations[slot(intent, bpc, space)]
             .get_or_init(|| {
+                let cms = intent.cms();
+                let exact = source::black_lift(&self.profile, cms, bpc)
+                    .and_then(|black| source::source_profile(space, &self.profile, cms, black))
+                    .ok()
+                    .and_then(|source| separate::tabulate(&source, &self.profile, cms, space));
+                if let Some(table) = exact {
+                    return Ok(Arc::new(table));
+                }
                 let xform = self.executor(space, intent, bpc)?;
                 tabulate(&*xform, space).map(Arc::new)
             })

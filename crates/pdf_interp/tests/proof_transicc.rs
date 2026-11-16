@@ -39,14 +39,9 @@ const MAX_DELTA_E_8_BIT_CHART: f64 = 1.2;
 const PRESS: &str = "printer-cmyk-v4.icc";
 
 /// The worst ΔE00 of `ours` against `theirs`, display values of `display`
-/// in `[0, 1]`, both decoded to Lab, over the patches `skip` does not
-/// mark; with the index of its patch and the mean.
-fn worst(
-    display: &str,
-    ours: &[Vec<f64>],
-    theirs: &[Vec<f64>],
-    skip: &[bool],
-) -> (f64, usize, f64) {
+/// in `[0, 1]`, both decoded to Lab; with the index of its patch and the
+/// mean.
+fn worst(display: &str, ours: &[Vec<f64>], theirs: &[Vec<f64>]) -> (f64, usize, f64) {
     let decode = |device: &[Vec<f64>]| {
         transicc(
             &[&format!("-i{display}"), "-o*Lab", "-t1"],
@@ -54,19 +49,17 @@ fn worst(
         )
     };
     let (lab_ours, lab_theirs) = (decode(ours), decode(theirs));
-    let (mut max, mut at, mut sum, mut count) = (0.0f64, 0, 0.0, 0u32);
+    let (mut max, mut at, mut sum) = (0.0f64, 0, 0.0);
     for (i, (a, b)) in lab_ours.iter().zip(&lab_theirs).enumerate() {
-        if skip.get(i).copied().unwrap_or(false) {
-            continue;
-        }
-        count += 1;
         let de = delta_e00(a, b);
         sum += de;
         if de > max {
             (max, at) = (de, i);
         }
     }
-    (max, at, sum / f64::from(count))
+    #[expect(clippy::cast_precision_loss, reason = "a patch count")]
+    let mean = sum / lab_ours.len() as f64;
+    (max, at, mean)
 }
 
 /// `inks`, of `[0, 1]`, painted on an ink canvas of `bits`, as a proofed
@@ -138,31 +131,6 @@ fn separated(
         .collect()
 }
 
-/// Which patches of `chart` are darker than the press's black: their
-/// `L*` below that of the press's darkest separation, the working-space
-/// black's, both through `transicc` under relative colorimetry.  Their
-/// separation is a clip whose evaluation differs between the two CMMs
-/// (`audit/2026-11-15_cmyk-separation-shadow-clip.md`), so the 8-bit
-/// comparison, whose rounding leaves no margin for it, omits them.
-fn below_press_black(src: &str, press: &str, chart: &[[f64; 3]]) -> Vec<bool> {
-    let black_ink = transicc(
-        &[&format!("-i{src}"), &format!("-o{press}"), "-t1"],
-        "0 0 0\n",
-    );
-    let black = transicc(
-        &[&format!("-i{press}"), "-o*Lab", "-t1"],
-        &lines(&black_ink, 1.0),
-    )[0][0];
-    let chart_lines: Vec<Vec<f64>> = chart.iter().map(|p| p.to_vec()).collect();
-    transicc(
-        &[&format!("-i{src}"), "-o*Lab", "-t1"],
-        &lines(&chart_lines, 255.0),
-    )
-    .iter()
-    .map(|lab| lab[0] < black)
-    .collect()
-}
-
 /// The display profile file `display` (the working space when `None`).
 fn display_file(dir: &Path, display: Option<&str>) -> String {
     display.map_or_else(
@@ -191,10 +159,9 @@ const PROOF_INTENTS: [(&str, ProofIntent); 2] = [
 ];
 
 /// Our proof of the chart on `display` within [`MAX_DELTA_E`] of
-/// `transicc -p` at 16 bits and [`MAX_DELTA_E_8_BIT_CHART`] at 8, the 8-bit
-/// chart without the patches darker than the press black
-/// ([`below_press_black`]), for every first-leg intent with and without
-/// compensation and both proof intents.
+/// `transicc -p` at 16 bits and [`MAX_DELTA_E_8_BIT_CHART`] at 8, for
+/// every first-leg intent with and without compensation and both proof
+/// intents.
 fn chart_agrees(display: Option<&str>) {
     let dir = tempfile_dir("proof");
     let src = working_space_file(&dir, rasterrocket_interp::WorkingSpace::Srgb);
@@ -204,7 +171,6 @@ fn chart_agrees(display: Option<&str>) {
     let press_file = press_file.to_str().unwrap();
     let proof = soft_proof(display);
     let chart = patches();
-    let below_black = below_press_black(src, press_file, &chart);
     let mut failures = Vec::new();
     let mut overall = 0.0f64;
     for (code, intent) in [
@@ -240,12 +206,7 @@ fn chart_agrees(display: Option<&str>) {
                         .collect();
                     let inks = separated(proof.press(), (intent, bpc), &chart, bits);
                     let ours = proofed(&proof, proof_intent, &inks, bits);
-                    let skip = if bits == 8 {
-                        below_black.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let (max, at, mean) = worst(&dst, &ours, &theirs, skip);
+                    let (max, at, mean) = worst(&dst, &ours, &theirs);
                     let what = format!(
                         "{} {intent} bpc {bpc} proof {proof_intent} {bits}-bit",
                         display.unwrap_or("working space")
@@ -312,7 +273,7 @@ fn ink_agrees(display: Option<&str>) {
             .map(|v| v.iter().map(|c| c / 255.0).collect())
             .collect();
             let ours = proofed(&proof, intent, &inks, bits);
-            let (max, at, mean) = worst(&dst, &ours, &theirs, &[]);
+            let (max, at, mean) = worst(&dst, &ours, &theirs);
             let what = format!(
                 "ink on {} proof {intent} {bits}-bit",
                 display.unwrap_or("working space")
