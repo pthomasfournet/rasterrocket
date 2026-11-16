@@ -126,10 +126,15 @@ impl<'doc> PageResources<'doc> {
     /// Construct a [`PageResources`] for the given page.
     #[must_use]
     pub const fn new(doc: &'doc Document, page_id: ObjectId) -> Self {
+        Self::over_object(doc, page_id)
+    }
+
+    /// The resources of the object `context`, none of them resolved yet.
+    const fn over_object(doc: &'doc Document, context: ObjectId) -> Self {
         Self {
             doc,
-            resource_context_id: page_id,
-            identity: ResourceIdentity::Object(page_id),
+            resource_context_id: context,
+            identity: ResourceIdentity::Object(context),
             subdicts: [const { OnceLock::new() }; Category::COUNT],
             default_spaces: OnceLock::new(),
             color_space_source: OnceLock::new(),
@@ -142,16 +147,10 @@ impl<'doc> PageResources<'doc> {
     /// including any already resolved.
     #[must_use]
     pub fn for_form(&self, form: &FormXObject) -> Self {
-        if !form.has_own_resources {
-            return self.inherited();
-        }
-        Self {
-            doc: self.doc,
-            resource_context_id: form.resources_id,
-            identity: ResourceIdentity::Object(form.resources_id),
-            subdicts: [const { OnceLock::new() }; Category::COUNT],
-            default_spaces: OnceLock::new(),
-            color_space_source: OnceLock::new(),
+        if form.has_own_resources {
+            self.for_context(form.resources_id)
+        } else {
+            self.inherited()
         }
     }
 
@@ -204,14 +203,7 @@ impl<'doc> PageResources<'doc> {
     /// object `context` (a Type 3 font dictionary carrying its own).
     #[must_use]
     pub const fn for_context(&self, context: ObjectId) -> Self {
-        Self {
-            doc: self.doc,
-            resource_context_id: context,
-            identity: ResourceIdentity::Object(context),
-            subdicts: [const { OnceLock::new() }; Category::COUNT],
-            default_spaces: OnceLock::new(),
-            color_space_source: OnceLock::new(),
-        }
+        Self::over_object(self.doc, context)
     }
 
     /// The underlying [`pdf::Document`] (read-only).
@@ -261,8 +253,7 @@ impl<'doc> PageResources<'doc> {
     /// Returns `None` if the resource name is not present in the resource dict.
     #[must_use]
     pub fn font_entry(&self, name: &[u8]) -> Option<(ResourceKey, &Object)> {
-        let entry = self.resource_subdict(Category::Font)?.get(name)?;
-        Some((self.key_of(entry, name), entry))
+        self.keyed_entry(Category::Font, name)
     }
 
     /// Resolve a font resource entry returned by [`Self::font_entry`].
@@ -280,38 +271,38 @@ impl<'doc> PageResources<'doc> {
     /// Unknown or unsupported keys in the dict are silently ignored.
     #[must_use]
     pub fn ext_gstate(&self, name: &[u8]) -> Option<ExtGStateParams> {
-        let eg_dict = self.resource_subdict(Category::ExtGState)?;
-        let gs_ref_or_dict = eg_dict.get(name)?;
-        let gs = resolve_dict(self.doc, gs_ref_or_dict)?;
-        Some(ExtGStateParams::from_dict(self.doc, &gs))
+        let entry = self.resource_subdict(Category::ExtGState)?.get(name)?;
+        ExtGStateParams::from_object(self.doc, entry)
     }
 
     /// The identity of the object the named `Pattern` resource refers to;
     /// `None` when the name is absent.
     #[must_use]
     pub fn pattern_key(&self, name: &[u8]) -> Option<ResourceKey> {
-        let entry = self.resource_subdict(Category::Pattern)?.get(name)?;
-        Some(self.key_of(entry, name))
+        self.keyed_entry(Category::Pattern, name)
+            .map(|(key, _)| key)
     }
 
     /// The identity of the object the named `Shading` resource refers to;
     /// `None` when the name is absent.
     #[must_use]
     pub fn shading_key(&self, name: &[u8]) -> Option<ResourceKey> {
-        let entry = self.resource_subdict(Category::Shading)?.get(name)?;
-        Some(self.key_of(entry, name))
+        self.keyed_entry(Category::Shading, name)
+            .map(|(key, _)| key)
     }
 
-    /// The identity of `entry`, held under `name` in a category of the
-    /// resources in effect.
-    fn key_of(&self, entry: &Object, name: &[u8]) -> ResourceKey {
-        match entry {
+    /// The entry `name` of the `category` sub-dictionary, with the identity
+    /// of the object it refers to; `None` when the name is absent.
+    fn keyed_entry(&self, category: Category, name: &[u8]) -> Option<(ResourceKey, &Object)> {
+        let entry = self.resource_subdict(category)?.get(name)?;
+        let key = match entry {
             Object::Reference(id) => ResourceKey::Object(*id),
             _ => ResourceKey::Direct {
                 context: self.resource_context_id,
                 name: name.into(),
             },
-        }
+        };
+        Some((key, entry))
     }
 
     /// The `Properties` resource `key` (PDF §14.6.2): the property list a

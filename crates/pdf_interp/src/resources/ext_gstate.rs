@@ -88,7 +88,13 @@ pub enum SoftMaskParams {
 }
 
 impl ExtGStateParams {
-    pub(super) fn from_dict(doc: &Document, d: &Dictionary) -> Self {
+    /// The parameters of the `ExtGState` dictionary `obj` refers to;
+    /// `None` when it is not a dictionary.
+    pub(super) fn from_object(doc: &Document, obj: &Object) -> Option<Self> {
+        resolve_dict(doc, obj).map(|d| Self::from_dict(doc, &d))
+    }
+
+    fn from_dict(doc: &Document, d: &Dictionary) -> Self {
         let overprint_stroke = d.get_bool(b"OP");
         let (black_generation, undercolour_removal) = black_generation::ext_gstate_black(doc, d);
         Self {

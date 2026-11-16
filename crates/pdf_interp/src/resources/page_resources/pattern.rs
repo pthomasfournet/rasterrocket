@@ -3,9 +3,7 @@
 
 use super::{Category, PageResources};
 use crate::resources::dict_ext::DictExt;
-use crate::resources::{
-    ExtGStateParams, read_matrix, resolve_dict, resolve_stream_dict, shading, tiling,
-};
+use crate::resources::{ExtGStateParams, read_matrix, resolve_stream_dict, shading, tiling};
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
 #[non_exhaustive]
@@ -86,8 +84,7 @@ impl PageResources<'_> {
         };
         let ext_gstate = pattern
             .get(b"ExtGState")
-            .and_then(|obj| resolve_dict(self.doc, obj))
-            .map(|d| ExtGStateParams::from_dict(self.doc, &d));
+            .and_then(|obj| ExtGStateParams::from_object(self.doc, obj));
         Some(ShadingPattern {
             shading,
             ext_gstate,

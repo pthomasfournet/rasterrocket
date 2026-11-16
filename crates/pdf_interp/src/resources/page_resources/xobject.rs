@@ -82,20 +82,14 @@ impl PageResources<'_> {
         draw_size: Option<(u32, u32)>,
         threshold: u32,
     ) -> bool {
-        let Some(obj) = self
-            .xobject_id(name)
-            .and_then(|id| self.doc.get_object(id).ok())
-        else {
-            return false;
-        };
-        let Some(dict) = obj.as_ref().as_stream().map(|s| &s.dict) else {
-            return false;
-        };
-        let Some(full) = device_jpx_size(dict, threshold) else {
-            return false;
-        };
-        !image::reduced_draw_size(self.doc, dict, draw_size)
-            .is_some_and(|draw| image::draw_halves(full, draw))
+        self.with_xobject_dict(name, |_, dict| {
+            let full = device_jpx_size(dict, threshold)?;
+            Some(
+                !image::reduced_draw_size(self.doc, dict, draw_size)
+                    .is_some_and(|draw| image::draw_halves(full, draw)),
+            )
+        })
+        .unwrap_or(false)
     }
 
     /// The object the `XObject` resource `name` refers to, when the entry is
@@ -106,6 +100,19 @@ impl PageResources<'_> {
             Object::Reference(id) => Some(*id),
             _ => None,
         }
+    }
+
+    /// `f` applied to the object and stream dictionary of the `XObject`
+    /// resource `name`; `None` when the name is absent or does not refer to
+    /// a stream.
+    fn with_xobject_dict<T>(
+        &self,
+        name: &[u8],
+        f: impl FnOnce(ObjectId, &Dictionary) -> Option<T>,
+    ) -> Option<T> {
+        let id = self.xobject_id(name)?;
+        let obj = self.doc.get_object(id).ok()?;
+        f(id, &obj.as_stream()?.dict)
     }
 
     /// Resolve the named `XObject` and return it as a [`FormXObject`] if its
@@ -122,13 +129,12 @@ impl PageResources<'_> {
     /// content is not decoded.
     #[must_use]
     pub fn form_xobject_entry(&self, name: &[u8]) -> Option<(ObjectId, bool)> {
-        let stream_id = self.xobject_id(name)?;
-        let obj = self.doc.get_object(stream_id).ok()?;
-        let dict = &obj.as_stream()?.dict;
-        if dict.get(b"Subtype")?.as_name()? != b"Form" {
-            return None;
-        }
-        Some((stream_id, dict.get(b"Resources").is_some()))
+        self.with_xobject_dict(name, |stream_id, dict| {
+            if dict.get(b"Subtype")?.as_name()? != b"Form" {
+                return None;
+            }
+            Some((stream_id, dict.get(b"Resources").is_some()))
+        })
     }
 
     /// Build a [`FormXObject`] directly from a stream object ID.
@@ -169,17 +175,17 @@ impl PageResources<'_> {
     /// optional content group or membership dictionary governing it.
     #[must_use]
     pub fn xobject_optional_content(&self, name: &[u8]) -> Option<Object> {
-        let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
-        stream.as_stream()?.dict.get(b"OC").cloned()
+        self.with_xobject_dict(name, |_, dict| dict.get(b"OC").cloned())
     }
 
     /// The `Intent` of the `XObject` resource `name`: an image's own
     /// rendering intent (§8.9.5.1).  `None` when absent.
     #[must_use]
     pub fn xobject_intent(&self, name: &[u8]) -> Option<crate::RenderingIntent> {
-        let stream = self.doc.get_object(self.xobject_id(name)?).ok()?;
-        let name = stream.as_stream()?.dict.get(b"Intent")?.as_name()?;
-        Some(crate::RenderingIntent::from_pdf_name(name))
+        self.with_xobject_dict(name, |_, dict| {
+            let intent = dict.get(b"Intent")?.as_name()?;
+            Some(crate::RenderingIntent::from_pdf_name(intent))
+        })
     }
 }
 
