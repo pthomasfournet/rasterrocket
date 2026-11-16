@@ -3741,6 +3741,26 @@ additive groups.**
 - **API changes.** `IccClutParams` has a `wide` field;
   `gpu::npp_rotate::rotate_gray16` and `gpu::backend::icc_clut16` are new.
 
+**Unreleased on master: 16-bit GPU pages and 16-bit nvJPEG2000.**
+`--gpu-pages` now renders `--depth 16` pages: the Vulkan page raster takes
+the bits per sample as a push constant, widens the CPU's coverage byte to
+the shape 257 · cov and composites with the 16-bit `div_max`, as the CPU's
+AA pipe does, storing two bytes a sample low first (no Int64, no 16-bit
+storage feature). It is byte-identical to `--backend cpu` at 16 bits on the
+RTX 5070, on RADV and on the A18 Pro through MoltenVK, and the 8-bit pages
+are unchanged; rrocket no longer refuses `--depth 16 --gpu-pages`. Under
+`--backend cuda`, a JPEG 2000 codestream of 9 to 16 bits on a 16-bit canvas
+decodes on nvJPEG2000 (`NVJPEG2K_UINT16`, the samples at their own
+precision, widened on the host by the CPU path's formula) when the
+reversible 5-3 wavelet is in force: equal to the CPU sample for sample on
+every such fixture. Under the irreversible 9-7 wavelet the device differs
+(up to 10 levels at 12 bits), so those codestreams decode on the CPU with a
+one-time warning. API changes: `PageCommands::new` takes a `SampleDepth`
+and `u16` samples, `VulkanBackend::render_page` is generic over
+`PageSample`, `NvJpeg2kDecoder::decode_sync_u16` and
+`SampleDepth::max_sample` are new, and `DecodedJpeg2k` carries the
+components' precisions.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
