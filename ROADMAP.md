@@ -3867,6 +3867,25 @@ takes 25.8 ms on the RTX 5070 (raster 0.44 ms) and 39.1 ms on RADV (raster
 both. `--gpu-pages` and plain renders of the fixtures are byte-identical to
 before on both GPUs.
 
+**Unreleased on master: `--gpu-pages` opens its device only for a page
+that may use it.** Under `auto`, the GPU page device was opened at session
+open and joined when the session closed, so every `--gpu-pages` process
+paid the whole Vulkan open, also when no page could render on the device.
+The first page that passes the operator check now starts the open; a job
+none of whose pages does opens nothing. On five pages of corpus-02 at 150
+dpi, `--gpu-pages` takes 19.0 ms single-threaded against 111.9 ms before
+(CPU 19.2 ms) on Linux, and 16.5 ms against 26.3 ms on six threads on the
+A18 Pro (CPU 17.0 ms). A device that fails to open is still logged at
+error, and a `--vulkan-device` naming no device still fails the session.
+Two device slots (recording page n+1 while page n rasterises) were
+measured and dropped: 5–9 % faster than one on Linux at 24 threads, still
+slower than the CPU there, and 7–14 % slower than one on the A18 Pro at
+six. Since exact-area coverage, recording a page for the device costs more
+than the CPU's whole page (28 ms against 20 ms on the A18 Pro, 23 against
+26 ms on Linux), so GPU pages no longer beat the CPU on any of the three
+GPUs. Output is byte-identical to before, plain and with `--gpu-pages`
+under `auto` and `--backend vulkan`, on the RTX 5070 and on RADV.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
