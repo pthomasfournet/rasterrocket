@@ -147,6 +147,23 @@ byte-identical on the benchmark images and passes the full test suite.
   caller decides whether to draw it. Decoded output is unchanged.
   `TNsot`, read and ignored before, is kept for the count.
 
+## Header survey
+
+- `lib.rs`: `Image::survey` parses the tile-part headers as a decode
+  does, reading no packet, and returns a `Survey`: the `Completeness` the
+  decode would report and the union of the code-block style bytes in
+  force for every component of every tile (main-header and tile-part COD
+  and COC markers).  `Image::plain_u8` reports, as a `NotPlain`, the
+  first property that keeps the samples of `decode_u8` from being the
+  components as reconstructed: a colour conversion, an alpha channel, a
+  palette, a channel definition, a component count other than one or
+  three, a precision other than 8 bits, a signed or a sub-sampled
+  component.  The private `fused_u8_path` shares its box checks.
+- `j2c/codestream.rs`: the signedness bit of `Ssiz`, read and dropped
+  before, and the raw code-block style byte are kept.  The decoder still
+  reconstructs signed components as unsigned.  Decoded output is
+  unchanged.
+
 ## Release tooling
 
 - `Cargo.toml`: `[package.metadata.release] release = false`, so

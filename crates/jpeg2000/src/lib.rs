@@ -89,7 +89,7 @@ pub use error::{
     ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
     ValidationError,
 };
-pub use j2c::{Completeness, ComponentData, DecoderContext};
+pub use j2c::{Completeness, ComponentData, DecoderContext, Survey};
 pub use jp2::DecodedImage;
 
 #[cfg(feature = "image")]
@@ -259,6 +259,20 @@ impl<'a> Image<'a> {
     /// after them must be a no-op, and `data_u8` must take its one- or
     /// three-component 8-bit path.
     fn fused_u8_path(&self) -> bool {
+        self.sample_transform().is_none()
+            && matches!(self.header.component_infos.len(), 1 | 3)
+            && self
+                .header
+                .component_infos
+                .iter()
+                .all(|c| c.size_info.precision == 8)
+    }
+
+    /// The first step [`Image::decode`] takes after reconstructing the
+    /// components that changes them: a colour conversion the colour
+    /// specification calls for, the split of an alpha channel, palette
+    /// resolution, or a channel definition.
+    fn sample_transform(&self) -> Option<NotPlain> {
         let converted = matches!(
             self.boxes
                 .color_specification
@@ -270,16 +284,53 @@ impl<'a> Image<'a> {
                     | EnumeratedColorspace::Ycck
             ))
         );
-        !converted
-            && !self.has_alpha
-            && self.boxes.palette.is_none()
-            && self.boxes.channel_definition.is_none()
-            && matches!(self.header.component_infos.len(), 1 | 3)
-            && self
-                .header
-                .component_infos
-                .iter()
-                .all(|c| c.size_info.precision == 8)
+        if converted {
+            Some(NotPlain::ColourConversion)
+        } else if self.has_alpha {
+            Some(NotPlain::Alpha)
+        } else if self.boxes.palette.is_some() {
+            Some(NotPlain::Palette)
+        } else if self.boxes.channel_definition.is_some() {
+            Some(NotPlain::ChannelDefinitions)
+        } else {
+            None
+        }
+    }
+
+    /// `Ok` when the samples [`Image::decode_u8`] returns are the
+    /// codestream's components as reconstructed, interleaved: one or three
+    /// components, each unsigned, of 8 bits and on the image grid, with no
+    /// colour conversion, alpha channel, palette or channel definition
+    /// applied after them; otherwise the first property that fails.
+    pub fn plain_u8(&self) -> core::result::Result<(), NotPlain> {
+        if let Some(transform) = self.sample_transform() {
+            return Err(transform);
+        }
+        let components = &self.header.component_infos;
+        if !matches!(components.len(), 1 | 3) {
+            return Err(NotPlain::Components(components.len()));
+        }
+        for c in components {
+            let size = &c.size_info;
+            if size.precision != 8 {
+                return Err(NotPlain::Precision(size.precision));
+            }
+            if size.signed {
+                return Err(NotPlain::Signed);
+            }
+            if size.horizontal_resolution != 1 || size.vertical_resolution != 1 {
+                return Err(NotPlain::SubSampled);
+            }
+        }
+        Ok(())
+    }
+
+    /// The [`Survey`] of the codestream: its tile-part headers parsed as
+    /// [`Image::decode`] parses them, without decoding a code-block.  Its
+    /// completeness is the one a decode would report; an error is one the
+    /// decode would fail with before decoding a tile.
+    pub fn survey(&self) -> Result<Survey> {
+        j2c::survey(self.codestream, &self.header)
     }
 
     /// Decode the image and return its decoded components.
@@ -395,6 +446,45 @@ pub(crate) fn resolve_alpha_and_color_space(
     }
 
     Ok((color_space, has_alpha))
+}
+
+/// The first property of an image that keeps the samples of
+/// [`Image::decode_u8`] from being its codestream's components as
+/// reconstructed (see [`Image::plain_u8`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotPlain {
+    /// The colour specification calls for a conversion of the components
+    /// (sYCC, CIELab or YCCK).
+    ColourConversion,
+    /// A component is an alpha channel.
+    Alpha,
+    /// The components are palette indices.
+    Palette,
+    /// A channel definition box maps the components.
+    ChannelDefinitions,
+    /// The codestream has this many components, neither one nor three.
+    Components(usize),
+    /// A component has this precision in bits, not 8.
+    Precision(u8),
+    /// A component is signed.
+    Signed,
+    /// A component is sub-sampled relative to the image grid.
+    SubSampled,
+}
+
+impl core::fmt::Display for NotPlain {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ColourConversion => f.write_str("a colour conversion of its components"),
+            Self::Alpha => f.write_str("an alpha channel"),
+            Self::Palette => f.write_str("palette indices"),
+            Self::ChannelDefinitions => f.write_str("a channel definition box"),
+            Self::Components(n) => write!(f, "{n} components"),
+            Self::Precision(bits) => write!(f, "{bits}-bit components"),
+            Self::Signed => f.write_str("signed components"),
+            Self::SubSampled => f.write_str("sub-sampled components"),
+        }
+    }
 }
 
 /// The color space of the image.

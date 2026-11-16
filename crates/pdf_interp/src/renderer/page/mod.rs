@@ -150,10 +150,22 @@ enum Nvjpeg2kSupply {
     /// The attached decoder, if any, is offered every decode.
     Attached,
     /// The decoder is offered only the draws
-    /// `PageRenderer::nvjpeg2k_for_draw` selects, and is obtained from the
-    /// source, while it is `Some`, by the first of them that finds none
-    /// attached.
-    OnDemand(Option<fn() -> Option<NvJpeg2kDecoder>>),
+    /// `PageRenderer::nvjpeg2k_offered` selects, and is obtained from the
+    /// source, while it is `Some`, by the first decode of theirs that uses
+    /// it and finds none attached.
+    OnDemand(Option<crate::resources::image::Jpeg2kSource>),
+}
+
+#[cfg(feature = "nvjpeg2k")]
+impl Nvjpeg2kSupply {
+    /// The source a decode offered the decoder obtains it from: none when
+    /// it is attached.
+    const fn source(&mut self) -> Option<&mut Option<crate::resources::image::Jpeg2kSource>> {
+        match self {
+            Self::Attached => None,
+            Self::OnDemand(source) => Some(source),
+        }
+    }
 }
 
 /// Identity CTM for passing to raster functions — coordinate transform is

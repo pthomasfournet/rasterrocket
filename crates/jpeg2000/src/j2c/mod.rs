@@ -15,7 +15,7 @@ mod tile;
 
 use super::jp2::ImageBoxes;
 use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
-use crate::error::{FormatError, MarkerError, Result, ValidationError, bail};
+use crate::error::{FormatError, MarkerError, Result, TileError, ValidationError, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
@@ -25,7 +25,18 @@ pub(crate) use bitplane::BITPLANE_BIT_SIZE;
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
 pub(crate) use decode::{Deferred, decode};
-pub use tile::Completeness;
+pub use tile::{Completeness, Survey};
+
+/// The [`Survey`] of the tile-parts of `data`, the codestream after the
+/// main header `header`: the tile-part headers are parsed as a decode
+/// parses them, and no packet is read.
+pub(crate) fn survey(data: &[u8], header: &Header) -> Result<Survey> {
+    let tiles = tile::parse(&mut BitReader::new(data), header)?;
+    if tiles.is_empty() {
+        bail!(TileError::Invalid);
+    }
+    Ok(Survey::of(&tiles))
+}
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,

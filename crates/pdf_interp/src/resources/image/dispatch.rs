@@ -172,7 +172,7 @@ pub(super) fn decode_image_stream<
         Some("JPXDecode") => {
             let opts = jpx_options(src, wide);
             #[cfg(feature = "nvjpeg2k")]
-            let samples = decode_jpx(&input, w, h, draw_size, &opts, ctx.nvjpeg2k.as_deref_mut());
+            let samples = decode_jpx(&input, w, h, draw_size, &opts, ctx.nvjpeg2k.as_mut());
             #[cfg(not(feature = "nvjpeg2k"))]
             let samples = decode_jpx(&input, w, h, draw_size, &opts);
             Some(samples.map_err(|e| format!("JPXDecode: {e}"))?)

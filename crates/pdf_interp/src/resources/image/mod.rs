@@ -37,10 +37,11 @@
 //!
 //! When the crate is built with `--features nvjpeg2k`, `JPXDecode` streams
 //! with pixel area ≥ `GPU_JPEG2K_THRESHOLD_PX` are decoded on the GPU via
-//! NVIDIA nvJPEG2000 instead of the CPU JPEG 2000 decoder.  Pass an
-//! `NvJpeg2kDecoder` (from `gpu::nvjpeg2k`) to [`resolve_image`] to enable this path; pass `None`
-//! for CPU-only behaviour.  Only 1- and 3-component images are accelerated;
-//! CMYK and other multi-channel images always fall through to the CPU path.
+//! NVIDIA nvJPEG2000 instead of the CPU JPEG 2000 decoder, when their
+//! samples are one or three unsigned 8-bit components taken as they are
+//! and their code-blocks use no coding style the library refuses.  A
+//! [`DeviceJpx`] in [`ImageDecodeCtx::nvjpeg2k`] enables this path; `None`
+//! is CPU-only behaviour.
 
 use std::borrow::Cow;
 
@@ -55,7 +56,7 @@ use crate::resources::dict_ext::DictExt;
 use gpu::nvjpeg::NvJpegDecoder;
 
 #[cfg(feature = "nvjpeg2k")]
-use gpu::nvjpeg2k::NvJpeg2kDecoder;
+pub(crate) use codecs::{DeviceJpx, Jpeg2kSource};
 
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
@@ -973,9 +974,10 @@ pub struct ImageDecodeCtx<'a> {
     /// VA-API JPEG queue for large `DCTDecode` images.
     #[cfg(feature = "vaapi")]
     pub vaapi: Option<&'a JpegQueueHandle>,
-    /// nvJPEG2000 decoder for large `JPXDecode` images.
+    /// The nvJPEG2000 decoder large `JPXDecode` images may use, obtained
+    /// on first use when it is supplied on demand.
     #[cfg(feature = "nvjpeg2k")]
-    pub nvjpeg2k: Option<&'a mut NvJpeg2kDecoder>,
+    pub nvjpeg2k: Option<DeviceJpx<'a>>,
     /// ICC conversion handles.
     #[cfg(feature = "gpu-icc")]
     pub icc: IccHandles<'a>,

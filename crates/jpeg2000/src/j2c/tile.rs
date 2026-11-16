@@ -220,6 +220,31 @@ impl Completeness {
     }
 }
 
+/// What the tile-part headers of a codestream declare, read without
+/// decoding a code-block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Survey {
+    /// How much of its tile data the codestream holds: the
+    /// [`Completeness`] a decode of it reports.
+    pub completeness: Completeness,
+    /// The union of the code-block style bytes (Table A.19) in force for
+    /// every component of every tile, from the COD and COC markers of the
+    /// main header and of the tile-part headers.
+    pub code_block_styles: u8,
+}
+
+impl Survey {
+    pub(crate) fn of(tiles: &[Tile<'_>]) -> Self {
+        Self {
+            completeness: Completeness::of(tiles),
+            code_block_styles: tiles
+                .iter()
+                .flat_map(|t| &t.component_infos)
+                .fold(0, |acc, c| acc | c.code_block_style().raw),
+        }
+    }
+}
+
 fn parse_tile_part<'a>(
     reader: &mut BitReader<'a>,
     main_header: &'a Header,
@@ -855,6 +880,7 @@ mod tests {
     #[test]
     fn test_jpeg2000_standard_example_b4() {
         let component_size_info_0 = ComponentSizeInfo {
+            signed: false,
             precision: 8,
             horizontal_resolution: 1,
             vertical_resolution: 1,
@@ -887,6 +913,7 @@ mod tests {
         };
 
         let component_size_info_1 = ComponentSizeInfo {
+            signed: false,
             precision: 8,
             horizontal_resolution: 2,
             vertical_resolution: 2,

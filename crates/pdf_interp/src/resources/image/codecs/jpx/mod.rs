@@ -4,16 +4,21 @@
 use crate::resources::image::colorspace::{KeySamples, Layout, Samples};
 
 #[cfg(feature = "nvjpeg2k")]
-use gpu::nvjpeg2k::{Jpeg2kColorSpace as GpuJ2kCs, NvJpeg2kDecoder};
+mod device;
+
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) use device::{DeviceJpx, Jpeg2kSource};
 
 // ── JPXDecode (JPEG 2000) ─────────────────────────────────────────────────────
 
 /// Decode a `JPXDecode` (JPEG 2000) stream.
 ///
-/// When the `nvjpeg2k` feature is active and `gpu` is `Some`, large images
-/// (pixel area ≥ `jpx_threshold()`) are decoded on the GPU via
-/// nvJPEG2000.  All other images, and any image for which the GPU path fails
-/// (unsupported component count, CUDA error, etc.), fall through to the CPU path.
+/// When the `nvjpeg2k` feature is active and `gpu` is `Some`, an image of
+/// at least `jpx_threshold()` pixels whose codestream nvJPEG2000
+/// reconstructs as the CPU decoder does (`device::takes`) is decoded on
+/// the device, the decoder being obtained from `gpu` only then.  Every
+/// other image, and one whose device decode fails, decodes on the CPU; a
+/// codestream the device does not take is reported (`device::report`).
 ///
 /// PDF JPEG 2000 streams may be raw codestreams (`.j2k`) or full JP2 container
 /// format (`.jp2`).  Both paths auto-detect the format from the stream.
@@ -35,7 +40,7 @@ pub(in crate::resources::image) fn decode_jpx(
     pdf_h: u32,
     draw_size: Option<(u32, u32)>,
     opts: &JpxOptions,
-    #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut NvJpeg2kDecoder>,
+    #[cfg(feature = "nvjpeg2k")] gpu: Option<&mut DeviceJpx<'_>>,
 ) -> Result<Samples, String> {
     if opts.indices {
         return decode_jpx_indices(data);
@@ -63,12 +68,11 @@ pub(in crate::resources::image) fn decode_jpx(
         _ => None,
     };
 
-    // ── GPU fast path (nvjpeg2k feature, large images, 1- or 3-component only) ─
-    // nvJPEG2000 rejects codestreams with an alpha channel, so the GPU result
-    // never needs `/SMaskInData`.  Its samples are 8-bit: a codestream of
-    // more than 8 bits kept at 16, or with a colour key, which compares the
-    // samples at their own precision, decodes on the CPU.  Samples whose
-    // two bytes each exceed the budget are kept at 8 bits.
+    // ── Device path ──────────────────────────────────────────────────────────
+    // The device returns 8-bit samples: a codestream of more than 8 bits
+    // kept at 16 (samples whose two bytes each exceed the budget are kept
+    // at 8), and one under a colour key, which compares the samples at
+    // their own precision, decode on the CPU.
     let wide = opts.wide
         && img.original_bit_depth() > 8
         && jpx_budget(&img, 2)
@@ -77,14 +81,18 @@ pub(in crate::resources::image) fn decode_jpx(
             })
             .is_ok();
     #[cfg(feature = "nvjpeg2k")]
-    if let Some(dec) = gpu.filter(|_| !opts.colour_key && !wide) {
-        let area = pdf_w.saturating_mul(pdf_h);
-        if area >= crate::resources::image::jpx_threshold() {
-            if let Some(mut samples) = decode_jpx_gpu(data, pdf_w, pdf_h, dec) {
-                samples.embedded_profile = embedded_profile;
-                return Ok(samples);
+    if let Some(device) = gpu.filter(|_| !opts.colour_key && !wide)
+        && pdf_w.saturating_mul(pdf_h) >= crate::resources::image::jpx_threshold()
+        && let Ok(survey) = img.survey()
+    {
+        match device::takes(&img, &survey) {
+            Ok(()) => {
+                if let Some(mut samples) = device::decode(data, pdf_w, pdf_h, device) {
+                    samples.embedded_profile = embedded_profile;
+                    return Ok(samples);
+                }
             }
-            log::debug!("image: JPXDecode: GPU path failed, retrying on CPU");
+            Err(why) => device::report(&why),
         }
     }
 
@@ -393,49 +401,6 @@ pub(in crate::resources::image) struct JpxOptions {
     pub channels: Option<u8>,
 }
 
-/// GPU-accelerated JPEG 2000 decode via nvJPEG2000.
-///
-/// Returns `None` for unsupported component counts (CMYK, LAB, N-channel) or
-/// when any CUDA API call fails; the caller falls back to the CPU path in
-/// both cases.
-#[cfg(feature = "nvjpeg2k")]
-fn decode_jpx_gpu(
-    data: &[u8],
-    pdf_w: u32,
-    pdf_h: u32,
-    dec: &mut NvJpeg2kDecoder,
-) -> Option<Samples> {
-    let img = match dec.decode_sync(data) {
-        Ok(img) => img,
-        // Unsupported component count (CMYK, Gray+Alpha, N-channel), sub-sampled
-        // chroma, or a codestream type not supported by this nvJPEG2000 build
-        // (HTJ2K, status 4) — all are expected; fall through to CPU silently.
-        Err(
-            gpu::nvjpeg2k::NvJpeg2kError::UnsupportedComponents(_)
-            | gpu::nvjpeg2k::NvJpeg2kError::SubSampledComponents
-            | gpu::nvjpeg2k::NvJpeg2kError::Nvjpeg2kStatus(4),
-        ) => return None,
-        Err(e) => {
-            log::warn!("image: JPXDecode GPU: nvJPEG2000 error: {e}");
-            return None;
-        }
-    };
-
-    if img.width != pdf_w || img.height != pdf_h {
-        log::debug!(
-            "image: JPXDecode GPU: PDF dict says {pdf_w}×{pdf_h}, nvJPEG2000 reports {}×{} — using nvJPEG2000 dims",
-            img.width,
-            img.height,
-        );
-    }
-
-    let layout = match img.color_space {
-        GpuJ2kCs::Gray => Layout::Color(1),
-        GpuJ2kCs::Rgb => Layout::Color(3),
-    };
-    Some(Samples::cpu(img.width, img.height, layout, img.data))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,7 +441,7 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_draw_size_skips_levels_without_going_below_it() {
-        let gray = include_bytes!("../testdata/gray8.jp2");
+        let gray = include_bytes!("../../testdata/gray8.jp2");
         let full = decode_jpx(gray, 8, 8, None, &PLAIN).expect("decodes");
         assert_eq!((full.width, full.height), (8, 8));
 
@@ -492,11 +457,11 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_gray_matches_reference_decode() {
-        let img = jpx_fixture(include_bytes!("../testdata/gray8.jp2"));
+        let img = jpx_fixture(include_bytes!("../../testdata/gray8.jp2"));
         assert_eq!(img.layout, Layout::Color(1));
         assert_eq!(
             img.data.as_cpu(),
-            Some(&include_bytes!("../testdata/gray8.gray")[..])
+            Some(&include_bytes!("../../testdata/gray8.gray")[..])
         );
         assert!(img.smask.is_none());
     }
@@ -504,19 +469,19 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_raw_codestream_rgb_matches_reference_decode() {
-        let img = jpx_fixture(include_bytes!("../testdata/rgb8.j2k"));
+        let img = jpx_fixture(include_bytes!("../../testdata/rgb8.j2k"));
         assert_eq!(img.layout, Layout::Color(3));
         assert_eq!(
             img.data.as_cpu(),
-            Some(&include_bytes!("../testdata/rgb8.rgb")[..])
+            Some(&include_bytes!("../../testdata/rgb8.rgb")[..])
         );
     }
 
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_alpha_channel_becomes_the_soft_mask() {
-        let img = jpx_fixture(include_bytes!("../testdata/rgba8.jp2"));
-        let rgba = include_bytes!("../testdata/rgba8.rgba");
+        let img = jpx_fixture(include_bytes!("../../testdata/rgba8.jp2"));
+        let rgba = include_bytes!("../../testdata/rgba8.rgba");
         let rgb: Vec<u8> = rgba
             .as_chunks::<4>()
             .0
@@ -537,11 +502,11 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_htj2k_codestream_matches_reference_decode() {
-        let img = jpx_fixture(include_bytes!("../testdata/rgb8_ht.j2k"));
+        let img = jpx_fixture(include_bytes!("../../testdata/rgb8_ht.j2k"));
         assert_eq!(img.layout, Layout::Color(3));
         assert_eq!(
             img.data.as_cpu(),
-            Some(&include_bytes!("../testdata/rgb8.rgb")[..])
+            Some(&include_bytes!("../../testdata/rgb8.rgb")[..])
         );
     }
 
@@ -552,7 +517,7 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn a_truncated_codestream_is_partial_or_refused() {
-        let j2k = include_bytes!("../testdata/rgb8.j2k");
+        let j2k = include_bytes!("../../testdata/rgb8.j2k");
         assert_eq!(&j2k[119..121], [0xFF, 0x90]);
         assert_eq!(&j2k[131..133], [0xFF, 0x93]);
         let decode = |len: usize| decode_jpx(&j2k[..len], 8, 8, None, &PLAIN);
@@ -608,7 +573,7 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_raw_codestream_takes_the_dictionary_channels() {
-        let img = raw_codestream(include_bytes!("../testdata/devicen2.j2k"), 2);
+        let img = raw_codestream(include_bytes!("../../testdata/devicen2.j2k"), 2);
         assert_eq!(img.layout, Layout::Color(2));
         assert!(img.smask.is_none());
         let ramp = [29, 95, 162, 228];
@@ -625,7 +590,7 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_raw_codestream_with_subsampled_rgb_is_not_ycbcr() {
-        let img = raw_codestream(include_bytes!("../testdata/subsampled_rgb.j2k"), 3);
+        let img = raw_codestream(include_bytes!("../../testdata/subsampled_rgb.j2k"), 3);
         assert_eq!(img.layout, Layout::Color(3));
         let (red, green) = ([28, 94, 160, 226], [26, 94, 162, 230]);
         for (cell, got) in cell_centres(&img, 3).iter().enumerate() {
@@ -643,7 +608,7 @@ mod tests {
     /// first, when the header is parsed.
     #[test]
     fn jpx_codestream_over_the_sample_limit_is_refused() {
-        let mut j2k = include_bytes!("../testdata/rgb8.j2k").to_vec();
+        let mut j2k = include_bytes!("../../testdata/rgb8.j2k").to_vec();
         assert_eq!(&j2k[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
         // Xsiz, Ysiz, then XTsiz and YTsiz (one tile), after Lsiz and Rsiz.
         for offset in [8, 12, 24, 28] {
@@ -676,8 +641,8 @@ mod tests {
     #[cfg(not(feature = "nvjpeg2k"))]
     #[test]
     fn jpx_16_bit_samples_scale_to_8_bit() {
-        let img = jpx_fixture(include_bytes!("../testdata/gray16.jp2"));
-        let reference = include_bytes!("../testdata/gray16.gray16");
+        let img = jpx_fixture(include_bytes!("../../testdata/gray16.jp2"));
+        let reference = include_bytes!("../../testdata/gray16.gray16");
         let got = img.data.as_cpu().expect("host-resident");
         assert_eq!(got.len(), 64);
         for (i, (&g, w)) in got.iter().zip(reference.as_chunks::<2>().0).enumerate() {

@@ -16,4 +16,6 @@ pub(super) use ccitt::decode_ccitt;
 pub(super) use dct::DctCacheCtx;
 pub(super) use dct::decode_dct;
 pub(super) use jbig2::decode_jbig2;
+#[cfg(feature = "nvjpeg2k")]
+pub(crate) use jpx::{DeviceJpx, Jpeg2kSource};
 pub(super) use jpx::{JpxOptions, decode_jpx};

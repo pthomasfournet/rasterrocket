@@ -409,6 +409,8 @@ impl CodingStyleFlags {
 /// Code-block style flags (Table A.19).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CodeBlockStyle {
+    /// The style byte as the COD or COC marker holds it.
+    pub(crate) raw: u8,
     pub(crate) selective_arithmetic_coding_bypass: bool,
     pub(crate) reset_context_probabilities: bool,
     pub(crate) termination_on_each_pass: bool,
@@ -423,6 +425,7 @@ pub(crate) struct CodeBlockStyle {
 impl CodeBlockStyle {
     fn from_u8(value: u8) -> Self {
         Self {
+            raw: value,
             selective_arithmetic_coding_bypass: (value & 0x01) != 0,
             reset_context_probabilities: (value & 0x02) != 0,
             termination_on_each_pass: (value & 0x04) != 0,
@@ -555,6 +558,9 @@ impl SizeData {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ComponentSizeInfo {
     pub(crate) precision: u8,
+    /// The component's samples are signed (bit 7 of `Ssiz`).  The decoder
+    /// reconstructs them as unsigned all the same.
+    pub(crate) signed: bool,
     pub(crate) horizontal_resolution: u8,
     pub(crate) vertical_resolution: u8,
 }
@@ -702,7 +708,7 @@ fn size_marker_inner(reader: &mut BitReader<'_>) -> Option<SizeData> {
         let precision = (ssiz & 0x7F) + 1;
         // No idea how to process signed images, but as far as I can tell
         // openjpeg and others just accept it as is, so let's do the same.
-        let _is_signed = (ssiz & 0x80) != 0;
+        let signed = (ssiz & 0x80) != 0;
 
         // In theory up to 38 is allowed, but we don't support more than that.
         if precision as u32 > BITPLANE_BIT_SIZE {
@@ -711,6 +717,7 @@ fn size_marker_inner(reader: &mut BitReader<'_>) -> Option<SizeData> {
 
         components.push(ComponentSizeInfo {
             precision,
+            signed,
             horizontal_resolution: x_rsiz,
             vertical_resolution: y_rsiz,
         });
