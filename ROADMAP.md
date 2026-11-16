@@ -3073,7 +3073,14 @@ wide pages. Without an output profile, at 8 bits, and with `--working-space
 srgb`, output is byte-identical: 0 of the corpus's files differ under 15
 modes (RGB, gray and CMYK at both depths, overprint, proofs with and without
 a display profile, RGB, gray and CMYK profiles at 8 bits, `--gpu-pages`).
-Not done: the wide space at 8 bits, group blending spaces, and the sRGB
+Also: on a 16-bit canvas an 8-bit image in an ICC, CalRGB, Lab or
+`DeviceCMYK` space converts at 16 bits, as a fill of its colour does, instead
+of being converted at 8 bits and widened, so `--depth 16` output changes
+without a profile on pages with such images: 14 of the corpus's 65 page files
+at 16 bits, by at most 1.29 8-bit steps (the 8-bit `DeviceCMYK` row
+conversion approximates the model by up to that), and 11 of its 99 `--cmyk
+--depth 16` files; DeviceRGB and DeviceGray images, and 8-bit output, are
+unchanged. Not done: the wide space at 8 bits, group blending spaces, and the sRGB
 output conversion's 8-bit-precise table interpolation. API changes:
 `WorkingSpace`, `ColourTarget` (replaces `ColourIntent` as the conversion
 argument of `ColorSpace::convert_to_rgb`), `CanvasRequest::WideRgb`,

@@ -207,7 +207,7 @@ pub(super) fn decode_image_stream<
         .colour
         .convert(
             doc,
-            ctx.target,
+            (ctx.target, ctx.depth),
             samples,
             ctx.tint_budget,
             #[cfg(feature = "gpu-icc")]

@@ -139,20 +139,22 @@ fn white_is_exact_in_the_wide_space() {
     }
 }
 
-/// A colour converts to the same canvas value as a fill and as an 8-bit
-/// image of the same components: `DeviceRGB`, a matrix/TRC ICC space and
-/// `DeviceCMYK`.
+/// A colour converts to the same 16-bit canvas value as a fill and as an
+/// 8-bit image of the same components, in either working space:
+/// `DeviceRGB`, a matrix/TRC ICC space and `DeviceCMYK`.
 #[test]
 fn a_fill_and_an_image_of_one_colour_agree() {
     let d = doc();
-    for (fill, im) in [
-        ("0.2 0.6 0.8 rg", "/Rgb"),
-        ("/A cs 0.2 0.6 0.8 sc", "/Adobe"),
-        ("0.2 0.6 0.8 0 k", "/Cmyk"),
-    ] {
-        let content = format!("{fill} 0 0 5 10 re f q 5 0 0 10 5 0 cm {im} Do Q");
-        let page = render(&d, WorkingSpace::Wide, &content);
-        assert_eq!(at(&page, 2), at(&page, 7), "{fill}");
+    for space in WorkingSpace::ALL {
+        for (fill, im) in [
+            ("0.2 0.6 0.8 rg", "/Rgb"),
+            ("/A cs 0.2 0.6 0.8 sc", "/Adobe"),
+            ("0.2 0.6 0.8 0 k", "/Cmyk"),
+        ] {
+            let content = format!("{fill} 0 0 5 10 re f q 5 0 0 10 5 0 cm {im} Do Q");
+            let page = render(&d, space, &content);
+            assert_eq!(at(&page, 2), at(&page, 7), "{space:?} {fill}");
+        }
     }
 }
 

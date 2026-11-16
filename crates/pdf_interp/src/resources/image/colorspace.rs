@@ -329,11 +329,12 @@ impl ImageColour {
     /// be allocated, or the work left cannot convert them even
     /// approximately.  Device-resident samples are drawn as they are; they
     /// are only produced for an [`identity`](Self::identity) colour.
-    /// Colours convert under `intent` (see [`ColorSpace::convert_to_rgb`]).
+    /// Colours convert to `target` (see [`ColorSpace::convert_to_rgb`]),
+    /// for a canvas of samples of `depth`.
     pub(super) fn convert(
         &self,
         doc: &Document,
-        target: ColourTarget,
+        (target, depth): (ColourTarget, color::SampleDepth),
         samples: Samples,
         budget: Option<&TintBudget>,
         #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
@@ -370,16 +371,18 @@ impl ImageColour {
         } else {
             255.0
         };
+        // On a 16-bit canvas a colour of three or four components that
+        // converts converts at 16 bits, from its samples widened exactly, as
+        // a fill of the same colour does; `DeviceRGB`, which converts as it
+        // is in sRGB, keeps its 8-bit samples there.
+        let device_rgb = matches!(space, ColorSpace::DeviceRgb) && profile.is_none();
+        let at16 = matches!(n, 3 | 4)
+            && self.converts_wide()
+            && (target.space == WorkingSpace::Wide
+                || (depth == color::SampleDepth::Sixteen && !device_rgb));
         let decoded = Decoded::new(doc, target, space, decode, max_sample, profile, budget);
         let bytes = match data {
-            // In the wide space a colour of three or four components converts
-            // at 16 bits, from its samples widened exactly: its 8-bit value
-            // would band, and a fill of the same colour converts at 16 bits.
-            ImageData::Cpu(bytes)
-                if target.space == WorkingSpace::Wide
-                    && matches!(n, 3 | 4)
-                    && self.converts_wide() =>
-            {
+            ImageData::Cpu(bytes) if at16 => {
                 let wide = widen(&bytes)?;
                 let (cs, wide) = convert16(&decoded, n, wide)?;
                 return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
@@ -1417,7 +1420,7 @@ mod tests {
         let width = u32::try_from(data.len() / layout_components(layout)).unwrap();
         colour.convert(
             doc,
-            ColourTarget::SRGB,
+            (ColourTarget::SRGB, color::SampleDepth::Eight),
             Samples::cpu(width, 1, layout, data.to_vec()),
             budget,
             #[cfg(feature = "gpu-icc")]
@@ -1655,7 +1658,7 @@ mod tests {
         let img = colour
             .convert(
                 &doc,
-                ColourTarget::SRGB,
+                (ColourTarget::SRGB, color::SampleDepth::Eight),
                 Samples::cpu(1, 1, Layout::Color(3), vec![1, 2, 3]),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -2174,7 +2177,7 @@ mod tests {
         colour
             .convert(
                 doc,
-                ColourTarget::SRGB,
+                (ColourTarget::SRGB, color::SampleDepth::Eight),
                 Samples::cpu16(width, 1, layout, data.to_vec()),
                 None,
                 #[cfg(feature = "gpu-icc")]
