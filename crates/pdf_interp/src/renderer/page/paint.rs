@@ -143,8 +143,13 @@ impl PageRenderer<'_> {
         let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, target, comps, depth);
         match cs {
             // In a group's ICC CMYK space a `DeviceCMYK` colour is the
-            // process-ink model's colour, separated into the group's ink.
+            // process-ink model's colour, separated into the group's ink;
+            // in an additive group, its RGB.
             ColorSpace::DeviceCmyk if !self.ink.separator.paints_device_cmyk() => {
+                RasterColor::from_srgb(srgb(cs))
+            }
+            // In an additive group a process colour is its RGB.
+            ColorSpace::IccBased { n: 4, .. } if self.ink.separator.separates_process_colours() => {
                 RasterColor::from_srgb(srgb(cs))
             }
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
@@ -185,14 +190,16 @@ impl PageRenderer<'_> {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. }
                 if self.canvas.kind().is_ink() =>
             {
+                let separator = self.separator(false);
                 let mut map = self.ink_map.borrow_mut();
+                let paint = (target, &separator);
                 let (ink, paints) = match depth {
                     SampleDepth::Eight => {
-                        let (ink, paints) = map.colorant_ink::<u8>(doc, target, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u8>(doc, paint, cs, comps);
                         (Inks::of(ink), paints)
                     }
                     SampleDepth::Sixteen => {
-                        let (ink, paints) = map.colorant_ink::<u16>(doc, target, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u16>(doc, paint, cs, comps);
                         (Inks::of(ink), paints)
                     }
                 };

@@ -333,6 +333,12 @@ pub(crate) enum Separator {
     /// The conversion into the ink of a transparency group's ICC CMYK
     /// space under one intent (see [`GroupInk`]).
     Group(GroupInk),
+    /// The complements of an RGB colour of a working space, black ink
+    /// none: the process channels of an ink canvas holding the RGB of an
+    /// additive transparency group beside its spot channels.  Blending
+    /// subtractive channels on their complements, the canvas blends the
+    /// RGB as an RGB canvas does.
+    Additive(crate::WorkingSpace),
 }
 
 impl Separator {
@@ -350,24 +356,36 @@ impl Separator {
     /// a profile's table, sRGB for the models.
     #[must_use]
     pub(crate) fn space(&self) -> crate::WorkingSpace {
-        self.profile_ink()
-            .map_or(crate::WorkingSpace::Srgb, |ink| ink.table.space)
+        match self {
+            Self::Additive(space) => *space,
+            _ => self
+                .profile_ink()
+                .map_or(crate::WorkingSpace::Srgb, |ink| ink.table.space),
+        }
     }
 
     /// The profile's conversion of a profile separator.
     const fn profile_ink(&self) -> Option<&ProfileInk> {
         match self {
-            Self::Model | Self::Device(_) => None,
+            Self::Model | Self::Device(_) | Self::Additive(_) => None,
             Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => Some(ink),
         }
     }
 
     /// Whether a `DeviceCMYK` colour paints its components as ink; in a
-    /// group's ICC CMYK space it is the process-ink model's colour, which
-    /// separates as a colour not given as ink does.
+    /// group's ICC CMYK space it is the process-ink model's colour, and in
+    /// an additive group any process colour is its RGB, which separate as
+    /// a colour not given as ink does.
     #[must_use]
     pub(crate) const fn paints_device_cmyk(&self) -> bool {
-        !matches!(self, Self::Group(_))
+        !matches!(self, Self::Group(_) | Self::Additive(_))
+    }
+
+    /// Whether every process colour, of `DeviceCMYK` or an ICC CMYK space,
+    /// separates from its RGB: the colours of an additive group.
+    #[must_use]
+    pub(crate) const fn separates_process_colours(&self) -> bool {
+        matches!(self, Self::Additive(_))
     }
 
     /// The group's ink a [`Self::Group`] separates into.
@@ -385,6 +403,10 @@ impl Separator {
     pub(crate) fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
+            Self::Additive(_) => {
+                let [r, g, b] = rgb.map(|v| S::from_wide(S::max_wide() - v.wide()));
+                [r, g, b, S::ZERO]
+            }
             Self::Device(black) => black.separate(rgb),
             Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => ink.table.ink(rgb),
         }
@@ -426,7 +448,7 @@ impl Separator {
     #[must_use]
     pub(crate) fn for_paint(&self, black: &DeviceBlack, intent: RenderingIntent) -> Self {
         match self {
-            Self::Model => Self::Model,
+            Self::Model | Self::Additive(_) => self.clone(),
             Self::Device(_) => Self::Device(black.clone()),
             Self::Profile(ink) if ink.press.intent(intent) == ink.intent => self.clone(),
             Self::Profile(ink) => Self::Profile(ProfileInk::new(&ink.press, intent)),

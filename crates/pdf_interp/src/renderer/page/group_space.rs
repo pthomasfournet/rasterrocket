@@ -14,9 +14,16 @@
 //!   profile's ink (see [`crate::separation::GroupInk`]) with spot slots of
 //!   its own, whose result converts back through the profile; a profile
 //!   that cannot separate composites as `DeviceCMYK` does;
-//! - for an sRGB space over a wide or an ink canvas, an sRGB canvas;
-//! - for any other RGB space over an ink canvas, an RGB canvas of the
-//!   separation's working space; over an RGB canvas the parent's own.
+//! - for an sRGB space over a wide canvas, an sRGB canvas;
+//! - for an RGB space over a canvas of ink, an additive ink canvas
+//!   ([`CanvasSpace::AdditiveInk`]), of sRGB for an sRGB space and of the
+//!   separation's working space for any other: its process channels hold
+//!   the complements of the RGB, which blend as RGB does, and its spot
+//!   channels the page's spots, so a spot colour keeps its channel through
+//!   the group (ISO 32000-2 §11.7.3) and its overprint; a process colour
+//!   paints no spot ink and a spot colour white RGB.  A CMYK group within
+//!   one composites through the process-ink model;
+//! - for any other RGB space over an RGB canvas, the parent's own.
 //!
 //! A gray group is painted on its parent's canvas and its colour reduced
 //! to gray as it composites (see [`super::space_convert`]): the reduction
@@ -39,6 +46,7 @@ use std::rc::Rc;
 
 use raster::GrayBlend;
 use raster::clip::Clip;
+use raster::pipe::ChannelMask;
 use raster::transparency::GroupParams;
 
 use pdf::ObjectId;
@@ -88,6 +96,13 @@ impl<S: CanvasSample> GrayBlend<S> for GrayReduction {
             CanvasSpace::Rgb(space) => {
                 px.copy_from_slice(&working_space::from_srgb::<S, S>(space, [gray; 3]));
             }
+            CanvasSpace::AdditiveInk(space) => {
+                let rgb = working_space::from_srgb::<S, S>(space, [gray; 3]);
+                px.fill(S::default());
+                for (p, v) in px.iter_mut().zip(rgb) {
+                    *p = S::from_wide(S::max_wide() - v.wide());
+                }
+            }
         }
     }
 }
@@ -121,10 +136,10 @@ pub(super) struct SwitchedParent {
 impl<'doc> PageRenderer<'doc> {
     /// The space the current canvas holds its colours in.
     pub(super) const fn canvas_space(&self) -> CanvasSpace {
-        if self.canvas.kind().is_ink() {
-            CanvasSpace::Ink
-        } else {
-            CanvasSpace::Rgb(self.space)
+        match (self.canvas.kind().is_ink(), &self.ink.separator) {
+            (true, Separator::Additive(space)) => CanvasSpace::AdditiveInk(*space),
+            (true, _) => CanvasSpace::Ink,
+            (false, _) => CanvasSpace::Rgb(self.space),
         }
     }
 
@@ -231,6 +246,10 @@ impl<'doc> PageRenderer<'doc> {
             (Some(GroupSpace::Cmyk { .. }), _) => CanvasSpace::Ink,
             (Some(GroupSpace::Rgb(_)), _) => CanvasSpace::Rgb(WorkingSpace::Srgb),
         };
+        let target = match target {
+            CanvasSpace::Rgb(space) if parent.has_spots() => CanvasSpace::AdditiveInk(space),
+            other => other,
+        };
         let profile = match (space, parent) {
             (Some(s @ GroupSpace::Cmyk { profile: Some(id) }), CanvasSpace::Rgb(working)) => {
                 let separates =
@@ -239,6 +258,10 @@ impl<'doc> PageRenderer<'doc> {
                     self.diag.approximated_group_spaces.record(s);
                 }
                 separates.then_some(id)
+            }
+            (Some(s @ GroupSpace::Cmyk { profile: Some(_) }), CanvasSpace::AdditiveInk(_)) => {
+                self.diag.approximated_group_spaces.record(s);
+                None
             }
             _ => None,
         };
@@ -278,7 +301,7 @@ impl<'doc> PageRenderer<'doc> {
     const fn kind_of(&self, space: CanvasSpace) -> CanvasKind {
         let depth = self.canvas.kind().depth();
         match space {
-            CanvasSpace::Ink => CanvasKind::ink(depth),
+            CanvasSpace::Ink | CanvasSpace::AdditiveInk(_) => CanvasKind::ink(depth),
             CanvasSpace::Rgb(_) => CanvasKind::rgb(depth),
         }
     }
@@ -305,7 +328,22 @@ impl<'doc> PageRenderer<'doc> {
                 };
                 (ink, space)
             }
+            (CanvasSpace::Ink, CanvasSpace::AdditiveInk(_)) => (
+                InkSetup {
+                    overprint: false,
+                    cmyk: false,
+                    separator: Separator::Model,
+                },
+                WorkingSpace::Srgb,
+            ),
             (CanvasSpace::Ink, CanvasSpace::Ink) => (self.ink.clone(), self.space),
+            (CanvasSpace::AdditiveInk(space), _) => {
+                let ink = InkSetup {
+                    separator: Separator::Additive(space),
+                    ..self.ink.clone()
+                };
+                (ink, space)
+            }
             (CanvasSpace::Rgb(space), _) => (self.ink.clone(), space),
         }
     }
@@ -421,7 +459,12 @@ impl<'doc> PageRenderer<'doc> {
         let (rehomed, cleared) = group.rehome(converted);
         self.group_pool.push(cleared);
         if self.canvas.kind().is_ink() {
-            self.record_painted(None, PROCESS_CHANNELS);
+            let channels = if from.has_spots() {
+                ChannelMask::ALL
+            } else {
+                PROCESS_CHANNELS
+            };
+            self.record_painted(None, channels);
         }
         Some(rehomed)
     }

@@ -550,3 +550,4 @@ fn a_cal_luminosity_mask_takes_the_luminance_of_its_colour() {
 }
 
 mod profile;
+mod spots;

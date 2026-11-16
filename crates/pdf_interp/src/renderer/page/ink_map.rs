@@ -218,32 +218,40 @@ impl InkMap {
     /// `/All` in every channel, `/None` in none.  When the colour's spot
     /// colorants do not all fit the slots, none of them takes one: the
     /// colour is instead the process ink of its alternate colour,
-    /// converted to `target`, and paints the process channels.
+    /// converted to `target` and separated by `separator`, the paint's, and
+    /// paints the process channels; so is a colour with a process colorant
+    /// under a separator of every process colour
+    /// ([`Separator::separates_process_colours`]), whose process channels
+    /// hold no ink.
     pub(super) fn colorant_ink<S: Sample>(
         &mut self,
         doc: &Document,
-        target: ColourTarget,
+        (target, separator): (ColourTarget, &Separator),
         space: &ColorSpace,
         comps: &[f64],
     ) -> ([S; 8], ChannelMask) {
-        let process_fallback = |map: &mut Self| {
-            map.report_overflow(space);
+        let process_fallback = |map: &mut Self, overflow: bool| {
+            if overflow {
+                map.report_overflow(space);
+            }
             let reproduced = &mut map.reproduced;
-            let cmyk =
-                space.process_ink_with(doc, target, comps, &map.separator, &mut |rgb, given| {
-                    reproduced.get(rgb, given)
-                });
+            let cmyk = space.process_ink_with(doc, target, comps, separator, &mut |rgb, given| {
+                reproduced.get(rgb, given)
+            });
             (no_spots(cmyk), PROCESS_CHANNELS)
         };
+        if separator.separates_process_colours() && has_process_colorant(space) {
+            return process_fallback(self, false);
+        }
         if !self.fits(space) {
-            return process_fallback(self);
+            return process_fallback(self, true);
         }
         let mut ink = [S::ZERO; 8];
         let mut bits = 0u8;
         for (colorant, &tint) in space.colorants().iter().zip(comps) {
             let tint = S::from_unit(tint);
             let Some(channels) = self.channels(doc, space, colorant) else {
-                return process_fallback(self);
+                return process_fallback(self, true);
             };
             paint_tint(&mut ink, channels, tint);
             bits |= channels;
@@ -272,24 +280,35 @@ impl InkMap {
     ) -> Option<ColorantPlan> {
         match space {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
-                Some(self.colorant_plan(doc, space))
+                Some(self.colorant_plan(doc, space, separator))
             }
             ColorSpace::DeviceCmyk => separator.paints_device_cmyk().then(process_plan),
-            ColorSpace::IccBased { n: 4, .. } => (!self.separator.reproduces_process_colour())
-                .then(|| {
-                    separator
-                        .cmyk_link(doc, space)
-                        .map_or_else(process_plan, ColorantPlan::Linked)
-                }),
+            ColorSpace::IccBased { n: 4, .. } => (!separator.reproduces_process_colour()
+                && !separator.separates_process_colours())
+            .then(|| {
+                separator
+                    .cmyk_link(doc, space)
+                    .map_or_else(process_plan, ColorantPlan::Linked)
+            }),
             _ => None,
         }
     }
 
-    /// [`Self::plan`] of a `Separation` or `DeviceN` space.
-    fn colorant_plan(&mut self, doc: &Document, space: &ColorSpace) -> ColorantPlan {
+    /// [`Self::plan`] of a `Separation` or `DeviceN` space, whose colours
+    /// fall back to `separator`'s ink of their alternate colour as
+    /// [`Self::colorant_ink`]'s do.
+    fn colorant_plan(
+        &mut self,
+        doc: &Document,
+        space: &ColorSpace,
+        separator: &Separator,
+    ) -> ColorantPlan {
+        if separator.separates_process_colours() && has_process_colorant(space) {
+            return ColorantPlan::Process(separator.clone());
+        }
         if !self.fits(space) {
             self.report_overflow(space);
-            return ColorantPlan::Process(self.separator.clone());
+            return ColorantPlan::Process(separator.clone());
         }
         let channels: Option<Box<[u8]>> = space
             .colorants()
@@ -299,7 +318,7 @@ impl InkMap {
         channels.map_or_else(
             || {
                 self.report_overflow(space);
-                ColorantPlan::Process(self.separator.clone())
+                ColorantPlan::Process(separator.clone())
             },
             ColorantPlan::Channels,
         )
@@ -316,6 +335,14 @@ impl InkMap {
             Colorant::Spot(name) => 1 << (SPOT_CHANNEL + self.slot(doc, name, space)?),
         })
     }
+}
+
+/// Whether a colorant of `space` is a process colorant.
+fn has_process_colorant(space: &ColorSpace) -> bool {
+    space
+        .colorants()
+        .iter()
+        .any(|c| matches!(c, Colorant::Process(_)))
 }
 
 /// The plan of a process colour: its four components paint the process
@@ -584,22 +611,22 @@ mod tests {
         let mut map = InkMap::default();
         let cyan = separation(&doc, "Cyan", "1 0 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &cyan, &[0.6]),
+            map.colorant_ink::<u8>(&doc, (ColourTarget::SRGB, &Separator::Model), &cyan, &[0.6]),
             ([153, 0, 0, 0, 0, 0, 0, 0], ChannelMask::new(0b0001))
         );
         let all = separation(&doc, "All", "1 1 1 1");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &all, &[0.6]),
+            map.colorant_ink::<u8>(&doc, (ColourTarget::SRGB, &Separator::Model), &all, &[0.6]),
             ([153; 8], ChannelMask::ALL)
         );
         let none = separation(&doc, "None", "0 0 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &none, &[0.6]),
+            map.colorant_ink::<u8>(&doc, (ColourTarget::SRGB, &Separator::Model), &none, &[0.6]),
             ([0; 8], ChannelMask::new(0))
         );
         let spot = separation(&doc, "Spot", "0 1 0 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &spot, &[1.0]),
+            map.colorant_ink::<u8>(&doc, (ColourTarget::SRGB, &Separator::Model), &spot, &[1.0]),
             ([0, 0, 0, 0, 255, 0, 0, 0], ChannelMask::new(0b1_0000))
         );
     }
@@ -611,7 +638,7 @@ mod tests {
         for (slot, name) in ["S0", "S1", "S2", "S3"].into_iter().enumerate() {
             let (_, paints) = map.colorant_ink::<u8>(
                 &doc,
-                ColourTarget::SRGB,
+                (ColourTarget::SRGB, &Separator::Model),
                 &separation(&doc, name, "0 0 0 1"),
                 &[1.0],
             );
@@ -619,7 +646,12 @@ mod tests {
         }
         let fifth = separation(&doc, "S4", "0 0.5 1 0");
         assert_eq!(
-            map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &fifth, &[1.0]),
+            map.colorant_ink::<u8>(
+                &doc,
+                (ColourTarget::SRGB, &Separator::Model),
+                &fifth,
+                &[1.0]
+            ),
             ([0, 128, 255, 0, 0, 0, 0, 0], PROCESS_CHANNELS)
         );
     }
@@ -638,7 +670,12 @@ mod tests {
             "[/DeviceN [/New1 /New2] /DeviceCMYK \
              << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>]",
         );
-        let (ink, paints) = map.colorant_ink::<u8>(&doc, ColourTarget::SRGB, &dn, &[1.0, 1.0]);
+        let (ink, paints) = map.colorant_ink::<u8>(
+            &doc,
+            (ColourTarget::SRGB, &Separator::Model),
+            &dn,
+            &[1.0, 1.0],
+        );
         assert_eq!(paints, PROCESS_CHANNELS);
         assert_eq!(ink[4..], [0; 4]);
         assert!(map.luts().narrow[3].is_none(), "the last slot stays free");
@@ -647,7 +684,7 @@ mod tests {
         // A colour whose spots are all seen fits whatever the free slots.
         let (ink, paints) = map.colorant_ink::<u8>(
             &doc,
-            ColourTarget::SRGB,
+            (ColourTarget::SRGB, &Separator::Model),
             &separation(&doc, "S1", "0 0 0 1"),
             &[0.5],
         );
@@ -707,7 +744,12 @@ mod tests {
         let doc = empty_doc();
         let teal = separation(&doc, "Teal", "1 0 0.5 0");
         let mut map = InkMap::new(SampleDepth::Sixteen, Separator::Model);
-        let (ink, paints) = map.colorant_ink::<u16>(&doc, ColourTarget::SRGB, &teal, &[0.25]);
+        let (ink, paints) = map.colorant_ink::<u16>(
+            &doc,
+            (ColourTarget::SRGB, &Separator::Model),
+            &teal,
+            &[0.25],
+        );
         assert_eq!(
             (ink, paints),
             ([0, 0, 0, 0, 16_384, 0, 0, 0], ChannelMask::new(0b1_0000))
