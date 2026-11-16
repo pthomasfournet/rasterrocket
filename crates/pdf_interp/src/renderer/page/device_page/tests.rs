@@ -342,11 +342,18 @@ fn operators_that_paint_otherwise_are_found_before_recording() {
 
 /// A page of full-page fills past the byte limit of a command list is
 /// refused when the limit is reached, and renders on the CPU in bounded
-/// memory.
+/// memory; translucent fills, which hide nothing below them.  Opaque ones
+/// hide every earlier item and stay within it.
 #[test]
 fn a_command_list_past_its_byte_limit_refuses_the_recording() {
     let doc = doc();
-    let fill = b"0 0 2000 2000 re f ".repeat(2_000);
+    let opaque = b"0 0 2000 2000 re f ".repeat(2_000);
+    assert!(matches!(
+        record(&doc, 2000, 2000, &opaque),
+        DeviceRecording::Recorded(_)
+    ));
+    let mut fill = b"/T gs ".to_vec();
+    fill.extend(b"0 0 2000 2000 re f ".repeat(2_000));
     assert!(matches!(
         record(&doc, 2000, 2000, &fill),
         DeviceRecording::Refused("command list size")

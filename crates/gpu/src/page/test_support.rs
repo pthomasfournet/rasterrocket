@@ -41,3 +41,25 @@ pub(crate) fn polygon(points: &[(i64, i64)]) -> Vec<[i64; 4]> {
         })
         .collect()
 }
+
+/// A rectangle 270 × 173 pixels from (4, 3), fixed point: inside it, its
+/// tiles hold a backdrop equal on every row.
+pub(crate) fn wide_rectangle() -> Vec<[i64; 4]> {
+    polygon(&[
+        (1_000, 700),
+        (70_000, 700),
+        (70_000, 45_000),
+        (1_000, 45_000),
+    ])
+}
+
+/// Twelve steep slivers side by side over a 300 × 200 pixel page, fixed
+/// point: most of their tiles list one segment.
+pub(crate) fn slivers() -> Vec<[i64; 4]> {
+    (0..12)
+        .flat_map(|k| {
+            let x = 3_000 + k * 5_500;
+            polygon(&[(x, 300), (x + 900, 300), (x + 4_000, 50_000)])
+        })
+        .collect()
+}

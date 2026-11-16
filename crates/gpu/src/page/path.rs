@@ -68,23 +68,64 @@ pub struct AreaPath<'a> {
     pub weight: u8,
 }
 
-/// One tile of a binned outline: the tile's index, its segments
-/// `lists[list_start..][..list_len]` (indices into the outline's
-/// segments), and its backdrop `backdrops[backdrop..][..PAGE_TILE]`, or
-/// [`NO_BACKDROP`]; and whether it hides what lies below it.
+/// One tile of a binned outline: the tile's index, its `list_len`
+/// segments, and its backdrop; and whether it hides what lies below it.
+///
+/// The segments are the one segment of index `list` (into the outline's
+/// segments) when `list_len` is 1, else `lists[list..][..list_len]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PathTile {
     pub tile: u32,
-    pub list_start: u32,
+    pub list: u32,
     pub list_len: u32,
-    pub backdrop: u32,
+    pub backdrop: Backdrop,
     /// Whether the tile hides the items before it
     /// ([`super::PageCommands::bin`]).
     pub occludes: bool,
 }
 
-/// The backdrop index of a tile whose backdrop is zero on every row.
+/// The backdrop of an outline tile: per pixel row of the tile, the cover
+/// its left column starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Backdrop {
+    /// Zero on every row.
+    Zero,
+    /// The same cover on every row of the tile that lies in the outline's
+    /// window; rows outside it paint no pixel of the command.
+    Uniform(i32),
+    /// The covers `backdrops[index..][..PAGE_TILE]`.
+    Stored(u32),
+}
+
+/// The bit of an item's `list_len` word marking its backdrop word as a
+/// [`Backdrop::Uniform`] cover rather than an index.
+pub(crate) const UNIFORM_BACKDROP: u32 = 1 << 31;
+
+/// The bits of an item's `list_len` word that count its segments.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "PATH_TILE_SEGMENTS is below 2^14"
+)]
+pub(crate) const LIST_LEN: u32 = PATH_TILE_SEGMENTS as u32;
+
+/// The backdrop word of an item whose backdrop is zero on every row.
 pub(crate) const NO_BACKDROP: u32 = u32::MAX;
+
+impl Backdrop {
+    /// The `list_len` flag and the backdrop word of an item with this
+    /// backdrop.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the item word holds the cover's two's-complement bits"
+    )]
+    pub(crate) const fn item_words(self) -> (u32, u32) {
+        match self {
+            Self::Zero => (0, NO_BACKDROP),
+            Self::Uniform(cover) => (UNIFORM_BACKDROP, cover as u32),
+            Self::Stored(i) => (0, i),
+        }
+    }
+}
 
 /// An outline binned into the tiles of a page: the tiles that may hold
 /// coverage, in raster order, with indices relative to this binning.
@@ -123,6 +164,16 @@ impl Occlusion {
         on_page.intersect(self.window) == Some(on_page)
     }
 
+    /// The rows of a tile of band `band`, `0..PAGE_TILE`, that lie in the
+    /// window.
+    fn window_rows(&self, band: i64) -> std::ops::Range<usize> {
+        let top = band * i64::from(PAGE_TILE);
+        let row = |y: i32| {
+            usize::try_from((i64::from(y) - top).clamp(0, i64::from(PAGE_TILE))).unwrap_or(0)
+        };
+        row(self.window.y0)..row(self.window.y1.saturating_add(1))
+    }
+
     /// Whether a tile of band `band` listing no segment, with backdrop
     /// `backdrop`, covers its rows on the page fully.
     fn full(&self, band: i64, backdrop: &[i32; PAGE_TILE as usize]) -> bool {
@@ -138,7 +189,10 @@ impl BinnedPath {
     /// Append the tiles of band `band`, columns `col0..`: column `k` lists
     /// the segments `lists[k]` and has the backdrop summed from
     /// `deltas[..=k]`, which changes only at the columns `changed[k]`.  A
-    /// tile with neither is left out.
+    /// tile with neither is left out.  A backdrop equal on every row of the
+    /// band within the window is held in the tile, any other is stored
+    /// once for the run of tiles that shares it; a list of one segment is
+    /// held in the tile.
     fn push_band(
         &mut self,
         (lists, deltas, changed): (&[Vec<u32>], &[[i32; PAGE_TILE as usize]], &[bool]),
@@ -149,15 +203,23 @@ impl BinnedPath {
         self.tiles.try_reserve(lists.len())?;
         self.lists.try_reserve(lists.iter().map(Vec::len).sum())?;
         let mut backdrop = [0i32; PAGE_TILE as usize];
-        // The current backdrop: whether it is non-zero, its index once
-        // stored, and whether it covers a tile's rows fully.
-        let (mut shaded, mut stored, mut full) = (false, None, false);
+        // The rows of the band within the window.
+        let rows = occlusion.window_rows(band);
+        // The current backdrop: whether it is non-zero, its value on every
+        // row of `rows` when uniform there, its index once stored, and
+        // whether it covers a tile's rows fully.
+        let (mut shaded, mut uniform, mut stored, mut full) = (false, None, None, false);
         for (k, (list, col)) in lists.iter().zip(col0..).enumerate() {
             if changed[k] {
                 for (b, d) in backdrop.iter_mut().zip(&deltas[k]) {
                     *b += d;
                 }
                 shaded = backdrop.iter().any(|&b| b != 0);
+                let within = &backdrop[rows.clone()];
+                uniform = within
+                    .first()
+                    .copied()
+                    .filter(|&v| within.iter().all(|&b| b == v));
                 stored = None;
                 full = shaded && occlusion.full(band, &backdrop);
             }
@@ -167,25 +229,31 @@ impl BinnedPath {
             if list.len() > PATH_TILE_SEGMENTS {
                 return Err(PageCommandsError::Unrepresentable);
             }
-            let list_start = u32::try_from(self.lists.len()).map_err(too_large)?;
-            self.lists.extend_from_slice(list);
-            let backdrop_index = match stored {
-                _ if !shaded => NO_BACKDROP,
-                Some(at) => at,
-                None => {
+            let list_at = if let [one] = list[..] {
+                one
+            } else {
+                let at = u32::try_from(self.lists.len()).map_err(too_large)?;
+                self.lists.extend_from_slice(list);
+                at
+            };
+            let held = match (uniform, stored) {
+                _ if !shaded => Backdrop::Zero,
+                (Some(cover), _) => Backdrop::Uniform(cover),
+                (None, Some(at)) => Backdrop::Stored(at),
+                (None, None) => {
                     self.backdrops.try_reserve(PAGE_TILE as usize)?;
                     let at = u32::try_from(self.backdrops.len() / PAGE_TILE as usize)
                         .map_err(too_large)?;
                     self.backdrops.extend_from_slice(&backdrop);
                     stored = Some(at);
-                    at
+                    Backdrop::Stored(at)
                 }
             };
             self.tiles.push(PathTile {
                 tile: u32::try_from(band * i64::from(tiles_x) + col).map_err(too_large)?,
-                list_start,
+                list: list_at,
                 list_len: u32::try_from(list.len()).map_err(too_large)?,
-                backdrop: backdrop_index,
+                backdrop: held,
                 occludes: list.is_empty() && full && occlusion.holds(col, band),
             });
         }

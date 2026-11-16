@@ -23,7 +23,13 @@
 //   tile_offsets  n_tiles + 1 offsets into tile_items: tile t's items are
 //                 tile_items[tile_offsets[t] .. tile_offsets[t + 1]].
 //   tile_items    four words per item, in paint order within a tile:
-//                 command, list_start, list_len, backdrop.
+//                 command, list, len, backdrop.  For an outline, the low
+//                 14 bits of len count the tile's segments: the one
+//                 segment of index list when it is 1, else the segment
+//                 indices from word lists_base + list on.  With bit 31 of
+//                 len set, backdrop is the cover of every row of the tile;
+//                 otherwise it indexes the backdrops, NO_BACKDROP standing
+//                 for zero.
 // Output:
 //   page          RGB of pc.bits bits per sample, row-major, width * 3
 //                 samples per row; a 16-bit sample is two bytes, low
@@ -66,6 +72,8 @@
 static const uint TILE = 16;
 static const uint KIND_PATH = 1;
 static const uint NO_BACKDROP = 0xFFFFFFFFu;
+static const uint LIST_LEN = 0x3FFFu;
+static const uint UNIFORM_BACKDROP = 0x80000000u;
 
 struct Cmd {
     uint kind;      // 0 = coverage table, 1 = outline
@@ -355,7 +363,15 @@ uint4 load_item(uint k)
 // Whether item of command c deposits cells: an outline listing segments.
 bool deposits(Cmd c, uint4 item)
 {
-    return c.kind == KIND_PATH && item.z != 0;
+    return c.kind == KIND_PATH && (item.z & LIST_LEN) != 0;
+}
+
+// The backdrop cover of row `row` of the tile of outline item `item`.
+int backdrop_cover(uint4 item, uint row)
+{
+    if ((item.z & UNIFORM_BACKDROP) != 0) return int(item.w);
+    if (item.w == NO_BACKDROP) return 0;
+    return table[pc.backdrops_base + item.w * TILE + row];
 }
 
 // Clear the cells of the batch k0 .. k0 + n and note each item's pairs;
@@ -368,7 +384,7 @@ void clear_batch(uint k0, uint n, uint li)
     }
     if (li < n) {
         uint4 item = load_item(k0 + li);
-        g_pairs[li] = deposits(cmds[item.x], item) ? item.z * TILE : 0;
+        g_pairs[li] = deposits(cmds[item.x], item) ? (item.z & LIST_LEN) * TILE : 0;
         g_list[li] = item.y;
     }
 }
@@ -382,10 +398,9 @@ void deposit_batch(uint k0, uint n, uint li, uint tx, uint ty)
 {
     uint slot = li / TILE;
     if (slot < n && g_pairs[slot] != 0) {
-        uint backdrop = load_item(k0 + slot).w;
-        if (backdrop != NO_BACKDROP) {
-            InterlockedAdd(g_cover[slot * TILE * TILE + (li % TILE) * TILE],
-                           table[pc.backdrops_base + backdrop * TILE + li % TILE]);
+        int cover = backdrop_cover(load_item(k0 + slot), li % TILE);
+        if (cover != 0) {
+            InterlockedAdd(g_cover[slot * TILE * TILE + (li % TILE) * TILE], cover);
         }
     }
     uint total = 0;
@@ -400,7 +415,9 @@ void deposit_batch(uint k0, uint n, uint li, uint tx, uint ty)
             rest -= g_pairs[at_slot];
             at_slot++;
         }
-        uint seg = uint(table[pc.lists_base + g_list[at_slot] + rest / TILE]);
+        uint seg = g_pairs[at_slot] == TILE
+            ? g_list[at_slot]
+            : uint(table[pc.lists_base + g_list[at_slot] + rest / TILE]);
         uint at = pc.segs_base + seg * 4;
         add_row(at_slot * TILE * TILE,
                 int64_t(table[at]) - ox, int64_t(table[at + 1]) - oy,
@@ -430,10 +447,10 @@ uint path_coverage(Cmd c, uint4 item, uint slot, uint lx, uint ly)
 {
     bool even_odd = (c.flags & 1u) != 0;
     uint weight = (c.flags >> 8) & 0xFFu;
-    if (item.z == 0) {
+    if ((item.z & LIST_LEN) == 0) {
         // No segment deposits in the tile: every pixel of a row takes the
         // row's backdrop alone.
-        int64_t cover = int64_t(table[pc.backdrops_base + item.w * TILE + ly]);
+        int64_t cover = int64_t(backdrop_cover(item, ly));
         return weighted(rule_byte(cover * 2 * ONE, even_odd), weight);
     }
     uint at = slot * TILE * TILE + ly * TILE + lx;

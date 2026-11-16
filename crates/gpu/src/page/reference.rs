@@ -3,7 +3,7 @@
 //! tested against and the model a twin of the kernel on another device
 //! API reproduces.
 
-use super::path::{NO_BACKDROP, TILE_PIXELS, TileCells};
+use super::path::{LIST_LEN, NO_BACKDROP, TILE_PIXELS, TileCells, UNIFORM_BACKDROP};
 use super::{KIND_PATH, PAGE_TILE, PageCommands, PageCommandsError};
 
 /// `x / M` rounded to nearest for `x ≤ M²`, `M = 2^bits − 1`.
@@ -30,7 +30,8 @@ fn row_coverage(spans: &[[i32; 3]], bytes: &[u8], x: i32) -> u8 {
 }
 
 /// The coverage of the pixels of tile `(tx, ty)`, row-major, by the item
-/// `[command, list_start, list_len, backdrop]` of a binning of `page`.
+/// `[command, list, len, backdrop]` of a binning of `page`
+/// ([`super::TileBins::items`]).
 #[expect(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
@@ -38,16 +39,22 @@ fn row_coverage(spans: &[[i32; 3]], bytes: &[u8], x: i32) -> u8 {
     reason = "pixel coordinates of a page within the push limit fit i32"
 )]
 fn item_coverage(page: &PageCommands, item: [u32; 4], tx: usize, ty: usize) -> [u8; TILE_PIXELS] {
-    let [cmd, list_start, list_len, backdrop] = item;
+    let [cmd, list, len, backdrop] = item;
     let c = &page.cmds[cmd as usize];
     let tile = PAGE_TILE as usize;
     if c.kind == KIND_PATH {
         let mut cells = TileCells::new();
-        if backdrop != NO_BACKDROP {
+        if len & UNIFORM_BACKDROP != 0 {
+            cells.add_backdrop(&[backdrop as i32; PAGE_TILE as usize]);
+        } else if backdrop != NO_BACKDROP {
             cells.add_backdrop(&page.backdrops[backdrop as usize * tile..][..tile]);
         }
         let (ox, oy) = ((tx * tile) as i64 * 256, (ty * tile) as i64 * 256);
-        for &s in &page.seg_lists[list_start as usize..][..list_len as usize] {
+        let segments = match len & LIST_LEN {
+            1 => std::slice::from_ref(&list),
+            n => &page.seg_lists[list as usize..][..n as usize],
+        };
+        for &s in segments {
             let [x0, y0, x1, y1] = page.segs[s as usize].map(i64::from);
             let rel = [x0 - ox, y0 - oy, x1 - ox, y1 - oy];
             for row in 0..PAGE_TILE {

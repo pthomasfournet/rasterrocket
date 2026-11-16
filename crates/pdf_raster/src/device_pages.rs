@@ -297,7 +297,7 @@ pub(crate) fn record(
     let recording = renderer.take_device_recording();
     crate::render::check_aborted(&renderer)?;
     match recording {
-        Some(DeviceRecording::Recorded(page)) => Ok(Ok(page)),
+        Some(DeviceRecording::Recorded(page)) => Ok(Ok(*page)),
         Some(DeviceRecording::Refused(reason)) => Ok(Err(reason)),
         None => unreachable!("a renderer recording for the device yields its recording"),
     }

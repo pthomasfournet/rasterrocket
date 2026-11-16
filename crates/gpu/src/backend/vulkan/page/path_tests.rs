@@ -4,7 +4,7 @@ use color::SampleDepth;
 
 use crate::backend::vulkan::VulkanBackend;
 use crate::page::reference::render_page;
-use crate::page::test_support::{Rng, polygon};
+use crate::page::test_support::{Rng, polygon, slivers, wide_rectangle};
 use crate::page::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS, PageCommands, PixelBounds};
 
 /// `page` on `backend` against its host model, packed rows of samples of
@@ -157,4 +157,43 @@ fn outlines_at_the_integer_bounds_match_the_host_model() {
             .expect("push outline");
     }
     assert_device_matches_model(&backend, &page, "integer bounds");
+}
+
+#[test]
+fn backdrops_and_segments_held_in_items_match_the_host_model() {
+    let Some(backend) = super::super::test_backend() else {
+        return;
+    };
+    if !backend.page_paths() {
+        eprintln!("skipping: the device has no 64-bit integers");
+        return;
+    }
+    for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
+        let max = depth.max_sample();
+        let mut page = PageCommands::new(300, 200, depth, [max; 3]);
+        for (segs, even_odd, alpha) in [
+            (wide_rectangle(), false, max),
+            (slivers(), true, max / 3),
+            (wide_rectangle(), true, max / 2),
+        ] {
+            let path = AreaPath {
+                segs: &segs,
+                window: PixelBounds {
+                    x0: 2,
+                    y0: 5,
+                    x1: 290,
+                    y1: 199,
+                },
+                even_odd,
+                weight: 200,
+            };
+            page.push_area_path(&path, [max / 5, max / 2, max], alpha)
+                .expect("push outline");
+        }
+        assert_device_matches_model(
+            &backend,
+            &page,
+            &format!("{}-bit held backdrops and segments", depth.bits()),
+        );
+    }
 }

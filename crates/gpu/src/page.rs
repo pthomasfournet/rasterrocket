@@ -31,7 +31,7 @@ mod runs;
 pub(crate) mod test_support;
 
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
-use path::{NO_BACKDROP, PathTile, bin_path};
+use path::{Backdrop, NO_BACKDROP, PathTile, bin_path};
 
 /// A region's coverage, row by row, as the page raster reads it.
 ///
@@ -205,11 +205,14 @@ impl From<TryReserveError> for PageCommandsError {
 /// The tile lists of a page: tile `t` (row-major over `tiles_x` columns)
 /// paints `items[offsets[t]..offsets[t + 1]]` in order.
 ///
-/// An item is `[command, list_start, list_len, backdrop]`: the command's
-/// index, and for an outline's command the tile's segments
-/// `segment_lists[list_start..][..list_len]` and backdrop
-/// (`u32::MAX` when it is zero), as [`PageCommands::table_parts`] lays
-/// them out; a table's command has `[command, 0, 0, u32::MAX]`.
+/// An item is `[command, list, len, backdrop]`: the command's index, and
+/// for an outline's command the tile's segments and backdrop, as
+/// [`PageCommands::table_parts`] lays them out.  The low 14 bits of `len`
+/// count the segments: the one segment of index `list` when it is 1, else
+/// `segment_lists[list..][..len]`.  With bit 31 of `len` set, `backdrop`
+/// is the two's-complement cover of every row of the tile; otherwise it
+/// indexes the backdrops, `u32::MAX` standing for zero.  A table's command
+/// has `[command, 0, 0, u32::MAX]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileBins {
     /// Tile columns.
@@ -246,8 +249,10 @@ pub struct PageCommands {
     backdrops: Vec<i32>,
     /// Every outline's tiles.
     path_tiles: Vec<PathTile>,
-    /// Tile references the commands make, the length of
-    /// [`TileBins::items`].
+    /// Per tile, the items [`Self::bin`] lists in it: those from the last
+    /// that hides the items before it on.  Empty until the first push.
+    live: Vec<u32>,
+    /// The sum of `live`, the length of [`TileBins::items`].
     tile_refs: usize,
 }
 
@@ -312,6 +317,9 @@ struct Counts {
     row_starts: usize,
     /// Tile references, four words each.
     tile_refs: usize,
+    /// Of a change only: the tile references it hides, which
+    /// [`PageCommands::bin`] leaves out.
+    hidden_refs: usize,
     segs: usize,
     seg_lists: usize,
     backdrops: usize,
@@ -363,6 +371,7 @@ impl PageCommands {
             seg_lists: Vec::new(),
             backdrops: Vec::new(),
             path_tiles: Vec::new(),
+            live: Vec::new(),
             tile_refs: 0,
         }
     }
@@ -418,20 +427,26 @@ impl PageCommands {
             coverage: 0,
             row_starts: 0,
             tile_refs: 0,
+            hidden_refs: 0,
             segs: 0,
             seg_lists: 0,
             backdrops: 0,
         })
     }
 
-    /// Bytes the page's device inputs would take with `more` more elements.
+    /// Bytes the page's device inputs would take with `more` more elements;
+    /// `more.hidden_refs` of the tile references are taken away.
     const fn bytes_with(&self, more: Counts) -> usize {
         Counts {
             cmds: self.cmds.len().saturating_add(more.cmds),
             spans: self.spans.len().saturating_add(more.spans),
             coverage: self.bytes.len().saturating_add(more.coverage),
             row_starts: self.row_starts.len().saturating_add(more.row_starts),
-            tile_refs: self.tile_refs.saturating_add(more.tile_refs),
+            tile_refs: self
+                .tile_refs
+                .saturating_add(more.tile_refs)
+                .saturating_sub(more.hidden_refs),
+            hidden_refs: 0,
             segs: self.segs.len().saturating_add(more.segs),
             seg_lists: self.seg_lists.len().saturating_add(more.seg_lists),
             backdrops: self.backdrops.len().saturating_add(more.backdrops),
@@ -511,6 +526,7 @@ impl PageCommands {
         self.spans.try_reserve(n_spans)?;
         self.bytes.try_reserve(n_bytes)?;
         self.row_starts.try_reserve(n_rows)?;
+        self.reserve_live()?;
         self.spans.extend(
             table.spans.iter().map(|&[x0, x1, offset]| {
                 [x0, x1, if offset < 0 { -1 } else { offset + byte_base }]
@@ -520,6 +536,13 @@ impl PageCommands {
         self.row_starts
             .extend(table.row_starts.iter().map(|&s| s + span_base));
         self.tile_refs += tile_refs;
+        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
+        let tile = |v: i32| v.unsigned_abs() as usize / PAGE_TILE as usize;
+        for ty in tile(bounds.y0)..=tile(bounds.y1) {
+            for live in &mut self.live[ty * tiles_x..][tile(bounds.x0)..=tile(bounds.x1)] {
+                *live += 1;
+            }
+        }
         let [rg, b] = pack_rgb(rgb);
         self.cmds.push(PageCmd {
             kind: KIND_TABLE,
@@ -578,9 +601,20 @@ impl PageCommands {
         if binned.tiles.is_empty() {
             return Ok(());
         }
+        let hidden_refs = if self.live.is_empty() {
+            0
+        } else {
+            binned
+                .tiles
+                .iter()
+                .filter(|t| t.occludes)
+                .map(|t| self.live[t.tile as usize] as usize)
+                .sum()
+        };
         let more = Counts {
             cmds: 1,
             tile_refs: binned.tiles.len(),
+            hidden_refs,
             segs: path.segs.len(),
             seg_lists: binned.lists.len(),
             backdrops: binned.backdrops.len(),
@@ -599,6 +633,7 @@ impl PageCommands {
         self.seg_lists.try_reserve(binned.lists.len())?;
         self.backdrops.try_reserve(binned.backdrops.len())?;
         self.path_tiles.try_reserve(binned.tiles.len())?;
+        self.reserve_live()?;
         // `bin_path` bounds every coordinate by `PATH_COORD_LIMIT`.
         self.segs.extend(
             path.segs
@@ -610,15 +645,18 @@ impl PageCommands {
         self.backdrops.extend_from_slice(&binned.backdrops);
         self.path_tiles
             .extend(binned.tiles.iter().map(|t| PathTile {
-                list_start: t.list_start + list_base,
-                backdrop: if t.backdrop == NO_BACKDROP {
-                    NO_BACKDROP
-                } else {
-                    t.backdrop + backdrop_base
+                list: t.list + if t.list_len == 1 { seg_base } else { list_base },
+                backdrop: match t.backdrop {
+                    Backdrop::Stored(i) => Backdrop::Stored(i + backdrop_base),
+                    other => other,
                 },
                 ..*t
             }));
-        self.tile_refs += binned.tiles.len();
+        for t in &binned.tiles {
+            let live = &mut self.live[t.tile as usize];
+            *live = if t.occludes { 1 } else { *live + 1 };
+        }
+        self.tile_refs = self.tile_refs + binned.tiles.len() - hidden_refs;
         let [rg, b] = pack_rgb(rgb);
         self.cmds.push(PageCmd {
             kind: KIND_PATH,
@@ -637,6 +675,16 @@ impl PageCommands {
         Ok(())
     }
 
+    /// Allocate the per-tile item counts on the first push.
+    fn reserve_live(&mut self) -> Result<(), PageCommandsError> {
+        if self.live.is_empty() {
+            let n = self.tile_count();
+            self.live.try_reserve_exact(n)?;
+            self.live.resize(n, 0);
+        }
+        Ok(())
+    }
+
     /// Call `f(tile, item, occludes)` for every tile each command paints,
     /// in paint order, with `item` as in [`TileBins::items`] and
     /// `occludes` whether it hides the items before it in the tile.
@@ -646,7 +694,8 @@ impl PageCommands {
         for (c, i) in self.cmds.iter().zip(0u32..) {
             if c.kind == KIND_PATH {
                 for t in &self.path_tiles[c.row_base as usize..][..c.n_rows as usize] {
-                    let item = [i, t.list_start, t.list_len, t.backdrop];
+                    let (flag, backdrop) = t.backdrop.item_words();
+                    let item = [i, t.list, t.list_len | flag, backdrop];
                     f(t.tile as usize, item, t.occludes);
                 }
                 continue;

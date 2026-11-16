@@ -54,7 +54,7 @@ pub(super) struct Recording {
 #[derive(Debug)]
 pub enum DeviceRecording {
     /// Every paint of the page was recorded.
-    Recorded(PageCommands),
+    Recorded(Box<PageCommands>),
     /// The page paints with something the GPU raster does not render.
     Refused(&'static str),
 }
@@ -259,13 +259,10 @@ impl PageRenderer<'_> {
     /// not recorded.  The renderer paints normally afterwards.
     pub fn take_device_recording(&mut self) -> Option<DeviceRecording> {
         let recording = self.device_page.take()?;
-        Some(
-            recording
-                .refused
-                .map_or(DeviceRecording::Recorded(recording.commands), |reason| {
-                    DeviceRecording::Refused(reason)
-                }),
-        )
+        Some(recording.refused.map_or_else(
+            || DeviceRecording::Recorded(Box::new(recording.commands)),
+            DeviceRecording::Refused,
+        ))
     }
 
     /// Hand the page's remaining work budget and warned operators to the

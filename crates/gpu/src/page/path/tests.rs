@@ -2,7 +2,7 @@ use color::SampleDepth;
 use raster::coverage::AreaOutline;
 
 use super::super::reference::render_page;
-use super::super::test_support::{Rng, polygon};
+use super::super::test_support::{Rng, polygon, slivers, wide_rectangle};
 use super::super::{PageCommands, PageCommandsError, PixelBounds};
 use super::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS};
 
@@ -258,4 +258,116 @@ fn an_opaque_interior_tile_hides_the_items_below_it() {
     let pixels = render_page(&opaque).expect("render");
     assert_eq!(pixels[(40 * 64 + 40) * 3..][..3], [200, 0, 0]);
     assert_eq!(pixels[(5 * 64 + 5) * 3..][..3], [9, 9, 9]);
+}
+
+/// The bytes of the device inputs of `page` as [`PageCommands::bin`] and
+/// [`PageCommands::table_parts`] produce them.
+fn binned_bytes(page: &PageCommands) -> usize {
+    let bins = page.bin().expect("bin");
+    let (parts, _) = page.table_parts();
+    page.len() * size_of::<super::super::PageCmd>()
+        + parts.iter().map(|p| p.len()).sum::<usize>()
+        + size_of_val(page.row_starts())
+        + size_of_val(bins.offsets.as_slice())
+        + size_of_val(bins.items.as_slice())
+}
+
+#[test]
+fn the_byte_count_is_that_of_the_binned_inputs() {
+    let mut rng = Rng(0xB17E_5C0A_7ED5);
+    let (width, height) = (211, 133);
+    let (fw, fh) = (i64::from(width) * 256, i64::from(height) * 256);
+    let mut page = PageCommands::new(width, height, SampleDepth::Eight, [255; 3]);
+    for i in 0..120 {
+        if i % 9 == 8 {
+            let y = i32::try_from(rng.range(0, i64::from(height))).unwrap();
+            page.push_opaque_runs(&mut [(y, 3, 90)], [1, 2, 3])
+                .expect("push runs");
+        } else {
+            let k = usize::try_from(rng.range(3, 9)).unwrap();
+            let points: Vec<(i64, i64)> = (0..k)
+                .map(|_| (rng.range(-2_000, fw + 2_000), rng.range(-2_000, fh + 2_000)))
+                .collect();
+            let segs = polygon(&points);
+            let path = AreaPath {
+                segs: &segs,
+                window: PixelBounds {
+                    x0: 0,
+                    y0: 0,
+                    x1: i32::try_from(width).unwrap() - 1,
+                    y1: i32::try_from(height).unwrap() - 1,
+                },
+                even_odd: i % 2 == 0,
+                weight: 255,
+            };
+            page.push_area_path(&path, [9, 99, 199], [255, 255, 120][i % 3])
+                .expect("push outline");
+        }
+        assert_eq!(page.bytes(), binned_bytes(&page), "after push {i}");
+    }
+}
+
+#[test]
+fn uniform_backdrops_and_single_segments_are_held_in_the_items() {
+    // A rectangle whose tiles inside it have a backdrop equal on every
+    // row, and steep slivers whose tiles list one segment each.
+    let (w, h) = (300, 200);
+    let (rect, slivers) = (wide_rectangle(), slivers());
+    for (segs, what) in [(&rect, "rectangle"), (&slivers, "slivers")] {
+        for even_odd in [false, true] {
+            let outline = AreaOutline {
+                window: (0, 0, w - 1, h - 1),
+                segs: segs.clone(),
+                even_odd,
+                weight: 255,
+            };
+            assert_same(
+                &outline,
+                w.unsigned_abs(),
+                h.unsigned_abs(),
+                &format!("{what}, even-odd {even_odd}"),
+            );
+        }
+    }
+    let mut page = PageCommands::new(300, 200, SampleDepth::Eight, [255; 3]);
+    let path = AreaPath {
+        segs: &rect,
+        window: PixelBounds {
+            x0: 0,
+            y0: 0,
+            x1: w - 1,
+            y1: h - 1,
+        },
+        even_odd: false,
+        weight: 255,
+    };
+    page.push_area_path(&path, [0; 3], 255).expect("push");
+    // Only the bands of its top and bottom edges, whose rows it covers
+    // partly, store a backdrop, once for the run of tiles that shares it.
+    assert_eq!(page.backdrops.len(), 2 * 16, "stored backdrops");
+    let items = page.bin().expect("bin").items;
+    assert!(
+        items.iter().any(|i| i[2] & super::UNIFORM_BACKDROP != 0),
+        "uniform backdrops held in items"
+    );
+    page.push_area_path(
+        &AreaPath {
+            segs: &slivers,
+            ..path
+        },
+        [0; 3],
+        255,
+    )
+    .expect("push");
+    let items = page.bin().expect("bin").items;
+    let single = items.iter().filter(|i| i[2] & super::LIST_LEN == 1).count();
+    assert!(single > 0, "no single-segment item");
+    assert!(
+        page.seg_lists.len()
+            < items
+                .iter()
+                .map(|i| (i[2] & super::LIST_LEN) as usize)
+                .sum(),
+        "single segments are not listed"
+    );
 }
