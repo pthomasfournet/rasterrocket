@@ -16,6 +16,7 @@ use super::color::RasterColor;
 use super::text::TextState;
 use crate::ColourIntent;
 use crate::resources::OverprintMode;
+use crate::resources::black_generation::DeviceBlack;
 use crate::resources::colorspace::ColorSpace;
 use crate::resources::transfer::Transfer;
 
@@ -182,6 +183,10 @@ pub(crate) struct InterpGState {
     /// Transfer function in effect (PDF §10.5), applied to the colour of
     /// each painted object.  `None` = identity.
     pub transfer: Option<Arc<Transfer>>,
+    /// Black-generation and undercolour-removal functions in effect
+    /// (ISO 32000-2 §8.4.5), applied by the device conversion of colours
+    /// to CMYK.
+    pub device_black: DeviceBlack,
     /// Set by `d1` in a Type 3 glyph description: the glyph is a stencil
     /// in the text fill colour, so the colour operators of the description
     /// are ignored until it ends (PDF §9.6.5).
@@ -244,6 +249,7 @@ impl Clone for InterpGState {
             stroke_components: self.stroke_components.clone(),
             soft_mask: self.soft_mask.clone(),
             transfer: self.transfer.clone(),
+            device_black: self.device_black.clone(),
             colour_locked: self.colour_locked,
             trace_clip: self.trace_clip,
             trace_fill: self.trace_fill.clone(),
@@ -325,6 +331,7 @@ impl InterpGState {
             stroke_components: None,
             soft_mask: None,
             transfer: None,
+            device_black: DeviceBlack::default(),
             colour_locked: false,
             trace_clip: 0,
             trace_fill: None,

@@ -169,6 +169,49 @@ fn gray_and_rgb_separate_by_the_device_conversion() {
     );
 }
 
+/// The black-generation and undercolour-removal functions of the graphics
+/// state apply to the device conversion of an RGB colour, from the paint
+/// after the `gs` that sets them, also for a colour set before it; a gray
+/// stays black ink alone; `/Default` restores the device's functions.
+#[test]
+fn black_generation_and_undercolour_removal_apply_to_rgb() {
+    let zero = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >>";
+    let doc = page_doc(
+        &format!("/None << /BG {zero} /UCR {zero} >> /Back << /BG2 /Default /UCR2 /Default >>"),
+        "/CG [/CalGray << /WhitePoint [0.9505 1 1.089] >>]",
+    );
+    for depth in DEPTHS {
+        let page = render(
+            &doc,
+            (10, depth),
+            &cmyk(false),
+            b"0.2 0.4 0.6 rg 0 0 2 10 re f /None gs 2 0 2 10 re f \
+              0.2 g 4 0 2 10 re f /CG cs 0.2 sc 6 0 2 10 re f \
+              /Back gs 0.2 0.4 0.6 rg 8 0 2 10 re f",
+        );
+        let device = of_unit([0.4, 0.2, 0.0, 0.4], depth);
+        assert_eq!(at(&page, 1, 5), device, "{depth:?}: before the gs");
+        assert_eq!(
+            at(&page, 3, 5),
+            of_unit([0.8, 0.6, 0.4, 0.0], depth),
+            "{depth:?}: no black generated, no undercolour removed"
+        );
+        assert_eq!(
+            at(&page, 5, 5),
+            of_unit([0.0, 0.0, 0.0, 0.8], depth),
+            "{depth:?}: DeviceGray"
+        );
+        let cal = at(&page, 7, 5);
+        // Black generated as the device does; the conversion through XYZ
+        // leaves the colour neutral within a few 16-bit levels.
+        assert!(
+            cal[..3].iter().all(|&v| v <= 8) && cal[3] > of_unit([0.0, 0.0, 0.0, 0.5], depth)[3],
+            "{depth:?}: CalGray {cal:?}"
+        );
+        assert_eq!(at(&page, 9, 5), device, "{depth:?}: /Default");
+    }
+}
+
 #[test]
 fn a_spot_folds_into_its_process_equivalent() {
     let space = format!(

@@ -147,6 +147,10 @@ pub struct ResolvedShading {
     /// Heap bytes `result` holds: a mesh's triangles or a function-based
     /// shading's samples.
     pub held_bytes: usize,
+    /// Whether the shading's colour space is a gray one
+    /// ([`ColorSpace::is_gray`]), whose colours separate to black ink
+    /// alone.
+    pub gray: bool,
 }
 
 impl ResolvedShading {
@@ -252,6 +256,7 @@ pub(crate) fn resolve_shading_object(
             background_ink: None,
             paints,
             held_bytes: 0,
+            gray: cs_space.is_gray(),
         });
     }
     let cs = ShadingCs {
@@ -279,6 +284,7 @@ pub(crate) fn resolve_shading_object(
         background_ink,
         paints,
         held_bytes,
+        gray: cs_space.is_gray(),
     })
 }
 

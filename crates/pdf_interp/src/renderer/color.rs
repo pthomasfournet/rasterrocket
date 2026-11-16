@@ -141,11 +141,12 @@ pub(crate) fn paint_tint<S: Sample>(ink: &mut [S; 8], bits: u8, tint: S) {
 /// amounts `[C, M, Y, K, S0, S1, S2, S3]` (0 = no ink), painted on an ink
 /// canvas.  A colour given in a four-component process space keeps its
 /// components as the ink, and a colour given in a `Separation` or `DeviceN`
-/// space its colorants' tints; any other colour's ink is the page's
-/// [`Separator`] of its sRGB bytes, with no spot ink, computed on first use
-/// so that a page painted on an RGB canvas never evaluates it.  A colour
-/// lives within one page, whose canvas has one separator, so the ink it
-/// keeps is that separator's.
+/// space its colorants' tints; any other colour's ink is a [`Separator`]'s
+/// conversion of its sRGB bytes, with no spot ink, computed on first use
+/// so that a page painted on an RGB canvas never evaluates it.  The
+/// separator is that of the paint reading the ink: a paint reads a copy
+/// of the graphics state's colour (`InterpGState::painted_fill_color`),
+/// which holds no derived ink.
 ///
 /// On an ink canvas the colour paints the channels of [`Self::paints`] and
 /// keeps the backdrop in the others: the process channels for a

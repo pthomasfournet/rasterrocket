@@ -261,7 +261,7 @@ impl PageRenderer<'_> {
                 let Some(window) = window_pattern(&shading, origin) else {
                     return;
                 };
-                let separator = r.ink.separator.clone();
+                let separator = r.separator(shading.gray);
                 let Some(pattern) = smooth_pattern(kind, &shading, &window, (transfer, &separator))
                 else {
                     return;
@@ -307,7 +307,7 @@ impl PageRenderer<'_> {
         let antialias = self.vector_antialias;
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
-        let separator = self.ink.separator.clone();
+        let separator = self.separator(shading.gray);
         let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
             with_canvas!(&mut r.canvas, |b| {
                 let pipe = pipe.at();
@@ -347,27 +347,18 @@ impl PageRenderer<'_> {
         transfer: Option<&Transfer>,
     ) {
         let origin = self.page_origin();
+        let separator = self.separator(shading.gray);
         match &shading.result {
             ShadingResult::Mesh(mesh) => {
                 for tri in mesh.meeting(clip, origin) {
-                    self.canvas.gouraud_triangle(
-                        origin,
-                        clip,
-                        pipe,
-                        (transfer, &self.ink.separator),
-                        tri,
-                    );
+                    self.canvas
+                        .gouraud_triangle(origin, clip, pipe, (transfer, &separator), tri);
                 }
             }
             ShadingResult::Mesh16(mesh) => {
                 for tri in mesh.meeting(clip, origin) {
-                    self.canvas.gouraud_triangle16(
-                        origin,
-                        clip,
-                        pipe,
-                        (transfer, &self.ink.separator),
-                        tri,
-                    );
+                    self.canvas
+                        .gouraud_triangle16(origin, clip, pipe, (transfer, &separator), tri);
                 }
             }
             ShadingResult::InkMesh(mesh) => {
@@ -422,7 +413,7 @@ impl PageRenderer<'_> {
     ) {
         let kind = self.canvas.kind();
         let transfer = self.gstate.current().transfer.clone();
-        let separator = self.ink.separator.clone();
+        let separator = self.separator(shading.gray);
         let paint = |r: &mut Self, clip: &Clip, source: CanvasSource<'_>| {
             with_canvas!(&mut r.canvas, |b| {
                 let pipe = pipe.at();

@@ -7,6 +7,10 @@
 //! and an intent change that selects another conversion of its space
 //! converts it again, so a painting operator always paints its colour as
 //! converted under the intent in effect at that operator (PDF §8.6.5.8).
+//!
+//! On an ink canvas a colour not given as ink is converted to ink by the
+//! separator of the paint (see [`PageRenderer::separator`]), which takes
+//! in the graphics state.
 
 use std::sync::Arc;
 
@@ -14,6 +18,8 @@ use super::PageRenderer;
 use crate::ColourIntent;
 use crate::renderer::gstate::{ColourMut, InterpGState};
 use crate::resources::ColorSpace;
+use crate::resources::black_generation::{DeviceBlack, KSetting};
+use crate::separation::Separator;
 
 /// The fill or the stroke colour of a graphics state.
 type Select = for<'a> fn(&'a mut InterpGState) -> ColourMut<'a>;
@@ -78,5 +84,34 @@ impl PageRenderer<'_> {
             let colour = self.color_for_components(&space, &comps);
             *select(self.gstate.current_mut()).colour = colour;
         }
+    }
+
+    /// The separator of a paint of a colour not given as ink: the page's,
+    /// with the graphics state's black generation and undercolour removal
+    /// for a colour of an RGB or other non-gray source; a colour of a gray
+    /// source (`gray`) takes the device's own functions.
+    pub(super) fn separator(&self, gray: bool) -> Separator {
+        if gray {
+            return self.ink.separator.with_black(&DeviceBlack::default());
+        }
+        self.ink
+            .separator
+            .with_black(&self.gstate.current().device_black)
+    }
+
+    /// The separator of a paint in the fill colour.
+    pub(super) fn fill_separator(&self) -> Separator {
+        self.separator(self.gstate.current().fill_color_space.is_gray())
+    }
+
+    /// The separator of a paint in the stroke colour.
+    pub(super) fn stroke_separator(&self) -> Separator {
+        self.separator(self.gstate.current().stroke_color_space.is_gray())
+    }
+
+    /// `gs /BG /BG2 /UCR /UCR2`: put the settings given into effect.
+    pub(super) fn set_device_black(&mut self, bg: Option<&KSetting>, ucr: Option<&KSetting>) {
+        let gs = self.gstate.current_mut();
+        gs.device_black = gs.device_black.with(bg, ucr);
     }
 }

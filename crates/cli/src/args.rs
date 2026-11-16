@@ -212,7 +212,8 @@ pub(crate) struct Args {
     /// CMYK JPEG (with --jpeg, Adobe YCCK).  `DeviceCMYK`, ICC-based CMYK
     /// and process colorants keep their values; spot colorants fold into
     /// their process equivalents; other colours separate through a CMYK
-    /// --output-profile, else as ISO 32000 §10.4.2 converts them (gray is
+    /// --output-profile, else as ISO 32000 §10.4.2 converts them, under
+    /// the content's black generation and undercolour removal (gray is
     /// black ink alone).  Overprint is simulated with --overprint.  Not
     /// with PNG, PPM, --print, --fax, --mono, --gray, --transparent,
     /// --invert, the camera cleanup flags, --deskew, --clean-borders,

@@ -265,6 +265,20 @@ impl ColorSpace {
         }
     }
 
+    /// Whether the colours of the space are grays: `DeviceGray`, `CalGray`,
+    /// a one-component ICC space, or an `Indexed` space over one of them.
+    /// The device conversion to CMYK prints a gray in black ink alone
+    /// (ISO 32000-2 §10.4.2).
+    #[must_use]
+    pub(crate) fn is_gray(&self) -> bool {
+        match self {
+            Self::DeviceGray | Self::IccBased { n: 1, .. } => true,
+            Self::Cal(cal) => cal.ncomponents() == 1,
+            Self::Indexed { base, .. } => base.is_gray(),
+            _ => false,
+        }
+    }
+
     /// Whether the space is a process CMYK space — `DeviceCMYK` or a
     /// four-component ICC space — whose components are the inks of a CMYK
     /// device.

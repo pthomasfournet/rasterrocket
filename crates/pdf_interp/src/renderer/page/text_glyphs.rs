@@ -264,7 +264,7 @@ impl PageRenderer<'_> {
                 self.height,
             );
             self.paint_object(region, u8::MAX, |r| {
-                r.blit_glyph_records(&sink.stroke_records, &clip, &paint, &stroke_color);
+                r.blit_glyph_records(&sink.stroke_records, &clip, &paint, (&stroke_color, true));
             });
         }
         // The stroke parameters are user-space quantities under the CTM, as
@@ -305,7 +305,7 @@ impl PageRenderer<'_> {
         );
         let alpha = self.gstate.current().fill_alpha;
         self.paint_object(region, alpha, |r| {
-            r.blit_glyph_records(&sink.records, &clip, &paint, &fill_color);
+            r.blit_glyph_records(&sink.records, &clip, &paint, (&fill_color, false));
             if sink.pattern_fill {
                 let mut union = Path::new();
                 for path in &sink.fill_paths {
@@ -323,16 +323,22 @@ impl PageRenderer<'_> {
     }
 
     /// Composite the glyph bitmaps of `records` through `clip` in the solid
-    /// colour `colour` with the parameters `paint`.
+    /// colour `colour` with the parameters `paint`: the stroke colour when
+    /// `stroking`, else the fill colour.
     fn blit_glyph_records(
         &mut self,
         records: &[GlyphRecord],
         clip: &Clip,
         paint: &PaintParams,
-        colour: &RasterColor,
+        (colour, stroking): (&RasterColor, bool),
     ) {
         let pipe = CanvasPipe::of(paint);
-        let source = CanvasSource::Solid(colour, &self.ink.separator);
+        let separator = if stroking {
+            self.stroke_separator()
+        } else {
+            self.fill_separator()
+        };
+        let source = CanvasSource::Solid(colour, &separator);
         for rec in records {
             #[expect(
                 clippy::cast_possible_wrap,

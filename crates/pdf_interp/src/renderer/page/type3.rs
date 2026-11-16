@@ -211,7 +211,8 @@ impl PageRenderer<'_> {
             aa: coverage.aa,
         };
         let pipe = CanvasPipe::of(&paint);
-        let source = CanvasSource::Solid(&fill, &self.ink.separator);
+        let separator = self.fill_separator();
+        let source = CanvasSource::Solid(&fill, &separator);
         with_canvas!(&mut self.canvas, |b| {
             let pipe = pipe.at();
             source.paint(b, |b, src| {

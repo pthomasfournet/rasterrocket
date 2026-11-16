@@ -12,6 +12,7 @@
 //! (`super::renderer::font_cache`) rather than here, so this module
 //! stays stateless and easy to test.
 
+pub(crate) mod black_generation;
 pub(crate) mod cmap;
 pub(crate) mod cmap_predefined;
 pub(crate) mod colorspace;
@@ -70,6 +71,11 @@ pub struct ExtGStateParams {
     pub soft_mask: Option<SoftMaskParams>,
     /// Transfer function `TR2`, else `TR`.  `None` = unchanged.
     pub transfer: Option<transfer::TransferSetting>,
+    /// Black-generation function `BG2`, else `BG`.  `None` = unchanged.
+    pub(crate) black_generation: Option<black_generation::KSetting>,
+    /// Undercolour-removal function `UCR2`, else `UCR`.  `None` =
+    /// unchanged.
+    pub(crate) undercolour_removal: Option<black_generation::KSetting>,
     /// Stroking overprint `OP`.  `None` = unchanged.
     pub overprint_stroke: Option<bool>,
     /// Non-stroking overprint `op`, which defaults to `OP` when absent.
@@ -135,6 +141,7 @@ pub enum SoftMaskParams {
 impl ExtGStateParams {
     fn from_dict(doc: &Document, d: &Dictionary) -> Self {
         let overprint_stroke = d.get_bool(b"OP");
+        let (black_generation, undercolour_removal) = black_generation::ext_gstate_black(doc, d);
         Self {
             fill_alpha: real_to_u8(d, b"ca"),
             stroke_alpha: real_to_u8(d, b"CA"),
@@ -146,6 +153,8 @@ impl ExtGStateParams {
             blend_mode: parse_blend_mode(d),
             soft_mask: parse_soft_mask(doc, d),
             transfer: transfer::ext_gstate_transfer(doc, d),
+            black_generation,
+            undercolour_removal,
             overprint_stroke,
             overprint_fill: d.get_bool(b"op").or(overprint_stroke),
             overprint_mode: d.get_i64(b"OPM").and_then(|m| match m {

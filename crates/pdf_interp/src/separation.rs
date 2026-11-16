@@ -12,11 +12,16 @@
 //! inverse of the process-ink model for the preview, so that the preview
 //! reproduces the colour, and for CMYK output the conversion of the
 //! output profile ([`ProfileSeparation`]) or, without one, the device
-//! conversion of ISO 32000-2 §10.4.2.3.
+//! conversion of ISO 32000-2 §10.4.2 under the graphics state's black
+//! generation and undercolour removal.  The separator of a paint is the
+//! page's with the graphics state's parameters taken in (see
+//! [`Separator::with_black`]).
 
 use std::sync::Arc;
 
 use color::Sample;
+
+use crate::resources::black_generation::DeviceBlack;
 
 /// The canvas a page is painted on and the pixels it finishes as.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -107,10 +112,10 @@ impl Separation {
         }
     }
 
-    /// The separator of the separation.
+    /// The separator of the separation under the initial graphics state.
     fn separator(&self) -> Separator {
         match self {
-            Self::Device => Separator::Device,
+            Self::Device => Separator::Device(DeviceBlack::default()),
             Self::Profile(table) => Separator::Profile(Arc::clone(table)),
         }
     }
@@ -215,8 +220,10 @@ pub(crate) enum Separator {
     /// converts back to the colour.
     #[default]
     Model,
+    /// The device conversion under black-generation and undercolour-removal
+    /// functions ([`DeviceBlack::separate`]); under the device's own,
     /// [`color::cmyk::rgb_to_device_cmyk`].
-    Device,
+    Device(DeviceBlack),
     /// An output profile's conversion.
     Profile(Arc<ProfileSeparation>),
 }
@@ -237,7 +244,7 @@ impl Separator {
     #[must_use]
     pub(crate) fn space(&self) -> crate::WorkingSpace {
         match self {
-            Self::Model | Self::Device => crate::WorkingSpace::Srgb,
+            Self::Model | Self::Device(_) => crate::WorkingSpace::Srgb,
             Self::Profile(table) => table.space,
         }
     }
@@ -248,8 +255,21 @@ impl Separator {
     pub(crate) fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
-            Self::Device => color::cmyk::rgb_to_device_cmyk(rgb),
+            Self::Device(black) => black.separate(rgb),
             Self::Profile(table) => table.ink(rgb),
+        }
+    }
+
+    /// The separator of a paint under `black`, the graphics state's
+    /// black-generation and undercolour-removal functions: the device
+    /// conversion under them; any other separator as it is.  A colour of a
+    /// gray source takes the device's own functions, under which gray is
+    /// black ink alone.
+    #[must_use]
+    pub(crate) fn with_black(&self, black: &DeviceBlack) -> Self {
+        match self {
+            Self::Device(_) => Self::Device(black.clone()),
+            other => other.clone(),
         }
     }
 }

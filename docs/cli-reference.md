@@ -237,11 +237,13 @@ the process inks of a CMYK printer, C, M, Y and K, 0 no ink:
   RGB and gray, images and shadings in them) separates through the CMYK
   `--output-profile` when one is given, under `--intent` (default relative
   colorimetric) and `--bpc`; without one, by the conversion ISO 32000-2
-  §10.4.2.3 defines for a device without a profile, as `pdftoppm -jpegcmyk`
-  does: `c = 1 − r`, `m = 1 − g`, `y = 1 − b`, the common part moved to
-  black, so gray is black ink alone (`0.5 g` is 50 % K) and black text is
-  K only.  The `ExtGState` black-generation and undercolour-removal
-  functions (`BG`, `UCR`) are not applied.
+  §10.4.2 defines for a device without a profile: `c = 1 − r`, `m = 1 − g`,
+  `y = 1 − b`, `k = min(c, m, y)`, then `C = c − UCR(k)` (likewise M, Y)
+  and `K = BG(k)`, under the `ExtGState` black-generation and
+  undercolour-removal functions in effect (`BG2`/`BG`, `UCR2`/`UCR`;
+  `/Default` and the initial state move the whole common part to black).
+  A gray (`DeviceGray`, `CalGray`, ICC gray) is black ink alone (`0.5 g` is
+  50 % K) under any functions, so black text is K only.
 - Overprint (`OP`, `op`, `OPM`) is simulated with `--overprint`, as on RGB
   output; without it every object knocks out every ink beneath it.
 

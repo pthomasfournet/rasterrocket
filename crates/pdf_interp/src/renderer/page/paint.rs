@@ -502,11 +502,12 @@ impl PageRenderer<'_> {
                 )
             },
         );
+        let separator = self.fill_separator();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
-            (transfer.as_deref(), &self.ink.separator),
+            (transfer.as_deref(), &separator),
         );
         let pipe = source.pipe(&paint);
         let source = source.source();
@@ -665,11 +666,12 @@ impl PageRenderer<'_> {
                 )
             },
         );
+        let separator = self.stroke_separator();
         let source = PaintSource::new(
             self.canvas.kind(),
             tiled.as_ref(),
             &solid_color,
-            (transfer.as_deref(), &self.ink.separator),
+            (transfer.as_deref(), &separator),
         );
         let pipe = source.pipe(&paint);
         let source = source.source();

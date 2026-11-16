@@ -560,6 +560,10 @@ impl PageRenderer<'_> {
             Some(TransferSetting::Functions(t)) => gs.transfer = Some(Arc::clone(t)),
             None => {}
         }
+        self.set_device_black(
+            params.black_generation.as_ref(),
+            params.undercolour_removal.as_ref(),
+        );
         if params.rendering_intent.is_some() || params.black_point_compensation.is_some() {
             let current = self.gstate.current().colour_intent;
             self.set_colour_intent(crate::ColourIntent::new(

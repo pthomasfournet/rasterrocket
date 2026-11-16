@@ -155,8 +155,9 @@ pub enum ColorModel {
     /// given in `DeviceCMYK`, a four-component ICC space or as process
     /// colorants paint their components; spot colorants fold into their
     /// process equivalents; any other colour is separated, by the session's
-    /// CMYK output profile when it has one and by the device conversion of
-    /// ISO 32000-2 §10.4.2.3 otherwise.  Overprint is simulated when the
+    /// CMYK output profile when it has one and otherwise by the device
+    /// conversion of ISO 32000-2 §10.4.2, under the graphics state's black
+    /// generation and undercolour removal.  Overprint is simulated when the
     /// session simulates it.
     Cmyk,
 }

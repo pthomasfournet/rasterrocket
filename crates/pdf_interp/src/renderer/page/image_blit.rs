@@ -314,10 +314,9 @@ impl PageRenderer<'_> {
         };
         let overprint = self.overprint_channels(false, paints);
         let paint = self.paint_params(fill_alpha, blend_mode, overprint, paints);
+        let separator = self.separator(false);
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
-            b,
-            &paint,
-            &self.ink.separator
+            b, &paint, &separator
         ));
         compositor.transfer = transfer.as_deref();
         compositor.ink_samples = Some(paints);
@@ -585,10 +584,15 @@ impl PageRenderer<'_> {
                 std::array::from_fn(|c| T::lookup(tables[c], px[c]))
             })
         };
+        // A stencil paints the fill colour; an image's samples separate as
+        // grays or as colours.
+        let separator = if stencil {
+            self.fill_separator()
+        } else {
+            self.separator(img.color_space == ImageColorSpace::Gray)
+        };
         let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
-            b,
-            &paint,
-            &self.ink.separator
+            b, &paint, &separator
         ));
         // On an ink canvas a stencil paints the fill colour as its ink, on
         // a 16-bit canvas as its 16-bit colour; there the samples map

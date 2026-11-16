@@ -462,6 +462,7 @@ mod tests {
             background_ink: None,
             paints: raster::pipe::ChannelMask::ALL,
             held_bytes,
+            gray: false,
         })
     }
 
