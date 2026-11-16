@@ -1,15 +1,16 @@
-//! The conversion of a three-channel profile's device → PCS table to a
-//! working space, tabulated over the device cube.
+//! The conversion of a three- or four-channel profile's device → PCS
+//! table to a working space, tabulated over the device cube.
 //!
-//! Each node of a grid of [`SPAN`] cells along each device axis holds the
+//! Each node of a grid of [`span`] cells along each device axis holds the
 //! working-space value of its device value: the table evaluated at that
 //! value in floating point ([`ProfileLut`], whose CLUT interpolates
-//! tetrahedrally), the media-relative PCS adjusted for the conversion's
-//! form ([`PcsAdjustment`]), then the working space's PCS → linear matrix
-//! and its sRGB curve, each linear component clipped to `[0, 1]`.  A pixel
-//! converts by interpolation in the tetrahedron of its grid cell
-//! ([`GridTable`]), at 16 bits, so device values of equal components take
-//! the nodes of equal components alone.
+//! tetrahedrally, linearly along the first of four inputs),
+//! the media-relative PCS adjusted for the conversion's form
+//! ([`PcsAdjustment`]), then the working space's PCS → linear matrix and
+//! its sRGB curve, each linear component clipped to `[0, 1]`.  A pixel
+//! converts by interpolation in the simplex of its grid cell
+//! ([`GridTable`]), at 16 bits, so three-channel device values of equal
+//! components take the nodes of equal components alone.
 
 use moxcms::{ColorProfile, DataColorSpace, RenderingIntent};
 
@@ -19,8 +20,12 @@ use crate::pcs::grid::GridTable;
 use crate::pcs::lut::{Direction, ProfileLut};
 use crate::resources::icc_shaper::srgb_encode;
 
-/// The number of cells along each device axis of the grid.
-const SPAN: u32 = 32;
+/// The number of cells along each device axis of the grid of `n`
+/// channels: 32 for three, 16 for four, whose grid of 17⁴ nodes is 2.3
+/// times the 33³ of three.
+const fn span(n: usize) -> u32 {
+    if n == 3 { 32 } else { 16 }
+}
 
 /// The adjustment of the media-relative PCS of a conversion's form.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,25 +54,27 @@ impl PcsAdjustment {
 /// The conversion of `profile`'s device values to `space` through its
 /// device → PCS table under `intent` ([`crate::pcs::lut::table_of`]),
 /// adjusted by `adjustment`; `None` when the profile's device space is not
-/// of three channels, is a PCS, or the table is missing or malformed.
-pub(super) fn tabulate(
+/// of `N` channels, is a PCS, or the table is missing or malformed.
+pub(super) fn tabulate<const N: usize>(
     profile: &ColorProfile,
     intent: RenderingIntent,
     adjustment: PcsAdjustment,
     space: WorkingSpace,
-) -> Option<GridTable<3>> {
-    use DataColorSpace::{Cmy, Color3, Hls, Hsv, Luv, Rgb, YCbr, Yxy};
-    if !matches!(
-        profile.color_space,
-        Rgb | Cmy | Hsv | Hls | YCbr | Yxy | Luv | Color3
-    ) {
+) -> Option<GridTable<N>> {
+    use DataColorSpace::{Cmy, Cmyk, Color3, Color4, Hls, Hsv, Luv, Rgb, YCbr, Yxy};
+    let channels = match profile.color_space {
+        Rgb | Cmy | Hsv | Hls | YCbr | Yxy | Luv | Color3 => 3,
+        Cmyk | Color4 => 4,
+        _ => 0,
+    };
+    if channels != N {
         return None;
     }
-    let lut = ProfileLut::new(profile, intent, Direction::ToPcs, 3)?;
+    let lut = ProfileLut::new(profile, intent, Direction::ToPcs, N)?;
     let to_linear = space.pcs_to_linear();
-    GridTable::tabulate(SPAN, 3, |device, out| {
+    GridTable::tabulate(span(N), 3, |device, out| {
         for (px, o) in device
-            .as_chunks::<3>()
+            .as_chunks::<N>()
             .0
             .iter()
             .zip(out.as_chunks_mut::<3>().0)
@@ -111,8 +118,8 @@ mod tests {
                 RenderingIntent::Saturation,
             ] {
                 for space in WorkingSpace::ALL {
-                    let table =
-                        tabulate(&profile, intent, PcsAdjustment::None, space).expect("tabulates");
+                    let table = tabulate::<3>(&profile, intent, PcsAdjustment::None, space)
+                        .expect("tabulates");
                     for v in (0..=u16::MAX).step_by(257 * 3) {
                         let out: [u16; 3] = table.convert([v; 3]);
                         let spread = out.iter().max().unwrap() - out.iter().min().unwrap();
@@ -141,18 +148,27 @@ mod tests {
         );
     }
 
+    /// A profile tabulates for the channel count of its device space
+    /// alone, and a matrix profile not at all.
     #[test]
-    fn a_cmyk_or_matrix_profile_does_not_tabulate() {
-        let none = |p: &ColorProfile| {
-            tabulate(
-                p,
+    fn a_profile_tabulates_for_its_own_channel_count() {
+        let tabulates = |p: &ColorProfile, n: usize| {
+            let args = (
                 RenderingIntent::Perceptual,
                 PcsAdjustment::None,
                 WorkingSpace::Srgb,
-            )
-            .is_none()
+            );
+            match n {
+                3 => tabulate::<3>(p, args.0, args.1, args.2).is_some(),
+                _ => tabulate::<4>(p, args.0, args.1, args.2).is_some(),
+            }
         };
-        assert!(none(&fixture("printer-cmyk-v4")));
-        assert!(none(&ColorProfile::new_srgb()));
+        let cmyk = fixture("printer-cmyk-v4");
+        assert!(tabulates(&cmyk, 4));
+        assert!(!tabulates(&cmyk, 3));
+        let rgb = fixture("printer-rgb-v4");
+        assert!(tabulates(&rgb, 3));
+        assert!(!tabulates(&rgb, 4));
+        assert!(!tabulates(&ColorProfile::new_srgb(), 3));
     }
 }

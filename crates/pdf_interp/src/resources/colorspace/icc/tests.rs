@@ -235,6 +235,31 @@ fn a_device_to_pcs_table_takes_precedence_over_the_matrix() {
     assert!(matches!(*conv, IccConversion::Transform { .. }));
 }
 
+/// Every form of a CMYK printer's tables, to either working space,
+/// compiles to the tabulated grid, whose 16-bit executor is given with it.
+#[test]
+fn cmyk_tables_compile_to_the_grid() {
+    let doc = make_doc_with_stream(&fixture("printer-cmyk-v4"), " /N 4");
+    for space in WorkingSpace::ALL {
+        for intent in RenderingIntent::ALL {
+            for bpc in [false, true] {
+                let target = ColourTarget::new(ColourIntent::new(intent, bpc), space);
+                let conv = IccConversion::load(&doc, (2, 0), 4, target).expect("compiles");
+                let IccConversion::Transform {
+                    n: 4,
+                    recipe: None,
+                    xform16,
+                    ..
+                } = &*conv
+                else {
+                    panic!("{intent} bpc {bpc} {space:?}: not the grid");
+                };
+                assert!(xform16.get().is_some_and(Option::is_some));
+            }
+        }
+    }
+}
+
 /// `[/ICCBased <unparseable profile, /N n, /Alternate alt>]`.
 fn garbage_doc(n: u8, alternate: &str) -> Document {
     make_doc_with_stream(b"not a profile", &format!(" /N {n} /Alternate {alternate}"))

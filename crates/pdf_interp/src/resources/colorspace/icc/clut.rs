@@ -1,6 +1,6 @@
 //! CMYK → sRGB lookup tables baked from an ICC transform.
 //!
-//! A four-channel `moxcms` transform is evaluated on a regular `grid_n^4`
+//! A four-channel 8-bit transform is evaluated on a regular `grid_n^4`
 //! lattice; the result is a flat `u8` table indexed by
 //! `(k·G³ + c·G² + m·G + y) · 3`, the layout of the device CLUT kernel
 //! `gpu::backend::icc_clut` and of the CPU quadrilinear interpolation

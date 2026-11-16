@@ -12,7 +12,7 @@
 //! off; absolute colorimetry, which is never compensated, once.
 //!
 //! Asserted, within the bounds of each profile at 8 and 16 bits
-//! ([`TABLES`], [`RGB_TABLES`]): every case but perceptual and saturation
+//! ([`CMYK_TABLES`], [`RGB_TABLES`], [`GRAY`]): every case but perceptual and saturation
 //! without compensation from a version 4 profile, which are printed only:
 //! Little CMS compensates the black of version 4 perceptual and
 //! saturation tables regardless of `-b`, where `/UseBlackPtComp /OFF`
@@ -45,8 +45,8 @@ struct Bounds {
     sixteen: f64,
 }
 
-/// The bounds of the CMYK and gray profiles.
-const TABLES: Bounds = Bounds {
+/// The bounds of the gray profile.
+const GRAY: Bounds = Bounds {
     eight: 1.5,
     sixteen: 1.0,
 };
@@ -56,6 +56,14 @@ const TABLES: Bounds = Bounds {
 /// between them.
 const RGB_TABLES: Bounds = Bounds {
     eight: 0.75,
+    sixteen: 0.1,
+};
+
+/// The bounds of the CMYK printers, tabulated as the RGB ones are and
+/// interpolated in the 4-simplices of the grid; at 8 bits a level of the
+/// output is near 1 ΔE00 in the shadows the CMYK patches reach.
+const CMYK_TABLES: Bounds = Bounds {
+    eight: 1.0,
     sixteen: 0.1,
 };
 
@@ -151,13 +159,16 @@ fn transicc(args: &[&str], input: &str) -> Vec<Vec<f64>> {
         .stderr(Stdio::piped())
         .spawn()
         .expect("transicc runs: install liblcms2-utils");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    // The input is written while the output is read: a pipe buffers a
+    // bounded amount, and the converter writes each line's answer before
+    // it reads the next.
+    let mut stdin = child.stdin.take().unwrap();
+    let out = std::thread::scope(|s| {
+        let writer = s.spawn(move || stdin.write_all(input.as_bytes()).unwrap());
+        let out = child.wait_with_output().unwrap();
+        writer.join().unwrap();
+        out
+    });
     assert!(
         out.status.success(),
         "transicc {args:?}: {}",
@@ -324,14 +335,15 @@ fn agrees(name: &str, n: usize, bounds: Bounds) {
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
-fn cmyk_printer_agrees_with_little_cms() {
-    agrees("printer-cmyk-v4", 4, TABLES);
+fn cmyk_printers_agree_with_little_cms() {
+    agrees("printer-cmyk-v4", 4, CMYK_TABLES);
+    agrees("printer-cmyk-v2", 4, CMYK_TABLES);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn gray_printer_agrees_with_little_cms() {
-    agrees("printer-gray-v4", 1, TABLES);
+    agrees("printer-gray-v4", 1, GRAY);
 }
 
 #[test]

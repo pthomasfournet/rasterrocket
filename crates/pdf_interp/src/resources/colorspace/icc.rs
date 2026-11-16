@@ -14,10 +14,12 @@
 //! compiles into a 16-bit [`LinearRgb`] through the composite of
 //! [`crate::working_space::wide_composite`], and a gray one, whose colours
 //! are neutral, into the sRGB shaper, a neutral having the same value in
-//! both spaces.  The device → PCS table of a three-channel profile compiles
-//! into a grid over the device cube evaluated in floating point and
-//! interpolated tetrahedrally (see [`table`]), which serves both depths.
-//! Any other 3- or 4-channel profile compiles into a `moxcms` 8-bit
+//! both spaces.  The device → PCS table of a three- or four-channel
+//! profile compiles into a grid over the device cube evaluated in floating
+//! point and interpolated in the simplices of its cells (see [`table`]),
+//! which serves both depths.  Any other 3- or 4-channel conversion (an
+//! RGB matrix/TRC model in a form the shaper does not take, a table the
+//! evaluator declines) compiles into a `moxcms` 8-bit
 //! transform to the working space, beside which a 16-bit transform is
 //! created on first use by a 16-bit render; ICC-absolute colorimetry there
 //! scales the PCS by the source's media white (see [`crate::pcs`]), folded
@@ -258,26 +260,21 @@ impl IccProfile {
         let model = Model::ALL[slot % MODELS];
         let form = [Form::Plain, Form::Absolute, Form::Compensated][slot / MODELS % FORMS];
         let space = WorkingSpace::ALL[slot / (MODELS * FORMS)];
-        // A three-channel device → PCS table is tabulated here: the
-        // converter interpolates such a table multilinearly, which takes a
-        // device value of equal components off the neutral axis.
-        if model != Model::Matrix && self.n == 3 {
+        // A three- or four-channel device → PCS table is tabulated here:
+        // the converter interpolates such a table multilinearly.
+        if model != Model::Matrix && matches!(self.n, 3 | 4) {
             let adjustment = match form {
                 Form::Plain => PcsAdjustment::None,
                 Form::Absolute => PcsAdjustment::Absolute(self.absolute?),
                 Form::Compensated => PcsAdjustment::Compensated(self.black(model)),
             };
-            if let Some(grid) = table::tabulate(profile, model.intent(), adjustment, space) {
-                let grid = Arc::new(grid);
-                let xform16: Arc<Transform16BitExecutor> = grid.clone();
-                return Some(IccConversion::Transform {
-                    n: self.n,
-                    xform: grid,
-                    recipe: None,
-                    xform16: OnceLock::from(Some(xform16)),
-                    #[cfg(feature = "gpu-icc")]
-                    clut: OnceLock::new(),
-                });
+            let tabulated = if self.n == 3 {
+                tabulated::<3>(profile, model.intent(), adjustment, space)
+            } else {
+                tabulated::<4>(profile, model.intent(), adjustment, space)
+            };
+            if tabulated.is_some() {
+                return tabulated;
             }
         }
         let dest = match form {
@@ -357,6 +354,27 @@ impl IccProfile {
             .conversion(first, alternate)
             .is_some_and(|conv| conv.is_device_equivalent())
     }
+}
+
+/// The conversion of `profile`'s `N`-channel device → PCS table to
+/// `space`, tabulated ([`table::tabulate`]), as a transform whose 8- and
+/// 16-bit executors are the one grid.
+fn tabulated<const N: usize>(
+    profile: &ColorProfile,
+    intent: moxcms::RenderingIntent,
+    adjustment: PcsAdjustment,
+    space: WorkingSpace,
+) -> Option<IccConversion> {
+    let grid = Arc::new(table::tabulate::<N>(profile, intent, adjustment, space)?);
+    let xform16: Arc<Transform16BitExecutor> = grid.clone();
+    Some(IccConversion::Transform {
+        n: u8::try_from(N).ok()?,
+        xform: grid,
+        recipe: None,
+        xform16: OnceLock::from(Some(xform16)),
+        #[cfg(feature = "gpu-icc")]
+        clut: OnceLock::new(),
+    })
 }
 
 /// The ICC-absolute conversion to `space` of the gray matrix/TRC

@@ -56,13 +56,16 @@ pub(crate) fn transicc(args: &[&str], input: &str) -> Vec<Vec<f64>> {
         .stderr(Stdio::piped())
         .spawn()
         .expect("transicc runs: install liblcms2-utils");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    // The input is written while the output is read: a pipe buffers a
+    // bounded amount, and the converter writes each line's answer before
+    // it reads the next.
+    let mut stdin = child.stdin.take().unwrap();
+    let out = std::thread::scope(|s| {
+        let writer = s.spawn(move || stdin.write_all(input.as_bytes()).unwrap());
+        let out = child.wait_with_output().unwrap();
+        writer.join().unwrap();
+        out
+    });
     assert!(
         out.status.success(),
         "transicc {args:?}: {}",
