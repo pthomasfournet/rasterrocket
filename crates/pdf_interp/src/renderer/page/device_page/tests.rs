@@ -311,6 +311,7 @@ fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: b
 }
 
 mod text;
+mod type3;
 
 #[test]
 fn device_page_matches_the_cpu_render() {

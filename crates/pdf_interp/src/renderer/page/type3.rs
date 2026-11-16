@@ -195,6 +195,16 @@ impl PageRenderer<'_> {
         if self.gstate.current().fill_color_space.paints_nothing() {
             return true;
         }
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            let glyph = super::device_page::PlacedGlyph {
+                pen_x: frame.pen_x,
+                pen_y: frame.pen_y,
+                bitmap: &coverage,
+            };
+            self.record_device_glyphs([glyph], false, u8::MAX);
+            return true;
+        }
         let fill = self.gstate.current().painted_fill_color();
         let paint = self.solid_paint(false, &fill, u8::MAX, BlendMode::Normal);
         let clip = self.gstate.current().clip.clone_shared();
