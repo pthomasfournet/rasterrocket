@@ -105,8 +105,14 @@ impl WorkingSpace {
 /// rows scaled to sum to 1 when they do within
 /// [`IDENTITY_MATRIX_TOLERANCE`].
 pub(crate) fn wide_composite(colorants: &Mat3) -> Mat3 {
-    let to_wide = mat_inverse(&ROMM_COLORANTS).expect("the ROMM colorant matrix is non-singular");
-    let composite = mat_mul(&to_wide, colorants);
+    composite(WorkingSpace::Wide, colorants)
+}
+
+/// The composite from the linear components of an RGB source of colorant
+/// matrix `colorants` to the linear components of `space`, its rows
+/// scaled to sum to 1 when they do within [`IDENTITY_MATRIX_TOLERANCE`].
+pub(crate) fn composite(space: WorkingSpace, colorants: &Mat3) -> Mat3 {
+    let composite = mat_mul(&space.pcs_to_linear(), colorants);
     let sums = composite.map(|row| row.iter().sum::<f64>());
     if sums
         .iter()
@@ -182,7 +188,7 @@ pub(crate) fn srgb_luminance<S: Sample>(rgb: [S; 3]) -> S {
 }
 
 /// The linear value of every 16-bit sRGB level.
-fn srgb_linear() -> &'static Arc<[f32]> {
+pub(crate) fn srgb_linear() -> &'static Arc<[f32]> {
     static TABLE: OnceLock<Arc<[f32]>> = OnceLock::new();
     TABLE.get_or_init(|| {
         (0..=u16::MAX)
@@ -199,26 +205,98 @@ fn srgb_linear() -> &'static Arc<[f32]> {
     })
 }
 
-/// The 16-bit conversion of an RGB source to the wide space: each component
-/// linearised by its table of every 16-bit level, then the composite
-/// matrix, then the encoding.
+/// The 16-bit conversion of an RGB source to an RGB destination: each
+/// component linearised by its table of every 16-bit level, then the
+/// composite matrix, then the destination's encoding.
 #[derive(Debug, PartialEq)]
 pub(crate) struct LinearRgb {
     linear: [Arc<[f32]>; 3],
     matrix: [[f32; 3]; 3],
+    encoding: Encoding,
+}
+
+/// The encoding of the linear components of a [`LinearRgb`]'s destination.
+#[derive(Debug, PartialEq)]
+enum Encoding {
+    /// The sRGB curve ([`encode16`]).
+    Srgb,
+    /// The inverse of a curve given, per component, by the linear value of
+    /// every 16-bit level, a non-decreasing table: a linear value encodes
+    /// as the level at which the table reaches it, interpolated between
+    /// the two levels whose values enclose it.
+    Inverse([Arc<[f32]>; 3]),
+}
+
+impl Encoding {
+    /// The 16-bit level of component `c` of the linear value `lin`.
+    fn encode(&self, c: usize, lin: f32) -> u16 {
+        match self {
+            Self::Srgb => encode16(lin),
+            Self::Inverse(tables) => invert16(&tables[c], lin),
+        }
+    }
+}
+
+/// The 16-bit level at which `table`, the non-decreasing linear value of
+/// every 16-bit level, reaches `lin`, interpolated between the enclosing
+/// levels; the first level at or above `lin` when they are equal, and the
+/// end levels beyond the table's range.
+fn invert16(table: &[f32], lin: f32) -> u16 {
+    let above = table.partition_point(|&v| v < lin);
+    let Some(&hi) = table.get(above) else {
+        return u16::MAX;
+    };
+    let Some(below) = above.checked_sub(1) else {
+        return 0;
+    };
+    let lo = table[below];
+    let t = if hi > lo { (lin - lo) / (hi - lo) } else { 1.0 };
+    #[expect(clippy::cast_precision_loss, reason = "a level is below 2^16")]
+    let level = (below as f32 + t).round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the level lies in [below, below + 1] within [0, 65 535]"
+    )]
+    let level = level as u16;
+    level
 }
 
 impl LinearRgb {
     /// The conversion of the linearisations `linear` (65 536 entries each)
-    /// followed by the linear → linear-wide `matrix`.
+    /// followed by the linear → linear-destination `matrix`, into a
+    /// destination of the sRGB curve.
     pub(crate) fn new(linear: [Arc<[f32]>; 3], matrix: &Mat3) -> Self {
+        Self::with_encoding(linear, matrix, Encoding::Srgb)
+    }
+
+    /// The conversion of the linearisations `linear` followed by `matrix`
+    /// into a destination whose component `c` has the linear value
+    /// `curves[c][v]` at level `v`, each table non-decreasing (see
+    /// [`Self::table`]); `None` when a table decreases.
+    pub(crate) fn into_curves(
+        linear: [Arc<[f32]>; 3],
+        matrix: &Mat3,
+        curves: [Arc<[f32]>; 3],
+    ) -> Option<Self> {
+        curves
+            .iter()
+            .all(|t| t.len() == 1 << 16 && t.is_sorted())
+            .then(|| Self::with_encoding(linear, matrix, Encoding::Inverse(curves)))
+    }
+
+    fn with_encoding(linear: [Arc<[f32]>; 3], matrix: &Mat3, encoding: Encoding) -> Self {
         debug_assert!(linear.iter().all(|t| t.len() == 1 << 16));
         #[expect(
             clippy::cast_possible_truncation,
             reason = "matrix coefficients need no more than f32 precision"
         )]
         let matrix = matrix.map(|row| row.map(|v| v as f32));
-        Self { linear, matrix }
+        Self {
+            linear,
+            matrix,
+            encoding,
+        }
     }
 
     /// The linearisation of every 16-bit level through `f`, the linear
@@ -238,8 +316,11 @@ impl LinearRgb {
     /// Convert one 16-bit pixel.
     pub(crate) fn convert(&self, px: [u16; 3]) -> [u16; 3] {
         let [r, g, b] = std::array::from_fn(|c| self.linear[c][usize::from(px[c])]);
-        self.matrix
-            .map(|row| encode16(row[2].mul_add(b, row[0].mul_add(r, row[1] * g))))
+        std::array::from_fn(|c| {
+            let row = self.matrix[c];
+            let lin = row[2].mul_add(b, row[0].mul_add(r, row[1] * g));
+            self.encoding.encode(c, lin)
+        })
     }
 }
 
@@ -385,6 +466,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_inverse_encoding_finds_the_level_of_a_linear_value() {
+        let table = LinearRgb::table(|x| Some(x * x)).expect("evaluates");
+        for v in [0u16, 1, 255, 30_000, 65_534, 65_535] {
+            assert_eq!(invert16(&table, table[usize::from(v)]), v);
+        }
+        assert_eq!(invert16(&table, -1.0), 0);
+        assert_eq!(invert16(&table, 2.0), u16::MAX);
+        // Halfway between two levels' values rounds to the nearer level.
+        let mid = f32::midpoint(table[1000], table[1001]);
+        assert!([1000, 1001].contains(&invert16(&table, mid)));
+    }
+
+    #[test]
+    fn a_decreasing_curve_has_no_inverse_encoding() {
+        let rising = LinearRgb::table(Some).expect("evaluates");
+        let falling = LinearRgb::table(|x| Some(1.0 - x)).expect("evaluates");
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let curves = |t: &Arc<[f32]>| [Arc::clone(t), Arc::clone(t), Arc::clone(t)];
+        assert!(LinearRgb::into_curves(curves(&rising), &identity, curves(&falling)).is_none());
+        let linear = LinearRgb::into_curves(curves(&rising), &identity, curves(&rising))
+            .expect("a rising curve inverts");
+        assert_eq!(linear.convert([0, 12_345, 65_535]), [0, 12_345, 65_535]);
     }
 
     #[test]

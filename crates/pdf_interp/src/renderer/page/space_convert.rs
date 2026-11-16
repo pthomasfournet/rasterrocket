@@ -8,7 +8,10 @@
 //! RGB converts between working spaces through sRGB
 //! ([`working_space::to_srgb16`], [`working_space::from_srgb16`]), and
 //! into ink by a [`Separator`] from its own working space, leaving the spot
-//! channels empty.
+//! channels empty.  The RGB of an additive ink canvas
+//! ([`CanvasSpace::AdditiveInk`]) is of a working space or of a group's own
+//! RGB space, which converts to and from its working space
+//! ([`AdditiveRgb`]).
 //!
 //! A reduction to gray takes the gray of the colour on the way: the
 //! `DeviceRGB` → `DeviceGray` weights of an sRGB value
@@ -34,25 +37,24 @@ use super::ink_map::SpotTables;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::no_spots;
 use crate::resources::colorspace::icc::IccConversion;
-use crate::separation::Separator;
+use crate::separation::{AdditiveRgb, Separator};
 use crate::{ColourTarget, WorkingSpace, working_space};
 
 /// The space a canvas holds its colours in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum CanvasSpace {
     /// RGB of a working space.
     Rgb(WorkingSpace),
     /// Process and spot ink.
     Ink,
-    /// RGB of a working space beside spot ink: an ink canvas whose process
-    /// channels hold the complements of the RGB, black none (see
-    /// [`Separator::Additive`]).
-    AdditiveInk(WorkingSpace),
+    /// RGB beside spot ink: an ink canvas whose process channels hold the
+    /// complements of the RGB, black none (see [`Separator::Additive`]).
+    AdditiveInk(AdditiveRgb),
 }
 
 impl CanvasSpace {
     /// Whether the canvas has spot channels.
-    pub(super) const fn has_spots(self) -> bool {
+    pub(super) const fn has_spots(&self) -> bool {
         matches!(self, Self::Ink | Self::AdditiveInk(_))
     }
 }
@@ -157,24 +159,32 @@ impl SpaceConversion<'_> {
     /// are folded into the colour.
     pub(super) fn pixel<S: CanvasSample>(&self, src: &[S], dst: &mut [S]) {
         let keeps_spots = !self.gray && self.from.has_spots() && self.to.has_spots();
-        let (space, rgb) = match self.from {
-            _ if self.gray => (WorkingSpace::Srgb, [gray_of(self.from, src, self.spots); 3]),
+        let (space, rgb) = match &self.from {
+            _ if self.gray => (
+                WorkingSpace::Srgb,
+                [gray_of(&self.from, src, self.spots); 3],
+            ),
             CanvasSpace::Ink if keeps_spots => self.ink.rgb([src[0], src[1], src[2], src[3]]),
             CanvasSpace::Ink => self.ink.rgb(fold_ink(src, self.spots)),
-            CanvasSpace::AdditiveInk(space) if keeps_spots => {
-                (space, complement([src[0], src[1], src[2]]))
-            }
-            CanvasSpace::AdditiveInk(space) => (space, additive_rgb(src, self.spots)),
-            CanvasSpace::Rgb(space) => (space, [src[0], src[1], src[2]]),
+            CanvasSpace::AdditiveInk(space) if keeps_spots => (
+                space.working(),
+                space.in_working(complement([src[0], src[1], src[2]])),
+            ),
+            CanvasSpace::AdditiveInk(space) => (
+                space.working(),
+                space.in_working(additive_rgb(src, self.spots)),
+            ),
+            CanvasSpace::Rgb(space) => (*space, [src[0], src[1], src[2]]),
         };
-        match self.to {
-            CanvasSpace::Rgb(to) => dst.copy_from_slice(&into_space(space, to, rgb)),
+        match &self.to {
+            CanvasSpace::Rgb(to) => dst.copy_from_slice(&into_space(space, *to, rgb)),
             CanvasSpace::Ink => {
                 let rgb = into_space(space, self.separator.space(), rgb);
                 dst.copy_from_slice(&no_spots(self.separator.ink(rgb)));
             }
             CanvasSpace::AdditiveInk(to) => {
-                let [r, g, b] = complement(into_space(space, to, rgb));
+                let rgb = to.of_working(into_space(space, to.working(), rgb));
+                let [r, g, b] = complement(rgb);
                 dst.copy_from_slice(&no_spots([r, g, b, S::ZERO]));
             }
         }
@@ -249,14 +259,15 @@ impl SpaceConversion<'_> {
 /// conventional `DeviceCMYK` → `DeviceGray` conversion of its process ink,
 /// its spots folded in by `spots`; the former for the RGB of an additive
 /// ink pixel, its spots folded in ([`additive_rgb`]).
-pub(super) fn gray_of<S: CanvasSample>(space: CanvasSpace, px: &[S], spots: &SpotTables<'_>) -> S {
+pub(super) fn gray_of<S: CanvasSample>(space: &CanvasSpace, px: &[S], spots: &SpotTables<'_>) -> S {
     match space {
         CanvasSpace::Ink => color::cmyk::device_gray_at(fold_ink(px, spots)),
         CanvasSpace::Rgb(space) => {
-            color::convert::gray_at(working_space::to_srgb(space, [px[0], px[1], px[2]]))
+            color::convert::gray_at(working_space::to_srgb(*space, [px[0], px[1], px[2]]))
         }
         CanvasSpace::AdditiveInk(space) => {
-            color::convert::gray_at(working_space::to_srgb(space, additive_rgb(px, spots)))
+            let rgb = space.in_working(additive_rgb(px, spots));
+            color::convert::gray_at(working_space::to_srgb(space.working(), rgb))
         }
     }
 }

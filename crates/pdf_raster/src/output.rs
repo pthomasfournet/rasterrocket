@@ -331,7 +331,8 @@ pub(crate) fn group_space_warnings(
     if approximated.rgb_profile && once(&flags.rgb_profile) {
         warnings.push(format!(
             "page {page_num} has a transparency group in an RGB colour space other than \
-             sRGB: it composites in the RGB working space of its canvas"
+             sRGB that does not convert: it composites in the RGB working space of its \
+             canvas"
         ));
     }
     warnings

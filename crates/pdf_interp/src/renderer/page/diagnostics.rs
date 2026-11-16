@@ -34,7 +34,8 @@ pub(crate) fn source_ppi(image_width_px: u32, page_width_pts: f64) -> Option<f32
 pub struct GroupSpaceApproximations {
     /// A CMYK ICC group space composited through the process-ink model.
     pub cmyk_profile: bool,
-    /// A non-sRGB RGB group space composited in the canvas's RGB space.
+    /// A `CalRGB` or non-sRGB ICC RGB group space whose conversions do not
+    /// build, composited in the canvas's RGB working space.
     pub rgb_profile: bool,
 }
 

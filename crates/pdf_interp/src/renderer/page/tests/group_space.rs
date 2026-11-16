@@ -21,13 +21,15 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 /// Page `(4, 0)`, 10 points square, whose form `/G` (5) is a transparency
 /// group of `group` entries drawing `content`; `/Half` is a fill alpha of
 /// one half, `/Mul` the `Multiply` and `/Diff` the `Difference` blend mode
-/// and `/Spot` a `Separation`
-/// colour space, in the page's and the form's resources.  Object 6 is an
-/// RGB ICC profile that is not sRGB, object 7 a CMYK one (its data unused).
+/// and `/Spot` a `Separation` and `/Adobe` an ICC colour space of object
+/// 6, in the page's and the form's resources.  Object 6 is an RGB ICC
+/// profile that is not sRGB, object 7 a CMYK one (its data unused), object
+/// 8 an RGB one whose data is not a profile.
 fn doc(group: &str, content: &str) -> Document {
     let res = "/ExtGState << /Half << /ca 0.5 >> /Mul << /BM /Multiply >> \
                /Diff << /BM /Difference >> >> /ColorSpace << /Spot [/Separation /Spot /DeviceCMYK \
-               << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.5 1 0] /N 1 >>] >>";
+               << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.5 1 0] /N 1 >>] \
+               /Adobe [/ICCBased 6 0 R] >>";
     let adobe = moxcms::ColorProfile::new_adobe_rgb()
         .encode()
         .expect("encodes");
@@ -49,6 +51,7 @@ fn doc(group: &str, content: &str) -> Document {
         ),
         (6, stream("/N 3", &adobe)),
         (7, stream("/N 4", b"")),
+        (8, stream("/N 3", b"not a profile")),
     ])
 }
 
@@ -185,10 +188,8 @@ fn a_spot_colour_keeps_its_channel_in_a_cmyk_group() {
 
 #[test]
 fn a_group_in_its_canvas_space_paints_as_one_without_a_space() {
-    let cases: [(&str, &CanvasRequest); 4] = [
+    let cases: [(&str, &CanvasRequest); 2] = [
         ("/CS /DeviceRGB", &CanvasRequest::Rgb),
-        ("/CS [/ICCBased 6 0 R]", &CanvasRequest::Rgb),
-        ("/CS [/ICCBased 6 0 R]", &CanvasRequest::WideRgb),
         ("/CS /DeviceCMYK", &CMYK),
     ];
     for (space, request) in cases {
@@ -394,21 +395,29 @@ fn a_gray_page_group_blends_in_gray() {
 
 #[test]
 fn an_approximated_group_space_is_reported() {
-    let doc = doc("/CS [/ICCBased 7 0 R] /I true", HALF);
-    let (_, diag) = render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, "/G Do");
+    let render = |group| {
+        render_page(
+            &doc(group, HALF),
+            &CanvasRequest::Rgb,
+            SampleDepth::Eight,
+            "/G Do",
+        )
+    };
+    let (_, diag) = render("/CS [/ICCBased 7 0 R] /I true");
     assert!(diag.approximated_group_spaces.cmyk_profile);
     assert!(!diag.approximated_group_spaces.rgb_profile);
-    let doc = doc_rgb_profiled();
-    let (_, diag) = render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, "/G Do");
+    let (_, diag) = render("/CS [/ICCBased 6 0 R] /I true");
+    assert!(!diag.approximated_group_spaces.any());
+    let (canvas, diag) = render("/CS [/ICCBased 8 0 R] /I true");
     assert!(diag.approximated_group_spaces.rgb_profile);
+    assert_eq!(
+        samples(&canvas),
+        grouped("/I true", HALF, &CanvasRequest::Rgb, SampleDepth::Eight),
+        "a space that does not convert composites in its canvas's"
+    );
     let doc = crate::test_helpers::make_doc_with_objects(&[(4, b"<< /Type /Page >>".to_vec())]);
     let (_, diag) = render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, HALF);
     assert!(!diag.approximated_group_spaces.any());
-}
-
-/// [`doc`] of a group in the non-sRGB RGB profile, drawing [`HALF`].
-fn doc_rgb_profiled() -> Document {
-    doc("/CS [/ICCBased 6 0 R] /I true", HALF)
 }
 
 /// A page drawing form 5, a transparency group of `group` entries whose
@@ -439,8 +448,9 @@ fn default_rgb_doc(group: &str) -> Document {
 }
 
 /// A `DefaultRGB` of the non-sRGB profile makes a `DeviceRGB` group's
-/// space that profile, which on a wide page is approximated by the page's
-/// own space: the group paints as one without a space.
+/// space that profile: its colours, of that profile too, mix there at the
+/// fill alpha of one half, 128/255 in the graphics state, and the mixture
+/// converts as a colour of the profile does.
 #[test]
 fn a_default_rgb_space_replaces_a_device_group_space() {
     let render = |group| {
@@ -452,8 +462,25 @@ fn a_default_rgb_space_replaces_a_device_group_space() {
         )
     };
     let (canvas, diag) = render("/CS /DeviceRGB");
-    assert!(diag.approximated_group_spaces.rgb_profile);
-    assert_eq!(samples(&canvas), samples(&render("").0));
+    assert!(!diag.approximated_group_spaces.any());
+    let doc = default_rgb_doc("");
+    let mixed = crate::resources::ColorSpace::IccBased {
+        n: 3,
+        stream_id: Some((6, 0)),
+    }
+    .convert::<u16>(
+        &doc,
+        crate::ColourTarget::new(crate::ColourIntent::INITIAL, crate::WorkingSpace::Wide),
+        &[127.0 / 255.0, 0.0, 128.0 / 255.0],
+    );
+    let got = samples(&canvas);
+    let off = got[..3].iter().zip(mixed).map(|(a, b)| a.abs_diff(b)).max();
+    assert!(off <= Some(2), "{:?} vs {mixed:?}", &got[..3]);
+    assert_ne!(
+        got,
+        samples(&render("").0),
+        "the profile's mixture is not the wide space's"
+    );
 }
 
 /// Page `(4, 0)` whose `/M` is a luminosity soft mask of backdrop entries
@@ -550,4 +577,5 @@ fn a_cal_luminosity_mask_takes_the_luminance_of_its_colour() {
 }
 
 mod profile;
+mod rgb_profile;
 mod spots;

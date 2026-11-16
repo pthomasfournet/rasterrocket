@@ -421,7 +421,7 @@ impl PageRenderer<'_> {
         // its objects knock out one another when it is a knockout group,
         // whatever the enclosing group is.
         let mut switched = None;
-        let parent_group = group.as_mut().zip(target).map(|(g, target)| {
+        let parent_group = group.as_mut().zip(target.as_ref()).map(|(g, target)| {
             switched = self.enter_form_group(g, target);
             let (x0, y0, x1, y1) = g.region();
             let gs = self.gstate.current_mut();
@@ -450,7 +450,7 @@ impl PageRenderer<'_> {
         // gstate.save() — the form's own state is irrelevant here).
         let group = group
             .zip(target)
-            .and_then(|(g, target)| self.leave_form_group(g, target, switched));
+            .and_then(|(g, target)| self.leave_form_group(g, &target, switched));
         if let Some(parent_group) = parent_group {
             self.group = parent_group;
         }

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pdf::{Document, Object, ObjectId};
 
 use super::ColorSpace;
+use super::cal::CalSpace;
 use super::icc::IccConversion;
 
 /// The family of a transparency group's colour space: the space the
@@ -41,8 +42,11 @@ pub enum RgbGroupSpace {
     Device,
     /// A CIE-based space that converts as sRGB does.
     Srgb,
-    /// `CalRGB` or an RGB ICC profile that is not sRGB.
-    Profiled,
+    /// An RGB ICC space whose profile, the stream of this identifier, is
+    /// not sRGB.
+    Icc(ObjectId),
+    /// A `CalRGB` space.
+    Cal(CalSpace),
 }
 
 impl GroupSpace {
@@ -57,7 +61,7 @@ impl GroupSpace {
             ColorSpace::DeviceCmyk => Some(Self::Cmyk { profile: None }),
             ColorSpace::Cal(cal) => match cal.ncomponents() {
                 1 => Some(Self::Gray),
-                _ => Some(Self::Rgb(RgbGroupSpace::Profiled)),
+                _ => Some(Self::Rgb(RgbGroupSpace::Cal(**cal))),
             },
             ColorSpace::IccBased { n, stream_id } => match (n, stream_id) {
                 (1, _) => Some(Self::Gray),
@@ -118,15 +122,6 @@ impl GroupSpace {
             Self::Gray | Self::Rgb(RgbGroupSpace::Device | RgbGroupSpace::Srgb)
         )
     }
-
-    /// Whether the space approximates its declared space: a `CalRGB` or
-    /// non-sRGB ICC space composites in the RGB space of the canvas.  An
-    /// ICC CMYK space composites in its profile's ink, unless the profile
-    /// cannot separate, which only the render finds.
-    #[must_use]
-    pub const fn approximated(self) -> bool {
-        matches!(self, Self::Rgb(RgbGroupSpace::Profiled))
-    }
 }
 
 /// The family name of `cs` when it names one of the group-space families,
@@ -162,7 +157,7 @@ fn icc_rgb(doc: &Document, id: ObjectId) -> Option<GroupSpace> {
     }
     let lab = crate::resources::icc_shaper::fetch_profile_bytes(doc, id)
         .is_some_and(|bytes| bytes.get(16..20) == Some(b"Lab ".as_slice()));
-    (!lab).then_some(GroupSpace::Rgb(RgbGroupSpace::Profiled))
+    (!lab).then_some(GroupSpace::Rgb(RgbGroupSpace::Icc(id)))
 }
 
 #[cfg(test)]
@@ -228,10 +223,10 @@ mod tests {
             read("[/CalGray << /WhitePoint [0.9505 1 1.089] >>]"),
             Some(GroupSpace::Gray)
         );
-        assert_eq!(
+        assert!(matches!(
             read("[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [1.8 1.8 1.8] >>]"),
-            Some(GroupSpace::Rgb(RgbGroupSpace::Profiled))
-        );
+            Some(GroupSpace::Rgb(RgbGroupSpace::Cal(_)))
+        ));
     }
 
     #[test]
@@ -250,7 +245,7 @@ mod tests {
         );
         assert_eq!(
             read_in("[/ICCBased 4 0 R]", &profile(3, &adobe)),
-            Some(GroupSpace::Rgb(RgbGroupSpace::Profiled))
+            Some(GroupSpace::Rgb(RgbGroupSpace::Icc((4, 0))))
         );
         assert_eq!(
             read_in("[/ICCBased 4 0 R]", &profile(1, b"")),
@@ -277,19 +272,5 @@ mod tests {
             read_in("4 0 R", &[(4, b"/DeviceCMYK".to_vec())]),
             Some(GroupSpace::Cmyk { profile: None })
         );
-    }
-
-    #[test]
-    fn approximated_spaces_are_non_srgb_rgb() {
-        assert!(GroupSpace::Rgb(RgbGroupSpace::Profiled).approximated());
-        assert!(
-            !GroupSpace::Cmyk {
-                profile: Some((4, 0))
-            }
-            .approximated()
-        );
-        assert!(!GroupSpace::Cmyk { profile: None }.approximated());
-        assert!(!GroupSpace::Rgb(RgbGroupSpace::Srgb).approximated());
-        assert!(!GroupSpace::Gray.approximated());
     }
 }

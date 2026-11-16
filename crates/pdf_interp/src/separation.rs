@@ -18,12 +18,16 @@
 //! [`Separator::for_paint`]): its black-generation and undercolour-removal
 //! functions, and the rendering intent a profile separates it under.  A
 //! transparency group of an ICC CMYK space over an RGB canvas is painted
-//! in its profile's ink, separated by the profile ([`GroupInk`]).
+//! in its profile's ink, separated by the profile ([`GroupInk`]); one of a
+//! `CalRGB` or non-sRGB ICC RGB space, in the complements of its own
+//! components ([`GroupRgb`]).
 
 mod group;
+mod group_rgb;
 mod press;
 
 pub(crate) use group::GroupInk;
+pub(crate) use group_rgb::{AdditiveRgb, GroupRgb};
 pub use press::PressSeparation;
 
 use std::sync::Arc;
@@ -333,12 +337,13 @@ pub(crate) enum Separator {
     /// The conversion into the ink of a transparency group's ICC CMYK
     /// space under one intent (see [`GroupInk`]).
     Group(GroupInk),
-    /// The complements of an RGB colour of a working space, black ink
-    /// none: the process channels of an ink canvas holding the RGB of an
-    /// additive transparency group beside its spot channels.  Blending
-    /// subtractive channels on their complements, the canvas blends the
-    /// RGB as an RGB canvas does.
-    Additive(crate::WorkingSpace),
+    /// The complements of an RGB colour, black ink none: the process
+    /// channels of an ink canvas holding the RGB of an additive
+    /// transparency group beside its spot channels, of a working space or
+    /// of the group's own space, a colour of the working space converted
+    /// into it.  Blending subtractive channels on their complements, the
+    /// canvas blends the RGB as an RGB canvas does.
+    Additive(AdditiveRgb),
 }
 
 impl Separator {
@@ -357,7 +362,7 @@ impl Separator {
     #[must_use]
     pub(crate) fn space(&self) -> crate::WorkingSpace {
         match self {
-            Self::Additive(space) => *space,
+            Self::Additive(rgb) => rgb.working(),
             _ => self
                 .profile_ink()
                 .map_or(crate::WorkingSpace::Srgb, |ink| ink.table.space),
@@ -403,13 +408,28 @@ impl Separator {
     pub(crate) fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
-            Self::Additive(_) => {
+            Self::Additive(space) => {
+                let rgb = space.of_working(rgb);
                 let [r, g, b] = rgb.map(|v| S::from_wide(S::max_wide() - v.wide()));
                 [r, g, b, S::ZERO]
             }
             Self::Device(black) => black.separate(rgb),
             Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => ink.table.ink(rgb),
         }
+    }
+
+    /// The process ink of the colour `comps` of `space` on the canvas of
+    /// an additive group whose space is `space`: the complements of the
+    /// components, black and spot ink none (see
+    /// [`AdditiveRgb::components_of`]).  `None` for any other separator or
+    /// space.
+    #[must_use]
+    pub(crate) fn own_ink(&self, space: &ColorSpace, comps: &[f64]) -> Option<[f64; 8]> {
+        let Self::Additive(rgb) = self else {
+            return None;
+        };
+        let [r, g, b] = rgb.components_of(space, comps)?;
+        Some([1.0 - r, 1.0 - g, 1.0 - b, 0.0, 0.0, 0.0, 0.0, 0.0])
     }
 
     /// The conversion of the colours of `space`, a four-component ICC

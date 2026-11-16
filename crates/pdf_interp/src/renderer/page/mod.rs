@@ -376,6 +376,10 @@ pub struct PageRenderer<'doc> {
     /// returned cleared when its group is composited; one per nesting level
     /// and canvas kind is allocated over the page's life.
     group_pool: Vec<PageCanvas>,
+    /// The conversions of the `CalRGB` and ICC group spaces the page's
+    /// groups composited in, by space and working space; `None` for a
+    /// space that does not convert.
+    group_rgb: Vec<group_space::GroupRgbEntry>,
     /// The spot colorants of the page and their channels on an ink canvas.
     ink_map: SharedInkMap,
     /// The settings of an ink canvas: whether overprint is simulated, the
@@ -753,6 +757,7 @@ impl<'doc> PageRenderer<'doc> {
             group: GroupContext::default(),
             page_group: group,
             group_pool: Vec::new(),
+            group_rgb: Vec::new(),
             ink_map: Rc::new(RefCell::new(ink_map)),
             ink,
             painted: Cell::new(InkChannels::NONE),

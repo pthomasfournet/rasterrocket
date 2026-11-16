@@ -132,6 +132,9 @@ impl PageRenderer<'_> {
     /// tint of `1.0` as a grey of `1.0` paints white and silently drops all
     /// content on spot-colour pages.
     ///
+    /// On the canvas of a group of a `CalRGB` or ICC RGB space a colour of
+    /// that space paints the complements of its components (see
+    /// [`Separator::own_ink`](crate::separation::Separator::own_ink)).
     /// On an ink canvas a `Separation` or `DeviceN` colour is given as its
     /// colorants' tints, each in its own channel (see `InkMap`); on an RGB
     /// canvas it is its sRGB conversion, like every other colour.  An
@@ -141,6 +144,9 @@ impl PageRenderer<'_> {
         let depth = self.canvas.kind().depth();
         let target = self.colour_target();
         let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, target, comps, depth);
+        if let Some(ink) = self.ink.separator.own_ink(cs, comps) {
+            return RasterColor::with_ink(srgb(cs), Inks::from_unit(ink), ChannelMask::ALL);
+        }
         match cs {
             // In a group's ICC CMYK space a `DeviceCMYK` colour is the
             // process-ink model's colour, separated into the group's ink;

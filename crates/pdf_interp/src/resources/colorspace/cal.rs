@@ -44,7 +44,7 @@ const BRADFORD: Mat3 = [
 ];
 
 /// A resolved `CalGray` (`n = 1`) or `CalRGB` (`n = 3`) space.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CalSpace {
     n: u8,
     /// Per-component exponent; the three entries are equal for `CalGray`.
@@ -69,12 +69,22 @@ impl PartialEq for CalSpace {
 
 impl Eq for CalSpace {}
 
+impl std::hash::Hash for CalSpace {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.n.hash(state);
+        self.gamma.map(f64::to_bits).hash(state);
+        self.to_linear_srgb
+            .map(|row| row.map(f64::to_bits))
+            .hash(state);
+    }
+}
+
 impl CalSpace {
     /// Resolve the parameter dictionary `params` of a `CalGray` (`n = 1`) or
     /// `CalRGB` (`n = 3`) array.  `None` when `WhitePoint` is missing or
     /// invalid (`Y ≠ 1`, or `X`, `Z` not positive), a `Gamma` entry is not a
     /// positive number, or the composed conversion is not finite.
-    pub(super) fn resolve(doc: &Document, params: &Object, n: u8) -> Option<Self> {
+    pub(crate) fn resolve(doc: &Document, params: &Object, n: u8) -> Option<Self> {
         let resolved;
         let dict = match params {
             Object::Reference(id) => {
@@ -146,6 +156,20 @@ impl CalSpace {
     #[must_use]
     pub const fn ncomponents(&self) -> usize {
         self.n as usize
+    }
+
+    /// The exponent of each component.
+    pub(crate) const fn gamma(&self) -> [f64; 3] {
+        self.gamma
+    }
+
+    /// The matrix from the gamma-decoded components to the linear
+    /// components of `space`.
+    pub(crate) const fn linear_matrix(&self, space: WorkingSpace) -> Mat3 {
+        match space {
+            WorkingSpace::Srgb => self.to_linear_srgb,
+            WorkingSpace::Wide => self.to_linear_wide,
+        }
     }
 
     /// The conversion of 8-bit `CalRGB` samples as a shaper: the per-channel
