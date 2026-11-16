@@ -506,10 +506,14 @@ pub(crate) fn render_page_canvas_with_geom(
     check_strict(session, &renderer)?;
     log_failures(page_num, renderer.image_failures());
 
-    let (bitmap, mut diag, spare) = renderer
+    let (mut bitmap, mut diag, spare) = renderer
         .try_finish_keeping(params.transparent_background)
         .map_err(allocation_failed)?;
     *buffers = spare;
+    crate::output::warn_group_spaces(session, page_num, diag.approximated_group_spaces);
+    if job.gray {
+        crate::gray::reduce_to_gray(&mut bitmap, job.space());
+    }
     let (bitmap, output_intent) = crate::output::convert(
         session,
         params,
@@ -647,6 +651,9 @@ pub(crate) struct PageJob<'a> {
     pub(crate) group: Option<pdf_interp::resources::TransparencyGroupParams>,
     /// The canvas the page is painted on.
     pub(crate) canvas: pdf_interp::CanvasRequest,
+    /// Whether the page's transparency group composites in gray, on an
+    /// RGB canvas, its finished colour reduced to gray.
+    pub(crate) gray: bool,
     pub(crate) params: &'a RenderParams,
     /// The backend policy for GPU decoder selection.
     policy: crate::BackendPolicy,
@@ -673,6 +680,9 @@ impl<'a> PageJob<'a> {
         let doc = &session.doc;
         let canvas = canvas_request(session, page_id, params)?;
         crate::output::warn_working_space(session, (page_num, page_id), params, &canvas);
+        let gray = !canvas.is_ink()
+            && pdf_interp::page_group_space(doc, page_id)
+                == Some(pdf_interp::resources::GroupSpace::Gray);
         Ok(Self {
             session,
             page_num,
@@ -681,6 +691,7 @@ impl<'a> PageJob<'a> {
             ops,
             group: page_group(doc, page_id, params.transparent_background),
             canvas,
+            gray,
             params,
             policy,
         })
@@ -766,9 +777,12 @@ impl<'a> PageJob<'a> {
 
 /// The canvas page `page_id` of `session` is painted on under `params`:
 /// for a CMYK page an ink canvas finished as CMYK, simulating overprint
-/// when the session does; otherwise the overprint preview when the session
-/// simulates overprint and some graphics state the page draws with sets
-/// it, sRGB otherwise.
+/// when the session does, whatever space the page's transparency group
+/// declares; otherwise an ink canvas finished as sRGB when the page's
+/// group composites in CMYK (ISO 32000-2 §11.4.7) or the session simulates
+/// overprint and some graphics state the page draws with sets it,
+/// simulating overprint in the latter case; an RGB canvas of the working
+/// space otherwise.
 ///
 /// A CMYK page separates the colours that are not CMYK through the
 /// session's CMYK output profile, under `params.intent`, else under the
@@ -791,7 +805,7 @@ fn canvas_request(
         None => None,
     };
     if session.proof.is_some() || params.color == crate::ColorModel::Cmyk {
-        let space = crate::output::working_space(session, params, false);
+        let space = crate::output::working_space(session, params, None);
         let separation = match press {
             Some(profile) => pdf_interp::OutputProfile::separation(
                 &profile,
@@ -809,13 +823,19 @@ fn canvas_request(
     }
     let preview = session.overprint
         && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations);
-    Ok(
-        match crate::output::working_space(session, params, preview) {
-            _ if preview => pdf_interp::CanvasRequest::OverprintPreview,
+    let declared = pdf_interp::page_group_space(&session.doc, page_id);
+    let cmyk_group = matches!(
+        declared,
+        Some(pdf_interp::resources::GroupSpace::Cmyk { .. })
+    );
+    Ok(if preview || cmyk_group {
+        pdf_interp::CanvasRequest::ProcessRgb { overprint: preview }
+    } else {
+        match crate::output::working_space(session, params, declared) {
             pdf_interp::WorkingSpace::Wide => pdf_interp::CanvasRequest::WideRgb,
             pdf_interp::WorkingSpace::Srgb => pdf_interp::CanvasRequest::Rgb,
-        },
-    )
+        }
+    })
 }
 
 /// The layout of the canvas page `page_id` of `session` is painted on

@@ -106,8 +106,9 @@ fn assert_close(got: &[u16], want: &[u16], what: &str) {
     assert!(off <= Some(1), "{what}: {got:?} vs {want:?}");
 }
 
-/// The ink canvas of the process-ink model, finished as sRGB.
-const INK: CanvasRequest = CanvasRequest::OverprintPreview;
+/// The ink canvas of the process-ink model, finished as sRGB, without
+/// overprint.
+const INK: CanvasRequest = CanvasRequest::ProcessRgb { overprint: false };
 /// A CMYK page separated by the device conversion.
 const CMYK: CanvasRequest = CanvasRequest::Cmyk {
     overprint: false,

@@ -25,11 +25,15 @@ use raster::types::BlendMode;
 
 use crate::renderer::page::MAX_FORM_DEPTH;
 use crate::resources::dict_ext::DictExt;
-use crate::resources::{TransparencyGroupParams, parse_blend_mode, resolve_array, resolve_dict};
+use crate::resources::{
+    GroupSpace, TransparencyGroupParams, parse_blend_mode, resolve_array, resolve_dict,
+};
 
 /// The page group of `page_id` when the page is to be painted as a group.
 ///
-/// Its `/Group` attributes, with `isolated` set, when the page is a knockout
+/// Its `/Group` attributes, with `isolated` set and no space, the page's
+/// space being that of the canvas it is painted on (see
+/// [`page_group_space`]), when the page is a knockout
 /// group or a blend mode other than `Normal` is reachable from its resources
 /// or annotations; `None` when painting onto opaque white gives the same
 /// result.
@@ -66,20 +70,19 @@ pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> Transparency
     }
 }
 
-/// Whether the page's transparency group declares a blending colour space.
+/// The colour space of the transparency group of page `page_id`.
 ///
-/// That is `/Group /CS` (ISO 32000-2 §11.4.7).  The renderer blends every
-/// group in the working space of its canvas, whatever space a group
-/// declares.
+/// That is its `/Group /CS` (ISO 32000-2 §11.4.7), the space the page
+/// composites in.  A device RGB space resolves through the page's `DefaultRGB`.  `None`
+/// when the page declares no group space.
 #[must_use]
-pub fn page_group_declares_space(doc: &Document, page_id: ObjectId) -> bool {
-    doc.get_dictionary(page_id).is_ok_and(|page| {
-        crate::resources::read_transparency_group(doc, &page).is_some()
-            && page
-                .get(b"Group")
-                .and_then(|g| resolve_dict(doc, g))
-                .is_some_and(|g| g.get(b"CS").is_some())
-    })
+pub fn page_group_space(doc: &Document, page_id: ObjectId) -> Option<GroupSpace> {
+    let page = doc.get_dictionary(page_id).ok()?;
+    let space = crate::resources::read_transparency_group(doc, &page)?.space?;
+    Some(space.with_default_rgb(doc, || {
+        crate::resources::PageResources::new(doc, page_id)
+            .device_space(crate::resources::ColorSpace::DeviceRgb)
+    }))
 }
 
 /// Whether some `ExtGState` reachable from the page's resources, or from

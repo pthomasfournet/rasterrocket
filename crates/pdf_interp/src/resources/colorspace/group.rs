@@ -90,6 +90,34 @@ impl GroupSpace {
         space
     }
 
+    /// The space with a `DeviceRGB` space replaced by `default_rgb`, the
+    /// RGB space of the resources in effect (`DefaultRGB`, ISO 32000-2
+    /// §8.6.5.6, or `DeviceRGB` itself), which is sRGB when it is
+    /// `DeviceRGB` or not a group space.
+    #[must_use]
+    pub(crate) fn with_default_rgb(
+        self,
+        doc: &Document,
+        default_rgb: impl FnOnce() -> ColorSpace,
+    ) -> Self {
+        if self != Self::Rgb(RgbGroupSpace::Device) {
+            return self;
+        }
+        match default_rgb() {
+            ColorSpace::DeviceRgb => Self::Rgb(RgbGroupSpace::Srgb),
+            other => Self::of(doc, &other).unwrap_or(Self::Rgb(RgbGroupSpace::Srgb)),
+        }
+    }
+
+    /// Whether the space is sRGB or gray, whose colours sRGB holds.
+    #[must_use]
+    pub const fn within_srgb(self) -> bool {
+        matches!(
+            self,
+            Self::Gray | Self::Rgb(RgbGroupSpace::Device | RgbGroupSpace::Srgb)
+        )
+    }
+
     /// Whether the space approximates its declared space: an ICC CMYK
     /// space composites as `DeviceCMYK`, and a `CalRGB` or non-sRGB ICC
     /// space in the RGB space of the canvas.

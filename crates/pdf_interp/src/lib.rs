@@ -40,9 +40,7 @@ pub use output_intent::{
     OutputIntent, OutputIntentError, document_output_intent, page_output_intent,
 };
 pub use output_profile::{OutputProfile, OutputProfileError, OutputSpace, SoftProof};
-pub use page_group::{
-    page_group, page_group_declares_space, page_uses_overprint, transparent_page_group,
-};
+pub use page_group::{page_group, page_group_space, page_uses_overprint, transparent_page_group};
 pub use prescan::prescan_page;
 pub use rotation::{InvalidRotation, Rotation};
 pub use separation::{CanvasRequest, PressSeparation, Separation};

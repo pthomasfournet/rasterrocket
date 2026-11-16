@@ -42,9 +42,15 @@ pub enum CanvasRequest {
     /// 16-bit pixels of the wide working space
     /// ([`WorkingSpace::Wide`](crate::WorkingSpace::Wide)).
     WideRgb,
-    /// Process and spot inks on which overprint (ISO 32000-2 §8.6.7) is
-    /// simulated, finished as sRGB.
-    OverprintPreview,
+    /// Process and spot inks finished as sRGB, the colours not given as
+    /// ink separated by the inverse of the process-ink model, which the
+    /// finish reproduces them through: a page whose transparency group
+    /// composites in CMYK, or an overprint preview, on which overprint
+    /// (ISO 32000-2 §8.6.7) is simulated when `overprint`.
+    ProcessRgb {
+        /// Whether overprint is simulated.
+        overprint: bool,
+    },
     /// Process and spot inks finished as CMYK, overprint simulated when
     /// `overprint` and every paint knocking out every channel otherwise;
     /// colours not given as ink are separated by `separation`.
@@ -69,7 +75,7 @@ impl CanvasRequest {
     #[must_use]
     pub fn space(&self) -> crate::WorkingSpace {
         match self {
-            Self::Rgb | Self::OverprintPreview => crate::WorkingSpace::Srgb,
+            Self::Rgb | Self::ProcessRgb { .. } => crate::WorkingSpace::Srgb,
             Self::WideRgb => crate::WorkingSpace::Wide,
             Self::Cmyk { separation, .. } => separation.space(),
         }
@@ -84,7 +90,11 @@ impl CanvasRequest {
     /// The ink-canvas settings of the request.
     pub(crate) fn ink_setup(&self) -> InkSetup {
         match self {
-            Self::Rgb | Self::WideRgb | Self::OverprintPreview => InkSetup::PREVIEW,
+            Self::Rgb | Self::WideRgb => InkSetup::PREVIEW,
+            Self::ProcessRgb { overprint } => InkSetup {
+                overprint: *overprint,
+                ..InkSetup::PREVIEW
+            },
             Self::Cmyk {
                 overprint,
                 separation,
@@ -410,7 +420,7 @@ mod tests {
     fn requests_set_up_the_ink_canvas() {
         assert!(!CanvasRequest::Rgb.is_ink());
         assert_eq!(
-            CanvasRequest::OverprintPreview.ink_setup(),
+            CanvasRequest::ProcessRgb { overprint: true }.ink_setup(),
             InkSetup::PREVIEW
         );
         let cmyk = CanvasRequest::Cmyk {

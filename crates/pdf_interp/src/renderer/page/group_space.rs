@@ -161,14 +161,9 @@ impl PageRenderer<'_> {
     /// `space` with a device RGB space replaced by the default RGB space
     /// of the resources in effect, when they name one.
     fn resolve_group_space(&self, space: GroupSpace) -> GroupSpace {
-        if space != GroupSpace::Rgb(RgbGroupSpace::Device) {
-            return space;
-        }
-        match self.resources.device_space(ColorSpace::DeviceRgb) {
-            ColorSpace::DeviceRgb => GroupSpace::Rgb(RgbGroupSpace::Srgb),
-            other => GroupSpace::of(self.resources.doc(), &other)
-                .unwrap_or(GroupSpace::Rgb(RgbGroupSpace::Srgb)),
-        }
+        space.with_default_rgb(self.resources.doc(), || {
+            self.resources.device_space(ColorSpace::DeviceRgb)
+        })
     }
 
     /// A transparent canvas of `kind` and the current canvas's size for a

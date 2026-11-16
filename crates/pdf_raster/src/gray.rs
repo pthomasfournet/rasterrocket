@@ -16,6 +16,7 @@
 //! divide (the parity test is exhaustive over all 2²⁴ inputs).
 
 use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16};
+use pdf_interp::renderer::FinishedCanvas;
 use raster::Bitmap;
 
 /// Convert an RGB bitmap to grayscale with the `DeviceRGB` → `DeviceGray`
@@ -296,6 +297,35 @@ unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
 
     let done = blocks * 16;
     convert_row_scalar(&src_row[done * 3..], &mut dst_row[done..]);
+}
+
+/// Reduce each pixel of a finished RGB page in `space` to its gray, the
+/// colour of a page whose transparency group composites in gray (ISO
+/// 32000-2 §11.4.7): the `DeviceRGB` → `DeviceGray` weights of its sRGB
+/// value, a wide value converted to sRGB first.  A neutral keeps its
+/// value in either space; a page of another model is left as it is.
+pub(crate) fn reduce_to_gray(page: &mut FinishedCanvas, space: pdf_interp::WorkingSpace) {
+    match page {
+        FinishedCanvas::Rgb8(b) => {
+            for y in 0..b.height {
+                for px in b.row_samples_mut(y).as_chunks_mut::<3>().0 {
+                    *px = [color::convert::gray_at(*px); 3];
+                }
+            }
+        }
+        FinishedCanvas::Rgb16(b) => {
+            for y in 0..b.height {
+                for px in b.row_samples_mut(y).as_chunks_mut::<3>().0 {
+                    let srgb = match space {
+                        pdf_interp::WorkingSpace::Srgb => *px,
+                        pdf_interp::WorkingSpace::Wide => pdf_interp::working_space::to_srgb16(*px),
+                    };
+                    *px = [color::convert::gray_at(srgb); 3];
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

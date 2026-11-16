@@ -532,7 +532,13 @@ impl<'doc> PageRenderer<'doc> {
     #[cfg(test)]
     pub(crate) fn new_ink(width: u32, height: u32, doc: &'doc Document, page_id: ObjectId) -> Self {
         let view = Self::unit_view(width, height);
-        Self::with_page_group(&view, doc, page_id, None, &CanvasRequest::OverprintPreview)
+        Self::with_page_group(
+            &view,
+            doc,
+            page_id,
+            None,
+            &CanvasRequest::ProcessRgb { overprint: true },
+        )
     }
 
     /// The whole of a `width` × `height`-point page at one pixel per point.

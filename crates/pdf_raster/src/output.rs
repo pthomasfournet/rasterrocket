@@ -5,7 +5,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas};
+use pdf_interp::renderer::{CanvasBuffers, FinishedCanvas, GroupSpaceApproximations};
+use pdf_interp::resources::GroupSpace;
 use pdf_interp::{IntentSet, OutputSpace, RenderingIntent, WorkingSpace};
 
 use crate::{RasterError, RasterSession, RenderParams};
@@ -145,25 +146,26 @@ fn check_cmyk(session: &RasterSession, params: &RenderParams) -> Result<(), Rast
     Ok(())
 }
 
-/// The working space a page of `session` rendered under `params` is
-/// composited in, `preview` whether it is painted as an overprint
-/// preview: sRGB for a preview, whose ink model is defined from sRGB;
-/// otherwise the session's [`working_space`](crate::SessionConfig::working_space),
-/// by default the wide space at 16 bits under an output profile and sRGB
-/// otherwise.
+/// The working space a page of `session` rendered under `params` on an
+/// RGB canvas is composited in, the page's transparency group declaring
+/// `declared`: the session's
+/// [`working_space`](crate::SessionConfig::working_space) when it asks for
+/// one; otherwise sRGB for a page whose group declares sRGB or gray
+/// (ISO 32000-2 §11.4.7), and else the wide space at 16 bits under an
+/// output profile and sRGB otherwise.
 pub(crate) fn working_space(
     session: &RasterSession,
     params: &RenderParams,
-    preview: bool,
+    declared: Option<GroupSpace>,
 ) -> WorkingSpace {
-    if preview {
+    if session.working_space.requested.is_none() && declared.is_some_and(GroupSpace::within_srgb) {
         return WorkingSpace::Srgb;
     }
     default_space(session, params)
 }
 
-/// The working space of a page of `session` under `params` that is not an
-/// overprint preview.
+/// The working space of a page of `session` under `params` whose group
+/// declares no space.
 fn default_space(session: &RasterSession, params: &RenderParams) -> WorkingSpace {
     match session.working_space.requested {
         Some(space) => space,
@@ -175,18 +177,32 @@ fn default_space(session: &RasterSession, params: &RenderParams) -> WorkingSpace
 }
 
 /// The working space a session asked for, and the departures of its pages
-/// from it reported so far, each once (see [`working_space_warnings`]).
+/// from it and from their declared group spaces reported so far, each
+/// once (see [`working_space_warnings`], [`group_space_warnings`]).
 #[derive(Debug, Default)]
 pub(crate) struct SessionSpace {
     /// [`SessionConfig::working_space`](crate::SessionConfig::working_space).
     requested: Option<WorkingSpace>,
     /// An 8-bit page composited in sRGB under an output profile.
     narrow: AtomicBool,
-    /// A wide page whose group declares a blending space.
-    group: AtomicBool,
+    /// A page whose group declares sRGB or gray, composited in sRGB
+    /// where it would be wide.
+    declared: AtomicBool,
+    /// A page whose group declares sRGB or gray, composited in the wide
+    /// space the session asked for.
+    overridden: AtomicBool,
+    /// A page painted in ink whose group declares an RGB or gray space.
+    ink: AtomicBool,
     /// An overprint-preview page composited in sRGB under an output
     /// profile.
     preview: AtomicBool,
+    /// A page whose group composites in CMYK, finished through sRGB under
+    /// an output profile.
+    process: AtomicBool,
+    /// A CMYK ICC group space composited through the process-ink model.
+    cmyk_profile: AtomicBool,
+    /// A non-sRGB RGB group space composited in the canvas's RGB space.
+    rgb_profile: AtomicBool,
 }
 
 impl SessionSpace {
@@ -200,7 +216,8 @@ impl SessionSpace {
 }
 
 /// Log, once per session each, the pages whose working space departs from
-/// what an output profile promises (see [`working_space_warnings`]).
+/// what an output profile promises or from their declared group space
+/// (see [`working_space_warnings`]).
 pub(crate) fn warn_working_space(
     session: &RasterSession,
     page: (u32, pdf::ObjectId),
@@ -213,11 +230,21 @@ pub(crate) fn warn_working_space(
 }
 
 /// The warnings, each the first of its kind in the session, of page
-/// `page_num` (object `page_id`) rendered under `params` on `canvas`
-/// under an output profile: an 8-bit page composited in sRGB, unless the
-/// session asked for sRGB; an overprint preview composited in sRGB where
-/// the page would otherwise be wide; a wide page whose group declares a
-/// blending space, which it blends in the working space instead.
+/// `page_num` (object `page_id`) rendered under `params` on `canvas`:
+///
+/// - a page painted in ink (a CMYK page, a proof, an overprint preview)
+///   whose group declares an RGB or gray space, which it composites in ink
+///   instead;
+///
+/// and under an output profile:
+///
+/// - an overprint preview, or a page whose group composites in CMYK,
+///   finished through sRGB where the page would otherwise be wide;
+/// - an 8-bit page composited in sRGB, unless the session asked for sRGB;
+/// - a page whose group declares sRGB or gray composited in sRGB where it
+///   would otherwise be wide;
+/// - a page whose group declares sRGB or gray composited in the wide space
+///   the session asked for.
 pub(crate) fn working_space_warnings(
     session: &RasterSession,
     (page_num, page_id): (u32, pdf::ObjectId),
@@ -225,40 +252,104 @@ pub(crate) fn working_space_warnings(
     canvas: &pdf_interp::CanvasRequest,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    let flags = &session.working_space;
+    let once = |flag: &AtomicBool| !flag.swap(true, Ordering::Relaxed);
+    let declared = pdf_interp::page_group_space(&session.doc, page_id);
+    let additive = declared.is_some_and(|d| !matches!(d, GroupSpace::Cmyk { .. }));
+    if canvas.is_ink() && additive && once(&flags.ink) {
+        warnings.push(format!(
+            "page {page_num}'s transparency group declares an RGB or gray blending colour \
+             space: the page is painted in ink, its separation's own space, and composites \
+             there instead"
+        ));
+    }
     if session.output_profile.is_none() {
         return warnings;
     }
-    let once = |flag: &AtomicBool| !flag.swap(true, Ordering::Relaxed);
     let space = canvas.space();
-    let preview = matches!(canvas, pdf_interp::CanvasRequest::OverprintPreview);
-    if preview && default_space(session, params) == WorkingSpace::Wide {
-        if once(&session.working_space.preview) {
+    let wide = default_space(session, params) == WorkingSpace::Wide;
+    let within_srgb = declared.is_some_and(GroupSpace::within_srgb);
+    match canvas {
+        pdf_interp::CanvasRequest::ProcessRgb { overprint } if wide => {
+            if *overprint && once(&flags.preview) {
+                warnings.push(format!(
+                    "page {page_num} is painted as an overprint preview, whose ink model is \
+                     defined from sRGB: it is composited in sRGB and its colours outside sRGB \
+                     clip before the conversion to the output profile"
+                ));
+            } else if !*overprint && once(&flags.process) {
+                warnings.push(format!(
+                    "page {page_num}'s transparency group composites in CMYK, through the \
+                     process-ink model, which is defined from sRGB: its colours outside sRGB \
+                     clip before the conversion to the output profile"
+                ));
+            }
+        }
+        _ if space == WorkingSpace::Srgb
+            && params.depth == color::SampleDepth::Eight
+            && flags.requested.is_none()
+            && once(&flags.narrow) =>
+        {
             warnings.push(format!(
-                "page {page_num} is painted as an overprint preview, whose ink model is \
-                 defined from sRGB: it is composited in sRGB and its colours outside sRGB \
-                 clip before the conversion to the output profile"
+                "page {page_num} is composited in sRGB at 8 bits: its colours outside sRGB clip \
+                 before the conversion to the output profile; render at 16 bits \
+                 (RenderParams::depth, rrocket --depth 16) to composite in the wide working \
+                 space, or ask for sRGB (SessionConfig::working_space, rrocket --working-space \
+                 srgb) to keep this"
             ));
         }
-    } else if space == WorkingSpace::Srgb
-        && params.depth == color::SampleDepth::Eight
-        && session.working_space.requested.is_none()
-        && once(&session.working_space.narrow)
-    {
+        pdf_interp::CanvasRequest::Rgb if wide && within_srgb && once(&flags.declared) => {
+            warnings.push(format!(
+                "page {page_num}'s transparency group declares sRGB or gray, so it composites \
+                 in sRGB: its colours outside sRGB clip before the conversion to the output \
+                 profile"
+            ));
+        }
+        pdf_interp::CanvasRequest::WideRgb if within_srgb && once(&flags.overridden) => {
+            warnings.push(format!(
+                "page {page_num}'s transparency group declares sRGB or gray: it composites in \
+                 the wide working space the session asks for instead"
+            ));
+        }
+        _ => {}
+    }
+    warnings
+}
+
+/// Log, once per session each, the group colour spaces a page composited
+/// in an approximation (see [`group_space_warnings`]).
+pub(crate) fn warn_group_spaces(
+    session: &RasterSession,
+    page_num: u32,
+    approximated: GroupSpaceApproximations,
+) {
+    for warning in group_space_warnings(session, page_num, approximated) {
+        log::warn!("{warning}");
+    }
+}
+
+/// The warnings, each the first of its kind in the session, of the
+/// transparency-group colour spaces page `page_num` composited in an
+/// approximation: a CMYK ICC space composited through the process-ink
+/// model, a `CalRGB` or non-sRGB RGB ICC space in the canvas's RGB space.
+pub(crate) fn group_space_warnings(
+    session: &RasterSession,
+    page_num: u32,
+    approximated: GroupSpaceApproximations,
+) -> Vec<String> {
+    let flags = &session.working_space;
+    let once = |flag: &AtomicBool| !flag.swap(true, Ordering::Relaxed);
+    let mut warnings = Vec::new();
+    if approximated.cmyk_profile && once(&flags.cmyk_profile) {
         warnings.push(format!(
-            "page {page_num} is composited in sRGB at 8 bits: its colours outside sRGB clip \
-             before the conversion to the output profile; render at 16 bits \
-             (RenderParams::depth, rrocket --depth 16) to composite in the wide working \
-             space, or ask for sRGB (SessionConfig::working_space, rrocket --working-space \
-             srgb) to keep this"
+            "page {page_num} has a transparency group in a CMYK ICC colour space: it \
+             composites as DeviceCMYK does, through the process-ink model"
         ));
     }
-    if space == WorkingSpace::Wide
-        && pdf_interp::page_group_declares_space(&session.doc, page_id)
-        && once(&session.working_space.group)
-    {
+    if approximated.rgb_profile && once(&flags.rgb_profile) {
         warnings.push(format!(
-            "page {page_num}'s transparency group declares a blending colour space: it blends \
-             in the wide working space instead"
+            "page {page_num} has a transparency group in an RGB colour space other than \
+             sRGB: it composites in the RGB working space of its canvas"
         ));
     }
     warnings
@@ -388,23 +479,77 @@ mod tests {
 
     #[test]
     fn each_working_space_warning_names_its_first_page_once() {
-        use pdf_interp::CanvasRequest::{OverprintPreview, Rgb, WideRgb};
+        use pdf_interp::CanvasRequest::{ProcessRgb, Rgb, WideRgb};
         let eight = RenderParams::new(1.0);
         let sixteen = RenderParams::new(1.0).with_depth(color::SampleDepth::Sixteen);
         let s = profiled_session();
         let first = warnings(&s, 1, &eight, &Rgb);
         assert!(first.len() == 1 && first[0].starts_with("page 1 is composited in sRGB at 8"));
         assert_eq!(warnings(&s, 2, &eight, &Rgb), Vec::<String>::new());
-        let preview = warnings(&s, 2, &sixteen, &OverprintPreview);
-        assert!(preview.len() == 1 && preview[0].starts_with("page 2 is painted as an overprint"));
-        assert_eq!(
-            warnings(&s, 1, &sixteen, &OverprintPreview),
-            Vec::<String>::new()
-        );
+        let preview = ProcessRgb { overprint: true };
+        let first = warnings(&s, 1, &sixteen, &preview);
+        assert!(first.len() == 1 && first[0].starts_with("page 1 is painted as an overprint"));
+        assert_eq!(warnings(&s, 1, &sixteen, &preview), Vec::<String>::new());
+        let process = ProcessRgb { overprint: false };
+        let first = warnings(&s, 1, &sixteen, &process);
+        assert!(first.len() == 1 && first[0].contains("composites in CMYK"));
+        assert_eq!(warnings(&s, 1, &sixteen, &process), Vec::<String>::new());
         assert_eq!(warnings(&s, 1, &sixteen, &WideRgb), Vec::<String>::new());
-        let group = warnings(&s, 2, &sixteen, &WideRgb);
-        assert!(group.len() == 1 && group[0].starts_with("page 2's transparency group"));
-        assert_eq!(warnings(&s, 2, &sixteen, &WideRgb), Vec::<String>::new());
+        let declared = warnings(&s, 2, &sixteen, &Rgb);
+        assert!(declared.len() == 1 && declared[0].contains("declares sRGB or gray, so it"));
+        assert_eq!(warnings(&s, 2, &sixteen, &Rgb), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_page_declaring_srgb_composites_in_srgb_unless_wide_is_asked_for() {
+        let sixteen = RenderParams::new(1.0).with_depth(color::SampleDepth::Sixteen);
+        let mut s = profiled_session();
+        let declared = |s: &RasterSession, page| {
+            let id = s.resolve_page(page).unwrap();
+            working_space(s, &sixteen, pdf_interp::page_group_space(&s.doc, id))
+        };
+        assert_eq!(declared(&s, 1), WorkingSpace::Wide);
+        assert_eq!(declared(&s, 2), WorkingSpace::Srgb);
+        s.working_space = SessionSpace::new(Some(WorkingSpace::Wide));
+        assert_eq!(declared(&s, 2), WorkingSpace::Wide);
+        let first = warnings(&s, 2, &sixteen, &pdf_interp::CanvasRequest::WideRgb);
+        assert!(first.len() == 1 && first[0].contains("the session asks for instead"));
+    }
+
+    #[test]
+    fn an_ink_page_declaring_an_additive_space_is_warned_about_once() {
+        let s = profiled_session();
+        let cmyk = pdf_interp::CanvasRequest::Cmyk {
+            overprint: false,
+            separation: pdf_interp::Separation::Device,
+        };
+        let eight = RenderParams::new(1.0);
+        assert!(
+            !warnings(&s, 1, &eight, &cmyk)
+                .iter()
+                .any(|w| w.contains("in ink"))
+        );
+        let first = warnings(&s, 2, &eight, &cmyk);
+        assert!(
+            first
+                .iter()
+                .any(|w| w.starts_with("page 2's transparency group declares an RGB"))
+        );
+        assert!(
+            !warnings(&s, 2, &eight, &cmyk)
+                .iter()
+                .any(|w| w.contains("in ink"))
+        );
+    }
+
+    #[test]
+    fn each_approximated_group_space_is_warned_about_once() {
+        let s = profiled_session();
+        let mut both = GroupSpaceApproximations::default();
+        both.cmyk_profile = true;
+        both.rgb_profile = true;
+        assert_eq!(group_space_warnings(&s, 3, both).len(), 2);
+        assert_eq!(group_space_warnings(&s, 4, both), Vec::<String>::new());
     }
 
     #[test]

@@ -271,7 +271,8 @@ fn wide_to_srgb() -> &'static LinearRgb {
 
 /// The sRGB value of the 16-bit wide value `px`, clipped to the sRGB
 /// cube; equal components are returned as they are.
-pub(crate) fn to_srgb16(px: [u16; 3]) -> [u16; 3] {
+#[must_use]
+pub fn to_srgb16(px: [u16; 3]) -> [u16; 3] {
     if px[0] == px[1] && px[1] == px[2] {
         return px;
     }

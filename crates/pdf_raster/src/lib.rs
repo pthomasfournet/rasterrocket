@@ -181,8 +181,8 @@ pub use page_buffer::{PageBuffer, PageInfo};
 pub use pdf::Password;
 pub use pdf_interp::renderer::FinishedCanvas;
 pub use pdf_interp::renderer::{
-    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, GlyphCounts, ImageFailure,
-    MAX_FORM_DEPTH, PageDiagnostics,
+    ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, GlyphCounts, GroupSpaceApproximations,
+    ImageFailure, MAX_FORM_DEPTH, PageDiagnostics,
 };
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{

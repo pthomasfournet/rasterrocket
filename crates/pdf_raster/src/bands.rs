@@ -291,9 +291,12 @@ fn draw_bands<E>(
         job.execute(&mut renderer)?;
         check_aborted(&renderer)?;
         check_strict(session, &renderer)?;
-        let (bitmap, next, mut spare) = renderer
+        let (mut bitmap, next, mut spare) = renderer
             .try_finish_band(params.transparent_background)
             .map_err(allocation_failed)?;
+        if job.gray {
+            crate::gray::reduce_to_gray(&mut bitmap, job.space());
+        }
         let (bitmap, output_intent) = crate::output::convert(
             session,
             params,
@@ -323,5 +326,6 @@ fn draw_bands<E>(
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     diag.output_intent = intent;
+    crate::output::warn_group_spaces(session, page_num, diag.approximated_group_spaces);
     Ok((diag, trace))
 }
