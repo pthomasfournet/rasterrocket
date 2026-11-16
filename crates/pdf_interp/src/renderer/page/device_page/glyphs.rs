@@ -11,7 +11,9 @@
 //!
 //! A clip that is a rectangle passes, in `fill_glyph`, every pixel of its
 //! integer bounds fully and no other: its row coverage is 255 or 0 by
-//! column, and a glyph byte scaled by 255 is itself.
+//! column, and a glyph byte scaled by 255 is itself.  A clip with path
+//! regions scales the glyph's coverage on the device by the clip's
+//! coverage, as `fill_glyph` does.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,7 +102,9 @@ impl PageRenderer<'_> {
             x1: paint.clip.x_max_i,
             y1: paint.clip.y_max_i,
         };
-        if let Some(recording) = self.device_page.as_mut() {
+        if let Some(recording) = self.device_page.as_mut()
+            && recording.clip_to(&paint.clip)
+        {
             let pushed = recording.push_glyphs(glyphs, clip, paint.rgb, paint.alpha);
             recording.refuse_on(pushed);
         }

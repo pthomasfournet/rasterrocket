@@ -15,7 +15,10 @@
 //! would sample, through the CPU's sampling tables (see [`images`]).  A
 //! form `XObject` records the paints of its content; one that is a
 //! transparency group refuses the recording, and a soft mask's group
-//! paints its own canvas with the recording set aside.
+//! paints its own canvas with the recording set aside.  A path clip is
+//! recorded as the coverage tables of its regions (see [`clips`]), and the
+//! paints of an object under a soft mask as one device object blended back
+//! by the mask's plane (see [`soft_masks`]).
 //! The device then composites every command
 //! with the CPU's arithmetic, so the page it renders is the page the CPU
 //! renders.
@@ -23,8 +26,8 @@
 //! A recorded paint composites as the CPU's `aa` pipe over an opaque RGB
 //! canvas of 8 or 16 bits per sample (an image at full constant alpha:
 //! as the CPU's direct image composite): `Normal` blend, no soft mask in
-//! the graphics state, no group backdrop, a rectangular clip (glyphs: no
-//! clipping text rendering mode either), identity transfer (a solid
+//! the graphics state but a soft mask, no group backdrop, a clip of
+//! antialiased path regions, identity transfer (a solid
 //! colour is mapped through the transfer function before painting; an
 //! image's samples are not).  Its colour and
 //! alpha are recorded as samples of the canvas's depth.  Anything else
@@ -50,11 +53,15 @@ use super::image_memo::SharedImageMemo;
 use super::paint::FillRule;
 use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
+use clips::HeldClips;
 use glyphs::HeldMasks;
 pub(super) use glyphs::PlacedGlyph;
+use soft_masks::HeldPlanes;
 
+mod clips;
 mod glyphs;
 mod images;
+mod soft_masks;
 
 /// A page being recorded.
 pub(super) struct Recording {
@@ -67,6 +74,10 @@ pub(super) struct Recording {
     runs: Vec<(i32, i32, i32)>,
     /// The glyph bitmaps the page holds as masks.
     masks: HeldMasks,
+    /// The path clips the page holds.
+    clips: HeldClips,
+    /// The soft masks the page holds as planes.
+    planes: HeldPlanes,
 }
 
 /// What recording a page produced.
@@ -274,6 +285,8 @@ impl PageRenderer<'_> {
             refused: None,
             runs: Vec::new(),
             masks: HeldMasks::default(),
+            clips: HeldClips::default(),
+            planes: HeldPlanes::default(),
         }));
         Ok(())
     }
@@ -410,9 +423,6 @@ impl PageRenderer<'_> {
         if gs.blend_mode != BlendMode::Normal {
             return Err("blend mode");
         }
-        if !gs.clip.is_rect() {
-            return Err("path clip");
-        }
         let (rgb, alpha) = match self.canvas.kind().depth() {
             SampleDepth::Eight => (colour.bytes().map(u16::from), u16::from(alpha)),
             SampleDepth::Sixteen => (*colour.rgb16(), u16::from_u8(alpha)),
@@ -442,7 +452,9 @@ impl PageRenderer<'_> {
             rule.even_odd,
             rule.zero_area_lines,
         );
-        if let Some(recording) = self.device_page.as_mut() {
+        if let Some(recording) = self.device_page.as_mut()
+            && recording.clip_to(&paint.clip)
+        {
             let pushed = recording.push_outlines(&outlines, paint.rgb, paint.alpha);
             recording.refuse_on(pushed);
         }
@@ -469,6 +481,10 @@ impl PageRenderer<'_> {
         let Some(recording) = self.device_page.as_mut() else {
             return;
         };
+        // Hairline runs pass the clip already, and are never clipped again.
+        if !recording.clip_to(&paint.clip) {
+            return;
+        }
         if params.line_width != 0.0 {
             if let Some(outline) = aa_stroke_outline(
                 &shape.path,

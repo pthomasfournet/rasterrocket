@@ -25,7 +25,7 @@ const WORDS: [&str; 8] = [
     clippy::many_single_char_names,
     reason = "coordinates, matrix entries and the stream under construction"
 )]
-fn random_text(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
+pub(super) fn random_text(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width, height);
     let mut s = vec![String::from("1 0 0 1 0.37 -0.21 cm")];
     for k in 0..24 {
@@ -182,22 +182,6 @@ fn a_repeated_glyph_is_held_once() {
     );
 }
 
-/// A clipping text rendering mode refuses the recording, whatever else
-/// it paints; the page then renders on the CPU, never with a clip
-/// missing.
-#[test]
-fn clipping_text_modes_refuse_the_recording() {
-    let doc = doc();
-    for mode in 4..=7 {
-        let content =
-            format!("BT /F1 30 Tf {mode} Tr 5 10 Td (Clip) Tj ET 0 0 1 rg 0 0 200 200 re f");
-        match record(&doc, 100, 50, content.as_bytes()) {
-            DeviceRecording::Refused(reason) => assert_eq!(reason, "text clip mode", "mode {mode}"),
-            DeviceRecording::Recorded(_) => panic!("mode {mode} was recorded"),
-        }
-    }
-}
-
 /// Text painted in a way the device raster does not composite refuses the
 /// recording with the reason.
 #[test]
@@ -217,7 +201,7 @@ fn unsupported_text_paints_refuse_the_recording() {
     );
     assert_eq!(
         refused(b"0 0 m 50 0 l 25 30 l h W n BT /F1 12 Tf 5 5 Td (a) Tj ET"),
-        "path clip"
+        ""
     );
     assert_eq!(refused(b"BT /F1 12 Tf 3 Tr 5 5 Td (a) Tj ET"), "");
 }

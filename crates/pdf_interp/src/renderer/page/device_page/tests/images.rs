@@ -48,7 +48,7 @@ const IMAGES: [&str; 13] = [
     clippy::too_many_lines,
     reason = "one entry per object of the document"
 )]
-fn image_doc() -> Document {
+pub(super) fn image_doc() -> Document {
     let objects: Vec<(u32, String)> = vec![
         (
             4,
@@ -227,7 +227,7 @@ fn image_matrix(rng: &mut Rng, w: u32, h: u32) -> String {
     clippy::many_single_char_names,
     reason = "coordinates and the stream under construction"
 )]
-fn random_images(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
+pub(super) fn random_images(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width, height);
     let mut s: Vec<Vec<u8>> = vec![b"1 0 0 1 0.21 -0.37 cm".to_vec()];
     for _ in 0..24 {
@@ -374,7 +374,7 @@ fn image_draws_the_device_does_not_take_refuse_the_recording() {
     assert_eq!(refused(b"/M gs 40 0 0 40 0 0 cm /S Do"), "blend mode");
     assert_eq!(
         refused(b"0 0 m 40 0 l 20 40 l h W n 40 0 0 40 0 0 cm /C Do"),
-        "path clip"
+        ""
     );
     assert_eq!(
         refused(b"/R gs 40 0 0 40 0 0 cm /G Do"),
@@ -391,7 +391,7 @@ fn image_draws_the_device_does_not_take_refuse_the_recording() {
 #[test]
 fn a_page_refused_after_an_image_decodes_it_once() {
     const CONTENT: &[u8] = b"q 40 0 0 40 1 1 cm /C Do Q q 50 0 0 50 0 0 cm /B Do Q \
-                             0 0 m 40 0 l 20 40 l h W n 0 0 50 50 re f \
+                             /M gs 0 0 50 50 re f \
                              q 40 0 0 40 1 1 cm /C Do Q";
     let doc = image_doc();
     for depth in DEPTHS {
@@ -402,7 +402,7 @@ fn a_page_refused_after_an_image_decodes_it_once() {
         first.execute(&crate::content::parse(CONTENT));
         assert!(matches!(
             first.take_device_recording(),
-            Some(DeviceRecording::Refused("path clip"))
+            Some(DeviceRecording::Refused("blend mode"))
         ));
         assert_eq!(decodes() - before, 2, "the recording decodes each image");
         let fallback = first.take_device_fallback();

@@ -310,8 +310,10 @@ fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: b
     }
 }
 
+mod clips;
 mod forms;
 mod images;
+mod soft_masks;
 mod text;
 mod type3;
 
@@ -374,10 +376,7 @@ fn unsupported_paints_refuse_the_recording() {
         refused(b"/T gs 0 0 10 10 re B"),
         "translucent fill and stroke"
     );
-    assert_eq!(
-        refused(b"0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f"),
-        "path clip"
-    );
+    assert_eq!(refused(b"0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f"), "");
     assert_eq!(refused(b"/Pattern cs /P scn 0 0 10 10 re f"), "pattern");
     assert_eq!(refused(b"0 0 m 9 0 l 5 9 l h W n"), "");
     assert_eq!(refused(b"q 2 2 6 6 re W n 0 0 10 10 re f Q"), "");
@@ -439,7 +438,8 @@ fn a_command_list_past_its_byte_limit_refuses_the_recording() {
 /// operators.
 #[test]
 fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
-    const CONTENT: &[u8] = b"zz 0 0 1 1 re f 0 0 1 1 re f 0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f";
+    const CONTENT: &[u8] =
+        b"zz 0 0 1 1 re f 0 0 1 1 re f 0 0 1 1 re f 0 0 1 1 re f /M gs 0 0 10 10 re f";
     let doc = doc();
     let ops = crate::content::parse(CONTENT);
     let n_ops = u64::try_from(ops.len()).expect("few operators");
@@ -452,7 +452,7 @@ fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
     assert!(first.budget_status().is_none());
     assert!(matches!(
         first.take_device_recording(),
-        Some(DeviceRecording::Refused("path clip"))
+        Some(DeviceRecording::Refused("blend mode"))
     ));
     assert_eq!(first.ops_executed, n_ops, "refused at the last operator");
     let fallback = first.take_device_fallback();

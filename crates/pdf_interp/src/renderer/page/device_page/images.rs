@@ -73,13 +73,13 @@ impl PageRenderer<'_> {
         grid: &SampleGrid,
     ) -> Result<(), &'static str> {
         let stencil = img.color_space == ImageColorSpace::Mask;
-        let (fill_alpha, blend_mode, transfer, rect_clip, clip) = {
+        let (fill_alpha, blend_mode, transfer, gs_clip, clip) = {
             let gs = self.gstate.current();
             (
                 gs.fill_alpha,
                 gs.blend_mode,
                 gs.transfer.is_some(),
-                gs.clip.is_rect(),
+                gs.clip.clone_shared(),
                 PixelBounds {
                     x0: gs.clip.x_min_i,
                     y0: gs.clip.y_min_i,
@@ -95,9 +95,6 @@ impl PageRenderer<'_> {
         } else {
             if blend_mode != BlendMode::Normal {
                 return Err("blend mode");
-            }
-            if !rect_clip {
-                return Err("path clip");
             }
             if transfer {
                 return Err("image transfer function");
@@ -132,6 +129,7 @@ impl PageRenderer<'_> {
         let Some(recording) = self.device_page.as_mut() else {
             return Ok(());
         };
+        recording.use_clip(&gs_clip)?;
         let refusal = |e| command_refusal(&e);
         let samples = recording
             .commands

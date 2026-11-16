@@ -6,7 +6,7 @@ use super::super::DeviceRecording;
 use super::{DEPTHS, Rng, VulkanBackend, backend, cpu, device, record};
 
 /// A content stream object.
-fn stream(dict: &str, content: &str) -> String {
+pub(super) fn stream(dict: &str, content: &str) -> String {
     format!(
         "<< {dict} /Length {} >>\nstream\n{content}\nendstream",
         content.len()
@@ -23,7 +23,7 @@ const FORMS: [&str; 5] = ["/F", "/S", "/N", "/P", "/E"];
 /// itself), and soft masks `/SM` and `/SN` whose groups fill their boxes
 /// (the second's form lacks its group attributes); the page's
 /// one annotation `/A` draws `/F` as its appearance.
-fn form_doc() -> Document {
+pub(super) fn form_doc() -> Document {
     let objects: Vec<(u32, String)> = vec![
         (
             4,
@@ -123,7 +123,7 @@ fn form_doc() -> Document {
 /// A random content stream drawing the forms of [`FORMS`] under random
 /// axis-aligned matrices, opaque and translucent, under rectangle clips,
 /// with fills between.
-fn random_forms(rng: &mut Rng) -> Vec<u8> {
+pub(super) fn random_forms(rng: &mut Rng) -> Vec<u8> {
     let mut s = vec![String::from("1 0 0 1 0.3 -0.2 cm")];
     for _ in 0..12 {
         s.push("q".into());
@@ -205,8 +205,8 @@ fn forms_the_device_does_not_take_refuse_the_recording() {
     assert_eq!(refused(b"/F Do /N Do /E Do /R Do"), "");
     assert_eq!(refused(b"/G Do"), "transparency group");
     // A box under a rotated matrix clips by a path.
-    assert_eq!(refused(b"0.8 0.6 -0.6 0.8 30 10 cm /F Do"), "path clip");
-    assert_eq!(refused(b"/SM gs 0 0 10 10 re f"), "soft mask");
+    assert_eq!(refused(b"0.8 0.6 -0.6 0.8 30 10 cm /F Do"), "");
+    assert_eq!(refused(b"/SM gs 0 0 10 10 re f"), "");
 }
 
 /// A soft mask's group paints its own canvas while the page is recorded:

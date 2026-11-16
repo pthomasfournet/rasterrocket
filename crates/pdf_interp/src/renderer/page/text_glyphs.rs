@@ -250,13 +250,8 @@ impl GlyphSink {
 impl PageRenderer<'_> {
     /// Paint the glyphs of `sink`: fill them, then stroke them, then add
     /// their outlines to the text object's clip (modes 4–7), which `ET`
-    /// applies.  A clipping mode refuses a device recording.
+    /// applies.
     pub(super) fn paint_glyphs(&mut self, sink: &GlyphSink) {
-        #[cfg(feature = "vulkan")]
-        if sink.mode.clip && self.device_recording() {
-            self.refuse_device("text clip mode");
-            return;
-        }
         self.fill_glyphs(sink);
         // The cached strokes are one opaque object in the normal blend mode
         // under the soft mask in effect.
