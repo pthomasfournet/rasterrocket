@@ -659,14 +659,14 @@ resources/
                        two producer faults before any decoder reads it
     icc_device.rs    — ICC CMYK → RGB through the profile's lookup table on
                        the session's backend (see §3.6)
-    colorspace.rs    — ImageColour: the samples' colour space and their
+    colorspace/      — ImageColour: the samples' colour space and their
                        conversion to gray / RGB
     smask.rs         — SMask decode and /Matte removal
     inline.rs        — BI … ID … EI; data length from the dictionary, a
                        named colour space resolved through the resources
 ```
 
-**Image colour** (`resources/image/colorspace.rs`)
+**Image colour** (`resources/image/colorspace/`)
 
 Every codec yields samples in the image's own colour space, before
 `/Decode`: stencil bytes, or `n` bytes per pixel.  `ImageColour`, resolved
