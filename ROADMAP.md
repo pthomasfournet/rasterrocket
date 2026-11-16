@@ -3761,6 +3761,32 @@ and `u16` samples, `VulkanBackend::render_page` is generic over
 `SampleDepth::max_sample` are new, and `DecodedJpeg2k` carries the
 components' precisions.
 
+**Unreleased on master: CalRGB and non-sRGB RGB groups composite in their
+own space.** A transparency group whose `/CS` is `CalRGB` or an RGB ICC
+profile other than sRGB (also through `DefaultRGB`) no longer blends in its
+canvas's RGB working space: it is painted on an additive ink canvas holding
+the complements of its own components, over RGB and ink pages alike. A
+colour of the group's space paints its components, any other converts from
+the working space into the space, a non-isolated group's backdrop converts
+in, and the result converts out as a colour of the space does on the page.
+`CalRGB` and matrix/TRC profiles convert both ways through the wide space's
+16-bit linearise–matrix–encode machinery with their own curves and
+colorants (the encoding now also inverts a tone curve); a table-based
+profile converts through two 65³ grids on the shared grid evaluator. A
+space whose conversions do not build keeps the old approximation, with a
+warning and `approximated_group_spaces.rgb_profile`. On isolated Adobe RGB
+and `CalRGB` groups (Multiply, Screen, Luminosity, half alpha) the result
+now agrees with Ghostscript 10.06 to the 1–2 levels an sRGB group does,
+where it used to be the sRGB result, up to 40 levels off (Ghostscript
+ignores the space of a non-isolated group, which rasterrocket converts
+like its CMYK groups). Of the 1 168 archive documents one has such a group
+(the "Generic RGB Profile" form, painting one opaque colour) and none
+reaches one through `DefaultRGB`; all 1 056 pages of the 8 documents with
+RGB ICC form groups are byte-identical at 50 dpi, as is the 34-PDF gate in
+26 modes. API changes: `RgbGroupSpace::Profiled` is replaced by
+`Icc(ObjectId)` and `Cal(CalSpace)`, and `GroupSpace::approximated` is
+removed.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
