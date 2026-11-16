@@ -220,11 +220,7 @@ fn kept_tints(
     src: &ImageStream<'_>,
     samples: &mut Samples,
 ) -> Option<ImageTints> {
-    let tints = if ctx.keep_tints {
-        src.colour.tints(samples)
-    } else {
-        None
-    };
+    let tints = src.colour.tints(samples, ctx.keep_tints);
     if !src.colour.converts_wide() {
         samples.data.narrow();
     }
@@ -269,7 +265,7 @@ fn jpx_options(src: &ImageStream<'_>, wide: bool) -> JpxOptions {
 fn keeps_wide(ctx: &ImageDecodeCtx<'_>, src: &ImageStream<'_>, budget: u64) -> bool {
     let wide = ctx.depth == color::SampleDepth::Sixteen
         && !src.is_mask
-        && (src.colour.converts_wide() || (ctx.keep_tints && src.colour.has_tints()));
+        && (src.colour.converts_wide() || src.colour.has_tints(ctx.keep_tints));
     if wide && src.stream.dict.get_i64(b"BitsPerComponent") == Some(16) {
         let components = 2 * src.colour.budget_components();
         if let Err(why) = super::decode_budget_of(src.width, src.height, components, budget) {

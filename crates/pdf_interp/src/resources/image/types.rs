@@ -54,27 +54,50 @@ pub struct DecodedImage {
     /// drawn, and the page is incomplete.
     pub partial: Option<String>,
     /// The ink amounts of an image in a `Separation`, `DeviceN` or process
-    /// CMYK space, kept when the decode was asked to keep them.
+    /// CMYK space, or the components of one in a `CalRGB` or ICC RGB
+    /// space, kept when the decode was asked to keep them.
     pub tints: Option<ImageTints>,
-    /// Whether the decode was asked to keep tints
+    /// The tints the decode was asked to keep
     /// ([`ImageDecodeCtx::keep_tints`]): `tints` is then present for every
-    /// image it applies to.
-    pub kept_tints: bool,
+    /// image they apply to.
+    pub kept_tints: KeptTints,
     /// The rendering intent the image's colours were converted under,
     /// which an ink canvas separates them under too.
     pub intent: crate::RenderingIntent,
 }
 
-/// The ink amounts of an image — the colorant tints of a `Separation` or
-/// `DeviceN` space, the components of a process CMYK space — on the grid
-/// of its decoded samples, for drawing on an ink canvas.
+/// The components of an image an ink canvas paints directly, on the grid
+/// of its decoded samples.
+///
+/// They are the colorant tints of a `Separation` or `DeviceN` space, the
+/// components of a process CMYK space, or the components of a `CalRGB` or
+/// ICC RGB space.
 #[derive(Debug)]
 pub struct ImageTints {
     /// The image's colour space.
     pub space: ColorSpace,
     /// One sample per component of `space` per pixel, `/Decode` applied:
-    /// 0 is no colorant, the sample's maximum the full tint.
+    /// 0 is no colorant, or the component's 0, the sample's maximum the
+    /// full tint, or the component's 1.
     pub data: TintData,
+}
+
+/// The images whose components a decode keeps beside their colours
+/// ([`DecodedImage::tints`]).  Each level keeps those of the levels below
+/// it, so a decode serves every request of its level or a lower one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum KeptTints {
+    /// No image's.
+    #[default]
+    None,
+    /// Those of an image in a `Separation`, `DeviceN` or process CMYK
+    /// space, the ink amounts an ink canvas paints.
+    Ink,
+    /// Those, and the components of an image in a `CalRGB` or ICC RGB
+    /// space, which the canvas of a transparency group of that space
+    /// paints.
+    InkAndRgb,
 }
 
 /// The tints of an image at the depth they were kept at: 16 bits for the
@@ -384,9 +407,9 @@ pub struct ImageDecodeCtx<'a> {
     /// Identity of the document within the cache.
     #[cfg(feature = "cache")]
     pub doc_id: Option<gpu::cache::DocId>,
-    /// Keep the ink amounts of an image in a `Separation`, `DeviceN` or
-    /// process CMYK space beside its colours ([`DecodedImage::tints`]).
-    pub keep_tints: bool,
+    /// The images whose components are kept beside their colours
+    /// ([`DecodedImage::tints`]).
+    pub keep_tints: KeptTints,
     /// The working space the image's colours convert into, and the
     /// rendering intent they convert under: the image's own `/Intent`,
     /// else the graphics state's (PDF §8.6.5.8).
@@ -419,7 +442,7 @@ impl<'a> ImageDecodeCtx<'a> {
             image_cache: None,
             #[cfg(feature = "cache")]
             doc_id: None,
-            keep_tints: false,
+            keep_tints: KeptTints::None,
             target: crate::ColourTarget::SRGB,
             depth: color::SampleDepth::Eight,
         }

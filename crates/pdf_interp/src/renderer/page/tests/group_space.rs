@@ -24,19 +24,38 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 /// and `/Spot` a `Separation` and `/Adobe` an ICC colour space of object
 /// 6, in the page's and the form's resources.  Object 6 is an RGB ICC
 /// profile that is not sRGB, object 7 a CMYK one (its data unused), object
-/// 8 an RGB one whose data is not a profile.
+/// 8 an RGB one whose data is not a profile, object 14 a second stream of
+/// the profile of object 6.  The images, one sample each, are `/Orange`
+/// (9), the colour `1 0.2 0` of object 6, `/Index` (10), the same as an
+/// `Indexed` image over object 6, and `/Orange16` (11), the same at 16
+/// bits in object 14; `/Sh` (12) is an axial shading of that colour and
+/// `/P` (13) a
+/// tiling pattern of one cell the page's size painting it; the forms
+/// `/Shaded` (15) and `/Tiled` (16), without a group, paint the page with
+/// `/Sh` and `/P`.
 fn doc(group: &str, content: &str) -> Document {
     let res = "/ExtGState << /Half << /ca 0.5 >> /Mul << /BM /Multiply >> \
                /Diff << /BM /Difference >> >> /ColorSpace << /Spot [/Separation /Spot /DeviceCMYK \
                << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.5 1 0] /N 1 >>] \
-               /Adobe [/ICCBased 6 0 R] >>";
+               /Adobe [/ICCBased 6 0 R] /Adobe2 [/ICCBased 14 0 R] >> \
+               /Shading << /Sh 12 0 R >> /Pattern << /P 13 0 R >>";
+    let images = "/Orange 9 0 R /Index 10 0 R /Orange16 11 0 R /Shaded 15 0 R /Tiled 16 0 R";
     let adobe = moxcms::ColorProfile::new_adobe_rgb()
         .encode()
         .expect("encodes");
+    let image = |space: &str, bits: u8, data: &[u8]| {
+        stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace {space} /BitsPerComponent {bits}"
+            ),
+            data,
+        )
+    };
     crate::test_helpers::make_doc_with_objects(&[
         (
             4,
-            format!("<< /Type /Page /Resources << {res} /XObject << /G 5 0 R >> >> >>")
+            format!("<< /Type /Page /Resources << {res} /XObject << /G 5 0 R {images} >> >> >>")
                 .into_bytes(),
         ),
         (
@@ -44,7 +63,8 @@ fn doc(group: &str, content: &str) -> Document {
             stream(
                 &format!(
                     "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
-                     /Group << /S /Transparency {group} >> /Resources << {res} >>"
+                     /Group << /S /Transparency {group} >> \
+                     /Resources << {res} /XObject << {images} >> >>"
                 ),
                 content.as_bytes(),
             ),
@@ -52,6 +72,46 @@ fn doc(group: &str, content: &str) -> Document {
         (6, stream("/N 3", &adobe)),
         (7, stream("/N 4", b"")),
         (8, stream("/N 3", b"not a profile")),
+        (9, image("[/ICCBased 6 0 R]", 8, &[255, 51, 0])),
+        (
+            10,
+            image("[/Indexed [/ICCBased 6 0 R] 0 <ff3300>]", 8, &[0]),
+        ),
+        (
+            11,
+            image("[/ICCBased 14 0 R]", 16, &[255, 255, 51, 51, 0, 0]),
+        ),
+        (
+            12,
+            b"<< /ShadingType 2 /ColorSpace [/ICCBased 6 0 R] /Coords [0 0 10 0] \
+               /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0.2 0] /C1 [1 0.2 0] /N 1 >> \
+               /Extend [true true] >>"
+                .to_vec(),
+        ),
+        (
+            13,
+            stream(
+                "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                 /BBox [0 0 10 10] /XStep 10 /YStep 10 \
+                 /Resources << /ColorSpace << /Adobe [/ICCBased 6 0 R] >> >>",
+                b"/Adobe cs 1 0.2 0 sc 0 0 10 10 re f",
+            ),
+        ),
+        (14, stream("/N 3", &adobe)),
+        (
+            15,
+            stream(
+                &format!("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << {res} >>"),
+                b"/Sh sh",
+            ),
+        ),
+        (
+            16,
+            stream(
+                &format!("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << {res} >>"),
+                b"/Pattern cs /P scn 0 0 10 10 re f",
+            ),
+        ),
     ])
 }
 
@@ -576,6 +636,7 @@ fn a_cal_luminosity_mask_takes_the_luminance_of_its_colour() {
     assert!(device.abs_diff(128) <= 1, "{device}");
 }
 
+mod own_space;
 mod profile;
 mod rgb_profile;
 mod spots;

@@ -17,15 +17,24 @@ use super::image_sampler::{
     BlendedRows, Filter, GridClip, GridView, MaskSampler, SampleGrid, sample_bytes,
 };
 use super::pixel_rect::PixelRect;
+use crate::resources::image::KeptTints;
 use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask, TintData};
 use crate::separation::Separator;
 
 impl PageRenderer<'_> {
-    /// Whether image decodes keep their colorant tints: on an ink canvas,
-    /// which draws an image in a `Separation` or `DeviceN` space as the
-    /// ink of its tints.
-    pub(super) const fn keeps_tints(&self) -> bool {
-        self.canvas.kind().is_ink()
+    /// The tints image decodes keep: on an ink canvas, which draws an
+    /// image in a `Separation` or `DeviceN` space as the ink of its tints,
+    /// those of the images of ink, and on the canvas of a group of a
+    /// `CalRGB` or ICC RGB space, which draws an image of that space as
+    /// its components, those of the RGB images as well.
+    pub(super) const fn keeps_tints(&self) -> KeptTints {
+        if !self.canvas.kind().is_ink() {
+            KeptTints::None
+        } else if self.ink.separator.has_own_space() {
+            KeptTints::InkAndRgb
+        } else {
+            KeptTints::Ink
+        }
     }
 
     /// Count the drawn image in the page diagnostics (presence, filter) and
@@ -203,7 +212,9 @@ impl PageRenderer<'_> {
     /// How `img`, the samples of `decoded` drawn under the resampling
     /// `plan`, draws under `colorants`, the plan of its tints.  On an ink
     /// canvas an image in a `Separation` or `DeviceN` space draws the ink
-    /// of its tints, resampled as its colours are.  One whose spot
+    /// of its tints, resampled as its colours are, and on the canvas of a
+    /// group of a `CalRGB` or ICC RGB space an image of that space the
+    /// complements of its components.  One whose spot
     /// colorants found no slot draws its sRGB samples as process ink in
     /// the process channels, as a colour of its space does; any other
     /// image draws its sRGB samples in every channel.
@@ -216,7 +227,11 @@ impl PageRenderer<'_> {
         name: Option<&[u8]>,
     ) -> ImageSource {
         match colorants {
-            Some(colorants @ (ColorantPlan::Channels(_) | ColorantPlan::Linked(_))) => {
+            Some(
+                colorants @ (ColorantPlan::Channels(_)
+                | ColorantPlan::Linked(_)
+                | ColorantPlan::Complements),
+            ) => {
                 let samples = img.width as usize * img.height as usize;
                 if let Some(ink) =
                     ink_samples(decoded, colorants, plan).filter(|ink| ink.len() == samples * 8)

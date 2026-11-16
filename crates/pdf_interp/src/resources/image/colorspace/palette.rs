@@ -1,30 +1,32 @@
-//! The ink of an `Indexed` image over a space of ink.
+//! The ink of an `Indexed` image over a space whose components an ink
+//! canvas paints.
 //!
 //! The samples of an `Indexed` image whose base space is a space of ink —
 //! `DeviceCMYK`, a four-component ICC space, a `Separation` or a `DeviceN`
-//! space — select palette entries that are amounts of that ink.  Each
+//! space — select palette entries that are amounts of that ink; over a
+//! `CalRGB` or ICC RGB space, entries that are its components.  Each
 //! sample maps through `/Decode` to an index, rounded and clamped to
 //! `hival`, whose entry's bytes map onto the base's component ranges
 //! (ISO 32000-2 §8.6.6.3), as the conversion of the colour does; the
 //! entry is then the tints of the base, painted on an ink canvas as an
 //! image in the base space is.
 
-use super::{ImageColour, Layout, Samples, is_ink};
+use super::{ImageColour, KeptTints, Layout, Samples, keeps};
 use crate::resources::colorspace::{ColorSpace, decoded_sample};
 use crate::resources::image::{ImageTints, TintData};
 
 impl ImageColour {
-    /// The tints of the base space of an `Indexed` image of ink at each of
-    /// its samples (see the module documentation); `None` for an image in
-    /// another space, for samples that are not one host-resident 8-bit
+    /// The tints of the base space of an `Indexed` image at each of its
+    /// samples, when `kept` keeps the base's components (see the module
+    /// documentation); `None` for an image in another space, for samples that are not one host-resident 8-bit
     /// index a pixel, and when a sample's entry is missing from the
     /// palette, which the conversion of the colour draws as black.
-    pub(super) fn palette_tints(&self, samples: &Samples) -> Option<ImageTints> {
+    pub(super) fn palette_tints(&self, samples: &Samples, kept: KeptTints) -> Option<ImageTints> {
         let indexed = self.space.as_ref()?;
         let ColorSpace::Indexed { base, .. } = indexed else {
             return None;
         };
-        if !is_ink(base) || samples.layout != Layout::Color(1) {
+        if !keeps(base, kept) || samples.layout != Layout::Color(1) {
             return None;
         }
         let &[pair] = self.decode.as_slice() else {
@@ -76,7 +78,7 @@ mod tests {
     fn an_indexed_cmyk_image_paints_its_palette_ink() {
         let c = colour("[/Indexed /DeviceCMYK 1 <ff000000 00000080>]", "");
         let tints = c
-            .palette_tints(&Samples::gray(3, 1, vec![0, 1, 7]))
+            .palette_tints(&Samples::gray(3, 1, vec![0, 1, 7]), KeptTints::Ink)
             .expect("tints");
         assert_eq!(tints.space, ColorSpace::DeviceCmyk);
         let TintData::U8(data) = tints.data else {
@@ -90,7 +92,7 @@ mod tests {
             "/Decode [1 0]",
         );
         let TintData::U8(data) = c
-            .palette_tints(&Samples::gray(1, 1, vec![0]))
+            .palette_tints(&Samples::gray(1, 1, vec![0]), KeptTints::Ink)
             .expect("tints")
             .data
         else {
@@ -104,14 +106,18 @@ mod tests {
         let samples = Samples::gray(1, 1, vec![1]);
         assert!(
             colour("[/Indexed /DeviceRGB 1 <ff0000 00ff00>]", "")
-                .palette_tints(&samples)
+                .palette_tints(&samples, KeptTints::Ink)
                 .is_none()
         );
-        assert!(colour("/DeviceCMYK", "").palette_tints(&samples).is_none());
+        assert!(
+            colour("/DeviceCMYK", "")
+                .palette_tints(&samples, KeptTints::Ink)
+                .is_none()
+        );
         // A short palette has no entry for index 1.
         assert!(
             colour("[/Indexed /DeviceCMYK 1 <ff000000>]", "")
-                .palette_tints(&samples)
+                .palette_tints(&samples, KeptTints::Ink)
                 .is_none()
         );
     }

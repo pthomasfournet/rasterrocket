@@ -2027,7 +2027,7 @@ fn short_stencil_through_a_pattern_is_an_image_failure() {
         own_soft_mask: false,
         partial: None,
         tints: None,
-        kept_tints: false,
+        kept_tints: crate::resources::image::KeptTints::None,
         intent: crate::RenderingIntent::RelativeColorimetric,
     };
     renderer.blit_image(&stencil, Some(b"Im0"));

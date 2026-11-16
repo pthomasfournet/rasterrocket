@@ -29,7 +29,9 @@
 //!
 //! A shading in a `Separation` or `DeviceN` space resolved for an ink
 //! canvas converts each colour instead to the ink of a [`ColorantPlan`], so
-//! that it paints its colorants' channels alone.
+//! that it paints its colorants' channels alone; so does one in the space
+//! of a `CalRGB` or ICC RGB transparency group on the group's canvas,
+//! which paints its components.
 //!
 //! A shading resolved for a 16-bit canvas converts each colour at 16 bits
 //! ([`ColorSpace::convert`]), and an axial or radial shading samples its
@@ -691,8 +693,9 @@ impl<S: Sample> ShadingColour<3, S> for ShadingCs<'_> {
     }
 }
 
-/// A shading space of ink — `Separation`, `DeviceN`, process CMYK —
-/// converting to the ink of `plan`.
+/// A shading space of ink — `Separation`, `DeviceN`, process CMYK — or of
+/// the group whose canvas the shading paints, converting to the ink of
+/// `plan`.
 #[derive(Clone, Copy)]
 struct InkCs<'a> {
     cs: ShadingCs<'a>,
@@ -717,7 +720,7 @@ impl<S: Sample> ShadingColour<8, S> for InkCs<'_> {
 
     fn conversion_cost(self) -> u64 {
         match self.plan {
-            ColorantPlan::Channels(_) | ColorantPlan::Linked(_) => 1,
+            ColorantPlan::Channels(_) | ColorantPlan::Linked(_) | ColorantPlan::Complements => 1,
             ColorantPlan::Process(_) => self.cs.space.process_ink_cost(),
         }
     }

@@ -84,7 +84,7 @@ pub(crate) use thresholds::{JpxSupply, draw_halves, jpx_area_dispatches, jpx_thr
 pub(crate) use types::dominant_filter;
 pub use types::{
     DecodedImage, IMAGE_FILTER_COUNT, ImageColorSpace, ImageData, ImageDecodeCtx, ImageDescriptor,
-    ImageFilter, ImageRequest, ImageResolution, ImageTints, TintData,
+    ImageFilter, ImageRequest, ImageResolution, ImageTints, KeptTints, TintData,
 };
 
 // Visible only when cargo-fuzz sets `--cfg fuzzing`.  Not part of the public API.

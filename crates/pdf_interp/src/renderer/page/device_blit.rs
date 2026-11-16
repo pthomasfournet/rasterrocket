@@ -373,7 +373,7 @@ mod tests {
             own_soft_mask: false,
             partial: None,
             tints: None,
-            kept_tints: false,
+            kept_tints: crate::resources::image::KeptTints::None,
             intent: crate::RenderingIntent::RelativeColorimetric,
         };
         r.blit_image(&decoded, Some(b"Im0"));

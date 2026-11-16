@@ -27,6 +27,7 @@ use pdf::ObjectId;
 
 use crate::renderer::document_images::{self, DocumentImages, ImageKey, host_bytes};
 use crate::resources::DecodedImage;
+use crate::resources::image::KeptTints;
 
 /// Host bytes of decoded pixels and masks the memo holds at most.  A decode
 /// that would exceed it is drawn without being kept.  Decodes the document
@@ -124,12 +125,12 @@ impl ImageMemo {
     }
 
     /// The decode kept for the inline image `key` (see
-    /// [`Self::inline_key`]), keeping colorant tints when `tints`; an
-    /// inline image has no draw size.
-    pub(super) fn get_inline(&self, key: &[u8], tints: bool) -> Option<Arc<DecodedImage>> {
+    /// [`Self::inline_key`]), keeping the tints of `tints`; an inline
+    /// image has no draw size.
+    pub(super) fn get_inline(&self, key: &[u8], tints: KeptTints) -> Option<Arc<DecodedImage>> {
         self.inline
             .get(key)
-            .filter(|e| !tints || e.image.kept_tints)
+            .filter(|e| e.image.kept_tints >= tints)
             .map(|e| Arc::clone(&e.image))
     }
 
@@ -146,14 +147,14 @@ impl ImageMemo {
         image
     }
 
-    /// The decode of `key` kept for a request at `draw_size`, keeping
-    /// colorant tints when `tints`, when it equals what decoding the stream
+    /// The decode of `key` kept for a request at `draw_size`, keeping the
+    /// tints of `tints`, when it equals what decoding the stream
     /// for that request returns.
     pub(super) fn get(
         &self,
         key: ImageKey,
         draw_size: Option<(u32, u32)>,
-        tints: bool,
+        tints: KeptTints,
     ) -> Option<Arc<DecodedImage>> {
         let entry = self.entries.get(&key)?;
         document_images::serves(&entry.image, entry.draw_size, draw_size, tints)
@@ -266,15 +267,15 @@ mod tests {
     #[test]
     fn non_jpx_decode_serves_every_draw_size() {
         let mut memo = memo(BUDGET_BYTES);
-        assert!(memo.get(KEY, None, false).is_none());
+        assert!(memo.get(KEY, None, KeptTints::None).is_none());
         let kept = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Dct, 8), true);
         for size in [None, Some((4, 4)), Some((100, 3))] {
-            let hit = memo.get(KEY, size, false).expect("hit");
+            let hit = memo.get(KEY, size, KeptTints::None).expect("hit");
             assert!(Arc::ptr_eq(&hit, &kept));
         }
         let other_object = ImageKey { id: (6, 0), ..KEY };
         assert!(
-            memo.get(other_object, None, false).is_none(),
+            memo.get(other_object, None, KeptTints::None).is_none(),
             "other objects miss"
         );
         let other_context = ImageKey {
@@ -282,7 +283,7 @@ mod tests {
             ..KEY
         };
         assert!(
-            memo.get(other_context, None, false).is_none(),
+            memo.get(other_context, None, KeptTints::None).is_none(),
             "other contexts miss"
         );
     }
@@ -291,15 +292,18 @@ mod tests {
     fn jpx_decode_serves_only_its_draw_size() {
         let mut memo = memo(BUDGET_BYTES);
         let _ = memo.insert(KEY, Some((4, 4)), decoded(ImageFilter::Jpx, 4), true);
-        assert!(memo.get(KEY, Some((4, 4)), false).is_some());
-        assert!(memo.get(KEY, Some((8, 8)), false).is_none());
-        assert!(memo.get(KEY, None, false).is_none());
+        assert!(memo.get(KEY, Some((4, 4)), KeptTints::None).is_some());
+        assert!(memo.get(KEY, Some((8, 8)), KeptTints::None).is_none());
+        assert!(memo.get(KEY, None, KeptTints::None).is_none());
 
         // A decode for another size replaces it.
         let _ = memo.insert(KEY, Some((8, 8)), decoded(ImageFilter::Jpx, 8), true);
-        assert!(memo.get(KEY, Some((4, 4)), false).is_none());
+        assert!(memo.get(KEY, Some((4, 4)), KeptTints::None).is_none());
         assert_eq!(
-            memo.get(KEY, Some((8, 8)), false).expect("hit").image.width,
+            memo.get(KEY, Some((8, 8)), KeptTints::None)
+                .expect("hit")
+                .image
+                .width,
             8
         );
         assert_eq!(memo.bytes, 8);
@@ -314,7 +318,7 @@ mod tests {
         let other = ImageKey { id: (6, 0), ..KEY };
         let over = memo.insert(other, None, decoded(ImageFilter::Raw, 3), true);
         assert_eq!(over.image.width, 3, "an image over budget is still drawn");
-        assert!(memo.get(other, None, false).is_none());
+        assert!(memo.get(other, None, KeptTints::None).is_none());
         assert_eq!(memo.bytes, 8);
         // Replacing an entry frees its bytes first.
         let _ = memo.insert(KEY, None, decoded(ImageFilter::Raw, 10), true);
@@ -329,7 +333,7 @@ mod tests {
         let shared = Arc::new(decoded(ImageFilter::Raw, 50));
         memo.insert_shared(other, None, &shared, true);
         assert!(Arc::ptr_eq(
-            &memo.get(other, None, false).expect("hit"),
+            &memo.get(other, None, KeptTints::None).expect("hit"),
             &shared
         ));
         assert_eq!(memo.bytes, 10);
@@ -349,7 +353,7 @@ mod tests {
             &Arc::new(decoded(ImageFilter::Raw, 200)),
             false,
         );
-        assert!(memo.get(other, None, false).is_none());
+        assert!(memo.get(other, None, KeptTints::None).is_none());
         assert_eq!(memo.bytes, 30);
     }
 
@@ -369,8 +373,14 @@ mod tests {
         assert_ne!(key(SampleDepth::Eight), key(SampleDepth::Sixteen));
         let mut memo = memo(1 << 20);
         let _ = memo.insert_inline(key(SampleDepth::Eight), decoded(ImageFilter::Raw, 1));
-        assert!(memo.get_inline(&key(SampleDepth::Eight), false).is_some());
-        assert!(memo.get_inline(&key(SampleDepth::Sixteen), false).is_none());
+        assert!(
+            memo.get_inline(&key(SampleDepth::Eight), KeptTints::None)
+                .is_some()
+        );
+        assert!(
+            memo.get_inline(&key(SampleDepth::Sixteen), KeptTints::None)
+                .is_none()
+        );
     }
 
     /// An inline image decoded under one rendering intent or black-point

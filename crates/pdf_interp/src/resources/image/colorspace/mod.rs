@@ -51,24 +51,37 @@ pub(super) use samples::{KeySamples, Layout, Samples};
 use wide::convert16;
 
 use super::{
-    ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask, TintData,
+    ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, KeptTints, SoftMask,
+    TintData,
 };
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{ColorSpace, default_space, resolve};
 use crate::resources::dict_ext::DictExt as _;
 use crate::{ColourTarget, WorkingSpace};
 
-/// Whether the colours of `space` are amounts of ink an ink canvas
-/// paints: colorant tints in a `Separation` or `DeviceN` space, process
-/// inks in `DeviceCMYK` or a four-component ICC space.
-const fn is_ink(space: &ColorSpace) -> bool {
-    matches!(
+/// Whether the components of a colour of `space` are kept under `kept`
+/// for an ink canvas to paint: those of a space of ink — colorant tints
+/// in a `Separation` or `DeviceN` space, process inks in `DeviceCMYK` or
+/// a four-component ICC space — and under [`KeptTints::InkAndRgb`] those
+/// of a `CalRGB` space or an RGB ICC profile stream.
+fn keeps(space: &ColorSpace, kept: KeptTints) -> bool {
+    let ink = matches!(
         space,
         ColorSpace::Separation { .. }
             | ColorSpace::DeviceN { .. }
             | ColorSpace::DeviceCmyk
             | ColorSpace::IccBased { n: 4, .. }
-    )
+    );
+    let rgb = match space {
+        ColorSpace::Cal(cal) => cal.ncomponents() == 3,
+        ColorSpace::IccBased { n: 3, stream_id } => stream_id.is_some(),
+        _ => false,
+    };
+    match kept {
+        KeptTints::None => false,
+        KeptTints::Ink => ink,
+        KeptTints::InkAndRgb => ink || rgb,
+    }
 }
 
 /// Largest `BitsPerComponent` of an `Indexed` image (PDF §8.6.6.3).
@@ -246,13 +259,10 @@ impl ImageColour {
         })
     }
 
-    /// Whether the image's samples are amounts of ink an ink canvas can
-    /// paint ([`Self::tints`]): those of a space of ink ([`is_ink`]).
-    pub(super) const fn has_tints(&self) -> bool {
-        match &self.space {
-            Some(space) => is_ink(space),
-            None => false,
-        }
+    /// Whether the image's samples are components kept under `kept` for
+    /// an ink canvas to paint ([`Self::tints`], [`keeps`]).
+    pub(super) fn has_tints(&self, kept: KeptTints) -> bool {
+        self.space.as_ref().is_some_and(|space| keeps(space, kept))
     }
 
     /// Convert `samples` to the gray or RGB descriptor the blit draws.
@@ -379,19 +389,19 @@ impl ImageColour {
 }
 
 impl ImageColour {
-    /// The ink amounts of `samples` in the image's `Separation`, `DeviceN`
-    /// or process CMYK space ([`Self::has_tints`]): each component mapped
-    /// through its `/Decode` pair to a sample of the samples' depth, 0 no
-    /// ink and the maximum the full tint; for an `Indexed` image over a
-    /// space of ink, the tints of its palette entries
+    /// The components of `samples` kept under `kept` ([`Self::has_tints`]):
+    /// each component mapped through its `/Decode` pair to a sample of the
+    /// samples' depth, 0 no ink, or the component's 0, and the maximum the
+    /// full tint, or the component's 1; for an `Indexed` image over a space
+    /// whose components are kept, those of its palette entries
     /// ([`Self::palette_tints`]).  `None` for any other space, for samples
     /// whose channel count is not the space's, and for samples that are
     /// not host-resident.
-    pub(super) fn tints(&self, samples: &Samples) -> Option<ImageTints> {
+    pub(super) fn tints(&self, samples: &Samples, kept: KeptTints) -> Option<ImageTints> {
         if self.indexed() {
-            return self.palette_tints(samples);
+            return self.palette_tints(samples, kept);
         }
-        let space = self.space.as_ref().filter(|_| self.has_tints())?;
+        let space = self.space.as_ref().filter(|_| self.has_tints(kept))?;
         let n = space.ncomponents();
         if samples.layout != Layout::Color(u8::try_from(n).ok()?) || self.decode.len() != n {
             return None;

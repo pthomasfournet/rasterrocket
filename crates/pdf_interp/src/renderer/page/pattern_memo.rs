@@ -12,12 +12,14 @@
 //! resource context its content resolves names in, which sizes its inline
 //! images.  A cell's raster is keyed additionally by the exact bits of the
 //! pattern-to-device matrix, the tint of an uncoloured pattern and the
-//! sub-pixel phase it is rasterised at.  A raster rendered while the page's
-//! work budget ran out is not kept.
+//! sub-pixel phase it is rasterised at.  On an ink canvas a shading is keyed
+//! as well by the separator its colours convert by, and a cell's raster by
+//! the canvas's ink setup, which decide the ink they hold.  A raster
+//! rendered while the page's work budget ran out is not kept.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use color::{DeviceN8, DeviceN16, Pixel, Rgb8, Rgb16};
@@ -32,6 +34,7 @@ use crate::resources::ColorSpace;
 use crate::resources::shading::{Canvas, PlanColorants, ResolvedShading};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceIdentity, ResourceKey, ShadingPattern};
+use crate::separation::{InkSetup, Separator};
 
 /// Host bytes of meshes and cell rasters the memo holds at most.  An entry
 /// that would exceed it is used without being kept.
@@ -40,6 +43,15 @@ const BUDGET_BYTES: usize = 64 << 20;
 /// The memo shared by a page renderer and the renderers of its pattern
 /// cells.
 pub(super) type SharedPatternMemo = Rc<RefCell<PatternMemo>>;
+
+/// A part of a key that takes part in its equality and not in its hash:
+/// keys equal in it hash alike, whatever it holds.
+#[derive(Clone, PartialEq, Eq)]
+struct Unhashed<T>(T);
+
+impl<T> Hash for Unhashed<T> {
+    fn hash<H: Hasher>(&self, _: &mut H) {}
+}
 
 /// A shading or shading pattern placed in device space.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -53,16 +65,20 @@ pub(super) struct PlacedKey {
     defaults: Option<ObjectId>,
     /// The canvas the object is resolved for.
     kind: CanvasKind,
+    /// The separator of the colours on an ink canvas, `None` on an RGB
+    /// one.
+    separator: Unhashed<Option<Separator>>,
 }
 
 impl PlacedKey {
     /// The key of object `id` under `matrix` on `canvas`, of the kind
-    /// `kind`, resolved with the default colour spaces of `defaults`.
+    /// `kind`, whose colours convert by `separator` on an ink canvas,
+    /// resolved with the default colour spaces of `defaults`.
     pub(super) fn new(
         id: ResourceKey,
         matrix: &[f64; 6],
         canvas: Canvas,
-        kind: CanvasKind,
+        (kind, separator): (CanvasKind, &Separator),
         defaults: Option<ObjectId>,
     ) -> Self {
         Self {
@@ -72,6 +88,7 @@ impl PlacedKey {
             target: canvas.target,
             defaults,
             kind,
+            separator: Unhashed(kind.is_ink().then(|| separator.clone())),
         }
     }
 }
@@ -86,19 +103,21 @@ pub(super) struct RasterKey {
     phase: CellPhase,
     /// The canvas the cell is rasterised for, and its working space.
     kind: (CanvasKind, crate::WorkingSpace),
+    /// The ink setup of an ink canvas, `None` for an RGB one.
+    ink: Unhashed<Option<InkSetup>>,
 }
 
 impl RasterKey {
     /// The key of pattern stream `id` under `device` with `tint`,
-    /// rasterised for a canvas of `kind` and working space `space`;
-    /// `context` is the identity of the resources a pattern without its own
-    /// inherits.
+    /// rasterised for a canvas of `kind`, working space `space` and, on an
+    /// ink canvas, ink setup `ink`; `context` is the identity of the
+    /// resources a pattern without its own inherits.
     pub(super) fn new(
         id: ObjectId,
         device: &[f64; 6],
         tint: Option<&RasterColor>,
         context: Option<ResourceIdentity>,
-        (kind, space): (CanvasKind, crate::WorkingSpace),
+        (kind, space, ink): (CanvasKind, crate::WorkingSpace, &InkSetup),
     ) -> Self {
         Self {
             id,
@@ -107,6 +126,7 @@ impl RasterKey {
             context,
             phase: (0, 0),
             kind: (kind, space),
+            ink: Unhashed(kind.is_ink().then(|| ink.clone())),
         }
     }
 
@@ -325,15 +345,15 @@ impl PageRenderer<'_> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
         let pattern_ctm = self.pattern_ctm;
+        let separator = self.separator(false);
         let key = PlacedKey::new(
             self.resources.pattern_key(name)?,
             &pattern_ctm,
             canvas,
-            kind,
+            (kind, &separator),
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
-        let separator = self.separator(false);
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             let doc = resources.doc();
             let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
@@ -349,15 +369,15 @@ impl PageRenderer<'_> {
     pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
+        let separator = self.separator(false);
         let key = PlacedKey::new(
             self.resources.shading_key(name)?,
             ctm,
             canvas,
-            kind,
+            (kind, &separator),
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
-        let separator = self.separator(false);
         self.pattern_memo.borrow_mut().shading(key, || {
             let doc = resources.doc();
             let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
@@ -484,7 +504,7 @@ mod tests {
             ResourceKey::Object(id),
             matrix,
             canvas,
-            CanvasKind::Rgb,
+            (CanvasKind::Rgb, &Separator::Model),
             None,
         )
     }
@@ -604,7 +624,11 @@ mod tests {
             &IDENTITY,
             Some(&red),
             None,
-            (CanvasKind::Rgb, crate::WorkingSpace::Srgb),
+            (
+                CanvasKind::Rgb,
+                crate::WorkingSpace::Srgb,
+                &InkSetup::PREVIEW,
+            ),
         );
         memo.insert_raster(key.clone(), CellRaster::Mean([255, 0, 0], 255));
         assert!(memo.raster(&key).is_some());
@@ -615,7 +639,11 @@ mod tests {
                 &IDENTITY,
                 Some(&green),
                 None,
-                (CanvasKind::Rgb, crate::WorkingSpace::Srgb)
+                (
+                    CanvasKind::Rgb,
+                    crate::WorkingSpace::Srgb,
+                    &InkSetup::PREVIEW
+                )
             ))
             .is_none()
         );
@@ -625,7 +653,11 @@ mod tests {
                 &IDENTITY,
                 Some(&red),
                 Some(ResourceIdentity::Object((1, 0))),
-                (CanvasKind::Rgb, crate::WorkingSpace::Srgb)
+                (
+                    CanvasKind::Rgb,
+                    crate::WorkingSpace::Srgb,
+                    &InkSetup::PREVIEW
+                )
             ))
             .is_none()
         );

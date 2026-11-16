@@ -271,13 +271,18 @@ impl InkMap {
     /// the separator reproduces such a colour from its profile
     /// ([`Separator::reproduces_process_colour`]); `separator`, the paint's,
     /// converts them to the ink of an output profile that is not theirs
-    /// ([`Separator::cmyk_link`]).
+    /// ([`Separator::cmyk_link`]).  On the canvas of an additive group, the
+    /// colours of the group's space paint their components
+    /// ([`ColorantPlan::Complements`]).
     pub(super) fn plan(
         &mut self,
         doc: &Document,
         space: &ColorSpace,
         separator: &Separator,
     ) -> Option<ColorantPlan> {
+        if separator.paints_components(doc, space) {
+            return Some(ColorantPlan::Complements);
+        }
         match space {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
                 Some(self.colorant_plan(doc, space, separator))

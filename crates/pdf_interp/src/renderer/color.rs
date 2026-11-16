@@ -57,9 +57,9 @@ impl InkChannels {
     }
 }
 
-/// The ink a `Separation` or `DeviceN` colour of a given space paints on an
-/// ink canvas, fixed for a page once the page's spot slots hold the
-/// space's spot colorants.
+/// The ink a colour of a given space paints on an ink canvas: that of a
+/// `Separation` or `DeviceN` colour fixed for a page once the page's spot
+/// slots hold the space's spot colorants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ColorantPlan {
     /// Component `i` paints its tint in the channels of bit mask
@@ -75,6 +75,11 @@ pub(crate) enum ColorantPlan {
     /// another profile than the output profile's, converted to the output
     /// profile's process ink by the link.
     Linked(CmykLink),
+    /// The three components of a colour of the space of an additive group,
+    /// painted on its canvas, are the complements of the process ink they
+    /// paint, black and spot ink none; the colour knocks out every channel
+    /// (see [`Separator::paints_components`]).
+    Complements,
 }
 
 impl ColorantPlan {
@@ -83,6 +88,7 @@ impl ColorantPlan {
         match self {
             Self::Channels(channels) => ChannelMask::new(channels.iter().fold(0, |a, &b| a | b)),
             Self::Process(_) | Self::Linked(_) => PROCESS_CHANNELS,
+            Self::Complements => ChannelMask::ALL,
         }
     }
 
@@ -111,12 +117,14 @@ impl ColorantPlan {
                 &[c, m, y, k] => no_spots(link.ink([c, m, y, k].map(S::from_unit))),
                 _ => [S::ZERO; 8],
             },
+            Self::Complements => crate::separation::unit_complement_ink(comps)
+                .map_or([S::ZERO; 8], |ink| no_spots(ink.map(S::from_unit))),
         }
     }
 
-    /// The ink of the tints `tints`, one sample per component, under a plan
-    /// of [`Self::Channels`] or [`Self::Linked`]; `None` under
-    /// [`Self::Process`].
+    /// The ink of the tints `tints`, one sample per component — under
+    /// [`Self::Complements`], the components — under any plan but
+    /// [`Self::Process`], for which it is `None`.
     pub(crate) fn ink_of_tints<S: Sample>(&self, tints: &[S]) -> Option<[S; 8]> {
         let channels = match self {
             Self::Channels(channels) => channels,
@@ -125,6 +133,12 @@ impl ColorantPlan {
                     return None;
                 };
                 return Some(no_spots(link.ink([c, m, y, k])));
+            }
+            Self::Complements => {
+                let &[r, g, b] = tints else {
+                    return None;
+                };
+                return Some(no_spots(crate::separation::complement_ink([r, g, b])));
             }
             Self::Process(_) => return None,
         };

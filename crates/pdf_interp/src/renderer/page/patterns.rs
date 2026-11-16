@@ -522,7 +522,7 @@ impl PageRenderer<'_> {
             &device,
             tint.as_ref(),
             (!desc.has_own_resources).then(|| self.resources.identity()),
-            (kind, self.space),
+            (kind, self.space, &self.ink),
         );
         match kind {
             CanvasKind::Rgb => self

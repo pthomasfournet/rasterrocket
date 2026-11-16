@@ -4,10 +4,13 @@
 //! The group is painted on an additive ink canvas
 //! ([`Separator::Additive`](super::Separator::Additive)) whose process
 //! channels hold the complements of the components of the group's space.
-//! A colour painted in the group converts to the working space as on the
-//! page and from there into the group's space ([`GroupRgb::entering`]);
-//! the group's result converts back as a colour of its space converts on
-//! the page ([`GroupRgb::leaving`]).
+//! A fill, image or shading of the group's space — the same `CalRGB`
+//! parameters, or a profile stream holding the group's profile — paints
+//! its components ([`AdditiveRgb::holds`]); any other colour painted in
+//! the group converts to the working space as on the page and from there
+//! into the group's space ([`GroupRgb::entering`]).  The group's result
+//! converts back as a colour of its space converts on the page
+//! ([`GroupRgb::leaving`]).
 //!
 //! A `CalRGB` space or a matrix/TRC profile converts in both directions
 //! through a [`LinearRgb`]: out of the group, its tone curves and its
@@ -26,6 +29,7 @@ use pdf::Document;
 
 use crate::WorkingSpace;
 use crate::pcs::grid::GridTable;
+use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::icc_shaper::{Mat3, eval_trc, fetch_profile_bytes, mat_inverse};
 use crate::resources::{ColorSpace, RgbGroupSpace};
 use crate::working_space::{self, LinearRgb};
@@ -60,6 +64,10 @@ pub(crate) struct GroupRgb {
     space: RgbGroupSpace,
     /// The working space converted to and from.
     working: WorkingSpace,
+    /// The [`tag_fingerprint`](crate::pcs::tag_fingerprint) of an ICC
+    /// space's profile, by which another stream of the same profile is
+    /// the same space.
+    fingerprint: Option<u64>,
     /// Working space → group space.
     into: RgbMap,
     /// Group space → working space.
@@ -123,6 +131,7 @@ impl GroupRgb {
 
     /// Build the conversions of `space` to and from `working`.
     fn new(doc: &Document, space: RgbGroupSpace, working: WorkingSpace) -> Result<Self, String> {
+        let mut fingerprint = None;
         let (into, out) = match space {
             RgbGroupSpace::Cal(cal) => {
                 let curves = curves(cal.gamma().map(|g| move |x: f64| Some(x.powf(g))))?;
@@ -135,6 +144,7 @@ impl GroupRgb {
                 if profile.color_space != moxcms::DataColorSpace::Rgb {
                     return Err("the profile is not RGB".to_owned());
                 }
+                fingerprint = Some(crate::pcs::tag_fingerprint(&bytes));
                 if is_matrix_trc(&profile) {
                     matrix_maps(&profile, working)?
                 } else {
@@ -146,13 +156,16 @@ impl GroupRgb {
         Ok(Self {
             space,
             working,
+            fingerprint,
             into,
             out,
         })
     }
 
-    /// Whether `space` is the group's space.
-    fn is(&self, space: &ColorSpace) -> bool {
+    /// Whether `space`, a space of `doc`, is the group's space: the
+    /// same `CalRGB` parameters, or an RGB profile stream holding the
+    /// group's profile.
+    fn is(&self, doc: &Document, space: &ColorSpace) -> bool {
         match (space, self.space) {
             (
                 ColorSpace::IccBased {
@@ -160,7 +173,12 @@ impl GroupRgb {
                     stream_id: Some(id),
                 },
                 RgbGroupSpace::Icc(own),
-            ) => *id == own,
+            ) => {
+                *id == own
+                    || self.fingerprint.is_some_and(|own| {
+                        IccConversion::source_profile(doc, *id, 3).map(|(_, f)| f) == Some(own)
+                    })
+            }
             (ColorSpace::Cal(cal), RgbGroupSpace::Cal(own)) => **cal == own,
             _ => false,
         }
@@ -255,6 +273,25 @@ fn grid_maps(profile: &ColorProfile, working: WorkingSpace) -> Result<(RgbMap, R
     Ok((grid(&space, profile)?, grid(profile, &space)?))
 }
 
+/// The process ink `[C, M, Y, K]` of the canvas value `rgb`, at its
+/// depth: the complements of its components, black none.
+pub(crate) fn complement_ink<S: Sample>(rgb: [S; 3]) -> [S; 4] {
+    let [r, g, b] = rgb.map(|v| S::from_wide(S::max_wide() - v.wide()));
+    [r, g, b, S::ZERO]
+}
+
+/// The process ink `[C, M, Y, K]`, in `[0, 1]`, of the canvas value
+/// `comps`, three components each clamped to `[0, 1]`, NaN read as 0:
+/// their complements, black none.  `None` for another number of
+/// components.
+pub(crate) fn unit_complement_ink(comps: &[f64]) -> Option<[f64; 4]> {
+    let &[r, g, b] = comps else {
+        return None;
+    };
+    let [r, g, b] = [r, g, b].map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) });
+    Some([1.0 - r, 1.0 - g, 1.0 - b, 0.0])
+}
+
 /// The RGB an additive ink canvas holds: of a working space, or of a
 /// group's `CalRGB` or ICC space over one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,20 +313,11 @@ impl AdditiveRgb {
         }
     }
 
-    /// The canvas's value of the colour `comps` of `space`, its components
-    /// clamped to `[0, 1]`, when `space` is the group's: a colour of the
-    /// space paints its components.  `None` for a colour of another space,
-    /// which converts from the working space.
-    pub(crate) fn components_of(&self, space: &ColorSpace, comps: &[f64]) -> Option<[f64; 3]> {
-        let Self::Group(group) = self else {
-            return None;
-        };
-        let &[r, g, b] = comps else {
-            return None;
-        };
-        group
-            .is(space)
-            .then(|| [r, g, b].map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }))
+    /// Whether the colours of `space`, a space of `doc`, paint their
+    /// components on the canvas: `space` is the group's.  The colours of
+    /// any other space convert from the working space.
+    pub(crate) fn holds(&self, doc: &Document, space: &ColorSpace) -> bool {
+        matches!(self, Self::Group(group) if group.is(doc, space))
     }
 
     /// The canvas's value of the colour `rgb` of [`Self::working`].

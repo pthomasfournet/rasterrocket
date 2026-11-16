@@ -27,7 +27,7 @@ mod group_rgb;
 mod press;
 
 pub(crate) use group::GroupInk;
-pub(crate) use group_rgb::{AdditiveRgb, GroupRgb};
+pub(crate) use group_rgb::{AdditiveRgb, GroupRgb, complement_ink, unit_complement_ink};
 pub use press::PressSeparation;
 
 use std::sync::Arc;
@@ -386,6 +386,14 @@ impl Separator {
         !matches!(self, Self::Group(_) | Self::Additive(_))
     }
 
+    /// Whether the separator is that of the canvas of a group of a
+    /// `CalRGB` or ICC RGB space, on which the colours of the space paint
+    /// their components ([`Self::paints_components`]).
+    #[must_use]
+    pub(crate) const fn has_own_space(&self) -> bool {
+        matches!(self, Self::Additive(AdditiveRgb::Group(_)))
+    }
+
     /// Whether every process colour, of `DeviceCMYK` or an ICC CMYK space,
     /// separates from its RGB: the colours of an additive group.
     #[must_use]
@@ -408,28 +416,36 @@ impl Separator {
     pub(crate) fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
-            Self::Additive(space) => {
-                let rgb = space.of_working(rgb);
-                let [r, g, b] = rgb.map(|v| S::from_wide(S::max_wide() - v.wide()));
-                [r, g, b, S::ZERO]
-            }
+            Self::Additive(space) => complement_ink(space.of_working(rgb)),
             Self::Device(black) => black.separate(rgb),
             Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => ink.table.ink(rgb),
         }
     }
 
-    /// The process ink of the colour `comps` of `space` on the canvas of
-    /// an additive group whose space is `space`: the complements of the
-    /// components, black and spot ink none (see
-    /// [`AdditiveRgb::components_of`]).  `None` for any other separator or
-    /// space.
+    /// Whether the colours of `space`, a space of `doc`, paint their
+    /// components on the canvas of an additive group whose space is
+    /// `space` (see [`AdditiveRgb::holds`]).
     #[must_use]
-    pub(crate) fn own_ink(&self, space: &ColorSpace, comps: &[f64]) -> Option<[f64; 8]> {
-        let Self::Additive(rgb) = self else {
+    pub(crate) fn paints_components(&self, doc: &pdf::Document, space: &ColorSpace) -> bool {
+        matches!(self, Self::Additive(rgb) if rgb.holds(doc, space))
+    }
+
+    /// The ink of the colour `comps` of `space`, a space of `doc`, on the
+    /// canvas of an additive group whose space is `space`: the complements
+    /// of the components, black and spot ink none (see
+    /// [`unit_complement_ink`]).  `None` for any other separator or space.
+    #[must_use]
+    pub(crate) fn own_ink(
+        &self,
+        doc: &pdf::Document,
+        space: &ColorSpace,
+        comps: &[f64],
+    ) -> Option<[f64; 8]> {
+        if !self.paints_components(doc, space) {
             return None;
-        };
-        let [r, g, b] = rgb.components_of(space, comps)?;
-        Some([1.0 - r, 1.0 - g, 1.0 - b, 0.0, 0.0, 0.0, 0.0, 0.0])
+        }
+        let [c, m, y, k] = unit_complement_ink(comps)?;
+        Some([c, m, y, k, 0.0, 0.0, 0.0, 0.0])
     }
 
     /// The conversion of the colours of `space`, a four-component ICC

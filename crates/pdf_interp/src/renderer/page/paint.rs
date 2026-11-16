@@ -144,7 +144,7 @@ impl PageRenderer<'_> {
         let depth = self.canvas.kind().depth();
         let target = self.colour_target();
         let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, target, comps, depth);
-        if let Some(ink) = self.ink.separator.own_ink(cs, comps) {
+        if let Some(ink) = self.ink.separator.own_ink(doc, cs, comps) {
             return RasterColor::with_ink(srgb(cs), Inks::from_unit(ink), ChannelMask::ALL);
         }
         match cs {
