@@ -72,7 +72,12 @@ fn tables_are_rebased_onto_the_page() {
         .expect("push");
     assert_eq!(page.row_starts(), [0, 2, 3, 3, 5, 6]);
     assert_eq!(page.spans()[3..], [[1, 2, 3], [4, 9, -1], [2, 2, 5]]);
-    let (words, bases) = page.table_words();
+    let (parts, bases) = page.table_parts();
+    let bytes: Vec<u8> = parts.concat();
+    let words: Vec<u32> = bytes
+        .chunks(4)
+        .map(|c| u32::from_le_bytes(c.try_into().expect("whole words")))
+        .collect();
     let base = bases.coverage;
     assert_eq!(base, 18);
     assert_eq!(

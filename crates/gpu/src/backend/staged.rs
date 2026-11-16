@@ -159,12 +159,29 @@ pub(crate) fn stage<'a, B: GpuBackend>(
     slot: &'a mut Option<Staged<B>>,
     bytes: &[u8],
 ) -> Result<&'a mut Staged<B>> {
-    let staged = ensure(backend, slot, bytes.len(), Direction::ToDevice)?;
+    stage_parts(backend, slot, &[bytes])
+}
+
+/// [`stage`] of the concatenation of `parts`, each written in place.
+///
+/// # Errors
+/// As [`stage`].
+pub(crate) fn stage_parts<'a, B: GpuBackend>(
+    backend: &B,
+    slot: &'a mut Option<Staged<B>>,
+    parts: &[&[u8]],
+) -> Result<&'a mut Staged<B>> {
+    let len = parts.iter().map(|p| p.len()).sum();
+    let staged = ensure(backend, slot, len, Direction::ToDevice)?;
     // SAFETY: the slot is borrowed exclusively (`&mut`), and every page
     // that used its buffers was waited on before the call that recorded it
     // returned, whether it succeeded or failed (`run_page`).
     let target = unsafe { host_view_mut(backend, staged) }?;
-    target[..bytes.len()].copy_from_slice(bytes);
+    let mut at = 0;
+    for part in parts {
+        target[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
     Ok(staged)
 }
 

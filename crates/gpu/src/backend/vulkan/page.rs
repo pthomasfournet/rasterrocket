@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant};
 
 use crate::backend::staged::{
-    Direction, Staged, ensure, host_view, record_download, record_upload, stage,
+    Direction, Staged, ensure, host_view, record_download, record_upload, stage_parts,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
 use crate::page::{PageCommands, PageSample, TableBases, TileBins, pack_rgb};
@@ -216,25 +216,29 @@ impl VulkanBackend {
             KernelId::PageRaster
         };
         let bins = page.bin().map_err(BackendError::new)?;
-        let (table, bases) = page.table_words();
+        let (table, bases) = page.table_parts();
         let push = push_constants(page, &bins, bases);
         let page_len = row_bytes * height;
-        let inputs: [(&'static str, &[u8]); 5] = [
-            ("render_page commands", bytemuck::cast_slice(page.cmds())),
-            ("render_page coverage table", bytemuck::cast_slice(&table)),
+        let inputs: [(&'static str, &[&[u8]]); 5] = [
+            ("render_page commands", &[bytemuck::cast_slice(page.cmds())]),
+            ("render_page coverage table", &table),
             (
                 "render_page row offsets",
-                bytemuck::cast_slice(page.row_starts()),
+                &[bytemuck::cast_slice(page.row_starts())],
             ),
             (
                 "render_page tile offsets",
-                bytemuck::cast_slice(&bins.offsets),
+                &[bytemuck::cast_slice(&bins.offsets)],
             ),
-            ("render_page tile items", bytemuck::cast_slice(&bins.items)),
+            (
+                "render_page tile items",
+                &[bytemuck::cast_slice(&bins.items)],
+            ),
         ];
-        for (what, bytes) in inputs {
+        let input_len = |parts: &[&[u8]]| parts.iter().map(|p| p.len()).sum::<usize>();
+        for (what, parts) in inputs {
             self.device
-                .check_storage_range(what, device_size(bytes.len()))?;
+                .check_storage_range(what, device_size(input_len(parts)))?;
         }
         self.device
             .check_storage_range("render_page pixels", device_size(page_len))?;
@@ -255,13 +259,13 @@ impl VulkanBackend {
         };
         let prepare = laps.lap();
         let mut staged = Vec::with_capacity(slots.len());
-        for (slot, (_, bytes)) in slots.iter_mut().zip(inputs) {
-            let bytes = if bytes.is_empty() {
-                &EMPTY_INPUT[..]
+        for (slot, (_, parts)) in slots.iter_mut().zip(inputs) {
+            let parts = if input_len(parts) == 0 {
+                &[&EMPTY_INPUT[..]]
             } else {
-                bytes
+                parts
             };
-            staged.push((stage(self, slot, bytes)?, bytes.len()));
+            staged.push((stage_parts(self, slot, parts)?, input_len(parts)));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
         let write = laps.lap();

@@ -206,7 +206,7 @@ impl From<TryReserveError> for PageCommandsError {
 /// An item is `[command, list_start, list_len, backdrop]`: the command's
 /// index, and for an outline's command the tile's segments
 /// `segment_lists[list_start..][..list_len]` and backdrop
-/// (`u32::MAX` when it is zero), as [`PageCommands::table_words`] lays
+/// (`u32::MAX` when it is zero), as [`PageCommands::table_parts`] lays
 /// them out; a table's command has `[command, 0, 0, u32::MAX]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileBins {
@@ -249,7 +249,7 @@ pub struct PageCommands {
     tile_refs: usize,
 }
 
-/// The layout of [`PageCommands::table_words`]: the index of the first
+/// The layout of [`PageCommands::table_parts`]: the index of the first
 /// word of each array after the spans.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TableBases {
@@ -717,40 +717,35 @@ impl PageCommands {
         &self.cmds
     }
 
-    /// The spans as words, three each; then the coverage bytes packed four
-    /// to a word, little-endian; the outlines' segments, four words each;
-    /// the outline tiles' segment lists; and their backdrops.  With the
-    /// index of the first word of each array after the spans.
-    pub(crate) fn table_words(&self) -> (Vec<u32>, TableBases) {
-        let mut words: Vec<u32> = Vec::with_capacity(
-            self.spans.len() * 3
-                + self.bytes.len().div_ceil(4)
-                + self.segs.len() * 4
-                + self.seg_lists.len()
-                + self.backdrops.len(),
-        );
-        words.extend(self.spans.iter().flat_map(|s| s.map(i32::cast_unsigned)));
-        let at =
-            |words: &Vec<u32>| u32::try_from(words.len()).expect("the push limit bounds the words");
-        let coverage = at(&words);
-        words.extend(self.bytes.chunks(4).map(|c| {
-            let mut w = [0u8; 4];
-            w[..c.len()].copy_from_slice(c);
-            u32::from_le_bytes(w)
-        }));
-        let segs = at(&words);
-        words.extend(self.segs.iter().flat_map(|s| s.map(i32::cast_unsigned)));
-        let seg_lists = at(&words);
-        words.extend_from_slice(&self.seg_lists);
-        let backdrops = at(&words);
-        words.extend(self.backdrops.iter().map(|&b| b.cast_unsigned()));
+    /// The table input as consecutive byte slices, words little-endian:
+    /// the spans, three words each; the coverage bytes, four to a word,
+    /// zero-padded to a whole word; the outlines' segments, four words
+    /// each; the outline tiles' segment lists; and their backdrops.  With
+    /// the index of the first word of each array after the spans.
+    pub(crate) fn table_parts(&self) -> ([&[u8]; 6], TableBases) {
+        const PAD: [u8; 3] = [0; 3];
+        let pad = &PAD[..self.bytes.len().next_multiple_of(4) - self.bytes.len()];
+        let parts: [&[u8]; 6] = [
+            bytemuck::cast_slice(&self.spans),
+            &self.bytes,
+            pad,
+            bytemuck::cast_slice(&self.segs),
+            bytemuck::cast_slice(&self.seg_lists),
+            bytemuck::cast_slice(&self.backdrops),
+        ];
+        let mut words = [0u32; 6];
+        let mut at = 0usize;
+        for (w, part) in words.iter_mut().zip(parts) {
+            *w = u32::try_from(at / 4).expect("the push limit bounds the words");
+            at += part.len();
+        }
         (
-            words,
+            parts,
             TableBases {
-                coverage,
-                segs,
-                seg_lists,
-                backdrops,
+                coverage: words[1],
+                segs: words[3],
+                seg_lists: words[4],
+                backdrops: words[5],
             },
         )
     }
