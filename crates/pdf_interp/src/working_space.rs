@@ -172,12 +172,7 @@ fn srgb_linear() -> &'static Arc<[f32]> {
     TABLE.get_or_init(|| {
         (0..=u16::MAX)
             .map(|v| {
-                let x = f64::from(v) / 65_535.0;
-                let lin = if x <= 0.040_45 {
-                    x / 12.92
-                } else {
-                    ((x + 0.055) / 1.055).powf(2.4)
-                };
+                let lin = crate::resources::icc_shaper::srgb_decode(f64::from(v) / 65_535.0);
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "a linear-light value needs no more than f32 precision"

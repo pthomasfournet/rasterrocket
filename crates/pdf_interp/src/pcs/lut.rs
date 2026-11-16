@@ -88,6 +88,28 @@ impl Curve {
     }
 }
 
+/// The number of values at which [`ProfileLut::input_curves`] samples a
+/// tone curve: 4 097, cells of 16 16-bit levels.
+const TONE_CURVE_SAMPLES: usize = 4097;
+
+impl Curve {
+    /// The curve's values at evenly spaced inputs spanning `[0, 1]`: a
+    /// table's own samples (two or more), else [`TONE_CURVE_SAMPLES`]
+    /// values of [`Self::eval`].
+    fn samples(&self) -> Vec<f64> {
+        match self {
+            Self::Table(t) if t.len() >= 2 => t.iter().map(|v| v.clamp(0.0, 1.0)).collect(),
+            _ => (0..TONE_CURVE_SAMPLES)
+                .map(|j| {
+                    #[expect(clippy::cast_precision_loss, reason = "j < 4097")]
+                    let x = j as f64 / (TONE_CURVE_SAMPLES - 1) as f64;
+                    self.eval(x)
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Linear interpolation in `table`, at least one sample, spanning
 /// `[0, 1]`, at `x ∈ [0, 1]`.
 fn interpolate(table: &[f64], x: f64) -> f64 {
@@ -376,13 +398,76 @@ impl ProfileLut {
         decode(out, self.pcs, self.legacy_lab)
     }
 
+    /// The curves a device → PCS table applies to its inputs before any
+    /// other stage, each as its values at evenly spaced inputs spanning
+    /// `[0, 1]`: a sampled table's own samples, a tone curve's at
+    /// [`TONE_CURVE_SAMPLES`] values.  `None` when the table's first stage
+    /// is not a set of curves, or each curve is the identity within half a
+    /// 16-bit level at its samples.
+    ///
+    /// # Panics
+    ///
+    /// For a table to the device.
+    pub(crate) fn input_curves(&self) -> Option<Vec<Vec<f64>>> {
+        assert_eq!(self.direction, Direction::ToPcs, "a device → PCS table");
+        let Some(Stage::Curves(curves)) = self.stages.first() else {
+            return None;
+        };
+        let samples: Vec<Vec<f64>> = curves.iter().map(Curve::samples).collect();
+        let identity = samples.iter().all(|s| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a curve has far fewer than 2^52 samples"
+            )]
+            let last = (s.len() - 1) as f64;
+            s.iter().enumerate().all(|(j, &v)| {
+                #[expect(clippy::cast_precision_loss, reason = "j < len")]
+                let x = j as f64 / last;
+                (v - x).abs() <= 0.5 / 65535.0
+            })
+        });
+        (!identity).then_some(samples)
+    }
+
+    /// The number of nodes of the table's CLUT along each input, `None`
+    /// for a table without one.
+    pub(crate) fn clut_grid(&self) -> Option<&[usize]> {
+        self.stages.iter().find_map(|stage| match stage {
+            Stage::Clut(clut) => Some(&*clut.grid),
+            _ => None,
+        })
+    }
+
+    /// The media-relative D50 XYZ of the device values whose images under
+    /// [`Self::input_curves`] are `shaped`: the stages after those curves
+    /// applied to `shaped`.
+    ///
+    /// # Panics
+    ///
+    /// For a table to the device or one without input curves.
+    pub(crate) fn to_pcs_shaped(&self, shaped: &[f64]) -> [f64; 3] {
+        assert_eq!(self.direction, Direction::ToPcs, "a device → PCS table");
+        assert!(
+            matches!(self.stages.first(), Some(Stage::Curves(_))),
+            "a table with input curves"
+        );
+        let mut out = [0.0; 3];
+        self.run_from(1, shaped, &mut out);
+        decode(out, self.pcs, self.legacy_lab)
+    }
+
     /// The stages applied to `input` into `out`.
     fn run(&self, input: &[f64], out: &mut [f64]) {
+        self.run_from(0, input, out);
+    }
+
+    /// The stages from the `first`th on applied to `input` into `out`.
+    fn run_from(&self, first: usize, input: &[f64], out: &mut [f64]) {
         let mut a = [0.0f64; 16];
         let mut b = [0.0f64; 16];
         let mut len = input.len();
         a[..len].copy_from_slice(input);
-        for stage in &self.stages {
+        for stage in &self.stages[first..] {
             match stage {
                 Stage::Curves(curves) => {
                     for (v, c) in a.iter_mut().zip(curves) {
@@ -737,5 +822,54 @@ mod tests {
             (out[0] - 0.25f64.mul_add(4.0, 0.5) / 5.0).abs() < 1e-12,
             "{out:?}"
         );
+    }
+
+    /// A device → PCS table of two inputs: `curves`, then the CLUT of
+    /// three nodes along each input whose XYZ is `(x, y, (x + y) / 2)`
+    /// scaled to the PCS encoding.
+    fn two_input_table(curves: Vec<Curve>) -> ProfileLut {
+        let mut nodes = Vec::new();
+        for x in 0..3 {
+            for y in 0..3 {
+                let [x, y] = [x, y].map(|v| f64::from(v) / 2.0);
+                nodes.extend([x, y, f64::midpoint(x, y)].map(|v| v * XYZ_SCALE));
+            }
+        }
+        let clut = Clut::new(vec![3, 3], 3, nodes, false).expect("a whole grid");
+        ProfileLut {
+            direction: Direction::ToPcs,
+            pcs: DataColorSpace::Xyz,
+            legacy_lab: false,
+            stages: vec![Stage::Curves(curves), Stage::Clut(clut)],
+        }
+    }
+
+    /// A table's input curves are its first stage's, a sampled table's
+    /// own samples and a tone curve's at 4 097 values, `None` when each is
+    /// the identity; the stages after them convert the curves' outputs as
+    /// the whole table converts their inputs.
+    #[test]
+    fn the_input_curves_split_from_the_table() {
+        let identity = two_input_table(vec![
+            Curve::Table(vec![0.0, 0.5, 1.0]),
+            Curve::Trc(moxcms::ToneReprCurve::Lut(Vec::new())),
+        ]);
+        assert!(identity.input_curves().is_none());
+        assert_eq!(identity.clut_grid(), Some(&[3, 3][..]));
+        let lut = two_input_table(vec![
+            Curve::Table(vec![0.0, 0.1, 1.0]),
+            Curve::Trc(moxcms::ToneReprCurve::Parametric(vec![2.0])),
+        ]);
+        let curves = lut.input_curves().expect("non-identity curves");
+        assert_eq!(curves[0], [0.0, 0.1, 1.0]);
+        assert_eq!(curves[1].len(), TONE_CURVE_SAMPLES);
+        assert!((curves[1][2048] - 0.25).abs() < 1e-6, "{}", curves[1][2048]);
+        for device in [[0.25, 0.5], [0.7, 0.1], [1.0, 0.0]] {
+            let shaped = [interpolate(&curves[0], device[0]), device[1] * device[1]];
+            let (a, b) = (lut.to_pcs(&device), lut.to_pcs_shaped(&shaped));
+            for (a, b) in a.iter().zip(b) {
+                assert!((a - b).abs() < 1e-6, "{device:?}: {a} {b}");
+            }
+        }
     }
 }

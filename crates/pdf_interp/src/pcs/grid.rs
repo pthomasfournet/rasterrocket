@@ -4,21 +4,47 @@
 use moxcms::{CmsError, TransformExecutor};
 
 /// A conversion of `N` device channels to at most four channels,
-/// tabulated at the `(span + 1)^N` nodes of a grid over the device cube:
-/// the node of indices `(i₀, …, i_{N−1})`, `i₀` slowest, holds the 16-bit
-/// value of the device value `i / span`, padded with zeros to four
-/// channels.
+/// tabulated at the nodes of a grid of `spans[i]` cells along input `i`,
+/// over the device cube or over the image of it under a curve per input
+/// (the shaper): the node of indices `(i₀, …, i_{N−1})`, `i₀` slowest,
+/// holds the 16-bit value of the device value whose shaped value along
+/// input `k` is `i_k / spans[k]`, padded with zeros to four channels.
 pub(crate) struct GridTable<const N: usize> {
-    span: u32,
+    spans: [u32; N],
     channels: usize,
     /// The node stride of each input, zero beyond the `N`th.
     strides: [usize; 8],
+    /// The curve of each input, if any.
+    shaper: Option<Shaper<N>>,
     nodes: Box<[[u16; 4]]>,
 }
 
 impl<const N: usize> GridTable<N> {
     /// The conversion `convert` tabulated on a grid of `span` cells along
-    /// each device axis into `channels` values: `convert` takes the device
+    /// each device axis into `channels` values ([`Self::tabulate_shaped`]
+    /// with no shaper).
+    ///
+    /// # Errors
+    ///
+    /// The first error `convert` returns.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::tabulate_shaped`].
+    pub(crate) fn tabulate<E>(
+        span: u32,
+        channels: usize,
+        convert: impl FnMut(&[f64], &mut [f64]) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        Self::tabulate_shaped([span; N], None, channels, convert)
+    }
+
+    /// The conversion `convert` tabulated on a grid of `spans[i]` cells
+    /// along input `i` into `channels` values.  Without a shaper the grid
+    /// lies over the device cube and `convert` takes device values; with
+    /// one, `shaper[i]` holds the curve of input `i` at evenly spaced
+    /// device values spanning `[0, 1]`, each in `[0, 1]`, the grid lies over
+    /// the curves' outputs and `convert` takes those.  `convert` takes the
     /// values of a run of nodes, `N` values of `[0, 1]` each, and writes
     /// their `channels` values of `[0, 1]`.
     ///
@@ -28,60 +54,61 @@ impl<const N: usize> GridTable<N> {
     ///
     /// # Panics
     ///
-    /// For no input or more than eight, no channel or more than four, or a
-    /// span outside `[1, 65 536]`, beyond which a scaled 16-bit device
-    /// value overflows a `u32`.
-    pub(crate) fn tabulate<E>(
-        span: u32,
+    /// For no input or more than eight, no channel or more than four, a
+    /// span outside `[1, 65 536]`, beyond which a scaled 16-bit value
+    /// overflows a `u32`, or a curve of fewer than two values or more than
+    /// 65 537.
+    pub(crate) fn tabulate_shaped<E>(
+        spans: [u32; N],
+        shaper: Option<[&[f64]; N]>,
         channels: usize,
         mut convert: impl FnMut(&[f64], &mut [f64]) -> Result<(), E>,
     ) -> Result<Self, E> {
         assert!((1..=8).contains(&N), "one to eight inputs");
         assert!((1..=4).contains(&channels), "one to four channels");
-        assert!((1..=65_536).contains(&span), "one to 65 536 cells");
-        let grid = span as usize + 1;
+        assert!(
+            spans.iter().all(|s| (1..=65_536).contains(s)),
+            "one to 65 536 cells"
+        );
+        let shaper = shaper.map(|curves| Shaper::new(curves, spans));
+        let grids = spans.map(|s| s as usize + 1);
         let mut strides = [0usize; 8];
         strides[N - 1] = 1;
         for i in (0..N - 1).rev() {
-            strides[i] = strides[i + 1] * grid;
+            strides[i] = strides[i + 1] * grids[i + 1];
         }
         // One call per node of the slowest axis: a slice of the grid.
         let slice = strides[0];
-        let full = f64::from(span);
         let mut input = Vec::with_capacity(slice * N);
         let mut out = vec![0.0; slice * channels];
-        let mut nodes = Vec::with_capacity(slice * grid);
-        for first in 0..grid {
+        let mut nodes = Vec::with_capacity(slice * grids[0]);
+        for first in 0..grids[0] {
             input.clear();
             for rest in 0..slice {
                 let index = first * slice + rest;
-                input.extend(strides[..N].iter().map(|&stride| {
+                input.extend((0..N).map(|i| {
                     #[expect(
                         clippy::cast_precision_loss,
                         reason = "a node index is below span + 1 ≤ 2^32"
                     )]
-                    let i = (index / stride % grid) as f64;
-                    i / full
+                    let node = (index / strides[i] % grids[i]) as f64;
+                    node / f64::from(spans[i])
                 }));
             }
             convert(&input, &mut out)?;
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "a value clamped to [0, 1] scaled to the u16 range"
-            )]
             nodes.extend(out.chunks_exact(channels).map(|v| {
                 let mut node = [0u16; 4];
                 for (n, &v) in node.iter_mut().zip(v) {
-                    *n = (v.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+                    *n = to_u16(v);
                 }
                 node
             }));
         }
         Ok(Self {
-            span,
+            spans,
             channels,
             strides,
+            shaper,
             nodes: nodes.into_boxed_slice(),
         })
     }
@@ -96,6 +123,12 @@ impl<const N: usize> GridTable<N> {
         assert_eq!(self.channels, M, "a table of {M} channels");
         self.value::<M>(px.map(<u16 as color::Sample>::from_sample))
             .map(S::from_sample)
+    }
+
+    /// Whether the grid lies over the outputs of a shaper.
+    #[cfg(test)]
+    pub(crate) const fn is_shaped(&self) -> bool {
+        self.shaper.is_some()
     }
 
     /// The number of values of a node.
@@ -121,7 +154,11 @@ impl<const N: usize> GridTable<N> {
         let mut base = 0usize;
         let mut key = [0u32; N];
         for (i, (&v, k)) in px.iter().zip(&mut key).enumerate() {
-            let (offset, input) = self.key(i, locate(self.span, v));
+            let cell = self
+                .shaper
+                .as_ref()
+                .map_or_else(|| locate(self.spans[i], v), |shaper| shaper.cell(i, v));
+            let (offset, input) = self.key(i, cell);
             base += offset;
             *k = input;
         }
@@ -129,10 +166,11 @@ impl<const N: usize> GridTable<N> {
         self.interpolate(base, key)
     }
 
-    /// The offset along input `i` of the cell `(cell, frac)` ([`locate`])
-    /// and the input's sort key: its position within the cell above the
-    /// three bits of `i`.  Sorted by key, the inputs are in decreasing
-    /// order of position, those of equal positions by decreasing index.
+    /// The offset along input `i` of the cell `(cell, frac)` of its axis
+    /// ([`locate`], [`Shaper::cell`]) and the input's sort key: its
+    /// position within the cell above the three bits of `i`.  Sorted by
+    /// key, the inputs are in decreasing order of position, those of equal
+    /// positions by decreasing index.
     #[inline]
     const fn key(&self, i: usize, (cell, frac): (u32, u32)) -> (usize, u32) {
         #[expect(clippy::cast_possible_truncation, reason = "i is below N ≤ 8")]
@@ -168,28 +206,70 @@ impl<const N: usize> GridTable<N> {
         std::array::from_fn(|c| ((acc[c] + FULL / 2) / FULL) as u16)
     }
 
+    /// The base node of each pixel of `block` into `base` and its keys
+    /// into `key`, input by input, `key_of` giving the offset and key
+    /// ([`Self::key`]) of the sample of input `i`.
+    #[inline]
+    fn block_keys<S: Copy>(
+        block: &[[S; N]],
+        base: &mut [usize; BLOCK],
+        key: &mut [[u32; BLOCK]; N],
+        key_of: impl Fn(usize, S) -> (usize, u32),
+    ) {
+        for (p, px) in block.iter().enumerate() {
+            let mut b = 0;
+            for (i, &v) in px.iter().enumerate() {
+                let (offset, k) = key_of(i, v);
+                b += offset;
+                key[i][p] = k;
+            }
+            base[p] = b;
+        }
+    }
+
+    /// [`Self::value`] of each pixel of `src`, `N` samples of `S` each,
+    /// into `dst`, `M` samples a pixel ([`Self::run_blocks`]), the values of
+    /// a shaped grid's block shaped first.
+    fn run_into<S: color::Sample, const M: usize>(&self, pixels: &[[S; N]], dst: &mut [S]) {
+        match &self.shaper {
+            Some(shaper) => {
+                let mut cells = [[0u32; N]; BLOCK];
+                self.run_blocks::<S, M>(pixels, dst, |block, base, key| {
+                    for (c, px) in cells.iter_mut().zip(block) {
+                        *c = std::array::from_fn(|i| shaper.packed_sample(i, px[i]));
+                    }
+                    let cells = &cells[..block.len()];
+                    Self::block_keys(cells, base, key, |i, c| self.key(i, (c >> 16, c & 0xffff)));
+                });
+            }
+            None => self.run_blocks::<S, M>(pixels, dst, |block, base, key| {
+                Self::block_keys(block, base, key, |i, v| {
+                    let v = <u16 as color::Sample>::from_sample(v);
+                    self.key(i, locate(self.spans[i], v))
+                });
+            }),
+        }
+    }
+
     /// [`Self::value`] of each pixel of `src`, `N` samples of `S` each,
     /// into `dst`, `M` samples a pixel, a block of [`BLOCK`] pixels at a
-    /// time: the keys of the block's inputs held input by input and sorted
-    /// across the block, each pixel interpolated, a pixel equal to the one
-    /// before it taking its value, then the block's values converted to
-    /// `S`.
-    fn run_into<S: color::Sample, const M: usize>(&self, pixels: &[[S; N]], dst: &mut [S]) {
+    /// time: the block's base nodes and keys, input by input, from
+    /// `keys` ([`Self::block_keys`]), the keys sorted across the block,
+    /// each pixel interpolated, a pixel equal to the one before it taking
+    /// its value, then the block's values converted to `S`.
+    #[inline]
+    fn run_blocks<S: color::Sample, const M: usize>(
+        &self,
+        pixels: &[[S; N]],
+        dst: &mut [S],
+        mut keys: impl FnMut(&[[S; N]], &mut [usize; BLOCK], &mut [[u32; BLOCK]; N]),
+    ) {
         let mut base = [0usize; BLOCK];
         let mut key = [[0u32; BLOCK]; N];
         let mut value = [[0u16; M]; BLOCK];
         let mut last: Option<([S; N], [u16; M])> = None;
         for (block, out) in pixels.chunks(BLOCK).zip(dst.chunks_mut(BLOCK * M)) {
-            for (p, px) in block.iter().enumerate() {
-                let mut b = 0;
-                for (i, &v) in px.iter().enumerate() {
-                    let cell = locate(self.span, <u16 as color::Sample>::from_sample(v));
-                    let (offset, k) = self.key(i, cell);
-                    b += offset;
-                    key[i][p] = k;
-                }
-                base[p] = b;
-            }
+            keys(block, &mut base, &mut key);
             sort_block_decreasing(&mut key);
             for (p, (px, v)) in block.iter().zip(&mut value).enumerate() {
                 *v = match last {
@@ -228,7 +308,7 @@ impl<const N: usize> GridTable<N> {
 }
 
 /// The index of the cell of a grid of `span` cells holding the 16-bit
-/// device value `v` along one input, and the position of `v` within it in
+/// value `v` along one input, and the position of `v` within it in
 /// `[0, 65 535]`.
 #[inline]
 const fn locate(span: u32, v: u16) -> (u32, u32) {
@@ -237,6 +317,108 @@ const fn locate(span: u32, v: u16) -> (u32, u32) {
     let cell = scaled / FULL;
     let cell = if cell < span - 1 { cell } else { span - 1 };
     (cell, scaled - cell * FULL)
+}
+
+/// The curve of each input of a shaped grid, tabulated at every 16-bit
+/// value as the cell of the grid its output lies in: the cell's index
+/// above 16 bits, the position within it in `[0, 65 535]` below, found
+/// from the curve's output in floating point, so a curve that flattens
+/// keeps the resolution of its input.
+struct Shaper<const N: usize> {
+    /// The cell of input `i` at the 16-bit value `v` at `i · 2¹⁶ + v`.
+    cells: Box<[u32]>,
+    /// The cell of input `i` at the 8-bit value `v` (the 16-bit `257 · v`)
+    /// at `256 · i + v`.
+    bytes: Box<[u32]>,
+}
+
+impl<const N: usize> Shaper<N> {
+    /// The shaper of the curves `curves`, each of values in `[0, 1]` at
+    /// evenly spaced inputs spanning `[0, 1]`, interpolated linearly, onto
+    /// a grid of `spans[i]` cells along input `i`.
+    ///
+    /// # Panics
+    ///
+    /// For a curve of fewer than two values or more than 65 537.
+    fn new(curves: [&[f64]; N], spans: [u32; N]) -> Self {
+        let mut cells = Vec::with_capacity(N << 16);
+        for (curve, span) in curves.iter().zip(spans) {
+            assert!(
+                (2..=65_537).contains(&curve.len()),
+                "two to 65 537 curve values"
+            );
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a curve holds at most 65 537 values"
+            )]
+            let last = (curve.len() - 1) as f64;
+            cells.extend((0..=u16::MAX).map(|v| {
+                let pos = f64::from(v) / f64::from(u16::MAX) * last;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "pos lies in [0, len - 1]"
+                )]
+                let lo = (pos as usize).min(curve.len() - 2);
+                #[expect(clippy::cast_precision_loss, reason = "lo < 65 537")]
+                let f = pos - lo as f64;
+                let u = f
+                    .mul_add(curve[lo + 1] - curve[lo], curve[lo])
+                    .clamp(0.0, 1.0);
+                let pos = u * f64::from(span);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "pos lies in [0, span] and span ≤ 65 536"
+                )]
+                let cell = (pos as u32).min(span - 1);
+                let frac = to_u16(pos - f64::from(cell));
+                cell << 16 | u32::from(frac)
+            }));
+        }
+        let bytes = (0..N)
+            .flat_map(|i| (0..256).map(move |v| (i << 16) | (v * 257)))
+            .map(|at| cells[at])
+            .collect();
+        Self {
+            cells: cells.into_boxed_slice(),
+            bytes,
+        }
+    }
+
+    /// The cell `(cell, frac)` of input `i` at the 16-bit value `v`.
+    #[inline]
+    fn cell(&self, i: usize, v: u16) -> (u32, u32) {
+        let c = self.cells[i << 16 | usize::from(v)];
+        (c >> 16, c & 0xffff)
+    }
+
+    /// The packed cell of input `i` at the sample `v`.
+    #[inline]
+    fn packed_sample<S: color::Sample>(&self, i: usize, v: S) -> u32 {
+        if S::BITS == 8 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "an 8-bit sample lies in [0, 255]"
+            )]
+            let v = v.signed() as usize;
+            self.bytes[i << 8 | v]
+        } else {
+            self.cells[i << 16 | usize::from(<u16 as color::Sample>::from_sample(v))]
+        }
+    }
+}
+
+/// `v` clamped to `[0, 1]` and scaled to the nearest 16-bit value.
+fn to_u16(v: f64) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a value clamped to [0, 1] scaled to the u16 range"
+    )]
+    let v = (v.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+    v
 }
 
 /// The number of pixels [`GridTable::run_into`] converts at a time.
@@ -285,7 +467,8 @@ impl<const N: usize> std::fmt::Debug for GridTable<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GridTable")
             .field("inputs", &N)
-            .field("span", &self.span)
+            .field("spans", &self.spans)
+            .field("shaped", &self.shaper.is_some())
             .field("channels", &self.channels)
             .finish_non_exhaustive()
     }
@@ -381,38 +564,96 @@ mod tests {
         assert!(table.transform(&[0u8; 4], &mut [0u8; 3]).is_err());
     }
 
+    /// The square of each input, at 257 values.
+    fn squares() -> Vec<f64> {
+        (0..=256).map(|i| (f64::from(i) / 256.0).powi(2)).collect()
+    }
+
     /// A run of pixels converts, block by block, to each pixel's own
     /// value at either depth, repeated pixels and the last partial block
-    /// included.
+    /// included, through a grid over the device cube and a shaped one of
+    /// uneven spans alike.
     #[test]
     fn a_run_converts_each_pixel_to_its_value() {
-        let table = GridTable::<4>::tabulate(16, 3, |i, o| {
+        let square = squares();
+        let unit = |i: &[f64], o: &mut [f64]| {
             convert(i, o);
+            Ok::<(), std::convert::Infallible>(())
+        };
+        let plain = GridTable::<4>::tabulate(16, 3, unit).unwrap();
+        let shaped =
+            GridTable::<4>::tabulate_shaped([20, 15, 16, 7], Some([&*square; 4]), 3, unit).unwrap();
+        for table in [plain, shaped] {
+            let mut state = 0x9e37_79b9u32;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state
+            };
+            let mut src: Vec<u16> = (0..4 * 150).map(|_| (next() & 0xffff) as u16).collect();
+            src.copy_within(0..4, 4);
+            src.copy_within(4 * 63..4 * 64, 4 * 64);
+            let mut dst = vec![0u16; 3 * 150];
+            TransformExecutor::<u16>::transform(&table, &src, &mut dst).unwrap();
+            let bytes: Vec<u8> = src.iter().map(|&v| (v >> 8) as u8).collect();
+            let mut dst8 = vec![0u8; 3 * 150];
+            TransformExecutor::<u8>::transform(&table, &bytes, &mut dst8).unwrap();
+            for p in 0..150 {
+                let px: [u16; 4] = src[4 * p..4 * p + 4].try_into().unwrap();
+                let want: [u16; 3] = table.value(px);
+                assert_eq!(dst[3 * p..3 * p + 3], want, "{table:?} pixel {p}");
+                let px8: [u8; 4] = bytes[4 * p..4 * p + 4].try_into().unwrap();
+                let want8: [u8; 3] = table.convert(px8);
+                assert_eq!(dst8[3 * p..3 * p + 3], want8, "{table:?} byte pixel {p}");
+            }
+        }
+    }
+
+    /// A grid over the outputs of its shaper interpolates a conversion
+    /// linear in those outputs within two levels wherever the inputs lie,
+    /// along uneven spans, where a grid over the device cube misses by
+    /// the curves' bend within its cells.
+    #[test]
+    fn a_shaped_grid_interpolates_over_the_curves() {
+        let square = squares();
+        // Linear in each input: reproduced by any simplex of any grid.
+        let linear = |u: &[f64], o: &mut [f64]| {
+            for (px, o) in u.as_chunks::<4>().0.iter().zip(o.as_chunks_mut::<3>().0) {
+                *o = [px[0], f64::midpoint(px[1], px[2]), px[3]];
+            }
+        };
+        let shaped =
+            GridTable::<4>::tabulate_shaped([3, 5, 7, 2], Some([&*square; 4]), 3, |u, o| {
+                linear(u, o);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+        let plain = GridTable::<4>::tabulate(4, 3, |x, o| {
+            let u: Vec<f64> = x.iter().map(|v| v * v).collect();
+            linear(&u, o);
             Ok::<(), std::convert::Infallible>(())
         })
         .unwrap();
-        let mut state = 0x9e37_79b9u32;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state
-        };
-        let mut src: Vec<u16> = (0..4 * 150).map(|_| (next() & 0xffff) as u16).collect();
-        src.copy_within(0..4, 4);
-        src.copy_within(4 * 63..4 * 64, 4 * 64);
-        let mut dst = vec![0u16; 3 * 150];
-        TransformExecutor::<u16>::transform(&table, &src, &mut dst).unwrap();
-        let bytes: Vec<u8> = src.iter().map(|&v| (v >> 8) as u8).collect();
-        let mut dst8 = vec![0u8; 3 * 150];
-        TransformExecutor::<u8>::transform(&table, &bytes, &mut dst8).unwrap();
-        for p in 0..150 {
-            let px: [u16; 4] = src[4 * p..4 * p + 4].try_into().unwrap();
-            let want: [u16; 3] = table.value(px);
-            assert_eq!(dst[3 * p..3 * p + 3], want, "pixel {p}");
-            let px8: [u8; 4] = bytes[4 * p..4 * p + 4].try_into().unwrap();
-            let want8: [u8; 3] = table.convert(px8);
-            assert_eq!(dst8[3 * p..3 * p + 3], want8, "byte pixel {p}");
+        let mut worst = 0.0f64;
+        for px in [
+            [1000u16, 20_000, 33_333, 65_535],
+            [65_000, 0, 7, 40_000],
+            [12_345; 4],
+        ] {
+            let x = px.map(|v| f64::from(v) / 65535.0);
+            let mut want = [0.0; 3];
+            linear(&x.map(|v| v * v), &mut want);
+            let got: [u16; 3] = shaped.value(px);
+            let plain: [u16; 3] = plain.value(px);
+            for ((g, p), w) in got.iter().zip(plain).zip(want) {
+                assert!(
+                    w.mul_add(-65535.0, f64::from(*g)).abs() <= 2.0,
+                    "{px:?}: {got:?} for {want:?}"
+                );
+                worst = worst.max(w.mul_add(-65535.0, f64::from(p)).abs());
+            }
         }
+        assert!(worst > 500.0, "the device grid misses by {worst}");
     }
 }

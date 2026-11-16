@@ -71,8 +71,8 @@ const CMYK_TABLES: Bounds = Bounds {
 /// on [`k_ramp`] and on the lattice of 9 levels offset by half a step,
 /// `(i + 1/2) / 9` along each ink.
 const CMYK_OFF_NODE: Bounds = Bounds {
-    eight: 2.0,
-    sixteen: 1.75,
+    eight: 1.25,
+    sixteen: 1.1,
 };
 
 /// The path of the test profile `name` of `tests/fixtures/icc`.

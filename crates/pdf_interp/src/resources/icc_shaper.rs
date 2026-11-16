@@ -136,6 +136,17 @@ pub(crate) fn srgb_encode(c: f64) -> f64 {
     }
 }
 
+/// sRGB → linear decoding per IEC 61966-2-1, the inverse of
+/// [`srgb_encode`] on `[0, 1]`, input clamped to it.
+pub(crate) fn srgb_decode(v: f64) -> f64 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// `v ∈ [0, 1]` to the nearest 8-bit level.
 #[expect(
     clippy::cast_possible_truncation,
