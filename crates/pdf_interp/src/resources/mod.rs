@@ -28,7 +28,7 @@ pub(crate) mod shading;
 pub(crate) mod tiling;
 pub(crate) mod transfer;
 
-use pdf::{Dictionary, Document, Object, ObjectId};
+use pdf::{Dictionary, Document, Object};
 
 pub use colorspace::{ColorSpace, GroupSpace, RgbGroupSpace};
 pub(crate) use ext_gstate::parse_blend_mode;
@@ -43,7 +43,7 @@ pub use image::{
     DecodedImage, IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
     ImageResolution, ImageTints, SoftMask, TintData, resolve_image,
 };
-pub use page_resources::{PageResources, ResourceIdentity, ResourceKey};
+pub use page_resources::{FormXObject, PageResources, ResourceIdentity, ResourceKey};
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
 #[non_exhaustive]
@@ -57,44 +57,6 @@ pub struct ShadingPattern {
     /// the pattern's parent content stream: pattern space to device space,
     /// before the device y-flip.
     pub matrix: [f64; 6],
-}
-
-/// Parsed Form `XObject` — content bytes and the CTM matrix to apply.
-///
-/// The `resources_id` is the `ObjectId` of the form stream itself; callers
-/// construct a child [`PageResources`] from it via [`PageResources::for_form`].
-#[non_exhaustive]
-pub struct FormXObject {
-    /// Decoded content bytes of the form's content stream.
-    pub content: Vec<u8>,
-    /// Optional form Matrix `[a b c d e f]` (default: identity).
-    pub matrix: [f64; 6],
-    /// Form bounding box in form space `[llx, lly, urx, ury]`, which clips
-    /// the form's content and bounds its transparency group; `None` when
-    /// absent or malformed.
-    pub bbox: Option<[f64; 4]>,
-    /// The object ID of the form stream, used to build a child `PageResources`.
-    pub resources_id: ObjectId,
-    /// True if the form has its own `Resources` dict; false means it inherits
-    /// from the parent context (the caller should keep the parent resources).
-    pub has_own_resources: bool,
-    /// Transparency group parameters, present when `Group /S /Transparency` is set.
-    pub transparency: Option<TransparencyGroupParams>,
-}
-
-impl FormXObject {
-    /// The form's dictionary entries, with no content.
-    #[must_use]
-    pub const fn without_content(&self) -> Self {
-        Self {
-            content: Vec::new(),
-            matrix: self.matrix,
-            bbox: self.bbox,
-            resources_id: self.resources_id,
-            has_own_resources: self.has_own_resources,
-            transparency: self.transparency,
-        }
-    }
 }
 
 /// The attributes of a transparency group dictionary (PDF §11.6.6), of a
