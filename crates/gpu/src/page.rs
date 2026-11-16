@@ -24,67 +24,23 @@ use std::fmt;
 use bytemuck::{Pod, Zeroable};
 use color::{Sample, SampleDepth};
 
+mod bins;
+mod budget;
 mod mask;
 mod path;
 #[doc(hidden)]
 pub mod reference;
 mod runs;
+mod table;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use bins::TileBins;
+use budget::{Counts, index};
 pub use mask::{MaskBits, MaskId};
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
-use path::{Backdrop, NO_BACKDROP, PathTile, bin_path};
-
-/// A region's coverage, row by row, as the page raster reads it.
-///
-/// The pixels `x0..=x1` of a span `[x0, x1, offset]` on row `y_min + i` are
-/// covered fully when `offset` is −1, else by `bytes[offset + (x − x0)]`;
-/// the spans of row `y_min + i` are `spans[row_starts[i]..row_starts[i +
-/// 1]]`.  Pixels in no span are uncovered.
-#[derive(Clone, Copy, Debug)]
-pub struct CoverageRows<'a> {
-    /// The row of `row_starts[0]`.
-    pub y_min: i32,
-    /// `n_rows + 1` offsets into `spans`.
-    pub row_starts: &'a [u32],
-    /// The spans, sorted by `x0` within each row.
-    pub spans: &'a [[i32; 3]],
-    /// The coverage bytes of the partial spans.
-    pub bytes: &'a [u8],
-}
-
-impl CoverageRows<'_> {
-    /// Rows the table holds.
-    #[must_use]
-    pub const fn n_rows(&self) -> usize {
-        self.row_starts.len().saturating_sub(1)
-    }
-
-    /// Whether every offset lies within its array: `row_starts` ascends
-    /// from 0 to at most `spans.len()`, and each partial span's bytes lie
-    /// in `bytes`.
-    #[must_use]
-    pub fn is_well_formed(&self) -> bool {
-        let rows_ok = self.row_starts.first().is_none_or(|&s| s == 0)
-            && self.row_starts.windows(2).all(|w| w[0] <= w[1])
-            && self
-                .row_starts
-                .last()
-                .is_none_or(|&e| e as usize <= self.spans.len());
-        let span_ok = |&[x0, x1, offset]: &[i32; 3]| {
-            let len = usize::try_from(i64::from(x1) - i64::from(x0) + 1).ok();
-            x0 <= x1
-                && (offset == -1
-                    || usize::try_from(offset)
-                        .ok()
-                        .zip(len)
-                        .and_then(|(o, len)| o.checked_add(len))
-                        .is_some_and(|end| end <= self.bytes.len()))
-        };
-        rows_ok && self.spans.iter().all(span_ok)
-    }
-}
+use path::{Backdrop, PathTile, bin_path};
+pub use table::CoverageRows;
 
 /// Side of a binning tile in pixels; equals the raster workgroup's side.
 pub const PAGE_TILE: u32 = 16;
@@ -158,7 +114,7 @@ impl PixelBounds {
 
     /// The number of [`PAGE_TILE`] tiles the rectangle touches, for
     /// `0 <= x0 <= x1` and `0 <= y0 <= y1`.
-    fn tiles(self) -> usize {
+    pub(super) fn tiles(self) -> usize {
         let tile = |v: i32| v.unsigned_abs() as usize / PAGE_TILE as usize;
         (tile(self.x1) - tile(self.x0) + 1) * (tile(self.y1) - tile(self.y0) + 1)
     }
@@ -208,29 +164,6 @@ impl From<TryReserveError> for PageCommandsError {
     fn from(e: TryReserveError) -> Self {
         Self::Alloc(e)
     }
-}
-
-/// The tile lists of a page: tile `t` (row-major over `tiles_x` columns)
-/// paints `items[offsets[t]..offsets[t + 1]]` in order.
-///
-/// An item is `[command, list, len, backdrop]`: the command's index, and
-/// for an outline's command the tile's segments and backdrop, as
-/// [`PageCommands::table_parts`] lays them out.  The low 14 bits of `len`
-/// count the segments: the one segment of index `list` when it is 1, else
-/// `segment_lists[list..][..len]`.  With bit 31 of `len` set, `backdrop`
-/// is the two's-complement cover of every row of the tile; otherwise it
-/// indexes the backdrops, `u32::MAX` standing for zero.  A table's command
-/// has `[command, 0, 0, u32::MAX]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileBins {
-    /// Tile columns.
-    pub tiles_x: u32,
-    /// Tile rows.
-    pub tiles_y: u32,
-    /// `tiles_x × tiles_y + 1` offsets into `items`.
-    pub offsets: Vec<u32>,
-    /// The items, grouped by tile, in paint order within a tile.
-    pub items: Vec<[u32; 4]>,
 }
 
 /// A page's paint commands and the coverage tables they read.
@@ -311,47 +244,6 @@ pub(crate) fn pack_rgb([r, g, b]: [u16; 3]) -> [u32; 2] {
     [u32::from(r) | u32::from(g) << 16, u32::from(b)]
 }
 
-/// `v` as a `u32` element index.
-fn index(v: usize) -> Result<u32, PageCommandsError> {
-    u32::try_from(v).map_err(|_| PageCommandsError::TooLarge)
-}
-
-/// Counts of the elements of a page's device inputs.
-#[derive(Clone, Copy, Default)]
-struct Counts {
-    cmds: usize,
-    spans: usize,
-    coverage: usize,
-    row_starts: usize,
-    /// Tile references, four words each.
-    tile_refs: usize,
-    /// Of a change only: the tile references it hides, which
-    /// [`PageCommands::bin`] leaves out.
-    hidden_refs: usize,
-    segs: usize,
-    seg_lists: usize,
-    backdrops: usize,
-}
-
-impl Counts {
-    /// The bytes of device inputs holding these elements and `tiles + 1`
-    /// tile offsets, saturating.  The coverage bytes are packed four to a
-    /// word.
-    const fn bytes(self, tiles: usize) -> usize {
-        let words = (self.coverage.saturating_add(3) / 4)
-            .saturating_add(self.row_starts)
-            .saturating_add(tiles.saturating_add(1))
-            .saturating_add(self.tile_refs.saturating_mul(4))
-            .saturating_add(self.segs.saturating_mul(4))
-            .saturating_add(self.seg_lists)
-            .saturating_add(self.backdrops);
-        size_of::<PageCmd>()
-            .saturating_mul(self.cmds)
-            .saturating_add(size_of::<[i32; 3]>().saturating_mul(self.spans))
-            .saturating_add(size_of::<u32>().saturating_mul(words))
-    }
-}
-
 impl PageCommands {
     /// An empty page of `width × height` pixels of `depth`, every pixel
     /// `paper`.
@@ -421,49 +313,12 @@ impl PageCommands {
     }
 
     /// Number of tiles of the page's binning grid.
-    const fn tile_count(&self) -> usize {
+    pub(super) const fn tile_count(&self) -> usize {
         self.width.div_ceil(PAGE_TILE) as usize * self.height.div_ceil(PAGE_TILE) as usize
     }
 
-    /// Bytes of the page's device inputs: the commands, their tables and
-    /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`].
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.bytes_with(Counts {
-            cmds: 0,
-            spans: 0,
-            coverage: 0,
-            row_starts: 0,
-            tile_refs: 0,
-            hidden_refs: 0,
-            segs: 0,
-            seg_lists: 0,
-            backdrops: 0,
-        })
-    }
-
-    /// Bytes the page's device inputs would take with `more` more elements;
-    /// `more.hidden_refs` of the tile references are taken away.
-    const fn bytes_with(&self, more: Counts) -> usize {
-        Counts {
-            cmds: self.cmds.len().saturating_add(more.cmds),
-            spans: self.spans.len().saturating_add(more.spans),
-            coverage: self.bytes.len().saturating_add(more.coverage),
-            row_starts: self.row_starts.len().saturating_add(more.row_starts),
-            tile_refs: self
-                .tile_refs
-                .saturating_add(more.tile_refs)
-                .saturating_sub(more.hidden_refs),
-            hidden_refs: 0,
-            segs: self.segs.len().saturating_add(more.segs),
-            seg_lists: self.seg_lists.len().saturating_add(more.seg_lists),
-            backdrops: self.backdrops.len().saturating_add(more.backdrops),
-        }
-        .bytes(self.tile_count())
-    }
-
     /// The page's pixels as bounds, or `None` for a page without pixels.
-    fn page_bounds(&self) -> Result<Option<PixelBounds>, PageCommandsError> {
+    pub(super) fn page_bounds(&self) -> Result<Option<PixelBounds>, PageCommandsError> {
         let extent = |v: u32| i32::try_from(v).map_err(|_| PageCommandsError::TooLarge);
         let (w, h) = (extent(self.width)?, extent(self.height)?);
         Ok((w > 0 && h > 0).then_some(PixelBounds {
@@ -472,94 +327,6 @@ impl PageCommands {
             x1: w - 1,
             y1: h - 1,
         }))
-    }
-
-    /// Paint `rgb` at constant alpha `a_input` with the coverage `table`
-    /// gives, as the shape, over the pixels of `bounds` that lie on the
-    /// page.  Nothing is pushed when none does.
-    ///
-    /// # Errors
-    ///
-    /// [`PageCommandsError`] when the command would take the page past
-    /// [`PAGE_COMMANDS_MAX_BYTES`] or its memory cannot be reserved; the
-    /// page is unchanged then.
-    ///
-    /// # Panics
-    ///
-    /// When the table is malformed ([`CoverageRows::is_well_formed`]), or a
-    /// sample of `rgb` or `a_input` exceeds the page's depth.
-    pub fn push_coverage(
-        &mut self,
-        table: CoverageRows<'_>,
-        bounds: PixelBounds,
-        rgb: [u16; 3],
-        a_input: u16,
-    ) -> Result<(), PageCommandsError> {
-        assert!(
-            table.is_well_formed(),
-            "push_coverage: malformed coverage table"
-        );
-        let max = self.depth.max_sample();
-        assert!(
-            rgb.iter().all(|&v| v <= max) && a_input <= max,
-            "push_coverage: colour {rgb:?} or alpha {a_input} exceeds {} bits",
-            self.depth.bits()
-        );
-        let Some(bounds) = self.page_bounds()?.and_then(|p| p.intersect(bounds)) else {
-            return Ok(());
-        };
-        let tile_refs = bounds.tiles();
-        let (n_spans, n_bytes, n_rows) =
-            (table.spans.len(), table.bytes.len(), table.row_starts.len());
-        let more = Counts {
-            cmds: 1,
-            spans: n_spans,
-            coverage: n_bytes,
-            row_starts: n_rows,
-            tile_refs,
-            ..Counts::default()
-        };
-        if self.bytes_with(more) > PAGE_COMMANDS_MAX_BYTES {
-            return Err(PageCommandsError::TooLarge);
-        }
-        let span_base = index(self.spans.len())?;
-        index(self.spans.len() + n_spans).map(drop)?;
-        i32::try_from(self.bytes.len() + n_bytes)
-            .map(drop)
-            .map_err(|_| PageCommandsError::TooLarge)?;
-        let byte_base = i32::try_from(self.bytes.len()).map_err(|_| PageCommandsError::TooLarge)?;
-        let row_base = index(self.row_starts.len())?;
-        let n_table_rows = index(table.n_rows())?;
-        self.cmds.try_reserve(1)?;
-        self.spans.try_reserve(n_spans)?;
-        self.bytes.try_reserve(n_bytes)?;
-        self.row_starts.try_reserve(n_rows)?;
-        self.reserve_live()?;
-        self.spans.extend(
-            table.spans.iter().map(|&[x0, x1, offset]| {
-                [x0, x1, if offset < 0 { -1 } else { offset + byte_base }]
-            }),
-        );
-        self.bytes.extend_from_slice(table.bytes);
-        self.row_starts
-            .extend(table.row_starts.iter().map(|&s| s + span_base));
-        self.count_rect(bounds);
-        let [rg, b] = pack_rgb(rgb);
-        self.cmds.push(PageCmd {
-            kind: KIND_TABLE,
-            rg,
-            b,
-            a_input: u32::from(a_input),
-            table_y0: table.y_min,
-            n_rows: n_table_rows,
-            row_base,
-            x0: bounds.x0,
-            y0: bounds.y0,
-            x1: bounds.x1,
-            y1: bounds.y1,
-            ..PageCmd::default()
-        });
-        Ok(())
     }
 
     /// Paint `rgb` at constant alpha `a_input` with the coverage of `path`
@@ -674,107 +441,6 @@ impl PageCommands {
             ..PageCmd::default()
         });
         Ok(())
-    }
-
-    /// Count one more item in every tile `bounds` touches, `bounds` on the
-    /// page, its per-tile counts allocated.
-    fn count_rect(&mut self, bounds: PixelBounds) {
-        self.tile_refs += bounds.tiles();
-        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
-        let tile = |v: i32| v.unsigned_abs() as usize / PAGE_TILE as usize;
-        for ty in tile(bounds.y0)..=tile(bounds.y1) {
-            for live in &mut self.live[ty * tiles_x..][tile(bounds.x0)..=tile(bounds.x1)] {
-                *live += 1;
-            }
-        }
-    }
-
-    /// Allocate the per-tile item counts on the first push.
-    fn reserve_live(&mut self) -> Result<(), PageCommandsError> {
-        if self.live.is_empty() {
-            let n = self.tile_count();
-            self.live.try_reserve_exact(n)?;
-            self.live.resize(n, 0);
-        }
-        Ok(())
-    }
-
-    /// Call `f(tile, item, occludes)` for every tile each command paints,
-    /// in paint order, with `item` as in [`TileBins::items`] and
-    /// `occludes` whether it hides the items before it in the tile.
-    fn for_each_item(&self, mut f: impl FnMut(usize, [u32; 4], bool)) {
-        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
-        let tile = |v: i32| usize::try_from(v).unwrap_or(0) / PAGE_TILE as usize;
-        for (c, i) in self.cmds.iter().zip(0u32..) {
-            if c.kind == KIND_PATH {
-                for t in &self.path_tiles[c.row_base as usize..][..c.n_rows as usize] {
-                    let (flag, backdrop) = t.backdrop.item_words();
-                    let item = [i, t.list, t.list_len | flag, backdrop];
-                    f(t.tile as usize, item, t.occludes);
-                }
-                continue;
-            }
-            for ty in tile(c.y0)..=tile(c.y1) {
-                for tx in tile(c.x0)..=tile(c.x1) {
-                    f(ty * tiles_x + tx, [i, 0, 0, NO_BACKDROP], false);
-                }
-            }
-        }
-    }
-
-    /// The commands' tile lists, built on the host: each command is listed,
-    /// in paint order, in every tile its bounds touch, and an outline's
-    /// command in every tile it may cover; the items a later item of the
-    /// tile hides are left out: an outline at full alpha and weight that
-    /// lists no segment in the tile and covers every pixel of it on the
-    /// page fully paints them in its colour, whatever lay below.
-    ///
-    /// # Errors
-    ///
-    /// [`PageCommandsError`] when the lists' memory cannot be reserved, or
-    /// they outnumber `u32` indices (which the push limit precludes).
-    pub fn bin(&self) -> Result<TileBins, PageCommandsError> {
-        let tiles_x = self.width.div_ceil(PAGE_TILE);
-        let tiles_y = self.height.div_ceil(PAGE_TILE);
-        let n_tiles = self.tile_count();
-        index(self.tile_refs).map(drop)?;
-        // Per tile: the items seen so far, and the index of the last one
-        // that hides those before it.
-        let mut seen = Vec::new();
-        seen.try_reserve_exact(n_tiles)?;
-        seen.resize(n_tiles, 0u32);
-        let mut first = seen.clone();
-        self.for_each_item(|t, _, occludes| {
-            if occludes {
-                first[t] = seen[t];
-            }
-            seen[t] += 1;
-        });
-        let mut offsets = Vec::new();
-        offsets.try_reserve_exact(n_tiles + 1)?;
-        offsets.resize(n_tiles + 1, 0u32);
-        for t in 0..n_tiles {
-            offsets[t + 1] = offsets[t] + seen[t] - first[t];
-        }
-        let n_items = offsets[n_tiles] as usize;
-        let mut cursor = offsets.clone();
-        let mut items = Vec::new();
-        items.try_reserve_exact(n_items)?;
-        items.resize(n_items, [0u32; 4]);
-        seen.fill(0);
-        self.for_each_item(|t, item, _| {
-            if seen[t] >= first[t] {
-                items[cursor[t] as usize] = item;
-                cursor[t] += 1;
-            }
-            seen[t] += 1;
-        });
-        Ok(TileBins {
-            tiles_x,
-            tiles_y,
-            offsets,
-            items,
-        })
     }
 
     /// The commands as the kernel reads them.
