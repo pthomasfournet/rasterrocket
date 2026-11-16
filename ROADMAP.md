@@ -3507,6 +3507,17 @@ converts out of.
   GRAY_SHIFT, gray_at}`, `color::cmyk::device_gray_at` and
   `raster::transparency::begin_group_converted` are new.
 
+**Unreleased on master: a folded patch shows its larger parameters.** Where a
+Coons or tensor patch surface folds over itself, the point painted is the one
+with the largest `v`, then the largest `u` (ISO 32000 §8.7.4.5.7); the
+tessellation emitted its sub-patches in depth-first order, which let the
+smallest parameters win. Sub-patches are now emitted by their parameter
+origin, `v` then `u`. Patches whose sides loop from a shared corner keep
+painting their surface, as the spec defines a patch; both references fill
+the region the boundary encloses instead, so pdfium's `shade-tensor` is
+registered as a divergence (RMSE 29.4, tile 97.8). A patch that does not fold
+covers the same pixels as before.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
