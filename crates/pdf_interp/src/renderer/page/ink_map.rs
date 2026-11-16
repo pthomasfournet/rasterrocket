@@ -249,16 +249,26 @@ impl InkMap {
     /// taking their slots.  Those of `DeviceCMYK` paint their components as
     /// process ink, and so do those of a four-component ICC space unless
     /// the separator reproduces such a colour from its profile
-    /// ([`Separator::reproduces_process_colour`]).
-    pub(super) fn plan(&mut self, doc: &Document, space: &ColorSpace) -> Option<ColorantPlan> {
+    /// ([`Separator::reproduces_process_colour`]); `separator`, the paint's,
+    /// converts them to the ink of an output profile that is not theirs
+    /// ([`Separator::cmyk_link`]).
+    pub(super) fn plan(
+        &mut self,
+        doc: &Document,
+        space: &ColorSpace,
+        separator: &Separator,
+    ) -> Option<ColorantPlan> {
         match space {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
                 Some(self.colorant_plan(doc, space))
             }
             ColorSpace::DeviceCmyk => Some(process_plan()),
-            ColorSpace::IccBased { n: 4, .. } => {
-                (!self.separator.reproduces_process_colour()).then(process_plan)
-            }
+            ColorSpace::IccBased { n: 4, .. } => (!self.separator.reproduces_process_colour())
+                .then(|| {
+                    separator
+                        .cmyk_link(doc, space)
+                        .map_or_else(process_plan, ColorantPlan::Linked)
+                }),
             _ => None,
         }
     }

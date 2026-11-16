@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use color::SampleDepth;
+use color::{Sample as _, SampleDepth};
 
 use raster::{
     eo_fill, fill, fill_area,
@@ -146,14 +146,19 @@ impl PageRenderer<'_> {
             // A four-component ICC space is a process CMYK space.  On the
             // preview's ink canvas its ink is the process ink printing the
             // profile's colour, with the components' zeros; on a canvas
-            // finished as CMYK, the components (see
+            // finished as CMYK, the components, converted to the ink of an
+            // output profile that is not the space's (see
             // `ColorSpace::process_ink`).
             ColorSpace::IccBased { n: 4, .. } => match comps {
                 &[c, m, y, k] => {
                     let rgb = srgb(cs);
                     let cmyk = [c, m, y, k];
                     if !self.ink.separator.reproduces_process_colour() {
-                        return RasterColor::with_process_inks(rgb, cmyk);
+                        let Some(link) = self.separator(false).cmyk_link(doc, cs) else {
+                            return RasterColor::with_process_inks(rgb, cmyk);
+                        };
+                        let linked = link.ink(cmyk.map(u16::from_unit));
+                        return RasterColor::with_process_ink_of(rgb, cmyk, Inks::process(linked));
                     }
                     let mut map = self.ink_map.borrow_mut();
                     let ink = match self.canvas.kind() {

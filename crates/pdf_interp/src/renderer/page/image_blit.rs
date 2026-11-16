@@ -215,7 +215,7 @@ impl PageRenderer<'_> {
         name: Option<&[u8]>,
     ) -> ImageSource {
         match colorants {
-            Some(colorants @ ColorantPlan::Channels(_)) => {
+            Some(colorants @ (ColorantPlan::Channels(_) | ColorantPlan::Linked(_))) => {
                 let samples = img.width as usize * img.height as usize;
                 if let Some(ink) =
                     ink_samples(decoded, colorants, plan).filter(|ink| ink.len() == samples * 8)
@@ -264,9 +264,10 @@ impl PageRenderer<'_> {
             return None;
         }
         let tints = decoded.tints.as_ref()?;
+        let separator = self.separator_for(false, Some(decoded.intent));
         self.ink_map
             .borrow_mut()
-            .plan(self.resources.doc(), &tints.space)
+            .plan(self.resources.doc(), &tints.space, &separator)
     }
 
     /// Composite the ink samples `ink`, on the grid of `img`, which they

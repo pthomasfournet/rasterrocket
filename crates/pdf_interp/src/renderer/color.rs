@@ -15,7 +15,7 @@ use raster::pipe::ChannelMask;
 
 use crate::resources::OverprintMode;
 use crate::resources::transfer::Transfer;
-use crate::separation::Separator;
+use crate::separation::{CmykLink, Separator};
 
 /// The process channels C, M, Y and K of an ink canvas.
 pub(crate) const PROCESS_CHANNELS: ChannelMask = ChannelMask::new(0b1111);
@@ -71,6 +71,10 @@ pub(crate) enum ColorantPlan {
     /// process ink of its alternate colour, a colour that is not process
     /// ink converted by the separator.
     Process(Separator),
+    /// The four components of a colour of an ICC CMYK space are the ink of
+    /// another profile than the output profile's, converted to the output
+    /// profile's process ink by the link.
+    Linked(CmykLink),
 }
 
 impl ColorantPlan {
@@ -78,7 +82,7 @@ impl ColorantPlan {
     pub(crate) fn paints(&self) -> ChannelMask {
         match self {
             Self::Channels(channels) => ChannelMask::new(channels.iter().fold(0, |a, &b| a | b)),
-            Self::Process(_) => PROCESS_CHANNELS,
+            Self::Process(_) | Self::Linked(_) => PROCESS_CHANNELS,
         }
     }
 
@@ -103,14 +107,26 @@ impl ColorantPlan {
             Self::Process(separator) => {
                 no_spots(space.process_ink::<S>(doc, target, comps, separator))
             }
+            Self::Linked(link) => match comps {
+                &[c, m, y, k] => no_spots(link.ink([c, m, y, k].map(S::from_unit))),
+                _ => [S::ZERO; 8],
+            },
         }
     }
 
     /// The ink of the tints `tints`, one sample per component, under a plan
-    /// of [`Self::Channels`]; `None` under [`Self::Process`].
+    /// of [`Self::Channels`] or [`Self::Linked`]; `None` under
+    /// [`Self::Process`].
     pub(crate) fn ink_of_tints<S: Sample>(&self, tints: &[S]) -> Option<[S; 8]> {
-        let Self::Channels(channels) = self else {
-            return None;
+        let channels = match self {
+            Self::Channels(channels) => channels,
+            Self::Linked(link) => {
+                let &[c, m, y, k] = tints else {
+                    return None;
+                };
+                return Some(no_spots(link.ink([c, m, y, k])));
+            }
+            Self::Process(_) => return None,
         };
         let mut ink = [S::ZERO; 8];
         for (&bits, &tint) in channels.iter().zip(tints) {

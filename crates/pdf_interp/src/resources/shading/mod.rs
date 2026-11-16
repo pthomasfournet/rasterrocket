@@ -1048,7 +1048,7 @@ impl<S: Sample> ShadingColour<8, S> for InkCs<'_> {
 
     fn conversion_cost(self) -> u64 {
         match self.plan {
-            ColorantPlan::Channels(_) => 1,
+            ColorantPlan::Channels(_) | ColorantPlan::Linked(_) => 1,
             ColorantPlan::Process(_) => self.cs.space.process_ink_cost(),
         }
     }

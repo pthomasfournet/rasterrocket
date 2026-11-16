@@ -333,9 +333,10 @@ impl PageRenderer<'_> {
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
+        let separator = self.separator(false);
         self.pattern_memo.borrow_mut().shading_pattern(key, || {
             let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
+            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
             let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
             resources
                 .shading_pattern(name, &pattern_ctm, canvas, ink)
@@ -356,9 +357,10 @@ impl PageRenderer<'_> {
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
+        let separator = self.separator(false);
         self.pattern_memo.borrow_mut().shading(key, || {
             let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space);
+            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
             let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
             resources.shading(name, ctm, canvas, ink).map(Rc::new)
         })

@@ -210,7 +210,9 @@ pub(crate) struct Args {
 
     /// Render CMYK pages and write them as CMYK TIFF (with --tiff) or
     /// CMYK JPEG (with --jpeg, Adobe YCCK).  `DeviceCMYK`, ICC-based CMYK
-    /// and process colorants keep their values; spot colorants fold into
+    /// and process colorants keep their values (ICC-based CMYK of another
+    /// profile than a CMYK --output-profile converts to its ink, under
+    /// --intent and --bpc); spot colorants fold into
     /// their process equivalents; other colours separate through a CMYK
     /// --output-profile, else as ISO 32000 §10.4.2 converts them, under
     /// the content's black generation and undercolour removal (gray is

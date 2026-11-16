@@ -153,7 +153,9 @@ pub enum ColorModel {
     Rgb,
     /// The process ink of a CMYK device, `[C, M, Y, K]`, 0 no ink.  Colours
     /// given in `DeviceCMYK`, a four-component ICC space or as process
-    /// colorants paint their components; spot colorants fold into their
+    /// colorants paint their components, those of an ICC space whose
+    /// profile is not the session's CMYK output profile converted to its
+    /// ink; spot colorants fold into their
     /// process equivalents; any other colour is separated, by the session's
     /// CMYK output profile when it has one and otherwise by the device
     /// conversion of ISO 32000-2 §10.4.2, under the graphics state's black

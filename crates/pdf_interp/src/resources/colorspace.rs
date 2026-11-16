@@ -381,7 +381,9 @@ impl ColorSpace {
     /// components, with the same zero components, printing the profile's
     /// sRGB colour in the process-ink model
     /// ([`color::cmyk::ink_reproducing`]), and the components themselves
-    /// under any other; the ink of the alternate colour for a `Separation`
+    /// under any other, converted to the ink of a CMYK output profile that
+    /// is not the space's ([`Separator::cmyk_link`]); the ink of the
+    /// alternate colour for a `Separation`
     /// or `DeviceN` space whose tint transform evaluates; otherwise
     /// `separator`'s ink of the sRGB conversion.  A component count other
     /// than [`ncomponents`](Self::ncomponents) converts as
@@ -426,7 +428,10 @@ impl ColorSpace {
             Self::IccBased { n: 4, .. } => {
                 if let &[c, m, y, k] = comps {
                     if !separator.reproduces_process_colour() {
-                        return [c, m, y, k].map(S::from_unit);
+                        let cmyk = [c, m, y, k].map(S::from_unit);
+                        return separator
+                            .cmyk_link(doc, self)
+                            .map_or(cmyk, |link| link.ink(cmyk));
                     }
                     return reproduce(self.convert::<S>(doc, target, comps), [c, m, y, k]);
                 }

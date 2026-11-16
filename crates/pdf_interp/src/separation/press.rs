@@ -96,6 +96,12 @@ impl PressSeparation {
         &self.profile
     }
 
+    /// Whether the separation compensates the black point.
+    #[must_use]
+    pub const fn bpc(&self) -> bool {
+        self.bpc
+    }
+
     /// The intent a paint under `intent` separates under: the session's,
     /// when it fixes one, else `intent`.
     #[must_use]

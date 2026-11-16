@@ -448,20 +448,29 @@ fn icc_cmyk_images_paint_their_samples_on_a_cmyk_page() {
     assert_eq!(at(&page, 5, 5), [10, 100, 50, 0]);
 }
 
+/// The bytes of the profile `name` of `tests/fixtures/icc`.
+fn fixture(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/icc")
+        .join(name);
+    std::fs::read(path).expect("the fixture is present")
+}
+
+/// The separation of sRGB colours through the test CMYK printer `name`,
+/// under `fixed` for every paint when given.
+fn separation_through(name: &str, fixed: Option<crate::RenderingIntent>) -> Separation {
+    let profile = std::sync::Arc::new(
+        crate::OutputProfile::from_bytes(fixture(name)).expect("a CMYK output profile"),
+    );
+    crate::OutputProfile::separation(&profile, crate::WorkingSpace::Srgb, fixed, false)
+        .expect("separates")
+}
+
 /// The separation of sRGB colours through the synthetic CMYK printer of
 /// `tests/fixtures/icc`, whose tables differ by intent, under `fixed` for
 /// every paint when given.
 fn printer_separation(fixed: Option<crate::RenderingIntent>) -> Separation {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/icc/printer-cmyk-v4.icc"
-    );
-    let profile = std::sync::Arc::new(
-        crate::OutputProfile::from_bytes(std::fs::read(path).expect("the fixture is present"))
-            .expect("a CMYK output profile"),
-    );
-    crate::OutputProfile::separation(&profile, crate::WorkingSpace::Srgb, fixed, false)
-        .expect("separates")
+    separation_through("printer-cmyk-v4.icc", fixed)
 }
 
 /// Each paint separates under its own intent: the graphics state's for a
@@ -526,4 +535,69 @@ fn a_spot_adds_no_ink_where_its_tint_is_zero() {
     assert_eq!(at(&page, 6, 5), [0; 4], "tint 0");
     let red = at(&page, 2, 5);
     assert!(red[1] > 200 && red[2] > 200, "{red:?}");
+}
+
+/// A colour of an ICC CMYK space whose profile is not the output profile
+/// paints the output profile's ink for it: through the printer replacing
+/// half the gray component, the full-replacement printer's black is four
+/// inks; a fill, an image and a `Separation` alternate in that space alike.
+/// The output profile's own colours, and `DeviceCMYK`, keep their values.
+#[test]
+fn icc_cmyk_of_another_profile_converts_to_the_output_profile() {
+    let profile = |name: &str| {
+        let bytes = fixture(name);
+        let mut s = format!("<< /N 4 /Length {} >>\nstream\n", bytes.len()).into_bytes();
+        s.extend_from_slice(&bytes);
+        s.extend_from_slice(b"\nendstream");
+        s
+    };
+    let image = |space: &str| {
+        let mut s = format!(
+            "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 \
+             /ColorSpace {space} /Length 4 >>\nstream\n"
+        )
+        .into_bytes();
+        s.extend_from_slice(&[0, 0, 0, 255]);
+        s.extend_from_slice(b"\nendstream");
+        s
+    };
+    let page = b"<< /Type /Page /Resources << /ColorSpace << /Full [/ICCBased 5 0 R] \
+        /Half [/ICCBased 6 0 R] /Spot [/Separation /Spot 7 0 R << /FunctionType 2 /Domain [0 1] \
+        /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>] >> /XObject << /Im 8 0 R >> >> >>"
+        .to_vec();
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (4, page),
+        (5, profile("printer-cmyk-v4.icc")),
+        (6, profile("printer-cmyk-v2.icc")),
+        (7, b"[/ICCBased 5 0 R]".to_vec()),
+        (8, image("[/ICCBased 5 0 R]")),
+    ]);
+    let request = CanvasRequest::Cmyk {
+        overprint: false,
+        separation: separation_through("printer-cmyk-v2.icc", None),
+    };
+    let content = b"/Full cs 0 0 0 1 sc 0 0 2 10 re f q 2 0 0 10 2 0 cm /Im Do Q \
+        /Spot cs 1 sc 4 0 2 10 re f /Half cs 0 0 0 1 sc 6 0 2 10 re f 0 0 0 1 k 8 0 2 10 re f";
+    // transicc -n -i printer-cmyk-v4.icc -o printer-cmyk-v2.icc -t1, 0 0 0 100.
+    let want = [99.9924, 94.2306, 92.9335, 48.1605];
+    for depth in DEPTHS {
+        let page = render(&doc, (10, depth), &request, content);
+        let full = f64::from(of_unit([1.0; 4], depth)[0]);
+        for x in [1, 3, 5] {
+            let got = at(&page, x, 5);
+            for (g, w) in got.iter().zip(want) {
+                assert!(
+                    (f64::from(*g) / full).mul_add(100.0, -w).abs() <= 1.5,
+                    "{depth:?}: pixel {x}: {got:?} for {want:?} %"
+                );
+            }
+        }
+        for x in [7, 9] {
+            assert_eq!(
+                at(&page, x, 5),
+                of_unit([0.0, 0.0, 0.0, 1.0], depth),
+                "{depth:?}: pixel {x}"
+            );
+        }
+    }
 }

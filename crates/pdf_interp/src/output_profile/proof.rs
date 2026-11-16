@@ -29,6 +29,7 @@ use std::sync::{Arc, OnceLock};
 use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16};
 use moxcms::{CmsError, ColorProfile, Layout, TransformExecutor, TransformOptions};
 
+use super::ink_table::InkTable;
 use super::{OutputProfile, OutputProfileError, OutputSpace, convert_to};
 use crate::intent::ProofIntent;
 use crate::pcs::black::{as_version_2, layout_of, pcs_lightness};
@@ -40,12 +41,8 @@ const SPAN: u32 = 32;
 /// The number of nodes along each ink axis of a proof's table.
 pub const PROOF_GRID: usize = SPAN as usize + 1;
 
-/// The distance between neighbouring nodes along each ink axis, `c`
-/// slowest.
-const STRIDES: [usize; 4] = [PROOF_GRID.pow(3), PROOF_GRID.pow(2), PROOF_GRID, 1];
-
 /// A tabulated proof conversion, or why it could not be built.
-type Tabulated = Result<Arc<ProofTable>, OutputProfileError>;
+type Tabulated = Result<Arc<InkTable>, OutputProfileError>;
 
 /// The conversion of a press's process ink to a display space.
 pub struct SoftProof {
@@ -196,38 +193,11 @@ impl SoftProof {
     }
 
     /// Evaluate the conversion of `intent` at every node of the grid.
-    fn tabulate(&self, intent: ProofIntent) -> Result<ProofTable, OutputProfileError> {
+    fn tabulate(&self, intent: ProofIntent) -> Result<InkTable, OutputProfileError> {
         let leg = self.leg(intent)?;
-        let channels = leg.channels;
-        let conversion = |e: CmsError| OutputProfileError::Conversion(e.to_string());
-        let span = f64::from(SPAN);
-        let row = PROOF_GRID * PROOF_GRID * PROOF_GRID;
-        let mut ink = Vec::with_capacity(row * 4);
-        let mut out = vec![0.0; row * channels];
-        let mut nodes = Vec::with_capacity(row * PROOF_GRID * channels);
-        for c in 0..=SPAN {
-            ink.clear();
-            for m in 0..=SPAN {
-                for y in 0..=SPAN {
-                    for k in 0..=SPAN {
-                        ink.extend([c, m, y, k].map(|i| f64::from(i) / span));
-                    }
-                }
-            }
-            leg.transform(&ink, &mut out).map_err(conversion)?;
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "a value clamped to [0, 1] scaled to the u16 range"
-            )]
-            nodes.extend(
-                out.iter()
-                    .map(|&v| (v.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16),
-            );
-        }
-        Ok(ProofTable {
-            channels,
-            nodes: nodes.into_boxed_slice(),
+        InkTable::tabulate(SPAN, leg.channels, |ink, out| {
+            leg.transform(ink, out)
+                .map_err(|e| OutputProfileError::Conversion(e.to_string()))
         })
     }
 
@@ -250,7 +220,7 @@ impl SoftProof {
     ) -> Result<FinishedCanvas, OutputProfileError> {
         let table = self.table(intent)?;
         let table = &*table;
-        let gray = table.channels == 1;
+        let gray = table.channels() == 1;
         Ok(match canvas {
             FinishedCanvas::Cmyk8(cmyk) if gray => {
                 let storage = buffers.gray.take_for(cmyk.has_alpha());
@@ -316,73 +286,6 @@ fn is_matrix_rgb(profile: &ColorProfile) -> bool {
         && profile.red_trc.is_some()
         && profile.green_trc.is_some()
         && profile.blue_trc.is_some()
-}
-
-/// A proof conversion tabulated over the ink cube: [`PROOF_GRID`]⁴ nodes
-/// of `channels` 16-bit display values, `c` slowest and `k` fastest; node
-/// `(c, m, y, k)` holds the display value of the ink `v / (PROOF_GRID −
-/// 1)` for `v` = `c`, `m`, `y`, `k`.
-struct ProofTable {
-    channels: usize,
-    nodes: Box<[u16]>,
-}
-
-impl ProofTable {
-    /// The display value of the 16-bit ink `ink` into `out`: the
-    /// interpolation in the simplex of the grid cell around it whose
-    /// vertices are visited in decreasing order of the ink's fractional
-    /// positions within the cell.
-    fn eval(&self, ink: [u16; 4], out: &mut [u16]) {
-        let full = u32::from(u16::MAX);
-        let mut base = 0usize;
-        let mut frac = [(0u32, 0usize); 4];
-        for ((&v, &stride), f) in ink.iter().zip(&STRIDES).zip(&mut frac) {
-            let scaled = u32::from(v) * SPAN;
-            let cell = (scaled / full).min(SPAN - 1);
-            base += cell as usize * stride;
-            *f = (scaled - cell * full, stride);
-        }
-        frac.sort_unstable_by_key(|f| std::cmp::Reverse(f.0));
-        let n = self.channels;
-        let mut acc = [0u64; 3];
-        let mut vertex = base;
-        let mut previous = full;
-        for &(f, stride) in &frac {
-            let weight = u64::from(previous - f);
-            for (a, &node) in acc.iter_mut().zip(&self.nodes[vertex * n..vertex * n + n]) {
-                *a += weight * u64::from(node);
-            }
-            previous = f;
-            vertex += stride;
-        }
-        for (a, &node) in acc.iter_mut().zip(&self.nodes[vertex * n..vertex * n + n]) {
-            *a += u64::from(previous) * u64::from(node);
-        }
-        let half = u64::from(full) / 2;
-        for (o, &a) in out.iter_mut().zip(&acc) {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a convex combination of u16 nodes, divided by its weight sum, fits u16"
-            )]
-            let value = ((a + half) / u64::from(full)) as u16;
-            *o = value;
-        }
-    }
-}
-
-impl TransformExecutor<u16> for ProofTable {
-    fn transform(&self, src: &[u16], dst: &mut [u16]) -> Result<(), CmsError> {
-        let (pixels, []) = src.as_chunks::<4>() else {
-            return Err(CmsError::LaneSizeMismatch);
-        };
-        if dst.len() != pixels.len() * self.channels {
-            return Err(CmsError::LaneSizeMismatch);
-        }
-        for (&ink, out) in pixels.iter().zip(dst.chunks_exact_mut(self.channels)) {
-            self.eval(ink, out);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

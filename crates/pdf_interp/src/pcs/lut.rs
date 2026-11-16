@@ -1,10 +1,11 @@
-//! Evaluation of an ICC profile's PCS → device tables at given values.
+//! Evaluation of an ICC profile's device ↔ PCS tables at given values.
 //!
-//! A [`ProfileLut`] evaluates one `BToA` table (ICC.1:2022 §10.8, §10.10,
-//! §10.12) in floating point at the values it is given, with no
-//! resampling of its own: `lut8Type` and `lut16Type` as matrix (on PCS XYZ
-//! input), input tables, CLUT and output tables; `lutBtoAType` as B
-//! curves, matrix, M curves, CLUT and A curves.  One-
+//! A [`ProfileLut`] evaluates one `AToB` or `BToA` table (ICC.1:2022
+//! §10.8, §10.10, §10.11, §10.12) in floating point at the values it is
+//! given, with no resampling of its own: `lut8Type` and `lut16Type` as
+//! matrix (on PCS XYZ input), input tables, CLUT and output tables;
+//! `lutAtoBType` as A curves, CLUT, M curves, matrix and B curves;
+//! `lutBtoAType` as B curves, matrix, M curves, CLUT and A curves.  One-
 //! dimensional tables interpolate linearly; a CLUT interpolates
 //! multilinearly in its cell, trilinearly for the three PCS inputs as
 //! colour-management modules do for a table indexed by Lab or XYZ.  Every
@@ -13,26 +14,43 @@
 //! The PCS side is encoded as the table type stores it: Lab as `L / 100`,
 //! `(a + 128) / 255`, `(b + 128) / 255`, scaled by `65280 / 65535` in a
 //! `lut16Type` (the legacy encoding); XYZ as `X · 32768 / 65535`
-//! (`u1Fixed15Number`).  [`ProfileLut::to_device`] takes media-relative
-//! D50 XYZ.
+//! (`u1Fixed15Number`).  [`ProfileLut::to_device`] takes and
+//! [`ProfileLut::to_pcs`] returns media-relative D50 XYZ.
 
 use moxcms::{ColorProfile, DataColorSpace, LutStore, LutType, LutWarehouse, RenderingIntent};
 
 use crate::pcs::D50;
 use crate::resources::icc_shaper::eval_trc;
 
-/// The `BToA` table `intent` takes in `profile`: that of the intent (the
-/// colorimetric one for both colorimetric intents), else the perceptual
-/// one (ICC.1:2022 §8.10.2).
+/// The direction of a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    /// `AToB`: device values to the PCS.
+    ToPcs,
+    /// `BToA`: the PCS to device values.
+    ToDevice,
+}
+
+/// The table `direction` takes under `intent` in `profile`: that of the
+/// intent (the colorimetric one for both colorimetric intents), else the
+/// perceptual one (ICC.1:2022 §8.10.2).
 pub(crate) const fn table_of(
     profile: &ColorProfile,
     intent: RenderingIntent,
+    direction: Direction,
 ) -> Option<&LutWarehouse> {
-    let (perceptual, colorimetric, saturation) = (
-        &profile.lut_b_to_a_perceptual,
-        &profile.lut_b_to_a_colorimetric,
-        &profile.lut_b_to_a_saturation,
-    );
+    let (perceptual, colorimetric, saturation) = match direction {
+        Direction::ToPcs => (
+            &profile.lut_a_to_b_perceptual,
+            &profile.lut_a_to_b_colorimetric,
+            &profile.lut_a_to_b_saturation,
+        ),
+        Direction::ToDevice => (
+            &profile.lut_b_to_a_perceptual,
+            &profile.lut_b_to_a_colorimetric,
+            &profile.lut_b_to_a_saturation,
+        ),
+    };
     let own = match intent {
         RenderingIntent::Perceptual => perceptual,
         RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => {
@@ -207,9 +225,10 @@ enum Stage {
     Clut(Clut),
 }
 
-/// One `BToA` table of a profile, evaluated at given values.
+/// One table of a profile, evaluated at given values.
 #[derive(Debug, Clone)]
 pub(crate) struct ProfileLut {
+    direction: Direction,
     /// The PCS of the profile.
     pcs: DataColorSpace,
     /// Whether Lab is encoded the legacy way of `lut16Type`.
@@ -218,25 +237,34 @@ pub(crate) struct ProfileLut {
 }
 
 impl ProfileLut {
-    /// The `BToA` table `intent` takes in `profile` ([`table_of`]) for a
-    /// profile of `device` channels; `None` when the profile has no such
-    /// table, its PCS is neither Lab nor XYZ, or the table is malformed.
+    /// The table `direction` takes under `intent` in `profile`
+    /// ([`table_of`]) for a profile of `device` channels; `None` when the
+    /// profile has no such table, its PCS is neither Lab nor XYZ, or the
+    /// table is malformed.
     pub(crate) fn new(
         profile: &ColorProfile,
         intent: RenderingIntent,
+        direction: Direction,
         device: usize,
     ) -> Option<Self> {
         if !matches!(profile.pcs, DataColorSpace::Lab | DataColorSpace::Xyz) {
             return None;
         }
-        let (stages, legacy_lab) = match table_of(profile, intent)? {
+        let (inputs, outputs) = match direction {
+            Direction::ToPcs => (device, 3),
+            Direction::ToDevice => (3, device),
+        };
+        let (stages, legacy_lab) = match table_of(profile, intent, direction)? {
             LutWarehouse::Lut(lut) => (
-                lut_stages(lut, device, profile.pcs)?,
+                lut_stages(lut, inputs, outputs, profile.pcs, direction)?,
                 lut.lut_type == LutType::Lut16,
             ),
-            LutWarehouse::Multidimensional(m) => (mab_stages(m, device)?, false),
+            LutWarehouse::Multidimensional(m) => {
+                (mab_stages(m, inputs, outputs, direction)?, false)
+            }
         };
         Some(Self {
+            direction,
             pcs: profile.pcs,
             legacy_lab,
             stages,
@@ -245,9 +273,26 @@ impl ProfileLut {
 
     /// The device values of the media-relative D50 XYZ `xyz` into `out`,
     /// one per device channel, each in `[0, 1]`.
+    ///
+    /// # Panics
+    ///
+    /// For a table to the PCS.
     pub(crate) fn to_device(&self, xyz: [f64; 3], out: &mut [f64]) {
+        assert_eq!(self.direction, Direction::ToDevice, "a PCS → device table");
         let input = encode(xyz, self.pcs, self.legacy_lab);
         self.run(&input, out);
+    }
+
+    /// The media-relative D50 XYZ of the device values `device`.
+    ///
+    /// # Panics
+    ///
+    /// For a table to the device.
+    pub(crate) fn to_pcs(&self, device: &[f64]) -> [f64; 3] {
+        assert_eq!(self.direction, Direction::ToPcs, "a device → PCS table");
+        let mut out = [0.0; 3];
+        self.run(device, &mut out);
+        decode(out, self.pcs, self.legacy_lab)
     }
 
     /// The stages applied to `input` into `out`.
@@ -281,14 +326,15 @@ impl ProfileLut {
     }
 }
 
-/// The stages of a `lut8Type` or `lut16Type` `BToA` table to `outputs`
-/// device channels.
+/// The stages of a `lut8Type` or `lut16Type` table of `inputs` inputs and
+/// `outputs` outputs.
 fn lut_stages(
     lut: &moxcms::LutDataType,
+    inputs: usize,
     outputs: usize,
     pcs: DataColorSpace,
+    direction: Direction,
 ) -> Option<Vec<Stage>> {
-    let inputs = 3;
     if usize::from(lut.num_input_channels) != inputs
         || usize::from(lut.num_output_channels) != outputs
     {
@@ -309,7 +355,7 @@ fn lut_stages(
         m: lut.matrix.v,
         b: [0.0; 3],
     };
-    if pcs == DataColorSpace::Xyz && !matrix.is_identity() {
+    if direction == Direction::ToDevice && pcs == DataColorSpace::Xyz && !matrix.is_identity() {
         stages.push(Stage::Affine(matrix));
     }
     stages.push(Stage::Curves(tables(
@@ -331,9 +377,14 @@ fn lut_stages(
     Some(stages)
 }
 
-/// The stages of a `lutBtoAType` table to `outputs` device channels.
-fn mab_stages(m: &moxcms::LutMultidimensionalType, outputs: usize) -> Option<Vec<Stage>> {
-    let inputs = 3;
+/// The stages of a `lutAtoBType` or `lutBtoAType` table of `inputs`
+/// inputs and `outputs` outputs.
+fn mab_stages(
+    m: &moxcms::LutMultidimensionalType,
+    inputs: usize,
+    outputs: usize,
+    direction: Direction,
+) -> Option<Vec<Stage>> {
     if usize::from(m.num_input_channels) != inputs || usize::from(m.num_output_channels) != outputs
     {
         return None;
@@ -347,7 +398,11 @@ fn mab_stages(m: &moxcms::LutMultidimensionalType, outputs: usize) -> Option<Vec
             _ => None,
         }
     };
-    let a = curves(&m.a_curves, outputs)?;
+    let device = match direction {
+        Direction::ToPcs => inputs,
+        Direction::ToDevice => outputs,
+    };
+    let a = curves(&m.a_curves, device)?;
     let b = curves(&m.b_curves, 3)?;
     let mc = curves(&m.m_curves, 3)?;
     let matrix = mc.as_ref().map(|_| {
@@ -367,7 +422,11 @@ fn mab_stages(m: &moxcms::LutMultidimensionalType, outputs: usize) -> Option<Vec
         None if inputs == outputs => None,
         None => return None,
     };
-    Some([b, matrix, mc, clut, a].into_iter().flatten().collect())
+    let stages = match direction {
+        Direction::ToPcs => [a, clut, mc, matrix, b],
+        Direction::ToDevice => [b, matrix, mc, clut, a],
+    };
+    Some(stages.into_iter().flatten().collect())
 }
 
 /// The scale of the legacy Lab encoding of `lut16Type`.
@@ -382,6 +441,16 @@ fn lab_f(t: f64) -> f64 {
         t.cbrt()
     } else {
         (24389.0f64 / 27.0).mul_add(t, 16.0) / 116.0
+    }
+}
+
+/// The inverse of [`lab_f`].
+fn lab_f_inv(f: f64) -> f64 {
+    let t = f * f * f;
+    if t > 216.0 / 24389.0 {
+        t
+    } else {
+        116.0f64.mul_add(f, -16.0) * 27.0 / 24389.0
     }
 }
 
@@ -400,12 +469,45 @@ fn encode(xyz: [f64; 3], pcs: DataColorSpace, legacy_lab: bool) -> [f64; 3] {
     lab.map(|v| (v * scale).clamp(0.0, 1.0))
 }
 
+/// The XYZ of `encoded`, a value of a table of PCS `pcs`.
+fn decode(encoded: [f64; 3], pcs: DataColorSpace, legacy_lab: bool) -> [f64; 3] {
+    if pcs == DataColorSpace::Xyz {
+        return encoded.map(|v| v / XYZ_SCALE);
+    }
+    let scale = if legacy_lab { LEGACY_LAB } else { 1.0 };
+    let [l, a, b] = encoded.map(|v| v / scale);
+    let (l, a, b) = (
+        l * 100.0,
+        a.mul_add(255.0, -128.0),
+        b.mul_add(255.0, -128.0),
+    );
+    let fy = (l + 16.0) / 116.0;
+    let f = [fy + a / 500.0, fy, fy - b / 200.0];
+    std::array::from_fn(|i| D50[i] * lab_f_inv(f[i]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_pcs_encoding_of_white() {
+    fn the_pcs_encodings_round_trip() {
+        for xyz in [
+            [0.9642, 1.0, 0.8249],
+            [0.2, 0.18, 0.1],
+            [0.001, 0.0012, 0.0009],
+        ] {
+            for (pcs, legacy) in [
+                (DataColorSpace::Lab, false),
+                (DataColorSpace::Lab, true),
+                (DataColorSpace::Xyz, false),
+            ] {
+                let back = decode(encode(xyz, pcs, legacy), pcs, legacy);
+                for (a, b) in back.iter().zip(xyz) {
+                    assert!((a - b).abs() < 1e-12, "{xyz:?} {pcs:?} {legacy}: {back:?}");
+                }
+            }
+        }
         // White is L* 100, a* = b* = 0.
         let white = encode([0.9642, 1.0, 0.8249], DataColorSpace::Lab, false);
         assert!((white[0] - 1.0).abs() < 1e-12 && (white[1] - 128.0 / 255.0).abs() < 1e-12);

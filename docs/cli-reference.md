@@ -228,7 +228,14 @@ the process inks of a CMYK printer, C, M, Y and K, 0 no ink:
 - `DeviceCMYK` colours, images and shadings, `ICCBased` CMYK colours and
   images, and the process colorants of `Separation` and `DeviceN` colours
   keep their values: a `0 0 0 1 k` text is black ink alone, a 100 % cyan
-  swatch cyan alone.
+  swatch cyan alone.  Under a CMYK `--output-profile`, `ICCBased` CMYK of
+  another profile (a press other than the output's) converts to the output
+  profile's ink, through the two profiles' tables under `--intent` and
+  `--bpc` as Little CMS converts CMYK to CMYK (so a K-only black of one
+  press becomes the other's four-colour black); of the same profile (equal
+  tags, whatever the header) it keeps its values.  An `Indexed` image over
+  `DeviceCMYK`, ICC CMYK, `Separation` or `DeviceN` paints its palette's
+  ink.
 - Spot colorants fold into their process equivalents (their alternate
   colour's process ink).  The first four spot colorants of a page are kept
   as inks while it is painted, so an overprinting spot keeps the inks
@@ -311,10 +318,11 @@ for. The press is the output intent of the page (a page's own
 the first intent of subtype `GTS_PDFX` that embeds a `/DestOutputProfile`,
 else the first of any subtype (`GTS_PDFA1`, `ISO_PDFE1`, …) that does. Its
 profile must be CMYK. Each page is painted as that press's process ink, as
-`--cmyk` paints it: `DeviceCMYK`, `ICCBased` CMYK and process colorants keep
-their values, spot colorants fold into their process equivalents, and every
-other colour separates through the press profile under `--intent` (default
-relative colorimetric) and `--bpc`; `--overprint` simulates overprint, so
+`--cmyk` paints it: `DeviceCMYK`, `ICCBased` CMYK of the press's profile and
+process colorants keep their values, `ICCBased` CMYK of another profile
+converts to the press's ink, spot colorants fold into their process
+equivalents, and every other colour separates through the press profile under
+`--intent` (default each object's own intent) and `--bpc`; `--overprint` simulates overprint, so
 overprinted inks proof as printed. The ink is then converted to sRGB, or to an
 RGB or gray `--output-profile` (the display profile, which the output is
 tagged with), under the proof intent, without black-point compensation.

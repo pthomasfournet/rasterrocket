@@ -50,6 +50,17 @@ pub(crate) fn absolute_scale(source: Xyzd, dest: Xyzd) -> Option<[f64; 3]> {
         .then_some(scale)
 }
 
+/// A fingerprint of the tags of the ICC profile `bytes`: the hash of the
+/// bytes after its 128-byte header, which tells two profiles apart by
+/// their data whatever header fields, a creation date or flags, their
+/// embedders rewrote.
+pub(crate) fn tag_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.get(128..).unwrap_or(bytes).hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The D50 illuminant as an XYZ value.
 pub(crate) const fn d50() -> Xyzd {
     Xyzd {

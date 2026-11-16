@@ -25,13 +25,18 @@
 //! conversion of the page's working space under the paint's intent,
 //! tabulated by [`OutputProfile::separation_table`].
 
+mod ink_table;
+mod link;
 mod proof;
 mod separate;
 mod source;
 
+pub(crate) use ink_table::InkTable;
+
 pub use proof::{PROOF_GRID, SoftProof};
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16, Sample};
 use moxcms::{
@@ -139,6 +144,10 @@ type Compiled = Result<Executor, OutputProfileError>;
 /// A tabulated separation, or why it could not be built.
 type Tabulated = Result<Arc<ProfileSeparation>, OutputProfileError>;
 
+/// The conversion of the ink of one source profile under one intent and
+/// compensation, tabulated on first use; `None` when it cannot be built.
+type Link = Arc<OnceLock<Option<Arc<InkTable>>>>;
+
 /// An ICC profile pages are converted to and tagged with.
 pub struct OutputProfile {
     bytes: Arc<[u8]>,
@@ -146,6 +155,11 @@ pub struct OutputProfile {
     space: OutputSpace,
     conversions: [OnceLock<Compiled>; SLOTS],
     separations: [OnceLock<Tabulated>; SLOTS],
+    /// The profile's [`crate::pcs::tag_fingerprint`].
+    fingerprint: u64,
+    /// The conversions to the profile's ink of the ink of other CMYK
+    /// profiles, by their fingerprint, intent and compensation.
+    links: Mutex<HashMap<(u64, RenderingIntent, bool), Link>>,
 }
 
 impl std::fmt::Debug for OutputProfile {
@@ -194,11 +208,13 @@ impl OutputProfile {
             return Err(OutputProfileError::Pcs);
         }
         Ok(Self {
+            fingerprint: crate::pcs::tag_fingerprint(&bytes),
             bytes,
             profile,
             space,
             conversions: std::array::from_fn(|_| OnceLock::new()),
             separations: std::array::from_fn(|_| OnceLock::new()),
+            links: Mutex::new(HashMap::new()),
         })
     }
 
@@ -340,6 +356,46 @@ impl OutputProfile {
                 tabulate(&*xform, space).map(Arc::new)
             })
             .clone()
+    }
+
+    /// The conversion of the ink of the CMYK profile `source`, of
+    /// fingerprint `fingerprint` ([`crate::pcs::tag_fingerprint`]), to
+    /// this CMYK profile's ink under `intent`, with black-point
+    /// compensation when `bpc` (see [`link`]), tabulated on first use and
+    /// kept; `None` for a source of this profile's tags, whose ink is this
+    /// profile's already, for a profile that is not CMYK, and when the
+    /// conversion cannot be built, which is logged once.
+    pub(crate) fn cmyk_link(
+        &self,
+        source: &ColorProfile,
+        fingerprint: u64,
+        intent: RenderingIntent,
+        bpc: bool,
+    ) -> Option<Arc<InkTable>> {
+        if self.space != OutputSpace::Cmyk
+            || source.color_space != DataColorSpace::Cmyk
+            || fingerprint == self.fingerprint
+        {
+            return None;
+        }
+        let cell = {
+            let mut links = self
+                .links
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(links.entry((fingerprint, intent, bpc)).or_default())
+        };
+        cell.get_or_init(|| {
+            let table = link::tabulate(source, &self.profile, intent.cms(), bpc);
+            if table.is_none() {
+                log::warn!(
+                    "rasterrocket-interp: no {intent} conversion of a CMYK profile's ink to the \
+                     output profile; its colours keep their values"
+                );
+            }
+            table.map(Arc::new)
+        })
+        .clone()
     }
 
     /// `canvas`, a canvas of the working space `space`, converted to the

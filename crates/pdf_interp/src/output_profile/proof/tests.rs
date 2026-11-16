@@ -138,29 +138,6 @@ fn a_gray_display_proofs_to_gray() {
     assert!(px[1] < 40, "solid black is dark: {px:?}");
 }
 
-/// At the 16-bit ink nearest a node the table's interpolation is the
-/// node's value within a level: a node lies at `v · 65535 / 16`, which
-/// 16-bit ink reaches only within half a level.
-#[test]
-fn the_interpolation_reproduces_the_nodes() {
-    let proof = SoftProof::new(press(), None).unwrap();
-    let table = proof.table(ProofIntent::RelativeColorimetric).unwrap();
-    let node = |i: u32| u16::try_from((i * u32::from(u16::MAX) + SPAN / 2) / SPAN).unwrap();
-    for (c, m, y, k) in [(0, 0, 0, 0), (16, 16, 16, 16), (3, 7, 11, 5), (16, 0, 9, 2)] {
-        let mut out = [0u16; 3];
-        table.eval([c, m, y, k].map(node), &mut out);
-        let at = [c, m, y, k]
-            .iter()
-            .zip(&STRIDES)
-            .map(|(&i, &s)| i as usize * s)
-            .sum::<usize>()
-            * 3;
-        for (o, n) in out.iter().zip(&table.nodes[at..at + 3]) {
-            assert!(o.abs_diff(*n) <= 1, "node {c} {m} {y} {k}: {out:?}");
-        }
-    }
-}
-
 /// The press is CMYK and the display not; the canvas is ink.
 #[test]
 fn proofs_of_other_colour_spaces_are_refused() {

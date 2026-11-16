@@ -144,6 +144,8 @@ pub(crate) struct IccProfile {
     /// The parsed profile; `None` when the stream is missing or is not a
     /// profile.
     profile: Option<Arc<ColorProfile>>,
+    /// The profile's [`crate::pcs::tag_fingerprint`].
+    fingerprint: u64,
     /// The PCS scale of ICC-absolute colorimetry (see
     /// [`crate::pcs::scale_from_white`]); `None` when the media white is
     /// D50, under which ICC-absolute is media-relative colorimetry.
@@ -178,6 +180,7 @@ impl IccProfile {
         Self {
             n,
             profile: profile.map(Arc::new),
+            fingerprint: bytes.map_or(0, crate::pcs::tag_fingerprint),
             absolute,
             models,
             blacks: Default::default(),
@@ -475,6 +478,18 @@ impl IccConversion {
     ) -> bool {
         let srgb = |intent| ColourTarget::new(intent, WorkingSpace::Srgb);
         Self::profile(doc, id, n).is_none_or(|p| p.slot(srgb(a)) == p.slot(srgb(b)))
+    }
+
+    /// The profile of stream `id` for `n`-component values, parsed, and its
+    /// [`crate::pcs::tag_fingerprint`]; `None` when the stream is not a
+    /// profile.
+    pub(crate) fn source_profile(
+        doc: &Document,
+        id: ObjectId,
+        n: u8,
+    ) -> Option<(Arc<ColorProfile>, u64)> {
+        let profile = Self::profile(doc, id, n)?;
+        Some((Arc::clone(profile.profile.as_ref()?), profile.fingerprint))
     }
 
     /// The parsed profile stream `id`, shared for the lifetime of `doc`.

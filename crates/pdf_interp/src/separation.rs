@@ -27,7 +27,10 @@ use std::sync::Arc;
 use color::Sample;
 
 use crate::RenderingIntent;
+use crate::output_profile::InkTable;
+use crate::resources::ColorSpace;
 use crate::resources::black_generation::DeviceBlack;
+use crate::resources::colorspace::icc::IccConversion;
 
 /// The canvas a page is painted on and the pixels it finishes as.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -303,6 +306,31 @@ impl Separator {
         }
     }
 
+    /// The conversion of the colours of `space`, a four-component ICC
+    /// space, to the ink of the separator's output profile, when its
+    /// profile is not the output profile (see
+    /// [`OutputProfile::cmyk_link`](crate::OutputProfile::cmyk_link));
+    /// `None` for any other separator or space, whose components are the
+    /// ink they paint.
+    #[must_use]
+    pub(crate) fn cmyk_link(&self, doc: &pdf::Document, space: &ColorSpace) -> Option<CmykLink> {
+        let Self::Profile(ink) = self else {
+            return None;
+        };
+        let ColorSpace::IccBased {
+            n: 4,
+            stream_id: Some(id),
+        } = space
+        else {
+            return None;
+        };
+        let (profile, fingerprint) = IccConversion::source_profile(doc, *id, 4)?;
+        ink.press
+            .profile()
+            .cmyk_link(&profile, fingerprint, ink.intent, ink.press.bpc())
+            .map(CmykLink)
+    }
+
     /// The separator of a paint under `black`, the graphics state's
     /// black-generation and undercolour-removal functions, and `intent`:
     /// the device conversion under the functions, a profile's conversion
@@ -316,6 +344,28 @@ impl Separator {
             Self::Profile(ink) if ink.press.intent(intent) == ink.intent => self.clone(),
             Self::Profile(ink) => Self::Profile(ProfileInk::new(&ink.press, intent)),
         }
+    }
+}
+
+/// The conversion of the ink of a CMYK profile to the ink of an output
+/// profile ([`Separator::cmyk_link`]).  Two are equal when they are the same
+/// table.
+#[derive(Clone, Debug)]
+pub(crate) struct CmykLink(Arc<InkTable>);
+
+impl PartialEq for CmykLink {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CmykLink {}
+
+impl CmykLink {
+    /// The output profile's ink of the source ink `cmyk`, at its depth.
+    #[must_use]
+    pub(crate) fn ink<S: Sample>(&self, cmyk: [S; 4]) -> [S; 4] {
+        self.0.convert(cmyk)
     }
 }
 

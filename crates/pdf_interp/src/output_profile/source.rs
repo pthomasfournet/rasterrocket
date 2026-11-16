@@ -118,7 +118,7 @@ pub(super) fn black_lift(
 /// under the other intents, the vertex of the least-squares quadratic
 /// through the ramp's shadow points: those whose output, normalised to
 /// the ramp's range, lies in `[0.1, 0.5)` (relative) or `[0.03, 0.25)`.
-fn destination_black(
+pub(super) fn destination_black(
     dest: &ColorProfile,
     intent: RenderingIntent,
 ) -> Result<f64, moxcms::CmsError> {

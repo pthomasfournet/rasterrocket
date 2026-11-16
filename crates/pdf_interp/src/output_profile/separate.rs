@@ -10,7 +10,7 @@
 use moxcms::ColorProfile;
 
 use crate::WorkingSpace;
-use crate::pcs::lut::ProfileLut;
+use crate::pcs::lut::{Direction, ProfileLut};
 use crate::resources::icc_shaper::eval_trc;
 use crate::separation::{PROFILE_GRID, ProfileSeparation};
 
@@ -24,7 +24,7 @@ pub(super) fn tabulate(
     intent: moxcms::RenderingIntent,
     space: WorkingSpace,
 ) -> Option<ProfileSeparation> {
-    let lut = ProfileLut::new(dest, intent, 4)?;
+    let lut = ProfileLut::new(dest, intent, Direction::ToDevice, 4)?;
     let trcs = [&source.red_trc, &source.green_trc, &source.blue_trc];
     let trcs: Vec<&moxcms::ToneReprCurve> =
         trcs.iter().map(|t| t.as_ref()).collect::<Option<_>>()?;

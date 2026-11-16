@@ -24,6 +24,8 @@ table is the inverse of its PCS -> device one.
                         rgb = (1 - cmy) * (1 - k), and the PCS -> device
                         tables separate with full gray-component
                         replacement, k = 1 - max(rgb)
+    printer-cmyk-v2.icc the same printer as v2.4, lut16Type, separating with
+                        half the gray component replaced, k = (1 - max(rgb)) / 2
 
 Run from the repository root:  python3 scripts/make_test_icc.py
 Needs liblcms2 (liblcms2-2).  The output is committed; the tests never run this.
@@ -135,8 +137,8 @@ def cmyk_to_rgb(ink):
     return tuple((1 - v) * (1 - k) for v in (c, m, y))
 
 
-def rgb_to_cmyk(rgb):
-    k = 1 - max(rgb)
+def rgb_to_cmyk(rgb, gcr=1.0):
+    k = gcr * (1 - max(rgb))
     if k >= 1:
         return (0.0, 0.0, 0.0, 1.0)
     return tuple(1 - v / (1 - k) for v in rgb) + (k,)
@@ -188,10 +190,10 @@ def cmyk_a2b_sampler(chroma, rescale):
     return SAMPLER16(sample)
 
 
-def cmyk_b2a_sampler(chroma, rescale):
+def cmyk_b2a_sampler(chroma, rescale, gcr):
     def sample(inp, out, _):
         lab = (inp[0] / 65535 * 100, inp[1] / 65535 * 255 - 128, inp[2] / 65535 * 255 - 128)
-        ink = rgb_to_cmyk(lab_to_device(lab, chroma, rescale))
+        ink = rgb_to_cmyk(lab_to_device(lab, chroma, rescale), gcr)
         for i in range(4):
             out[i] = clamp16(ink[i])
         return 1
@@ -298,9 +300,9 @@ def rgb_printer(path, version):
     LCMS.cmsCloseProfile(profile)
 
 
-def cmyk_printer(path):
+def cmyk_printer(path, version=4.3, gcr=1.0, description="rasterrocket test CMYK printer"):
     profile = LCMS.cmsCreateProfilePlaceholder(None)
-    common(profile, 4.3, "CMYK", "Lab ", "rasterrocket test CMYK printer")
+    common(profile, version, "CMYK", "Lab ", description)
     for n, chroma, rescale in ((0, 1 / 0.85, True), (1, 1.0, False), (2, 1.1, True)):
         a2b = clut(
             CMYK_A2B_GRID,
@@ -311,7 +313,7 @@ def cmyk_printer(path):
         )
         b2a = clut(
             B2A_GRID,
-            cmyk_b2a_sampler(chroma, rescale),
+            cmyk_b2a_sampler(chroma, rescale, gcr),
             gamma_curves(1.0),
             gamma_curves(1.0, 4),
             (3, 4),
@@ -341,6 +343,12 @@ def main():
     rgb_printer(os.path.join(OUT, "printer-rgb-v2.icc"), 2.4)
     gray_printer(os.path.join(OUT, "printer-gray-v4.icc"))
     cmyk_printer(os.path.join(OUT, "printer-cmyk-v4.icc"))
+    cmyk_printer(
+        os.path.join(OUT, "printer-cmyk-v2.icc"),
+        2.4,
+        0.5,
+        "rasterrocket test CMYK printer, half GCR",
+    )
     ink = (0.2, 0.5, 0.0, 0.3)
     back = rgb_to_cmyk(cmyk_to_rgb(ink))
     assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(back, ink))
