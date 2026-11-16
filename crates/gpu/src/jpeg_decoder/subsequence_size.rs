@@ -3,7 +3,7 @@
 use crate::jpeg_decoder::JpegPreparedInput;
 
 /// Subsequence bit-width [`pick_subsequence_size`] returns.
-pub(crate) const JPEG_SUBSEQUENCE_BITS: u32 = 512;
+pub(crate) const JPEG_SUBSEQUENCE_BITS: u32 = 1024;
 
 /// Choose the subsequence bit-width for the parallel-Huffman JPEG
 /// dispatcher.
@@ -13,9 +13,13 @@ pub(crate) const JPEG_SUBSEQUENCE_BITS: u32 = 512;
 /// per thread, so their latency grows with the size; a Phase 2 miss
 /// (a slot whose true left input matches neither memo entry) costs one
 /// sequential region re-decode, also growing with the size; and the
-/// miss rate falls as the size grows, because a fresh-start Phase 1
-/// walker has more bits in which to synchronise with the true decode
-/// before its region ends. None of the three depends on the
+/// re-decode budget counts re-decodes, not bits. The fraction of
+/// fresh-start walkers that miss is set by the content (walkers that
+/// stop at a decode error, and parses that stay valid but wrong across
+/// uniform areas) and changes little with the size, but a wrong parse
+/// that persists over a stretch of the stream costs one re-decode per
+/// region of that stretch, so a larger size spends fewer of a
+/// workgroup's re-decodes on it. None of the three depends on the
 /// quantisation tables — a stream's quality changes its density, not
 /// whether its walkers synchronise — so the choice is a constant, and
 /// `prep` does not enter it.

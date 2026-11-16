@@ -660,6 +660,20 @@ groupshared uint4 g_phase2_state[JPEG_PHASE2_GROUP];
 /// and read by every lane after that step's barrier.
 groupshared uint g_phase2_redecoded[JPEG_PHASE2_GROUP];
 
+/// Bits of one maximal symbol (16-bit codeword + 11 magnitude bits):
+/// the padding tail within which an exact chain may stop at a decode
+/// error. Must match the CUDA macro and the host stall check.
+static const uint JPEG_MAX_SYMBOL_BITS = 27u;
+
+/// True when `left`, the snapshot slot `seq_idx` inherits, stopped at a
+/// decode error short of region `seq_idx - 1`'s end and before the
+/// padding tail. An exact chain holds such a state only for a stream
+/// that errors before its tail.
+bool jpeg_error_point(uint4 left, uint seq_idx) {
+    return left.x < min(length_bits, seq_idx * subsequence_bits)
+        && left.x + JPEG_MAX_SYMBOL_BITS < length_bits;
+}
+
 /// True when two snapshots agree on everything the re-decode reads:
 /// p, block_in_mcu, z_in_block (n is a per-region count).
 bool jpeg_same_decode_state(uint4 a, uint4 b) {
@@ -702,6 +716,16 @@ bool jpeg_same_decode_state(uint4 a, uint4 b) {
 /// the predecessor's fresh-start walk had not synchronised with the
 /// true decode and the left input changed since the last dispatch.
 ///
+/// A left input that is an error-point state (`jpeg_error_point`) is
+/// replaced by the slot's Phase 1 memo key, when it has one. A wrong
+/// left input that reaches a decode error would otherwise hand the
+/// error state to the next slot, whose re-decode from it repeats or
+/// soon meets a failure, so the error state would be carried through
+/// the later slots of the workgroup and, in later dispatches, through
+/// later workgroups. The exact chain of a stream
+/// that does not error before its padding tail holds no error-point
+/// state, so no replacement occurs on it.
+///
 /// A workgroup that has run more than `redecode_budget` re-decodes
 /// stops, leaves its slots unchanged and flags every one of them
 /// `JPEG_PHASE2_OVER_BUDGET`; the dispatcher then abandons the GPU
@@ -716,10 +740,14 @@ bool jpeg_same_decode_state(uint4 a, uint4 b) {
 /// so by induction each chain is true. Truth advances at least one
 /// workgroup per host pass, bounding the host loop by
 /// `ceil(num_subsequences / JPEG_PHASE2_GROUP)`. A decode error
-/// mid-region stops that region's walk at the error-point state;
-/// every downstream snapshot collapses to the error bit, and the
-/// dispatcher's post-convergence stall check surfaces it (Phase 4
-/// replays these walks and exits cleanly at end_p).
+/// mid-region stops that region's walk at the error-point state. A
+/// chain that converges with a replaced error-point left input holds a
+/// slot whose left snapshot lies below its region start; Phase 4 fails
+/// at that slot's first symbol and reports it. A chain whose
+/// downstream snapshots all collapse to the error bit (no replacement
+/// was available) is surfaced by the dispatcher's post-convergence
+/// stall check (Phase 4 replays these walks and exits cleanly at
+/// end_p).
 ///
 /// Lanes past `num_subsequences` take part in every barrier and do no
 /// work; the step count and the only early return
@@ -761,6 +789,9 @@ void jpeg_phase2_inter_sync(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_Gro
             uint redecoded = 0u;
             if (propagates) {
                 uint4 left = (lane == 0u) ? left_fixed : g_phase2_state[lane - 1u];
+                if (jpeg_error_point(left, seq_idx) && key_p1.x != JPEG_MEMO_NONE) {
+                    left = key_p1;
+                }
                 if (jpeg_same_decode_state(left, key_last)) {
                     cur = val_last;
                 } else if (jpeg_same_decode_state(left, key_p1)) {

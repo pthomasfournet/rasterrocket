@@ -295,6 +295,17 @@ fn jpeg_phase2_vulkan_converges_on_grayscale() {
     );
 }
 
+/// The Vulkan kernel resumes after error-point left inputs as the
+/// oracle does.
+#[test]
+fn jpeg_phase2_vulkan_resumes_after_error_point_left_inputs() {
+    let Some(vk) = try_vulkan() else {
+        eprintln!("skipping: no Vulkan device");
+        return;
+    };
+    super::tests::assert_phase2_resumes_after_error_point_left_inputs(&vk);
+}
+
 /// JPEG Phase 1+2 CUDA and Vulkan produce byte-identical `s_info`
 /// after convergence on the grayscale fixture.
 #[test]

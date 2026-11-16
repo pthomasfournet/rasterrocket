@@ -222,6 +222,20 @@ pub(in crate::jpeg_decoder) fn jpeg_region_end(
     )
 }
 
+/// Whether `left`, the snapshot slot `i` inherits, stopped at a decode
+/// error short of region `i - 1`'s end and before the padding tail
+/// ([`JPEG_MAX_SYMBOL_BITS`](super::huffman::JPEG_MAX_SYMBOL_BITS)).
+/// Mirrors `jpeg_error_point` in both kernel sources.
+pub(in crate::jpeg_decoder) fn jpeg_error_point(
+    left: SubsequenceState,
+    i: usize,
+    subsequence_bits: u32,
+    length_bits: u32,
+) -> bool {
+    left.p < jpeg_region_end(i - 1, subsequence_bits, length_bits)
+        && left.p.saturating_add(super::huffman::JPEG_MAX_SYMBOL_BITS) < length_bits
+}
+
 /// Drive the JPEG-framed Phase 2 propagation loop to convergence.
 ///
 /// Mirrors the `jpeg_phase2_inter_sync` kernels pass for pass. One
@@ -240,6 +254,13 @@ pub(in crate::jpeg_decoder) fn jpeg_region_end(
 /// block phase for every subsequence — the property the
 /// single-symbol-advance predicate this replaces could not establish
 /// for multi-component streams.
+///
+/// A slot whose left input is an error-point state ([`jpeg_error_point`])
+/// re-decodes from its predecessor's Phase 1 snapshot instead, when that
+/// snapshot reached its region end, as the kernels do through their
+/// Phase 1 memo key. A convergence reached without a substitution is
+/// the exact chain, and the exact chain of a stream that decodes
+/// without error up to its padding tail holds no error-point state.
 ///
 /// Returns `Converged { iterations }` (0-based index of the converged
 /// pass) or `SyncBoundExceeded` after `jpeg_phase2_retry_bound`
@@ -274,6 +295,19 @@ pub(super) fn jpeg_phase2_run_to_sync(
             blocks_per_mcu,
         )
     };
+    let phase1 = s_info.to_vec();
+    // The left input slot `i` re-decodes from: `left`, or the Phase 1
+    // snapshot of slot `i - 1` in place of an error-point `left`.
+    let resolve_left = |i: usize, left: SubsequenceState| {
+        let fallback = phase1[i - 1];
+        if jpeg_error_point(left, i, subsequence_bits, length_bits)
+            && fallback.p >= jpeg_region_end(i - 1, subsequence_bits, length_bits)
+        {
+            fallback
+        } else {
+            left
+        }
+    };
     for iter in 0..bound {
         let prev = s_info.to_vec();
         for base in (0..n).step_by(group) {
@@ -288,7 +322,7 @@ pub(super) fn jpeg_phase2_run_to_sync(
                         continue;
                     }
                     let left = if t == 0 { prev[i - 1] } else { cur[t - 1] };
-                    *slot = redecode(i, left);
+                    *slot = redecode(i, resolve_left(i, left));
                     changed |= *slot != cur[t];
                 }
                 cur = next;
@@ -429,6 +463,7 @@ mod tests {
         include_bytes!("../../../../tests/fixtures/jpeg/colour_128x128_444.jpg");
     static COLOUR_128X128_420: &[u8] =
         include_bytes!("../../../../tests/fixtures/jpeg/colour_128x128_420.jpg");
+    use crate::jpeg_decoder::tests::fixtures::{GRAY_TEXT, GRAY_TEXT_SUBSEQUENCE_BITS};
 
     /// Fresh-start Phase 1 `s_info`, one `phase1_jpeg_walk_snapshot`
     /// per subsequence — what the JPEG Phase 1 kernel dispatch produces.
@@ -725,5 +760,34 @@ mod tests {
             matches!(r, Phase2Outcome::SyncBoundExceeded { .. }),
             "expected SyncBoundExceeded, got {r:?}"
         );
+    }
+
+    /// On a text-like gray page, fresh-start walkers that stop at a
+    /// decode error hand error-point left inputs to some workgroups. The
+    /// propagation resumes after them from the Phase 1 snapshots and
+    /// converges to the sequential truth in two passes; carried forward,
+    /// an error state stalls one more workgroup in every pass.
+    #[test]
+    fn jpeg_propagation_resumes_after_error_point_left_inputs() {
+        let prep = prepare_jpeg(GRAY_TEXT).unwrap();
+        let (sched, bpm) = build_mcu_schedule(&prep);
+        let ssb = GRAY_TEXT_SUBSEQUENCE_BITS;
+        let truth = sequential_truth(&prep, &sched, bpm, ssb);
+        let mut s_info = build_jpeg_phase1_s_info(&prep, &sched, bpm, ssb);
+        assert!(
+            s_info.len() > 8 * HUFFMAN_THREADS as usize,
+            "precondition: the fixture must span many workgroups"
+        );
+        let r = jpeg_phase2_run_to_sync(
+            &mut s_info,
+            &prep.bitstream,
+            &prep.dc_codebooks_for_dispatch(),
+            &prep.ac_codebooks_for_dispatch(),
+            &sched,
+            bpm,
+            ssb,
+        );
+        assert_eq!(r, Phase2Outcome::Converged { iterations: 1 });
+        assert_eq!(s_info, truth, "converged s_info must be true");
     }
 }

@@ -583,6 +583,31 @@ fn jpeg_phase2_cuda_matches_propagation_oracle_across_workgroups() {
     }
 }
 
+/// Over error-point left inputs at workgroup boundaries the kernel
+/// resumes from the Phase 1 snapshots as the oracle does, converging in
+/// two passes to the oracle's chain.
+#[test]
+fn jpeg_phase2_cuda_resumes_after_error_point_left_inputs() {
+    let Some(b) = try_cuda() else {
+        eprintln!("skipping: no CUDA device");
+        return;
+    };
+    assert_phase2_resumes_after_error_point_left_inputs(&b);
+}
+
+/// [`jpeg_phase2_cuda_resumes_after_error_point_left_inputs`] on `backend`.
+pub(super) fn assert_phase2_resumes_after_error_point_left_inputs<B: GpuBackend>(backend: &B) {
+    use crate::jpeg_decoder::tests::fixtures::{GRAY_TEXT, GRAY_TEXT_SUBSEQUENCE_BITS};
+    let prep = prepare_jpeg(GRAY_TEXT).expect("gray JPEG must prepare");
+    let (gpu_s_info, gpu_outcome) =
+        dispatch_jpeg_phase1_then_phase2(backend, &prep, GRAY_TEXT_SUBSEQUENCE_BITS)
+            .expect("dispatch");
+    let (cpu_s_info, cpu_outcome) = cpu_jpeg_phase1_then_phase2(&prep, GRAY_TEXT_SUBSEQUENCE_BITS);
+    assert_eq!(cpu_outcome, Phase2Outcome::Converged { iterations: 1 });
+    assert_eq!(gpu_outcome, cpu_outcome, "GPU vs CPU Phase 2 outcome");
+    assert_eq!(gpu_s_info, cpu_s_info, "GPU vs CPU converged s_info");
+}
+
 /// The Phase 2 pass budget is exact: a budget one short of the
 /// oracle's converged pass count reports non-convergence, the
 /// oracle's count converges, and the capped production decoder

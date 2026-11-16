@@ -375,11 +375,12 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
 }
 
 /// True when the converged chain's terminal snapshot stopped short of
-/// the stream tail: a decode error inside any region stalls the
-/// propagation at the error bit — every downstream snapshot collapses
-/// to it, and Phase 4, replaying exactly the walks that produced the
-/// snapshots, exits cleanly at `end_p` without re-encountering the
-/// error. The stall is only observable here.
+/// the stream tail: a decode error that no downstream slot resumes
+/// from (see `jpeg_error_point`) stalls the propagation at the error
+/// bit — every downstream snapshot collapses to it, and Phase 4,
+/// replaying exactly the walks that produced the snapshots, exits
+/// cleanly at `end_p` without re-encountering the error. The stall is
+/// only observable here.
 ///
 /// The tail allowance is one maximal symbol (16-bit codeword + 11
 /// magnitude bits): byte-padding legitimately ends every stream in a
@@ -388,9 +389,13 @@ fn run_jpeg_phase1_and_phase2<B: GpuBackend>(
 /// mid-stream stall indicates a kernel bug or GPU fault, not a
 /// malformed file.
 const fn jpeg_stream_stalled(terminal_p: u32, length_bits: u32) -> bool {
-    const MAX_SYMBOL_BITS: u32 = 16 + 11;
-    terminal_p.saturating_add(MAX_SYMBOL_BITS) < length_bits
+    terminal_p.saturating_add(JPEG_MAX_SYMBOL_BITS) < length_bits
 }
+
+/// Bits of one maximal symbol, a 16-bit codeword and 11 magnitude bits:
+/// the padding tail within which an exact chain may stop at a decode
+/// error. Must match `JPEG_MAX_SYMBOL_BITS` in both kernel sources.
+pub(in crate::jpeg_decoder) const JPEG_MAX_SYMBOL_BITS: u32 = 16 + 11;
 
 /// One-shot JPEG Phase 1 dispatch using real JPEG framing.
 ///
@@ -534,6 +539,18 @@ fn dispatch_jpeg_phase1_through_phase4<B: GpuBackend>(
 /// into a different parse (bit offset, DC/AC role, or block phase) and
 /// never re-synchronise. [`Phase2Budget::PRODUCTION`] bounds both
 /// factors and abandons the GPU decode on content where they explode.
+///
+/// A fresh-start walker that hits a decode error stops at an
+/// error-point state, below its region end. Phase 2 resumes the slot
+/// after such a left input from that slot's Phase 1 snapshot instead
+/// (`jpeg_error_point`), so one wrong workgroup-boundary input does not
+/// stall every later slot of its workgroup, nor every later workgroup
+/// in later passes. The exact chain holds an error-point state only
+/// for a stream that errors before its padding tail. The pre-pass
+/// rejects every error inside the scan's MCUs that advances the bit
+/// position, so for such a stream the resumed slot's Phase 4 walk
+/// either fails at its first symbol or emits symbols past the final
+/// MCU, which `symbols_to_coefficients` rejects.
 ///
 /// # Errors
 /// Returns `BackendError` if any allocation, upload, kernel dispatch,

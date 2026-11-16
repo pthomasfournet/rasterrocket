@@ -2,13 +2,23 @@
 //!
 //! `book4` is a 4-symbol Huffman book (codes 00, 01, 100, 101 at
 //! lengths 2, 2, 3, 3) used by every parity test. `book4_stream`
-//! encodes a symbol stream against it. Both lived in four sibling
-//! modules until the b9cbb10 hardening pass folded them here.
+//! encodes a symbol stream against it. `GRAY_TEXT` is a real-encoder
+//! stream on which the Phase 2 propagation meets error-point left
+//! inputs.
 
 use crate::jpeg::CanonicalCodebook;
 use crate::jpeg::headers::{DhtClass, JpegHuffmanTable};
 use crate::jpeg_decoder::tests::synthetic::encode_symbols;
 use crate::jpeg_decoder::{PackedBitstream, pack_be_words};
+
+/// A synthetic text-like gray page, 320 × 240 at quality 50: dark
+/// strokes in lines on a light ground, with sparse noise.
+pub(crate) static GRAY_TEXT: &[u8] =
+    include_bytes!("../../../../../tests/fixtures/jpeg/gray_text_320x240.jpg");
+
+/// Subsequence size at which fresh-start walkers over [`GRAY_TEXT`] stop
+/// at decode errors on workgroup-boundary slots.
+pub(crate) const GRAY_TEXT_SUBSEQUENCE_BITS: u32 = 32;
 
 /// 4-symbol Huffman book: codes 00, 01, 100, 101 (lengths 2, 2, 3, 3).
 ///

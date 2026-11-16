@@ -537,6 +537,19 @@ __device__ __forceinline__ uint4 jpeg_phase2_redecode_device(
 // than `redecode_budget` re-decodes. Mirrors the Slang constant.
 #define JPEG_PHASE2_OVER_BUDGET 2u
 
+// Bits of one maximal symbol (16-bit codeword + 11 magnitude bits): the
+// padding tail within which an exact chain may stop at a decode error.
+// Mirrors the Slang constant and the host stall check.
+#define JPEG_MAX_SYMBOL_BITS 27u
+
+// Mirror of `jpeg_error_point` in parallel_huffman.slang.
+__device__ __forceinline__ bool jpeg_error_point_device(
+    uint4 left, unsigned int seq_idx, unsigned int subsequence_bits, unsigned int length_bits
+) {
+    return left.x < min(length_bits, seq_idx * subsequence_bits)
+        && left.x + JPEG_MAX_SYMBOL_BITS < length_bits;
+}
+
 // True when two snapshots agree on everything the re-decode reads:
 // p, block_in_mcu, z_in_block (n is a per-region count).
 __device__ __forceinline__ bool jpeg_same_decode_state(uint4 a, uint4 b) {
@@ -609,6 +622,10 @@ extern "C" __global__ void jpeg_phase2_inter_sync(
             unsigned int redecoded = 0u;
             if (propagates) {
                 uint4 left = (lane == 0u) ? left_fixed : g_state[lane - 1u];
+                if (jpeg_error_point_device(left, seq_idx, subsequence_bits, length_bits)
+                    && key_p1.x != JPEG_MEMO_NONE) {
+                    left = key_p1;
+                }
                 if (jpeg_same_decode_state(left, key_last)) {
                     cur = val_last;
                 } else if (jpeg_same_decode_state(left, key_p1)) {
