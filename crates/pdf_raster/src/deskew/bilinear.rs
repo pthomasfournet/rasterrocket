@@ -31,7 +31,7 @@ pub(super) struct RowParams {
 /// to the edge, so the missing neighbour duplicates the edge pixel and the
 /// interpolation degrades gracefully to nearest-neighbour there.
 #[inline]
-pub(super) fn footprint<P: DeskewPixel>(src: &Bitmap<P>, x0: usize, y0: usize) -> [P::Sample; 4] {
+fn footprint<P: DeskewPixel>(src: &Bitmap<P>, x0: usize, y0: usize) -> [P::Sample; 4] {
     let x1 = (x0 + 1).min(src.width as usize - 1);
     let y1 = (y0 + 1).min(src.height as usize - 1);
     // y0 ≤ sy_max = h-1 ≤ 32767 and y1 ≤ h-1 — safe casts.

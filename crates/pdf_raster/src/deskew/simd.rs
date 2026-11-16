@@ -9,9 +9,9 @@
 //!   out-of-bounds lanes.
 //! - **aarch64**: [`rotate_row_neon`] processes 8 output pixels per
 //!   iteration as two 4-lane quads: fused coordinate stepping, floor, an
-//!   unsigned bounds mask, fused bilinear blend and a white merge are
-//!   lane-wise; only the 2×2 footprint fetch is per lane (NEON has no
-//!   gather).
+//!   unsigned bounds mask, footprint indices, fused bilinear blend and a
+//!   white merge are lane-wise; only the sample loads are per lane (NEON
+//!   has no gather).
 //! - **other**: the scalar per-pixel loop.  Its per-pixel `floor`, early
 //!   return and gathered 2×2 reads keep LLVM from auto-vectorising it.
 //!
@@ -23,8 +23,6 @@ use color::Sample;
 use raster::Bitmap;
 
 use super::DeskewPixel;
-#[cfg(target_arch = "aarch64")]
-use super::bilinear::footprint;
 use super::bilinear::{RowParams, rotate_span_scalar};
 
 /// NEON inner loop: 8 output pixels per iteration as two 4-lane quads,
@@ -33,9 +31,11 @@ use super::bilinear::{RowParams, rotate_span_scalar};
 /// Coordinates are stepped with fused multiply-add exactly as the scalar
 /// path does (`cos·ox + sx_base`), floored with `vcvtmq_s32_f32`, and
 /// bounds-tested as unsigned integers so a negative origin compares above
-/// the maximum.  NEON has no gather, so each in-bounds lane fetches its 2×2
-/// footprint through [`footprint`]; out-of-bounds lanes fetch at origin
-/// `(0, 0)` and are replaced by `Sample::MAX` afterwards.  The bilinear
+/// the maximum.  The footprint's four sample indices are formed lane-wise,
+/// the neighbours clamped to the last column and row as the scalar
+/// footprint clamps them; NEON has no gather, so each lane then loads its
+/// four samples by index.  Out-of-bounds lanes fetch at origin `(0, 0)`
+/// and are replaced by `Sample::MAX` afterwards.  The bilinear
 /// blend is the scalar `mul_add` chain lane-wise (`vfmaq_f32`),
 /// `vcvtaq_u32_f32` rounds half away from zero as `f32::round` does, and
 /// saturating narrows to the sample width mirror the clamp of
@@ -62,10 +62,10 @@ pub(super) unsafe fn rotate_row_neon<P: DeskewPixel>(
     p: &RowParams,
 ) {
     use std::arch::aarch64::{
-        uint32x4_t, vaddq_f32, vandq_u32, vbslq_u32, vcleq_u32, vcombine_u16, vcvtaq_u32_f32,
-        vcvtmq_s32_f32, vcvtq_f32_s32, vdupq_n_f32, vdupq_n_u32, vfmaq_f32, vgetq_lane_u32,
-        vld1q_f32, vmaxvq_u32, vqmovn_u16, vqmovn_u32, vreinterpretq_u32_s32, vst1_u8, vst1q_u16,
-        vsubq_f32,
+        uint32x4_t, vaddq_f32, vaddq_u32, vandq_u32, vbslq_u32, vcleq_u32, vcombine_u16,
+        vcvtaq_u32_f32, vcvtmq_s32_f32, vcvtq_f32_s32, vdupq_n_f32, vdupq_n_u32, vfmaq_f32,
+        vld1q_f32, vmaxvq_u32, vminq_u32, vmulq_u32, vqmovn_u16, vqmovn_u32, vreinterpretq_u32_s32,
+        vst1_u8, vst1q_u16, vst1q_u32, vsubq_f32,
     };
 
     // sx_max / sy_max ≥ 0 because the source is at least 1×1.
@@ -78,6 +78,18 @@ pub(super) unsafe fn rotate_row_neon<P: DeskewPixel>(
     let v_sin = vdupq_n_f32(p.sin_a);
     let v_sx_base = vdupq_n_f32(p.sx_base);
     let v_sy_base = vdupq_n_f32(p.sy_base);
+    let v_one = vdupq_n_u32(1);
+    let data = src.data();
+    // Sample indices are u32 lanes: a longer buffer takes the scalar path.
+    let Ok(stride) = u32::try_from(src.stride) else {
+        rotate_span_scalar(dst_row, 0, src, p);
+        return;
+    };
+    if u32::try_from(data.len()).is_err() {
+        rotate_span_scalar(dst_row, 0, src, p);
+        return;
+    }
+    let v_stride = vdupq_n_u32(stride);
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -112,19 +124,28 @@ pub(super) unsafe fn rotate_row_neon<P: DeskewPixel>(
         // Out-of-bounds lanes are zeroed so every origin is a valid index.
         let x0 = vandq_u32(vreinterpretq_u32_s32(x0), in_bounds);
         let y0 = vandq_u32(vreinterpretq_u32_s32(y0), in_bounds);
-        let origin = |x: u32, y: u32| footprint(src, x as usize, y as usize);
-        let f = [
-            origin(vgetq_lane_u32::<0>(x0), vgetq_lane_u32::<0>(y0)),
-            origin(vgetq_lane_u32::<1>(x0), vgetq_lane_u32::<1>(y0)),
-            origin(vgetq_lane_u32::<2>(x0), vgetq_lane_u32::<2>(y0)),
-            origin(vgetq_lane_u32::<3>(x0), vgetq_lane_u32::<3>(y0)),
-        ];
-        let corner = |c: usize| {
-            let v = [f[0][c], f[1][c], f[2][c], f[3][c]].map(P::to_f32);
+        // The footprint's sample indices, its neighbours clamped to the
+        // last column and row as `footprint` clamps them.
+        let x1 = vminq_u32(vaddq_u32(x0, v_one), v_sx_max);
+        let y1 = vminq_u32(vaddq_u32(y0, v_one), v_sy_max);
+        let (r0, r1) = (vmulq_u32(y0, v_stride), vmulq_u32(y1, v_stride));
+        let corner = |o: uint32x4_t| {
+            let mut i = [0u32; 4];
+            // SAFETY: four u32 values, the extent of one vst1q_u32.
+            unsafe { vst1q_u32(i.as_mut_ptr(), o) };
+            // SAFETY: an in-bounds origin and its clamped neighbours index
+            // `y · stride + x` with `x ≤ w − 1` and `y ≤ h − 1`, below
+            // `data.len()`; an out-of-bounds lane indexes 0.
+            let v = i.map(|i| P::to_f32(unsafe { *data.get_unchecked(i as usize) }));
             // SAFETY: four f32 values, the extent of one vld1q_f32.
             unsafe { vld1q_f32(v.as_ptr()) }
         };
-        let (p00, p10, p01, p11) = (corner(0), corner(1), corner(2), corner(3));
+        let (p00, p10, p01, p11) = (
+            corner(vaddq_u32(r0, x0)),
+            corner(vaddq_u32(r0, x1)),
+            corner(vaddq_u32(r1, x0)),
+            corner(vaddq_u32(r1, x1)),
+        );
 
         let top = vfmaq_f32(p00, vsubq_f32(p10, p00), fx);
         let bot = vfmaq_f32(p01, vsubq_f32(p11, p01), fx);
@@ -543,29 +564,35 @@ mod tests {
         assert_rows_match_scalar::<Gray16>("dispatch", super::dispatch_rotate_row);
     }
 
-    /// Timing smoke test of the 16-bit rotation on 2900×2900 at 1.5°,
-    /// through the dispatched tier and the scalar loop.  Always passes; run
-    /// with `--ignored --nocapture` in a release build to see the times.
+    /// Timing smoke test of the rotation of 2900×2900 at 1.5°, at 8 and
+    /// 16 bits, through the dispatched tier and the scalar loop: the mean
+    /// of ten warm runs.  Always passes; run with `--ignored --nocapture`
+    /// in a release build to see the times.
     #[test]
     #[ignore = "manual perf smoke test; run with `--ignored --nocapture` for timing"]
-    fn rotate_gray16_8mp_timing() {
-        let src = pattern::<Gray16>(2900, 2900, 1);
-        let time = |name: &str, f: &dyn Fn() -> Bitmap<Gray16>| {
-            let _ = f();
-            let t0 = std::time::Instant::now();
-            for _ in 0..10 {
-                drop(std::hint::black_box(f()));
-            }
-            println!(
-                "{name}: {:.2} ms",
-                t0.elapsed().as_secs_f64() * 1000.0 / 10.0
-            );
-        };
-        time("dispatched", &|| {
-            rotate_cpu_with(&src, 1.5, super::dispatch_rotate_row)
-        });
-        time("scalar", &|| {
-            rotate_cpu_with(&src, 1.5, |row, s, p| rotate_span_scalar(row, 0, s, p))
-        });
+    fn rotate_8mp_timing_per_depth() {
+        fn time<P: DeskewPixel>() {
+            let src = pattern::<P>(2900, 2900, 1);
+            let run = |name: &str, f: &dyn Fn() -> Bitmap<P>| {
+                drop(f());
+                let t0 = std::time::Instant::now();
+                for _ in 0..10 {
+                    drop(std::hint::black_box(f()));
+                }
+                println!(
+                    "{} bits, {name}: {:.2} ms",
+                    P::Sample::BITS,
+                    t0.elapsed().as_secs_f64() * 100.0
+                );
+            };
+            run("dispatched", &|| {
+                rotate_cpu_with(&src, 1.5, super::dispatch_rotate_row)
+            });
+            run("scalar", &|| {
+                rotate_cpu_with(&src, 1.5, |row, s, p| rotate_span_scalar(row, 0, s, p))
+            });
+        }
+        time::<Gray8>();
+        time::<Gray16>();
     }
 }
