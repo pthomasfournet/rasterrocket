@@ -666,6 +666,55 @@ impl<'doc> PageRenderer<'doc> {
         depth: SampleDepth,
         buffers: CanvasBuffers,
     ) -> Result<Self, raster::BitmapAllocError> {
+        Self::try_build_in(view, doc, page_id, group, canvas, depth, buffers, true)
+    }
+
+    /// [`Self::try_with_page_group_in`] without a page group, for a page
+    /// whose every canvas sample a device page paints
+    /// ([`Self::paint_device_page`]): the canvas's samples are unspecified
+    /// until then.  [`Self::paint_paper`] gives the renderer of
+    /// [`Self::try_with_page_group_in`], for a page painted otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`raster::BitmapAllocError`] when the canvas cannot be allocated.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_view`].
+    pub fn try_unpainted_in(
+        view: &PageView,
+        doc: &'doc Document,
+        page_id: ObjectId,
+        canvas: &CanvasRequest,
+        depth: SampleDepth,
+        buffers: CanvasBuffers,
+    ) -> Result<Self, raster::BitmapAllocError> {
+        Self::try_build_in(view, doc, page_id, None, canvas, depth, buffers, false)
+    }
+
+    /// Paint every sample of a canvas built by [`Self::try_unpainted_in`]
+    /// paper white.
+    pub fn paint_paper(&mut self) {
+        self.canvas.paint_paper();
+    }
+
+    /// [`Self::try_with_page_group_in`], the canvas painted paper white or
+    /// transparent when `painted`, else unspecified.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the constructor's arguments and whether the canvas is painted"
+    )]
+    fn try_build_in(
+        view: &PageView,
+        doc: &'doc Document,
+        page_id: ObjectId,
+        group: Option<crate::resources::TransparencyGroupParams>,
+        canvas: &CanvasRequest,
+        depth: SampleDepth,
+        buffers: CanvasBuffers,
+        painted: bool,
+    ) -> Result<Self, raster::BitmapAllocError> {
         let alpha = group.is_some();
         let mut spare = buffers;
         let kind = if canvas.is_ink() {
@@ -679,7 +728,11 @@ impl<'doc> PageRenderer<'doc> {
             "the wide working space is painted at 16 bits"
         );
         let (ink, working, approximated) = canvas.ink_setup_in(doc);
-        let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?;
+        let canvas = if painted {
+            PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?
+        } else {
+            PageCanvas::try_new_unpainted_in(kind, view.width, view.height, &mut spare)?
+        };
         let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group, ink, working);
         renderer.buffers = spare;
         renderer.finish_space = finish_space;

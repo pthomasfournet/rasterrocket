@@ -757,10 +757,9 @@ impl<'a> PageJob<'a> {
         &self,
         buffers: CanvasBuffers,
     ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
-        let session = self.session;
-        let mut renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
+        let renderer = pdf_interp::renderer::PageRenderer::try_with_page_group_in(
             self.view,
-            &session.doc,
+            &self.session.doc,
             self.page_id,
             self.group,
             &self.canvas,
@@ -768,6 +767,37 @@ impl<'a> PageJob<'a> {
             buffers,
         )
         .map_err(allocation_failed)?;
+        Ok(self.configure(renderer))
+    }
+
+    /// A renderer of the page without its page group, configured from the
+    /// session, whose canvas samples are unspecified
+    /// ([`pdf_interp::renderer::PageRenderer::try_unpainted_in`]), its
+    /// bitmap built in `buffers`.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn unpainted_renderer(
+        &self,
+        buffers: CanvasBuffers,
+    ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
+        debug_assert!(self.group.is_none(), "a device page has no page group");
+        let renderer = pdf_interp::renderer::PageRenderer::try_unpainted_in(
+            self.view,
+            &self.session.doc,
+            self.page_id,
+            &self.canvas,
+            self.depth,
+            buffers,
+        )
+        .map_err(allocation_failed)?;
+        Ok(self.configure(renderer))
+    }
+
+    /// `renderer` configured from the session and the page's parameters.
+    fn configure(
+        &self,
+        mut renderer: pdf_interp::renderer::PageRenderer<'a>,
+    ) -> pdf_interp::renderer::PageRenderer<'a> {
+        let session = self.session;
         if let Some(cancel) = &self.params.cancel {
             renderer.set_cancel(cancel.flag());
         }
@@ -784,7 +814,7 @@ impl<'a> PageJob<'a> {
 
         #[cfg(feature = "cache")]
         renderer.set_image_cache(session.image_cache.clone(), session.doc_id);
-        Ok(renderer)
+        renderer
     }
 
     /// Execute the page's content and annotations on `renderer`.

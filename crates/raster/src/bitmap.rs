@@ -239,6 +239,46 @@ impl<P: Pixel> Bitmap<P> {
         })
     }
 
+    /// A bitmap without an alpha plane whose samples are unspecified, for a
+    /// caller that writes every sample before it reads one: built in
+    /// `buffers.data` when its capacity suffices, keeping the samples it
+    /// holds, else in a new zeroed allocation, which the allocator may
+    /// grant without writing it.  The alpha buffer is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when a buffer that must be allocated cannot be.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row_pad` is 0.
+    pub fn try_new_unpainted_in(
+        buffers: BitmapBuffers<P::Sample>,
+        width: u32,
+        height: u32,
+        row_pad: usize,
+    ) -> Result<Self, BitmapAllocError> {
+        let error = BitmapAllocError { width, height };
+        let (stride, data_len, _) = Self::layout(width, height, row_pad, false).ok_or(error)?;
+        let mut data = buffers.data;
+        if data.capacity() < data_len {
+            data = bytemuck::allocation::try_zeroed_slice_box(data_len)
+                .map_err(|()| error)?
+                .into_vec();
+        } else {
+            data.truncate(data_len);
+            data.resize(data_len, P::Sample::default());
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            data,
+            alpha: None,
+            _marker: PhantomData,
+        })
+    }
+
     /// Row stride, colour buffer length and, when `with_alpha`, alpha
     /// plane length of a `width` × `height` bitmap with rows padded to
     /// `row_pad` samples; `None` when a length overflows `usize`.
@@ -680,6 +720,24 @@ mod tests {
         assert!(b.alpha_plane().unwrap().iter().all(|&v| v == 0));
         let want = Bitmap::<Rgb8>::new_filled(4, 4, 1, true, 255);
         assert_eq!(b.stride, want.stride);
+    }
+
+    #[test]
+    fn an_unpainted_bitmap_keeps_or_allocates_its_buffer() {
+        let held = Bitmap::<Rgb8>::new_filled(8, 4, 1, true, 7).into_buffers();
+        let ptr = held.data.as_ptr();
+        let b = Bitmap::<Rgb8>::try_new_unpainted_in(held, 4, 4, 1).unwrap();
+        assert_eq!(b.data().as_ptr(), ptr, "colour buffer reused");
+        assert!(!b.has_alpha());
+        assert_eq!(b.data_len(), 4 * 4 * 3);
+        assert_eq!(b.stride, Bitmap::<Rgb8>::new(4, 4, 1, false).stride);
+        let fresh =
+            Bitmap::<Rgb8>::try_new_unpainted_in(BitmapBuffers::default(), 5, 3, 4).unwrap();
+        assert_eq!(
+            fresh.data_len(),
+            Bitmap::<Rgb8>::new(5, 3, 4, false).data_len()
+        );
+        assert!(fresh.data().iter().all(|&v| v == 0));
     }
 
     #[test]

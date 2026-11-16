@@ -289,7 +289,7 @@ pub(crate) fn record(
     if let Some(reason) = ruled_out(job) {
         return Ok(Err(reason));
     }
-    let mut renderer = job.renderer(CanvasBuffers::default())?;
+    let mut renderer = job.unpainted_renderer(CanvasBuffers::default())?;
     if let Err(reason) = renderer.record_for_device(true) {
         return Ok(Err(reason));
     }
@@ -338,10 +338,13 @@ pub(crate) fn render<'a>(
     let Some(claim) = pages.try_claim() else {
         return Ok((job.run(buffers)?, DevicePage::NotOffered));
     };
-    let mut renderer = job.renderer(buffers)?;
+    // The device paints every sample of the canvas; a page it does not
+    // paint is painted paper white first.
+    let mut renderer = job.unpainted_renderer(buffers)?;
     if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
         drop(claim);
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+        renderer.paint_paper();
         job.execute(&mut renderer)?;
         return Ok((renderer, DevicePage::Ineligible(reason)));
     }
@@ -352,6 +355,7 @@ pub(crate) fn render<'a>(
     job.execute(&mut renderer)?;
     let recording = renderer.take_device_recording();
     if renderer.budget_status().is_some() {
+        renderer.paint_paper();
         return Ok((renderer, DevicePage::NotOffered));
     }
     let outcome = match recording {

@@ -44,6 +44,25 @@ fn renderer(doc: &Document, width: u32, height: u32, depth: SampleDepth) -> Page
     .expect("the canvas is allocated")
 }
 
+/// [`renderer`] on a canvas whose samples are unspecified
+/// ([`PageRenderer::try_unpainted_in`]), built in buffers that hold
+/// samples no page paints.
+fn unpainted(doc: &Document, width: u32, height: u32, depth: SampleDepth) -> PageRenderer<'_> {
+    let len = width as usize * height as usize * 3;
+    let mut buffers = CanvasBuffers::default();
+    buffers.rgb.data = vec![0x5A; len];
+    buffers.rgb16.data = vec![0x5A5A; len];
+    PageRenderer::try_unpainted_in(
+        &PageRenderer::unit_view(width, height),
+        doc,
+        (4, 0),
+        &CanvasRequest::Rgb,
+        depth,
+        buffers,
+    )
+    .expect("the canvas is allocated")
+}
+
 /// The canvas samples of `r`, widened to 16 bits.
 fn samples(r: &PageRenderer<'_>) -> Vec<u16> {
     match &r.canvas {
@@ -81,7 +100,7 @@ fn device(
     content: &[u8],
     paths: bool,
 ) -> Vec<u16> {
-    let mut r = renderer(doc, width, height, depth);
+    let mut r = unpainted(doc, width, height, depth);
     r.record_for_device(paths).expect("an RGB page records");
     r.execute(&crate::content::parse(content));
     let DeviceRecording::Recorded(page) = r.take_device_recording().expect("recorded") else {
@@ -406,4 +425,15 @@ fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
         cpu(&doc, 50, 50, SampleDepth::Eight, CONTENT),
         "the CPU pass renders the page"
     );
+}
+
+#[test]
+fn paper_on_an_unpainted_canvas_is_the_painted_canvas() {
+    let doc = doc();
+    for depth in DEPTHS {
+        let mut r = unpainted(&doc, 23, 11, depth);
+        assert!(samples(&r).iter().all(|&v| v == 0x5A || v == 0x5A5A));
+        r.paint_paper();
+        assert_eq!(samples(&r), samples(&renderer(&doc, 23, 11, depth)));
+    }
 }

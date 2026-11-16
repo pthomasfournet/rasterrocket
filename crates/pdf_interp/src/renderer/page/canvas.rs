@@ -203,6 +203,39 @@ impl PageCanvas {
         })
     }
 
+    /// A `width × height` opaque canvas of `kind` whose samples are
+    /// unspecified ([`Bitmap::try_new_unpainted_in`]), built in the buffers
+    /// of `buffers` for `kind`; [`Self::paint_paper`] makes it the canvas
+    /// [`Self::try_new_in`] builds.
+    pub(super) fn try_new_unpainted_in(
+        kind: CanvasKind,
+        width: u32,
+        height: u32,
+        buffers: &mut CanvasBuffers,
+    ) -> Result<Self, raster::BitmapAllocError> {
+        fn bitmap<P: Pixel>(
+            held: &mut BitmapBuffers<P::Sample>,
+            width: u32,
+            height: u32,
+        ) -> Result<Bitmap<P>, raster::BitmapAllocError> {
+            Bitmap::try_new_unpainted_in(held.take_for(false), width, height, 1)
+        }
+        Ok(match kind {
+            CanvasKind::Rgb => Self::Rgb(bitmap(&mut buffers.rgb, width, height)?),
+            CanvasKind::Rgb16 => Self::Rgb16(bitmap(&mut buffers.rgb16, width, height)?),
+            CanvasKind::Ink => Self::Ink(bitmap(&mut buffers.ink, width, height)?),
+            CanvasKind::Ink16 => Self::Ink16(bitmap(&mut buffers.ink16, width, height)?),
+        })
+    }
+
+    /// Paint every sample of the opaque canvas paper white.
+    pub(super) fn paint_paper(&mut self) {
+        fn fill<P: Pixel>(bitmap: &mut Bitmap<P>) {
+            bitmap.data_mut().fill(paper::<P>());
+        }
+        with_canvas!(self, |b| fill(b));
+    }
+
     /// The pixel type of the canvas.
     pub(super) const fn kind(&self) -> CanvasKind {
         match self {
