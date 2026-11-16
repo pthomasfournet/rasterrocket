@@ -3,7 +3,10 @@
 //! space profile, and both results, decoded to Lab through `transicc`, lie
 //! within ΔE00 1 of each other on every patch, for every intent with and
 //! without black-point compensation: from sRGB at 8 and 16 bits, from the
-//! wide working space at 16 bits.
+//! wide working space at 16 bits.  At 16 bits the mean over the chart, whose
+//! cube lies between the nodes of the conversion's grid, is held to
+//! [`MAX_MEAN_DELTA_E_16`]: a conversion that interpolates at 8-bit
+//! precision stays within ΔE00 1 on every patch but not on average.
 //!
 //! The conversion of ICC CMYK content to another CMYK output profile is
 //! measured the same way: an image of a chart of inks in one test
@@ -27,7 +30,8 @@ use std::sync::Arc;
 
 use color::{Rgb8, Rgb16, Sample, SampleDepth};
 use common::{
-    MAX_DELTA_E, delta_e00, fixture, lines, patches, tempfile_dir, transicc, working_space_file,
+    MAX_DELTA_E, cube_and_ramp, delta_e00, fixture, lines, patches, tempfile_dir, transicc,
+    working_space_file,
 };
 use raster::Bitmap;
 use rasterrocket_interp::renderer::{CanvasBuffers, FinishedCanvas, PageRenderer, PageView};
@@ -50,6 +54,15 @@ fn ciede2000_matches_published_pairs() {
         assert!((got - want).abs() < 1e-4, "{a:?} {b:?}: {got} vs {want}");
     }
 }
+
+/// A 10-level RGB cube, whose levels `i / 9` but 0 and 1 lie between the
+/// nodes of a grid of `2^k + 1` nodes, and a 64-step neutral ramp.
+fn off_grid_patches() -> Vec<[f64; 3]> {
+    cube_and_ramp(10)
+}
+
+/// The largest mean ΔE00 over the chart accepted at 16 bits.
+const MAX_MEAN_DELTA_E_16: f64 = 0.1;
 
 /// Our conversion of `patches` of `space` at `bits` to `profile` under
 /// `intent`.
@@ -105,7 +118,8 @@ fn ours(
         .collect()
 }
 
-/// Both conversions of the chart to `name` within [`MAX_DELTA_E`].
+/// Both conversions of the chart to `name` within [`MAX_DELTA_E`] and
+/// [`MAX_MEAN_DELTA_E_16`].
 fn agrees(name: &str) {
     for space in WorkingSpace::ALL {
         agrees_from(name, space);
@@ -113,14 +127,14 @@ fn agrees(name: &str) {
 }
 
 /// Both conversions of the chart of `space` to `name` within
-/// [`MAX_DELTA_E`].
+/// [`MAX_DELTA_E`] and [`MAX_MEAN_DELTA_E_16`].
 fn agrees_from(name: &str, space: WorkingSpace) {
     let dir = tempfile_dir("output-profile");
     let src = working_space_file(&dir, space);
     let dst = fixture(name);
     let profile = OutputProfile::from_bytes(std::fs::read(&dst).unwrap()).unwrap();
     let (src, dst) = (src.to_str().unwrap(), dst.to_str().unwrap());
-    let chart = patches();
+    let chart = off_grid_patches();
     let mut worst = 0.0f64;
     let mut failures = Vec::new();
     for (code, intent) in [
@@ -183,6 +197,11 @@ fn agrees_from(name: &str, space: WorkingSpace) {
                         chart[at], mine[at], theirs[at]
                     ));
                 }
+                if bits == 16 && mean > MAX_MEAN_DELTA_E_16 {
+                    failures.push(format!(
+                        "{name} {space:?} {intent} bpc {bpc} 16-bit: mean ΔE00 {mean:.3}"
+                    ));
+                }
                 worst = worst.max(max);
             }
         }
@@ -208,7 +227,7 @@ fn srgb_colours_agree_through_the_wide_space(name: &str) {
         wide.to_str().unwrap(),
         dst.to_str().unwrap(),
     );
-    let chart: Vec<Vec<f64>> = patches().iter().map(|p| p.to_vec()).collect();
+    let chart: Vec<Vec<f64>> = off_grid_patches().iter().map(|p| p.to_vec()).collect();
     let in_wide: Vec<[f64; 3]> = transicc(
         &[&format!("-i{srgb}"), &format!("-o{wide}"), "-t1"],
         &lines(&chart, 255.0),

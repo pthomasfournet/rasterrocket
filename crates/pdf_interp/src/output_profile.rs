@@ -169,6 +169,21 @@ impl std::fmt::Debug for OutputProfile {
     }
 }
 
+/// The options of every conversion to an output profile under `intent`:
+/// evaluated in floating point, the destination's tables interpolated in
+/// tetrahedra weighed at the sample's full 16-bit precision.  The
+/// converter's defaults resolve linear light to 2⁻¹³ and reduce a sample to
+/// 8 bits for the interpolation.
+const fn conversion_options(intent: moxcms::RenderingIntent) -> TransformOptions {
+    TransformOptions {
+        rendering_intent: intent,
+        allow_use_cicp_transfer: false,
+        prefer_fixed_point: false,
+        interpolation_method: moxcms::InterpolationMethod::Tetrahedral,
+        barycentric_weight_scale: moxcms::BarycentricWeightScale::High,
+    }
+}
+
 /// The index of the conversion of `intent`, with compensation when `bpc`,
 /// from `space`.
 fn slot(intent: RenderingIntent, bpc: bool, space: WorkingSpace) -> usize {
@@ -278,24 +293,7 @@ impl OutputProfile {
             Layout::Rgb,
             &self.profile,
             layout,
-            TransformOptions {
-                rendering_intent: intent,
-                allow_use_cicp_transfer: false,
-                // From the wide space the conversion evaluates in floating
-                // point and interpolates the destination's tables in
-                // tetrahedra weighed at the sample's full precision; the
-                // defaults, which sRGB keeps, resolve linear light to 2⁻¹³
-                // and reduce a sample to 8 bits for the interpolation.
-                prefer_fixed_point: space == WorkingSpace::Srgb,
-                interpolation_method: match space {
-                    WorkingSpace::Srgb => moxcms::InterpolationMethod::default(),
-                    WorkingSpace::Wide => moxcms::InterpolationMethod::Tetrahedral,
-                },
-                barycentric_weight_scale: match space {
-                    WorkingSpace::Srgb => moxcms::BarycentricWeightScale::default(),
-                    WorkingSpace::Wide => moxcms::BarycentricWeightScale::High,
-                },
-            },
+            conversion_options(intent),
         )
     }
 

@@ -26,11 +26,17 @@ pub(crate) fn working_space_file(dir: &Path, space: WorkingSpace) -> PathBuf {
 
 /// A 9-level RGB cube, a 64-step neutral ramp and the corners.
 pub(crate) fn patches() -> Vec<[f64; 3]> {
+    cube_and_ramp(9)
+}
+
+/// A `levels`-level RGB cube and a 64-step neutral ramp.
+pub(crate) fn cube_and_ramp(levels: i32) -> Vec<[f64; 3]> {
+    let top = f64::from(levels - 1);
     let mut out = Vec::new();
-    for r in 0..9 {
-        for g in 0..9 {
-            for b in 0..9 {
-                out.push([r, g, b].map(|v: i32| f64::from(v) / 8.0));
+    for r in 0..levels {
+        for g in 0..levels {
+            for b in 0..levels {
+                out.push([r, g, b].map(|v: i32| f64::from(v) / top));
             }
         }
     }
