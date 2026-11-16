@@ -11,13 +11,12 @@
 //!    within the sweep ([`detect`] returns `None`) is left as it is.
 //!
 //! 2. **Rotation** (`rotate` module): bilinear rotation by the detected
-//!    angle, white outside the source.  For 8-bit gray: on the GPU (CUDA
-//!    NPP `nppiRotate`) when the `gpu-deskew` feature is enabled and the
-//!    backend policy is [`BackendPolicy::ForceCuda`], where a failed GPU
+//!    angle, white outside the source, at the page's depth: on the GPU
+//!    (CUDA NPP `nppiRotate`) when the `gpu-deskew` feature is enabled and
+//!    the backend policy is [`BackendPolicy::ForceCuda`], where a failed GPU
 //!    rotation is an error ([`DeskewError::GpuRotation`]); on the CPU
-//!    otherwise.  16-bit gray is measured on its
-//!    8-bit levels and rotated on the CPU at 16 bits.  The CPU rotation of
-//!    either depth runs through SIMD row kernels exact with the scalar one.  Rotation is
+//!    otherwise, through SIMD row kernels exact with the scalar one.  16-bit
+//!    gray is measured on its 8-bit levels.  Rotation is
 //!    clockwise-positive: a detected counter-clockwise tilt of +θ° is
 //!    corrected by a clockwise rotation by θ°.
 //!
@@ -164,13 +163,12 @@ impl DeskewPixel for Gray16 {
         detect::detect(&img.converted())
     }
 
-    /// On the CPU, whatever the policy: the GPU rotation is 8-bit.
     fn rotated(
         img: &Bitmap<Self>,
         angle_deg: f32,
-        _policy: BackendPolicy,
+        policy: BackendPolicy,
     ) -> Result<Bitmap<Self>, DeskewError> {
-        Ok(rotate::rotate_cpu(img, angle_deg))
+        rotate::rotated(img, angle_deg, policy)
     }
 
     fn to_f32(s: u16) -> f32 {
@@ -195,10 +193,10 @@ pub fn detect<P: DeskewPixel>(img: &Bitmap<P>) -> Result<Option<Skew>, DeskewErr
 ///
 /// `img` is left as it is when the skew is `None` or its magnitude below
 /// [`MIN_CORRECT_DEG`].
-/// An 8-bit page rotates on the GPU only under
+/// The page rotates at its depth, on the GPU only under
 /// [`BackendPolicy::ForceCuda`] in a build with the `gpu-deskew` feature,
 /// on the CPU otherwise; a 16-bit page is measured on its nearest 8-bit
-/// levels and rotated on the CPU at 16 bits.
+/// levels.
 ///
 /// # Errors
 ///

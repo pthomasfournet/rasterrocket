@@ -27,7 +27,7 @@ nvjpeg = []
 # /usr/lib/x86_64-linux-gnu/libnvjpeg2k/13/ (build.rs also probes the
 # unversioned /usr/lib/x86_64-linux-gnu/libnvjpeg2k/).
 nvjpeg2k = []
-# Enable GPU rotation via CUDA NPP nppiRotate_8u_C1R_Ctx.
+# Enable GPU rotation via CUDA NPP nppiRotate_8u_C1R_Ctx and nppiRotate_16u_C1R_Ctx.
 # Requires libnppig.so + libnppc.so + libcudart.so (all ship with the CUDA 13 toolkit).
 gpu-deskew = []
 # Enable GPU vs CPU parity tests (requires a CUDA device at test time).

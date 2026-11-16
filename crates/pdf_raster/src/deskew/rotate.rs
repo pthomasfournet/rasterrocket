@@ -12,8 +12,9 @@
 //! fastest row kernel of the machine (`simd` module), each bit-exact with
 //! the scalar kernel.
 //!
-//! **GPU path** (`gpu-deskew` feature, optional): CUDA NPP `nppiRotate_8u_C1R_Ctx`
-//! with hardware bilinear via texture units.  ~0.3–0.5 ms for a 2550×3300 image
+//! **GPU path** (`gpu-deskew` feature, optional): CUDA NPP
+//! `nppiRotate_8u_C1R_Ctx` and `nppiRotate_16u_C1R_Ctx` with hardware
+//! bilinear via texture units.  ~0.3–0.5 ms for a 2550×3300 image
 //! on RTX 5070.  Taken only under [`BackendPolicy::ForceCuda`], where a
 //! failed GPU rotation, as without a CUDA device, is an error.
 
@@ -27,18 +28,19 @@ use crate::BackendPolicy;
 
 /// `img` rotated by `angle_deg` degrees (clockwise positive).
 ///
-/// A new bitmap of the same dimensions holds the rotated content; out-of-bounds source pixels are filled with 255
-/// (white).  The rotation runs on the GPU when [`rotated_on_gpu`] gives a
-/// result under `policy`, and on the CPU otherwise.
+/// A new bitmap of the same dimensions holds the rotated content;
+/// out-of-bounds source pixels are white (`Sample::MAX`).  The rotation
+/// runs on the GPU when [`rotated_on_gpu`] gives a result under `policy`,
+/// and on the CPU otherwise.
 ///
 /// # Errors
 ///
 /// As [`rotated_on_gpu`].
-pub(crate) fn rotated(
-    img: &Bitmap<Gray8>,
+pub(crate) fn rotated<P: DeskewPixel>(
+    img: &Bitmap<P>,
     angle_deg: f32,
     policy: BackendPolicy,
-) -> Result<Bitmap<Gray8>, DeskewError> {
+) -> Result<Bitmap<P>, DeskewError> {
     Ok(rotated_on_gpu(img, angle_deg, policy)?.unwrap_or_else(|| rotate_cpu(img, angle_deg)))
 }
 
@@ -51,11 +53,11 @@ pub(crate) fn rotated(
 /// [`DeskewError::GpuRotation`] when `policy` requires the GPU rotation
 /// and it fails.
 #[cfg(feature = "gpu-deskew")]
-pub(crate) fn rotated_on_gpu(
-    img: &Bitmap<Gray8>,
+pub(crate) fn rotated_on_gpu<P: DeskewPixel>(
+    img: &Bitmap<P>,
     angle_deg: f32,
     policy: BackendPolicy,
-) -> Result<Option<Bitmap<Gray8>>, DeskewError> {
+) -> Result<Option<Bitmap<P>>, DeskewError> {
     if !rotates_on_gpu(policy) {
         return Ok(None);
     }
@@ -68,11 +70,11 @@ pub(crate) fn rotated_on_gpu(
     clippy::unnecessary_wraps,
     reason = "the signature of the `gpu-deskew` build, whose GPU rotation can fail"
 )]
-pub(crate) const fn rotated_on_gpu(
-    _img: &Bitmap<Gray8>,
+pub(crate) const fn rotated_on_gpu<P: DeskewPixel>(
+    _img: &Bitmap<P>,
     _angle_deg: f32,
     _policy: BackendPolicy,
-) -> Result<Option<Bitmap<Gray8>>, DeskewError> {
+) -> Result<Option<Bitmap<P>>, DeskewError> {
     Ok(None)
 }
 
@@ -115,25 +117,34 @@ pub(crate) fn rotate_cpu_into(src: &Bitmap<Gray8>, angle_deg: f32, dst: &mut [u8
     rotate_rows(src, angle_deg, dst, stride, dispatch_rotate_row);
 }
 
-/// GPU rotation via CUDA NPP (`nppiRotate_8u_C1R_Ctx`).
+/// GPU rotation via CUDA NPP (`nppiRotate_8u_C1R_Ctx` for 8-bit samples,
+/// `nppiRotate_16u_C1R_Ctx` for 16-bit ones).
 #[cfg(feature = "gpu-deskew")]
-pub(crate) fn rotate_gpu(
-    src: &Bitmap<Gray8>,
+pub(crate) fn rotate_gpu<P: DeskewPixel>(
+    src: &Bitmap<P>,
     angle_deg: f32,
-) -> Result<Bitmap<Gray8>, DeskewError> {
-    let pixels =
-        gpu::npp_rotate::rotate_gray8(src.data(), src.stride, src.width, src.height, angle_deg)
-            .map_err(|e| DeskewError::GpuRotation(e.to_string()))?;
+) -> Result<Bitmap<P>, DeskewError> {
+    use color::Sample as _;
 
-    // `rotate_gray8` returns `width × height` bytes with no row padding,
+    let gpu_err = |e: gpu::npp_rotate::NppRotateError| DeskewError::GpuRotation(e.to_string());
+    let (data, stride, w, h) = (src.data(), src.stride, src.width, src.height);
+    // The rotation returns `width × height` samples with no row padding,
     // the layout of a bitmap with a row pad of 1.
-    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
+    let mut dst = Bitmap::<P>::new(w, h, 1, false);
+    let pixels: Vec<P::Sample> = if let Some(bytes) = P::Sample::as_u8(data) {
+        let out = gpu::npp_rotate::rotate_gray8(bytes, stride, w, h, angle_deg).map_err(gpu_err)?;
+        P::Sample::from_u8_slice(&out).map(<[_]>::to_vec)
+    } else if let Some(wide) = P::Sample::as_u16(data) {
+        let out = gpu::npp_rotate::rotate_gray16(wide, stride, w, h, angle_deg).map_err(gpu_err)?;
+        P::Sample::from_u16_slice(&out).map(<[_]>::to_vec)
+    } else {
+        None
+    }
+    .ok_or_else(|| DeskewError::GpuRotation("a sample of neither 8 nor 16 bits".to_owned()))?;
     if pixels.len() != dst.data().len() {
         return Err(DeskewError::GpuRotation(format!(
-            "GPU rotation returned {} bytes for a {}×{} image ({} expected)",
+            "GPU rotation returned {} samples for a {w}×{h} image ({} expected)",
             pixels.len(),
-            src.width,
-            src.height,
             dst.data().len()
         )));
     }
@@ -505,6 +516,65 @@ mod tests {
             max_diff <= 2,
             "GPU vs CPU rotation max diff {max_diff} > 2 at 2°"
         );
+    }
+
+    /// At 16 bits, GPU and CPU bilinear rotation agree to within the
+    /// 8-bit tolerance, 2 levels of 257, at any interior pixel at 2°, on a
+    /// source whose samples use all 16 bits.
+    #[test]
+    #[cfg(all(feature = "gpu-deskew", feature = "gpu-validation"))]
+    fn gpu_vs_cpu_rotation_parity_at_16_bits() {
+        let mut src = Bitmap::<color::Gray16>::new(128, 128, 1, false);
+        for y in 0..128u32 {
+            for (x, px) in (0usize..).zip(src.row_samples_mut(y).iter_mut()) {
+                *px = u16::try_from((x * 523 + y as usize * 787) % 65_536).expect("below 2^16");
+            }
+        }
+        let angle = 2.0_f32;
+        let cpu = rotate_cpu(&src, angle);
+        let gpu = rotate_gpu(&src, angle).expect("GPU rotate failed");
+        let mut max_diff = 0u16;
+        for y in 4..124u32 {
+            let cr = &cpu.row_samples(y)[4..124];
+            let gr = &gpu.row_samples(y)[4..124];
+            for (&a, &b) in cr.iter().zip(gr.iter()) {
+                max_diff = max_diff.max(a.abs_diff(b));
+            }
+        }
+        eprintln!("16-bit GPU vs CPU rotation max diff at 2°: {max_diff}");
+        assert!(
+            max_diff <= 2 * 257,
+            "16-bit GPU vs CPU rotation max diff {max_diff} > 514 at 2°"
+        );
+        // The bilinear blend keeps 16-bit levels: the rotation is not the
+        // 8-bit one widened.
+        assert!(gpu.data().iter().any(|&v| v % 257 != 0));
+    }
+
+    /// Under `ForceCuda` a 16-bit page rotates on the GPU, or the rotation
+    /// is an error; other policies rotate on the CPU.
+    #[test]
+    #[cfg(feature = "gpu-deskew")]
+    fn a_16_bit_page_rotates_on_the_gpu_only_under_force_cuda() {
+        let img = Bitmap::<color::Gray16>::new_filled(64, 64, 1, false, 30_000);
+        assert!(matches!(
+            rotated_on_gpu(&img, 3.0, BackendPolicy::CpuOnly),
+            Ok(None)
+        ));
+        match rotated_on_gpu(&img, 3.0, BackendPolicy::ForceCuda) {
+            Ok(Some(out)) => {
+                assert_eq!((out.width, out.height), (64, 64));
+                assert_eq!(
+                    out.row_samples(32)[32],
+                    30_000,
+                    "the centre is the source's"
+                );
+                assert_eq!(out.row_samples(0)[0], u16::MAX, "a corner is white");
+            }
+            Err(DeskewError::GpuRotation(_)) => {}
+            Ok(None) => panic!("ForceCuda declined the 16-bit GPU rotation"),
+            Err(e) => panic!("ForceCuda rotation failed with {e:?}"),
+        }
     }
 
     #[test]

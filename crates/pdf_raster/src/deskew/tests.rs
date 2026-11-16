@@ -129,7 +129,7 @@ fn a_16_bit_page_deskews_like_its_8_bit_levels() {
     assert_eq!(detect(&sixteen).expect("within bounds"), Some(skew));
     let mut fixed = tilted_text(2.5);
     let _ = apply(&mut fixed, BackendPolicy::CpuOnly).expect("within bounds");
-    let applied = apply(&mut sixteen, BackendPolicy::ForceCuda).expect("within bounds");
+    let applied = apply(&mut sixteen, BackendPolicy::CpuOnly).expect("within bounds");
     assert_eq!(applied, Some(skew));
     let mut finer = false;
     for (&deep, &narrow) in sixteen.data().iter().zip(fixed.data()) {
