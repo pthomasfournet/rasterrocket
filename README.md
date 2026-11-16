@@ -458,10 +458,10 @@ and the page/annotation JavaScript-disclosure work).
 ## What's new in v1.0.0
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
-- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the AA-fill and parallel-Huffman JPEG decode kernels (both dormant by default) on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. Under `auto`, a GPU backend is initialised only when a GPU kernel is enabled by its threshold environment variable (a pixel area below the type's maximum; the Huffman one only in a `gpu-jpeg-huffman` build), Vulkan then preferred over CUDA; with both dormant, the default, `auto` renders on the CPU.
+- **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
-- **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature, implied by `vulkan`) is wired into the production decode path. Dormant by default (threshold = `u32::MAX`); enable with `PDF_RASTER_HUFFMAN_THRESHOLD=0` for benchmarking.
+- **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed after v2.3.0: it lost to the multi-threaded CPU decoder on every measured workload.
 - **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (Since v2.0.0 the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` does not compile outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 
@@ -509,7 +509,7 @@ crates.io (see the note at the top).
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) and, with `gpu-jpeg-huffman`, the parallel-Huffman JPEG decode kernels (dormant by default) run on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -563,7 +563,6 @@ Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus]
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (AMD/Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend (cross-vendor) for whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
-| `gpu-jpeg-huffman` | Custom parallel-Huffman GPU JPEG decode, on CUDA or (with `vulkan`) Vulkan (dormant; `PDF_RASTER_HUFFMAN_THRESHOLD=0` enables it) | CUDA or Vulkan |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
@@ -576,10 +575,10 @@ The runtime backend is chosen from three sources, in priority order:
 2. The `PDF_RASTER_BACKEND` environment variable (same valid values).
 3. The compile-time default — `auto`.
 
-Under `auto` a GPU backend is initialised only when the parallel-Huffman JPEG decoder is enabled (`PDF_RASTER_HUFFMAN_THRESHOLD` set to a pixel area below `u32::MAX`, in a `gpu-jpeg-huffman` build); it is dormant by default, so `auto` is a CPU session: no Vulkan device, CUDA context, image cache or nvJPEG decoder (in an `nvjpeg2k` build, a thread's nvJPEG2000 decoder is built when it first draws a `JPXDecode` image of at least 2 097 152 px at more than half its size; `PDF_RASTER_JPX_THRESHOLD` overrides the area). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. With it enabled, **Vulkan is preferred over CUDA** when both are compiled in.  Both backends fall through to CPU when their runtime is unavailable; `--backend cuda` / `--backend vulkan` make the failure loud instead.
+`auto` initialises no GPU backend at start-up: it is a CPU session, with no Vulkan device, CUDA context, image cache or nvJPEG decoder (in an `nvjpeg2k` build, a thread's nvJPEG2000 decoder is built when it first draws a `JPXDecode` image of at least 2 097 152 px at more than half its size; `PDF_RASTER_JPX_THRESHOLD` overrides the area; `--gpu-pages` opens a Vulkan device of its own). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. `--backend cuda` / `--backend vulkan` initialise their backend and fail loudly when its runtime is unavailable.
 
 ```bash
-# Ship a Vulkan-default binary, override per-process when you need CUDA:
+# Select a backend per process:
 PDF_RASTER_BACKEND=cuda rrocket input.pdf out
 
 # CLI flag always wins over the env var:

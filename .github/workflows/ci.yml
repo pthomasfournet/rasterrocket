@@ -81,9 +81,6 @@ jobs:
       - name: Test rasterrocket-gpu (CMYK matrix — AVX2 and scalar parity)
         run: cargo test -p rasterrocket-gpu --lib -- cmyk
 
-      - name: Test rasterrocket-gpu (parallel-Huffman JPEG decoder, gpu-jpeg-huffman)
-        run: cargo test -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --lib -- jpeg_decoder huffman
-
       # The integration suites assemble their PDFs in memory and assert
       # rendered pixels; suites that need the gitignored corpus skip.
       - name: Test rasterrocket (unit suite + in-memory rendering suites, encryption)
@@ -272,8 +269,8 @@ jobs:
       - name: Clippy (rasterrocket-camera, lib and tests)
         run: cargo clippy -p rasterrocket-camera --tests -- -D warnings
 
-      - name: Clippy (rasterrocket-gpu, gpu-jpeg-huffman)
-        run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation,gpu-jpeg-huffman --tests -- -D warnings
+      - name: Clippy (rasterrocket-gpu, cache and gpu-validation, lib and tests)
+        run: cargo clippy -p rasterrocket-gpu --features cache,gpu-validation --tests -- -D warnings
 
       # The vendored forks at clippy's defaults, one package at a time so
       # features do not unify across them: library and tests, with the

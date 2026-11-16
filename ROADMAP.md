@@ -2414,7 +2414,9 @@ Reverse-engineering desktop NVJPG would take a multi-month research project (cf.
 
 ---
 
-## Phase 8 — Custom on-GPU parallel Huffman decoder (Phase A SHIPPED as OSS artifact v1.0.0; B–D CLOSED)
+## Phase 8 — Custom on-GPU parallel Huffman decoder (Phase A SHIPPED as OSS artifact v1.0.0; B–D CLOSED; REMOVED 2026-11-15)
+
+**Removed (2026-11-15).** The whole GPU JPEG decoder is deleted: the parallel-Huffman entropy stage, the Blelloch scan, the GPU IDCT and the CPU pre-pass that fed them, with the `gpu-jpeg-huffman` feature. It had no case to win: the CPU pre-pass already decodes every symbol of the scan to resolve the DC chain, and the CPU walks the stream again for the magnitude bits after the device returns, so the device stage replaces only table lookups between two sequential CPU walks; whole-process it lost about 10× on gray scans (Vulkan, 20 pages at 600 dpi: 2.2 s against 0.22 s for `--backend cpu`) and 1.6–8× on the A18 Pro. Master `10393d55` is the last commit with the complete decoder, converging on CUDA and Vulkan.
 
 **Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`). Phases B–D are closed (2026-11-12): the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
 
@@ -2547,7 +2549,7 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
 
 **Status of bench gate:** criteria 1, 2, and 3 all PASS on RTX 5070 (commit `1783d66` + bench/v10/results.md, vector-heavy corpora 01-05).  Criterion 4 (cross-vendor proof of life) was blocked on hardware when the gate was measured. It no longer is: `--vulkan-device radv` renders on the dev box's AMD Raphael iGPU (v1.5.0). It renders byte-identically to the CPU path on RADV and llvmpipe (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe); Phase 10 has no open item but Intel ANV, untested for want of hardware.
 
-**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; Vulkan is preferred over CUDA under `auto` when a device kernel is enabled; otherwise `auto` renders on the CPU. The parallel-Huffman JPEG decoder (Phase 8 Phase-A algorithm) is wired into the production Vulkan path (`gpu-jpeg-huffman`, a feature of its own that `vulkan` does not imply) but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`) pending threshold tuning — it beats nvJPEG on 7/10 corpora when forced. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
+**Production status (v1.0.0):** the full Vulkan path is wired end-to-end and stable. `--backend vulkan` / `--backend cuda` / `PDF_RASTER_BACKEND` select the backend at runtime; `auto` renders on the CPU. The parallel-Huffman JPEG decoder (Phase 8) ran on the Vulkan backend until its removal on 2026-11-15. The Task 3 perf-only follow-ups (dedicated transfer queue, ICC CLUT Texture3D, BDA push-constants) were measured on 2026-11-13 and closed as not worth it (see Task 3). The `record_tile_fill` parity oracle is moot: the tile-fill kernel is deleted.
 
 **Total scope:** ~3100 LoC new Rust + ~1000 LoC Slang + ~400 LoC modified. Estimated ~6-8 weeks elapsed (3-4 weeks tasks 1+2; 3-4 weeks task 3).
 
@@ -3330,25 +3332,30 @@ not convert (below `GPU_ICC_CLUT_THRESHOLD`, or declined) now takes the
 profile transform a CPU-only session uses instead of the scalar CPU table
 evaluator (about 3× faster on the A18 Pro); a page with
 `PageDiagnostics::device_icc_conversions == 0` is byte-identical to a
-CPU-only render, and a device-converted image stays within ±4 of it. The
-dormant parallel-Huffman JPEG decoder refuses subsampled, non-standard and
-restart-coded streams from their headers, before its entropy pre-pass. On
+CPU-only render, and a device-converted image stays within ±4 of it. On
 Windows, `--ram-path` works (available memory is read through
 `GlobalMemoryStatusEx`); `--ram` alone is still refused there, having no
 `/dev/shm`.
 
-**Unreleased on master: parallel-Huffman convergence and draw size.** The
-dormant GPU parallel-Huffman JPEG decoder (`PDF_RASTER_HUFFMAN_THRESHOLD=0`)
-now converges on gray text scans: when a fresh-start Phase 1 walker stops at
-a decode error on a workgroup boundary, Phase 2 resumes the next slot from
-its Phase 1 snapshot instead of carrying the error state through the
-workgroup and into one more workgroup per pass, and subsequences grow from
-512 to 1024 bits. On the first 20 gray pages of qsj-1889 and qsj-2444 every
-image decodes on the device (22 of 40 before; the rest fell back to the CPU
-entropy walk), in at most two passes, on CUDA, Vulkan and RADV, with the
-CPU walk's coefficients, so the output is byte for byte as before. The
-decoder is no longer used for a draw at half the image's size or less on
-both axes, the rule nvJPEG2000 already followed.
+**Unreleased on master: the GPU parallel-Huffman JPEG decoder is removed.**
+It was dormant (reached only through `PDF_RASTER_HUFFMAN_THRESHOLD`) and lost
+to the multi-threaded CPU decoder on every measured workload, by about 10×
+whole-process on gray scans, so the decoder, its CPU pre-pass, the
+parallel-Huffman, Blelloch-scan and IDCT kernels (CUDA and Slang) and their
+tests are deleted (see Phase 8; master `10393d55` is the last commit with it).
+`Auto` no longer starts a GPU backend at start-up under any setting: an `Auto`
+session opens no Vulkan device or CUDA context, and only the on-demand
+nvJPEG2000 decoder and the `gpu_pages` device remain. Rendered output does not
+change. Removed public API: the `gpu-jpeg-huffman` feature (gpu, interp,
+`rasterrocket`, CLI); the `rasterrocket_gpu::jpeg_decoder` module, with
+`JpegGpuDecoder` and `JpegGpuError`; `GpuBackend::record_scan`,
+`record_huffman` and `record_idct`, with `ScanParams`, `ScanPhase`,
+`HuffmanParams`, `HuffmanPhase`, `Phase4FailureKind`, `IdctParams` and their
+constants; `rasterrocket_interp::huffman_threshold` and
+`DeviceKernel::HuffmanJpeg`; `PageRenderer::set_jpeg_gpu`, `take_jpeg_gpu`,
+`set_jpeg_vk` and `take_jpeg_vk`; the `B: GpuBackend` parameter and decoder
+argument of `resolve_image` and `PageResources::image`; and the
+`PDF_RASTER_HUFFMAN_THRESHOLD` variable, which is now ignored.
 
 **Unreleased on master: nvJPEG2000 declines before the decoder is built.**
 The device JPEG 2000 path now decides from the codestream's headers, before

@@ -144,15 +144,12 @@ and why it failed. On the
 Apple GPU device buffers live in shared memory, which the CPU reads and
 writes in place, so no data is copied to or from the GPU.
 
-A `vulkan,gpu-jpeg-huffman` build runs the parallel-Huffman JPEG decoder
-on the GPU, off by default (`PDF_RASTER_HUFFMAN_THRESHOLD=0` enables
-it); a `vulkan,gpu-icc` build converts ICC-based CMYK images of at least
+A `vulkan,gpu-icc` build converts ICC-based CMYK images of at least
 128 000 px through the profile's lookup table on the device, and a
 `vulkan,cache` build keeps decoded images in the device image cache.
 `--gpu-pages` renders pages made only of solid fills and strokes whole on
 the device, beside the CPU workers. Under the default `--backend auto`, no
-Vulkan device is opened while the Huffman decoder is off and `--gpu-pages`
-is not given.
+Vulkan device is opened unless `--gpu-pages` is given.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
 byte-identically on the GPU and the CPU.

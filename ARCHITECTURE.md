@@ -917,8 +917,8 @@ GpuBackend trait          (backend/mod.rs)
 ```
 
 The trait surface is `begin_page → record_* → submit_page → wait_page`
-(`run_page` wraps the four and abandons a page whose step fails), with five
-kernel `record_*` methods (blit, ICC CLUT and the three JPEG stages), the copy and zero-fill records, `alloc_device` / `alloc_host_pinned`
+(`run_page` wraps the four and abandons a page whose step fails), with two
+kernel `record_*` methods (blit, ICC CLUT), the copy and zero-fill records, `alloc_device` / `alloc_host_pinned`
 / `upload` / `download`, and `scratch()`.  GATs (`type DeviceBuffer`) make it
 usable only as a generic parameter, not `dyn` — callers monomorphise per
 backend; the trait is sealed to the two backends of the crate.  The
@@ -946,21 +946,14 @@ and the cached-image blit through it, and `VulkanBackend::render_page`
 renders whole pages (*Page raster* below).
 
 **Backend start-up under `Auto`.**  A session under `BackendPolicy::Auto`
-initialises no GPU backend, image cache or nvJPEG decoder unless a device
-kernel is enabled by its threshold (`device_kernel_enabled`: the
-parallel-Huffman decoder or nvJPEG), so with the default thresholds `Auto`
-renders on the CPU, except JPEG 2000 images for which a thread's nvJPEG2000
-decoder is built on demand.  `ForceCuda` / `ForceVulkan` initialise their
-backend regardless.  When a Vulkan backend is held under `Auto`, CUDA is not
-initialised.
+initialises no GPU backend, image cache or nvJPEG decoder: it renders on the
+CPU, except JPEG 2000 images for which a thread's nvJPEG2000 decoder is built
+on demand, and pages `gpu_pages` sends to a Vulkan device it opens itself.
+`ForceCuda` / `ForceVulkan` initialise their backend.
 
-**Kernel inventory.**  Five kernel sources exist in **both** `.cu` (CUDA, compiled to
+**Kernel inventory.**  Two kernel sources exist in **both** `.cu` (CUDA, compiled to
 PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature; `page_raster` exists in Slang only.  The
-table below lists the render-path kernels; the remaining three —
-`blelloch_scan`, `idct_color`, and `parallel_huffman` — belong to the GPU
-JPEG pipeline and are dormant by default
-(`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`).
+time, gated on the `vulkan` feature; `page_raster` exists in Slang only.
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
@@ -1314,7 +1307,6 @@ gpu-icc             → gpu-icc            → gpu-icc             → (crate on
 gpu-deskew          → gpu-deskew         →                     → gpu-deskew
 cache               → cache              → cache               → cache
 vulkan              → vulkan             → vulkan              → vulkan
-gpu-jpeg-huffman    → gpu-jpeg-huffman   → gpu-jpeg-huffman    → gpu-jpeg-huffman
 gpu-validation      → gpu-validation     →                     → gpu-validation
 bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
 
