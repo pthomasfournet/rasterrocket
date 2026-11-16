@@ -4,7 +4,7 @@
 //! A resolved shading is in device space: it is keyed by its resource (the
 //! object, or the resource context and name of a direct dictionary), the
 //! exact bits of the matrix that places it and of the page height, the
-//! rendering intent its colours convert under, and, when
+//! working space and rendering intent its colours convert to, and, when
 //! the resources in effect replace a device colour space with a default
 //! space, the resource context, so every use sees what a fresh resolve under
 //! its own matrix and resources returns.  A tiling cell is keyed by its
@@ -47,8 +47,8 @@ pub(super) struct PlacedKey {
     id: ResourceKey,
     matrix: [u64; 6],
     canvas: [u64; 2],
-    /// The rendering intent the colours convert under.
-    intent: crate::ColourIntent,
+    /// The working space and rendering intent the colours convert to.
+    target: crate::ColourTarget,
     /// The resource context, when its default colour spaces take part.
     defaults: Option<ObjectId>,
     /// The canvas the object is resolved for.
@@ -69,7 +69,7 @@ impl PlacedKey {
             id,
             matrix: matrix.map(f64::to_bits),
             canvas: [canvas.width.to_bits(), canvas.height.to_bits()],
-            intent: canvas.intent,
+            target: canvas.target,
             defaults,
             kind,
         }
@@ -84,20 +84,21 @@ pub(super) struct RasterKey {
     tint: Option<RasterColor>,
     context: Option<ResourceIdentity>,
     phase: CellPhase,
-    /// The canvas the cell is rasterised for.
-    kind: CanvasKind,
+    /// The canvas the cell is rasterised for, and its working space.
+    kind: (CanvasKind, crate::WorkingSpace),
 }
 
 impl RasterKey {
     /// The key of pattern stream `id` under `device` with `tint`,
-    /// rasterised for a canvas of `kind`; `context` is the identity of the
-    /// resources a pattern without its own inherits.
+    /// rasterised for a canvas of `kind` and working space `space`;
+    /// `context` is the identity of the resources a pattern without its own
+    /// inherits.
     pub(super) fn new(
         id: ObjectId,
         device: &[f64; 6],
         tint: Option<&RasterColor>,
         context: Option<ResourceIdentity>,
-        kind: CanvasKind,
+        (kind, space): (CanvasKind, crate::WorkingSpace),
     ) -> Self {
         Self {
             id,
@@ -105,7 +106,7 @@ impl RasterKey {
             tint: tint.cloned(),
             context,
             phase: (0, 0),
-            kind,
+            kind: (kind, space),
         }
     }
 
@@ -372,7 +373,7 @@ impl PageRenderer<'_> {
             width: f64::from(self.page_width),
             height: f64::from(self.page_height),
             depth: self.canvas.kind().depth(),
-            intent: self.gstate.current().colour_intent,
+            target: self.colour_target(),
         }
     }
 
@@ -474,7 +475,7 @@ mod tests {
             width: 100.0,
             height: page_h,
             depth: color::SampleDepth::Eight,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         };
         PlacedKey::new(
             ResourceKey::Object(id),
@@ -595,7 +596,13 @@ mod tests {
     fn a_raster_is_kept_per_tint_context_and_phase() {
         let mut memo = PatternMemo::with_budget(BUDGET_BYTES);
         let red = RasterColor::rgb(1.0, 0.0, 0.0);
-        let key = RasterKey::new(ID, &IDENTITY, Some(&red), None, CanvasKind::Rgb);
+        let key = RasterKey::new(
+            ID,
+            &IDENTITY,
+            Some(&red),
+            None,
+            (CanvasKind::Rgb, crate::WorkingSpace::Srgb),
+        );
         memo.insert_raster(key.clone(), CellRaster::Mean([255, 0, 0], 255));
         assert!(memo.raster(&key).is_some());
         let green = RasterColor::rgb(0.0, 1.0, 0.0);
@@ -605,7 +612,7 @@ mod tests {
                 &IDENTITY,
                 Some(&green),
                 None,
-                CanvasKind::Rgb
+                (CanvasKind::Rgb, crate::WorkingSpace::Srgb)
             ))
             .is_none()
         );
@@ -615,7 +622,7 @@ mod tests {
                 &IDENTITY,
                 Some(&red),
                 Some(ResourceIdentity::Object((1, 0))),
-                CanvasKind::Rgb
+                (CanvasKind::Rgb, crate::WorkingSpace::Srgb)
             ))
             .is_none()
         );

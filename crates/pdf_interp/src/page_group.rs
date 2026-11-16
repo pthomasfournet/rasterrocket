@@ -64,6 +64,22 @@ pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> Transparency
     }
 }
 
+/// Whether the page's transparency group declares a blending colour space.
+///
+/// That is `/Group /CS` (ISO 32000-2 §11.4.7).  The renderer blends every
+/// group in the working space of its canvas, whatever space a group
+/// declares.
+#[must_use]
+pub fn page_group_declares_space(doc: &Document, page_id: ObjectId) -> bool {
+    doc.get_dictionary(page_id).is_ok_and(|page| {
+        crate::resources::read_transparency_group(doc, &page).is_some()
+            && page
+                .get(b"Group")
+                .and_then(|g| resolve_dict(doc, g))
+                .is_some_and(|g| g.get(b"CS").is_some())
+    })
+}
+
 /// Whether some `ExtGState` reachable from the page's resources, or from
 /// its annotations' appearance streams when `annotations` (the
 /// annotations are drawn), sets stroking or non-stroking overprint.

@@ -77,7 +77,8 @@ pub(crate) use triangles::Mesh;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// The device canvas a shading is resolved for, in pixels, the depth of
-/// its samples and the rendering intent its colours convert under.
+/// its samples and the working space and rendering intent its colours
+/// convert to.
 /// Device y runs down from the top edge, so `height` places the page's
 /// origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,7 +86,7 @@ pub(crate) struct Canvas {
     pub width: f64,
     pub height: f64,
     pub depth: SampleDepth,
-    pub intent: crate::ColourIntent,
+    pub target: crate::ColourTarget,
 }
 
 /// The colour source of a resolved shading.
@@ -256,7 +257,7 @@ pub(crate) fn resolve_shading_object(
     let cs = ShadingCs {
         doc,
         space: &cs_space,
-        intent: canvas.intent,
+        target: canvas.target,
     };
     let bbox = read_bbox(&sh_dict, ctm, page_h);
     let source = Source {
@@ -945,8 +946,8 @@ impl<C> Type1<'_, C> {
 pub(super) struct ShadingCs<'a> {
     doc: &'a Document,
     space: &'a ColorSpace,
-    /// The rendering intent the colours convert under.
-    intent: crate::ColourIntent,
+    /// The working space and rendering intent the colours convert to.
+    target: crate::ColourTarget,
 }
 
 impl ShadingCs<'_> {
@@ -955,7 +956,8 @@ impl ShadingCs<'_> {
         self.space.ncomponents()
     }
 
-    /// Convert colour components (nominally in `[0, 1]`) to an sRGB triple.
+    /// Convert colour components (nominally in `[0, 1]`) to a triple of the
+    /// working space.
     ///
     /// A slice shorter than [`Self::channels`] reads the missing components
     /// as `0.0`; surplus components are ignored.  Out-of-range values clamp
@@ -964,11 +966,11 @@ impl ShadingCs<'_> {
     pub(super) fn to_rgb<S: Sample>(self, channels: &[f64]) -> [S; 3] {
         let n = self.channels();
         if channels.len() == n {
-            return self.space.convert(self.doc, self.intent, channels);
+            return self.space.convert(self.doc, self.target, channels);
         }
         let mut fitted = channels[..channels.len().min(n)].to_vec();
         fitted.resize(n, 0.0);
-        self.space.convert(self.doc, self.intent, &fitted)
+        self.space.convert(self.doc, self.target, &fitted)
     }
 
     /// [`Self::to_rgb`] at both depths for a canvas of `depth` (see
@@ -1031,11 +1033,11 @@ impl<S: Sample> ShadingColour<8, S> for InkCs<'_> {
         let (doc, space) = (self.cs.doc, self.cs.space);
         let n = self.cs.channels();
         if comps.len() == n {
-            return self.plan.ink(doc, self.cs.intent, space, comps);
+            return self.plan.ink(doc, self.cs.target, space, comps);
         }
         let mut fitted = comps[..comps.len().min(n)].to_vec();
         fitted.resize(n, 0.0);
-        self.plan.ink(doc, self.cs.intent, space, &fitted)
+        self.plan.ink(doc, self.cs.target, space, &fitted)
     }
 
     fn conversion_cost(self) -> u64 {
@@ -1097,7 +1099,7 @@ mod tests {
         let cs = ShadingCs {
             doc: &doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         assert!(resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, CANVAS, None).is_none());
@@ -1105,7 +1107,7 @@ mod tests {
 
     /// A 100 × 100 pixel canvas.
     const CANVAS: Canvas = Canvas {
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
         width: 100.0,
         height: 100.0,
         depth: SampleDepth::Eight,
@@ -1137,7 +1139,7 @@ mod tests {
         let cs = ShadingCs {
             doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         resolve_function_based(doc, &sh, cs, 1, &ctm, CANVAS, None)
@@ -1163,7 +1165,7 @@ mod tests {
             cs: ShadingCs {
                 doc: &doc,
                 space: &ColorSpace::DeviceGray,
-                intent: crate::ColourIntent::INITIAL,
+                target: crate::ColourTarget::SRGB,
             },
             n: 1,
             domain: [0.0, 1.0, 0.0, 1.0],
@@ -1227,7 +1229,7 @@ mod tests {
         let cs = ShadingCs {
             doc: &doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         };
         let ramp: ColorRamp<3, u16> = sample_ramp(&doc, &obj, cs, 1, 0.0, 1.0).expect("a ramp");
         let exact = Function::load(&doc, &obj);
@@ -1274,7 +1276,7 @@ mod tests {
         ShadingCs {
             doc: &doc,
             space,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         }
         .to_rgb(channels)
     }

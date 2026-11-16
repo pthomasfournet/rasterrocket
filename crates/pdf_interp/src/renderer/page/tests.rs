@@ -2507,6 +2507,7 @@ mod cmyk;
 mod intent;
 mod overprint;
 mod trace;
+mod wide;
 
 /// Page `(4, 0)` invoking `/F`, the first of `MAX_FORM_DEPTH + 1` nested
 /// forms (objects 5 onwards), each invoking the next.  The form invoked

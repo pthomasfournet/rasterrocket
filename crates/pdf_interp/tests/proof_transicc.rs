@@ -123,7 +123,10 @@ fn separated(
     chart: &[[f64; 3]],
     bits: u8,
 ) -> Vec<[f64; 4]> {
-    let Separation::Profile(table) = press.separation(intent, bpc).expect("separates") else {
+    let Separation::Profile(table) = press
+        .separation(rasterrocket_interp::WorkingSpace::Srgb, intent, bpc)
+        .expect("separates")
+    else {
         panic!("a profile separation")
     };
     chart
@@ -166,7 +169,12 @@ fn below_press_black(src: &str, press: &str, chart: &[[f64; 3]]) -> Vec<bool> {
 /// The display profile file `display` (the working space when `None`).
 fn display_file(dir: &Path, display: Option<&str>) -> String {
     display.map_or_else(
-        || working_space_file(dir).to_str().unwrap().to_owned(),
+        || {
+            working_space_file(dir, rasterrocket_interp::WorkingSpace::Srgb)
+                .to_str()
+                .unwrap()
+                .to_owned()
+        },
         |name| fixture(name).to_str().unwrap().to_owned(),
     )
 }
@@ -192,7 +200,7 @@ const PROOF_INTENTS: [(&str, ProofIntent); 2] = [
 /// compensation and both proof intents.
 fn chart_agrees(display: Option<&str>) {
     let dir = tempfile_dir("proof");
-    let src = working_space_file(&dir);
+    let src = working_space_file(&dir, rasterrocket_interp::WorkingSpace::Srgb);
     let src = src.to_str().unwrap();
     let dst = display_file(&dir, display);
     let press_file = fixture(PRESS);

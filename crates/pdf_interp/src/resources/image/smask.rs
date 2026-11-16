@@ -430,14 +430,14 @@ pub(super) fn dict_matte(dict: &Dictionary) -> Option<Vec<f64>> {
 /// Each stored component is `c' = m + α·(c − m)`; the inverse
 /// `c = m + (c' − m)/α`, clamped to the component range, is applied to the
 /// decoded device samples with the matte converted to the same device
-/// space under `intent`, the image's.  Pixels of alpha 0 are left as
+/// space into `target`, the image's.  Pixels of alpha 0 are left as
 /// stored.  The mask must share the
 /// image's grid, as §11.6.5.3 requires of a mask carrying `/Matte`;
 /// otherwise, or when the matte does not match the colour space's
 /// component count, the image is left as stored.
 pub(super) fn remove_matte(
     doc: &Document,
-    intent: crate::ColourIntent,
+    target: crate::ColourTarget,
     cs: Option<&ColorSpace>,
     matte: &[f64],
     img: &mut ImageDescriptor,
@@ -469,11 +469,11 @@ pub(super) fn remove_matte(
     }
     match &mut img.data {
         ImageData::Cpu(bytes) => {
-            let rgb = cs.convert_to_rgb(doc, intent, matte);
+            let rgb = cs.convert_to_rgb(doc, target, matte);
             unmatte(bytes, mask.alpha(), &rgb[..channels]);
         }
         ImageData::Cpu16(samples) => {
-            let rgb = cs.convert::<u16>(doc, intent, matte);
+            let rgb = cs.convert::<u16>(doc, target, matte);
             let widened: Vec<u16>;
             let alpha = if let Some(alpha) = mask.alpha16() {
                 alpha
@@ -880,11 +880,11 @@ mod tests {
     fn remove_matte_reads_the_alpha_of_16_bit_samples() {
         let doc = crate::test_helpers::empty_doc();
         let mut img = matted16(SoftMask::new16(2, 1, vec![16_384, 0]).expect("a mask"));
-        remove_matte(&doc, crate::ColourIntent::INITIAL, None, &[0.0], &mut img);
+        remove_matte(&doc, crate::ColourTarget::SRGB, None, &[0.0], &mut img);
         let data = img.data.as_cpu16().expect("16-bit samples");
         assert!(data[0].abs_diff(40_000) <= 1 && data[1] == 5, "{data:?}");
         let mut img = matted16(SoftMask::new(2, 1, vec![64, 0]).expect("a mask"));
-        remove_matte(&doc, crate::ColourIntent::INITIAL, None, &[0.0], &mut img);
+        remove_matte(&doc, crate::ColourTarget::SRGB, None, &[0.0], &mut img);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,

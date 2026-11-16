@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use moxcms::ColorProfile;
+use rasterrocket_interp::WorkingSpace;
 
 /// The largest ΔE00 accepted between the two conversions.
 pub(crate) const MAX_DELTA_E: f64 = 1.0;
@@ -17,12 +17,10 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The working space as a profile file: sRGB described by its tags.
-pub(crate) fn working_space_file(dir: &Path) -> PathBuf {
-    let mut srgb = ColorProfile::new_srgb();
-    srgb.cicp = None;
-    let path = dir.join("working-space.icc");
-    std::fs::write(&path, srgb.encode().expect("encodes")).unwrap();
+/// The working space `space` as a profile file, described by its tags.
+pub(crate) fn working_space_file(dir: &Path, space: WorkingSpace) -> PathBuf {
+    let path = dir.join(format!("working-space-{space:?}.icc"));
+    std::fs::write(&path, space.profile().encode().expect("encodes")).unwrap();
     path
 }
 

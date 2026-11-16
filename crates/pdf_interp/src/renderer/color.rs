@@ -88,7 +88,7 @@ impl ColorantPlan {
     pub(crate) fn ink<S: Sample>(
         &self,
         doc: &pdf::Document,
-        intent: crate::ColourIntent,
+        target: crate::ColourTarget,
         space: &crate::resources::ColorSpace,
         comps: &[f64],
     ) -> [S; 8] {
@@ -101,7 +101,7 @@ impl ColorantPlan {
                 ink
             }
             Self::Process(separator) => {
-                no_spots(space.process_ink::<S>(doc, intent, comps, separator))
+                no_spots(space.process_ink::<S>(doc, target, comps, separator))
             }
         }
     }
@@ -280,11 +280,7 @@ impl RasterColor {
     /// the components are the ink.
     #[must_use]
     pub(crate) fn cmyk(c: f64, m: f64, y: f64, k: f64) -> Self {
-        let rgb = Srgb {
-            bytes: color::cmyk::cmyk_f64_to_rgb(c, m, y, k),
-            wide: color::cmyk::cmyk_f64_to_rgb_at(c, m, y, k),
-        };
-        Self::with_process_inks(rgb, [c, m, y, k])
+        Self::with_process_inks(Srgb::of_cmyk([c, m, y, k]), [c, m, y, k])
     }
 
     /// The colour of sRGB `rgb` given in a process space as the inks `cmyk`
@@ -501,8 +497,10 @@ impl RasterColor {
     }
 }
 
-/// An sRGB colour at both sample depths: its 8-bit bytes and its 16-bit
-/// value, each quantised from the same conversion.
+/// A working-space colour at both sample depths: its 8-bit bytes and its
+/// 16-bit value, each quantised from the same conversion.  A colour of the
+/// wide space is only painted at 16 bits; its bytes are its 16-bit value
+/// narrowed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Srgb {
     /// The 8-bit bytes.
@@ -569,6 +567,33 @@ impl Srgb {
         Self {
             bytes: rgb.map(gray_to_u8),
             wide: rgb.map(u16::from_unit),
+        }
+    }
+
+    /// The sRGB colour of the `DeviceCMYK` components `cmyk` ([0, 1] each)
+    /// in the process-ink model of [`color::cmyk`].
+    #[must_use]
+    pub(crate) fn of_cmyk([c, m, y, k]: [f64; 4]) -> Self {
+        Self {
+            bytes: color::cmyk::cmyk_f64_to_rgb(c, m, y, k),
+            wide: color::cmyk::cmyk_f64_to_rgb_at(c, m, y, k),
+        }
+    }
+
+    /// The sRGB colour `self` in the working space `space`: itself in
+    /// sRGB; in the wide space its 16-bit value converted
+    /// ([`crate::working_space::from_srgb16`]), the bytes narrowed from it.
+    #[must_use]
+    pub(crate) fn in_space(self, space: crate::WorkingSpace) -> Self {
+        match space {
+            crate::WorkingSpace::Srgb => self,
+            crate::WorkingSpace::Wide => {
+                let wide = crate::working_space::from_srgb16(self.wide);
+                Self {
+                    bytes: wide.map(u8::from_sample),
+                    wide,
+                }
+            }
         }
     }
 

@@ -147,7 +147,7 @@ mod tests {
         let source = DirectColors::new(ShadingCs {
             doc: &doc,
             space: &ColorSpace::DeviceGray,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
         });
         let decode = default_decode(1);
         let format =

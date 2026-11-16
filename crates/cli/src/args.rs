@@ -301,6 +301,19 @@ pub(crate) struct Args {
     )]
     pub proof: Option<ProofArg>,
 
+    /// The working space the pages are composited in before the conversion
+    /// to --output-profile: `wide` (the ROMM RGB primaries with the sRGB
+    /// tone curve), which keeps colours outside sRGB up to the conversion,
+    /// or `srgb`.  Default: `wide` at --depth 16 under --output-profile,
+    /// `srgb` otherwise; an 8-bit page under --output-profile is
+    /// composited in sRGB and warns once that its colours outside sRGB
+    /// clip, unless `srgb` is given.  Blending and transparency groups
+    /// composite in the working space, and transfer functions map its
+    /// components; overprint-preview pages (--overprint) are composited in
+    /// sRGB.  `wide` needs --output-profile and --depth 16.
+    #[arg(long = "working-space", value_name = "SPACE", value_enum)]
+    pub working_space: Option<WorkingSpaceArg>,
+
     /// The ICC profile the output is tagged with: --output-profile's,
     /// set from the session's profile once it is read.
     #[arg(skip)]
@@ -794,6 +807,24 @@ impl From<IntentArg> for pdf_raster::RenderingIntent {
     }
 }
 
+/// `--working-space` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WorkingSpaceArg {
+    /// sRGB.
+    Srgb,
+    /// The ROMM RGB primaries with the sRGB tone curve.
+    Wide,
+}
+
+impl From<WorkingSpaceArg> for pdf_raster::WorkingSpace {
+    fn from(space: WorkingSpaceArg) -> Self {
+        match space {
+            WorkingSpaceArg::Srgb => Self::Srgb,
+            WorkingSpaceArg::Wide => Self::Wide,
+        }
+    }
+}
+
 /// `--proof` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ProofArg {
@@ -1194,6 +1225,20 @@ impl Args {
     /// with CMYK and transparent output.
     fn validate_output_profile_flags(&self) -> Result<(), String> {
         self.validate_proof_flags()?;
+        if self.working_space == Some(WorkingSpaceArg::Wide) {
+            if self.output_profile.is_none() {
+                return Err(
+                    "--working-space wide carries its gamut to the conversion to the output                      profile: add --output-profile"
+                        .to_owned(),
+                );
+            }
+            if self.depth() == pdf_raster::SampleDepth::Eight {
+                return Err(
+                    "--working-space wide is composited at 16 bits, at which its levels are as                      fine as sRGB's at 8: add --depth 16"
+                        .to_owned(),
+                );
+            }
+        }
         if self.output_profile.is_none() && self.proof.is_none() {
             return match (self.intent.is_some(), self.bpc) {
                 (true, _) => {
@@ -1305,10 +1350,26 @@ impl Args {
             && self.proof.is_none()
         {
             profile
-                .prepare(intent.into(), self.bpc)
+                .prepare(self.resolved_working_space(), intent.into(), self.bpc)
                 .map_err(|e| format!("--output-profile {shown}: {e}"))?;
         }
         Ok(Some(std::sync::Arc::new(profile)))
+    }
+
+    /// The working space the pages are composited in, as the session
+    /// resolves it for a page that is not an overprint preview:
+    /// `--working-space`, else the wide space at --depth 16 under
+    /// --output-profile, else sRGB.
+    fn resolved_working_space(&self) -> pdf_raster::WorkingSpace {
+        match self.working_space {
+            Some(space) => space.into(),
+            None if self.output_profile.is_some()
+                && self.depth() == pdf_raster::SampleDepth::Sixteen =>
+            {
+                pdf_raster::WorkingSpace::Wide
+            }
+            None => pdf_raster::WorkingSpace::Srgb,
+        }
     }
 
     /// The warning of an output that cannot carry the output profile:
@@ -1820,6 +1881,7 @@ impl Args {
         config.band_bytes = self.band_bytes();
         config.output_profile = self.output_profile()?;
         config.proof = self.proof.map(Into::into);
+        config.working_space = self.working_space.map(Into::into);
         #[cfg(feature = "cache")]
         {
             config.prefetch = self.prefetch;

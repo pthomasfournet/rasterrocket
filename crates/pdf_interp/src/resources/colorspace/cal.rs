@@ -6,17 +6,25 @@
 //! - `CalRGB`: `(X, Y, Z) = Matrix · (A^GR, B^GG, C^GB)`, with `Matrix`
 //!   holding the XYZ of the three components as columns.
 //!
-//! XYZ is then adapted from `WhitePoint` to D65 by the Bradford transform
-//! (relative colorimetric: the space's white maps to sRGB white) and encoded
-//! as sRGB.  The three linear steps compose into one matrix at resolve time.
+//! XYZ is then adapted by the Bradford transform from `WhitePoint` to the
+//! white of the working space (relative colorimetric: the space's white maps
+//! to the working white): to D65 and the sRGB primaries for sRGB, to D50 and
+//! the PCS → linear wide matrix for the wide space (see
+//! [`crate::working_space`]), and encoded by the sRGB curve.  The linear
+//! steps compose into one matrix per working space at resolve time.
 //! `BlackPoint` is not applied.
 
 use std::sync::Arc;
 
 use pdf::{Dictionary, Document, Object};
 
+use crate::WorkingSpace;
 use crate::resources::icc_shaper::{Mat3, RgbShaper, mat_inverse, mat_mul, srgb_encode};
 use crate::resources::obj_to_f64;
+use crate::working_space::{encode_wide, pcs_to_linear_wide};
+
+/// CIE XYZ of the D50 white of the PCS, `Y = 1`.
+const D50: [f64; 3] = crate::pcs::D50;
 
 /// CIE XYZ of the D65 white, `Y = 1`.
 pub(super) const D65: [f64; 3] = [0.950_47, 1.0, 1.088_83];
@@ -43,6 +51,8 @@ pub struct CalSpace {
     gamma: [f64; 3],
     /// Gamma-decoded components → linear sRGB.
     to_linear_srgb: Mat3,
+    /// Gamma-decoded components → linear wide components.
+    to_linear_wide: Mat3,
 }
 
 impl PartialEq for CalSpace {
@@ -116,13 +126,19 @@ impl CalSpace {
             &mat_mul(&XYZ_D65_TO_LINEAR_SRGB, &bradford(white)?),
             &matrix,
         );
-        if !to_linear_srgb.iter().flatten().all(|v| v.is_finite()) {
+        let to_linear_wide = mat_mul(
+            &mat_mul(&pcs_to_linear_wide(), &bradford_to(white, D50)?),
+            &matrix,
+        );
+        let finite = |m: &Mat3| m.iter().flatten().all(|v| v.is_finite());
+        if !finite(&to_linear_srgb) || !finite(&to_linear_wide) {
             return None;
         }
         Some(Self {
             n,
             gamma,
             to_linear_srgb,
+            to_linear_wide,
         })
     }
 
@@ -154,27 +170,37 @@ impl CalSpace {
         RgbShaper::from_linearisation(linear, &self.to_linear_srgb)
     }
 
-    /// Convert `comps` (each clipped to `[0, 1]`) to sRGB bytes.  The
-    /// caller guarantees `comps.len() == self.ncomponents()`.
-    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64]) -> [S; 3] {
+    /// Convert `comps` (each clipped to `[0, 1]`) to `space` at the depth
+    /// of `S`.  The caller guarantees `comps.len() == self.ncomponents()`.
+    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64], space: WorkingSpace) -> [S; 3] {
         let decode = |i: usize| {
             let c = comps[i.min(comps.len() - 1)];
             let c = if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) };
             c.powf(self.gamma[i])
         };
         let abc = [decode(0), decode(1), decode(2)];
-        let [r, g, b] = self
-            .to_linear_srgb
-            .map(|row| row[0].mul_add(abc[0], row[1].mul_add(abc[1], row[2] * abc[2])));
-        [r, g, b].map(|c| S::from_unit(srgb_encode(c)))
+        let linear =
+            |m: &Mat3| m.map(|row| row[0].mul_add(abc[0], row[1].mul_add(abc[1], row[2] * abc[2])));
+        match space {
+            WorkingSpace::Srgb => {
+                linear(&self.to_linear_srgb).map(|c| S::from_unit(srgb_encode(c)))
+            }
+            WorkingSpace::Wide => encode_wide(linear(&self.to_linear_wide)),
+        }
     }
 }
 
 /// The Bradford adaptation from white `src` to D65; `None` when singular.
 pub(super) fn bradford(src: [f64; 3]) -> Option<Mat3> {
+    bradford_to(src, D65)
+}
+
+/// The Bradford adaptation from white `src` to white `dst`; `None` when
+/// singular.
+pub(super) fn bradford_to(src: [f64; 3], dst: [f64; 3]) -> Option<Mat3> {
     let cone =
         |w: [f64; 3]| BRADFORD.map(|row| row[0].mul_add(w[0], row[1].mul_add(w[1], row[2] * w[2])));
-    let (s, d) = (cone(src), cone(D65));
+    let (s, d) = (cone(src), cone(dst));
     let scale = [
         [d[0] / s[0], 0.0, 0.0],
         [0.0, d[1] / s[1], 0.0],
@@ -232,7 +258,7 @@ mod tests {
     ];
 
     fn rgb(space: &ColorSpace, c: [f64; 3]) -> [u8; 3] {
-        space.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &c)
+        space.convert_to_rgb(&empty_doc(), crate::ColourTarget::SRGB, &c)
     }
 
     fn close(got: [u8; 3], want: [u8; 3], tol: u8) {
@@ -262,11 +288,7 @@ mod tests {
         ] {
             close(
                 rgb(&space, c),
-                ColorSpace::DeviceRgb.convert_to_rgb(
-                    &empty_doc(),
-                    crate::ColourIntent::INITIAL,
-                    &c,
-                ),
+                ColorSpace::DeviceRgb.convert_to_rgb(&empty_doc(), crate::ColourTarget::SRGB, &c),
                 3,
             );
         }
@@ -317,14 +339,14 @@ mod tests {
         );
         assert_eq!(space.ncomponents(), 1);
         close(
-            space.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &[0.5]),
+            space.convert_to_rgb(&empty_doc(), crate::ColourTarget::SRGB, &[0.5]),
             [128; 3],
             2,
         );
         // Gamma 1 is linear light: 0.5 → sRGB 0.735 → 188.
         let linear = cal("CalGray", &[("WhitePoint", reals(&D65_WP))]);
         close(
-            linear.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &[0.5]),
+            linear.convert_to_rgb(&empty_doc(), crate::ColourTarget::SRGB, &[0.5]),
             [188; 3],
             1,
         );

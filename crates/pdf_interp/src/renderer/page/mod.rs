@@ -269,6 +269,9 @@ fn page_ink_map(ink_map: SharedInkMap) -> ink_map::InkMap {
 pub struct PageRenderer<'doc> {
     /// Target pixel buffer.
     canvas: PageCanvas,
+    /// The working space colours convert into: the page's, sRGB while a
+    /// soft-mask group is painted.
+    space: crate::WorkingSpace,
     /// The storage not in `canvas`: for an ink canvas, the RGB buffers the
     /// finished bitmap is built in; for an RGB canvas, the ink buffers,
     /// carried through to the next page.
@@ -639,14 +642,20 @@ impl<'doc> PageRenderer<'doc> {
             CanvasKind::rgb(depth)
         };
         let ink = canvas.ink_setup();
+        let working = canvas.space();
+        debug_assert!(
+            working == crate::WorkingSpace::Srgb || depth == SampleDepth::Sixteen,
+            "the wide working space is painted at 16 bits"
+        );
         let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?;
-        let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group, ink);
+        let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group, ink, working);
         renderer.buffers = spare;
         Ok(renderer)
     }
 
     /// A renderer for `view` painting onto `canvas`, a bitmap of the view's
-    /// window, as the page group `group`, an ink canvas set up as `ink`.
+    /// window, as the page group `group`, an ink canvas set up as `ink`,
+    /// its colours converting into `space`.
     ///
     /// # Panics
     ///
@@ -658,6 +667,7 @@ impl<'doc> PageRenderer<'doc> {
         canvas: PageCanvas,
         group: Option<crate::resources::TransparencyGroupParams>,
         ink: InkSetup,
+        space: crate::WorkingSpace,
     ) -> Self {
         let (sx, sy) = (view.scale_x, view.scale_y);
         assert!(
@@ -685,6 +695,7 @@ impl<'doc> PageRenderer<'doc> {
 
         Self {
             canvas,
+            space,
             buffers: CanvasBuffers::default(),
             width,
             height,
@@ -1031,6 +1042,7 @@ impl<'doc> PageRenderer<'doc> {
             canvas,
             None,
             self.ink.clone(),
+            self.space,
         );
         child.set_document_fonts(Arc::clone(self.font_cache.document_fonts()));
         child.set_antialias(self.text_antialias, self.vector_antialias);

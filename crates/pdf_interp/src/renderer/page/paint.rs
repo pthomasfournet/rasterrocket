@@ -15,7 +15,7 @@ use raster::{
     xpath::XPath,
 };
 
-use super::super::color::{Inks, RasterColor};
+use super::super::color::{Inks, RasterColor, Srgb};
 use super::super::gstate::{Ctm, ctm_transform, invert_affine};
 use super::canvas::{CanvasKind, CanvasPattern, CanvasPipe, CanvasSource, with_canvas};
 use super::depth::{CanvasBackdrop, CanvasSample};
@@ -134,15 +134,15 @@ impl PageRenderer<'_> {
     pub(super) fn color_for_components(&mut self, cs: &ColorSpace, comps: &[f64]) -> RasterColor {
         let doc = self.resources.doc();
         let depth = self.canvas.kind().depth();
-        let intent = self.gstate.current().colour_intent;
-        let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, intent, comps, depth);
+        let target = self.colour_target();
+        let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, target, comps, depth);
         match cs {
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
-                components_to_color(comps)
+                components_to_color(comps, self.space)
             }
             // Pattern operands are handled by the pattern dispatch, not here;
             // fall back to the legacy heuristic for any stray component.
-            ColorSpace::Pattern { .. } => components_to_color(comps),
+            ColorSpace::Pattern { .. } => components_to_color(comps, self.space),
             // A four-component ICC space is a process CMYK space.  On the
             // preview's ink canvas its ink is the process ink printing the
             // profile's colour, with the components' zeros; on a canvas
@@ -173,11 +173,11 @@ impl PageRenderer<'_> {
                 let mut map = self.ink_map.borrow_mut();
                 let (ink, paints) = match depth {
                     SampleDepth::Eight => {
-                        let (ink, paints) = map.colorant_ink::<u8>(doc, intent, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u8>(doc, target, cs, comps);
                         (Inks::of(ink), paints)
                     }
                     SampleDepth::Sixteen => {
-                        let (ink, paints) = map.colorant_ink::<u16>(doc, intent, cs, comps);
+                        let (ink, paints) = map.colorant_ink::<u16>(doc, target, cs, comps);
                         (Inks::of(ink), paints)
                     }
                 };
@@ -818,12 +818,17 @@ impl<'a> PaintSource<'a> {
 
 // ── Component → colour helpers ────────────────────────────────────────────────
 
-/// Map a raw component slice to a [`RasterColor`] by channel count.
-pub(super) fn components_to_color(comps: &[f64]) -> RasterColor {
-    match comps {
-        [g] => RasterColor::gray(*g),
-        [r, g, b] => RasterColor::rgb(*r, *g, *b),
-        [c, m, y, k] => RasterColor::cmyk(*c, *m, *y, *k),
+/// Map a raw component slice to a [`RasterColor`] of the working space
+/// `space` by channel count: gray, `DeviceRGB` or `DeviceCMYK`, each of its
+/// sRGB meaning.
+pub(super) fn components_to_color(comps: &[f64], space: crate::WorkingSpace) -> RasterColor {
+    match *comps {
+        [g] => RasterColor::gray(g),
+        [r, g, b] => RasterColor::from_srgb(Srgb::from_unit([r, g, b]).in_space(space)),
+        [c, m, y, k] => RasterColor::with_process_inks(
+            Srgb::of_cmyk([c, m, y, k]).in_space(space),
+            [c, m, y, k],
+        ),
         _ => RasterColor::default(),
     }
 }

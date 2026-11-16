@@ -71,10 +71,11 @@ impl PageRenderer<'_> {
     ) -> Option<SoftMaskPlane> {
         let form = self.resources.form_from_stream_id(group)?;
         // A mask group yields mask values, not printed colorants, so it is
-        // painted in sRGB whatever the page's canvas: its luminosity is
-        // that of its colours (ISO 32000-1 §11.6.5.2), not of the inks
-        // that print them, which reproduce a colour only within the
-        // process gamut.  It is painted at the depth of the page.
+        // painted in sRGB whatever the page's canvas and working space: its
+        // luminosity is that of its colours (ISO 32000-1 §11.6.5.2), not of
+        // the inks that print them, which reproduce a colour only within
+        // the process gamut, and its values do not depend on the working
+        // space.  It is painted at the depth of the page.
         let depth = self.canvas.kind().depth();
         let mask = self.try_canvas(CanvasKind::rgb(depth), self.width, self.height)?;
 
@@ -94,7 +95,9 @@ impl PageRenderer<'_> {
         }
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
+        let space = std::mem::replace(&mut self.space, crate::WorkingSpace::Srgb);
         self.without_glyph_census(|r| r.do_form_xobject(&form));
+        self.space = space;
         let canvas = std::mem::replace(&mut self.canvas, page);
         self.group = enclosing;
         self.gstate.restore();
@@ -140,8 +143,11 @@ impl PageRenderer<'_> {
         });
         match space {
             Some(space) if !bc.is_empty() && space.ncomponents() == bc.len() => {
-                let intent = self.gstate.current().colour_intent;
-                space.convert_to_srgb(doc, intent, bc, self.canvas.kind().depth())
+                let target = crate::ColourTarget::new(
+                    self.gstate.current().colour_intent,
+                    crate::WorkingSpace::Srgb,
+                );
+                space.convert_to_srgb(doc, target, bc, self.canvas.kind().depth())
             }
             _ => backdrop_rgb(bc),
         }

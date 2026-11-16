@@ -25,6 +25,9 @@ pub enum CanvasRequest {
     /// sRGB pixels.
     #[default]
     Rgb,
+    /// 16-bit pixels of the wide working space
+    /// ([`WorkingSpace::Wide`](crate::WorkingSpace::Wide)).
+    WideRgb,
     /// Process and spot inks on which overprint (ISO 32000-2 §8.6.7) is
     /// simulated, finished as sRGB.
     OverprintPreview,
@@ -43,7 +46,19 @@ impl CanvasRequest {
     /// Whether the page is painted on an ink canvas.
     #[must_use]
     pub const fn is_ink(&self) -> bool {
-        !matches!(self, Self::Rgb)
+        !matches!(self, Self::Rgb | Self::WideRgb)
+    }
+
+    /// The working space the page's colours convert into: that of the
+    /// separation of a CMYK page, the wide space for
+    /// [`Self::WideRgb`], sRGB otherwise.
+    #[must_use]
+    pub fn space(&self) -> crate::WorkingSpace {
+        match self {
+            Self::Rgb | Self::OverprintPreview => crate::WorkingSpace::Srgb,
+            Self::WideRgb => crate::WorkingSpace::Wide,
+            Self::Cmyk { separation, .. } => separation.space(),
+        }
     }
 
     /// Whether the page finishes as CMYK.
@@ -55,7 +70,7 @@ impl CanvasRequest {
     /// The ink-canvas settings of the request.
     pub(crate) fn ink_setup(&self) -> InkSetup {
         match self {
-            Self::Rgb | Self::OverprintPreview => InkSetup::PREVIEW,
+            Self::Rgb | Self::WideRgb | Self::OverprintPreview => InkSetup::PREVIEW,
             Self::Cmyk {
                 overprint,
                 separation,
@@ -83,6 +98,15 @@ pub enum Separation {
 }
 
 impl Separation {
+    /// The working space the separation converts from.
+    #[must_use]
+    pub fn space(&self) -> crate::WorkingSpace {
+        match self {
+            Self::Device => crate::WorkingSpace::Srgb,
+            Self::Profile(table) => table.space,
+        }
+    }
+
     /// The separator of the separation.
     fn separator(&self) -> Separator {
         match self {
@@ -95,15 +119,17 @@ impl Separation {
 /// The number of nodes along each axis of a [`ProfileSeparation`].
 pub(crate) const PROFILE_GRID: usize = 65;
 
-/// The CMYK of a profile's conversion from sRGB, tabulated on a
-/// `65 × 65 × 65` grid over the sRGB cube and interpolated trilinearly.
+/// The CMYK of a profile's conversion from a working space, tabulated on a
+/// `65 × 65 × 65` grid over the space's cube and interpolated trilinearly.
 ///
-/// Node `(r, g, b)` holds the 16-bit CMYK of the sRGB colour of channels
+/// Node `(r, g, b)` holds the 16-bit CMYK of the colour of channels
 /// `v · 65535 / 64`, rounded, for `v` = `r`, `g`, `b`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProfileSeparation {
     /// The nodes, `r` slowest, `b` fastest.
     nodes: Box<[[u16; 4]]>,
+    /// The working space of the colours separated.
+    space: crate::WorkingSpace,
 }
 
 impl std::fmt::Debug for ProfileSeparation {
@@ -122,15 +148,16 @@ impl ProfileSeparation {
             .expect("a node value lies within the sample range")
     }
 
-    /// The table of `nodes`, `PROFILE_GRID³` of them, `r` slowest; `None`
-    /// for another count.
-    pub(crate) fn from_nodes(nodes: Vec<[u16; 4]>) -> Option<Self> {
+    /// The table of `nodes`, `PROFILE_GRID³` of them, `r` slowest, of
+    /// colours of `space`; `None` for another count.
+    pub(crate) fn from_nodes(nodes: Vec<[u16; 4]>, space: crate::WorkingSpace) -> Option<Self> {
         (nodes.len() == PROFILE_GRID.pow(3)).then(|| Self {
             nodes: nodes.into_boxed_slice(),
+            space,
         })
     }
 
-    /// The CMYK of the sRGB colour `rgb`, at its depth: the trilinear
+    /// The CMYK of the working-space colour `rgb`, at its depth: the trilinear
     /// interpolation of the eight nodes around it.
     #[must_use]
     pub fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
@@ -205,8 +232,18 @@ impl Separator {
         matches!(self, Self::Model)
     }
 
-    /// The process ink `[C, M, Y, K]` of the sRGB colour `rgb`, at its
-    /// depth.
+    /// The working space of the colours the separator converts: that of
+    /// a profile's table, sRGB for the models.
+    #[must_use]
+    pub(crate) fn space(&self) -> crate::WorkingSpace {
+        match self {
+            Self::Model | Self::Device => crate::WorkingSpace::Srgb,
+            Self::Profile(table) => table.space,
+        }
+    }
+
+    /// The process ink `[C, M, Y, K]` of the colour `rgb` of the
+    /// separator's working space ([`Self::space`]), at its depth.
     #[must_use]
     pub(crate) fn ink<S: Sample>(&self, rgb: [S; 3]) -> [S; 4] {
         match self {
@@ -284,7 +321,8 @@ mod tests {
                 }
             }
         }
-        let table = ProfileSeparation::from_nodes(nodes).expect("a whole grid");
+        let table =
+            ProfileSeparation::from_nodes(nodes, crate::WorkingSpace::Srgb).expect("a whole grid");
         assert_eq!(ProfileSeparation::node_value(PROFILE_GRID - 1), u16::MAX);
         for rgb in [[0u8; 3], [255; 3], [255, 0, 0], [12, 200, 77], [128; 3]] {
             let want = color::cmyk::rgb_to_device_cmyk(rgb);
@@ -294,6 +332,8 @@ mod tests {
             }
         }
         assert_eq!(table.ink([u16::MAX; 3]), [0; 4]);
-        assert!(ProfileSeparation::from_nodes(vec![[0; 4]; 8]).is_none());
+        assert!(
+            ProfileSeparation::from_nodes(vec![[0; 4]; 8], crate::WorkingSpace::Srgb).is_none()
+        );
     }
 }

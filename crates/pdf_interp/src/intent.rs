@@ -119,6 +119,30 @@ impl Default for ColourIntent {
     }
 }
 
+/// The destination of a colour conversion: the working space the colour
+/// converts into, and the intent and compensation it converts under.
+///
+/// The space is that of the canvas being painted; the intent is the
+/// graphics state's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColourTarget {
+    /// The rendering intent and black-point compensation.
+    pub intent: ColourIntent,
+    /// The working space.
+    pub space: crate::WorkingSpace,
+}
+
+impl ColourTarget {
+    /// The initial intent into sRGB.
+    pub const SRGB: Self = Self::new(ColourIntent::INITIAL, crate::WorkingSpace::Srgb);
+
+    /// Conversion under `intent` into `space`.
+    #[must_use]
+    pub const fn new(intent: ColourIntent, space: crate::WorkingSpace) -> Self {
+        Self { intent, space }
+    }
+}
+
 impl std::fmt::Display for RenderingIntent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.pdf_name())

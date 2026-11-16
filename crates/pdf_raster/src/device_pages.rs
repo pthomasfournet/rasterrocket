@@ -219,6 +219,9 @@ fn device_render(
 
 /// Why `job`'s page cannot be recorded, known before interpretation.
 fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
+    if job.space() != pdf_interp::WorkingSpace::Srgb {
+        return Some("the wide working space");
+    }
     if job.params.depth != color::SampleDepth::Eight {
         return Some("16-bit samples");
     }

@@ -29,15 +29,18 @@ pub mod separation;
 #[cfg(test)]
 mod test_helpers;
 pub mod unsupported;
+pub mod working_space;
 
 pub use form_type::{FormType, form_type};
-pub use intent::{ColourIntent, IntentSet, ProofIntent, RenderingIntent};
+pub use intent::{ColourIntent, ColourTarget, IntentSet, ProofIntent, RenderingIntent};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use output_intent::{
     OutputIntent, OutputIntentError, document_output_intent, page_output_intent,
 };
 pub use output_profile::{OutputProfile, OutputProfileError, OutputSpace, SoftProof};
-pub use page_group::{page_group, page_uses_overprint, transparent_page_group};
+pub use page_group::{
+    page_group, page_group_declares_space, page_uses_overprint, transparent_page_group,
+};
 pub use prescan::prescan_page;
 pub use rotation::{InvalidRotation, Rotation};
 pub use separation::{CanvasRequest, Separation};
@@ -45,6 +48,7 @@ pub use unsupported::{
     MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
     page_has_javascript, page_unsupported_features,
 };
+pub use working_space::WorkingSpace;
 
 /// The effective parallel-Huffman JPEG dispatch threshold in pixels, unless
 /// `PDF_RASTER_HUFFMAN_THRESHOLD` overrides it.  `u32::MAX` means no JPEG

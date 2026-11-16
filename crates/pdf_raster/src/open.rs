@@ -71,6 +71,9 @@ pub struct RasterSession {
     pub(crate) proof: Option<crate::proof::SessionProof>,
     /// Whether a page of mixed rendering intents has been reported.
     pub(crate) mixed_intents_warned: AtomicBool,
+    /// The working space asked for ([`crate::SessionConfig::working_space`])
+    /// and the departures from it reported so far.
+    pub(crate) working_space: crate::output::SessionSpace,
     /// The document-level features the renderer ignores.
     pub(crate) unsupported_features: Vec<pdf_interp::UnsupportedFeature>,
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
@@ -490,7 +493,7 @@ fn open_session_with_doc(
     if let Some(reason) = uncompiled_backend(config.policy) {
         return Err(RasterError::BackendUnavailable(reason.to_owned()));
     }
-    config.check_gpu_pages()?;
+    config.check()?;
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
     #[cfg(feature = "vulkan")]
@@ -583,6 +586,7 @@ fn open_session_with_doc(
         output_profile: config.output_profile.clone(),
         proof,
         mixed_intents_warned: AtomicBool::new(false),
+        working_space: crate::output::SessionSpace::new(config.working_space),
         unsupported_features,
         #[cfg(any(feature = "gpu-icc", feature = "cache"))]
         gpu_ctx,

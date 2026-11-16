@@ -298,7 +298,7 @@ fn draw_bands<E>(
             session,
             params,
             (page_num, page_id),
-            (bitmap, next.content_intents()),
+            (bitmap, next.content_intents(), job.space()),
             &mut spare,
         )?;
         sink(Band {

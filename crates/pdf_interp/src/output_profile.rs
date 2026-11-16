@@ -8,9 +8,10 @@
 //! compensation, on first use, and shared by every page of the profile.
 //! It runs on 16-bit samples at both depths: an 8-bit sample is widened
 //! exactly (`257 · v`) and the result rounded back to 8 bits, which keeps
-//! the 8-bit result within rounding of the 16-bit one.  The source of every conversion is the working space
-//! (sRGB) with the intent's adjustments folded in (see
-//! [`working_space`]).
+//! the 8-bit result within rounding of the 16-bit one.  The source of
+//! every conversion is the working space the page was composited in
+//! ([`WorkingSpace`]), with the intent's adjustments folded in (see
+//! [`source`]); a conversion is compiled per working space.
 //!
 //! [`OutputProfile::convert`] converts a [`FinishedCanvas`] in place for an
 //! RGB profile and into a gray bitmap for a gray one, row by row, the
@@ -21,11 +22,11 @@
 //! A CMYK profile does not convert finished pages: a page rendered as CMYK
 //! paints its process colours as they are, a CMYK device's values, and
 //! separates every other colour as it is painted, through the profile's
-//! conversion of the working space tabulated by
+//! conversion of the page's working space tabulated by
 //! [`OutputProfile::separation`].
 
 mod proof;
-mod working_space;
+mod source;
 
 pub use proof::{PROOF_GRID, SoftProof};
 
@@ -38,9 +39,9 @@ use moxcms::{
 };
 use raster::Bitmap;
 
-use crate::RenderingIntent;
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
 use crate::separation::{PROFILE_GRID, ProfileSeparation, Separation};
+use crate::{RenderingIntent, WorkingSpace};
 
 /// The colour space of an output profile's device values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,9 +128,9 @@ impl std::error::Error for OutputProfileError {}
 /// A compiled conversion of 16-bit samples.
 type Executor = Arc<dyn TransformExecutor<u16> + Send + Sync>;
 
-/// The conversions of one intent and compensation, in the order of
-/// [`slot`].
-const SLOTS: usize = RenderingIntent::ALL.len() * 2;
+/// The conversions of one intent, compensation and working space, in the
+/// order of [`slot`].
+const SLOTS: usize = RenderingIntent::ALL.len() * 2 * WorkingSpace::ALL.len();
 
 /// A compiled conversion, or why it could not be compiled.
 type Compiled = Result<Executor, OutputProfileError>;
@@ -155,9 +156,10 @@ impl std::fmt::Debug for OutputProfile {
     }
 }
 
-/// The index of the conversion of `intent`, with compensation when `bpc`.
-fn slot(intent: RenderingIntent, bpc: bool) -> usize {
-    intent.index() * 2 + usize::from(bpc)
+/// The index of the conversion of `intent`, with compensation when `bpc`,
+/// from `space`.
+fn slot(intent: RenderingIntent, bpc: bool, space: WorkingSpace) -> usize {
+    (space.index() * RenderingIntent::ALL.len() + intent.index()) * 2 + usize::from(bpc)
 }
 
 impl OutputProfile {
@@ -211,23 +213,29 @@ impl OutputProfile {
         self.space
     }
 
-    /// Compile the conversion of `intent`, with black-point compensation
-    /// when `bpc`, unless already compiled.
+    /// Compile the conversion from `space` under `intent`, with black-point
+    /// compensation when `bpc`, unless already compiled.
     ///
     /// # Errors
     ///
     /// [`OutputProfileError::Transform`] when the profile admits no such
     /// conversion; the error is kept and returned again on every later
     /// call.
-    pub fn prepare(&self, intent: RenderingIntent, bpc: bool) -> Result<(), OutputProfileError> {
-        self.executor(intent, bpc).map(drop)
+    pub fn prepare(
+        &self,
+        space: WorkingSpace,
+        intent: RenderingIntent,
+        bpc: bool,
+    ) -> Result<(), OutputProfileError> {
+        self.executor(space, intent, bpc).map(drop)
     }
 
-    /// The conversion of `intent` and `bpc`, compiled on first use.
-    fn executor(&self, intent: RenderingIntent, bpc: bool) -> Compiled {
-        self.conversions[slot(intent, bpc)]
+    /// The conversion from `space` of `intent` and `bpc`, compiled on first
+    /// use.
+    fn executor(&self, space: WorkingSpace, intent: RenderingIntent, bpc: bool) -> Compiled {
+        self.conversions[slot(intent, bpc, space)]
             .get_or_init(|| {
-                self.compile(intent, bpc)
+                self.compile(space, intent, bpc)
                     .map_err(|e| OutputProfileError::Transform {
                         intent,
                         reason: e.to_string(),
@@ -236,11 +244,16 @@ impl OutputProfile {
             .clone()
     }
 
-    /// Build the conversion of `intent` and `bpc`.
-    fn compile(&self, intent: RenderingIntent, bpc: bool) -> Result<Executor, CmsError> {
+    /// Build the conversion from `space` of `intent` and `bpc`.
+    fn compile(
+        &self,
+        space: WorkingSpace,
+        intent: RenderingIntent,
+        bpc: bool,
+    ) -> Result<Executor, CmsError> {
         let intent = intent.cms();
-        let black = working_space::black_lift(&self.profile, intent, bpc)?;
-        let source = working_space::source_profile(&self.profile, intent, black)?;
+        let black = source::black_lift(&self.profile, intent, bpc)?;
+        let source = source::source_profile(space, &self.profile, intent, black)?;
         let layout = match self.space {
             OutputSpace::Rgb => Layout::Rgb,
             OutputSpace::Gray => Layout::Gray,
@@ -253,13 +266,27 @@ impl OutputProfile {
             TransformOptions {
                 rendering_intent: intent,
                 allow_use_cicp_transfer: false,
-                ..TransformOptions::default()
+                // From the wide space the conversion evaluates in floating
+                // point and interpolates the destination's tables in
+                // tetrahedra weighed at the sample's full precision; the
+                // defaults, which sRGB keeps, resolve linear light to 2⁻¹³
+                // and reduce a sample to 8 bits for the interpolation.
+                prefer_fixed_point: space == WorkingSpace::Srgb,
+                interpolation_method: match space {
+                    WorkingSpace::Srgb => moxcms::InterpolationMethod::default(),
+                    WorkingSpace::Wide => moxcms::InterpolationMethod::Tetrahedral,
+                },
+                barycentric_weight_scale: match space {
+                    WorkingSpace::Srgb => moxcms::BarycentricWeightScale::default(),
+                    WorkingSpace::Wide => moxcms::BarycentricWeightScale::High,
+                },
             },
         )
     }
 
-    /// The separation of colours from the working space to the CMYK of the
-    /// profile under `intent`, with black-point compensation when `bpc`,
+    /// The separation of colours from the working space `space` to the CMYK
+    /// of the profile under `intent`, with black-point compensation when
+    /// `bpc`,
     /// tabulated on first use: [`PROFILE_GRID`]³ nodes, each a 16-bit
     /// conversion.
     ///
@@ -271,23 +298,24 @@ impl OutputProfile {
     /// built or run, kept and returned again on every later call.
     pub fn separation(
         &self,
+        space: WorkingSpace,
         intent: RenderingIntent,
         bpc: bool,
     ) -> Result<Separation, OutputProfileError> {
         if self.space != OutputSpace::Cmyk {
             return Err(OutputProfileError::Mismatch(self.space));
         }
-        self.separations[slot(intent, bpc)]
+        self.separations[slot(intent, bpc, space)]
             .get_or_init(|| {
-                let xform = self.executor(intent, bpc)?;
-                tabulate(&*xform).map(Arc::new)
+                let xform = self.executor(space, intent, bpc)?;
+                tabulate(&*xform, space).map(Arc::new)
             })
             .clone()
             .map(Separation::Profile)
     }
 
-    /// `canvas`, a working-space canvas, converted to the profile's device
-    /// values under `intent`, with black-point compensation when `bpc`: in
+    /// `canvas`, a canvas of the working space `space`, converted to the
+    /// profile's device values under `intent`, with black-point compensation when `bpc`: in
     /// place for an RGB profile, into a gray canvas built in `buffers` for
     /// a gray one, the working-space storage then reclaimed into
     /// `buffers`.  A canvas already in a gray space is returned as it is.
@@ -303,6 +331,7 @@ impl OutputProfile {
     pub fn convert(
         &self,
         canvas: FinishedCanvas,
+        space: WorkingSpace,
         (intent, bpc): (RenderingIntent, bool),
         buffers: &mut CanvasBuffers,
     ) -> Result<FinishedCanvas, OutputProfileError> {
@@ -318,7 +347,7 @@ impl OutputProfile {
         ) {
             return Ok(canvas);
         }
-        let xform = self.executor(intent, bpc)?;
+        let xform = self.executor(space, intent, bpc)?;
         let xform = &*xform;
         Ok(match (canvas, self.space) {
             (FinishedCanvas::Rgb8(mut rgb), OutputSpace::Rgb) => {
@@ -355,10 +384,11 @@ impl OutputProfile {
     }
 }
 
-/// The [`ProfileSeparation`] of `xform`, a conversion of 16-bit sRGB to
-/// CMYK: its value at every node, a row of nodes converted at a time.
+/// The [`ProfileSeparation`] of `xform`, a conversion of 16-bit
+/// working-space values of `space` to CMYK: its value at every node, a row of nodes converted at a time.
 fn tabulate(
     xform: &(dyn TransformExecutor<u16> + Send + Sync),
+    space: WorkingSpace,
 ) -> Result<ProfileSeparation, OutputProfileError> {
     let mut nodes = Vec::with_capacity(PROFILE_GRID.pow(3));
     let mut src = Vec::with_capacity(PROFILE_GRID * 3);
@@ -375,7 +405,7 @@ fn tabulate(
             nodes.extend(dst.as_chunks::<4>().0.iter().copied());
         }
     }
-    ProfileSeparation::from_nodes(nodes)
+    ProfileSeparation::from_nodes(nodes, space)
         .ok_or_else(|| OutputProfileError::Conversion("an incomplete grid".to_owned()))
 }
 

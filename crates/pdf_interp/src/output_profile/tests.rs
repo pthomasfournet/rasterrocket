@@ -80,7 +80,12 @@ fn srgb_to_srgb_is_the_identity() {
         for bpc in [false, true] {
             let canvas = FinishedCanvas::Rgb8(rgb8(&PATCHES, None));
             let out = profile
-                .convert(canvas, (intent, bpc), &mut CanvasBuffers::default())
+                .convert(
+                    canvas,
+                    WorkingSpace::Srgb,
+                    (intent, bpc),
+                    &mut CanvasBuffers::default(),
+                )
                 .unwrap();
             let FinishedCanvas::Rgb8(out) = out else {
                 panic!("RGB")
@@ -101,6 +106,7 @@ fn a_gray_profile_converts_to_gray_keeping_alpha() {
     let FinishedCanvas::Gray8(gray) = profile
         .convert(
             canvas,
+            WorkingSpace::Srgb,
             (RenderingIntent::RelativeColorimetric, false),
             &mut buffers,
         )
@@ -133,6 +139,7 @@ fn sixteen_bit_canvases_convert_through_the_16_bit_conversion() {
     let FinishedCanvas::Gray16(gray) = profile
         .convert(
             FinishedCanvas::Rgb16(rgb),
+            WorkingSpace::Srgb,
             (RenderingIntent::Perceptual, false),
             &mut CanvasBuffers::default(),
         )
@@ -147,13 +154,19 @@ fn sixteen_bit_canvases_convert_through_the_16_bit_conversion() {
 #[test]
 fn conversions_are_compiled_once_and_slots_are_distinct() {
     let profile = OutputProfile::from_bytes(srgb_bytes()).unwrap();
-    let a = profile.executor(RenderingIntent::Saturation, true).unwrap();
-    let b = profile.executor(RenderingIntent::Saturation, true).unwrap();
+    let a = profile
+        .executor(WorkingSpace::Wide, RenderingIntent::Saturation, true)
+        .unwrap();
+    let b = profile
+        .executor(WorkingSpace::Wide, RenderingIntent::Saturation, true)
+        .unwrap();
     assert!(Arc::ptr_eq(&a, &b));
     let mut seen = std::collections::HashSet::new();
-    for intent in RenderingIntent::ALL {
-        for bpc in [false, true] {
-            assert!(seen.insert(slot(intent, bpc)));
+    for space in WorkingSpace::ALL {
+        for intent in RenderingIntent::ALL {
+            for bpc in [false, true] {
+                assert!(seen.insert(slot(intent, bpc, space)));
+            }
         }
     }
     assert_eq!(seen.len(), SLOTS);
@@ -179,7 +192,11 @@ fn a_cmyk_profile_separates_like_transicc() {
     assert_eq!(profile.space(), OutputSpace::Cmyk);
     assert_eq!(profile.space().channels(), 4);
     let Separation::Profile(table) = profile
-        .separation(RenderingIntent::RelativeColorimetric, false)
+        .separation(
+            WorkingSpace::Srgb,
+            RenderingIntent::RelativeColorimetric,
+            false,
+        )
         .expect("separates")
     else {
         panic!("a profile separation")
@@ -199,7 +216,11 @@ fn a_cmyk_profile_separates_like_transicc() {
         }
     }
     let again = profile
-        .separation(RenderingIntent::RelativeColorimetric, false)
+        .separation(
+            WorkingSpace::Srgb,
+            RenderingIntent::RelativeColorimetric,
+            false,
+        )
         .expect("separates");
     assert!(
         matches!(&again, Separation::Profile(t) if Arc::ptr_eq(t, &table)),
@@ -217,7 +238,11 @@ fn a_cmyk_profile_separates_like_transicc() {
 fn a_compensated_cmyk_separation_maps_black_to_the_perceptual_black() {
     let profile = cmyk_printer();
     let Separation::Profile(table) = profile
-        .separation(RenderingIntent::RelativeColorimetric, true)
+        .separation(
+            WorkingSpace::Srgb,
+            RenderingIntent::RelativeColorimetric,
+            true,
+        )
         .expect("separates")
     else {
         panic!("a profile separation")
@@ -270,19 +295,26 @@ fn profiles_and_pages_of_other_colour_spaces_are_refused() {
     let relative = (RenderingIntent::RelativeColorimetric, false);
     let mut buffers = CanvasBuffers::default();
     assert_eq!(
-        rgb.separation(relative.0, relative.1).unwrap_err(),
+        rgb.separation(WorkingSpace::Srgb, relative.0, relative.1)
+            .unwrap_err(),
         OutputProfileError::Mismatch(OutputSpace::Rgb)
     );
     let page = FinishedCanvas::Rgb8(rgb8(&PATCHES, None));
     assert_eq!(
-        cmyk.convert(page, relative, &mut buffers).unwrap_err(),
+        cmyk.convert(page, WorkingSpace::Srgb, relative, &mut buffers)
+            .unwrap_err(),
         OutputProfileError::Mismatch(OutputSpace::Cmyk)
     );
     let mut ink = Bitmap::<color::Cmyk8>::new(2, 1, 1, false);
     ink.row_samples_mut(0)
         .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
     let FinishedCanvas::Cmyk8(same) = cmyk
-        .convert(FinishedCanvas::Cmyk8(ink), relative, &mut buffers)
+        .convert(
+            FinishedCanvas::Cmyk8(ink),
+            WorkingSpace::Srgb,
+            relative,
+            &mut buffers,
+        )
         .unwrap()
     else {
         panic!("CMYK")
@@ -290,8 +322,13 @@ fn profiles_and_pages_of_other_colour_spaces_are_refused() {
     assert_eq!(same.row_samples(0), [1, 2, 3, 4, 5, 6, 7, 8]);
     let ink = Bitmap::<color::Cmyk8>::new(2, 1, 1, false);
     assert_eq!(
-        rgb.convert(FinishedCanvas::Cmyk8(ink), relative, &mut buffers)
-            .unwrap_err(),
+        rgb.convert(
+            FinishedCanvas::Cmyk8(ink),
+            WorkingSpace::Srgb,
+            relative,
+            &mut buffers
+        )
+        .unwrap_err(),
         OutputProfileError::Mismatch(OutputSpace::Rgb)
     );
 }

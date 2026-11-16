@@ -48,10 +48,10 @@ use color::Sample;
 use pdf::{Dictionary, Document, Object, ObjectId};
 
 use super::shading::function::Function;
-use crate::ColourIntent;
 use crate::renderer::color::Srgb;
 use crate::resources::dict_ext::DictExt as _;
 use crate::separation::Separator;
+use crate::{ColourIntent, ColourTarget, WorkingSpace};
 
 mod cal;
 pub(crate) mod icc;
@@ -378,13 +378,13 @@ impl ColorSpace {
     pub(crate) fn process_ink<S: Sample>(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         comps: &[f64],
         separator: &Separator,
     ) -> [S; 4] {
         self.process_ink_with(
             doc,
-            intent,
+            target,
             comps,
             separator,
             &mut color::cmyk::ink_reproducing_at,
@@ -398,7 +398,7 @@ impl ColorSpace {
     pub(crate) fn process_ink_with<S: Sample>(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         comps: &[f64],
         separator: &Separator,
         reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
@@ -414,7 +414,7 @@ impl ColorSpace {
                     if !separator.reproduces_process_colour() {
                         return [c, m, y, k].map(S::from_unit);
                     }
-                    return reproduce(self.convert::<S>(doc, intent, comps), [c, m, y, k]);
+                    return reproduce(self.convert::<S>(doc, target, comps), [c, m, y, k]);
                 }
             }
             Self::Separation {
@@ -428,15 +428,16 @@ impl ColorSpace {
                 ..
             } if comps.len() == self.ncomponents() => {
                 if let Some(alt) = tint.alternate_components(alternate, comps) {
-                    return alternate.process_ink_with(doc, intent, &alt, separator, reproduce);
+                    return alternate.process_ink_with(doc, target, &alt, separator, reproduce);
                 }
             }
             _ => {}
         }
-        separator.ink(self.convert::<S>(doc, intent, comps))
+        separator.ink(self.convert::<S>(doc, target, comps))
     }
 
-    /// Convert a tint-component slice to an sRGB byte triple per PDF §8.6.
+    /// Convert a tint-component slice to a byte triple of the working space
+    /// per PDF §8.6.
     ///
     /// `comps` must have exactly [`ncomponents`](Self::ncomponents)
     /// elements; any mismatch falls back to opaque black.
@@ -446,24 +447,28 @@ impl ColorSpace {
     /// Separation/DeviceN tint functions, Indexed palette lookups).
     /// Pass the page's document; the borrow is read-only.
     ///
-    /// `intent` is the rendering intent of the conversion (PDF §8.6.5.8):
-    /// it selects the profile table of an ICC-based space, also one
-    /// reached as an `Indexed` base or a `Separation`/`DeviceN` alternate.
-    /// Every other conversion is independent of it.
+    /// `target` holds the working space the colour converts into and the
+    /// rendering intent of the conversion (PDF §8.6.5.8): the intent
+    /// selects the profile table of an ICC-based space, also one reached as
+    /// an `Indexed` base or a `Separation`/`DeviceN` alternate; every other
+    /// conversion is independent of it.  A device colour keeps its sRGB
+    /// meaning: in the wide space its sRGB value converts through
+    /// [`crate::working_space::from_srgb16`] at 16 bits.
     ///
     /// # Variant behaviour
     ///
     /// - `DeviceGray/Rgb`: direct conversion via the `color::convert`
     ///   helpers; `DeviceCmyk` via the process-ink model of `color::cmyk`.
     /// - `Cal`: gamma and matrix to XYZ, Bradford adaptation from the
-    ///   space's white point to D65, sRGB encoding (see `CalSpace`).
+    ///   space's white point to the working white, the working space's
+    ///   encoding (see `CalSpace`).
     /// - `Lab`: `a*` and `b*` clipped to the `Range`, CIE Lab → XYZ relative
-    ///   to the `WhitePoint`, Bradford adaptation to D65, sRGB encoding (see
-    ///   `LabSpace`).
+    ///   to the `WhitePoint`, Bradford adaptation to the working white, the
+    ///   working space's encoding (see `LabSpace`).
     /// - `IccBased`: converts through the `icc::IccConversion` compiled
     ///   from the profile stream `stream_id`: shaper tables for a gray or
-    ///   RGB matrix/TRC profile, otherwise a `moxcms` 8-bit transform of a
-    ///   3- or 4-channel profile to sRGB, otherwise the stream's device or
+    ///   RGB matrix/TRC profile, otherwise a `moxcms` transform of a
+    ///   3- or 4-channel profile to the working space, otherwise the stream's device or
     ///   Lab `/Alternate` space of the same component count.  When none
     ///   applies (missing stream, unusable profile and alternate, transform
     ///   failure) the device space with `n` components converts.
@@ -480,27 +485,28 @@ impl ColorSpace {
     ///   function and converts the result via the alternate colour space.
     ///   Any failure drops back to `1 - comps[0]` as gray.
     #[must_use]
-    pub fn convert_to_rgb(&self, doc: &Document, intent: ColourIntent, comps: &[f64]) -> [u8; 3] {
-        self.convert::<u8>(doc, intent, comps)
+    pub fn convert_to_rgb(&self, doc: &Document, target: ColourTarget, comps: &[f64]) -> [u8; 3] {
+        self.convert::<u8>(doc, target, comps)
     }
 
-    /// [`Self::convert_to_rgb`] at both depths for a render at `depth`:
+    /// [`Self::convert_to_rgb`] at both depths for a render at `depth`, as
+    /// the working-space value a [`Srgb`] holds:
     /// the 8-bit bytes, and the 16-bit value converted at 16 bits for a
     /// 16-bit render, the bytes widened otherwise.
     #[must_use]
     pub(crate) fn convert_to_srgb(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         comps: &[f64],
         depth: color::SampleDepth,
     ) -> Srgb {
-        let bytes = self.convert::<u8>(doc, intent, comps);
+        let bytes = self.convert::<u8>(doc, target, comps);
         match depth {
             color::SampleDepth::Eight => Srgb::of_bytes(bytes),
             color::SampleDepth::Sixteen => Srgb {
                 bytes,
-                wide: self.convert::<u16>(doc, intent, comps),
+                wide: self.convert::<u16>(doc, target, comps),
             },
         }
     }
@@ -512,7 +518,7 @@ impl ColorSpace {
     pub(crate) fn convert<S: Sample>(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         comps: &[f64],
     ) -> [S; 3] {
         if comps.len() != self.ncomponents() {
@@ -524,21 +530,34 @@ impl ColorSpace {
             );
             return [S::default(); 3];
         }
+        let wide = target.space == WorkingSpace::Wide;
         match self {
             Self::DeviceGray => [S::from_unit(comps[0]); 3],
+            Self::DeviceRgb if wide => {
+                from_srgb16([comps[0], comps[1], comps[2]].map(u16::from_unit))
+            }
             Self::DeviceRgb => [comps[0], comps[1], comps[2]].map(S::from_unit),
+            Self::DeviceCmyk if wide => from_srgb16(color::cmyk::cmyk_f64_to_rgb_at(
+                comps[0], comps[1], comps[2], comps[3],
+            )),
             Self::DeviceCmyk => {
                 color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3])
             }
-            Self::Cal(cal) => cal.convert(comps),
-            Self::Lab(lab) => lab.convert(comps),
+            Self::Cal(cal) => cal.convert(comps, target.space),
+            Self::Lab(lab) => lab.convert(comps, target.space),
             Self::IccBased { n, stream_id } => stream_id
-                .and_then(|id| IccConversion::load(doc, id, *n, intent))
+                .and_then(|id| IccConversion::load(doc, id, *n, target))
                 .and_then(|conv| conv.convert(doc, comps))
-                .unwrap_or_else(|| icc_fallback_by_n(*n, comps)),
+                .unwrap_or_else(|| {
+                    if wide {
+                        from_srgb16(icc_fallback_by_n(*n, comps))
+                    } else {
+                        icc_fallback_by_n(*n, comps)
+                    }
+                }),
             Self::Indexed { .. } => self.indexed_base_components(comps).map_or_else(
                 || [S::default(); 3],
-                |(base, entry)| base.convert(doc, intent, &entry),
+                |(base, entry)| base.convert(doc, target, &entry),
             ),
             Self::Pattern { .. } => [S::default(); 3],
             Self::Separation {
@@ -550,7 +569,7 @@ impl ColorSpace {
                 // failure (no function, or evaluation fails), use the
                 // `1 - tint` gray approximation.
                 if let Some(tint) = tint
-                    && let Some(rgb) = tint.to_rgb(doc, intent, alternate, comps)
+                    && let Some(rgb) = tint.to_rgb(doc, target, alternate, comps)
                 {
                     return rgb;
                 }
@@ -562,7 +581,7 @@ impl ColorSpace {
                 // PDF §8.6.6.5: like Separation, with one tint input per
                 // colorant.
                 if let Some(tint) = tint
-                    && let Some(rgb) = tint.to_rgb(doc, intent, alternate, comps)
+                    && let Some(rgb) = tint.to_rgb(doc, target, alternate, comps)
                 {
                     return rgb;
                 }
@@ -606,12 +625,12 @@ impl TintTransform {
     fn to_rgb<S: Sample>(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         alternate: &ColorSpace,
         tints: &[f64],
     ) -> Option<[S; 3]> {
         let outputs = self.alternate_components(alternate, tints)?;
-        Some(alternate.convert(doc, intent, &outputs))
+        Some(alternate.convert(doc, target, &outputs))
     }
 }
 
@@ -699,6 +718,12 @@ pub(crate) fn decoded_sample(s: u8, (dmin, dmax): (f64, f64), max_sample: f64) -
 /// (black), per PDF §8.6.6.4.
 fn separation_fallback_gray<S: Sample>(tint: f64) -> [S; 3] {
     [S::from_unit(1.0 - tint); 3]
+}
+
+/// The wide value at the depth of `S` of the 16-bit sRGB value `srgb`
+/// ([`crate::working_space::from_srgb16`]).
+fn from_srgb16<S: Sample>(srgb: [u16; 3]) -> [S; 3] {
+    crate::working_space::from_srgb16(srgb).map(S::from_sample)
 }
 
 /// Fall back to the device space matching the ICC profile's channel count
@@ -980,7 +1005,10 @@ mod tests {
     use crate::test_helpers::empty_doc;
 
     /// The intent of the conversions under test, the initial one.
-    const RI: ColourIntent = ColourIntent::new(crate::RenderingIntent::RelativeColorimetric, true);
+    const RI: ColourTarget = ColourTarget::new(
+        ColourIntent::new(crate::RenderingIntent::RelativeColorimetric, true),
+        WorkingSpace::Srgb,
+    );
 
     fn name_obj(s: &[u8]) -> Object {
         Object::Name(s.to_vec())

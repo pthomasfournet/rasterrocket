@@ -510,7 +510,7 @@ pub(crate) fn render_page_canvas_with_geom(
         session,
         params,
         (page_num, page_id),
-        (bitmap, diag.content_intents),
+        (bitmap, diag.content_intents, job.space()),
         buffers,
     )?;
     diag.output_intent = output_intent;
@@ -667,6 +667,8 @@ impl<'a> PageJob<'a> {
         policy: crate::BackendPolicy,
     ) -> Result<Self, RasterError> {
         let doc = &session.doc;
+        let canvas = canvas_request(session, page_id, params)?;
+        crate::output::warn_working_space(session, (page_num, page_id), params, &canvas);
         Ok(Self {
             session,
             page_num,
@@ -674,10 +676,15 @@ impl<'a> PageJob<'a> {
             view,
             ops,
             group: page_group(doc, page_id, params.transparent_background),
-            canvas: canvas_request(session, page_id, params)?,
+            canvas,
             params,
             policy,
         })
+    }
+
+    /// The working space the page is composited in.
+    pub(crate) fn space(&self) -> pdf_interp::WorkingSpace {
+        self.canvas.space()
     }
 
     /// A renderer of the page, configured from the session, its bitmap
@@ -780,9 +787,11 @@ fn canvas_request(
         None => None,
     };
     if session.proof.is_some() || params.color == crate::ColorModel::Cmyk {
+        let space = crate::output::working_space(session, params, false);
         let separation = match press {
             Some(profile) => profile
                 .separation(
+                    space,
                     crate::output::cmyk_intent(params),
                     params.black_point_compensation,
                 )
@@ -794,13 +803,13 @@ fn canvas_request(
             separation,
         });
     }
+    let preview = session.overprint
+        && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations);
     Ok(
-        if session.overprint
-            && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations)
-        {
-            pdf_interp::CanvasRequest::OverprintPreview
-        } else {
-            pdf_interp::CanvasRequest::Rgb
+        match crate::output::working_space(session, params, preview) {
+            _ if preview => pdf_interp::CanvasRequest::OverprintPreview,
+            pdf_interp::WorkingSpace::Wide => pdf_interp::CanvasRequest::WideRgb,
+            pdf_interp::WorkingSpace::Srgb => pdf_interp::CanvasRequest::Rgb,
         },
     )
 }

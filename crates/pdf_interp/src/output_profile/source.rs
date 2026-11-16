@@ -1,10 +1,10 @@
 //! The working space as the source profile of a conversion to an output
 //! profile, with the intent's adjustments folded into it.
 //!
-//! The working space is sRGB, a matrix/TRC profile: a device value maps to
-//! the D50 profile connection space (PCS) as `M · lin(v)`, `lin` the
-//! channel's tone curve and `M` the matrix whose columns are the
-//! colorants; device black is the PCS origin and device white the D50
+//! Either working space ([`WorkingSpace`]) is a matrix/TRC profile: a
+//! value maps to the D50 profile connection space (PCS) as `M · lin(v)`,
+//! `lin` the channel's tone curve, the sRGB curve in both, and `M` the
+//! matrix whose columns are the colorants; device black is the PCS origin and device white the D50
 //! white `W = M · (1, 1, 1)`.  Two adjustments of the PCS are affine maps
 //! of that form and stay within it:
 //!
@@ -22,6 +22,7 @@
 
 use moxcms::{ColorProfile, RenderingIntent};
 
+use crate::WorkingSpace;
 use crate::pcs::D50;
 use crate::pcs::black::{
     MAX_BLACK_Y, PERCEPTUAL_BLACK_Y, as_version_2, is_v4, lab_l_to_y, lifted_srgb_curve,
@@ -29,18 +30,16 @@ use crate::pcs::black::{
 };
 
 /// The source profile of a conversion to `dest` under `intent`: the
-/// working space, scaled to the destination's media white under absolute
+/// working space `space`, scaled to the destination's media white under absolute
 /// colorimetry, its black lifted to `black` (the luminance of the neutral
 /// destination black) when given.
 pub(super) fn source_profile(
+    space: WorkingSpace,
     dest: &ColorProfile,
     intent: RenderingIntent,
     black: Option<f64>,
 ) -> Result<ColorProfile, moxcms::CmsError> {
-    let mut source = ColorProfile::new_srgb();
-    // The working space is described by its tags alone: a CICP description
-    // would let the transform evaluate the standard sRGB curve instead.
-    source.cicp = None;
+    let mut source = space.profile();
     if intent == RenderingIntent::AbsoluteColorimetric
         && let Some(white) = dest.media_white_point
     {
@@ -233,8 +232,20 @@ mod tests {
             y: 0.95,
             z: 0.7,
         });
-        let plain = source_profile(&dest, RenderingIntent::RelativeColorimetric, None).unwrap();
-        let abs = source_profile(&dest, RenderingIntent::AbsoluteColorimetric, None).unwrap();
+        let plain = source_profile(
+            WorkingSpace::Srgb,
+            &dest,
+            RenderingIntent::RelativeColorimetric,
+            None,
+        )
+        .unwrap();
+        let abs = source_profile(
+            WorkingSpace::Srgb,
+            &dest,
+            RenderingIntent::AbsoluteColorimetric,
+            None,
+        )
+        .unwrap();
         assert!((plain.red_colorant.x - ColorProfile::new_srgb().red_colorant.x).abs() < 1e-4);
         let ratio = abs.green_colorant.z / plain.green_colorant.z;
         assert!((ratio - D50[2] / 0.7).abs() < 1e-4, "{ratio}");

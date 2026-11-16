@@ -5,16 +5,20 @@
 //! rendering intents select (ISO 32000-1 §8.6.5.8): the `AToB0`, `AToB1`
 //! or `AToB2` table of the intent (ICC.1:2022 §8.10.2, `AToB0` standing in
 //! for a table the profile lacks), or, in a profile without such tables,
-//! its matrix/TRC model.  Each model compiles at most twice, media-relative
-//! and ICC-absolute; intents that select the same model share one
-//! conversion.
+//! its matrix/TRC model.  Each model compiles, per working space, at most
+//! once in each form (media-relative, ICC-absolute, black-point
+//! compensated); intents that select the same model share one conversion.
 //!
 //! A gray or RGB matrix/TRC model compiles into the shared shaper tables of
-//! `super::super::icc_shaper`, any other 3- or 4-channel profile into a
-//! `moxcms` 8-bit transform to sRGB, beside which a 16-bit transform is
-//! created on first use by a 16-bit render.  ICC-absolute colorimetry
+//! `super::super::icc_shaper` for sRGB; for the wide space an RGB one
+//! compiles into a 16-bit [`LinearRgb`] through the composite of
+//! [`crate::working_space::wide_composite`], and a gray one, whose colours
+//! are neutral, into the sRGB shaper, a neutral having the same value in
+//! both spaces.  Any other 3- or 4-channel profile compiles into a `moxcms`
+//! 8-bit transform to the working space, beside which a 16-bit transform
+//! is created on first use by a 16-bit render.  ICC-absolute colorimetry
 //! scales the PCS by the source's media white (see [`crate::pcs`]), folded
-//! into the sRGB destination's colorants.  A profile that admits neither
+//! into the working-space destination's colorants.  A profile that admits neither
 //! compiles to its `/Alternate` space when that space takes the same
 //! number of components (§8.6.5.5, Table 66).  Converting a colour value
 //! is then a table lookup, one transform call, or a conversion in the
@@ -29,8 +33,9 @@ use moxcms::{
 use pdf::{Document, ObjectId};
 
 use super::ColorSpace;
-use crate::resources::icc_shaper::{ProfileConversion, fetch_profile_bytes};
-use crate::{ColourIntent, RenderingIntent};
+use crate::resources::icc_shaper::{ProfileConversion, eval_trc, fetch_profile_bytes};
+use crate::working_space::{LinearRgb, wide_composite};
+use crate::{ColourIntent, ColourTarget, RenderingIntent, WorkingSpace};
 
 #[cfg(feature = "gpu-icc")]
 pub(crate) mod clut;
@@ -103,7 +108,8 @@ impl Model {
 
 /// The forms in which an [`IccProfile`] compiles each [`Model`]: plain,
 /// ICC-absolute, and with black-point compensation.  The conversion of
-/// model `m` in form `f` is held in slot `f · MODELS + m`.
+/// model `m` in form `f` to working space `w` is held in slot
+/// `(w · FORMS + f) · MODELS + m`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Form {
     /// Media-relative, the model's PCS converted as it is.
@@ -117,9 +123,12 @@ enum Form {
 /// Number of models.
 const MODELS: usize = 4;
 
+/// Number of forms.
+const FORMS: usize = 3;
+
 /// Number of conversions an [`IccProfile`] holds: every [`Model`] in
-/// every [`Form`].
-const SLOTS: usize = 3 * MODELS;
+/// every [`Form`] to every working space.
+const SLOTS: usize = WorkingSpace::ALL.len() * FORMS * MODELS;
 
 /// The largest black-point luminance compensation leaves alone, that of
 /// `L* = 0.1`: the resolution at which a black point is found, so a black
@@ -176,11 +185,13 @@ impl IccProfile {
         }
     }
 
-    /// The slot of the conversion under `intent`: the model the rendering
+    /// The slot of the conversion to `target`: the model the rendering
     /// intent selects, ICC-absolute when the intent is and the media white
     /// is not D50, compensated when compensation is on, the intent is not
-    /// absolute and the model's black is not the PCS origin, else plain.
-    fn slot(&self, intent: ColourIntent) -> usize {
+    /// absolute and the model's black is not the PCS origin, else plain,
+    /// into the target's working space.
+    fn slot(&self, target: ColourTarget) -> usize {
+        let intent = target.intent;
         let model = self.models[intent.intent.index()];
         let form = match intent.intent {
             RenderingIntent::AbsoluteColorimetric if self.absolute.is_some() => Form::Absolute,
@@ -188,7 +199,7 @@ impl IccProfile {
             _ if intent.bpc && self.black(model) > BLACK_EPSILON => Form::Compensated,
             _ => Form::Plain,
         };
-        form as usize * MODELS + model as usize
+        (target.space.index() * FORMS + form as usize) * MODELS + model as usize
     }
 
     /// The black-point luminance of `model` as a conversion source,
@@ -210,19 +221,21 @@ impl IccProfile {
         })
     }
 
-    /// The conversion of the profile's colour values under `intent`,
+    /// The conversion of the profile's colour values to `target`,
     /// compiled on first use; `alternate` supplies the `/Alternate` space
     /// a profile without a conversion of its own converts through.
     fn conversion(
         &self,
-        intent: ColourIntent,
+        target: ColourTarget,
         alternate: impl FnOnce() -> Option<ColorSpace>,
     ) -> Option<Arc<IccConversion>> {
-        let slot = self.slot(intent);
+        let slot = self.slot(target);
         self.conversions[slot]
             .get_or_init(|| {
                 self.compile(slot)
-                    .or_else(|| alternate().map(IccConversion::Alternate))
+                    .or_else(|| {
+                        alternate().map(|space| IccConversion::Alternate(space, target.space))
+                    })
                     .map(Arc::new)
             })
             .clone()
@@ -234,31 +247,38 @@ impl IccProfile {
     fn compile(&self, slot: usize) -> Option<IccConversion> {
         let profile = self.profile.as_ref()?;
         let model = Model::ALL[slot % MODELS];
-        let form = [Form::Plain, Form::Absolute, Form::Compensated][slot / MODELS];
+        let form = [Form::Plain, Form::Absolute, Form::Compensated][slot / MODELS % FORMS];
+        let space = WorkingSpace::ALL[slot / (MODELS * FORMS)];
         let dest = match form {
             Form::Plain => {
                 if model == Model::Matrix {
                     let shaper = ProfileConversion::from_profile(profile);
-                    if matches!(
-                        (&shaper, self.n),
-                        (ProfileConversion::Gray(_), 1) | (ProfileConversion::Rgb(_), 3)
-                    ) {
-                        return Some(IccConversion::Shaper(shaper));
+                    match (&shaper, self.n, space) {
+                        (ProfileConversion::Gray(_), 1, _)
+                        | (ProfileConversion::Rgb(_), 3, WorkingSpace::Srgb) => {
+                            return Some(IccConversion::Shaper(shaper));
+                        }
+                        (ProfileConversion::Rgb(_), 3, WorkingSpace::Wide) => {
+                            if let Some(wide) = wide_rgb(profile) {
+                                return Some(IccConversion::Wide(wide));
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                ColorProfile::new_srgb()
+                space.profile()
             }
             Form::Absolute => {
                 let scale = self.absolute?;
                 if model == Model::Matrix
                     && self.n == 1
-                    && let Some(gray) = absolute_gray(profile, scale)
+                    && let Some(gray) = absolute_gray(profile, scale, space)
                 {
-                    return Some(IccConversion::GrayAbsolute(gray));
+                    return Some(gray);
                 }
-                crate::pcs::scaled_srgb(scale)
+                crate::pcs::scaled_working(space, scale)
             }
-            Form::Compensated => crate::pcs::black::compensating_srgb(self.black(model)),
+            Form::Compensated => crate::pcs::black::compensating(space, self.black(model)),
         };
         let layout = layout(self.n)?;
         // Floating-point table evaluation: the fixed-point one misses by up
@@ -291,10 +311,14 @@ impl IccProfile {
     /// is device-equivalent (see [`IccConversion::is_device_equivalent`]).
     fn is_device_equivalent(&self, alternate: impl FnOnce() -> Option<ColorSpace>) -> bool {
         let first = ColourIntent::INITIAL;
+        let first = ColourTarget::new(first, WorkingSpace::Srgb);
         let one = RenderingIntent::ALL.iter().all(|&intent| {
-            [false, true]
-                .iter()
-                .all(|&bpc| self.slot(ColourIntent::new(intent, bpc)) == self.slot(first))
+            [false, true].iter().all(|&bpc| {
+                self.slot(ColourTarget::new(
+                    ColourIntent::new(intent, bpc),
+                    WorkingSpace::Srgb,
+                )) == self.slot(first)
+            })
         });
         one && self
             .conversion(first, alternate)
@@ -302,12 +326,17 @@ impl IccProfile {
     }
 }
 
-/// The ICC-absolute conversion of the gray matrix/TRC `profile`, whose
-/// PCS scale is `scale` (`D50 / w`): the RGB matrix/TRC profile with the
-/// gray tone curve on every channel and the sRGB colorants scaled by
-/// `w / D50`, which maps the gray `v` on every channel to the absolute PCS
-/// `w · TRC(v)` of `v`.  `None` for a profile that is not a gray TRC one.
-fn absolute_gray(profile: &ColorProfile, scale: [f64; 3]) -> Option<ProfileConversion> {
+/// The ICC-absolute conversion to `space` of the gray matrix/TRC
+/// `profile`, whose PCS scale is `scale` (`D50 / w`): the RGB matrix/TRC
+/// profile with the gray tone curve on every channel and the colorants of
+/// `space` scaled by `w / D50`, which maps the gray `v` on every channel to
+/// the absolute PCS `w · TRC(v)` of `v`.  `None` for a profile that is not
+/// a gray TRC one.
+fn absolute_gray(
+    profile: &ColorProfile,
+    scale: [f64; 3],
+    space: WorkingSpace,
+) -> Option<IccConversion> {
     let trc = profile
         .gray_trc
         .as_ref()
@@ -318,8 +347,46 @@ fn absolute_gray(profile: &ColorProfile, scale: [f64; 3]) -> Option<ProfileConve
     rgb.green_trc = Some(trc.clone());
     rgb.blue_trc = Some(trc.clone());
     crate::pcs::scale_colorants(&mut rgb, scale.map(f64::recip));
-    let conversion = ProfileConversion::from_profile(&rgb);
-    matches!(conversion, ProfileConversion::Rgb(_)).then_some(conversion)
+    match space {
+        WorkingSpace::Srgb => {
+            let conversion = ProfileConversion::from_profile(&rgb);
+            matches!(conversion, ProfileConversion::Rgb(_))
+                .then_some(IccConversion::GrayAbsolute(conversion))
+        }
+        WorkingSpace::Wide => wide_rgb(&rgb).map(IccConversion::WideGray),
+    }
+}
+
+/// The 16-bit conversion to the wide space of the RGB matrix/TRC
+/// `profile`: each tone curve tabulated at every 16-bit level, then the
+/// composite of [`wide_composite`].  `None` when a tag is missing, the
+/// colorant matrix is singular or a curve does not evaluate.
+fn wide_rgb(profile: &ColorProfile) -> Option<Arc<LinearRgb>> {
+    let trcs = [&profile.red_trc, &profile.green_trc, &profile.blue_trc];
+    let column = |c: &moxcms::Xyzd| [c.x, c.y, c.z];
+    let cols = [
+        column(&profile.red_colorant),
+        column(&profile.green_colorant),
+        column(&profile.blue_colorant),
+    ];
+    let colorants = [0, 1, 2].map(|r| [cols[0][r], cols[1][r], cols[2][r]]);
+    // A singular colorant matrix covers the all-zero default of absent tags.
+    crate::resources::icc_shaper::mat_inverse(&colorants).map(drop)?;
+    let mut tables: Vec<Arc<[f32]>> = Vec::with_capacity(3);
+    for (i, trc) in trcs.iter().enumerate() {
+        let trc = trc.as_ref()?;
+        let shared = (0..i).find(|&j| trcs[j].as_ref() == Some(trc));
+        let table = match shared {
+            Some(j) => Arc::clone(&tables[j]),
+            None => LinearRgb::table(|x| eval_trc(trc, x))?,
+        };
+        tables.push(table);
+    }
+    let linear: [Arc<[f32]>; 3] = tables.try_into().ok()?;
+    Some(Arc::new(LinearRgb::new(
+        linear,
+        &wide_composite(&colorants),
+    )))
 }
 
 /// The source layout of `n`-channel colour values.
@@ -332,11 +399,18 @@ const fn layout(n: u8) -> Option<Layout> {
     }
 }
 
-/// The compiled sRGB conversion of one ICC profile stream for colour values
-/// of its declared component count under one device-to-PCS model.
+/// The compiled conversion to a working space of one ICC profile stream
+/// for colour values of its declared component count under one
+/// device-to-PCS model.
 pub(crate) enum IccConversion {
-    /// A gray (`n = 1`) or RGB (`n = 3`) matrix/TRC profile.
+    /// A gray (`n = 1`) or RGB (`n = 3`) matrix/TRC profile, to sRGB; a
+    /// gray one to either space.
     Shaper(ProfileConversion),
+    /// An RGB matrix/TRC profile, to the wide space.
+    Wide(Arc<LinearRgb>),
+    /// A gray matrix/TRC profile under ICC-absolute colorimetry, to the
+    /// wide space: as [`Self::GrayAbsolute`].
+    WideGray(Arc<LinearRgb>),
     /// A gray matrix/TRC profile under ICC-absolute colorimetry: an RGB
     /// shaper evaluated at the gray value on every channel (see
     /// [`absolute_gray`]).  The converter maps a gray source to a neutral,
@@ -350,7 +424,7 @@ pub(crate) enum IccConversion {
         xform: Arc<Transform8BitExecutor>,
         /// The source profile, from which the 16-bit transform is created.
         profile: Arc<ColorProfile>,
-        /// The destination profile, sRGB, of both transforms.
+        /// The destination profile, the working space, of both transforms.
         dest: Box<ColorProfile>,
         /// The options of both transforms.
         options: TransformOptions,
@@ -363,22 +437,23 @@ pub(crate) enum IccConversion {
         clut: OnceLock<Option<Arc<[u8]>>>,
     },
     /// A profile with no conversion of its own: the `/Alternate` space of
-    /// the stream, a device or CIE-based space of the same component count.
-    Alternate(ColorSpace),
+    /// the stream, a device or CIE-based space of the same component count,
+    /// converting to the working space given.
+    Alternate(ColorSpace, WorkingSpace),
 }
 
 impl IccConversion {
-    /// The conversion of profile stream `id` for `n`-component values
-    /// under `intent`, compiled on first use and shared for the lifetime of
+    /// The conversion of profile stream `id` for `n`-component values to
+    /// `target`, compiled on first use and shared for the lifetime of
     /// `doc`.  `None` when neither the profile nor the `/Alternate` space
     /// converts `n` components.
     pub(crate) fn load(
         doc: &Document,
         id: ObjectId,
         n: u8,
-        intent: ColourIntent,
+        target: ColourTarget,
     ) -> Option<Arc<Self>> {
-        Self::profile(doc, id, n)?.conversion(intent, || Self::alternate(doc, id, n))
+        Self::profile(doc, id, n)?.conversion(target, || Self::alternate(doc, id, n))
     }
 
     /// Whether profile stream `id` converts `n`-component values as the
@@ -398,7 +473,8 @@ impl IccConversion {
         a: ColourIntent,
         b: ColourIntent,
     ) -> bool {
-        Self::profile(doc, id, n).is_none_or(|p| p.slot(a) == p.slot(b))
+        let srgb = |intent| ColourTarget::new(intent, WorkingSpace::Srgb);
+        Self::profile(doc, id, n).is_none_or(|p| p.slot(srgb(a)) == p.slot(srgb(b)))
     }
 
     /// The parsed profile stream `id`, shared for the lifetime of `doc`.
@@ -432,10 +508,10 @@ impl IccConversion {
         usable.then_some(space)
     }
 
-    /// Compile profile `bytes` for `n`-component values under `intent`
+    /// Compile profile `bytes` for `n`-component values to `target`
     /// without consulting a cache.
-    pub(crate) fn compile(bytes: &[u8], n: u8, intent: ColourIntent) -> Option<Arc<Self>> {
-        IccProfile::new(Some(bytes), n).conversion(intent, || None)
+    pub(crate) fn compile(bytes: &[u8], n: u8, target: ColourTarget) -> Option<Arc<Self>> {
+        IccProfile::new(Some(bytes), n).conversion(target, || None)
     }
 
     /// The CMYK → sRGB table of a four-channel transform on the
@@ -472,7 +548,8 @@ impl IccConversion {
             self,
             Self::Shaper(ProfileConversion::Gray(None) | ProfileConversion::Rgb(None))
                 | Self::Alternate(
-                    ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk
+                    ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk,
+                    _
                 )
         )
     }
@@ -495,22 +572,39 @@ impl IccConversion {
             .ok()
     }
 
-    /// Convert normalised components to sRGB at the depth of `S`.
+    /// Convert normalised components to the working space at the depth of
+    /// `S`.
     /// Components are quantised to that depth for the transform, which is
     /// the 8-bit or the 16-bit one; the shaper evaluates at that depth (see
     /// `ProfileConversion::convert_components_at`).  `None` when `comps`
     /// does not hold the compiled component count or the transform fails.
     pub(crate) fn convert<S: Sample>(&self, doc: &Document, comps: &[f64]) -> Option<[S; 3]> {
         match self {
-            Self::Alternate(space) => {
+            Self::Alternate(space, working) => {
                 // An alternate is a device or CIE-based space, whose conversion
                 // is independent of the intent.
-                (comps.len() == space.ncomponents())
-                    .then(|| space.convert(doc, ColourIntent::INITIAL, comps))
+                (comps.len() == space.ncomponents()).then(|| {
+                    space.convert(
+                        doc,
+                        ColourTarget::new(ColourIntent::INITIAL, *working),
+                        comps,
+                    )
+                })
             }
             Self::Shaper(shaper) => shaper.convert_components_at(comps),
             Self::GrayAbsolute(shaper) => match *comps {
                 [v] => shaper.convert_components_at(&[v, v, v]),
+                _ => None,
+            },
+            Self::Wide(wide) => match *comps {
+                [r, g, b] => Some(
+                    wide.convert([r, g, b].map(u16::from_unit))
+                        .map(S::from_sample),
+                ),
+                _ => None,
+            },
+            Self::WideGray(wide) => match *comps {
+                [v] => Some(wide.convert([u16::from_unit(v); 3]).map(S::from_sample)),
                 _ => None,
             },
             Self::Transform { n, xform, .. } => {
@@ -598,6 +692,11 @@ fn run<S: Sample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conversion under `intent` into sRGB.
+    const fn srgb(intent: ColourIntent) -> ColourTarget {
+        ColourTarget::new(intent, WorkingSpace::Srgb)
+    }
     use crate::resources::colorspace::ColorSpace;
     use crate::test_helpers::make_doc_with_stream;
 
@@ -613,7 +712,7 @@ mod tests {
     #[test]
     fn srgb_default_space_keeps_the_device_space() {
         let doc = srgb_doc();
-        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourTarget::SRGB)
             .expect("sRGB profile compiles");
         assert!(conv.is_device_equivalent());
         let mut dict = pdf::Dictionary::new();
@@ -633,9 +732,9 @@ mod tests {
     #[test]
     fn profile_stream_is_compiled_once_per_document() {
         let doc = srgb_doc();
-        let first = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
+        let first = IccConversion::load(&doc, (2, 0), 3, ColourTarget::SRGB)
             .expect("sRGB profile compiles");
-        let second = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
+        let second = IccConversion::load(&doc, (2, 0), 3, ColourTarget::SRGB)
             .expect("sRGB profile compiles");
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -643,7 +742,7 @@ mod tests {
     #[test]
     fn matrix_trc_profile_compiles_to_the_shaper() {
         let doc = srgb_doc();
-        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL)
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourTarget::SRGB)
             .expect("sRGB profile compiles");
         assert!(matches!(*conv, IccConversion::Shaper(_)));
         assert_eq!(
@@ -656,7 +755,7 @@ mod tests {
     #[test]
     fn unusable_profiles_do_not_compile() {
         let bytes = ColorProfile::new_srgb().encode().expect("encodes");
-        let intent = ColourIntent::INITIAL;
+        let intent = ColourTarget::SRGB;
         assert!(IccConversion::compile(&bytes, 1, intent).is_none());
         assert!(IccConversion::compile(b"not a profile", 3, intent).is_none());
     }
@@ -676,7 +775,7 @@ mod tests {
     fn cmyk_printer() -> (Document, [Arc<IccConversion>; 4]) {
         let doc = make_doc_with_stream(&fixture("printer-cmyk-v4"), " /N 4");
         let conv = RenderingIntent::ALL.map(|intent| {
-            IccConversion::load(&doc, (2, 0), 4, ColourIntent::new(intent, false))
+            IccConversion::load(&doc, (2, 0), 4, srgb(ColourIntent::new(intent, false)))
                 .expect("compiles")
         });
         (doc, conv)
@@ -706,7 +805,7 @@ mod tests {
             &doc,
             (2, 0),
             4,
-            ColourIntent::new(RelativeColorimetric, false),
+            srgb(ColourIntent::new(RelativeColorimetric, false)),
         )
         .unwrap();
         assert!(Arc::ptr_eq(&again, at(RelativeColorimetric)));
@@ -747,7 +846,7 @@ mod tests {
         let doc = make_doc_with_stream(&fixture("printer-cmyk-v4"), " /N 4");
         let at = |bpc, ink: &[f64]| {
             let intent = ColourIntent::new(RenderingIntent::RelativeColorimetric, bpc);
-            let conv = IccConversion::load(&doc, (2, 0), 4, intent).expect("compiles");
+            let conv = IccConversion::load(&doc, (2, 0), 4, srgb(intent)).expect("compiles");
             conv.convert::<u8>(&doc, ink).expect("converts")
         };
         let black = [0.0, 0.0, 0.0, 1.0];
@@ -788,7 +887,7 @@ mod tests {
     fn absolute_gray_reproduces_the_paper_white() {
         let doc = make_doc_with_stream(&fixture("printer-gray-v4"), " /N 1");
         let at = |intent| {
-            let conv = IccConversion::load(&doc, (2, 0), 1, ColourIntent::new(intent, false))
+            let conv = IccConversion::load(&doc, (2, 0), 1, srgb(ColourIntent::new(intent, false)))
                 .expect("compiles");
             conv.convert::<u8>(&doc, &[1.0]).expect("converts")
         };
@@ -807,7 +906,8 @@ mod tests {
     fn a_matrix_profile_shares_one_conversion() {
         let doc = srgb_doc();
         let conv = RenderingIntent::ALL.map(|intent| {
-            IccConversion::load(&doc, (2, 0), 3, ColourIntent::new(intent, true)).expect("compiles")
+            IccConversion::load(&doc, (2, 0), 3, srgb(ColourIntent::new(intent, true)))
+                .expect("compiles")
         });
         assert!(conv.iter().all(|c| Arc::ptr_eq(c, &conv[0])));
         assert!(matches!(*conv[0], IccConversion::Shaper(_)));
@@ -822,7 +922,7 @@ mod tests {
         both.lut_a_to_b_perceptual = printer.lut_a_to_b_perceptual;
         let bytes = both.encode().expect("encodes");
         let doc = make_doc_with_stream(&bytes, " /N 3");
-        let conv = IccConversion::load(&doc, (2, 0), 3, ColourIntent::INITIAL).unwrap();
+        let conv = IccConversion::load(&doc, (2, 0), 3, ColourTarget::SRGB).unwrap();
         assert!(matches!(*conv, IccConversion::Transform { .. }));
     }
 
@@ -841,7 +941,7 @@ mod tests {
     #[test]
     fn unusable_profile_converts_through_its_alternate() {
         let doc = garbage_doc(3, "[/Lab << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray = icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[50.0, 0.0, 0.0]);
+        let gray = icc(3).convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[50.0, 0.0, 0.0]);
         assert!(gray.iter().all(|&c| c.abs_diff(119) <= 1), "got {gray:?}");
     }
 
@@ -849,7 +949,7 @@ mod tests {
     fn alternate_with_another_component_count_is_ignored() {
         let doc = garbage_doc(3, "/DeviceGray");
         assert_eq!(
-            icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0, 0.0, 0.0]),
+            icc(3).convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[1.0, 0.0, 0.0]),
             [255, 0, 0]
         );
     }
@@ -858,7 +958,7 @@ mod tests {
     fn derived_alternates_are_ignored() {
         let doc = garbage_doc(3, "[/ICCBased 2 0 R]");
         assert_eq!(
-            icc(3).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0, 0.0, 0.0]),
+            icc(3).convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[1.0, 0.0, 0.0]),
             [255, 0, 0]
         );
         // A Separation alternate whose own alternate is this profile.
@@ -867,7 +967,7 @@ mod tests {
             "[/Separation /Spot [/ICCBased 2 0 R] << /FunctionType 2 /Domain [0 1] /N 1 >>]",
         );
         assert_eq!(
-            icc(1).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[1.0]),
+            icc(1).convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[1.0]),
             [255; 3]
         );
     }
@@ -876,7 +976,7 @@ mod tests {
     fn cal_alternate_converts_through_its_parameters() {
         // CalGray with the default Gamma 1: 0.5 is linear light, sRGB 188.
         let doc = garbage_doc(1, "[/CalGray << /WhitePoint [0.9505 1 1.089] >>]");
-        let gray = icc(1).convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[0.5]);
+        let gray = icc(1).convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[0.5]);
         assert!(gray.iter().all(|&c| c.abs_diff(188) <= 1), "got {gray:?}");
     }
 }

@@ -286,18 +286,18 @@ pub(crate) fn source_black(
     })
 }
 
-/// sRGB described by its tags, its tone curves lifted to `(1 − k) · lin +
-/// k` ([`lifted_srgb_curve`]): as a destination, it maps the neutral PCS
-/// black `k · D50` to sRGB black and keeps white, the black-point
+/// The working space `space` described by its tags, its tone curves lifted
+/// to `(1 − k) · lin + k` ([`lifted_srgb_curve`]; both working spaces have
+/// the sRGB curve): as a destination, it maps the neutral PCS black
+/// `k · D50` to the working black and keeps white, the black-point
 /// compensation of a source whose black is `k`.
-pub(crate) fn compensating_srgb(k: f64) -> ColorProfile {
-    let mut srgb = ColorProfile::new_srgb();
-    srgb.cicp = None;
+pub(crate) fn compensating(space: crate::WorkingSpace, k: f64) -> ColorProfile {
+    let mut profile = space.profile();
     let curve = lifted_srgb_curve(k);
-    srgb.red_trc = Some(curve.clone());
-    srgb.green_trc = Some(curve.clone());
-    srgb.blue_trc = Some(curve);
-    srgb
+    profile.red_trc = Some(curve.clone());
+    profile.green_trc = Some(curve.clone());
+    profile.blue_trc = Some(curve);
+    profile
 }
 
 #[cfg(test)]

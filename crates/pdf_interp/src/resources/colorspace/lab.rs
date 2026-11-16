@@ -4,14 +4,17 @@
 //! `L*` to `[0, 100]` (components outside the range are adjusted to the
 //! nearest valid value), then converts to CIE XYZ relative to the space's
 //! `WhitePoint` by the CIE 1976 formulae.  XYZ is adapted from `WhitePoint`
-//! to D65 by the Bradford transform and encoded as sRGB, as for `CalRGB`;
-//! the two linear steps compose into one matrix at resolve time.
+//! to the white of the working space by the Bradford transform and encoded
+//! as for `CalRGB`; the linear steps compose into one matrix per working
+//! space at resolve time.
 //! `BlackPoint` is not applied.
 
 use pdf::{Document, Object};
 
-use super::cal::{D65, XYZ_D65_TO_LINEAR_SRGB, bradford, numbers};
+use super::cal::{D65, XYZ_D65_TO_LINEAR_SRGB, bradford, bradford_to, numbers};
+use crate::WorkingSpace;
 use crate::resources::icc_shaper::{Mat3, mat_mul, srgb_encode};
+use crate::working_space::{encode_wide, pcs_to_linear_wide};
 
 /// The default `Range`: `a*` and `b*` in `[-100, 100]`.
 const DEFAULT_RANGE: [f64; 4] = [-100.0, 100.0, -100.0, 100.0];
@@ -25,6 +28,8 @@ pub struct LabSpace {
     range: [f64; 4],
     /// XYZ relative to `white` → linear sRGB.
     to_linear_srgb: Mat3,
+    /// XYZ relative to `white` → linear wide components.
+    to_linear_wide: Mat3,
 }
 
 impl PartialEq for LabSpace {
@@ -81,10 +86,14 @@ impl LabSpace {
         let adapt = bradford(white).unwrap_or_else(|| {
             bradford(D65).expect("the Bradford adaptation of D65 to itself is the identity")
         });
+        let to_d50 = bradford_to(white, crate::pcs::D50).unwrap_or_else(|| {
+            bradford_to(D65, crate::pcs::D50).expect("the Bradford adaptation of D65 is regular")
+        });
         Self {
             white,
             range,
             to_linear_srgb: mat_mul(&XYZ_D65_TO_LINEAR_SRGB, &adapt),
+            to_linear_wide: mat_mul(&pcs_to_linear_wide(), &to_d50),
         }
     }
 
@@ -94,9 +103,10 @@ impl LabSpace {
         self.range
     }
 
-    /// Convert `(L*, a*, b*)` to sRGB bytes, each component clipped to its
-    /// range.  The caller guarantees `comps.len() == 3`.
-    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64]) -> [S; 3] {
+    /// Convert `(L*, a*, b*)` to `space` at the depth of `S`, each
+    /// component clipped to its range.  The caller guarantees
+    /// `comps.len() == 3`.
+    pub(super) fn convert<S: color::Sample>(&self, comps: &[f64], space: WorkingSpace) -> [S; 3] {
         let finite = |v: f64| if v.is_nan() { 0.0 } else { v };
         let l_star = finite(comps[0]).clamp(0.0, 100.0);
         let a_star = finite(comps[1]).clamp(self.range[0], self.range[1]);
@@ -109,10 +119,14 @@ impl LabSpace {
             self.white[1] * f_inv(fy),
             self.white[2] * f_inv(fz),
         ];
-        let [r, g, b] = self
-            .to_linear_srgb
-            .map(|row| row[0].mul_add(xyz[0], row[1].mul_add(xyz[1], row[2] * xyz[2])));
-        [r, g, b].map(|c| S::from_unit(srgb_encode(c)))
+        let linear =
+            |m: &Mat3| m.map(|row| row[0].mul_add(xyz[0], row[1].mul_add(xyz[1], row[2] * xyz[2])));
+        match space {
+            WorkingSpace::Srgb => {
+                linear(&self.to_linear_srgb).map(|c| S::from_unit(srgb_encode(c)))
+            }
+            WorkingSpace::Wide => encode_wide(linear(&self.to_linear_wide)),
+        }
     }
 }
 
@@ -141,7 +155,7 @@ mod tests {
     }
 
     fn rgb(space: &ColorSpace, c: [f64; 3]) -> [u8; 3] {
-        space.convert_to_rgb(&empty_doc(), crate::ColourIntent::INITIAL, &c)
+        space.convert_to_rgb(&empty_doc(), crate::ColourTarget::SRGB, &c)
     }
 
     const D65_LAB: &str = "[/Lab << /WhitePoint [0.9505 1 1.089] >>]";

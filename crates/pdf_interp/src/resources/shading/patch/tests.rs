@@ -134,7 +134,7 @@ fn tessellate_patch_uniform_emits_two_triangles() {
     let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
         doc: &doc,
         space: &super::super::ColorSpace::DeviceRgb,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     });
     let mut sink = TriangleSink::new();
     tessellate_patch(&source, p, &mut sink);
@@ -151,7 +151,7 @@ fn triangles(p: &Patch<[u8; 3]>) -> Vec<[[f64; 2]; 3]> {
     let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
         doc: &doc,
         space: &super::super::ColorSpace::DeviceRgb,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     });
     let mut sink = TriangleSink::new();
     tessellate_patch(&source, *p, &mut sink);
@@ -226,7 +226,7 @@ fn tessellate_patch_stops_at_the_pixel() {
     let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
         doc: &doc,
         space: &super::super::ColorSpace::DeviceRgb,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     });
     let mut sink = TriangleSink::new();
     tessellate_patch(&source, p, &mut sink);
@@ -260,7 +260,7 @@ fn a_16_bit_patch_subdivides_to_its_finer_tolerance() {
     let cs = super::super::ShadingCs {
         doc: &doc,
         space: &super::super::ColorSpace::DeviceRgb,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     };
     let mut narrow = TriangleSink::new();
     tessellate_patch(
@@ -397,7 +397,7 @@ fn a_flag_1_record_continues_from_the_shared_edge() {
     let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
         doc: &doc,
         space: &super::super::ColorSpace::DeviceGray,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     });
     let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
     // page_h = 0: device y is the negated shading y.

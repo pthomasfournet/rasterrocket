@@ -89,14 +89,13 @@ pub(crate) fn scale_colorants(profile: &mut ColorProfile, scale: [f64; 3]) {
     }
 }
 
-/// sRGB described by its tags alone, its PCS scaled by `scale` (see
-/// [`scale_colorants`]).  Without a CICP description the converter
-/// evaluates the tags, so the scale takes effect.
-pub(crate) fn scaled_srgb(scale: [f64; 3]) -> ColorProfile {
-    let mut srgb = ColorProfile::new_srgb();
-    srgb.cicp = None;
-    scale_colorants(&mut srgb, scale);
-    srgb
+/// The working space `space` described by its tags alone, its PCS scaled
+/// by `scale` (see [`scale_colorants`]).  Without a CICP description the
+/// converter evaluates the tags, so the scale takes effect.
+pub(crate) fn scaled_working(space: crate::WorkingSpace, scale: [f64; 3]) -> ColorProfile {
+    let mut profile = space.profile();
+    scale_colorants(&mut profile, scale);
+    profile
 }
 
 #[cfg(test)]

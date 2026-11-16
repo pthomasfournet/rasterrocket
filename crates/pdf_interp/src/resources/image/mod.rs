@@ -622,9 +622,14 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     // stays host-resident: neither looked up (a content-hash hit from
     // another document would drop the mask or the conversion) nor
     // inserted.  The decode also bypasses the cache for an image drawn
-    // below the resolution its frame header declares.
+    // below the resolution its frame header declares, and for a canvas of
+    // the wide working space, into which even device colours convert.
     #[cfg(feature = "cache")]
-    let dct_cache = if smask_entry.is_some() || mask_entry.is_some() || !src.colour.identity() {
+    let dct_cache = if smask_entry.is_some()
+        || mask_entry.is_some()
+        || !src.colour.identity()
+        || ctx.target.space != crate::WorkingSpace::Srgb
+    {
         None
     } else {
         codecs::DctCacheCtx::from_resources(
@@ -664,7 +669,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
     }
 
     if let Some(matte) = &matte {
-        smask::remove_matte(doc, ctx.intent, src.colour.space(), matte, &mut img);
+        smask::remove_matte(doc, ctx.target, src.colour.space(), matte, &mut img);
     }
 
     ImageResolution::Ok(DecodedImage {
@@ -977,9 +982,10 @@ pub struct ImageDecodeCtx<'a> {
     /// Keep the ink amounts of an image in a `Separation`, `DeviceN` or
     /// process CMYK space beside its colours ([`DecodedImage::tints`]).
     pub keep_tints: bool,
-    /// The rendering intent the image's colours convert under: its own
-    /// `/Intent`, else the graphics state's (PDF §8.6.5.8).
-    pub intent: crate::ColourIntent,
+    /// The working space the image's colours convert into, and the
+    /// rendering intent they convert under: the image's own `/Intent`,
+    /// else the graphics state's (PDF §8.6.5.8).
+    pub target: crate::ColourTarget,
     /// The depth of the render the image is drawn in.  At 16 bits a stream
     /// of more than 8 bits a sample keeps its samples at 16 bits
     /// ([`ImageData::Cpu16`]); every other stream decodes to 8-bit samples
@@ -1009,7 +1015,7 @@ impl<'a> ImageDecodeCtx<'a> {
             #[cfg(feature = "cache")]
             doc_id: None,
             keep_tints: false,
-            intent: crate::ColourIntent::INITIAL,
+            target: crate::ColourTarget::SRGB,
             depth: color::SampleDepth::Eight,
         }
     }

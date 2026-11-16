@@ -6,7 +6,7 @@ use super::canvas::{CanvasKind, PageCanvas};
 use super::pattern_memo::{CellRaster, RasterKey, cell_raster_bytes};
 use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, MAX_PATTERN_DEPTH, MAX_TILE_PX, PageRenderer, components_to_color};
-use crate::ColourIntent;
+use crate::ColourTarget;
 use crate::resources::{ColorSpace, ShadingPattern};
 use std::rc::Rc;
 
@@ -20,19 +20,19 @@ use raster::{Bitmap, CELL_PHASES, CellPhase, Lattice, TiledPattern, XPath};
 ///
 /// The tint components of `scn /Name c1 … cn` are colour values in the
 /// underlying colour space of the fill's `[/Pattern base]` space
-/// (PDF §8.7.3.3), and convert through `base` under `intent`.  A bare `/Pattern` space,
+/// (PDF §8.7.3.3), and convert through `base` to `target`.  A bare `/Pattern` space,
 /// or a component count `base` does not take, is read by its count:
 /// 1 grey, 3 RGB, 4 CMYK.
 fn resolve_pattern_tint(
     doc: &Document,
-    intent: ColourIntent,
+    target: ColourTarget,
     fill_cs: &ColorSpace,
     components: &[f64],
     depth: SampleDepth,
 ) -> RasterColor {
     if let ColorSpace::Pattern { base: Some(base) } = fill_cs {
         if components.len() == base.ncomponents() {
-            return RasterColor::from_srgb(base.convert_to_srgb(doc, intent, components, depth));
+            return RasterColor::from_srgb(base.convert_to_srgb(doc, target, components, depth));
         }
         log::debug!(
             "rasterrocket-interp: pattern tint comp count {} mismatches base CS expected {} — using heuristic",
@@ -40,7 +40,7 @@ fn resolve_pattern_tint(
             base.ncomponents(),
         );
     }
-    components_to_color(components)
+    components_to_color(components, target.space)
 }
 
 /// Side, in pixels, at which a sub-pixel cell is sampled to take its mean.
@@ -485,7 +485,7 @@ impl PageRenderer<'_> {
         {
             Some(resolve_pattern_tint(
                 self.resources.doc(),
-                gs.colour_intent,
+                self.colour_target(),
                 &gs.fill_color_space,
                 &gs.fill_pattern_components,
                 self.canvas.kind().depth(),
@@ -522,7 +522,7 @@ impl PageRenderer<'_> {
             &device,
             tint.as_ref(),
             (!desc.has_own_resources).then(|| self.resources.identity()),
-            kind,
+            (kind, self.space),
         );
         match kind {
             CanvasKind::Rgb => self
@@ -915,7 +915,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[1.0, 0.0, 0.0],
             SampleDepth::Eight,
@@ -937,7 +937,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[50.0, 0.0, 0.0],
             SampleDepth::Eight,
@@ -959,7 +959,7 @@ mod tests {
         let fill_cs = ColorSpace::Pattern { base: None };
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[0.5, 0.5, 0.5],
             SampleDepth::Eight,
@@ -977,7 +977,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[0.5],
             SampleDepth::Eight,
@@ -994,7 +994,7 @@ mod tests {
         };
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[1.0],
             SampleDepth::Eight,
@@ -1011,7 +1011,7 @@ mod tests {
         // (0,0,0,1) = solid K: all four components reach the CMYK conversion.
         let tint = resolve_pattern_tint(
             &doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             &fill_cs,
             &[0.0, 0.0, 0.0, 1.0],
             SampleDepth::Eight,

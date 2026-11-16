@@ -2,7 +2,8 @@
 //! CMS's `transicc` converts the same patch chart from the same working
 //! space profile, and both results, decoded to Lab through `transicc`, lie
 //! within ΔE00 1 of each other on every patch, for every intent with and
-//! without black-point compensation, at 8 and 16 bits.
+//! without black-point compensation: from sRGB at 8 and 16 bits, from the
+//! wide working space at 16 bits.
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket-interp --test output_profile_transicc -- --ignored`.
@@ -15,7 +16,7 @@ use common::{
 };
 use raster::Bitmap;
 use rasterrocket_interp::renderer::{CanvasBuffers, FinishedCanvas};
-use rasterrocket_interp::{OutputProfile, RenderingIntent};
+use rasterrocket_interp::{OutputProfile, RenderingIntent, WorkingSpace};
 
 #[test]
 fn ciede2000_matches_published_pairs() {
@@ -35,9 +36,11 @@ fn ciede2000_matches_published_pairs() {
     }
 }
 
-/// Our conversion of `patches` at `bits` to `profile` under `intent`.
+/// Our conversion of `patches` of `space` at `bits` to `profile` under
+/// `intent`.
 fn ours(
     profile: &OutputProfile,
+    space: WorkingSpace,
     (intent, bpc): (RenderingIntent, bool),
     patches: &[[f64; 3]],
     bits: u8,
@@ -71,7 +74,7 @@ fn ours(
     };
     let full = if bits == 8 { 255.0 } else { 65535.0 };
     let samples: Vec<f64> = match profile
-        .convert(canvas, (intent, bpc), &mut buffers)
+        .convert(canvas, space, (intent, bpc), &mut buffers)
         .expect("converts")
     {
         FinishedCanvas::Rgb8(b) => b.row_samples(0).iter().map(|&v| f64::from(v)).collect(),
@@ -89,8 +92,16 @@ fn ours(
 
 /// Both conversions of the chart to `name` within [`MAX_DELTA_E`].
 fn agrees(name: &str) {
+    for space in WorkingSpace::ALL {
+        agrees_from(name, space);
+    }
+}
+
+/// Both conversions of the chart of `space` to `name` within
+/// [`MAX_DELTA_E`].
+fn agrees_from(name: &str, space: WorkingSpace) {
     let dir = tempfile_dir("output-profile");
-    let src = working_space_file(&dir);
+    let src = working_space_file(&dir, space);
     let dst = fixture(name);
     let profile = OutputProfile::from_bytes(std::fs::read(&dst).unwrap()).unwrap();
     let (src, dst) = (src.to_str().unwrap(), dst.to_str().unwrap());
@@ -108,6 +119,9 @@ fn agrees(name: &str) {
                 continue;
             }
             for (bits, full) in [(8u8, 255.0), (16, 65535.0)] {
+                if bits == 8 && space == WorkingSpace::Wide {
+                    continue;
+                }
                 let mut args = vec![format!("-i{src}"), format!("-o{dst}"), format!("-t{code}")];
                 if bpc {
                     args.push("-b".to_owned());
@@ -125,7 +139,7 @@ fn agrees(name: &str) {
                     .iter()
                     .map(|v| v.iter().map(|c| c / 255.0).collect())
                     .collect();
-                let mine = ours(&profile, (intent, bpc), &chart, bits);
+                let mine = ours(&profile, space, (intent, bpc), &chart, bits);
                 let decode = |device: &[Vec<f64>]| {
                     transicc(
                         &[&format!("-i{dst}"), "-o*Lab", "-t1"],
@@ -144,12 +158,12 @@ fn agrees(name: &str) {
                 #[expect(clippy::cast_precision_loss, reason = "a patch count")]
                 let mean = sum / lab_mine.len() as f64;
                 eprintln!(
-                    "{name} {intent} bpc {bpc} {bits}-bit: ΔE00 max {max:.3} (patch {:?}), mean {mean:.3}",
+                    "{name} {space:?} {intent} bpc {bpc} {bits}-bit: ΔE00 max {max:.3} (patch {:?}), mean {mean:.3}",
                     chart[at]
                 );
                 if max > MAX_DELTA_E {
                     failures.push(format!(
-                        "{name} {intent} bpc {bpc} {bits}-bit: ΔE00 {max:.3} at patch {:?}: \
+                        "{name} {space:?} {intent} bpc {bpc} {bits}-bit: ΔE00 {max:.3} at patch {:?}: \
                          ours {:?}, transicc {:?}",
                         chart[at], mine[at], theirs[at]
                     ));
@@ -158,9 +172,87 @@ fn agrees(name: &str) {
             }
         }
     }
-    eprintln!("{name}: worst ΔE00 {worst:.3}");
+    eprintln!("{name} {space:?}: worst ΔE00 {worst:.3}");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The chart of sRGB colours, converted to the wide space by `transicc`,
+/// then by us from the wide space to `name` at 16 bits, within
+/// [`MAX_DELTA_E`] of `transicc`'s conversion of the sRGB colours to
+/// `name`, under relative colorimetry: colours inside sRGB print through
+/// the wide space as they print from sRGB.
+fn srgb_colours_agree_through_the_wide_space(name: &str) {
+    let dir = tempfile_dir("output-profile-wide");
+    let srgb = working_space_file(&dir, WorkingSpace::Srgb);
+    let wide = working_space_file(&dir, WorkingSpace::Wide);
+    let dst = fixture(name);
+    let profile = OutputProfile::from_bytes(std::fs::read(&dst).unwrap()).unwrap();
+    let (srgb, wide, dst) = (
+        srgb.to_str().unwrap(),
+        wide.to_str().unwrap(),
+        dst.to_str().unwrap(),
+    );
+    let chart: Vec<Vec<f64>> = patches().iter().map(|p| p.to_vec()).collect();
+    let in_wide: Vec<[f64; 3]> = transicc(
+        &[&format!("-i{srgb}"), &format!("-o{wide}"), "-t1"],
+        &lines(&chart, 255.0),
+    )
+    .iter()
+    .map(|v| [v[0], v[1], v[2]].map(|c| (c / 255.0).clamp(0.0, 1.0)))
+    .collect();
+    let mine = ours(
+        &profile,
+        WorkingSpace::Wide,
+        (RenderingIntent::RelativeColorimetric, false),
+        &in_wide,
+        16,
+    );
+    let theirs: Vec<Vec<f64>> = transicc(
+        &[&format!("-i{srgb}"), &format!("-o{dst}"), "-t1"],
+        &lines(&chart, 255.0),
+    )
+    .iter()
+    .map(|v| v.iter().map(|c| c / 255.0).collect())
+    .collect();
+    let decode = |device: &[Vec<f64>]| {
+        transicc(
+            &[&format!("-i{dst}"), "-o*Lab", "-t1"],
+            &lines(device, 255.0),
+        )
+    };
+    let (lab_theirs, lab_mine) = (decode(&theirs), decode(&mine));
+    let (worst, at) = lab_theirs
+        .iter()
+        .zip(&lab_mine)
+        .map(|(a, b)| delta_e00(a, b))
+        .enumerate()
+        .fold(
+            (0.0f64, 0),
+            |(m, at), (i, d)| if d > m { (d, i) } else { (m, at) },
+        );
+    eprintln!(
+        "{name}: sRGB colours through the wide space, worst ΔE00 {worst:.3} at {:?}",
+        chart[at]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        worst <= MAX_DELTA_E,
+        "{name}: ΔE00 {worst:.3} at {:?}",
+        chart[at]
+    );
+}
+
+#[test]
+#[ignore = "needs transicc (liblcms2-utils)"]
+fn srgb_colours_print_through_the_wide_space_as_from_srgb() {
+    for name in [
+        "printer-rgb-v4.icc",
+        "printer-rgb-v2.icc",
+        "printer-gray-v4.icc",
+    ] {
+        srgb_colours_agree_through_the_wide_space(name);
+    }
 }
 
 #[test]

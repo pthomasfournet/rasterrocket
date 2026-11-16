@@ -27,11 +27,11 @@ use moxcms::{ColorProfile, DataColorSpace, ToneReprCurve, Xyzd};
 use pdf::{Document, ObjectId};
 
 /// 3×3 matrix, row-major: `m[row][col]`.
-pub(super) type Mat3 = [[f64; 3]; 3];
+pub(crate) type Mat3 = [[f64; 3]; 3];
 
 /// D50-adapted sRGB colorants (Bradford) as columns: the `rXYZ`, `gXYZ` and
 /// `bXYZ` tags of the IEC 61966-2.1 profile.
-const SRGB_D50_COLORANTS: Mat3 = [
+pub(crate) const SRGB_D50_COLORANTS: Mat3 = [
     [0.436_065_7, 0.385_147_1, 0.143_066_4],
     [0.222_488_4, 0.716_873_2, 0.060_607_9],
     [0.013_916_0, 0.097_076_4, 0.714_096_1],
@@ -41,7 +41,7 @@ const SRGB_D50_COLORANTS: Mat3 = [
 /// for it to be treated as the identity.  Two encodings of the sRGB
 /// colorants differ by under `1e-3` (s15Fixed16 rounding and adaptation
 /// method); a deviation of `2e-3` moves a full-scale channel by half a level.
-const IDENTITY_MATRIX_TOLERANCE: f64 = 2e-3;
+pub(crate) const IDENTITY_MATRIX_TOLERANCE: f64 = 2e-3;
 
 /// Entries in the linear → sRGB encoding table.  The steepest segment of
 /// the encoding has slope 12.92, so one table step is at most
@@ -64,7 +64,7 @@ const ENCODE_TABLE_LEN: usize = 16_384;
     clippy::many_single_char_names,
     reason = "g, a … f are the parameter names of ICC.1:2010 Table 68"
 )]
-pub(super) fn eval_trc(curve: &ToneReprCurve, x: f64) -> Option<f64> {
+pub(crate) fn eval_trc(curve: &ToneReprCurve, x: f64) -> Option<f64> {
     let x = x.clamp(0.0, 1.0);
     match curve {
         ToneReprCurve::Lut(table) => Some(match table.as_slice() {
@@ -127,7 +127,7 @@ fn sampled_curve(samples: &[u16], x: f64) -> f64 {
 }
 
 /// Linear → sRGB encoding per IEC 61966-2-1, input clamped to `[0, 1]`.
-pub(super) fn srgb_encode(c: f64) -> f64 {
+pub(crate) fn srgb_encode(c: f64) -> f64 {
     let c = c.clamp(0.0, 1.0);
     if c <= 0.003_130_8 {
         12.92 * c
@@ -177,7 +177,7 @@ const fn encode_index(v: f32) -> usize {
         .mul_add((ENCODE_TABLE_LEN - 1) as f32, 0.5) as usize
 }
 
-pub(super) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+pub(crate) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut out = [[0.0; 3]; 3];
     for (r, row) in out.iter_mut().enumerate() {
         for (c, cell) in row.iter_mut().enumerate() {
@@ -188,7 +188,7 @@ pub(super) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
 }
 
 /// Inverse by the adjugate; `None` for a singular or non-finite matrix.
-pub(super) fn mat_inverse(m: &Mat3) -> Option<Mat3> {
+pub(crate) fn mat_inverse(m: &Mat3) -> Option<Mat3> {
     let cof = |r0: usize, r1: usize, c0: usize, c1: usize| {
         m[r0][c0].mul_add(m[r1][c1], -(m[r0][c1] * m[r1][c0]))
     };

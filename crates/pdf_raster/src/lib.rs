@@ -191,7 +191,7 @@ pub use pdf_interp::{
 };
 pub use pdf_interp::{
     IntentSet, OutputIntentError, OutputProfile, OutputProfileError, OutputSpace, ProofIntent,
-    RenderingIntent,
+    RenderingIntent, WorkingSpace,
 };
 pub use render::{
     render_page_canvas, render_page_canvas_with_diagnostics, render_page_cmyk, render_page_gray,

@@ -96,21 +96,24 @@ impl ImageMemo {
     }
 
     /// The key of an inline image: the sample depth of the canvas it is
-    /// decoded for, the rendering intent its colours convert under,
+    /// decoded for, the working space and rendering intent its colours
+    /// convert to,
     /// `spaces` (the object identifying the `/ColorSpace` dictionary its
     /// colour-space names resolve in, `None` when there is none), its
     /// parameters and its data.
     pub(super) fn inline_key(
         depth: SampleDepth,
-        intent: crate::ColourIntent,
+        target: crate::ColourTarget,
         spaces: Option<ObjectId>,
         params: &[u8],
         data: &[u8],
     ) -> Box<[u8]> {
-        let mut key = Vec::with_capacity(19 + params.len() + data.len());
+        let mut key = Vec::with_capacity(20 + params.len() + data.len());
         let (tag, (num, generation)) = spaces.map_or((0u8, (0, 0)), |id| (1, id));
         key.push(depth.bits());
-        key.push(intent.bits());
+        key.push(target.intent.bits());
+        #[expect(clippy::cast_possible_truncation, reason = "two working spaces")]
+        key.push(target.space.index() as u8);
         key.push(tag);
         key.extend_from_slice(&num.to_le_bytes());
         key.extend_from_slice(&generation.to_le_bytes());
@@ -253,7 +256,7 @@ mod tests {
         depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     };
 
     fn memo(budget: usize) -> ImageMemo {
@@ -357,7 +360,7 @@ mod tests {
         let key = |depth| {
             ImageMemo::inline_key(
                 depth,
-                crate::ColourIntent::INITIAL,
+                crate::ColourTarget::SRGB,
                 Some((3, 0)),
                 b"/W 1 /H 1",
                 b"\x80",
@@ -374,12 +377,15 @@ mod tests {
     /// compensation is not served under another.
     #[test]
     fn the_inline_key_holds_the_intent() {
-        let key = |intent: crate::ColourIntent| {
-            ImageMemo::inline_key(SampleDepth::Eight, intent, None, b"/W 1 /H 1", b"\x80")
+        let key = |target: crate::ColourTarget| {
+            ImageMemo::inline_key(SampleDepth::Eight, target, None, b"/W 1 /H 1", b"\x80")
         };
         let keys: Vec<_> = crate::RenderingIntent::ALL
             .into_iter()
-            .flat_map(|i| [false, true].map(|bpc| key(crate::ColourIntent::new(i, bpc))))
+            .flat_map(|i| [false, true].map(move |bpc| crate::ColourIntent::new(i, bpc)))
+            .flat_map(|intent| {
+                crate::WorkingSpace::ALL.map(|space| key(crate::ColourTarget::new(intent, space)))
+            })
             .collect();
         for (i, a) in keys.iter().enumerate() {
             assert!(keys[i + 1..].iter().all(|b| a != b));

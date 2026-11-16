@@ -47,7 +47,7 @@ pub(crate) struct ImageKey {
     pub(crate) id: ObjectId,
     pub(crate) context: Option<ObjectId>,
     pub(crate) depth: color::SampleDepth,
-    pub(crate) intent: crate::ColourIntent,
+    pub(crate) target: crate::ColourTarget,
 }
 
 /// What decoding an image `XObject` produced, as kept for other pages.
@@ -344,7 +344,7 @@ pub(crate) mod tests {
         depth: color::SampleDepth::Eight,
         id: (5, 0),
         context: None,
-        intent: crate::ColourIntent::INITIAL,
+        target: crate::ColourTarget::SRGB,
     };
     const PAGE_1: ObjectId = (10, 0);
     const PAGE_2: ObjectId = (11, 0);

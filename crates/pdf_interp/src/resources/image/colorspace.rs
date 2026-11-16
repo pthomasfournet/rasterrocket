@@ -39,7 +39,6 @@ use pdf::{Dictionary, Document, Object};
 use super::{
     ImageColorSpace, ImageData, ImageDescriptor, ImageFilter, ImageTints, SoftMask, TintData,
 };
-use crate::ColourIntent;
 use crate::resources::colorspace::icc::IccConversion;
 use crate::resources::colorspace::{
     ColorSpace, EXACT_WORK_BUDGET, decoded_sample, default_space, resolve,
@@ -47,6 +46,7 @@ use crate::resources::colorspace::{
 use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
 use crate::resources::lattice::{Axis, for_each_corner};
+use crate::{ColourTarget, WorkingSpace};
 
 // ── Codec output ──────────────────────────────────────────────────────────────
 
@@ -333,7 +333,7 @@ impl ImageColour {
     pub(super) fn convert(
         &self,
         doc: &Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         samples: Samples,
         budget: Option<&TintBudget>,
         #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
@@ -364,14 +364,26 @@ impl ImageColour {
         let profile = embedded_profile
             .as_deref()
             .filter(|_| self.space.is_none())
-            .and_then(|bytes| IccConversion::compile(bytes, u8::try_from(n).ok()?, intent));
+            .and_then(|bytes| IccConversion::compile(bytes, u8::try_from(n).ok()?, target));
         let max_sample = if n == self.components() {
             self.max_sample
         } else {
             255.0
         };
-        let decoded = Decoded::new(doc, intent, space, decode, max_sample, profile, budget);
+        let decoded = Decoded::new(doc, target, space, decode, max_sample, profile, budget);
         let bytes = match data {
+            // In the wide space a colour of three or four components converts
+            // at 16 bits, from its samples widened exactly: its 8-bit value
+            // would band, and a fill of the same colour converts at 16 bits.
+            ImageData::Cpu(bytes)
+                if target.space == WorkingSpace::Wide
+                    && matches!(n, 3 | 4)
+                    && self.converts_wide() =>
+            {
+                let wide = widen(&bytes)?;
+                let (cs, wide) = convert16(&decoded, n, wide)?;
+                return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
+            }
             ImageData::Cpu(bytes) => bytes,
             ImageData::Cpu16(wide) => {
                 let (cs, wide) = convert16(&decoded, n, wide)?;
@@ -487,25 +499,23 @@ fn convert16(
     let value = |s: u16, (dmin, dmax): (f64, f64)| s.to_unit().mul_add(dmax - dmin, dmin);
     let identity = decoded.identity_decode();
     let device = decoded.profile.is_none();
+    let wide = decoded.target.space == WorkingSpace::Wide;
     match (decoded.space, n) {
-        (ColorSpace::DeviceGray | ColorSpace::DeviceRgb, 1 | 3) if device && identity => {
-            let cs = if n == 1 {
-                ImageColorSpace::Gray
-            } else {
-                ImageColorSpace::Rgb
-            };
-            return Some((cs, samples));
-        }
         (ColorSpace::DeviceGray | ColorSpace::DeviceRgb, 1 | 3) if device => {
             let mut samples = samples;
-            for px in samples.chunks_exact_mut(n) {
-                for (s, &pair) in px.iter_mut().zip(decoded.decode) {
-                    *s = u16::from_unit(value(*s, pair));
+            if !identity {
+                for px in samples.chunks_exact_mut(n) {
+                    for (s, &pair) in px.iter_mut().zip(decoded.decode) {
+                        *s = u16::from_unit(value(*s, pair));
+                    }
                 }
             }
             let cs = if n == 1 {
                 ImageColorSpace::Gray
             } else {
+                if wide {
+                    crate::working_space::from_srgb16_in_place(&mut samples);
+                }
                 ImageColorSpace::Rgb
             };
             return Some((cs, samples));
@@ -523,7 +533,7 @@ fn convert16(
         ColorSpace::IccBased {
             n: k,
             stream_id: Some(id),
-        } => IccConversion::load(decoded.doc, *id, *k, decoded.intent),
+        } => IccConversion::load(decoded.doc, *id, *k, decoded.target),
         _ => None,
     });
     let to_inputs = |px: &[u16], comps: &mut [f64; MAX_WIDE_COMPONENTS]| {
@@ -556,7 +566,9 @@ fn convert16(
             _ => {
                 to_inputs(px, &mut comps);
                 let rgb = if cmyk {
-                    color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3])
+                    let srgb =
+                        color::cmyk::cmyk_f64_to_rgb_at(comps[0], comps[1], comps[2], comps[3]);
+                    crate::working_space::from_srgb::<u16, u16>(decoded.target.space, srgb)
                 } else {
                     let comps = &comps[..n];
                     icc.as_deref()
@@ -564,7 +576,7 @@ fn convert16(
                         .unwrap_or_else(|| {
                             decoded
                                 .space
-                                .convert::<u16>(decoded.doc, decoded.intent, comps)
+                                .convert::<u16>(decoded.doc, decoded.target, comps)
                         })
                 };
                 let mut seen = [0; MAX_WIDE_COMPONENTS];
@@ -576,6 +588,15 @@ fn convert16(
         out.extend_from_slice(&rgb);
     }
     Some((ImageColorSpace::Rgb, out))
+}
+
+/// `bytes` widened exactly to 16-bit samples; `None` when they cannot be
+/// allocated.
+fn widen(bytes: &[u8]) -> Option<Vec<u16>> {
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(bytes.len()).ok()?;
+    wide.extend(bytes.iter().map(|&b| u16::from_u8(b)));
+    Some(wide)
 }
 
 /// The most components a pixel converted at 16 bits has: those of an ICC
@@ -611,8 +632,8 @@ fn default_decode(doc: &Document, space: &ColorSpace) -> Vec<(f64, f64)> {
     // The `/Alternate` space stands in for a profile that converts under no
     // intent; the initial intent's conversion answers for every intent.
     range.unwrap_or_else(|| {
-        match IccConversion::load(doc, *id, *n, ColourIntent::INITIAL).as_deref() {
-            Some(IccConversion::Alternate(alt)) => alt.default_decode(8),
+        match IccConversion::load(doc, *id, *n, ColourTarget::SRGB).as_deref() {
+            Some(IccConversion::Alternate(alt, _)) => alt.default_decode(8),
             _ => space.default_decode(8),
         }
     })
@@ -804,8 +825,8 @@ impl Lattice {
 /// The conversion of samples in one space under one `/Decode`.
 struct Decoded<'a> {
     doc: &'a Document,
-    /// The rendering intent the samples convert under.
-    intent: ColourIntent,
+    /// The working space and intent the samples convert to.
+    target: ColourTarget,
     space: &'a ColorSpace,
     decode: &'a [(f64, f64)],
     max_sample: f64,
@@ -865,7 +886,7 @@ impl<'a> Decoded<'a> {
     /// [`TintBudget`]).
     fn new(
         doc: &'a Document,
-        intent: ColourIntent,
+        target: ColourTarget,
         space: &'a ColorSpace,
         decode: &'a [(f64, f64)],
         max_sample: f64,
@@ -881,7 +902,7 @@ impl<'a> Decoded<'a> {
         let allowance = limiting.map_or(EXACT_WORK_BUDGET, TintBudget::remaining);
         Self {
             doc,
-            intent,
+            target,
             space,
             decode,
             max_sample,
@@ -918,7 +939,7 @@ impl<'a> Decoded<'a> {
         self.profile
             .as_ref()
             .and_then(|p| p.convert(self.doc, comps))
-            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, self.intent, comps))
+            .unwrap_or_else(|| self.space.convert_to_rgb(self.doc, self.target, comps))
     }
 
     /// The table of the space's conversion of every one-component sample:
@@ -1000,7 +1021,7 @@ impl<'a> Decoded<'a> {
                 stream_id: Some(id),
                 ..
             } => {
-                let Some(conv) = IccConversion::load(self.doc, *id, 3, self.intent) else {
+                let Some(conv) = IccConversion::load(self.doc, *id, 3, self.target) else {
                     return RgbConvert::Identity;
                 };
                 match &*conv {
@@ -1008,10 +1029,10 @@ impl<'a> Decoded<'a> {
                         RgbConvert::Shaper(Arc::clone(&shaper.shaper))
                     }
                     IccConversion::Transform { .. } => RgbConvert::Transform(Arc::clone(&conv)),
-                    IccConversion::Alternate(ColorSpace::Cal(cal)) => cal
+                    IccConversion::Alternate(ColorSpace::Cal(cal), _) => cal
                         .rgb_shaper()
                         .map_or(RgbConvert::Identity, RgbConvert::Shaper),
-                    IccConversion::Alternate(ColorSpace::Lab(_)) => RgbConvert::Memo,
+                    IccConversion::Alternate(ColorSpace::Lab(_), _) => RgbConvert::Memo,
                     _ => RgbConvert::Identity,
                 }
             }
@@ -1055,7 +1076,7 @@ impl<'a> Decoded<'a> {
             ColorSpace::IccBased {
                 stream_id: Some(id),
                 ..
-            } => match IccConversion::load(self.doc, *id, 4, self.intent) {
+            } => match IccConversion::load(self.doc, *id, 4, self.target) {
                 Some(conv) if matches!(*conv, IccConversion::Transform { .. }) => {
                     CmykConvert::Icc(conv)
                 }
@@ -1396,7 +1417,7 @@ mod tests {
         let width = u32::try_from(data.len() / layout_components(layout)).unwrap();
         colour.convert(
             doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             Samples::cpu(width, 1, layout, data.to_vec()),
             budget,
             #[cfg(feature = "gpu-icc")]
@@ -1412,7 +1433,7 @@ mod tests {
     fn unit_decoded<'a>(doc: &'a Document, space: &'a ColorSpace, n: usize) -> Decoded<'a> {
         Decoded::new(
             doc,
-            ColourIntent::INITIAL,
+            ColourTarget::SRGB,
             space,
             &UNIT_DECODE[..n],
             255.0,
@@ -1634,7 +1655,7 @@ mod tests {
         let img = colour
             .convert(
                 &doc,
-                ColourIntent::INITIAL,
+                ColourTarget::SRGB,
                 Samples::cpu(1, 1, Layout::Color(3), vec![1, 2, 3]),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -1672,8 +1693,7 @@ mod tests {
     fn cal_images_convert_as_the_fill_path_does() {
         let doc = empty_doc();
         let rgb_space = resolve(&doc, &cal("CalRGB", "[1.8 1.8 1.8]"));
-        let want =
-            rgb_space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0; 3]);
+        let want = rgb_space.convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[128.0 / 255.0; 3]);
         let img = convert(
             &doc,
             cal("CalRGB", "[1.8 1.8 1.8]"),
@@ -1687,7 +1707,7 @@ mod tests {
             "got {got:?}, fill path {want:?}"
         );
         let gray_space = resolve(&doc, &cal("CalGray", "1.8"));
-        let want = gray_space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0]);
+        let want = gray_space.convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[128.0 / 255.0]);
         let img = convert(&doc, cal("CalGray", "1.8"), &[], Layout::Color(1), &[128]);
         assert_eq!(img.color_space, ImageColorSpace::Gray);
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
@@ -1874,7 +1894,7 @@ mod tests {
             .iter()
             .map(|&s| decoded_sample(s, (0.0, 1.0), 255.0))
             .collect();
-        space.convert_to_rgb(doc, crate::ColourIntent::INITIAL, &comps)
+        space.convert_to_rgb(doc, crate::ColourTarget::SRGB, &comps)
     }
 
     /// A program of `n` inputs and four outputs, smooth in each, padded
@@ -2154,7 +2174,7 @@ mod tests {
         colour
             .convert(
                 doc,
-                ColourIntent::INITIAL,
+                ColourTarget::SRGB,
                 Samples::cpu16(width, 1, layout, data.to_vec()),
                 None,
                 #[cfg(feature = "gpu-icc")]
@@ -2214,7 +2234,7 @@ mod tests {
             .flat_map(|px| {
                 ColorSpace::DeviceCmyk.convert::<u16>(
                     &doc,
-                    crate::ColourIntent::INITIAL,
+                    crate::ColourTarget::SRGB,
                     &px.map(u16::to_unit),
                 )
             })
@@ -2270,7 +2290,7 @@ mod tests {
                 &doc,
                 (2, 0),
                 3,
-                crate::ColourIntent::INITIAL
+                crate::ColourTarget::SRGB
             )
             .as_deref(),
             Some(crate::resources::colorspace::icc::IccConversion::Transform { .. })
@@ -2318,7 +2338,7 @@ mod tests {
         let img = convert(&doc, icc_cs(), &[], Layout::Color(1), &[128]);
         let want = resolve(&doc, &cal("CalGray", "1.8")).convert_to_rgb(
             &doc,
-            crate::ColourIntent::INITIAL,
+            crate::ColourTarget::SRGB,
             &[128.0 / 255.0],
         );
         assert_eq!(img.data.as_cpu().unwrap(), &want[..1]);
@@ -2435,7 +2455,7 @@ mod tests {
     fn lut_based_profile_converts_through_moxcms() {
         let doc = make_doc_with_stream(&lut_rgb_profile(), " /N 3");
         let space = resolve(&doc, &icc_cs());
-        let want = space.convert_to_rgb(&doc, crate::ColourIntent::INITIAL, &[128.0 / 255.0; 3]);
+        let want = space.convert_to_rgb(&doc, crate::ColourTarget::SRGB, &[128.0 / 255.0; 3]);
         assert!(
             want.iter().all(|&c| c.abs_diff(146) <= 3),
             "the fill path lightens mid-gray through the table, got {want:?}"

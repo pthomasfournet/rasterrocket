@@ -1,5 +1,6 @@
 //! Minimal ICC v2 profiles assembled in memory: matrix/TRC display
-//! profiles with a pure power-law tone curve on sRGB primaries.
+//! profiles with a pure power-law tone curve on sRGB or Adobe RGB (1998)
+//! primaries.
 
 /// `u8Fixed8Number` 1.8.
 pub const GAMMA_1_8: u16 = 461;
@@ -71,9 +72,30 @@ fn icc_profile(space: [u8; 4], tags: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     [header, table, data].concat()
 }
 
+/// Adobe RGB (1998) primaries adapted to D50 (Bradford), as XYZ columns.
+const ADOBE_D50_COLORANTS: [[f64; 3]; 3] = [
+    [0.609_755_9, 0.311_124_2, 0.019_481_1],
+    [0.205_240_1, 0.625_656_0, 0.060_890_2],
+    [0.149_224_0, 0.063_219_7, 0.744_838_7],
+];
+
+/// The Adobe RGB (1998) tone curve, gamma 563/256, as a `u8Fixed8Number`.
+pub const GAMMA_ADOBE: u16 = 563;
+
 /// An RGB profile with gamma `gamma` (`u8Fixed8Number`) on sRGB primaries.
 pub fn rgb_profile(gamma: u16) -> Vec<u8> {
-    let [r, g, b] = SRGB_D50_COLORANTS;
+    rgb_profile_of(SRGB_D50_COLORANTS, gamma)
+}
+
+/// An Adobe RGB (1998) profile: its D50-adapted primaries and tone curve.
+pub fn adobe_rgb_profile() -> Vec<u8> {
+    rgb_profile_of(ADOBE_D50_COLORANTS, GAMMA_ADOBE)
+}
+
+/// An RGB profile with gamma `gamma` (`u8Fixed8Number`) on the XYZ
+/// colorant columns `colorants`.
+fn rgb_profile_of(colorants: [[f64; 3]; 3], gamma: u16) -> Vec<u8> {
+    let [r, g, b] = colorants;
     icc_profile(
         *b"RGB ",
         &[

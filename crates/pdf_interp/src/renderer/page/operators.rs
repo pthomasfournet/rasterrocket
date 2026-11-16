@@ -103,19 +103,27 @@ impl PageRenderer<'_> {
     /// any clipping to the window drawn, so every band of a page records
     /// the same set.
     pub(super) fn record_intent(&mut self, own: Option<crate::RenderingIntent>) {
-        let intent = self.painting_intent(own).intent;
+        let intent = self.painting_target(own).intent.intent;
         self.diag.content_intents.insert(intent);
     }
 
-    /// The intent an object paints under: `own`, an image's own intent,
-    /// else the graphics state's, with the graphics state's black-point
-    /// compensation.
-    pub(super) fn painting_intent(
+    /// The target an object's colours convert to: the working space, under
+    /// `own`, an image's own intent, else the graphics state's, with the
+    /// graphics state's black-point compensation.
+    pub(super) fn painting_target(
         &self,
         own: Option<crate::RenderingIntent>,
-    ) -> crate::ColourIntent {
+    ) -> crate::ColourTarget {
         let gs = self.gstate.current().colour_intent;
-        crate::ColourIntent::new(own.unwrap_or(gs.intent), gs.bpc)
+        crate::ColourTarget::new(
+            crate::ColourIntent::new(own.unwrap_or(gs.intent), gs.bpc),
+            self.space,
+        )
+    }
+
+    /// The target the graphics state's colours convert to.
+    pub(super) fn colour_target(&self) -> crate::ColourTarget {
+        self.painting_target(None)
     }
 
     #[expect(clippy::too_many_lines, reason = "operator dispatch table")]
@@ -361,10 +369,10 @@ impl PageRenderer<'_> {
                 self.trace_inline_image(params, data);
                 // The same block in a form or pattern cell drawn repeatedly
                 // decodes once per page.
-                let intent = self.painting_intent(inline_intent(params));
+                let target = self.painting_target(inline_intent(params));
                 let key = super::image_memo::ImageMemo::inline_key(
                     self.canvas.kind().depth(),
-                    intent,
+                    target,
                     self.resources.color_space_source(),
                     params,
                     data,
@@ -403,7 +411,7 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "cache")]
                     doc_id: None,
                     keep_tints,
-                    intent,
+                    target,
                     depth: self.canvas.kind().depth(),
                 };
                 // Route to whichever GPU JPEG decoder is active (only one is Some per render).

@@ -457,6 +457,22 @@ pub struct SessionConfig {
     ///
     /// [`open_session`]: crate::open_session
     pub proof: Option<pdf_interp::ProofIntent>,
+    /// The working space pages are composited in before the conversion to
+    /// the [`output_profile`](Self::output_profile).
+    ///
+    /// Default `None`, automatic: the wide space
+    /// ([`WorkingSpace::Wide`](pdf_interp::WorkingSpace::Wide)) for a page
+    /// rendered at 16 bits under an output profile, sRGB otherwise.  The
+    /// wide space has the primaries of ROMM RGB and the sRGB tone curve;
+    /// colours outside sRGB keep their gamut up to the output conversion,
+    /// and blending and transparency groups composite in it.  A page
+    /// painted as an overprint preview is composited in sRGB.
+    /// `Some(Srgb)` composites every page in sRGB; `Some(Wide)` is refused
+    /// by [`open_session`] without an output profile and per page at
+    /// 8 bits.
+    ///
+    /// [`open_session`]: crate::open_session
+    pub working_space: Option<pdf_interp::WorkingSpace>,
 }
 
 impl SessionConfig {
@@ -498,7 +514,36 @@ impl SessionConfig {
             gpu_pages: false,
             output_profile: None,
             proof: None,
+            working_space: None,
         }
+    }
+
+    /// The checks [`open_session`](crate::open_session) applies:
+    /// [`check_gpu_pages`](Self::check_gpu_pages) and
+    /// [`check_working_space`](Self::check_working_space).
+    pub(crate) fn check(&self) -> Result<(), RasterError> {
+        self.check_gpu_pages()?;
+        self.check_working_space()
+    }
+
+    /// Refuse the wide working space without an output profile: only the
+    /// conversion to one carries the wide gamut.
+    ///
+    /// # Errors
+    ///
+    /// [`RasterError::InvalidOptions`] for
+    /// [`working_space`](Self::working_space) `Some(Wide)` without an
+    /// [`output_profile`](Self::output_profile).
+    pub fn check_working_space(&self) -> Result<(), RasterError> {
+        if self.working_space == Some(pdf_interp::WorkingSpace::Wide)
+            && self.output_profile.is_none()
+        {
+            return Err(RasterError::InvalidOptions(
+                "the wide working space carries its gamut to the output profile's conversion:                  give the session an output profile (SessionConfig::output_profile, rrocket                  --output-profile)"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// The soft proof of `doc` this config asks for, its document-level
