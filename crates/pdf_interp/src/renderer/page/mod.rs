@@ -65,6 +65,7 @@ mod device_page;
 mod devices;
 mod diagnostics;
 mod fill_stroke;
+mod finished;
 mod form_memo;
 mod group_space;
 mod image_blit;
@@ -96,7 +97,6 @@ mod view;
 mod xobject;
 
 pub use band::PageState;
-pub use canvas::FinishedCanvas;
 use canvas::{CanvasKind, PageCanvas};
 #[cfg(feature = "vulkan")]
 pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
@@ -106,6 +106,7 @@ pub(crate) use diagnostics::source_ppi;
 pub use diagnostics::{
     DevicePage, GlyphCounts, GroupSpaceApproximations, ImageFailure, PageDiagnostics, RenderAbort,
 };
+pub use finished::FinishedCanvas;
 #[cfg(feature = "cache")]
 pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;

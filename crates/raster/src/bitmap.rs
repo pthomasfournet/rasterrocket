@@ -526,6 +526,42 @@ impl<P: Pixel> Bitmap<P> {
         }
         Bitmap::from_packed(self.width, self.height, data)
     }
+
+    /// The bitmap's pixels and alpha plane with every sample on the scale
+    /// of `Q`'s samples, as [`Self::converted`] maps them, in a bitmap of
+    /// rows padded to 1 built in `buffers` ([`Self::try_new_filled_in`]).
+    /// `Q` has the components of `P`.
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when a buffer that must be allocated cannot be.
+    pub fn try_converted_in<Q: Pixel>(
+        &self,
+        buffers: BitmapBuffers<Q::Sample>,
+    ) -> Result<Bitmap<Q>, BitmapAllocError> {
+        const { assert!(P::NCOMPS == Q::NCOMPS, "a conversion keeps the components") };
+        let mut out = Bitmap::<Q>::try_new_filled_in(
+            buffers,
+            self.width,
+            self.height,
+            1,
+            self.has_alpha(),
+            Q::Sample::default(),
+        )?;
+        let live = u32_to_usize(self.width) * P::NCOMPS;
+        for y in 0..self.height {
+            let row = &mut out.row_samples_mut(y)[..live];
+            for (d, &s) in row.iter_mut().zip(&self.row_samples(y)[..live]) {
+                *d = Q::Sample::from_sample(s);
+            }
+        }
+        if let (Some(from), Some(to)) = (self.alpha_plane(), out.alpha_plane_mut()) {
+            for (d, &s) in to.iter_mut().zip(from) {
+                *d = Q::Sample::from_sample(s);
+            }
+        }
+        Ok(out)
+    }
 }
 
 // ── Row interleaving ──────────────────────────────────────────────────────────
@@ -714,5 +750,26 @@ mod tests {
         assert_eq!(back.data(), [0, 1, 255, 128, 7, 9]);
         let narrow: Bitmap<Gray8> = Bitmap::<Gray16>::from_packed(2, 1, vec![128, 129]).converted();
         assert_eq!(narrow.data(), [0, 1]);
+    }
+
+    #[test]
+    fn conversion_in_buffers_narrows_the_alpha_plane_too() {
+        use color::{Gray8, Gray16};
+        let mut wide = Bitmap::<Gray16>::new(2, 2, 4, true);
+        wide.row_samples_mut(0)[..2].copy_from_slice(&[128, 129]);
+        wide.row_samples_mut(1)[..2].copy_from_slice(&[65_535, 32_896]);
+        wide.alpha_plane_mut()
+            .expect("an alpha plane")
+            .copy_from_slice(&[0, 129, 65_535, 257]);
+        let narrow: Bitmap<Gray8> = wide
+            .try_converted_in(BitmapBuffers::default())
+            .expect("allocation");
+        assert_eq!((narrow.width, narrow.height, narrow.stride), (2, 2, 2));
+        assert_eq!(narrow.data(), [0, 1, 255, 128]);
+        assert_eq!(narrow.alpha_plane(), Some(&[0, 1, 255, 1][..]));
+        let opaque: Bitmap<Gray8> = Bitmap::<Gray16>::from_packed(1, 1, vec![257])
+            .try_converted_in(BitmapBuffers::default())
+            .expect("allocation");
+        assert!(opaque.alpha_plane().is_none() && opaque.data() == [1]);
     }
 }

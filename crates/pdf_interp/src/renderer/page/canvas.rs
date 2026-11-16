@@ -14,10 +14,7 @@
 //! an ink canvas through [`InkPattern`], which converts each span to ink.
 
 use color::cmyk::{ink_to_cmyk_row, ink_to_cmyk_row16, ink_to_rgb_row, ink_to_rgb_row16};
-use color::{
-    Cmyk8, Cmyk16, DeviceN8, DeviceN16, Gray8, Gray16, Pixel, PixelMode, Rgb8, Rgb16, Sample,
-    SampleDepth,
-};
+use color::{DeviceN8, DeviceN16, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth};
 use raster::clip::Clip;
 use raster::pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
 use raster::shading::gouraud::{GouraudVertex, gouraud_triangle_fill, gouraud_triangle_spans};
@@ -29,7 +26,7 @@ use super::depth::{CanvasBackdrop, CanvasSample, SampleVec, SourcePattern, Widen
 use super::ink_map::SpotTables;
 use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
-use super::{CanvasBuffers, PageRenderer};
+use super::{CanvasBuffers, FinishedCanvas, PageRenderer};
 use crate::resources::transfer::Transfer;
 use crate::separation::Separator;
 
@@ -114,95 +111,6 @@ pub(super) enum PageCanvas {
     Ink(Bitmap<DeviceN8>),
     /// Ink pixels of 16-bit samples.
     Ink16(Bitmap<DeviceN16>),
-}
-
-/// A finished page, as sRGB, as device values or as CMYK.
-///
-/// The canvas is sRGB pixels at its depth, or, once converted to an output
-/// profile ([`OutputProfile::convert`](crate::OutputProfile::convert)), the
-/// profile's RGB or gray device values; an ink canvas finished as CMYK
-/// ([`CanvasRequest::Cmyk`](crate::CanvasRequest::Cmyk)) is its process
-/// ink.
-pub enum FinishedCanvas {
-    /// 8-bit RGB.
-    Rgb8(Bitmap<Rgb8>),
-    /// 16-bit RGB.
-    Rgb16(Bitmap<Rgb16>),
-    /// 8-bit gray, 0 black: the device values of a gray output profile.
-    Gray8(Bitmap<Gray8>),
-    /// 16-bit gray, 0 black: the device values of a gray output profile.
-    Gray16(Bitmap<Gray16>),
-    /// 8-bit CMYK, 0 no ink.
-    Cmyk8(Bitmap<Cmyk8>),
-    /// 16-bit CMYK, 0 no ink.
-    Cmyk16(Bitmap<Cmyk16>),
-}
-
-impl std::fmt::Debug for FinishedCanvas {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (width, height) = self.dims();
-        f.debug_struct("FinishedCanvas")
-            .field("depth", &self.depth())
-            .field("width", &width)
-            .field("height", &height)
-            .finish_non_exhaustive()
-    }
-}
-
-impl FinishedCanvas {
-    /// The bitmap's `(width, height)` in pixels.
-    #[must_use]
-    pub const fn dims(&self) -> (u32, u32) {
-        match self {
-            Self::Rgb8(b) => (b.width, b.height),
-            Self::Rgb16(b) => (b.width, b.height),
-            Self::Gray8(b) => (b.width, b.height),
-            Self::Gray16(b) => (b.width, b.height),
-            Self::Cmyk8(b) => (b.width, b.height),
-            Self::Cmyk16(b) => (b.width, b.height),
-        }
-    }
-
-    /// The depth of the bitmap's samples.
-    #[must_use]
-    pub const fn depth(&self) -> SampleDepth {
-        match self {
-            Self::Rgb8(_) | Self::Gray8(_) | Self::Cmyk8(_) => SampleDepth::Eight,
-            Self::Rgb16(_) | Self::Gray16(_) | Self::Cmyk16(_) => SampleDepth::Sixteen,
-        }
-    }
-
-    /// Whether the bitmap holds CMYK.
-    #[must_use]
-    pub const fn is_cmyk(&self) -> bool {
-        matches!(self, Self::Cmyk8(_) | Self::Cmyk16(_))
-    }
-
-    /// Return the canvas's storage to `buffers` for the next canvas of its
-    /// kind.
-    pub fn reclaim_into(self, buffers: &mut CanvasBuffers) {
-        match self {
-            Self::Rgb8(b) => buffers.rgb.reclaim(b),
-            Self::Rgb16(b) => buffers.rgb16.reclaim(b),
-            Self::Gray8(b) => buffers.gray.reclaim(b),
-            Self::Gray16(b) => buffers.gray16.reclaim(b),
-            Self::Cmyk8(b) => buffers.cmyk.reclaim(b),
-            Self::Cmyk16(b) => buffers.cmyk16.reclaim(b),
-        }
-    }
-
-    /// Set the colour of every pixel whose alpha is 0 to 0 (see
-    /// [`zero_transparent_colour`]).
-    pub(super) fn zero_transparent_colour(&mut self) {
-        match self {
-            Self::Rgb8(b) => zero_transparent_colour(b),
-            Self::Rgb16(b) => zero_transparent_colour(b),
-            Self::Gray8(b) => zero_transparent_colour(b),
-            Self::Gray16(b) => zero_transparent_colour(b),
-            Self::Cmyk8(b) => zero_transparent_colour(b),
-            Self::Cmyk16(b) => zero_transparent_colour(b),
-        }
-    }
 }
 
 /// The value of every channel of paper white in pixels of type `P`.
