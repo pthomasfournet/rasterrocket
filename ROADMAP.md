@@ -3803,6 +3803,26 @@ right-to-left documents and three Latin ones are byte-identical at 100 dpi
 (their RTL text is embedded or in standard-named fonts); only synthetic
 documents change.
 
+**Unreleased on master: images and shadings of an RGB group's own space
+keep their components.** Inside a `CalRGB` or non-sRGB ICC RGB group, an
+image, an `Indexed` image over the space, or a shading given in the
+group's own space now paints its components on the group canvas, as fills
+already did. They no longer pass through the working space, where colours
+outside sRGB clipped. A space is the group's when its `CalRGB` parameters
+match, or when its profile stream holds the group's profile (same tag
+fingerprint), so a copy of the profile embedded beside each image counts,
+for fills too. On an isolated Adobe RGB (and `CalRGB`) group under Multiply,
+8- and 16-bit images, an `Indexed` image, an image in a second copy of the
+profile and an axial shading now agree with Ghostscript 10.06 to 1 level.
+Before, they were up to 21 levels off. The pattern memo now also keys
+resolved shadings by the paint's separator and tiling-cell rasters by the
+canvas's ink setup. Without that, a shading or cell resolved on an ink page
+was reused, with the wrong ink, inside an additive group. The 34-PDF gate
+in 26 modes and the 1 056 pages of the 8 archive documents with RGB ICC form
+groups are byte-identical. API change: `ImageDecodeCtx::keep_tints` and
+`DecodedImage::kept_tints` are now `KeptTints` (`None`, `Ink`,
+`InkAndRgb`), not `bool`.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
