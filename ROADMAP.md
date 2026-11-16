@@ -3121,10 +3121,10 @@ Blending, transparency groups, antialiased edges, shading and image
 interpolation and transfer functions act on wide values, which moves mixtures
 of colours: against compositing in sRGB, colour over white at 50 % coverage
 by mean ΔE00 2.3 (p95 5.5), random colour pairs at 50 % alpha by 3.6,
-Multiply by 6.3 (neutral mixtures by 0). Group `/CS` stays unread for
-blending, and a wide page whose group declares one warns; soft-mask groups
-are still painted in sRGB, and overprint-preview pages are composited in sRGB
-and warn. The output conversion and CMYK separation from the wide space
+Multiply by 6.3 (neutral mixtures by 0). A page or group whose `/CS` is
+sRGB or gray composites in sRGB (see the group-colour-space paragraph below);
+soft-mask groups are painted in sRGB, and overprint-preview pages are
+composited in sRGB and warn. The output conversion and CMYK separation from the wide space
 evaluate in floating point with tetrahedral interpolation at full weight
 precision: against Little CMS, sRGB colours printed through the wide space to
 the RGB test printers within ΔE00 0.60 (1.03 on PhotoGamutRGB avg6c), the
@@ -3148,12 +3148,12 @@ without a profile on pages with such images: 14 of the corpus's 65 page files
 at 16 bits, by at most 1.29 8-bit steps (the 8-bit `DeviceCMYK` row
 conversion approximates the model by up to that), and 11 of its 99 `--cmyk
 --depth 16` files; DeviceRGB and DeviceGray images, and 8-bit output, are
-unchanged. Not done: the wide space at 8 bits, group blending spaces, and the sRGB
+unchanged. Not done: the wide space at 8 bits and the sRGB
 output conversion's 8-bit-precise table interpolation. API changes:
 `WorkingSpace`, `ColourTarget` (replaces `ColourIntent` as the conversion
 argument of `ColorSpace::convert_to_rgb`), `CanvasRequest::WideRgb`,
-`SessionConfig::working_space`, `page_group_declares_space`;
-`OutputProfile::{convert, separation, prepare}` take the working space.
+`SessionConfig::working_space`; `OutputProfile::{convert, separation,
+prepare}` take the working space.
 
 **Unreleased on master: CMYK output completes its conversions.**
 - **Black generation and undercolour removal.** Without an output profile,
@@ -3445,6 +3445,67 @@ cross-reference offset N and no `1836 0 obj` header elsewhere in the file
 (damaged file)" (pages 375–376 of the 1872 Pike constitutions); the page
 still fails, no blank page stands in. pdfium corpus: 0 FAIL, 0 XPASS. All
 1168 archive PDFs open with page counts identical to before.
+
+**Unreleased on master: transparency groups composite in their colour
+space.** A group's `/CS` (ISO 32000-2 §11.3.4, §11.4.7, §11.6.6) is the
+space its colours convert into, its objects composite in and its result
+converts out of.
+- **Nested groups.** A form group whose space is not its parent canvas's is
+  painted on a canvas of its space: a CMYK group over an RGB page on an ink
+  canvas, other colours separated by the inverse of the process-ink model
+  and the result converted back through the model, spots folded in; an sRGB
+  group over a wide or ink page on an sRGB canvas; a gray group on its
+  parent's canvas, its colour reduced by the `DeviceRGB`/`DeviceCMYK` →
+  `DeviceGray` weights as it composites (exact for `Normal` compositing).
+  Inherited colours convert again for the group's canvas; a non-isolated
+  group's backdrop converts into its space for the blend modes that read it,
+  and pixels the group leaves unpainted keep their value. A CMYK ICC group
+  composites as `DeviceCMYK`, a `CalRGB` or non-sRGB RGB group in its
+  canvas's RGB space; `PageDiagnostics::approximated_group_spaces` reports
+  each and a session warns once per kind.
+- **Page group.** On RGB and gray output a page whose group is CMYK is
+  painted in ink and finished through the model; a page whose group is sRGB
+  or gray composites in sRGB where the wide space would be chosen
+  automatically (an explicit `--working-space wide` wins, with a warning);
+  a gray page finishes gray. A page painted in ink (`--cmyk`, `--proof`, an
+  overprint preview) keeps compositing in ink whatever RGB or gray space its
+  group declares, and warns once. Under an output profile the first page
+  finished through sRGB this way warns that colours outside sRGB clip.
+- **Luminosity masks.** A CMYK mask group is painted in ink, its other
+  colours separated by the device conversion, and takes the conventional
+  gray `1 − min(1, 0.3C + 0.59M + 0.11Y + K)` over `BC` read as ink: black
+  ink alone is a mask of 0 (was 9 %), an RGB or gray colour masks as in an
+  RGB group. Masks of every other space are unchanged; CIE-based mask groups
+  keep the luma of their encoded values.
+- **Pixel impact** (master against this, 100 dpi, the 141 pages of the 23
+  archive documents whose groups declare a space other than DeviceRGB or
+  sRGB): under default RGB output 105 pages of 16 documents change, those
+  whose page group is CMYK (103 DeviceCMYK, 2 ICC CMYK pages); the other 36
+  are byte-identical (gray groups: their content is already neutral). Per
+  page, 18.7 % of pixels change, 10.4 % by more than 2 levels; mean ΔE76
+  1.00, median page p99 14.1, worst pixel 36.4. Saturated RGB colours take
+  the press model's gamut (`1 0 0 rg`: 255,0,0 → 227,4,11, ΔE76 28); 15
+  pages whose content is already CMYK move by at most 2 levels. Antialiased
+  edges mix in ink, an artefact of fractional coverage (the spec gives a
+  shape 0 or 1), not a spec effect: an edge of registration black (`/All`)
+  at 36 % coverage goes from 162 to 109,94,91, of RGB black (rich black on
+  the ink canvas) to a near neutral about 54 levels darker, and K-only text
+  is unchanged; OCR word recall on 101 of these pages at 300 dpi went from
+  87.53 % to 87.52 %. On the 34-PDF gate corpus (pages 1–2, 50 dpi, 15
+  modes) the files that differ are exactly the pages whose group declares a
+  space other than their canvas's: the CMYK page of one document in 10
+  modes, and under 16 bits and an output profile 4 pages declaring
+  DeviceRGB; exit codes are identical.
+- **Also:** a soft-mask group painting in the colour in effect at `gs` on a
+  wide page (or an ink page separated in the wide space) read wide values as
+  sRGB; inherited colours now convert for the mask's canvas.
+- **API changes:** `CanvasRequest::ProcessRgb { overprint }` replaces
+  `OverprintPreview`; `page_group_space` replaces `page_group_declares_space`;
+  `GroupSpace`, `RgbGroupSpace`, `TransparencyGroupParams::space`,
+  `GroupSpaceApproximations`, `PageDiagnostics::approximated_group_spaces`,
+  `working_space::to_srgb16`, `color::convert::{GRAY_WEIGHTS, GRAY_BIAS,
+  GRAY_SHIFT, gray_at}`, `color::cmyk::device_gray_at` and
+  `raster::transparency::begin_group_converted` are new.
 
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
