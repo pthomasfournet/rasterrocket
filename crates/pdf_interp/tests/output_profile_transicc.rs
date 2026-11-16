@@ -15,11 +15,7 @@
 //! printed through the output profile and decoded to Lab; under every
 //! intent, with and without black-point compensation, in both directions
 //! between a printer replacing the whole gray component and one replacing
-//! half of it.  A compensated perceptual or saturation conversion to the
-//! version 2 printer is held to [`MAX_DELTA_E_V2_COMPENSATED`]: its black,
-//! found on the round trip of a ramp, is neutral here and keeps the `a*`
-//! and `b*` of the initial black in Little CMS, which moves the darkest
-//! colours apart.
+//! half of it.
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket-interp --test output_profile_transicc -- --ignored`.
@@ -62,7 +58,7 @@ fn off_grid_patches() -> Vec<[f64; 3]> {
 }
 
 /// The largest mean ΔE00 over the chart accepted at 16 bits.
-const MAX_MEAN_DELTA_E_16: f64 = 0.1;
+const MAX_MEAN_DELTA_E_16: f64 = 0.06;
 
 /// Our conversion of `patches` of `space` at `bits` to `profile` under
 /// `intent`.
@@ -307,8 +303,9 @@ fn gray_printer_agrees_with_transicc() {
     agrees("printer-gray-v4.icc");
 }
 
-/// The separation of the chart and of a dark neutral ramp through the CMYK
-/// printer prints, at 8 and 16 bits, within [`MAX_DELTA_E`] of the ink
+/// The separation of the chart and of a dark neutral ramp through either
+/// CMYK printer, replacing the whole gray component or half of it, prints,
+/// at 8 and 16 bits, within [`MAX_DELTA_E`] of the ink
 /// `transicc` separates it to, from either working space under every
 /// intent with and without compensation; also below the printer's black,
 /// where its relative colorimetric table moves the inks by percents for a
@@ -317,8 +314,16 @@ fn gray_printer_agrees_with_transicc() {
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn a_cmyk_separation_prints_as_transicc_s() {
+    for name in ["printer-cmyk-v4.icc", "printer-cmyk-v2.icc"] {
+        separation_agrees(name);
+    }
+}
+
+/// The separation of the chart and a dark neutral ramp through the CMYK
+/// printer `name` within [`MAX_DELTA_E`] of `transicc`'s.
+fn separation_agrees(name: &str) {
     let dir = tempfile_dir("separation");
-    let dst = fixture("printer-cmyk-v4.icc");
+    let dst = fixture(name);
     let profile = OutputProfile::from_bytes(std::fs::read(&dst).unwrap()).unwrap();
     let dst = dst.to_str().unwrap();
     let mut chart = patches();
@@ -377,12 +382,12 @@ fn a_cmyk_separation_prints_as_transicc_s() {
                             |(m, at), (i, d)| if d > m { (d, i) } else { (m, at) },
                         );
                     eprintln!(
-                        "{space:?} {intent} bpc {bpc} {bits}-bit: worst ΔE00 {worst:.3} at {:?}",
+                        "{name} {space:?} {intent} bpc {bpc} {bits}-bit: worst ΔE00 {worst:.3} at {:?}",
                         chart[at]
                     );
                     if worst > MAX_DELTA_E {
                         failures.push(format!(
-                            "{space:?} {intent} bpc {bpc} {bits}-bit: ΔE00 {worst:.3} at {:?}",
+                            "{name} {space:?} {intent} bpc {bpc} {bits}-bit: ΔE00 {worst:.3} at {:?}",
                             chart[at]
                         ));
                     }
@@ -393,10 +398,6 @@ fn a_cmyk_separation_prints_as_transicc_s() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
-
-/// The largest ΔE00 accepted for a compensated perceptual or saturation
-/// conversion to the version 2 printer.
-const MAX_DELTA_E_V2_COMPENSATED: f64 = 1.6;
 
 /// A PDF of objects `bodies`, numbered from 1, object 1 the catalog.
 fn pdf(bodies: &[Vec<u8>]) -> Vec<u8> {
@@ -567,17 +568,7 @@ fn icc_cmyk_converts_to_another_press_as_transicc_converts_it() {
                     "{from} → {to} {intent} bpc {bpc}: worst ΔE00 {worst:.3} at {:?}",
                     chart[at]
                 );
-                let limit = if bpc
-                    && to.ends_with("v2.icc")
-                    && matches!(
-                        intent,
-                        RenderingIntent::Perceptual | RenderingIntent::Saturation
-                    ) {
-                    MAX_DELTA_E_V2_COMPENSATED
-                } else {
-                    MAX_DELTA_E
-                };
-                if worst > limit {
+                if worst > MAX_DELTA_E {
                     failures.push(format!(
                         "{from} → {to} {intent} bpc {bpc}: ΔE00 {worst:.3} at {:?}",
                         chart[at]

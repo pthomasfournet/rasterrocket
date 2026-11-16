@@ -548,12 +548,15 @@ fn lab_f_inv(f: f64) -> f64 {
     }
 }
 
-/// `xyz` encoded for a table of PCS `pcs`.
+/// `xyz` encoded for a table of PCS `pcs`, each encoded component clipped
+/// to `[0, 1]`.  A component below 0 converts to Lab through the linear
+/// branch of [`lab_f`], which extends below the origin, so a colour moved
+/// below the PCS black keeps its `a*` and `b*` while its `L*` clips.
 fn encode(xyz: [f64; 3], pcs: DataColorSpace, legacy_lab: bool) -> [f64; 3] {
     if pcs == DataColorSpace::Xyz {
         return xyz.map(|v| (v * XYZ_SCALE).clamp(0.0, 1.0));
     }
-    let [fx, fy, fz] = [0, 1, 2].map(|i| lab_f(xyz[i].max(0.0) / D50[i]));
+    let [fx, fy, fz] = [0, 1, 2].map(|i| lab_f(xyz[i] / D50[i]));
     let lab = [
         116.0f64.mul_add(fy, -16.0) / 100.0,
         500.0f64.mul_add(fx - fy, 128.0) / 255.0,
@@ -605,6 +608,21 @@ mod tests {
         // White is L* 100, a* = b* = 0.
         let white = encode([0.9642, 1.0, 0.8249], DataColorSpace::Lab, false);
         assert!((white[0] - 1.0).abs() < 1e-12 && (white[1] - 128.0 / 255.0).abs() < 1e-12);
+    }
+
+    /// A PCS value below the origin, as a black-point map leaves the
+    /// darkest colours, keeps the `a*` and `b*` of the linear branch of the
+    /// CIE `f` while its `L*` clips to 0.
+    #[test]
+    fn a_colour_below_the_pcs_black_keeps_its_hue() {
+        let xyz = [-0.0002, -0.0008, -0.0012];
+        let lab = encode(xyz, DataColorSpace::Lab, false);
+        let f = [0, 1, 2].map(|i| lab_f(xyz[i] / D50[i]));
+        let [a, b] = [lab[1], lab[2]].map(|v| v.mul_add(255.0, -128.0));
+        assert!(lab[0].abs() < 1e-12, "{lab:?}");
+        assert!(500.0f64.mul_add(f[1] - f[0], a).abs() < 1e-9, "{lab:?}");
+        assert!(200.0f64.mul_add(f[2] - f[1], b).abs() < 1e-9, "{lab:?}");
+        assert!(a > 1.0, "a* of {lab:?}");
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! curve lifted to map one black onto another.
 //!
 //! Lightness and luminance are relative to the D50 white of the PCS; a
-//! black is neutral, `k · D50`, and given by its luminance `k`.
+//! black is neutral, `k · D50`, and given by its luminance `k`.  A profile
+//! with device ↔ PCS tables is evaluated through them directly
+//! ([`ProfileLut`]); any other converts through `moxcms`.
 
 use moxcms::{
     ColorProfile, DataColorSpace, Layout, ProfileClass, ProfileVersion, RenderingIntent,
@@ -11,6 +13,7 @@ use moxcms::{
 };
 
 use super::D50;
+use super::lut::{Direction, ProfileLut};
 
 /// The luminance `Y` of the perceptual reference medium's black
 /// (ICC.1:2022 §6.3.4.4), the black of a version 4 profile's perceptual
@@ -80,6 +83,26 @@ fn round_trip(
     l_in: &[f64],
 ) -> Result<Vec<f64>, moxcms::CmsError> {
     let (layout, channels) = layout_of(profile);
+    if let (Some(to_device), Some(to_pcs)) = (
+        ProfileLut::new(profile, intent, Direction::ToDevice, channels),
+        ProfileLut::new(
+            profile,
+            RenderingIntent::RelativeColorimetric,
+            Direction::ToPcs,
+            channels,
+        ),
+    ) {
+        let mut device = [0.0; 4];
+        let device = &mut device[..channels];
+        return Ok(l_in
+            .iter()
+            .map(|&l| {
+                let y = lab_l_to_y(l);
+                to_device.to_device([D50[0] * y, y, D50[2] * y], device);
+                y_to_lab_l(to_pcs.to_pcs(device)[1])
+            })
+            .collect());
+    }
     let pcs = as_version_2(&pcs_lightness())?;
     let to_device =
         pcs.create_transform_f64(Layout::Rgb, profile, layout, lightness_options(intent))?;
@@ -134,6 +157,9 @@ fn device_y(
     intent: RenderingIntent,
     device: &[f64],
 ) -> Result<f64, moxcms::CmsError> {
+    if let Some(lut) = ProfileLut::new(profile, intent, Direction::ToPcs, device.len()) {
+        return Ok(lut.to_pcs(device)[1]);
+    }
     let xform = profile.create_transform_f64(
         layout_of(profile).0,
         &pcs_lightness(),

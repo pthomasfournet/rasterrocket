@@ -217,6 +217,42 @@ mod tests {
     use super::*;
     use crate::pcs::black::darkest_colorant_y;
 
+    /// The destination blacks of the test printers as Little CMS's
+    /// `cmsDetectDestinationBlackPoint` finds them (luminance `Y`).
+    #[test]
+    fn destination_blacks_are_found_as_iso_18619_finds_them() {
+        for (name, intent, want) in [
+            ("printer-cmyk-v2", RenderingIntent::Perceptual, 0.000_127),
+            (
+                "printer-cmyk-v2",
+                RenderingIntent::RelativeColorimetric,
+                0.009_341,
+            ),
+            ("printer-cmyk-v2", RenderingIntent::Saturation, 0.000_139),
+            (
+                "printer-cmyk-v4",
+                RenderingIntent::RelativeColorimetric,
+                0.012_190,
+            ),
+            (
+                "printer-rgb-v2",
+                RenderingIntent::RelativeColorimetric,
+                0.008_891,
+            ),
+        ] {
+            let path = format!(
+                "{}/../../tests/fixtures/icc/{name}.icc",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let dest = ColorProfile::new_from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let y = destination_black(&dest, intent).unwrap();
+            assert!(
+                (y - want).abs() < 2.5e-5,
+                "{name} {intent:?}: Y {y:.6}, not {want}"
+            );
+        }
+    }
+
     #[test]
     fn the_working_space_black_of_a_matrix_destination_is_its_origin() {
         let dest = ColorProfile::new_srgb();
