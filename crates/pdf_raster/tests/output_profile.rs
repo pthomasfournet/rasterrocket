@@ -15,10 +15,10 @@ use std::sync::Arc;
 use common::gradients::gradient_page;
 use common::{one_page, stream_object};
 use rasterrocket::{
-    BackendPolicy, BandBitmap, FinishedCanvas, OutputProfile, RasterError, RasterSession,
-    RenderParams, RenderingIntent, SampleDepth, SessionConfig, open_session_from_bytes,
-    render_page_bands, render_page_canvas, render_page_canvas_with_diagnostics,
-    render_page_rgb_with,
+    BackendPolicy, BandBitmap, FinishedCanvas, OutputProfile, PreserveBlack, RasterError,
+    RasterSession, RenderParams, RenderingIntent, SampleDepth, SessionConfig,
+    open_session_from_bytes, render_page_bands, render_page_canvas,
+    render_page_canvas_with_diagnostics, render_page_rgb_with,
 };
 
 fn profile(name: &str) -> Arc<OutputProfile> {
@@ -196,4 +196,16 @@ fn what_the_session_cannot_convert_is_refused() {
         render_page_rgb_with(&gray, 1, &params),
         Err(RasterError::InvalidOptions(_))
     ));
+    // Black preservation needs CMYK ink converted to a CMYK profile's.
+    let k_only = params.with_preserve_black(PreserveBlack::KOnly);
+    assert!(invalid(render_page_canvas(&managed, 1, &k_only)));
+    let press = session(gradient_page(), Some(profile("printer-cmyk-v4.icc")));
+    assert!(invalid(render_page_canvas(&press, 1, &k_only)));
+    let cmyk = k_only.with_cmyk();
+    assert!(render_page_canvas(&press, 1, &cmyk).is_ok());
+    assert!(invalid(render_page_canvas(
+        &press,
+        1,
+        &cmyk.with_intent(RenderingIntent::AbsoluteColorimetric)
+    )));
 }

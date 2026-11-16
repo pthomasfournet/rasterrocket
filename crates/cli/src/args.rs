@@ -283,6 +283,25 @@ pub(crate) struct Args {
     #[arg(long = "bpc")]
     pub bpc: bool,
 
+    /// Keep black ink black where ICC-based CMYK of another profile
+    /// converts to the ink of a CMYK --output-profile (under --proof, of
+    /// the press): `k-only` (the bare flag) prints a colour of black ink
+    /// alone as black ink alone, through the K → K curve matching the two
+    /// profiles' blacks by L*; `k-plane` also gives every other colour the
+    /// curve's K and solves its C, M and Y for its colour, a colour that K
+    /// cannot print converting as without the flag.  Other colours convert
+    /// as without it.  Needs --cmyk or --jpegcmyk with --output-profile, or
+    /// --proof; not with --intent absolute.
+    #[arg(
+        long = "preserve-black",
+        value_name = "MODE",
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "k-only"
+    )]
+    pub preserve_black: Option<PreserveBlackArg>,
+
     /// Soft-proof the pages: show on screen how they print on the press
     /// the document's PDF/X output intent names.  Each page is painted as
     /// that press's process ink (`DeviceCMYK` and process colorants as
@@ -808,6 +827,24 @@ impl From<IntentArg> for pdf_raster::RenderingIntent {
     }
 }
 
+/// `--preserve-black` argument value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PreserveBlackArg {
+    /// Colours of black ink alone keep black ink alone.
+    KOnly,
+    /// Every colour keeps the K of the K → K curve.
+    KPlane,
+}
+
+impl From<PreserveBlackArg> for pdf_raster::PreserveBlack {
+    fn from(mode: PreserveBlackArg) -> Self {
+        match mode {
+            PreserveBlackArg::KOnly => Self::KOnly,
+            PreserveBlackArg::KPlane => Self::KPlane,
+        }
+    }
+}
+
 /// `--working-space` argument value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum WorkingSpaceArg {
@@ -1220,8 +1257,10 @@ impl Args {
         ))
     }
 
-    /// Refuse `--intent` and `--bpc` without `--output-profile` or
-    /// `--proof`, `--bpc` under absolute colorimetry, and `--output-profile`
+    /// Refuse `--intent`, `--bpc` and `--preserve-black` without
+    /// `--output-profile` or `--proof`, `--preserve-black` without CMYK
+    /// output under `--output-profile`, `--bpc` and `--preserve-black`
+    /// under absolute colorimetry, and `--output-profile`
     /// and `--proof` with the bilevel outputs and comic input, `--proof`
     /// with CMYK and transparent output.
     fn validate_output_profile_flags(&self) -> Result<(), String> {
@@ -1243,13 +1282,39 @@ impl Args {
             }
         }
         if self.output_profile.is_none() && self.proof.is_none() {
-            return match (self.intent.is_some(), self.bpc) {
-                (true, _) => {
+            return match (
+                self.intent.is_some(),
+                self.bpc,
+                self.preserve_black.is_some(),
+            ) {
+                (true, _, _) => {
                     Err("--intent applies to --output-profile and --proof only".to_owned())
                 }
-                (_, true) => Err("--bpc applies to --output-profile and --proof only".to_owned()),
+                (_, true, _) => {
+                    Err("--bpc applies to --output-profile and --proof only".to_owned())
+                }
+                (_, _, true) => Err(
+                    "--preserve-black applies to a CMYK --output-profile and --proof only"
+                        .to_owned(),
+                ),
                 _ => Ok(()),
             };
+        }
+        if self.preserve_black.is_some() {
+            if self.output_profile.is_some() && !self.cmyk() {
+                return Err(
+                    "--preserve-black applies to CMYK ink converted to a CMYK --output-profile's \
+                     ink: add --cmyk with --tiff or --jpeg"
+                        .to_owned(),
+                );
+            }
+            if self.intent == Some(IntentArg::Absolute) {
+                return Err(
+                    "--preserve-black does not apply to --intent absolute, which reproduces \
+                     measured colour: drop --preserve-black or choose another intent"
+                        .to_owned(),
+                );
+            }
         }
         if self.bpc && self.intent == Some(IntentArg::Absolute) {
             return Err(

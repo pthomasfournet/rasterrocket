@@ -30,6 +30,7 @@ pub(crate) fn check_params(
                 .to_owned(),
         ));
     }
+    check_preserve_black(session, params)?;
     if session.proof.is_some() {
         return check_proof(params);
     }
@@ -77,6 +78,36 @@ fn check_proof(params: &RenderParams) -> Result<(), RasterError> {
         ));
     }
     check_compensation(params)
+}
+
+/// Refuse black preservation without a conversion of CMYK ink to CMYK
+/// ink, a CMYK page with a CMYK output profile or a soft proof, and under
+/// absolute colorimetry.
+fn check_preserve_black(session: &RasterSession, params: &RenderParams) -> Result<(), RasterError> {
+    if params.preserve_black.is_none() {
+        return Ok(());
+    }
+    let cmyk_to_cmyk = session.proof.is_some()
+        || params.color == crate::ColorModel::Cmyk
+            && session
+                .output_profile
+                .as_ref()
+                .is_some_and(|p| p.space() == OutputSpace::Cmyk);
+    if !cmyk_to_cmyk {
+        return Err(RasterError::InvalidOptions(
+            "black preservation applies to the conversion of CMYK ink to the ink of a CMYK \
+             output profile: render CMYK pages with a CMYK output profile, or soft-proof"
+                .to_owned(),
+        ));
+    }
+    if params.intent == Some(RenderingIntent::AbsoluteColorimetric) {
+        return Err(RasterError::InvalidOptions(
+            "black preservation does not apply to absolute colorimetry, which reproduces \
+             measured colour: choose another intent or drop the preservation"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse black-point compensation under absolute colorimetry.

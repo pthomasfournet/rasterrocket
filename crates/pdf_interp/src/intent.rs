@@ -81,6 +81,30 @@ impl RenderingIntent {
     }
 }
 
+/// The preservation of black ink in the conversion of a colour given as
+/// the ink of one CMYK profile to the ink of another.
+///
+/// It applies under every intent but absolute colorimetry.  The K → K
+/// curve maps a source black ink to the
+/// destination black ink of the same `L*`: the source's `(0, 0, 0, K)`
+/// and the destination's `(0, 0, 0, K')` through each profile's device →
+/// PCS table of the intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreserveBlack {
+    /// A colour of black ink alone (`C = M = Y = 0`) converts to black ink
+    /// alone, its K through the K → K curve; every other colour converts
+    /// colorimetrically.
+    KOnly,
+    /// As [`Self::KOnly`], and every other colour takes the K the curve
+    /// gives, its `C M Y` found by Newton iteration so that the
+    /// destination's colorimetric table reproduces the colour of the
+    /// colorimetric conversion, then scaled down to the destination's
+    /// total ink limit.  A colour whose colorimetric K is the curve's, or
+    /// that no `C M Y` with the curve's K prints within ΔE76 1, converts
+    /// colorimetrically.
+    KPlane,
+}
+
 /// How a colour converts to the working space: its rendering intent and
 /// black-point compensation.
 ///

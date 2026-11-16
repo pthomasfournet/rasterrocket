@@ -462,7 +462,7 @@ fn separation_through(name: &str, fixed: Option<crate::RenderingIntent>) -> Sepa
     let profile = std::sync::Arc::new(
         crate::OutputProfile::from_bytes(fixture(name)).expect("a CMYK output profile"),
     );
-    crate::OutputProfile::separation(&profile, crate::WorkingSpace::Srgb, fixed, false)
+    crate::OutputProfile::separation(&profile, crate::WorkingSpace::Srgb, (fixed, false), None)
         .expect("separates")
 }
 

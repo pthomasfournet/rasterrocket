@@ -57,7 +57,8 @@ take rows; the full list is in [ROADMAP.md](ROADMAP.md).
   writes 16-bit PNG, PPM/PGM, TIFF and print spools, overprint included.
 - **Output profiles.** `--output-profile`, `--intent` and `--bpc` /
   `SessionConfig::output_profile` convert each page to an RGB, gray or CMYK
-  ICC profile, embedded in PNG, TIFF, JPEG and the print spool.
+  ICC profile, embedded in PNG, TIFF, JPEG and the print spool;
+  `--preserve-black` keeps K-only black K-only between two CMYK presses.
 - **CMYK output.** `--cmyk` and `--jpegcmyk` / `ColorModel::Cmyk` write
   CMYK TIFF (8 or 16 bits) and Adobe CMYK JPEG; process colours keep their
   values, others separate through a CMYK profile or the ISO 32000-2 device

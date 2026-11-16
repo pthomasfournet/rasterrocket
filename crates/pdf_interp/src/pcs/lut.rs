@@ -566,6 +566,18 @@ fn encode(xyz: [f64; 3], pcs: DataColorSpace, legacy_lab: bool) -> [f64; 3] {
     lab.map(|v| (v * scale).clamp(0.0, 1.0))
 }
 
+/// The media-relative D50 XYZ `xyz` as Lab, encoded `L / 100`,
+/// `(a + 128) / 255`, `(b + 128) / 255`, each clipped to `[0, 1]`.
+pub(crate) fn lab_encoding(xyz: [f64; 3]) -> [f64; 3] {
+    encode(xyz, DataColorSpace::Lab, false)
+}
+
+/// The media-relative D50 XYZ of `encoded`, Lab in the encoding of
+/// [`lab_encoding`].
+pub(crate) fn lab_decoding(encoded: [f64; 3]) -> [f64; 3] {
+    decode(encoded, DataColorSpace::Lab, false)
+}
+
 /// The XYZ of `encoded`, a value of a table of PCS `pcs`.
 fn decode(encoded: [f64; 3], pcs: DataColorSpace, legacy_lab: bool) -> [f64; 3] {
     if pcs == DataColorSpace::Xyz {

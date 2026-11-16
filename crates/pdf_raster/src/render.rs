@@ -203,6 +203,7 @@ pub fn render_page_gray(
     params.cancel.clone_from(&opts.cancel);
     params.intent = opts.intent;
     params.black_point_compensation = opts.black_point_compensation;
+    params.preserve_black = opts.preserve_black;
     let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
@@ -284,6 +285,7 @@ pub fn render_page_rgba(
     params.cancel.clone_from(&opts.cancel);
     params.intent = opts.intent;
     params.black_point_compensation = opts.black_point_compensation;
+    params.preserve_black = opts.preserve_black;
     let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
@@ -313,8 +315,9 @@ pub fn render_page_rgba(
 ///
 /// Of `opts`, only [`dpi`](RasterOptions::dpi),
 /// [`depth`](RasterOptions::depth), [`intent`](RasterOptions::intent),
-/// [`black_point_compensation`](RasterOptions::black_point_compensation)
-/// and [`cancel`](RasterOptions::cancel) apply.
+/// [`black_point_compensation`](RasterOptions::black_point_compensation),
+/// [`preserve_black`](RasterOptions::preserve_black) and
+/// [`cancel`](RasterOptions::cancel) apply.
 ///
 /// # Errors
 ///
@@ -340,6 +343,7 @@ pub fn render_page_cmyk(
     params.cancel.clone_from(&opts.cancel);
     params.intent = opts.intent;
     params.black_point_compensation = opts.black_point_compensation;
+    params.preserve_black = opts.preserve_black;
     let (canvas, diagnostics) = render_page_canvas_with_geom(
         session,
         page_num,
@@ -792,8 +796,8 @@ fn canvas_request(
             Some(profile) => pdf_interp::OutputProfile::separation(
                 &profile,
                 space,
-                params.intent,
-                params.black_point_compensation,
+                (params.intent, params.black_point_compensation),
+                params.preserve_black,
             )
             .map_err(RasterError::OutputProfile)?,
             None => pdf_interp::Separation::Device,

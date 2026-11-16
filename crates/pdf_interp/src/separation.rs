@@ -327,7 +327,12 @@ impl Separator {
         let (profile, fingerprint) = IccConversion::source_profile(doc, *id, 4)?;
         ink.press
             .profile()
-            .cmyk_link(&profile, fingerprint, ink.intent, ink.press.bpc())
+            .cmyk_link(
+                &profile,
+                fingerprint,
+                (ink.intent, ink.press.bpc()),
+                ink.press.preserve(),
+            )
             .map(CmykLink)
     }
 

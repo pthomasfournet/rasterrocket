@@ -190,8 +190,8 @@ pub use pdf_interp::{
     ScriptLocation, UnsupportedFeature,
 };
 pub use pdf_interp::{
-    IntentSet, OutputIntentError, OutputProfile, OutputProfileError, OutputSpace, ProofIntent,
-    RenderingIntent, WorkingSpace,
+    IntentSet, OutputIntentError, OutputProfile, OutputProfileError, OutputSpace, PreserveBlack,
+    ProofIntent, RenderingIntent, WorkingSpace,
 };
 pub use render::{
     render_page_canvas, render_page_canvas_with_diagnostics, render_page_cmyk, render_page_gray,
@@ -523,6 +523,11 @@ pub struct RasterOptions {
     /// [`RenderParams::black_point_compensation`].  Default `false`.
     pub black_point_compensation: bool,
 
+    /// The preservation of black in the conversion of another CMYK
+    /// profile's ink to [`output_profile`](Self::output_profile)'s; see
+    /// [`RenderParams::preserve_black`].  Default `None`.
+    pub preserve_black: Option<PreserveBlack>,
+
     /// Soft-proof every page against its output intent; see
     /// [`SessionConfig::proof`].  Default `None`.  Incompatible with
     /// [`transparent_background`](Self::transparent_background) and CMYK
@@ -588,6 +593,7 @@ impl Default for RasterOptions {
             output_profile: None,
             intent: None,
             black_point_compensation: false,
+            preserve_black: None,
             proof: None,
             color: ColorModel::Rgb,
             cancel: None,

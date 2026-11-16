@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use color::SampleDepth;
 
 use crate::BackendPolicy;
-use pdf_interp::RenderingIntent;
+use pdf_interp::{PreserveBlack, RenderingIntent};
 
 #[cfg(doc)]
 use crate::{RasterError, RasterSession, render_page_rgb, render_page_rgb_with};
@@ -132,6 +132,12 @@ pub struct RenderParams {
     /// darkest neutral.  Refused without an output profile, and under
     /// absolute colorimetry, which reproduces measured colour.
     pub black_point_compensation: bool,
+    /// The preservation of black in the conversion of a colour given as
+    /// the ink of another CMYK profile to the ink of the session's CMYK
+    /// output profile, or of a soft proof's press; `None` converts it
+    /// colorimetrically.  Refused without a CMYK page and a CMYK output
+    /// profile or a soft proof, and under absolute colorimetry.
+    pub preserve_black: Option<PreserveBlack>,
     /// The colour model of the page: sRGB (the default), or the process
     /// ink of a CMYK device, which [`render_page_canvas`](crate::render_page_canvas)
     /// and [`render_page_bands`](crate::render_page_bands) return as
@@ -187,6 +193,7 @@ impl RenderParams {
             depth: SampleDepth::Eight,
             intent: None,
             black_point_compensation: false,
+            preserve_black: None,
             color: ColorModel::Rgb,
         }
     }
@@ -233,6 +240,14 @@ impl RenderParams {
     #[must_use]
     pub const fn with_black_point_compensation(mut self) -> Self {
         self.black_point_compensation = true;
+        self
+    }
+
+    /// Preserve black by `mode` in the conversion of another CMYK
+    /// profile's ink (see [`preserve_black`](Self::preserve_black)).
+    #[must_use]
+    pub const fn with_preserve_black(mut self, mode: PreserveBlack) -> Self {
+        self.preserve_black = Some(mode);
         self
     }
 

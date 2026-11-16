@@ -254,7 +254,8 @@ fn a_cmyk_profile_separates_like_transicc() {
     }
     let profile = Arc::new(profile);
     let Separation::Profile(press) =
-        OutputProfile::separation(&profile, WorkingSpace::Srgb, None, false).expect("separates")
+        OutputProfile::separation(&profile, WorkingSpace::Srgb, (None, false), None)
+            .expect("separates")
     else {
         panic!("a profile separation")
     };
@@ -304,15 +305,16 @@ fn a_press_separation_takes_each_paint_s_intent_unless_one_is_fixed() {
             .expect("separates")
     };
     let Separation::Profile(own) =
-        OutputProfile::separation(&profile, WorkingSpace::Srgb, None, false).expect("separates")
+        OutputProfile::separation(&profile, WorkingSpace::Srgb, (None, false), None)
+            .expect("separates")
     else {
         panic!("a profile separation")
     };
     let Separation::Profile(fixed) = OutputProfile::separation(
         &profile,
         WorkingSpace::Srgb,
-        Some(RenderingIntent::Saturation),
-        false,
+        (Some(RenderingIntent::Saturation), false),
+        None,
     )
     .expect("separates") else {
         panic!("a profile separation")

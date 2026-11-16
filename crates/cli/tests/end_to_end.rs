@@ -1259,6 +1259,26 @@ fn output_profile_refusals_name_the_conflict() {
             vec!["--working-space", "wide", "--output-profile", rgb],
             "--working-space wide is composited at 16 bits",
         ),
+        (
+            vec!["--preserve-black"],
+            "--preserve-black applies to a CMYK --output-profile and --proof only",
+        ),
+        (
+            vec!["--output-profile", rgb, "--preserve-black=k-plane"],
+            "--preserve-black applies to CMYK ink converted to a CMYK --output-profile's ink",
+        ),
+        (
+            vec![
+                "--output-profile",
+                cmyk_printer.to_str().unwrap(),
+                "--cmyk",
+                "--tiff",
+                "--intent",
+                "absolute",
+                "--preserve-black",
+            ],
+            "--preserve-black does not apply to --intent absolute",
+        ),
     ] {
         let out = rrocket(dir.path(), &input, &args);
         assert!(!out.status.success(), "{args:?} succeeded");
@@ -1894,4 +1914,57 @@ fn ocr_prep_flags_are_refused_where_they_cannot_apply() {
         args.extend_from_slice(flags);
         assert_success(&rrocket(dir.path(), &input, &args));
     }
+}
+
+/// A 20 × 10 pt page in `[/ICCBased <printer-cmyk-v4>]`: black ink alone
+/// at 80 %, then a blue of the four inks.
+fn icc_cmyk_black_pdf() -> Vec<u8> {
+    let press = std::fs::read(icc_fixture("printer-cmyk-v4.icc")).expect("read profile");
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 10] /Contents 4 0 R \
+          /Resources << /ColorSpace << /P [/ICCBased 5 0 R] >> >> >>"
+            .to_vec(),
+        stream_object(
+            "",
+            b"/P cs 0 0 0 0.8 sc 0 0 10 10 re f 0.8 0.5 0 0.5 sc 10 0 10 10 re f",
+        ),
+        stream_object("/N 4", &press),
+    ])
+}
+
+/// Converted to another press, black ink alone becomes four-colour black;
+/// `--preserve-black` keeps it black ink alone and the blue as it was, and
+/// `=k-plane` also gives the blue the K of the K → K curve, not the
+/// four-colour conversion's.
+#[test]
+fn preserve_black_keeps_black_ink_alone() {
+    let (dir, input) = workdir(&icc_cmyk_black_pdf());
+    let press = icc_fixture("printer-cmyk-v2.icc");
+    let ink = |extra: &[&str]| {
+        let mut args = vec!["--cmyk", "--tiff", "-r", "72", "--output-profile"];
+        args.push(press.to_str().unwrap());
+        args.extend_from_slice(extra);
+        let out = rrocket(dir.path(), &input, &args);
+        assert_success(&out);
+        let (_, _, samples) = cmyk_tiff(&dir.path().join("out-1.tif"));
+        let at = |x: usize| -> [u16; 4] { samples[(5 * 20 + x) * 4..][..4].try_into().unwrap() };
+        (at(5), at(15))
+    };
+    let (black, blue) = ink(&[]);
+    assert!(
+        black[..3].iter().all(|&v| v > 0),
+        "four-colour black {black:?}"
+    );
+    let (only, only_blue) = ink(&["--preserve-black"]);
+    assert_eq!(only[..3], [0, 0, 0], "black ink alone {only:?}");
+    assert!(only[3] > 0);
+    assert_eq!(only_blue, blue, "k-only leaves other colours");
+    let (plane, plane_blue) = ink(&["--preserve-black=k-plane"]);
+    assert_eq!(plane, only);
+    assert!(
+        plane_blue[3] != blue[3],
+        "k-plane {plane_blue:?} against {blue:?}"
+    );
 }

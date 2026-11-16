@@ -15,12 +15,16 @@
 //! the two blacks: the source's as a conversion source finds it, the
 //! output profile's as a separation to it does ([`super::source`]), which
 //! a perceptual or saturation conversion to a version 4 profile always
-//! compensates to.  The conversion is tabulated on a
-//! grid of [`LINK_SPAN`] cells along each ink axis
+//! compensates to.  Under black preservation the colorimetric conversion
+//! is that of [`super::preserve`]'s K → K map and K-plane solve, under
+//! every intent but absolute colorimetry.  The conversion is tabulated on
+//! a grid of [`LINK_SPAN`] cells along each ink axis
 //! ([`crate::pcs::grid::GridTable`]).
 
 use moxcms::{ColorProfile, RenderingIntent};
 
+use super::preserve::Preservation;
+use crate::PreserveBlack;
 use crate::pcs::D50;
 use crate::pcs::black::{is_v4, source_black};
 use crate::pcs::grid::GridTable;
@@ -30,18 +34,33 @@ use crate::pcs::lut::{Direction, ProfileLut};
 pub(super) const LINK_SPAN: u32 = 16;
 
 /// The conversion of the ink of `source` to the ink of `dest` under
-/// `intent`, with black-point compensation when `bpc`; `None` when either
-/// profile lacks the table of the intent or a black point cannot be
-/// found.
+/// `intent`, with black-point compensation when `bpc` and black preserved
+/// by `preserve`; `None` when either profile lacks the table of the
+/// intent or a black point cannot be found.  A preservation that cannot
+/// be built (see [`Preservation::new`]) is logged, and the conversion is
+/// colorimetric.
 pub(super) fn tabulate(
     source: &ColorProfile,
     dest: &ColorProfile,
     intent: RenderingIntent,
     bpc: bool,
+    preserve: Option<PreserveBlack>,
 ) -> Option<GridTable<4>> {
     let to_pcs = ProfileLut::new(source, intent, Direction::ToPcs, 4)?;
     let to_device = ProfileLut::new(dest, intent, Direction::ToDevice, 4)?;
     let adjust = pcs_adjustment(source, dest, intent, bpc)?;
+    let preservation = match preserve {
+        Some(mode) if intent != RenderingIntent::AbsoluteColorimetric => {
+            let preservation = Preservation::new(source, dest, intent, mode);
+            if preservation.is_none() {
+                log::warn!(
+                    "rasterrocket-interp: no K → K curve between a CMYK profile and the output                      profile under {intent:?}; its colours convert without preserving black"
+                );
+            }
+            preservation
+        }
+        _ => None,
+    };
     GridTable::tabulate(LINK_SPAN, 4, |inks, out| {
         for (ink, o) in inks
             .as_chunks::<4>()
@@ -49,7 +68,12 @@ pub(super) fn tabulate(
             .iter()
             .zip(out.as_chunks_mut::<4>().0)
         {
-            to_device.to_device(adjust.apply(to_pcs.to_pcs(ink)), o);
+            let colorimetric =
+                |o: &mut [f64; 4]| to_device.to_device(adjust.apply(to_pcs.to_pcs(ink)), o);
+            match &preservation {
+                Some(p) => p.convert(ink, colorimetric, o),
+                None => colorimetric(o),
+            }
         }
         Ok::<(), std::convert::Infallible>(())
     })

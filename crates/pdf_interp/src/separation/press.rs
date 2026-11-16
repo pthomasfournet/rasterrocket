@@ -14,15 +14,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ProfileSeparation;
-use crate::{OutputProfile, OutputProfileError, RenderingIntent, WorkingSpace};
+use crate::{OutputProfile, OutputProfileError, PreserveBlack, RenderingIntent, WorkingSpace};
 
 /// The separation of colours of a working space through a CMYK output
-/// profile under each rendering intent, with black-point compensation or
-/// without.
+/// profile under each rendering intent.
+///
+/// It compensates the black point or not, and preserves black, or not, in
+/// colours given as the ink of another CMYK profile.
 pub struct PressSeparation {
     profile: Arc<OutputProfile>,
     space: WorkingSpace,
     bpc: bool,
+    preserve: Option<PreserveBlack>,
     /// The intent every paint separates under, when the session fixes one.
     fixed: Option<RenderingIntent>,
     /// The table of `fixed`, else of relative colorimetry.
@@ -36,6 +39,7 @@ impl std::fmt::Debug for PressSeparation {
         f.debug_struct("PressSeparation")
             .field("space", &self.space)
             .field("bpc", &self.bpc)
+            .field("preserve", &self.preserve)
             .field("fixed", &self.fixed)
             .finish_non_exhaustive()
     }
@@ -48,6 +52,7 @@ impl PartialEq for PressSeparation {
         Arc::ptr_eq(&self.profile, &other.profile)
             && self.space == other.space
             && self.bpc == other.bpc
+            && self.preserve == other.preserve
             && self.fixed == other.fixed
     }
 }
@@ -57,7 +62,8 @@ impl Eq for PressSeparation {}
 impl PressSeparation {
     /// The separation through `profile` of colours of `space`, under
     /// `fixed` for every paint when given, else under each paint's intent,
-    /// with black-point compensation when `bpc`; the table of `fixed`, else
+    /// with black-point compensation when `bpc`, preserving the black of
+    /// another CMYK profile's ink by `preserve`; the table of `fixed`, else
     /// of relative colorimetry, is tabulated now.
     ///
     /// # Errors
@@ -68,6 +74,7 @@ impl PressSeparation {
         space: WorkingSpace,
         fixed: Option<RenderingIntent>,
         bpc: bool,
+        preserve: Option<PreserveBlack>,
     ) -> Result<Self, OutputProfileError> {
         let first = profile.separation_table(
             space,
@@ -78,6 +85,7 @@ impl PressSeparation {
             profile,
             space,
             bpc,
+            preserve,
             fixed,
             first,
             warned: AtomicBool::new(false),
@@ -100,6 +108,13 @@ impl PressSeparation {
     #[must_use]
     pub const fn bpc(&self) -> bool {
         self.bpc
+    }
+
+    /// The preservation of black in the conversion of another CMYK
+    /// profile's ink to the output profile's.
+    #[must_use]
+    pub const fn preserve(&self) -> Option<PreserveBlack> {
+        self.preserve
     }
 
     /// The intent a paint under `intent` separates under: the session's,

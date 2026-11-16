@@ -182,7 +182,7 @@ pub(crate) fn lab_l_to_y(l: f64) -> f64 {
 }
 
 /// The CIE lightness of relative luminance `y`.
-fn y_to_lab_l(y: f64) -> f64 {
+pub(crate) fn y_to_lab_l(y: f64) -> f64 {
     let f = if y > (6.0f64 / 29.0).powi(3) {
         y.cbrt()
     } else {

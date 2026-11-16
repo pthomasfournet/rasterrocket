@@ -26,6 +26,7 @@
 //! tabulated by [`OutputProfile::separation_table`].
 
 mod link;
+mod preserve;
 mod proof;
 mod separate;
 mod source;
@@ -45,7 +46,7 @@ use raster::Bitmap;
 use crate::pcs::grid::GridTable;
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
 use crate::separation::{PROFILE_GRID, PressSeparation, ProfileSeparation, Separation};
-use crate::{RenderingIntent, WorkingSpace};
+use crate::{PreserveBlack, RenderingIntent, WorkingSpace};
 
 /// The colour space of an output profile's device values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +147,10 @@ type Tabulated = Result<Arc<ProfileSeparation>, OutputProfileError>;
 /// compensation, tabulated on first use; `None` when it cannot be built.
 type Link = Arc<OnceLock<Option<Arc<GridTable<4>>>>>;
 
+/// The key of a [`Link`]: the source's fingerprint, the intent,
+/// compensation and black preservation.
+type LinkKey = (u64, RenderingIntent, bool, Option<PreserveBlack>);
+
 /// An ICC profile pages are converted to and tagged with.
 pub struct OutputProfile {
     bytes: Arc<[u8]>,
@@ -156,8 +161,8 @@ pub struct OutputProfile {
     /// The profile's [`crate::pcs::tag_fingerprint`].
     fingerprint: u64,
     /// The conversions to the profile's ink of the ink of other CMYK
-    /// profiles, by their fingerprint, intent and compensation.
-    links: Mutex<HashMap<(u64, RenderingIntent, bool), Link>>,
+    /// profiles, by [`LinkKey`].
+    links: Mutex<HashMap<LinkKey, Link>>,
 }
 
 impl std::fmt::Debug for OutputProfile {
@@ -300,8 +305,9 @@ impl OutputProfile {
     /// The separation of colours from the working space `space` to the CMYK
     /// of `profile`, under `intent` for every paint when given, else under
     /// each paint's own intent (see [`PressSeparation`]), with black-point
-    /// compensation when `bpc`.  The table of `intent`, else of relative
-    /// colorimetry, is tabulated now.
+    /// compensation when `bpc`; a colour given as the ink of another CMYK
+    /// profile converts to this one's preserving black by `preserve`.  The
+    /// table of `intent`, else of relative colorimetry, is tabulated now.
     ///
     /// # Errors
     ///
@@ -309,10 +315,10 @@ impl OutputProfile {
     pub fn separation(
         profile: &Arc<Self>,
         space: WorkingSpace,
-        intent: Option<RenderingIntent>,
-        bpc: bool,
+        (intent, bpc): (Option<RenderingIntent>, bool),
+        preserve: Option<PreserveBlack>,
     ) -> Result<Separation, OutputProfileError> {
-        PressSeparation::new(Arc::clone(profile), space, intent, bpc)
+        PressSeparation::new(Arc::clone(profile), space, intent, bpc, preserve)
             .map(|press| Separation::Profile(Arc::new(press)))
     }
 
@@ -357,16 +363,17 @@ impl OutputProfile {
     /// The conversion of the ink of the CMYK profile `source`, of
     /// fingerprint `fingerprint` ([`crate::pcs::tag_fingerprint`]), to
     /// this CMYK profile's ink under `intent`, with black-point
-    /// compensation when `bpc` (see [`link`]), tabulated on first use and
-    /// kept; `None` for a source of this profile's tags, whose ink is this
-    /// profile's already, for a profile that is not CMYK, and when the
-    /// conversion cannot be built, which is logged once.
+    /// compensation when `bpc` and black preserved by `preserve` (see
+    /// [`link`]), tabulated on first use and kept; `None` for a source of
+    /// this profile's tags, whose ink is this profile's already, for a
+    /// profile that is not CMYK, and when the conversion cannot be built,
+    /// which is logged once.
     pub(crate) fn cmyk_link(
         &self,
         source: &ColorProfile,
         fingerprint: u64,
-        intent: RenderingIntent,
-        bpc: bool,
+        (intent, bpc): (RenderingIntent, bool),
+        preserve: Option<PreserveBlack>,
     ) -> Option<Arc<GridTable<4>>> {
         if self.space != OutputSpace::Cmyk
             || source.color_space != DataColorSpace::Cmyk
@@ -379,10 +386,14 @@ impl OutputProfile {
                 .links
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(links.entry((fingerprint, intent, bpc)).or_default())
+            Arc::clone(
+                links
+                    .entry((fingerprint, intent, bpc, preserve))
+                    .or_default(),
+            )
         };
         cell.get_or_init(|| {
-            let table = link::tabulate(source, &self.profile, intent.cms(), bpc);
+            let table = link::tabulate(source, &self.profile, intent.cms(), bpc, preserve);
             if table.is_none() {
                 log::warn!(
                     "rasterrocket-interp: no {intent} conversion of a CMYK profile's ink to the \

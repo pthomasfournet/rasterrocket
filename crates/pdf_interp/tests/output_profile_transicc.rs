@@ -15,7 +15,8 @@
 //! printed through the output profile and decoded to Lab; under every
 //! intent, with and without black-point compensation, in both directions
 //! between a printer replacing the whole gray component and one replacing
-//! half of it.
+//! half of it.  With black preserved the same chart is held to
+//! `transicc`'s K-preserving intents ([`black_is_preserved_as_transicc_preserves_it`]).
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket-interp --test output_profile_transicc -- --ignored`.
@@ -31,7 +32,9 @@ use common::{
 };
 use raster::Bitmap;
 use rasterrocket_interp::renderer::{CanvasBuffers, FinishedCanvas, PageRenderer, PageView};
-use rasterrocket_interp::{CanvasRequest, OutputProfile, RenderingIntent, WorkingSpace};
+use rasterrocket_interp::{
+    CanvasRequest, OutputProfile, PreserveBlack, RenderingIntent, WorkingSpace,
+};
 
 #[test]
 fn ciede2000_matches_published_pairs() {
@@ -451,11 +454,13 @@ fn chart() -> Vec<[f64; 4]> {
 }
 
 /// The inks of `chart`, an image in the profile `source`, painted on a
-/// 16-bit CMYK page separated through `dest` under `intent` and `bpc`.
+/// 16-bit CMYK page separated through `dest` under `intent` and `bpc`,
+/// black preserved by `preserve`.
 fn painted(
     source: &[u8],
     dest: &Arc<OutputProfile>,
     (intent, bpc): (RenderingIntent, bool),
+    preserve: Option<PreserveBlack>,
     chart: &[[f64; 4]],
 ) -> Vec<Vec<f64>> {
     let n = chart.len();
@@ -489,7 +494,8 @@ fn painted(
         .expect("a page");
     let view = PageView::whole(&geometry, (1.0, 1.0));
     let separation =
-        OutputProfile::separation(dest, WorkingSpace::Srgb, Some(intent), bpc).expect("separates");
+        OutputProfile::separation(dest, WorkingSpace::Srgb, (Some(intent), bpc), preserve)
+            .expect("separates");
     let request = CanvasRequest::Cmyk {
         overprint: false,
         separation,
@@ -554,7 +560,7 @@ fn icc_cmyk_converts_to_another_press_as_transicc_converts_it() {
                 }
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 let theirs = decode(&transicc(&args, &lines(&rows, 1.0)));
-                let ours = decode(&painted(&source, &output, (intent, bpc), &chart));
+                let ours = decode(&painted(&source, &output, (intent, bpc), None, &chart));
                 let (worst, at) = ours
                     .iter()
                     .zip(&theirs)
@@ -578,4 +584,198 @@ fn icc_cmyk_converts_to_another_press_as_transicc_converts_it() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Black preservation between the two test printers against `transicc`'s
+/// K-only (`-t10` to `-t12`) and K-plane (`-t13` to `-t15`) preserving
+/// intents, both inks printed through the output profile and decoded to
+/// Lab.  A black-ink patch converts to black ink alone.  Under K-only
+/// every patch lies within [`MAX_DELTA_E`] of `transicc`'s ink and its K
+/// within [`MAX_K_DIFFERENCE`].  Under K-plane, [`MIN_AGREEING`] of the
+/// patches lie within [`MAX_DELTA_E`]; on each other one ours lies no
+/// farther from the colorimetric conversion's colour than `transicc`'s,
+/// whose Newton iteration stops at the first step that does not reduce
+/// the error, its ink then the colorimetric `C M Y` with the preserved K.
+/// Of the patches whose K `transicc` moves off the colorimetric
+/// conversion's, all take the same K under K-only and [`MIN_HELD`] under
+/// K-plane: where the preserved K cannot print the colour, ours keeps the
+/// colorimetric ink, and `transicc` keeps the preserved K or the
+/// colorimetric ink by whether its Jacobian came out singular.  Perceptual and
+/// saturation without compensation to the version 4 printer are printed
+/// only: Little CMS compensates the black of a version 4 destination under
+/// those intents, but not under its K-preserving ones.
+#[test]
+#[ignore = "needs transicc (liblcms2-utils)"]
+fn black_is_preserved_as_transicc_preserves_it() {
+    /// The share of patches within [`MAX_DELTA_E`] under K-plane.
+    const MIN_AGREEING: f64 = 0.95;
+    /// The share of the patches whose K `transicc` moves off the
+    /// colorimetric conversion's that take its K under K-plane.
+    const MIN_HELD: f64 = 0.85;
+    let chart = chart();
+    let rows: Vec<Vec<f64>> = chart
+        .iter()
+        .map(|p| p.iter().map(|v| v * 100.0).collect())
+        .collect();
+    let mut failures = Vec::new();
+    for (from, to) in [
+        ("printer-cmyk-v4.icc", "printer-cmyk-v2.icc"),
+        ("printer-cmyk-v2.icc", "printer-cmyk-v4.icc"),
+    ] {
+        let (from_file, to_file) = (fixture(from), fixture(to));
+        let source = std::fs::read(&from_file).unwrap();
+        let output = Arc::new(OutputProfile::from_bytes(std::fs::read(&to_file).unwrap()).unwrap());
+        let (src, dst) = (from_file.to_str().unwrap(), to_file.to_str().unwrap());
+        let decode =
+            |ink: &[Vec<f64>]| transicc(&[&format!("-i{dst}"), "-o*Lab", "-t1"], &lines(ink, 1.0));
+        let convert = |code: u32, bpc: bool| {
+            let mut args = vec![format!("-i{src}"), format!("-o{dst}"), format!("-t{code}")];
+            if bpc {
+                args.push("-b".to_owned());
+            }
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let ink = transicc(&args, &lines(&rows, 1.0));
+            let lab = decode(&ink);
+            (ink, lab)
+        };
+        for (mode, base) in [(PreserveBlack::KOnly, 10), (PreserveBlack::KPlane, 13)] {
+            for (offset, intent) in [
+                (0, RenderingIntent::Perceptual),
+                (1, RenderingIntent::RelativeColorimetric),
+                (2, RenderingIntent::Saturation),
+            ] {
+                for bpc in [false, true] {
+                    let case = format!("{from} → {to} {mode:?} {intent} bpc {bpc}");
+                    let claimed =
+                        bpc || intent == RenderingIntent::RelativeColorimetric || to.contains("v2");
+                    let ink = painted(&source, &output, (intent, bpc), Some(mode), &chart);
+                    let lab = decode(&ink);
+                    let stats = Preserved::measure(
+                        &chart,
+                        (&ink, &lab),
+                        &convert(base + offset, bpc),
+                        &convert(offset, bpc),
+                    );
+                    eprintln!("{case}: {stats}");
+                    let (agreement, holding) = match mode {
+                        PreserveBlack::KOnly => (1.0, 1.0),
+                        PreserveBlack::KPlane => (MIN_AGREEING, MIN_HELD),
+                    };
+                    let k_only = mode == PreserveBlack::KOnly;
+                    if !stats.black_mixed.is_empty()
+                        || claimed
+                            && (stats.agreeing() < agreement
+                                || stats.held() < holding
+                                || k_only && stats.k_worst > MAX_K_DIFFERENCE
+                                || !stats.farther.is_empty())
+                    {
+                        failures.push(format!("{case}: {stats}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The largest difference of K, in percent of full ink, at which two
+/// conversions agree on a patch's K.
+const MAX_K_DIFFERENCE: f64 = 0.1;
+
+/// How a black-preserving conversion of a chart compares with
+/// `transicc`'s, the inks in percent and their colours in Lab.
+struct Preserved {
+    patches: usize,
+    /// Patches within [`MAX_DELTA_E`] of `transicc`'s.
+    within: usize,
+    /// The largest difference and its patch.
+    worst: (f64, [f64; 4]),
+    /// The largest difference of K among the patches within.
+    k_worst: f64,
+    /// Patches whose K `transicc` moves off its colorimetric conversion's.
+    moved: u32,
+    /// Those of them whose K ours shares.
+    shared: u32,
+    /// Patches outside [`MAX_DELTA_E`] where ours lies farther from the
+    /// colorimetric conversion's colour than `transicc`'s.
+    farther: Vec<[f64; 4]>,
+    /// Black-ink patches whose ink holds another ink.
+    black_mixed: Vec<[f64; 4]>,
+}
+
+impl Preserved {
+    /// The comparison on `chart` of `ours` with `theirs`, both an ink and
+    /// its Lab per patch, given `transicc`'s colorimetric conversion.
+    fn measure(
+        chart: &[[f64; 4]],
+        (ink, lab): (&[Vec<f64>], &[Vec<f64>]),
+        theirs: &(Vec<Vec<f64>>, Vec<Vec<f64>>),
+        colorimetric: &(Vec<Vec<f64>>, Vec<Vec<f64>>),
+    ) -> Self {
+        let mut stats = Self {
+            patches: chart.len(),
+            within: 0,
+            worst: (0.0, [0.0; 4]),
+            k_worst: 0.0,
+            moved: 0,
+            shared: 0,
+            farther: Vec::new(),
+            black_mixed: Vec::new(),
+        };
+        for (i, patch) in chart.iter().enumerate() {
+            let de = delta_e00(&lab[i], &theirs.1[i]);
+            if de > stats.worst.0 {
+                stats.worst = (de, *patch);
+            }
+            if patch[..3] == [0.0; 3] && ink[i][..3].iter().any(|&v| v > 0.0) {
+                stats.black_mixed.push(*patch);
+            }
+            let k_difference = (ink[i][3] - theirs.0[i][3]).abs();
+            if (theirs.0[i][3] - colorimetric.0[i][3]).abs() > MAX_K_DIFFERENCE {
+                stats.moved += 1;
+                stats.shared += u32::from(k_difference <= MAX_K_DIFFERENCE);
+            }
+            if de <= MAX_DELTA_E {
+                stats.within += 1;
+                stats.k_worst = stats.k_worst.max(k_difference);
+            } else if delta_e00(&lab[i], &colorimetric.1[i])
+                > delta_e00(&theirs.1[i], &colorimetric.1[i]) + 0.1
+            {
+                stats.farther.push(*patch);
+            }
+        }
+        stats
+    }
+
+    /// The share of the patches within [`MAX_DELTA_E`].
+    fn agreeing(&self) -> f64 {
+        #[expect(clippy::cast_precision_loss, reason = "a chart has 642 patches")]
+        let share = self.within as f64 / self.patches as f64;
+        share
+    }
+
+    /// The share of the patches `transicc` moves whose K ours shares.
+    fn held(&self) -> f64 {
+        f64::from(self.shared) / f64::from(self.moved.max(1))
+    }
+}
+
+impl std::fmt::Display for Preserved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of {} patches within ΔE00 {MAX_DELTA_E}, worst {:.3} at {:?}; K within \
+             {:.3}% on those; K of {} of the {} patches transicc moves; farther from \
+             colorimetry at {:?}; black ink mixed at {:?}",
+            self.within,
+            self.patches,
+            self.worst.0,
+            self.worst.1,
+            self.k_worst,
+            self.shared,
+            self.moved,
+            self.farther,
+            self.black_mixed
+        )
+    }
 }

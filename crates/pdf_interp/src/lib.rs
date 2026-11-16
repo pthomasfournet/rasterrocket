@@ -32,7 +32,9 @@ pub mod unsupported;
 pub mod working_space;
 
 pub use form_type::{FormType, form_type};
-pub use intent::{ColourIntent, ColourTarget, IntentSet, ProofIntent, RenderingIntent};
+pub use intent::{
+    ColourIntent, ColourTarget, IntentSet, PreserveBlack, ProofIntent, RenderingIntent,
+};
 pub use optional_content::{OptionalContent, RenderPurpose};
 pub use output_intent::{
     OutputIntent, OutputIntentError, document_output_intent, page_output_intent,

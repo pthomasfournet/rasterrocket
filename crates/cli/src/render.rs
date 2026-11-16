@@ -138,6 +138,9 @@ pub(crate) fn render_page(
     if args.bpc {
         params = params.with_black_point_compensation();
     }
+    if let Some(mode) = args.preserve_black {
+        params = params.with_preserve_black(mode.into());
+    }
     if args.transparent {
         params = params.with_transparent_background();
     }
