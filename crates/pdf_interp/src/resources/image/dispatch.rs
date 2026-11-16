@@ -102,8 +102,8 @@ pub(super) struct DecodedStream {
 /// its stored samples (see `decode_raw`).
 ///
 /// `draw_size` is the device-pixel extent the image is drawn at, for a
-/// codec that can reconstruct at reduced resolution; `None` decodes in
-/// full.  `dct_cache` selects the device image cache entry of a
+/// codec that can reconstruct at reduced resolution and for the device
+/// decoders that decline a reduced draw; `None` decodes in full.  `dct_cache` selects the device image cache entry of a
 /// `DCTDecode` stream.  The error string names the stage that failed.
 pub(super) fn decode_image_stream<
     #[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBackend,
@@ -164,6 +164,8 @@ pub(super) fn decode_image_stream<
             ctx,
             #[cfg(feature = "gpu-jpeg-huffman")]
             jpeg_gpu,
+            #[cfg(feature = "gpu-jpeg-huffman")]
+            draw_size,
             #[cfg(feature = "cache")]
             dct_cache,
         ),

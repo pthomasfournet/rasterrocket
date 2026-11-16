@@ -795,11 +795,13 @@ pub(crate) fn reduced_draw_size(
     ImageMasks::of(doc, dict, is_mask).reduced_draw_size(draw_size)
 }
 
-/// Whether the CPU decode of a JPEG 2000 image of `full` pixels drawn at
-/// `draw` skips a resolution level: each level halves both axes, and the
-/// decoder keeps every level that leaves the image at least `draw` on both.
-#[cfg(feature = "nvjpeg2k")]
-pub(crate) const fn jpx_draw_reduces((w, h): (u32, u32), (dw, dh): (u32, u32)) -> bool {
+/// Whether an image of `full` pixels drawn at `draw` is drawn at half its
+/// size or less along both axes.  The device decoders reconstruct at full
+/// resolution, and decline such a draw: its samples are resampled on the
+/// host to at most a quarter of their number, and the CPU JPEG 2000
+/// decoder skips at least one resolution level (each halves both axes).
+#[cfg(any(feature = "nvjpeg2k", feature = "gpu-jpeg-huffman"))]
+pub(crate) const fn draw_halves((w, h): (u32, u32), (dw, dh): (u32, u32)) -> bool {
     dw.saturating_mul(2) <= w && dh.saturating_mul(2) <= h
 }
 

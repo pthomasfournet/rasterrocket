@@ -29,6 +29,10 @@ use gpu::cache::{
 /// them: an Adobe JPEG that stores inverted ink carries `/Decode [1 0 1 0 1
 /// 0 1 0]`, which the colour conversion applies, so no inversion is implied
 /// by the JPEG itself.  A YCCK stream is converted to CMYK here.
+///
+/// `draw_size` is the device-pixel extent of the draw, when known; the GPU
+/// parallel-Huffman decoder is not used for a draw at half the frame's size
+/// or less (see [`frame_draw_halves`]).
 #[expect(
     clippy::too_many_lines,
     reason = "GPU dispatch paths (nvjpeg, vaapi) plus the CPU decode path are each short; \
@@ -58,6 +62,7 @@ pub(in crate::resources::image) fn decode_dct<
     #[cfg(feature = "gpu-jpeg-huffman")] jpeg_gpu: Option<
         &mut gpu::jpeg_decoder::JpegGpuDecoder<B>,
     >,
+    #[cfg(feature = "gpu-jpeg-huffman")] draw_size: Option<(u32, u32)>,
     #[cfg(feature = "cache")] cache_ctx: Option<&DctCacheCtx<'_>>,
 ) -> Option<Samples> {
     use zune_core::bytestream::ZCursor;
@@ -146,7 +151,7 @@ pub(in crate::resources::image) fn decode_dct<
 
     // ── GPU parallel-Huffman path ─────────────────────────────────────────────
     #[cfg(feature = "gpu-jpeg-huffman")]
-    if let Some(dec) = jpeg_gpu {
+    if let Some(dec) = jpeg_gpu.filter(|_| !frame_draw_halves(data, draw_size)) {
         let area = pdf_w.saturating_mul(pdf_h);
         // The decoder sizes its device and host RGBA buffers from the frame
         // header, so the header's dimensions must pass the decode budget
@@ -409,6 +414,18 @@ fn frame_draw_reduces(data: &[u8], draw: Option<(u32, u32)>) -> bool {
     })
 }
 
+/// Whether the JPEG `data`, at the dimensions of its frame header, is drawn
+/// over `draw` device pixels at half its size or less (see
+/// [`draw_halves`](crate::resources::image::draw_halves)); the GPU
+/// parallel-Huffman decoder declines such a draw.  A stream without a frame
+/// header is not.
+#[cfg(feature = "gpu-jpeg-huffman")]
+fn frame_draw_halves(data: &[u8], draw: Option<(u32, u32)>) -> bool {
+    draw.zip(jpeg_sof(data)).is_some_and(|(draw, sof)| {
+        crate::resources::image::draw_halves((u32::from(sof.width), u32::from(sof.height)), draw)
+    })
+}
+
 /// Probe the cache.  On a hit returns the device-resident
 /// `ImageDescriptor`; on a miss returns `Err(ContentHash)` so the
 /// caller can pass the already-computed hash to
@@ -608,6 +625,27 @@ mod cache_tests {
         assert!(!frame_draw_reduces(FRAME, Some((640, 480))));
         assert!(!frame_draw_reduces(FRAME, None));
         assert!(!frame_draw_reduces(b"not a jpeg", Some((1, 1))));
+    }
+}
+
+#[cfg(all(test, feature = "gpu-jpeg-huffman"))]
+mod huffman_dispatch_tests {
+    use super::frame_draw_halves;
+
+    /// SOI and a baseline frame header of 64 × 48 samples.
+    const FRAME: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x30, 0x00, 0x40, 0x01, 0x01, 0x11, 0x00,
+    ];
+
+    #[test]
+    fn the_gpu_huffman_decode_declines_a_draw_at_half_size_or_less() {
+        assert!(frame_draw_halves(FRAME, Some((32, 24))));
+        assert!(frame_draw_halves(FRAME, Some((8, 6))));
+        assert!(!frame_draw_halves(FRAME, Some((33, 24))));
+        assert!(!frame_draw_halves(FRAME, Some((32, 25))));
+        assert!(!frame_draw_halves(FRAME, Some((64, 48))));
+        assert!(!frame_draw_halves(FRAME, None));
+        assert!(!frame_draw_halves(b"not a jpeg", Some((1, 1))));
     }
 }
 

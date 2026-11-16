@@ -31,6 +31,8 @@ fn decode(data: &[u8], pdf_w: u32, pdf_h: u32) -> Option<Samples> {
         &mut ImageDecodeCtx::cpu(&doc),
         #[cfg(feature = "gpu-jpeg-huffman")]
         None::<&mut gpu::jpeg_decoder::JpegGpuDecoder<gpu::backend::cuda::CudaBackend>>,
+        #[cfg(feature = "gpu-jpeg-huffman")]
+        None,
         #[cfg(feature = "cache")]
         None,
     )

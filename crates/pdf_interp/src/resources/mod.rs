@@ -729,7 +729,7 @@ impl<'doc> PageResources<'doc> {
     /// resource `name` drawn at `draw_size`: an image with terminal filter
     /// `JPXDecode` and at least [`image::jpx_threshold`] pixels by
     /// its dictionary, whose CPU decode would not skip a resolution level
-    /// (see `jpx_draw_reduces`) at the size its masks let it reduce to
+    /// (see `draw_halves`) at the size its masks let it reduce to
     /// (see `reduced_draw_size`).
     #[cfg(feature = "nvjpeg2k")]
     #[must_use]
@@ -751,7 +751,7 @@ impl<'doc> PageResources<'doc> {
             return false;
         };
         !image::reduced_draw_size(self.doc, dict, draw_size)
-            .is_some_and(|draw| image::jpx_draw_reduces(full, draw))
+            .is_some_and(|draw| image::draw_halves(full, draw))
     }
 
     /// The object the `XObject` resource `name` refers to, when the entry is
