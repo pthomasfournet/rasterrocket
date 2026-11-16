@@ -224,45 +224,85 @@ pub(super) fn corner_vertex<const N: usize, S: CornerSource<N>>(
 /// control points span at most [`MIN_SUBDIVISION_EXTENT`] pixels (the patch
 /// lies in their convex hull); or when [`MAX_PATCH_DEPTH`] is reached.
 /// The work stack is explicit, so the native stack depth is constant.
+///
+/// Where the surface folds over itself, a device point is the image of the
+/// parameter point with the largest `v`, then the largest `u` (PDF
+/// §8.7.4.5.7).  The leaves, parameter squares whose origins lie on the
+/// grid of spacing `2^-MAX_PATCH_DEPTH`, are emitted in increasing order of
+/// their origin's `v`, then `u`, so that a later leaf paints over an
+/// earlier one; a patch has at most `4^MAX_PATCH_DEPTH` leaves.
 pub(super) fn tessellate_patch<const N: usize, S: CornerSource<N>>(
     source: &S,
     patch: Patch<S::Corner>,
     out: &mut TriangleSink<N, S::Sample>,
 ) {
-    // Pre-allocate the work stack.  In a DFS traversal of a 4-ary tree of depth D,
-    // at most 3*D+1 nodes are simultaneously live on the stack (3 siblings waiting
-    // at each level plus the children just pushed).  For MAX_PATCH_DEPTH=6 that is 19;
-    // 24 is a safe round-up.
-    let mut stack: Vec<(Patch<S::Corner>, u8)> =
+    // In a DFS traversal of a 4-ary tree of depth D, at most 3*D+1 nodes are
+    // live on the stack (3 siblings waiting at each level plus the children
+    // just pushed).
+    let mut stack: Vec<(Patch<S::Corner>, ParamSquare)> =
         Vec::with_capacity(3 * MAX_PATCH_DEPTH as usize + 1);
-    stack.push((patch, 0));
+    stack.push((patch, ParamSquare::UNIT));
+    let mut leaves = Vec::new();
     let limit = color_delta::<S::Sample>();
 
-    while !out.is_full()
-        && let Some((p, depth)) = stack.pop()
-    {
-        if depth >= MAX_PATCH_DEPTH
+    while let Some((p, square)) = stack.pop() {
+        if square.depth >= MAX_PATCH_DEPTH
             || (corner_spread(&p) <= limit && is_flat(&p))
             || extent(p.xy.into_iter().flatten()) <= MIN_SUBDIVISION_EXTENT
         {
-            // Leaf: emit 2 triangles covering the patch quad from its 4 corners.
-            let v00 = corner_vertex(source, &p, 0, 0);
-            let v01 = corner_vertex(source, &p, 0, 1);
-            let v10 = corner_vertex(source, &p, 1, 0);
-            let v11 = corner_vertex(source, &p, 1, 1);
-            out.push([v00, v01, v10]);
-            out.push([v01, v11, v10]);
+            let corners =
+                [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(u, v)| corner_vertex(source, &p, u, v));
+            leaves.push(((square.v, square.u), corners));
         } else {
-            // Split into 4 sub-patches and push them.
             let (pu0, pu1) = split_patch_u(&p);
             let (p00, p01) = split_patch_v(&pu0);
             let (p10, p11) = split_patch_v(&pu1);
-            let nd = depth + 1;
-            stack.push((p00, nd));
-            stack.push((p01, nd));
-            stack.push((p10, nd));
-            stack.push((p11, nd));
+            let [s00, s01, s10, s11] = square.quarters();
+            stack.extend([(p00, s00), (p01, s01), (p10, s10), (p11, s11)]);
         }
+    }
+
+    // The leaves are disjoint squares, so their origins are distinct.
+    leaves.sort_unstable_by_key(|&(key, _)| key);
+    for (_, [v00, v01, v10, v11]) in leaves {
+        if out.is_full() {
+            break;
+        }
+        // Two triangles covering the leaf's corner quadrilateral.
+        out.push([v00, v01, v10]);
+        out.push([v01, v11, v10]);
+    }
+}
+
+/// A square of a patch's parameter space: origin `(u, v)` in units of
+/// `2^-MAX_PATCH_DEPTH`, side `2^-depth`.
+#[derive(Clone, Copy)]
+struct ParamSquare {
+    u: u8,
+    v: u8,
+    depth: u8,
+}
+
+impl ParamSquare {
+    /// The unit square.
+    const UNIT: Self = Self {
+        u: 0,
+        v: 0,
+        depth: 0,
+    };
+
+    /// The four quarters, in the order of the sub-patches of
+    /// [`split_patch_u`] then [`split_patch_v`]: `(u, v)` low/low,
+    /// low/high, high/low, high/high.  `depth` is below [`MAX_PATCH_DEPTH`].
+    fn quarters(self) -> [Self; 4] {
+        let depth = self.depth + 1;
+        let half = 1 << (MAX_PATCH_DEPTH - depth);
+        let at = |du: u8, dv: u8| Self {
+            u: self.u + du,
+            v: self.v + dv,
+            depth,
+        };
+        [at(0, 0), at(0, half), at(half, 0), at(half, half)]
     }
 }
 

@@ -458,3 +458,53 @@ fn build_patch_type6_interior_formula() {
         );
     }
 }
+
+/// The colour of the triangle `tessellate_patch` paints last over `p`, the
+/// mean of its vertex colours, for the 8-bit RGB patch `patch`.
+fn last_colour_at(patch: &Patch<[u8; 3]>, p: [f64; 2]) -> [f64; 3] {
+    let doc = crate::test_helpers::empty_doc();
+    let source = super::super::mesh::DirectColors::new(super::super::ShadingCs {
+        doc: &doc,
+        space: &super::super::ColorSpace::DeviceRgb,
+        target: crate::ColourTarget::SRGB,
+    });
+    let mut sink = TriangleSink::new();
+    tessellate_patch(&source, *patch, &mut sink);
+    let tris = sink.finish();
+    let last = tris
+        .iter()
+        .rev()
+        .find(|t| covered(&[t.each_ref().map(|v| [v.x, v.y])], p))
+        .expect("a triangle covers the point");
+    std::array::from_fn(|i| last.iter().map(|v| f64::from(v.color[i])).sum::<f64>() / 3.0)
+}
+
+/// A patch folded along `v` (its `x` runs out to 15 and back) shows, where
+/// the two halves overlap, the half of the larger `v`.
+#[test]
+fn a_fold_in_v_shows_the_larger_v() {
+    let (red, blue) = ([255, 0, 0], [0, 0, 255]);
+    let mut p = flat_patch(0.0, 0.0, 0.0, 10.0, red, blue, red, blue);
+    for row in &mut p.xy {
+        for (pt, x) in row.iter_mut().zip([0.0, 20.0, 20.0, 0.0]) {
+            pt[0] = x;
+        }
+    }
+    let [r, _, b] = last_colour_at(&p, [5.0, 5.0]);
+    assert!(b > 200.0 && r < 55.0, "red {r}, blue {b}");
+}
+
+/// A patch folded along `u` (its `y` runs out to 15 and back) shows, where
+/// the two halves overlap, the half of the larger `u`.
+#[test]
+fn a_fold_in_u_shows_the_larger_u() {
+    let (red, blue) = ([255, 0, 0], [0, 0, 255]);
+    let mut p = flat_patch(0.0, 0.0, 10.0, 0.0, red, red, blue, blue);
+    for (row, y) in p.xy.iter_mut().zip([0.0, 20.0, 20.0, 0.0]) {
+        for pt in row {
+            pt[1] = y;
+        }
+    }
+    let [r, _, b] = last_colour_at(&p, [5.0, 5.0]);
+    assert!(b > 200.0 && r < 55.0, "red {r}, blue {b}");
+}
