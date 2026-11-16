@@ -2946,6 +2946,34 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: CMYK input tables on the shared grid, and black
+preservation between presses.** `ICCBased` CMYK now converts through the
+same floating-point table evaluator and 17⁴-node device grid as RGB
+(interpolated in its 4-simplices at both depths), not the converter's
+quadrilinear CLUT. Against `transicc` the worst ΔE00 falls from 0.51–0.67
+to 0.03–0.07 at 16 bits and from 0.91–1.11 to 0.56–0.71 at 8 on the v4
+test printer, and from 0.48–0.66 to 0.03 (16 bits) on the archive's US
+Supreme Court slip-opinion profile; between grid nodes, on a K-only ramp,
+it stays at the 0.17–0.23 the old path had. The grid's
+executor converts 64 pixels a block with a branchless sorting network: 5.6
+ns a pixel at 8 bits and 5.0 at 16 against the converter's 4.2, from 42 as
+first written; the GPU ICC CLUT is baked from it and stays byte-identical
+to its CPU evaluator. Default RGB output changes on every table-based CMYK
+page: of the 1 168 archive documents, 29 carry a CMYK profile and 24 use
+one as an `ICCBased` space; on their pages 1–10 at 50 dpi, 197 of 236
+pages in 22 documents change, 3.7 % of their pixels by at most 2/255
+(mean ΔE00 0.87 on the pixels that change, max 2.1), mostly the
+antialiased edges of K-only text. `--preserve-black[=k-only|k-plane]`
+(`RenderParams::preserve_black`, `PreserveBlack`) keeps black ink black
+where ICC CMYK of one press converts to a CMYK `--output-profile`'s (or a
+proof press's) ink, as Little CMS's black-preserving intents do: K-only
+text stays K-only through a K → K curve matching the two blacks by L*,
+and `k-plane` also keeps every other colour on that curve's K, solving C,
+M and Y for its colour within the press's ink limit. K-only agrees with
+`transicc -t10..12` on every patch (worst ΔE00 0.15); K-plane with
+`-t13..15` on 96–99.7 % of them, and is nearer the colorimetric colour on
+the rest, where Little CMS's Newton iteration stops early.
+
 **Unreleased on master: colour conversions agree with Little CMS to its
 precision.** Three corrections, each measured against `transicc`
 (`input_profile_transicc`, `output_profile_transicc`, ignored tests that
