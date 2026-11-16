@@ -3957,6 +3957,22 @@ would also remove the stalls, but it makes the CPU 14-17 % slower on the
 same pages, so it was not done. Output is byte-identical; on macOS the
 change does nothing.
 
+**Unreleased on master: text on GPU pages.** `--gpu-pages` no longer
+refuses a page for its text. The CPU draws a glyph from a cached coverage
+bitmap; the page now holds each such bitmap once as a mask on the device,
+and each glyph places it, so the device composites the CPU's own coverage
+bytes with the CPU's arithmetic. Cached glyph strokes and cached Type 3
+glyphs take the same path, and devices without 64-bit integers render text
+too. A page still renders on the CPU, with the reason in the debug log,
+when its text uses a clipping render mode (4–7), a pattern, a blend mode,
+a soft mask, a path clip or a Type 3 glyph that runs its CharProc. Of the
+3 824 fixture pages, 799 now render on the GPU instead of 9; all the rest
+draw XObjects (images on 67 % of the fixture pages, forms on 12 %), the next
+coverage. No text page is faster: a 150-dpi text page costs the CPU 1–1.6
+ms, about the recording plus one device round trip. Output is
+byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
+and the A18 Pro.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
