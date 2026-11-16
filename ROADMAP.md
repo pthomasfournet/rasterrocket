@@ -3312,6 +3312,24 @@ CPU walk's coefficients, so the output is byte for byte as before. The
 decoder is no longer used for a draw at half the image's size or less on
 both axes, the rule nvJPEG2000 already followed.
 
+**Unreleased on master: nvJPEG2000 declines before the decoder is built.**
+The device JPEG 2000 path now decides from the codestream's headers, before
+a thread's nvJPEG2000 decoder is built, whether the device returns the
+samples the CPU decoder does: one or three unsigned 8-bit components on the
+image grid, no JP2 palette, channel definition or sYCC/CIELab/YCCK
+conversion, and no code-block style but predictable termination, which
+nvJPEG2000 0.11 refuses at parse (the sweep's lost cells c01, c05 and c12,
+and every image of Saunders, were such refusals, falling back silently after
+the build). A decline is reported at warn, once per kind. Previously
+sub-8-bit components were drawn unscaled (a 5-bit ramp near black) and signed
+ones unshifted. A codestream that ends early (`Image::survey` in the JPEG
+2000 fork reads its tile-part headers without decoding) decodes on the CPU,
+drawn and marked partial (`--strict` fails) or refused when a tile holds no
+data. `--prefetch` sizes draws inside forms too, and prefetches nothing, with
+a warning, when the render scale depends on the page. A job-level signal for
+Auto (single pages lose about 3x to the cold start, 24-page runs win only
+sometimes) is measured and proposed, not shipped.
+
 **Unreleased on master: paint trace.** A pixel-independent regression
 oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
 `rasterrocket::dev::paint_trace`) records one line of text per painting
