@@ -3,8 +3,11 @@
 //! tested against and the model a twin of the kernel on another device
 //! API reproduces.
 
+use super::image::{DIRECT, ImageModel};
 use super::path::{LIST_LEN, NO_BACKDROP, TILE_PIXELS, TileCells, UNIFORM_BACKDROP};
-use super::{KIND_MASK, KIND_PATH, PAGE_TILE, PageCommands, PageCommandsError};
+use super::{
+    KIND_IMAGE, KIND_MASK, KIND_PATH, PAGE_TILE, PageCmd, PageCommands, PageCommandsError,
+};
 
 /// `x / M` rounded to nearest for `x ≤ M²`, `M = 2^bits − 1`.
 const fn div_max(x: u32, bits: u32) -> u32 {
@@ -90,6 +93,66 @@ fn item_coverage(page: &PageCommands, item: [u32; 4], tx: usize, ty: usize) -> [
     coverage
 }
 
+/// Composite `src` with shape `shape > 0`, samples of `bits` bits, over
+/// the pixel `dst` as the antialiasing pipe at constant alpha `a_input`.
+fn composite_pipe(dst: &mut [u16], src: [u32; 3], shape: u32, a_input: u32, bits: u32) {
+    let max = (1u32 << bits) - 1;
+    let alpha = div_max(a_input * shape, bits);
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d = u16::try_from(div_max((max - alpha) * u32::from(*d) + alpha * s, bits))
+            .expect("a composite is a sample");
+    }
+}
+
+/// Composite `src` with shape `shape > 0`, samples of `bits` bits, over
+/// the pixel `dst` directly: a full shape writes `src`, any other blends
+/// with the quotient truncated.
+fn composite_direct(dst: &mut [u16], src: [u32; 3], shape: u32, bits: u32) {
+    let max = (1u32 << bits) - 1;
+    for (d, s) in dst.iter_mut().zip(src) {
+        let v = if shape == max {
+            s
+        } else {
+            (s * shape + u32::from(*d) * (max - shape)) / max
+        };
+        *d = u16::try_from(v).expect("a composite is a sample");
+    }
+}
+
+/// Paint the pixels of tile `(tx, ty)` of `out`, a `width × height` page,
+/// that the image command `c` covers.
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    reason = "pixel coordinates of a page within the push limit fit i32"
+)]
+fn paint_image(
+    model: &ImageModel<'_>,
+    c: &PageCmd,
+    (tx, ty): (usize, usize),
+    (width, height): (usize, usize),
+    out: &mut [u16],
+) {
+    let tile = PAGE_TILE as usize;
+    for i in 0..TILE_PIXELS {
+        let (px, py) = (tx * tile + i % tile, ty * tile + i / tile);
+        let (x, y) = (px as i32, py as i32);
+        if px >= width || py >= height || !(c.x0..=c.x1).contains(&x) || !(c.y0..=c.y1).contains(&y)
+        {
+            continue;
+        }
+        let Some((src, shape)) = model.pixel(c, x, y) else {
+            continue;
+        };
+        let o = (py * width + px) * 3;
+        if c.flags & DIRECT == 0 {
+            composite_pipe(&mut out[o..o + 3], src, shape, c.a_input, model.bits);
+        } else {
+            composite_direct(&mut out[o..o + 3], src, shape, model.bits);
+        }
+    }
+}
+
 /// The pixels of `page`, RGB samples of its depth, row-major without
 /// padding, as the device raster renders them.
 ///
@@ -99,15 +162,18 @@ fn item_coverage(page: &PageCommands, item: [u32; 4], tx: usize, ty: usize) -> [
 #[expect(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
-    reason = "pixel coordinates of a page within the push limit fit i32; a composited sample \
-              fits its depth"
+    reason = "pixel coordinates of a page within the push limit fit i32"
 )]
 pub fn render_page(page: &PageCommands) -> Result<Vec<u16>, PageCommandsError> {
     let binned = page.bin()?;
     let (width, height) = (page.width() as usize, page.height() as usize);
     let bits = u32::from(page.depth().bits());
-    let max_sample = (1u32 << bits) - 1;
-    let shape_scale = max_sample / 255;
+    let shape_scale = ((1u32 << bits) - 1) / 255;
+    let model = ImageModel {
+        words: &page.image_words,
+        bytes: &page.bytes,
+        bits,
+    };
     let mut out: Vec<u16> = (0..width * height).flat_map(|_| page.paper()).collect();
     let tile = PAGE_TILE as usize;
     for ty in 0..binned.tiles_y as usize {
@@ -115,6 +181,10 @@ pub fn render_page(page: &PageCommands) -> Result<Vec<u16>, PageCommandsError> {
             let t = ty * binned.tiles_x as usize + tx;
             for &item in &binned.items[binned.offsets[t] as usize..binned.offsets[t + 1] as usize] {
                 let c = &page.cmds[item[0] as usize];
+                if c.kind == KIND_IMAGE {
+                    paint_image(&model, c, (tx, ty), (width, height), &mut out);
+                    continue;
+                }
                 let src = [c.rg & 0xFFFF, c.rg >> 16, c.b];
                 for (i, &cov) in item_coverage(page, item, tx, ty).iter().enumerate() {
                     let (px, py) = (tx * tile + i % tile, ty * tile + i / tile);
@@ -125,11 +195,9 @@ pub fn render_page(page: &PageCommands) -> Result<Vec<u16>, PageCommandsError> {
                     if !inside || cov == 0 {
                         continue;
                     }
-                    let alpha = div_max(c.a_input * (u32::from(cov) * shape_scale), bits);
                     let o = (py * width + px) * 3;
-                    for (d, s) in out[o..o + 3].iter_mut().zip(src) {
-                        *d = div_max((max_sample - alpha) * u32::from(*d) + alpha * s, bits) as u16;
-                    }
+                    let shape = u32::from(cov) * shape_scale;
+                    composite_pipe(&mut out[o..o + 3], src, shape, c.a_input, bits);
                 }
             }
         }

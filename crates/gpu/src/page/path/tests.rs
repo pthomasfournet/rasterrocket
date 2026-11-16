@@ -2,7 +2,7 @@ use color::SampleDepth;
 use raster::coverage::AreaOutline;
 
 use super::super::reference::render_page;
-use super::super::test_support::{Rng, polygon, slivers, wide_rectangle};
+use super::super::test_support::{Rng, binned_bytes, polygon, slivers, wide_rectangle};
 use super::super::{PageCommands, PageCommandsError, PixelBounds};
 use super::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS};
 
@@ -258,18 +258,6 @@ fn an_opaque_interior_tile_hides_the_items_below_it() {
     let pixels = render_page(&opaque).expect("render");
     assert_eq!(pixels[(40 * 64 + 40) * 3..][..3], [200, 0, 0]);
     assert_eq!(pixels[(5 * 64 + 5) * 3..][..3], [9, 9, 9]);
-}
-
-/// The bytes of the device inputs of `page` as [`PageCommands::bin`] and
-/// [`PageCommands::table_parts`] produce them.
-fn binned_bytes(page: &PageCommands) -> usize {
-    let bins = page.bin().expect("bin");
-    let (parts, _) = page.table_parts();
-    page.len() * size_of::<super::super::PageCmd>()
-        + parts.iter().map(|p| p.len()).sum::<usize>()
-        + size_of_val(page.row_starts())
-        + size_of_val(bins.offsets.as_slice())
-        + size_of_val(bins.items.as_slice())
 }
 
 #[test]

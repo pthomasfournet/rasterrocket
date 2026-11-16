@@ -16,7 +16,9 @@
 //                 [x0, y0, x1, y1] each, fixed point (1/256 pixel); from
 //                 lists_base on, the segment indices of every outline
 //                 tile; from backdrops_base on, the backdrops, 16 ints
-//                 each.  The pixels x0..x1 (inclusive) of a span are
+//                 each; from images_base on, the image commands'
+//                 records and sampling tables (page_image.slang).  The
+//                 pixels x0..x1 (inclusive) of a span are
 //                 covered fully when offset is -1, else by byte offset +
 //                 (x - x0).
 //   row_starts    absolute span offsets; a table of n rows owns n + 1
@@ -35,6 +37,10 @@
 //   page          RGB of pc.bits bits per sample, row-major, width * 3
 //                 samples per row; a 16-bit sample is two bytes, low
 //                 byte first.
+//
+// An image command samples an image per pixel and composites the sampled
+// colour (page_image.slang); every other command paints one colour with
+// a coverage.
 //
 // A command paints the pixels of its inclusive bounds (x0, y0) - (x1, y1),
 // which lie on the page and inside the command's clip rectangle.
@@ -112,6 +118,7 @@ struct Params {
     uint segs_base;
     uint lists_base;
     uint backdrops_base;
+    uint images_base;
 };
 
 [[vk::push_constant]] ConstantBuffer<Params> pc;
@@ -188,6 +195,8 @@ uint flat_coverage(Cmd c, int x, int y)
 {
     return c.kind == KIND_MASK ? mask_coverage(c, x, y) : table_coverage(c, x, y);
 }
+
+#include "page_image.slang"
 
 // Composite command c over the pixel (r, g, b) with coverage cov > 0.
 void composite(Cmd c, uint cov, inout uint r, inout uint g, inout uint b)
@@ -516,6 +525,10 @@ void raster(uint3 lid, uint3 wid)
             Cmd c = cmds[item.x];
             bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
             if (!inside) continue;
+            if (c.kind == KIND_IMAGE) {
+                image_paint(c, x, y, r, g, b);
+                continue;
+            }
             uint cov = c.kind == KIND_PATH ? path_coverage(c, item, s, lid.x, lid.y)
                                            : flat_coverage(c, x, y);
             if (cov == 0) continue;
@@ -527,6 +540,10 @@ void raster(uint3 lid, uint3 wid)
         Cmd c = cmds[tile_items[k * 4]];
         bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
         if (!inside) continue;
+        if (c.kind == KIND_IMAGE) {
+            image_paint(c, x, y, r, g, b);
+            continue;
+        }
         uint cov = flat_coverage(c, x, y);
         if (cov == 0) continue;
         composite(c, cov, r, g, b);

@@ -1,14 +1,16 @@
 //! A page as a list of paint commands for the device page raster.
 //!
-//! Each command paints one colour at a constant alpha over an opaque RGB
-//! page of 8 or 16 bits per sample, limited to an inclusive pixel
-//! rectangle, with per-pixel coverage either taken from a coverage table
-//! the CPU rasteriser computed (see [`CoverageRows`]), computed on the
-//! device from a closed outline by the CPU rasteriser's integer arithmetic
-//! (see [`AreaPath`]), or read from a coverage mask the page holds once
-//! and any number of commands place (see [`MaskId`]).  Commands paint in
-//! the order they were pushed.  The tables, outlines and masks of every
-//! command are copied into shared flat arrays.
+//! Each command paints over an opaque RGB page of 8 or 16 bits per
+//! sample, limited to an inclusive pixel rectangle: one colour at a
+//! constant alpha with per-pixel coverage either taken from a coverage
+//! table the CPU rasteriser computed (see [`CoverageRows`]), computed on
+//! the device from a closed outline by the CPU rasteriser's integer
+//! arithmetic (see [`AreaPath`]), or read from a coverage mask the page
+//! holds once and any number of commands place (see [`MaskId`]); or an
+//! image's samples, sampled per pixel through the CPU image sampler's
+//! tables (see [`ImageDraw`]).  Commands paint in the order they were
+//! pushed.  The tables, outlines, masks and samples of every command are
+//! copied into shared flat arrays.
 //!
 //! The device raster bins the commands into [`PAGE_TILE`]-pixel square
 //! tiles ([`PageCommands::bin`]) and walks each tile's commands in order;
@@ -26,6 +28,7 @@ use color::{Sample, SampleDepth};
 
 mod bins;
 mod budget;
+mod image;
 mod mask;
 mod path;
 #[doc(hidden)]
@@ -37,6 +40,9 @@ pub(crate) mod test_support;
 
 pub use bins::TileBins;
 use budget::{Counts, index};
+pub use image::{
+    IMAGE_TABLE_ENTRY_WORDS, ImageDraw, ImageLayout, ImageMask, SampleMap, Samples, SamplesId,
+};
 pub use mask::{MaskBits, MaskId};
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
 use path::{Backdrop, PathTile, bin_path};
@@ -61,6 +67,9 @@ const KIND_PATH: u32 = 1;
 
 /// [`PageCmd::kind`] of a command whose coverage is a mask's.
 const KIND_MASK: u32 = 2;
+
+/// [`PageCmd::kind`] of a command sampling an image.
+const KIND_IMAGE: u32 = 3;
 
 /// One command as the kernel reads it; layout of `Cmd` in
 /// `kernels/page_raster.slang`.  An outline's command holds its rule in
@@ -190,6 +199,8 @@ pub struct PageCommands {
     backdrops: Vec<i32>,
     /// Every outline's tiles.
     path_tiles: Vec<PathTile>,
+    /// Every image command's record and sampling tables.
+    image_words: Vec<u32>,
     /// Per tile, the items [`Self::bin`] lists in it: those from the last
     /// that hides the items before it on.  Empty until the first push.
     live: Vec<u32>,
@@ -209,6 +220,8 @@ pub(crate) struct TableBases {
     pub seg_lists: u32,
     /// Backdrops, [`PAGE_TILE`] words each.
     pub backdrops: u32,
+    /// Image records and sampling tables.
+    pub images: u32,
 }
 
 /// A sample type of the page raster's output: `u8` for an 8-bit page,
@@ -271,6 +284,7 @@ impl PageCommands {
             seg_lists: Vec::new(),
             backdrops: Vec::new(),
             path_tiles: Vec::new(),
+            image_words: Vec::new(),
             live: Vec::new(),
             tile_refs: 0,
         }
@@ -451,20 +465,22 @@ impl PageCommands {
     /// The table input as consecutive byte slices, words little-endian:
     /// the spans, three words each; the coverage bytes, four to a word,
     /// zero-padded to a whole word; the outlines' segments, four words
-    /// each; the outline tiles' segment lists; and their backdrops.  With
-    /// the index of the first word of each array after the spans.
-    pub(crate) fn table_parts(&self) -> ([&[u8]; 6], TableBases) {
+    /// each; the outline tiles' segment lists; their backdrops; and the
+    /// image records and sampling tables.  With the index of the first
+    /// word of each array after the spans.
+    pub(crate) fn table_parts(&self) -> ([&[u8]; 7], TableBases) {
         const PAD: [u8; 3] = [0; 3];
         let pad = &PAD[..self.bytes.len().next_multiple_of(4) - self.bytes.len()];
-        let parts: [&[u8]; 6] = [
+        let parts: [&[u8]; 7] = [
             bytemuck::cast_slice(&self.spans),
             &self.bytes,
             pad,
             bytemuck::cast_slice(&self.segs),
             bytemuck::cast_slice(&self.seg_lists),
             bytemuck::cast_slice(&self.backdrops),
+            bytemuck::cast_slice(&self.image_words),
         ];
-        let mut words = [0u32; 6];
+        let mut words = [0u32; 7];
         let mut at = 0usize;
         for (w, part) in words.iter_mut().zip(parts) {
             *w = u32::try_from(at / 4).expect("the push limit bounds the words");
@@ -477,6 +493,7 @@ impl PageCommands {
                 segs: words[3],
                 seg_lists: words[4],
                 backdrops: words[5],
+                images: words[6],
             },
         )
     }

@@ -23,6 +23,8 @@ pub(super) struct Counts {
     pub(super) segs: usize,
     pub(super) seg_lists: usize,
     pub(super) backdrops: usize,
+    /// Image record and sampling table words.
+    pub(super) image_words: usize,
 }
 
 impl Counts {
@@ -36,7 +38,8 @@ impl Counts {
             .saturating_add(self.tile_refs.saturating_mul(4))
             .saturating_add(self.segs.saturating_mul(4))
             .saturating_add(self.seg_lists)
-            .saturating_add(self.backdrops);
+            .saturating_add(self.backdrops)
+            .saturating_add(self.image_words);
         size_of::<PageCmd>()
             .saturating_mul(self.cmds)
             .saturating_add(size_of::<[i32; 3]>().saturating_mul(self.spans))
@@ -59,6 +62,7 @@ impl PageCommands {
             segs: 0,
             seg_lists: 0,
             backdrops: 0,
+            image_words: 0,
         })
     }
 
@@ -78,6 +82,7 @@ impl PageCommands {
             segs: self.segs.len().saturating_add(more.segs),
             seg_lists: self.seg_lists.len().saturating_add(more.seg_lists),
             backdrops: self.backdrops.len().saturating_add(more.backdrops),
+            image_words: self.image_words.len().saturating_add(more.image_words),
         }
         .bytes(self.tile_count())
     }

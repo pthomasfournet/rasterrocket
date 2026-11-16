@@ -93,7 +93,7 @@ impl Laps {
 /// The push constants of the raster of `page` binned as `bins`, its table
 /// words laid out as `bases`, in the order of `Params` in
 /// `kernels/page_raster.slang`.
-fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u8; 48] {
+fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u8; 52] {
     let n_cmds = u32::try_from(page.len()).expect("the push limit bounds the commands");
     let [paper_rg, paper_b] = pack_rgb(page.paper());
     let values = [
@@ -109,8 +109,9 @@ fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u
         bases.segs,
         bases.seg_lists,
         bases.backdrops,
+        bases.images,
     ];
-    let mut push = [0u8; 48];
+    let mut push = [0u8; 52];
     for (dst, v) in push.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         dst.copy_from_slice(&v.to_ne_bytes());
     }
@@ -342,6 +343,8 @@ impl VulkanBackend {
     }
 }
 
+#[cfg(test)]
+mod image_tests;
 #[cfg(test)]
 mod mask_tests;
 #[cfg(test)]
