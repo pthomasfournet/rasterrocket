@@ -3664,6 +3664,53 @@ new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
   `page_group` and `transparent_page_group` now return the space the page
   declares.
 
+**Unreleased on master: ICC CMYK groups in their profile's ink, spots through
+additive groups.**
+- **ICC CMYK groups.** A transparency group whose `/CS` is an ICC CMYK space,
+  over an RGB canvas, is painted in its profile's ink instead of the
+  process-ink model's. Colours of the profile paint their components, another
+  CMYK profile's convert through the PCS, and RGB, gray and `DeviceCMYK`
+  colours (the last as the model's colour) separate by the profile's
+  PCS → device table, with the black-point compensation the result converts
+  back under; the result converts back through the profile's device → PCS
+  conversion, the one a colour of the space takes on an RGB page. The group
+  has spot slots of its own, built for its separation. A page whose group is
+  such a space is painted the same way (`CanvasRequest::ProfileRgb`) and
+  finished as RGB of the working space. A profile that cannot separate falls
+  back to the model and is reported as before. Red under blue at half alpha
+  in a US Web Coated (SWOP) v2 group: 154,66,102 before, 158,70,102 now,
+  Ghostscript 10.06 158,69,102; in FOGRA39, 156,66,101 against its 156,66,100.
+- **Spots through additive groups.** On an ink page (`--cmyk`, `--proof`, the
+  overprint preview) an RGB transparency group is painted on an ink canvas
+  holding the complements of its RGB beside the page's spot channels, which
+  blends the RGB exactly as an RGB canvas does: a spot colour inside keeps
+  its channel and its overprint (ISO 32000-2 §11.7.3) instead of becoming
+  process ink through its alternate's RGB. A spot alone in such a group under
+  `--proof` (SWOP output intent) shows 252,189,123 as on the page, where it
+  showed 248,171,86.
+- **Archive impact.** Default RGB output changes on the 2 pages with ICC CMYK
+  page groups, at 100 dpi: the FOGRA39 page 9.5 % of pixels (7.3 % by more
+  than 2 levels, at most 20; mean ΔE76 of changed pixels 3.7, max 8.1), the
+  SWOP v2 page 24.9 % (13.6 %, at most 22; mean 3.3, max 8.9). Against
+  Ghostscript, on the changed pixels where neither render lies more than
+  ΔE76 20 from it (its fonts differ), the mean falls from 6.0 to 5.2 and from
+  3.6 to 2.2 (median 3.8 → 3.0 and 1.6 → 0.8). The other 109 pages of the 3
+  documents are byte-identical, the "Generic RGB Profile" form group's page
+  included: it paints one opaque colour, which no compositing space changes,
+  so `CalRGB` and non-sRGB RGB ICC groups still composite in their canvas's
+  RGB space. No archive form group of an additive space paints a spot colour
+  (0 of 943), and 27 pages of 11 documents with such groups are
+  byte-identical under `--cmyk` at 8 and 16 bits, an output profile, the
+  overprint preview and `--proof`. On the 34-PDF gate corpus (pages 1–2,
+  50 dpi, 19 modes) every file and exit code is identical to before.
+- **Also.** A spot overflowing the slots separates under the paint's black
+  generation and intent; a wide group's colour separated into ink of a wide
+  separation no longer passes through sRGB; a test of the shared ink map at
+  finish expected a panic that only debug builds raise.
+- **API changes.** `GroupSpace::Cmyk { profile: Option<ObjectId> }` replaces
+  `{ profiled: bool }`, and `GroupSpace::approximated` covers non-sRGB RGB
+  spaces only; `CanvasRequest::ProfileRgb { profile, space }` is new.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
