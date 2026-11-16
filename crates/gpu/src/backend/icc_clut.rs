@@ -2,8 +2,8 @@
 //! backend page, on either backend.
 //!
 //! The kernels interpolate the grid in integer arithmetic, the
-//! arithmetic of [`CmykGrid::convert`], so a device's conversion is the
-//! host's byte for byte; [`icc_clut_matches_cpu`] checks a device against
+//! arithmetic of [`CmykGrid::convert`] and [`CmykGrid::convert16`], so a
+//! device's conversion is the host's value for value, at 8 or 16 bits; [`icc_clut_matches_cpu`] checks a device against
 //! it.
 
 use color::grid::{CmykGrid, NodeRange};
@@ -54,6 +54,32 @@ impl<B: GpuBackend> Default for IccClutScratch<B> {
 /// pixels or the pixel count violates the [`IccClutParams`] invariants;
 /// the backend's error when an allocation, a transfer or the kernel fails.
 pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Result<Vec<u8>> {
+    convert(backend, cmyk, grid, false)
+}
+
+/// [`icc_clut`] at 16 bits: [`CmykGrid::convert16`] value for value.
+///
+/// # Errors
+///
+/// As [`icc_clut`].
+pub fn icc_clut16<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Result<Vec<u16>> {
+    let bytes = convert(backend, cmyk, grid, true)?;
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
+        .collect())
+}
+
+/// [`icc_clut`], the output of 16-bit values, two bytes each, low first,
+/// when `wide`.
+fn convert<B: GpuBackend>(
+    backend: &B,
+    cmyk: &[u8],
+    grid: &CmykGrid,
+    wide: bool,
+) -> Result<Vec<u8>> {
     const KIND: &str = "IccClutInvariantViolation";
     let invariant = |detail| BackendError::InvariantViolation { kind: KIND, detail };
     if !cmyk.len().is_multiple_of(4) {
@@ -68,7 +94,7 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Res
         .filter(|&n| n <= MAX_KERNEL_PIXELS)
         .ok_or_else(|| invariant("n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)"))?;
     let table = grid.as_bytes();
-    let rgb_len = n * 3;
+    let rgb_len = n * if wide { 6 } else { 3 };
     backend.scratch().icc_clut.with(|scratch| {
         let IccClutScratch {
             cmyk: cmyk_slot,
@@ -89,6 +115,7 @@ pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Res
                 rgb: &mut d_rgb.device,
                 clut: &d_clut.device,
                 n_pixels,
+                wide,
             })?;
             unsafe { record_download(backend, d_rgb, rgb_len) }
         })?;
@@ -143,8 +170,8 @@ fn probe_pixels() -> Vec<u8> {
     cmyk
 }
 
-/// Whether [`icc_clut`] on `backend` reproduces [`CmykGrid::convert`]
-/// byte for byte.
+/// Whether [`icc_clut`] and [`icc_clut16`] on `backend` reproduce
+/// [`CmykGrid::convert`] and [`CmykGrid::convert16`] value for value.
 ///
 /// The check converts the [`probe_pixels`] through a [`random_grid`] of
 /// uneven spans in the extended range, whose outputs clamp at both ends.
@@ -157,7 +184,8 @@ fn probe_pixels() -> Vec<u8> {
 pub fn icc_clut_matches_cpu<B: GpuBackend>(backend: &B) -> Result<bool> {
     let grid = random_grid(0x0dd_ba11, [7, 4, 5, 3], NodeRange::Extended);
     let cmyk = probe_pixels();
-    Ok(icc_clut(backend, &cmyk, &grid)? == grid.convert(&cmyk))
+    Ok(icc_clut(backend, &cmyk, &grid)? == grid.convert(&cmyk)
+        && icc_clut16(backend, &cmyk, &grid)? == grid.convert16(&cmyk))
 }
 
 /// The grid shapes the device evaluators are checked on: one cell, uneven
@@ -166,22 +194,27 @@ pub fn icc_clut_matches_cpu<B: GpuBackend>(backend: &B) -> Result<bool> {
 const EXACTNESS_SPANS: [[u32; 4]; 4] = [[1; 4], [20, 15, 16, 7], [16; 4], [32; 4]];
 
 /// Converts, on a grid of each of the [`EXACTNESS_SPANS`] in each range,
-/// every grey level and 65 536 pseudo-random pixels with `convert`, and
-/// asserts byte equality with [`CmykGrid::convert`].
+/// every grey level and 65 536 pseudo-random pixels with `device`, and
+/// asserts equality with `host`, value for value.
 #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
-fn assert_exact_across_grids(label: &str, convert: impl Fn(&[u8], &CmykGrid) -> Vec<u8>) {
+fn assert_exact_across_grids<T: PartialEq>(
+    label: &str,
+    host: impl Fn(&CmykGrid, &[u8]) -> Vec<T>,
+    device: impl Fn(&[u8], &CmykGrid) -> Vec<T>,
+) {
     let mut next = lcg(0x1234_5678);
     let mut cmyk: Vec<u8> = (0..=u8::MAX).flat_map(|v| [v; 4]).collect();
     cmyk.extend((0..65_536 * 4).map(|_| next().to_be_bytes()[0]));
     for (seed, spans) in (1u32..).zip(EXACTNESS_SPANS) {
         for range in [NodeRange::Unit, NodeRange::Extended] {
             let grid = random_grid(seed, spans, range);
-            let cpu = grid.convert(&cmyk);
-            let device = convert(&cmyk, &grid);
+            let cpu = host(&grid, &cmyk);
+            let device = device(&cmyk, &grid);
+            assert_eq!(cpu.len(), device.len(), "{label}: lengths differ");
             let differing = cpu.iter().zip(&device).filter(|(a, b)| a != b).count();
             assert_eq!(
                 differing, 0,
-                "{label}: spans {spans:?} {range:?}: {differing} bytes differ from the host"
+                "{label}: spans {spans:?} {range:?}: {differing} values differ from the host"
             );
         }
     }
@@ -228,8 +261,11 @@ mod vulkan_tests {
             backend.icc_clut_is_exact(),
             "the device fails the exactness probe"
         );
-        assert_exact_across_grids("vulkan", |cmyk, grid| {
+        assert_exact_across_grids("vulkan", CmykGrid::convert, |cmyk, grid| {
             icc_clut(&backend, cmyk, grid).expect("icc_clut")
+        });
+        assert_exact_across_grids("vulkan 16-bit", CmykGrid::convert16, |cmyk, grid| {
+            icc_clut16(&backend, cmyk, grid).expect("icc_clut16")
         });
     }
 
@@ -264,11 +300,14 @@ mod tests {
             eprintln!("skipping: no CUDA device");
             return;
         };
-        assert_exact_across_grids("cuda backend", |cmyk, grid| {
+        assert_exact_across_grids("cuda backend", CmykGrid::convert, |cmyk, grid| {
             icc_clut(&backend, cmyk, grid).expect("icc_clut")
         });
+        assert_exact_across_grids("cuda backend 16-bit", CmykGrid::convert16, |cmyk, grid| {
+            icc_clut16(&backend, cmyk, grid).expect("icc_clut16")
+        });
         let gpu = crate::GpuCtx::init().expect("gpu init");
-        assert_exact_across_grids("cuda context", |cmyk, grid| {
+        assert_exact_across_grids("cuda context", CmykGrid::convert, |cmyk, grid| {
             gpu.icc_cmyk_to_rgb_gpu(cmyk, Some(grid))
                 .expect("icc_cmyk_to_rgb_gpu")
         });

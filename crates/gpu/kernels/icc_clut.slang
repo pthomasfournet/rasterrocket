@@ -7,7 +7,8 @@
 //     grid (`color::grid::CmykGrid`): interpolation in the simplex of the
 //     pixel's grid cell, five node lookups a pixel, in the 32-bit integer
 //     arithmetic of `CmykGrid::convert`, so the output is byte-identical to
-//     the host's on every conformant device.
+//     the host's on every conformant device: 8-bit, or with `wide` the 16-bit
+//     outputs of `CmykGrid::convert16`, two bytes each, low first.
 //
 // The profile-free conversion (the CUDA `icc_cmyk_matrix` entry) always runs
 // on the CPU and has no Slang counterpart.
@@ -34,9 +35,9 @@ uint3 grid_node(StructuredBuffer<uint> grid, uint j, uint n_nodes)
     return uint3(lo & 0xffff, lo >> 16, hi & 0xffff);
 }
 
-// `NodeRange::output` of the node sums `acc`, then the nearest byte of
-// each 16-bit output.  Extended: (2 (acc' - L) + 1) / F with acc' clamped
-// to [L, L + (F^2 - 1) / 2], L = (F (F - 1) / 2 + 1) / 2.
+// `NodeRange::output` of the node sums `acc`, 16-bit values.  Extended:
+// (2 (acc' - L) + 1) / F with acc' clamped to [L, L + (F^2 - 1) / 2],
+// L = (F (F - 1) / 2 + 1) / 2.
 uint3 grid_output(uint3 acc, uint extended)
 {
     const uint low = (GRID_FULL * (GRID_FULL - 1) / 2 + 1) / 2;
@@ -47,7 +48,7 @@ uint3 grid_output(uint3 acc, uint extended)
     } else {
         v = (acc + GRID_FULL / 2) / GRID_FULL;
     }
-    return (v * 255 + 32767) / 65535;
+    return v;
 }
 
 // The larger of `a` and `b` into `a`, the smaller into `b`.
@@ -70,7 +71,8 @@ void icc_cmyk_clut(
     uniform RWStructuredBuffer<uint8_t> rgb,
     uniform StructuredBuffer<uint> grid,
     uniform uint n_nodes,
-    uniform uint n)
+    uniform uint n,
+    uniform uint wide)
 {
     uint i = tid.x;
     if (i >= n) return;
@@ -99,8 +101,19 @@ void icc_cmyk_clut(
     }
     acc += previous * grid_node(grid, vertex, n_nodes);
 
-    uint3 out_rgb = grid_output(acc, grid[4]);
-    rgb[i * 3 + 0] = uint8_t(out_rgb.x);
-    rgb[i * 3 + 1] = uint8_t(out_rgb.y);
-    rgb[i * 3 + 2] = uint8_t(out_rgb.z);
+    uint3 v = grid_output(acc, grid[4]);
+    if (wide != 0) {
+        // Channel c at 2 (3i + c), low byte first.
+        rgb[i * 6 + 0] = uint8_t(v.x & 0xff);
+        rgb[i * 6 + 1] = uint8_t(v.x >> 8);
+        rgb[i * 6 + 2] = uint8_t(v.y & 0xff);
+        rgb[i * 6 + 3] = uint8_t(v.y >> 8);
+        rgb[i * 6 + 4] = uint8_t(v.z & 0xff);
+        rgb[i * 6 + 5] = uint8_t(v.z >> 8);
+    } else {
+        uint3 b = (v * 255 + 32767) / 65535;
+        rgb[i * 3 + 0] = uint8_t(b.x);
+        rgb[i * 3 + 1] = uint8_t(b.y);
+        rgb[i * 3 + 2] = uint8_t(b.z);
+    }
 }

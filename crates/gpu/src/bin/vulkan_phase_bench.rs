@@ -320,6 +320,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                                 rgb: &mut r,
                                 clut: &l,
                                 n_pixels: n_px,
+                                wide: false,
                             }),
                             "record",
                         );

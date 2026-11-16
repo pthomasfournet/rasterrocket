@@ -207,6 +207,7 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
                 rgb: &mut rgb,
                 clut: &clut,
                 n_pixels: N_PIXELS,
+                wide: false,
             })
             .unwrap_or_else(|e| panic!("record_icc_clut #{i} of {PER_PAGE_MAX} failed: {e}"));
     }
@@ -216,6 +217,7 @@ fn vulkan_backend_descriptor_pool_exhausts_at_max_sets() {
             rgb: &mut rgb,
             clut: &clut,
             n_pixels: N_PIXELS,
+            wide: false,
         })
         .expect_err("record_icc_clut past the cap must be rejected");
     let BackendError::DescriptorPoolExhausted { allocated, max } = err else {

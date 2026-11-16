@@ -391,8 +391,12 @@ impl ImageColour {
         let decoded = Decoded::new(doc, target, space, decode, max_sample, profile, budget);
         let bytes = match data {
             ImageData::Cpu(bytes) if at16 => {
-                let wide = widen(&bytes)?;
-                let (cs, wide) = convert16(&decoded, n, wide)?;
+                let (cs, wide) = decoded.convert_bytes16(
+                    n,
+                    &bytes,
+                    #[cfg(feature = "gpu-icc")]
+                    icc,
+                )?;
                 return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
             }
             ImageData::Cpu(bytes) => bytes,
@@ -545,13 +549,7 @@ fn convert16(
     }
     let mut out: Vec<u16> = Vec::new();
     out.try_reserve_exact(samples.len() / n * 3).ok()?;
-    let icc = decoded.profile.clone().or_else(|| match decoded.space {
-        ColorSpace::IccBased {
-            n: k,
-            stream_id: Some(id),
-        } => IccConversion::load(decoded.doc, *id, *k, decoded.target),
-        _ => None,
-    });
+    let icc = decoded.icc_conversion();
     let to_inputs = |px: &[u16], comps: &mut [f64; MAX_WIDE_COMPONENTS]| {
         for ((c, &s), &pair) in comps.iter_mut().zip(px).zip(decoded.decode) {
             *c = value(s, pair);
@@ -931,6 +929,42 @@ impl<'a> Decoded<'a> {
     }
 
     /// Whether `/Decode` leaves every sample unchanged.
+    /// The ICC conversion of the samples: the codestream's own profile,
+    /// else that of an ICC-based space.
+    fn icc_conversion(&self) -> Option<Arc<IccConversion>> {
+        self.profile.clone().or_else(|| match self.space {
+            ColorSpace::IccBased {
+                n: k,
+                stream_id: Some(id),
+            } => IccConversion::load(self.doc, *id, *k, self.target),
+            _ => None,
+        })
+    }
+
+    /// [`convert16`] of the 8-bit samples `bytes` of `n` components
+    /// widened exactly.  CMYK samples under the `/Decode` `[0 1]` of every
+    /// component through a tabulated ICC conversion convert on the device
+    /// when it takes them ([`super::icc_device::cmyk_clut_to_rgb`]): that
+    /// `/Decode` maps each widened sample `257 · v` to itself, so the
+    /// 16-bit transform reads the cells of the 8-bit sample `v`, which the
+    /// device grid holds.  `None` as [`convert16`].
+    fn convert_bytes16(
+        &self,
+        n: usize,
+        bytes: &[u8],
+        #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
+    ) -> Option<(ImageColorSpace, Vec<u16>)> {
+        #[cfg(feature = "gpu-icc")]
+        if n == 4
+            && self.decode.iter().all(|&pair| pair == (0.0, 1.0))
+            && let Some(conv) = self.icc_conversion()
+            && let Some(rgb) = super::icc_device::cmyk_clut_to_rgb::<u16>(icc, bytes, &conv)
+        {
+            return Some((ImageColorSpace::Rgb, rgb));
+        }
+        convert16(self, n, widen(bytes)?)
+    }
+
     fn identity_decode(&self) -> bool {
         self.decode.iter().all(|&(d0, d1)| is_identity_pair(d0, d1))
     }

@@ -7,7 +7,10 @@
 //! Page 1 draws one 1000 × 600 image (600 000 pixels, converted on the
 //! device); page 2 draws the same samples as six 1000 × 100 images, each
 //! below the threshold.  Both pages are rendered at one pixel per sample in
-//! a GPU and a CPU session and must be byte-identical between them.
+//! a GPU and a CPU session and must be byte-identical between them: on an
+//! 8-bit canvas, where the device gives 8-bit samples, and on a 16-bit one
+//! and in the wide working space under an output profile, where it gives
+//! the 16-bit samples the CPU converts the image's samples widened to.
 //!
 //! The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE` names, or
 //! the automatically ranked one, and is skipped when no Vulkan device
@@ -31,10 +34,13 @@ mod common;
 
 use std::fmt::Write as _;
 
-use common::{assemble_pdf, assert_identical, session, stream_object};
+use std::sync::Arc;
+
+use common::{assemble_pdf, assert_identical, stream_object};
 use rasterrocket::{
-    BackendPolicy, PageDiagnostics, RasterSession, RenderParams, SessionConfig,
-    open_session_from_bytes, render_page_rgb_with_diagnostics,
+    BackendPolicy, FinishedCanvas, OutputProfile, PageDiagnostics, RasterSession, RenderParams,
+    SampleDepth, SessionConfig, WorkingSpace, open_session_from_bytes,
+    render_page_canvas_with_diagnostics,
 };
 
 /// A CMYK output profile whose transform is a four-dimensional lookup.
@@ -106,45 +112,118 @@ fn fixture_pdf() -> Vec<u8> {
     assemble_pdf(&objects)
 }
 
-/// Page `page` of `session` at one pixel per sample.
-fn render(session: &RasterSession, page: u32) -> ((u32, u32, Vec<u8>), PageDiagnostics) {
-    let (bmp, diag) = render_page_rgb_with_diagnostics(session, page, &RenderParams::new(1.0))
-        .expect("render page");
-    ((bmp.width, bmp.height, bmp.data().to_vec()), diag)
+/// A configuration of the sessions compared: the canvas depth, and the
+/// wide working space under an RGB output profile or the default space.
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    depth: SampleDepth,
+    wide: bool,
+}
+
+/// The setups every backend is checked in.
+const SETUPS: [Setup; 4] = [
+    Setup {
+        depth: SampleDepth::Eight,
+        wide: false,
+    },
+    Setup {
+        depth: SampleDepth::Sixteen,
+        wide: false,
+    },
+    Setup {
+        depth: SampleDepth::Eight,
+        wide: true,
+    },
+    Setup {
+        depth: SampleDepth::Sixteen,
+        wide: true,
+    },
+];
+
+impl Setup {
+    /// `config` set up for this setup.
+    fn apply(self, mut config: SessionConfig) -> SessionConfig {
+        if self.wide {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/icc/printer-rgb-v4.icc"
+            );
+            let profile = OutputProfile::from_bytes(std::fs::read(path).expect("profile"))
+                .expect("an output profile");
+            config.output_profile = Some(Arc::new(profile));
+            config.working_space = Some(WorkingSpace::Wide);
+        }
+        config
+    }
+}
+
+/// Page `page` of `session` at one pixel per sample and depth `depth`:
+/// its dimensions and its samples' bytes.
+fn render(
+    session: &RasterSession,
+    page: u32,
+    depth: SampleDepth,
+) -> ((u32, u32, Vec<u8>), PageDiagnostics) {
+    let params = RenderParams::new(1.0).with_depth(depth);
+    let (canvas, diag) =
+        render_page_canvas_with_diagnostics(session, page, &params).expect("render page");
+    let page = match canvas {
+        FinishedCanvas::Rgb8(b) => (b.width, b.height, b.data().to_vec()),
+        FinishedCanvas::Rgb16(b) => (
+            b.width,
+            b.height,
+            b.data().iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ),
+        other => panic!("an RGB page, not {other:?}"),
+    };
+    (page, diag)
 }
 
 /// The device converts page 1's image and nothing on page 2, without a
-/// failure; both pages are byte-identical to the CPU session's.
-fn assert_device_conversion_matches_cpu(gpu: &RasterSession, what: &str) {
+/// failure; both pages are byte-identical to the CPU session's, in every
+/// one of the [`SETUPS`], `gpu` opening the GPU session of a
+/// configuration (`None`: skipped).
+fn assert_device_conversion_matches_cpu(
+    gpu: impl Fn(&SessionConfig) -> Option<RasterSession>,
+    config: &SessionConfig,
+    what: &str,
+) {
     if std::env::var_os("PDF_RASTER_ICC_CLUT_THRESHOLD").is_some() {
         eprintln!(
             "skipping: PDF_RASTER_ICC_CLUT_THRESHOLD overrides the threshold the pages straddle"
         );
         return;
     }
-    let cpu_session = session(fixture_pdf(), BackendPolicy::CpuOnly);
-    let (device, diag) = render(gpu, 1);
-    assert_eq!(
-        (diag.device_icc_conversions, diag.device_icc_failures),
-        (1, 0),
-        "{what}: device ICC conversions and failures on the large image's page \
-         (0 conversions without a failure: the device failed the exactness check)"
-    );
-    assert_eq!((device.0, device.1), (1000, 600), "{what}: page size");
-    assert!(
-        device.2.iter().any(|&b| b != 0xff),
-        "{what}: the image rendered blank"
-    );
-    let (cpu, _) = render(&cpu_session, 1);
-    assert_identical(&cpu, &device, what);
-    let (strips, diag) = render(gpu, 2);
-    assert_eq!(
-        (diag.device_icc_conversions, diag.device_icc_failures),
-        (0, 0),
-        "{what}: images below the threshold reached the device"
-    );
-    let (cpu, _) = render(&cpu_session, 2);
-    assert_identical(&cpu, &strips, what);
+    for setup in SETUPS {
+        let what = format!("{what} {setup:?}");
+        let Some(gpu) = gpu(&setup.apply(config.clone())) else {
+            return;
+        };
+        let cpu_config = setup.apply(SessionConfig::with_policy(BackendPolicy::CpuOnly));
+        let cpu_session = open_session_from_bytes(fixture_pdf(), &cpu_config).expect("CPU session");
+        let (device, diag) = render(&gpu, 1, setup.depth);
+        assert_eq!(
+            (diag.device_icc_conversions, diag.device_icc_failures),
+            (1, 0),
+            "{what}: device ICC conversions and failures on the large image's page \
+             (0 conversions without a failure: the device failed the exactness check)"
+        );
+        assert_eq!((device.0, device.1), (1000, 600), "{what}: page size");
+        assert!(
+            device.2.iter().any(|&b| b != 0xff),
+            "{what}: the image rendered blank"
+        );
+        let (cpu, _) = render(&cpu_session, 1, setup.depth);
+        assert_identical(&cpu, &device, &what);
+        let (strips, diag) = render(&gpu, 2, setup.depth);
+        assert_eq!(
+            (diag.device_icc_conversions, diag.device_icc_failures),
+            (0, 0),
+            "{what}: images below the threshold reached the device"
+        );
+        let (cpu, _) = render(&cpu_session, 2, setup.depth);
+        assert_identical(&cpu, &strips, &what);
+    }
 }
 
 #[cfg(feature = "vulkan")]
@@ -152,20 +231,22 @@ fn assert_device_conversion_matches_cpu(gpu: &RasterSession, what: &str) {
 fn icc_cmyk_image_converts_on_vulkan() {
     let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
     config.vulkan_device = SessionConfig::vulkan_device_from_env();
-    let session = match open_session_from_bytes(fixture_pdf(), &config) {
-        Ok(session) => session,
+    let open = |config: &SessionConfig| match open_session_from_bytes(fixture_pdf(), config) {
+        Ok(session) => Some(session),
         Err(e) => {
             eprintln!("skipping: no Vulkan session ({e})");
-            return;
+            None
         }
     };
-    assert_device_conversion_matches_cpu(&session, "vulkan");
+    assert_device_conversion_matches_cpu(open, &config, "vulkan");
 }
 
 #[cfg(feature = "gpu-validation")]
 #[test]
 fn icc_cmyk_image_converts_on_cuda() {
+    let open = |config: &SessionConfig| {
+        Some(open_session_from_bytes(fixture_pdf(), config).expect("CUDA session"))
+    };
     let config = SessionConfig::with_policy(BackendPolicy::ForceCuda);
-    let session = open_session_from_bytes(fixture_pdf(), &config).expect("CUDA session");
-    assert_device_conversion_matches_cpu(&session, "cuda");
+    assert_device_conversion_matches_cpu(open, &config, "cuda");
 }

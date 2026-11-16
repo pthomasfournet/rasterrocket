@@ -364,11 +364,12 @@ impl PageRecorder {
         p: params::IccClutParams<'_, super::VulkanBackend>,
         n_nodes: u32,
     ) -> Result<()> {
-        // Push: n_nodes(u32), n(u32), the order of icc_clut.slang's
-        // uniforms.
-        let mut push = [0u8; 8];
+        // Push: n_nodes(u32), n(u32), wide(u32), the order of
+        // icc_clut.slang's uniforms.
+        let mut push = [0u8; 12];
         push[0..4].copy_from_slice(&n_nodes.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());
+        push[8..12].copy_from_slice(&u32::from(p.wide).to_ne_bytes());
         self.dispatch_kernel(
             KernelId::IccClut,
             &[p.cmyk.handle(), p.rgb.handle(), p.clut.handle()],

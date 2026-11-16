@@ -190,7 +190,7 @@ impl PageRecorder {
         n_nodes: u32,
     ) -> Result<()> {
         self.ctx
-            .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, n_nodes, p.n_pixels)
+            .launch_icc_clut_async(p.cmyk, p.rgb, p.clut, n_nodes, (p.n_pixels, p.wide))
             .map_err(be)
     }
 

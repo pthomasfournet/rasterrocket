@@ -265,10 +265,24 @@ impl CmykGrid {
     }
 
     /// The RGB of each whole CMYK pixel of `cmyk`, three bytes a pixel:
-    /// the interpolation of the pixel's cells, each output the 8-bit
-    /// value nearest its 16-bit [`NodeRange::output`].
+    /// the 8-bit value nearest each output of [`Self::convert16`].
     #[must_use]
     pub fn convert(&self, cmyk: &[u8]) -> Vec<u8> {
+        self.outputs(cmyk)
+            .flat_map(|rgb| rgb.map(Sample::to_u8))
+            .collect()
+    }
+
+    /// The RGB of each whole CMYK pixel of `cmyk`, three 16-bit values a
+    /// pixel: the interpolation of the pixel's cells, each output its
+    /// [`NodeRange::output`].
+    #[must_use]
+    pub fn convert16(&self, cmyk: &[u8]) -> Vec<u16> {
+        self.outputs(cmyk).flatten().collect()
+    }
+
+    /// The 16-bit outputs of each whole CMYK pixel of `cmyk`.
+    fn outputs<'a>(&'a self, cmyk: &'a [u8]) -> impl Iterator<Item = [u16; 3]> + 'a {
         let range = if self.words[4] == 1 {
             NodeRange::Extended
         } else {
@@ -280,23 +294,19 @@ impl CmykGrid {
         }
         let cells = &self.words[Self::CELLS..Self::NODES];
         let nodes: &[[u16; 4]] = bytemuck::cast_slice(&self.words[Self::NODES..]);
-        cmyk.as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|px| {
-                let mut base = 0;
-                let mut key = [0u32; 4];
-                for (i, (&v, k)) in px.iter().zip(&mut key).enumerate() {
-                    let cell = cells[256 * i + usize::from(v)];
-                    base += (cell >> 16) as usize * strides[i];
-                    #[expect(clippy::cast_possible_truncation, reason = "i is below 4")]
-                    let input = i as u32;
-                    *k = sort_key(cell & 0xffff, input);
-                }
-                sort_decreasing(&mut key);
-                interpolate::<4, 3>(nodes, &strides, base, key).map(|acc| range.output(acc).to_u8())
-            })
-            .collect()
+        cmyk.as_chunks::<4>().0.iter().map(move |px| {
+            let mut base = 0;
+            let mut key = [0u32; 4];
+            for (i, (&v, k)) in px.iter().zip(&mut key).enumerate() {
+                let cell = cells[256 * i + usize::from(v)];
+                base += (cell >> 16) as usize * strides[i];
+                #[expect(clippy::cast_possible_truncation, reason = "i is below 4")]
+                let input = i as u32;
+                *k = sort_key(cell & 0xffff, input);
+            }
+            sort_decreasing(&mut key);
+            interpolate::<4, 3>(nodes, &strides, base, key).map(|acc| range.output(acc))
+        })
     }
 }
 
@@ -377,6 +387,25 @@ mod tests {
                 assert!((f64::from(rgb[1]) - (255.0 - mean)).abs() <= 1.0, "{rgb:?}");
                 assert_eq!(rgb[2], 128, "{rgb:?}");
             }
+        }
+    }
+
+    /// The 8-bit conversion is the nearest byte of the 16-bit one.
+    #[test]
+    fn the_8_bit_conversion_narrows_the_16_bit_one() {
+        for range in [NodeRange::Unit, NodeRange::Extended] {
+            let grid = mean_grid(range);
+            let cmyk: Vec<u8> = (0..=255u8)
+                .flat_map(|v| [v, 255 - v, v / 3, v / 2])
+                .collect();
+            let wide = grid.convert16(&cmyk);
+            assert_eq!(wide.len(), 256 * 3);
+            let narrowed: Vec<u8> = wide.iter().map(|&v| v.to_u8()).collect();
+            assert_eq!(grid.convert(&cmyk), narrowed, "{range:?}");
+            assert!(
+                wide.iter().any(|&v| v % 257 != 0),
+                "{range:?}: no 16-bit level"
+            );
         }
     }
 

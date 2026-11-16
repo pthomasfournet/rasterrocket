@@ -1,10 +1,11 @@
 //! Device dispatch of the ICC CMYK → RGB conversion.
 //!
-//! An image in an ICC-based CMYK space of at least
+//! An image of 8-bit samples in an ICC-based CMYK space of at least
 //! [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels converts on the session's GPU
 //! backend through the grid of its tabulated conversion
 //! ([`IccConversion::cmyk_grid`]), which the device kernels interpolate
-//! in the integer arithmetic of the CPU conversion.  Every other image, and
+//! in the integer arithmetic of the CPU conversion, to 8-bit samples or,
+//! where the CPU converts the samples widened at 16 bits, to 16-bit ones.  Every other image, and
 //! one the device declines or fails, converts on the CPU, as in a session
 //! without a backend.  A GPU session's output is therefore a CPU
 //! session's, byte for byte.
@@ -94,26 +95,59 @@ impl DeviceIccCounts {
 }
 
 /// The outcome of offering a conversion to a device.
-enum DeviceIcc {
+enum DeviceIcc<T> {
     /// The device converted the pixels.
-    Converted(Vec<u8>),
+    Converted(Vec<T>),
     /// The device does not take the conversion.
     Declined,
     /// The device failed.
     Failed,
 }
 
-/// The RGB conversion of the CMYK pixels `cmyk` on the device, through
-/// the grid of `conv`; `None` when the caller converts through the profile
-/// transform instead: no backend is attached, the image is below
-/// [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, the conversion is not a
-/// tabulated one, or the device declines or fails.  A device failure is counted and
-/// logged (see [`report_failure`]).
-pub(super) fn cmyk_clut_to_rgb(
+/// An output sample of the device conversion: `u8`, the outputs of
+/// [`CmykGrid::convert`], or `u16`, those of [`CmykGrid::convert16`].
+pub(super) trait ClutSample: Sized {
+    /// The conversion of `cmyk` through `grid` on `backend`.
+    fn convert<B: GpuBackend>(
+        backend: &B,
+        cmyk: &[u8],
+        grid: &CmykGrid,
+    ) -> gpu::backend::Result<Vec<Self>>;
+}
+
+impl ClutSample for u8 {
+    fn convert<B: GpuBackend>(
+        backend: &B,
+        cmyk: &[u8],
+        grid: &CmykGrid,
+    ) -> gpu::backend::Result<Vec<Self>> {
+        gpu::backend::icc_clut(backend, cmyk, grid)
+    }
+}
+
+impl ClutSample for u16 {
+    fn convert<B: GpuBackend>(
+        backend: &B,
+        cmyk: &[u8],
+        grid: &CmykGrid,
+    ) -> gpu::backend::Result<Vec<Self>> {
+        gpu::backend::icc_clut16(backend, cmyk, grid)
+    }
+}
+
+/// The RGB conversion of the 8-bit CMYK pixels `cmyk` on the device,
+/// through the grid of `conv`, to samples of `T`: those of the conversion's
+/// 8-bit transform for `u8`, of its 16-bit transform of the samples
+/// widened (`257 · v`) for `u16`.  `None` when the caller converts through
+/// the profile transform instead: no backend is attached, the image is
+/// below [`gpu::GPU_ICC_CLUT_THRESHOLD`] pixels, the conversion is not a
+/// tabulated one, or the device declines or fails.  A device failure is
+/// counted and logged (see [`report_failure`]).
+pub(super) fn cmyk_clut_to_rgb<T: ClutSample>(
     icc: &IccHandles<'_>,
     cmyk: &[u8],
     conv: &IccConversion,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<T>> {
     if !icc.has_device() || cmyk.len() / 4 < icc_clut_threshold() {
         return None;
     }
@@ -162,8 +196,8 @@ fn icc_clut_threshold() -> usize {
 }
 
 /// Convert on `backend`; a failure is logged.
-fn run<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> DeviceIcc {
-    match gpu::backend::icc_clut(backend, cmyk, grid) {
+fn run<B: GpuBackend, T: ClutSample>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> DeviceIcc<T> {
+    match T::convert(backend, cmyk, grid) {
         Ok(rgb) => DeviceIcc::Converted(rgb),
         Err(e) => {
             report_failure(B::NAME, &e);

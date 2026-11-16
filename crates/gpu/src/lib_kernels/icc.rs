@@ -98,7 +98,7 @@ impl GpuCtx {
                 let bytes = grid.as_bytes();
                 let n_nodes = CmykGrid::node_count(bytes.len()).ok_or("a grid of no nodes")?;
                 let d_grid = stream.clone_htod(bytes)?;
-                self.launch_icc_clut_async(&d_cmyk, &mut d_rgb, &d_grid, n_nodes, n_u32)?;
+                self.launch_icc_clut_async(&d_cmyk, &mut d_rgb, &d_grid, n_nodes, (n_u32, false))?;
             }
         }
 
@@ -138,9 +138,11 @@ impl GpuCtx {
         Ok(())
     }
 
-    /// Async kernel launch for the ICC CMYK→RGB grid kernel: `d_clut`
-    /// holds the bytes of a grid of `n_nodes` nodes
+    /// Async kernel launch for the ICC CMYK→RGB grid kernel over
+    /// `n_pixels`: `d_clut` holds the bytes of a grid of `n_nodes` nodes
     /// ([`CmykGrid::as_bytes`]); the kernel reads no node beyond them.
+    /// With `wide`, `d_rgb` receives the 16-bit outputs, two bytes each,
+    /// low first ([`CmykGrid::convert16`]); otherwise the 8-bit ones.
     ///
     /// Caller is responsible for stream ordering and any final D→H download.
     ///
@@ -157,18 +159,20 @@ impl GpuCtx {
         d_rgb: &mut CudaSlice<u8>,
         d_clut: &CudaSlice<u8>,
         n_nodes: u32,
-        n_pixels: u32,
+        (n_pixels, wide): (u32, bool),
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = launch_cfg(n_pixels as usize);
         let stream = self.stream();
+        let wide = u32::from(wide);
         let mut builder = stream.launch_builder(&self.kernels.icc_cmyk_clut);
         builder
             .arg(d_cmyk)
             .arg(d_rgb)
             .arg(d_clut)
             .arg(&n_nodes)
-            .arg(&n_pixels);
-        // SAFETY: 5 args match icc_cmyk_clut PTX signature exactly.
+            .arg(&n_pixels)
+            .arg(&wide);
+        // SAFETY: 6 args match icc_cmyk_clut PTX signature exactly.
         unsafe { builder.launch(cfg) }?;
         Ok(())
     }

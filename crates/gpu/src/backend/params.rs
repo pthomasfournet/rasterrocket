@@ -184,9 +184,10 @@ fn validate_per_pixel<B: GpuBackend + ?Sized>(
 /// kernel runs on the GPU, so `clut` is required.
 ///
 /// # Invariants enforced by `IccClutParams::validate`
-/// - `n_pixels` ≤ [`MAX_KERNEL_PIXELS`]
+/// - `n_pixels` ≤ [`MAX_KERNEL_PIXELS`], and with `wide` at most
+///   [`MAX_WIDE_CLUT_PIXELS`]
 /// - `cmyk` holds at least `n_pixels × 4` bytes and `rgb` at least
-///   `n_pixels × 3`
+///   `n_pixels × 3`, `n_pixels × 6` with `wide`
 /// - `clut` is as long as a grid of some number of nodes
 ///   ([`color::grid::CmykGrid::node_count`]), at most `i32::MAX` bytes;
 ///   the kernels read no node beyond that number, whatever the buffer
@@ -201,7 +202,16 @@ pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     pub clut: &'a B::DeviceBuffer,
     /// Number of pixels to transform.
     pub n_pixels: u32,
+    /// Whether `rgb` receives the 16-bit outputs, two bytes each, low
+    /// first ([`color::grid::CmykGrid::convert16`]), rather than the 8-bit
+    /// ones ([`color::grid::CmykGrid::convert`]).
+    pub wide: bool,
 }
+
+/// Largest pixel count of a 16-bit [`IccClutParams`] conversion: the grid
+/// kernel addresses the output bytes of pixel `i` at `i × 6` in 32-bit
+/// arithmetic.
+pub const MAX_WIDE_CLUT_PIXELS: u32 = u32::MAX / 6;
 
 impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
     /// Check the invariants documented on `IccClutParams` and return the
@@ -211,13 +221,24 @@ impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
     /// Returns a `BackendError` if any documented invariant is violated.
     pub fn validate(&self, backend: &B) -> super::Result<u32> {
         const KIND: &str = "IccClutInvariantViolation";
+        if self.wide && self.n_pixels > MAX_WIDE_CLUT_PIXELS {
+            return Err(super::BackendError::InvariantViolation {
+                kind: KIND,
+                detail: "n_pixels exceeds MAX_WIDE_CLUT_PIXELS (32-bit byte addressing)",
+            });
+        }
+        let (rgb_bytes, rgb_short) = if self.wide {
+            (6, "rgb buffer shorter than n_pixels × 6 bytes")
+        } else {
+            (3, "rgb buffer shorter than n_pixels × 3 bytes")
+        };
         validate_per_pixel(
             backend,
             KIND,
             self.n_pixels,
             &[
                 (self.cmyk, 4, "cmyk buffer shorter than n_pixels × 4 bytes"),
-                (self.rgb, 3, "rgb buffer shorter than n_pixels × 3 bytes"),
+                (&*self.rgb, rgb_bytes, rgb_short),
             ],
         )?;
         color::grid::CmykGrid::node_count(backend.device_buffer_len(self.clut)).ok_or(
@@ -562,6 +583,7 @@ mod tests {
             rgb: fake_out(),
             clut: &GRID,
             n_pixels: 4,
+            wide: false,
         };
         assert_eq!(ok().validate(&FakeBackend).unwrap(), 17);
         let err =
@@ -580,5 +602,22 @@ mod tests {
             ..ok()
         });
         assert!(e.contains("MAX_KERNEL_PIXELS"), "{e}");
+        let wide = || IccClutParams {
+            wide: true,
+            rgb: fake_out_of(24),
+            ..ok()
+        };
+        assert_eq!(wide().validate(&FakeBackend).unwrap(), 17);
+        let e = err(IccClutParams {
+            rgb: fake_out_of(23),
+            ..wide()
+        });
+        assert!(e.contains("n_pixels × 6"), "{e}");
+        let e = err(IccClutParams {
+            n_pixels: MAX_WIDE_CLUT_PIXELS + 1,
+            rgb: fake_out(),
+            ..wide()
+        });
+        assert!(e.contains("MAX_WIDE_CLUT_PIXELS"), "{e}");
     }
 }

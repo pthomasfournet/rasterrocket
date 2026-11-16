@@ -48,6 +48,7 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
             rgb: &mut rgb,
             clut: &clut,
             n_pixels,
+            wide: false,
         })
         .expect("record_icc_clut failed — kernel launch error or arg mismatch");
     let fence = backend

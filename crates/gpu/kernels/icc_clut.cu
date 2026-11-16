@@ -11,11 +11,13 @@
 //     grid (`color::grid::CmykGrid`): interpolation in the simplex of the
 //     pixel's grid cell, five node lookups a pixel through __ldg(), in the
 //     32-bit integer arithmetic of `CmykGrid::convert`, so the output is
-//     byte-identical to the host's.
+//     byte-identical to the host's: 8-bit, or with `wide` the 16-bit
+//     outputs of `CmykGrid::convert16`.
 //
 // Input layout:  `n_pixels` × 4 bytes, interleaved CMYK (PDF convention:
 //                0 = no ink, 255 = full ink for DeviceCMYK).
-// Output layout: `n_pixels` × 3 bytes, interleaved RGB.
+// Output layout: `n_pixels` × 3 bytes, interleaved RGB; the grid kernel
+//                with `wide`, `n_pixels` × 3 little-endian 16-bit values.
 //
 // Thread/block layout: 256 threads/block, ceil(n_pixels/256) blocks.
 
@@ -110,10 +112,10 @@ __device__ __forceinline__ void grid_node(
     *v2 = hi & 0xffffu;
 }
 
-// `NodeRange::output` of the node sum `acc`, then the nearest byte of the
-// 16-bit output.  Extended: (2 (acc' - L) + 1) / F with acc' clamped to
-// [L, L + (F^2 - 1) / 2], L = (F (F - 1) / 2 + 1) / 2.
-__device__ __forceinline__ unsigned char grid_output(unsigned int acc, unsigned int extended) {
+// `NodeRange::output` of the node sum `acc`, a 16-bit value.  Extended:
+// (2 (acc' - L) + 1) / F with acc' clamped to [L, L + (F^2 - 1) / 2],
+// L = (F (F - 1) / 2 + 1) / 2.
+__device__ __forceinline__ unsigned int grid_output(unsigned int acc, unsigned int extended) {
     const unsigned int low = (GRID_FULL * (GRID_FULL - 1u) / 2u + 1u) / 2u;
     const unsigned int high = low + (GRID_FULL * GRID_FULL - 1u) / 2u;
     unsigned int v;
@@ -122,7 +124,22 @@ __device__ __forceinline__ unsigned char grid_output(unsigned int acc, unsigned 
     } else {
         v = (acc + GRID_FULL / 2u) / GRID_FULL;
     }
-    return (unsigned char)((v * 255u + 32767u) / 65535u);
+    return v;
+}
+
+// Output channel `c` of pixel `i`, the 16-bit value `v`: with `wide` its
+// two bytes, low first, at 2 (3i + c); otherwise its nearest byte at 3i + c.
+__device__ __forceinline__ void grid_store(
+    unsigned char* __restrict__ rgb, unsigned int i, unsigned int c, unsigned int v,
+    unsigned int wide
+) {
+    unsigned int at = i * 3u + c;
+    if (wide) {
+        rgb[2u * at]      = (unsigned char)(v & 0xffu);
+        rgb[2u * at + 1u] = (unsigned char)(v >> 8);
+    } else {
+        rgb[at] = (unsigned char)((v * 255u + 32767u) / 65535u);
+    }
 }
 
 // The larger of `*a` and `*b` into `*a`, the smaller into `*b`.
@@ -133,10 +150,11 @@ __device__ __forceinline__ void exchange(unsigned int* a, unsigned int* b) {
 }
 
 // cmyk    : interleaved input,  4 bytes per pixel
-// rgb     : interleaved output, 3 bytes per pixel
+// rgb     : interleaved output, 3 bytes per pixel, 6 with `wide`
 // grid    : the grid's words
 // n_nodes : the grid's node count
 // n       : total pixel count
+// wide    : nonzero for 16-bit outputs
 //
 // Each input's cell gives the base node's offset and a sort key, the
 // position above the input's index; the keys, sorted in decreasing order
@@ -147,7 +165,8 @@ extern "C" __global__ void icc_cmyk_clut(
     unsigned char*       __restrict__ rgb,
     const unsigned int*  __restrict__ grid,
     unsigned int n_nodes,
-    unsigned int n
+    unsigned int n,
+    unsigned int wide
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -185,7 +204,7 @@ extern "C" __global__ void icc_cmyk_clut(
     acc2 += previous * v2;
 
     unsigned int extended = __ldg(&grid[4]);
-    rgb[i * 3u]      = grid_output(acc0, extended);
-    rgb[i * 3u + 1u] = grid_output(acc1, extended);
-    rgb[i * 3u + 2u] = grid_output(acc2, extended);
+    grid_store(rgb, i, 0u, grid_output(acc0, extended), wide);
+    grid_store(rgb, i, 1u, grid_output(acc1, extended), wide);
+    grid_store(rgb, i, 2u, grid_output(acc2, extended), wide);
 }
