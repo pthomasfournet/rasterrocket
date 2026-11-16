@@ -3087,6 +3087,56 @@ argument of `ColorSpace::convert_to_rgb`), `CanvasRequest::WideRgb`,
 `SessionConfig::working_space`, `page_group_declares_space`;
 `OutputProfile::{convert, separation, prepare}` take the working space.
 
+**Unreleased on master: CMYK output completes its conversions.**
+- **Black generation and undercolour removal.** Without an output profile,
+  `--cmyk` separates RGB-family colours under the `ExtGState` `BG2`/`BG` and
+  `UCR2`/`UCR` functions (ISO 32000-2 §8.4.5, §10.4.2): `C = c − UCR(k)`,
+  `K = BG(k)`; `/Default` is the device's full gray-component removal, as
+  before. Grays (`DeviceGray`, `CalGray`, ICC gray, gray images and
+  shadings) stay black ink alone. A CMYK output profile, the proof and RGB
+  output ignore them, a profile's `BToA` being its own black generation.
+- **ICC CMYK of another press.** Under a CMYK output profile, a colour,
+  image, shading or tint alternate in an `ICCBased` CMYK space whose profile
+  is not the output's (by tag data) converts to the output's ink: source
+  `AToB` and output `BToA` evaluated in floating point, the absolute white
+  scale or the ISO 18619 black map between them, on a 17⁴ table per source,
+  intent and compensation; within ΔE00 0.73 of Little CMS between the two
+  test printers (1.53 for compensated perceptual/saturation to the new v2
+  one). The output's own profile and `DeviceCMYK` keep their values.
+- **Indexed images over ink** (`DeviceCMYK`, ICC CMYK, `Separation`,
+  `DeviceN`) paint their palette's ink instead of a separated sRGB value.
+- **Rendering intent per object.** Without `--intent`, each object separates
+  under its own intent (`ri`, `/RI`, an image's `/Intent`), on CMYK pages
+  and proofs; tables are built per intent on first use.
+- **Exact separation.** Each node of the 65³ separation table is the
+  profile's `BToA` evaluated at the node's PCS value, no longer the
+  converter's 33³-grid transform, and the table interpolates in tetrahedra
+  so grays read the neutral axis alone: below the test press's black, sRGB
+  grays 4–16 separate as Little CMS does (cyan 0/0/0/11.2 %, was
+  5.3/0.1/8.0/11.4 %); the chart prints within ΔE00 0.60 of `transicc`, and
+  the 8-bit proof chart, the patches below the press black now included,
+  within 1.11.
+- **Spots.** A spot whose alternate's white separates to ink no longer tints
+  the whole page: tint 0 is no ink.
+- **Pixel impact** (pages 1–10, 50 dpi, against the previous master, of the
+  43 archive documents with BG/UCR functions, Indexed-CMYK images or ICC
+  CMYK sources): under `--cmyk --output-profile` ISO Coated v2 300 %, 36
+  change on 284 of 423 pages, by up to 215 levels: SCOTUS slip opinions'
+  US Web Coated (SWOP) v2 K-only text becomes ISO Coated's four-colour black
+  (C70 M61 Y60 K85, as Little CMS converts it), K-only Indexed palette
+  entries stop printing as four-colour black. Without a profile, 8 change on
+  28 pages (the Indexed images); the 9 documents with BG/UCR functions are
+  unchanged on these pages. Through the SWOP press of their own content,
+  the SCOTUS pages keep their K. Of the 63 documents painting under a
+  non-relative intent, 60 change through ISO Coated v2 (333 of 528 pages,
+  at most 82 levels).
+- **API changes:** `OutputProfile::separation(&Arc<Self>, space,
+  Option<RenderingIntent>, bpc)` returns `Separation::Profile(Arc<PressSeparation>)`;
+  `OutputProfile::separation_table(space, intent, bpc)` is one intent's
+  `ProfileSeparation`; `DecodedImage::intent`; `PageDiagnostics::output_intent`
+  of a CMYK or proofed page is `--intent`, else the page's one content
+  intent.
+
 **Unreleased on master: forced-CUDA deskew, deep forms, JPEG 2000 matte
 and truncation, Type 3 without `/FontMatrix`.**  Under `--backend cuda` a
 deskew rotation that fails on the GPU is `RasterError::BackendUnavailable`
