@@ -3560,6 +3560,20 @@ now the CPU's: byte-identical on qsj-0616 p. 10 and Halbwachs pp. 1–24.
 API changes: `DeviceKernel::NvJpeg2kOnDemand` and `NvJpeg2kAttached` are
 new; `device_kernel_enabled` is no longer `const`.
 
+**Unreleased on master: an image thinner than a pixel draws.** The blit
+paints the pixels whose centres an image covers, so an image (seen with
+1-bit Type 3 glyph masks) whose device extent along one axis was below one
+pixel and lay between two pixel centres painted nothing. Such an axis now
+spans the one pixel containing its centre, holding the mean of its samples
+along the axis; on a rotated or skewed draw it is sheared to one pixel
+across the other axis, so a thin band marks every row it crosses. This is
+pdfium's placement of a sub-pixel image (exact-area coverage would draw it
+lighter, over two pixels). pdfium's `bug_1128284` now matches pdfium except
+for its rounding of cached Type 3 glyph origins to whole pixels, registered
+as a divergence (RMSE 3.56 → 3.35). An axis of a pixel or more is untouched:
+the ten corpus fixtures and 20 image-heavy archive documents, pages 1–3 at
+50 dpi, render byte-identical.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
