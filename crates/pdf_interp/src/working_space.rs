@@ -33,7 +33,8 @@ use color::Sample;
 use moxcms::{ColorProfile, Xyzd};
 
 use crate::resources::icc_shaper::{
-    IDENTITY_MATRIX_TOLERANCE, Mat3, SRGB_D50_COLORANTS, mat_inverse, mat_mul, srgb_encode,
+    IDENTITY_MATRIX_TOLERANCE, Mat3, SRGB_D50_COLORANTS, mat_inverse, mat_mul, pcs_to_linear_srgb,
+    srgb_encode,
 };
 
 /// The RGB space a page is composited in.
@@ -88,6 +89,14 @@ impl WorkingSpace {
             profile.blue_colorant = column(2);
         }
         profile
+    }
+
+    /// The D50 PCS → linear component matrix of the space.
+    pub(crate) fn pcs_to_linear(self) -> Mat3 {
+        match self {
+            Self::Srgb => pcs_to_linear_srgb(),
+            Self::Wide => pcs_to_linear_wide(),
+        }
     }
 }
 

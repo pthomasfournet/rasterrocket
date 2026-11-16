@@ -6,10 +6,14 @@
 //! matrix (on PCS XYZ input), input tables, CLUT and output tables;
 //! `lutAtoBType` as A curves, CLUT, M curves, matrix and B curves;
 //! `lutBtoAType` as B curves, matrix, M curves, CLUT and A curves.  One-
-//! dimensional tables interpolate linearly; a CLUT interpolates
-//! multilinearly in its cell, trilinearly for the three PCS inputs as
-//! colour-management modules do for a table indexed by Lab or XYZ.  Every
-//! stage's output is clamped to `[0, 1]`.
+//! dimensional tables interpolate linearly.  A CLUT indexed by Lab
+//! interpolates trilinearly in its cell; any other interpolates in the
+//! tetrahedron of its last three inputs around the value (the simplex of
+//! the cell visited in decreasing order of the fractional positions),
+//! linearly along each input before them, and bilinearly or linearly with
+//! fewer than three inputs.  A tetrahedron holds the cell's main diagonal
+//! whole, so device values of equal components take the table's nodes of
+//! equal components alone.  Every stage's output is clamped to `[0, 1]`.
 //!
 //! The PCS side is encoded as the table type stores it: Lab as `L / 100`,
 //! `(a + 128) / 255`, `(b + 128) / 255`, scaled by `65280 / 65535` in a
@@ -117,6 +121,18 @@ fn values(store: &LutStore) -> Vec<f64> {
     }
 }
 
+/// The interpolation of a [`Clut`] within a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interpolation {
+    /// Multilinear in every input.
+    Multilinear,
+    /// Tetrahedral in the last three inputs, linear along each before.
+    Tetrahedral,
+}
+
+/// The largest number of outputs of a CLUT (ICC.1:2022 §10.12).
+const MAX_OUTPUTS: usize = 16;
+
 /// A colour lookup table of `outputs` values at each node of a grid of
 /// `grid[i]` nodes along input `i`, the first input varying slowest.
 #[derive(Debug, Clone)]
@@ -124,23 +140,32 @@ struct Clut {
     grid: Vec<usize>,
     outputs: usize,
     nodes: Vec<f64>,
+    interpolation: Interpolation,
 }
 
 impl Clut {
-    /// The table of `nodes`, `None` when their count is not the grid's.
-    fn new(grid: Vec<usize>, outputs: usize, nodes: Vec<f64>) -> Option<Self> {
+    /// The table of `nodes`, `None` when their count is not the grid's or
+    /// it has more than [`MAX_OUTPUTS`] outputs.  A table indexed by Lab
+    /// (`lab_indexed`) interpolates multilinearly, any other
+    /// tetrahedrally.
+    fn new(grid: Vec<usize>, outputs: usize, nodes: Vec<f64>, lab_indexed: bool) -> Option<Self> {
         let count = grid.iter().try_fold(outputs, |n, &g| {
             (g >= 2).then(|| n.checked_mul(g)).flatten()
         })?;
-        (nodes.len() == count).then_some(Self {
+        let interpolation = if lab_indexed {
+            Interpolation::Multilinear
+        } else {
+            Interpolation::Tetrahedral
+        };
+        (nodes.len() == count && outputs <= MAX_OUTPUTS).then_some(Self {
             grid,
             outputs,
             nodes,
+            interpolation,
         })
     }
 
-    /// The multilinear interpolation of the cell around `input` into
-    /// `out`.
+    /// The interpolation of the cell around `input` into `out`.
     fn eval(&self, input: &[f64], out: &mut [f64]) {
         let n = self.grid.len();
         let mut base = 0usize;
@@ -162,11 +187,21 @@ impl Clut {
             cell[i] = (stride, f);
             stride *= g;
         }
+        match self.interpolation {
+            Interpolation::Multilinear => self.multilinear(&cell[..n], base, out),
+            Interpolation::Tetrahedral => self.tetrahedral(&cell[..n], base, out),
+        }
+    }
+
+    /// The multilinear interpolation in the cell of node `base`, whose
+    /// inputs have the strides and fractional positions `cell`, into
+    /// `out`.
+    fn multilinear(&self, cell: &[(usize, f64)], base: usize, out: &mut [f64]) {
         out.fill(0.0);
-        for corner in 0..1usize << n {
+        for corner in 0..1usize << cell.len() {
             let mut weight = 1.0;
             let mut at = base;
-            for (i, &(stride, f)) in cell.iter().enumerate().take(n) {
+            for (i, &(stride, f)) in cell.iter().enumerate() {
                 if corner >> i & 1 == 1 {
                     weight *= f;
                     at += stride;
@@ -177,9 +212,54 @@ impl Clut {
             if weight == 0.0 {
                 continue;
             }
-            for (o, &v) in out.iter_mut().zip(&self.nodes[at..at + self.outputs]) {
-                *o = weight.mul_add(v, *o);
+            self.accumulate(weight, at, out);
+        }
+    }
+
+    /// The interpolation in the cell of node `base` as
+    /// [`Interpolation::Tetrahedral`] into `out`: along the first input
+    /// between the interpolations of the faces at its two ends while more
+    /// than three inputs remain; with three, the sum of the cell's nodes
+    /// from `base` towards the opposite corner, one input at a time in
+    /// decreasing order of fractional position, each weighted by the
+    /// difference of successive positions; with fewer, multilinear.
+    fn tetrahedral(&self, cell: &[(usize, f64)], base: usize, out: &mut [f64]) {
+        match *cell {
+            [(stride, f), ref rest @ ..] if rest.len() >= 3 => {
+                self.tetrahedral(rest, base, out);
+                if f > 0.0 {
+                    let mut far = [0.0; MAX_OUTPUTS];
+                    let far = &mut far[..self.outputs];
+                    self.tetrahedral(rest, base + stride, far);
+                    for (o, &v) in out.iter_mut().zip(&*far) {
+                        *o = f.mul_add(v - *o, *o);
+                    }
+                }
             }
+            [a, b, c] => {
+                let mut order = [a, b, c];
+                order.sort_unstable_by(|x, y| y.1.total_cmp(&x.1));
+                out.fill(0.0);
+                let mut at = base;
+                let mut previous = 1.0;
+                for (stride, f) in order {
+                    self.accumulate(previous - f, at, out);
+                    previous = f;
+                    at += stride;
+                }
+                self.accumulate(previous, at, out);
+            }
+            _ => self.multilinear(cell, base, out),
+        }
+    }
+
+    /// `out += weight · node(at)`.
+    fn accumulate(&self, weight: f64, at: usize, out: &mut [f64]) {
+        if weight == 0.0 {
+            return;
+        }
+        for (o, &v) in out.iter_mut().zip(&self.nodes[at..at + self.outputs]) {
+            *o = weight.mul_add(v, *o);
         }
     }
 }
@@ -259,9 +339,10 @@ impl ProfileLut {
                 lut_stages(lut, inputs, outputs, profile.pcs, direction)?,
                 lut.lut_type == LutType::Lut16,
             ),
-            LutWarehouse::Multidimensional(m) => {
-                (mab_stages(m, inputs, outputs, direction)?, false)
-            }
+            LutWarehouse::Multidimensional(m) => (
+                mab_stages(m, inputs, outputs, profile.pcs, direction)?,
+                false,
+            ),
         };
         Some(Self {
             direction,
@@ -368,6 +449,7 @@ fn lut_stages(
         grid,
         outputs,
         values(&lut.clut_table),
+        lab_indexed(pcs, direction),
     )?));
     stages.push(Stage::Curves(tables(
         &lut.output_table,
@@ -383,6 +465,7 @@ fn mab_stages(
     m: &moxcms::LutMultidimensionalType,
     inputs: usize,
     outputs: usize,
+    pcs: DataColorSpace,
     direction: Direction,
 ) -> Option<Vec<Stage>> {
     if usize::from(m.num_input_channels) != inputs || usize::from(m.num_output_channels) != outputs
@@ -417,7 +500,12 @@ fn mab_stages(
                 .iter()
                 .map(|&g| usize::from(g))
                 .collect();
-            Some(Stage::Clut(Clut::new(grid, outputs, values(store))?))
+            Some(Stage::Clut(Clut::new(
+                grid,
+                outputs,
+                values(store),
+                lab_indexed(pcs, direction),
+            )?))
         }
         None if inputs == outputs => None,
         None => return None,
@@ -427,6 +515,12 @@ fn mab_stages(
         Direction::ToDevice => [b, matrix, mc, clut, a],
     };
     Some(stages.into_iter().flatten().collect())
+}
+
+/// Whether the CLUT of a table `direction` of a profile of PCS `pcs` is
+/// indexed by Lab.
+fn lab_indexed(pcs: DataColorSpace, direction: Direction) -> bool {
+    direction == Direction::ToDevice && pcs == DataColorSpace::Lab
 }
 
 /// The scale of the legacy Lab encoding of `lut16Type`.
@@ -517,13 +611,101 @@ mod tests {
     fn a_clut_interpolates_multilinearly() {
         // f(x, y) = x + 2y on a 2 × 3 grid, the first input slowest.
         let nodes = vec![0.0, 1.0, 2.0, 1.0, 2.0, 3.0];
-        let clut = Clut::new(vec![2, 3], 1, nodes).expect("a whole grid");
+        let clut = Clut::new(vec![2, 3], 1, nodes, true).expect("a whole grid");
         let mut out = [0.0];
         clut.eval(&[0.25, 0.75], &mut out);
         assert!(
             (out[0] - 2.0f64.mul_add(0.75, 0.25)).abs() < 1e-12,
             "{out:?}"
         );
-        assert!(Clut::new(vec![2, 3], 1, vec![0.0; 5]).is_none());
+        assert!(Clut::new(vec![2, 3], 1, vec![0.0; 5], true).is_none());
+    }
+
+    /// A table of nodes `(x + y + z, x · y · z)` on a 3 × 3 × 3 grid, in
+    /// `[0, 1]`, interpolated tetrahedrally: exact on the main diagonal
+    /// whatever the off-diagonal nodes hold, and the cell's corners'
+    /// convex combination elsewhere.
+    #[test]
+    fn a_device_clut_interpolates_tetrahedrally() {
+        let mut nodes = Vec::new();
+        for x in 0..3 {
+            for y in 0..3 {
+                for z in 0..3 {
+                    let [x, y, z] = [x, y, z].map(|v| f64::from(v) / 2.0);
+                    nodes.extend([(x + y + z) / 3.0, x * y * z]);
+                }
+            }
+        }
+        let clut = Clut::new(vec![3; 3], 2, nodes, false).expect("a whole grid");
+        let mut out = [0.0; 2];
+        clut.eval(&[0.3; 3], &mut out);
+        // (0.3, 0.3, 0.3) lies 0.6 of the way from node 0 to node 1/2 of
+        // the diagonal: 0.6 · (0.5, 0.125).
+        assert!(
+            (out[0] - 0.3).abs() < 1e-12 && (out[1] - 0.075).abs() < 1e-12,
+            "{out:?}"
+        );
+        // Off the diagonal, fractions 0.8 ≥ 0.4 ≥ 0.2 in the first cell:
+        // node 0, then (1, 0, 0), (1, 1, 0) and (1, 1, 1), halves.
+        clut.eval(&[0.4, 0.2, 0.1], &mut out);
+        let want = 0.4f64.mul_add(1.0 / 6.0, 0.2f64.mul_add(2.0 / 6.0, 0.2 * 3.0 / 6.0));
+        assert!((out[0] - want).abs() < 1e-12, "{out:?} for {want}");
+        assert!(0.2f64.mul_add(-0.125, out[1]).abs() < 1e-12, "{out:?}");
+    }
+
+    /// The version 4 RGB test printer maps equal device components to a
+    /// neutral PCS, `a* = b* = 0` within the rounding of its model's
+    /// matrix, at nodes and between them alike.
+    #[test]
+    fn a_device_table_keeps_equal_components_neutral() {
+        for name in ["printer-rgb-v4"] {
+            let path = format!(
+                "{}/../../tests/fixtures/icc/{name}.icc",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let profile =
+                ColorProfile::new_from_slice(&std::fs::read(&path).unwrap()).expect("parses");
+            for intent in [
+                RenderingIntent::Perceptual,
+                RenderingIntent::RelativeColorimetric,
+                RenderingIntent::Saturation,
+            ] {
+                let lut = ProfileLut::new(&profile, intent, Direction::ToPcs, 3).expect("a table");
+                for v in [0.03, 0.125, 0.2, 0.5, 0.77] {
+                    let xyz = lut.to_pcs(&[v; 3]);
+                    let lab = encode(xyz, DataColorSpace::Lab, false);
+                    for c in &lab[1..] {
+                        assert!(
+                            (c - 128.0 / 255.0).abs() * 255.0 < 0.05,
+                            "{name} {intent:?} {v}: {lab:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Four inputs interpolate linearly along the first between the
+    /// tetrahedral interpolations of the other three.
+    #[test]
+    fn a_four_input_clut_is_linear_along_its_first_input() {
+        let mut nodes = Vec::new();
+        for w in 0..2 {
+            for x in 0..2 {
+                for y in 0..2 {
+                    for z in 0..2 {
+                        nodes.push(f64::from(w * 4 + x * y * z));
+                    }
+                }
+            }
+        }
+        let nodes: Vec<f64> = nodes.iter().map(|v| v / 5.0).collect();
+        let clut = Clut::new(vec![2; 4], 1, nodes, false).expect("a whole grid");
+        let mut out = [0.0];
+        clut.eval(&[0.25, 0.5, 0.5, 0.5], &mut out);
+        assert!(
+            (out[0] - 0.25f64.mul_add(4.0, 0.5) / 5.0).abs() < 1e-12,
+            "{out:?}"
+        );
     }
 }

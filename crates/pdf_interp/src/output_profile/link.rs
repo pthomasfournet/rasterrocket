@@ -17,13 +17,13 @@
 //! a perceptual or saturation conversion to a version 4 profile always
 //! compensates to.  The conversion is tabulated on a
 //! grid of [`LINK_SPAN`] cells along each ink axis
-//! ([`super::ink_table::InkTable`]).
+//! ([`crate::pcs::grid::GridTable`]).
 
 use moxcms::{ColorProfile, RenderingIntent};
 
-use super::ink_table::InkTable;
 use crate::pcs::D50;
 use crate::pcs::black::{is_v4, source_black};
+use crate::pcs::grid::GridTable;
 use crate::pcs::lut::{Direction, ProfileLut};
 
 /// The number of cells along each ink axis of a link's table.
@@ -38,11 +38,11 @@ pub(super) fn tabulate(
     dest: &ColorProfile,
     intent: RenderingIntent,
     bpc: bool,
-) -> Option<InkTable> {
+) -> Option<GridTable<4>> {
     let to_pcs = ProfileLut::new(source, intent, Direction::ToPcs, 4)?;
     let to_device = ProfileLut::new(dest, intent, Direction::ToDevice, 4)?;
     let adjust = pcs_adjustment(source, dest, intent, bpc)?;
-    InkTable::tabulate(LINK_SPAN, 4, |inks, out| {
+    GridTable::tabulate(LINK_SPAN, 4, |inks, out| {
         for (ink, o) in inks
             .as_chunks::<4>()
             .0

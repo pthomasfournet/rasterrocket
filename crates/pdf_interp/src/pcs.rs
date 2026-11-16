@@ -13,6 +13,7 @@
 use moxcms::{ColorProfile, ProfileClass, ProfileVersion, Xyzd};
 
 pub(crate) mod black;
+pub(crate) mod grid;
 pub(crate) mod lut;
 
 /// The D50 illuminant of the PCS.

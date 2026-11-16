@@ -29,10 +29,10 @@ use std::sync::{Arc, OnceLock};
 use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16};
 use moxcms::{CmsError, ColorProfile, Layout, TransformExecutor, TransformOptions};
 
-use super::ink_table::InkTable;
 use super::{OutputProfile, OutputProfileError, OutputSpace, convert_to};
 use crate::intent::ProofIntent;
 use crate::pcs::black::{as_version_2, layout_of, pcs_lightness};
+use crate::pcs::grid::GridTable;
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
 
 /// The number of cells along each ink axis of a proof's table.
@@ -42,7 +42,7 @@ const SPAN: u32 = 32;
 pub const PROOF_GRID: usize = SPAN as usize + 1;
 
 /// A tabulated proof conversion, or why it could not be built.
-type Tabulated = Result<Arc<InkTable>, OutputProfileError>;
+type Tabulated = Result<Arc<GridTable<4>>, OutputProfileError>;
 
 /// The conversion of a press's process ink to a display space.
 pub struct SoftProof {
@@ -193,9 +193,9 @@ impl SoftProof {
     }
 
     /// Evaluate the conversion of `intent` at every node of the grid.
-    fn tabulate(&self, intent: ProofIntent) -> Result<InkTable, OutputProfileError> {
+    fn tabulate(&self, intent: ProofIntent) -> Result<GridTable<4>, OutputProfileError> {
         let leg = self.leg(intent)?;
-        InkTable::tabulate(SPAN, leg.channels, |ink, out| {
+        GridTable::tabulate(SPAN, leg.channels, |ink, out| {
             leg.transform(ink, out)
                 .map_err(|e| OutputProfileError::Conversion(e.to_string()))
         })

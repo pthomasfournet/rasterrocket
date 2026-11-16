@@ -25,13 +25,10 @@
 //! conversion of the page's working space under the paint's intent,
 //! tabulated by [`OutputProfile::separation_table`].
 
-mod ink_table;
 mod link;
 mod proof;
 mod separate;
 mod source;
-
-pub(crate) use ink_table::InkTable;
 
 pub use proof::{PROOF_GRID, SoftProof};
 
@@ -45,6 +42,7 @@ use moxcms::{
 };
 use raster::Bitmap;
 
+use crate::pcs::grid::GridTable;
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
 use crate::separation::{PROFILE_GRID, PressSeparation, ProfileSeparation, Separation};
 use crate::{RenderingIntent, WorkingSpace};
@@ -146,7 +144,7 @@ type Tabulated = Result<Arc<ProfileSeparation>, OutputProfileError>;
 
 /// The conversion of the ink of one source profile under one intent and
 /// compensation, tabulated on first use; `None` when it cannot be built.
-type Link = Arc<OnceLock<Option<Arc<InkTable>>>>;
+type Link = Arc<OnceLock<Option<Arc<GridTable<4>>>>>;
 
 /// An ICC profile pages are converted to and tagged with.
 pub struct OutputProfile {
@@ -371,7 +369,7 @@ impl OutputProfile {
         fingerprint: u64,
         intent: RenderingIntent,
         bpc: bool,
-    ) -> Option<Arc<InkTable>> {
+    ) -> Option<Arc<GridTable<4>>> {
         if self.space != OutputSpace::Cmyk
             || source.color_space != DataColorSpace::Cmyk
             || fingerprint == self.fingerprint

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use color::Sample;
 
 use crate::RenderingIntent;
-use crate::output_profile::InkTable;
+use crate::pcs::grid::GridTable;
 use crate::resources::ColorSpace;
 use crate::resources::black_generation::DeviceBlack;
 use crate::resources::colorspace::icc::IccConversion;
@@ -351,7 +351,7 @@ impl Separator {
 /// profile ([`Separator::cmyk_link`]).  Two are equal when they are the same
 /// table.
 #[derive(Clone, Debug)]
-pub(crate) struct CmykLink(Arc<InkTable>);
+pub(crate) struct CmykLink(Arc<GridTable<4>>);
 
 impl PartialEq for CmykLink {
     fn eq(&self, other: &Self) -> bool {

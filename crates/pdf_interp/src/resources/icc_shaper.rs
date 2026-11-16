@@ -208,7 +208,7 @@ pub(crate) fn mat_inverse(m: &Mat3) -> Option<Mat3> {
 }
 
 /// XYZ (D50 PCS) → linear sRGB.
-fn pcs_to_linear_srgb() -> Mat3 {
+pub(crate) fn pcs_to_linear_srgb() -> Mat3 {
     mat_inverse(&SRGB_D50_COLORANTS).expect("the sRGB colorant matrix is non-singular")
 }
 

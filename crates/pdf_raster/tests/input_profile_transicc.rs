@@ -11,13 +11,12 @@
 //! compensation on (`/UseBlackPtComp /ON`, against `transicc -b`) and
 //! off; absolute colorimetry, which is never compensated, once.
 //!
-//! Asserted, within [`MAX_DELTA_E_8`] at 8 bits and [`MAX_DELTA_E_16`] at
-//! 16: the CMYK and gray profiles under every compensated intent and under
-//! absolute colorimetry.  Printed only: the intents without compensation,
-//! where Little CMS compensates the black of version 4 perceptual tables
-//! regardless, and the RGB printers, whose table-based conversion the CMS
-//! evaluates with a red cast at dark neutrals under every intent (about
-//! 2 ΔE00).
+//! Asserted, within the bounds of each profile at 8 and 16 bits
+//! ([`TABLES`], [`RGB_TABLES`]): every case but perceptual and saturation
+//! without compensation from a version 4 profile, which are printed only:
+//! Little CMS compensates the black of version 4 perceptual and
+//! saturation tables regardless of `-b`, where `/UseBlackPtComp /OFF`
+//! leaves it.
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket --test input_profile_transicc -- --ignored`.
@@ -38,11 +37,27 @@ use rasterrocket::{
     open_session_from_bytes, render_page_canvas,
 };
 
-/// The largest ΔE00 accepted between the two conversions at 8 bits.
-const MAX_DELTA_E_8: f64 = 1.5;
+/// The largest ΔE00 accepted between the two conversions at 8 and at 16
+/// bits.
+#[derive(Clone, Copy)]
+struct Bounds {
+    eight: f64,
+    sixteen: f64,
+}
 
-/// The largest ΔE00 accepted between the two conversions at 16 bits.
-const MAX_DELTA_E_16: f64 = 1.0;
+/// The bounds of the CMYK and gray profiles.
+const TABLES: Bounds = Bounds {
+    eight: 1.5,
+    sixteen: 1.0,
+};
+
+/// The bounds of the RGB printers, whose tables are evaluated exactly at
+/// the nodes of a grid over the device cube and interpolated tetrahedrally
+/// between them.
+const RGB_TABLES: Bounds = Bounds {
+    eight: 0.75,
+    sixteen: 0.1,
+};
 
 /// The path of the test profile `name` of `tests/fixtures/icc`.
 fn profile_path(name: &str) -> String {
@@ -224,11 +239,12 @@ fn delta_e00(a: &[f64], b: &[f64]) -> f64 {
 
 /// Our rendering of the patches of profile `name` (`n` components)
 /// against `transicc` under every intent at both depths, asserted within
-/// the bound of the depth when `asserted` and the case is compensated or
-/// absolute.
-fn agrees(name: &str, n: usize, asserted: bool) {
+/// `bounds` but for the perceptual and saturation intents without
+/// compensation from a version 4 profile.
+fn agrees(name: &str, n: usize, bounds: Bounds) {
     let path = profile_path(name);
     let profile = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let v4 = profile[8] >= 4;
     let chart = patches(n);
     // transicc reads CMYK in percent and gray or RGB in 0 to 255.
     let full = if n == 4 { 100.0 } else { 255.0 };
@@ -242,11 +258,11 @@ fn agrees(name: &str, n: usize, asserted: bool) {
         ("1", "RelativeColorimetric", false),
         ("2", "Saturation", false),
     ] {
-        let claimed = asserted && (bpc || code == "3");
+        let claimed = bpc || !v4 || !matches!(code, "0" | "2");
         let pdf = patch_page(&profile, n, (intent, bpc), &chart);
         for (depth, quantum, bound) in [
-            (SampleDepth::Eight, 255.0, MAX_DELTA_E_8),
-            (SampleDepth::Sixteen, 65535.0, MAX_DELTA_E_16),
+            (SampleDepth::Eight, 255.0, bounds.eight),
+            (SampleDepth::Sixteen, 65535.0, bounds.sixteen),
         ] {
             // Both convert the components quantised to the render's depth.
             let input: String = chart
@@ -309,18 +325,18 @@ fn agrees(name: &str, n: usize, asserted: bool) {
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn cmyk_printer_agrees_with_little_cms() {
-    agrees("printer-cmyk-v4", 4, true);
+    agrees("printer-cmyk-v4", 4, TABLES);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn gray_printer_agrees_with_little_cms() {
-    agrees("printer-gray-v4", 1, true);
+    agrees("printer-gray-v4", 1, TABLES);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
-fn rgb_printers_against_little_cms() {
-    agrees("printer-rgb-v4", 3, false);
-    agrees("printer-rgb-v2", 3, false);
+fn rgb_printers_agree_with_little_cms() {
+    agrees("printer-rgb-v4", 3, RGB_TABLES);
+    agrees("printer-rgb-v2", 3, RGB_TABLES);
 }
