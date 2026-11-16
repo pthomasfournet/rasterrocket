@@ -3497,8 +3497,9 @@ converts out of.
   colours separated by the device conversion, and takes the conventional
   gray `1 − min(1, 0.3C + 0.59M + 0.11Y + K)` over `BC` read as ink: black
   ink alone is a mask of 0 (was 9 %), an RGB or gray colour masks as in an
-  RGB group. Masks of every other space are unchanged; CIE-based mask groups
-  keep the luma of their encoded values.
+  RGB group. Masks of every other space are unchanged; ICC-based mask groups
+  keep the luma of their encoded values (`CalRGB` and `CalGray` ones take Y,
+  see below).
 - **Pixel impact** (master against this, 100 dpi, the 141 pages of the 23
   archive documents whose groups declare a space other than DeviceRGB or
   sRGB): under default RGB output 105 pages of 16 documents change, those
@@ -3606,6 +3607,36 @@ Against before, at 8 bits: RGB mean 0.07, p99 0.77, max 12.1; gray max
 4.6; CMYK printer mean 0.04, p99 0.67, max 7.6; proof p99 1.15, max 6.8.
 API changes: `FinishedCanvas::narrowed` and `Bitmap::try_converted_in` are
 new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
+
+**Unreleased on master: blend modes in gray groups, luminance of Cal masks.**
+- **Gray groups.** A blend mode other than `Normal` inside a gray group
+  blends the gray of its colour with the gray of what it is painted over.
+  Before, it blended the colour's components before the group's reduction to
+  gray, so blue multiplied onto red gave black; it now gives gray 8, the
+  product of their grays 76 and 28. This covers a form group of a gray space,
+  a group without a space inside one, and a gray page group on an RGB canvas.
+  The raster pipe gains a gray blending space for this.
+- **Cal masks.** A luminosity mask whose group is `CalRGB` or `CalGray` takes
+  the luminance Y of its colour (ISO 32000-1 §11.5.3), not the luma of its
+  encoded values. A gray of 0.5 under gamma 2.2 now masks 0.218, where it
+  masked 0.5. Ghostscript 10.06 agrees to a level.
+- **Unchanged.** ICC-based mask groups keep the luma, as pdftoppm, pdfium,
+  mutool and Ghostscript all do. Antialiased edges on ink canvases finished
+  as RGB still mix in ink:
+  - On 9 of the 105 CMYK-page-group archive pages at 300 dpi, OCR word recall
+    was 2 513 of 3 815 words, against 2 516 with coverage applied in the
+    finished RGB space. That reference was a bilevel 1200-dpi render reduced
+    4×. Two control pages on RGB canvases differ by 2 words with the same
+    method.
+  - Edges of RGB-black text are darker by 42 levels on the 2 pages that have
+    such text, and by under 1 level elsewhere.
+- **Archive impact.** None under default RGB output: the 141 pages whose
+  groups declare a space other than DeviceRGB or sRGB render byte-identical,
+  master against this, at 100 dpi. Their gray content is neutral, and no
+  archive group is a Cal space.
+- **API changes.** New: `raster::GrayBlend` and `PipeState::gray`.
+  `page_group` and `transparent_page_group` now return the space the page
+  declares.
 
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
