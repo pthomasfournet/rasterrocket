@@ -67,10 +67,7 @@ pub(super) fn decoded_bytes(width: u32, height: u32, components: usize) -> u64 {
 /// fails; a decoder refuses an image it cannot hold instead of aborting
 /// the process.
 pub(super) fn try_filled(len: usize, fill: u8) -> Option<Vec<u8>> {
-    let mut v = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|e| log::warn!("image: cannot allocate {len} bytes: {e}"))
-        .ok()?;
+    let mut v = try_with_capacity(len)?;
     v.resize(len, fill);
     Some(v)
 }
