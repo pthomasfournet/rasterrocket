@@ -3941,6 +3941,22 @@ where the unwritten canvas takes three times the page faults. Pages
 larger than `--band-mib` (64 MiB by default) still render in CPU bands.
 Output is byte-identical to `--backend cpu` at 8 and 16 bits.
 
+**Unreleased on master: the RADV loss of the uncleared canvas is gone.**
+The loss was not the page faults themselves. The CLI's allocator marks
+its memory for transparent huge pages, and the kernel then compacts
+memory synchronously whenever such a fault finds no free 2 MiB page. On
+RADV the 300 MB read-back buffer of the wide page comes from host memory
+and was allocated first, so the canvas faults that followed compacted
+and failed (about 100 stalls a page). A GPU page now faults in its whole
+canvas (`MADV_POPULATE_WRITE` on Linux) before it allocates any device
+buffer. Whole process, the 24-outline A1 page at 360 dpi, cleared canvas /
+before / now: 711 / 858 / 713 ms on RADV and 344 / 321 / 333 ms on the RTX
+5070. At 16 bits RADV goes from 1630 to 1188 ms, and the 120-outline page
+on RADV from 1990 to 1805 ms. Building the allocator without huge pages
+would also remove the stalls, but it makes the CPU 14-17 % slower on the
+same pages, so it was not done. Output is byte-identical; on macOS the
+change does nothing.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
