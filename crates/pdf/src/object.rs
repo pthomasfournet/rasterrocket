@@ -14,6 +14,22 @@ use crate::lexer::{
 /// In practice generation numbers are always 0 in modern PDFs.
 pub type ObjectId = (u32, u16);
 
+/// The largest number a file can give an object or a reference.
+///
+/// A larger number in an object header, a reference or a cross-reference
+/// entry is not an object number: the header and the entry are ignored and
+/// the `N G R` is read as integers.  The numbers above this one identify
+/// page-tree nodes written as direct dictionaries (see
+/// [`crate::Document::get_page`]), so they never collide with an object of
+/// the file.
+pub const MAX_OBJECT_NUMBER: u32 = (1 << 31) - 1;
+
+/// `n` as an object number: `None` when it is negative or larger than
+/// [`MAX_OBJECT_NUMBER`].
+pub(crate) fn object_number<N: TryInto<u32>>(n: N) -> Option<u32> {
+    n.try_into().ok().filter(|&num| num <= MAX_OBJECT_NUMBER)
+}
+
 /// A PDF object value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
@@ -618,9 +634,9 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
     if let Ok(s) = std::str::from_utf8(word) {
         if let Ok(n) = s.parse::<i64>() {
             // Peek for "gen R" to form an indirect reference. Only valid when
-            // the object number fits in u32 and is non-negative; otherwise we
+            // `n` is an object number (see `object_number`); otherwise we
             // fall through and emit a plain Integer.
-            if let Ok(num) = u32::try_from(n) {
+            if let Some(num) = object_number(n) {
                 let mut peek = *pos;
                 skip_ws(data, &mut peek);
                 let gen_tok = scan_token(data, &mut peek);
@@ -760,7 +776,7 @@ pub(crate) fn parse_indirect_object(data: &[u8], offset: usize) -> Option<(Objec
     let mut pos = offset;
     skip_ws(data, &mut pos);
 
-    let id_num = u32::try_from(parse_u64(data, &mut pos)?).ok()?;
+    let id_num = object_number(parse_u64(data, &mut pos)?)?;
     skip_ws(data, &mut pos);
     let gen_num = u16::try_from(parse_u64(data, &mut pos)?).ok()?;
     skip_ws(data, &mut pos);
@@ -1128,6 +1144,20 @@ mod tests {
         let mut pos = 0;
         let obj = parse_object(src, &mut pos).expect("parse");
         assert_eq!(obj, Object::Integer(99_999_999_999));
+    }
+
+    /// Numbers above `MAX_OBJECT_NUMBER` name neither an object nor a
+    /// reference; the largest object number does both.
+    #[test]
+    fn numbers_above_the_largest_object_number_are_no_object_numbers() {
+        let parse = |src: &[u8]| parse_object(src, &mut 0).expect("parse");
+        assert_eq!(parse(b"2147483648 0 R"), Object::Integer(2_147_483_648));
+        assert_eq!(
+            parse(b"2147483647 0 R"),
+            Object::Reference((MAX_OBJECT_NUMBER, 0))
+        );
+        assert!(parse_indirect_object(b"2147483648 0 obj\n1\nendobj", 0).is_none());
+        assert!(parse_indirect_object(b"2147483647 0 obj\n1\nendobj", 0).is_some());
     }
 
     /// Container nesting depth of `obj` (a scalar is depth 0).

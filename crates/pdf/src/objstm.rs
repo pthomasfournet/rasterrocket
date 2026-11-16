@@ -19,7 +19,7 @@ use crate::{
     dictionary::Dictionary,
     error::PdfError,
     lexer::{parse_u64, skip_ws},
-    object::{Object, parse_object},
+    object::{Object, object_number, parse_object},
     stream::decode_stream,
 };
 
@@ -175,7 +175,7 @@ fn read_directory(data: &[u8], n: usize, first: usize) -> Vec<(u32, usize)> {
         let Some(rel) = parse_u64(data, &mut pos) else {
             break;
         };
-        let entry = u32::try_from(num).ok().zip(
+        let entry = object_number(num).zip(
             usize::try_from(rel)
                 .ok()
                 .and_then(|rel| first.checked_add(rel))

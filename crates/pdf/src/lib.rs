@@ -10,6 +10,7 @@
 mod crypt;
 mod derived;
 mod dictionary;
+mod direct_nodes;
 mod document;
 mod error;
 mod lexer;
@@ -32,6 +33,6 @@ pub use document::{
 pub use error::PdfError;
 pub use lexer::{decode_name, parse_number};
 pub use linearization::LinearizationHints;
-pub use object::{Object, ObjectId, Stream, StringFormat, parse_object};
+pub use object::{MAX_OBJECT_NUMBER, Object, ObjectId, Stream, StringFormat, parse_object};
 pub use page_tree::descend_to_page_index;
 pub use stream::{filter_full_name, inflate, is_decoded_filter};

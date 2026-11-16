@@ -193,11 +193,51 @@ fn kid_subtree_count(kid_id: ObjectId, kid_dict: &Dictionary) -> Result<u32, Des
         })
 }
 
-/// `/Kids` may be either an inline array or an indirect reference to one
-/// (corpus-04 ships the second form).  Resolve both into a `Vec<ObjectId>`.
+/// The ids of the `/Kids` of node `node_id` (dictionary `node_dict`), one
+/// per element: the referenced object for a reference, the number
+/// [`Document::page_tree_node`] gives a direct dictionary, and `None` for
+/// any other element.  `/Kids` is an array or a reference to one; the
+/// object holding the array names the site of its direct elements.
 ///
-/// Rejects malformed `/Kids` entries (non-references) hard rather than
-/// silently filtering them out.  The descent indexes into the result by
+/// # Errors
+/// [`PdfError::MissingKey`] without `/Kids`, the errors of
+/// [`Document::get_object`] for a referenced array, and
+/// [`PdfError::BadObject`] when `/Kids` is not an array.
+pub(crate) fn kid_ids(
+    doc: &Document,
+    node_id: ObjectId,
+    node_dict: &Dictionary,
+) -> Result<Vec<Option<ObjectId>>, PdfError> {
+    let kids_obj = node_dict.get(b"Kids").ok_or(PdfError::MissingKey("Kids"))?;
+    let referenced;
+    let (holder, kids) = match kids_obj {
+        Object::Array(a) => (node_id.0, a.as_slice()),
+        Object::Reference(rid) => {
+            referenced = doc.get_object(*rid)?;
+            let kids = referenced.as_array().ok_or_else(|| PdfError::BadObject {
+                id: node_id.0,
+                detail: "/Kids reference does not resolve to an array".into(),
+            })?;
+            (rid.0, kids)
+        }
+        _ => {
+            return Err(PdfError::BadObject {
+                id: node_id.0,
+                detail: "/Kids is neither an array nor a reference".into(),
+            });
+        }
+    };
+    Ok(kids
+        .iter()
+        .zip(0u32..)
+        .map(|(kid, slot)| doc.page_tree_node(kid, holder, slot, Some(node_id)))
+        .collect())
+}
+
+/// [`kid_ids`] with every element a page-tree node.
+///
+/// Rejects an element that is neither a reference nor a dictionary hard
+/// rather than filtering it out.  The descent indexes into the result by
 /// page index, so a filtered list breaks the page-index invariant: a
 /// `/Kids [3 0 R 4 0 R 99]` with `/Count 3` would silently misroute
 /// page 2 to a `BadObject` error rather than the `99` slot the source
@@ -207,47 +247,145 @@ fn resolve_kids(
     node_id: ObjectId,
     node_dict: &Dictionary,
 ) -> Result<Vec<ObjectId>, PdfError> {
-    let kids_obj = node_dict.get(b"Kids").ok_or(PdfError::MissingKey("Kids"))?;
-    let arr_slice: &[Object] = match kids_obj {
-        Object::Array(a) => a,
-        Object::Reference(rid) => {
-            let resolved = doc.get_object(*rid)?;
-            return refs_from_array_or_err(resolved.as_ref(), node_id);
-        }
-        _ => {
-            return Err(PdfError::BadObject {
-                id: node_id.0,
-                detail: "/Kids is neither an array nor a reference".into(),
-            });
-        }
-    };
-    refs_from_array(arr_slice, node_id)
-}
-
-fn refs_from_array_or_err(obj: &Object, node_id: ObjectId) -> Result<Vec<ObjectId>, PdfError> {
-    match obj {
-        Object::Array(a) => refs_from_array(a, node_id),
-        _ => Err(PdfError::BadObject {
-            id: node_id.0,
-            detail: "/Kids reference does not resolve to an array".into(),
-        }),
-    }
-}
-
-fn refs_from_array(arr: &[Object], node_id: ObjectId) -> Result<Vec<ObjectId>, PdfError> {
-    let refs: Vec<ObjectId> = arr.iter().filter_map(Object::as_reference).collect();
-    if refs.len() != arr.len() {
+    let kids = kid_ids(doc, node_id, node_dict)?;
+    let total = kids.len();
+    let nodes: Vec<ObjectId> = kids.into_iter().flatten().collect();
+    if nodes.len() != total {
         return Err(PdfError::BadObject {
             id: node_id.0,
             detail: format!(
-                "/Kids contains {} non-reference entries (have {} of {} as refs)",
-                arr.len() - refs.len(),
-                refs.len(),
-                arr.len()
+                "/Kids contains {} entries that are neither references nor dictionaries \
+                 (have {} of {total} as nodes)",
+                total - nodes.len(),
+                nodes.len(),
             ),
         });
     }
-    Ok(refs)
+    Ok(nodes)
+}
+
+// ── Page iterator ─────────────────────────────────────────────────────────────
+
+/// Most node visits plus `/Kids` entries one page-tree walk processes.  A
+/// kid referenced from several `/Kids` arrays is visited once per
+/// reference, so a tree of shared nodes describes exponentially many
+/// pages in linear space; the walk ends at this bound instead.
+pub(crate) const MAX_PAGE_TREE_WORK: usize = 1 << 22;
+
+/// The document-order walk of [`Document::get_pages`].
+pub(crate) struct PageIter<'a> {
+    doc: &'a Document,
+    /// Interior nodes on the traversal path, each with its resolved `/Kids`.
+    stack: Vec<PageTreeFrame>,
+    /// Object numbers of the nodes in `stack`; a kid already present is a
+    /// cyclic `/Kids` reference and is skipped.
+    on_stack: HashSet<u32>,
+    /// The `/Pages` root, visited on the first call to `next`.
+    root: Option<ObjectId>,
+    page_num: u32,
+    /// Work left of [`MAX_PAGE_TREE_WORK`].
+    budget: usize,
+}
+
+/// One interior page-tree node: its `/Kids` references, resolved once, and
+/// the index of the next kid to visit.
+struct PageTreeFrame {
+    id: ObjectId,
+    kids: Vec<ObjectId>,
+    next: usize,
+}
+
+impl<'a> PageIter<'a> {
+    pub(crate) fn new(doc: &'a Document) -> Self {
+        // A catalog without a page tree root yields no pages; logged so
+        // corruption doesn't go silent.
+        let root = doc
+            .pages_root_id()
+            .inspect_err(|e| log::warn!("PageIter: no page tree root, no pages yielded: {e}"))
+            .ok();
+        Self {
+            doc,
+            stack: Vec::new(),
+            on_stack: HashSet::new(),
+            root,
+            page_num: 0,
+            budget: MAX_PAGE_TREE_WORK,
+        }
+    }
+
+    /// Take `work` units from the budget; on exhaustion the walk ends.
+    fn charge(&mut self, work: usize) -> bool {
+        if let Some(left) = self.budget.checked_sub(work) {
+            self.budget = left;
+            return true;
+        }
+        log::warn!(
+            "page-tree walk stopped after {MAX_PAGE_TREE_WORK} node visits and /Kids entries \
+             ({} pages found); the tree repeats nodes past that bound",
+            self.page_num
+        );
+        self.budget = 0;
+        self.root = None;
+        self.stack.clear();
+        self.on_stack.clear();
+        false
+    }
+
+    /// Visit node `id`: a page object (see [`is_interior`])
+    /// is returned as the next page; an interior node with a `/Kids` array
+    /// (direct, or an indirect reference to one) is pushed.  Anything else is
+    /// skipped.
+    fn visit(&mut self, id: ObjectId) -> Option<(u32, ObjectId)> {
+        if !self.charge(1) {
+            return None;
+        }
+        let obj = self.doc.get_object(id).ok()?;
+        let dict = obj.as_dict()?;
+        if !is_interior(dict) {
+            self.page_num += 1;
+            return Some((self.page_num, id));
+        }
+        let kids: Vec<ObjectId> = kid_ids(self.doc, id, dict)
+            .ok()?
+            .into_iter()
+            .flatten()
+            .collect();
+        if !self.charge(kids.len()) {
+            return None;
+        }
+        let _ = self.on_stack.insert(id.0);
+        self.stack.push(PageTreeFrame { id, kids, next: 0 });
+        None
+    }
+}
+
+impl Iterator for PageIter<'_> {
+    type Item = (u32, ObjectId);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(root) = self.root.take()
+            && let Some(page) = self.visit(root)
+        {
+            return Some(page);
+        }
+        loop {
+            let frame = self.stack.last_mut()?;
+            let Some(&kid) = frame.kids.get(frame.next) else {
+                let id = frame.id;
+                let _ = self.stack.pop();
+                let _ = self.on_stack.remove(&id.0);
+                continue;
+            };
+            frame.next += 1;
+            if self.on_stack.contains(&kid.0) {
+                log::warn!("PageIter: cyclic /Kids reference to obj {} skipped", kid.0);
+                continue;
+            }
+            if let Some(page) = self.visit(kid) {
+                return Some(page);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -412,8 +550,8 @@ startxref\n258\n%%EOF"
         match err {
             PdfError::BadObject { detail, .. } => {
                 assert!(
-                    detail.contains("non-reference"),
-                    "expected non-reference error, got: {detail}"
+                    detail.contains("neither references nor dictionaries"),
+                    "expected a non-node /Kids error, got: {detail}"
                 );
             }
             other => panic!("expected BadObject, got {other:?}"),
@@ -569,7 +707,7 @@ startxref\n258\n%%EOF"
         let doc = Document::from_bytes_owned(assemble(&bodies)).unwrap();
         let start = std::time::Instant::now();
         let count = doc.page_count_fast();
-        assert!(count > 0 && (count as usize) < crate::document::MAX_PAGE_TREE_WORK);
+        assert!(count > 0 && (count as usize) < MAX_PAGE_TREE_WORK);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(20),
             "page-tree walk must be bounded, took {:?}",
@@ -593,5 +731,89 @@ startxref\n258\n%%EOF"
         assert!(is_interior(&node("<</Kids []>>")));
         assert!(!is_interior(&node("<</Type /Annot>>")));
         assert!(is_interior(&node("<</Type /Annot /Kids []>>")));
+    }
+
+    /// The ids of the walk, in document order.
+    fn walked(doc: &Document) -> Vec<ObjectId> {
+        doc.get_pages().map(|(_, id)| id).collect()
+    }
+
+    /// A catalog whose `/Pages` is a direct dictionary without `/Kids` has
+    /// that dictionary as its one page.
+    #[test]
+    fn direct_pages_root_is_a_page() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages <</MediaBox [0 0 200 100]>>>>",
+        ]))
+        .unwrap();
+        assert_eq!(doc.page_count_fast(), 1);
+        let id = descend_to_page_index(&doc, 0).expect("page 0");
+        assert!(id.0 > crate::object::MAX_OBJECT_NUMBER);
+        assert_eq!(walked(&doc), [id]);
+        assert!(!doc.is_undefined(id.0));
+        assert!(doc.is_undefined(id.0 + 1));
+        assert!(doc.get_object((id.0 + 1, 0)).is_err());
+        let media_box = doc.get_inherited_page_attr(id, b"MediaBox");
+        assert_eq!(
+            media_box
+                .as_ref()
+                .and_then(Object::as_array)
+                .map(<[_]>::len),
+            Some(4)
+        );
+    }
+
+    /// Direct dictionaries in `/Kids`, under a direct root and under an
+    /// indirect node, are pages and interior nodes to both walkers, with
+    /// the same id on every walk, and inherit through the node holding
+    /// them.
+    #[test]
+    fn direct_kids_are_page_tree_nodes() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages <</Type /Pages /Count 4 /Rotate 90 /Kids [\
+             <</Type /Page>> 2 0 R \
+             <</Type /Pages /Count 2 /Kids [<</Type /Page /Rotate 180>> 3 0 R]>>]>>>>",
+            "<</Type /Page>>",
+            "<</Type /Pages /Count 1 /Rotate 270 /Kids [<</Type /Page>>]>>",
+        ]))
+        .unwrap();
+        assert_eq!(doc.page_count_fast(), 4);
+        let pages = walked(&doc);
+        assert_eq!(pages.len(), 4);
+        assert_eq!(walked(&doc), pages);
+        let descended: Vec<ObjectId> = (0..4)
+            .map(|i| descend_to_page_index(&doc, i).expect("page"))
+            .collect();
+        assert_eq!(descended, pages);
+        assert_eq!(pages[1], (2, 0));
+        let direct = [pages[0], pages[2], pages[3]];
+        assert!(
+            direct
+                .iter()
+                .all(|id| id.0 > crate::object::MAX_OBJECT_NUMBER)
+        );
+        let rotate = |id| {
+            doc.get_inherited_page_attr(id, b"Rotate")
+                .and_then(|o| o.as_u32())
+        };
+        assert_eq!(direct.map(rotate), [Some(90), Some(180), Some(270)]);
+        assert_eq!(rotate(pages[1]), None);
+    }
+
+    /// A direct node in a shared `/Kids` array that lists the array again
+    /// is the same node at every visit: the cycle is cut and the walk ends.
+    #[test]
+    fn direct_kid_listing_its_own_array_is_a_cycle() {
+        let doc = Document::from_bytes_owned(assemble(&[
+            "<</Type /Catalog /Pages 2 0 R>>",
+            "<</Type /Pages /Kids 3 0 R>>",
+            "[<</Type /Pages /Kids 3 0 R>> <</Type /Page>>]",
+        ]))
+        .unwrap();
+        let pages = walked(&doc);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0], pages[1]);
+        assert_eq!(doc.page_count_fast(), 2);
+        assert_eq!(descended(&doc).len(), 2);
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     dictionary::Dictionary,
     error::PdfError,
     lexer::{is_ws, parse_u64, skip_ws},
-    object::{Object, Stream, parse_object},
+    object::{MAX_OBJECT_NUMBER, Object, Stream, parse_object},
     repair::reconstruct_xref,
 };
 
@@ -109,8 +109,12 @@ impl XrefEntries {
 
     /// Store `entry` as object `num`'s, over an existing one only when
     /// `replace`, growing the dense part over `num` when that keeps it
-    /// within its bound.
+    /// within its bound.  A `num` above [`MAX_OBJECT_NUMBER`] is no object
+    /// number and gets no entry.
     fn place(&mut self, num: u32, entry: XrefEntry, replace: bool) {
+        if num > MAX_OBJECT_NUMBER {
+            return;
+        }
         let index = num as usize;
         if index >= self.dense.len() {
             let bound = (2 * (self.len + 1)).max(MIN_DENSE);
@@ -609,6 +613,17 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(!entries.contains(4));
         assert!(entries.get(u32::MAX).is_none());
+    }
+
+    /// A number above the largest object number gets no entry.
+    #[test]
+    fn entries_refuse_numbers_above_the_largest_object_number() {
+        let mut entries = XrefEntries::default();
+        entries.insert(MAX_OBJECT_NUMBER + 1, direct(1));
+        entries.insert_if_absent(u32::MAX, direct(2));
+        assert!(entries.is_empty());
+        entries.insert(MAX_OBJECT_NUMBER, direct(3));
+        assert_eq!(offset_of(&entries, MAX_OBJECT_NUMBER), Some(3));
     }
 
     #[test]

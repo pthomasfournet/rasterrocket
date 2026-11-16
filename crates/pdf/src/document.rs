@@ -21,9 +21,10 @@ use crate::{
     crypt::{OpenOptions, Password, SecurityHandler},
     derived::DerivedCache,
     dictionary::Dictionary,
+    direct_nodes::{DirectNodes, PAGES_ROOT_SLOT},
     error::PdfError,
     linearization::LinearizationHints,
-    object::{Object, ObjectId, parse_indirect_object},
+    object::{MAX_OBJECT_NUMBER, Object, ObjectId, parse_indirect_object},
     objstm::ObjStmCache,
     repair::scan_objects,
     stream::decode_stream,
@@ -193,6 +194,9 @@ pub struct Document {
     scanned_offsets: OnceLock<Option<XrefEntries>>,
     /// Values derived from objects by higher layers ([`Self::derived`]).
     derived: DerivedCache,
+    /// Page-tree nodes written as direct dictionaries, numbered above
+    /// [`MAX_OBJECT_NUMBER`] ([`Self::page_tree_node`]).
+    direct_nodes: DirectNodes,
     /// The authenticated security handler of an encrypted document; `None`
     /// for a document whose trailer has no `/Encrypt`.
     crypt: Option<SecurityHandler>,
@@ -431,6 +435,7 @@ impl Document {
             lin_hints: OnceLock::new(),
             scanned_offsets: OnceLock::new(),
             derived: DerivedCache::default(),
+            direct_nodes: DirectNodes::default(),
             crypt: None,
             encrypt_id: None,
             instance_id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
@@ -501,6 +506,9 @@ impl Document {
     /// exceeds its sanity limit and the answer is unknown.
     #[must_use]
     pub fn is_undefined(&self, num: u32) -> bool {
+        if num > MAX_OBJECT_NUMBER {
+            return self.direct_nodes.get(num).is_none();
+        }
         let in_use = |entry: Option<XrefEntry>| {
             matches!(
                 entry,
@@ -516,11 +524,13 @@ impl Document {
     /// Resolve an indirect reference and return a shared reference to its value.
     ///
     /// First call parses the object from the file; subsequent calls return the
-    /// cached value.
+    /// cached value.  A number above [`MAX_OBJECT_NUMBER`] names a direct
+    /// page-tree node (see [`Self::get_page`]).
     ///
     /// # Errors
     /// [`PdfError::BadObject`] when neither the xref entry for `id` nor the
-    /// header scan of the file leads to a parseable object `id`.
+    /// header scan of the file leads to a parseable object `id`, or when
+    /// `id` is above [`MAX_OBJECT_NUMBER`] and names no direct node.
     pub fn get_object(&self, id: ObjectId) -> Result<Arc<Object>, PdfError> {
         self.get_object_at(id, 0)
     }
@@ -528,6 +538,15 @@ impl Document {
     /// [`Self::get_object`] at object-stream nesting `depth`: the number of
     /// object-stream containers being resolved further up the call chain.
     fn get_object_at(&self, id: ObjectId, depth: u8) -> Result<Arc<Object>, PdfError> {
+        if id.0 > MAX_OBJECT_NUMBER {
+            return self
+                .direct_nodes
+                .get(id.0)
+                .ok_or_else(|| PdfError::BadObject {
+                    id: id.0,
+                    detail: "above the largest object number and no direct page-tree node".into(),
+                });
+        }
         {
             // Poison recovery: a previous panic while holding the lock left the
             // mutex poisoned. The cache is just a memo of immutable parses, so
@@ -970,7 +989,8 @@ impl Document {
 
     /// The number of pages, memoised: the page tree root's `/Count` when it
     /// is plausible, at least 1 and at most the number of cross-reference
-    /// entries (every page is an object of its own), and the `/Count`
+    /// entries (which only pages written as direct dictionaries exceed),
+    /// and the `/Count`
     /// entries lead to a page at its last index; else the count of an eager
     /// walk of the tree ([`Self::page_count`]).
     #[must_use]
@@ -1013,30 +1033,58 @@ impl Document {
         }
     }
 
-    /// Return the catalog's `/Pages` reference, memoised on first call.
+    /// The id of the catalog's `/Pages` node, memoised on first call: the
+    /// referenced object, or for a direct dictionary the number
+    /// [`Self::page_tree_node`] gives it.
     ///
     /// `pages_root` is invariant for the document, so caching it avoids
     /// re-cloning the catalog dictionary on every page-tree descent.
     ///
     /// # Errors
     /// The errors of [`Self::catalog`], and [`PdfError::MissingKey`] when the
-    /// catalog has no `/Pages` reference.
+    /// catalog's `/Pages` is neither a reference nor a dictionary.
     pub fn pages_root_id(&self) -> Result<ObjectId, PdfError> {
         if let Some(id) = self.pages_root_id.get() {
             return Ok(*id);
         }
-        let catalog = self.catalog()?;
+        let catalog_id = self.catalog_id()?;
+        let catalog = self.get_dict(catalog_id)?;
         let id = catalog
             .get(b"Pages")
-            .and_then(Object::as_reference)
+            .and_then(|pages| self.page_tree_node(pages, catalog_id.0, PAGES_ROOT_SLOT, None))
             .ok_or(PdfError::MissingKey("Pages"))?;
         let _ = self.pages_root_id.set(id);
         Ok(id)
     }
 
+    /// The id of page-tree node `node`, written at position `slot` of the
+    /// `/Kids` array held by object `holder` (or as the `/Pages` value of
+    /// the catalog `holder`) and reached from node `parent`: the referenced
+    /// object for a reference; for a dictionary, a number above
+    /// [`MAX_OBJECT_NUMBER`] under which [`Self::get_object`] returns the
+    /// dictionary with `/Parent` set to `parent`, the same number for the
+    /// same site on every call.  `None` for any other object.
+    pub(crate) fn page_tree_node(
+        &self,
+        node: &Object,
+        holder: u32,
+        slot: u32,
+        parent: Option<ObjectId>,
+    ) -> Option<ObjectId> {
+        match node {
+            Object::Reference(id) => Some(*id),
+            Object::Dictionary(dict) => self.direct_nodes.intern(holder, slot, dict, parent),
+            _ => None,
+        }
+    }
+
     /// Resolve a 0-based page index to its `ObjectId` via logarithmic descent.
     ///
-    /// See [`crate::descend_to_page_index`] for the full descent contract.
+    /// A page or page-tree node written as a direct dictionary (the
+    /// catalog's `/Pages` value, or a `/Kids` element) has an id above
+    /// [`MAX_OBJECT_NUMBER`], which only [`Self::get_object`] and the
+    /// methods built on it resolve.  See [`crate::descend_to_page_index`]
+    /// for the full descent contract.
     ///
     /// # Errors
     /// The errors of [`crate::descend_to_page_index`].
@@ -1044,9 +1092,10 @@ impl Document {
         crate::page_tree::descend_to_page_index(self, idx)
     }
 
-    /// Iterate over all pages in document order, yielding `(1-based page number, ObjectId)`.
+    /// Iterate over all pages in document order, yielding `(1-based page
+    /// number, ObjectId)`, with ids as for [`Self::get_page`].
     pub fn get_pages(&self) -> impl Iterator<Item = (u32, ObjectId)> + '_ {
-        PageIter::new(self)
+        crate::page_tree::PageIter::new(self)
     }
 
     /// Return the decoded content stream bytes for a page.
@@ -1337,135 +1386,6 @@ impl Document {
                 Ok(r.as_dict().cloned().unwrap_or_default())
             }
             _ => Ok(Dictionary::new()),
-        }
-    }
-}
-
-// ── Page iterator ─────────────────────────────────────────────────────────────
-
-/// Most node visits plus `/Kids` entries one page-tree walk processes.  A
-/// kid referenced from several `/Kids` arrays is visited once per
-/// reference, so a tree of shared nodes describes exponentially many
-/// pages in linear space; the walk ends at this bound instead.
-pub(crate) const MAX_PAGE_TREE_WORK: usize = 1 << 22;
-
-struct PageIter<'a> {
-    doc: &'a Document,
-    /// Interior nodes on the traversal path, each with its resolved `/Kids`.
-    stack: Vec<PageTreeFrame>,
-    /// Object numbers of the nodes in `stack`; a kid already present is a
-    /// cyclic `/Kids` reference and is skipped.
-    on_stack: std::collections::HashSet<u32>,
-    /// The `/Pages` root, visited on the first call to `next`.
-    root: Option<ObjectId>,
-    page_num: u32,
-    /// Work left of [`MAX_PAGE_TREE_WORK`].
-    budget: usize,
-}
-
-/// One interior page-tree node: its `/Kids` references, resolved once, and
-/// the index of the next kid to visit.
-struct PageTreeFrame {
-    id: ObjectId,
-    kids: Vec<ObjectId>,
-    next: usize,
-}
-
-impl<'a> PageIter<'a> {
-    fn new(doc: &'a Document) -> Self {
-        // Catalog errors collapse to an empty iterator — same outcome as a PDF
-        // with no /Pages root. Logged so corruption doesn't go silent.
-        let catalog = doc.catalog().unwrap_or_else(|e| {
-            log::warn!("PageIter: catalog unavailable, no pages will be yielded: {e:?}");
-            Arc::default()
-        });
-        Self {
-            doc,
-            stack: Vec::new(),
-            on_stack: std::collections::HashSet::new(),
-            root: catalog.get(b"Pages").and_then(Object::as_reference),
-            page_num: 0,
-            budget: MAX_PAGE_TREE_WORK,
-        }
-    }
-
-    /// Take `work` units from the budget; on exhaustion the walk ends.
-    fn charge(&mut self, work: usize) -> bool {
-        if let Some(left) = self.budget.checked_sub(work) {
-            self.budget = left;
-            return true;
-        }
-        log::warn!(
-            "page-tree walk stopped after {MAX_PAGE_TREE_WORK} node visits and /Kids entries \
-             ({} pages found); the tree repeats nodes past that bound",
-            self.page_num
-        );
-        self.budget = 0;
-        self.root = None;
-        self.stack.clear();
-        self.on_stack.clear();
-        false
-    }
-
-    /// Visit node `id`: a page object (see [`crate::page_tree::is_interior`])
-    /// is returned as the next page; an interior node with a `/Kids` array
-    /// (direct, or an indirect reference to one) is pushed.  Anything else is
-    /// skipped.
-    fn visit(&mut self, id: ObjectId) -> Option<(u32, ObjectId)> {
-        if !self.charge(1) {
-            return None;
-        }
-        let obj = self.doc.get_object(id).ok()?;
-        let dict = obj.as_dict()?;
-        if !crate::page_tree::is_interior(dict) {
-            self.page_num += 1;
-            return Some((self.page_num, id));
-        }
-        let kids: Vec<ObjectId> = match dict.get(b"Kids") {
-            Some(Object::Array(a)) => a.iter().filter_map(Object::as_reference).collect(),
-            Some(Object::Reference(rid)) => {
-                let arr = self.doc.get_object(*rid).ok()?;
-                arr.as_array()?
-                    .iter()
-                    .filter_map(Object::as_reference)
-                    .collect()
-            }
-            _ => return None,
-        };
-        if !self.charge(kids.len()) {
-            return None;
-        }
-        let _ = self.on_stack.insert(id.0);
-        self.stack.push(PageTreeFrame { id, kids, next: 0 });
-        None
-    }
-}
-
-impl Iterator for PageIter<'_> {
-    type Item = (u32, ObjectId);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(root) = self.root.take()
-            && let Some(page) = self.visit(root)
-        {
-            return Some(page);
-        }
-        loop {
-            let frame = self.stack.last_mut()?;
-            let Some(&kid) = frame.kids.get(frame.next) else {
-                let id = frame.id;
-                let _ = self.stack.pop();
-                let _ = self.on_stack.remove(&id.0);
-                continue;
-            };
-            frame.next += 1;
-            if self.on_stack.contains(&kid.0) {
-                log::warn!("PageIter: cyclic /Kids reference to obj {} skipped", kid.0);
-                continue;
-            }
-            if let Some(page) = self.visit(kid) {
-                return Some(page);
-            }
         }
     }
 }
