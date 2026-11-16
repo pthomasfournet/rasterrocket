@@ -326,3 +326,70 @@ fn a_default_rgb_space_replaces_a_device_group_space() {
     assert!(diag.approximated_group_spaces.rgb_profile);
     assert_eq!(samples(&canvas), samples(&render("").0));
 }
+
+/// Page `(4, 0)` whose `/M` is a luminosity soft mask of backdrop entries
+/// `bc` whose group (5), of `/CS space`, draws `content` over the page.
+fn mask_doc(space: &str, bc: &str, content: &str) -> Document {
+    crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            format!(
+                "<< /Type /Page /Resources << /ExtGState << \
+                 /M << /SMask << /S /Luminosity /G 5 0 R {bc} >> >> >> >> >>"
+            )
+            .into_bytes(),
+        ),
+        (
+            5,
+            stream(
+                &format!(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                     /Group << /S /Transparency /CS {space} >>"
+                ),
+                content.as_bytes(),
+            ),
+        ),
+    ])
+}
+
+/// Black painted through the luminosity mask of `mask_doc(space, bc,
+/// content)`: the first pixel of the 8-bit sRGB page, `255 − mask`.
+fn masked(space: &str, bc: &str, content: &str) -> u16 {
+    let doc = mask_doc(space, bc, content);
+    let page = "/M gs 0 g 0 0 10 10 re f";
+    samples(&render_page(&doc, &CanvasRequest::Rgb, SampleDepth::Eight, page).0)[0]
+}
+
+/// A CMYK mask group takes the conventional gray of its ink: black ink
+/// alone is a mask of zero.
+#[test]
+fn a_cmyk_luminosity_mask_takes_the_device_gray_of_its_ink() {
+    assert_eq!(masked("/DeviceCMYK", "", "0 0 0 1 k 0 0 10 10 re f"), 255);
+    assert_eq!(masked("/DeviceCMYK", "", "0 0 0 0 k 0 0 10 10 re f"), 0);
+    // 1 − (0.59 + 0.11) of solid magenta and yellow.
+    assert_eq!(
+        masked("/DeviceCMYK", "", "0 1 1 0 k 0 0 10 10 re f"),
+        255 - 76
+    );
+}
+
+/// A colour that is not ink takes its own gray in a CMYK mask, as in an
+/// RGB one: the device separation's ink has the colour's gray.
+#[test]
+fn a_cmyk_luminosity_mask_takes_the_gray_of_an_rgb_colour() {
+    for colour in ["0.5 g", "0.2 0.6 0.8 rg", "1 0 0 rg"] {
+        let content = format!("{colour} 0 0 10 10 re f");
+        let cmyk = masked("/DeviceCMYK", "", &content);
+        let rgb = masked("/DeviceRGB", "", &content);
+        assert!(cmyk.abs_diff(rgb) <= 1, "{colour}: {cmyk} vs {rgb}");
+    }
+}
+
+/// `BC` of a CMYK mask group is ink: no ink is a full mask, and the
+/// default is black ink, a mask of zero.
+#[test]
+fn a_cmyk_mask_backdrop_is_ink() {
+    assert_eq!(masked("/DeviceCMYK", "/BC [0 0 0 0]", ""), 0);
+    assert_eq!(masked("/DeviceCMYK", "", ""), 255);
+    assert_eq!(masked("/DeviceCMYK", "/BC [0 0 0 0.5]", ""), 128);
+}

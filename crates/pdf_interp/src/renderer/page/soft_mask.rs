@@ -25,12 +25,15 @@ use raster::types::BlendMode;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, PageCanvas, Snapshot, with_canvas};
 use super::depth::{CanvasSample, SampleVec};
+use super::ink_map::SpotTables;
 use super::pixel_rect::PixelRect;
 use crate::renderer::color::{RasterColor, Srgb};
 use crate::renderer::gstate::SoftMaskPlane;
+use crate::resources::black_generation::DeviceBlack;
 use crate::resources::shading::function::Function;
 use crate::resources::transfer::tabulate;
 use crate::resources::{SoftMaskParams, colorspace, resolve_dict};
+use crate::separation::{InkSetup, Separator};
 
 impl PageRenderer<'_> {
     /// Apply an `ExtGState` `SMask` entry to the current graphics state.
@@ -71,13 +74,26 @@ impl PageRenderer<'_> {
     ) -> Option<SoftMaskPlane> {
         let form = self.resources.form_from_stream_id(group)?;
         // A mask group yields mask values, not printed colorants, so it is
-        // painted in sRGB whatever the page's canvas and working space: its
-        // luminosity is that of its colours (ISO 32000-1 §11.6.5.2), not of
-        // the inks that print them, which reproduce a colour only within
-        // the process gamut, and its values do not depend on the working
-        // space.  It is painted at the depth of the page.
+        // painted in its own space, whatever the page's canvas and working
+        // space: its luminosity is that of its colours (ISO 32000-1
+        // §11.6.5.2), not of the inks that print them, and its values do not
+        // depend on the working space.  A luminosity group of a CMYK space
+        // is painted on an ink canvas whose other colours separate by the
+        // device conversion, under which the conventional gray of the ink a
+        // colour separates to is the colour's own gray; any other on an
+        // sRGB canvas.  It is painted at the depth of the page.
         let depth = self.canvas.kind().depth();
-        let mask = self.try_canvas(CanvasKind::rgb(depth), self.width, self.height)?;
+        let cmyk = luminosity
+            && form
+                .transparency
+                .and_then(|tg| tg.space)
+                .is_some_and(|space| matches!(space, crate::resources::GroupSpace::Cmyk { .. }));
+        let kind = if cmyk {
+            CanvasKind::ink(depth)
+        } else {
+            CanvasKind::rgb(depth)
+        };
+        let mask = self.try_canvas(kind, self.width, self.height)?;
 
         // The mask group is painted with the graphics state in effect at
         // `gs`, except that the soft mask is `None`, the alpha constants are
@@ -96,26 +112,39 @@ impl PageRenderer<'_> {
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
         let space = std::mem::replace(&mut self.space, crate::WorkingSpace::Srgb);
+        let ink = cmyk.then(|| {
+            let device = InkSetup {
+                overprint: false,
+                cmyk: false,
+                separator: Separator::Device(DeviceBlack::default()),
+            };
+            std::mem::replace(&mut self.ink, device)
+        });
         self.reconvert_colours(|_| true);
         self.without_glyph_census(|r| r.do_form_xobject(&form));
+        if let Some(ink) = ink {
+            self.ink = ink;
+        }
         self.space = space;
         let canvas = std::mem::replace(&mut self.canvas, page);
         self.group = enclosing;
         self.gstate.restore();
 
         let function = transfer.map(|f| Function::load(self.resources.doc(), f));
-        let reduce = if luminosity {
-            Reduce::Luminosity(self.mask_backdrop_rgb(group, backdrop))
-        } else {
-            Reduce::Alpha
+        let reduce = match (luminosity, cmyk) {
+            (true, true) => Reduce::DeviceGray(mask_backdrop_ink(backdrop)),
+            (true, false) => Reduce::Luminosity(self.mask_backdrop_rgb(group, backdrop)),
+            (false, _) => Reduce::Alpha,
         };
+        let map = std::rc::Rc::clone(&self.ink_map);
+        let map = map.borrow();
+        let spots = map.luts();
+        let function = function.as_deref();
         let values = match canvas {
-            PageCanvas::Rgb(b) => mask_values(&b, reduce, function.as_deref()),
-            PageCanvas::Rgb16(b) => mask_values(&b, reduce, function.as_deref()),
-            PageCanvas::Ink(_) | PageCanvas::Ink16(_) => {
-                debug_assert!(false, "a soft mask group is painted on an RGB canvas");
-                return None;
-            }
+            PageCanvas::Rgb(b) => mask_values(&b, reduce, &spots, function),
+            PageCanvas::Rgb16(b) => mask_values(&b, reduce, &spots, function),
+            PageCanvas::Ink(b) => mask_values(&b, reduce, &spots, function),
+            PageCanvas::Ink16(b) => mask_values(&b, reduce, &spots, function),
         };
         let values = match values {
             Ok(values) => values?,
@@ -458,11 +487,22 @@ fn mask_plane<S: Sample>(width: u32, height: u32) -> Result<Vec<S>, raster::Bitm
     Ok(values)
 }
 
+/// The backdrop colour `BC` of a CMYK mask group as ink: its components,
+/// or black, `0 0 0 1`, when it has not four.
+const fn mask_backdrop_ink(bc: &[f64]) -> [f64; 4] {
+    match *bc {
+        [c, m, y, k] => [c, m, y, k],
+        _ => [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
 /// How a mask group's canvas reduces to mask values.
 #[derive(Clone, Copy)]
 enum Reduce {
-    /// The luminosity of the group over the opaque backdrop colour.
+    /// The luminosity of an sRGB group over the opaque backdrop colour.
     Luminosity(Srgb),
+    /// The conventional gray of an ink group over the opaque backdrop ink.
+    DeviceGray([f64; 4]),
     /// The group's alpha.
     Alpha,
 }
@@ -475,6 +515,7 @@ enum Reduce {
 fn mask_values<P: Pixel>(
     group: &Bitmap<P>,
     reduce: Reduce,
+    spots: &SpotTables<'_>,
     function: Option<&Function>,
 ) -> Result<Option<SampleVec>, raster::BitmapAllocError>
 where
@@ -483,6 +524,9 @@ where
     let mut values = mask_plane::<P::Sample>(group.width, group.height)?;
     match reduce {
         Reduce::Luminosity(bc) => luminosity_values(group, bc.at(), &mut values),
+        Reduce::DeviceGray(bc) => {
+            device_gray_values(group, bc.map(P::Sample::from_unit), spots, &mut values);
+        }
         Reduce::Alpha => match group.alpha_plane() {
             Some(alpha) => values.extend_from_slice(alpha),
             None => return Ok(None),
@@ -518,6 +562,34 @@ fn luminosity_values<P: Pixel>(group: &Bitmap<P>, bc: [P::Sample; 3], out: &mut 
             let px = &row[x * 3..x * 3 + 3];
             let ch = |i: usize| P::Sample::div_max(px[i].wide() * a + bc[i].wide() * ia);
             out.push(color::convert::luminosity_at(ch(0), ch(1), ch(2)));
+        }
+    }
+}
+
+/// Append to `out` the mask values of an ink group: each pixel, its
+/// spots folded into its process ink, composited over the opaque backdrop
+/// ink `bc` and reduced to its gray by the conventional `DeviceCMYK` →
+/// `DeviceGray` conversion ([`color::cmyk::device_gray_at`]).
+fn device_gray_values<P: Pixel>(
+    group: &Bitmap<P>,
+    bc: [P::Sample; 4],
+    spots: &SpotTables<'_>,
+    out: &mut Vec<P::Sample>,
+) where
+    P::Sample: CanvasSample,
+{
+    let w = group.width as usize;
+    let n = P::NCOMPS;
+    for y in 0..group.height {
+        let row = group.row_samples(y);
+        let alpha = group.alpha_row(y);
+        for x in 0..w {
+            let a = alpha.map_or(P::Sample::MAX, |r| r[x]).wide();
+            let ia = P::Sample::max_wide() - a;
+            let ink = super::space_convert::fold_ink(&row[x * n..(x + 1) * n], spots);
+            let cmyk: [P::Sample; 4] =
+                std::array::from_fn(|i| P::Sample::div_max(ink[i].wide() * a + bc[i].wide() * ia));
+            out.push(color::cmyk::device_gray_at(cmyk));
         }
     }
 }

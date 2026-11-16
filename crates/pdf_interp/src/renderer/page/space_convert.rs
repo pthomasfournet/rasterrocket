@@ -63,7 +63,7 @@ impl SpaceConversion<'_> {
     pub(super) fn pixel<S: CanvasSample>(&self, src: &[S], dst: &mut [S]) {
         let srgb = match self.from {
             CanvasSpace::Ink => {
-                let cmyk = self.fold(src);
+                let cmyk = fold_ink(src, self.spots);
                 if self.gray {
                     [color::cmyk::device_gray_at(cmyk); 3]
                 } else {
@@ -89,21 +89,6 @@ impl SpaceConversion<'_> {
                 dst.copy_from_slice(&no_spots(self.separator.ink(rgb)));
             }
         }
-    }
-
-    /// The process ink of the ink pixel `px` with its spots folded in.
-    fn fold<S: Sample>(&self, px: &[S]) -> [S; 4] {
-        S::as_u8(px).map_or_else(
-            || {
-                let wide = S::as_u16(px).expect("a canvas sample is 8 or 16 bits");
-                let px: &[u16; 8] = wide.try_into().expect("an ink pixel has eight samples");
-                color::cmyk::fold_spots16(px, &self.spots.wide).map(S::from_sample)
-            },
-            |bytes| {
-                let px: &[u8; 8] = bytes.try_into().expect("an ink pixel has eight samples");
-                color::cmyk::fold_spots(px, &self.spots.narrow).map(S::from_u8)
-            },
-        )
     }
 
     /// Convert the pixels of `region` of `src` into `dst`, a transparent
@@ -165,6 +150,22 @@ impl SpaceConversion<'_> {
             }
         }
     }
+}
+
+/// The process ink of the ink pixel `px`, its spots folded in by `spots`
+/// ([`color::cmyk::fold_spots`], [`color::cmyk::fold_spots16`]).
+pub(super) fn fold_ink<S: Sample>(px: &[S], spots: &SpotTables<'_>) -> [S; 4] {
+    S::as_u8(px).map_or_else(
+        || {
+            let wide = S::as_u16(px).expect("a canvas sample is 8 or 16 bits");
+            let px: &[u16; 8] = wide.try_into().expect("an ink pixel has eight samples");
+            color::cmyk::fold_spots16(px, &spots.wide).map(S::from_sample)
+        },
+        |bytes| {
+            let px: &[u8; 8] = bytes.try_into().expect("an ink pixel has eight samples");
+            color::cmyk::fold_spots(px, &spots.narrow).map(S::from_u8)
+        },
+    )
 }
 
 impl PageCanvas {
