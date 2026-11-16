@@ -280,6 +280,39 @@ mod tests {
         assert_eq!(CALLS.load(Ordering::Relaxed), 1);
     }
 
+    /// A codestream that ends early is not decoded on the device: cut
+    /// short, it is drawn from the CPU decode and marked partial; ended
+    /// before its tile's data, it is refused.  `rgb8.j2k` holds one
+    /// tile-part, its `SOD` at byte 131.
+    #[test]
+    fn a_truncated_codestream_is_judged_by_the_cpu_decode() {
+        fn source() -> Option<NvJpeg2kDecoder> {
+            panic!("no decoder is built for a codestream that ends early")
+        }
+        let rgb = include_bytes!("../../testdata/rgb8.j2k");
+        let decode = |len: usize| {
+            let mut decoder = None;
+            let mut slot = Some(source as Jpeg2kSource);
+            let mut device = DeviceJpx::new(&mut decoder, Some(&mut slot)).expect("a source");
+            let opts = super::super::JpxOptions {
+                indices: false,
+                smask_in_data: 0,
+                matte: None,
+                colour_key: false,
+                wide: false,
+                channels: None,
+            };
+            super::super::decode_jpx(&rgb[..len], 65_535, 65_535, None, &opts, Some(&mut device))
+        };
+        let reason = decode(170).expect("cut short").partial.expect("partial");
+        assert!(
+            reason.contains("1 of its 1 tiles are cut short"),
+            "{reason}"
+        );
+        let err = decode(133).expect_err("no tile data");
+        assert!(err.contains("1 of its 1 tiles hold no data"), "{err}");
+    }
+
     /// Without a decoder or a source there is no device to offer.
     #[test]
     fn no_device_without_a_decoder_or_a_source() {
