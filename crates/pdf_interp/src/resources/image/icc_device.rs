@@ -191,7 +191,10 @@ fn icc_clut_threshold() -> usize {
     use std::sync::OnceLock;
     static THRESHOLD: OnceLock<usize> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
-        super::threshold_from_env("PDF_RASTER_ICC_CLUT_THRESHOLD", gpu::GPU_ICC_CLUT_THRESHOLD)
+        super::thresholds::threshold_from_env(
+            "PDF_RASTER_ICC_CLUT_THRESHOLD",
+            gpu::GPU_ICC_CLUT_THRESHOLD,
+        )
     })
 }
 
