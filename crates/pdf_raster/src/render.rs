@@ -467,10 +467,37 @@ pub(crate) fn render_page_canvas_with_geom(
     params: &RenderParams,
     buffers: &mut CanvasBuffers,
 ) -> Result<(FinishedCanvas, pdf_interp::renderer::PageDiagnostics), RasterError> {
+    with_page_job(session, (page_num, page_id), &geom, params, |job, page| {
+        render_job(job, page, buffers)
+    })
+}
+
+/// What [`with_page_job`] found about a page besides its job.
+pub(crate) struct PageFindings {
+    /// The page's unsupported features, already warned about.
+    unsupported_features: Vec<pdf_interp::UnsupportedFeature>,
+    /// The page's content streams that failed to decode.
+    content_failures: Vec<pdf::ContentFailure>,
+}
+
+/// `f` applied to the job of drawing page `page` (number and id) of
+/// geometry `geom` as `params` asks, after the checks every render makes.
+///
+/// # Errors
+///
+/// As [`begin`], [`page_view`], [`page_content`] and [`PageJob::new`], or
+/// `f`'s error.
+pub(crate) fn with_page_job<R>(
+    session: &RasterSession,
+    (page_num, page_id): (u32, pdf::ObjectId),
+    geom: &pdf_interp::PageGeometry,
+    params: &RenderParams,
+    f: impl FnOnce(&PageJob<'_>, PageFindings) -> Result<R, RasterError>,
+) -> Result<R, RasterError> {
     let effective_policy = begin(session, params)?;
     let doc = &session.doc;
     let view = page_view(
-        &geom,
+        geom,
         (params.scale_x, params.scale_y),
         params.region,
         page_layout(session, page_id, params)?.bytes_per_px(),
@@ -480,7 +507,6 @@ pub(crate) fn render_page_canvas_with_geom(
     warn_unsupported(session, page_num, &unsupported_features);
     let content = page_content(session, page_id)?;
     let ops = pdf_interp::parse_page_content(doc, page_id, &content.bytes);
-    let content_failures = content.failures;
 
     // The view carries the full-precision scales that also sized the page,
     // so the CTM's translation terms are consistent with the bitmap extent.
@@ -493,8 +519,30 @@ pub(crate) fn render_page_canvas_with_geom(
         params,
         effective_policy,
     )?;
+    f(
+        &job,
+        PageFindings {
+            unsupported_features,
+            content_failures: content.failures,
+        },
+    )
+}
+
+/// Render `job`, with what [`with_page_job`] found about its page, as
+/// [`render_page_canvas_with_geom`] does.
+fn render_job(
+    job: &PageJob<'_>,
+    page: PageFindings,
+    buffers: &mut CanvasBuffers,
+) -> Result<(FinishedCanvas, pdf_interp::renderer::PageDiagnostics), RasterError> {
+    let PageFindings {
+        unsupported_features,
+        content_failures,
+    } = page;
+    let (session, params) = (job.session, job.params);
+    let (page_num, page_id) = (job.page_num, job.page_id);
     #[cfg(feature = "vulkan")]
-    let (mut renderer, device_page) = crate::device_pages::render(&job, std::mem::take(buffers))?;
+    let (mut renderer, device_page) = crate::device_pages::render(job, std::mem::take(buffers))?;
     #[cfg(not(feature = "vulkan"))]
     let mut renderer = job.run(std::mem::take(buffers))?;
 
@@ -639,10 +687,6 @@ pub(crate) fn page_content(
 /// A page to render: its content, the view it is drawn in and how.
 pub(crate) struct PageJob<'a> {
     pub(crate) session: &'a RasterSession,
-    #[cfg_attr(
-        not(feature = "vulkan"),
-        expect(dead_code, reason = "read by the GPU page queue")
-    )]
     pub(crate) page_num: u32,
     page_id: pdf::ObjectId,
     view: &'a pdf_interp::renderer::PageView,

@@ -252,6 +252,33 @@ fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
     )
 }
 
+/// The paint commands of `job`'s page as the GPU page queue records them,
+/// or why the page is not recorded; nothing is rendered.
+///
+/// # Errors
+///
+/// As [`PageJob::run`]; [`crate::render::check_aborted`]'s error when the
+/// recording stopped on the page's budget, deadline or cancellation.
+pub(crate) fn record(
+    job: &PageJob<'_>,
+) -> Result<Result<gpu::page::PageCommands, &'static str>, RasterError> {
+    if let Some(reason) = ruled_out(job) {
+        return Ok(Err(reason));
+    }
+    let mut renderer = job.renderer(CanvasBuffers::default())?;
+    if let Err(reason) = renderer.record_for_device() {
+        return Ok(Err(reason));
+    }
+    job.execute(&mut renderer)?;
+    let recording = renderer.take_device_recording();
+    crate::render::check_aborted(&renderer)?;
+    match recording {
+        Some(DeviceRecording::Recorded(page)) => Ok(Ok(page)),
+        Some(DeviceRecording::Refused(reason)) => Ok(Err(reason)),
+        None => unreachable!("a renderer recording for the device yields its recording"),
+    }
+}
+
 /// Render `job`'s page, on the session's GPU page device when it qualifies
 /// and the device is free, and on the CPU otherwise; return the renderer
 /// that executed it and how the device was used.

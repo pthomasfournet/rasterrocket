@@ -160,6 +160,26 @@ pub mod dev {
     ) -> Result<String, RasterError> {
         crate::bands::paint_trace(session, page_num, params)
     }
+
+    /// The paint commands the GPU page queue records for page `page_num`
+    /// (1-based) rendered as `params` describes, or why it would render
+    /// the page on the CPU; the page is not rendered.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::render_page_canvas`], for the page's recording.
+    #[cfg(feature = "vulkan")]
+    pub fn device_page_commands(
+        session: &RasterSession,
+        page_num: u32,
+        params: &RenderParams,
+    ) -> Result<Result<gpu::page::PageCommands, &'static str>, RasterError> {
+        let page_id = session.resolve_page(page_num)?;
+        let geom = session.geometry_by_id(page_id)?;
+        crate::render::with_page_job(session, (page_num, page_id), &geom, params, |job, _| {
+            crate::device_pages::record(job)
+        })
+    }
 }
 
 pub use bands::{Band, BandBitmap, BandError, render_page_bands};
