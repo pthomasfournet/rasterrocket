@@ -16,6 +16,7 @@
 //! - `pipeline` — descriptor set layouts + pipeline cache (lazy SPIR-V compile).
 //! - `select` — device selector parsing and physical-device ranking.
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
+//! - `timestamps` — device timestamps between the stages of a page.
 //! - `transfer` — synchronous staged upload and download.
 
 mod barrier;
@@ -26,9 +27,11 @@ mod page;
 mod pipeline;
 mod recorder;
 mod select;
+mod timestamps;
 mod transfer;
 
 pub use memory::{DeviceBuffer, HostBuffer};
+pub use page::PageTimes;
 pub use recorder::PageFence;
 pub use select::DeviceSelector;
 

@@ -8,6 +8,12 @@
 //! one workgroup per tile, and on a device whose buffers the host does not
 //! map, a copy of the page into a host read-back buffer.  Every buffer is
 //! kept between pages and grown on demand.
+//!
+//! A timed page ([`VulkanBackend::render_page_timed`]) also reads the host
+//! clock between its host stages and writes device timestamps between its
+//! device stages; an untimed page does neither.
+
+use std::time::{Duration, Instant};
 
 use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage,
@@ -17,6 +23,7 @@ use crate::page::{PageCommands, PageSample, TileBins, pack_rgb};
 
 use super::VulkanBackend;
 use super::pipeline::KernelId;
+use super::timestamps::StageClock;
 
 /// The bytes staged for an empty input: a descriptor binds a non-empty
 /// range, and the kernel reads no element of an empty array.
@@ -30,6 +37,57 @@ pub(super) struct PageScratch {
     inputs: [Option<Staged<VulkanBackend>>; 5],
     /// The page.
     target: Option<Staged<VulkanBackend>>,
+    /// The timestamp queries of timed pages, created by the first.
+    clock: Option<StageClock>,
+}
+
+/// The duration of each stage of one page rendered by
+/// [`VulkanBackend::render_page_timed`].
+///
+/// The host stages run in order and together span the call; the device
+/// stages are measured by timestamps the page's command buffer writes
+/// between them, so they lie within `submit_wait`.  A transfer the device
+/// does not need (its buffers are host-mapped) takes no device time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageTimes {
+    /// Host: binning the commands into tiles and packing the coverage
+    /// tables.
+    pub prepare: Duration,
+    /// Host: writing the inputs into the staging buffers, or into the
+    /// device buffers in place.
+    pub write: Duration,
+    /// Host: beginning and recording the page's command buffer.
+    pub record: Duration,
+    /// Host: submitting the page and waiting for it to complete.
+    pub submit_wait: Duration,
+    /// Host: copying the pixels into the caller's samples.
+    pub read: Duration,
+    /// Device: copying the inputs from the staging buffers.
+    pub device_upload: Duration,
+    /// Device: the raster dispatch.
+    pub device_raster: Duration,
+    /// Device: copying the page into the read-back buffer.
+    pub device_download: Duration,
+}
+
+/// The host clock of a timed page: the time since the previous lap, or
+/// nothing for an untimed page, which never reads the clock.
+struct Laps(Option<Instant>);
+
+impl Laps {
+    fn new(timed: bool) -> Self {
+        Self(timed.then(Instant::now))
+    }
+
+    /// The time since the previous lap; zero when untimed.
+    fn lap(&mut self) -> Duration {
+        self.0.as_mut().map_or(Duration::ZERO, |last| {
+            let now = Instant::now();
+            let lap = now - *last;
+            *last = now;
+            lap
+        })
+    }
 }
 
 /// The push constants of the raster of `page` binned as `bins`, in the
@@ -82,6 +140,40 @@ impl VulkanBackend {
         out: &mut [S],
         stride: usize,
     ) -> Result<()> {
+        self.render_page_with(page, out, stride, None)
+    }
+
+    /// As [`Self::render_page`], and return the duration of each of the
+    /// page's stages.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::render_page`]; also when the device's compute queue
+    /// writes no timestamps, before anything is staged.
+    pub fn render_page_timed<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+    ) -> Result<PageTimes> {
+        let mut times = PageTimes::default();
+        self.render_page_with(page, out, stride, Some(&mut times))?;
+        Ok(times)
+    }
+
+    /// [`Self::render_page`], timed into `times` when given.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one page's stages in order: checks, staging, recording, read-back"
+    )]
+    fn render_page_with<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+        times: Option<&mut PageTimes>,
+    ) -> Result<()> {
+        let mut laps = Laps::new(times.is_some());
         let (width, height) = (page.width() as usize, page.height() as usize);
         let row = width * 3;
         let row_bytes = row * S::DEPTH.bytes() as usize;
@@ -135,7 +227,14 @@ impl VulkanBackend {
         let PageScratch {
             inputs: slots,
             target,
+            clock,
         } = &mut *scratch;
+        let clock = match (&times, clock) {
+            (None, _) => None,
+            (Some(_), Some(clock)) => Some(&*clock),
+            (Some(_), clock @ None) => Some(&*clock.insert(StageClock::new(self.device.clone())?)),
+        };
+        let prepare = laps.lap();
         let mut staged = Vec::with_capacity(slots.len());
         for (slot, (_, bytes)) in slots.iter_mut().zip(inputs) {
             let bytes = if bytes.is_empty() {
@@ -146,12 +245,28 @@ impl VulkanBackend {
             staged.push((stage(self, slot, bytes)?, bytes.len()));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
+        let write = laps.lap();
 
+        // Query `i` of a timed page is written once every command before it
+        // has completed: 0 before the uploads, 1 after them, 2 after the
+        // raster, 3 after the download.
+        let stamp = |backend: &Self, query: u32| {
+            clock.map_or(Ok(()), |c| {
+                backend.recorder.record_timestamp(c.pool(), query)
+            })
+        };
+        let mut record = Duration::ZERO;
         // SAFETY (the recorded copies and the read below): the scratch is
         // held under its lock for this whole call, and `run_page` returns
         // only once its page has completed or, on failure, been waited on;
         // nothing touches the buffers in between.
         self.run_page(|backend| {
+            if let Some(c) = clock {
+                backend
+                    .recorder
+                    .record_reset_queries(c.pool(), StageClock::COUNT)?;
+            }
+            stamp(backend, 0)?;
             let mut handles = Vec::with_capacity(staged.len() + 1);
             let mut sizes = Vec::with_capacity(staged.len() + 1);
             for (input, len) in &mut staged {
@@ -160,6 +275,7 @@ impl VulkanBackend {
                 handles.push(input.device.handle());
                 sizes.push(device_size(len));
             }
+            stamp(backend, 1)?;
             handles.push(target.device.handle());
             sizes.push(device_size(page_len));
             backend.recorder.dispatch_kernel(
@@ -169,12 +285,31 @@ impl VulkanBackend {
                 &push,
                 (bins.tiles_x, bins.tiles_y, 1),
             )?;
-            unsafe { record_download(backend, target, page_len) }
+            stamp(backend, 2)?;
+            unsafe { record_download(backend, target, page_len) }?;
+            stamp(backend, 3)?;
+            record = laps.lap();
+            Ok(())
         })?;
+        let submit_wait = laps.lap();
 
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
         for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(row_bytes)) {
             S::copy_from_le(&mut dst[..row], src);
+        }
+        let read = laps.lap();
+        if let (Some(times), Some(clock)) = (times, clock) {
+            let [device_upload, device_raster, device_download] = clock.intervals()?;
+            *times = PageTimes {
+                prepare,
+                write,
+                record,
+                submit_wait,
+                read,
+                device_upload,
+                device_raster,
+                device_download,
+            };
         }
         drop(scratch);
         Ok(())
@@ -387,6 +522,42 @@ mod tests {
         };
         page_raster_matches_the_host_composite_at::<u8>(&backend);
         page_raster_matches_the_host_composite_at::<u16>(&backend);
+    }
+
+    #[test]
+    fn a_timed_page_is_the_untimed_page() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let mut rng = Rng(11);
+        let (width, height) = (130, 70);
+        let mut page = PageCommands::new(width, height, SampleDepth::Eight, [250, 240, 230]);
+        for _ in 0..200 {
+            let c = random_cmd(&mut rng, width, height, 255);
+            page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
+                .expect("push");
+        }
+        let len = width as usize * height as usize * 3;
+        let (mut plain, mut stamped) = (vec![0u8; len], vec![1u8; len]);
+        let row = width as usize * 3;
+        backend
+            .render_page(&page, &mut plain, row)
+            .expect("render_page");
+        for _ in 0..2 {
+            let times = backend
+                .render_page_timed(&page, &mut stamped, row)
+                .expect("render_page_timed");
+            assert_eq!(plain, stamped);
+            assert!(times.device_raster > std::time::Duration::ZERO, "{times:?}");
+            assert!(
+                times.device_raster < times.submit_wait,
+                "the raster lies within the wait: {times:?}"
+            );
+        }
+        backend
+            .render_page(&page, &mut plain, row)
+            .expect("render_page after a timed page");
+        assert_eq!(plain, stamped);
     }
 
     #[test]

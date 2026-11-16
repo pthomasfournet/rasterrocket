@@ -442,13 +442,7 @@ impl PageRecorder {
     /// to `src` made before `submit_page` need no barrier: queue submission
     /// makes them visible to the device.
     pub(super) fn record_copy(&self, src: vk::Buffer, dst: vk::Buffer, len: u64) -> Result<()> {
-        let s = self.inner.lock().expect("recorder mutex poisoned");
-        if s.state != State::Recording {
-            return Err(BackendError::msg(format!(
-                "record_copy called from {:?} state; expected Recording",
-                s.state
-            )));
-        }
+        let s = self.recording("record_copy")?;
         let region = [vk::BufferCopy::default().size(len)];
         // Safety: cmd is in the Recording state (checked above); both
         // buffers carry TRANSFER_SRC | TRANSFER_DST usage and the callers
@@ -481,13 +475,7 @@ impl PageRecorder {
         buf: &super::memory::DeviceBuffer,
         len: usize,
     ) -> Result<()> {
-        let s = self.inner.lock().expect("recorder mutex poisoned");
-        if s.state != State::Recording {
-            return Err(BackendError::msg(format!(
-                "record_zero_buffer called from {:?} state; expected Recording",
-                s.state
-            )));
-        }
+        let s = self.recording("record_zero_buffer")?;
         let len = crate::backend::copy_len(len, buf.size(), "record_zero_buffer", "destination")?;
         let size = match super::memory::validate_fill_size(len)? {
             super::memory::FillAction::Skip => return Ok(()),
@@ -504,6 +492,50 @@ impl PageRecorder {
             barrier::global(d, s.cmd, barrier::FILL_WRITES, barrier::PAGE_COMMANDS);
         }
         Ok(())
+    }
+
+    /// Record the reset of the first `count` queries of `pool` into the
+    /// active per-page command buffer.
+    pub(super) fn record_reset_queries(&self, pool: vk::QueryPool, count: u32) -> Result<()> {
+        let s = self.recording("record_reset_queries")?;
+        // Safety: cmd is in the Recording state (checked above); the caller
+        // owns `pool`, which holds at least `count` queries.
+        unsafe {
+            self.device
+                .device
+                .cmd_reset_query_pool(s.cmd, pool, 0, count);
+        };
+        Ok(())
+    }
+
+    /// Record a timestamp write into query `query` of `pool`, made once
+    /// every earlier command of the page has completed.
+    pub(super) fn record_timestamp(&self, pool: vk::QueryPool, query: u32) -> Result<()> {
+        let s = self.recording("record_timestamp")?;
+        // Safety: cmd is in the Recording state (checked above); the caller
+        // reset the query earlier in this page.
+        unsafe {
+            self.device.device.cmd_write_timestamp2(
+                s.cmd,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                pool,
+                query,
+            );
+        }
+        Ok(())
+    }
+
+    /// The recorder's state, held, when a page is recording; `what` names
+    /// the caller in the error otherwise.
+    fn recording(&self, what: &str) -> Result<std::sync::MutexGuard<'_, RecorderState>> {
+        let s = self.inner.lock().expect("recorder mutex poisoned");
+        if s.state != State::Recording {
+            return Err(BackendError::msg(format!(
+                "{what} called from {:?} state; expected Recording",
+                s.state
+            )));
+        }
+        Ok(s)
     }
 
     /// Bail if `groups` exceeds the device's `maxComputeWorkGroupCount`
@@ -545,13 +577,7 @@ impl PageRecorder {
             self.device.check_storage_range(id.label(), size)?;
         }
 
-        let mut s = self.inner.lock().expect("recorder mutex poisoned");
-        if s.state != State::Recording {
-            return Err(BackendError::msg(format!(
-                "dispatch_kernel called from {:?} state; expected Recording",
-                s.state
-            )));
-        }
+        let mut s = self.recording("dispatch_kernel")?;
         if s.desc_sets_in_flight >= MAX_DESC_SETS_PER_PAGE {
             return Err(BackendError::DescriptorPoolExhausted {
                 allocated: s.desc_sets_in_flight,
