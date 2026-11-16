@@ -166,6 +166,15 @@ impl Nvjpeg2kSupply {
             Self::OnDemand(source) => Some(source),
         }
     }
+
+    /// The dispatch threshold of the decoder, in pixels.
+    fn jpx_threshold(&self) -> u32 {
+        use crate::resources::image::{JpxSupply, jpx_threshold};
+        jpx_threshold(match self {
+            Self::Attached => JpxSupply::Attached,
+            Self::OnDemand(_) => JpxSupply::OnDemand,
+        })
+    }
 }
 
 /// Identity CTM for passing to raster functions — coordinate transform is

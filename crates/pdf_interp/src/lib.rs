@@ -56,13 +56,28 @@ pub use working_space::WorkingSpace;
 pub enum DeviceKernel {
     /// The nvJPEG decoder (`GPU_JPEG_THRESHOLD_PX`, feature `nvjpeg`).
     NvJpeg,
+    /// The nvJPEG2000 decoder built on demand, as under `Auto`
+    /// (`GPU_JPEG2K_THRESHOLD_PX`, or `PDF_RASTER_JPX_THRESHOLD` when set;
+    /// feature `nvjpeg2k`).
+    NvJpeg2kOnDemand,
+    /// The nvJPEG2000 decoder attached before the page renders, as under
+    /// `ForceCuda` (`GPU_JPEG2K_ATTACHED_THRESHOLD_PX`, or
+    /// `PDF_RASTER_JPX_THRESHOLD` when set; feature `nvjpeg2k`).
+    NvJpeg2kAttached,
 }
 
-/// Whether `kernel` can dispatch at all.  A threshold equal to its type's
-/// maximum disables its kernel, and a kernel not compiled into this build
-/// is disabled.
+/// Whether `kernel` can dispatch at all.  An effective threshold equal to
+/// its type's maximum disables its kernel, and a kernel not compiled into
+/// this build is disabled.
 #[must_use]
-pub const fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
+#[cfg_attr(
+    not(feature = "nvjpeg2k"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "reads the environment-derived threshold in nvjpeg2k builds"
+    )
+)]
+pub fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
     match kernel {
         DeviceKernel::NvJpeg => {
             #[cfg(feature = "nvjpeg")]
@@ -70,6 +85,22 @@ pub const fn device_kernel_enabled(kernel: DeviceKernel) -> bool {
                 resources::image::GPU_JPEG_THRESHOLD_PX != u32::MAX
             }
             #[cfg(not(feature = "nvjpeg"))]
+            {
+                false
+            }
+        }
+        DeviceKernel::NvJpeg2kOnDemand | DeviceKernel::NvJpeg2kAttached => {
+            #[cfg(feature = "nvjpeg2k")]
+            {
+                use resources::image::{JpxSupply, jpx_threshold};
+                let supply = if kernel == DeviceKernel::NvJpeg2kOnDemand {
+                    JpxSupply::OnDemand
+                } else {
+                    JpxSupply::Attached
+                };
+                jpx_threshold(supply) != u32::MAX
+            }
+            #[cfg(not(feature = "nvjpeg2k"))]
             {
                 false
             }
@@ -1287,5 +1318,23 @@ startxref\n180\n%%EOF"
         #[cfg(not(feature = "nvjpeg"))]
         let nvjpeg = false;
         assert_eq!(device_kernel_enabled(DeviceKernel::NvJpeg), nvjpeg);
+        #[cfg(feature = "nvjpeg2k")]
+        {
+            use crate::resources::image::{JpxSupply, jpx_threshold};
+            for (kernel, supply) in [
+                (DeviceKernel::NvJpeg2kOnDemand, JpxSupply::OnDemand),
+                (DeviceKernel::NvJpeg2kAttached, JpxSupply::Attached),
+            ] {
+                let enabled = jpx_threshold(supply) != u32::MAX;
+                assert_eq!(device_kernel_enabled(kernel), enabled, "{kernel:?}");
+            }
+        }
+        #[cfg(not(feature = "nvjpeg2k"))]
+        for kernel in [
+            DeviceKernel::NvJpeg2kOnDemand,
+            DeviceKernel::NvJpeg2kAttached,
+        ] {
+            assert!(!device_kernel_enabled(kernel), "{kernel:?}");
+        }
     }
 }

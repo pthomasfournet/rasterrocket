@@ -731,16 +731,17 @@ impl<'doc> PageResources<'doc> {
 
     /// Whether the GPU JPEG 2000 decoder is worth offering the `XObject`
     /// resource `name` drawn at `draw_size`: an image with terminal filter
-    /// `JPXDecode` and at least [`image::jpx_threshold`] pixels by
-    /// its dictionary, whose CPU decode would not skip a resolution level
-    /// (see `draw_halves`) at the size its masks let it reduce to
-    /// (see `reduced_draw_size`).
+    /// `JPXDecode` that meets the dispatch threshold `threshold`
+    /// ([`image::jpx_area_dispatches`]) by its dictionary, whose CPU decode
+    /// would not skip a resolution level (see `draw_halves`) at the size its
+    /// masks let it reduce to (see `reduced_draw_size`).
     #[cfg(feature = "nvjpeg2k")]
     #[must_use]
     pub(crate) fn xobject_takes_device_jpx(
         &self,
         name: &[u8],
         draw_size: Option<(u32, u32)>,
+        threshold: u32,
     ) -> bool {
         let Some(obj) = self
             .xobject_id(name)
@@ -751,7 +752,7 @@ impl<'doc> PageResources<'doc> {
         let Some(dict) = obj.as_ref().as_stream().map(|s| &s.dict) else {
             return false;
         };
-        let Some(full) = device_jpx_size(dict) else {
+        let Some(full) = device_jpx_size(dict, threshold) else {
             return false;
         };
         !image::reduced_draw_size(self.doc, dict, draw_size)
@@ -955,17 +956,17 @@ impl<'doc> PageResources<'doc> {
 }
 
 /// The dimensions of the image dictionary `dict` when the GPU JPEG 2000
-/// decoder takes it: terminal filter `JPXDecode` and at least
-/// [`image::jpx_threshold`] pixels.
+/// decoder takes it: terminal filter `JPXDecode` and an area meeting the
+/// dispatch threshold `threshold` ([`image::jpx_area_dispatches`]).
 #[cfg(feature = "nvjpeg2k")]
-fn device_jpx_size(dict: &Dictionary) -> Option<(u32, u32)> {
+fn device_jpx_size(dict: &Dictionary, threshold: u32) -> Option<(u32, u32)> {
     let chain = image::image_filter_chain(dict.get(b"Filter")?);
     if chain.last().is_none_or(|f| f != "JPXDecode") {
         return None;
     }
     let dim = |key: &[u8]| dict.get_i64(key).and_then(|v| u32::try_from(v).ok());
     let (w, h) = (dim(b"Width")?, dim(b"Height")?);
-    (w.saturating_mul(h) >= image::jpx_threshold()).then_some((w, h))
+    image::jpx_area_dispatches(w, h, threshold).then_some((w, h))
 }
 
 /// Convert a [`pdf::Object`] (Real or Integer) to `f64`.
@@ -1263,7 +1264,6 @@ mod tests {
     #[cfg(feature = "nvjpeg2k")]
     #[test]
     fn device_jpx_is_offered_where_the_cpu_decode_cannot_reduce() {
-        const { assert!(4096 * 4096 >= image::GPU_JPEG2K_THRESHOLD_PX) };
         let jpx = "/Type /XObject /Subtype /Image /Width 4096 /Height 4096 \
                    /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode";
         let stream = |extra: &str| format!("<< {jpx} {extra} /Length 0 >>\nstream\n\nendstream");
@@ -1285,12 +1285,14 @@ mod tests {
             (8, stream("/Mask [0 0 0 0 0 0]")),
         ]);
         let resources = PageResources::new(&doc, (4, 0));
+        let takes = |name: &[u8], draw| resources.xobject_takes_device_jpx(name, draw, 2_097_152);
         let half = Some((2048, 2048));
-        assert!(!resources.xobject_takes_device_jpx(b"Plain", half));
-        assert!(resources.xobject_takes_device_jpx(b"Plain", Some((2049, 2048))));
-        assert!(resources.xobject_takes_device_jpx(b"Plain", None));
-        assert!(resources.xobject_takes_device_jpx(b"Matted", half));
-        assert!(resources.xobject_takes_device_jpx(b"Keyed", half));
-        assert!(!resources.xobject_takes_device_jpx(b"Missing", None));
+        assert!(!takes(b"Plain", half));
+        assert!(takes(b"Plain", Some((2049, 2048))));
+        assert!(takes(b"Plain", None));
+        assert!(takes(b"Matted", half));
+        assert!(takes(b"Keyed", half));
+        assert!(!takes(b"Missing", None));
+        assert!(!resources.xobject_takes_device_jpx(b"Plain", None, u32::MAX));
     }
 }

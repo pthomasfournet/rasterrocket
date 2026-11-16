@@ -4,6 +4,8 @@
 #[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k"))]
 use crate::gpu_init;
 use crate::{BackendPolicy, RasterError, RasterSession};
+#[cfg(feature = "nvjpeg2k")]
+use pdf_interp::DeviceKernel;
 
 /// Lend per-thread GPU JPEG decoders to the renderer for one page.
 ///
@@ -14,7 +16,8 @@ use crate::{BackendPolicy, RasterError, RasterSession};
 /// On `CpuOnly` this is a no-op.  The nvJPEG decoder is built only where
 /// `wants_nvjpeg_decoder` says so, and the nvJPEG2000 decoder as
 /// `nvjpeg2k_supply` says: on `Auto` only when the page draws an image it
-/// takes, never under `ForceVulkan`.  On `ForceCuda`/`ForceVaapi` init
+/// takes, never under `ForceVulkan` nor while the policy's threshold
+/// disables it (`nvjpeg2k_supply`).  On `ForceCuda`/`ForceVaapi` init
 /// failure is returned as `RasterError::BackendUnavailable` rather than
 /// silently falling back.
 #[cfg_attr(
@@ -58,7 +61,7 @@ pub(crate) fn lend_decoders(
     }
 
     #[cfg(feature = "nvjpeg2k")]
-    match nvjpeg2k_supply(effective_policy) {
+    match nvjpeg2k_supply(effective_policy, pdf_interp::device_kernel_enabled) {
         Nvjpeg2kSupply::OnDemand => {
             // A decoder this thread already built is lent; otherwise the
             // renderer builds one when it first meets an image it takes.
@@ -114,13 +117,22 @@ enum Nvjpeg2kSupply {
     None,
 }
 
-/// The nvJPEG2000 supply of `policy`: on demand under `Auto`, eager under
-/// `ForceCuda`, none under the policies that initialise no CUDA context.
+/// The nvJPEG2000 supply of `policy`, `enabled` being
+/// [`pdf_interp::device_kernel_enabled`]: on demand under `Auto` while
+/// [`DeviceKernel::NvJpeg2kOnDemand`] is enabled, eager under `ForceCuda`
+/// while [`DeviceKernel::NvJpeg2kAttached`] is, and otherwise none, as under
+/// the policies that initialise no CUDA context.
 #[cfg(feature = "nvjpeg2k")]
-const fn nvjpeg2k_supply(policy: BackendPolicy) -> Nvjpeg2kSupply {
+fn nvjpeg2k_supply(
+    policy: BackendPolicy,
+    enabled: impl Fn(DeviceKernel) -> bool,
+) -> Nvjpeg2kSupply {
     match policy {
-        BackendPolicy::Auto => Nvjpeg2kSupply::OnDemand,
-        BackendPolicy::ForceCuda => Nvjpeg2kSupply::Eager,
+        BackendPolicy::Auto if enabled(DeviceKernel::NvJpeg2kOnDemand) => Nvjpeg2kSupply::OnDemand,
+        BackendPolicy::ForceCuda if enabled(DeviceKernel::NvJpeg2kAttached) => {
+            Nvjpeg2kSupply::Eager
+        }
+        BackendPolicy::Auto | BackendPolicy::ForceCuda => Nvjpeg2kSupply::None,
         BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => Nvjpeg2kSupply::None,
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => Nvjpeg2kSupply::None,
@@ -208,25 +220,48 @@ mod cuda_decoder_tests {
         assert!(!wants_nvjpeg_decoder(BackendPolicy::ForceVaapi, true));
     }
 
-    /// A Vulkan session starts no CUDA nvJPEG2000 decoder.
+    /// A Vulkan session starts no CUDA nvJPEG2000 decoder, and no session
+    /// starts one while its kernel is disabled.
     #[cfg(feature = "nvjpeg2k")]
     #[test]
     fn nvjpeg2k_is_supplied_only_to_cuda_capable_policies() {
         use super::{Nvjpeg2kSupply, nvjpeg2k_supply};
+        use pdf_interp::DeviceKernel;
+        let only = |on: DeviceKernel| move |kernel: DeviceKernel| kernel == on;
+        let auto = BackendPolicy::Auto;
+        let cuda = BackendPolicy::ForceCuda;
+        assert_eq!(nvjpeg2k_supply(auto, |_| true), Nvjpeg2kSupply::OnDemand);
+        assert_eq!(nvjpeg2k_supply(cuda, |_| true), Nvjpeg2kSupply::Eager);
+        let on_demand = only(DeviceKernel::NvJpeg2kOnDemand);
+        let attached = only(DeviceKernel::NvJpeg2kAttached);
+        assert_eq!(nvjpeg2k_supply(auto, on_demand), Nvjpeg2kSupply::OnDemand);
+        assert_eq!(nvjpeg2k_supply(auto, attached), Nvjpeg2kSupply::None);
+        assert_eq!(nvjpeg2k_supply(cuda, attached), Nvjpeg2kSupply::Eager);
+        assert_eq!(nvjpeg2k_supply(cuda, on_demand), Nvjpeg2kSupply::None);
+        for policy in [BackendPolicy::ForceVulkan, BackendPolicy::CpuOnly] {
+            assert_eq!(nvjpeg2k_supply(policy, |_| true), Nvjpeg2kSupply::None);
+        }
+        for policy in [auto, cuda] {
+            assert_eq!(nvjpeg2k_supply(policy, |_| false), Nvjpeg2kSupply::None);
+        }
+    }
+
+    /// By default `ForceCuda` builds its nvJPEG2000 decoder before the
+    /// page renders, while `Auto` builds none.
+    #[cfg(feature = "nvjpeg2k")]
+    #[test]
+    fn force_cuda_is_not_dormant_by_default() {
+        use super::{Nvjpeg2kSupply, nvjpeg2k_supply};
+        if std::env::var_os("PDF_RASTER_JPX_THRESHOLD").is_some() {
+            return;
+        }
+        let enabled = pdf_interp::device_kernel_enabled;
         assert_eq!(
-            nvjpeg2k_supply(BackendPolicy::Auto),
-            Nvjpeg2kSupply::OnDemand
-        );
-        assert_eq!(
-            nvjpeg2k_supply(BackendPolicy::ForceCuda),
+            nvjpeg2k_supply(BackendPolicy::ForceCuda, enabled),
             Nvjpeg2kSupply::Eager
         );
         assert_eq!(
-            nvjpeg2k_supply(BackendPolicy::ForceVulkan),
-            Nvjpeg2kSupply::None
-        );
-        assert_eq!(
-            nvjpeg2k_supply(BackendPolicy::CpuOnly),
+            nvjpeg2k_supply(BackendPolicy::Auto, enabled),
             Nvjpeg2kSupply::None
         );
     }

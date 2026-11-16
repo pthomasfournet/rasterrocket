@@ -232,9 +232,11 @@ impl PageRenderer<'_> {
             #[cfg(feature = "nvjpeg2k")]
             nvjpeg2k: nvjpeg2k
                 .then(|| {
+                    let threshold = self.nvjpeg2k_supply.jpx_threshold();
                     crate::resources::image::DeviceJpx::new(
                         &mut self.nvjpeg2k,
                         self.nvjpeg2k_supply.source(),
+                        threshold,
                     )
                 })
                 .flatten(),

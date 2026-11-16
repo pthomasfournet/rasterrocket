@@ -509,7 +509,7 @@ crates.io (see the note at the top).
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. CI runs the test suite on x86-64 Linux; clippy on x86-64 and arm64 Linux, macOS and Windows; the NEON tests on arm64 Linux; and the renderer, interpreter, library and font suites on macOS and Windows (on Windows also the CLI, parser, colour, encode and comic suites); see the platform guides above.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
+- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 - **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) runs on any Vulkan 1.3+ device (NVIDIA, AMD, Intel, Apple via `MoltenVK`). Runs on an RTX 5070, on an AMD integrated GPU (RADV) and on an A-series Apple GPU (MoltenVK); select one with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode on AMD VCN, Intel Quick Sync, Intel Arc; wired but dormant, sharing nvJPEG's disabled size gate.
 
@@ -576,7 +576,7 @@ The runtime backend is chosen from three sources, in priority order:
 2. The `PDF_RASTER_BACKEND` environment variable (same valid values).
 3. The compile-time default — `auto`.
 
-`auto` initialises no GPU backend at start-up: it is a CPU session, with no Vulkan device, CUDA context, image cache or nvJPEG decoder (in an `nvjpeg2k` build, a thread's nvJPEG2000 decoder is built when it first draws a `JPXDecode` image of at least 2 097 152 px at more than half its size; `PDF_RASTER_JPX_THRESHOLD` overrides the area; `--gpu-pages` opens a Vulkan device of its own). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. `--backend cuda` / `--backend vulkan` initialise their backend and fail loudly when its runtime is unavailable.
+`auto` initialises no GPU backend at start-up: it is a CPU session, with no Vulkan device, CUDA context, image cache or nvJPEG decoder (nvJPEG2000 is dormant under `auto`: in an `nvjpeg2k` build, only a pixel area set in `PDF_RASTER_JPX_THRESHOLD` makes a thread build its decoder, when it first draws a `JPXDecode` image of that area at more than half its size; `--gpu-pages` opens a Vulkan device of its own). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. `--backend cuda` / `--backend vulkan` initialise their backend and fail loudly when its runtime is unavailable; `--backend cuda` decodes a `JPXDecode` image of at least 2 097 152 px on the GPU (`PDF_RASTER_JPX_THRESHOLD` overrides the area).
 
 ```bash
 # Select a backend per process:

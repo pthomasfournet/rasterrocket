@@ -2,6 +2,8 @@
 //! feature.
 
 use crate::resources::image::colorspace::{KeySamples, Layout, Samples};
+#[cfg(feature = "nvjpeg2k")]
+use crate::resources::image::jpx_area_dispatches;
 
 #[cfg(feature = "nvjpeg2k")]
 mod device;
@@ -14,7 +16,7 @@ pub(crate) use device::{DeviceJpx, Jpeg2kSource};
 /// Decode a `JPXDecode` (JPEG 2000) stream.
 ///
 /// When the `nvjpeg2k` feature is active and `gpu` is `Some`, an image of
-/// at least `jpx_threshold()` pixels whose codestream nvJPEG2000
+/// at least `gpu`'s threshold in pixels whose codestream nvJPEG2000
 /// reconstructs as the CPU decoder does (`device::takes`), and which
 /// holds all the tile data its headers declare, is decoded on the device,
 /// the decoder being obtained from `gpu` only then.  Every
@@ -83,7 +85,7 @@ pub(in crate::resources::image) fn decode_jpx(
             .is_ok();
     #[cfg(feature = "nvjpeg2k")]
     if let Some(device) = gpu.filter(|_| !opts.colour_key && !wide)
-        && pdf_w.saturating_mul(pdf_h) >= crate::resources::image::jpx_threshold()
+        && jpx_area_dispatches(pdf_w, pdf_h, device.threshold())
         && let Ok(survey) = img.survey()
     {
         match device::takes(&img, &survey) {

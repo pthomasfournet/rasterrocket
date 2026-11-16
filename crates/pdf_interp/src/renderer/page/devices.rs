@@ -71,8 +71,10 @@ impl PageRenderer<'_> {
     /// Attach a GPU JPEG 2000 decoder to this renderer.
     ///
     /// When set, `JPXDecode` image streams with pixel area ≥
-    /// [`crate::resources::image::jpx_threshold`] are decoded on the
-    /// GPU via nvJPEG2000 rather than the CPU JPEG 2000 decoder.
+    /// [`crate::resources::image::GPU_JPEG2K_ATTACHED_THRESHOLD_PX`]
+    /// (`PDF_RASTER_JPX_THRESHOLD` overrides it) are decoded on the GPU via
+    /// nvJPEG2000 rather than the CPU JPEG 2000 decoder; with a source set
+    /// (see [`Self::set_nvjpeg2k_source`]) the source's threshold applies.
     ///
     /// Call with `None` to revert to CPU-only JPEG 2000 decode.
     #[cfg(feature = "nvjpeg2k")]
@@ -83,7 +85,8 @@ impl PageRenderer<'_> {
     /// Obtain the GPU JPEG 2000 decoder from `source` on demand.  With a
     /// source set, an image `XObject` is offered the decoder only when it
     /// is one the decoder takes (`JPXDecode`, at least
-    /// [`crate::resources::image::jpx_threshold`] pixels) and the
+    /// [`crate::resources::image::GPU_JPEG2K_THRESHOLD_PX`] pixels, which
+    /// admits none unless `PDF_RASTER_JPX_THRESHOLD` sets an area) and the
     /// draw does not reduce it to half its size or less on both axes (such
     /// a draw decodes on the CPU at a reduced resolution level); the first
     /// such image whose codestream the device decodes obtains the decoder
@@ -104,9 +107,11 @@ impl PageRenderer<'_> {
     pub(super) fn nvjpeg2k_offered(&self, name: &[u8], draw_size: Option<(u32, u32)>) -> bool {
         match self.nvjpeg2k_supply {
             super::Nvjpeg2kSupply::Attached => true,
-            super::Nvjpeg2kSupply::OnDemand(_) => {
-                self.resources.xobject_takes_device_jpx(name, draw_size)
-            }
+            super::Nvjpeg2kSupply::OnDemand(_) => self.resources.xobject_takes_device_jpx(
+                name,
+                draw_size,
+                self.nvjpeg2k_supply.jpx_threshold(),
+            ),
         }
     }
 

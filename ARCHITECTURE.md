@@ -850,8 +850,10 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
 - DCTDecode: `gpu::NvJpegDecoder::decode_sync()` if pixels ≥
   `GPU_JPEG_THRESHOLD_PX` (dormant: `u32::MAX`)
 - JPXDecode: `gpu::NvJpeg2kDecoder::decode_sync()` if pixels ≥
-  `GPU_JPEG2K_THRESHOLD_PX` (2 097 152; `PDF_RASTER_JPX_THRESHOLD`
-  overrides it); under `Auto` only when the draw
+  `GPU_JPEG2K_ATTACHED_THRESHOLD_PX` (2 097 152) for the decoder `ForceCuda`
+  attaches, or `GPU_JPEG2K_THRESHOLD_PX` (dormant: `u32::MAX`, so no
+  decoder is built) under `Auto`; `PDF_RASTER_JPX_THRESHOLD` overrides both;
+  under `Auto` only when the draw
   does not reduce the image to half its size or less on both axes, and the
   thread's decoder is then built on demand
 - ICC CMYK→RGB: with a GPU backend in the session, an image of at least
@@ -947,8 +949,8 @@ renders whole pages (*Page raster* below).
 
 **Backend start-up under `Auto`.**  A session under `BackendPolicy::Auto`
 initialises no GPU backend, image cache or nvJPEG decoder: it renders on the
-CPU, except JPEG 2000 images for which a thread's nvJPEG2000 decoder is built
-on demand, and pages `gpu_pages` sends to a Vulkan device it opens itself.
+CPU, except JPEG 2000 images for which, when `PDF_RASTER_JPX_THRESHOLD` sets a
+pixel area, a thread's nvJPEG2000 decoder is built on demand, and pages `gpu_pages` sends to a Vulkan device it opens itself.
 `ForceCuda` / `ForceVulkan` initialise their backend.
 
 **Kernel inventory.**  Two kernel sources exist in **both** `.cu` (CUDA, compiled to
@@ -1427,7 +1429,8 @@ main thread
 Each rayon worker thread lazily initialises a `NvJpegDecoder` on first use and
 stores it in thread-local storage (under `Auto`, only when the nvJPEG
 threshold enables it; a thread's `NvJpeg2kDecoder` is built when its first
-qualifying JPEG 2000 image is drawn). At process exit all TLS destructors fire
+qualifying JPEG 2000 image is drawn, and only while `PDF_RASTER_JPX_THRESHOLD`
+enables it under `Auto`). At process exit all TLS destructors fire
 concurrently, which races with the CUDA driver's own atexit shutdown. The fix:
 call `release_gpu_decoders()` via `pool.broadcast()` after `pool.install()` returns.
 This drops each decoder while the driver is still fully live; the TLS destructors

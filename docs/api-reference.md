@@ -1452,7 +1452,7 @@ and the guides for [Linux](platforms/linux.md), [macOS](platforms/macos.md) and
 | Feature | Requires | Effect |
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Wired but disabled: `GPU_JPEG_THRESHOLD_PX` is `u32::MAX`, so JPEGs decode on the CPU (zune-jpeg). |
-| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Falls back to the CPU decoder (pure-Rust `hayro-jpeg2000`) below 2 097 152 px in area (`GPU_JPEG2K_THRESHOLD_PX`; `PDF_RASTER_JPX_THRESHOLD` overrides it) or for sub-sampled chroma. |
+| `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Dormant under `Auto` (`GPU_JPEG2K_THRESHOLD_PX` = `u32::MAX`); under `ForceCuda` it dispatches from 2 097 152 px (`GPU_JPEG2K_ATTACHED_THRESHOLD_PX`). `PDF_RASTER_JPX_THRESHOLD` sets the pixel area for both. Below that area, or for a codestream the device does not take, the CPU decoder (pure-Rust `hayro-jpeg2000`) decodes. |
 | `gpu-icc` | CUDA 13, or `vulkan` | An image in an ICC-based CMYK space converts through the profile's 17⁴ lookup table on the session's GPU backend (Vulkan when attached, else CUDA) from 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it); the device output is byte-identical to the CPU evaluation of the table. Smaller images, those a Vulkan device whose kernel fails a one-time exactness check declines, and those a device conversion fails on convert through the profile transform, as without a backend; a GPU session therefore differs from a CPU session only in the images counted in `PageDiagnostics::device_icc_conversions`. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate). Falls back to CPU bilinear when disabled. |
 | `cache` | CUDA 13 | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. Runs on the session's backend: CUDA, or Vulkan under `--backend vulkan` with the `vulkan` feature; an `Auto` session has none. A JPEG drawn below its resolution (every scanned page rendered under its scan resolution) is neither looked up nor inserted: it is area-averaged on the host from host-resident samples. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
@@ -1468,11 +1468,15 @@ Under `Auto`, GPU initialisation failures log a warning and fall back to CPU —
 | Path | Threshold | Constant |
 |---|---|---|
 | nvJPEG (DCTDecode) | **disabled** (`u32::MAX`) | `GPU_JPEG_THRESHOLD_PX` |
-| nvJPEG2000 (JPXDecode) | ≥ 2 097 152 px (area; `PDF_RASTER_JPX_THRESHOLD` overrides) | `GPU_JPEG2K_THRESHOLD_PX` |
+| nvJPEG2000 (JPXDecode), `Auto` | **dormant** (`u32::MAX`; `PDF_RASTER_JPX_THRESHOLD` sets an area) | `GPU_JPEG2K_THRESHOLD_PX` |
+| nvJPEG2000 (JPXDecode), `ForceCuda` | ≥ 2 097 152 px (area; `PDF_RASTER_JPX_THRESHOLD` overrides) | `GPU_JPEG2K_ATTACHED_THRESHOLD_PX` |
 | GPU ICC CLUT | ≥ 128 000 px (area) | `GPU_ICC_CLUT_THRESHOLD` |
 
 The nvJPEG threshold is `u32::MAX` **by design**, so JPEG decode runs on the
 CPU: nvJPEG's `GPU_HYBRID` backend lost to 24-thread CPU decode on consumer
-hardware. nvJPEG2000 is genuinely active above its area
-threshold.
+hardware. Under `Auto` nvJPEG2000 is dormant too: a thread's decoder build
+costs more process time than the device saves on a single page, and over
+runs of pages the device wins on some documents and ties or loses on others.
+Set `PDF_RASTER_JPX_THRESHOLD` to a pixel area to enable it. `ForceCuda`,
+which asks for the device, keeps the 2 097 152 px area threshold.
 

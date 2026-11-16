@@ -398,7 +398,11 @@ impl PageRenderer<'_> {
                     #[cfg(feature = "vaapi")]
                     vaapi: self.vaapi_jpeg_queue.as_ref(),
                     #[cfg(feature = "nvjpeg2k")]
-                    nvjpeg2k: crate::resources::image::DeviceJpx::new(&mut self.nvjpeg2k, None),
+                    nvjpeg2k: crate::resources::image::DeviceJpx::new(
+                        &mut self.nvjpeg2k,
+                        None,
+                        self.nvjpeg2k_supply.jpx_threshold(),
+                    ),
                     #[cfg(feature = "gpu-icc")]
                     icc: crate::resources::image::IccHandles {
                         gpu_ctx: self.gpu_ctx.as_ref(),

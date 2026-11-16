@@ -20,21 +20,33 @@ pub(crate) type Jpeg2kSource = fn() -> Option<NvJpeg2kDecoder>;
 /// The device JPEG 2000 decoder a decode may use: the one attached, or,
 /// when none is and a source remains, one the source supplies on first
 /// use.  The source is consumed by that use, whatever it returns, so it
-/// is called at most once.
+/// is called at most once.  Only an image whose area meets `threshold`
+/// (`jpx_area_dispatches`) is decoded on it.
 pub struct DeviceJpx<'a> {
     decoder: &'a mut Option<NvJpeg2kDecoder>,
     source: Option<&'a mut Option<Jpeg2kSource>>,
+    threshold: u32,
 }
 
 impl<'a> DeviceJpx<'a> {
-    /// The decoder in `decoder`, else one from the source in `source`;
-    /// `None` when there is neither.
+    /// The decoder in `decoder`, else one from the source in `source`, for
+    /// images of at least `threshold` pixels; `None` when there is neither.
     pub fn new(
         decoder: &'a mut Option<NvJpeg2kDecoder>,
         source: Option<&'a mut Option<Jpeg2kSource>>,
+        threshold: u32,
     ) -> Option<Self> {
         let source = source.filter(|s| s.is_some());
-        (decoder.is_some() || source.is_some()).then_some(Self { decoder, source })
+        (decoder.is_some() || source.is_some()).then_some(Self {
+            decoder,
+            source,
+            threshold,
+        })
+    }
+
+    /// The dispatch threshold of the decoder, in pixels.
+    pub(super) const fn threshold(&self) -> u32 {
+        self.threshold
     }
 
     /// The decoder, obtained from the source when none is attached.
@@ -265,7 +277,7 @@ mod tests {
         let decode = |bytes: &[u8]| {
             let mut decoder = None;
             let mut slot = Some(source as Jpeg2kSource);
-            let mut device = DeviceJpx::new(&mut decoder, Some(&mut slot)).expect("a source");
+            let mut device = DeviceJpx::new(&mut decoder, Some(&mut slot), 0).expect("a source");
             let samples =
                 super::super::decode_jpx(bytes, 65_535, 65_535, None, &opts, Some(&mut device))
                     .expect("decodes on the CPU");
@@ -293,7 +305,7 @@ mod tests {
         let decode = |len: usize| {
             let mut decoder = None;
             let mut slot = Some(source as Jpeg2kSource);
-            let mut device = DeviceJpx::new(&mut decoder, Some(&mut slot)).expect("a source");
+            let mut device = DeviceJpx::new(&mut decoder, Some(&mut slot), 0).expect("a source");
             let opts = super::super::JpxOptions {
                 indices: false,
                 smask_in_data: 0,
@@ -316,8 +328,8 @@ mod tests {
     /// Without a decoder or a source there is no device to offer.
     #[test]
     fn no_device_without_a_decoder_or_a_source() {
-        assert!(DeviceJpx::new(&mut None, None).is_none());
-        assert!(DeviceJpx::new(&mut None, Some(&mut None)).is_none());
+        assert!(DeviceJpx::new(&mut None, None, 0).is_none());
+        assert!(DeviceJpx::new(&mut None, Some(&mut None), 0).is_none());
     }
 
     /// Each kind of decline is reported at warn once.

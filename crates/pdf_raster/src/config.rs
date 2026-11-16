@@ -26,16 +26,18 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 #[non_exhaustive]
 pub enum BackendPolicy {
     /// Auto: the CPU.  The session initialises no Vulkan device, CUDA
-    /// context, image cache or nvJPEG decoder at start-up; with the
-    /// `nvjpeg2k` feature a rendering thread builds its nvJPEG2000 decoder
-    /// when it first draws a `JPXDecode` image the decoder takes at more
-    /// than half its size on some axis; smaller draws decode on the CPU.
+    /// context, image cache or nvJPEG decoder at start-up.  With the
+    /// `nvjpeg2k` feature and a finite `PDF_RASTER_JPX_THRESHOLD`, a
+    /// rendering thread builds its nvJPEG2000 decoder when it first draws a
+    /// `JPXDecode` image the decoder takes at more than half its size on
+    /// some axis; smaller draws decode on the CPU.  Its default
+    /// threshold disables the decoder.
     #[default]
     Auto,
     /// CPU only.  All GPU init is skipped; no CUDA or VA-API calls are made.
     CpuOnly,
-    /// Require CUDA (nvJPEG2000, ICC CLUT, image blits, and nvJPEG while its
-    /// threshold enables it).
+    /// Require CUDA (nvJPEG2000 for images of at least 2²¹ pixels, ICC CLUT,
+    /// image blits, and nvJPEG while its threshold enables it).
     /// Returns [`RasterError::BackendUnavailable`] if CUDA initialisation fails
     /// rather than falling back to CPU.
     ForceCuda,

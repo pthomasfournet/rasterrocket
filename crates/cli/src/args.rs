@@ -564,12 +564,15 @@ pub(crate) struct Args {
     /// Compute backend for image decoding and GPU kernels.
     ///
     /// `auto`   — CPU; no Vulkan device or CUDA context is opened at
-    ///            start-up.  A binary built with `nvjpeg2k` decodes a
-    ///            JPEG 2000 image of at least 2 097 152 pixels on the GPU
-    ///            when it is drawn at more than half its size, and
-    ///            --gpu-pages opens a Vulkan device.  This is the default.
+    ///            start-up; --gpu-pages opens a Vulkan device.  A binary
+    ///            built with `nvjpeg2k` decodes JPEG 2000 on the GPU only
+    ///            when `PDF_RASTER_JPX_THRESHOLD` sets a pixel area.  This is
+    ///            the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
-    /// `cuda`   — Require CUDA (nvJPEG/ICC/image cache); exit with error if unavailable.
+    /// `cuda`   — Require CUDA (nvJPEG2000 for JPEG 2000 images of at least
+    ///            2 097 152 pixels or the `PDF_RASTER_JPX_THRESHOLD` area,
+    ///            ICC, image cache; nvJPEG while its threshold enables it);
+    ///            exit with error if unavailable.
     /// `vaapi`  — Require VA-API JPEG; exit with error if the DRM device cannot be opened.
     /// `vulkan` — Require the Vulkan compute backend.
     ///
