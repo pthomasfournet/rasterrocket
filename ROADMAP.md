@@ -3249,6 +3249,19 @@ Windows, `--ram-path` works (available memory is read through
 `GlobalMemoryStatusEx`); `--ram` alone is still refused there, having no
 `/dev/shm`.
 
+**Unreleased on master: parallel-Huffman convergence and draw size.** The
+dormant GPU parallel-Huffman JPEG decoder (`PDF_RASTER_HUFFMAN_THRESHOLD=0`)
+now converges on gray text scans: when a fresh-start Phase 1 walker stops at
+a decode error on a workgroup boundary, Phase 2 resumes the next slot from
+its Phase 1 snapshot instead of carrying the error state through the
+workgroup and into one more workgroup per pass, and subsequences grow from
+512 to 1024 bits. On the first 20 gray pages of qsj-1889 and qsj-2444 every
+image decodes on the device (22 of 40 before; the rest fell back to the CPU
+entropy walk), in at most two passes, on CUDA, Vulkan and RADV, with the
+CPU walk's coefficients, so the output is byte for byte as before. The
+decoder is no longer used for a draw at half the image's size or less on
+both axes, the rule nvJPEG2000 already followed.
+
 **Unreleased on master: paint trace.** A pixel-independent regression
 oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
 `rasterrocket::dev::paint_trace`) records one line of text per painting
