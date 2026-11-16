@@ -25,7 +25,7 @@ unless the entry says otherwise.
   panic on an unusual component count, nor on an oversized DC prediction;
   wrapping multiplication when a coefficient is dequantised. It predates upstream's resumable (incremental) decoding, which this
   project does not use. Upstream history after the base is reviewed up to
-  commit `ab211bb1` (2026-11-11, 0.5.16-rc3): "Upstream review" below
+  commit `7fd6c70b` (2026-11-15, after 0.5.16-rc3): "Upstream review" below
   lists what was brought over and what was left out.
 
 - Kept: `src/`, `tests/`, `README.md`, `Changelog.md`, `Benches.md` and the
@@ -168,7 +168,7 @@ unless the entry says otherwise.
   otherwise. Both allocation sites share `JpegDecoder::coefficient_planes`.
   Test: `invalid_images::coefficients_over_the_limit_are_not_allocated`.
 
-## Upstream review (9706202c..ab211bb1)
+## Upstream review (9706202c..7fd6c70b)
 
 The 139 upstream commits to the crate after the base were read; the fixes
 that apply to this fork's code are brought over by hand, each with a test
@@ -311,7 +311,9 @@ as before unless an entry says otherwise.
   `9b8ef2e9` `f4011ced` `9e623cc6` `2f9086b0` `dc9d4510` `083c0d33`
   `fb9fc04f` `c3b9adbe` `c65df8ee` `c5ddc597` `58d2d171` `49855297`
   `ba9fc244`. (`8620bb88` also reads every marker segment whole before
-  parsing it; the checks are the same.)
+  parsing it; the checks are the same.) Also `7fd6c70b`
+  (`RawDecodeSession::quantization_tables`, per-component DQT tables on
+  the raw-plane output; the fork has no raw-plane output).
 - **Features**: frames whose height comes from a DNL marker (`506a2af3`,
   `8f1d3832`; the PDF interpreter writes the image dictionary's height into
   the frame header, and the DNL segment is then read and skipped, see
