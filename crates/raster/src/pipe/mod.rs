@@ -145,6 +145,9 @@ thread_local! {
     /// Separate from the coverage scratch because the masked composite
     /// encloses its use.
     static MASKED_SPAN: Scratch = const { Scratch::new() };
+    /// The colour the blend function reads under a masked paint of a blend
+    /// mode other than `Normal`.
+    static UNPAINTED_SOURCE: Scratch = const { Scratch::new() };
     /// Colour of the span of a pattern that may leave pixels unpainted.
     static COVERAGE_COLOUR: Scratch = const { Scratch::new() };
     /// Coverage of that span.
@@ -214,10 +217,12 @@ pub trait GrayBlend<S: Sample>: std::fmt::Debug {
 ///
 /// Bit `i` is set when channel `i` (the `i`-th sample of a pixel) is painted.
 /// The destination alpha is composited regardless, since the object's shape
-/// is painted.  A channel outside the mask receives no ink from the source
-/// and keeps its premultiplied value: over an opaque destination it keeps
-/// its value exactly, and over a translucent one its value scales by the
-/// ratio of the old alpha to the new (see `restore_unpainted`).
+/// is painted.  Under `Normal` a channel outside the mask receives no ink
+/// from the source and keeps its premultiplied value: over an opaque
+/// destination it keeps its value exactly, and over a translucent one its
+/// value scales by the ratio of the old alpha to the new (see
+/// `restore_unpainted`).  Under another blend mode it is blended with
+/// itself (see [`render_span`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ChannelMask(u8);
 
@@ -340,9 +345,12 @@ pub fn with_shape<S: Sample, R>(coverage: &[u8], f: impl FnOnce(&[S]) -> R) -> R
 /// - `x0`, `x1`: inclusive device column range of the span.
 /// - `y`: device row, at which a pattern source is evaluated.
 ///
-/// When `pipe.overprint` masks out channels, those channels of every pixel
-/// keep their premultiplied destination value (their value exactly where
-/// the destination is opaque) and the others are composited as usual.
+/// When `pipe.overprint` masks out channels, under `Normal` those channels
+/// of every pixel keep their premultiplied destination value (their value
+/// exactly where the destination is opaque) and the others are composited
+/// as usual; under another blend mode each unpainted channel composites
+/// with the colour the blend function reads there as its source (see
+/// `render_blended_unpainted`).
 ///
 /// A pattern source that [may leave pixels unpainted](Pattern::may_leave_unpainted)
 /// is composited over its painted pixels only.
@@ -392,6 +400,19 @@ pub fn render_span<P: Pixel>(
     // A mask covering every channel of `P` writes the whole pixel.
     let full = u8::MAX >> (8 - P::NCOMPS);
     match pipe.overprint {
+        Some(mask) if mask.bits() & full != full && pipe.blend_mode != BlendMode::Normal => {
+            render_blended_unpainted::<P>(
+                pipe,
+                mask,
+                src,
+                Span {
+                    dst: dst_pixels,
+                    alpha: dst_alpha,
+                    shape,
+                },
+                (x0, x1, y),
+            );
+        }
         Some(mask) if mask.bits() & full != full => {
             let saved_len = dst_pixels.len() + dst_alpha.as_ref().map_or(0, |a| a.len());
             MASKED_SPAN.with(|scratch| {
@@ -428,6 +449,155 @@ pub fn render_span<P: Pixel>(
     }
 }
 
+/// Composite a span under a blend mode other than `Normal` whose paint
+/// writes only the channels of `mask` (ISO 32000-1 §11.7.4.3).
+///
+/// The object is painted with `CompatibleOverprint` in an implicit
+/// non-isolated, non-knockout group, whose result is composited under the
+/// blend mode.  The object alone in such a group leaves the group's colour
+/// equal to the source in the channels it paints and to the backdrop the
+/// blend function sees in the others; the group's alpha is the object's.
+/// The span is therefore composited from a source whose unpainted channels
+/// hold, at each pixel, the colour the blend function reads there: the
+/// destination, or inside a non-isolated group the group's content over its
+/// backdrop.  A white-preserving mode leaves an unpainted channel of tint 0
+/// at tint 0.
+///
+/// The pipe's transfer applies to the substituted channels too; the ink
+/// canvas, the only one painted through a mask, composites under the
+/// identity transfer.
+fn render_blended_unpainted<P: Pixel>(
+    pipe: &PipeState<'_, P::Sample>,
+    mask: ChannelMask,
+    src: &PipeSrc<'_, P::Sample>,
+    span: Span<'_, P::Sample>,
+    (x0, x1, y): (i32, i32, i32),
+) {
+    let Span { dst, alpha, shape } = span;
+    UNPAINTED_SOURCE.with(|scratch| {
+        scratch.with::<P::Sample, ()>(dst.len(), |seen| {
+            blended_backdrop::<P>(pipe, dst, alpha.as_deref(), seen, (x0, y));
+            let source = Unpainted {
+                source: src,
+                mask,
+                seen,
+                x0,
+                ncomps: P::NCOMPS,
+            };
+            render_unmasked::<P>(
+                pipe,
+                &PipeSrc::Pattern(&source),
+                dst,
+                alpha,
+                shape,
+                x0,
+                x1,
+                y,
+            );
+        });
+    });
+}
+
+/// Write into `out` the colour the blend function reads at each pixel of
+/// the span `dst` (alpha `alpha`, `None` for opaque) starting at device
+/// pixel `(x0, y)`: the destination's, or with a group backdrop the
+/// destination composited over it, the backdrop being transparent outside
+/// its rectangle.
+fn blended_backdrop<P: Pixel>(
+    pipe: &PipeState<'_, P::Sample>,
+    dst: &[P::Sample],
+    alpha: Option<&[P::Sample]>,
+    out: &mut [P::Sample],
+    (x0, y): (i32, i32),
+) {
+    let ncomps = P::NCOMPS;
+    let Some(backdrop) = pipe.backdrop.as_ref() else {
+        out.copy_from_slice(dst);
+        return;
+    };
+    for (i, ((x, px), seen)) in (x0..)
+        .zip(dst.chunks_exact(ncomps))
+        .zip(out.chunks_exact_mut(ncomps))
+        .enumerate()
+    {
+        let a_dst = alpha.map_or(P::Sample::MAX, |a| a[i]);
+        match backdrop.pixel(x, y, ncomps) {
+            Some((c_0, a_0)) => {
+                let _ = general::union_colour(px, a_dst.wide(), c_0, a_0.wide(), seen);
+            }
+            // Over a transparent backdrop the union is the destination.
+            None => seen.copy_from_slice(px),
+        }
+    }
+}
+
+/// The source of a masked paint under a blend mode other than `Normal`:
+/// `source` in the channels of `mask`, and in the others the colour
+/// `seen` the blend function reads at the pixel, `ncomps` samples a pixel
+/// over the span starting at device column `x0`.
+struct Unpainted<'a, S: Sample> {
+    source: &'a PipeSrc<'a, S>,
+    mask: ChannelMask,
+    seen: &'a [S],
+    x0: i32,
+    ncomps: usize,
+}
+
+impl<S: Sample> Unpainted<'_, S> {
+    /// Overwrite the unpainted channels of `out`, the pixels from device
+    /// column `x0`, with the colour the blend function reads there.
+    fn substitute(&self, x0: i32, out: &mut [S]) {
+        let skip = usize::try_from(x0 - self.x0)
+            .expect("Unpainted: a span starting left of the painted span");
+        let seen = &self.seen[skip * self.ncomps..];
+        assert!(
+            out.len() <= seen.len(),
+            "Unpainted: a span reaching right of the painted span"
+        );
+        for (px, seen) in out
+            .chunks_exact_mut(self.ncomps)
+            .zip(seen.chunks_exact(self.ncomps))
+        {
+            for (channel, (c, &b)) in px.iter_mut().zip(seen).enumerate() {
+                if !self.mask.paints(channel) {
+                    *c = b;
+                }
+            }
+        }
+    }
+}
+
+impl<S: Sample> Pattern<S> for Unpainted<'_, S> {
+    fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]) {
+        match self.source {
+            PipeSrc::Solid(colour) => {
+                for px in out.chunks_exact_mut(self.ncomps) {
+                    px.copy_from_slice(colour);
+                }
+            }
+            PipeSrc::Pattern(pattern) => pattern.fill_span(y, x0, x1, out),
+        }
+        self.substitute(x0, out);
+    }
+
+    fn may_leave_unpainted(&self) -> bool {
+        matches!(self.source, PipeSrc::Pattern(p) if p.may_leave_unpainted())
+    }
+
+    fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
+        match self.source {
+            PipeSrc::Solid(_) => {
+                self.fill_span(y, x0, x1, out);
+                coverage.fill(S::MAX);
+            }
+            PipeSrc::Pattern(pattern) => {
+                pattern.fill_span_coverage(y, x0, x1, out, coverage);
+                self.substitute(x0, out);
+            }
+        }
+    }
+}
+
 /// A span's state before a masked paint.
 struct SpanBefore<'a, S> {
     /// Colour samples before the paint.
@@ -437,7 +607,7 @@ struct SpanBefore<'a, S> {
 }
 
 /// Write the channels `mask` does not paint as the `CompatibleOverprint`
-/// blend function composites them (ISO 32000-1 §11.7.4.3).
+/// blend function composites them under `Normal` (ISO 32000-1 §11.7.4.3).
 ///
 /// For an unpainted channel the blend function is `B(c_b, c_s) = c_b`, and
 /// the source carries no ink in it (`c_s = 0`): the channel is either a
@@ -1306,5 +1476,138 @@ mod tests {
         };
         assert_eq!(paint(Some(ChannelMask::new(0b111))), [9, 9, 9]);
         assert_eq!(paint(Some(ChannelMask::new(0b101))), [9, 2, 9]);
+    }
+
+    /// Paint `src` through `overprint` under `mode` at constant alpha
+    /// `a_input` over the `DeviceN8` pixels `dst` of alpha `alpha` (`None`
+    /// for opaque), with the group backdrop `backdrop`.
+    fn blended_paint(
+        mode: BlendMode,
+        (a_input, overprint): (u8, Option<ChannelMask>),
+        src: &PipeSrc<'_>,
+        backdrop: Option<GroupBackdrop<'_>>,
+        dst: &mut [u8],
+        alpha: Option<&mut [u8]>,
+    ) {
+        let pipe = PipeState {
+            backdrop,
+            overprint,
+            ..make_pipe(a_input, mode)
+        };
+        let x1 = i32::try_from(dst.len() / 8).expect("test span fits i32") - 1;
+        render_span::<DeviceN8>(&pipe, src, dst, alpha, None, 0, x1, 0);
+    }
+
+    /// A masked paint under a blend mode other than `Normal` composites
+    /// its unpainted channels as an unmasked paint whose source holds
+    /// the destination's colour there: C and the spot of tint 0 blend with
+    /// themselves under `Screen`, at full and at half alpha.
+    #[test]
+    fn masked_blend_modes_blend_unpainted_channels_with_themselves() {
+        let old = [128u8, 0, 0, 0, 0, 0, 0, 0];
+        for a_input in [255, 128] {
+            let mut masked = old;
+            blended_paint(
+                BlendMode::Screen,
+                (a_input, Some(ChannelMask::new(0b1000))),
+                &PipeSrc::Solid(&INK_K),
+                None,
+                &mut masked,
+                None,
+            );
+            let mut unmasked = old;
+            blended_paint(
+                BlendMode::Screen,
+                (a_input, None),
+                &PipeSrc::Solid(&[128, 0, 0, 255, 0, 0, 0, 0]),
+                None,
+                &mut unmasked,
+                None,
+            );
+            assert_eq!(masked, unmasked, "alpha {a_input}");
+            assert!(
+                masked[0] < 128,
+                "alpha {a_input}: C screened to {}",
+                masked[0]
+            );
+            assert_eq!(masked[4], 0, "alpha {a_input}: the spot stays blank");
+        }
+    }
+
+    /// Inside a non-isolated group the unpainted channels of a masked
+    /// blended paint take the group's content over its backdrop as their
+    /// source; the spot pattern source is substituted per pixel too.
+    #[test]
+    fn masked_blend_modes_read_the_group_backdrop() {
+        let colour = [200u8, 0, 0, 0, 0, 0, 0, 0].repeat(2);
+        let backdrop = GroupBackdrop {
+            colour: &colour,
+            alpha: None,
+            x0: 0,
+            y0: 0,
+            width: 2,
+            height: 1,
+        };
+        let row = [INK_K, [0, 0, 0, 128, 0, 0, 0, 0]].concat();
+        let pattern = RowPattern { data: &row };
+        let mut masked = [0u8; 16];
+        let mut masked_alpha = [0u8; 2];
+        blended_paint(
+            BlendMode::Multiply,
+            (255, Some(ChannelMask::new(0b1000))),
+            &PipeSrc::Pattern(&pattern),
+            Some(backdrop),
+            &mut masked,
+            Some(&mut masked_alpha),
+        );
+        let substituted = [[200u8, 0, 0, 255, 0, 0, 0, 0], [200, 0, 0, 128, 0, 0, 0, 0]].concat();
+        let pattern = RowPattern { data: &substituted };
+        let mut unmasked = [0u8; 16];
+        let mut unmasked_alpha = [0u8; 2];
+        blended_paint(
+            BlendMode::Multiply,
+            (255, None),
+            &PipeSrc::Pattern(&pattern),
+            Some(backdrop),
+            &mut unmasked,
+            Some(&mut unmasked_alpha),
+        );
+        assert_eq!((masked, masked_alpha), (unmasked, unmasked_alpha));
+        // Multiply of the backdrop's cyan with itself: 1 − (55/255)² of ink.
+        assert!(masked[0] > 240, "C multiplied to {}", masked[0]);
+    }
+
+    /// A spot channel is blended by a white-preserving separable mode and
+    /// painted as under `Normal` by `Difference`, `Exclusion` and the
+    /// non-separable modes.
+    #[test]
+    fn spot_channels_blend_only_under_white_preserving_separable_modes() {
+        let spot = |mode, tint| {
+            let mut dst = [0u8, 0, 0, 0, 128, 0, 0, 0];
+            let src = [0u8, 0, 0, 0, tint, 0, 0, 0];
+            blended_paint(
+                mode,
+                (255, None),
+                &PipeSrc::Solid(&src),
+                None,
+                &mut dst,
+                None,
+            );
+            dst[4]
+        };
+        // 1 − (127/255)² of ink.
+        assert!(spot(BlendMode::Multiply, 128).abs_diff(191) <= 1);
+        assert_eq!(spot(BlendMode::Darken, 255), 255);
+        for mode in [
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ] {
+            assert_eq!(spot(mode, 255), 255, "{mode:?}");
+            assert_eq!(spot(mode, 0), 0, "{mode:?}");
+        }
     }
 }

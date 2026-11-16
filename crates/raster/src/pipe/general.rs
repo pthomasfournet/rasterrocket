@@ -374,6 +374,13 @@ fn blend_in_space<S: Sample>(
     gray.neutral(blended[0], c_blend);
 }
 
+/// Whether the separable blend mode `mode` is white-preserving:
+/// `B(1, 1) = 1` in additive values.  Every separable mode is but
+/// `Difference` and `Exclusion`.
+const fn white_preserving(mode: BlendMode) -> bool {
+    !matches!(mode, BlendMode::Difference | BlendMode::Exclusion)
+}
+
 /// Apply the blend function and write into `c_blend`.
 fn apply_blend_fn<S: Sample>(
     mode: BlendMode,
@@ -405,7 +412,7 @@ fn apply_blend_fn<S: Sample>(
             c_blend[0] = inv(r3[0]);
             c_blend[1] = inv(r3[1]);
             c_blend[2] = inv(r3[2]);
-            // K/spot channel: for Luminosity, use src K; for others use dst K (PDF §11.3.5).
+            // K: the source's for Luminosity, the backdrop's otherwise (PDF §11.3.5).
             if ncomps >= 4 {
                 c_blend[3] = inv(if mode == BlendMode::Luminosity {
                     src2[3]
@@ -413,22 +420,29 @@ fn apply_blend_fn<S: Sample>(
                     dst2[3]
                 });
             }
-            for j in 4..ncomps {
-                // Spot channels pass through dst (same rule as K for non-Luminosity).
-                c_blend[j] = inv(dst2[j]);
+            // Spot channels take `Normal` under a non-separable mode.
+            if ncomps > 4 {
+                c_blend[4..ncomps].copy_from_slice(&src[4..ncomps]);
             }
         } else {
+            // Spot channels are blended by a white-preserving separable
+            // mode and take `Normal` under any other (ISO 32000-1
+            // §11.7.4.2).
+            let blended = if white_preserving(mode) {
+                ncomps
+            } else {
+                ncomps.min(4)
+            };
             blend::apply_separable(
                 mode,
-                &src2[..ncomps.min(4)],
-                &dst2[..ncomps.min(4)],
-                &mut c_blend[..ncomps.min(4)],
+                &src2[..blended],
+                &dst2[..blended],
+                &mut c_blend[..blended],
             );
-            for v in &mut c_blend[..ncomps.min(4)] {
+            for v in &mut c_blend[..blended] {
                 *v = inv(*v);
             }
-            // Spot channels (j >= 4): not blended, pass dst through unchanged.
-            c_blend[4..ncomps].copy_from_slice(&dst[4..ncomps]);
+            c_blend[blended..ncomps].copy_from_slice(&src[blended..ncomps]);
         }
     } else if is_nonseparable {
         // RGB/Gray additive space.

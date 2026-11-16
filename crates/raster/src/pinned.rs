@@ -239,7 +239,7 @@ fn colour_ramp_positions() {
 
 const SEPARABLE_DIGEST: u64 = 0x997b_adbe_23b5_0fa5;
 const NONSEPARABLE_DIGEST: u64 = 0x54ca_930d_3671_d848;
-const RGB_SPAN_DIGEST: u64 = 0x7a9d_a368_6f82_a82a;
-const GRAY_SPAN_DIGEST: u64 = 0xd835_ca3b_915e_462d;
-const INK_SPAN_DIGEST: u64 = 0xcacd_4f19_3aa8_d646;
+const RGB_SPAN_DIGEST: u64 = 0x1179_df9b_fe5a_d66b;
+const GRAY_SPAN_DIGEST: u64 = 0x9fac_50b5_2f82_c905;
+const INK_SPAN_DIGEST: u64 = 0x00b9_4314_508b_1d24;
 const RAMP_DIGEST: u64 = 0xd4b4_e6e3_cc00_d16a;
