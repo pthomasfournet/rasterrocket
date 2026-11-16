@@ -27,6 +27,8 @@ mod path;
 #[doc(hidden)]
 pub mod reference;
 mod runs;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
 use path::{NO_BACKDROP, PathTile, bin_path};

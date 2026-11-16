@@ -346,6 +346,7 @@ mod path_tests;
 mod tests {
     use color::{Sample, SampleDepth};
 
+    use crate::page::test_support::Rng;
     use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
 
     /// One command as the host model paints it.
@@ -429,32 +430,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// `SplitMix64`.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-
-        fn below(&mut self, n: u32) -> i32 {
-            i32::try_from(self.next() % u64::from(n)).unwrap()
-        }
-
-        fn byte(&mut self) -> u8 {
-            u8::try_from(self.below(256)).unwrap()
-        }
-
-        /// A sample of at most `max`.
-        fn sample(&mut self, max: u16) -> u16 {
-            u16::try_from(self.below(u32::from(max) + 1)).unwrap()
-        }
     }
 
     /// A random table over rows near the page: disjoint sorted spans, full

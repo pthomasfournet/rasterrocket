@@ -4,39 +4,8 @@ use color::SampleDepth;
 
 use crate::backend::vulkan::VulkanBackend;
 use crate::page::reference::render_page;
+use crate::page::test_support::{Rng, polygon};
 use crate::page::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS, PageCommands, PixelBounds};
-
-/// `SplitMix64`.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in `[lo, hi)`.
-    fn range(&mut self, lo: i64, hi: i64) -> i64 {
-        lo + i64::try_from(self.next() % u64::try_from(hi - lo).unwrap()).unwrap()
-    }
-
-    fn sample(&mut self, max: u16) -> u16 {
-        u16::try_from(self.range(0, i64::from(max) + 1)).unwrap()
-    }
-}
-
-/// The closed polygon through `points`, as segments.
-fn polygon(points: &[(i64, i64)]) -> Vec<[i64; 4]> {
-    (0..points.len())
-        .map(|i| {
-            let (a, b) = (points[i], points[(i + 1) % points.len()]);
-            [a.0, a.1, b.0, b.1]
-        })
-        .collect()
-}
 
 /// `page` on `backend` against its host model, packed rows of samples of
 /// its depth widened to 16 bits.

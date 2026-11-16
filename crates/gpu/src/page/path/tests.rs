@@ -2,36 +2,9 @@ use color::SampleDepth;
 use raster::coverage::AreaOutline;
 
 use super::super::reference::render_page;
+use super::super::test_support::{Rng, polygon};
 use super::super::{PageCommands, PageCommandsError, PixelBounds};
 use super::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS};
-
-/// `SplitMix64`.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in `[lo, hi)`.
-    fn range(&mut self, lo: i64, hi: i64) -> i64 {
-        lo + i64::try_from(self.next() % u64::try_from(hi - lo).unwrap()).unwrap()
-    }
-}
-
-/// The closed polygon through `points`, as segments.
-fn polygon(points: &[(i64, i64)]) -> Vec<[i64; 4]> {
-    (0..points.len())
-        .map(|i| {
-            let (a, b) = (points[i], points[(i + 1) % points.len()]);
-            [a.0, a.1, b.0, b.1]
-        })
-        .collect()
-}
 
 /// The coverage of every pixel of a `width × height` page that the device
 /// raster's host model gives `outline` (black at full alpha over white
