@@ -12,11 +12,11 @@
 //! off; absolute colorimetry, which is never compensated, once.
 //!
 //! Asserted, within the bounds of each profile at 8 and 16 bits
-//! ([`CMYK_TABLES`], [`RGB_TABLES`], [`GRAY`]): every case but perceptual and saturation
-//! without compensation from a version 4 profile, which are printed only:
-//! Little CMS compensates the black of version 4 perceptual and
-//! saturation tables regardless of `-b`, where `/UseBlackPtComp /OFF`
-//! leaves it.
+//! ([`CMYK_TABLES`], [`CMYK_OFF_NODE`], [`RGB_TABLES`], [`GRAY`]): every
+//! case but perceptual and saturation without compensation, which are
+//! printed only: Little CMS compensates the black of a perceptual or
+//! saturation conversion into a version 4 profile regardless of `-b`, and
+//! its built-in sRGB is one, where `/UseBlackPtComp /OFF` leaves it.
 //!
 //! Needs `transicc` (Debian/Ubuntu `liblcms2-utils`):
 //! `cargo test -p rasterrocket --test input_profile_transicc -- --ignored`.
@@ -67,6 +67,14 @@ const CMYK_TABLES: Bounds = Bounds {
     sixteen: 0.1,
 };
 
+/// The bounds of the CMYK printers between the nodes of their tables:
+/// on [`k_ramp`] and on the lattice of 9 levels offset by half a step,
+/// `(i + 1/2) / 9` along each ink.
+const CMYK_OFF_NODE: Bounds = Bounds {
+    eight: 2.0,
+    sixteen: 1.75,
+};
+
 /// The path of the test profile `name` of `tests/fixtures/icc`.
 fn profile_path(name: &str) -> String {
     format!(
@@ -75,28 +83,44 @@ fn profile_path(name: &str) -> String {
     )
 }
 
-/// The patches of an `n`-component space, components in `[0, 1]`: the
-/// lattice of 64 levels of gray, 9 of RGB or 5 of CMYK.
-fn patches(n: usize) -> Vec<Vec<f64>> {
-    let count: u32 = match n {
-        1 => 64,
-        3 => 9,
-        _ => 5,
-    };
+/// The lattice of `levels` levels along each of `n` components, level
+/// `i` at `(i + offset) / (levels − 1 + 2 · offset)`, the first component
+/// varying slowest.
+fn lattice(n: usize, levels: u32, offset: f64) -> Vec<Vec<f64>> {
+    let steps = 2.0f64.mul_add(offset, f64::from(levels - 1));
     let mut out = vec![Vec::new()];
     for _ in 0..n {
         out = out
             .into_iter()
             .flat_map(|p| {
-                (0..count).map(move |i| {
+                (0..levels).map(move |i| {
                     let mut q = p.clone();
-                    q.push(f64::from(i) / f64::from(count - 1));
+                    q.push((f64::from(i) + offset) / steps);
                     q
                 })
             })
             .collect();
     }
     out
+}
+
+/// The patches of an `n`-component space, components in `[0, 1]`: the
+/// lattice of 64 levels of gray, 9 of RGB or 5 of CMYK.
+fn patches(n: usize) -> Vec<Vec<f64>> {
+    let levels = match n {
+        1 => 64,
+        3 => 9,
+        _ => 5,
+    };
+    lattice(n, levels, 0.0)
+}
+
+/// A K ramp of 256 levels at `C = M = Y = 0`, which falls between the
+/// nodes of a table along its K axis.
+fn k_ramp() -> Vec<Vec<f64>> {
+    (0..256u32)
+        .map(|k| vec![0.0, 0.0, 0.0, f64::from(k) / 255.0])
+        .collect()
 }
 
 /// A one-point-high page with one patch a point, each filled with its
@@ -251,12 +275,10 @@ fn delta_e00(a: &[f64], b: &[f64]) -> f64 {
 /// Our rendering of the patches of profile `name` (`n` components)
 /// against `transicc` under every intent at both depths, asserted within
 /// `bounds` but for the perceptual and saturation intents without
-/// compensation from a version 4 profile.
-fn agrees(name: &str, n: usize, bounds: Bounds) {
+/// compensation.
+fn agrees(name: &str, n: usize, (label, chart): (&str, &[Vec<f64>]), bounds: Bounds) {
     let path = profile_path(name);
     let profile = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let v4 = profile[8] >= 4;
-    let chart = patches(n);
     // transicc reads CMYK in percent and gray or RGB in 0 to 255.
     let full = if n == 4 { 100.0 } else { 255.0 };
     let mut failures = Vec::new();
@@ -269,8 +291,8 @@ fn agrees(name: &str, n: usize, bounds: Bounds) {
         ("1", "RelativeColorimetric", false),
         ("2", "Saturation", false),
     ] {
-        let claimed = bpc || !v4 || !matches!(code, "0" | "2");
-        let pdf = patch_page(&profile, n, (intent, bpc), &chart);
+        let claimed = bpc || !matches!(code, "0" | "2");
+        let pdf = patch_page(&profile, n, (intent, bpc), chart);
         for (depth, quantum, bound) in [
             (SampleDepth::Eight, 255.0, bounds.eight),
             (SampleDepth::Sixteen, 65535.0, bounds.sixteen),
@@ -321,12 +343,14 @@ fn agrees(name: &str, n: usize, bounds: Bounds) {
             )]
             let mean = sum / chart.len() as f64;
             eprintln!(
-                "{name} {intent} bpc {bpc} {depth:?}: mean ΔE00 {mean:.3}, max {worst:.3} at {:?} \
+                "{name} {label} {intent} bpc {bpc} {depth:?}: mean ΔE00 {mean:.3}, max {worst:.3} at {:?} \
                  (ours {:?}, transicc {:?})",
                 chart[worst_at], ours[worst_at], theirs[worst_at]
             );
             if claimed && worst > bound {
-                failures.push(format!("{intent} bpc {bpc} {depth:?}: max ΔE00 {worst:.3}"));
+                failures.push(format!(
+                    "{label} {intent} bpc {bpc} {depth:?}: max ΔE00 {worst:.3}"
+                ));
             }
         }
     }
@@ -336,19 +360,25 @@ fn agrees(name: &str, n: usize, bounds: Bounds) {
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn cmyk_printers_agree_with_little_cms() {
-    agrees("printer-cmyk-v4", 4, CMYK_TABLES);
-    agrees("printer-cmyk-v2", 4, CMYK_TABLES);
+    let (nodes, ramp, half) = (patches(4), k_ramp(), lattice(4, 9, 0.5));
+    for name in ["printer-cmyk-v4", "printer-cmyk-v2"] {
+        agrees(name, 4, ("lattice", &nodes), CMYK_TABLES);
+        agrees(name, 4, ("k-ramp", &ramp), CMYK_OFF_NODE);
+        agrees(name, 4, ("half-step", &half), CMYK_OFF_NODE);
+    }
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn gray_printer_agrees_with_little_cms() {
-    agrees("printer-gray-v4", 1, GRAY);
+    agrees("printer-gray-v4", 1, ("lattice", &patches(1)), GRAY);
 }
 
 #[test]
 #[ignore = "needs transicc (liblcms2-utils)"]
 fn rgb_printers_agree_with_little_cms() {
-    agrees("printer-rgb-v4", 3, RGB_TABLES);
-    agrees("printer-rgb-v2", 3, RGB_TABLES);
+    let chart = patches(3);
+    for name in ["printer-rgb-v4", "printer-rgb-v2"] {
+        agrees(name, 3, ("lattice", &chart), RGB_TABLES);
+    }
 }
