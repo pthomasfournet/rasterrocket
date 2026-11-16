@@ -310,6 +310,7 @@ fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: b
     }
 }
 
+mod forms;
 mod images;
 mod text;
 mod type3;

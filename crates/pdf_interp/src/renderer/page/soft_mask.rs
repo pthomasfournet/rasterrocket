@@ -121,7 +121,14 @@ impl PageRenderer<'_> {
             std::mem::replace(&mut self.ink, device)
         });
         self.reconvert_colours(|_| true);
+        // The mask group paints its own canvas, never the recorded page.
+        #[cfg(feature = "vulkan")]
+        let recording = self.device_page.take();
         self.without_glyph_census(|r| r.do_form_xobject(&form));
+        #[cfg(feature = "vulkan")]
+        {
+            self.device_page = recording;
+        }
         if let Some(ink) = ink {
             self.ink = ink;
         }

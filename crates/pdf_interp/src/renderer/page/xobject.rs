@@ -354,8 +354,8 @@ impl PageRenderer<'_> {
     /// `source`.
     fn run_form_xobject(&mut self, form: &FormXObject, source: FormContent<'_>) {
         #[cfg(feature = "vulkan")]
-        if self.device_recording() {
-            self.refuse_device("form XObject");
+        if self.device_recording() && form.transparency.is_some() {
+            self.refuse_device("transparency group");
             return;
         }
         if self.form_depth >= MAX_FORM_DEPTH {

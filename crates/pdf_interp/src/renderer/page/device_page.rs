@@ -12,7 +12,10 @@
 //! (`raster::hairline_runs`).  A glyph composited from a coverage bitmap
 //! is appended as a mask command reading that bitmap (see [`glyphs`]).
 //! An image is appended as an image command sampling the samples the CPU
-//! would sample, through the CPU's sampling tables (see [`images`]).
+//! would sample, through the CPU's sampling tables (see [`images`]).  A
+//! form `XObject` records the paints of its content; one that is a
+//! transparency group refuses the recording, and a soft mask's group
+//! paints its own canvas with the recording set aside.
 //! The device then composites every command
 //! with the CPU's arithmetic, so the page it renders is the page the CPU
 //! renders.

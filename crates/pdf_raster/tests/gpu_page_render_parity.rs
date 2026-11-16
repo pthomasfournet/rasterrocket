@@ -269,9 +269,9 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
             assert_identical(&cpu_render(&cpu, page), &got, &what);
         }
     }
-    // The text and image pages of the fixtures render on the device.
+    // The text, image and form pages of the fixtures render on the device.
     assert!(
-        found < FIXTURES.len() || on_device >= 30,
+        found < FIXTURES.len() || on_device >= 36,
         "{on_device} fixture pages rendered on the device"
     );
 }
