@@ -3823,6 +3823,31 @@ groups are byte-identical. API change: `ImageDecodeCtx::keep_tints` and
 `DecodedImage::kept_tints` are now `KeptTints` (`None`, `Ink`,
 `InkAndRgb`), not `bool`.
 
+**Unreleased on master: overprint under blend modes, and spot colorants
+under blend modes.** An object that overprints under a blend mode other
+than Normal is now composited as ISO 32000-1 §11.7.4.3 defines: painted
+with `CompatibleOverprint` in an implicit non-isolated group whose result
+takes the blend mode. The colorants it does not paint therefore blend with
+themselves rather than keeping the backdrop: a Screen black overprinting
+50 % cyan leaves 25 % cyan, as Ghostscript 10.06 and MuPDF 1.27 render it,
+where it used to leave 50 %. On the ink canvas, spot channels under a mode
+other than Normal kept the backdrop, so a spot colour painted under
+Multiply, Hue or Difference printed nothing. Now a separable
+white-preserving mode blends them and any other mode paints them as Normal
+does (§11.7.4.2), matching Ghostscript's separations. The ticket's
+proposal to composite a transparency group through the colorants its
+content painted was not adopted. Table 149's last row and its NOTE 2 have
+a group paint every colorant whatever the overprint parameters, because no
+record of the painted colorants is kept. Ghostscript and MuPDF agree on 19
+synthetic group cases (isolated and non-isolated groups, overprint at
+`Do`, Multiply and Screen, knockout, spot backdrop, half alpha), and the
+renderer already matched both; 18 of the cases are now pinned as tests.
+The 34-PDF gate at 50 dpi in five modes (RGB, gray, CMYK at 8 and 16 bits,
+`--overprint`) and all 2 598 pages of the 11 archive documents that
+combine blend modes with overprint or spot colours are byte-identical at
+40 dpi plain, with `--overprint` and as overprinted CMYK. No archive page
+overprints under a blend mode.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
