@@ -23,9 +23,9 @@ path = "src/page_gpu/main.rs"
 required-features = ["vulkan"]
 
 [features]
-# Vulkan page-raster benchmark (`page_gpu_bench`): compiles
-# `kernels/page_raster.slang` to SPIR-V with `slangc` at build time.
-vulkan = ["dep:ash"]
+# Vulkan page-raster benchmark (`page_gpu_bench`): the library's GPU page
+# path, on the gpu crate's Vulkan backend.
+vulkan = ["dep:gpu", "gpu/vulkan", "pdf_raster/vulkan"]
 
 [dependencies]
 raster     = { package = "rasterrocket-render", path = "../raster" }
@@ -34,7 +34,7 @@ encode     = { package = "rasterrocket-encode", path = "../encode" }
 pdf_raster = { package = "rasterrocket",        path = "../pdf_raster" }
 vello_cpu  = "0.4.0"
 bytemuck   = { workspace = true }
-ash        = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
+gpu        = { package = "rasterrocket-gpu",    path = "../gpu", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }

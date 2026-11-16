@@ -1,16 +1,12 @@
-//! The star document: pages of random solid star polygons, as a PDF and as
-//! device-space paths.
+//! The star document: pages of random solid star polygons, as a PDF.
 //!
 //! Every page is US Letter (612 × 792 pt) and holds `stars` concave star
 //! polygons of 5, 7 or 9 points, each filled with `r g b rg … h f`.  The
 //! generator is a fixed `SplitMix64` stream, so a seed always yields the same
 //! document.  Vertex coordinates are written with two decimals and colour
-//! components with four; the device paths are built from the same decimal
-//! strings, parsed back, so the PDF and the paths carry identical `f64`s.
+//! components with four.
 
 use std::fmt::Write as _;
-
-use raster::{Path, PathBuilder};
 
 /// Page width in points.
 pub const PAGE_W_PT: f64 = 612.0;
@@ -146,41 +142,4 @@ pub fn write_pdf(doc: &[Vec<Star>]) -> Vec<u8> {
         .as_bytes(),
     );
     out
-}
-
-/// Device size of a page at `scale` pixels per point.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a Letter page at a sane scale is a few thousand pixels"
-)]
-pub fn page_px(scale: f64) -> (u32, u32) {
-    (
-        (PAGE_W_PT * scale).round() as u32,
-        (PAGE_H_PT * scale).round() as u32,
-    )
-}
-
-/// The star's outline in device space (y down) at `scale` pixels per
-/// point on a page `height_px` pixels tall: the transform of a page with no
-/// rotation and a zero box origin, `x' = s·x`, `y' = height − s·y`, with
-/// the same operation order as the interpreter's point transform.
-pub fn device_path(star: &Star, scale: f64, height_px: u32) -> Path {
-    let ctm = [scale, 0.0, 0.0, scale, 0.0, 0.0];
-    let page_h = f64::from(height_px);
-    let mut b = PathBuilder::new();
-    for (k, (xs, ys)) in star.pts.iter().enumerate() {
-        let x: f64 = xs.parse().expect("written as a decimal");
-        let y: f64 = ys.parse().expect("written as a decimal");
-        let dx = ctm[0].mul_add(x, ctm[2] * y) + ctm[4];
-        let dy = page_h - (ctm[1].mul_add(x, ctm[3] * y) + ctm[5]);
-        let r = if k == 0 {
-            b.move_to(dx, dy)
-        } else {
-            b.line_to(dx, dy)
-        };
-        r.expect("a finite star vertex");
-    }
-    b.close(false).expect("an open subpath");
-    b.build()
 }
