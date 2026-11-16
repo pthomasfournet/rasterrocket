@@ -9,7 +9,7 @@ use color::SampleDepth;
 
 use super::PlaneValues;
 use crate::page::reference::render_page;
-use crate::page::test_support::{Rng, binned_bytes, page_plane, random_plane};
+use crate::page::test_support::{Rng, binned_bytes, object_over_tiles, page_plane, random_plane};
 use crate::page::{MaskBits, PAGE_TILE, PageCommands, PixelBounds};
 
 /// `x / M` rounded to nearest, for an independent statement of the blend.
@@ -175,58 +175,10 @@ fn a_plane_is_held_as_the_rectangle_that_differs() {
 fn an_object_hides_nothing_and_blends_from_its_first_item_in_each_tile() {
     let tile = PAGE_TILE as i32;
     let (width, height) = (3 * PAGE_TILE, 2 * PAGE_TILE);
-    let mut page = PageCommands::new(width, height, SampleDepth::Eight, [200, 100, 50]);
-    let runs = |y0: i32, y1: i32, x0: i32, x1: i32| -> Vec<(i32, i32, i32)> {
-        (y0..=y1).map(|y| (y, x0, x1)).collect()
-    };
-    // Below the object: a stripe over every tile.
-    page.push_opaque_runs(&mut runs(0, 2 * tile - 1, 4, 3 * tile - 5), [10, 20, 30])
-        .expect("runs");
+    let page = object_over_tiles(SampleDepth::Eight);
     let values: Vec<u8> = (0..width * height)
         .map(|i| u8::try_from(i % 256).unwrap())
         .collect();
-    let plane = page
-        .add_mask_plane(PlaneValues::Eight(&values))
-        .expect("plane");
-    page.begin_object(
-        plane,
-        PixelBounds {
-            x0: 0,
-            y0: 0,
-            x1: 3 * tile - 1,
-            y1: 2 * tile - 1,
-        },
-    )
-    .expect("begin");
-    // A member in the left tiles only, then a page-covering opaque square.
-    page.push_opaque_runs(&mut runs(0, 2 * tile - 1, 0, tile - 1), [255, 0, 0])
-        .expect("runs");
-    let square = crate::page::test_support::polygon(&[
-        (0, 0),
-        (i64::from(width) * 256, 0),
-        (i64::from(width) * 256, i64::from(height) * 256),
-        (0, i64::from(height) * 256),
-    ]);
-    page.push_area_path(
-        &crate::page::AreaPath {
-            segs: &square,
-            window: PixelBounds {
-                x0: 0,
-                y0: 0,
-                x1: 3 * tile - 1,
-                y1: 2 * tile - 1,
-            },
-            even_odd: false,
-            weight: 255,
-        },
-        [0, 0, 255],
-        255,
-    )
-    .expect("square");
-    page.end_object();
-    // After the object, a member-free command in the middle tiles only.
-    page.push_opaque_runs(&mut runs(3, 3, tile, 2 * tile - 1), [1, 2, 3])
-        .expect("runs");
     let bins = page.bin().expect("bin");
     let n_tiles = (width / PAGE_TILE * (height / PAGE_TILE)) as usize;
     assert!(

@@ -5,7 +5,7 @@ use color::SampleDepth;
 
 use super::path_tests::assert_device_matches_model;
 use crate::page::PageCommands;
-use crate::page::test_support::{Rng, push_random_modified};
+use crate::page::test_support::{Rng, object_over_tiles, push_random_modified};
 
 fn random_modified_pages(seed: u64, tables: bool) {
     let Some(backend) = super::super::test_backend() else {
@@ -39,4 +39,21 @@ fn clipped_and_masked_tables_match_the_host_model() {
 #[test]
 fn clipped_and_masked_outlines_match_the_host_model() {
     random_modified_pages(0xC11F_0A71, false);
+}
+
+/// An opaque tile-covering outline inside a soft-masked object, members
+/// absent from some tiles and an object spanning tiles: device = model.
+#[test]
+fn an_object_over_tiles_matches_the_host_model() {
+    let Some(backend) = super::super::test_backend() else {
+        return;
+    };
+    if !backend.page_paths() {
+        eprintln!("skipping: the device has no 64-bit integers");
+        return;
+    }
+    for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
+        let page = object_over_tiles(depth);
+        assert_device_matches_model(&backend, &page, &format!("{}-bit", depth.bits()));
+    }
 }

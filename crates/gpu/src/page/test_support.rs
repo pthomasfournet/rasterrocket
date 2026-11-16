@@ -4,7 +4,8 @@ use color::SampleDepth;
 
 use super::{
     AreaPath, ClipId, ClipRegionId, CoverageRows, ImageDraw, ImageLayout, ImageMask, MaskBits,
-    PageCmd, PageCommands, PixelBounds, PlaneId, PlaneValues, SampleMap, Samples, SamplesId,
+    PAGE_TILE, PageCmd, PageCommands, PixelBounds, PlaneId, PlaneValues, SampleMap, Samples,
+    SamplesId,
 };
 
 /// `SplitMix64`.
@@ -495,4 +496,72 @@ pub(crate) fn push_random_modified(rng: &mut Rng, page: &mut PageCommands, n: us
         }
     }
     page.end_object();
+}
+
+/// A page of three by two tiles, its samples of `depth`: an opaque stripe
+/// over every tile, then an object under a mask plane of values `i % 256`
+/// (pixel `i`, scaled to the depth) over the whole page, of an opaque run
+/// in the left tiles only and an opaque square covering every tile, then
+/// an opaque run in the middle tiles only, after the object.
+pub(crate) fn object_over_tiles(depth: SampleDepth) -> PageCommands {
+    let scale = |v: u16| v * (depth.max_sample() / 255);
+    let tile = PAGE_TILE.cast_signed();
+    let (width, height) = (3 * PAGE_TILE, 2 * PAGE_TILE);
+    let mut page = PageCommands::new(width, height, depth, [200, 100, 50].map(scale));
+    let runs = |y0: i32, y1: i32, x0: i32, x1: i32| -> Vec<(i32, i32, i32)> {
+        (y0..=y1).map(|y| (y, x0, x1)).collect()
+    };
+    // Below the object: a stripe over every tile.
+    page.push_opaque_runs(
+        &mut runs(0, 2 * tile - 1, 4, 3 * tile - 5),
+        [10, 20, 30].map(scale),
+    )
+    .expect("runs");
+    let values: Vec<u16> = (0..width * height)
+        .map(|i| scale(u16::try_from(i % 256).unwrap()))
+        .collect();
+    let plane = page_plane(&mut page, &values);
+    page.begin_object(
+        plane,
+        PixelBounds {
+            x0: 0,
+            y0: 0,
+            x1: 3 * tile - 1,
+            y1: 2 * tile - 1,
+        },
+    )
+    .expect("begin");
+    // A member in the left tiles only, then a page-covering opaque square.
+    page.push_opaque_runs(
+        &mut runs(0, 2 * tile - 1, 0, tile - 1),
+        [255, 0, 0].map(scale),
+    )
+    .expect("runs");
+    let square = polygon(&[
+        (0, 0),
+        (i64::from(width) * 256, 0),
+        (i64::from(width) * 256, i64::from(height) * 256),
+        (0, i64::from(height) * 256),
+    ]);
+    page.push_area_path(
+        &AreaPath {
+            segs: &square,
+            window: PixelBounds {
+                x0: 0,
+                y0: 0,
+                x1: 3 * tile - 1,
+                y1: 2 * tile - 1,
+            },
+            even_odd: false,
+            weight: 255,
+        },
+        [0, 0, 255].map(scale),
+        depth.max_sample(),
+    )
+    .expect("square");
+    page.end_object();
+    // After the object, a member-free command in the middle tiles only.
+    page.push_opaque_runs(&mut runs(3, 3, tile, 2 * tile - 1), [1, 2, 3].map(scale))
+        .expect("runs");
+    page
 }
