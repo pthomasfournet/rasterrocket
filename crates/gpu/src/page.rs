@@ -3,11 +3,12 @@
 //! Each command paints one colour at a constant alpha over an opaque RGB
 //! page of 8 or 16 bits per sample, limited to an inclusive pixel
 //! rectangle, with per-pixel coverage either taken from a coverage table
-//! the CPU rasteriser computed (see [`CoverageRows`]) or computed on the
+//! the CPU rasteriser computed (see [`CoverageRows`]), computed on the
 //! device from a closed outline by the CPU rasteriser's integer arithmetic
-//! (see [`AreaPath`]).  Commands paint in the order they were pushed.  The
-//! tables and outlines of every command are copied into shared flat
-//! arrays.
+//! (see [`AreaPath`]), or read from a coverage mask the page holds once
+//! and any number of commands place (see [`MaskId`]).  Commands paint in
+//! the order they were pushed.  The tables, outlines and masks of every
+//! command are copied into shared flat arrays.
 //!
 //! The device raster bins the commands into [`PAGE_TILE`]-pixel square
 //! tiles ([`PageCommands::bin`]) and walks each tile's commands in order;
@@ -23,6 +24,7 @@ use std::fmt;
 use bytemuck::{Pod, Zeroable};
 use color::{Sample, SampleDepth};
 
+mod mask;
 mod path;
 #[doc(hidden)]
 pub mod reference;
@@ -30,6 +32,7 @@ mod runs;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use mask::{MaskBits, MaskId};
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
 use path::{Backdrop, NO_BACKDROP, PathTile, bin_path};
 
@@ -100,10 +103,15 @@ const KIND_TABLE: u32 = 0;
 /// [`PageCmd::kind`] of a command whose coverage is an outline's.
 const KIND_PATH: u32 = 1;
 
+/// [`PageCmd::kind`] of a command whose coverage is a mask's.
+const KIND_MASK: u32 = 2;
+
 /// One command as the kernel reads it; layout of `Cmd` in
 /// `kernels/page_raster.slang`.  An outline's command holds its rule in
 /// bit 0 of `flags` and its weight in bits 8–15, and its tiles in
-/// `path_tiles[row_base..][..n_rows]`.
+/// `path_tiles[row_base..][..n_rows]`.  A mask's command holds the mask's
+/// left column in `flags` (two's complement), its top row in `table_y0`,
+/// its width in `n_rows` and the offset of its bytes in `row_base`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub(crate) struct PageCmd {
@@ -535,14 +543,7 @@ impl PageCommands {
         self.bytes.extend_from_slice(table.bytes);
         self.row_starts
             .extend(table.row_starts.iter().map(|&s| s + span_base));
-        self.tile_refs += tile_refs;
-        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
-        let tile = |v: i32| v.unsigned_abs() as usize / PAGE_TILE as usize;
-        for ty in tile(bounds.y0)..=tile(bounds.y1) {
-            for live in &mut self.live[ty * tiles_x..][tile(bounds.x0)..=tile(bounds.x1)] {
-                *live += 1;
-            }
-        }
+        self.count_rect(bounds);
         let [rg, b] = pack_rgb(rgb);
         self.cmds.push(PageCmd {
             kind: KIND_TABLE,
@@ -673,6 +674,19 @@ impl PageCommands {
             ..PageCmd::default()
         });
         Ok(())
+    }
+
+    /// Count one more item in every tile `bounds` touches, `bounds` on the
+    /// page, its per-tile counts allocated.
+    fn count_rect(&mut self, bounds: PixelBounds) {
+        self.tile_refs += bounds.tiles();
+        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
+        let tile = |v: i32| v.unsigned_abs() as usize / PAGE_TILE as usize;
+        for ty in tile(bounds.y0)..=tile(bounds.y1) {
+            for live in &mut self.live[ty * tiles_x..][tile(bounds.x0)..=tile(bounds.x1)] {
+                *live += 1;
+            }
+        }
     }
 
     /// Allocate the per-tile item counts on the first push.

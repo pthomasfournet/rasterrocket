@@ -2,15 +2,16 @@
 // tile's items in order, keeps each pixel in a register and writes the
 // tile to the page once.
 //
-// Compiled twice: as `page_raster` with tables only, and with PAGE_PATHS
-// defined as `page_raster_paths`, which also rasterises outlines and needs
-// 64-bit integers.
+// Compiled twice: as `page_raster` with tables and masks only, and with
+// PAGE_PATHS defined as `page_raster_paths`, which also rasterises outlines
+// and needs 64-bit integers.
 //
 // Inputs, prepared on the host:
 //   cmds          the page's commands, in paint order.
 //   table         every table command's spans, as int triples
 //                 [x0, x1, offset]; from word coverage_base on, the
-//                 spans' coverage bytes, four to a word, little-endian;
+//                 spans' and masks' coverage bytes, four to a word,
+//                 little-endian;
 //                 from segs_base on, every outline's segments, four ints
 //                 [x0, y0, x1, y1] each, fixed point (1/256 pixel); from
 //                 lists_base on, the segment indices of every outline
@@ -40,6 +41,12 @@
 //
 // A table command's coverage of a pixel is read from its table: the span
 // of the pixel's row holding it, found by binary search.
+//
+// A mask command's coverage of a pixel is a byte of its mask, which the
+// command places with its top-left pixel at (left, top): byte
+// (y - top) * width + (x - left) of the mask's bytes, which start at byte
+// row_base of the coverage bytes.  The command's bounds lie in the mask's
+// rectangle.
 //
 // An outline command's coverage of a pixel is the CPU's exact-area
 // rasteriser's over the tile taken as the window, which equals its
@@ -71,18 +78,20 @@
 
 static const uint TILE = 16;
 static const uint KIND_PATH = 1;
+static const uint KIND_MASK = 2;
 static const uint NO_BACKDROP = 0xFFFFFFFFu;
 static const uint LIST_LEN = 0x3FFFu;
 static const uint UNIFORM_BACKDROP = 0x80000000u;
 
 struct Cmd {
-    uint kind;      // 0 = coverage table, 1 = outline
-    uint flags;     // outline: bit 0 even-odd, bits 8..15 weight
+    uint kind;      // 0 = coverage table, 1 = outline, 2 = mask
+    uint flags;     // outline: bit 0 even-odd, bits 8..15 weight; mask: left
     uint rg;        // r | g << 16
     uint a_input;
-    int table_y0;   // pixel row of the table's row 0
-    uint n_rows;
-    uint row_base;  // index of the table's first entry in row_starts
+    int table_y0;   // pixel row of the table's row 0; mask: top
+    uint n_rows;    // mask: width
+    uint row_base;  // index of the table's first entry in row_starts;
+                    // mask: offset of its first coverage byte
     uint b;
     int x0;         // pixel bounds, inclusive
     int y0;
@@ -163,6 +172,21 @@ uint table_coverage(Cmd c, int x, int y)
     uint start = row_starts[c.row_base + uint(row)];
     uint stop = row_starts[c.row_base + uint(row) + 1];
     return row_coverage(start, stop, x);
+}
+
+// The coverage of pixel (x, y), inside its bounds, by mask command c.
+uint mask_coverage(Cmd c, int x, int y)
+{
+    uint row = uint(y - c.table_y0);
+    uint col = uint(x - int(c.flags));
+    return coverage_byte(c.row_base + row * c.n_rows + col);
+}
+
+// The coverage of pixel (x, y), inside its bounds, by table or mask
+// command c.
+uint flat_coverage(Cmd c, int x, int y)
+{
+    return c.kind == KIND_MASK ? mask_coverage(c, x, y) : table_coverage(c, x, y);
 }
 
 // Composite command c over the pixel (r, g, b) with coverage cov > 0.
@@ -493,7 +517,7 @@ void raster(uint3 lid, uint3 wid)
             bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
             if (!inside) continue;
             uint cov = c.kind == KIND_PATH ? path_coverage(c, item, s, lid.x, lid.y)
-                                           : table_coverage(c, x, y);
+                                           : flat_coverage(c, x, y);
             if (cov == 0) continue;
             composite(c, cov, r, g, b);
         }
@@ -503,7 +527,7 @@ void raster(uint3 lid, uint3 wid)
         Cmd c = cmds[tile_items[k * 4]];
         bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
         if (!inside) continue;
-        uint cov = table_coverage(c, x, y);
+        uint cov = flat_coverage(c, x, y);
         if (cov == 0) continue;
         composite(c, cov, r, g, b);
     }

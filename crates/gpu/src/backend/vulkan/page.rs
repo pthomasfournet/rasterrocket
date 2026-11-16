@@ -343,6 +343,8 @@ impl VulkanBackend {
 }
 
 #[cfg(test)]
+mod mask_tests;
+#[cfg(test)]
 mod path_tests;
 
 #[cfg(test)]

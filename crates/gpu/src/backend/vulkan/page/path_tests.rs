@@ -9,7 +9,11 @@ use crate::page::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS, PageCommands, 
 
 /// `page` on `backend` against its host model, packed rows of samples of
 /// its depth widened to 16 bits.
-fn assert_device_matches_model(backend: &VulkanBackend, page: &PageCommands, what: &str) {
+pub(super) fn assert_device_matches_model(
+    backend: &VulkanBackend,
+    page: &PageCommands,
+    what: &str,
+) {
     let want = render_page(page).expect("host model");
     let n = want.len();
     let got: Vec<u16> = match page.depth() {
@@ -43,7 +47,7 @@ fn assert_device_matches_model(backend: &VulkanBackend, page: &PageCommands, wha
 }
 
 /// A page of random outlines and opaque runs at `depth`.
-fn random_page(
+pub(super) fn random_page(
     rng: &mut Rng,
     width: u32,
     height: u32,

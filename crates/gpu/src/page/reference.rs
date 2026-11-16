@@ -4,7 +4,7 @@
 //! API reproduces.
 
 use super::path::{LIST_LEN, NO_BACKDROP, TILE_PIXELS, TileCells, UNIFORM_BACKDROP};
-use super::{KIND_PATH, PAGE_TILE, PageCommands, PageCommandsError};
+use super::{KIND_MASK, KIND_PATH, PAGE_TILE, PageCommands, PageCommandsError};
 
 /// `x / M` rounded to nearest for `x ≤ M²`, `M = 2^bits − 1`.
 const fn div_max(x: u32, bits: u32) -> u32 {
@@ -64,6 +64,19 @@ fn item_coverage(page: &PageCommands, item: [u32; 4], tx: usize, ty: usize) -> [
         return cells.coverage(c.flags & 1 != 0, ((c.flags >> 8) & 0xFF) as u8);
     }
     let mut coverage = [0u8; TILE_PIXELS];
+    if c.kind == KIND_MASK {
+        let left = c.flags as i32;
+        for (i, v) in coverage.iter_mut().enumerate() {
+            let (x, y) = ((tx * tile + i % tile) as i32, (ty * tile + i / tile) as i32);
+            if (c.x0..=c.x1).contains(&x) && (c.y0..=c.y1).contains(&y) {
+                let at = c.row_base as usize
+                    + (y - c.table_y0) as usize * c.n_rows as usize
+                    + (x - left) as usize;
+                *v = page.bytes[at];
+            }
+        }
+        return coverage;
+    }
     for (i, v) in coverage.iter_mut().enumerate() {
         let (x, y) = ((tx * tile + i % tile) as i32, (ty * tile + i / tile) as i32);
         let row = y - c.table_y0;
