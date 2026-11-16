@@ -1,14 +1,17 @@
 //! Per-row run-length coverage of a region.
 
+use bytemuck::{Pod, Zeroable};
 use color::convert::div255;
 
-use super::AreaRaster;
+use super::{AreaRaster, run_len};
 
-/// `Span::bytes` of a fully covered span.
+/// `Span::bytes` of a fully covered span; −1 as an `i32`.
 const FULL: u32 = u32::MAX;
 
-/// A maximal run of covered pixels on one row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A maximal run of covered pixels on one row; laid out as `[x0, x1,
+/// bytes]` in `i32`s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[repr(C)]
 struct Span {
     /// First pixel, inclusive.
     x0: i32,
@@ -86,15 +89,18 @@ impl CoverageTable {
             let v = coverage[i];
             let start = i;
             if v == 0 {
-                while i < coverage.len() && coverage[i] == 0 {
-                    i += 1;
-                }
+                i += run_len(&coverage[i..], 0);
                 continue;
             }
             let full = v == u8::MAX;
-            while i < coverage.len() && (coverage[i] == u8::MAX) == full && coverage[i] != 0 {
-                i += 1;
-            }
+            i += if full {
+                run_len(&coverage[i..], u8::MAX)
+            } else {
+                coverage[i..]
+                    .iter()
+                    .position(|&c| c == 0 || c == u8::MAX)
+                    .unwrap_or(coverage.len() - i)
+            };
             let x0 = x.saturating_add(i32::try_from(start).unwrap_or(i32::MAX));
             let x1 = x.saturating_add(i32::try_from(i - 1).unwrap_or(i32::MAX));
             let bytes = if full {
@@ -128,16 +134,11 @@ impl CoverageTable {
 
     /// Every span as `[x0, x1, offset]`, in row order: pixels `x0..=x1`
     /// covered fully when `offset` is −1, else by the bytes
-    /// `bytes()[offset..][..x1 − x0 + 1]`.
-    pub fn span_triples(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
-        self.spans.iter().map(|s| {
-            let offset = if s.bytes == FULL {
-                -1
-            } else {
-                i32::try_from(s.bytes).unwrap_or(i32::MAX)
-            };
-            [s.x0, s.x1, offset]
-        })
+    /// `bytes()[offset..][..x1 − x0 + 1]`.  An offset from 2³¹ on, which
+    /// no table within the `i32` range of offsets holds, reads as negative.
+    #[must_use]
+    pub fn span_triples(&self) -> &[[i32; 3]] {
+        bytemuck::cast_slice(&self.spans)
     }
 
     /// The partial spans' coverage bytes.

@@ -19,7 +19,7 @@
 
 use crate::bitmap::Bitmap;
 use crate::clip::{Clip, ClipResult};
-use crate::coverage::{AreaRaster, CoverageTable};
+use crate::coverage::{AreaRaster, BLOCK, CoverageTable, run_len, uniform};
 use crate::path::{Path, PathBuilder, collinear};
 use crate::pipe::{self, PipeSrc, PipeState};
 use crate::scanner::XPathScanner;
@@ -297,16 +297,13 @@ fn area_rows(
     let Some(mut raster) = area_raster(xpath, clip, width, height) else {
         return;
     };
-    let mut scratch = Vec::new();
-    raster.rows(eo, |y, x, coverage| {
-        scratch.clear();
-        scratch.extend_from_slice(coverage);
+    raster.rows_mut(eo, |y, x, coverage| {
         if weight != u8::MAX {
-            for c in &mut scratch {
+            for c in coverage.iter_mut() {
                 *c = div255(u32::from(*c) * u32::from(weight));
             }
         }
-        emit(y, x, &mut scratch);
+        emit(y, x, coverage);
     });
 }
 
@@ -462,26 +459,6 @@ fn add_line(lines: &mut PathBuilder, from: (f64, f64), to: (f64, f64), centre: b
     };
     let (from, to) = (place(from), place(to));
     lines.move_to(from.0, from.1).is_ok() && lines.line_to(to.0, to.1).is_ok()
-}
-
-/// Pixels per block in which [`draw_coverage_row`] looks for solid runs.
-const BLOCK: usize = 16;
-
-/// The number of leading bytes of `bytes` equal to `value`.
-fn run_len(bytes: &[u8], value: u8) -> usize {
-    let (blocks, _) = bytes.as_chunks::<BLOCK>();
-    let whole = blocks.iter().take_while(|b| is_uniform(b, value)).count() * BLOCK;
-    whole + bytes[whole..].iter().take_while(|&&c| c == value).count()
-}
-
-/// Whether every byte of `block` equals `value`.
-const fn is_uniform(block: &[u8; BLOCK], value: u8) -> bool {
-    u128::from_ne_bytes(*block) == u128::from_ne_bytes([value; BLOCK])
-}
-
-/// Whether `block` holds [`BLOCK`] bytes, all equal to `value`.
-fn uniform(block: &[u8], value: u8) -> bool {
-    <&[u8; BLOCK]>::try_from(block).is_ok_and(|b| is_uniform(b, value))
 }
 
 /// Composite `coverage[i]` as the shape of pixel `(x0 + i, row)`.

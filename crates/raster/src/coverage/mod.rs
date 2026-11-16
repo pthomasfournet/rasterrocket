@@ -92,6 +92,27 @@ fn fixed(v: f64) -> i64 {
     ((v * 256.0).floor() as i64).clamp(-COORD_LIMIT, COORD_LIMIT)
 }
 
+/// Bytes per block in which a coverage row is searched for runs of one
+/// value.
+pub(crate) const BLOCK: usize = 16;
+
+/// The number of leading bytes of `bytes` equal to `value`.
+pub(crate) fn run_len(bytes: &[u8], value: u8) -> usize {
+    let (blocks, _) = bytes.as_chunks::<BLOCK>();
+    let whole = blocks.iter().take_while(|b| is_uniform(b, value)).count() * BLOCK;
+    whole + bytes[whole..].iter().take_while(|&&c| c == value).count()
+}
+
+/// Whether every byte of `block` equals `value`.
+const fn is_uniform(block: &[u8; BLOCK], value: u8) -> bool {
+    u128::from_ne_bytes(*block) == u128::from_ne_bytes([value; BLOCK])
+}
+
+/// Whether `block` holds [`BLOCK`] bytes, all equal to `value`.
+pub(crate) fn uniform(block: &[u8], value: u8) -> bool {
+    <&[u8; BLOCK]>::try_from(block).is_ok_and(|b| is_uniform(b, value))
+}
+
 /// One cell deposit.
 #[derive(Clone, Copy, Debug)]
 struct Cell {
@@ -319,13 +340,19 @@ impl AreaRaster {
     /// A span may hold uncovered pixels and may be empty.
     ///
     /// The deposits are consumed: the rasteriser is empty afterwards.
+    pub fn rows(&mut self, eo: bool, mut emit: impl FnMut(i32, i32, &[u8])) {
+        self.rows_mut(eo, |y, x, coverage| emit(y, x, coverage));
+    }
+
+    /// [`Self::rows`], each row's coverage lent mutably: `emit` may change
+    /// it in place, and the change is not seen by later rows.
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_wrap,
         clippy::cast_possible_truncation,
         reason = "cell coordinates lie in [0, width) × [0, height), both within i32"
     )]
-    pub fn rows(&mut self, eo: bool, mut emit: impl FnMut(i32, i32, &[u8])) {
+    pub fn rows_mut(&mut self, eo: bool, mut emit: impl FnMut(i32, i32, &mut [u8])) {
         if self.cells.is_empty() {
             return;
         }
@@ -392,7 +419,7 @@ impl AreaRaster {
                 self.line.resize(width - x_first, tail);
             }
             let y = self.y0 + row as i32;
-            emit(y, self.x0 + x_first as i32, &self.line);
+            emit(y, self.x0 + x_first as i32, &mut self.line);
         }
     }
 }

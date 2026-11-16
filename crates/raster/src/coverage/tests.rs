@@ -224,3 +224,37 @@ fn table_products_and_queries() {
     assert_eq!(moved.coverage(5, 3), 128);
     assert_eq!(moved.coverage(12, 3), 255);
 }
+
+#[test]
+fn table_rows_split_into_canonical_spans() {
+    // Runs of each kind both shorter and longer than a search block.
+    let mut row = vec![0u8; 3];
+    row.extend([255; 40]);
+    row.extend([7, 9, 200]);
+    row.extend([0; 17]);
+    row.extend([255; 5]);
+    row.extend([1; 33]);
+    row.push(255);
+    row.extend([0; 2]);
+    let mut table = CoverageTable::empty();
+    table.push_row(4, 10, &row);
+    table.push_row(6, 10, &row[3..]);
+    let x = |i: usize| 10 + i32::try_from(i).expect("short row");
+    for (i, &c) in row.iter().enumerate() {
+        assert_eq!(table.coverage(x(i), 4), c, "pixel {i} of row 4");
+        assert_eq!(table.coverage(x(i), 5), 0, "pixel {i} of row 5");
+    }
+    for (i, &c) in row[3..].iter().enumerate() {
+        assert_eq!(table.coverage(x(i), 6), c, "pixel {i} of row 6");
+    }
+    let row4 = [
+        [13, 52, -1],
+        [53, 55, 0],
+        [73, 77, -1],
+        [78, 110, 3],
+        [111, 111, -1],
+    ];
+    assert_eq!(&table.span_triples()[..5], &row4);
+    assert_eq!(table.row_starts(), &[0, 5, 5, 10]);
+    assert_eq!(table.bytes().len(), 2 * (3 + 33));
+}

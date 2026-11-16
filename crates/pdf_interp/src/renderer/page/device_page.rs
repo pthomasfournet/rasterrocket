@@ -40,8 +40,6 @@ pub(super) struct Recording {
     commands: PageCommands,
     /// Why the recording stopped, once it has.
     refused: Option<&'static str>,
-    /// Scratch: the spans of the table being appended.
-    spans: Vec<[i32; 3]>,
     /// Scratch: the runs of the hairline being appended.
     runs: Vec<(i32, i32, i32)>,
 }
@@ -137,12 +135,10 @@ impl Recording {
             let Some((x0, y0, x1, y1)) = table.bounds() else {
                 continue;
             };
-            self.spans.clear();
-            self.spans.extend(table.span_triples());
             let rows = CoverageRows {
                 y_min: table.y_min(),
                 row_starts: table.row_starts(),
-                spans: &self.spans,
+                spans: table.span_triples(),
                 bytes: table.bytes(),
             };
             self.commands
@@ -212,7 +208,6 @@ impl PageRenderer<'_> {
                 [kind.depth().max_sample(); 3],
             ),
             refused: None,
-            spans: Vec::new(),
             runs: Vec::new(),
         }));
         Ok(())
