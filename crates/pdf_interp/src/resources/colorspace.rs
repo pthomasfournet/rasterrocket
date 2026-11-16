@@ -359,7 +359,8 @@ impl ColorSpace {
 
     /// The process ink `[C, M, Y, K]` (0 = no ink) of the colour `comps`
     /// in this space, as a CMYK device would print it: the components
-    /// themselves in `DeviceCMYK`; in a four-component ICC space, under
+    /// themselves in `DeviceCMYK`, unless `separator` separates its colour
+    /// ([`Separator::paints_device_cmyk`]); in a four-component ICC space, under
     /// the preview's separator ([`Separator::Model`]) the inks nearest the
     /// components, with the same zero components, printing the profile's
     /// sRGB colour in the process-ink model
@@ -403,7 +404,7 @@ impl ColorSpace {
         reproduce: &mut dyn FnMut([S; 3], [f64; 4]) -> [S; 4],
     ) -> [S; 4] {
         match self {
-            Self::DeviceCmyk => {
+            Self::DeviceCmyk if separator.paints_device_cmyk() => {
                 if let &[c, m, y, k] = comps {
                     return [c, m, y, k].map(S::from_unit);
                 }

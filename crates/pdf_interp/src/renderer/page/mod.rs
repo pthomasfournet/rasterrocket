@@ -295,6 +295,8 @@ pub struct PageRenderer<'doc> {
     /// The working space colours convert into: the page's, sRGB while a
     /// soft-mask group is painted.
     space: crate::WorkingSpace,
+    /// The working space an ink canvas finished as RGB converts into.
+    finish_space: crate::WorkingSpace,
     /// The storage not in `canvas`: for an ink canvas, the RGB buffers the
     /// finished bitmap is built in; for an RGB canvas, the ink buffers,
     /// carried through to the next page.
@@ -666,15 +668,19 @@ impl<'doc> PageRenderer<'doc> {
         } else {
             CanvasKind::rgb(depth)
         };
-        let ink = canvas.ink_setup();
-        let working = canvas.space();
+        let finish_space = canvas.space();
         debug_assert!(
-            working == crate::WorkingSpace::Srgb || depth == SampleDepth::Sixteen,
+            finish_space == crate::WorkingSpace::Srgb || depth == SampleDepth::Sixteen,
             "the wide working space is painted at 16 bits"
         );
+        let (ink, working, approximated) = canvas.ink_setup_in(doc);
         let canvas = PageCanvas::try_new_in(kind, view.width, view.height, alpha, &mut spare)?;
         let mut renderer = Self::with_canvas(view, doc, page_id, canvas, group, ink, working);
         renderer.buffers = spare;
+        renderer.finish_space = finish_space;
+        if approximated {
+            renderer.diag.approximated_group_spaces.cmyk_profile = true;
+        }
         Ok(renderer)
     }
 
@@ -721,6 +727,7 @@ impl<'doc> PageRenderer<'doc> {
         let mut renderer = Self {
             canvas,
             space,
+            finish_space: space,
             buffers: CanvasBuffers::default(),
             width,
             height,
@@ -1188,9 +1195,10 @@ impl<'doc> PageRenderer<'doc> {
     /// [`Self::try_finish_keeping`].
     #[must_use]
     pub fn finish(self) -> (Bitmap<Rgb8>, PageDiagnostics) {
+        let finish = self.ink_finish();
         let (canvas, _, ink_map, diag) = self.into_parts(true);
         let ink_map = page_ink_map(ink_map);
-        let rgb = rgb8(canvas.into_finished(&ink_map.luts(), false));
+        let rgb = rgb8(canvas.into_finished(&ink_map.luts(), &finish));
         (rgb, Self::finish_diagnostics(diag, ink_map))
     }
 
@@ -1241,10 +1249,10 @@ impl<'doc> PageRenderer<'doc> {
         self,
         transparent: bool,
     ) -> Result<(FinishedCanvas, PageDiagnostics, CanvasBuffers), raster::BitmapAllocError> {
-        let cmyk = self.ink.cmyk;
+        let finish = self.ink_finish();
         let (canvas, mut buffers, ink_map, diag) = self.into_parts(!transparent);
         let ink_map = page_ink_map(ink_map);
-        let mut finished = canvas.try_into_finished_in(&ink_map.luts(), cmyk, &mut buffers)?;
+        let mut finished = canvas.try_into_finished_in(&ink_map.luts(), &finish, &mut buffers)?;
         if transparent {
             finished.zero_transparent_colour();
         }

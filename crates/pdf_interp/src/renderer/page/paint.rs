@@ -142,6 +142,11 @@ impl PageRenderer<'_> {
         let target = self.colour_target();
         let srgb = |space: &ColorSpace| space.convert_to_srgb(doc, target, comps, depth);
         match cs {
+            // In a group's ICC CMYK space a `DeviceCMYK` colour is the
+            // process-ink model's colour, separated into the group's ink.
+            ColorSpace::DeviceCmyk if !self.ink.separator.paints_device_cmyk() => {
+                RasterColor::from_srgb(srgb(cs))
+            }
             ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk => {
                 components_to_color(comps, self.space)
             }

@@ -289,3 +289,56 @@ fn a_partially_covered_pixel_interpolates_by_the_object_shape() {
         px[2]
     );
 }
+
+/// The synthetic CMYK printer of `tests/fixtures/icc`.
+fn printer() -> Vec<u8> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/icc/printer-cmyk-v2.icc"
+    );
+    std::fs::read(path).expect("the fixture is present")
+}
+
+/// A page of group entries `page_group` that runs `content`, its `/F` a
+/// form of group entries `group` running `form_content`, `/H` a fill
+/// alpha of one half; object 6 is the printer's ICC CMYK space.
+fn icc_page(page_group: &str, content: &str, group: &str, form_content: &str) -> Vec<u8> {
+    with_page_tree(&[
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] {page_group} \
+             /Resources << /ExtGState << /H << /ca 0.5 >> >> /XObject << /F 5 0 R >> >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream_object("", content.as_bytes()),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 {W} {H}] \
+                 /Group << /S /Transparency {group} >> \
+                 /Resources << /ExtGState << /H << /ca 0.5 >> >> >>"
+            ),
+            form_content.as_bytes(),
+        ),
+        stream_object("/N 4", &printer()),
+    ])
+}
+
+/// A page whose group is an ICC CMYK space composites in the profile's ink,
+/// as a form group of that space does, not through the process-ink model.
+#[test]
+fn an_icc_cmyk_page_group_composites_in_its_profiles_ink() {
+    const HALF: &str = "1 0 0 rg 0 0 100 100 re f /H gs 0 0 1 rg 0 0 100 100 re f";
+    let icc = "/Group << /S /Transparency /CS [/ICCBased 6 0 R] >>";
+    let page = rgb_at(icc_page(icc, HALF, "", ""), &[(50, 50)])[0];
+    let form = rgb_at(
+        icc_page("", "/F Do", "/CS [/ICCBased 6 0 R] /I true", HALF),
+        &[(50, 50)],
+    )[0];
+    common::assert_rgb_near(page, form, 1, "page group against form group");
+    let device = "/Group << /S /Transparency /CS /DeviceCMYK >>";
+    let model = rgb_at(icc_page(device, HALF, "", ""), &[(50, 50)])[0];
+    assert!(
+        page.iter().zip(model).any(|(a, b)| a.abs_diff(b) > 8),
+        "{page:?} against the model's {model:?}"
+    );
+}

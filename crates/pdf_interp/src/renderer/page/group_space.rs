@@ -7,10 +7,13 @@
 //! parent canvas's, is painted on a canvas of the parent's kind as any
 //! group is.  Otherwise the canvas of the group's space is:
 //!
-//! - for a CMYK space over an RGB canvas, an ink canvas whose colours not
+//! - for `DeviceCMYK` over an RGB canvas, an ink canvas whose colours not
 //!   given as ink separate by the inverse of the process-ink model, which
-//!   reproduces them through the model (an ICC CMYK space composites as
-//!   `DeviceCMYK` does);
+//!   reproduces them through the model;
+//! - for an ICC CMYK space over an RGB canvas, an ink canvas of the
+//!   profile's ink (see [`crate::separation::GroupInk`]) with spot slots of
+//!   its own, whose result converts back through the profile; a profile
+//!   that cannot separate composites as `DeviceCMYK` does;
 //! - for an sRGB space over a wide or an ink canvas, an sRGB canvas;
 //! - for any other RGB space over an ink canvas, an RGB canvas of the
 //!   separation's working space; over an RGB canvas the parent's own.
@@ -31,20 +34,23 @@
 //! group's converted result alone, so a pixel the group leaves unpainted
 //! keeps its value.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use raster::GrayBlend;
 use raster::clip::Clip;
 use raster::transparency::GroupParams;
 
+use pdf::ObjectId;
+
 use super::canvas::{CanvasGroup, CanvasKind, PageCanvas};
 use super::depth::CanvasSample;
 use super::pixel_rect::PixelRect;
-use super::space_convert::{self, CanvasSpace, SpaceConversion};
-use super::{PageRenderer, SharedInkMap};
+use super::space_convert::{self, CanvasSpace, InkColour, SpaceConversion};
+use super::{PageRenderer, SharedInkMap, ink_map, page_ink_map};
 use crate::renderer::color::PROCESS_CHANNELS;
 use crate::resources::{ColorSpace, GroupSpace, RgbGroupSpace};
-use crate::separation::{InkSetup, Separator};
+use crate::separation::{GroupInk, InkSetup, Separator};
 use crate::{WorkingSpace, working_space};
 
 /// The blending space of a group composited in gray on a canvas of RGB or
@@ -93,6 +99,9 @@ pub(super) struct GroupTarget {
     pub(super) space: CanvasSpace,
     /// Whether the group's colour reduces to gray as it composites.
     pub(super) gray: bool,
+    /// The profile stream of an ICC CMYK space whose ink an ink canvas
+    /// over an RGB one holds.
+    profile: Option<ObjectId>,
 }
 
 /// The parent's state a group painted on a canvas of another space keeps
@@ -104,9 +113,12 @@ pub(super) struct SwitchedParent {
     space: WorkingSpace,
     /// The parent's ink setup.
     ink: InkSetup,
+    /// The parent's ink map, when the group's canvas holds spot slots of
+    /// its own.
+    ink_map: Option<SharedInkMap>,
 }
 
-impl PageRenderer<'_> {
+impl<'doc> PageRenderer<'doc> {
     /// The space the current canvas holds its colours in.
     pub(super) const fn canvas_space(&self) -> CanvasSpace {
         if self.canvas.kind().is_ink() {
@@ -152,7 +164,7 @@ impl PageRenderer<'_> {
             self.canvas.swap_group(group);
             None
         } else {
-            Some(self.enter_group_in(group, target.space))
+            Some(self.enter_group_in(group, target))
         }
     }
 
@@ -219,15 +231,26 @@ impl PageRenderer<'_> {
             (Some(GroupSpace::Cmyk { .. }), _) => CanvasSpace::Ink,
             (Some(GroupSpace::Rgb(_)), _) => CanvasSpace::Rgb(WorkingSpace::Srgb),
         };
+        let profile = match (space, parent) {
+            (Some(s @ GroupSpace::Cmyk { profile: Some(id) }), CanvasSpace::Rgb(working)) => {
+                let separates =
+                    GroupInk::load(self.resources.doc(), id, self.group_press(working)).is_some();
+                if !separates {
+                    self.diag.approximated_group_spaces.record(s);
+                }
+                separates.then_some(id)
+            }
+            _ => None,
+        };
         if let Some(space) = space
             && space.approximated()
-            && (target != parent || matches!(space, GroupSpace::Rgb(_)))
         {
             self.diag.approximated_group_spaces.record(space);
         }
         GroupTarget {
             space: target,
             gray: space == Some(GroupSpace::Gray),
+            profile,
         }
     }
 
@@ -260,23 +283,48 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// The ink setup and working space of a canvas of `space` opened over
-    /// the current one: an ink canvas over an RGB one separates by the
-    /// process-ink model, without simulating overprint; any other keeps
-    /// the parent's setup.
-    fn setup_of(&self, space: CanvasSpace) -> (InkSetup, WorkingSpace) {
-        match (space, self.canvas_space()) {
-            (CanvasSpace::Ink, CanvasSpace::Rgb(_)) => (
-                InkSetup {
+    /// The ink setup and working space of a canvas opened for `target`
+    /// over the current one: an ink canvas over an RGB one, without
+    /// simulating overprint, separates into the ink of the target's
+    /// profile from the parent's working space, else by the process-ink
+    /// model from sRGB; any other keeps the parent's setup.
+    fn setup_of(&self, target: GroupTarget) -> (InkSetup, WorkingSpace) {
+        match (target.space, self.canvas_space()) {
+            (CanvasSpace::Ink, CanvasSpace::Rgb(working)) => {
+                let group = target.profile.and_then(|id| {
+                    GroupInk::load(self.resources.doc(), id, self.group_press(working))
+                });
+                let (separator, space) = group
+                    .map_or((Separator::Model, WorkingSpace::Srgb), |g| {
+                        (Separator::Group(g), working)
+                    });
+                let ink = InkSetup {
                     overprint: false,
                     cmyk: false,
-                    separator: Separator::Model,
-                },
-                WorkingSpace::Srgb,
-            ),
+                    separator,
+                };
+                (ink, space)
+            }
             (CanvasSpace::Ink, CanvasSpace::Ink) => (self.ink.clone(), self.space),
             (CanvasSpace::Rgb(space), _) => (self.ink.clone(), space),
         }
+    }
+
+    /// The working space `working` and the black-point compensation in
+    /// effect, which a group's ink separates under: the group's result
+    /// converts back under the graphics state the group is painted in.
+    fn group_press(&self, working: WorkingSpace) -> (WorkingSpace, bool) {
+        (working, self.gstate.current().colour_intent.bpc)
+    }
+
+    /// The colour of the ink the current canvas holds, converted to the
+    /// working space and intent in effect.
+    fn ink_colour(&self) -> InkColour<'doc> {
+        InkColour::of(
+            &self.ink.separator,
+            self.resources.doc(),
+            self.colour_target(),
+        )
     }
 
     /// Open a transparency group of `params` painted in `target.space`, a
@@ -290,7 +338,8 @@ impl PageRenderer<'_> {
         params: GroupParams,
     ) -> Option<CanvasGroup> {
         let bitmap = self.group_bitmap_of(self.kind_of(target.space))?;
-        let (ink, _) = self.setup_of(target.space);
+        let (ink, _) = self.setup_of(target);
+        let colour = self.ink_colour();
         let map = Rc::clone(&self.ink_map);
         let map = map.borrow();
         let spots = map.luts();
@@ -300,6 +349,7 @@ impl PageRenderer<'_> {
             gray: false,
             separator: &ink.separator,
             spots: &spots,
+            ink: &colour,
         };
         Some(self.canvas.begin_converted_group(
             self.group.backdrop.as_deref(),
@@ -310,16 +360,23 @@ impl PageRenderer<'_> {
         ))
     }
 
-    /// Paint on the canvas of `group`, opened in `space`: the parent's
-    /// canvas, working space and ink setup are set aside and the inherited
-    /// colours convert for the group's canvas.
-    fn enter_group_in(&mut self, group: &mut CanvasGroup, space: CanvasSpace) -> SwitchedParent {
-        let (ink, working) = self.setup_of(space);
+    /// Paint on the canvas of `group`, opened for `target`: the parent's
+    /// canvas, working space and ink setup are set aside, and its ink map
+    /// for a canvas of a group's ink, which takes a map of its own; the
+    /// inherited colours convert for the group's canvas.
+    fn enter_group_in(&mut self, group: &mut CanvasGroup, target: GroupTarget) -> SwitchedParent {
+        let (ink, working) = self.setup_of(target);
+        let ink_map = ink.separator.group_ink().is_some().then(|| {
+            let depth = self.canvas.kind().depth();
+            let map = ink_map::InkMap::new(depth, ink.separator.clone());
+            std::mem::replace(&mut self.ink_map, Rc::new(RefCell::new(map)))
+        });
         let canvas = std::mem::replace(&mut self.canvas, group.take_bitmap());
         let parent = SwitchedParent {
             canvas,
             space: std::mem::replace(&mut self.space, working),
             ink: std::mem::replace(&mut self.ink, ink),
+            ink_map,
         };
         self.reconvert_colours(|_| true);
         parent
@@ -338,16 +395,28 @@ impl PageRenderer<'_> {
         let from = self.canvas_space();
         let painted = std::mem::replace(&mut self.canvas, parent.canvas);
         self.space = parent.space;
-        self.ink = parent.ink;
+        let source = std::mem::replace(&mut self.ink, parent.ink);
+        let own_map = parent
+            .ink_map
+            .map(|map| std::mem::replace(&mut self.ink_map, map));
+        let spots = own_map.clone().unwrap_or_else(|| Rc::clone(&self.ink_map));
         let mut group = group;
-        let Some(mut converted) = self.group_bitmap_of(self.canvas.kind()) else {
+        let mut converted = self.group_bitmap_of(self.canvas.kind());
+        if let Some(converted) = &mut converted
+            && let Some(region) = group_rect(&group)
+        {
+            self.convert_canvas(&painted, converted, region, (from, &source, &spots));
+        }
+        drop(spots);
+        if let Some(map) = own_map {
+            let unslotted = page_ink_map(map).into_unslotted();
+            self.ink_map.borrow_mut().note_unslotted(unslotted);
+        }
+        let Some(converted) = converted else {
             group.put_bitmap(painted);
             self.group_pool.push(group.discard());
             return None;
         };
-        if let Some(region) = group_rect(&group) {
-            self.convert_canvas(&painted, &mut converted, region, from);
-        }
         group.put_bitmap(painted);
         let (rehomed, cleared) = group.rehome(converted);
         self.group_pool.push(cleared);
@@ -364,6 +433,7 @@ impl PageRenderer<'_> {
         let mut bitmap = group.take_bitmap();
         let region = group_rect(group);
         let separator = self.separator(true);
+        let colour = self.ink_colour();
         let map = Rc::clone(&self.ink_map);
         let map = map.borrow();
         let spots = map.luts();
@@ -373,6 +443,7 @@ impl PageRenderer<'_> {
             gray: true,
             separator: &separator,
             spots: &spots,
+            ink: &colour,
         };
         if let Some(region) = region {
             bitmap.convert_region(region, &conversion);
@@ -383,17 +454,23 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// Convert `region` of `src`, a group's canvas painted in `from`, into
-    /// `dst`, a transparent canvas of the current canvas's kind.
+    /// Convert `region` of `src`, a group's canvas painted in `from` and
+    /// set up as `source`, its spots slotted in `map`, into `dst`, a
+    /// transparent canvas of the current canvas's kind.
     fn convert_canvas(
         &self,
         src: &PageCanvas,
         dst: &mut PageCanvas,
         region: PixelRect,
-        from: CanvasSpace,
+        (from, source, map): (CanvasSpace, &InkSetup, &SharedInkMap),
     ) {
         let separator = self.separator(false);
-        let map = self.ink_map.borrow();
+        let colour = InkColour::of(
+            &source.separator,
+            self.resources.doc(),
+            self.colour_target(),
+        );
+        let map = map.borrow();
         let spots = map.luts();
         let conversion = SpaceConversion {
             from,
@@ -401,6 +478,7 @@ impl PageRenderer<'_> {
             gray: false,
             separator: &separator,
             spots: &spots,
+            ink: &colour,
         };
         src.convert_region_into(dst, region, &conversion);
     }

@@ -1,12 +1,14 @@
 //! Pixels converted between the spaces a canvas holds its colours in.
 //!
 //! A canvas holds RGB of a working space ([`CanvasSpace::Rgb`]) or process
-//! and spot ink ([`CanvasSpace::Ink`]).  A conversion passes through sRGB:
-//! ink converts by the process-ink model with its spots folded in
-//! ([`color::cmyk::fold_spots`], [`color::cmyk::cmyk_to_rgb_at`]), wide
-//! values by [`working_space::to_srgb16`]; sRGB converts into the wide
-//! space by [`working_space::from_srgb16`] and into ink by a
-//! [`Separator`], whose spot channels it leaves empty.
+//! and spot ink ([`CanvasSpace::Ink`]).  Ink converts to RGB with its spots
+//! folded in ([`color::cmyk::fold_spots`]) by its [`InkColour`]: the
+//! process-ink model ([`color::cmyk::cmyk_to_rgb_at`]), or the device →
+//! PCS conversion of the ICC CMYK profile whose ink a group's canvas holds.
+//! RGB converts between working spaces through sRGB
+//! ([`working_space::to_srgb16`], [`working_space::from_srgb16`]), and
+//! into ink by a [`Separator`] from its own working space, leaving the spot
+//! channels empty.
 //!
 //! A reduction to gray takes the gray of the colour on the way: the
 //! `DeviceRGB` → `DeviceGray` weights of an sRGB value
@@ -19,6 +21,8 @@
 //! A group's colour is straight, beside its alpha, so a converted pixel is
 //! the group's colour converted; pixels of zero alpha stay empty.
 
+use std::sync::Arc;
+
 use color::{DeviceN8, DeviceN16, Pixel, Rgb8, Rgb16, Sample};
 use raster::Bitmap;
 use raster::clip::Clip;
@@ -28,10 +32,10 @@ use super::canvas::{CanvasGroup, PageCanvas};
 use super::depth::{CanvasBackdrop, CanvasSample};
 use super::ink_map::SpotTables;
 use super::pixel_rect::PixelRect;
-use crate::WorkingSpace;
 use crate::renderer::color::no_spots;
+use crate::resources::colorspace::icc::IccConversion;
 use crate::separation::Separator;
-use crate::working_space;
+use crate::{ColourTarget, WorkingSpace, working_space};
 
 /// The space a canvas holds its colours in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +46,62 @@ pub(super) enum CanvasSpace {
     Ink,
 }
 
+/// The colour the process ink of a canvas shows.
+pub(super) enum InkColour<'a> {
+    /// The process-ink model's sRGB colour.
+    Model,
+    /// The colour of the ink in an ICC CMYK space: `conversion` into the
+    /// working space `space`, a conversion of `doc`'s.
+    Profile {
+        conversion: Arc<IccConversion>,
+        doc: &'a pdf::Document,
+        space: WorkingSpace,
+    },
+}
+
+impl<'a> InkColour<'a> {
+    /// The colour of the ink `separator` separates into, converted to
+    /// `target`: through the profile of a group's ink
+    /// ([`Separator::group_ink`]), the process-ink model otherwise.
+    pub(super) fn of(separator: &Separator, doc: &'a pdf::Document, target: ColourTarget) -> Self {
+        separator
+            .group_ink()
+            .and_then(|ink| IccConversion::load(doc, ink.id(), 4, target))
+            .map_or(Self::Model, |conversion| Self::Profile {
+                conversion,
+                doc,
+                space: target.space,
+            })
+    }
+
+    /// The colour of the process ink `cmyk`, and the working space it is
+    /// in.
+    pub(super) fn rgb<S: Sample>(&self, [c, m, y, k]: [S; 4]) -> (WorkingSpace, [S; 3]) {
+        if let Self::Profile {
+            conversion,
+            doc,
+            space,
+        } = self
+            && let Some(rgb) = conversion.convert::<S>(doc, &[c, m, y, k].map(S::to_unit))
+        {
+            return (*space, rgb);
+        }
+        (WorkingSpace::Srgb, color::cmyk::cmyk_to_rgb_at(c, m, y, k))
+    }
+}
+
+/// The colour `rgb` of the working space `from` in the working space
+/// `to`: itself when they are one space, through sRGB otherwise.
+pub(super) fn into_space<S: Sample>(from: WorkingSpace, to: WorkingSpace, rgb: [S; 3]) -> [S; 3] {
+    if from == to {
+        rgb
+    } else {
+        working_space::from_srgb::<S, S>(to, working_space::to_srgb::<S, S>(from, rgb))
+    }
+}
+
 /// The conversion of pixels of one canvas space into another, or into
-/// the same one, through sRGB, reduced to gray on the way when `gray`.
+/// the same one, reduced to gray on the way when `gray`.
 pub(super) struct SpaceConversion<'a> {
     /// The space converted from.
     pub(super) from: CanvasSpace,
@@ -51,30 +109,27 @@ pub(super) struct SpaceConversion<'a> {
     pub(super) to: CanvasSpace,
     /// Whether the colour reduces to gray.
     pub(super) gray: bool,
-    /// The conversion of sRGB into ink, in its own working space.
+    /// The conversion of RGB into ink, from its own working space.
     pub(super) separator: &'a Separator,
     /// The process equivalents of the spot channels of an ink pixel.
     pub(super) spots: &'a SpotTables<'a>,
+    /// The colour of the process ink of an ink pixel converted from.
+    pub(super) ink: &'a InkColour<'a>,
 }
 
 impl SpaceConversion<'_> {
     /// Convert one pixel: `src` holds the samples of a pixel of `from`,
     /// `dst` receives those of a pixel of `to`.
     pub(super) fn pixel<S: CanvasSample>(&self, src: &[S], dst: &mut [S]) {
-        let srgb = match self.from {
-            _ if self.gray => [gray_of(self.from, src, self.spots); 3],
-            CanvasSpace::Ink => {
-                let [c, m, y, k] = fold_ink(src, self.spots);
-                color::cmyk::cmyk_to_rgb_at(c, m, y, k)
-            }
-            CanvasSpace::Rgb(space) => working_space::to_srgb(space, [src[0], src[1], src[2]]),
+        let (space, rgb) = match self.from {
+            _ if self.gray => (WorkingSpace::Srgb, [gray_of(self.from, src, self.spots); 3]),
+            CanvasSpace::Ink => self.ink.rgb(fold_ink(src, self.spots)),
+            CanvasSpace::Rgb(space) => (space, [src[0], src[1], src[2]]),
         };
         match self.to {
-            CanvasSpace::Rgb(space) => {
-                dst.copy_from_slice(&working_space::from_srgb::<S, S>(space, srgb));
-            }
+            CanvasSpace::Rgb(to) => dst.copy_from_slice(&into_space(space, to, rgb)),
             CanvasSpace::Ink => {
-                let rgb = working_space::from_srgb::<S, S>(self.separator.space(), srgb);
+                let rgb = into_space(space, self.separator.space(), rgb);
                 dst.copy_from_slice(&no_spots(self.separator.ink(rgb)));
             }
         }
@@ -371,6 +426,7 @@ mod tests {
             gray,
             separator: &separator,
             spots: &spots,
+            ink: &InkColour::Model,
         };
         let mut out = vec![S::default(); n];
         c.pixel(src, &mut out);
@@ -492,6 +548,7 @@ mod tests {
             gray: false,
             separator: &Separator::Model,
             spots: &spots,
+            ink: &InkColour::Model,
         };
         src.convert_region_into(&mut dst, PixelRect::new(0, 0, 3, 1).unwrap(), &conversion);
         let PageCanvas::Ink(b) = dst else {

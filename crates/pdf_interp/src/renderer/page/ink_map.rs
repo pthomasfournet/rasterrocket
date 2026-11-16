@@ -186,6 +186,16 @@ impl InkMap {
         self.unslotted
     }
 
+    /// Record `names`, spot colorants that found no slot on a canvas of
+    /// slots of its own, after those already recorded, each once.
+    pub(super) fn note_unslotted(&mut self, names: Vec<String>) {
+        for name in names {
+            if !self.unslotted.contains(&name) {
+                self.unslotted.push(name);
+            }
+        }
+    }
+
     /// The process inks printing the sRGB colour `rgb` of the
     /// four-component ICC colour `given` at the depth of `S` (see
     /// [`color::cmyk::ink_reproducing_at`]), solved once per page for each
@@ -247,7 +257,9 @@ impl InkMap {
     /// The colours of a `Separation` or `DeviceN` space paint their
     /// colorants (see [`Self::colorant_ink`]), the space's spot colorants
     /// taking their slots.  Those of `DeviceCMYK` paint their components as
-    /// process ink, and so do those of a four-component ICC space unless
+    /// process ink unless `separator` separates their colour
+    /// ([`Separator::paints_device_cmyk`]), and so do those of a
+    /// four-component ICC space unless
     /// the separator reproduces such a colour from its profile
     /// ([`Separator::reproduces_process_colour`]); `separator`, the paint's,
     /// converts them to the ink of an output profile that is not theirs
@@ -262,7 +274,7 @@ impl InkMap {
             ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
                 Some(self.colorant_plan(doc, space))
             }
-            ColorSpace::DeviceCmyk => Some(process_plan()),
+            ColorSpace::DeviceCmyk => separator.paints_device_cmyk().then(process_plan),
             ColorSpace::IccBased { n: 4, .. } => (!self.separator.reproduces_process_colour())
                 .then(|| {
                     separator

@@ -4,7 +4,8 @@
 //! paper white.  An ink canvas holds [`DeviceN8`] or [`DeviceN16`] pixels,
 //! the amounts `[C, M, Y, K, S0, S1, S2, S3]` of four process and four
 //! spot inks, `0` being no ink, so that paper white is all zeros; it is
-//! converted to sRGB of its depth when the page is finished.
+//! converted to RGB or CMYK of its depth when the page is finished (see
+//! [`super::finished`]).
 //!
 //! The raster primitives are generic over the pixel type.  [`with_canvas!`]
 //! dispatches one call to the bitmap of any kind, so a paint is written
@@ -13,7 +14,6 @@
 //! in sRGB — shadings, tiling cells, image samples, mesh triangles — reach
 //! an ink canvas through [`InkPattern`], which converts each span to ink.
 
-use color::cmyk::{ink_to_cmyk_row, ink_to_cmyk_row16, ink_to_rgb_row, ink_to_rgb_row16};
 use color::{DeviceN8, DeviceN16, Pixel, PixelMode, Rgb8, Rgb16, Sample, SampleDepth};
 use raster::clip::Clip;
 use raster::pipe::{ChannelMask, Pattern, PipeSrc, PipeState, RowPattern, render_bitmap_span};
@@ -23,10 +23,9 @@ use raster::{Bitmap, BitmapBuffers};
 
 use super::super::color::{PROCESS_CHANNELS, no_spots};
 use super::depth::{CanvasBackdrop, CanvasSample, SampleVec, SourcePattern, Widened};
-use super::ink_map::SpotTables;
 use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
-use super::{CanvasBuffers, FinishedCanvas, PageRenderer};
+use super::{CanvasBuffers, PageRenderer};
 use crate::resources::transfer::Transfer;
 use crate::separation::Separator;
 
@@ -132,49 +131,6 @@ fn initial_fill<P: Pixel>(alpha: bool) -> P::Sample {
     }
 }
 
-/// Convert the ink canvas `ink` into `out`, of its size and depth, one
-/// row at a time through `row` (eight ink samples a pixel to the
-/// `Q::NCOMPS` samples of `out`: sRGB by [`ink_to_rgb_row`] or
-/// [`ink_to_rgb_row16`], CMYK by [`ink_to_cmyk_row`] or
-/// [`ink_to_cmyk_row16`]), copying its alpha.
-fn ink_into<P: Pixel, Q: Pixel<Sample = P::Sample>>(
-    ink: &Bitmap<P>,
-    out: &mut Bitmap<Q>,
-    row: impl Fn(&[P::Sample], &mut [P::Sample]),
-) {
-    let n = ink.width as usize;
-    for y in 0..ink.height {
-        row(
-            &ink.row_samples(y)[..n * 8],
-            &mut out.row_samples_mut(y)[..n * Q::NCOMPS],
-        );
-    }
-    if let (Some(src), Some(dst)) = (ink.alpha_plane(), out.alpha_plane_mut()) {
-        dst.copy_from_slice(src);
-    }
-}
-
-/// A bitmap of pixels `Q` of the size and alpha of `ink`, built in
-/// `held`, holding the conversion of `ink` through `row` (see
-/// [`ink_into`]).
-fn try_ink_into<P: Pixel, Q: Pixel<Sample = P::Sample>>(
-    ink: &Bitmap<P>,
-    held: &mut BitmapBuffers<P::Sample>,
-    row: impl Fn(&[P::Sample], &mut [P::Sample]),
-) -> Result<Bitmap<Q>, raster::BitmapAllocError> {
-    let alpha = ink.has_alpha();
-    let mut out = Bitmap::<Q>::try_new_filled_in(
-        held.take_for(alpha),
-        ink.width,
-        ink.height,
-        1,
-        alpha,
-        P::Sample::default(),
-    )?;
-    ink_into(ink, &mut out, row);
-    Ok(out)
-}
-
 /// Fill one Gouraud-shaded triangle `tri` of vertices of `N` samples of
 /// type `V` onto `b` through `pipe`, clipped to `clip`: each span of the
 /// interpolated vertex colours is handed to `span`, which runs its second
@@ -265,73 +221,6 @@ impl PageCanvas {
     /// Whether the canvas has an alpha plane.
     pub(super) const fn has_alpha(&self) -> bool {
         with_canvas!(self, |b| b.has_alpha())
-    }
-
-    /// The canvas as sRGB pixels at its depth, keeping its alpha plane,
-    /// or, for an ink canvas when `cmyk`, as CMYK (see
-    /// [`Self::try_into_finished_in`]).
-    ///
-    /// # Panics
-    ///
-    /// When the allocator refuses the finished bitmap.
-    pub(super) fn into_finished(self, spots: &SpotTables<'_>, cmyk: bool) -> FinishedCanvas {
-        self.try_into_finished_in(spots, cmyk, &mut CanvasBuffers::default())
-            .expect("the finished bitmap is allocated")
-    }
-
-    /// The canvas as sRGB pixels at its depth, keeping its alpha plane; an
-    /// ink canvas converts through [`ink_to_rgb_row`] or
-    /// [`ink_to_rgb_row16`] with the spot colourants `spots`, or, when
-    /// `cmyk`, to its process ink with the spots folded in
-    /// ([`ink_to_cmyk_row`], [`ink_to_cmyk_row16`]).
-    ///
-    /// The bitmap of an ink canvas is built in the buffers of `buffers` of
-    /// its model and depth ([`Bitmap::try_new_filled_in`]), and the ink
-    /// canvas's storage is then reclaimed into its ink buffers; an RGB
-    /// canvas is returned as it is and `buffers` are left as they are.
-    ///
-    /// # Errors
-    ///
-    /// The allocator refused the bitmap of an ink canvas.
-    pub(super) fn try_into_finished_in(
-        self,
-        spots: &SpotTables<'_>,
-        cmyk: bool,
-        buffers: &mut CanvasBuffers,
-    ) -> Result<FinishedCanvas, raster::BitmapAllocError> {
-        let (narrow, wide) = (&spots.narrow, &spots.wide);
-        Ok(match (self, cmyk) {
-            (Self::Rgb(bitmap), _) => FinishedCanvas::Rgb8(bitmap),
-            (Self::Rgb16(bitmap), _) => FinishedCanvas::Rgb16(bitmap),
-            (Self::Ink(ink), false) => {
-                let rgb = try_ink_into(&ink, &mut buffers.rgb, |i, o| {
-                    ink_to_rgb_row(i, narrow, o);
-                })?;
-                buffers.ink.reclaim(ink);
-                FinishedCanvas::Rgb8(rgb)
-            }
-            (Self::Ink16(ink), false) => {
-                let rgb = try_ink_into(&ink, &mut buffers.rgb16, |i, o| {
-                    ink_to_rgb_row16(i, wide, o);
-                })?;
-                buffers.ink16.reclaim(ink);
-                FinishedCanvas::Rgb16(rgb)
-            }
-            (Self::Ink(ink), true) => {
-                let out = try_ink_into(&ink, &mut buffers.cmyk, |i, o| {
-                    ink_to_cmyk_row(i, narrow, o);
-                })?;
-                buffers.ink.reclaim(ink);
-                FinishedCanvas::Cmyk8(out)
-            }
-            (Self::Ink16(ink), true) => {
-                let out = try_ink_into(&ink, &mut buffers.cmyk16, |i, o| {
-                    ink_to_cmyk_row16(i, wide, o);
-                })?;
-                buffers.ink16.reclaim(ink);
-                FinishedCanvas::Cmyk16(out)
-            }
-        })
     }
 
     /// Composite the canvas, a page group with an alpha plane, onto opaque
@@ -1083,6 +972,8 @@ impl CanvasSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::page::FinishedCanvas;
+    use crate::renderer::page::ink_map::SpotTables;
     use color::cmyk::rgb_to_ink;
 
     /// The 8-bit RGB bitmap of a finished canvas.
@@ -1091,7 +982,7 @@ mod tests {
             narrow: [None; 4],
             wide: [None; 4],
         };
-        match canvas.into_finished(&spots, false) {
+        match canvas.into_finished(&spots, &crate::renderer::page::finished::InkFinish::SRGB) {
             FinishedCanvas::Rgb8(b) => b,
             other => panic!("an 8-bit RGB canvas, not {other:?}"),
         }

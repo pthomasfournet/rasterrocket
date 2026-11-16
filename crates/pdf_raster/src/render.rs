@@ -783,11 +783,13 @@ impl<'a> PageJob<'a> {
 /// The canvas page `page_id` of `session` is painted on under `params`:
 /// for a CMYK page an ink canvas finished as CMYK, simulating overprint
 /// when the session does, whatever space the page's transparency group
-/// declares; otherwise an ink canvas finished as sRGB when the page's
-/// group composites in CMYK (ISO 32000-2 §11.4.7) or the session simulates
-/// overprint and some graphics state the page draws with sets it,
-/// simulating overprint in the latter case; an RGB canvas of the working
-/// space otherwise.
+/// declares; otherwise, when the session simulates overprint and some
+/// graphics state the page draws with sets it, an ink canvas of the
+/// process-ink model finished as sRGB, simulating overprint; when the
+/// page's group composites in CMYK (ISO 32000-2 §11.4.7), an ink canvas of
+/// its ICC profile finished as RGB of the working space, or of the
+/// process-ink model finished as sRGB for `DeviceCMYK`; an RGB canvas of
+/// the working space otherwise.
 ///
 /// A CMYK page separates the colours that are not CMYK through the
 /// session's CMYK output profile, under `params.intent`, else under the
@@ -829,17 +831,22 @@ fn canvas_request(
     let preview = session.overprint
         && pdf_interp::page_uses_overprint(&session.doc, page_id, session.annotations);
     let declared = pdf_interp::page_group_space(&session.doc, page_id);
-    let cmyk_group = matches!(
-        declared,
-        Some(pdf_interp::resources::GroupSpace::Cmyk { .. })
-    );
-    Ok(if preview || cmyk_group {
-        pdf_interp::CanvasRequest::ProcessRgb { overprint: preview }
-    } else {
-        match crate::output::working_space(session, declared) {
+    let cmyk_group = match declared {
+        Some(pdf_interp::resources::GroupSpace::Cmyk { profile }) => Some(profile),
+        _ => None,
+    };
+    Ok(match cmyk_group {
+        Some(Some(profile)) if !preview => pdf_interp::CanvasRequest::ProfileRgb {
+            profile,
+            space: crate::output::working_space(session, declared),
+        },
+        _ if preview || cmyk_group.is_some() => {
+            pdf_interp::CanvasRequest::ProcessRgb { overprint: preview }
+        }
+        _ => match crate::output::working_space(session, declared) {
             pdf_interp::WorkingSpace::Wide => pdf_interp::CanvasRequest::WideRgb,
             pdf_interp::WorkingSpace::Srgb => pdf_interp::CanvasRequest::Rgb,
-        }
+        },
     })
 }
 

@@ -310,8 +310,9 @@ pub(crate) fn warn_group_spaces(
 
 /// The warnings, each the first of its kind in the session, of the
 /// transparency-group colour spaces page `page_num` composited in an
-/// approximation: a CMYK ICC space composited through the process-ink
-/// model, a `CalRGB` or non-sRGB RGB ICC space in the canvas's RGB space.
+/// approximation: a CMYK ICC space whose profile does not separate,
+/// composited through the process-ink model, a `CalRGB` or non-sRGB RGB
+/// ICC space in the canvas's RGB space.
 pub(crate) fn group_space_warnings(
     session: &RasterSession,
     page_num: u32,
@@ -322,8 +323,9 @@ pub(crate) fn group_space_warnings(
     let mut warnings = Vec::new();
     if approximated.cmyk_profile && once(&flags.cmyk_profile) {
         warnings.push(format!(
-            "page {page_num} has a transparency group in a CMYK ICC colour space: it \
-             composites as DeviceCMYK does, through the process-ink model"
+            "page {page_num} has a transparency group in a CMYK ICC colour space whose \
+             profile does not separate: it composites as DeviceCMYK does, through the \
+             process-ink model"
         ));
     }
     if approximated.rgb_profile && once(&flags.rgb_profile) {

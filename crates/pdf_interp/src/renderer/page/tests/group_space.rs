@@ -548,3 +548,5 @@ fn a_cal_luminosity_mask_takes_the_luminance_of_its_colour() {
     let device = masked("/DeviceRGB", "", "/C cs 0.5 0.5 0.5 sc 0 0 10 10 re f");
     assert!(device.abs_diff(128) <= 1, "{device}");
 }
+
+mod profile;

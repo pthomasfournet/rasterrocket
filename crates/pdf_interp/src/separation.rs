@@ -16,10 +16,14 @@
 //! generation and undercolour removal.  The separator of a paint is the
 //! page's with the graphics state's parameters taken in (see
 //! [`Separator::for_paint`]): its black-generation and undercolour-removal
-//! functions, and the rendering intent a profile separates it under.
+//! functions, and the rendering intent a profile separates it under.  A
+//! transparency group of an ICC CMYK space over an RGB canvas is painted
+//! in its profile's ink, separated by the profile ([`GroupInk`]).
 
+mod group;
 mod press;
 
+pub(crate) use group::GroupInk;
 pub use press::PressSeparation;
 
 use std::sync::Arc;
@@ -51,6 +55,20 @@ pub enum CanvasRequest {
         /// Whether overprint is simulated.
         overprint: bool,
     },
+    /// The process and spot inks of an ICC CMYK space, finished as RGB of
+    /// `space` through its profile: a page whose transparency group
+    /// composites in the CMYK space of profile stream `profile`, colours
+    /// not given in it separated into its ink from `space` (see
+    /// [`GroupInk`]).  A profile that cannot separate paints as
+    /// [`Self::ProcessRgb`] without overprint does, finished as RGB of
+    /// `space`, which the page's diagnostics report
+    /// ([`GroupSpaceApproximations::cmyk_profile`](crate::renderer::GroupSpaceApproximations::cmyk_profile)).
+    ProfileRgb {
+        /// The profile stream of the page group's space.
+        profile: pdf::ObjectId,
+        /// The working space the page is finished as.
+        space: crate::WorkingSpace,
+    },
     /// Process and spot inks finished as CMYK, overprint simulated when
     /// `overprint` and every paint knocking out every channel otherwise;
     /// colours not given as ink are separated by `separation`.
@@ -77,6 +95,7 @@ impl CanvasRequest {
         match self {
             Self::Rgb | Self::ProcessRgb { .. } => crate::WorkingSpace::Srgb,
             Self::WideRgb => crate::WorkingSpace::Wide,
+            Self::ProfileRgb { space, .. } => *space,
             Self::Cmyk { separation, .. } => separation.space(),
         }
     }
@@ -87,12 +106,41 @@ impl CanvasRequest {
         matches!(self, Self::Cmyk { .. })
     }
 
-    /// The ink-canvas settings of the request.
+    /// The ink-canvas settings of the request for a page of `doc`, the
+    /// working space its colours convert into, and whether a profile that
+    /// cannot separate is approximated by the process-ink model.
+    pub(crate) fn ink_setup_in(
+        &self,
+        doc: &pdf::Document,
+    ) -> (InkSetup, crate::WorkingSpace, bool) {
+        let Self::ProfileRgb { profile, space } = self else {
+            return (self.ink_setup(), self.space(), false);
+        };
+        let group = GroupInk::load(doc, *profile, (*space, crate::ColourIntent::INITIAL.bpc));
+        let approximated = group.is_none();
+        let (separator, working) = group
+            .map_or((Separator::Model, crate::WorkingSpace::Srgb), |ink| {
+                (Separator::Group(ink), *space)
+            });
+        let setup = InkSetup {
+            overprint: false,
+            cmyk: false,
+            separator,
+        };
+        (setup, working, approximated)
+    }
+
+    /// The ink-canvas settings of the request; a profile's request
+    /// separates by the process-ink model (see [`Self::ink_setup_in`]).
     pub(crate) fn ink_setup(&self) -> InkSetup {
         match self {
             Self::Rgb | Self::WideRgb => InkSetup::PREVIEW,
             Self::ProcessRgb { overprint } => InkSetup {
                 overprint: *overprint,
+                ..InkSetup::PREVIEW
+            },
+            Self::ProfileRgb { .. } => InkSetup {
+                overprint: false,
                 ..InkSetup::PREVIEW
             },
             Self::Cmyk {
@@ -282,6 +330,9 @@ pub(crate) enum Separator {
     Device(DeviceBlack),
     /// An output profile's conversion under one intent.
     Profile(ProfileInk),
+    /// The conversion into the ink of a transparency group's ICC CMYK
+    /// space under one intent (see [`GroupInk`]).
+    Group(GroupInk),
 }
 
 impl Separator {
@@ -299,9 +350,32 @@ impl Separator {
     /// a profile's table, sRGB for the models.
     #[must_use]
     pub(crate) fn space(&self) -> crate::WorkingSpace {
+        self.profile_ink()
+            .map_or(crate::WorkingSpace::Srgb, |ink| ink.table.space)
+    }
+
+    /// The profile's conversion of a profile separator.
+    const fn profile_ink(&self) -> Option<&ProfileInk> {
         match self {
-            Self::Model | Self::Device(_) => crate::WorkingSpace::Srgb,
-            Self::Profile(ink) => ink.table.space,
+            Self::Model | Self::Device(_) => None,
+            Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => Some(ink),
+        }
+    }
+
+    /// Whether a `DeviceCMYK` colour paints its components as ink; in a
+    /// group's ICC CMYK space it is the process-ink model's colour, which
+    /// separates as a colour not given as ink does.
+    #[must_use]
+    pub(crate) const fn paints_device_cmyk(&self) -> bool {
+        !matches!(self, Self::Group(_))
+    }
+
+    /// The group's ink a [`Self::Group`] separates into.
+    #[must_use]
+    pub(crate) const fn group_ink(&self) -> Option<&GroupInk> {
+        match self {
+            Self::Group(ink) => Some(ink),
+            _ => None,
         }
     }
 
@@ -312,21 +386,19 @@ impl Separator {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
             Self::Device(black) => black.separate(rgb),
-            Self::Profile(ink) => ink.table.ink(rgb),
+            Self::Profile(ink) | Self::Group(GroupInk { ink, .. }) => ink.table.ink(rgb),
         }
     }
 
     /// The conversion of the colours of `space`, a four-component ICC
-    /// space, to the ink of the separator's output profile, when its
-    /// profile is not the output profile (see
+    /// space, to the ink of the separator's profile, when its profile is
+    /// not the separator's (see
     /// [`OutputProfile::cmyk_link`](crate::OutputProfile::cmyk_link));
     /// `None` for any other separator or space, whose components are the
     /// ink they paint.
     #[must_use]
     pub(crate) fn cmyk_link(&self, doc: &pdf::Document, space: &ColorSpace) -> Option<CmykLink> {
-        let Self::Profile(ink) = self else {
-            return None;
-        };
+        let ink = self.profile_ink()?;
         let ColorSpace::IccBased {
             n: 4,
             stream_id: Some(id),
@@ -358,6 +430,7 @@ impl Separator {
             Self::Device(_) => Self::Device(black.clone()),
             Self::Profile(ink) if ink.press.intent(intent) == ink.intent => self.clone(),
             Self::Profile(ink) => Self::Profile(ProfileInk::new(&ink.press, intent)),
+            Self::Group(ink) => Self::Group(ink.under(intent)),
         }
     }
 }

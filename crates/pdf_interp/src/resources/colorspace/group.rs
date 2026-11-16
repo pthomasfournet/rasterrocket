@@ -26,8 +26,9 @@ pub enum GroupSpace {
     Rgb(RgbGroupSpace),
     /// Four subtractive components: `DeviceCMYK` or a CMYK ICC space.
     Cmyk {
-        /// Whether the space is an ICC profile rather than `DeviceCMYK`.
-        profiled: bool,
+        /// The profile stream of an ICC space; `None` for `DeviceCMYK` and
+        /// an ICC space without a stream, which converts as `DeviceCMYK`.
+        profile: Option<ObjectId>,
     },
 }
 
@@ -53,7 +54,7 @@ impl GroupSpace {
         match space {
             ColorSpace::DeviceGray => Some(Self::Gray),
             ColorSpace::DeviceRgb => Some(Self::Rgb(RgbGroupSpace::Device)),
-            ColorSpace::DeviceCmyk => Some(Self::Cmyk { profiled: false }),
+            ColorSpace::DeviceCmyk => Some(Self::Cmyk { profile: None }),
             ColorSpace::Cal(cal) => match cal.ncomponents() {
                 1 => Some(Self::Gray),
                 _ => Some(Self::Rgb(RgbGroupSpace::Profiled)),
@@ -62,7 +63,7 @@ impl GroupSpace {
                 (1, _) => Some(Self::Gray),
                 (3, Some(id)) => icc_rgb(doc, *id),
                 (3, None) => Some(Self::Rgb(RgbGroupSpace::Device)),
-                (4, _) => Some(Self::Cmyk { profiled: true }),
+                (4, id) => Some(Self::Cmyk { profile: *id }),
                 _ => None,
             },
             ColorSpace::Lab(_)
@@ -118,15 +119,13 @@ impl GroupSpace {
         )
     }
 
-    /// Whether the space approximates its declared space: an ICC CMYK
-    /// space composites as `DeviceCMYK`, and a `CalRGB` or non-sRGB ICC
-    /// space in the RGB space of the canvas.
+    /// Whether the space approximates its declared space: a `CalRGB` or
+    /// non-sRGB ICC space composites in the RGB space of the canvas.  An
+    /// ICC CMYK space composites in its profile's ink, unless the profile
+    /// cannot separate, which only the render finds.
     #[must_use]
     pub const fn approximated(self) -> bool {
-        matches!(
-            self,
-            Self::Cmyk { profiled: true } | Self::Rgb(RgbGroupSpace::Profiled)
-        )
+        matches!(self, Self::Rgb(RgbGroupSpace::Profiled))
     }
 }
 
@@ -204,7 +203,7 @@ mod tests {
         );
         assert_eq!(
             read("/DeviceCMYK"),
-            Some(GroupSpace::Cmyk { profiled: false })
+            Some(GroupSpace::Cmyk { profile: None })
         );
     }
 
@@ -259,7 +258,9 @@ mod tests {
         );
         assert_eq!(
             read_in("[/ICCBased 4 0 R]", &profile(4, b"")),
-            Some(GroupSpace::Cmyk { profiled: true })
+            Some(GroupSpace::Cmyk {
+                profile: Some((4, 0))
+            })
         );
     }
 
@@ -274,15 +275,20 @@ mod tests {
     fn a_reference_resolves_to_its_space() {
         assert_eq!(
             read_in("4 0 R", &[(4, b"/DeviceCMYK".to_vec())]),
-            Some(GroupSpace::Cmyk { profiled: false })
+            Some(GroupSpace::Cmyk { profile: None })
         );
     }
 
     #[test]
-    fn approximated_spaces_are_profiled_cmyk_and_non_srgb_rgb() {
-        assert!(GroupSpace::Cmyk { profiled: true }.approximated());
+    fn approximated_spaces_are_non_srgb_rgb() {
         assert!(GroupSpace::Rgb(RgbGroupSpace::Profiled).approximated());
-        assert!(!GroupSpace::Cmyk { profiled: false }.approximated());
+        assert!(
+            !GroupSpace::Cmyk {
+                profile: Some((4, 0))
+            }
+            .approximated()
+        );
+        assert!(!GroupSpace::Cmyk { profile: None }.approximated());
         assert!(!GroupSpace::Rgb(RgbGroupSpace::Srgb).approximated());
         assert!(!GroupSpace::Gray.approximated());
     }

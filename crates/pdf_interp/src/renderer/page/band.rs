@@ -125,10 +125,10 @@ impl PageRenderer<'_> {
             filter_counts: self.filter_counts,
             trace: self.trace.take(),
         };
-        let cmyk = self.ink.cmyk;
+        let finish = self.ink_finish();
         let (canvas, mut buffers, ink_map, _) = self.into_parts(!transparent);
         let mut finished =
-            canvas.try_into_finished_in(&ink_map.borrow().luts(), cmyk, &mut buffers)?;
+            canvas.try_into_finished_in(&ink_map.borrow().luts(), &finish, &mut buffers)?;
         if transparent {
             finished.zero_transparent_colour();
         }
