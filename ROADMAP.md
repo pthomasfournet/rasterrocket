@@ -3711,6 +3711,36 @@ additive groups.**
   `{ profiled: bool }`, and `GroupSpace::approximated` covers non-sRGB RGB
   spaces only; `CanvasRequest::ProfileRgb { profile, space }` is new.
 
+**Unreleased on master: the GPU and SIMD paths at 16 bits.**
+- **SIMD 16-bit deskew rotation.** The AVX-512 and NEON row kernels of the
+  bilinear rotation are generic over the sample depth (`deskew/simd.rs`) and
+  bit-exact with the scalar kernel at 8 and 16 bits, padded or not. On
+  2900×2900 at 1.5°, a 16-bit page rotates in 13.4 ms instead of 35.6 ms on
+  the Ryzen 9 9900X3D and in 16.8 ms instead of 22.9 ms on the A18 Pro. The
+  NEON tier now forms its footprint indices lane by lane. Before, it was
+  slower than the scalar loop on the A18 Pro at 8 bits (25.9 against
+  21.3 ms); it now takes 16.1 ms.
+- **NPP 16-bit rotation.** Under `--backend cuda` with `gpu-deskew`, a 16-bit
+  page rotates through `nppiRotate_16u_C1R_Ctx`, as an 8-bit one goes through
+  the 8u call. It is within one 16-bit level of the CPU's at every interior
+  pixel and takes 6.4 ms against 14.8 ms (2900×2900, upload and download
+  included).
+- **ICC CMYK grid at 16 bits.** The CUDA and Vulkan grid kernels also write
+  the 16-bit outputs (`CmykGrid::convert16`, `gpu::backend::icc_clut16`). An
+  8-bit ICC CMYK image on a 16-bit canvas, or in the wide working space,
+  whose `/Decode` is exactly `[0 1]`, now converts on the device at
+  ≥ 128 000 px. The result is byte-identical to the CPU's 16-bit transform of
+  the widened samples, which reads the same cells. The Vulkan exactness probe
+  checks both widths. A 600 000 px page on a 16-bit canvas takes 4.4 ms
+  (CUDA) and 4.8 ms (Vulkan) instead of 12.2 ms on the CPU.
+- **Image cache on a 16-bit canvas.** The decoder keeps a 16-bit canvas's
+  JPEGs out of the image cache, whose blit kernel samples at 8 bits. A
+  device-resident image that reaches such a canvas is drawn from its host
+  copy, or recorded as an image failure when the read-back fails. It no
+  longer goes through the 8-bit device blit.
+- **API changes.** `IccClutParams` has a `wide` field;
+  `gpu::npp_rotate::rotate_gray16` and `gpu::backend::icc_clut16` are new.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
