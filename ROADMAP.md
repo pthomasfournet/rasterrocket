@@ -3848,6 +3848,25 @@ combine blend modes with overprint or spot colours are byte-identical at
 40 dpi plain, with `--overprint` and as overprinted CMYK. No archive page
 overprints under a blend mode.
 
+**Unreleased on master: per-stage times of a GPU page, and a benchmark of
+the production GPU page path.** `VulkanBackend::render_page_timed` renders
+a page as `render_page` does and returns `PageTimes`: the host stages
+(binning and table packing, input writes, recording, submit and wait, the
+copy into the caller's samples) and the device stages (input copies,
+raster, page copy) from timestamp queries the page's command buffer writes
+between them. `render_page` records no query and reads no clock. The
+doc-hidden `pdf_raster::dev::device_page_commands` returns the paint
+commands the GPU page queue records for a page, or the reason it would
+render on the CPU. `page_gpu_bench` now measures exactly the production
+path through these two, and its own command list, bounds code, kernel copy
+and Vulkan bootstrap are gone (about 1 400 lines). So are its two
+bench-only kernels, the per-tile-row raster and GPU binning, which
+production does not use. On 5 pages of 300 stars at 150 dpi, a GPU page
+takes 25.8 ms on the RTX 5070 (raster 0.44 ms) and 39.1 ms on RADV (raster
+14.1 ms), against 25.3 ms for the CPU page; the recording is 23 ms of it on
+both. `--gpu-pages` and plain renders of the fixtures are byte-identical to
+before on both GPUs.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
