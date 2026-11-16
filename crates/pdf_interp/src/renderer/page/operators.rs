@@ -382,6 +382,9 @@ impl PageRenderer<'_> {
                     .borrow()
                     .get_inline(&key, self.keeps_tints());
                 if let Some(decoded) = memoized {
+                    if let Some(reason) = &decoded.partial {
+                        self.record_partial_image(None, reason.clone());
+                    }
                     self.blit_image(&decoded, None);
                     return;
                 }

@@ -11,20 +11,25 @@
 //! them.  A hairline is appended as the pixel runs the CPU paints
 //! (`raster::hairline_runs`).  A glyph composited from a coverage bitmap
 //! is appended as a mask command reading that bitmap (see [`glyphs`]).
+//! An image is appended as an image command sampling the samples the CPU
+//! would sample, through the CPU's sampling tables (see [`images`]).
 //! The device then composites every command
 //! with the CPU's arithmetic, so the page it renders is the page the CPU
 //! renders.
 //!
 //! A recorded paint composites as the CPU's `aa` pipe over an opaque RGB
-//! canvas of 8 or 16 bits per sample: `Normal` blend, no soft mask, no
-//! group backdrop, a rectangular clip (glyphs: no clipping text rendering
-//! mode either), identity transfer (a solid colour is
-//! mapped through the transfer function before painting).  Its colour and
+//! canvas of 8 or 16 bits per sample (an image at full constant alpha:
+//! as the CPU's direct image composite): `Normal` blend, no soft mask in
+//! the graphics state, no group backdrop, a rectangular clip (glyphs: no
+//! clipping text rendering mode either), identity transfer (a solid
+//! colour is mapped through the transfer function before painting; an
+//! image's samples are not).  Its colour and
 //! alpha are recorded as samples of the canvas's depth.  Anything else
 //! refuses the recording with a reason, and the content stream stops
 //! there: the caller renders the page on the CPU, whole.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use color::{Sample, SampleDepth};
 use gpu::backend::BackendError;
@@ -38,6 +43,7 @@ use raster::types::BlendMode;
 use raster::{aa_stroke_outline, hairline_runs};
 
 use super::canvas::{CanvasKind, PageCanvas};
+use super::image_memo::SharedImageMemo;
 use super::paint::FillRule;
 use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
@@ -45,6 +51,7 @@ use glyphs::HeldMasks;
 pub(super) use glyphs::PlacedGlyph;
 
 mod glyphs;
+mod images;
 
 /// A page being recorded.
 pub(super) struct Recording {
@@ -69,11 +76,10 @@ pub enum DeviceRecording {
 }
 
 /// Why `op` cannot be recorded, if it cannot: the operators that paint
-/// other than by filling or stroking a path or showing text.
+/// other than by filling or stroking a path, showing text or drawing an
+/// `XObject` or inline image.
 const fn unsupported_operator(op: &Operator<'_>) -> Option<&'static str> {
     match op {
-        Operator::PaintXObject(_) => Some("XObject"),
-        Operator::InlineImage { .. } => Some("inline image"),
         Operator::PaintShading(_) => Some("shading"),
         Operator::Type3GlyphWidth(..) | Operator::Type3GlyphWidthBBox(..) => Some("Type 3 glyph"),
         _ => None,
@@ -100,10 +106,11 @@ const fn ineligible_canvas(ink: bool, group: bool, vector_antialias: bool) -> Op
 ///
 /// It is ruled out when it paints on an ink canvas (`ink`), as a page
 /// group (`group`) or with vector antialiasing off (`!vector_antialias`),
-/// or when an operator paints other than by filling or stroking a path or
-/// showing text.  A page not ruled out may still be refused while it is
-/// recorded, by the graphics state a paint is made under or the way a
-/// glyph is drawn.
+/// or when an operator paints other than by filling or stroking a path,
+/// showing text or drawing an `XObject` or inline image.  A page not ruled
+/// out may still be refused while it is recorded, by the graphics state a
+/// paint is made under, the way a glyph is drawn or the way an image is
+/// sampled.
 #[must_use]
 pub fn device_page_ineligible(
     ink: bool,
@@ -128,11 +135,17 @@ const fn command_refusal(e: &PageCommandsError) -> &'static str {
 /// to the renderer that renders it on the CPU.
 ///
 /// It holds the page's deadline and cancellation flag, which the two
-/// passes share, and the unsupported operators already warned about.
+/// passes share, the unsupported operators already warned about, and the
+/// page's image decodes, which the second pass draws without decoding
+/// again.
 pub struct DeviceFallback {
     budget: WorkBudget,
     warned_unknown_ops: HashSet<Vec<u8>>,
     warned_unknown_ops_capped: bool,
+    /// The images the first pass decoded, and the device colour
+    /// conversions their decodes counted.
+    image_memo: SharedImageMemo,
+    device_icc: (u32, u32),
 }
 
 impl Recording {
@@ -281,6 +294,11 @@ impl PageRenderer<'_> {
             budget: self.remaining_budget(),
             warned_unknown_ops: std::mem::take(&mut self.warned_unknown_ops),
             warned_unknown_ops_capped: self.warned_unknown_ops_capped,
+            image_memo: Rc::clone(&self.image_memo),
+            device_icc: (
+                self.diag.device_icc_conversions,
+                self.diag.device_icc_failures,
+            ),
         }
     }
 
@@ -289,7 +307,9 @@ impl PageRenderer<'_> {
     /// page deadline and cancellation flag, this pass with its own operator
     /// budget, so the page executes the operators it would execute on the
     /// CPU alone; an operator warned about in the first pass is not warned
-    /// about again.  Call before [`Self::execute`].
+    /// about again; an image the first pass decoded is drawn from its
+    /// decode, whose device colour conversions this pass counts.  Call
+    /// before [`Self::execute`].
     pub fn resume_after_device(&mut self, fallback: DeviceFallback) {
         self.adopt_budget(WorkBudget {
             ops: self.op_budget,
@@ -297,6 +317,10 @@ impl PageRenderer<'_> {
         });
         self.warned_unknown_ops = fallback.warned_unknown_ops;
         self.warned_unknown_ops_capped = fallback.warned_unknown_ops_capped;
+        self.image_memo = fallback.image_memo;
+        let (conversions, failures) = fallback.device_icc;
+        self.diag.device_icc_conversions = conversions;
+        self.diag.device_icc_failures = failures;
     }
 
     /// Render `page`, a recording of this page, on `backend` into the

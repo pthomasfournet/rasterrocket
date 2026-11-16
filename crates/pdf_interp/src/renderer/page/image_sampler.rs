@@ -632,11 +632,17 @@ impl SampleGrid {
         self.filter
     }
 
+    /// The width and height in samples of the image the grid samples.
+    #[cfg(feature = "vulkan")]
+    pub(super) const fn source_size(&self) -> (u32, u32) {
+        (self.img_w, self.img_h)
+    }
+
     /// The column table, `(x1 - x0) * ENTRY_WORDS` words, and the row
     /// table, `(y1 - y0) * ENTRY_WORDS` words; `None` when the draw's terms
     /// exceed the Q32 table range and the grid evaluates the inverse matrix
     /// per pixel instead.
-    #[cfg(any(feature = "cache", test))]
+    #[cfg(any(feature = "cache", feature = "vulkan", test))]
     pub(super) fn tables(&self) -> Option<(&[u32], &[u32])> {
         match &self.map {
             GridMap::Tables { cols, rows } => Some((cols, rows)),
@@ -757,12 +763,12 @@ impl SampleGrid {
 /// resampled at.  Where the image admits a pixel centre that rounding
 /// places just off the mask, the nearest mask pixel is used.
 pub(super) struct MaskSampler<'a> {
-    alpha: &'a [u8],
+    pub(super) alpha: &'a [u8],
     /// The mask's 16-bit alpha, when it was decoded at 16 bits.
-    alpha16: Option<&'a [u16]>,
+    pub(super) alpha16: Option<&'a [u16]>,
     width: usize,
     /// `None` when the mask shares the image's grid.
-    grid: Option<SampleGrid>,
+    pub(super) grid: Option<SampleGrid>,
 }
 
 impl<'a> MaskSampler<'a> {

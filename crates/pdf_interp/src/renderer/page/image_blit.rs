@@ -486,6 +486,21 @@ impl PageRenderer<'_> {
         grid_clip: &mut GridClip<'_>,
         (overprint, separator): (Option<ChannelMask>, &Separator),
     ) -> Result<(), String> {
+        // A page recorded for the device raster takes the host copy of
+        // device-resident samples.
+        #[cfg(all(feature = "cache", feature = "vulkan"))]
+        if self.device_recording() && matches!(img.data, crate::resources::image::ImageData::Gpu(_))
+        {
+            return match self.host_copy(img, "a recorded page") {
+                Some(host) => {
+                    self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator))
+                }
+                None => {
+                    self.refuse_device("device-resident image");
+                    Ok(())
+                }
+            };
+        }
         // Device-resident samples are drawn by the device blit, or through
         // the CPU path below from their host copy.
         #[cfg(feature = "cache")]
@@ -527,6 +542,11 @@ impl PageRenderer<'_> {
             }
             None => None,
         };
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            self.record_device_image(img, (wide, bytes), mask.as_ref(), grid);
+            return Ok(());
+        }
         // The shape is taken at the canvas's depth, so a 16-bit mask keeps
         // its levels whatever the depth of the image's samples.
         let deep = self.canvas.kind().depth() == color::SampleDepth::Sixteen;

@@ -149,7 +149,7 @@ fn declined_pages_render_on_the_cpu_with_the_reason() {
             &b"0 g BT /F1 12 Tf 7 Tr 10 10 Td (a) Tj ET 0 0 400 400 re f"[..],
             "text clip mode",
         ),
-        (b"1 0 0 rg 10 10 100 100 re f /Im Do", "XObject"),
+        (b"1 0 0 rg 10 10 100 100 re f /Sh sh", "shading"),
         (
             b"10 10 m 200 10 l 100 200 l h W n 0 0 1 rg 0 0 400 400 re f",
             "path clip",
@@ -269,9 +269,9 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
             assert_identical(&cpu_render(&cpu, page), &got, &what);
         }
     }
-    // The text pages of the fixtures render on the device.
+    // The text and image pages of the fixtures render on the device.
     assert!(
-        found < FIXTURES.len() || on_device >= 8,
+        found < FIXTURES.len() || on_device >= 30,
         "{on_device} fixture pages rendered on the device"
     );
 }

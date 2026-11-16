@@ -31,6 +31,12 @@ pub(crate) fn image_draw_size(ctm: &[f64; 6]) -> Option<(u32, u32)> {
     Some((extent(ctm[0], ctm[1])?, extent(ctm[2], ctm[3])?))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The image `XObject` decodes the renderers of this thread started.
+    pub(super) static IMAGE_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Where a form's operators come from.
 #[derive(Clone, Copy)]
 enum FormContent<'a> {
@@ -97,6 +103,9 @@ impl PageRenderer<'_> {
             .borrow()
             .get(key, draw_size, self.keeps_tints());
         if let Some(decoded) = memoized {
+            if let Some(reason) = &decoded.partial {
+                self.record_partial_image(Some(name), reason.clone());
+            }
             self.draw_image_xobject(name, &decoded);
             return;
         }
@@ -213,6 +222,8 @@ impl PageRenderer<'_> {
         name: &[u8],
         draw_size: Option<(u32, u32)>,
     ) -> (ImageResolution, bool) {
+        #[cfg(test)]
+        IMAGE_DECODES.with(|n| n.set(n.get() + 1));
         let curtailed = self.tint_budget.curtailments();
         #[cfg(feature = "nvjpeg2k")]
         let nvjpeg2k = self.nvjpeg2k_offered(name, draw_size);

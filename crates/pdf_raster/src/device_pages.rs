@@ -658,13 +658,13 @@ mod tests {
     /// opens no device, and the session's drop joins nothing.
     #[test]
     fn auto_opens_no_device_for_pages_it_cannot_take() {
-        const XOBJECT: &str = "0 g 0 0 10 10 re f /Im Do";
-        let doc = pdf(&[XOBJECT, XOBJECT]);
+        const SHADING: &str = "0 g 0 0 10 10 re f /Sh sh";
+        let doc = pdf(&[SHADING, SHADING]);
         let session = auto_session(doc.clone(), SessionConfig::vulkan_device_from_env());
         for page in 1..=2 {
             let (bitmap, outcome) =
                 render(&session, page, &RenderParams::new(2.0)).expect("render");
-            assert_eq!(outcome, DevicePage::Ineligible("XObject"));
+            assert_eq!(outcome, DevicePage::Ineligible("shading"));
             assert_eq!(bitmap, cpu(doc.clone(), page));
         }
         let pages = device_pages(&session);

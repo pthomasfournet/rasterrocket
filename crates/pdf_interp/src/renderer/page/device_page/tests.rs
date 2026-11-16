@@ -310,6 +310,7 @@ fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: b
     }
 }
 
+mod images;
 mod text;
 mod type3;
 
@@ -364,7 +365,7 @@ fn unsupported_paints_refuse_the_recording() {
         DeviceRecording::Recorded(_) => "",
     };
     assert_eq!(refused(b"BT /F1 12 Tf 5 5 Td (a) Tj ET"), "");
-    assert_eq!(refused(b"/Im Do"), "XObject");
+    assert_eq!(refused(b"/Im Do"), "");
     assert_eq!(refused(b"/Sh sh"), "shading");
     assert_eq!(refused(b"/M gs 0 0 10 10 re f"), "blend mode");
     assert_eq!(refused(b"/T gs 0 w 0 0 m 9 9 l S"), "translucent hairline");
@@ -383,10 +384,10 @@ fn unsupported_paints_refuse_the_recording() {
 
 #[test]
 fn operators_that_paint_otherwise_are_found_before_recording() {
-    let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET /Im Do");
+    let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET /Im Do /Sh sh");
     assert_eq!(
         device_page_ineligible(false, false, true, &ops),
-        Some("XObject")
+        Some("shading")
     );
     let ops = crate::content::parse(b"q 0 0 10 10 re f Q");
     assert_eq!(device_page_ineligible(false, false, true, &ops), None);
