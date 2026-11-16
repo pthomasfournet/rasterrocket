@@ -295,6 +295,40 @@ fn image_doc(dict: &str, samples: &[u8]) -> Document {
     ])
 }
 
+/// An `Indexed` image over `DeviceCMYK` paints its palette's ink, and one
+/// over a `Separation` space its palette's tints in the spot's channel.
+#[test]
+fn indexed_images_over_ink_paint_their_palette_ink() {
+    let doc = image_doc(
+        "/ColorSpace [/Indexed /DeviceCMYK 1 <ff000000 1a330080>] /BitsPerComponent 8",
+        &[1],
+    );
+    for depth in DEPTHS {
+        let page = render(&doc, (10, depth), &cmyk(false), b"10 0 0 10 0 0 cm /Im Do");
+        let want = [0x1au8, 0x33, 0, 0x80].map(|v| match depth {
+            SampleDepth::Eight => u16::from(v),
+            SampleDepth::Sixteen => u16::from_u8(v),
+        });
+        assert_eq!(at(&page, 5, 5), want, "{depth:?}");
+    }
+    let spot = image_doc(
+        &format!(
+            "/ColorSpace [/Indexed [/Separation /Spot /DeviceCMYK {}] 1 <00 80>] \
+             /BitsPerComponent 8",
+            super::tint_to_cmyk("0 0.91 0.76 0")
+        ),
+        &[1],
+    );
+    let page = render(
+        &spot,
+        (10, SampleDepth::Eight),
+        &cmyk(false),
+        b"10 0 0 10 0 0 cm /Im Do",
+    );
+    // The spot's tint 0x80 folds into its process equivalent.
+    assert_eq!(at(&page, 5, 5), [0, 116, 97, 0]);
+}
+
 #[test]
 fn device_cmyk_images_paint_their_samples() {
     let doc = image_doc(

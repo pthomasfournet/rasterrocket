@@ -29,6 +29,8 @@
 //! converts the samples as an `ICCBased` space of the same channel count
 //! would; otherwise the channel count selects the device space.
 
+mod palette;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,6 +49,19 @@ use crate::resources::dict_ext::DictExt as _;
 use crate::resources::icc_shaper::{ProfileConversion, RgbShaper};
 use crate::resources::lattice::{Axis, for_each_corner};
 use crate::{ColourTarget, WorkingSpace};
+
+/// Whether the colours of `space` are amounts of ink an ink canvas
+/// paints: colorant tints in a `Separation` or `DeviceN` space, process
+/// inks in `DeviceCMYK` or a four-component ICC space.
+const fn is_ink(space: &ColorSpace) -> bool {
+    matches!(
+        space,
+        ColorSpace::Separation { .. }
+            | ColorSpace::DeviceN { .. }
+            | ColorSpace::DeviceCmyk
+            | ColorSpace::IccBased { n: 4, .. }
+    )
+}
 
 // ── Codec output ──────────────────────────────────────────────────────────────
 
@@ -305,19 +320,12 @@ impl ImageColour {
     }
 
     /// Whether the image's samples are amounts of ink an ink canvas can
-    /// paint ([`Self::tints`]): colorant tints in a `Separation` or
-    /// `DeviceN` space, process inks in `DeviceCMYK` or a four-component
-    /// ICC space.
+    /// paint ([`Self::tints`]): those of a space of ink ([`is_ink`]).
     pub(super) const fn has_tints(&self) -> bool {
-        matches!(
-            self.space,
-            Some(
-                ColorSpace::Separation { .. }
-                    | ColorSpace::DeviceN { .. }
-                    | ColorSpace::DeviceCmyk
-                    | ColorSpace::IccBased { n: 4, .. }
-            )
-        )
+        match &self.space {
+            Some(space) => is_ink(space),
+            None => false,
+        }
     }
 
     /// Convert `samples` to the gray or RGB descriptor the blit draws.
@@ -443,10 +451,15 @@ impl ImageColour {
     /// The ink amounts of `samples` in the image's `Separation`, `DeviceN`
     /// or process CMYK space ([`Self::has_tints`]): each component mapped
     /// through its `/Decode` pair to a sample of the samples' depth, 0 no
-    /// ink and the maximum the full tint.  `None` for any other space, for samples whose channel
-    /// count is not the space's, and for samples that are not
-    /// host-resident.
+    /// ink and the maximum the full tint; for an `Indexed` image over a
+    /// space of ink, the tints of its palette entries
+    /// ([`Self::palette_tints`]).  `None` for any other space, for samples
+    /// whose channel count is not the space's, and for samples that are
+    /// not host-resident.
     pub(super) fn tints(&self, samples: &Samples) -> Option<ImageTints> {
+        if self.indexed() {
+            return self.palette_tints(samples);
+        }
         let space = self.space.as_ref().filter(|_| self.has_tints())?;
         let n = space.ncomponents();
         if samples.layout != Layout::Color(u8::try_from(n).ok()?) || self.decode.len() != n {
