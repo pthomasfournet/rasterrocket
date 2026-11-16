@@ -117,8 +117,11 @@ fn render(session: &RasterSession, page: u32) -> ((u32, u32, Vec<u8>), PageDiagn
 }
 
 /// Largest channel difference between the table interpolation and the
-/// profile transform on the fixture's samples.
-const TABLE_TOLERANCE: u8 = 4;
+/// profile transform on the fixture's samples: the device interpolates
+/// its 17⁴ nodes multilinearly, the transform interpolates its own grid
+/// in simplices, and the fixture's 6-node CLUT bends within the cells of
+/// both.
+const TABLE_TOLERANCE: u8 = 10;
 
 /// The device converts page 1's image and nothing on page 2, without a
 /// failure; page 2 is byte-identical to the CPU session's, page 1 within
