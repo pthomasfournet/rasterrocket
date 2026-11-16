@@ -2995,6 +2995,32 @@ pages 1–10 at 50 dpi, 3 of 236 pages change (127 468 pixels, mean ΔE00
 0.46, max 2.4); K-only text is unchanged, its antialiased edges being
 blends of the converted solid ink.
 
+**Unreleased on master: unclipped ICC grid nodes, and a GPU ICC session
+equal to a CPU one.** The CMYK and RGB input grids hold each node's
+working-space value unclipped (the sRGB curve extended beyond `[0, 1]`, in
+`[−1/2, 3/2]` at one bit less precision) and clip after interpolation, so
+a colour that leaves the gamut inside a grid cell is clipped where it
+leaves it. Against `transicc` the worst ΔE00 at 16 bits falls from 1.03
+to 0.48 (half-step lattice) on the v4 test printer, 0.70 to 0.16 (K ramp)
+on the v2 one, 0.68 to 0.35 on the US Supreme Court profile and 1.87 to
+0.83 on the worst archive profile with input curves; `CMYK_OFF_NODE`
+tightens to 1.1 / 0.5 and the RGB neutral axis holds. The grid's 64-pixel
+blocks now map their node sums to outputs in one pass, which vectorises:
+4.8 / 4.6 ns a pixel at 8 / 16 bits (was 5.8 / 5.1), 5.3 / 5.2 shaped. On
+the 24 archive documents with CMYK `ICCBased` content, pages 1–10 at 50
+dpi, 2 of 236 pages change (two covers, 6 205 pixels by at most 3/255,
+mean ΔE00 0.53, max 1.78). The device ICC conversion now interpolates the
+CPU's own grid (`color::grid::CmykGrid`: cells, strides, unclipped nodes)
+in the same simplices in 32-bit integers, in CUDA and Slang, instead of a
+17⁴ table baked from it and interpolated multilinearly in f32: a GPU
+session's ICC CMYK images are a CPU session's byte for byte on CUDA, Vulkan
+on the RTX 5070 and RADV (`gpu_icc_render_parity` was within 12 levels; on
+the archive cover the old device path moved 39 222 pixels by up to 2/255).
+The Vulkan exactness probe now checks a faulty device rather than f32
+rounding. API changes: `gpu::icc_cmyk_to_rgb_cpu` and the `GpuCompute`
+trait are removed; `gpu::backend::icc_clut` and `GpuCtx::icc_cmyk_to_rgb`
+take a `&CmykGrid`.
+
 **Unreleased on master: colour conversions agree with Little CMS to its
 precision.** Three corrections, each measured against `transicc`
 (`input_profile_transicc`, `output_profile_transicc`, ignored tests that
