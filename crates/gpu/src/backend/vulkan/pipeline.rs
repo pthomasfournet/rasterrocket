@@ -1,8 +1,6 @@
 //! Pipeline cache: SPIR-V → `VkPipeline` per kernel.
 //!
-//! Each kernel (`icc_clut`, `blit_image`, `page_raster`, and under the
-//! `gpu-jpeg-huffman` feature the scan, Huffman and IDCT entry points) gets
-//! its own descriptor set layout + pipeline layout + compute pipeline,
+//! Each kernel (`icc_clut`, `blit_image`, `page_raster`) gets its own descriptor set layout + pipeline layout + compute pipeline,
 //! lazy-created on first dispatch.
 //! The SPIR-V blobs are baked into the binary via `include_bytes!` of the
 //! build-script outputs.
@@ -31,57 +29,9 @@ pub(super) enum KernelId {
     BlitImage,
     /// Page raster from a binned command list (Vulkan only).
     PageRaster,
-    /// Blelloch scan, per-workgroup phase. Same SPIR-V as the other
-    /// two scan phases (`blelloch_scan.spv` has 3 entry points); the
-    /// pipeline is compiled with this specific entry.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    ScanPerWorkgroup,
-    /// Blelloch scan, single-workgroup block-sums phase.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    ScanBlockSums,
-    /// Blelloch scan, scatter phase.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    ScanScatter,
-    /// Parallel-Huffman Phase 1 (intra-sequence sync).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    Phase1IntraSync,
-    /// Parallel-Huffman Phase 2 (inter-sequence sync, bounded retry).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    Phase2InterSync,
-    /// Parallel-Huffman Phase 4 (re-decode + write final symbols).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    Phase4Redecode,
-    /// JPEG-framed Phase 1 (intra-sequence sync).  Same kernel as
-    /// `Phase1IntraSync` but uses the JPEG state machine
-    /// (DC magnitude skip + AC run/size/EOB/ZRL framing).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    JpegPhase1IntraSync,
-    /// JPEG-framed Phase 2 (inter-sequence sync by re-decode
-    /// propagation over the JPEG state machine).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    JpegPhase2InterSync,
-    /// JPEG-framed Phase 4 (re-decode + write final symbols).  Same
-    /// kernel as `Phase4Redecode` but uses the JPEG state machine and
-    /// inherits `(block_in_mcu, z_in_block)` from the predecessor
-    /// snapshot instead of `(c, z)`.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    JpegPhase4Redecode,
-    /// IDCT + dequant + colour-conversion kernel (Phase 5).
-    /// One 8×8×3-thread workgroup per 8×8 block; produces RGBA8 pixels
-    /// from zigzag DCT coefficients and quantisation tables.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    IdctColor,
 }
 
 /// Total number of kernel slots, used to size the `OnceLock` array.
-///
-/// Adding a kernel variant requires bumping this AND adding a
-/// `slot_index()` arm. The `const _` assertion below catches drift
-/// at build time: if `slot_index()` ever returns a value
-/// `>= NUM_KERNELS` for any variant, the build fails.
-#[cfg(feature = "gpu-jpeg-huffman")]
-const NUM_KERNELS: usize = 13;
-#[cfg(not(feature = "gpu-jpeg-huffman"))]
 const NUM_KERNELS: usize = 3;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
@@ -94,19 +44,11 @@ const _: () = {
     assert!(KernelId::BlitImage.slot_index() < NUM_KERNELS);
     assert!(KernelId::PageRaster.slot_index() < NUM_KERNELS);
 };
-#[cfg(feature = "gpu-jpeg-huffman")]
-const _: () = {
-    assert!(KernelId::ScanPerWorkgroup.slot_index() < NUM_KERNELS);
-    assert!(KernelId::ScanBlockSums.slot_index() < NUM_KERNELS);
-    assert!(KernelId::ScanScatter.slot_index() < NUM_KERNELS);
-    assert!(KernelId::Phase1IntraSync.slot_index() < NUM_KERNELS);
-    assert!(KernelId::Phase2InterSync.slot_index() < NUM_KERNELS);
-    assert!(KernelId::Phase4Redecode.slot_index() < NUM_KERNELS);
-    assert!(KernelId::JpegPhase1IntraSync.slot_index() < NUM_KERNELS);
-    assert!(KernelId::JpegPhase2InterSync.slot_index() < NUM_KERNELS);
-    assert!(KernelId::JpegPhase4Redecode.slot_index() < NUM_KERNELS);
-    assert!(KernelId::IdctColor.slot_index() < NUM_KERNELS);
-};
+
+/// SPIR-V entry-point name of every kernel: each is compiled with
+/// `slangc -entry NAME`, which renames its entry point to `main` in the
+/// SPIR-V `OpEntryPoint` op.
+const ENTRY_POINT: &CStr = c"main";
 
 /// SPIR-V magic number, `OpCapability`, and the `Int64` capability operand.
 const SPIRV_MAGIC: u32 = 0x0723_0203;
@@ -147,31 +89,7 @@ fn spirv_words(spirv: &[u8], label: &str) -> Result<Vec<u32>> {
 impl KernelId {
     /// Every kernel of this build.
     #[cfg(test)]
-    const ALL: &[Self] = &[
-        Self::IccClut,
-        Self::BlitImage,
-        Self::PageRaster,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::ScanPerWorkgroup,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::ScanBlockSums,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::ScanScatter,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::Phase1IntraSync,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::Phase2InterSync,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::Phase4Redecode,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::JpegPhase1IntraSync,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::JpegPhase2InterSync,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::JpegPhase4Redecode,
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        Self::IdctColor,
-    ];
+    const ALL: &[Self] = &[Self::IccClut, Self::BlitImage, Self::PageRaster];
 
     /// SPIR-V blob for this kernel, baked into the binary at build time.
     const fn spirv(self) -> &'static [u8] {
@@ -179,55 +97,6 @@ impl KernelId {
             Self::IccClut => include_bytes!(concat!(env!("OUT_DIR"), "/icc_clut.spv")),
             Self::BlitImage => include_bytes!(concat!(env!("OUT_DIR"), "/blit_image.spv")),
             Self::PageRaster => include_bytes!(concat!(env!("OUT_DIR"), "/page_raster.spv")),
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => {
-                include_bytes!(concat!(env!("OUT_DIR"), "/blelloch_scan.spv"))
-            }
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync
-            | Self::Phase2InterSync
-            | Self::Phase4Redecode
-            | Self::JpegPhase1IntraSync
-            | Self::JpegPhase2InterSync
-            | Self::JpegPhase4Redecode => {
-                include_bytes!(concat!(env!("OUT_DIR"), "/parallel_huffman.spv"))
-            }
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => include_bytes!(concat!(env!("OUT_DIR"), "/idct_color.spv")),
-        }
-    }
-
-    /// SPIR-V entry-point name.
-    ///
-    /// `slangc` renames the entry to `"main"` only when `-entry NAME`
-    /// is passed at compile time; without `-entry` slangc honours the
-    /// `[shader(...)]` attributes and preserves the source function
-    /// names in the SPIR-V `OpEntryPoint` op. The Blelloch scan was
-    /// compiled multi-entry (build.rs `slang_entry` → `None`) so its
-    /// three pipelines must look up by source name.
-    pub(super) const fn entry_point(self) -> &'static CStr {
-        match self {
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => c"scan_per_workgroup",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => c"scan_block_sums",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => c"scan_scatter",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => c"phase1_intra_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => c"phase2_inter_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => c"phase4_redecode",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => c"jpeg_phase1_intra_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => c"jpeg_phase2_inter_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => c"jpeg_phase4_redecode",
-            // Every other kernel was compiled with `-entry`, so its
-            // entry point is renamed to `main` in the SPIR-V.
-            _ => c"main",
         }
     }
 
@@ -238,26 +107,6 @@ impl KernelId {
             Self::IccClut => 0,
             Self::BlitImage => 1,
             Self::PageRaster => 2,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => 3,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => 4,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => 5,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => 6,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 7,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => 8,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 9,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 10,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => 11,
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => 12,
         }
     }
 
@@ -268,38 +117,12 @@ impl KernelId {
             Self::IccClut => "icc_cmyk_clut",
             Self::BlitImage => "blit_image",
             Self::PageRaster => "page_raster",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup => "scan_per_workgroup",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanBlockSums => "scan_block_sums",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanScatter => "scan_scatter",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => "phase1_intra_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => "phase2_inter_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => "phase4_redecode",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => "jpeg_phase1_intra_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => "jpeg_phase2_inter_sync",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => "jpeg_phase4_redecode",
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => "idct_dequant_colour",
         }
     }
 
     /// Descriptor-set binding slots for this kernel's storage buffers,
-    /// in the order the recorder supplies them.
-    ///
-    /// Most kernels use sequential `0..n_storage_buffers()` slots —
-    /// `binding_slots()`'s default impl returns that range. Kernels
-    /// that **skip** an intermediate slot (e.g., Phase 4 shares the
-    /// global Slang resource declarations with Phase 2's `sync_flags`
-    /// at slot 3, but Phase 4 doesn't reference it) override the
-    /// default to declare their actual slot set.
+    /// in the order the recorder supplies them: `0..n_storage_buffers()`
+    /// for every kernel.
     ///
     /// The SPIR-V's `OpDecorate %resource Binding N` directly drives
     /// what `Vk{Update,CmdBind}DescriptorSets` must target. Mismatch
@@ -308,59 +131,16 @@ impl KernelId {
     /// checking is enabled.
     pub(super) const fn binding_slots(self) -> &'static [u32] {
         match self {
-            // Phase 4 skips slot 3 because the shared Slang file
-            // declares `sync_flags @ binding 3` (Phase 2 only) and
-            // Slang gives Phase 4's resources the next available
-            // declared slots 4, 5, 6 rather than re-numbering down.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => &[0, 1, 2, 4, 5, 6],
-            // JpegPhase1 reads bitstream + codebook + s_info_out
-            // (slots 0..2) plus dc_codebook + mcu_schedule (slots
-            // 7..8) and writes the re-decode memo (slot 10). It does
-            // not touch slots 3..6 (sync_flags / offsets / symbols_out
-            // / decode_status are Phase 2/4 territory) or 9.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => &[0, 1, 2, 7, 8, 10],
-            // JpegPhase2 reads bitstream + codebook (slots 0..1),
-            // writes s_info_out (slot 2) + sync_flags (slot 3), reads
-            // dc_codebook + mcu_schedule (slots 7..8), the previous
-            // pass's s_info_prev (slot 9 — the Jacobi read side) and
-            // the re-decode memo (slot 10). It skips slots 4..6
-            // (offsets / symbols_out / decode_status are Phase 4
-            // territory).
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => &[0, 1, 2, 3, 7, 8, 9, 10],
-            // JpegPhase4 reads bitstream + codebook + s_info_out
-            // (slots 0..2) + offsets + symbols_out + decode_status
-            // (slots 4..6) + dc_codebook + mcu_schedule (slots 7..8).
-            // It skips slot 3 (sync_flags is Phase 2 only).
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => &[0, 1, 2, 4, 5, 6, 7, 8],
-            // (coefficients, qtables, dc_values, pixels_rgba) — sequential 0..3
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => &[0, 1, 2, 3],
-            // Everyone else: sequential 0..n.
             Self::BlitImage => &[0, 1, 2, 3],
             Self::IccClut => &[0, 1, 2],
             Self::PageRaster => &[0, 1, 2, 3, 4, 5],
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => &[0, 1],
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => &[0, 1, 2],
-            // Synthetic Phase 2 writes s_info_out (slot 2) + sync_flags
-            // (slot 3) and reads the previous pass's s_info_prev (slot 9).
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => &[0, 1, 2, 3, 9],
         }
     }
 
     /// Number of `STORAGE_BUFFER` descriptors in set 0.
     ///
     /// Order matches the Slang signature so the recorder binds in the
-    /// same order it builds the descriptor write list. Same-count
-    /// variants stay on separate arms with per-arm comments so future
-    /// kernel additions surface their binding count next to the
-    /// relevant kernel name.
+    /// same order it builds the descriptor write list.
     const fn n_storage_buffers(self) -> u32 {
         match self {
             // (cmyk, rgb, clut)
@@ -369,43 +149,6 @@ impl KernelId {
             Self::BlitImage => 4,
             // (cmds, intersects, row_starts, tile_offsets, tile_cmds, page)
             Self::PageRaster => 6,
-            // (data, block_sums) — len_elems travels as push constant
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::ScanPerWorkgroup | Self::ScanBlockSums | Self::ScanScatter => 2,
-            // (bitstream, codebook, s_info) — the shared 24-byte
-            // huffman push struct carries the scalars.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase1IntraSync => 3,
-            // (bitstream, codebook, s_info, sync_flags, s_info_prev) —
-            // shares the 24-byte push struct with all huffman phases.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase2InterSync => 5,
-            // (bitstream, codebook, s_info, offsets, symbols_out,
-            // decode_status) — shares the 24-byte push struct;
-            // Phase 4 reads `total_symbols` for bounds-checking
-            // writes; the other phases ignore it. `decode_status`
-            // is the per-subseq u32 exit-condition buffer (see
-            // Phase4FailureKind for the encoding).
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::Phase4Redecode => 6,
-            // (bitstream, codebook, s_info, dc_codebook, mcu_schedule,
-            // memo) — JPEG-framed Phase 1 reads `blocks_per_mcu` from
-            // the 24-byte push struct that all huffman phases share.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase1IntraSync => 6,
-            // (bitstream, codebook, s_info, sync_flags, dc_codebook,
-            // mcu_schedule, s_info_prev, memo) — JPEG-framed Phase 2,
-            // same 24-byte push.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase2InterSync => 8,
-            // (bitstream, codebook, s_info, offsets, symbols_out,
-            // decode_status, dc_codebook, mcu_schedule) — JPEG-framed
-            // Phase 4. 8 storage buffers; same 24-byte push constant.
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::JpegPhase4Redecode => 8,
-            // (coefficients, qtables, dc_values, pixels_rgba)
-            #[cfg(feature = "gpu-jpeg-huffman")]
-            Self::IdctColor => 4,
         }
     }
 }
@@ -498,8 +241,7 @@ impl PipelineCache {
             )));
         }
         // Descriptor-set layout binding slots match the kernel's
-        // SPIR-V `OpDecorate Binding N` exactly. Most kernels use
-        // sequential 0..n; Phase 4 skips slot 3 (see
+        // SPIR-V `OpDecorate Binding N` exactly (see
         // `KernelId::binding_slots`).
         let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = id
             .binding_slots()
@@ -555,7 +297,7 @@ impl PipelineCache {
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(id.entry_point());
+            .name(ENTRY_POINT);
         let pipeline_info = [vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(pipeline_layout)];
@@ -686,7 +428,6 @@ pub(super) struct PipelineHandles {
     pub(super) descriptor_set_layout: vk::DescriptorSetLayout,
     pub(super) n_storage_buffers: u32,
     /// Slot indices the kernel binds at (length == `n_storage_buffers`).
-    /// Most kernels are sequential `0..n`; Phase 4 skips slot 3.
     pub(super) binding_slots: &'static [u32],
 }
 
@@ -715,11 +456,6 @@ mod tests {
         };
         assert!(!declares(KernelId::IccClut, CAPABILITY_INT64));
         assert!(!declares(KernelId::PageRaster, CAPABILITY_INT64));
-        #[cfg(feature = "gpu-jpeg-huffman")]
-        {
-            assert!(declares(KernelId::IdctColor, CAPABILITY_INT64));
-            assert!(declares(KernelId::Phase1IntraSync, CAPABILITY_INT64));
-        }
         // Every module declares Shader (capability 1).
         assert!(declares(KernelId::IccClut, 1));
     }

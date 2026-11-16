@@ -48,14 +48,6 @@ cache = ["dep:blake3", "dep:dashmap"]
 # at build time via `slangc` (LunarG SDK), pulls in `ash` for runtime
 # Vulkan, and exposes `VulkanBackend` implementing `GpuBackend`.
 vulkan = ["dep:ash", "dep:gpu-allocator"]
-# Custom parallel-Huffman GPU JPEG decoder (Weißenberger & Schmidt 2021):
-# CPU pre-pass builds canonical codebooks and a per-subsequence launch
-# plan, then CUDA/Vulkan kernels run Phases 1-4 (intra-sync decode,
-# inter-sequence sync, prefix-sum, re-decode + write) to produce the
-# symbol stream in parallel. Routed by `GPU_JPEG_HUFFMAN_THRESHOLD_PX`
-# (`crates/pdf_interp`), currently `u32::MAX` (off) pending a corpus
-# benchmark crossover point.
-gpu-jpeg-huffman = []
 
 [dependencies]
 cudarc   = { version = "0.19", features = ["cuda-13030"] }
@@ -75,9 +67,6 @@ gpu-allocator = { version = "0.28", optional = true, default-features = false, f
 [dev-dependencies]
 # Disk-tier tests want isolated cache dirs.
 tempfile = { workspace = true }
-# Pixel-level oracle for JPEG decode parity tests (already resolved in
-# the workspace lockfile via raster/image transitive deps).
-zune-jpeg = { workspace = true }
 
 # unsafe_code must be "allow" here because cudarc requires unsafe blocks.
 # We do not inherit workspace lints so we can override unsafe_code.

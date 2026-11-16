@@ -1,9 +1,8 @@
 //! Shared JPEG header parser.
 //!
-//! Walks the JPEG marker stream and extracts every header that any downstream
-//! consumer (VA-API parameter buffers, on-GPU decoder Phase 0, future paths)
-//! needs.  No allocations on the hot path beyond a single `Vec<JpegHuffmanTable>`
-//! (typically 4 entries).
+//! Walks the JPEG marker stream and extracts every header the VA-API
+//! parameter buffers need.  No allocations on the hot path beyond a single
+//! `Vec<JpegHuffmanTable>` (typically 4 entries).
 //!
 //! This parser handles only what we actually decode:
 //!
@@ -14,10 +13,8 @@
 //!   calling [`JpegHeaders::parse`]; this parser deliberately fails when
 //!   confronted with non-SOF0 data so the caller routes it elsewhere.
 //! - DQT — 8-bit and 16-bit quantisation tables. 16-bit values are clamped to
-//!   `u8` since every existing consumer (VA-API, our IDCT kernel) takes 8-bit
-//!   quantisers; widening that contract is a separate change.
+//!   `u8` since VA-API takes 8-bit quantisers.
 //! - DHT — DC and AC Huffman tables in JPEG wire form `(num_codes[16], values[])`.
-//!   Canonical-code construction lives in [`super::canonical`].
 //! - SOS — scan header + offset/length of the entropy-coded data.
 //! - DRI — restart interval (0 if absent).
 //! - `APPn` / COM (0xE0–0xFE) — skipped via length prefix.
@@ -442,43 +439,6 @@ impl<'a> JpegHeaders<'a> {
             scan_data_offset,
         })
     }
-
-    /// Look up a Huffman table by class and table ID. Returns `None` if no
-    /// matching table was declared in any DHT segment.
-    #[cfg(any(test, feature = "gpu-jpeg-huffman"))]
-    #[must_use]
-    pub(crate) fn huffman(&self, class: DhtClass, table_id: u8) -> Option<&JpegHuffmanTable> {
-        self.huffman_tables
-            .iter()
-            .find(|t| t.class == class && t.table_id == table_id)
-    }
-
-    /// Number of MCUs (minimum coded units) in this image, computed from
-    /// `components`, `width`/`height`, and the per-component sampling factors.
-    #[cfg(any(test, feature = "gpu-jpeg-huffman"))]
-    #[must_use]
-    pub(crate) fn num_mcus(&self) -> u32 {
-        mcu_count(
-            self.width,
-            self.height,
-            &self.frame_components[..self.components as usize],
-        )
-    }
-}
-
-/// Compute the MCU count from raw frame parameters.  Shared between
-/// [`JpegHeaders::num_mcus`] and [`super::CpuPrepassOutput::num_mcus`] so
-/// the formula lives in exactly one place.
-#[cfg(any(test, feature = "gpu-jpeg-huffman"))]
-#[must_use]
-pub(crate) fn mcu_count(width: u16, height: u16, frame_components: &[JpegFrameComponent]) -> u32 {
-    if frame_components.is_empty() {
-        return 0;
-    }
-    let (max_h, max_v) = frame_components.iter().fold((1u8, 1u8), |(h, v), c| {
-        (h.max(c.h_sampling), v.max(c.v_sampling))
-    });
-    mcu_count_from_max_sampling(width, height, max_h, max_v)
 }
 
 /// MCU-count core, parameterised on the folded max sampling factors.
@@ -805,8 +765,13 @@ mod tests {
     #[test]
     fn parse_extracts_huffman_tables() {
         let h = JpegHeaders::parse(GRAY_16X16_JPEG).expect("parse failed");
-        let dc = h.huffman(DhtClass::Dc, 0).expect("DC luma table missing");
-        let ac = h.huffman(DhtClass::Ac, 0).expect("AC luma table missing");
+        let table = |class| {
+            h.huffman_tables
+                .iter()
+                .find(|t| t.class == class && t.table_id == 0)
+        };
+        let dc = table(DhtClass::Dc).expect("DC luma table missing");
+        let ac = table(DhtClass::Ac).expect("AC luma table missing");
         // From the fixture: DC num_codes [0,1,1,0,...] → 2 entries; AC has
         // num_codes [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] (no codes!) but the
         // body still has 1 trailing value byte 0x00, so total_codes = 0 and
@@ -897,12 +862,5 @@ mod tests {
                 v_sampling: 1,
             },
         ));
-    }
-
-    #[test]
-    fn num_mcus_grayscale_16x16_is_4() {
-        let h = JpegHeaders::parse(GRAY_16X16_JPEG).unwrap();
-        // 16x16 with 1:1 sampling → 8x8 MCUs → 2×2 = 4 MCUs.
-        assert_eq!(h.num_mcus(), 4);
     }
 }

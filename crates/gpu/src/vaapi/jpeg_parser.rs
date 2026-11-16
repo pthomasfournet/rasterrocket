@@ -5,7 +5,7 @@
 //! consumers expect (4-slot DC/AC `VaHuffmanEntry` layout, fixed-size arrays
 //! sized for the FFI buffers).
 //!
-//! Wire-format parsing logic, including [`crate::jpeg::headers::JpegHeaders::num_mcus`],
+//! Wire-format parsing logic, including [`crate::jpeg::headers::mcu_count_from_max_sampling`],
 //! is **not** duplicated — it lives in one place.
 
 #![cfg(feature = "vaapi")]

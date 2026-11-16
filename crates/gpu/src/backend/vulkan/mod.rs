@@ -2,9 +2,8 @@
 //!
 //! Mirrors the CUDA backend's shape: instance → device → queue at init
 //! time, then `begin_page → record_* → submit_page → wait_page` for each
-//! rendered page.  The five kernel families (image blit, ICC CLUT, scan,
-//! Huffman, IDCT) dispatch through `record_*` into a per-page command
-//! buffer; submission uses a timeline semaphore so the host waits exactly
+//! rendered page.  The image blit and ICC CLUT kernels dispatch through
+//! `record_*` into a per-page command buffer; submission uses a timeline semaphore so the host waits exactly
 //! once per page.  The whole-page raster (`page`) records its own command
 //! buffer from a page's command list.
 //!
@@ -289,45 +288,6 @@ impl GpuBackend for VulkanBackend {
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()> {
         let grid_n = params.validate(self)?;
         self.recorder.record_icc_clut(params, grid_n)
-    }
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_scan(&self, params: params::ScanParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_scan(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_scan(&self, _params: params::ScanParams<'_, Self>) -> Result<()> {
-        Err(crate::backend::BackendError::msg(
-            "VulkanBackend::record_scan: gpu-jpeg-huffman feature is not enabled",
-        ))
-    }
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_huffman(&self, params: params::HuffmanParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_huffman(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_huffman(&self, _params: params::HuffmanParams<'_, Self>) -> Result<()> {
-        Err(crate::backend::BackendError::msg(
-            "VulkanBackend::record_huffman: gpu-jpeg-huffman feature is not enabled",
-        ))
-    }
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_idct(&self, params: params::IdctParams<'_, Self>) -> Result<()> {
-        params.validate(self)?;
-        self.recorder.record_idct(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_idct(&self, _params: params::IdctParams<'_, Self>) -> Result<()> {
-        Err(crate::backend::BackendError::msg(
-            "VulkanBackend::record_idct: gpu-jpeg-huffman feature is not enabled",
-        ))
     }
 
     fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {

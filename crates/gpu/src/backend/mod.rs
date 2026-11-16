@@ -414,46 +414,6 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// Returns `BackendError` if the operation cannot be recorded.
     fn record_icc_clut(&self, params: params::IccClutParams<'_, Self>) -> Result<()>;
 
-    /// Record one phase of the Blelloch exclusive scan kernel.
-    ///
-    /// The scan is built from three dispatches (selected by
-    /// `params.phase`); callers must invoke all three in order
-    /// (`PerWorkgroup` → `BlockSums` → `ScatterBlockSums`) for the
-    /// scan to complete. All three share `params.data` /
-    /// `params.block_sums` / `params.len_elems`, so the caller builds
-    /// one `ScanParams` and updates only `phase` between dispatches.
-    ///
-    /// The shared shape (one trait method, phase enum in the params)
-    /// avoids multiplying `record_*` trait methods 1-per-kernel-phase.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded or
-    /// if `params.validate(self)` fails.
-    fn record_scan(&self, params: params::ScanParams<'_, Self>) -> Result<()>;
-
-    /// Record one phase of the parallel-Huffman JPEG decoder.
-    ///
-    /// One thread per subsequence walks the entropy-coded stream and
-    /// writes a `(p, n, c, z)` tuple into `s_info[seq_idx]`. Phase 3
-    /// of the Weißenberger algorithm is the Blelloch scan (see
-    /// [`Self::record_scan`]); other phases are dispatched by
-    /// selecting `params.phase`.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded or
-    /// if `params.validate(self)` fails.
-    fn record_huffman(&self, params: params::HuffmanParams<'_, Self>) -> Result<()>;
-    /// Record IDCT + dequant + colour-conversion (Phase 5) into the current
-    /// page's command list.
-    ///
-    /// Dispatches one workgroup per 8×8 block per component.  The kernel
-    /// performs zigzag inverse, dequantisation, 2-D LLM IDCT, YCbCr→RGB
-    /// colour conversion (T.871/JFIF full-range), and RGBA8 packing.
-    ///
-    /// # Errors
-    /// Returns `BackendError` if the operation cannot be recorded or if
-    /// `params.validate(self)` fails.
-    fn record_idct(&self, params: params::IdctParams<'_, Self>) -> Result<()>;
     /// Record a zero-fill of the first `len` bytes of `buf` into the current
     /// page's command list.
     ///

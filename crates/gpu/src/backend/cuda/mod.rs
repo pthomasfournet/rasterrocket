@@ -144,51 +144,6 @@ impl GpuBackend for CudaBackend {
         self.recorder.record_icc_clut(params, grid_n)
     }
 
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_scan(&self, params: params::ScanParams<'_, Self>) -> Result<()> {
-        self.recorder.check_recording("record_scan")?;
-        params.validate(self)?;
-        self.recorder.record_scan(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_scan(&self, _params: params::ScanParams<'_, Self>) -> Result<()> {
-        // The kernel only ships when the gpu-jpeg-huffman feature is
-        // enabled at build time; outside that feature the trait
-        // method exists for ABI uniformity but rejects calls loudly.
-        Err(BackendError::msg(
-            "CudaBackend::record_scan: gpu-jpeg-huffman feature is not enabled",
-        ))
-    }
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_huffman(&self, params: params::HuffmanParams<'_, Self>) -> Result<()> {
-        self.recorder.check_recording("record_huffman")?;
-        params.validate(self)?;
-        self.recorder.record_huffman(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_huffman(&self, _params: params::HuffmanParams<'_, Self>) -> Result<()> {
-        Err(BackendError::msg(
-            "CudaBackend::record_huffman: gpu-jpeg-huffman feature is not enabled",
-        ))
-    }
-
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    fn record_idct(&self, params: params::IdctParams<'_, Self>) -> Result<()> {
-        self.recorder.check_recording("record_idct")?;
-        params.validate(self)?;
-        self.recorder.record_idct(params)
-    }
-
-    #[cfg(not(feature = "gpu-jpeg-huffman"))]
-    fn record_idct(&self, _params: params::IdctParams<'_, Self>) -> Result<()> {
-        Err(BackendError::msg(
-            "CudaBackend::record_idct: gpu-jpeg-huffman feature is not enabled",
-        ))
-    }
-
     fn record_zero_buffer(&self, buf: &mut Self::DeviceBuffer, len: usize) -> Result<()> {
         self.recorder.check_recording("record_zero_buffer")?;
         self.recorder.record_zero_buffer(buf, len)

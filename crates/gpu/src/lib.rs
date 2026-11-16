@@ -1,14 +1,12 @@
 //! GPU compute for the rasteriser: a CUDA context ([`GpuCtx`], via cudarc)
 //! and the CUDA and Vulkan (`vulkan` feature) backends of
-//! [`backend::GpuBackend`], which run the ICC CLUT, image blit and JPEG
-//! decode kernels; the whole-page raster (`page`, `vulkan` feature); the
+//! [`backend::GpuBackend`], which run the ICC CLUT and image blit kernels; the whole-page raster (`page`, `vulkan` feature); the
 //! device-resident image cache (`cache`, `cache` feature); and the nvJPEG,
 //! nvJPEG2000 and VA-API decoders.  The CPU reference implementation of the
 //! ICC kernel (`icc_cmyk_to_rgb_cpu`) is always built.
 //!
 //! The interpreter depends on this crate through its `gpu-icc`,
-//! `cache`, `vulkan`, `gpu-jpeg-huffman`, `nvjpeg`, `nvjpeg2k` and `vaapi`
-//! features.
+//! `cache`, `vulkan`, `nvjpeg`, `nvjpeg2k` and `vaapi` features.
 //!
 //! # Usage
 //!
@@ -41,12 +39,9 @@ pub mod blit;
 #[cfg(feature = "cache")]
 pub mod cache;
 
-#[cfg(feature = "gpu-jpeg-huffman")]
-pub mod jpeg_decoder;
-
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub(crate) mod decode_queue;
-#[cfg(any(feature = "vaapi", feature = "gpu-jpeg-huffman"))]
+#[cfg(feature = "vaapi")]
 pub(crate) mod jpeg;
 pub(crate) mod jpeg_sof;
 #[cfg(feature = "vulkan")]
@@ -91,12 +86,6 @@ use cudarc::nvrtc::Ptx;
 const PTX_ICC_CLUT: &str = include_str!(concat!(env!("OUT_DIR"), "/icc_clut.ptx"));
 #[cfg(all(not(ptx_placeholder), feature = "cache"))]
 const PTX_BLIT_IMAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/blit_image.ptx"));
-#[cfg(all(not(ptx_placeholder), feature = "gpu-jpeg-huffman"))]
-const PTX_BLELLOCH_SCAN: &str = include_str!(concat!(env!("OUT_DIR"), "/blelloch_scan.ptx"));
-#[cfg(all(not(ptx_placeholder), feature = "gpu-jpeg-huffman"))]
-const PTX_PARALLEL_HUFFMAN: &str = include_str!(concat!(env!("OUT_DIR"), "/parallel_huffman.ptx"));
-#[cfg(all(not(ptx_placeholder), feature = "gpu-jpeg-huffman"))]
-const PTX_IDCT_COLOR: &str = include_str!(concat!(env!("OUT_DIR"), "/idct_color.ptx"));
 
 /// Bytes per pixel for the RGBA8 pixel format the renderer composites in.
 ///
@@ -130,45 +119,6 @@ pub(crate) struct GpuKernels {
     pub(crate) icc_cmyk_clut: CudaFunction,
     #[cfg(feature = "cache")]
     pub(crate) blit_image: CudaFunction,
-    /// Per-workgroup Blelloch scan entry (phase 1).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) scan_per_workgroup: CudaFunction,
-    /// Single-workgroup scan of block sums (phase 2).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) scan_block_sums: CudaFunction,
-    /// Scatter scanned block sums back into tiles (phase 3).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) scan_scatter: CudaFunction,
-    /// JPEG Huffman Phase 1 (intra-sequence sync).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) phase1_intra_sync: CudaFunction,
-    /// JPEG Huffman Phase 2 (inter-sequence sync, bounded retry).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) phase2_inter_sync: CudaFunction,
-    /// JPEG Huffman Phase 4 (re-decode + write final symbols).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) phase4_redecode: CudaFunction,
-    /// JPEG-framed Phase 1.  Same kernel shape as
-    /// [`Self::phase1_intra_sync`] but uses the real JPEG state
-    /// machine (DC magnitude skip + AC run/size/EOB/ZRL framing).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) jpeg_phase1_intra_sync: CudaFunction,
-    /// JPEG-framed Phase 2.  Same kernel shape as
-    /// [`Self::phase2_inter_sync`] but uses the real JPEG state
-    /// machine and the JPEG sync predicate (`block_in_mcu` + `z_in_block`).
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) jpeg_phase2_inter_sync: CudaFunction,
-    /// JPEG-framed Phase 4 (re-decode + write final symbols).  Same
-    /// kernel shape as [`Self::phase4_redecode`] but uses the JPEG
-    /// state machine and inherits `(block_in_mcu, z_in_block)` from
-    /// the predecessor's Phase-1 snapshot instead of `(c, z)`.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) jpeg_phase4_redecode: CudaFunction,
-    /// IDCT + dequant + colour-conversion kernel (Phase 5).
-    /// One 8×8×3 workgroup per 8×8 block; produces RGBA8 pixels from
-    /// zigzag DCT coefficients and quantisation tables.
-    #[cfg(feature = "gpu-jpeg-huffman")]
-    pub(crate) idct_dequant_colour: CudaFunction,
 }
 
 /// An initialised CUDA context and compiled kernel set.
@@ -260,26 +210,6 @@ impl GpuCtx {
                 icc_cmyk_clut: load(PTX_ICC_CLUT, "icc_cmyk_clut")?,
                 #[cfg(feature = "cache")]
                 blit_image: load(PTX_BLIT_IMAGE, "blit_image")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                scan_per_workgroup: load(PTX_BLELLOCH_SCAN, "scan_per_workgroup")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                scan_block_sums: load(PTX_BLELLOCH_SCAN, "scan_block_sums")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                scan_scatter: load(PTX_BLELLOCH_SCAN, "scan_scatter")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                phase1_intra_sync: load(PTX_PARALLEL_HUFFMAN, "phase1_intra_sync")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                phase2_inter_sync: load(PTX_PARALLEL_HUFFMAN, "phase2_inter_sync")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                phase4_redecode: load(PTX_PARALLEL_HUFFMAN, "phase4_redecode")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                jpeg_phase1_intra_sync: load(PTX_PARALLEL_HUFFMAN, "jpeg_phase1_intra_sync")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                jpeg_phase2_inter_sync: load(PTX_PARALLEL_HUFFMAN, "jpeg_phase2_inter_sync")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                jpeg_phase4_redecode: load(PTX_PARALLEL_HUFFMAN, "jpeg_phase4_redecode")?,
-                #[cfg(feature = "gpu-jpeg-huffman")]
-                idct_dequant_colour: load(PTX_IDCT_COLOR, "idct_dequant_colour")?,
             },
         })
     }

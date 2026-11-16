@@ -631,7 +631,7 @@ fn new_vulkan_image_cache(
 /// `ForceCuda` if init fails; logs a warning and returns `None` on
 /// `ForceVaapi` if init fails.
 ///
-/// The CUDA context, stream, and 7 PTX modules cost ~240 ms warm /
+/// The CUDA context, stream, and PTX modules cost ~240 ms warm /
 /// ~1100 ms cold to build, and are process-wide state — there is no
 /// per-session work hidden inside.  We therefore cache the init result
 /// in a process-wide `OnceLock` so workloads that open many short-lived

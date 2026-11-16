@@ -39,13 +39,7 @@ fn link_lib_in_dir(dirs: &[&str], lib: &str, warn_context: &str) {
 /// Listed once here to ensure the placeholder-write loops, the nvcc-compile loop,
 /// and the slangc-compile loop stay in sync — adding a new kernel only requires
 /// updating this list.
-const KERNELS: &[&str] = &[
-    "icc_clut",
-    "blit_image",
-    "blelloch_scan",
-    "parallel_huffman",
-    "idct_color",
-];
+const KERNELS: &[&str] = &["icc_clut", "blit_image"];
 
 /// Compute kernels with a Slang source only, compiled to SPIR-V for the
 /// Vulkan backend; the CUDA backend has no twin of them.
@@ -55,27 +49,14 @@ const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster"];
 /// capabilities.
 const SLANG_PROFILE: &str = "spirv_1_5";
 
-/// Entry-point selector for the slangc invocation.
-///
-/// - `Some(name)` → pass `-entry name` so slangc compiles exactly that
-///   entry, whose name need not match the file (e.g. `icc_clut.slang`
-///   → `icc_cmyk_clut`).
-/// - `None` → pass no `-entry` flag; slangc uses every
-///   `[shader("compute")]` attribute in the file as an entry point and
-///   emits them into a single multi-entry SPIR-V module. Used by the
-///   Blelloch scan, which has 3 cooperating entries sharing helper
-///   logic and is naturally one .slang file.
-fn slang_entry(kernel: &str) -> Option<&'static str> {
+/// Entry point slangc compiles for `kernel`, passed as `-entry name`; its
+/// name need not match the file (e.g. `icc_clut.slang` → `icc_cmyk_clut`).
+/// slangc renames the entry point to `main` in the SPIR-V.
+fn slang_entry(kernel: &str) -> &'static str {
     match kernel {
-        "icc_clut" => Some("icc_cmyk_clut"),
-        // Multi-entry: slangc picks all [shader("compute")] entries
-        // when no -entry is passed and preserves their source names
-        // in the SPIR-V OpEntryPoint op.
-        "blelloch_scan" | "parallel_huffman" => None,
-        "idct_color" => Some("idct_dequant_colour"),
-        // Default: single entry point named after the file.
-        "blit_image" => Some("blit_image"),
-        "page_raster" => Some("page_raster"),
+        "icc_clut" => "icc_cmyk_clut",
+        "blit_image" => "blit_image",
+        "page_raster" => "page_raster",
         _ => panic!("unknown kernel name: {kernel}"),
     }
 }
@@ -334,12 +315,6 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
         let spv = out_dir.join(format!("{kernel}.spv"));
         let profile = SLANG_PROFILE;
 
-        // -entry is omitted for multi-entry kernels; slangc then uses
-        // the [shader(...)] attributes in the source to pick entries.
-        let entry_args: &[&str] = match slang_entry(kernel) {
-            Some(entry) => &["-entry", entry],
-            None => &[],
-        };
         let output = Command::new(&slangc)
             .args([
                 "-target",
@@ -349,7 +324,7 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
                 "-o",
                 spv.to_str().expect("OUT_DIR path contains non-UTF-8"),
             ])
-            .args(entry_args)
+            .args(["-entry", slang_entry(kernel)])
             .arg(src.to_str().expect("slang source path contains non-UTF-8"))
             .output()
             .unwrap_or_else(|e| {
