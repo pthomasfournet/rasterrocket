@@ -14,12 +14,10 @@ use crate::resources::dict_ext::DictExt as _;
 
 use super::codecs::{JpxOptions, decode_ccitt, decode_dct, decode_jbig2, decode_jpx};
 use super::colorspace::{ImageColour, KeySamples, Samples};
+use super::filters::{image_filter_chain, is_transport_filter, terminal_decode_parms};
 use super::raw::{apply_stencil_decode, decode_raw};
 use super::smask::{colour_key_mask, colour_key_mask_with};
-use super::{
-    ImageDecodeCtx, ImageDescriptor, ImageFilter, ImageTints, decode_budget, image_filter_chain,
-    is_transport_filter, terminal_decode_parms,
-};
+use super::{ImageDecodeCtx, ImageDescriptor, ImageFilter, ImageTints, decode_budget};
 
 /// An image stream and the geometry its dictionary declares.
 pub(super) struct ImageStream<'a> {
