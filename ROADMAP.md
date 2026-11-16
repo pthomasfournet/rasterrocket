@@ -3373,7 +3373,8 @@ parallel-Huffman, Blelloch-scan and IDCT kernels (CUDA and Slang) and their
 tests are deleted (see Phase 8; master `10393d55` is the last commit with it).
 `Auto` no longer starts a GPU backend at start-up under any setting: an `Auto`
 session opens no Vulkan device or CUDA context, and only the on-demand
-nvJPEG2000 decoder and the `gpu_pages` device remain. Rendered output does not
+nvJPEG2000 decoder (now dormant by default, see below) and the `gpu_pages`
+device remain. Rendered output does not
 change. Removed public API: the `gpu-jpeg-huffman` feature (gpu, interp,
 `rasterrocket`, CLI); the `rasterrocket_gpu::jpeg_decoder` module, with
 `JpegGpuDecoder` and `JpegGpuError`; `GpuBackend::record_scan`,
@@ -3399,9 +3400,9 @@ ones unshifted. A codestream that ends early (`Image::survey` in the JPEG
 2000 fork reads its tile-part headers without decoding) decodes on the CPU,
 drawn and marked partial (`--strict` fails) or refused when a tile holds no
 data. `--prefetch` sizes draws inside forms too, and prefetches nothing, with
-a warning, when the render scale depends on the page. A job-level signal for
-Auto (single pages lose about 3x to the cold start, 24-page runs win only
-sometimes) is measured and proposed, not shipped.
+a warning, when the render scale depends on the page. Auto's job-level outcome
+(single pages lose about 3x to the cold start, 24-page runs win only
+sometimes) made the decoder dormant under Auto (see below).
 
 **Unreleased on master: paint trace.** A pixel-independent regression
 oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
@@ -3517,6 +3518,26 @@ painting their surface, as the spec defines a patch; both references fill
 the region the boundary encloses instead, so pdfium's `shade-tensor` is
 registered as a divergence (RMSE 29.4, tile 97.8). A patch that does not fold
 covers the same pixels as before.
+
+**Unreleased on master: nvJPEG2000 is dormant under Auto.**
+Under `auto` no JPEG 2000 image goes to the device and no thread builds an
+nvJPEG2000 decoder, unless `PDF_RASTER_JPX_THRESHOLD` sets a pixel area:
+`GPU_JPEG2K_THRESHOLD_PX` is now `u32::MAX`, as nvJPEG's is. `--backend
+cuda`, which asks for the device, keeps the 2 097 152 px rule
+(`GPU_JPEG2K_ATTACHED_THRESHOLD_PX`), and the variable overrides both.
+A `u32::MAX` threshold now admits no image, an area that saturates `u32`
+included. Measured whole-process (`--gray`, RTX 5070), Halbwachs pp. 1–24
+at 360 dpi: 1141 ms on the CPU and 1115 ms (re-run 911) under the old
+`auto` at 24 threads; 970 ms (re-run 912) against 805 ms at 4 threads.
+Building 4 decoders instead of 24 leaves `auto`/CPU at about 0.86, because
+the CPU path gains as much from fewer threads. So the serialised decoder
+builds do not explain the small multi-page gain, and a shared decoder pool
+would not fix it. qsj-1798 pp. 1–24 ties or loses (1.04–1.13×), a single
+page loses about 3× to the cold start (qsj-0616 p. 10), and two noisy
+points do not place a job-level area threshold. Output under `auto` is
+now the CPU's: byte-identical on qsj-0616 p. 10 and Halbwachs pp. 1–24.
+API changes: `DeviceKernel::NvJpeg2kOnDemand` and `NvJpeg2kAttached` are
+new; `device_kernel_enabled` is no longer `const`.
 
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
