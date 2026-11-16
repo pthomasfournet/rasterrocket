@@ -21,9 +21,14 @@ fn bins_list_each_command_in_its_tiles_in_paint_order() {
             .expect("push");
     }
     let bins = page.bin().expect("bin");
-    assert_eq!(bins.cmds.len(), 6 + 1 + 3);
+    assert_eq!(bins.items.len(), 6 + 1 + 3);
     assert_eq!((bins.tiles_x, bins.tiles_y), (3, 2));
-    let tile = |t: usize| &bins.cmds[bins.offsets[t] as usize..bins.offsets[t + 1] as usize];
+    let tile = |t: usize| {
+        bins.items[bins.offsets[t] as usize..bins.offsets[t + 1] as usize]
+            .iter()
+            .map(|i| i[0])
+            .collect::<Vec<_>>()
+    };
     assert_eq!(tile(0), [0]);
     assert_eq!(tile(1), [0, 1]);
     assert_eq!(tile(2), [0]);
@@ -67,7 +72,8 @@ fn tables_are_rebased_onto_the_page() {
         .expect("push");
     assert_eq!(page.row_starts(), [0, 2, 3, 3, 5, 6]);
     assert_eq!(page.spans()[3..], [[1, 2, 3], [4, 9, -1], [2, 2, 5]]);
-    let (words, base) = page.table_words();
+    let (words, bases) = page.table_words();
+    let base = bases.coverage;
     assert_eq!(base, 18);
     assert_eq!(
         words[18..],

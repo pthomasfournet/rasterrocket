@@ -1,13 +1,17 @@
 //! Recording a page for the whole-page GPU raster.
 //!
 //! While a page is recorded, a fill or stroke of a solid colour is not
-//! painted.  Its coverage is computed on the CPU by the functions the CPU
-//! fill and stroke use (`raster::fill::aa_fill_coverage`,
-//! `raster::aa_stroke_coverage`, `raster::hairline_runs`), and the result is
-//! appended to the page's [`PageCommands`] with the colour, constant alpha
-//! and clip rectangle the CPU pipe would composite with.  The device then
-//! composites every command with the CPU's arithmetic, so the page it
-//! renders is the page the CPU renders.
+//! painted.  It is appended to the page's [`PageCommands`] with the colour,
+//! constant alpha and clip rectangle the CPU pipe would composite with, as
+//! the outlines the CPU's exact-area rasteriser would rasterise
+//! (`raster::fill::aa_fill_outlines`, `raster::aa_stroke_outline`), whose
+//! coverage the device computes with the CPU's integer arithmetic; or, on a
+//! device that does not rasterise outlines and for an outline past the
+//! device's integer range, as the coverage tables the CPU computes from
+//! them.  A hairline is appended as the pixel runs the CPU paints
+//! (`raster::hairline_runs`).  The device then composites every command
+//! with the CPU's arithmetic, so the page it renders is the page the CPU
+//! renders.
 //!
 //! A recorded paint composites as the CPU's `aa` pipe over an opaque RGB
 //! canvas of 8 or 16 bits per sample: `Normal` blend, no soft mask, no
@@ -23,12 +27,12 @@ use color::{Sample, SampleDepth};
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::{
-    CoverageRows, PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds,
+    AreaPath, CoverageRows, PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds,
 };
 use raster::clip::Clip;
-use raster::coverage::CoverageTable;
+use raster::coverage::{AreaOutline, CoverageTable};
 use raster::types::BlendMode;
-use raster::{aa_stroke_coverage, hairline_runs};
+use raster::{aa_stroke_outline, hairline_runs};
 
 use super::canvas::{CanvasKind, PageCanvas};
 use super::paint::FillRule;
@@ -38,6 +42,8 @@ use crate::content::Operator;
 /// A page being recorded.
 pub(super) struct Recording {
     commands: PageCommands,
+    /// Whether outlines are recorded as outlines, else as tables.
+    paths: bool,
     /// Why the recording stopped, once it has.
     refused: Option<&'static str>,
     /// Scratch: the runs of the hairline being appended.
@@ -108,6 +114,7 @@ const fn command_refusal(e: &PageCommandsError) -> &'static str {
     match e {
         PageCommandsError::TooLarge => "command list size",
         PageCommandsError::Alloc(_) => "command list allocation",
+        PageCommandsError::Unrepresentable => "outline range",
     }
 }
 
@@ -147,6 +154,38 @@ impl Recording {
         Ok(())
     }
 
+    /// Append `outlines` in `rgb` at alpha `alpha`, samples of the page's
+    /// depth, in order: as outlines when the recording takes them and the
+    /// device's integer range holds them, else as their coverage tables.
+    fn push_outlines(
+        &mut self,
+        outlines: &[AreaOutline],
+        rgb: [u16; 3],
+        alpha: u16,
+    ) -> Result<(), PageCommandsError> {
+        for outline in outlines {
+            let (x0, y0, x1, y1) = outline.window;
+            let path = AreaPath {
+                segs: &outline.segs,
+                window: PixelBounds { x0, y0, x1, y1 },
+                even_odd: outline.even_odd,
+                weight: outline.weight,
+            };
+            let pushed = if self.paths {
+                self.commands.push_area_path(&path, rgb, alpha)
+            } else {
+                Err(PageCommandsError::Unrepresentable)
+            };
+            match pushed {
+                Err(PageCommandsError::Unrepresentable) => {
+                    self.push_tables(&[outline.table()], rgb, alpha)?;
+                }
+                other => other?,
+            }
+        }
+        Ok(())
+    }
+
     /// Stop the recording with the refusal of `result`'s error, if any,
     /// unless it has already stopped.
     fn refuse_on(&mut self, result: Result<(), PageCommandsError>) {
@@ -177,7 +216,9 @@ impl PageRenderer<'_> {
     /// Record the page for the whole-page GPU raster instead of painting
     /// it: fills and strokes of a solid colour become paint commands, and
     /// the first paint the raster does not render stops the recording.
-    /// Call before [`Self::execute`]; take the outcome with
+    /// Outlines are recorded as outlines when `paths`, for a device that
+    /// rasterises them, else as coverage tables.  Call before
+    /// [`Self::execute`]; take the outcome with
     /// [`Self::take_device_recording`] after it and
     /// [`Self::render_annotations`].
     ///
@@ -187,7 +228,7 @@ impl PageRenderer<'_> {
     /// the CPU records, is armed, or it simulates overprint on an ink
     /// canvas, paints as a page group, or fills without antialiasing.  The
     /// renderer is unchanged then.
-    pub fn record_for_device(&mut self) -> Result<(), &'static str> {
+    pub fn record_for_device(&mut self, paths: bool) -> Result<(), &'static str> {
         if self.trace.is_some() {
             return Err("paint trace");
         }
@@ -207,6 +248,7 @@ impl PageRenderer<'_> {
                 kind.depth(),
                 [kind.depth().max_sample(); 3],
             ),
+            paths,
             refused: None,
             runs: Vec::new(),
         }));
@@ -356,7 +398,7 @@ impl PageRenderer<'_> {
             Err(reason) => return self.refuse_device(reason),
         };
         let flatness = self.gstate.current().flatness.max(0.1);
-        let tables = raster::fill::aa_fill_coverage(
+        let outlines = raster::fill::aa_fill_outlines(
             path,
             &DEVICE_MATRIX,
             flatness,
@@ -367,7 +409,7 @@ impl PageRenderer<'_> {
             rule.zero_area_lines,
         );
         if let Some(recording) = self.device_page.as_mut() {
-            let pushed = recording.push_tables(&tables, paint.rgb, paint.alpha);
+            let pushed = recording.push_outlines(&outlines, paint.rgb, paint.alpha);
             recording.refuse_on(pushed);
         }
     }
@@ -394,7 +436,7 @@ impl PageRenderer<'_> {
             return;
         };
         if params.line_width != 0.0 {
-            if let Some(table) = aa_stroke_coverage(
+            if let Some(outline) = aa_stroke_outline(
                 &shape.path,
                 &shape.matrix,
                 &params,
@@ -402,7 +444,7 @@ impl PageRenderer<'_> {
                 width,
                 height,
             ) {
-                let pushed = recording.push_tables(&[table], paint.rgb, paint.alpha);
+                let pushed = recording.push_outlines(&[outline], paint.rgb, paint.alpha);
                 recording.refuse_on(pushed);
             }
             return;

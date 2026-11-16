@@ -61,31 +61,57 @@ fn cpu(doc: &Document, width: u32, height: u32, depth: SampleDepth, content: &[u
     samples(&r)
 }
 
-/// The recording of `content` on an 8-bit `width × height` page.
+/// The recording of `content` on an 8-bit `width × height` page, its
+/// outlines recorded as outlines.
 fn record(doc: &Document, width: u32, height: u32, content: &[u8]) -> DeviceRecording {
     let mut r = PageRenderer::new(width, height, doc, (4, 0));
-    r.record_for_device().expect("an RGB page records");
+    r.record_for_device(true).expect("an RGB page records");
     r.execute(&crate::content::parse(content));
     r.take_device_recording().expect("recorded")
 }
 
-/// The canvas samples of `content` on a page of `depth`, recorded and
-/// rendered on `backend`.
+/// The canvas samples of `content` on a page of `depth`, recorded (its
+/// outlines as outlines when `paths`, else as tables) and rendered on
+/// `backend`, or by the device raster's host model without one.
 fn device(
-    backend: &VulkanBackend,
+    backend: Option<&VulkanBackend>,
     doc: &Document,
     (width, height): (u32, u32),
     depth: SampleDepth,
     content: &[u8],
+    paths: bool,
 ) -> Vec<u16> {
     let mut r = renderer(doc, width, height, depth);
-    r.record_for_device().expect("an RGB page records");
+    r.record_for_device(paths).expect("an RGB page records");
     r.execute(&crate::content::parse(content));
     let DeviceRecording::Recorded(page) = r.take_device_recording().expect("recorded") else {
         panic!("the content was refused");
     };
     assert_eq!(page.depth(), depth);
-    r.paint_device_page(backend, &page).expect("device page");
+    assert_eq!(page.has_paths(), paths && !page.is_empty());
+    if let Some(backend) = backend {
+        r.paint_device_page(backend, &page).expect("device page");
+    } else {
+        let model = gpu::page::reference::render_page(&page).expect("host model");
+        let row = width as usize * 3;
+        match &mut r.canvas {
+            PageCanvas::Rgb(b) => {
+                let stride = b.stride;
+                for (dst, src) in b.data_mut().chunks_mut(stride).zip(model.chunks(row)) {
+                    for (d, &v) in dst.iter_mut().zip(src) {
+                        *d = u8::try_from(v).expect("an 8-bit sample");
+                    }
+                }
+            }
+            PageCanvas::Rgb16(b) => {
+                let stride = b.stride;
+                for (dst, src) in b.data_mut().chunks_mut(stride).zip(model.chunks(row)) {
+                    dst[..row].copy_from_slice(src);
+                }
+            }
+            PageCanvas::Ink(_) | PageCanvas::Ink16(_) => panic!("an RGB canvas"),
+        }
+    }
     samples(&r)
 }
 
@@ -188,11 +214,9 @@ fn random_content(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
     s.join(" ").into_bytes()
 }
 
-#[test]
-fn device_page_matches_the_cpu_render() {
-    let Some(backend) = backend() else {
-        return;
-    };
+/// Random pages recorded, with outlines or as tables only, and rendered
+/// on `backend` (or the host model) match the CPU render.
+fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: bool) {
     let doc = doc();
     let mut rng = Rng(11);
     for (width, height) in [(1, 1), (97, 83), (200, 131), (33, 257)] {
@@ -214,15 +238,36 @@ fn device_page_matches_the_cpu_render() {
                     "the page is mostly paper"
                 );
                 assert_eq!(
-                    device(&backend, &doc, (width, height), depth, &content),
+                    device(backend, &doc, (width, height), depth, &content, paths),
                     want,
-                    "{} bits, {width}×{height}, round {round}:\n{}",
+                    "{} bits, {width}×{height}, round {round}, outlines {paths}:\n{}",
                     depth.bits(),
                     String::from_utf8_lossy(&content)
                 );
             }
         }
     }
+}
+
+#[test]
+fn device_page_matches_the_cpu_render() {
+    let Some(backend) = backend() else {
+        return;
+    };
+    recorded_pages_match_the_cpu_render(Some(&backend), backend.page_paths());
+}
+
+#[test]
+fn device_page_of_tables_only_matches_the_cpu_render() {
+    let Some(backend) = backend() else {
+        return;
+    };
+    recorded_pages_match_the_cpu_render(Some(&backend), false);
+}
+
+#[test]
+fn host_model_of_a_recording_matches_the_cpu_render() {
+    recorded_pages_match_the_cpu_render(None, true);
 }
 
 #[test]
@@ -236,12 +281,14 @@ fn opaque_hairlines_and_strokes_match_the_cpu_render() {
                     0 1 0 RG 6 w 1 J 1 j 10 50 m 50 10 l 85 70 l S \
                     q 20 20 40 40 re W n 0 0 0 RG 0 w 0 0 m 100 90 l S Q";
     for depth in DEPTHS {
-        assert_eq!(
-            device(&backend, &doc, (95, 90), depth, content),
-            cpu(&doc, 95, 90, depth, content),
-            "{} bits",
-            depth.bits()
-        );
+        for paths in [false, backend.page_paths()] {
+            assert_eq!(
+                device(Some(&backend), &doc, (95, 90), depth, content, paths),
+                cpu(&doc, 95, 90, depth, content),
+                "{} bits, outlines {paths}",
+                depth.bits()
+            );
+        }
     }
 }
 
@@ -327,7 +374,7 @@ fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
     assert!(n_ops * 2 > budget && n_ops < budget);
     let mut first = PageRenderer::new(50, 50, &doc, (4, 0));
     first.op_budget = budget;
-    first.record_for_device().expect("an RGB page records");
+    first.record_for_device(true).expect("an RGB page records");
     first.execute(&ops);
     assert!(first.budget_status().is_none());
     assert!(matches!(

@@ -19,7 +19,7 @@ use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
-use crate::page::{PageCommands, PageSample, TileBins, pack_rgb};
+use crate::page::{PageCommands, PageSample, TableBases, TileBins, pack_rgb};
 
 use super::VulkanBackend;
 use super::pipeline::KernelId;
@@ -90,9 +90,10 @@ impl Laps {
     }
 }
 
-/// The push constants of the raster of `page` binned as `bins`, in the
-/// order of `Params` in `kernels/page_raster.slang`.
-fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [u8; 36] {
+/// The push constants of the raster of `page` binned as `bins`, its table
+/// words laid out as `bases`, in the order of `Params` in
+/// `kernels/page_raster.slang`.
+fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u8; 48] {
     let n_cmds = u32::try_from(page.len()).expect("the push limit bounds the commands");
     let [paper_rg, paper_b] = pack_rgb(page.paper());
     let values = [
@@ -101,12 +102,15 @@ fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [
         page.height(),
         bins.tiles_x,
         bins.tiles_y,
-        coverage_base,
+        bases.coverage,
         paper_rg,
         paper_b,
         u32::from(page.depth().bits()),
+        bases.segs,
+        bases.seg_lists,
+        bases.backdrops,
     ];
-    let mut push = [0u8; 36];
+    let mut push = [0u8; 48];
     for (dst, v) in push.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         dst.copy_from_slice(&v.to_ne_bytes());
     }
@@ -119,6 +123,14 @@ fn device_size(len: usize) -> u64 {
 }
 
 impl VulkanBackend {
+    /// Whether the device rasterises outlines ([`crate::page::AreaPath`]):
+    /// it supports 64-bit integers in kernels.  A page with outlines
+    /// renders only on such a device.
+    #[must_use]
+    pub fn page_paths(&self) -> bool {
+        self.device.has_int64
+    }
+
     /// Render `page` on the device and write its pixels into `out`, RGB
     /// samples of the page's depth: row `y` at
     /// `out[y × stride..][..width × 3]`, `stride` in samples.  Samples
@@ -193,9 +205,19 @@ impl VulkanBackend {
                 out.len()
             )));
         }
+        let kernel = if page.has_paths() {
+            if !self.page_paths() {
+                return Err(BackendError::msg(
+                    "render_page: the page has outlines, which this device does not rasterise",
+                ));
+            }
+            KernelId::PageRasterPaths
+        } else {
+            KernelId::PageRaster
+        };
         let bins = page.bin().map_err(BackendError::new)?;
-        let (table, coverage_base) = page.table_words();
-        let push = push_constants(page, &bins, coverage_base);
+        let (table, bases) = page.table_words();
+        let push = push_constants(page, &bins, bases);
         let page_len = row_bytes * height;
         let inputs: [(&'static str, &[u8]); 5] = [
             ("render_page commands", bytemuck::cast_slice(page.cmds())),
@@ -208,10 +230,7 @@ impl VulkanBackend {
                 "render_page tile offsets",
                 bytemuck::cast_slice(&bins.offsets),
             ),
-            (
-                "render_page tile commands",
-                bytemuck::cast_slice(&bins.cmds),
-            ),
+            ("render_page tile items", bytemuck::cast_slice(&bins.items)),
         ];
         for (what, bytes) in inputs {
             self.device
@@ -279,7 +298,7 @@ impl VulkanBackend {
             handles.push(target.device.handle());
             sizes.push(device_size(page_len));
             backend.recorder.dispatch_kernel(
-                KernelId::PageRaster,
+                kernel,
                 &handles,
                 &sizes,
                 &push,
@@ -315,6 +334,9 @@ impl VulkanBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod path_tests;
 
 #[cfg(test)]
 mod tests {

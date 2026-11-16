@@ -1,11 +1,13 @@
 //! A page as a list of paint commands for the device page raster.
 //!
 //! Each command paints one colour at a constant alpha over an opaque RGB
-//! page of 8 or 16 bits per sample, with per-pixel coverage taken from a coverage table the CPU
-//! rasteriser computed (see [`CoverageRows`]) and limited
-//! to an inclusive pixel rectangle.  Commands paint in the order they were
-//! pushed.  The table of every command is copied into one shared pair of
-//! buffers, so a page is three flat arrays plus its size and paper colour.
+//! page of 8 or 16 bits per sample, limited to an inclusive pixel
+//! rectangle, with per-pixel coverage either taken from a coverage table
+//! the CPU rasteriser computed (see [`CoverageRows`]) or computed on the
+//! device from a closed outline by the CPU rasteriser's integer arithmetic
+//! (see [`AreaPath`]).  Commands paint in the order they were pushed.  The
+//! tables and outlines of every command are copied into shared flat
+//! arrays.
 //!
 //! The device raster bins the commands into [`PAGE_TILE`]-pixel square
 //! tiles ([`PageCommands::bin`]) and walks each tile's commands in order;
@@ -20,6 +22,14 @@ use std::fmt;
 
 use bytemuck::{Pod, Zeroable};
 use color::{Sample, SampleDepth};
+
+mod path;
+#[doc(hidden)]
+pub mod reference;
+mod runs;
+
+pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
+use path::{NO_BACKDROP, PathTile, bin_path};
 
 /// A region's coverage, row by row, as the page raster reads it.
 ///
@@ -82,13 +92,21 @@ pub const PAGE_TILE: u32 = 16;
 /// every element index into an input fits `u32`.
 pub const PAGE_COMMANDS_MAX_BYTES: usize = 1 << 27;
 
+/// [`PageCmd::kind`] of a command whose coverage is a table.
+const KIND_TABLE: u32 = 0;
+
+/// [`PageCmd::kind`] of a command whose coverage is an outline's.
+const KIND_PATH: u32 = 1;
+
 /// One command as the kernel reads it; layout of `Cmd` in
-/// `kernels/page_raster.slang`.
+/// `kernels/page_raster.slang`.  An outline's command holds its rule in
+/// bit 0 of `flags` and its weight in bits 8–15, and its tiles in
+/// `path_tiles[row_base..][..n_rows]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub(crate) struct PageCmd {
     kind: u32,
-    reserved: u32,
+    flags: u32,
     rg: u32,
     a_input: u32,
     table_y0: i32,
@@ -143,6 +161,10 @@ pub enum PageCommandsError {
     /// The page's device inputs would exceed [`PAGE_COMMANDS_MAX_BYTES`],
     /// or the page is too large for the raster's 32-bit coordinates.
     TooLarge,
+    /// An outline exceeds the integer range of the device raster
+    /// ([`PATH_COORD_LIMIT`], [`PATH_SEGMENTS`], [`PATH_TILE_SEGMENTS`]);
+    /// its coverage can be pushed as a table instead.
+    Unrepresentable,
     /// Host memory for the inputs could not be reserved.
     Alloc(TryReserveError),
 }
@@ -155,6 +177,9 @@ impl fmt::Display for PageCommandsError {
                 "the page's paint commands exceed {PAGE_COMMANDS_MAX_BYTES} bytes or its \
                  coordinates exceed 32 bits"
             ),
+            Self::Unrepresentable => {
+                write!(f, "an outline exceeds the device raster's integer range")
+            }
             Self::Alloc(e) => write!(f, "the page's paint commands cannot be allocated: {e}"),
         }
     }
@@ -163,7 +188,7 @@ impl fmt::Display for PageCommandsError {
 impl std::error::Error for PageCommandsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::TooLarge => None,
+            Self::TooLarge | Self::Unrepresentable => None,
             Self::Alloc(e) => Some(e),
         }
     }
@@ -176,18 +201,23 @@ impl From<TryReserveError> for PageCommandsError {
 }
 
 /// The tile lists of a page: tile `t` (row-major over `tiles_x` columns)
-/// paints `cmds[offsets[t]..offsets[t + 1]]`, command indices in paint
-/// order.
+/// paints `items[offsets[t]..offsets[t + 1]]` in order.
+///
+/// An item is `[command, list_start, list_len, backdrop]`: the command's
+/// index, and for an outline's command the tile's segments
+/// `segment_lists[list_start..][..list_len]` and backdrop
+/// (`u32::MAX` when it is zero), as [`PageCommands::table_words`] lays
+/// them out; a table's command has `[command, 0, 0, u32::MAX]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileBins {
     /// Tile columns.
     pub tiles_x: u32,
     /// Tile rows.
     pub tiles_y: u32,
-    /// `tiles_x × tiles_y + 1` offsets into `cmds`.
+    /// `tiles_x × tiles_y + 1` offsets into `items`.
     pub offsets: Vec<u32>,
-    /// Command indices, grouped by tile.
-    pub cmds: Vec<u32>,
+    /// The items, grouped by tile, in paint order within a tile.
+    pub items: Vec<[u32; 4]>,
 }
 
 /// A page's paint commands and the coverage tables they read.
@@ -206,9 +236,31 @@ pub struct PageCommands {
     /// Every command's coverage bytes.
     bytes: Vec<u8>,
     row_starts: Vec<u32>,
-    /// Tile references the commands' bounds make, the length of
-    /// [`TileBins::cmds`].
+    /// Every outline's segments, fixed point.
+    segs: Vec<[i32; 4]>,
+    /// Every outline tile's segments, indices into `segs`.
+    seg_lists: Vec<u32>,
+    /// Every outline tile's backdrop, [`PAGE_TILE`] covers each.
+    backdrops: Vec<i32>,
+    /// Every outline's tiles.
+    path_tiles: Vec<PathTile>,
+    /// Tile references the commands make, the length of
+    /// [`TileBins::items`].
     tile_refs: usize,
+}
+
+/// The layout of [`PageCommands::table_words`]: the index of the first
+/// word of each array after the spans.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TableBases {
+    /// Coverage bytes, four to a word.
+    pub coverage: u32,
+    /// Segments, four words each.
+    pub segs: u32,
+    /// Segment lists.
+    pub seg_lists: u32,
+    /// Backdrops, [`PAGE_TILE`] words each.
+    pub backdrops: u32,
 }
 
 /// A sample type of the page raster's output: `u8` for an 8-bit page,
@@ -249,22 +301,37 @@ fn index(v: usize) -> Result<u32, PageCommandsError> {
     u32::try_from(v).map_err(|_| PageCommandsError::TooLarge)
 }
 
-/// The bytes of device inputs holding `cmds` commands, `spans` spans,
-/// `coverage` coverage bytes, `row_starts` row offsets and `tile_words`
-/// binning words, saturating.  The coverage bytes are packed four to a
-/// word after the spans.
-const fn input_bytes(
+/// Counts of the elements of a page's device inputs.
+#[derive(Clone, Copy, Default)]
+struct Counts {
     cmds: usize,
     spans: usize,
     coverage: usize,
     row_starts: usize,
-    tile_words: usize,
-) -> usize {
-    size_of::<PageCmd>()
-        .saturating_mul(cmds)
-        .saturating_add(size_of::<[i32; 3]>().saturating_mul(spans))
-        .saturating_add(coverage.saturating_add(3) / 4 * 4)
-        .saturating_add(size_of::<u32>().saturating_mul(row_starts.saturating_add(tile_words)))
+    /// Tile references, four words each.
+    tile_refs: usize,
+    segs: usize,
+    seg_lists: usize,
+    backdrops: usize,
+}
+
+impl Counts {
+    /// The bytes of device inputs holding these elements and `tiles + 1`
+    /// tile offsets, saturating.  The coverage bytes are packed four to a
+    /// word.
+    const fn bytes(self, tiles: usize) -> usize {
+        let words = (self.coverage.saturating_add(3) / 4)
+            .saturating_add(self.row_starts)
+            .saturating_add(tiles.saturating_add(1))
+            .saturating_add(self.tile_refs.saturating_mul(4))
+            .saturating_add(self.segs.saturating_mul(4))
+            .saturating_add(self.seg_lists)
+            .saturating_add(self.backdrops);
+        size_of::<PageCmd>()
+            .saturating_mul(self.cmds)
+            .saturating_add(size_of::<[i32; 3]>().saturating_mul(self.spans))
+            .saturating_add(size_of::<u32>().saturating_mul(words))
+    }
 }
 
 impl PageCommands {
@@ -290,6 +357,10 @@ impl PageCommands {
             spans: Vec::new(),
             bytes: Vec::new(),
             row_starts: Vec::new(),
+            segs: Vec::new(),
+            seg_lists: Vec::new(),
+            backdrops: Vec::new(),
+            path_tiles: Vec::new(),
             tile_refs: 0,
         }
     }
@@ -339,29 +410,31 @@ impl PageCommands {
     /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`].
     #[must_use]
     pub const fn bytes(&self) -> usize {
-        self.bytes_with(0, 0, 0, 0, 0)
+        self.bytes_with(Counts {
+            cmds: 0,
+            spans: 0,
+            coverage: 0,
+            row_starts: 0,
+            tile_refs: 0,
+            segs: 0,
+            seg_lists: 0,
+            backdrops: 0,
+        })
     }
 
-    /// Bytes the page's device inputs would take with `cmds` more commands
-    /// holding `spans` more spans, `coverage` more coverage bytes,
-    /// `row_starts` more row offsets and `tile_refs` more tile references.
-    const fn bytes_with(
-        &self,
-        cmds: usize,
-        spans: usize,
-        coverage: usize,
-        row_starts: usize,
-        tile_refs: usize,
-    ) -> usize {
-        input_bytes(
-            self.cmds.len().saturating_add(cmds),
-            self.spans.len().saturating_add(spans),
-            self.bytes.len().saturating_add(coverage),
-            self.row_starts.len().saturating_add(row_starts),
-            (self.tile_count() + 1)
-                .saturating_add(self.tile_refs)
-                .saturating_add(tile_refs),
-        )
+    /// Bytes the page's device inputs would take with `more` more elements.
+    const fn bytes_with(&self, more: Counts) -> usize {
+        Counts {
+            cmds: self.cmds.len().saturating_add(more.cmds),
+            spans: self.spans.len().saturating_add(more.spans),
+            coverage: self.bytes.len().saturating_add(more.coverage),
+            row_starts: self.row_starts.len().saturating_add(more.row_starts),
+            tile_refs: self.tile_refs.saturating_add(more.tile_refs),
+            segs: self.segs.len().saturating_add(more.segs),
+            seg_lists: self.seg_lists.len().saturating_add(more.seg_lists),
+            backdrops: self.backdrops.len().saturating_add(more.backdrops),
+        }
+        .bytes(self.tile_count())
     }
 
     /// The page's pixels as bounds, or `None` for a page without pixels.
@@ -413,7 +486,15 @@ impl PageCommands {
         let tile_refs = bounds.tiles();
         let (n_spans, n_bytes, n_rows) =
             (table.spans.len(), table.bytes.len(), table.row_starts.len());
-        if self.bytes_with(1, n_spans, n_bytes, n_rows, tile_refs) > PAGE_COMMANDS_MAX_BYTES {
+        let more = Counts {
+            cmds: 1,
+            spans: n_spans,
+            coverage: n_bytes,
+            row_starts: n_rows,
+            tile_refs,
+            ..Counts::default()
+        };
+        if self.bytes_with(more) > PAGE_COMMANDS_MAX_BYTES {
             return Err(PageCommandsError::TooLarge);
         }
         let span_base = index(self.spans.len())?;
@@ -439,6 +520,7 @@ impl PageCommands {
         self.tile_refs += tile_refs;
         let [rg, b] = pack_rgb(rgb);
         self.cmds.push(PageCmd {
+            kind: KIND_TABLE,
             rg,
             b,
             a_input: u32::from(a_input),
@@ -454,71 +536,133 @@ impl PageCommands {
         Ok(())
     }
 
-    /// Paint `rgb` opaquely over the pixel runs `runs`, each `(y, x0, x1)`
-    /// with `x0 ≤ x1` inclusive: every pixel of a run that lies on the page
-    /// takes `rgb`, however many runs cover it.  The runs are clipped to
-    /// the page, sorted and merged in place, so the slice's order and
-    /// contents are unspecified afterwards.
+    /// Paint `rgb` at constant alpha `a_input` with the coverage of `path`
+    /// as the shape, over the pixels of its window that lie on the page.
+    /// Nothing is pushed when none does.
     ///
     /// # Errors
     ///
-    /// As [`Self::push_coverage`].
+    /// As [`Self::push_coverage`]; [`PageCommandsError::Unrepresentable`]
+    /// when the outline exceeds the device raster's integer range.  The
+    /// page is unchanged then.
     ///
     /// # Panics
     ///
-    /// When a sample of `rgb` exceeds the page's depth.
-    pub fn push_opaque_runs(
+    /// When a sample of `rgb` or `a_input` exceeds the page's depth.
+    pub fn push_area_path(
         &mut self,
-        runs: &mut [(i32, i32, i32)],
+        path: &AreaPath<'_>,
         rgb: [u16; 3],
+        a_input: u16,
     ) -> Result<(), PageCommandsError> {
+        let max = self.depth.max_sample();
+        assert!(
+            rgb.iter().all(|&v| v <= max) && a_input <= max,
+            "push_area_path: colour {rgb:?} or alpha {a_input} exceeds {} bits",
+            self.depth.bits()
+        );
         let Some(page) = self.page_bounds()? else {
             return Ok(());
         };
-        let runs = merge_runs(runs, page);
-        let (Some(&(y_first, ..)), Some(&(y_last, ..))) = (runs.first(), runs.last()) else {
+        let Some(window) = page.intersect(path.window) else {
             return Ok(());
         };
-        let n_rows = (y_last - y_first + 1).unsigned_abs() as usize;
-        let bounds = runs.iter().fold(
-            PixelBounds {
-                x0: i32::MAX,
-                y0: y_first,
-                x1: i32::MIN,
-                y1: y_last,
-            },
-            |b, &(_, x0, x1)| PixelBounds {
-                x0: b.x0.min(x0),
-                x1: b.x1.max(x1),
-                ..b
-            },
-        );
-        if self.bytes_with(1, runs.len(), 0, n_rows + 1, bounds.tiles()) > PAGE_COMMANDS_MAX_BYTES {
+        let binned = bin_path(
+            &AreaPath { window, ..*path },
+            page,
+            self.width.div_ceil(PAGE_TILE),
+            a_input == max,
+        )?;
+        if binned.tiles.is_empty() {
+            return Ok(());
+        }
+        let more = Counts {
+            cmds: 1,
+            tile_refs: binned.tiles.len(),
+            segs: path.segs.len(),
+            seg_lists: binned.lists.len(),
+            backdrops: binned.backdrops.len(),
+            ..Counts::default()
+        };
+        if self.bytes_with(more) > PAGE_COMMANDS_MAX_BYTES {
             return Err(PageCommandsError::TooLarge);
         }
-        let mut spans = Vec::new();
-        spans.try_reserve_exact(runs.len())?;
-        let mut row_starts = Vec::new();
-        row_starts.try_reserve_exact(n_rows + 1)?;
-        row_starts.push(0u32);
-        let mut rest = runs.iter().peekable();
-        for y in y_first..=y_last {
-            while let Some(&(_, x0, x1)) = rest.next_if(|r| r.0 == y) {
-                spans.push([x0, x1, -1]);
+        let seg_base = index(self.segs.len())?;
+        let list_base = index(self.seg_lists.len())?;
+        let backdrop_base = index(self.backdrops.len() / PAGE_TILE as usize)?;
+        let tile_base = index(self.path_tiles.len())?;
+        let n_tiles = index(binned.tiles.len())?;
+        self.cmds.try_reserve(1)?;
+        self.segs.try_reserve(path.segs.len())?;
+        self.seg_lists.try_reserve(binned.lists.len())?;
+        self.backdrops.try_reserve(binned.backdrops.len())?;
+        self.path_tiles.try_reserve(binned.tiles.len())?;
+        // `bin_path` bounds every coordinate by `PATH_COORD_LIMIT`.
+        self.segs.extend(
+            path.segs
+                .iter()
+                .map(|s| s.map(|v| i32::try_from(v).unwrap_or_default())),
+        );
+        self.seg_lists
+            .extend(binned.lists.iter().map(|&i| i + seg_base));
+        self.backdrops.extend_from_slice(&binned.backdrops);
+        self.path_tiles
+            .extend(binned.tiles.iter().map(|t| PathTile {
+                list_start: t.list_start + list_base,
+                backdrop: if t.backdrop == NO_BACKDROP {
+                    NO_BACKDROP
+                } else {
+                    t.backdrop + backdrop_base
+                },
+                ..*t
+            }));
+        self.tile_refs += binned.tiles.len();
+        let [rg, b] = pack_rgb(rgb);
+        self.cmds.push(PageCmd {
+            kind: KIND_PATH,
+            flags: u32::from(path.even_odd) | u32::from(path.weight) << 8,
+            rg,
+            b,
+            a_input: u32::from(a_input),
+            n_rows: n_tiles,
+            row_base: tile_base,
+            x0: window.x0,
+            y0: window.y0,
+            x1: window.x1,
+            y1: window.y1,
+            ..PageCmd::default()
+        });
+        Ok(())
+    }
+
+    /// Call `f(tile, item, occludes)` for every tile each command paints,
+    /// in paint order, with `item` as in [`TileBins::items`] and
+    /// `occludes` whether it hides the items before it in the tile.
+    fn for_each_item(&self, mut f: impl FnMut(usize, [u32; 4], bool)) {
+        let tiles_x = self.width.div_ceil(PAGE_TILE) as usize;
+        let tile = |v: i32| usize::try_from(v).unwrap_or(0) / PAGE_TILE as usize;
+        for (c, i) in self.cmds.iter().zip(0u32..) {
+            if c.kind == KIND_PATH {
+                for t in &self.path_tiles[c.row_base as usize..][..c.n_rows as usize] {
+                    let item = [i, t.list_start, t.list_len, t.backdrop];
+                    f(t.tile as usize, item, t.occludes);
+                }
+                continue;
             }
-            row_starts.push(index(spans.len())?);
+            for ty in tile(c.y0)..=tile(c.y1) {
+                for tx in tile(c.x0)..=tile(c.x1) {
+                    f(ty * tiles_x + tx, [i, 0, 0, NO_BACKDROP], false);
+                }
+            }
         }
-        let table = CoverageRows {
-            y_min: y_first,
-            row_starts: &row_starts,
-            spans: &spans,
-            bytes: &[],
-        };
-        self.push_coverage(table, bounds, rgb, self.depth.max_sample())
     }
 
     /// The commands' tile lists, built on the host: each command is listed,
-    /// in paint order, in every tile its bounds touch.
+    /// in paint order, in every tile its bounds touch, and an outline's
+    /// command in every tile it may cover; the items a later item of the
+    /// tile hides are left out: an outline at full alpha and weight that
+    /// lists no segment in the tile and covers every pixel of it on the
+    /// page fully paints them in its colour, whatever lay below.
     ///
     /// # Errors
     ///
@@ -528,41 +672,43 @@ impl PageCommands {
         let tiles_x = self.width.div_ceil(PAGE_TILE);
         let tiles_y = self.height.div_ceil(PAGE_TILE);
         let n_tiles = self.tile_count();
-        let tile = |v: i32| usize::try_from(v).unwrap_or(0) / PAGE_TILE as usize;
-        let tiles_of = |c: &PageCmd| {
-            let (tx0, tx1) = (tile(c.x0), tile(c.x1));
-            (tile(c.y0)..=tile(c.y1))
-                .flat_map(move |ty| (tx0..=tx1).map(move |tx| ty * tiles_x as usize + tx))
-        };
         index(self.tile_refs).map(drop)?;
+        // Per tile: the items seen so far, and the index of the last one
+        // that hides those before it.
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(n_tiles)?;
+        seen.resize(n_tiles, 0u32);
+        let mut first = seen.clone();
+        self.for_each_item(|t, _, occludes| {
+            if occludes {
+                first[t] = seen[t];
+            }
+            seen[t] += 1;
+        });
         let mut offsets = Vec::new();
         offsets.try_reserve_exact(n_tiles + 1)?;
         offsets.resize(n_tiles + 1, 0u32);
-        for c in &self.cmds {
-            for t in tiles_of(c) {
-                offsets[t + 1] += 1;
-            }
-        }
-        // Every partial sum is at most `tile_refs`, which fits `u32`.
         for t in 0..n_tiles {
-            offsets[t + 1] += offsets[t];
+            offsets[t + 1] = offsets[t] + seen[t] - first[t];
         }
+        let n_items = offsets[n_tiles] as usize;
         let mut cursor = offsets.clone();
-        let mut cmds = Vec::new();
-        cmds.try_reserve_exact(self.tile_refs)?;
-        cmds.resize(self.tile_refs, 0u32);
-        for (i, c) in self.cmds.iter().enumerate() {
-            let i = index(i)?;
-            for t in tiles_of(c) {
-                cmds[cursor[t] as usize] = i;
+        let mut items = Vec::new();
+        items.try_reserve_exact(n_items)?;
+        items.resize(n_items, [0u32; 4]);
+        seen.fill(0);
+        self.for_each_item(|t, item, _| {
+            if seen[t] >= first[t] {
+                items[cursor[t] as usize] = item;
                 cursor[t] += 1;
             }
-        }
+            seen[t] += 1;
+        });
         Ok(TileBins {
             tiles_x,
             tiles_y,
             offsets,
-            cmds,
+            items,
         })
     }
 
@@ -571,21 +717,48 @@ impl PageCommands {
         &self.cmds
     }
 
-    /// The spans as words, three each, then the coverage bytes packed four
-    /// to a word, little-endian; and the index of the first coverage word.
-    pub(crate) fn table_words(&self) -> (Vec<u32>, u32) {
-        let mut words: Vec<u32> = self
-            .spans
-            .iter()
-            .flat_map(|s| s.map(i32::cast_unsigned))
-            .collect();
-        let base = u32::try_from(words.len()).expect("the push limit bounds the spans");
+    /// The spans as words, three each; then the coverage bytes packed four
+    /// to a word, little-endian; the outlines' segments, four words each;
+    /// the outline tiles' segment lists; and their backdrops.  With the
+    /// index of the first word of each array after the spans.
+    pub(crate) fn table_words(&self) -> (Vec<u32>, TableBases) {
+        let mut words: Vec<u32> = Vec::with_capacity(
+            self.spans.len() * 3
+                + self.bytes.len().div_ceil(4)
+                + self.segs.len() * 4
+                + self.seg_lists.len()
+                + self.backdrops.len(),
+        );
+        words.extend(self.spans.iter().flat_map(|s| s.map(i32::cast_unsigned)));
+        let at =
+            |words: &Vec<u32>| u32::try_from(words.len()).expect("the push limit bounds the words");
+        let coverage = at(&words);
         words.extend(self.bytes.chunks(4).map(|c| {
             let mut w = [0u8; 4];
             w[..c.len()].copy_from_slice(c);
             u32::from_le_bytes(w)
         }));
-        (words, base)
+        let segs = at(&words);
+        words.extend(self.segs.iter().flat_map(|s| s.map(i32::cast_unsigned)));
+        let seg_lists = at(&words);
+        words.extend_from_slice(&self.seg_lists);
+        let backdrops = at(&words);
+        words.extend(self.backdrops.iter().map(|&b| b.cast_unsigned()));
+        (
+            words,
+            TableBases {
+                coverage,
+                segs,
+                seg_lists,
+                backdrops,
+            },
+        )
+    }
+
+    /// Whether a command takes its coverage from an outline.
+    #[must_use]
+    pub const fn has_paths(&self) -> bool {
+        !self.path_tiles.is_empty()
     }
 
     pub(crate) fn row_starts(&self) -> &[u32] {
@@ -596,37 +769,6 @@ impl PageCommands {
     pub(crate) fn spans(&self) -> &[[i32; 3]] {
         &self.spans
     }
-}
-
-/// The runs of `runs` that meet `page`, clipped to it, sorted by row and
-/// column, with each run that starts within the previous run of its row
-/// merged into it; compacted to the front of `runs`.
-fn merge_runs(runs: &mut [(i32, i32, i32)], page: PixelBounds) -> &[(i32, i32, i32)] {
-    let mut kept = 0;
-    for i in 0..runs.len() {
-        let (y, x0, x1) = runs[i];
-        let (x0, x1) = (x0.max(page.x0), x1.min(page.x1));
-        if (page.y0..=page.y1).contains(&y) && x0 <= x1 {
-            runs[kept] = (y, x0, x1);
-            kept += 1;
-        }
-    }
-    let runs = &mut runs[..kept];
-    runs.sort_unstable();
-    let mut merged: usize = 0;
-    for i in 0..runs.len() {
-        let run = runs[i];
-        if let Some(m) = merged.checked_sub(1)
-            && runs[m].0 == run.0
-            && run.1 <= runs[m].2
-        {
-            runs[m].2 = runs[m].2.max(run.2);
-        } else {
-            runs[merged] = run;
-            merged += 1;
-        }
-    }
-    &runs[..merged]
 }
 
 #[cfg(test)]

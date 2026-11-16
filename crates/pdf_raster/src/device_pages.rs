@@ -282,7 +282,7 @@ pub(crate) fn record(
         return Ok(Err(reason));
     }
     let mut renderer = job.renderer(CanvasBuffers::default())?;
-    if let Err(reason) = renderer.record_for_device() {
+    if let Err(reason) = renderer.record_for_device(true) {
         return Ok(Err(reason));
     }
     job.execute(&mut renderer)?;
@@ -331,7 +331,7 @@ pub(crate) fn render<'a>(
         return Ok((job.run(buffers)?, DevicePage::NotOffered));
     };
     let mut renderer = job.renderer(buffers)?;
-    if let Err(reason) = renderer.record_for_device() {
+    if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
         drop(claim);
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
         job.execute(&mut renderer)?;

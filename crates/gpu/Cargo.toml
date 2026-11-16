@@ -67,6 +67,8 @@ gpu-allocator = { version = "0.28", optional = true, default-features = false, f
 [dev-dependencies]
 # Disk-tier tests want isolated cache dirs.
 tempfile = { workspace = true }
+# The CPU's exact-area rasteriser, the oracle of the device outline raster.
+raster   = { package = "rasterrocket-render", path = "../raster" }
 
 # unsafe_code must be "allow" here because cudarc requires unsafe blocks.
 # We do not inherit workspace lints so we can override unsafe_code.

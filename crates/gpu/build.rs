@@ -43,7 +43,7 @@ const KERNELS: &[&str] = &["icc_clut", "blit_image"];
 
 /// Compute kernels with a Slang source only, compiled to SPIR-V for the
 /// Vulkan backend; the CUDA backend has no twin of them.
-const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster"];
+const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster", "page_raster_paths"];
 
 /// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
 /// capabilities.
@@ -56,8 +56,18 @@ fn slang_entry(kernel: &str) -> &'static str {
     match kernel {
         "icc_clut" => "icc_cmyk_clut",
         "blit_image" => "blit_image",
-        "page_raster" => "page_raster",
+        "page_raster" | "page_raster_paths" => "page_raster",
         _ => panic!("unknown kernel name: {kernel}"),
+    }
+}
+
+/// The `.slang` file `kernel` is compiled from, and the preprocessor
+/// macros it is compiled with: a kernel may be a variant of another's
+/// source.
+fn slang_source(kernel: &str) -> (&str, &'static [&'static str]) {
+    match kernel {
+        "page_raster_paths" => ("page_raster", &["PAGE_PATHS"]),
+        _ => (kernel, &[]),
     }
 }
 
@@ -306,7 +316,8 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
     let slangc = env::var("SLANGC").unwrap_or_else(|_| "slangc".to_owned());
 
     for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
-        let src = kernels_dir.join(format!("{kernel}.slang"));
+        let (source, defines) = slang_source(kernel);
+        let src = kernels_dir.join(format!("{source}.slang"));
         assert!(
             src.exists(),
             "slang source missing: {} (did you forget to add it alongside the .cu kernel?)",
@@ -325,6 +336,7 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
                 spv.to_str().expect("OUT_DIR path contains non-UTF-8"),
             ])
             .args(["-entry", slang_entry(kernel)])
+            .args(defines.iter().map(|d| format!("-D{d}")))
             .arg(src.to_str().expect("slang source path contains non-UTF-8"))
             .output()
             .unwrap_or_else(|e| {
@@ -335,7 +347,7 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
 
         assert!(
             output.status.success(),
-            "slangc failed for {kernel}.slang (profile={profile}, status={}):\n{}",
+            "slangc failed for {kernel} ({source}.slang, profile={profile}, status={}):\n{}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim(),
         );

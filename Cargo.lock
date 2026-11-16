@@ -1706,6 +1706,7 @@ dependencies = [
  "gpu-allocator",
  "log",
  "rasterrocket-color",
+ "rasterrocket-render",
  "tempfile",
 ]
 

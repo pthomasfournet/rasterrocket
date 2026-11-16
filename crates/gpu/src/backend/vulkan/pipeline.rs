@@ -27,12 +27,16 @@ use super::error::vk_err;
 pub(super) enum KernelId {
     IccClut,
     BlitImage,
-    /// Page raster from a binned command list (Vulkan only).
+    /// Page raster from a binned command list of coverage tables
+    /// (Vulkan only).
     PageRaster,
+    /// [`Self::PageRaster`] that also rasterises outlines; needs
+    /// `shaderInt64` (Vulkan only).
+    PageRasterPaths,
 }
 
 /// Total number of kernel slots, used to size the `OnceLock` array.
-const NUM_KERNELS: usize = 3;
+const NUM_KERNELS: usize = 4;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
 /// here would surface as a runtime panic when `self.slots[idx]` is
@@ -43,6 +47,7 @@ const _: () = {
     assert!(KernelId::IccClut.slot_index() < NUM_KERNELS);
     assert!(KernelId::BlitImage.slot_index() < NUM_KERNELS);
     assert!(KernelId::PageRaster.slot_index() < NUM_KERNELS);
+    assert!(KernelId::PageRasterPaths.slot_index() < NUM_KERNELS);
 };
 
 /// SPIR-V entry-point name of every kernel: each is compiled with
@@ -89,7 +94,12 @@ fn spirv_words(spirv: &[u8], label: &str) -> Result<Vec<u32>> {
 impl KernelId {
     /// Every kernel of this build.
     #[cfg(test)]
-    const ALL: &[Self] = &[Self::IccClut, Self::BlitImage, Self::PageRaster];
+    const ALL: &[Self] = &[
+        Self::IccClut,
+        Self::BlitImage,
+        Self::PageRaster,
+        Self::PageRasterPaths,
+    ];
 
     /// SPIR-V blob for this kernel, baked into the binary at build time.
     const fn spirv(self) -> &'static [u8] {
@@ -97,6 +107,9 @@ impl KernelId {
             Self::IccClut => include_bytes!(concat!(env!("OUT_DIR"), "/icc_clut.spv")),
             Self::BlitImage => include_bytes!(concat!(env!("OUT_DIR"), "/blit_image.spv")),
             Self::PageRaster => include_bytes!(concat!(env!("OUT_DIR"), "/page_raster.spv")),
+            Self::PageRasterPaths => {
+                include_bytes!(concat!(env!("OUT_DIR"), "/page_raster_paths.spv"))
+            }
         }
     }
 
@@ -107,6 +120,7 @@ impl KernelId {
             Self::IccClut => 0,
             Self::BlitImage => 1,
             Self::PageRaster => 2,
+            Self::PageRasterPaths => 3,
         }
     }
 
@@ -117,6 +131,7 @@ impl KernelId {
             Self::IccClut => "icc_cmyk_clut",
             Self::BlitImage => "blit_image",
             Self::PageRaster => "page_raster",
+            Self::PageRasterPaths => "page_raster_paths",
         }
     }
 
@@ -133,7 +148,7 @@ impl KernelId {
         match self {
             Self::BlitImage => &[0, 1, 2, 3],
             Self::IccClut => &[0, 1, 2],
-            Self::PageRaster => &[0, 1, 2, 3, 4, 5],
+            Self::PageRaster | Self::PageRasterPaths => &[0, 1, 2, 3, 4, 5],
         }
     }
 
@@ -147,8 +162,8 @@ impl KernelId {
             Self::IccClut => 3,
             // (src, dst_rgba, cols, rows) — dimensions and bbox travel as push constants
             Self::BlitImage => 4,
-            // (cmds, intersects, row_starts, tile_offsets, tile_cmds, page)
-            Self::PageRaster => 6,
+            // (cmds, table, row_starts, tile_offsets, tile_items, page)
+            Self::PageRaster | Self::PageRasterPaths => 6,
         }
     }
 }
@@ -456,6 +471,7 @@ mod tests {
         };
         assert!(!declares(KernelId::IccClut, CAPABILITY_INT64));
         assert!(!declares(KernelId::PageRaster, CAPABILITY_INT64));
+        assert!(declares(KernelId::PageRasterPaths, CAPABILITY_INT64));
         // Every module declares Shader (capability 1).
         assert!(declares(KernelId::IccClut, 1));
     }
