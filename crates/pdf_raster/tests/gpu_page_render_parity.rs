@@ -142,18 +142,38 @@ fn device_page_renders_identically_with(cpu: Render, gpu_render: Diagnosed) {
     assert_identical(&cpu, &page, "device page");
 }
 
+/// A page clipped by a path, or by text in a clipping mode, renders on
+/// the device, identically to the CPU, at 8 and 16 bits.
+#[test]
+fn clipped_pages_render_on_the_device_identically() {
+    for content in [
+        &b"0 g BT /F1 120 Tf 7 Tr 10 100 Td (Clip) Tj ET 0 0 1 rg 0 0 400 400 re f"[..],
+        b"10 10 m 200 10 l 100 200 l h W n 30 20 m 390 90 l 40 370 l h W* n \
+          0 0 1 rg 0 0 400 400 re f /T gs 1 0 0 rg BT /F2 60 Tf 20 60 Td (text) Tj ET",
+    ] {
+        let pdf = page_pdf(content);
+        let Some(gpu) = gpu_session(pdf.clone()) else {
+            return;
+        };
+        let cpu_session = session(pdf, BackendPolicy::CpuOnly);
+        for (depth, cpu, gpu_render) in DEPTHS {
+            let (page, diag) = gpu_render(&gpu, 1);
+            assert!(
+                matches!(diag.device_page, DevicePage::Rendered { .. }),
+                "{depth}: {:?}",
+                diag.device_page
+            );
+            let want = cpu(&cpu_session, 1);
+            assert!(want.2.iter().any(|&b| b != 0xff), "blank on the CPU");
+            assert_identical(&want, &page, depth);
+        }
+    }
+}
+
 #[test]
 fn declined_pages_render_on_the_cpu_with_the_reason() {
     for (content, reason) in [
-        (
-            &b"0 g BT /F1 12 Tf 7 Tr 10 10 Td (a) Tj ET 0 0 400 400 re f"[..],
-            "text clip mode",
-        ),
-        (b"1 0 0 rg 10 10 100 100 re f /Sh sh", "shading"),
-        (
-            b"10 10 m 200 10 l 100 200 l h W n 0 0 1 rg 0 0 400 400 re f",
-            "path clip",
-        ),
+        (&b"1 0 0 rg 10 10 100 100 re f /Sh sh"[..], "shading"),
         (
             b"/T gs 0 0 1 RG 0 w 10 10 m 300 300 l S",
             "translucent hairline",
@@ -269,9 +289,9 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
             assert_identical(&cpu_render(&cpu, page), &got, &what);
         }
     }
-    // The text, image and form pages of the fixtures render on the device.
+    // Every first page of the fixtures renders on the device.
     assert!(
-        found < FIXTURES.len() || on_device >= 36,
+        found < FIXTURES.len() || on_device == 41,
         "{on_device} fixture pages rendered on the device"
     );
 }
