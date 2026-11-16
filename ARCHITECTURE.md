@@ -686,7 +686,7 @@ A JPEG 2000 image whose dictionary names no colour space converts through
 the ICC profile of its `colr` box, when it has one.  Colour-key masks are
 compared with the samples before any of this.
 
-**Image decode budget** (`resources/image/mod.rs`)
+**Image decode budget** (`resources/image/limits.rs`)
 
 An image's sides may each reach `MAX_IMAGE_SIDE` (131 071), and its
 decoded samples `width × height × components` may reach
@@ -843,7 +843,8 @@ resolution is stateless and on-demand; no per-page pre-computation. This
 makes unit testing straightforward: inject a `Document` and page `ObjectId`.
 
 **GPU integration points** (feature-gated; `renderer/page/device_blit.rs`,
-`device_page.rs`, `resources/image/icc_device.rs`)
+`device_page.rs`, `resources/image/icc_device.rs`, the thresholds in
+`resources/image/thresholds.rs`)
 - DCTDecode: `gpu::NvJpegDecoder::decode_sync()` if pixels ≥
   `GPU_JPEG_THRESHOLD_PX` (dormant: `u32::MAX`)
 - JPXDecode: `gpu::NvJpeg2kDecoder::decode_sync()` if pixels ≥
