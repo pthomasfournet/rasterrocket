@@ -188,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "exceeds bits slice length")]
     fn pack_more_bits_than_input_panics_in_debug() {
         // Asks for 16 bits but only provides 1 byte. Debug-only
