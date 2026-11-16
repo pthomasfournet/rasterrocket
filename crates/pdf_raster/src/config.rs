@@ -252,8 +252,8 @@ pub struct SessionConfig {
     /// fixed resolution); `None` (the default) when unknown or page
     /// dependent.  With a scale the prefetcher skips an image every draw of
     /// which on its page is smaller than the image, which the render
-    /// resamples on the host without the image cache; without one it
-    /// prefetches every JPEG image.  No effect unless
+    /// resamples on the host without the image cache; without one nothing
+    /// is prefetched (reported at warn).  No effect unless
     /// [`prefetch`](Self::prefetch) is set.
     #[cfg(feature = "cache")]
     pub prefetch_scale: Option<(f64, f64)>,

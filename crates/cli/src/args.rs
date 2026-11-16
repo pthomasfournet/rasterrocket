@@ -694,7 +694,8 @@ pub(crate) struct Args {
     /// Prefetch image `XObject`s into the device-resident image cache at
     /// session open.  Has no effect on a session without an image cache,
     /// such as one under `--backend cpu`, or `--backend auto` while every
-    /// GPU kernel is dormant.  Off by default — the prefetch walk is wasted work for
+    /// GPU kernel is dormant, nor when the scale depends on the page
+    /// (`--scale-to*`, fax output, per-page print resolution).  Off by default — the prefetch walk is wasted work for
     /// short single-page renders, but a clear win on multi-page or
     /// multi-pass workloads (OCR pipelines).
     #[cfg(feature = "cache")]

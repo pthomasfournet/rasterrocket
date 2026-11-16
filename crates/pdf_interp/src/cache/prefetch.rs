@@ -8,19 +8,20 @@
 //! upload cost serially on the render hot path.
 //!
 //! This module:
-//! 1. Walks `doc.get_pages()`; for each page reads `/Resources
-//!    /XObject` and lists the named image references.
-//! 2. Hands each `(page, name, stream_id)` tuple to a small worker
+//! 1. Walks `doc.get_pages()`; for each page walks its content stream, and
+//!    the forms it paints, for the image `XObject`s drawn and the
+//!    transformation in effect at each `Do`.
+//! 2. Hands each image a draw of which the cache serves to a small worker
 //!    pool that decodes + inserts into the cache.
 //! 3. Dedupes by `ObjId` so an image referenced from N pages is
 //!    decoded once, not N times.
 //!
-//! When the scale the pages render at is known ([`PrefetchConfig::scale`]),
-//! discovery also walks each page's content stream for the transformation
-//! in effect at each `Do`, and an image every draw of which reduces it
+//! The draw sizes need the scale the pages render at
+//! ([`PrefetchConfig::scale`]).  An image every draw of which reduces it
 //! (see [`draw_reduces`]) is not prefetched: the render resamples such a
 //! draw from host-resident samples and bypasses the cache, so its decode
-//! would be wasted work.
+//! would be wasted work.  Without one scale for every page nothing is
+//! prefetched, since no draw can be told to be one the cache serves.
 //!
 //! Only `/DCTDecode` (JPEG) images are prefetched — those are the
 //! decode-expensive case and the one the [`gpu::cache::ImageCache`]
@@ -43,10 +44,10 @@ use pdf::{Document, Object, ObjectId};
 use crate::content::Operator;
 use crate::renderer::PageView;
 use crate::renderer::gstate::{Ctm, ctm_multiply};
-use crate::renderer::page::{draw_reduces, image_draw_size};
+use crate::renderer::page::{MAX_FORM_DEPTH, draw_reduces, image_draw_size};
 use crate::resources::dict_ext::DictExt;
 use crate::resources::image::{ImageFilter, ImageRequest, filter_name, validated_dims};
-use crate::resources::resolve_image;
+use crate::resources::{PageResources, resolve_image};
 use crate::{PageBox, Rotation};
 
 /// Upper bound on prefetcher worker threads.
@@ -83,10 +84,9 @@ pub struct PrefetchConfig {
     pub max_images: usize,
     /// Device pixels per point `(x, y)` along the device axes at which every
     /// page of the session renders, when that is one scale for all pages.
-    /// An image is then prefetched only when some draw of it on a page's own
-    /// content stream does not reduce it.  `None` (the default) prefetches
-    /// every JPEG image at full resolution.  A scale that is not finite and
-    /// positive counts as `None`.
+    /// An image is prefetched only when some draw of it on a page, or in a
+    /// form the page paints, does not reduce it.  `None` (the default)
+    /// prefetches nothing, as does a scale that is not finite and positive.
     pub scale: Option<(f64, f64)>,
     /// The session's rotation, added to each page's `/Rotate`; it decides
     /// which device axis each scale applies to.  Default
@@ -161,6 +161,9 @@ impl Drop for PrefetchHandle {
 /// to a private `discover_pages` helper; an image referenced from
 /// many pages is only decoded once.
 ///
+/// Without a valid [`PrefetchConfig::scale`] no thread is started and
+/// nothing is prefetched, which is reported at warn.
+///
 /// # Errors
 ///
 /// The error of `std::thread::Builder::spawn` when the OS cannot create a
@@ -172,12 +175,24 @@ pub fn spawn_prefetch(
     doc_id: DocId,
     config: PrefetchConfig,
 ) -> std::io::Result<PrefetchHandle> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let Some(scale) = config.valid_scale() else {
+        log::warn!(
+            "image prefetch: the pages render at no one scale, so no draw can be told to be \
+             one the image cache serves; nothing is prefetched"
+        );
+        return Ok(PrefetchHandle {
+            cancel,
+            workers: Mutex::new(Vec::new()),
+        });
+    };
     let state = Arc::new(PrefetchState {
         cache,
         doc,
         doc_id,
-        cancel: Arc::new(AtomicBool::new(false)),
-        view: config.valid_scale().map(|scale| (scale, config.rotation)),
+        cancel,
+        scale,
+        rotation: config.rotation,
     });
     let workers = clamp_workers(config.workers);
     let mut handles = Vec::with_capacity(workers + 1);
@@ -232,8 +247,8 @@ fn spawn_threads(
 
 /// Job payload passed from the discovery thread to the worker pool.
 struct PrefetchJob {
-    page_id: ObjectId,
-    image_name: Vec<u8>,
+    /// The image `XObject` stream.
+    stream_id: ObjectId,
     /// The device-pixel extent of a draw of the image that does not reduce
     /// it; `None` for a full-resolution decode.
     draw_size: Option<(u32, u32)>,
@@ -251,25 +266,17 @@ struct PrefetchState {
     doc: Arc<Document>,
     doc_id: DocId,
     cancel: Arc<AtomicBool>,
-    /// The valid [`PrefetchConfig::scale`] and the session rotation; `None`
-    /// when the scale is unknown.
-    view: Option<((f64, f64), Rotation)>,
+    /// The valid [`PrefetchConfig::scale`].
+    scale: (f64, f64),
+    /// The session rotation.
+    rotation: Rotation,
 }
 
-/// Walk every page's `/XObject` resource dict and emit a
-/// [`PrefetchJob`] for each `/DCTDecode`-filtered image `XObject` we
-/// haven't already seen.
-///
-/// Form `XObject`s are *not* recursed into; images nested inside
-/// a Form's own resource dict will not be prefetched and the
-/// renderer will decode them on first touch.  The renderer already
-/// pays that cost only once per image (subsequent pages hit the
-/// cache), so the gap is bounded.
-///
-/// When the scale is known, an image is emitted with the size of a draw
-/// on the page that does not reduce it (see [`cached_draw`]), and skipped
-/// on a page whose draws all reduce it; a later page drawing it larger
-/// still emits it.
+/// Walk every page's draws ([`page_draws`]) and emit a [`PrefetchJob`]
+/// for each `/DCTDecode`-filtered image `XObject` we haven't already
+/// seen, with the size of a draw on the page that does not reduce it
+/// (see [`cached_draw`]).  An image every draw of which on a page reduces
+/// it is skipped there; a later page drawing it larger still emits it.
 fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<PrefetchJob>) {
     // Discovery is single-threaded so the dedup set is a plain
     // local — no Mutex / Arc.  An image referenced from N pages
@@ -284,16 +291,12 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
         if state.cancel.load(Ordering::Acquire) {
             break;
         }
-        // get_page_resource_dict already follows the page-tree
-        // /Resources inheritance chain and resolves indirect refs;
-        // when /XObject is absent we just get a NotFound error and
-        // skip this page.
-        let Ok(xobj_dict) = doc.get_page_resource_dict(page_id, b"XObject") else {
+        // A page without `XObject` resources paints none.
+        if doc.get_page_resource_dict(page_id, b"XObject").is_err() {
             continue;
-        };
-        // The content stream is walked for the first JPEG candidate only.
-        let mut draws = None;
-        for (name, value) in &xobj_dict {
+        }
+        let draws = page_draws(doc, page_id, state.scale, state.rotation);
+        for (stream_id, sizes) in &draws {
             if state.cancel.load(Ordering::Acquire) {
                 break 'pages;
             }
@@ -301,9 +304,6 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
                 log::debug!("prefetch: hit max_images={max_images}, stopping discovery early");
                 break 'pages;
             }
-            let Object::Reference(stream_id) = value else {
-                continue;
-            };
             let obj_id = ObjId(stream_id.0);
             if seen.contains(&obj_id) {
                 continue;
@@ -316,22 +316,13 @@ fn discover_pages(state: &PrefetchState, max_images: usize, tx: &mpsc::Sender<Pr
                 let _ = seen.insert(obj_id);
                 continue;
             };
-            let draw_size = match state.view {
-                Some((scale, rotation)) => {
-                    let draws =
-                        draws.get_or_insert_with(|| page_draws(doc, page_id, scale, rotation));
-                    match cached_draw(dims, draws.get(name.as_slice())) {
-                        Prefetch::At(draw_size) => draw_size,
-                        Prefetch::Skip => continue,
-                    }
-                }
-                None => None,
+            let Prefetch::At(draw_size) = cached_draw(dims, sizes) else {
+                continue;
             };
             let _ = seen.insert(obj_id);
             if tx
                 .send(PrefetchJob {
-                    page_id,
-                    image_name: name.clone(),
+                    stream_id: *stream_id,
                     draw_size,
                 })
                 .is_err()
@@ -371,9 +362,8 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<PrefetchJob>>, state: &PrefetchState) {
         }));
         if result.is_err() {
             log::warn!(
-                "prefetch: decode panicked for image {:?} on page {:?}",
-                String::from_utf8_lossy(&job.image_name),
-                job.page_id,
+                "prefetch: decode panicked for image object {}",
+                job.stream_id.0
             );
         }
     }
@@ -384,9 +374,11 @@ fn worker_loop(rx: &Mutex<mpsc::Receiver<PrefetchJob>>, state: &PrefetchState) {
 /// `resolve_image` logs its own failures at warn level; this fn
 /// is fire-and-forget from the worker's perspective.
 fn decode_one(doc: &Document, doc_id: DocId, cache: &ImageCache, job: &PrefetchJob) {
-    let Ok(xobjects) = doc.get_page_resource_dict(job.page_id, b"XObject") else {
-        return;
-    };
+    // The stream under a name of its own: the decode resolves an image by
+    // name in an `XObject` dictionary.
+    const NAME: &[u8] = b"Im";
+    let mut xobjects = pdf::Dictionary::new();
+    xobjects.set(NAME, Object::Reference(job.stream_id));
     let mut ctx = crate::resources::image::ImageDecodeCtx {
         image_cache: Some(cache),
         doc_id: Some(doc_id),
@@ -396,7 +388,7 @@ fn decode_one(doc: &Document, doc_id: DocId, cache: &ImageCache, job: &PrefetchJ
         &mut ctx,
         &xobjects,
         ImageRequest {
-            name: &job.image_name,
+            name: NAME,
             draw_size: job.draw_size,
         },
         #[cfg(feature = "gpu-jpeg-huffman")]
@@ -441,60 +433,102 @@ enum Prefetch {
 /// reduce the image, or [`Prefetch::Skip`] when every draw reduces it or
 /// the page draws it nowhere.  A draw of unknown extent decodes at full
 /// resolution and does not reduce.
-fn cached_draw(
-    (width, height): (u32, u32),
-    draws: Option<&HashSet<Option<(u32, u32)>>>,
-) -> Prefetch {
+fn cached_draw((width, height): (u32, u32), draws: &HashSet<Option<(u32, u32)>>) -> Prefetch {
     draws
-        .into_iter()
-        .flatten()
+        .iter()
         .copied()
         .find(|draw| !draw.is_some_and(|draw| draw_reduces(width, height, draw)))
         .map_or(Prefetch::Skip, Prefetch::At)
 }
 
 /// The device-pixel extents (`image_draw_size`) of the draws of each
-/// `XObject` that the content stream of page `page_id` paints by name,
-/// at `scale` device pixels per point under the session rotation
-/// `rotation`.  Only `q`, `Q` and `cm` change the transformation followed;
-/// the `XObjects` of forms are not visited.  Empty when the page's geometry
-/// or content cannot be read.
-fn page_draws(
-    doc: &Document,
-    page_id: ObjectId,
-    scale: (f64, f64),
-    rotation: Rotation,
-) -> HashMap<Vec<u8>, HashSet<Option<(u32, u32)>>> {
-    let mut draws: HashMap<Vec<u8>, HashSet<Option<(u32, u32)>>> = HashMap::new();
+/// `XObject` that the content stream of page `page_id`, or a form it
+/// paints, paints by name, keyed by the `XObject`'s stream, at `scale`
+/// device pixels per point under the session rotation `rotation`.  Only
+/// `q`, `Q`, `cm` and a form's `/Matrix` change the transformation
+/// followed.  Forms are followed to the nesting depth the renderer
+/// executes ([`MAX_FORM_DEPTH`]); a form is not entered from within
+/// itself.  Empty when the page's geometry or content cannot be read.
+fn page_draws(doc: &Document, page_id: ObjectId, scale: (f64, f64), rotation: Rotation) -> Draws {
+    let mut walk = DrawWalk::default();
     // The extents depend on the linear part of the page CTM alone, which
     // the page box does not enter.
     let Ok(geom) = crate::page_size_pts_by_id(doc, page_id, PageBox::default()) else {
-        return draws;
+        return walk.draws;
     };
     let Ok(content) = doc.page_content(page_id) else {
-        return draws;
+        return walk.draws;
     };
-    let mut ctm: Ctm = PageView::whole(&geom.rotated(rotation), scale).page_ctm();
-    let mut saved: Vec<Ctm> = Vec::new();
-    for op in &crate::parse_page_content(doc, page_id, &content.bytes) {
-        match op {
-            Operator::Save => saved.push(ctm),
-            Operator::Restore => {
-                if let Some(outer) = saved.pop() {
-                    ctm = outer;
+    let ctm: Ctm = PageView::whole(&geom.rotated(rotation), scale).page_ctm();
+    let ops = crate::parse_page_content(doc, page_id, &content.bytes);
+    walk.content(&PageResources::new(doc, page_id), &ops, ctm, 0);
+    walk.draws
+}
+
+/// The draw extents of each `XObject` stream (see [`page_draws`]).
+type Draws = HashMap<ObjectId, HashSet<Option<(u32, u32)>>>;
+
+/// The state of [`page_draws`]: the draws found and the forms being walked.
+#[derive(Default)]
+struct DrawWalk {
+    draws: Draws,
+    /// The forms whose content is being walked, outermost first.
+    forms: Vec<ObjectId>,
+}
+
+impl DrawWalk {
+    /// Record the draws of `ops`, a content stream whose names resolve in
+    /// `resources`, entered under `ctm` at form nesting depth `depth`.
+    fn content(
+        &mut self,
+        resources: &PageResources<'_>,
+        ops: &[Operator<'_>],
+        mut ctm: Ctm,
+        depth: u32,
+    ) {
+        let mut saved: Vec<Ctm> = Vec::new();
+        for op in ops {
+            match op {
+                Operator::Save => saved.push(ctm),
+                Operator::Restore => {
+                    if let Some(outer) = saved.pop() {
+                        ctm = outer;
+                    }
                 }
+                Operator::ConcatMatrix(m) => ctm = ctm_multiply(m, &ctm),
+                Operator::PaintXObject(name) => self.paint(resources, name, ctm, depth),
+                _ => {}
             }
-            Operator::ConcatMatrix(m) => ctm = ctm_multiply(m, &ctm),
-            Operator::PaintXObject(name) => {
-                let _ = draws
-                    .entry(name.to_vec())
-                    .or_default()
-                    .insert(image_draw_size(&ctm));
-            }
-            _ => {}
         }
     }
-    draws
+
+    /// Record the draw of `XObject` `name` of `resources` under `ctm`, at
+    /// form nesting depth `depth`: an image's extent, or a form's draws.
+    fn paint(&mut self, resources: &PageResources<'_>, name: &[u8], ctm: Ctm, depth: u32) {
+        let Some(id) = resources.xobject_id(name) else {
+            return;
+        };
+        if resources.form_xobject_entry(name).is_none() {
+            let _ = self
+                .draws
+                .entry(id)
+                .or_default()
+                .insert(image_draw_size(&ctm));
+            return;
+        }
+        if depth >= MAX_FORM_DEPTH || self.forms.contains(&id) {
+            return;
+        }
+        let Some(form) = resources.form_xobject(name) else {
+            return;
+        };
+        let inner = resources.for_form(&form);
+        let components = |name: &[u8]| inner.inline_image_components(name);
+        let ops = crate::content::parse_with(&form.content, Some(&components));
+        self.forms.push(id);
+        self.content(&inner, &ops, ctm_multiply(&form.matrix, &ctm), depth + 1);
+        let _ = self.forms.pop();
+    }
 }
 
 #[cfg(test)]
@@ -579,11 +613,17 @@ startxref\n180\n%%EOF"
         ])
     }
 
+    /// The prefetch of image `(6, 0)` given the draws `draws`.
+    fn prefetch_of(doc: &Document, draws: &Draws) -> Prefetch {
+        let dims = dct_image_dims(doc, (6, 0)).expect("a JPEG image");
+        draws
+            .get(&(6, 0))
+            .map_or(Prefetch::Skip, |sizes| cached_draw(dims, sizes))
+    }
+
     /// The prefetch of `/Im` on page `(4, 0)` at `scale`.
     fn prefetched_draw(doc: &Document, scale: (f64, f64)) -> Prefetch {
-        let dims = dct_image_dims(doc, (6, 0)).expect("a JPEG image");
-        let draws = page_draws(doc, (4, 0), scale, Rotation::None);
-        cached_draw(dims, draws.get(b"Im".as_slice()))
+        prefetch_of(doc, &page_draws(doc, (4, 0), scale, Rotation::None))
     }
 
     #[test]
@@ -622,13 +662,70 @@ startxref\n180\n%%EOF"
         // 400 × 100 points, drawn at 1 pixel a point across and 4 down: the
         // image is reduced across.  Turned a quarter, its width lies down.
         let doc = page_with_jpeg("q 400 0 0 100 0 0 cm /Im Do Q");
-        let dims = dct_image_dims(&doc, (6, 0)).expect("a JPEG image");
-        let at = |rotation| {
-            let draws = page_draws(&doc, (4, 0), (1.0, 4.0), rotation);
-            cached_draw(dims, draws.get(b"Im".as_slice()))
-        };
+        let at = |rotation| prefetch_of(&doc, &page_draws(&doc, (4, 0), (1.0, 4.0), rotation));
         assert_eq!(at(Rotation::None), Prefetch::At(Some((400, 400))));
         assert_eq!(at(Rotation::Cw90), Prefetch::Skip);
+    }
+
+    /// A page `(4, 0)` that paints form `/F` (object 7, `/Matrix`
+    /// `matrix`, content `form`, `/Im` its own resource) with `page`.
+    fn page_with_form(page: &str, matrix: &str, form: &str) -> Document {
+        let stream = |dict: &str, content: &str| {
+            format!(
+                "<< {dict} /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            )
+        };
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /MediaBox [0 0 400 400] /Contents 5 0 R \
+                 /Resources << /XObject << /F 7 0 R >> >> >>"
+                    .to_owned(),
+            ),
+            (5, stream("", page)),
+            (
+                6,
+                "<< /Type /XObject /Subtype /Image /Filter /DCTDecode /Width 400 \
+                 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 0 >>\n\
+                 stream\n\nendstream"
+                    .to_owned(),
+            ),
+            (
+                7,
+                stream(
+                    &format!(
+                        "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Matrix {matrix} \
+                         /Resources << /XObject << /Im 6 0 R /F 7 0 R >> >>"
+                    ),
+                    form,
+                ),
+            ),
+        ])
+    }
+
+    /// An image drawn only inside a form is sized under the form's matrix
+    /// and the transformation at its `Do`.
+    #[test]
+    fn an_image_drawn_in_a_form_is_sized_by_the_forms_matrix() {
+        let doc = page_with_form("q 5 0 0 5 0 0 cm /F Do Q", "[100 0 0 100 0 0]", "/Im Do");
+        assert_eq!(
+            prefetched_draw(&doc, (1.0, 1.0)),
+            Prefetch::At(Some((500, 500)))
+        );
+        // At a fifth of that size the draw reduces it.
+        let small = page_with_form("/F Do", "[100 0 0 100 0 0]", "/Im Do");
+        assert_eq!(prefetched_draw(&small, (1.0, 1.0)), Prefetch::Skip);
+    }
+
+    /// A form that paints itself ends the walk, its draws recorded.
+    #[test]
+    fn a_form_painting_itself_ends_the_walk() {
+        let doc = page_with_form("/F Do", "[1 0 0 1 0 0]", "/F Do 400 0 0 400 0 0 cm /Im Do");
+        assert_eq!(
+            prefetched_draw(&doc, (1.0, 1.0)),
+            Prefetch::At(Some((400, 400)))
+        );
     }
 
     #[test]
