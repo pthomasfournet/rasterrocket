@@ -3574,6 +3574,39 @@ as a divergence (RMSE 3.56 → 3.35). An axis of a pixel or more is untouched:
 the ten corpus fixtures and 20 image-heavy archive documents, pages 1–3 at
 50 dpi, render byte-identical.
 
+**Unreleased on master: the wide working space at 8 bits.** Under an
+output profile a page of the wide working space is painted on a 16-bit
+canvas at `--depth 8` too, and rounded to 8 bits after the conversion to
+the profile (or the proof's conversion to the display, or the CMYK
+finish), the one rounding an 8-bit file already took: depth now chooses
+the sample size of the file, not the gamut. CMYK pages and proofs under an
+output profile separate from the wide space at 8 bits as well. The byte
+budget, the band planner and `page_layout` count the 16-bit canvas (6 bytes
+a pixel of RGB, 16 of ink), and so do `--print`'s default resolution and
+its band-spill decision; output bitmaps and bands stay 8-bit. The 8-bit
+warning and the refusal of `--working-space wide` at 8 bits are gone.
+`--working-space srgb` paints at the render's depth, its 8-bit output
+byte-identical to before. `--gpu-pages`, whose raster is 8-bit sRGB,
+renders wide pages on the CPU, now at 8 bits too, and the first such page
+of a session warns, naming `--working-space srgb`. Results change for
+every 8-bit `--output-profile` render: the wide gamut, the conversion's
+16-bit precision, and blending in the wide space (see the wide working
+space paragraph). On the 34-PDF gate corpus (pages 1–2, 50 dpi), the
+files that differ from before are those of 8-bit renders under a profile:
+54 of 65 page files under the RGB test printer, 52 under the gray one, 51
+under the CMYK one, 6 of 8 proofs to the RGB printer; 0 differ without a
+profile (RGB, gray and CMYK at both depths, overprint, proof, `--gpu-pages`
+against `--backend cpu`), with `--working-space srgb` at 8 bits (RGB, gray,
+CMYK, proof) and 16, and at 16 bits under the RGB printer; exit codes are
+identical. ΔE00 of the 8-bit file against the 16-bit render of the page,
+in the printer's Lab: RGB printer mean 0.36, max 1.54 (was mean 0.39,
+p99 0.69, max 11.8, 0.41 % of pixels above 1); gray printer mean 0.02,
+max 0.66 (was max 4.4); proof mean 0.31, max 1.03 (was p99 1.00, max 6.8).
+Against before, at 8 bits: RGB mean 0.07, p99 0.77, max 12.1; gray max
+4.6; CMYK printer mean 0.04, p99 0.67, max 7.6; proof p99 1.15, max 6.8.
+API changes: `FinishedCanvas::narrowed` and `Bitmap::try_converted_in` are
+new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
