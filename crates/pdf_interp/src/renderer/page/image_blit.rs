@@ -13,6 +13,7 @@ use super::depth::CanvasSample;
 #[cfg(feature = "cache")]
 use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
+use super::image_hairline;
 use super::image_reduce::{self, DeviceWindow};
 use super::image_sampler::{
     BlendedRows, Filter, GridClip, GridView, MaskSampler, SampleGrid, sample_bytes,
@@ -100,8 +101,10 @@ impl PageRenderer<'_> {
         // The resampling and the sampling are computed on the whole page's
         // device grid, from the CTM and the paintable pixels there, and the
         // window takes the pixels it covers, so a window draws as the page
-        // does.
-        let page_ctm = self.gstate.current().ctm;
+        // does.  An axis shorter than a device pixel is first widened to
+        // one pixel (`image_hairline`), so that the image meets a pixel
+        // centre.
+        let page_ctm = image_hairline::widen(&self.gstate.current().ctm);
         let window = self.paintable_window();
         let reduced_mask = img
             .smask

@@ -69,6 +69,7 @@ mod form_memo;
 mod group_space;
 mod image_blit;
 mod image_compositor;
+mod image_hairline;
 mod image_memo;
 mod image_reduce;
 mod image_sampler;
