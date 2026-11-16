@@ -18,12 +18,15 @@
 //!   the whole process from outside (`both` = `--threads` CPU workers plus
 //!   the GPU thread).
 //! - `--write-pdf PATH`: write the document and exit.
+//! - `--pdf PATH`: the first `--pages` pages of the PDF at `PATH` instead
+//!   of the star document; every page must be recordable.
 //!
 //! Run:
 //! ```text
 //! cargo build --release -p bench --features vulkan --bin page_gpu_bench
 //! target/release/page_gpu_bench [--device NAME|INDEX] [--pages 5] [--stars 300] [--dpi 150]
 //!     [--iters 9] [--warmup 2] [--threads N] [--mode report|cpu|gpu|both] [--write-pdf PATH]
+//!     [--pdf PATH]
 //! ```
 //! The device defaults to `PDF_RASTER_VULKAN_DEVICE`, else the device the
 //! backend ranks first.
@@ -51,6 +54,7 @@ struct Config {
     device: Option<String>,
     mode: String,
     write_pdf: Option<String>,
+    pdf: Option<String>,
 }
 
 fn parse_config() -> Config {
@@ -67,6 +71,7 @@ fn parse_config() -> Config {
             .filter(|s| !s.is_empty()),
         mode: "report".to_owned(),
         write_pdf: None,
+        pdf: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -82,6 +87,7 @@ fn parse_config() -> Config {
             ("--device", Some(v)) => cfg.device = Some(v),
             ("--mode", Some(v)) => cfg.mode = v,
             ("--write-pdf", Some(v)) => cfg.write_pdf = Some(v),
+            ("--pdf", Some(v)) => cfg.pdf = Some(v),
             (f, _) => panic!("unknown or incomplete flag {f}"),
         }
     }
@@ -235,7 +241,10 @@ fn main() {
     let process_start = Instant::now();
     let cfg = parse_config();
     let scale = cfg.dpi / 72.0;
-    let pdf = write_pdf(&generate(cfg.pages, cfg.stars, cfg.seed));
+    let pdf = cfg.pdf.as_ref().map_or_else(
+        || write_pdf(&generate(cfg.pages, cfg.stars, cfg.seed)),
+        |path| std::fs::read(path).expect("read --pdf"),
+    );
     if let Some(path) = &cfg.write_pdf {
         std::fs::write(path, &pdf).expect("write the PDF");
         println!("wrote {path} ({} pages, {} bytes)", cfg.pages, pdf.len());
