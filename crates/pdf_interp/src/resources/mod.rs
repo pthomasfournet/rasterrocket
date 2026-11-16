@@ -1,16 +1,9 @@
 //! PDF resource resolution — fonts, colour spaces, `XObject`s, shadings.
 //!
-//! The [`PageResources`] struct holds a reference to the [`pdf::Document`]
-//! and the current page's [`ObjectId`], and provides lazy-loading helpers
-//! for each resource category.
-//!
-//! # Design
-//!
-//! `pdf::Document` is immutable after load; resource dicts are accessed
-//! via `get_page_fonts()` and friends, which traverse the page tree and
-//! dereference indirect objects.  All caching lives in the caller
-//! (`super::renderer::font_cache`) rather than here, so this module
-//! stays stateless and easy to test.
+//! [`PageResources`] resolves the named resources of a content stream
+//! through the resource dictionaries in effect for it; the submodules parse
+//! each kind of resource.  This module holds the dictionary readers they
+//! share.
 
 pub(crate) mod black_generation;
 pub(crate) mod cmap;
@@ -27,6 +20,7 @@ mod page_resources;
 pub(crate) mod shading;
 pub(crate) mod tiling;
 pub(crate) mod transfer;
+mod transparency_group;
 
 use pdf::{Dictionary, Document, Object};
 
@@ -46,24 +40,7 @@ pub use image::{
 pub use page_resources::{
     FormXObject, PageResources, ResourceIdentity, ResourceKey, ShadingPattern,
 };
-
-/// The attributes of a transparency group dictionary (PDF §11.6.6), of a
-/// form `XObject` or of a page.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TransparencyGroupParams {
-    /// `I`: the group is isolated, so blend modes inside it do not see the
-    /// backdrop under it (default: false).
-    pub isolated: bool,
-    /// `K`: the group is a knockout group, in which each object composites
-    /// with the group's initial backdrop rather than over the objects
-    /// before it (default: false).
-    pub knockout: bool,
-    /// `CS`: the colour space the group's colours convert into and
-    /// composite in; `None` when absent or not a group colour space, the
-    /// group then compositing in its parent's.
-    pub space: Option<GroupSpace>,
-}
+pub use transparency_group::{TransparencyGroupParams, read_transparency_group};
 
 /// Convert a [`pdf::Object`] (Real or Integer) to `f64`.
 ///
@@ -117,27 +94,6 @@ pub(crate) fn read_bbox(dict: &Dictionary) -> Option<[f64; 4]> {
         r.swap(1, 3);
     }
     Some(r)
-}
-
-/// The transparency group attributes of `dict`, a form `XObject` stream
-/// dictionary or a page dictionary: `Some` when its `Group` has
-/// `/S /Transparency`, `None` otherwise.
-#[must_use]
-pub fn read_transparency_group(
-    doc: &Document,
-    dict: &Dictionary,
-) -> Option<TransparencyGroupParams> {
-    let grp_obj = dict.get(b"Group")?;
-    let grp = resolve_dict(doc, grp_obj)?;
-    if grp.get(b"S")?.as_name()? != b"Transparency" {
-        return None;
-    }
-    let bool_flag = |key: &[u8]| grp.get(key).and_then(Object::as_bool).unwrap_or(false);
-    Some(TransparencyGroupParams {
-        isolated: bool_flag(b"I"),
-        knockout: bool_flag(b"K"),
-        space: grp.get(b"CS").and_then(|cs| GroupSpace::read(doc, cs)),
-    })
 }
 
 /// Read a 6-element `Matrix` array from a dictionary, returning `None` if the

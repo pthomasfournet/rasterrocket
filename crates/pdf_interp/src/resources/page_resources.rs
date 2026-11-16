@@ -1,5 +1,9 @@
 //! The resource dictionaries in effect for a content stream (ISO 32000-1
 //! §7.8.3) and the lookup of named resources through them.
+//!
+//! A [`PageResources`] resolves each category sub-dictionary once and
+//! shares it with the sets that inherit it; the resources it resolves
+//! (fonts, images, shadings) are cached by its callers.
 
 use std::sync::{Arc, OnceLock};
 
