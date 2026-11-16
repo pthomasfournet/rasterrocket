@@ -54,7 +54,7 @@ pub mod xpath;
 pub(crate) mod testutil;
 
 pub use bitmap::{Bitmap, BitmapAllocError, BitmapBuffers, interleave_rgba};
-pub use clip::{Clip, ClipResult, ClipRows, RowClip};
+pub use clip::{Clip, ClipResult, ClipRows, RegionKey, RowClip};
 pub use fill::{eo_fill, fill, fill_area};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};
 pub use path::{Path, PathBuilder, PathFlags, PathPoint, StrokeAdjustHint};

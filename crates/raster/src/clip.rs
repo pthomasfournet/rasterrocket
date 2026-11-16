@@ -80,6 +80,14 @@ pub struct Clip {
     scanners: Option<Arc<ClipNode>>,
 }
 
+/// The identity of a path-clip region of a [`Clip`].
+///
+/// Equal for the same region, distinct for distinct regions alive at once.
+/// It is valid while a clip holding the region lives; once none does, a new
+/// region may take it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RegionKey(usize);
+
 /// One path clip of a [`Clip`] and the clips it was intersected with.
 struct ClipNode {
     region: Region,
@@ -462,6 +470,28 @@ impl Clip {
         coverage >= 128
     }
 
+    /// The path-clip regions, newest first, each with its identity: the
+    /// order in which [`Self::mul_row`] scales a coverage by them.  An
+    /// antialiased region is its coverage table, an aliased one `None`.
+    pub fn path_regions(&self) -> impl Iterator<Item = (RegionKey, Option<&CoverageTable>)> {
+        std::iter::successors(self.scanners.as_deref(), |node| node.parent.as_deref()).map(|node| {
+            let table = match &node.region {
+                Region::Area(t) => Some(t),
+                Region::Aliased(_) => None,
+            };
+            (RegionKey(std::ptr::from_ref(node) as usize), table)
+        })
+    }
+
+    /// The identity of the newest path-clip region, `None` for a
+    /// rectangle-only clip.  Clips sharing it share every path region.
+    #[must_use]
+    pub fn path_key(&self) -> Option<RegionKey> {
+        self.scanners
+            .as_deref()
+            .map(|node| RegionKey(std::ptr::from_ref(node) as usize))
+    }
+
     /// The path-clip regions, newest first.  Every consumer intersects them,
     /// so the order does not affect any result.
     fn regions(&self) -> impl Iterator<Item = &Region> {
@@ -817,6 +847,40 @@ mod tests {
         let mut row = vec![u8::MAX; n];
         clip.mul_row(y, x, &mut row);
         row
+    }
+    /// The exported regions are the clip's, newest first, the order
+    /// `mul_row` scales by, with identities shared by `clone_shared`
+    /// copies and distinct between regions.
+    #[test]
+    fn path_regions_are_exported_newest_first() {
+        let mut clip = Clip::new(0.0, 0.0, 64.0, 64.0, true);
+        assert!(clip.path_key().is_none());
+        assert_eq!(clip.path_regions().count(), 0);
+        clip_to_diamond(&mut clip, 20.0, 20.0, 15.0);
+        let first = clip.path_key().expect("a path clip");
+        let saved = clip.clone_shared();
+        clip_to_diamond(&mut clip, 30.0, 26.0, 18.0);
+        let regions: Vec<_> = clip.path_regions().collect();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(Some(regions[0].0), clip.path_key());
+        assert_eq!(regions[1].0, first);
+        assert_ne!(regions[0].0, regions[1].0);
+        assert_eq!(saved.path_key(), Some(first));
+        let (newest, oldest) = (regions[0].1.expect("area"), regions[1].1.expect("area"));
+        for y in 0..64 {
+            for x in 0..64 {
+                for v in [1u8, 200, 255] {
+                    let mut row = [v];
+                    clip.mul_row(y, x, &mut row);
+                    let scaled = div255(u32::from(v) * u32::from(newest.coverage(x, y)));
+                    let want = div255(u32::from(scaled) * u32::from(oldest.coverage(x, y)));
+                    assert_eq!(row[0], want, "({x}, {y}) {v}");
+                }
+            }
+        }
+        let mut aliased = Clip::new(0.0, 0.0, 64.0, 64.0, false);
+        clip_to_diamond(&mut aliased, 20.0, 20.0, 15.0);
+        assert!(aliased.path_regions().all(|(_, t)| t.is_none()));
     }
 
     /// `mul_row` scales the coverage already in the row by the clip's:
