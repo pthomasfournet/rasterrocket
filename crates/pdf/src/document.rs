@@ -680,7 +680,7 @@ impl Document {
         };
 
         match entry {
-            XrefEntry::Direct { offset, .. } => {
+            XrefEntry::Direct { offset, generation } => {
                 match self.parse_direct(offset) {
                     Some((found, obj)) if found.0 == id.0 => Ok(obj),
                     // The entry does not lead to object `id`: its offset is
@@ -692,11 +692,10 @@ impl Document {
                         .recover_object(id.0, Some(entry), depth)
                         .ok_or_else(|| PdfError::BadObject {
                             id: id.0,
-                            detail: parsed.map_or_else(
-                                || format!("parse failed at offset {offset}"),
-                                |(found, _)| {
-                                    format!("xref offset {offset} holds object {}", found.0)
-                                },
+                            detail: self.misdirected_entry_detail(
+                                (id.0, generation),
+                                offset,
+                                parsed.map(|(found, _)| found),
                             ),
                         }),
                 }
@@ -713,6 +712,42 @@ impl Document {
                     id: id.0,
                     detail: "free in xref table".into(),
                 }),
+        }
+    }
+
+    /// Why the cross-reference entry of object `id` at `offset`, holding
+    /// object `found` or nothing parseable, yields no object `id`.  When the
+    /// whole-file scan finds no header for the number either, the object is
+    /// missing from the file, which the detail states.
+    fn misdirected_entry_detail(
+        &self,
+        id: ObjectId,
+        offset: u64,
+        found: Option<ObjectId>,
+    ) -> String {
+        let header_missing = self
+            .scanned_entries()
+            .is_some_and(|scanned| !scanned.contains(id.0));
+        let absent = || {
+            format!(
+                "no `{} {} obj` header elsewhere in the file (damaged file)",
+                id.0, id.1
+            )
+        };
+        match (found, header_missing) {
+            (None, true) => format!(
+                "no object at the cross-reference offset {offset} and {}",
+                absent()
+            ),
+            (None, false) => format!("parse failed at offset {offset}"),
+            (Some(found), true) => {
+                format!(
+                    "xref offset {offset} holds object {} and {}",
+                    found.0,
+                    absent()
+                )
+            }
+            (Some(found), false) => format!("xref offset {offset} holds object {}", found.0),
         }
     }
 
@@ -1574,7 +1609,8 @@ mod tests {
         let doc = Document::from_bytes_owned(bytes).expect("opens");
         let err = doc.get_object((4, 0)).expect_err("no object 4 exists");
         assert!(
-            matches!(&err, PdfError::BadObject { id: 4, detail } if detail.contains("object 5")),
+            matches!(&err, PdfError::BadObject { id: 4, detail } if detail.contains("object 5")
+                && detail.contains("no `4 0 obj` header elsewhere in the file (damaged file)")),
             "got {err:?}"
         );
         assert_eq!(
@@ -1584,7 +1620,9 @@ mod tests {
     }
 
     /// An xref entry that leads to no object header at all, for an object
-    /// with no body in the file, is a missing object.
+    /// with no body in the file, is a missing object, and the error says
+    /// the file holds no header for it; with a header elsewhere that does
+    /// not parse, the error is the failed parse.
     #[test]
     fn xref_offset_into_garbage_with_no_body_is_missing() {
         let mut bytes = pdf_with_objects(&[(5, "(five)".to_owned())]);
@@ -1592,8 +1630,23 @@ mod tests {
         set_xref_in_use(&mut bytes, 4, inside_five);
         let doc = Document::from_bytes_owned(bytes).expect("opens");
         let err = doc.get_object((4, 0)).expect_err("no object 4 exists");
+        let expected = format!(
+            "no object at the cross-reference offset {inside_five} and no `4 0 obj` \
+             header elsewhere in the file (damaged file)"
+        );
         assert!(
-            matches!(&err, PdfError::BadObject { id: 4, .. }),
+            matches!(&err, PdfError::BadObject { id: 4, detail } if *detail == expected),
+            "got {err:?}"
+        );
+
+        let mut bytes = pdf_with_objects(&[(4, "]".to_owned()), (5, "(five)".to_owned())]);
+        let inside_five = find(&bytes, b"(five)").expect("object 5 body");
+        set_xref_in_use(&mut bytes, 4, inside_five);
+        let doc = Document::from_bytes_owned(bytes).expect("opens");
+        let err = doc.get_object((4, 0)).expect_err("object 4 does not parse");
+        let expected = format!("parse failed at offset {inside_five}");
+        assert!(
+            matches!(&err, PdfError::BadObject { id: 4, detail } if *detail == expected),
             "got {err:?}"
         );
     }
