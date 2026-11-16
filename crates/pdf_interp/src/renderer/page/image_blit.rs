@@ -10,8 +10,6 @@ use super::super::gstate::Ctm;
 use super::PageRenderer;
 use super::canvas::{CanvasKind, blend, with_canvas};
 use super::depth::CanvasSample;
-#[cfg(feature = "cache")]
-use super::device_blit::BlitOutcome;
 use super::image_compositor::ImageCompositor;
 use super::image_hairline;
 use super::image_reduce::{self, DeviceWindow};
@@ -473,51 +471,15 @@ impl PageRenderer<'_> {
         grid_clip: &mut GridClip<'_>,
         (overprint, separator): (Option<ChannelMask>, &Separator),
     ) -> Result<(), String> {
-        // GPU image-blit path: device-resident pixels sampled by the blit
-        // kernel of the cache's backend through the same grid, composited onto `bitmap` before
-        // this call returns so later operators paint over the image in
-        // content-stream order.
-        //
-        // The kernel composites opaquely and takes no mask: the decoder
-        // keeps every masked image host-resident, so masked images of any
-        // resolution take the CPU path below.
-        // The device blit composites 8-bit samples: a 16-bit canvas takes
-        // the host copy through the CPU path.
-        #[cfg(feature = "cache")]
-        if self.canvas.kind().depth() == color::SampleDepth::Sixteen
-            && let Some(host) = self.host_copy(img, "a 16-bit canvas")
-        {
-            return self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator));
-        }
+        // Device-resident samples are drawn by the device blit, or through
+        // the CPU path below from their host copy.
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
-            debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            match self.try_gpu_blit_image(cached, grid, grid_clip, (overprint, separator)) {
-                BlitOutcome::Drawn => {
-                    self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
-                    return Ok(());
-                }
-                // Nothing is on the bitmap yet: the host copy, when the
-                // read-back succeeds, draws the image through the CPU path.
-                BlitOutcome::NotStarted => {
-                    if let Some(host) = self.host_copy(img, "a failed device blit") {
-                        return self.composite_image(
-                            &host,
-                            ctm,
-                            mask,
-                            grid,
-                            grid_clip,
-                            (overprint, separator),
-                        );
-                    }
-                    return Err("the device blit and the host read-back failed".to_owned());
-                }
-                BlitOutcome::Partial => {
-                    return Err(
-                        "the device blit failed after compositing part of the image".to_owned()
-                    );
-                }
-            }
+            let host =
+                self.draw_device_image(img, cached, grid, grid_clip, (overprint, separator))?;
+            return host.map_or(Ok(()), |host| {
+                self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator))
+            });
         }
 
         // CPU path: needs host-resident pixels.

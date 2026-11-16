@@ -31,7 +31,8 @@ use common::{
 };
 use jpeg_encoder::{ColorType, Encoder};
 use rasterrocket::{
-    BackendPolicy, RasterError, RasterSession, SessionConfig, open_session, open_session_from_bytes,
+    BackendPolicy, FinishedCanvas, RasterError, RasterSession, RenderParams, SampleDepth,
+    SessionConfig, open_session, open_session_from_bytes, render_page_canvas_with_diagnostics,
 };
 
 // ── fixture ───────────────────────────────────────────────────────────────────
@@ -320,6 +321,43 @@ on_each_backend!(
     overprint_page_renders_identically,
     overprint_page_renders_identically_through_the_cuda_cache,
     overprint_page_renders_identically_through_the_vulkan_cache
+);
+
+/// A 16-bit page keeps its JPEGs host-resident: the blit kernel samples at
+/// 8 bits, so the images neither enter the cache nor reach the device
+/// blit, and the page is byte-identical to the CPU's at 16 bits.
+fn sixteen_bit_page_bypasses_the_cache(backend: Backend) {
+    let params = RenderParams::new(common::SCALE).with_depth(SampleDepth::Sixteen);
+    let render16 = |session: &RasterSession| {
+        let (canvas, diag) =
+            render_page_canvas_with_diagnostics(session, 1, &params).expect("16-bit render");
+        let FinishedCanvas::Rgb16(bitmap) = canvas else {
+            panic!("an RGB page, not {canvas:?}");
+        };
+        (bitmap.data().to_vec(), diag)
+    };
+    let pdf = fixture_pdf();
+    let (cpu, _) = render16(&session(pdf.clone(), BackendPolicy::CpuOnly));
+    let Some(session) = backend.session_from_bytes(pdf) else {
+        return;
+    };
+    let (gpu, diag) = render16(&session);
+    assert!(cpu == gpu, "the 16-bit pages differ");
+    assert_eq!(
+        diag.device_image_blits, 0,
+        "a 16-bit page took the device blit"
+    );
+    assert!(diag.image_failures.is_empty(), "{:?}", diag.image_failures);
+    assert!(
+        session.image_cache().expect("image cache").is_empty(),
+        "a 16-bit page filled the image cache"
+    );
+}
+
+on_each_backend!(
+    sixteen_bit_page_bypasses_the_cache,
+    sixteen_bit_page_bypasses_the_cuda_cache,
+    sixteen_bit_page_bypasses_the_vulkan_cache
 );
 
 /// Magnified draws, which the sampler interpolates: a gray JPEG drawn

@@ -627,13 +627,15 @@ pub fn resolve_image(
     // stays host-resident: neither looked up (a content-hash hit from
     // another document would drop the mask or the conversion) nor
     // inserted.  The decode also bypasses the cache for an image drawn
-    // below the resolution its frame header declares, and for a canvas of
-    // the wide working space, into which even device colours convert.
+    // below the resolution its frame header declares, for a canvas of the
+    // wide working space, into which even device colours convert, and for
+    // a 16-bit canvas, which the blit's 8-bit sampling does not serve.
     #[cfg(feature = "cache")]
     let dct_cache = if smask_entry.is_some()
         || mask_entry.is_some()
         || !src.colour.identity()
         || ctx.target.space != crate::WorkingSpace::Srgb
+        || ctx.depth == color::SampleDepth::Sixteen
     {
         None
     } else {

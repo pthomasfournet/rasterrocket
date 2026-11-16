@@ -19,7 +19,7 @@ use crate::separation::Separator;
 
 /// What a device blit left on the bitmap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BlitOutcome {
+enum BlitOutcome {
     /// Every pixel of the image is composited.
     Drawn,
     /// Nothing is composited; the image may still be drawn another way.
@@ -84,6 +84,56 @@ impl PageRenderer<'_> {
         })
     }
 
+    /// Draw `img`, whose samples are the device-resident `cached`, by the
+    /// device blit kernel of the cache's backend through `grid`: `None`
+    /// once it is composited onto the bitmap, before the call returns so
+    /// that later operators paint over it in content-stream order; the
+    /// host copy for the CPU path to draw when the blit does not start.
+    ///
+    /// The kernel composites opaquely and takes no mask, so the decoder
+    /// keeps every masked image host-resident.  The kernel samples at 8
+    /// bits, so a 16-bit canvas draws device-resident samples from their
+    /// host copy alone (the decoder keeps the images of a 16-bit canvas
+    /// host-resident in the first place).
+    ///
+    /// `Err` when the host copy the draw needs cannot be read back, or the
+    /// blit fails after compositing part of the image.
+    pub(super) fn draw_device_image(
+        &mut self,
+        img: &crate::resources::ImageDescriptor,
+        cached: &CachedImage,
+        grid: &SampleGrid,
+        grid_clip: &mut GridClip<'_>,
+        (overprint, separator): (Option<ChannelMask>, &Separator),
+    ) -> Result<Option<crate::resources::ImageDescriptor>, String> {
+        debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
+        if self.canvas.kind().depth() == color::SampleDepth::Sixteen {
+            return self
+                .host_copy(img, "a 16-bit canvas")
+                .map(Some)
+                .ok_or_else(|| {
+                    "a 16-bit canvas draws device-resident samples from their host copy, \
+                 and the read-back failed"
+                        .to_owned()
+                });
+        }
+        match self.try_gpu_blit_image(cached, grid, grid_clip, (overprint, separator)) {
+            BlitOutcome::Drawn => {
+                self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
+                Ok(None)
+            }
+            // Nothing is on the bitmap yet: the host copy, when the
+            // read-back succeeds, draws the image through the CPU path.
+            BlitOutcome::NotStarted => self
+                .host_copy(img, "a failed device blit")
+                .map(Some)
+                .ok_or_else(|| "the device blit and the host read-back failed".to_owned()),
+            BlitOutcome::Partial => {
+                Err("the device blit failed after compositing part of the image".to_owned())
+            }
+        }
+    }
+
     /// GPU image blit: sample `cached` through `grid` on the device of the
     /// image cache's backend, then download the pixels the kernel wrote
     /// and composite them onto `bitmap`, writing the channels `overprint`
@@ -97,7 +147,7 @@ impl PageRenderer<'_> {
     /// Compositing before returning keeps content-stream order: anything
     /// painted after the image lands on top of it, and an image inside a
     /// transparency group lands in the group's bitmap.
-    pub(super) fn try_gpu_blit_image(
+    fn try_gpu_blit_image(
         &mut self,
         cached: &CachedImage,
         grid: &SampleGrid,
@@ -140,6 +190,11 @@ impl PageRenderer<'_> {
         // the transfer function here, on an ink canvas the compositor
         // converts them to ink and maps that, as the CPU blit does.
         let kind = self.canvas.kind();
+        debug_assert_eq!(
+            kind.depth(),
+            color::SampleDepth::Eight,
+            "a 16-bit canvas draws the host copy"
+        );
         let rgb_transfer = transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
         let gpu_ctx = self.gpu_ctx.as_deref();
         with_canvas!(&mut self.canvas, |bitmap| {
