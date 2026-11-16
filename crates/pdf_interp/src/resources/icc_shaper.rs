@@ -128,12 +128,19 @@ fn sampled_curve(samples: &[u16], x: f64) -> f64 {
 
 /// Linear → sRGB encoding per IEC 61966-2-1, input clamped to `[0, 1]`.
 pub(crate) fn srgb_encode(c: f64) -> f64 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.003_130_8 {
-        12.92 * c
+    srgb_encode_extended(c.clamp(0.0, 1.0))
+}
+
+/// The sRGB encoding of IEC 61966-2-1 extended to every real value: the
+/// curve of [`srgb_encode`] above 1, mirrored through the origin below 0.
+pub(crate) fn srgb_encode_extended(c: f64) -> f64 {
+    let a = c.abs();
+    let encoded = if a <= 0.003_130_8 {
+        12.92 * a
     } else {
-        c.powf(1.0 / 2.4).mul_add(1.055, -0.055)
-    }
+        a.powf(1.0 / 2.4).mul_add(1.055, -0.055)
+    };
+    encoded.copysign(c)
 }
 
 /// sRGB → linear decoding per IEC 61966-2-1, the inverse of

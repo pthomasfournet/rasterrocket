@@ -3,15 +3,65 @@
 
 use moxcms::{CmsError, TransformExecutor};
 
+/// The values a grid's nodes hold, and how an interpolated value maps to
+/// an output in `[0, 1]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeRange {
+    /// `[0, 1]`, the value `v` held as the 16-bit `v · 65 535`; an
+    /// interpolated value is the output.
+    Unit,
+    /// `[−1/2, 3/2]`, the value `v` held as the 16-bit `(v + 1/2) / 2 ·
+    /// 65 535`; an interpolated value is clamped to `[0, 1]`, so an output
+    /// that leaves `[0, 1]` within a cell is clamped at the point and not
+    /// at the cell's nodes.
+    Extended,
+}
+
+impl NodeRange {
+    /// The 16-bit node of the value `v`, clamped to the range.
+    fn node(self, v: f64) -> u16 {
+        match self {
+            Self::Unit => to_u16(v),
+            Self::Extended => to_u16(f64::midpoint(v, 0.5)),
+        }
+    }
+
+    /// The 16-bit output of the sum `acc` of nodes weighted by weights
+    /// summing to 65 535, `F`, rounded to nearest: for [`Self::Extended`],
+    /// `(4 · acc − F² + F) / 2F` clamped to `[0, F]`, computed as
+    /// `(2 (acc′ − L) + 1) / F` for `acc′` the sum clamped to
+    /// `[L, L + (F² − 1) / 2]`, `L = (F (F − 1) / 2 + 1) / 2`: every sum
+    /// up to `L` has output 0, every sum from the upper bound output `F`,
+    /// and `2 (acc′ − L) + 1` lies in `[1, F²]`.
+    #[inline]
+    fn output(self, acc: u32) -> u16 {
+        const FULL: u32 = u16::MAX as u32;
+        const LOW: u32 = (FULL * (FULL - 1) / 2).div_ceil(2);
+        const HIGH: u32 = LOW + (FULL * FULL - 1) / 2;
+        let v = match self {
+            Self::Unit => (acc + FULL / 2) / FULL,
+            Self::Extended => (2 * (acc.clamp(LOW, HIGH) - LOW) + 1) / FULL,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a convex combination of u16 nodes divided by its weight sum, or clamped to [0, 65 535]"
+        )]
+        let v = v as u16;
+        v
+    }
+}
+
 /// A conversion of `N` device channels to at most four channels,
 /// tabulated at the nodes of a grid of `spans[i]` cells along input `i`,
 /// over the device cube or over the image of it under a curve per input
 /// (the shaper): the node of indices `(i₀, …, i_{N−1})`, `i₀` slowest,
-/// holds the 16-bit value of the device value whose shaped value along
-/// input `k` is `i_k / spans[k]`, padded with zeros to four channels.
+/// holds the 16-bit value in `range` of the device value whose shaped
+/// value along input `k` is `i_k / spans[k]`, padded with zeros to four
+/// channels.
 pub(crate) struct GridTable<const N: usize> {
     spans: [u32; N],
     channels: usize,
+    range: NodeRange,
     /// The node stride of each input, zero beyond the `N`th.
     strides: [usize; 8],
     /// The curve of each input, if any.
@@ -21,8 +71,8 @@ pub(crate) struct GridTable<const N: usize> {
 
 impl<const N: usize> GridTable<N> {
     /// The conversion `convert` tabulated on a grid of `span` cells along
-    /// each device axis into `channels` values ([`Self::tabulate_shaped`]
-    /// with no shaper).
+    /// each device axis into `channels` values of `[0, 1]`
+    /// ([`Self::tabulate_shaped`] with no shaper, [`NodeRange::Unit`]).
     ///
     /// # Errors
     ///
@@ -36,7 +86,7 @@ impl<const N: usize> GridTable<N> {
         channels: usize,
         convert: impl FnMut(&[f64], &mut [f64]) -> Result<(), E>,
     ) -> Result<Self, E> {
-        Self::tabulate_shaped([span; N], None, channels, convert)
+        Self::tabulate_shaped([span; N], None, NodeRange::Unit, channels, convert)
     }
 
     /// The conversion `convert` tabulated on a grid of `spans[i]` cells
@@ -46,7 +96,7 @@ impl<const N: usize> GridTable<N> {
     /// device values spanning `[0, 1]`, each in `[0, 1]`, the grid lies over
     /// the curves' outputs and `convert` takes those.  `convert` takes the
     /// values of a run of nodes, `N` values of `[0, 1]` each, and writes
-    /// their `channels` values of `[0, 1]`.
+    /// their `channels` values, each clamped to `range`.
     ///
     /// # Errors
     ///
@@ -61,6 +111,7 @@ impl<const N: usize> GridTable<N> {
     pub(crate) fn tabulate_shaped<E>(
         spans: [u32; N],
         shaper: Option<[&[f64]; N]>,
+        range: NodeRange,
         channels: usize,
         mut convert: impl FnMut(&[f64], &mut [f64]) -> Result<(), E>,
     ) -> Result<Self, E> {
@@ -99,7 +150,7 @@ impl<const N: usize> GridTable<N> {
             nodes.extend(out.chunks_exact(channels).map(|v| {
                 let mut node = [0u16; 4];
                 for (n, &v) in node.iter_mut().zip(v) {
-                    *n = to_u16(v);
+                    *n = range.node(v);
                 }
                 node
             }));
@@ -107,6 +158,7 @@ impl<const N: usize> GridTable<N> {
         Ok(Self {
             spans,
             channels,
+            range,
             strides,
             shaper,
             nodes: nodes.into_boxed_slice(),
@@ -147,8 +199,8 @@ impl<const N: usize> GridTable<N> {
     /// order, the vertex between them taking weight 0.  A position is
     /// at most 65 535, so it fits a `u32` above three bits of index.
     ///
-    /// The weights sum to 65 535, so a node sum is at most 65 535² plus
-    /// the rounding half, below 2³².
+    /// The weights sum to 65 535, so a node sum is at most 65 535², below
+    /// 2³², mapped to the output by [`NodeRange::output`].
     #[inline]
     fn value<const M: usize>(&self, px: [u16; N]) -> [u16; M] {
         let mut base = 0usize;
@@ -163,7 +215,8 @@ impl<const N: usize> GridTable<N> {
             *k = input;
         }
         sort_decreasing(&mut key);
-        self.interpolate(base, key)
+        self.interpolate::<M>(base, key)
+            .map(|acc| self.range.output(acc))
     }
 
     /// The offset along input `i` of the cell `(cell, frac)` of its axis
@@ -178,10 +231,11 @@ impl<const N: usize> GridTable<N> {
         (cell as usize * self.strides[i & 7], frac << 3 | index)
     }
 
-    /// The interpolation from node `base` along the inputs of `key`,
-    /// sorted in decreasing order ([`Self::key`]).
+    /// The node sums of the interpolation from node `base` along the
+    /// inputs of `key`, sorted in decreasing order ([`Self::key`]), each
+    /// the output's [`NodeRange::output`].
     #[inline]
-    fn interpolate<const M: usize>(&self, base: usize, key: [u32; N]) -> [u16; M] {
+    fn interpolate<const M: usize>(&self, base: usize, key: [u32; N]) -> [u32; M] {
         const FULL: u32 = u16::MAX as u32;
         let nodes = &*self.nodes;
         let mut acc = [0u32; 4];
@@ -199,11 +253,7 @@ impl<const N: usize> GridTable<N> {
         for (a, &v) in acc.iter_mut().zip(&nodes[vertex]) {
             *a += previous * u32::from(v);
         }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a convex combination of u16 nodes, divided by its weight sum, fits u16"
-        )]
-        std::array::from_fn(|c| ((acc[c] + FULL / 2) / FULL) as u16)
+        std::array::from_fn(|c| acc[c])
     }
 
     /// The base node of each pixel of `block` into `base` and its keys
@@ -255,10 +305,26 @@ impl<const N: usize> GridTable<N> {
     /// into `dst`, `M` samples a pixel, a block of [`BLOCK`] pixels at a
     /// time: the block's base nodes and keys, input by input, from
     /// `keys` ([`Self::block_keys`]), the keys sorted across the block,
-    /// each pixel interpolated, a pixel equal to the one before it taking
-    /// its value, then the block's values converted to `S`.
+    /// each pixel's node sums interpolated, a pixel equal to the one before
+    /// it taking its sums, then the block's sums mapped to outputs
+    /// ([`NodeRange::output`]) and converted to `S`.
     #[inline]
     fn run_blocks<S: color::Sample, const M: usize>(
+        &self,
+        pixels: &[[S; N]],
+        dst: &mut [S],
+        keys: impl FnMut(&[[S; N]], &mut [usize; BLOCK], &mut [[u32; BLOCK]; N]),
+    ) {
+        match self.range {
+            NodeRange::Unit => self.run_blocks_in::<S, M, false>(pixels, dst, keys),
+            NodeRange::Extended => self.run_blocks_in::<S, M, true>(pixels, dst, keys),
+        }
+    }
+
+    /// [`Self::run_blocks`] in the node range [`NodeRange::Extended`] or
+    /// not, as `EXTENDED`.
+    #[inline]
+    fn run_blocks_in<S: color::Sample, const M: usize, const EXTENDED: bool>(
         &self,
         pixels: &[[S; N]],
         dst: &mut [S],
@@ -266,12 +332,17 @@ impl<const N: usize> GridTable<N> {
     ) {
         let mut base = [0usize; BLOCK];
         let mut key = [[0u32; BLOCK]; N];
-        let mut value = [[0u16; M]; BLOCK];
-        let mut last: Option<([S; N], [u16; M])> = None;
+        let range = if EXTENDED {
+            NodeRange::Extended
+        } else {
+            NodeRange::Unit
+        };
+        let mut sums = [[0u32; M]; BLOCK];
+        let mut last: Option<([S; N], [u32; M])> = None;
         for (block, out) in pixels.chunks(BLOCK).zip(dst.chunks_mut(BLOCK * M)) {
             keys(block, &mut base, &mut key);
             sort_block_decreasing(&mut key);
-            for (p, (px, v)) in block.iter().zip(&mut value).enumerate() {
+            for (p, (px, v)) in block.iter().zip(&mut sums).enumerate() {
                 *v = match last {
                     Some((seen, value)) if seen == *px => value,
                     _ => {
@@ -282,8 +353,8 @@ impl<const N: usize> GridTable<N> {
                     }
                 };
             }
-            for (o, v) in out.as_chunks_mut::<M>().0.iter_mut().zip(&value) {
-                *o = v.map(S::from_sample);
+            for (o, v) in out.as_chunks_mut::<M>().0.iter_mut().zip(&sums) {
+                *o = v.map(|acc| S::from_sample(range.output(acc)));
             }
         }
     }
@@ -469,6 +540,7 @@ impl<const N: usize> std::fmt::Debug for GridTable<N> {
             .field("inputs", &N)
             .field("spans", &self.spans)
             .field("shaped", &self.shaper.is_some())
+            .field("range", &self.range)
             .field("channels", &self.channels)
             .finish_non_exhaustive()
     }
@@ -564,6 +636,65 @@ mod tests {
         assert!(table.transform(&[0u8; 4], &mut [0u8; 3]).is_err());
     }
 
+    /// The extended range's output is the rounded `(4 · acc − F² + F) /
+    /// 2F` clamped to `[0, F]` at every sum, those around both clamps and
+    /// the extremes included.
+    #[test]
+    fn the_extended_output_is_the_clamped_rescaled_sum() {
+        const F: u64 = u16::MAX as u64;
+        let want = |acc: u64| ((4 * acc).saturating_sub(F * F) + F) / (2 * F);
+        let low = (F * (F - 1) / 2).div_ceil(2);
+        let high = low + (F * F - 1) / 2;
+        let sums = (0..=F * F)
+            .step_by(9_973)
+            .chain(low - 70_000..low + 70_000)
+            .chain(high - 70_000..high + 70_000)
+            .chain(F * F - 70_000..=F * F);
+        for acc in sums {
+            let got = NodeRange::Extended.output(u32::try_from(acc).unwrap());
+            assert_eq!(u64::from(got), want(acc).min(F), "sum {acc}");
+        }
+        assert_eq!(NodeRange::Extended.node(-0.5), 0);
+        assert_eq!(NodeRange::Extended.node(1.5), u16::MAX);
+        assert_eq!(NodeRange::Extended.node(0.0), 16_384);
+    }
+
+    /// A conversion leaving `[0, 1]` within a cell, tabulated in the
+    /// extended range, is clamped where it leaves it, within two levels;
+    /// in the unit range the cell interpolates between its nodes' clamped
+    /// values and misses by the overshoot.
+    #[test]
+    fn an_extended_grid_clamps_within_its_cells() {
+        // Linear in the inputs, leaving [0, 1] at x₀ = 3/16 and 13/16,
+        // inside the cells [0, 1/4] and [3/4, 1].
+        let ramp = |x: &[f64]| [1.6f64.mul_add(x[0], -0.3), 0.5, x[3]];
+        let table = |range| {
+            GridTable::<4>::tabulate_shaped([4; 4], None, range, 3, |x, o| {
+                for (px, o) in x.as_chunks::<4>().0.iter().zip(o.as_chunks_mut::<3>().0) {
+                    *o = ramp(px);
+                }
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap()
+        };
+        let (extended, unit) = (table(NodeRange::Extended), table(NodeRange::Unit));
+        let mut worst = 0.0f64;
+        for x in (0..=u16::MAX).step_by(97) {
+            let px = [x, 20_000, 40_000, 65_535 - x];
+            let want = ramp(&px.map(|v| f64::from(v) / 65535.0)).map(|v| v.clamp(0.0, 1.0));
+            let got: [u16; 3] = extended.value(px);
+            let plain: [u16; 3] = unit.value(px);
+            for ((g, p), w) in got.iter().zip(plain).zip(want) {
+                assert!(
+                    w.mul_add(-65535.0, f64::from(*g)).abs() <= 2.0,
+                    "{px:?}: {got:?} for {want:?}"
+                );
+                worst = worst.max(w.mul_add(-65535.0, f64::from(p)).abs());
+            }
+        }
+        assert!(worst > 4000.0, "the unit grid misses by {worst}");
+    }
+
     /// The square of each input, at 257 values.
     fn squares() -> Vec<f64> {
         (0..=256).map(|i| (f64::from(i) / 256.0).powi(2)).collect()
@@ -571,8 +702,8 @@ mod tests {
 
     /// A run of pixels converts, block by block, to each pixel's own
     /// value at either depth, repeated pixels and the last partial block
-    /// included, through a grid over the device cube and a shaped one of
-    /// uneven spans alike.
+    /// included, through a grid over the device cube, a shaped one of
+    /// uneven spans and one in the extended range alike.
     #[test]
     fn a_run_converts_each_pixel_to_its_value() {
         let square = squares();
@@ -581,9 +712,25 @@ mod tests {
             Ok::<(), std::convert::Infallible>(())
         };
         let plain = GridTable::<4>::tabulate(16, 3, unit).unwrap();
-        let shaped =
-            GridTable::<4>::tabulate_shaped([20, 15, 16, 7], Some([&*square; 4]), 3, unit).unwrap();
-        for table in [plain, shaped] {
+        let shaped = GridTable::<4>::tabulate_shaped(
+            [20, 15, 16, 7],
+            Some([&*square; 4]),
+            NodeRange::Unit,
+            3,
+            unit,
+        )
+        .unwrap();
+        let overshoot = |i: &[f64], o: &mut [f64]| {
+            convert(i, o);
+            for v in o.iter_mut() {
+                *v = 1.8f64.mul_add(*v, -0.4);
+            }
+            Ok::<(), std::convert::Infallible>(())
+        };
+        let extended =
+            GridTable::<4>::tabulate_shaped([16; 4], None, NodeRange::Extended, 3, overshoot)
+                .unwrap();
+        for table in [plain, shaped, extended] {
             let mut state = 0x9e37_79b9u32;
             let mut next = || {
                 state ^= state << 13;
@@ -623,12 +770,17 @@ mod tests {
                 *o = [px[0], f64::midpoint(px[1], px[2]), px[3]];
             }
         };
-        let shaped =
-            GridTable::<4>::tabulate_shaped([3, 5, 7, 2], Some([&*square; 4]), 3, |u, o| {
+        let shaped = GridTable::<4>::tabulate_shaped(
+            [3, 5, 7, 2],
+            Some([&*square; 4]),
+            NodeRange::Unit,
+            3,
+            |u, o| {
                 linear(u, o);
                 Ok::<(), std::convert::Infallible>(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         let plain = GridTable::<4>::tabulate(4, 3, |x, o| {
             let u: Vec<f64> = x.iter().map(|v| v * v).collect();
             linear(&u, o);

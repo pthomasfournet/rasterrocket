@@ -6,10 +6,13 @@
 //! point ([`ProfileLut`], whose CLUT interpolates tetrahedrally, linearly
 //! along the first of four inputs), the media-relative PCS adjusted for the
 //! conversion's form ([`PcsAdjustment`]), then the working space's PCS →
-//! linear matrix and its sRGB curve, each linear component clipped to
-//! `[0, 1]`.  A pixel converts by interpolation in the simplex of its grid
-//! cell ([`GridTable`]), at 16 bits, so three-channel device values of
-//! equal components take the nodes of equal components alone.
+//! linear matrix and its sRGB curve extended beyond `[0, 1]`
+//! ([`srgb_encode_extended`]), held in [`NodeRange::Extended`].  A pixel
+//! converts by interpolation in the simplex of its grid cell
+//! ([`GridTable`]), at 16 bits, clipped to `[0, 1]` after it, so that a
+//! colour leaving the working space's gamut within a cell is clipped
+//! where it leaves it; three-channel device values of equal components
+//! take the nodes of equal components alone.
 //!
 //! The table is piecewise linear in its CLUT's cells, which lie between
 //! the nodes of its CLUT along the outputs of its input curves.  The
@@ -30,9 +33,9 @@ use moxcms::{ColorProfile, DataColorSpace, RenderingIntent};
 
 use crate::WorkingSpace;
 use crate::pcs::D50;
-use crate::pcs::grid::GridTable;
+use crate::pcs::grid::{GridTable, NodeRange};
 use crate::pcs::lut::{Direction, ProfileLut, lab_encoding};
-use crate::resources::icc_shaper::{Mat3, mat_inverse, srgb_decode, srgb_encode};
+use crate::resources::icc_shaper::{Mat3, mat_inverse, srgb_decode, srgb_encode_extended};
 
 /// The number of cells along each device axis a grid of `n` channels
 /// approaches: 32 for three, 16 for four, whose grid of 17⁴ nodes is 2.3
@@ -111,25 +114,32 @@ pub(super) fn tabulate<const N: usize>(
     let to_linear = space.pcs_to_linear();
     let encode = |pcs: [f64; 3]| {
         let xyz = adjustment.apply(pcs);
-        to_linear.map(|[a, b, c]| srgb_encode(a.mul_add(xyz[0], b.mul_add(xyz[1], c * xyz[2]))))
+        to_linear
+            .map(|[a, b, c]| srgb_encode_extended(a.mul_add(xyz[0], b.mul_add(xyz[1], c * xyz[2]))))
     };
     let grid = |shaper: Option<[&[f64]; N]>| {
         let shaped = shaper.is_some();
-        GridTable::tabulate_shaped(spans::<N>(lut.clut_grid()), shaper, 3, |values, out| {
-            for (px, o) in values
-                .as_chunks::<N>()
-                .0
-                .iter()
-                .zip(out.as_chunks_mut::<3>().0)
-            {
-                *o = encode(if shaped {
-                    lut.to_pcs_shaped(px)
-                } else {
-                    lut.to_pcs(px)
-                });
-            }
-            Ok::<(), std::convert::Infallible>(())
-        })
+        GridTable::tabulate_shaped(
+            spans::<N>(lut.clut_grid()),
+            shaper,
+            NodeRange::Extended,
+            3,
+            |values, out| {
+                for (px, o) in values
+                    .as_chunks::<N>()
+                    .0
+                    .iter()
+                    .zip(out.as_chunks_mut::<3>().0)
+                {
+                    *o = encode(if shaped {
+                        lut.to_pcs_shaped(px)
+                    } else {
+                        lut.to_pcs(px)
+                    });
+                }
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
         .ok()
     };
     let plain = grid(None)?;
@@ -155,8 +165,8 @@ pub(super) fn tabulate<const N: usize>(
 const PROBES: usize = 4096;
 
 /// The sum of the CIE 1976 colour differences between `table`'s 16-bit
-/// values and `exact`'s, working-space values in `[0, 1]` whose linear
-/// components `to_pcs` maps to the PCS, at [`PROBES`] device values spread
+/// values and `exact`'s, working-space values clipped to `[0, 1]` whose
+/// linear components `to_pcs` maps to the PCS, at [`PROBES`] device values spread
 /// over the device cube by a fixed pseudo-random sequence.
 fn probe_error<const N: usize>(
     table: &GridTable<N>,
