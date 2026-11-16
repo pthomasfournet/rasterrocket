@@ -264,3 +264,30 @@ fn a_soft_mask_does_not_depend_on_the_working_space() {
         "{mask:?}"
     );
 }
+
+/// A luminosity mask whose group paints in the fill colour in effect at
+/// `gs` takes the luminosity of that colour's sRGB value on a wide page,
+/// as on an sRGB one: the colour converts again for the mask's canvas.
+#[test]
+fn a_soft_mask_takes_an_inherited_colour_in_srgb() {
+    let d = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            b"<< /Type /Page /Resources << /ExtGState << \
+              /Lum << /SMask << /S /Luminosity /G 5 0 R >> >> >> >> >>"
+                .to_vec(),
+        ),
+        (
+            5,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Group << /S /Transparency /CS /DeviceRGB >>",
+                b"0 0 10 10 re f",
+            ),
+        ),
+    ]);
+    let content = "0.9 0.1 0.6 rg /Lum gs 0 g 0 0 10 10 re f";
+    let wide = render(&d, WorkingSpace::Wide, content);
+    let srgb = render(&d, WorkingSpace::Srgb, content);
+    assert_eq!(at(&wide, 5), at(&srgb, 5));
+}

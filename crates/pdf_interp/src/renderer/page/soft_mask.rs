@@ -96,6 +96,7 @@ impl PageRenderer<'_> {
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
         let space = std::mem::replace(&mut self.space, crate::WorkingSpace::Srgb);
+        self.reconvert_colours(|_| true);
         self.without_glyph_census(|r| r.do_form_xobject(&form));
         self.space = space;
         let canvas = std::mem::replace(&mut self.canvas, page);

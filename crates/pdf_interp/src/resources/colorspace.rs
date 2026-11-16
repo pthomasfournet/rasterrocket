@@ -315,28 +315,9 @@ impl ColorSpace {
         }
     }
 
-    /// Whether a conversion of this space depends on the rendering intent:
-    /// an ICC-based space, or a space converting through one (an `Indexed`
-    /// base, a `Separation` or `DeviceN` alternate, an uncoloured-pattern
-    /// base).
-    #[must_use]
-    pub(crate) fn depends_on_intent(&self) -> bool {
-        match self {
-            Self::IccBased { .. } => true,
-            Self::Indexed { base, .. } => base.depends_on_intent(),
-            Self::Separation { alternate, .. } | Self::DeviceN { alternate, .. } => {
-                alternate.depends_on_intent()
-            }
-            Self::Pattern { base } => base.as_deref().is_some_and(Self::depends_on_intent),
-            Self::DeviceGray | Self::DeviceRgb | Self::DeviceCmyk | Self::Cal(_) | Self::Lab(_) => {
-                false
-            }
-        }
-    }
-
     /// Whether this space converts its colours alike under the intents `a`
     /// and `b`: every ICC-based space it converts through selects the same
-    /// conversion under both (see [`Self::depends_on_intent`]).
+    /// conversion under both.
     #[must_use]
     pub(crate) fn converts_alike(&self, doc: &Document, a: ColourIntent, b: ColourIntent) -> bool {
         match self {

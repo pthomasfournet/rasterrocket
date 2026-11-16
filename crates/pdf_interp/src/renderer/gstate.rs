@@ -170,10 +170,9 @@ pub(crate) struct InterpGState {
     /// Declared colour space for stroke operations (PDF §8.6).  Mirrors
     /// `fill_color_space`; set by `CS /Name` and `G`/`RG`/`K`.
     pub stroke_color_space: ColorSpace,
-    /// The components in `fill_color_space` of `fill_color` when the
-    /// space's conversion depends on the rendering intent (see
-    /// `ColorSpace::depends_on_intent`), from which a change of intent
-    /// converts the colour again; `None` otherwise.
+    /// The components in `fill_color_space` of `fill_color`, from which a
+    /// change of rendering intent or of working space converts the colour
+    /// again; `None` for a colour not set from components.
     pub fill_components: Option<Arc<[f64]>>,
     /// The stroking counterpart of `fill_components`.
     pub stroke_components: Option<Arc<[f64]>>,

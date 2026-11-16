@@ -52,7 +52,7 @@ impl PageRenderer<'_> {
 
     fn set_colour(&mut self, select: Select, space: ColorSpace, comps: &[f64]) {
         let colour = self.color_for_components(&space, comps);
-        let components = space.depends_on_intent().then(|| Arc::from(comps));
+        let components = Some(Arc::from(comps));
         let slot = select(self.gstate.current_mut());
         *slot.colour = colour;
         *slot.pattern = None;
@@ -72,12 +72,23 @@ impl PageRenderer<'_> {
             return;
         }
         let doc = self.resources.doc();
+        self.reconvert_colours(|space| !space.converts_alike(doc, replaced, intent));
+    }
+
+    /// Convert the fill and stroke colours again from their components, in
+    /// the spaces `stale` selects, for the canvas and working space now in
+    /// effect.  A colour converts into the working space when it is set,
+    /// so a change of working space or canvas, or of an intent its space
+    /// converts under, leaves it in the space it replaced until converted
+    /// again.  A colour set without components (a tint given to a pattern
+    /// cell, the initial black) is kept.
+    pub(super) fn reconvert_colours(&mut self, stale: impl Fn(&ColorSpace) -> bool) {
         for select in [InterpGState::fill_mut as Select, InterpGState::stroke_mut] {
             let slot = select(self.gstate.current_mut());
             let Some(comps) = slot.components.clone() else {
                 continue;
             };
-            if slot.space.converts_alike(doc, replaced, intent) {
+            if !stale(slot.space) {
                 continue;
             }
             let space = slot.space.clone();
