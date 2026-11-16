@@ -9,6 +9,8 @@ use super::super::color::RasterColor;
 use super::PageRenderer;
 use super::canvas::with_canvas;
 use super::canvas::{CanvasPipe, CanvasSource};
+#[cfg(feature = "vulkan")]
+use super::device_page::PlacedGlyph;
 use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
 use super::text_ops::{GlyphRecord, glyph_placement};
@@ -248,8 +250,13 @@ impl GlyphSink {
 impl PageRenderer<'_> {
     /// Paint the glyphs of `sink`: fill them, then stroke them, then add
     /// their outlines to the text object's clip (modes 4–7), which `ET`
-    /// applies.
+    /// applies.  A clipping mode refuses a device recording.
     pub(super) fn paint_glyphs(&mut self, sink: &GlyphSink) {
+        #[cfg(feature = "vulkan")]
+        if sink.mode.clip && self.device_recording() {
+            self.refuse_device("text clip mode");
+            return;
+        }
         self.fill_glyphs(sink);
         // The cached strokes are one opaque object in the normal blend mode
         // under the soft mask in effect.
@@ -332,6 +339,16 @@ impl PageRenderer<'_> {
         paint: &PaintParams,
         (colour, stroking): (&RasterColor, bool),
     ) {
+        #[cfg(feature = "vulkan")]
+        if self.device_recording() {
+            let glyphs = records.iter().map(|rec| PlacedGlyph {
+                pen_x: rec.pen_x,
+                pen_y: rec.pen_y,
+                bitmap: &rec.bitmap,
+            });
+            self.record_device_glyphs(glyphs, stroking, paint.alpha);
+            return;
+        }
         let pipe = CanvasPipe::of(paint);
         let separator = if stroking {
             self.stroke_separator()

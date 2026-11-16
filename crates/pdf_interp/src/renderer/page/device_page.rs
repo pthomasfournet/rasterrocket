@@ -9,13 +9,16 @@
 //! device that does not rasterise outlines and for an outline past the
 //! device's integer range, as the coverage tables the CPU computes from
 //! them.  A hairline is appended as the pixel runs the CPU paints
-//! (`raster::hairline_runs`).  The device then composites every command
+//! (`raster::hairline_runs`).  A glyph composited from a coverage bitmap
+//! is appended as a mask command reading that bitmap (see [`glyphs`]).
+//! The device then composites every command
 //! with the CPU's arithmetic, so the page it renders is the page the CPU
 //! renders.
 //!
 //! A recorded paint composites as the CPU's `aa` pipe over an opaque RGB
 //! canvas of 8 or 16 bits per sample: `Normal` blend, no soft mask, no
-//! group backdrop, a rectangular clip, identity transfer (a solid colour is
+//! group backdrop, a rectangular clip (glyphs: no clipping text rendering
+//! mode either), identity transfer (a solid colour is
 //! mapped through the transfer function before painting).  Its colour and
 //! alpha are recorded as samples of the canvas's depth.  Anything else
 //! refuses the recording with a reason, and the content stream stops
@@ -38,6 +41,10 @@ use super::canvas::{CanvasKind, PageCanvas};
 use super::paint::FillRule;
 use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
+use glyphs::HeldMasks;
+pub(super) use glyphs::PlacedGlyph;
+
+mod glyphs;
 
 /// A page being recorded.
 pub(super) struct Recording {
@@ -48,6 +55,8 @@ pub(super) struct Recording {
     refused: Option<&'static str>,
     /// Scratch: the runs of the hairline being appended.
     runs: Vec<(i32, i32, i32)>,
+    /// The glyph bitmaps the page holds as masks.
+    masks: HeldMasks,
 }
 
 /// What recording a page produced.
@@ -60,13 +69,9 @@ pub enum DeviceRecording {
 }
 
 /// Why `op` cannot be recorded, if it cannot: the operators that paint
-/// other than by filling or stroking a path.
+/// other than by filling or stroking a path or showing text.
 const fn unsupported_operator(op: &Operator<'_>) -> Option<&'static str> {
     match op {
-        Operator::ShowText(_)
-        | Operator::ShowTextArray(_)
-        | Operator::MoveNextLineShow(_)
-        | Operator::MoveNextLineShowSpaced { .. } => Some("text"),
         Operator::PaintXObject(_) => Some("XObject"),
         Operator::InlineImage { .. } => Some("inline image"),
         Operator::PaintShading(_) => Some("shading"),
@@ -95,9 +100,10 @@ const fn ineligible_canvas(ink: bool, group: bool, vector_antialias: bool) -> Op
 ///
 /// It is ruled out when it paints on an ink canvas (`ink`), as a page
 /// group (`group`) or with vector antialiasing off (`!vector_antialias`),
-/// or when an operator paints other than by filling or stroking a path.
-/// A page not ruled out may still be refused while it is recorded, by the
-/// graphics state a paint is made under.
+/// or when an operator paints other than by filling or stroking a path or
+/// showing text.  A page not ruled out may still be refused while it is
+/// recorded, by the graphics state a paint is made under or the way a
+/// glyph is drawn.
 #[must_use]
 pub fn device_page_ineligible(
     ink: bool,
@@ -251,6 +257,7 @@ impl PageRenderer<'_> {
             paths,
             refused: None,
             runs: Vec::new(),
+            masks: HeldMasks::default(),
         }));
         Ok(())
     }
@@ -354,18 +361,21 @@ impl PageRenderer<'_> {
     /// cannot be recorded.
     fn solid_device_paint(&self, stroke: bool) -> Result<SolidPaint, &'static str> {
         let gs = self.gstate.current();
-        let (pattern, colour, alpha) = if stroke {
-            (
-                gs.stroke_pattern.is_some(),
-                gs.painted_stroke_color(),
-                gs.stroke_alpha,
-            )
+        let alpha = if stroke {
+            gs.stroke_alpha
         } else {
-            (
-                gs.fill_pattern.is_some(),
-                gs.painted_fill_color(),
-                gs.fill_alpha,
-            )
+            gs.fill_alpha
+        };
+        self.solid_device_paint_at(stroke, alpha)
+    }
+
+    /// [`Self::solid_device_paint`] at the constant alpha `alpha`.
+    fn solid_device_paint_at(&self, stroke: bool, alpha: u8) -> Result<SolidPaint, &'static str> {
+        let gs = self.gstate.current();
+        let (pattern, colour) = if stroke {
+            (gs.stroke_pattern.is_some(), gs.painted_stroke_color())
+        } else {
+            (gs.fill_pattern.is_some(), gs.painted_fill_color())
         };
         if pattern {
             return Err("pattern");

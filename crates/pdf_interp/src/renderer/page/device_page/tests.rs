@@ -7,14 +7,17 @@ use super::{DeviceRecording, PageCanvas, PageRenderer, device_page_ineligible};
 
 const DEPTHS: [SampleDepth; 2] = [SampleDepth::Eight, SampleDepth::Sixteen];
 
-/// A page whose resources name the graphics states the tests use:
-/// `/T` (fill and stroke alpha), `/O` (opaque), `/M` (`Multiply`).
+/// A page whose resources name the graphics states and fonts the tests
+/// use: `/T` (fill and stroke alpha), `/O` (opaque), `/M` (`Multiply`);
+/// `/F1`–`/F3`, three of the standard 14.
 fn doc() -> Document {
     crate::test_helpers::make_doc_with_objects(&[(
         4,
         "<< /Type /Page /MediaBox [0 0 200 200] /Resources << /ExtGState << \
          /T << /ca 0.37 /CA 0.61 >> /O << /ca 1 /CA 1 >> /M << /BM /Multiply >> \
-         >> >> >>",
+         >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> \
+         /F2 << /Type /Font /Subtype /Type1 /BaseFont /Times-BoldItalic >> \
+         /F3 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> >> >>",
     )])
 }
 
@@ -48,6 +51,17 @@ fn renderer(doc: &Document, width: u32, height: u32, depth: SampleDepth) -> Page
 /// ([`PageRenderer::try_unpainted_in`]), built in buffers that hold
 /// samples no page paints.
 fn unpainted(doc: &Document, width: u32, height: u32, depth: SampleDepth) -> PageRenderer<'_> {
+    unpainted_aa(doc, width, height, depth, true)
+}
+
+/// [`unpainted`], its glyphs antialiased when `text_aa`.
+fn unpainted_aa(
+    doc: &Document,
+    width: u32,
+    height: u32,
+    depth: SampleDepth,
+    text_aa: bool,
+) -> PageRenderer<'_> {
     let len = width as usize * height as usize * 3;
     let mut buffers = CanvasBuffers::default();
     buffers.rgb.data = vec![0x5A; len];
@@ -60,6 +74,10 @@ fn unpainted(doc: &Document, width: u32, height: u32, depth: SampleDepth) -> Pag
         depth,
         buffers,
     )
+    .map(|mut r| {
+        r.set_antialias(text_aa, true);
+        r
+    })
     .expect("the canvas is allocated")
 }
 
@@ -75,7 +93,19 @@ fn samples(r: &PageRenderer<'_>) -> Vec<u16> {
 /// The canvas samples of `content` on a `width × height` page of
 /// `depth`.
 fn cpu(doc: &Document, width: u32, height: u32, depth: SampleDepth, content: &[u8]) -> Vec<u16> {
+    cpu_aa(doc, (width, height), depth, content, true)
+}
+
+/// [`cpu`], its glyphs antialiased when `text_aa`.
+fn cpu_aa(
+    doc: &Document,
+    (width, height): (u32, u32),
+    depth: SampleDepth,
+    content: &[u8],
+    text_aa: bool,
+) -> Vec<u16> {
     let mut r = renderer(doc, width, height, depth);
+    r.set_antialias(text_aa, true);
     r.execute(&crate::content::parse(content));
     samples(&r)
 }
@@ -95,19 +125,31 @@ fn record(doc: &Document, width: u32, height: u32, content: &[u8]) -> DeviceReco
 fn device(
     backend: Option<&VulkanBackend>,
     doc: &Document,
-    (width, height): (u32, u32),
+    size: (u32, u32),
     depth: SampleDepth,
     content: &[u8],
     paths: bool,
 ) -> Vec<u16> {
-    let mut r = unpainted(doc, width, height, depth);
+    device_aa(backend, doc, size, depth, content, (paths, true))
+}
+
+/// [`device`], its glyphs antialiased when `text_aa`.
+fn device_aa(
+    backend: Option<&VulkanBackend>,
+    doc: &Document,
+    (width, height): (u32, u32),
+    depth: SampleDepth,
+    content: &[u8],
+    (paths, text_aa): (bool, bool),
+) -> Vec<u16> {
+    let mut r = unpainted_aa(doc, width, height, depth, text_aa);
     r.record_for_device(paths).expect("an RGB page records");
     r.execute(&crate::content::parse(content));
     let DeviceRecording::Recorded(page) = r.take_device_recording().expect("recorded") else {
         panic!("the content was refused");
     };
     assert_eq!(page.depth(), depth);
-    assert_eq!(page.has_paths(), paths && !page.is_empty());
+    assert!(paths || !page.has_paths(), "outlines recorded as outlines");
     if let Some(backend) = backend {
         r.paint_device_page(backend, &page).expect("device page");
     } else {
@@ -268,6 +310,8 @@ fn recorded_pages_match_the_cpu_render(backend: Option<&VulkanBackend>, paths: b
     }
 }
 
+mod text;
+
 #[test]
 fn device_page_matches_the_cpu_render() {
     let Some(backend) = backend() else {
@@ -318,7 +362,7 @@ fn unsupported_paints_refuse_the_recording() {
         DeviceRecording::Refused(reason) => reason,
         DeviceRecording::Recorded(_) => "",
     };
-    assert_eq!(refused(b"BT /F1 12 Tf (a) Tj ET"), "text");
+    assert_eq!(refused(b"BT /F1 12 Tf 5 5 Td (a) Tj ET"), "");
     assert_eq!(refused(b"/Im Do"), "XObject");
     assert_eq!(refused(b"/Sh sh"), "shading");
     assert_eq!(refused(b"/M gs 0 0 10 10 re f"), "blend mode");
@@ -338,10 +382,10 @@ fn unsupported_paints_refuse_the_recording() {
 
 #[test]
 fn operators_that_paint_otherwise_are_found_before_recording() {
-    let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET");
+    let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET /Im Do");
     assert_eq!(
         device_page_ineligible(false, false, true, &ops),
-        Some("text")
+        Some("XObject")
     );
     let ops = crate::content::parse(b"q 0 0 10 10 re f Q");
     assert_eq!(device_page_ineligible(false, false, true, &ops), None);

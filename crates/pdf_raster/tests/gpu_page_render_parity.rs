@@ -48,11 +48,13 @@ fn gpu_session(pdf: Vec<u8>) -> Option<RasterSession> {
 }
 
 /// A one-page PDF of `content` on a 400 × 400 pt page whose resources
-/// name the graphics state `/T` (alpha).
+/// name the graphics state `/T` (alpha) and the fonts `/F1` and `/F2`.
 fn page_pdf(content: &[u8]) -> Vec<u8> {
     with_page_tree(&[
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] \
-           /Resources << /ExtGState << /T << /ca 0.45 /CA 0.7 >> >> >> \
+           /Resources << /ExtGState << /T << /ca 0.45 /CA 0.7 >> >> \
+           /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> \
+           /F2 << /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >> >> >> \
            /Contents 4 0 R >>"
             .to_vec(),
         stream_object("", content),
@@ -62,7 +64,8 @@ fn page_pdf(content: &[u8]) -> Vec<u8> {
 /// Fills and strokes the device renders: rectangles with fractional
 /// edges, a triangle, a Bézier circle, an even-odd donut, a fill at
 /// constant alpha, fills under rectangular clips, wide strokes with caps,
-/// joins and dashes, opaque hairlines, and fills off the page's edges.
+/// joins and dashes, opaque hairlines, fills off the page's edges, and
+/// text filled, stroked, translucent and under a rectangular clip.
 const DEVICE_CONTENT: &[u8] = b"\
 0.47843 0.45882 0.44706 rg 100.31 50.27 4.76 76.8 re f\n\
 0 0 1 rg 30.3 300.7 m 190.9 330.2 l 60.1 380.4 l h f\n\
@@ -76,7 +79,10 @@ q 20 200 100 50 re W n 0.2 0.2 0.2 rg 0 180 150 100 re f Q\n\
 0.9 0.3 0.1 RG 5.5 w 1 J 2 j [12 4] 3 d 40 40 m 160 90 l 90 160 l S [] 0 d\n\
 0 0 0.6 RG 0 w 10 390 m 390 10 l S 0.4 w 15 20 m 380 30 l S\n\
 0.3 0.6 0.9 rg -20.5 -10.3 60 40 re f\n\
-0.9 0.5 0.1 rg 370.2 380.7 60 60 re f\n";
+0.9 0.5 0.1 rg 370.2 380.7 60 60 re f\n\
+BT /F1 18 Tf 0 0 0 rg 30.4 350.2 Td (Device text, AVAWfi) Tj ET\n\
+q /T gs BT /F2 31 Tf 0.8 0 0.2 rg 0.1 0.1 0.6 RG 0.8 w 2 Tr 60 300 Td (Italic) Tj ET Q\n\
+q 200 20 70 30 re W n BT /F1 40 Tf 0 0.4 0 rg 190 25 Td 1 Tr (Clip) Tj 0 Tr (ped) Tj ET Q\n";
 
 /// Page `page` of `session` at [`SCALE`] and 16 bits per sample, its
 /// samples as little-endian bytes, with the diagnostics of the render.
@@ -139,7 +145,10 @@ fn device_page_renders_identically_with(cpu: Render, gpu_render: Diagnosed) {
 #[test]
 fn declined_pages_render_on_the_cpu_with_the_reason() {
     for (content, reason) in [
-        (&b"0 g BT /F1 12 Tf 10 10 Td (a) Tj ET"[..], "text"),
+        (
+            &b"0 g BT /F1 12 Tf 7 Tr 10 10 Td (a) Tj ET 0 0 400 400 re f"[..],
+            "text clip mode",
+        ),
         (b"1 0 0 rg 10 10 100 100 re f /Im Do", "XObject"),
         (
             b"10 10 m 200 10 l 100 200 l h W n 0 0 1 rg 0 0 400 400 re f",
@@ -230,10 +239,12 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
         "corpus-10-scan-jbig2-jpx.pdf",
         "corpus-11-cmyk-swatches.pdf",
     ];
+    let (mut found, mut on_device) = (0, 0);
     for fixture in FIXTURES {
         let Some(path) = corpus_fixture(fixture) else {
             continue;
         };
+        found += 1;
         let cpu = open_session(&path, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
             .expect("CPU session");
         let Ok(gpu) = open_session(&path, &gpu_config(BackendPolicy::ForceVulkan)) else {
@@ -254,7 +265,13 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
                 "{what}: not offered"
             );
             eprintln!("{what}: {:?}", diag.device_page);
+            on_device += usize::from(matches!(diag.device_page, DevicePage::Rendered { .. }));
             assert_identical(&cpu_render(&cpu, page), &got, &what);
         }
     }
+    // The text pages of the fixtures render on the device.
+    assert!(
+        found < FIXTURES.len() || on_device >= 8,
+        "{on_device} fixture pages rendered on the device"
+    );
 }
