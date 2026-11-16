@@ -3,8 +3,8 @@
 use color::SampleDepth;
 
 use super::{
-    ImageDraw, ImageLayout, ImageMask, PageCmd, PageCommands, PixelBounds, SampleMap, Samples,
-    SamplesId,
+    AreaPath, ClipId, ClipRegionId, CoverageRows, ImageDraw, ImageLayout, ImageMask, MaskBits,
+    PageCmd, PageCommands, PixelBounds, PlaneId, PlaneValues, SampleMap, Samples, SamplesId,
 };
 
 /// `SplitMix64`.
@@ -248,4 +248,251 @@ pub(crate) fn push_random_images(rng: &mut Rng, page: &mut PageCommands, count: 
         })
         .expect("push image");
     }
+}
+
+/// The identity matrix.
+pub(crate) const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// A random polygon of 3 to 11 vertices over a `width × height` page and a
+/// margin around it, in device pixels.
+pub(crate) fn random_path(rng: &mut Rng, width: u32, height: u32) -> raster::Path {
+    let coord = |rng: &mut Rng, extent: u32| {
+        f64::from(i32::try_from(rng.range(-40, i64::from(extent) * 8 + 40)).unwrap()) / 8.0
+    };
+    let mut builder = raster::PathBuilder::new();
+    builder
+        .move_to(coord(rng, width), coord(rng, height))
+        .expect("move_to");
+    for _ in 0..rng.range(2, 11) {
+        builder
+            .line_to(coord(rng, width), coord(rng, height))
+            .expect("line_to");
+    }
+    builder.close(false).expect("close");
+    builder.build()
+}
+
+/// An antialiased clip of the page `width × height` (its rectangle shrunk
+/// by up to 3 pixels a side) intersected with `n` random polygons, each
+/// non-zero or even-odd at random; from 8 polygons on, the CPU folds them.
+pub(crate) fn random_clip(rng: &mut Rng, width: u32, height: u32, n: usize) -> raster::Clip {
+    let inset = |rng: &mut Rng| f64::from(rng.below(4));
+    let mut clip = raster::Clip::new(
+        inset(rng),
+        inset(rng),
+        f64::from(width) - inset(rng),
+        f64::from(height) - inset(rng),
+        true,
+    );
+    for _ in 0..n {
+        let path = random_path(rng, width, height);
+        let xpath = raster::xpath::XPath::new(&path, &IDENTITY, 0.1, true);
+        clip.clip_to_path(&xpath, rng.below(2) == 0);
+    }
+    clip
+}
+
+/// The path regions of `clip` held by `page` as a clip, `None` for a
+/// rectangle-only clip.
+pub(crate) fn page_clip(page: &mut PageCommands, clip: &raster::Clip) -> Option<ClipId> {
+    let regions: Vec<ClipRegionId> = clip
+        .path_regions()
+        .map(|(_, table)| {
+            let table = table.expect("an antialiased region");
+            page.add_clip_region(CoverageRows {
+                y_min: table.y_min(),
+                row_starts: table.row_starts(),
+                spans: table.span_triples(),
+                bytes: table.bytes(),
+            })
+            .expect("add clip region")
+        })
+        .collect();
+    (!regions.is_empty()).then(|| page.add_clip(&regions).expect("add clip"))
+}
+
+/// The clip rectangle's pixels as bounds.
+pub(crate) const fn clip_bounds(clip: &raster::Clip) -> PixelBounds {
+    PixelBounds {
+        x0: clip.x_min_i,
+        y0: clip.y_min_i,
+        x1: clip.x_max_i,
+        y1: clip.y_max_i,
+    }
+}
+
+/// A random mask plane for a page of `depth`: one value outside a random
+/// rectangle (0, M or any) and random values inside it, or random values
+/// everywhere, or one value everywhere.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test pages are a few hundred pixels wide"
+)]
+pub(crate) fn random_plane(rng: &mut Rng, width: u32, height: u32, depth: SampleDepth) -> Vec<u16> {
+    let max = depth.max_sample();
+    let n = (width * height) as usize;
+    let pick = |rng: &mut Rng| match rng.below(5) {
+        0 => 0,
+        1 => max,
+        2 => max - 1,
+        _ => rng.sample(max),
+    };
+    match rng.below(4) {
+        0 => (0..n).map(|_| pick(rng)).collect(),
+        1 => vec![pick(rng); n],
+        _ => {
+            let outside = pick(rng);
+            let (x0, y0) = (rng.below(width), rng.below(height));
+            let (x1, y1) = (
+                x0 + rng.below(width - x0.unsigned_abs()),
+                y0 + rng.below(height - y0.unsigned_abs()),
+            );
+            (0..n)
+                .map(|i| {
+                    let (x, y) = ((i % width as usize) as i32, (i / width as usize) as i32);
+                    if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                        pick(rng)
+                    } else {
+                        outside
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+/// `values` held by `page` as a mask plane of its depth.
+pub(crate) fn page_plane(page: &mut PageCommands, values: &[u16]) -> PlaneId {
+    match page.depth() {
+        SampleDepth::Eight => {
+            let v: Vec<u8> = values.iter().map(|&s| u8::try_from(s).unwrap()).collect();
+            page.add_mask_plane(PlaneValues::Eight(&v))
+        }
+        SampleDepth::Sixteen => page.add_mask_plane(PlaneValues::Sixteen(values)),
+    }
+    .expect("add mask plane")
+}
+
+/// Push the antialiased fill of `path` that the CPU composites under
+/// `clip`'s rectangle, as outlines, or as their tables when `tables`.
+pub(crate) fn push_fill(
+    page: &mut PageCommands,
+    (path, even_odd): (&raster::Path, bool),
+    clip: &raster::Clip,
+    (rgb, alpha): ([u16; 3], u16),
+    tables: bool,
+) {
+    let (width, height) = (page.width(), page.height());
+    for o in
+        raster::fill::aa_fill_outlines(path, &IDENTITY, 0.1, clip, width, height, even_odd, false)
+    {
+        let (x0, y0, x1, y1) = o.window;
+        if tables {
+            let table = o.table();
+            let Some((x0, y0, x1, y1)) = table.bounds() else {
+                continue;
+            };
+            let rows = CoverageRows {
+                y_min: table.y_min(),
+                row_starts: table.row_starts(),
+                spans: table.span_triples(),
+                bytes: table.bytes(),
+            };
+            page.push_coverage(rows, PixelBounds { x0, y0, x1, y1 }, rgb, alpha)
+                .expect("push table");
+        } else {
+            let area = AreaPath {
+                segs: &o.segs,
+                window: PixelBounds { x0, y0, x1, y1 },
+                even_odd: o.even_odd,
+                weight: o.weight,
+            };
+            page.push_area_path(&area, rgb, alpha)
+                .expect("push outline");
+        }
+    }
+}
+
+/// Push `n` random steps onto `page`: clip changes among clips of 1, 3
+/// and 9 regions and none, soft-masked objects begun and ended over random
+/// planes and rectangles, and fills (outlines unless `tables`), masks,
+/// images and opaque runs at random alphas.
+pub(crate) fn push_random_modified(rng: &mut Rng, page: &mut PageCommands, n: usize, tables: bool) {
+    let (width, height, depth) = (page.width(), page.height(), page.depth());
+    let max = depth.max_sample();
+    let clips: Vec<Option<ClipId>> = [1, 3, 9]
+        .into_iter()
+        .map(|k| {
+            let clip = random_clip(rng, width, height, k);
+            page_clip(page, &clip)
+        })
+        .chain([None])
+        .collect();
+    let planes: Vec<PlaneId> = (0..2)
+        .map(|_| {
+            let values = random_plane(rng, width, height, depth);
+            page_plane(page, &values)
+        })
+        .collect();
+    let rect = raster::Clip::new(0.0, 0.0, f64::from(width), f64::from(height), true);
+    let w = i32::try_from(width).unwrap();
+    let h = i32::try_from(height).unwrap();
+    for _ in 0..n {
+        let alpha =
+            [max, max, max / 2 + 1, 1, rng.sample(max)][usize::try_from(rng.below(5)).unwrap()];
+        let rgb = [0; 3].map(|_| rng.sample(max));
+        match rng.below(10) {
+            0 => page.set_clip(clips[usize::try_from(rng.below(4)).unwrap()]),
+            1 => {
+                let plane = planes[usize::try_from(rng.below(2)).unwrap()];
+                let (x0, y0) = (rng.below(width + 8) - 8, rng.below(height + 8) - 8);
+                let bounds = PixelBounds {
+                    x0,
+                    y0,
+                    x1: x0 + rng.below(width + 8),
+                    y1: y0 + rng.below(height + 8),
+                };
+                page.begin_object(plane, bounds).expect("begin object");
+            }
+            2 => page.end_object(),
+            3 => {
+                let (mw, mh) = (
+                    rng.below(40).unsigned_abs() + 1,
+                    rng.below(30).unsigned_abs() + 1,
+                );
+                let data: Vec<u8> = (0..mw * mh).map(|_| rng.byte()).collect();
+                let mask = page
+                    .add_mask(&data, mw, mh, MaskBits::Coverage)
+                    .expect("add mask");
+                let origin = (rng.below(width + 20) - 20, rng.below(height + 20) - 20);
+                let bounds = PixelBounds {
+                    x0: 0,
+                    y0: 0,
+                    x1: w - 1,
+                    y1: h - 1,
+                };
+                page.push_mask(mask, origin, bounds, rgb, alpha)
+                    .expect("push mask");
+            }
+            4 => push_random_images(rng, page, 1),
+            5 => {
+                let y = rng.below(height);
+                let x0 = rng.below(width + 5) - 5;
+                page.push_opaque_runs(&mut [(y, x0, x0 + rng.below(40))], rgb)
+                    .expect("push runs");
+            }
+            _ => {
+                let path = random_path(rng, width, height);
+                push_fill(
+                    page,
+                    (&path, rng.below(2) == 0),
+                    &rect,
+                    (rgb, alpha),
+                    tables,
+                );
+            }
+        }
+    }
+    page.end_object();
 }

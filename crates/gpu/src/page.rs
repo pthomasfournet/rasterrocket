@@ -8,8 +8,11 @@
 //! arithmetic (see [`AreaPath`]), or read from a coverage mask the page
 //! holds once and any number of commands place (see [`MaskId`]); or an
 //! image's samples, sampled per pixel through the CPU image sampler's
-//! tables (see [`ImageDraw`]).  Commands paint in the order they were
-//! pushed.  The tables, outlines, masks and samples of every command are
+//! tables (see [`ImageDraw`]).  A command may be clipped by coverage
+//! tables of the CPU's path clips (see [`ClipId`]), and the commands of an
+//! object painted under a soft mask are blended back toward the pixels
+//! before them by the mask's values (see [`PlaneId`]).  Commands paint in
+//! the order they were pushed.  The tables, outlines, masks and samples of every command are
 //! copied into shared flat arrays.
 //!
 //! The device raster bins the commands into [`PAGE_TILE`]-pixel square
@@ -28,8 +31,10 @@ use color::{Sample, SampleDepth};
 
 mod bins;
 mod budget;
+mod clip;
 mod image;
 mod mask;
+mod object;
 mod path;
 #[doc(hidden)]
 pub mod reference;
@@ -40,10 +45,12 @@ pub(crate) mod test_support;
 
 pub use bins::TileBins;
 use budget::{Counts, index};
+pub use clip::{ClipId, ClipRegionId};
 pub use image::{
     IMAGE_TABLE_ENTRY_WORDS, ImageDraw, ImageLayout, ImageMask, SampleMap, Samples, SamplesId,
 };
 pub use mask::{MaskBits, MaskId};
+pub use object::{PlaneId, PlaneValues};
 pub use path::{AreaPath, PATH_COORD_LIMIT, PATH_SEGMENTS, PATH_TILE_SEGMENTS};
 use path::{Backdrop, PathTile, bin_path};
 pub use table::CoverageRows;
@@ -77,6 +84,8 @@ const KIND_IMAGE: u32 = 3;
 /// `path_tiles[row_base..][..n_rows]`.  A mask's command holds the mask's
 /// left column in `flags` (two's complement), its top row in `table_y0`,
 /// its width in `n_rows` and the offset of its bytes in `row_base`.
+/// `clip` and `object` are one more than the modifier words of the
+/// command's clip and soft-masked object, 0 for none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
 pub(crate) struct PageCmd {
@@ -92,6 +101,8 @@ pub(crate) struct PageCmd {
     y0: i32,
     x1: i32,
     y1: i32,
+    clip: u32,
+    object: u32,
 }
 
 /// An inclusive rectangle of device pixels: `x0..=x1` × `y0..=y1`.
@@ -201,6 +212,10 @@ pub struct PageCommands {
     path_tiles: Vec<PathTile>,
     /// Every image command's record and sampling tables.
     image_words: Vec<u32>,
+    /// The records of clip regions, clips, mask planes and objects.
+    mod_words: Vec<u32>,
+    /// The clip and object stamped on the commands pushed now.
+    modifiers: clip::Modifiers,
     /// Per tile, the items [`Self::bin`] lists in it: those from the last
     /// that hides the items before it on.  Empty until the first push.
     live: Vec<u32>,
@@ -222,6 +237,8 @@ pub(crate) struct TableBases {
     pub backdrops: u32,
     /// Image records and sampling tables.
     pub images: u32,
+    /// Clip, mask plane and object records.
+    pub mods: u32,
 }
 
 /// A sample type of the page raster's output: `u8` for an 8-bit page,
@@ -285,6 +302,8 @@ impl PageCommands {
             backdrops: Vec::new(),
             path_tiles: Vec::new(),
             image_words: Vec::new(),
+            mod_words: Vec::new(),
+            modifiers: clip::Modifiers::default(),
             live: Vec::new(),
             tile_refs: 0,
         }
@@ -371,14 +390,14 @@ impl PageCommands {
         let Some(page) = self.page_bounds()? else {
             return Ok(());
         };
-        let Some(window) = page.intersect(path.window) else {
+        let Some(window) = self.paint_bounds()?.and_then(|b| b.intersect(path.window)) else {
             return Ok(());
         };
         let binned = bin_path(
             &AreaPath { window, ..*path },
             page,
             self.width.div_ceil(PAGE_TILE),
-            a_input == max,
+            a_input == max && self.modifiers.is_plain(),
         )?;
         if binned.tiles.is_empty() {
             return Ok(());
@@ -452,7 +471,7 @@ impl PageCommands {
             y0: window.y0,
             x1: window.x1,
             y1: window.y1,
-            ..PageCmd::default()
+            ..self.modifiers.stamp()
         });
         Ok(())
     }
@@ -466,12 +485,12 @@ impl PageCommands {
     /// the spans, three words each; the coverage bytes, four to a word,
     /// zero-padded to a whole word; the outlines' segments, four words
     /// each; the outline tiles' segment lists; their backdrops; and the
-    /// image records and sampling tables.  With the index of the first
-    /// word of each array after the spans.
-    pub(crate) fn table_parts(&self) -> ([&[u8]; 7], TableBases) {
+    /// image records and sampling tables; and the modifier records.  With
+    /// the index of the first word of each array after the spans.
+    pub(crate) fn table_parts(&self) -> ([&[u8]; 8], TableBases) {
         const PAD: [u8; 3] = [0; 3];
         let pad = &PAD[..self.bytes.len().next_multiple_of(4) - self.bytes.len()];
-        let parts: [&[u8]; 7] = [
+        let parts: [&[u8]; 8] = [
             bytemuck::cast_slice(&self.spans),
             &self.bytes,
             pad,
@@ -479,8 +498,9 @@ impl PageCommands {
             bytemuck::cast_slice(&self.seg_lists),
             bytemuck::cast_slice(&self.backdrops),
             bytemuck::cast_slice(&self.image_words),
+            bytemuck::cast_slice(&self.mod_words),
         ];
-        let mut words = [0u32; 7];
+        let mut words = [0u32; 8];
         let mut at = 0usize;
         for (w, part) in words.iter_mut().zip(parts) {
             *w = u32::try_from(at / 4).expect("the push limit bounds the words");
@@ -494,6 +514,7 @@ impl PageCommands {
                 seg_lists: words[4],
                 backdrops: words[5],
                 images: words[6],
+                mods: words[7],
             },
         )
     }

@@ -278,7 +278,10 @@ fn masks_are_held_once_and_counted() {
     // the tiles they touch: columns 0, 0–1 and 1 of tile rows 0–1.
     let bins = page.bin().expect("bin");
     assert_eq!(bins.items.len(), 2 + 4 + 2);
-    assert_eq!(page.bytes(), before + 2 * 4 + 3 * 48 + 8 * 16);
+    assert_eq!(
+        page.bytes(),
+        before + 2 * 4 + 3 * size_of::<crate::page::PageCmd>() + 8 * 16
+    );
 }
 
 #[test]

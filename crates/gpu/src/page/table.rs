@@ -88,44 +88,21 @@ impl PageCommands {
             "push_coverage: colour {rgb:?} or alpha {a_input} exceeds {} bits",
             self.depth.bits()
         );
-        let Some(bounds) = self.page_bounds()?.and_then(|p| p.intersect(bounds)) else {
+        let Some(bounds) = self.paint_bounds()?.and_then(|p| p.intersect(bounds)) else {
             return Ok(());
         };
-        let tile_refs = bounds.tiles();
-        let (n_spans, n_bytes, n_rows) =
-            (table.spans.len(), table.bytes.len(), table.row_starts.len());
         let more = Counts {
             cmds: 1,
-            spans: n_spans,
-            coverage: n_bytes,
-            row_starts: n_rows,
-            tile_refs,
-            ..Counts::default()
+            tile_refs: bounds.tiles(),
+            ..table_counts(&table)
         };
         if self.bytes_with(more) > PAGE_COMMANDS_MAX_BYTES {
             return Err(PageCommandsError::TooLarge);
         }
-        let span_base = index(self.spans.len())?;
-        index(self.spans.len() + n_spans).map(drop)?;
-        i32::try_from(self.bytes.len() + n_bytes)
-            .map(drop)
-            .map_err(|_| PageCommandsError::TooLarge)?;
-        let byte_base = i32::try_from(self.bytes.len()).map_err(|_| PageCommandsError::TooLarge)?;
-        let row_base = index(self.row_starts.len())?;
-        let n_table_rows = index(table.n_rows())?;
+        let at = self.reserve_rows(&table)?;
         self.cmds.try_reserve(1)?;
-        self.spans.try_reserve(n_spans)?;
-        self.bytes.try_reserve(n_bytes)?;
-        self.row_starts.try_reserve(n_rows)?;
         self.reserve_live()?;
-        self.spans.extend(
-            table.spans.iter().map(|&[x0, x1, offset]| {
-                [x0, x1, if offset < 0 { -1 } else { offset + byte_base }]
-            }),
-        );
-        self.bytes.extend_from_slice(table.bytes);
-        self.row_starts
-            .extend(table.row_starts.iter().map(|&s| s + span_base));
+        let (row_base, n_table_rows) = self.extend_rows(&table, at);
         self.count_rect(bounds);
         let [rg, b] = pack_rgb(rgb);
         self.cmds.push(PageCmd {
@@ -140,8 +117,76 @@ impl PageCommands {
             y0: bounds.y0,
             x1: bounds.x1,
             y1: bounds.y1,
-            ..PageCmd::default()
+            ..self.modifiers.stamp()
         });
         Ok(())
+    }
+}
+
+/// The elements `table` adds to a page's inputs.
+pub(super) const fn table_counts(table: &CoverageRows<'_>) -> Counts {
+    Counts {
+        spans: table.spans.len(),
+        coverage: table.bytes.len(),
+        row_starts: table.row_starts.len(),
+        ..Counts::ZERO
+    }
+}
+
+/// Where [`PageCommands::extend_rows`] appends a table: its first span and
+/// coverage byte.
+#[derive(Clone, Copy)]
+pub(super) struct RowsAt {
+    span_base: u32,
+    byte_base: i32,
+}
+
+impl PageCommands {
+    /// Reserve room for `table` in the spans, coverage bytes and row
+    /// offsets, its offsets checked against their index ranges; the page
+    /// is unchanged.
+    pub(super) fn reserve_rows(
+        &mut self,
+        table: &CoverageRows<'_>,
+    ) -> Result<RowsAt, PageCommandsError> {
+        let span_base = index(self.spans.len())?;
+        index(self.spans.len() + table.spans.len()).map(drop)?;
+        let too_large = |_| PageCommandsError::TooLarge;
+        i32::try_from(self.bytes.len() + table.bytes.len())
+            .map_err(too_large)
+            .map(drop)?;
+        let byte_base = i32::try_from(self.bytes.len()).map_err(too_large)?;
+        index(self.row_starts.len() + table.row_starts.len()).map(drop)?;
+        index(table.n_rows()).map(drop)?;
+        self.spans.try_reserve(table.spans.len())?;
+        self.bytes.try_reserve(table.bytes.len())?;
+        self.row_starts.try_reserve(table.row_starts.len())?;
+        Ok(RowsAt {
+            span_base,
+            byte_base,
+        })
+    }
+
+    /// Append `table`, reserved by [`Self::reserve_rows`] at `at`: its
+    /// entry in the row offsets and its row count.
+    pub(super) fn extend_rows(&mut self, table: &CoverageRows<'_>, at: RowsAt) -> (u32, u32) {
+        let row_base = u32::try_from(self.row_starts.len()).unwrap_or(u32::MAX);
+        let n_rows = u32::try_from(table.n_rows()).unwrap_or(u32::MAX);
+        self.spans
+            .extend(table.spans.iter().map(|&[x0, x1, offset]| {
+                [
+                    x0,
+                    x1,
+                    if offset < 0 {
+                        -1
+                    } else {
+                        offset + at.byte_base
+                    },
+                ]
+            }));
+        self.bytes.extend_from_slice(table.bytes);
+        self.row_starts
+            .extend(table.row_starts.iter().map(|&s| s + at.span_base));
+        (row_base, n_rows)
     }
 }

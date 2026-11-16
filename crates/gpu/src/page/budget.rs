@@ -25,9 +25,26 @@ pub(super) struct Counts {
     pub(super) backdrops: usize,
     /// Image record and sampling table words.
     pub(super) image_words: usize,
+    /// Clip, mask plane and object record words.
+    pub(super) mod_words: usize,
 }
 
 impl Counts {
+    /// No element.
+    pub(super) const ZERO: Self = Self {
+        cmds: 0,
+        spans: 0,
+        coverage: 0,
+        row_starts: 0,
+        tile_refs: 0,
+        hidden_refs: 0,
+        segs: 0,
+        seg_lists: 0,
+        backdrops: 0,
+        image_words: 0,
+        mod_words: 0,
+    };
+
     /// The bytes of device inputs holding these elements and `tiles + 1`
     /// tile offsets, saturating.  The coverage bytes are packed four to a
     /// word.
@@ -39,7 +56,8 @@ impl Counts {
             .saturating_add(self.segs.saturating_mul(4))
             .saturating_add(self.seg_lists)
             .saturating_add(self.backdrops)
-            .saturating_add(self.image_words);
+            .saturating_add(self.image_words)
+            .saturating_add(self.mod_words);
         size_of::<PageCmd>()
             .saturating_mul(self.cmds)
             .saturating_add(size_of::<[i32; 3]>().saturating_mul(self.spans))
@@ -52,18 +70,7 @@ impl PageCommands {
     /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`].
     #[must_use]
     pub const fn bytes(&self) -> usize {
-        self.bytes_with(Counts {
-            cmds: 0,
-            spans: 0,
-            coverage: 0,
-            row_starts: 0,
-            tile_refs: 0,
-            hidden_refs: 0,
-            segs: 0,
-            seg_lists: 0,
-            backdrops: 0,
-            image_words: 0,
-        })
+        self.bytes_with(Counts::ZERO)
     }
 
     /// Bytes the page's device inputs would take with `more` more elements;
@@ -83,6 +90,7 @@ impl PageCommands {
             seg_lists: self.seg_lists.len().saturating_add(more.seg_lists),
             backdrops: self.backdrops.len().saturating_add(more.backdrops),
             image_words: self.image_words.len().saturating_add(more.image_words),
+            mod_words: self.mod_words.len().saturating_add(more.mod_words),
         }
         .bytes(self.tile_count())
     }

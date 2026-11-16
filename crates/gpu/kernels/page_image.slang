@@ -25,7 +25,8 @@
 // page is widened by 257.  A mask read through its own tables first
 // clamps the pixel onto its rectangle, and its taps onto the mask.
 //
-// The shape is M, the mask's value, or M less a stencil's value; 0 leaves
+// The shape is M, the mask's value, or M less a stencil's value, scaled
+// by the clip's scaling s of 255 as div_max(shape * s * M / 255); 0 leaves
 // the pixel unchanged.  The direct composite writes the colour at shape M
 // and (c s + d (M - s)) / M, truncated, otherwise; the pipe composite is
 // composite_shape.
@@ -176,6 +177,10 @@ void image_paint(Cmd c, int x, int y, inout uint r, inout uint g, inout uint b)
         shape = blend_sample(m, tm, 0, 1);
     }
     if (shape == 0) return;
+    if (c.clip != 0) {
+        shape = div_max(shape * (clip_scale(c.clip - 1, x, y, 255u) * (max_sample / 255)), pc.bits);
+        if (shape == 0) return;
+    }
     uint cr, cg, cb;
     if (layout == LAYOUT_RGB) {
         cr = blend_sample(s, t, 0, 3);

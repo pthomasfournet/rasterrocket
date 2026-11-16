@@ -8,7 +8,8 @@ use super::{
 impl PageCommands {
     /// Paint `rgb` opaquely over the pixel runs `runs`, each `(y, x0, x1)`
     /// with `x0 ≤ x1` inclusive: every pixel of a run that lies on the page
-    /// takes `rgb`, however many runs cover it.  The runs are clipped to
+    /// takes `rgb`, however many runs cover it.  The runs are taken as
+    /// already clipped: the clip in effect does not scale them.  The runs are clipped to
     /// the page, sorted and merged in place, so the slice's order and
     /// contents are unspecified afterwards.
     ///
@@ -73,7 +74,11 @@ impl PageCommands {
             spans: &spans,
             bytes: &[],
         };
-        self.push_coverage(table, bounds, rgb, self.depth.max_sample())
+        // The runs are the pixels the clip passes: no clip scales them.
+        let clip = self.modifiers.clip.take();
+        let pushed = self.push_coverage(table, bounds, rgb, self.depth.max_sample());
+        self.modifiers.clip = clip;
+        pushed
     }
 }
 

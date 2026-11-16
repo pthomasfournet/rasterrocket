@@ -1,5 +1,6 @@
 //! The page raster on the host: the device kernel's algorithm, tile by
-//! tile, in the same integer arithmetic.  It is the oracle the device is
+//! tile, in the same integer arithmetic, clips and soft-masked objects
+//! included.  It is the oracle the device is
 //! tested against and the model a twin of the kernel on another device
 //! API reproduces.
 
@@ -18,7 +19,7 @@ const fn div_max(x: u32, bits: u32) -> u32 {
 }
 
 /// Coverage of pixel `x` in spans `[x0, x1, offset]` of one row, sorted.
-fn row_coverage(spans: &[[i32; 3]], bytes: &[u8], x: i32) -> u8 {
+pub(super) fn row_coverage(spans: &[[i32; 3]], bytes: &[u8], x: i32) -> u8 {
     let i = spans.partition_point(|s| s[1] < x);
     match spans.get(i) {
         Some(&[x0, _, offset]) if x0 <= x => {
@@ -127,6 +128,7 @@ fn composite_direct(dst: &mut [u16], src: [u32; 3], shape: u32, bits: u32) {
     reason = "pixel coordinates of a page within the push limit fit i32"
 )]
 fn paint_image(
+    page: &PageCommands,
     model: &ImageModel<'_>,
     c: &PageCmd,
     (tx, ty): (usize, usize),
@@ -141,9 +143,16 @@ fn paint_image(
         {
             continue;
         }
-        let Some((src, shape)) = model.pixel(c, x, y) else {
+        let Some((src, mut shape)) = model.pixel(c, x, y) else {
             continue;
         };
+        if let Some(clip) = c.clip.checked_sub(1) {
+            let s = u32::from(page.clip_scale(clip, x, y, u8::MAX));
+            shape = div_max(shape * s * (((1 << model.bits) - 1) / 255), model.bits);
+            if shape == 0 {
+                continue;
+            }
+        }
         let o = (py * width + px) * 3;
         if c.flags & DIRECT == 0 {
             composite_pipe(&mut out[o..o + 3], src, shape, c.a_input, model.bits);
@@ -176,23 +185,52 @@ pub fn render_page(page: &PageCommands) -> Result<Vec<u16>, PageCommandsError> {
     };
     let mut out: Vec<u16> = (0..width * height).flat_map(|_| page.paper()).collect();
     let tile = PAGE_TILE as usize;
+    // The pixels of a tile on the page, as (x, y, sample offset).
+    let pixels = |tx: usize, ty: usize| {
+        (0..TILE_PIXELS).filter_map(move |i| {
+            let (px, py) = (tx * tile + i % tile, ty * tile + i / tile);
+            (px < width && py < height).then(|| (px as i32, py as i32, (py * width + px) * 3))
+        })
+    };
     for ty in 0..binned.tiles_y as usize {
         for tx in 0..binned.tiles_x as usize {
-            let t = ty * binned.tiles_x as usize + tx;
-            for &item in &binned.items[binned.offsets[t] as usize..binned.offsets[t + 1] as usize] {
+            let at = ty * binned.tiles_x as usize + tx;
+            // The object being painted, and the tile before its first item.
+            let mut open = 0u32;
+            let mut prior = Vec::new();
+            for &item in &binned.items[binned.offsets[at] as usize..binned.offsets[at + 1] as usize]
+            {
                 let c = &page.cmds[item[0] as usize];
+                if c.object != open {
+                    close_object(page, open, &prior, pixels(tx, ty), bits, &mut out);
+                    open = c.object;
+                    prior = pixels(tx, ty)
+                        .map(|(.., o)| [out[o], out[o + 1], out[o + 2]])
+                        .collect();
+                }
                 if c.kind == KIND_IMAGE {
-                    paint_image(&model, c, (tx, ty), (width, height), &mut out);
+                    paint_image(page, &model, c, (tx, ty), (width, height), &mut out);
                     continue;
                 }
                 let src = [c.rg & 0xFFFF, c.rg >> 16, c.b];
                 for (i, &cov) in item_coverage(page, item, tx, ty).iter().enumerate() {
                     let (px, py) = (tx * tile + i % tile, ty * tile + i / tile);
+                    let (x, y) = (px as i32, py as i32);
                     let inside = px < width
                         && py < height
-                        && (c.x0..=c.x1).contains(&(px as i32))
-                        && (c.y0..=c.y1).contains(&(py as i32));
+                        && (c.x0..=c.x1).contains(&x)
+                        && (c.y0..=c.y1).contains(&y);
                     if !inside || cov == 0 {
+                        continue;
+                    }
+                    let cov = match c.clip.checked_sub(1) {
+                        None => cov,
+                        Some(clip) if c.kind == KIND_MASK => color::convert::div255(
+                            u32::from(cov) * u32::from(page.clip_scale(clip, x, y, u8::MAX)),
+                        ),
+                        Some(clip) => page.clip_scale(clip, x, y, cov),
+                    };
+                    if cov == 0 {
                         continue;
                     }
                     let o = (py * width + px) * 3;
@@ -200,7 +238,37 @@ pub fn render_page(page: &PageCommands) -> Result<Vec<u16>, PageCommandsError> {
                     composite_pipe(&mut out[o..o + 3], src, shape, c.a_input, bits);
                 }
             }
+            close_object(page, open, &prior, pixels(tx, ty), bits, &mut out);
         }
     }
     Ok(out)
+}
+
+/// Blend the tile's pixels `pixels` of `out` back toward `prior`, their
+/// values before the first item of the object `open` (one more than its
+/// record's word; 0 for none), by the object's mask within its rectangle.
+fn close_object(
+    page: &PageCommands,
+    open: u32,
+    prior: &[[u16; 3]],
+    pixels: impl Iterator<Item = (i32, i32, usize)>,
+    bits: u32,
+    out: &mut [u16],
+) {
+    let Some(object) = open.checked_sub(1) else {
+        return;
+    };
+    let max = (1u32 << bits) - 1;
+    for ((x, y, o), p) in pixels.zip(prior) {
+        let Some(m) = page.object_mask(object, x, y).map(u32::from) else {
+            continue;
+        };
+        if m == max {
+            continue;
+        }
+        for (d, &b) in out[o..o + 3].iter_mut().zip(p) {
+            let v = div_max(u32::from(*d) * m + u32::from(b) * (max - m), bits);
+            *d = u16::try_from(v).expect("a blend is a sample");
+        }
+    }
 }

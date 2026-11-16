@@ -287,7 +287,7 @@ impl PageCommands {
             y1: draw.map.y1 - 1,
         };
         let Some(bounds) = self
-            .page_bounds()?
+            .paint_bounds()?
             .and_then(|p| p.intersect(draw.bounds))
             .and_then(|b| b.intersect(rect))
         else {
@@ -341,7 +341,7 @@ impl PageCommands {
             y0: bounds.y0,
             x1: bounds.x1,
             y1: bounds.y1,
-            ..PageCmd::default()
+            ..self.modifiers.stamp()
         });
         Ok(())
     }

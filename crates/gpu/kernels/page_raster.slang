@@ -17,7 +17,9 @@
 //                 lists_base on, the segment indices of every outline
 //                 tile; from backdrops_base on, the backdrops, 16 ints
 //                 each; from images_base on, the image commands'
-//                 records and sampling tables (page_image.slang).  The
+//                 records and sampling tables (page_image.slang); from
+//                 mods_base on, the records of clips, mask planes and
+//                 objects (page_modifiers.slang).  The
 //                 pixels x0..x1 (inclusive) of a span are
 //                 covered fully when offset is -1, else by byte offset +
 //                 (x - x0).
@@ -43,7 +45,10 @@
 // a coverage.
 //
 // A command paints the pixels of its inclusive bounds (x0, y0) - (x1, y1),
-// which lie on the page and inside the command's clip rectangle.
+// which lie on the page and inside the command's clip rectangle.  A
+// clipped command's coverage is scaled by its clip, and the commands of an
+// object painted under a soft mask are blended back by its mask once the
+// object's last item in the tile has painted (page_modifiers.slang).
 //
 // A table command's coverage of a pixel is read from its table: the span
 // of the pixel's row holding it, found by binary search.
@@ -103,6 +108,8 @@ struct Cmd {
     int y0;
     int x1;
     int y1;
+    uint clip;      // 1 + the word of its clip's record, 0 for none
+    uint object;    // 1 + the word of its object's record, 0 for none
 };
 
 struct Params {
@@ -119,6 +126,7 @@ struct Params {
     uint lists_base;
     uint backdrops_base;
     uint images_base;
+    uint mods_base;
 };
 
 [[vk::push_constant]] ConstantBuffer<Params> pc;
@@ -196,7 +204,17 @@ uint flat_coverage(Cmd c, int x, int y)
     return c.kind == KIND_MASK ? mask_coverage(c, x, y) : table_coverage(c, x, y);
 }
 
+#include "page_modifiers.slang"
 #include "page_image.slang"
+
+// The coverage cov > 0 of pixel (x, y) by the table, outline or mask
+// command c, scaled by the command's clip.
+uint clipped_coverage(Cmd c, uint cov, int x, int y)
+{
+    if (c.clip == 0) return cov;
+    if (c.kind == KIND_MASK) return div_max(cov * clip_scale(c.clip - 1, x, y, 255u), 8);
+    return clip_scale(c.clip - 1, x, y, cov);
+}
 
 // Composite command c over the pixel (r, g, b) with coverage cov > 0.
 void composite(Cmd c, uint cov, inout uint r, inout uint g, inout uint b)
@@ -508,6 +526,11 @@ void raster(uint3 lid, uint3 wid)
     uint r = pc.paper_rg & 0xFFFF;
     uint g = pc.paper_rg >> 16;
     uint b = pc.paper_b;
+    // The object being painted, and the pixel before its first item.
+    uint open = 0;
+    uint pr = r;
+    uint pg = g;
+    uint pb = b;
 #ifdef PAGE_PATHS
     uint li = lid.y * TILE + lid.x;
     for (uint k0 = begin; k0 < end; k0 += BATCH) {
@@ -523,6 +546,7 @@ void raster(uint3 lid, uint3 wid)
         for (uint s = 0; s < n; s++) {
             uint4 item = load_item(k0 + s);
             Cmd c = cmds[item.x];
+            switch_object(c.object, x, y, open, pr, pg, pb, r, g, b);
             bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
             if (!inside) continue;
             if (c.kind == KIND_IMAGE) {
@@ -532,12 +556,15 @@ void raster(uint3 lid, uint3 wid)
             uint cov = c.kind == KIND_PATH ? path_coverage(c, item, s, lid.x, lid.y)
                                            : flat_coverage(c, x, y);
             if (cov == 0) continue;
+            cov = clipped_coverage(c, cov, x, y);
+            if (cov == 0) continue;
             composite(c, cov, r, g, b);
         }
     }
 #else
     for (uint k = begin; k < end; k++) {
         Cmd c = cmds[tile_items[k * 4]];
+        switch_object(c.object, x, y, open, pr, pg, pb, r, g, b);
         bool inside = on_page && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1;
         if (!inside) continue;
         if (c.kind == KIND_IMAGE) {
@@ -546,9 +573,12 @@ void raster(uint3 lid, uint3 wid)
         }
         uint cov = flat_coverage(c, x, y);
         if (cov == 0) continue;
+        cov = clipped_coverage(c, cov, x, y);
+        if (cov == 0) continue;
         composite(c, cov, r, g, b);
     }
 #endif
+    switch_object(0, x, y, open, pr, pg, pb, r, g, b);
 
     if (!on_page) return;
     uint o = (py * pc.width + px) * 3;
