@@ -3973,6 +3973,25 @@ ms, about the recording plus one device round trip. Output is
 byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
 and the A18 Pro.
 
+**Unreleased on master: images and forms on GPU pages.** `--gpu-pages` no
+longer refuses a page for its image or form XObjects. The CPU still decodes,
+colour-converts and downsamples an image and builds its sampling tables; the
+page then holds the samples once and the device samples every pixel with the
+CPU's integer arithmetic (taps, bilinear blend, soft mask, stencil) and
+composites as the CPU does: directly at full opacity, through the pipe
+otherwise. Forms record their content; inline images and annotation
+appearances take the same paths. A page still renders on the CPU, with the
+reason in the debug log, under a soft mask, a path clip, a transparency-group
+form, a transfer function on an image or a blend mode. A page refused after it
+drew images re-renders from the first pass's decodes. Of the 3 824 fixture
+pages, 3 737 now render on the GPU (799 before); 79 refuse on soft masks and 8
+on path clips. On image pages the GPU page is now cheaper than the CPU page in
+process (19 vs 25 ms on a 150-dpi journal page; the decode stays on both
+paths), and single-threaded the whole process is level to 17 % faster on the
+image documents (RADV, A18 Pro); with all threads the CPU still wins. Output
+is byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
+and the A18 Pro.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
