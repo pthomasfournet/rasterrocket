@@ -438,6 +438,7 @@ fn a_transparent_finish_keeps_the_page_alpha() {
     let group = crate::resources::TransparencyGroupParams {
         isolated: true,
         knockout: false,
+        space: None,
     };
     for ink in [false, true] {
         let mut renderer = if ink {

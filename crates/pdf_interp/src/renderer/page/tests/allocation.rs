@@ -65,6 +65,7 @@ fn render_refusing_snapshots(content: &[u8], knockout: bool) -> (Option<RenderAb
         let group = TransparencyGroupParams {
             isolated: true,
             knockout: true,
+            space: None,
         };
         renderer.try_set_page_group(Some(group)).unwrap();
     }
@@ -138,6 +139,7 @@ fn a_refused_page_group_canvas_is_an_error() {
     let group = TransparencyGroupParams {
         isolated: true,
         knockout: true,
+        space: None,
     };
     renderer.try_set_page_group(Some(group)).unwrap();
     assert!(renderer.canvas.has_alpha());

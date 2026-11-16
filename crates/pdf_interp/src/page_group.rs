@@ -41,6 +41,7 @@ pub fn page_group(doc: &Document, page_id: ObjectId) -> Option<TransparencyGroup
     blends.then_some(TransparencyGroupParams {
         isolated: true,
         knockout: group.knockout,
+        space: None,
     })
 }
 
@@ -61,6 +62,7 @@ pub fn transparent_page_group(doc: &Document, page_id: ObjectId) -> Transparency
     TransparencyGroupParams {
         isolated: true,
         knockout,
+        space: None,
     }
 }
 
@@ -412,7 +414,8 @@ mod tests {
             page_group(&doc, (4, 0)),
             Some(TransparencyGroupParams {
                 isolated: true,
-                knockout: false
+                knockout: false,
+                space: None,
             })
         );
     }
@@ -424,7 +427,8 @@ mod tests {
             page_group(&doc, (4, 0)),
             Some(TransparencyGroupParams {
                 isolated: true,
-                knockout: true
+                knockout: true,
+                space: None,
             })
         );
     }
@@ -441,6 +445,7 @@ mod tests {
             let want = page_group(&doc, (4, 0)).unwrap_or(TransparencyGroupParams {
                 isolated: true,
                 knockout: false,
+                space: None,
             });
             assert_eq!(
                 transparent_page_group(&doc, (4, 0)),

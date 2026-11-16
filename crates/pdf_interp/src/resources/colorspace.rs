@@ -54,10 +54,12 @@ use crate::separation::Separator;
 use crate::{ColourIntent, ColourTarget, WorkingSpace};
 
 mod cal;
+mod group;
 pub(crate) mod icc;
 mod lab;
 
 pub(crate) use cal::CalSpace;
+pub use group::{GroupSpace, RgbGroupSpace};
 use icc::IccConversion;
 pub(crate) use lab::LabSpace;
 

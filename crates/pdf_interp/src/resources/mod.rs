@@ -32,7 +32,7 @@ use dict_ext::DictExt;
 use pdf::{Dictionary, Document, Object, ObjectId};
 use raster::types::BlendMode;
 
-pub use colorspace::ColorSpace;
+pub use colorspace::{ColorSpace, GroupSpace, RgbGroupSpace};
 pub use font::{BaseEncoding, FontDescriptor, PdfFontKind, resolve_font};
 /// Re-exported from [`gpu::nvjpeg`] for callers that enable the `nvjpeg` feature.
 /// Create via [`gpu::nvjpeg::NvJpegDecoder::new`] with a raw `CUstream` handle,
@@ -328,6 +328,10 @@ pub struct TransparencyGroupParams {
     /// with the group's initial backdrop rather than over the objects
     /// before it (default: false).
     pub knockout: bool,
+    /// `CS`: the colour space the group's colours convert into and
+    /// composite in; `None` when absent or not a group colour space, the
+    /// group then compositing in its parent's.
+    pub space: Option<GroupSpace>,
 }
 
 /// The identity of a resource object (a font, pattern or shading
@@ -1035,6 +1039,7 @@ pub fn read_transparency_group(
     Some(TransparencyGroupParams {
         isolated: bool_flag(b"I"),
         knockout: bool_flag(b"K"),
+        space: grp.get(b"CS").and_then(|cs| GroupSpace::read(doc, cs)),
     })
 }
 
