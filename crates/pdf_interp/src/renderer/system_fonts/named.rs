@@ -71,37 +71,32 @@ impl FontLibrary {
         name: &FaceName,
         style: SubstituteStyle,
     ) -> Option<Arc<FontProgram>> {
-        let request: Request = (name.clone(), style.bold, style.italic);
-        let cached = self
+        // The face list is built before the lock is taken; the match runs
+        // under it, so concurrent requests for one name resolve and log once.
+        let faces = self.faces();
+        let index = *self
             .named
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&request)
-            .copied();
-        let index = cached.unwrap_or_else(|| {
-            let faces = self.faces();
-            let index = best_match(faces, name, style.bold, style.italic);
-            match index.map(|i| &faces[i]) {
-                Some(face) => log::info!(
-                    "system_fonts: font {} drawn with the installed face {} ({}#{})",
-                    name.postscript,
-                    face.postscript.as_deref().unwrap_or(&face.family),
-                    face.path.display(),
-                    face.index
-                ),
-                None => log::debug!(
-                    "system_fonts: no installed face named {}; drawing a substitute",
-                    name.postscript
-                ),
-            }
-            let _ = self
-                .named
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(request, index);
-            index
-        })?;
-        self.face_program(index)
+            .entry((name.clone(), style.bold, style.italic))
+            .or_insert_with(|| {
+                let index = best_match(faces, name, style.bold, style.italic);
+                match index.map(|i| &faces[i]) {
+                    Some(face) => log::info!(
+                        "system_fonts: font {} drawn with the installed face {} ({}#{})",
+                        name.postscript,
+                        face.postscript.as_deref().unwrap_or(&face.family),
+                        face.path.display(),
+                        face.index
+                    ),
+                    None => log::debug!(
+                        "system_fonts: no installed face named {}; drawing a substitute",
+                        name.postscript
+                    ),
+                }
+                index
+            });
+        self.face_program(index?)
     }
 }
 
