@@ -24,7 +24,9 @@ pub(crate) fn check_params(
         && params.depth == color::SampleDepth::Eight
     {
         return Err(RasterError::InvalidOptions(
-            "the wide working space is composited at 16 bits, at which its levels are as              fine as sRGB's at 8: render the page at 16 bits (RenderParams::depth, rrocket              --depth 16)"
+            "the wide working space is composited at 16 bits, at which its levels are as \
+             fine as sRGB's at 8: render the page at 16 bits (RenderParams::depth, rrocket \
+             --depth 16)"
                 .to_owned(),
         ));
     }

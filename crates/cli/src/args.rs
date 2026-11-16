@@ -1228,13 +1228,15 @@ impl Args {
         if self.working_space == Some(WorkingSpaceArg::Wide) {
             if self.output_profile.is_none() {
                 return Err(
-                    "--working-space wide carries its gamut to the conversion to the output                      profile: add --output-profile"
+                    "--working-space wide carries its gamut to the conversion to the output \
+                     profile: add --output-profile"
                         .to_owned(),
                 );
             }
             if self.depth() == pdf_raster::SampleDepth::Eight {
                 return Err(
-                    "--working-space wide is composited at 16 bits, at which its levels are as                      fine as sRGB's at 8: add --depth 16"
+                    "--working-space wide is composited at 16 bits, at which its levels are as \
+                     fine as sRGB's at 8: add --depth 16"
                         .to_owned(),
                 );
             }

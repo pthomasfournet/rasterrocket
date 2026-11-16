@@ -1250,6 +1250,15 @@ fn output_profile_refusals_name_the_conflict() {
             vec!["--output-profile", rgb, "--cmyk", "--tiff"],
             "give a CMYK output profile",
         ),
+        (
+            vec!["--working-space", "wide", "--depth", "16"],
+            "--working-space wide carries its gamut to the conversion to the output \
+             profile: add --output-profile",
+        ),
+        (
+            vec!["--working-space", "wide", "--output-profile", rgb],
+            "--working-space wide is composited at 16 bits",
+        ),
     ] {
         let out = rrocket(dir.path(), &input, &args);
         assert!(!out.status.success(), "{args:?} succeeded");

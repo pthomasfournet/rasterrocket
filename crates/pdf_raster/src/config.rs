@@ -539,7 +539,9 @@ impl SessionConfig {
             && self.output_profile.is_none()
         {
             return Err(RasterError::InvalidOptions(
-                "the wide working space carries its gamut to the output profile's conversion:                  give the session an output profile (SessionConfig::output_profile, rrocket                  --output-profile)"
+                "the wide working space carries its gamut to the output profile's conversion: \
+                 give the session an output profile (SessionConfig::output_profile, rrocket \
+                 --output-profile)"
                     .to_owned(),
             ));
         }
