@@ -21,7 +21,8 @@
 //! its shaping context: those of the neighbouring codes of its string and,
 //! at the string's ends, those of the strings shown next to it on its
 //! baseline (see [`Neighbours`]).  A word split between two strings is
-//! thereby joined across the split, each part keeping its own positions.
+//! thereby joined across the split; its parts are drawn as one chain (see
+//! [`super::text_layout`]).
 //!
 //! Right-to-left visual order stores a combining mark before its letter.
 //! The marks that end a right-to-left string whose neighbour after starts
@@ -166,6 +167,14 @@ pub(super) fn shapes(descriptor: &FontDescriptor, face: &PageFace) -> bool {
 /// script that needs shaping, a combining mark or a joiner.
 pub(super) fn takes_context(text: CodeText) -> bool {
     text.is_some_and(|(first, _)| class(first).is_some())
+}
+
+/// The texts of the last codes, at most [`CONTEXT_CODES`], of a string of
+/// codes of the texts `texts` shown after codes of the texts `before`.
+pub(super) fn last_texts(before: &[CodeText], texts: &[CodeText]) -> Vec<CodeText> {
+    let all = before.len() + texts.len();
+    let skip = all.saturating_sub(CONTEXT_CODES);
+    before.iter().chain(texts).skip(skip).copied().collect()
 }
 
 /// Whether a code of text `text` is a combining mark: its first character

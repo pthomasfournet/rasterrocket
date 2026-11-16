@@ -88,6 +88,7 @@ mod text;
 mod text_census;
 mod text_context;
 mod text_glyphs;
+mod text_layout;
 mod text_ops;
 mod text_shaping;
 mod text_stroke;

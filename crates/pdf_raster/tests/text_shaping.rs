@@ -58,13 +58,41 @@ fn render_with_form(names: &[&str], show: &str, form: &str) -> Vec<Vec<bool>> {
 
 /// The document [`render_with_form`] renders.
 fn page(names: &[&str], show: &str, form: &str) -> Vec<u8> {
+    page_in("/BaseFont /Arial", names, show, form)
+}
+
+/// Render `show` as [`render`] does, with a font outside the standard 14,
+/// `/TraditionalArabic`, whose codes from 65 on advance by `widths`: its
+/// substitute's glyphs are fitted to those advances.
+fn render_fitted(names: &[&str], widths: &[u32], show: &str) -> Vec<Vec<bool>> {
+    rendered(fitted_page(names, widths, show))
+}
+
+/// The document [`render_fitted`] renders.
+fn fitted_page(names: &[&str], widths: &[u32], show: &str) -> Vec<u8> {
+    let last = 64 + widths.len();
+    let widths = widths
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    page_in(
+        &format!("/BaseFont /TraditionalArabic /FirstChar 65 /LastChar {last} /Widths [{widths}]"),
+        names,
+        show,
+        "",
+    )
+}
+
+/// The document [`page`] renders, with a font of the entries `font`.
+fn page_in(font: &str, names: &[&str], show: &str, form: &str) -> Vec<u8> {
     let differences = names
         .iter()
         .map(|n| format!("/{n}"))
         .collect::<Vec<_>>()
         .join(" ");
     let font = format!(
-        "<< /Type /Font /Subtype /TrueType /BaseFont /Arial \
+        "<< /Type /Font /Subtype /TrueType {font} \
          /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 {differences}] >> >>"
     );
     let content = format!("BT /F1 36 Tf 20 15 Td {show} ET\n");
@@ -155,6 +183,94 @@ fn an_arabic_word_split_between_strings_joins_across_the_split() {
         );
     }
     assert_joined_beh_yeh_teh(&render(&names, "[<4142> 20 <43>] TJ"));
+}
+
+/// The first and the last inked column of `page`.
+fn inked_span(page: &[Vec<bool>]) -> (usize, usize) {
+    let inked = |x: usize| page.iter().any(|row| row[x]);
+    let first = (0..page[0].len()).find(|&x| inked(x)).expect("ink");
+    let last = (0..page[0].len()).rfind(|&x| inked(x)).expect("ink");
+    (first, last)
+}
+
+/// Beh, yeh, teh in a font whose substitute is fitted to its advances,
+/// split between show strings as above: the parts of the word are fitted
+/// as the whole word is, centred in the advances of all its codes when
+/// they are wider than its glyphs and condensed by one scale when they
+/// are narrower, so the word is drawn as when shown whole.
+#[test]
+fn a_fitted_arabic_word_split_between_strings_is_fitted_as_one_word() {
+    let names = ["uni062A", "uni064A", "uni0628"];
+    for widths in [[700, 700, 700], [150, 150, 150]] {
+        let whole = render_fitted(&names, &widths, "<414243> Tj");
+        assert_joined_beh_yeh_teh(&whole);
+        for show in [
+            "[<41> 0 <4243>] TJ",
+            "[<4142> 0 <43>] TJ",
+            "<41> Tj /F2 36 Tf <42> Tj /F1 36 Tf <43> Tj",
+            "<41> Tj <42> Tj <43> Tj",
+        ] {
+            assert!(
+                render_fitted(&names, &widths, show) == whole,
+                "{widths:?}: {show} is drawn as one string"
+            );
+        }
+    }
+    assert_centred(|widths| render_fitted(&names, widths, "<414243> Tj"));
+}
+
+/// The word `draw` renders with the advances it is given is centred in
+/// them: three advances of 1000 rather than 700 thousandths of the 36-unit
+/// em widen the word by 32.4 pixels and move its middle by half that.
+fn assert_centred(draw: impl Fn(&[u32]) -> Vec<Vec<bool>>) {
+    let middle = |widths: &[u32]| {
+        let (first, last) = inked_span(&draw(widths));
+        usize::midpoint(first, last)
+    };
+    let (narrow, wide) = (middle(&[700; 3]), middle(&[1000; 3]));
+    assert!(
+        (wide - narrow).abs_diff(16) <= 1,
+        "the word is centred in its advances (middle {narrow} at 700, {wide} at 1000)"
+    );
+}
+
+/// Teh, keheh with two dots above, beh ("بػت") in a font whose
+/// substitute is fitted to its advances, shown as one string: keheh is
+/// drawn by another face than its neighbours, so the word is three runs
+/// that join, centred in its advances as one.  Split between strings, it
+/// is drawn the same.  The faces are the installed `DejaVuSans.ttf`,
+/// which lacks keheh with two dots above, and the bundled Arabic face;
+/// the test is skipped without the first.
+#[test]
+fn a_fitted_arabic_word_drawn_by_two_faces_is_fitted_as_one_word() {
+    let Some(face) = installed_dejavu_sans() else {
+        eprintln!("DejaVu Sans is not installed; skipping");
+        return;
+    };
+    let fonts = font_dir("text-shaping-two-faces", &[("DejaVuSans.ttf", &face)]);
+    let names = ["uni062A", "uni063B", "uni0628"];
+    for widths in [[700, 700, 700], [150, 150, 150]] {
+        let draw = |show: &str| rendered_with(fitted_page(&names, &widths, show), fonts.clone());
+        let whole = draw("<414243> Tj");
+        assert_eq!(gaps(&whole), 0, "{widths:?}: the word is connected");
+        assert!(
+            draw("[<41> 0 <42> 0 <43>] TJ") == whole,
+            "{widths:?}: the word split between strings is drawn as one string"
+        );
+    }
+    assert_centred(|widths| {
+        rendered_with(fitted_page(&names, widths, "<414243> Tj"), fonts.clone())
+    });
+}
+
+/// The installed `DejaVuSans.ttf`, `None` when it is not installed.
+fn installed_dejavu_sans() -> Option<Vec<u8>> {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ];
+    CANDIDATES.iter().find_map(|p| std::fs::read(p).ok())
 }
 
 /// A `TJ` adjustment as wide as a word space separates the strings around
@@ -362,12 +478,7 @@ fn a_hebrew_mark_lies_under_its_letter_across_strings() {
 /// Arial; the test is skipped without it.
 #[test]
 fn a_mark_does_not_join_a_letter_of_another_script() {
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    ];
-    let Some(face) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
+    let Some(face) = installed_dejavu_sans() else {
         eprintln!("DejaVu Sans is not installed; skipping");
         return;
     };

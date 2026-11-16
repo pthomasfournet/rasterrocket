@@ -15,6 +15,7 @@
 //! text state they set.
 
 use super::PageRenderer;
+use super::text_layout::Continuation;
 use super::text_ops::{apply_kern, is_singular, text_rendering_matrix};
 use super::text_shaping::{CONTEXT_CODES, CodeText, font_shapes, shapes};
 use crate::content::{Operator, TextArrayElement};
@@ -31,15 +32,15 @@ const MAX_OVERLAP: f64 = 0.5;
 /// The end of a shown string: the texts of its last codes in storage
 /// order, at most [`CONTEXT_CODES`], the text matrix after its last
 /// advance, its text rise, its em, `Tfs × Th`, in text space, and the
-/// distance along x in text space from that end to where the glyphs of its
-/// last run end when that run continues into the string after, else zero.
+/// chain of its last run when that run continues into the string after
+/// (see [`super::text_layout`]).
 #[derive(Clone, Debug)]
 pub(super) struct TextTail {
     pub texts: Vec<CodeText>,
     pub end: TextMatrix,
     pub rise: f64,
     pub em: f64,
-    pub drift: f64,
+    pub continuation: Option<Continuation>,
 }
 
 /// What follows a shown string in its content stream: the rest of its
@@ -116,41 +117,53 @@ fn offset(end: &TextMatrix, start: &TextMatrix, rise: f64, em: f64) -> Option<f6
     ((-MAX_OVERLAP * em..=MAX_GAP * em).contains(&tx) && ty.abs() <= em * 1e-3).then_some(tx)
 }
 
-/// The start of the string shown after a string on its baseline: the
-/// texts of its first codes, at most [`CONTEXT_CODES`], and how far along
-/// x in text space past the end of the string before it starts.
-#[derive(Clone, Debug, Default)]
-pub(super) struct NextString {
+/// The string shown after a string on its baseline: the texts of its
+/// first codes, at most [`CONTEXT_CODES`], how far along x in text space
+/// past the end of the string before it starts, its bytes, the text state
+/// it is shown in and what follows it.
+pub(super) struct NextString<'a, 'o> {
     pub texts: Vec<CodeText>,
     pub start: f64,
+    pub bytes: &'a [u8],
+    pub state: TextState,
+    pub following: Following<'a, 'o>,
 }
 
 impl PageRenderer<'_> {
-    /// The start of the string shown after a string that ends at `end`
-    /// with em `em` in the current text state, when it is a neighbour (see
-    /// the module documentation) drawn by a substitute face in horizontal
-    /// writing.
-    pub(super) fn next_string(
+    /// The string shown after a string that ends at the text matrix of
+    /// `ts`, the text state it was shown in, with em `em`, when it is a
+    /// neighbour (see the module documentation) drawn by a substitute face
+    /// in horizontal writing.
+    pub(super) fn next_string<'a, 'o>(
         &mut self,
-        end: TextMatrix,
+        mut ts: TextState,
         em: f64,
-        following: Following<'_, '_>,
-    ) -> Option<NextString> {
-        let mut ts = self.gstate.current().text.clone();
-        let rise = ts.rise;
-        ts.text_matrix = end;
-        if let Some(bytes) = first_string(&mut ts, following.elements) {
-            return self.next_string_at(&ts, bytes, (end, rise), em);
+        following: Following<'a, 'o>,
+    ) -> Option<NextString<'a, 'o>> {
+        let before = (ts.text_matrix, ts.rise);
+        if let Some((i, bytes)) = first_string(&mut ts, following.elements) {
+            let after = Following {
+                elements: &following.elements[i + 1..],
+                ops: following.ops,
+            };
+            return self.next_string_at(ts, bytes, after, before, em);
         }
-        for op in following.ops {
+        for (k, op) in following.ops.iter().enumerate() {
             if ts.apply_state_op(op, |name| self.font_cache.select(&self.resources, name)) {
                 continue;
             }
-            let bytes = if let Some(bytes) = ts.begin_show(op) {
-                bytes
+            let rest = &following.ops[k + 1..];
+            let (bytes, after) = if let Some(bytes) = ts.begin_show(op) {
+                (bytes, Following::ops(rest))
             } else if let Operator::ShowTextArray(elements) = op {
                 match first_string(&mut ts, elements) {
-                    Some(bytes) => bytes,
+                    Some((i, bytes)) => (
+                        bytes,
+                        Following {
+                            elements: &elements[i + 1..],
+                            ops: rest,
+                        },
+                    ),
                     None => continue,
                 }
             } else if keeps_text_context(op) {
@@ -159,23 +172,24 @@ impl PageRenderer<'_> {
                 return None;
             };
             if !bytes.is_empty() {
-                return self.next_string_at(&ts, bytes, (end, rise), em);
+                return self.next_string_at(ts, bytes, after, before, em);
             }
         }
         None
     }
 
-    /// The start of `bytes` shown in the text state `ts` after a string
-    /// that ends at `end` with text rise `rise` and em `em`; `None` unless
-    /// the two strings are neighbours and `bytes` is drawn by a substitute
-    /// face in horizontal writing.
-    fn next_string_at(
+    /// The string `bytes`, shown in the text state `ts` and followed by
+    /// `following`, after a string that ends at `end` with text rise `rise`
+    /// and em `em`; `None` unless the two strings are neighbours and
+    /// `bytes` is drawn by a substitute face in horizontal writing.
+    fn next_string_at<'a, 'o>(
         &mut self,
-        ts: &TextState,
-        bytes: &[u8],
+        ts: TextState,
+        bytes: &'a [u8],
+        following: Following<'a, 'o>,
         (end, rise): (TextMatrix, f64),
         em: f64,
-    ) -> Option<NextString> {
+    ) -> Option<NextString<'a, 'o>> {
         let font = ts.font.as_ref()?;
         if !font_shapes(&font.descriptor) {
             return None;
@@ -195,22 +209,29 @@ impl PageRenderer<'_> {
         if !shapes(&font.descriptor, face) {
             return None;
         }
+        let texts = CidEncoding::shown_codes(font.descriptor.cid_encoding.as_ref(), bytes)
+            .take(CONTEXT_CODES)
+            .map(|d| face.text(d.code, d.value))
+            .collect();
         Some(NextString {
-            texts: CidEncoding::shown_codes(font.descriptor.cid_encoding.as_ref(), bytes)
-                .take(CONTEXT_CODES)
-                .map(|d| face.text(d.code, d.value))
-                .collect(),
+            texts,
             start,
+            bytes,
+            state: ts,
+            following,
         })
     }
 }
 
-/// The first non-empty string of the `TJ` array `elements`, with `ts`
-/// moved by the adjustments before it.
-fn first_string<'e>(ts: &mut TextState, elements: &'e [TextArrayElement<'_>]) -> Option<&'e [u8]> {
-    for element in elements {
+/// The first non-empty string of the `TJ` array `elements` and its index,
+/// with `ts` moved by the adjustments before it.
+fn first_string<'e>(
+    ts: &mut TextState,
+    elements: &'e [TextArrayElement<'_>],
+) -> Option<(usize, &'e [u8])> {
+    for (i, element) in elements.iter().enumerate() {
         match element {
-            TextArrayElement::Text(bytes) if !bytes.is_empty() => return Some(bytes),
+            TextArrayElement::Text(bytes) if !bytes.is_empty() => return Some((i, bytes)),
             TextArrayElement::Text(_) => {}
             TextArrayElement::Offset(kern) => apply_kern(ts, *kern),
         }
