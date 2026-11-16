@@ -3399,6 +3399,25 @@ two renders differ at to the operation that paints them
 (`tests/compare/trace_blame.sh`).  No pixel changes (ab_render: 0 of 215
 fixture outputs).
 
+**Unreleased on master: direct page-tree nodes and a damaged-object
+message.** A catalog whose `/Pages` is a direct dictionary, and a `/Kids`
+array holding dictionaries rather than references, now give pages (pdfium's
+`bug_828049`, its registry entry removed). Such a node gets an object number
+above the new `pdf::MAX_OBJECT_NUMBER` (2^31 − 1), the same on every walk,
+and `Document::get_object` returns it with `/Parent` set to the node holding
+it, so inheritance and every page consumer work unchanged; the walk's work
+bound and the descent's depth and cycle checks are kept. API changes: the
+ids of `Document::get_page`, `get_pages` and `pages_root_id` may name such a
+node, which resolves only through `get_object` and the methods built on it;
+an object header, reference or cross-reference entry numbered above
+`MAX_OBJECT_NUMBER` is no longer an object (`N G R` past it reads as two
+integers and a keyword). An xref entry that leads to no object, for a number
+whose header appears nowhere in the file, now fails with "no object at the
+cross-reference offset N and no `1836 0 obj` header elsewhere in the file
+(damaged file)" (pages 375–376 of the 1872 Pike constitutions); the page
+still fails, no blank page stands in. pdfium corpus: 0 FAIL, 0 XPASS. All
+1168 archive PDFs open with page counts identical to before.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
