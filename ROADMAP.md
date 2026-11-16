@@ -2944,6 +2944,44 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: colour conversions agree with Little CMS to its
+precision.** Three corrections, each measured against `transicc`
+(`input_profile_transicc`, `output_profile_transicc`, ignored tests that
+now assert every case they printed):
+- **Table-based RGB input profiles.** The converter interpolated every
+  device → PCS CLUT trilinearly, which leaves the gray axis; on a gamma
+  2.2 table that gave dark neutrals a red cast (Lab 13.2 1.0 0.4 for
+  11.96 0 0). A three-channel `AToB` table now converts through a 33-node
+  device grid evaluated in floating point and interpolated tetrahedrally
+  at both depths. Worst ΔE00 1.8–4.4 → 0.71 at 8 bits, 0.07 at 16. A
+  version 4 perceptual or saturation table with `/UseBlackPtComp /ON` is
+  no longer compensated twice; with `/OFF` it is no longer compensated
+  at all. Default output without a profile: 1 of 1168 archive documents
+  carries such a profile (a scanner profile on the images of pages 244,
+  253 and 254). Its pages 1–10 render byte for byte as before; those
+  three pages move by at most 5/255 (ΔE00 mean 0.45–0.69, max 4.1, in
+  the dark tones), and that profile agrees with Little CMS to 0.03 at 16
+  bits instead of 2.3.
+- **sRGB to an output profile at 16-bit precision.** The conversion from
+  the sRGB working space now uses the wide space's floating point,
+  tetrahedral interpolation and full-precision weights; it reduced a
+  sample to 8 bits for the interpolation before. On an off-grid chart the
+  16-bit mean ΔE00 falls from 0.12–0.13 to 0.03, the worst from 0.67 to
+  0.45. `--output-profile` at `--depth 8`, or `--depth 16 --working-space
+  srgb`, changes: on 10 archive pages to a table-based RGB printer, 3 % of
+  8-bit pixels by up to 7/255 (ΔE00 mean about 0.6, max 2.2).
+- **Black points of table profiles.** The ISO 18619 round trip that finds
+  a destination black now runs through the profile's own tables. The v2
+  test printer's perceptual black was L* 1.0 where Little CMS finds 0.11.
+  A colour compensated below the PCS black also keeps its a*/b*. CMYK
+  separation with compensation goes from 1.27 to 0.19 ΔE00 at 16 bits,
+  the CMYK → CMYK link from 1.53 to 0.06, and the special v2 bound is
+  gone. The blacks stay neutral, as Little CMS's are. The input-side
+  black of CMYK printer profiles under relative colorimetry moves too: 21
+  of the 29 archive documents with such a profile change, on pages 1–10
+  at 50 dpi, in about 5 % of pixels by exactly 1/255 (ΔE00 mean 0.7, max
+  1.18).
+
 **Unreleased on master: input ICC conversions honour the rendering intent
 and compensate the black point.**
 An `ICCBased` colour converts to sRGB under the intent it is painted with
