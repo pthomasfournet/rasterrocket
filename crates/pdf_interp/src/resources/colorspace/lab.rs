@@ -160,6 +160,26 @@ mod tests {
 
     const D65_LAB: &str = "[/Lab << /WhitePoint [0.9505 1 1.089] >>]";
 
+    /// D50 Lab converts into the wide space as Little CMS's `transicc -i
+    /// '*Lab' -o <wide space> -t 1` does (its values, 0–255, below), within
+    /// a tenth of an 8-bit level; a colour outside sRGB among them.
+    #[test]
+    fn lab_converts_into_the_wide_space_as_transicc_does() {
+        let space = lab("[/Lab << /WhitePoint [0.9642 1 0.8249] >>]");
+        let wide = crate::ColourTarget::new(crate::ColourIntent::INITIAL, WorkingSpace::Wide);
+        for (lab, want) in [
+            ([50.0, 60.0, -40.0], [161.362, 94.7299, 179.6946]),
+            ([70.0, -60.0, 50.0], [124.1828, 185.9258, 96.652]),
+            ([30.0, 0.0, 0.0], [70.632, 70.6311, 70.6311]),
+        ] {
+            let got = space.convert::<u16>(&empty_doc(), wide, &lab);
+            for (g, w) in got.iter().zip(want) {
+                let (g, w) = (f64::from(*g) / 65_535.0, w / 255.0);
+                assert!((g - w).abs() < 0.1 / 255.0, "{lab:?}: {got:?} vs {want:?}");
+            }
+        }
+    }
+
     #[test]
     fn black_and_white_map_to_the_srgb_extremes() {
         let space = lab(D65_LAB);

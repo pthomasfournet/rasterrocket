@@ -182,6 +182,49 @@ fn cmyk_printer() -> OutputProfile {
         .expect("a CMYK output profile")
 }
 
+/// The separation of wide-space colours to the CMYK printer under
+/// relative colorimetry agrees with Little CMS's `transicc -t 1` from the
+/// wide space within 1.5 % of each ink: Adobe RGB (1998) colours, two of
+/// them outside sRGB, converted to the wide space by `transicc` too.
+#[test]
+fn a_cmyk_profile_separates_the_wide_space_like_transicc() {
+    let profile = cmyk_printer();
+    let Separation::Profile(table) = profile
+        .separation(
+            WorkingSpace::Wide,
+            RenderingIntent::RelativeColorimetric,
+            false,
+        )
+        .expect("separates")
+    else {
+        panic!("a profile separation")
+    };
+    // The wide value (0–255) and its ink (percent), for the Adobe RGB
+    // colours (100, 180, 160), (60, 140, 200), (150, 200, 90), (200, 120, 160).
+    let reference: [([f64; 3], [f64; 4]); 4] = [
+        ([123.4434, 172.5023, 161.9424], [100.0, 0.0, 13.5561, 26.45]),
+        (
+            [106.9496, 135.8517, 195.6185],
+            [100.0, 35.3658, 0.0, 16.1761],
+        ),
+        (
+            [151.452, 193.1052, 105.2139],
+            [45.8854, 0.0, 82.5956, 17.3938],
+        ),
+        (
+            [188.8293, 136.9135, 160.015],
+            [0.0, 58.0056, 32.5109, 8.7648],
+        ),
+    ];
+    for (wide, want) in reference {
+        let got = table.ink(wide.map(|v| u16::from_unit(v / 255.0)));
+        for (g, w) in got.iter().zip(want) {
+            let g = f64::from(*g) / 655.35;
+            assert!((g - w).abs() <= 1.5, "{wide:?}: {got:?} for {want:?} %");
+        }
+    }
+}
+
 /// The separation of sRGB colours to the CMYK printer under relative
 /// colorimetry agrees with Little CMS's `transicc -t 1` within 1.5 % of
 /// each ink; gray separates to black ink alone, as the profile's tables
