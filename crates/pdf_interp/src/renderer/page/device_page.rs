@@ -10,14 +10,16 @@
 //! renders is the page the CPU renders.
 //!
 //! A recorded paint composites as the CPU's `aa` pipe over an opaque RGB
-//! canvas: `Normal` blend, no soft mask, no group backdrop, a rectangular
-//! clip, identity transfer (a solid colour is mapped through the transfer
-//! function before painting).  Anything else refuses the recording with a
-//! reason, and the content stream stops there: the caller renders the page
-//! on the CPU, whole.
+//! canvas of 8 or 16 bits per sample: `Normal` blend, no soft mask, no
+//! group backdrop, a rectangular clip, identity transfer (a solid colour is
+//! mapped through the transfer function before painting).  Its colour and
+//! alpha are recorded as samples of the canvas's depth.  Anything else
+//! refuses the recording with a reason, and the content stream stops
+//! there: the caller renders the page on the CPU, whole.
 
 use std::collections::HashSet;
 
+use color::{Sample, SampleDepth};
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::{
@@ -32,9 +34,6 @@ use super::canvas::{CanvasKind, PageCanvas};
 use super::paint::FillRule;
 use super::{DEVICE_MATRIX, PageRenderer, WorkBudget};
 use crate::content::Operator;
-
-/// The colour of the paper an opaque RGB canvas starts as.
-const PAPER: [u8; 3] = [u8::MAX; 3];
 
 /// A page being recorded.
 pub(super) struct Recording {
@@ -126,12 +125,13 @@ pub struct DeviceFallback {
 }
 
 impl Recording {
-    /// Append the coverage `tables` in `rgb` at alpha `alpha`, in order.
+    /// Append the coverage `tables` in `rgb` at alpha `alpha`, samples of
+    /// the page's depth, in order.
     fn push_tables(
         &mut self,
         tables: &[CoverageTable],
-        rgb: [u8; 3],
-        alpha: u8,
+        rgb: [u16; 3],
+        alpha: u16,
     ) -> Result<(), PageCommandsError> {
         for table in tables {
             let Some((x0, y0, x1, y1)) = table.bounds() else {
@@ -168,11 +168,13 @@ impl Recording {
     }
 }
 
-/// The paint parameters a recorded paint takes from the graphics state.
+/// The paint parameters a recorded paint takes from the graphics state;
+/// the colour and alpha are samples of the canvas's depth, as the CPU
+/// pipe composites them.
 struct SolidPaint {
     clip: Clip,
-    rgb: [u8; 3],
-    alpha: u8,
+    rgb: [u16; 3],
+    alpha: u16,
 }
 
 impl PageRenderer<'_> {
@@ -186,25 +188,29 @@ impl PageRenderer<'_> {
     /// # Errors
     ///
     /// Why the page cannot be recorded at all: its paint trace, which only
-    /// the CPU records, is armed, or it is painted at 16 bits, simulates
-    /// overprint on an ink canvas, paints as a page group, or fills
-    /// without antialiasing.  The renderer is unchanged then.
+    /// the CPU records, is armed, or it simulates overprint on an ink
+    /// canvas, paints as a page group, or fills without antialiasing.  The
+    /// renderer is unchanged then.
     pub fn record_for_device(&mut self) -> Result<(), &'static str> {
         if self.trace.is_some() {
             return Err("paint trace");
         }
-        if self.canvas.kind().depth() == color::SampleDepth::Sixteen {
-            return Err("16-bit samples");
-        }
+        let kind = self.canvas.kind();
         if let Some(reason) = ineligible_canvas(
-            self.canvas.kind() != CanvasKind::Rgb,
+            !matches!(kind, CanvasKind::Rgb | CanvasKind::Rgb16),
             self.canvas.has_alpha() || self.page_group.is_some(),
             self.vector_antialias,
         ) {
             return Err(reason);
         }
+        // An opaque RGB canvas starts as white paper.
         self.device_page = Some(Box::new(Recording {
-            commands: PageCommands::new(self.width, self.height, PAPER),
+            commands: PageCommands::new(
+                self.width,
+                self.height,
+                kind.depth(),
+                [kind.depth().max_sample(); 3],
+            ),
             refused: None,
             spans: Vec::new(),
             runs: Vec::new(),
@@ -257,18 +263,26 @@ impl PageRenderer<'_> {
     ///
     /// # Errors
     ///
-    /// When the canvas is not an RGB canvas, or the device fails; the
-    /// canvas is unchanged then.
+    /// When the canvas is not an RGB canvas of the page's depth, or the
+    /// device fails; the canvas is unchanged then.
     pub fn paint_device_page(
         &mut self,
         backend: &VulkanBackend,
         page: &PageCommands,
     ) -> Result<(), BackendError> {
-        let PageCanvas::Rgb(bitmap) = &mut self.canvas else {
-            return Err(BackendError::msg("a device page paints an RGB canvas"));
-        };
-        let stride = bitmap.stride;
-        backend.render_page(page, bitmap.data_mut(), stride)
+        match &mut self.canvas {
+            PageCanvas::Rgb(bitmap) => {
+                let stride = bitmap.stride;
+                backend.render_page(page, bitmap.data_mut(), stride)
+            }
+            PageCanvas::Rgb16(bitmap) => {
+                let stride = bitmap.stride;
+                backend.render_page(page, bitmap.data_mut(), stride)
+            }
+            PageCanvas::Ink(_) | PageCanvas::Ink16(_) => {
+                Err(BackendError::msg("a device page paints an RGB canvas"))
+            }
+        }
     }
 
     /// Whether the page is being recorded.
@@ -328,10 +342,10 @@ impl PageRenderer<'_> {
         if !gs.clip.is_rect() {
             return Err("path clip");
         }
-        let rgb = colour
-            .bytes_for(color::PixelMode::Rgb8, &self.ink.separator)
-            .try_into()
-            .map_err(|_| "colour")?;
+        let (rgb, alpha) = match self.canvas.kind().depth() {
+            SampleDepth::Eight => (colour.bytes().map(u16::from), u16::from(alpha)),
+            SampleDepth::Sixteen => (*colour.rgb16(), u16::from_u8(alpha)),
+        };
         Ok(SolidPaint {
             clip: gs.clip.clone_shared(),
             rgb,
@@ -377,7 +391,7 @@ impl PageRenderer<'_> {
         };
         let shape = self.stroke_shape(path, line_width);
         let params = shape.params();
-        if params.line_width == 0.0 && paint.alpha != u8::MAX {
+        if params.line_width == 0.0 && paint.alpha != self.canvas.kind().depth().max_sample() {
             return self.refuse_device("translucent hairline");
         }
         let (width, height) = (self.width, self.height);
@@ -431,324 +445,4 @@ impl PageRenderer<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
-    use pdf::Document;
-
-    use super::{DeviceRecording, PageRenderer, device_page_ineligible};
-
-    /// A page whose resources name the graphics states the tests use:
-    /// `/T` (fill and stroke alpha), `/O` (opaque), `/M` (`Multiply`).
-    fn doc() -> Document {
-        crate::test_helpers::make_doc_with_objects(&[(
-            4,
-            "<< /Type /Page /MediaBox [0 0 200 200] /Resources << /ExtGState << \
-             /T << /ca 0.37 /CA 0.61 >> /O << /ca 1 /CA 1 >> /M << /BM /Multiply >> \
-             >> >> >>",
-        )])
-    }
-
-    /// The device `PDF_RASTER_VULKAN_DEVICE` names, or the automatically
-    /// ranked one; `None` (the test is skipped) when no device opens.
-    fn backend() -> Option<VulkanBackend> {
-        let selector = std::env::var("PDF_RASTER_VULKAN_DEVICE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
-        VulkanBackend::with_selector(selector.as_ref())
-            .inspect_err(|e| eprintln!("skipping: no Vulkan backend: {e}"))
-            .ok()
-    }
-
-    /// The canvas bytes of `content` on a `width × height` page.
-    fn cpu(doc: &Document, width: u32, height: u32, content: &[u8]) -> Vec<u8> {
-        let mut r = PageRenderer::new(width, height, doc, (4, 0));
-        r.execute(&crate::content::parse(content));
-        r.rgb_canvas().data().to_vec()
-    }
-
-    /// The recording of `content` on a `width × height` page.
-    fn record(doc: &Document, width: u32, height: u32, content: &[u8]) -> DeviceRecording {
-        let mut r = PageRenderer::new(width, height, doc, (4, 0));
-        r.record_for_device().expect("an RGB page records");
-        r.execute(&crate::content::parse(content));
-        r.take_device_recording().expect("recorded")
-    }
-
-    /// The canvas bytes of `content` recorded and rendered on `backend`.
-    fn device(
-        backend: &VulkanBackend,
-        doc: &Document,
-        width: u32,
-        height: u32,
-        content: &[u8],
-    ) -> Vec<u8> {
-        let mut r = PageRenderer::new(width, height, doc, (4, 0));
-        r.record_for_device().expect("an RGB page records");
-        r.execute(&crate::content::parse(content));
-        let DeviceRecording::Recorded(page) = r.take_device_recording().expect("recorded") else {
-            panic!("the content was refused");
-        };
-        r.paint_device_page(backend, &page).expect("device page");
-        r.rgb_canvas().data().to_vec()
-    }
-
-    /// `SplitMix64`.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-
-        fn below(&mut self, n: u32) -> u32 {
-            u32::try_from(self.next() % u64::from(n)).expect("below n")
-        }
-
-        /// A coordinate in `[-20, span + 20)`, in hundredths.
-        fn coord(&mut self, span: u32) -> f64 {
-            f64::from(self.below((span + 40) * 100)) / 100.0 - 20.0
-        }
-
-        fn unit(&mut self) -> f64 {
-            f64::from(self.below(1001)) / 1000.0
-        }
-    }
-
-    /// A random content stream of fills and strokes of solid colours:
-    /// polygons, curves and rectangles under the non-zero and even-odd
-    /// rules, strokes of every cap, join and width (hairlines included) and
-    /// dashes, translucent paints, rectangle clips and a scaled CTM.
-    #[expect(
-        clippy::many_single_char_names,
-        reason = "coordinates, colours and the stream under construction"
-    )]
-    fn random_content(rng: &mut Rng, width: u32, height: u32) -> Vec<u8> {
-        let (w, h) = (width, height);
-        let mut s = vec![String::from("0.83 0 0 0.91 3.3 -2.7 cm")];
-        for _ in 0..60 {
-            s.push("q".into());
-            if rng.below(4) == 0 {
-                let (x, y, dx, dy) = (rng.coord(w), rng.coord(h), rng.coord(w), rng.coord(h));
-                s.push(format!("{x} {y} {} {} re W n ", dx / 2.0, dy / 2.0));
-            }
-            let translucent = rng.below(3) == 0;
-            s.push(if translucent { "/T gs" } else { "/O gs" }.into());
-            let rgb: Vec<f64> = (0..6).map(|_| rng.unit()).collect();
-            s.push(format!(
-                "{} {} {} rg {} {} {} RG ",
-                rgb[0], rgb[1], rgb[2], rgb[3], rgb[4], rgb[5]
-            ));
-            let line_width = match rng.below(4) {
-                0 if !translucent => 0.0,
-                1 => 0.4,
-                _ => rng.unit() * 9.0,
-            };
-            let (cap, join) = (rng.below(3), rng.below(3));
-            s.push(format!("{line_width} w {cap} J {join} j "));
-            if rng.below(4) == 0 {
-                let (on, off, phase) = (rng.unit().mul_add(6.0, 1.0), rng.unit() * 4.0, rng.unit());
-                s.push(format!("[{on} {off}] {phase} d "));
-            }
-            if rng.below(3) == 0 {
-                let (x, y, dx, dy) = (rng.coord(w), rng.coord(h), rng.coord(w), rng.coord(h));
-                s.push(format!("{x} {y} {} {} re ", dx / 3.0, dy / 3.0));
-            } else {
-                let (x, y) = (rng.coord(w), rng.coord(h));
-                s.push(format!("{x} {y} m "));
-                for _ in 0..2 + rng.below(6) {
-                    if rng.below(3) == 0 {
-                        let p: Vec<f64> =
-                            (0..3).flat_map(|_| [rng.coord(w), rng.coord(h)]).collect();
-                        s.push(format!(
-                            "{} {} {} {} {} {} c ",
-                            p[0], p[1], p[2], p[3], p[4], p[5]
-                        ));
-                    } else {
-                        let (x, y) = (rng.coord(w), rng.coord(h));
-                        s.push(format!("{x} {y} l "));
-                    }
-                }
-                if rng.below(2) == 0 {
-                    s.push("h".into());
-                }
-            }
-            let paint = ["f", "f*", "S", "s", "F", "f"][usize::try_from(rng.below(6)).unwrap()];
-            s.push(format!("{paint} Q\n"));
-            // `B` with a translucent stroke paints as a knockout group,
-            // which the recording refuses; it is drawn opaque only.
-            if rng.below(5) == 0 {
-                let c: Vec<f64> = (0..3).map(|_| rng.unit()).collect();
-                let p: Vec<f64> = (0..3).flat_map(|_| [rng.coord(w), rng.coord(h)]).collect();
-                s.push(format!(
-                    "q /O gs {} {} {} rg {} {} m {} {} l {} {} l h B Q\n",
-                    c[0], c[1], c[2], p[0], p[1], p[2], p[3], p[4], p[5]
-                ));
-            }
-        }
-        s.join(" ").into_bytes()
-    }
-
-    #[test]
-    fn device_page_matches_the_cpu_render() {
-        let Some(backend) = backend() else {
-            return;
-        };
-        let doc = doc();
-        let mut rng = Rng(11);
-        for (width, height) in [(1, 1), (97, 83), (200, 131), (33, 257)] {
-            for round in 0..4 {
-                let content = random_content(&mut rng, width, height);
-                match record(&doc, width, height, &content) {
-                    DeviceRecording::Refused(reason) => {
-                        panic!("{width}×{height}, round {round} refused: {reason}")
-                    }
-                    DeviceRecording::Recorded(page) => {
-                        assert!(width < 10 || page.len() > 20, "few commands recorded");
-                    }
-                }
-                let want = cpu(&doc, width, height, &content);
-                assert!(
-                    width < 10 || want.iter().filter(|&&b| b != u8::MAX).count() > want.len() / 4,
-                    "the page is mostly paper"
-                );
-                assert_eq!(
-                    device(&backend, &doc, width, height, &content),
-                    want,
-                    "{width}×{height}, round {round}:\n{}",
-                    String::from_utf8_lossy(&content)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn opaque_hairlines_and_strokes_match_the_cpu_render() {
-        let Some(backend) = backend() else {
-            return;
-        };
-        let doc = doc();
-        let content = b"0 0 1 RG 0 w 3.2 4.7 m 90.1 60.3 l 10 70 l 70 2 l S \
-                        1 0 0 RG 0.5 w 5 5 m 80 80 l S \
-                        0 1 0 RG 6 w 1 J 1 j 10 50 m 50 10 l 85 70 l S \
-                        q 20 20 40 40 re W n 0 0 0 RG 0 w 0 0 m 100 90 l S Q";
-        assert_eq!(
-            device(&backend, &doc, 95, 90, content),
-            cpu(&doc, 95, 90, content)
-        );
-    }
-
-    #[test]
-    fn unsupported_paints_refuse_the_recording() {
-        let doc = doc();
-        let refused = |content: &[u8]| match record(&doc, 50, 50, content) {
-            DeviceRecording::Refused(reason) => reason,
-            DeviceRecording::Recorded(_) => "",
-        };
-        assert_eq!(refused(b"BT /F1 12 Tf (a) Tj ET"), "text");
-        assert_eq!(refused(b"/Im Do"), "XObject");
-        assert_eq!(refused(b"/Sh sh"), "shading");
-        assert_eq!(refused(b"/M gs 0 0 10 10 re f"), "blend mode");
-        assert_eq!(refused(b"/T gs 0 w 0 0 m 9 9 l S"), "translucent hairline");
-        assert_eq!(
-            refused(b"/T gs 0 0 10 10 re B"),
-            "translucent fill and stroke"
-        );
-        assert_eq!(
-            refused(b"0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f"),
-            "path clip"
-        );
-        assert_eq!(refused(b"/Pattern cs /P scn 0 0 10 10 re f"), "pattern");
-        assert_eq!(refused(b"0 0 m 9 0 l 5 9 l h W n"), "");
-        assert_eq!(refused(b"q 2 2 6 6 re W n 0 0 10 10 re f Q"), "");
-    }
-
-    #[test]
-    fn operators_that_paint_otherwise_are_found_before_recording() {
-        let ops = crate::content::parse(b"0 0 10 10 re f BT (a) Tj ET");
-        assert_eq!(
-            device_page_ineligible(false, false, true, &ops),
-            Some("text")
-        );
-        let ops = crate::content::parse(b"q 0 0 10 10 re f Q");
-        assert_eq!(device_page_ineligible(false, false, true, &ops), None);
-        assert_eq!(
-            device_page_ineligible(true, true, false, &ops),
-            Some("overprint simulation")
-        );
-        assert_eq!(
-            device_page_ineligible(false, true, false, &ops),
-            Some("page group")
-        );
-        assert_eq!(
-            device_page_ineligible(false, false, false, &ops),
-            Some("aliased vector paint")
-        );
-    }
-
-    /// A page of full-page fills past the byte limit of a command list is
-    /// refused when the limit is reached, and renders on the CPU in bounded
-    /// memory.
-    #[test]
-    fn a_command_list_past_its_byte_limit_refuses_the_recording() {
-        let doc = doc();
-        let fill = b"0 0 2000 2000 re f ".repeat(2_000);
-        assert!(matches!(
-            record(&doc, 2000, 2000, &fill),
-            DeviceRecording::Refused("command list size")
-        ));
-        let mut hairline = b"0 w 0 0 m ".to_vec();
-        hairline.extend(b"2000 2000 l 0 0 l ".repeat(4_000));
-        hairline.extend(b"S");
-        assert!(matches!(
-            record(&doc, 2000, 2000, &hairline),
-            DeviceRecording::Refused("command list size")
-        ));
-    }
-
-    /// A page refused late in its recording, after more than half of its
-    /// operator budget, renders on the CPU: the CPU pass has its own
-    /// operator budget, and keeps the recording's deadline and warned
-    /// operators.
-    #[test]
-    fn the_cpu_pass_after_a_late_refusal_has_its_own_operator_budget() {
-        const CONTENT: &[u8] =
-            b"zz 0 0 1 1 re f 0 0 1 1 re f 0 0 m 9 0 l 5 9 l h W n 0 0 10 10 re f";
-        let doc = doc();
-        let ops = crate::content::parse(CONTENT);
-        let n_ops = u64::try_from(ops.len()).expect("few operators");
-        let budget = 15;
-        assert!(n_ops * 2 > budget && n_ops < budget);
-        let mut first = PageRenderer::new(50, 50, &doc, (4, 0));
-        first.op_budget = budget;
-        first.record_for_device().expect("an RGB page records");
-        first.execute(&ops);
-        assert!(first.budget_status().is_none());
-        assert!(matches!(
-            first.take_device_recording(),
-            Some(DeviceRecording::Refused("path clip"))
-        ));
-        assert_eq!(first.ops_executed, n_ops, "refused at the last operator");
-        let fallback = first.take_device_fallback();
-        let mut second = PageRenderer::new(50, 50, &doc, (4, 0));
-        second.op_budget = budget;
-        second.resume_after_device(fallback);
-        assert_eq!(second.deadline, first.deadline);
-        assert!(second.warned_unknown_ops.contains(&b"zz"[..]));
-        second.execute(&ops);
-        assert!(
-            second.budget_status().is_none(),
-            "the CPU pass ran on the recording's leftover budget: {:?}",
-            second.budget_status()
-        );
-        assert_eq!(
-            second.rgb_canvas().data(),
-            cpu(&doc, 50, 50, CONTENT),
-            "the CPU pass renders the page"
-        );
-    }
-}
+mod tests;

@@ -1018,7 +1018,6 @@ fn depth_16_refuses_8_bit_and_bilevel_outputs() {
         (&["--dither", "halftone"], "--dither"),
         (&["--fax"], "--fax"),
         (&["--jpeg"], "use --png or --tiff"),
-        (&["--gpu-pages"], "drop --gpu-pages"),
     ] {
         let (dir, input) = workdir(&two_page_pdf());
         let mut args = vec!["--depth", "16"];

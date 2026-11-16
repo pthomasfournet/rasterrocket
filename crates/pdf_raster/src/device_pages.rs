@@ -244,9 +244,6 @@ fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
     if job.space() != pdf_interp::WorkingSpace::Srgb {
         return Some(WIDE);
     }
-    if job.depth != color::SampleDepth::Eight {
-        return Some("16-bit samples");
-    }
     pdf_interp::renderer::device_page_ineligible(
         job.canvas.is_ink(),
         job.group.is_some(),

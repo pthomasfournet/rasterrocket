@@ -248,8 +248,7 @@ pub(crate) struct Args {
     /// 16-bit pages are rendered at 16 bits per sample (shadings, soft
     /// masks and colour conversions keep their levels) and written as
     /// 16-bit PPM and PGM (maxval 65535), PNG and TIFF, or into the
-    /// --print spool; not with --mono, --dither, --fax, --jpeg, the camera
-    /// cleanup flags or --gpu-pages, nor for comic archives.
+    /// --print spool; not with --mono, --dither, --fax or --jpeg.
     #[arg(long = "depth", value_name = "BITS", value_enum, default_value = "8")]
     pub depth: DepthArg,
 
@@ -1207,11 +1206,6 @@ impl Args {
             (self.jpeg, "--jpeg", jpeg),
             (self.jpegopt.is_some(), "--jpegopt", jpeg),
             (self.jpegcmyk, "--jpegcmyk", jpeg),
-            (
-                self.gpu_pages,
-                "--gpu-pages",
-                "the GPU page raster composites 8-bit pages; drop --gpu-pages for 16-bit pages",
-            ),
         ];
         match refused.iter().find(|(set, _, _)| *set) {
             Some((_, what, why)) => Err(format!("--depth 16 is refused with {what}: {why}")),
@@ -2379,6 +2373,7 @@ mod page_list_tests {
             &["--depth", "16", "--tiff", "--gray"],
             &["--depth", "16", "--png", "--transparent"],
             &["--depth", "16", "--invert=auto"],
+            &["--depth", "16", "--gpu-pages"],
             &["--depth", "8", "--mono"],
         ] {
             let args = args_with(flags);
@@ -2406,7 +2401,6 @@ mod page_list_tests {
             (&["--jpeg"], "use --png or --tiff"),
             (&["--jpeg", "--jpegopt", "quality=90"], "--jpeg"),
             (&["--jpegcmyk"], "--jpegcmyk"),
-            (&["--gpu-pages"], "drop --gpu-pages"),
         ] {
             let mut argv = vec!["--depth", "16"];
             argv.extend_from_slice(flags);

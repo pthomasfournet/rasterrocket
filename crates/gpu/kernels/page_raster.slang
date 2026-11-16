@@ -15,30 +15,35 @@
 //                 tile_cmds[tile_offsets[t] .. tile_offsets[t + 1]].
 //   tile_cmds     command indices per tile, in command order.
 // Output:
-//   page          RGB8, row-major, width * 3 bytes per row.
+//   page          RGB of pc.bits bits per sample, row-major, width * 3
+//                 samples per row; a 16-bit sample is two bytes, low
+//                 byte first.
 //
 // A command paints the pixels of its inclusive bounds (x0, y0) - (x1, y1),
 // which lie on the page and inside the command's clip rectangle.  A
 // pixel's coverage is the CPU rasteriser's, read from the table: the
-// span of the pixel's row holding it, found by binary search.  It
-// composites over the opaque pixel as the CPU's composite_aa_rgb8_opaque
-// does:
-//   a = div255(a_input * coverage),
-//   c = div255((255 - a) * c_dst + a * c_src).
-// A coverage of 0 leaves the pixel unchanged, as the CPU's composite does
-// for a zero shape byte.
+// span of the pixel's row holding it, found by binary search.  With
+// M = 2^bits - 1, the coverage byte becomes the shape cov * M / 255 (exact:
+// cov at 8 bits, 257 * cov at 16), and the command composites over the
+// opaque pixel as the CPU's AA pipe does at that depth:
+//   a = div_max(a_input * shape),
+//   c = div_max((M - a) * c_dst + a * c_src),
+// a_input, c_src and c_dst being samples of the page's depth.  Every
+// operand stays below 2^32: x <= M^2, and div_max adds at most
+// 2^(bits - 1) + M to it.  A coverage of 0 leaves the pixel unchanged, as
+// the CPU's composite does for a zero shape.
 
 static const uint TILE = 16;
 
 struct Cmd {
     uint kind;      // reserved; 0 = coverage table
     uint reserved;
-    uint rgb;       // r | g << 8 | b << 16
+    uint rg;        // r | g << 16
     uint a_input;
     int table_y0;   // pixel row of the table's row 0
     uint n_rows;
     uint row_base;  // index of the table's first entry in row_starts
-    uint pad;
+    uint b;
     int x0;         // pixel bounds, inclusive
     int y0;
     int x1;
@@ -52,7 +57,9 @@ struct Params {
     uint tiles_x;
     uint tiles_y;
     uint coverage_base;
-    uint paper;     // r | g << 8 | b << 16
+    uint paper_rg;  // r | g << 16
+    uint paper_b;
+    uint bits;      // bits per sample: 8 or 16
 };
 
 [[vk::push_constant]] ConstantBuffer<Params> pc;
@@ -64,10 +71,22 @@ struct Params {
 [[vk::binding(4, 0)]] StructuredBuffer<uint> tile_cmds;
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint8_t> page;
 
-uint div255(uint x)
+// x / M rounded to nearest, for x <= M^2, M = 2^bits - 1.
+uint div_max(uint x, uint bits)
 {
-    uint t = x + 0x80;
-    return min((t + (t >> 8)) >> 8, 255u);
+    uint t = x + (1u << (bits - 1));
+    return min((t + (t >> bits)) >> bits, (1u << bits) - 1);
+}
+
+// Sample v of the page at sample index i, low byte first.
+void store(uint i, uint v)
+{
+    if (pc.bits == 16) {
+        page[i * 2] = uint8_t(v & 0xFF);
+        page[i * 2 + 1] = uint8_t(v >> 8);
+    } else {
+        page[i] = uint8_t(v);
+    }
 }
 
 // Coverage byte i of the table's coverage words.
@@ -106,9 +125,12 @@ void page_raster(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
     uint end = tile_offsets[tile + 1];
     int x = int(px);
     int y = int(py);
-    uint r = pc.paper & 0xFF;
-    uint g = (pc.paper >> 8) & 0xFF;
-    uint b = (pc.paper >> 16) & 0xFF;
+    uint bits = pc.bits;
+    uint max_sample = (1u << bits) - 1;
+    uint shape_scale = max_sample / 255;
+    uint r = pc.paper_rg & 0xFFFF;
+    uint g = pc.paper_rg >> 16;
+    uint b = pc.paper_b;
     for (uint k = begin; k < end; k++) {
         Cmd c = cmds[tile_cmds[k]];
         if (x < c.x0 || x > c.x1 || y < c.y0 || y > c.y1) continue;
@@ -118,15 +140,15 @@ void page_raster(uint3 lid : SV_GroupThreadID, uint3 wid : SV_GroupID)
         uint stop = row_starts[c.row_base + uint(row) + 1];
         uint cov = row_coverage(start, stop, x);
         if (cov == 0) continue;
-        uint a = div255(c.a_input * cov);
-        uint inv = 255 - a;
-        r = div255(inv * r + a * (c.rgb & 0xFF));
-        g = div255(inv * g + a * ((c.rgb >> 8) & 0xFF));
-        b = div255(inv * b + a * ((c.rgb >> 16) & 0xFF));
+        uint a = div_max(c.a_input * (cov * shape_scale), bits);
+        uint inv = max_sample - a;
+        r = div_max(inv * r + a * (c.rg & 0xFFFF), bits);
+        g = div_max(inv * g + a * (c.rg >> 16), bits);
+        b = div_max(inv * b + a * c.b, bits);
     }
 
     uint o = (py * pc.width + px) * 3;
-    page[o] = uint8_t(r);
-    page[o + 1] = uint8_t(g);
-    page[o + 2] = uint8_t(b);
+    store(o, r);
+    store(o + 1, g);
+    store(o + 2, b);
 }

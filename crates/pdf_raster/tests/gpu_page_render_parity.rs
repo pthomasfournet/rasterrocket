@@ -21,12 +21,13 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    assert_identical, corpus_fixture, render, render_diagnosed, session, stream_object,
-    with_page_tree,
+    Page, SCALE, assert_identical, corpus_fixture, render, render_diagnosed, session,
+    stream_object, with_page_tree,
 };
 use rasterrocket::{
-    BackendPolicy, DevicePage, RasterError, RasterSession, SessionConfig, open_session,
-    open_session_from_bytes,
+    BackendPolicy, DevicePage, FinishedCanvas, PageDiagnostics, RasterError, RasterSession,
+    RenderParams, SampleDepth, SessionConfig, open_session, open_session_from_bytes,
+    render_page_canvas_with_diagnostics,
 };
 
 /// A config rendering GPU pages under `policy` on the device
@@ -77,15 +78,56 @@ q 20 200 100 50 re W n 0.2 0.2 0.2 rg 0 180 150 100 re f Q\n\
 0.3 0.6 0.9 rg -20.5 -10.3 60 40 re f\n\
 0.9 0.5 0.1 rg 370.2 380.7 60 60 re f\n";
 
+/// Page `page` of `session` at [`SCALE`] and 16 bits per sample, its
+/// samples as little-endian bytes, with the diagnostics of the render.
+fn render16_diagnosed(session: &RasterSession, page: u32) -> (Page, PageDiagnostics) {
+    let params = RenderParams::new(SCALE).with_depth(SampleDepth::Sixteen);
+    let (canvas, diag) =
+        render_page_canvas_with_diagnostics(session, page, &params).expect("render page");
+    let FinishedCanvas::Rgb16(bitmap) = canvas else {
+        panic!("a 16-bit RGB render, not {canvas:?}");
+    };
+    let bytes = bitmap.data().iter().flat_map(|v| v.to_le_bytes()).collect();
+    ((bitmap.width, bitmap.height, bytes), diag)
+}
+
+/// [`render16_diagnosed`] without the diagnostics.
+fn render16(session: &RasterSession, page: u32) -> Page {
+    render16_diagnosed(session, page).0
+}
+
+/// A renderer of a page of a session.
+type Render = fn(&RasterSession, u32) -> Page;
+
+/// A renderer of a page of a session: the page and its diagnostics.
+type Diagnosed = fn(&RasterSession, u32) -> (Page, PageDiagnostics);
+
+/// The renders of pages at 8 and 16 bits per sample: CPU, diagnosed.
+const DEPTHS: [(&str, Render, Diagnosed); 2] = [
+    ("8-bit", render, render_diagnosed),
+    ("16-bit", render16, render16_diagnosed),
+];
+
 #[test]
 fn device_page_renders_identically() {
+    device_page_renders_identically_with(render, render_diagnosed);
+}
+
+#[test]
+fn device_page_renders_identically_at_16_bits() {
+    device_page_renders_identically_with(render16, render16_diagnosed);
+}
+
+/// The page of [`DEVICE_CONTENT`] renders on the device, identically to
+/// the CPU, as `cpu` and `gpu` render it.
+fn device_page_renders_identically_with(cpu: Render, gpu_render: Diagnosed) {
     let pdf = page_pdf(DEVICE_CONTENT);
     let Some(gpu) = gpu_session(pdf.clone()) else {
         return;
     };
-    let cpu = render(&session(pdf, BackendPolicy::CpuOnly), 1);
+    let cpu = cpu(&session(pdf, BackendPolicy::CpuOnly), 1);
     assert!(cpu.2.iter().any(|&b| b != 0xff), "blank on the CPU");
-    let (page, diag) = render_diagnosed(&gpu, 1);
+    let (page, diag) = gpu_render(&gpu, 1);
     assert!(
         matches!(diag.device_page, DevicePage::Rendered { commands } if commands >= 12),
         "the device did not render the page: {:?}",
@@ -112,10 +154,12 @@ fn declined_pages_render_on_the_cpu_with_the_reason() {
         let Some(gpu) = gpu_session(pdf.clone()) else {
             return;
         };
-        let cpu = render(&session(pdf, BackendPolicy::CpuOnly), 1);
-        let (page, diag) = render_diagnosed(&gpu, 1);
-        assert_eq!(diag.device_page, DevicePage::Ineligible(reason));
-        assert_identical(&cpu, &page, reason);
+        let cpu_session = session(pdf, BackendPolicy::CpuOnly);
+        for (depth, cpu, gpu_render) in DEPTHS {
+            let (page, diag) = gpu_render(&gpu, 1);
+            assert_eq!(diag.device_page, DevicePage::Ineligible(reason), "{depth}");
+            assert_identical(&cpu(&cpu_session, 1), &page, &format!("{depth} {reason}"));
+        }
     }
 }
 
@@ -161,6 +205,18 @@ fn gpu_pages_need_a_vulkan_policy() {
 /// fixtures' GPU coverage.
 #[test]
 fn corpus_pages_render_identically() {
+    corpus_pages_render_identically_with(render, render_diagnosed);
+}
+
+/// [`corpus_pages_render_identically`] at 16 bits per sample.
+#[test]
+fn corpus_pages_render_identically_at_16_bits() {
+    corpus_pages_render_identically_with(render16, render16_diagnosed);
+}
+
+/// Every corpus fixture's first pages render identically on the CPU and
+/// with GPU pages, as `cpu_render` and `gpu_render` render them.
+fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnosed) {
     const FIXTURES: &[&str] = &[
         "corpus-01-native-text-small.pdf",
         "corpus-02-native-vector-text.pdf",
@@ -186,7 +242,7 @@ fn corpus_pages_render_identically() {
         };
         for page in 1..=cpu.total_pages().min(4) {
             let what = format!("{fixture} page {page}");
-            let (got, diag) = render_diagnosed(&gpu, page);
+            let (got, diag) = gpu_render(&gpu, page);
             assert_ne!(
                 diag.device_page,
                 DevicePage::Failed,
@@ -198,7 +254,7 @@ fn corpus_pages_render_identically() {
                 "{what}: not offered"
             );
             eprintln!("{what}: {:?}", diag.device_page);
-            assert_identical(&render(&cpu, page), &got, &what);
+            assert_identical(&cpu_render(&cpu, page), &got, &what);
         }
     }
 }

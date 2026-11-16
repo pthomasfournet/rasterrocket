@@ -44,6 +44,15 @@ impl SampleDepth {
             Self::Sixteen => 2,
         }
     }
+
+    /// The largest sample, full intensity: 255 or 65535.
+    #[must_use]
+    pub const fn max_sample(self) -> u16 {
+        match self {
+            Self::Eight => 255,
+            Self::Sixteen => u16::MAX,
+        }
+    }
 }
 
 /// The unsigned integer type products of samples are formed in.

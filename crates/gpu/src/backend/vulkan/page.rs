@@ -13,7 +13,7 @@ use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage,
 };
 use crate::backend::{BackendError, GpuBackend, Result};
-use crate::page::{PageCommands, TileBins, pack_rgb};
+use crate::page::{PageCommands, PageSample, TileBins, pack_rgb};
 
 use super::VulkanBackend;
 use super::pipeline::KernelId;
@@ -34,8 +34,9 @@ pub(super) struct PageScratch {
 
 /// The push constants of the raster of `page` binned as `bins`, in the
 /// order of `Params` in `kernels/page_raster.slang`.
-fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [u8; 28] {
+fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [u8; 36] {
     let n_cmds = u32::try_from(page.len()).expect("the push limit bounds the commands");
+    let [paper_rg, paper_b] = pack_rgb(page.paper());
     let values = [
         n_cmds,
         page.width(),
@@ -43,9 +44,11 @@ fn push_constants(page: &PageCommands, bins: &TileBins, coverage_base: u32) -> [
         bins.tiles_x,
         bins.tiles_y,
         coverage_base,
-        pack_rgb(page.paper()),
+        paper_rg,
+        paper_b,
+        u32::from(page.depth().bits()),
     ];
-    let mut push = [0u8; 28];
+    let mut push = [0u8; 36];
     for (dst, v) in push.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         dst.copy_from_slice(&v.to_ne_bytes());
     }
@@ -58,9 +61,10 @@ fn device_size(len: usize) -> u64 {
 }
 
 impl VulkanBackend {
-    /// Render `page` on the device and write its pixels into `out`, RGB8:
-    /// row `y` at `out[y × stride..][..width × 3]`.  Bytes between rows are
-    /// left unchanged.
+    /// Render `page` on the device and write its pixels into `out`, RGB
+    /// samples of the page's depth: row `y` at
+    /// `out[y × stride..][..width × 3]`, `stride` in samples.  Samples
+    /// between rows are left unchanged.
     ///
     /// Concurrent calls run one at a time; other kernels' pages may run
     /// between them.
@@ -69,25 +73,38 @@ impl VulkanBackend {
     ///
     /// [`BackendError::DeviceLimit`] when an input or the page exceeds the
     /// device's `maxStorageBufferRange`, before anything is allocated;
-    /// otherwise an error when the page has no pixel, `out` or `stride` is
-    /// too small for it, an allocation fails, or the device reports an
-    /// error.  `out` is unchanged then.
-    pub fn render_page(&self, page: &PageCommands, out: &mut [u8], stride: usize) -> Result<()> {
+    /// otherwise an error when the page has no pixel, its depth is not
+    /// that of `S`, `out` or `stride` is too small for it, an allocation
+    /// fails, or the device reports an error.  `out` is unchanged then.
+    pub fn render_page<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+    ) -> Result<()> {
         let (width, height) = (page.width() as usize, page.height() as usize);
         let row = width * 3;
+        let row_bytes = row * S::DEPTH.bytes() as usize;
         if width == 0 || height == 0 {
             return Err(BackendError::msg("render_page: the page has no pixel"));
         }
+        if page.depth() != S::DEPTH {
+            return Err(BackendError::msg(format!(
+                "render_page: a {}-bit page does not render into {}-bit samples",
+                page.depth().bits(),
+                S::DEPTH.bits()
+            )));
+        }
         if stride < row || out.len() < stride * (height - 1) + row {
             return Err(BackendError::msg(format!(
-                "render_page: a {width}×{height} page does not fit {} bytes at stride {stride}",
+                "render_page: a {width}×{height} page does not fit {} samples at stride {stride}",
                 out.len()
             )));
         }
         let bins = page.bin().map_err(BackendError::new)?;
         let (table, coverage_base) = page.table_words();
         let push = push_constants(page, &bins, coverage_base);
-        let page_len = row * height;
+        let page_len = row_bytes * height;
         let inputs: [(&'static str, &[u8]); 5] = [
             ("render_page commands", bytemuck::cast_slice(page.cmds())),
             ("render_page coverage table", bytemuck::cast_slice(&table)),
@@ -156,8 +173,8 @@ impl VulkanBackend {
         })?;
 
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
-        for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(row)) {
-            dst[..row].copy_from_slice(src);
+        for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(row_bytes)) {
+            S::copy_from_le(&mut dst[..row], src);
         }
         drop(scratch);
         Ok(())
@@ -166,9 +183,9 @@ impl VulkanBackend {
 
 #[cfg(test)]
 mod tests {
-    use color::convert::div255;
+    use color::{Sample, SampleDepth};
 
-    use crate::page::{CoverageRows, PageCommands, PixelBounds};
+    use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
 
     /// One command as the host model paints it.
     struct HostCmd {
@@ -177,8 +194,8 @@ mod tests {
         spans: Vec<[i32; 3]>,
         bytes: Vec<u8>,
         bounds: PixelBounds,
-        rgb: [u8; 3],
-        a_input: u8,
+        rgb: [u16; 3],
+        a_input: u16,
     }
 
     impl HostCmd {
@@ -214,14 +231,25 @@ mod tests {
         }
     }
 
-    /// The page `cmds` paint, composited on the host as the CPU pipe does.
+    /// The sample of `S` of value `v`, which fits it.
+    fn sample<S: Sample>(v: u16) -> S {
+        S::from_wide(<S::Wide as color::Wide>::of(u32::from(v)))
+    }
+
+    /// The page `cmds` paint at the depth of `S`, composited on the host
+    /// as the CPU's AA pipe does: the coverage byte widened exactly to a
+    /// shape, `a = div_max(a_input · shape)` and
+    /// `c = div_max((M − a) · c_dst + a · c_src)`.
     #[expect(
         clippy::many_single_char_names,
         reason = "pixel coordinates, coverage and alpha of the kernel's formulas"
     )]
-    fn host_page(width: u32, height: u32, paper: [u8; 3], cmds: &[HostCmd]) -> Vec<u8> {
+    fn host_page<S: Sample>(width: u32, height: u32, paper: [u16; 3], cmds: &[HostCmd]) -> Vec<S> {
         let (w, h) = (width as usize, i32::try_from(height).unwrap());
-        let mut out: Vec<u8> = (0..width * height).flat_map(|_| paper).collect();
+        let max = S::max_wide();
+        let mut out: Vec<S> = (0..width * height)
+            .flat_map(|_| paper.map(sample::<S>))
+            .collect();
         for c in cmds {
             for y in c.bounds.y0.max(0)..=c.bounds.y1.min(h - 1) {
                 for x in c.bounds.x0.max(0)..=c.bounds.x1.min(i32::try_from(w).unwrap() - 1) {
@@ -229,11 +257,12 @@ mod tests {
                     if n == 0 {
                         continue;
                     }
-                    let a = u32::from(div255(u32::from(c.a_input) * u32::from(n)));
+                    let shape = S::from_u8(n).wide();
+                    let a = S::div_max(sample::<S>(c.a_input).wide() * shape).wide();
                     let o = (usize::try_from(y).unwrap() * w + usize::try_from(x).unwrap()) * 3;
                     for (j, &s) in c.rgb.iter().enumerate() {
-                        let d = u32::from(out[o + j]);
-                        out[o + j] = div255((255 - a) * d + a * u32::from(s));
+                        let d = out[o + j].wide();
+                        out[o + j] = S::div_max((max - a) * d + a * sample::<S>(s).wide());
                     }
                 }
             }
@@ -260,11 +289,17 @@ mod tests {
         fn byte(&mut self) -> u8 {
             u8::try_from(self.below(256)).unwrap()
         }
+
+        /// A sample of at most `max`.
+        fn sample(&mut self, max: u16) -> u16 {
+            u16::try_from(self.below(u32::from(max) + 1)).unwrap()
+        }
     }
 
     /// A random table over rows near the page: disjoint sorted spans, full
-    /// or with random coverage bytes, some reaching off the page.
-    fn random_cmd(rng: &mut Rng, width: u32, height: u32) -> HostCmd {
+    /// or with random coverage bytes, some reaching off the page; its
+    /// colour and alpha samples are at most `max`.
+    fn random_cmd(rng: &mut Rng, width: u32, height: u32, max: u16) -> HostCmd {
         let y_min = rng.below(height + 8) - 4;
         let n_rows = rng.below(40);
         let (mut spans, mut bytes, mut row_starts) = (Vec::new(), Vec::new(), vec![0u32]);
@@ -298,45 +333,46 @@ mod tests {
                 x1: x0 + rng.below(width),
                 y1: y0 + rng.below(height),
             },
-            rgb: [rng.byte(), rng.byte(), rng.byte()],
-            a_input: [255, 255, 128, 1, 0, 77][usize::try_from(rng.below(6)).unwrap()],
+            rgb: [0; 3].map(|_| rng.sample(max)),
+            a_input: [max, max, max / 2 + 1, 1, 0, rng.sample(max)]
+                [usize::try_from(rng.below(6)).unwrap()],
         }
     }
 
-    #[test]
-    fn page_raster_matches_the_host_composite() {
-        let Some(backend) = super::super::test_backend() else {
-            return;
-        };
+    /// Random pages rendered at the depth of `S` match the host model.
+    fn page_raster_matches_the_host_composite_at<S: PageSample>(backend: &super::VulkanBackend) {
+        let max = u16::try_from(S::MAX.signed()).unwrap();
+        let pad = sample::<S>(max / 3);
         let mut rng = Rng(7);
         for (width, height, n) in [(1, 1, 3), (37, 21, 40), (130, 70, 300), (300, 17, 900)] {
-            let paper = [250, 240, 230];
+            let paper = [max - 5, max - 15, max - 25];
             let cmds: Vec<HostCmd> = (0..n)
-                .map(|_| random_cmd(&mut rng, width, height))
+                .map(|_| random_cmd(&mut rng, width, height, max))
                 .collect();
-            let mut page = PageCommands::new(width, height, paper);
+            let mut page = PageCommands::new(width, height, S::DEPTH, paper);
             for c in &cmds {
                 page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
                     .expect("push");
             }
             let row = width as usize * 3;
             let stride = row + 5;
-            let mut out = vec![0xAB; stride * height as usize];
+            let mut out = vec![pad; stride * height as usize];
             backend
                 .render_page(&page, &mut out, stride)
                 .expect("render_page");
-            let want = host_page(width, height, paper, &cmds);
+            let want = host_page::<S>(width, height, paper, &cmds);
+            let bits = S::DEPTH.bits();
             for y in 0..height as usize {
                 assert_eq!(
                     out[y * stride..][..row],
                     want[y * row..][..row],
-                    "{width}×{height}, {n} commands: row {y}"
+                    "{bits} bits, {width}×{height}, {n} commands: row {y}"
                 );
                 if y + 1 < height as usize {
                     assert!(
                         out[y * stride + row..(y + 1) * stride]
                             .iter()
-                            .all(|&b| b == 0xAB),
+                            .all(|&b| b == pad),
                         "row padding written"
                     );
                 }
@@ -345,24 +381,51 @@ mod tests {
     }
 
     #[test]
+    fn page_raster_matches_the_host_composite() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        page_raster_matches_the_host_composite_at::<u8>(&backend);
+        page_raster_matches_the_host_composite_at::<u16>(&backend);
+    }
+
+    #[test]
+    fn a_page_renders_into_samples_of_its_depth_only() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let page = PageCommands::new(2, 2, SampleDepth::Sixteen, [9; 3]);
+        let mut narrow = vec![0u8; 12];
+        let err = backend
+            .render_page(&page, &mut narrow, 6)
+            .expect_err("a 16-bit page into bytes");
+        assert!(err.to_string().contains("16-bit page"), "{err}");
+        assert!(narrow.iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn opaque_runs_paint_whole_pixels() {
         let Some(backend) = super::super::test_backend() else {
             return;
         };
-        let mut page = PageCommands::new(8, 4, [255; 3]);
+        let mut page = PageCommands::new(8, 4, SampleDepth::Sixteen, [65_535; 3]);
         page.push_opaque_runs(
             &mut [(1, 2, 4), (1, 3, 6), (3, 0, 0), (9, 0, 7)],
-            [10, 20, 30],
+            [10, 2_000, 65_534],
         )
         .expect("push");
-        let mut out = vec![0; 8 * 4 * 3];
+        let mut out = vec![0u16; 8 * 4 * 3];
         backend
             .render_page(&page, &mut out, 24)
             .expect("render_page");
         for y in 0..4 {
             for x in 0..8 {
                 let painted = (y == 1 && (2..=6).contains(&x)) || (y == 3 && x == 0);
-                let want = if painted { [10, 20, 30] } else { [255; 3] };
+                let want = if painted {
+                    [10, 2_000, 65_534]
+                } else {
+                    [65_535; 3]
+                };
                 assert_eq!(out[(y * 8 + x) * 3..][..3], want, "pixel ({x}, {y})");
             }
         }
@@ -373,8 +436,8 @@ mod tests {
         let Some(backend) = super::super::test_backend() else {
             return;
         };
-        let page = PageCommands::new(19, 3, [1, 2, 3]);
-        let mut out = vec![0; 19 * 3 * 3];
+        let page = PageCommands::new(19, 3, SampleDepth::Eight, [1, 2, 3]);
+        let mut out = vec![0u8; 19 * 3 * 3];
         backend
             .render_page(&page, &mut out, 19 * 3)
             .expect("render_page");
