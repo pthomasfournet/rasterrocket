@@ -437,36 +437,66 @@ fn devanagari_vowel_sign_i_is_drawn_before_its_consonant() {
 #[test]
 fn a_hebrew_mark_lies_under_its_letter_across_strings() {
     let names = ["uni05DC", "uni05B8", "uni05E9"];
-    // The centre of the ink more than a pixel below the baseline, 15
-    // units above the bottom edge: the qamats alone; and the middle of
-    // the word's inked columns.
-    let qamats = |show: &str| {
-        let page = render(&names, show);
-        let inked = |x: usize, rows: &[Vec<bool>]| rows.iter().any(|row| row[x]);
-        let columns: Vec<usize> = (0..page[0].len()).filter(|&x| inked(x, &page)).collect();
-        let below = &page[page.len() - 13..];
-        let mark: Vec<usize> = columns
-            .iter()
-            .copied()
-            .filter(|&x| inked(x, below))
-            .collect();
-        assert!(!mark.is_empty(), "{show}: the qamats is drawn");
-        (
-            usize::midpoint(mark[0], mark[mark.len() - 1]),
-            usize::midpoint(columns[0], columns[columns.len() - 1]),
-        )
-    };
+    let qamats = |show: &str| qamats_and_middle(&render(&names, show), show);
     let (shaped, middle) = qamats("<414243> Tj");
     assert!(shaped > middle, "the shaped qamats lies under shin");
-    for show in [
-        "[<4142> 0 <43>] TJ",
-        "<4142> Tj <43> Tj",
-        "<41> Tj <42> Tj <43> Tj",
-    ] {
+    for show in HEBREW_SPLITS {
         let (centre, _) = qamats(show);
         assert!(
             centre.abs_diff(shaped) <= 1,
             "{show}: the qamats lies under shin ({centre}, shaped {shaped})"
+        );
+    }
+}
+
+/// Lamed, qamats, shin split before shin, and shown one code per string.
+const HEBREW_SPLITS: [&str; 3] = [
+    "[<4142> 0 <43>] TJ",
+    "<4142> Tj <43> Tj",
+    "<41> Tj <42> Tj <43> Tj",
+];
+
+/// The centre of the ink of `page` more than a pixel below the baseline,
+/// 15 units above the bottom edge: the qamats alone; and the middle of the
+/// word's inked columns.  `show` names the page in messages.
+fn qamats_and_middle(page: &[Vec<bool>], show: &str) -> (usize, usize) {
+    let inked = |x: usize, rows: &[Vec<bool>]| rows.iter().any(|row| row[x]);
+    let columns: Vec<usize> = (0..page[0].len()).filter(|&x| inked(x, page)).collect();
+    let below = &page[page.len() - 13..];
+    let mark: Vec<usize> = columns
+        .iter()
+        .copied()
+        .filter(|&x| inked(x, below))
+        .collect();
+    assert!(!mark.is_empty(), "{show}: the qamats is drawn");
+    (
+        usize::midpoint(mark[0], mark[mark.len() - 1]),
+        usize::midpoint(columns[0], columns[columns.len() - 1]),
+    )
+}
+
+/// Lamed, qamats, shin as above in a font whose substitute is fitted to
+/// advances wider than its glyphs: the word is centred in its advances,
+/// and a qamats that ends a string lies under shin where the string after
+/// draws it, as when the word is shown whole.
+#[test]
+fn a_hebrew_mark_lies_under_its_fitted_letter_across_strings() {
+    let names = ["uni05DC", "uni05B8", "uni05E9"];
+    let widths = [900, 0, 900];
+    let whole = render_fitted(&names, &widths, "<414243> Tj");
+    let (shaped, middle) = qamats_and_middle(&whole, "<414243> Tj");
+    assert!(shaped > middle, "the shaped qamats lies under shin");
+    for show in HEBREW_SPLITS {
+        let page = render_fitted(&names, &widths, show);
+        let (centre, _) = qamats_and_middle(&page, show);
+        assert!(
+            centre.abs_diff(shaped) <= 1,
+            "{show}: the qamats lies under shin ({centre}, shaped {shaped})"
+        );
+        assert_eq!(
+            inked_span(&page),
+            inked_span(&whole),
+            "{show}: the word is centred as when shown whole"
         );
     }
 }

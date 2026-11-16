@@ -166,7 +166,8 @@ pub(super) struct ChainExtent {
 
 impl ChainExtent {
     /// The extent of `runs`, whose codes advance by `advances` (indexed as
-    /// the runs' codes) and whose glyph advances are in em of `em`.
+    /// the runs' codes) and whose glyph advances are in em of `em`.  The
+    /// marks drawn over the string after advance their codes only.
     pub(super) fn of(runs: &[ShapedRun<'_>], advances: &[f64], em: f64) -> Self {
         runs.iter().fold(Self::default(), |sum, run| Self {
             width: sum.width + advances[run.start..run.end].iter().sum::<f64>(),
@@ -202,14 +203,14 @@ impl ChainExtent {
 }
 
 /// Whether the glyphs of the run after `run` can continue those of `run`:
-/// it joins the code after it.
+/// it joins the code after it, or its marks belong to the letter after.
 const fn continues_forward(run: &ShapedRun<'_>) -> bool {
-    run.joins.1
+    run.joins.1 || run.over_next
 }
 
 /// Whether `run` continues a chain whose next run starts at code `at`.
 const fn continues(run: &ShapedRun<'_>, at: usize) -> bool {
-    run.start == at && run.joins.0
+    run.start == at && (run.joins.0 || run.over_next)
 }
 
 /// The end of the chain that starts with `runs[first]` in a string of
@@ -377,6 +378,11 @@ impl Layout<'_, '_> {
     /// glyphs end, at its scale; one that starts a chain is fitted with the
     /// rest of the chain (see the module documentation).  `continuation`
     /// is replaced by where the run's chain continues after it.
+    ///
+    /// The marks of a run drawn over the first letter of the string after
+    /// are displaced from where that letter's glyph starts: where the
+    /// chain continues, shifted by how far past the string's end the string
+    /// after starts.
     fn place_run(
         &self,
         (runs, k): (&[ShapedRun<'_>], usize),
@@ -389,21 +395,6 @@ impl Layout<'_, '_> {
         let run = &runs[k];
         let f = &self.frame;
         let em = f.em();
-        // Marks drawn over the first letter of the string after, at their
-        // displacements from its origin.
-        if run.over_next {
-            for g in &run.glyphs {
-                let tx = g.offset.0.mul_add(em, width + context.next_start);
-                let ty = g.offset.1.mul_add(f.font_size, f.rise);
-                sink.push(
-                    (run.face, g.selector, true),
-                    g.selector,
-                    f.page(origin, tx, ty),
-                    1.0,
-                );
-            }
-            return;
-        }
         let (scale, mut pen) = continuation.filter(|c| continues(run, c.at)).map_or_else(
             || {
                 let (end, past) = chain_end(runs, k, self.decoded.len());
@@ -413,8 +404,13 @@ impl Layout<'_, '_> {
             },
             |c| (if self.fit { c.scale } else { 1.0 }, c.drift),
         );
+        let next_start = if run.over_next {
+            context.next_start
+        } else {
+            0.0
+        };
         for g in &run.glyphs {
-            let tx = (g.offset.0 * em).mul_add(scale, pen);
+            let tx = (g.offset.0 * em).mul_add(scale, pen + next_start);
             let ty = g.offset.1.mul_add(f.font_size, f.rise);
             sink.push(
                 (run.face, g.selector, true),
