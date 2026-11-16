@@ -16,8 +16,8 @@
 //!    backend policy is [`BackendPolicy::ForceCuda`], where a failed GPU
 //!    rotation is an error ([`DeskewError::GpuRotation`]); on the CPU
 //!    otherwise.  16-bit gray is measured on its
-//!    8-bit levels and rotated on the CPU at 16 bits, through the scalar
-//!    kernel the 8-bit SIMD tiers are exact with.  Rotation is
+//!    8-bit levels and rotated on the CPU at 16 bits.  The CPU rotation of
+//!    either depth runs through SIMD row kernels exact with the scalar one.  Rotation is
 //!    clockwise-positive: a detected counter-clockwise tilt of +θ° is
 //!    corrected by a clockwise rotation by θ°.
 //!
@@ -46,6 +46,7 @@
 mod bilinear;
 pub(crate) mod detect;
 pub(crate) mod rotate;
+mod simd;
 
 use color::{Gray8, Gray16, Pixel};
 use raster::Bitmap;
@@ -81,8 +82,9 @@ pub struct Skew {
 ///
 /// The rotation's source coordinates are `f32`, whose resolution at
 /// 2^15 px is 2^-9 px, finer than its 8-bit interpolation weights; the
-/// AVX-512 rotation kernel gathers bytes at `i32` offsets, which an image
-/// of 2^15 × 2^15 bytes (2^30) leaves inside `i32`.
+/// AVX-512 rotation kernel gathers at `i32` byte offsets, which reach an
+/// unpadded 2^15 × 2^15 image of either depth (at most 2^31 − 2 bytes), and
+/// leaves a longer buffer to the scalar kernel.
 pub const DESKEW_MAX_SIDE: u32 = 32_768;
 
 /// Error type for deskew operations (see [`apply`]).
@@ -168,7 +170,7 @@ impl DeskewPixel for Gray16 {
         angle_deg: f32,
         _policy: BackendPolicy,
     ) -> Result<Bitmap<Self>, DeskewError> {
-        Ok(bilinear::rotate_scalar(img, angle_deg))
+        Ok(rotate::rotate_cpu(img, angle_deg))
     }
 
     fn to_f32(s: u16) -> f32 {

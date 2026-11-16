@@ -1,6 +1,6 @@
 //! The scalar bilinear rotation shared by every sample depth: the
 //! per-row inverse-map parameters, the 2×2 footprint, the blend, and the
-//! row driver the SIMD tiers of the 8-bit rotation plug into.
+//! row driver the SIMD row kernels plug into.
 //!
 //! Rotation is clockwise-positive about the image centre; a source
 //! coordinate outside `[0, w−1] × [0, h−1]` is white (`Sample::MAX`).  The
@@ -11,14 +11,6 @@ use color::Sample;
 use raster::Bitmap;
 
 use super::DeskewPixel;
-
-/// A clockwise rotation of `src` by `angle_deg` degrees on the CPU, through
-/// the scalar kernel, into a new packed bitmap.
-pub(super) fn rotate_scalar<P: DeskewPixel>(src: &Bitmap<P>, angle_deg: f32) -> Bitmap<P> {
-    rotate_cpu_with(src, angle_deg, |row, src, p| {
-        rotate_span_scalar(row, 0, src, p);
-    })
-}
 
 /// Parameters shared between the scalar and SIMD row kernels.
 ///
