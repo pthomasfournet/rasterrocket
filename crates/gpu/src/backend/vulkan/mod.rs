@@ -22,6 +22,7 @@
 mod barrier;
 mod device;
 mod error;
+mod host_pages;
 mod memory;
 mod page;
 mod pipeline;

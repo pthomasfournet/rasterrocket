@@ -215,6 +215,9 @@ impl VulkanBackend {
         } else {
             KernelId::PageRaster
         };
+        // Before any device buffer of the page is allocated: see
+        // `host_pages`.
+        super::host_pages::populate_for_write(&mut out[..stride * (height - 1) + row]);
         let bins = page.bin().map_err(BackendError::new)?;
         let (table, bases) = page.table_parts();
         let push = push_constants(page, &bins, bases);

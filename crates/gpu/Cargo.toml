@@ -64,6 +64,10 @@ ash      = { version = "0.38", optional = true, default-features = false, featur
 # metal which we don't need.
 gpu-allocator = { version = "0.28", optional = true, default-features = false, features = ["std", "vulkan"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+# madvise(MADV_POPULATE_WRITE) of the page raster's host destination.
+libc     = "0.2"
+
 [dev-dependencies]
 # Disk-tier tests want isolated cache dirs.
 tempfile = { workspace = true }

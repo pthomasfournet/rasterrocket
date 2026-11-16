@@ -1704,6 +1704,7 @@ dependencies = [
  "cudarc",
  "dashmap",
  "gpu-allocator",
+ "libc",
  "log",
  "rasterrocket-color",
  "rasterrocket-render",
