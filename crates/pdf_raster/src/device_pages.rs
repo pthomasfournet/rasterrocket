@@ -1,9 +1,11 @@
 //! The GPU page queue: pages rendered whole on a Vulkan device beside the
 //! CPU workers ([`SessionConfig::gpu_pages`]).
 //!
-//! The device is opened on a thread of its own when the session opens, so
-//! the workers start rendering at once; until it is open every page renders
-//! on the CPU.  The device takes one page at a time: a worker whose page
+//! Unless the session holds a device of its own, the device is opened on a
+//! thread of its own when the first page that qualifies asks for it, so the
+//! workers keep rendering meanwhile and a job none of whose pages qualifies
+//! never opens it; until it is open every page renders on the CPU.  The
+//! device takes one page at a time: a worker whose page
 //! qualifies claims it while it is idle, records the page's paint commands
 //! and renders them on it, and a worker that finds it busy, or a page that
 //! does not qualify, renders on the CPU.  Pages are returned by index, so
@@ -30,9 +32,8 @@ use crate::render::PageJob;
 pub(crate) struct DevicePages {
     /// The device once its opening has finished: `None` when it failed.
     device: Arc<OnceLock<Option<Arc<VulkanBackend>>>>,
-    /// The thread opening the device; joined when the session drops, so
-    /// the process never exits while a driver is initialising.
-    opener: Mutex<Option<JoinHandle<()>>>,
+    /// The opening of the device.
+    opener: Mutex<Opener>,
     /// Set while a page holds the device.
     busy: AtomicBool,
     /// Set once the device has failed; it is offered no page afterwards.
@@ -43,6 +44,19 @@ pub(crate) struct DevicePages {
     /// Test hooks.
     #[cfg(test)]
     faults: TestFaults,
+}
+
+/// The opening of a session's GPU page device.
+enum Opener {
+    /// Not started: the selector of the device to open, the automatically
+    /// ranked one when `None`.
+    Deferred(Option<String>),
+    /// The thread opening the device; joined when the session drops, so
+    /// the process never exits while a driver is initialising.
+    Running(JoinHandle<()>),
+    /// Nothing to open or to join: the device came with the session, or
+    /// its opening could not start.
+    Settled,
 }
 
 /// See [`DevicePages::faults`].
@@ -81,30 +95,29 @@ impl Drop for Claim<'_> {
 impl DevicePages {
     /// The GPU pages of a session opened with `config` that holds
     /// `backend`: `None` unless the config asks for them, on `backend`
-    /// when the session opened one, and otherwise on a device opened
-    /// beside the workers.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::open`].
+    /// when the session opened one, and otherwise on a device opened when
+    /// a page first asks for it.
     pub(crate) fn for_session(
         config: &crate::SessionConfig,
         backend: Option<&Arc<VulkanBackend>>,
-    ) -> Result<Option<Self>, RasterError> {
-        if !config.gpu_pages {
-            return Ok(None);
-        }
-        Ok(Some(match backend {
-            Some(backend) => Self::on(Arc::clone(backend)),
-            None => Self::open(config.vulkan_device.clone())?,
-        }))
+    ) -> Option<Self> {
+        config.gpu_pages.then(|| {
+            backend.map_or_else(
+                || {
+                    Self::new(
+                        OnceLock::new(),
+                        Opener::Deferred(config.vulkan_device.clone()),
+                    )
+                },
+                |backend| Self::new(OnceLock::from(Some(Arc::clone(backend))), Opener::Settled),
+            )
+        })
     }
 
-    /// GPU pages on `backend`, a device the session has already opened.
-    pub(crate) fn on(backend: Arc<VulkanBackend>) -> Self {
+    fn new(device: OnceLock<Option<Arc<VulkanBackend>>>, opener: Opener) -> Self {
         Self {
-            device: Arc::new(OnceLock::from(Some(backend))),
-            opener: Mutex::new(None),
+            device: Arc::new(device),
+            opener: Mutex::new(opener),
             busy: AtomicBool::new(false),
             retired: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
@@ -113,17 +126,17 @@ impl DevicePages {
         }
     }
 
-    /// GPU pages on the device `selector` names (the automatically ranked
-    /// one when `None`), opened on a new thread.  A device that does not
-    /// open is logged at `error` and leaves every page on the CPU.
-    ///
-    /// # Errors
-    ///
-    /// [`RasterError::BackendUnavailable`] when the thread cannot start.
-    pub(crate) fn open(selector: Option<String>) -> Result<Self, RasterError> {
-        let device = Arc::new(OnceLock::new());
-        let slot = Arc::clone(&device);
-        let opener = std::thread::Builder::new()
+    /// Start opening the device on a new thread unless it has been
+    /// started.  A device that does not open, or a thread that does not
+    /// start, is logged at `error` and leaves every page on the CPU.
+    fn start_opening(&self) {
+        let mut opener = self.opener.lock().unwrap_or_else(PoisonError::into_inner);
+        let Opener::Deferred(selector) = &mut *opener else {
+            return;
+        };
+        let selector = selector.take();
+        let slot = Arc::clone(&self.device);
+        let spawned = std::thread::Builder::new()
             .name("rrocket-gpu-pages".to_owned())
             .spawn(move || {
                 let started = std::time::Instant::now();
@@ -143,29 +156,31 @@ impl DevicePages {
                     .ok();
                 // The slot is set by this thread alone.
                 drop(slot.set(backend));
-            })
-            .map_err(|e| {
-                RasterError::BackendUnavailable(format!(
-                    "cannot start the thread that opens the GPU page device: {e}"
-                ))
-            })?;
-        Ok(Self {
-            device,
-            opener: Mutex::new(Some(opener)),
-            busy: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
-            wide_declined: AtomicBool::new(false),
-            #[cfg(test)]
-            faults: TestFaults::default(),
-        })
+            });
+        *opener = match spawned {
+            Ok(thread) => Opener::Running(thread),
+            Err(e) => {
+                log::error!(
+                    "rasterrocket: GPU page rendering was requested, but the thread that opens \
+                     the Vulkan device did not start ({e}); every page renders on the CPU"
+                );
+                drop(self.device.set(None));
+                Opener::Settled
+            }
+        };
     }
 
-    /// The device, if it is open, in service and no page holds it.
+    /// The device, if it is open, in service and no page holds it.  A call
+    /// before the device is open starts opening it.
     pub(crate) fn try_claim(&self) -> Option<Claim<'_>> {
         if self.retired.load(Ordering::Acquire) {
             return None;
         }
-        let backend = self.device.get()?.as_deref()?;
+        let Some(device) = self.device.get() else {
+            self.start_opening();
+            return None;
+        };
+        let backend = device.as_deref()?;
         self.busy
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
@@ -209,12 +224,13 @@ impl DevicePages {
 
 impl Drop for DevicePages {
     fn drop(&mut self) {
-        let opener = self
-            .opener
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(opener) = opener
+        let opener = std::mem::replace(
+            self.opener
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+            Opener::Settled,
+        );
+        if let Opener::Running(opener) = opener
             && opener.join().is_err()
         {
             log::warn!("rasterrocket: the thread opening the GPU page device panicked");
@@ -376,7 +392,7 @@ mod tests {
 
     use gpu::backend::BackendError;
 
-    use super::DevicePages;
+    use super::{DevicePages, Opener};
     use crate::test_pdf::{assemble, stream};
     use crate::{
         BackendPolicy, CancelToken, DevicePage, RasterError, RasterSession, RenderParams,
@@ -593,6 +609,71 @@ mod tests {
             None,
             "warned on page 1"
         );
+    }
+
+    /// An `Auto` GPU-page session over `pdf` opening the device `selector`
+    /// names.
+    fn auto_session(pdf: Vec<u8>, selector: Option<String>) -> RasterSession {
+        let mut config = SessionConfig::with_policy(BackendPolicy::Auto);
+        config.vulkan_device = selector;
+        config.gpu_pages = true;
+        open_session_from_bytes(pdf, &config).expect("an Auto session opens")
+    }
+
+    /// Under `Auto`, rendering pages none of which the device can take
+    /// opens no device, and the session's drop joins nothing.
+    #[test]
+    fn auto_opens_no_device_for_pages_it_cannot_take() {
+        const TEXT: &str = "0 g BT /F1 12 Tf 10 10 Td (a) Tj ET";
+        let doc = pdf(&[TEXT, TEXT]);
+        let session = auto_session(doc.clone(), SessionConfig::vulkan_device_from_env());
+        for page in 1..=2 {
+            let (bitmap, outcome) =
+                render(&session, page, &RenderParams::new(2.0)).expect("render");
+            assert_eq!(outcome, DevicePage::Ineligible("text"));
+            assert_eq!(bitmap, cpu(doc.clone(), page));
+        }
+        let pages = device_pages(&session);
+        assert!(pages.device.get().is_none(), "a device was opened");
+        assert!(
+            matches!(*pages.opener.lock().expect("lock"), Opener::Deferred(_)),
+            "the opening started"
+        );
+    }
+
+    /// Under `Auto`, the first page the device could take starts opening
+    /// it and renders on the CPU; once the device is open, a later page
+    /// renders on it (on the CPU when no device opens), identically.
+    #[test]
+    fn auto_opens_the_device_for_the_first_page_it_could_take() {
+        let doc = pdf(&[DEVICE, DEVICE]);
+        let session = auto_session(doc.clone(), SessionConfig::vulkan_device_from_env());
+        let pages = device_pages(&session);
+        assert!(matches!(
+            *pages.opener.lock().expect("lock"),
+            Opener::Deferred(_)
+        ));
+        let params = RenderParams::new(2.0);
+        let (page, outcome) = render(&session, 1, &params).expect("render");
+        assert_eq!(outcome, DevicePage::NotOffered);
+        assert_eq!(page, cpu(doc.clone(), 1));
+        let opener = std::mem::replace(&mut *pages.opener.lock().expect("lock"), Opener::Settled);
+        let Opener::Running(thread) = opener else {
+            panic!("the first page did not start opening the device");
+        };
+        thread.join().expect("the opener");
+        let device_open = matches!(pages.device.get(), Some(Some(_)));
+        let (page, outcome) = render(&session, 2, &params).expect("render");
+        if device_open {
+            assert!(
+                matches!(outcome, DevicePage::Rendered { .. }),
+                "{outcome:?}"
+            );
+        } else {
+            eprintln!("no Vulkan device opened");
+            assert_eq!(outcome, DevicePage::NotOffered);
+        }
+        assert_eq!(page, cpu(doc, 2));
     }
 
     /// GPU pages are refused at open without vector antialiasing, which

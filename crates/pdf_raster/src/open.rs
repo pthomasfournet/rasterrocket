@@ -324,8 +324,7 @@ const _: fn() = || {
 ///   allocated.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is
 ///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
-///   was not compiled in or fails to initialise, or if `config.gpu_pages`
-///   is set and the thread that opens its device cannot start.
+///   was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
 ///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
 ///   `config.vulkan_device` matches no usable Vulkan device or several.
@@ -350,8 +349,7 @@ pub fn open_session(
 ///   password is wrong.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is
 ///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
-///   was not compiled in or fails to initialise, or if `config.gpu_pages`
-///   is set and the thread that opens its device cannot start.
+///   was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
 ///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
 ///   `config.vulkan_device` matches no usable Vulkan device or several.
@@ -456,7 +454,7 @@ fn open_session_with_doc(
     #[cfg(feature = "vulkan")]
     let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
     #[cfg(feature = "vulkan")]
-    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
+    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref());
 
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     let gpu_ctx = init_gpu_ctx(config.policy)?;

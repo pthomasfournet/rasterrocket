@@ -563,8 +563,8 @@ pub(crate) struct Args {
     /// Compute backend for image decoding and GPU kernels.
     ///
     /// `auto`   — CPU; no Vulkan device or CUDA context is opened at
-    ///            start-up; --gpu-pages opens a Vulkan device.  A binary
-    ///            built with `nvjpeg2k` decodes JPEG 2000 on the GPU only
+    ///            start-up; --gpu-pages opens a Vulkan device once a page
+    ///            may render on it.  A binary built with `nvjpeg2k` decodes JPEG 2000 on the GPU only
     ///            when `PDF_RASTER_JPX_THRESHOLD` sets a pixel area.  This is
     ///            the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
@@ -607,7 +607,9 @@ pub(crate) struct Args {
 
     /// Render pages whole on a Vulkan GPU beside the CPU workers.
     ///
-    /// The device opens in the background; once open, a page made only of
+    /// Under --backend auto the device opens in the background when the
+    /// first page that may render on it is reached, so a document with no
+    /// such page opens none; once open, a page made only of
     /// solid fills and strokes (rectangle clips, Normal blend, constant
     /// alpha) renders on it while it is idle, every other page on the CPU,
     /// with identical output.  Needs a build with the `vulkan` feature,

@@ -406,9 +406,12 @@ pub struct SessionConfig {
     /// Whether pages are rendered whole on a Vulkan GPU beside the CPU
     /// workers.
     ///
-    /// Default `false`.  `true` opens the device of
-    /// [`vulkan_device`](Self::vulkan_device) on a thread of its own when the
-    /// session opens; once it is open, a page whose every paint the GPU
+    /// Default `false`.  `true` under [`Auto`](BackendPolicy::Auto) opens
+    /// the device of [`vulkan_device`](Self::vulkan_device) on a thread of
+    /// its own when the first page that may render on it is rendered, so a
+    /// job none of whose pages can never opens it; under
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) the session's device is
+    /// used.  Once the device is open, a page whose every paint the GPU
     /// raster renders (fills and strokes of solid colours under rectangular
     /// clips, `Normal` blend, constant alpha) is rendered on it while it is
     /// idle, and every other page on the CPU, with the same bytes.
