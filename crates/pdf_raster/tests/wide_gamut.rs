@@ -1,7 +1,8 @@
 //! The wide working space: colours outside sRGB kept up to the output
 //! profile, opaque sRGB content through it as through sRGB, one session's
-//! decodes kept apart by working space, and the refusals of the wide space
-//! without an output profile or at 8 bits.
+//! decodes kept apart by working space, 8-bit pages painted on the 16-bit
+//! wide canvas, and the refusal of the wide space without an output
+//! profile.
 
 #[expect(
     dead_code,
@@ -15,8 +16,9 @@ use std::sync::Arc;
 use common::icc::adobe_rgb_profile;
 use common::{assemble_pdf, one_page, stream_object};
 use rasterrocket::{
-    BackendPolicy, FinishedCanvas, OutputProfile, RasterError, RenderParams, SampleDepth,
-    SessionConfig, WorkingSpace, open_session_from_bytes, render_page_canvas,
+    BackendPolicy, BandBitmap, FinishedCanvas, OutputProfile, RasterError, RenderParams,
+    SampleDepth, SessionConfig, WorkingSpace, open_session_from_bytes, render_page_bands,
+    render_page_canvas,
 };
 
 /// The 16-bit RGB samples of page `page` of `pdf` rendered at 1 pixel a
@@ -232,12 +234,140 @@ fn the_wide_space_needs_an_output_profile() {
     assert!(matches!(err, RasterError::InvalidOptions(_)), "{err}");
 }
 
+/// The test profile `name` of `tests/fixtures/icc`.
+fn fixture_profile(name: &str) -> Arc<OutputProfile> {
+    let path = format!(
+        "{}/../../tests/fixtures/icc/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    Arc::new(OutputProfile::from_bytes(std::fs::read(path).unwrap()).unwrap())
+}
+
+/// A page of 4 × 2 points: saturated green, and red and blue at half
+/// opacity over it.
+fn blend_page() -> Vec<u8> {
+    one_page(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 2] \
+         /Resources << /ExtGState << /H << /ca 0.5 >> >> >> /Contents 4 0 R >>",
+        vec![stream_object(
+            "",
+            b"0 1 0 rg 0 0 4 2 re f /H gs 1 0 0 rg 1 0 2 2 re f 0 0 1 rg 2 1 2 1 re f",
+        )],
+    )
+}
+
+/// The colour samples and alpha plane of `canvas`, every sample on the
+/// 8-bit scale: a 16-bit sample rounded to the nearest level.
+fn eight_bit_samples(canvas: &FinishedCanvas) -> (Vec<u8>, Option<Vec<u8>>) {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the quotient is at most 255"
+    )]
+    let narrow = |s: &[u16]| {
+        s.iter()
+            .map(|&v| ((u32::from(v) * 255 + 32_767) / 65_535) as u8)
+            .collect::<Vec<u8>>()
+    };
+    match canvas {
+        FinishedCanvas::Rgb8(b) => (b.data().to_vec(), b.alpha_plane().map(<[u8]>::to_vec)),
+        FinishedCanvas::Gray8(b) => (b.data().to_vec(), b.alpha_plane().map(<[u8]>::to_vec)),
+        FinishedCanvas::Cmyk8(b) => (b.data().to_vec(), b.alpha_plane().map(<[u8]>::to_vec)),
+        FinishedCanvas::Rgb16(b) => (narrow(b.data()), b.alpha_plane().map(narrow)),
+        FinishedCanvas::Gray16(b) => (narrow(b.data()), b.alpha_plane().map(narrow)),
+        FinishedCanvas::Cmyk16(b) => (narrow(b.data()), b.alpha_plane().map(narrow)),
+    }
+}
+
+/// An 8-bit page under an output profile is its 16-bit render rounded to
+/// 8 bits, of RGB, gray and CMYK profiles, over paper and over a
+/// transparent backdrop: one wide canvas, one conversion, one rounding.
 #[test]
-fn the_wide_space_needs_16_bits() {
-    let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
-    config.output_profile = Some(printer());
-    config.working_space = Some(WorkingSpace::Wide);
-    let session = open_session_from_bytes(cube_page(), &config).expect("opens");
-    let err = render_page_canvas(&session, 1, &RenderParams::new(1.0)).unwrap_err();
-    assert!(matches!(err, RasterError::InvalidOptions(_)), "{err}");
+fn an_8_bit_page_is_its_16_bit_render_rounded() {
+    let (rgb, gray, cmyk) = (
+        printer(),
+        fixture_profile("printer-gray-v4.icc"),
+        fixture_profile("printer-cmyk-v4.icc"),
+    );
+    let cases = [
+        (&rgb, RenderParams::new(2.0)),
+        (&rgb, RenderParams::new(2.0).with_transparent_background()),
+        (&gray, RenderParams::new(2.0)),
+        (&cmyk, RenderParams::new(2.0).with_cmyk()),
+    ];
+    for pdf in [blend_page(), adobe_page()] {
+        for (profile, params) in &cases {
+            let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+            config.output_profile = Some(Arc::clone(profile));
+            let session = open_session_from_bytes(pdf.clone(), &config).expect("opens");
+            let eight = render_page_canvas(&session, 1, params).expect("renders");
+            let sixteen = render_page_canvas(
+                &session,
+                1,
+                &params.clone().with_depth(SampleDepth::Sixteen),
+            )
+            .expect("renders");
+            assert_eq!(eight.depth(), SampleDepth::Eight, "{params:?}");
+            assert_eq!(eight.dims(), sixteen.dims(), "{params:?}");
+            assert_eq!(
+                eight_bit_samples(&eight),
+                eight_bit_samples(&sixteen),
+                "{params:?}"
+            );
+        }
+    }
+}
+
+/// The 16-bit wide canvas of an 8-bit page counts against the byte budget
+/// and sizes the bands: a budget of the 8-bit canvas refuses the page,
+/// bands of `band_bytes` hold half the rows they would at 8 bits, and the
+/// sRGB working space keeps the 8-bit canvas.
+#[test]
+fn the_wide_canvas_of_an_8_bit_page_is_counted_at_16_bits() {
+    let pdf = blend_page();
+    let params = RenderParams::new(4.0);
+    let (width, height) = (16_u32, 8_u32);
+    let open = |space, max_page_bytes, band_bytes| {
+        let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        config.output_profile = Some(printer());
+        config.working_space = space;
+        config.max_page_bytes = max_page_bytes;
+        config.band_bytes = band_bytes;
+        open_session_from_bytes(pdf.clone(), &config).expect("opens")
+    };
+    let eight_bit = u64::from(width * height * 3);
+    let err = render_page_canvas(&open(None, eight_bit, 1 << 20), 1, &params).unwrap_err();
+    assert!(matches!(err, RasterError::PageTooLarge { .. }), "{err}");
+    assert!(
+        render_page_canvas(
+            &open(Some(WorkingSpace::Srgb), eight_bit, 1 << 20),
+            1,
+            &params
+        )
+        .is_ok()
+    );
+
+    let four_rows = u64::from(width * 3 * 4);
+    let banded = |space| {
+        let session = open(space, 1 << 20, four_rows);
+        let mut rows = Vec::new();
+        let mut pixels = Vec::new();
+        let _diagnostics = render_page_bands(&session, 1, &params, |band| {
+            let BandBitmap::Rgb8(b) = band.bitmap else {
+                panic!("an 8-bit RGB band");
+            };
+            rows.push(b.height);
+            pixels.extend_from_slice(b.data());
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .expect("renders");
+        let FinishedCanvas::Rgb8(whole) =
+            render_page_canvas(&session, 1, &params).expect("renders")
+        else {
+            panic!("an 8-bit RGB page");
+        };
+        assert_eq!(pixels, whole.data(), "the bands make up the page");
+        rows
+    };
+    assert_eq!(banded(None), [2, 2, 2, 2]);
+    assert_eq!(banded(Some(WorkingSpace::Srgb)), [4, 4]);
 }

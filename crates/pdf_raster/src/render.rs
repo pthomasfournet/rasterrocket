@@ -651,6 +651,9 @@ pub(crate) struct PageJob<'a> {
     pub(crate) group: Option<pdf_interp::resources::TransparencyGroupParams>,
     /// The canvas the page is painted on.
     pub(crate) canvas: pdf_interp::CanvasRequest,
+    /// The depth of the canvas's samples (see
+    /// [`canvas_depth`](crate::output::canvas_depth)).
+    pub(crate) depth: SampleDepth,
     /// Whether the page's transparency group composites in gray, on an
     /// RGB canvas, its finished colour reduced to gray.
     pub(crate) gray: bool,
@@ -679,7 +682,8 @@ impl<'a> PageJob<'a> {
     ) -> Result<Self, RasterError> {
         let doc = &session.doc;
         let canvas = canvas_request(session, page_id, params)?;
-        crate::output::warn_working_space(session, (page_num, page_id), params, &canvas);
+        crate::output::warn_working_space(session, (page_num, page_id), &canvas);
+        let depth = crate::output::canvas_depth(&canvas, params);
         let gray = !canvas.is_ink()
             && pdf_interp::page_group_space(doc, page_id)
                 == Some(pdf_interp::resources::GroupSpace::Gray);
@@ -691,6 +695,7 @@ impl<'a> PageJob<'a> {
             ops,
             group: page_group(doc, page_id, params.transparent_background),
             canvas,
+            depth,
             gray,
             params,
             policy,
@@ -715,7 +720,7 @@ impl<'a> PageJob<'a> {
             self.page_id,
             self.group,
             &self.canvas,
-            self.params.depth,
+            self.depth,
             buffers,
         )
         .map_err(allocation_failed)?;
@@ -805,7 +810,7 @@ fn canvas_request(
         None => None,
     };
     if session.proof.is_some() || params.color == crate::ColorModel::Cmyk {
-        let space = crate::output::working_space(session, params, None);
+        let space = crate::output::working_space(session, None);
         let separation = match press {
             Some(profile) => pdf_interp::OutputProfile::separation(
                 &profile,
@@ -831,7 +836,7 @@ fn canvas_request(
     Ok(if preview || cmyk_group {
         pdf_interp::CanvasRequest::ProcessRgb { overprint: preview }
     } else {
-        match crate::output::working_space(session, params, declared) {
+        match crate::output::working_space(session, declared) {
             pdf_interp::WorkingSpace::Wide => pdf_interp::CanvasRequest::WideRgb,
             pdf_interp::WorkingSpace::Srgb => pdf_interp::CanvasRequest::Rgb,
         }
@@ -840,7 +845,9 @@ fn canvas_request(
 
 /// The layout of the canvas page `page_id` of `session` is painted on
 /// under `params`, which the byte budget counts: of ink for a page
-/// painted on an ink canvas (see [`canvas_request`]).
+/// painted on an ink canvas (see [`canvas_request`]), of 16-bit samples
+/// for a canvas of the wide working space at either output depth (see
+/// [`canvas_depth`](crate::output::canvas_depth)).
 ///
 /// # Errors
 ///
@@ -850,8 +857,9 @@ pub(crate) fn page_layout(
     page_id: pdf::ObjectId,
     params: &RenderParams,
 ) -> Result<crate::CanvasLayout, RasterError> {
-    let ink = canvas_request(session, page_id, params)?.is_ink();
-    Ok(params.canvas_layout().with_ink(ink))
+    let canvas = canvas_request(session, page_id, params)?;
+    let depth = crate::output::canvas_depth(&canvas, params);
+    Ok(crate::CanvasLayout::new(depth, params.transparent_background).with_ink(canvas.is_ink()))
 }
 
 /// Warn about the first page found to carry JavaScript and the first

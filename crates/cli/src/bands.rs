@@ -383,8 +383,11 @@ pub(crate) fn print_page_banded(
     (size, dpi): ((u32, u32), (f64, f64)),
 ) -> Result<(), RenderError> {
     let model = Model::of(args);
-    let page_bytes =
-        u64::from(size.0) * u64::from(size.1) * u64::from(params.canvas_layout().bytes_per_px());
+    let layout = pdf_raster::CanvasLayout {
+        depth: args.canvas_depth(),
+        ..params.canvas_layout()
+    };
+    let page_bytes = u64::from(size.0) * u64::from(size.1) * u64::from(layout.bytes_per_px());
     let rgb = matches!(model, Model::Rgb { .. });
     let mut encoder = page_encoder(
         (size, dpi),

@@ -460,14 +460,16 @@ pub struct SessionConfig {
     ///
     /// Default `None`, automatic: the wide space
     /// ([`WorkingSpace::Wide`](pdf_interp::WorkingSpace::Wide)) for a page
-    /// rendered at 16 bits under an output profile, sRGB otherwise.  The
-    /// wide space has the primaries of ROMM RGB and the sRGB tone curve;
-    /// colours outside sRGB keep their gamut up to the output conversion,
-    /// and blending and transparency groups composite in it.  A page
+    /// under an output profile, sRGB otherwise.  The wide space has the
+    /// primaries of ROMM RGB and the sRGB tone curve; colours outside sRGB
+    /// keep their gamut up to the output conversion, and blending and
+    /// transparency groups composite in it.  It is painted at 16 bits at
+    /// either [`RenderParams::depth`](crate::RenderParams::depth), an
+    /// 8-bit page rounded to 8 bits after the output conversion.  A page
     /// painted as an overprint preview is composited in sRGB.
-    /// `Some(Srgb)` composites every page in sRGB; `Some(Wide)` is refused
-    /// by [`open_session`] without an output profile and per page at
-    /// 8 bits.
+    /// `Some(Srgb)` composites every page in sRGB, at the depth of the
+    /// render; `Some(Wide)` is refused by [`open_session`] without an
+    /// output profile.
     ///
     /// [`open_session`]: crate::open_session
     pub working_space: Option<pdf_interp::WorkingSpace>,

@@ -37,6 +37,9 @@ pub(crate) struct DevicePages {
     busy: AtomicBool,
     /// Set once the device has failed; it is offered no page afterwards.
     retired: AtomicBool,
+    /// Set once a page of the wide working space has been rendered on the
+    /// CPU in its place.
+    wide_declined: AtomicBool,
     /// Test hooks.
     #[cfg(test)]
     faults: TestFaults,
@@ -104,6 +107,7 @@ impl DevicePages {
             opener: Mutex::new(None),
             busy: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            wide_declined: AtomicBool::new(false),
             #[cfg(test)]
             faults: TestFaults::default(),
         }
@@ -150,6 +154,7 @@ impl DevicePages {
             opener: Mutex::new(Some(opener)),
             busy: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            wide_declined: AtomicBool::new(false),
             #[cfg(test)]
             faults: TestFaults::default(),
         })
@@ -186,6 +191,20 @@ impl DevicePages {
             );
         }
     }
+
+    /// The warning of page `page_num` of the wide working space rendered
+    /// on the CPU, the first such page of the session.
+    fn wide_declined(&self, page_num: u32) -> Option<String> {
+        (!self.wide_declined.swap(true, Ordering::Relaxed)).then(|| {
+            format!(
+                "page {page_num} is composited in the wide working space, which the GPU page \
+                 raster does not paint: it and every later page of that space render on the \
+                 CPU; the sRGB working space (SessionConfig::working_space, rrocket \
+                 --working-space srgb) keeps them on the GPU, their colours outside sRGB \
+                 clipped"
+            )
+        })
+    }
 }
 
 impl Drop for DevicePages {
@@ -217,12 +236,15 @@ fn device_render(
     renderer.paint_device_page(claim.backend, page)
 }
 
+/// The reason a page of the wide working space is rendered on the CPU.
+const WIDE: &str = "the wide working space";
+
 /// Why `job`'s page cannot be recorded, known before interpretation.
 fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
     if job.space() != pdf_interp::WorkingSpace::Srgb {
-        return Some("the wide working space");
+        return Some(WIDE);
     }
-    if job.params.depth != color::SampleDepth::Eight {
+    if job.depth != color::SampleDepth::Eight {
         return Some("16-bit samples");
     }
     pdf_interp::renderer::device_page_ineligible(
@@ -257,6 +279,12 @@ pub(crate) fn render<'a>(
     };
     if let Some(reason) = ruled_out(job) {
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+        if let Some(warning) = (reason == WIDE)
+            .then(|| pages.wide_declined(job.page_num))
+            .flatten()
+        {
+            log::warn!("{warning}");
+        }
         return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
     }
     let Some(claim) = pages.try_claim() else {
@@ -501,6 +529,45 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, DevicePage::Rendered { .. })),
             "{outcomes:?}"
+        );
+    }
+
+    /// A page of the wide working space renders on the CPU, as a CPU
+    /// session renders it, and the first such page warns.
+    #[test]
+    fn a_wide_page_renders_on_the_cpu_and_warns_once() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/icc/printer-rgb-v4.icc"
+        );
+        let profile = std::sync::Arc::new(
+            pdf_interp::OutputProfile::from_bytes(std::fs::read(path).expect("read"))
+                .expect("profile"),
+        );
+        let doc = pdf(&[DEVICE, DEVICE]);
+        let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
+        config.vulkan_device = SessionConfig::vulkan_device_from_env();
+        config.gpu_pages = true;
+        config.output_profile = Some(std::sync::Arc::clone(&profile));
+        let Ok(session) = open_session_from_bytes(doc.clone(), &config)
+            .inspect_err(|e| eprintln!("skipping: no Vulkan device: {e}"))
+        else {
+            return;
+        };
+        let mut cpu_config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        cpu_config.output_profile = Some(profile);
+        let cpu_session = open_session_from_bytes(doc, &cpu_config).expect("CPU session");
+        let params = RenderParams::new(2.0);
+        let (page, outcome) = render(&session, 1, &params).expect("render");
+        assert_eq!(outcome, DevicePage::Ineligible("the wide working space"));
+        assert_eq!(
+            page,
+            render(&cpu_session, 1, &params).expect("CPU render").0
+        );
+        assert_eq!(
+            device_pages(&session).wide_declined(2),
+            None,
+            "warned on page 1"
         );
     }
 

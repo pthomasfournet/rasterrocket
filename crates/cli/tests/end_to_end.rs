@@ -1256,10 +1256,6 @@ fn output_profile_refusals_name_the_conflict() {
              profile: add --output-profile",
         ),
         (
-            vec!["--working-space", "wide", "--output-profile", rgb],
-            "--working-space wide is composited at 16 bits",
-        ),
-        (
             vec!["--preserve-black"],
             "--preserve-black applies to a CMYK --output-profile and --proof only",
         ),

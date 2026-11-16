@@ -16,21 +16,11 @@ use crate::{RasterError, RasterSession, RenderParams};
 /// compensation under absolute colorimetry; and a CMYK page over a
 /// transparent backdrop, or under an output profile that is not CMYK, and
 /// an sRGB page under a CMYK one; under a soft proof, a CMYK page or a
-/// transparent backdrop; the wide working space at 8 bits.
+/// transparent backdrop.
 pub(crate) fn check_params(
     session: &RasterSession,
     params: &RenderParams,
 ) -> Result<(), RasterError> {
-    if session.working_space.requested == Some(WorkingSpace::Wide)
-        && params.depth == color::SampleDepth::Eight
-    {
-        return Err(RasterError::InvalidOptions(
-            "the wide working space is composited at 16 bits, at which its levels are as \
-             fine as sRGB's at 8: render the page at 16 bits (RenderParams::depth, rrocket \
-             --depth 16)"
-                .to_owned(),
-        ));
-    }
     check_preserve_black(session, params)?;
     if session.proof.is_some() {
         return check_proof(params);
@@ -146,33 +136,42 @@ fn check_cmyk(session: &RasterSession, params: &RenderParams) -> Result<(), Rast
     Ok(())
 }
 
-/// The working space a page of `session` rendered under `params` on an
-/// RGB canvas is composited in, the page's transparency group declaring
+/// The working space a page of `session` on an RGB canvas is composited
+/// in, the page's transparency group declaring
 /// `declared`: the session's
 /// [`working_space`](crate::SessionConfig::working_space) when it asks for
 /// one; otherwise sRGB for a page whose group declares sRGB or gray
-/// (ISO 32000-2 §11.4.7), and else the wide space at 16 bits under an
-/// output profile and sRGB otherwise.
-pub(crate) fn working_space(
-    session: &RasterSession,
-    params: &RenderParams,
-    declared: Option<GroupSpace>,
-) -> WorkingSpace {
+/// (ISO 32000-2 §11.4.7), and else the wide space under an output profile
+/// and sRGB without one.
+pub(crate) fn working_space(session: &RasterSession, declared: Option<GroupSpace>) -> WorkingSpace {
     if session.working_space.requested.is_none() && declared.is_some_and(GroupSpace::within_srgb) {
         return WorkingSpace::Srgb;
     }
-    default_space(session, params)
+    default_space(session)
 }
 
-/// The working space of a page of `session` under `params` whose group
-/// declares no space.
-fn default_space(session: &RasterSession, params: &RenderParams) -> WorkingSpace {
+/// The working space of a page of `session` whose group declares no
+/// space.
+const fn default_space(session: &RasterSession) -> WorkingSpace {
     match session.working_space.requested {
         Some(space) => space,
-        None if session.output_profile.is_some() && params.depth == color::SampleDepth::Sixteen => {
-            WorkingSpace::Wide
-        }
+        None if session.output_profile.is_some() => WorkingSpace::Wide,
         None => WorkingSpace::Srgb,
+    }
+}
+
+/// The depth of the samples of `canvas`, on which a page rendered under
+/// `params` is painted: 16 bits for a canvas of the wide working space,
+/// whose 8-bit levels are coarser than sRGB's, narrowed after the
+/// conversion to the output profile (see [`convert`]); `params.depth`
+/// otherwise.
+pub(crate) fn canvas_depth(
+    canvas: &pdf_interp::CanvasRequest,
+    params: &RenderParams,
+) -> color::SampleDepth {
+    match canvas.space() {
+        WorkingSpace::Wide => color::SampleDepth::Sixteen,
+        WorkingSpace::Srgb => params.depth,
     }
 }
 
@@ -183,8 +182,6 @@ fn default_space(session: &RasterSession, params: &RenderParams) -> WorkingSpace
 pub(crate) struct SessionSpace {
     /// [`SessionConfig::working_space`](crate::SessionConfig::working_space).
     requested: Option<WorkingSpace>,
-    /// An 8-bit page composited in sRGB under an output profile.
-    narrow: AtomicBool,
     /// A page whose group declares sRGB or gray, composited in sRGB
     /// where it would be wide.
     declared: AtomicBool,
@@ -221,16 +218,15 @@ impl SessionSpace {
 pub(crate) fn warn_working_space(
     session: &RasterSession,
     page: (u32, pdf::ObjectId),
-    params: &RenderParams,
     canvas: &pdf_interp::CanvasRequest,
 ) {
-    for warning in working_space_warnings(session, page, params, canvas) {
+    for warning in working_space_warnings(session, page, canvas) {
         log::warn!("{warning}");
     }
 }
 
 /// The warnings, each the first of its kind in the session, of page
-/// `page_num` (object `page_id`) rendered under `params` on `canvas`:
+/// `page_num` (object `page_id`) painted on `canvas`:
 ///
 /// - a page painted in ink (a CMYK page, a proof, an overprint preview)
 ///   whose group declares an RGB or gray space, which it composites in ink
@@ -240,7 +236,6 @@ pub(crate) fn warn_working_space(
 ///
 /// - an overprint preview, or a page whose group composites in CMYK,
 ///   finished through sRGB where the page would otherwise be wide;
-/// - an 8-bit page composited in sRGB, unless the session asked for sRGB;
 /// - a page whose group declares sRGB or gray composited in sRGB where it
 ///   would otherwise be wide;
 /// - a page whose group declares sRGB or gray composited in the wide space
@@ -248,7 +243,6 @@ pub(crate) fn warn_working_space(
 pub(crate) fn working_space_warnings(
     session: &RasterSession,
     (page_num, page_id): (u32, pdf::ObjectId),
-    params: &RenderParams,
     canvas: &pdf_interp::CanvasRequest,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -266,8 +260,7 @@ pub(crate) fn working_space_warnings(
     if session.output_profile.is_none() {
         return warnings;
     }
-    let space = canvas.space();
-    let wide = default_space(session, params) == WorkingSpace::Wide;
+    let wide = default_space(session) == WorkingSpace::Wide;
     let within_srgb = declared.is_some_and(GroupSpace::within_srgb);
     match canvas {
         pdf_interp::CanvasRequest::ProcessRgb { overprint } if wide => {
@@ -284,19 +277,6 @@ pub(crate) fn working_space_warnings(
                      clip before the conversion to the output profile"
                 ));
             }
-        }
-        _ if space == WorkingSpace::Srgb
-            && params.depth == color::SampleDepth::Eight
-            && flags.requested.is_none()
-            && once(&flags.narrow) =>
-        {
-            warnings.push(format!(
-                "page {page_num} is composited in sRGB at 8 bits: its colours outside sRGB clip \
-                 before the conversion to the output profile; render at 16 bits \
-                 (RenderParams::depth, rrocket --depth 16) to composite in the wide working \
-                 space, or ask for sRGB (SessionConfig::working_space, rrocket --working-space \
-                 srgb) to keep this"
-            ));
         }
         pdf_interp::CanvasRequest::Rgb if wide && within_srgb && once(&flags.declared) => {
             warnings.push(format!(
@@ -378,13 +358,36 @@ pub(crate) fn page_intent(
 /// warning.  Under a soft proof the canvas is the press's ink, converted
 /// to the display.  The colours of a CMYK page and of a proof separate
 /// under each object's intent, or `params.intent` for all; the intent
-/// returned for them is the page's ([`page_intent`]).
+/// returned for them is the page's ([`page_intent`]).  The result is
+/// narrowed to `params.depth`: a canvas painted at 16 bits for an 8-bit
+/// render (see [`canvas_depth`]) is rounded to 8 bits after the
+/// conversion, its 8-bit storage built in `buffers`.
 ///
 /// # Errors
 ///
 /// [`RasterError::OutputProfile`] when the conversion cannot be built or
-/// fails; [`RasterError::OutputIntent`] when the page has no press.
+/// fails; [`RasterError::OutputIntent`] when the page has no press;
+/// [`RasterError::PageAllocationFailed`] when the 8-bit bitmap cannot be
+/// allocated.
 pub(crate) fn convert(
+    session: &RasterSession,
+    params: &RenderParams,
+    page: (u32, pdf::ObjectId),
+    painted: (FinishedCanvas, IntentSet, WorkingSpace),
+    buffers: &mut CanvasBuffers,
+) -> Result<(FinishedCanvas, Option<RenderingIntent>), RasterError> {
+    let (canvas, intent) = convert_to_output(session, params, page, painted, buffers)?;
+    let canvas = match params.depth {
+        color::SampleDepth::Eight => canvas
+            .narrowed(buffers)
+            .map_err(crate::render::allocation_failed)?,
+        color::SampleDepth::Sixteen => canvas,
+    };
+    Ok((canvas, intent))
+}
+
+/// The conversion of [`convert`], at the depth of the canvas.
+fn convert_to_output(
     session: &RasterSession,
     params: &RenderParams,
     (page_num, page_id): (u32, pdf::ObjectId),
@@ -465,55 +468,67 @@ mod tests {
         crate::open_session_from_bytes(pdf, &config).unwrap()
     }
 
-    /// The working-space warnings of page `page_num` of `session` under
-    /// `params` on `canvas`.
+    /// The working-space warnings of page `page_num` of `session` on
+    /// `canvas`.
     fn warnings(
         session: &RasterSession,
         page_num: u32,
-        params: &RenderParams,
         canvas: &pdf_interp::CanvasRequest,
     ) -> Vec<String> {
         let page_id = session.resolve_page(page_num).unwrap();
-        working_space_warnings(session, (page_num, page_id), params, canvas)
+        working_space_warnings(session, (page_num, page_id), canvas)
     }
 
     #[test]
     fn each_working_space_warning_names_its_first_page_once() {
         use pdf_interp::CanvasRequest::{ProcessRgb, Rgb, WideRgb};
-        let eight = RenderParams::new(1.0);
-        let sixteen = RenderParams::new(1.0).with_depth(color::SampleDepth::Sixteen);
         let s = profiled_session();
-        let first = warnings(&s, 1, &eight, &Rgb);
-        assert!(first.len() == 1 && first[0].starts_with("page 1 is composited in sRGB at 8"));
-        assert_eq!(warnings(&s, 2, &eight, &Rgb), Vec::<String>::new());
+        assert_eq!(warnings(&s, 1, &Rgb), Vec::<String>::new());
         let preview = ProcessRgb { overprint: true };
-        let first = warnings(&s, 1, &sixteen, &preview);
+        let first = warnings(&s, 1, &preview);
         assert!(first.len() == 1 && first[0].starts_with("page 1 is painted as an overprint"));
-        assert_eq!(warnings(&s, 1, &sixteen, &preview), Vec::<String>::new());
+        assert_eq!(warnings(&s, 1, &preview), Vec::<String>::new());
         let process = ProcessRgb { overprint: false };
-        let first = warnings(&s, 1, &sixteen, &process);
+        let first = warnings(&s, 1, &process);
         assert!(first.len() == 1 && first[0].contains("composites in CMYK"));
-        assert_eq!(warnings(&s, 1, &sixteen, &process), Vec::<String>::new());
-        assert_eq!(warnings(&s, 1, &sixteen, &WideRgb), Vec::<String>::new());
-        let declared = warnings(&s, 2, &sixteen, &Rgb);
+        assert_eq!(warnings(&s, 1, &process), Vec::<String>::new());
+        assert_eq!(warnings(&s, 1, &WideRgb), Vec::<String>::new());
+        let declared = warnings(&s, 2, &Rgb);
         assert!(declared.len() == 1 && declared[0].contains("declares sRGB or gray, so it"));
-        assert_eq!(warnings(&s, 2, &sixteen, &Rgb), Vec::<String>::new());
+        assert_eq!(warnings(&s, 2, &Rgb), Vec::<String>::new());
     }
 
     #[test]
     fn a_page_declaring_srgb_composites_in_srgb_unless_wide_is_asked_for() {
-        let sixteen = RenderParams::new(1.0).with_depth(color::SampleDepth::Sixteen);
         let mut s = profiled_session();
         let declared = |s: &RasterSession, page| {
             let id = s.resolve_page(page).unwrap();
-            working_space(s, &sixteen, pdf_interp::page_group_space(&s.doc, id))
+            working_space(s, pdf_interp::page_group_space(&s.doc, id))
         };
         assert_eq!(declared(&s, 1), WorkingSpace::Wide);
         assert_eq!(declared(&s, 2), WorkingSpace::Srgb);
         s.working_space = SessionSpace::new(Some(WorkingSpace::Wide));
         assert_eq!(declared(&s, 2), WorkingSpace::Wide);
-        let first = warnings(&s, 2, &sixteen, &pdf_interp::CanvasRequest::WideRgb);
+        let first = warnings(&s, 2, &pdf_interp::CanvasRequest::WideRgb);
         assert!(first.len() == 1 && first[0].contains("the session asks for instead"));
+    }
+
+    #[test]
+    fn a_wide_canvas_is_painted_at_16_bits_whatever_the_output_depth() {
+        use color::SampleDepth::{Eight, Sixteen};
+        use pdf_interp::CanvasRequest::{ProcessRgb, Rgb, WideRgb};
+        let eight = RenderParams::new(1.0);
+        let sixteen = RenderParams::new(1.0).with_depth(Sixteen);
+        assert_eq!(canvas_depth(&WideRgb, &eight), Sixteen);
+        assert_eq!(canvas_depth(&WideRgb, &sixteen), Sixteen);
+        assert_eq!(canvas_depth(&Rgb, &eight), Eight);
+        assert_eq!(canvas_depth(&ProcessRgb { overprint: true }, &eight), Eight);
+        let device = pdf_interp::CanvasRequest::Cmyk {
+            overprint: false,
+            separation: pdf_interp::Separation::Device,
+        };
+        assert_eq!(canvas_depth(&device, &eight), Eight);
+        assert_eq!(canvas_depth(&Rgb, &sixteen), Sixteen);
     }
 
     #[test]
@@ -523,23 +538,14 @@ mod tests {
             overprint: false,
             separation: pdf_interp::Separation::Device,
         };
-        let eight = RenderParams::new(1.0);
-        assert!(
-            !warnings(&s, 1, &eight, &cmyk)
-                .iter()
-                .any(|w| w.contains("in ink"))
-        );
-        let first = warnings(&s, 2, &eight, &cmyk);
+        assert!(!warnings(&s, 1, &cmyk).iter().any(|w| w.contains("in ink")));
+        let first = warnings(&s, 2, &cmyk);
         assert!(
             first
                 .iter()
                 .any(|w| w.starts_with("page 2's transparency group declares an RGB"))
         );
-        assert!(
-            !warnings(&s, 2, &eight, &cmyk)
-                .iter()
-                .any(|w| w.contains("in ink"))
-        );
+        assert!(!warnings(&s, 2, &cmyk).iter().any(|w| w.contains("in ink")));
     }
 
     #[test]
@@ -554,12 +560,11 @@ mod tests {
 
     #[test]
     fn an_explicit_srgb_space_is_not_warned_about() {
+        use pdf_interp::CanvasRequest::{ProcessRgb, Rgb};
         let mut s = profiled_session();
         s.working_space = SessionSpace::new(Some(WorkingSpace::Srgb));
-        let eight = RenderParams::new(1.0);
-        assert_eq!(
-            warnings(&s, 1, &eight, &pdf_interp::CanvasRequest::Rgb),
-            Vec::<String>::new()
-        );
+        for (page, canvas) in [(1, Rgb), (2, Rgb), (1, ProcessRgb { overprint: true })] {
+            assert_eq!(warnings(&s, page, &canvas), Vec::<String>::new());
+        }
     }
 }

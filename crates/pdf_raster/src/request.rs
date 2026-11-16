@@ -120,7 +120,11 @@ pub struct RenderParams {
     /// default), or 16, which [`render_page_canvas`](crate::render_page_canvas)
     /// and [`render_page_bands`](crate::render_page_bands) return as
     /// 16-bit RGB.  A 16-bit render costs twice the bytes of an 8-bit one
-    /// against the byte budget.
+    /// against the byte budget.  A page composited in the wide working
+    /// space (see [`SessionConfig::working_space`](crate::SessionConfig::working_space))
+    /// is painted at 16 bits at either depth, and costs the bytes of a
+    /// 16-bit render; at 8 bits its result is rounded to 8 bits after the
+    /// conversion to the output profile.
     pub depth: SampleDepth,
     /// The rendering intent of the conversion to the session's
     /// [`output_profile`](crate::SessionConfig::output_profile); `None`
@@ -258,9 +262,12 @@ impl RenderParams {
         self
     }
 
-    /// The layout of the canvas the render allocates: of ink for a CMYK
-    /// page; a page simulating overprint is painted on ink too (see
-    /// [`CanvasLayout::with_ink`](crate::CanvasLayout::with_ink)).
+    /// The layout of the canvas the render allocates in the sRGB working
+    /// space: of ink for a CMYK page; a page simulating overprint is
+    /// painted on ink too (see
+    /// [`CanvasLayout::with_ink`](crate::CanvasLayout::with_ink)), and a
+    /// page of the wide working space at 16 bits (see
+    /// [`depth`](Self::depth)).
     #[must_use]
     pub const fn canvas_layout(&self) -> crate::CanvasLayout {
         crate::CanvasLayout::new(self.depth, self.transparent_background)

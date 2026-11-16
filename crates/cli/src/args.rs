@@ -326,13 +326,13 @@ pub(crate) struct Args {
     /// The working space the pages are composited in before the conversion
     /// to --output-profile: `wide` (the ROMM RGB primaries with the sRGB
     /// tone curve), which keeps colours outside sRGB up to the conversion,
-    /// or `srgb`.  Default: `wide` at --depth 16 under --output-profile,
-    /// `srgb` otherwise; an 8-bit page under --output-profile is
-    /// composited in sRGB and warns once that its colours outside sRGB
-    /// clip, unless `srgb` is given.  Blending and transparency groups
-    /// composite in the working space, and transfer functions map its
-    /// components; overprint-preview pages (--overprint) are composited in
-    /// sRGB.  `wide` needs --output-profile and --depth 16.
+    /// or `srgb`.  Default: `wide` under --output-profile, `srgb`
+    /// otherwise.  `wide` is painted at 16 bits at either --depth, an
+    /// 8-bit page rounded to 8 bits after the conversion; `srgb` at the
+    /// --depth given.  Blending and transparency groups composite in the
+    /// working space, and transfer functions map its components;
+    /// overprint-preview pages (--overprint) are composited in sRGB.
+    /// `wide` needs --output-profile.
     #[arg(long = "working-space", value_name = "SPACE", value_enum)]
     pub working_space: Option<WorkingSpaceArg>,
 
@@ -1268,21 +1268,12 @@ impl Args {
     /// with CMYK and transparent output.
     fn validate_output_profile_flags(&self) -> Result<(), String> {
         self.validate_proof_flags()?;
-        if self.working_space == Some(WorkingSpaceArg::Wide) {
-            if self.output_profile.is_none() {
-                return Err(
-                    "--working-space wide carries its gamut to the conversion to the output \
-                     profile: add --output-profile"
-                        .to_owned(),
-                );
-            }
-            if self.depth() == pdf_raster::SampleDepth::Eight {
-                return Err(
-                    "--working-space wide is composited at 16 bits, at which its levels are as \
-                     fine as sRGB's at 8: add --depth 16"
-                        .to_owned(),
-                );
-            }
+        if self.working_space == Some(WorkingSpaceArg::Wide) && self.output_profile.is_none() {
+            return Err(
+                "--working-space wide carries its gamut to the conversion to the output \
+                 profile: add --output-profile"
+                    .to_owned(),
+            );
         }
         if self.output_profile.is_none() && self.proof.is_none() {
             return match (
@@ -1428,18 +1419,24 @@ impl Args {
     }
 
     /// The working space the pages are composited in, as the session
-    /// resolves it for a page that is not an overprint preview:
-    /// `--working-space`, else the wide space at --depth 16 under
-    /// --output-profile, else sRGB.
+    /// resolves it for a page that is not an overprint preview and whose
+    /// transparency group declares no space: `--working-space`, else the
+    /// wide space under --output-profile, else sRGB.
     fn resolved_working_space(&self) -> pdf_raster::WorkingSpace {
         match self.working_space {
             Some(space) => space.into(),
-            None if self.output_profile.is_some()
-                && self.depth() == pdf_raster::SampleDepth::Sixteen =>
-            {
-                pdf_raster::WorkingSpace::Wide
-            }
+            None if self.output_profile.is_some() => pdf_raster::WorkingSpace::Wide,
             None => pdf_raster::WorkingSpace::Srgb,
+        }
+    }
+
+    /// The depth of the canvas the pages are painted on, as
+    /// [`Self::resolved_working_space`] resolves their space: 16 bits in
+    /// the wide space, [`Self::depth`] in sRGB.
+    pub(crate) fn canvas_depth(&self) -> pdf_raster::SampleDepth {
+        match self.resolved_working_space() {
+            pdf_raster::WorkingSpace::Wide => pdf_raster::SampleDepth::Sixteen,
+            pdf_raster::WorkingSpace::Srgb => self.depth(),
         }
     }
 
@@ -1628,7 +1625,7 @@ impl Args {
     /// flag, else the run's ([`Self::dpi`]).
     pub(crate) fn page_dpi(&self, page_pts: (f64, f64)) -> (f64, f64) {
         if self.print_resolution_per_page {
-            let layout = pdf_raster::CanvasLayout::new(self.depth(), false);
+            let layout = pdf_raster::CanvasLayout::new(self.canvas_depth(), false);
             let dpi = crate::print::default_dpi(page_pts, layout.bytes_per_px());
             (dpi, dpi)
         } else {
@@ -2453,6 +2450,24 @@ mod page_list_tests {
         sixteen.apply_print_preset();
         assert_eq!(eight.page_dpi(page).0, crate::print::PRINT_DPI);
         assert_eq!(sixteen.page_dpi(page).0, crate::print::LARGE_FORMAT_DPI);
+        // The wide working space is painted at 16 bits at --depth 8.
+        let profiled = |extra: &[&str]| {
+            let mut args = Args::parse_from(
+                [
+                    &["rrocket", "--print", "--output-profile", "p.icc"],
+                    extra,
+                    &["in.pdf"],
+                ]
+                .concat(),
+            );
+            args.apply_print_preset();
+            args.page_dpi(page).0
+        };
+        assert_eq!(profiled(&[]), crate::print::LARGE_FORMAT_DPI);
+        assert_eq!(
+            profiled(&["--working-space", "srgb"]),
+            crate::print::PRINT_DPI
+        );
     }
 
     #[test]
