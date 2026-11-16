@@ -15,6 +15,7 @@ use super::canvas::{CanvasKind, with_canvas};
 use super::devices::CacheState;
 use super::image_compositor::{ImageCompositor, RgbaRows, composite_rgba_rows};
 use super::image_sampler::{GridClip, SampleGrid};
+use crate::separation::Separator;
 
 /// What a device blit left on the bitmap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +102,7 @@ impl PageRenderer<'_> {
         cached: &CachedImage,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
-        overprint: Option<ChannelMask>,
+        (overprint, separator): (Option<ChannelMask>, &Separator),
     ) -> BlitOutcome {
         // Grid edges are clamped to the page, so they fit i32 whenever the
         // page does; a page wider than i32::MAX pixels cannot exist.
@@ -141,9 +142,8 @@ impl PageRenderer<'_> {
         let kind = self.canvas.kind();
         let rgb_transfer = transfer.as_deref().filter(|_| kind == CanvasKind::Rgb);
         let gpu_ctx = self.gpu_ctx.as_deref();
-        let separator = self.separator(false);
         with_canvas!(&mut self.canvas, |bitmap| {
-            let mut compositor = ImageCompositor::new(bitmap, &paint, &separator);
+            let mut compositor = ImageCompositor::new(bitmap, &paint, separator);
             match kind {
                 CanvasKind::Rgb => {}
                 CanvasKind::Rgb16 => compositor.wide_transfer = transfer.as_deref(),
@@ -319,6 +319,7 @@ mod tests {
             partial: None,
             tints: None,
             kept_tints: false,
+            intent: crate::RenderingIntent::RelativeColorimetric,
         };
         r.blit_image(&decoded, Some(b"Im0"));
         (r.rgb_canvas().data().to_vec(), r.diag.image_failures.len())

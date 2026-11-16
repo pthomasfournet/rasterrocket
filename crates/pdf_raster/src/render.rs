@@ -767,9 +767,9 @@ impl<'a> PageJob<'a> {
 /// it, sRGB otherwise.
 ///
 /// A CMYK page separates the colours that are not CMYK through the
-/// session's CMYK output profile, under `params.intent`, else relative
-/// colorimetry, and its black-point compensation; without a profile, by
-/// the device conversion.  Under a soft proof every page is a CMYK page
+/// session's CMYK output profile, under `params.intent`, else under the
+/// intent each object is painted with, and its black-point compensation;
+/// without a profile, by the device conversion.  Under a soft proof every page is a CMYK page
 /// whose profile is the page's press.
 ///
 /// # Errors
@@ -789,13 +789,13 @@ fn canvas_request(
     if session.proof.is_some() || params.color == crate::ColorModel::Cmyk {
         let space = crate::output::working_space(session, params, false);
         let separation = match press {
-            Some(profile) => profile
-                .separation(
-                    space,
-                    crate::output::cmyk_intent(params),
-                    params.black_point_compensation,
-                )
-                .map_err(RasterError::OutputProfile)?,
+            Some(profile) => pdf_interp::OutputProfile::separation(
+                &profile,
+                space,
+                params.intent,
+                params.black_point_compensation,
+            )
+            .map_err(RasterError::OutputProfile)?,
             None => pdf_interp::Separation::Device,
         };
         return Ok(pdf_interp::CanvasRequest::Cmyk {

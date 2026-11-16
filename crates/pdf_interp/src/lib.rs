@@ -43,7 +43,7 @@ pub use page_group::{
 };
 pub use prescan::prescan_page;
 pub use rotation::{InvalidRotation, Rotation};
-pub use separation::{CanvasRequest, Separation};
+pub use separation::{CanvasRequest, PressSeparation, Separation};
 pub use unsupported::{
     MediaKind, ScriptLocation, UnsupportedFeature, document_unsupported_features,
     page_has_javascript, page_unsupported_features,

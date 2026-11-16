@@ -259,6 +259,9 @@ pub struct DecodedImage {
     /// ([`ImageDecodeCtx::keep_tints`]): `tints` is then present for every
     /// image it applies to.
     pub kept_tints: bool,
+    /// The rendering intent the image's colours were converted under,
+    /// which an ink canvas separates them under too.
+    pub intent: crate::RenderingIntent,
 }
 
 /// The ink amounts of an image — the colorant tints of a `Separation` or
@@ -680,6 +683,7 @@ pub fn resolve_image<#[cfg(feature = "gpu-jpeg-huffman")] B: gpu::backend::GpuBa
         partial,
         tints,
         kept_tints: ctx.keep_tints,
+        intent: ctx.target.intent.intent,
     })
 }
 

@@ -86,17 +86,27 @@ impl PageRenderer<'_> {
         }
     }
 
-    /// The separator of a paint of a colour not given as ink: the page's,
-    /// with the graphics state's black generation and undercolour removal
-    /// for a colour of an RGB or other non-gray source; a colour of a gray
-    /// source (`gray`) takes the device's own functions.
+    /// The separator of a paint of a colour not given as ink under the
+    /// graphics state's intent (see [`Self::separator_for`]).
     pub(super) fn separator(&self, gray: bool) -> Separator {
-        if gray {
-            return self.ink.separator.with_black(&DeviceBlack::default());
-        }
-        self.ink
-            .separator
-            .with_black(&self.gstate.current().device_black)
+        self.separator_for(gray, None)
+    }
+
+    /// The separator of a paint of a colour not given as ink: the page's,
+    /// under `own`, an image's own intent, else the graphics state's, with
+    /// the graphics state's black generation and undercolour removal for a
+    /// colour of a non-gray source; a colour of a gray source (`gray`)
+    /// takes the device's own functions.
+    pub(super) fn separator_for(
+        &self,
+        gray: bool,
+        own: Option<crate::RenderingIntent>,
+    ) -> Separator {
+        let gs = self.gstate.current();
+        let device = DeviceBlack::default();
+        let black = if gray { &device } else { &gs.device_black };
+        let intent = own.unwrap_or(gs.colour_intent.intent);
+        self.ink.separator.for_paint(black, intent)
     }
 
     /// The separator of a paint in the fill colour.

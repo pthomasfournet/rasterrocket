@@ -189,16 +189,13 @@ fn cmyk_printer() -> OutputProfile {
 #[test]
 fn a_cmyk_profile_separates_the_wide_space_like_transicc() {
     let profile = cmyk_printer();
-    let Separation::Profile(table) = profile
-        .separation(
+    let table = profile
+        .separation_table(
             WorkingSpace::Wide,
             RenderingIntent::RelativeColorimetric,
             false,
         )
-        .expect("separates")
-    else {
-        panic!("a profile separation")
-    };
+        .expect("separates");
     // The wide value (0–255) and its ink (percent), for the Adobe RGB
     // colours (100, 180, 160), (60, 140, 200), (150, 200, 90), (200, 120, 160).
     let reference: [([f64; 3], [f64; 4]); 4] = [
@@ -234,16 +231,13 @@ fn a_cmyk_profile_separates_like_transicc() {
     let profile = cmyk_printer();
     assert_eq!(profile.space(), OutputSpace::Cmyk);
     assert_eq!(profile.space().channels(), 4);
-    let Separation::Profile(table) = profile
-        .separation(
+    let table = profile
+        .separation_table(
             WorkingSpace::Srgb,
             RenderingIntent::RelativeColorimetric,
             false,
         )
-        .expect("separates")
-    else {
-        panic!("a profile separation")
-    };
+        .expect("separates");
     // transicc -n -i '*sRGB' -o printer-cmyk-v4.icc -t 1, in percent.
     let reference: [([u8; 3], [f64; 4]); 4] = [
         ([255, 0, 0], [0.0, 100.0, 100.0, 0.0]),
@@ -258,16 +252,55 @@ fn a_cmyk_profile_separates_like_transicc() {
             assert!((g - w).abs() <= 1.5, "{rgb:?}: {got:?} for {want:?} %");
         }
     }
-    let again = profile
-        .separation(
-            WorkingSpace::Srgb,
-            RenderingIntent::RelativeColorimetric,
-            false,
-        )
-        .expect("separates");
+    let profile = Arc::new(profile);
+    let Separation::Profile(press) =
+        OutputProfile::separation(&profile, WorkingSpace::Srgb, None, false).expect("separates")
+    else {
+        panic!("a profile separation")
+    };
     assert!(
-        matches!(&again, Separation::Profile(t) if Arc::ptr_eq(t, &table)),
+        Arc::ptr_eq(&press.table(RenderingIntent::RelativeColorimetric), &table),
         "the table is built once"
+    );
+}
+
+/// Without a fixed intent a paint separates through the table of its own
+/// intent; a fixed intent serves every paint.
+#[test]
+fn a_press_separation_takes_each_paint_s_intent_unless_one_is_fixed() {
+    let profile = Arc::new(cmyk_printer());
+    let table = |intent| {
+        profile
+            .separation_table(WorkingSpace::Srgb, intent, false)
+            .expect("separates")
+    };
+    let Separation::Profile(own) =
+        OutputProfile::separation(&profile, WorkingSpace::Srgb, None, false).expect("separates")
+    else {
+        panic!("a profile separation")
+    };
+    let Separation::Profile(fixed) = OutputProfile::separation(
+        &profile,
+        WorkingSpace::Srgb,
+        Some(RenderingIntent::Saturation),
+        false,
+    )
+    .expect("separates") else {
+        panic!("a profile separation")
+    };
+    for intent in RenderingIntent::ALL {
+        assert!(Arc::ptr_eq(&own.table(intent), &table(intent)), "{intent}");
+        assert!(
+            Arc::ptr_eq(&fixed.table(intent), &table(RenderingIntent::Saturation)),
+            "{intent}"
+        );
+    }
+    let perceptual = table(RenderingIntent::Perceptual);
+    let relative = table(RenderingIntent::RelativeColorimetric);
+    assert_ne!(
+        perceptual.ink([30u8, 120, 200]),
+        relative.ink([30u8, 120, 200]),
+        "the test printer's intents separate differently"
     );
 }
 
@@ -280,16 +313,13 @@ fn a_cmyk_profile_separates_like_transicc() {
 #[test]
 fn a_compensated_cmyk_separation_maps_black_to_the_perceptual_black() {
     let profile = cmyk_printer();
-    let Separation::Profile(table) = profile
-        .separation(
+    let table = profile
+        .separation_table(
             WorkingSpace::Srgb,
             RenderingIntent::RelativeColorimetric,
             true,
         )
-        .expect("separates")
-    else {
-        panic!("a profile separation")
-    };
+        .expect("separates");
     let mut srgb = ColorProfile::new_srgb();
     srgb.cicp = None;
     let printed = profile
@@ -338,7 +368,7 @@ fn profiles_and_pages_of_other_colour_spaces_are_refused() {
     let relative = (RenderingIntent::RelativeColorimetric, false);
     let mut buffers = CanvasBuffers::default();
     assert_eq!(
-        rgb.separation(WorkingSpace::Srgb, relative.0, relative.1)
+        rgb.separation_table(WorkingSpace::Srgb, relative.0, relative.1)
             .unwrap_err(),
         OutputProfileError::Mismatch(OutputSpace::Rgb)
     );

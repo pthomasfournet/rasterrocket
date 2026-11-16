@@ -233,15 +233,6 @@ pub(crate) fn working_space_warnings(
     warnings
 }
 
-/// The intent a CMYK page separates under: `params.intent`, else relative
-/// colorimetry.  The separation is made as the page is painted, before
-/// its content's intents are known.
-pub(crate) fn cmyk_intent(params: &RenderParams) -> RenderingIntent {
-    params
-        .intent
-        .unwrap_or(RenderingIntent::RelativeColorimetric)
-}
-
 /// The intent a page whose marking operators used `content` converts
 /// under: `explicit` when given, else the page's one intent, else
 /// relative colorimetric.  The second value is whether the page mixed
@@ -263,8 +254,9 @@ pub(crate) fn page_intent(
 /// intents; returned with the intent, or as it is with `None` without a
 /// profile.  The first page of mixed intents in the session logs a
 /// warning.  Under a soft proof the canvas is the press's ink, converted
-/// to the display; the intent returned is the one its colours separated
-/// under ([`cmyk_intent`]).
+/// to the display.  The colours of a CMYK page and of a proof separate
+/// under each object's intent, or `params.intent` for all; the intent
+/// returned for them is the page's ([`page_intent`]).
 ///
 /// # Errors
 ///
@@ -282,13 +274,13 @@ pub(crate) fn convert(
             .for_page(&session.doc, page_id)?
             .convert(canvas, proof.intent, buffers)
             .map_err(RasterError::OutputProfile)?;
-        return Ok((canvas, Some(cmyk_intent(params))));
+        return Ok((canvas, Some(page_intent(params.intent, content).0)));
     }
     let Some(profile) = &session.output_profile else {
         return Ok((canvas, None));
     };
     if canvas.is_cmyk() {
-        return Ok((canvas, Some(cmyk_intent(params))));
+        return Ok((canvas, Some(page_intent(params.intent, content).0)));
     }
     let (intent, mixed) = page_intent(params.intent, content);
     if mixed && !session.mixed_intents_warned.swap(true, Ordering::Relaxed) {

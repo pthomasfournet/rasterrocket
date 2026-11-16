@@ -447,3 +447,49 @@ fn icc_cmyk_images_paint_their_samples_on_a_cmyk_page() {
     );
     assert_eq!(at(&page, 5, 5), [10, 100, 50, 0]);
 }
+
+/// The separation of sRGB colours through the synthetic CMYK printer of
+/// `tests/fixtures/icc`, whose tables differ by intent, under `fixed` for
+/// every paint when given.
+fn printer_separation(fixed: Option<crate::RenderingIntent>) -> Separation {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/icc/printer-cmyk-v4.icc"
+    );
+    let profile = std::sync::Arc::new(
+        crate::OutputProfile::from_bytes(std::fs::read(path).expect("the fixture is present"))
+            .expect("a CMYK output profile"),
+    );
+    crate::OutputProfile::separation(&profile, crate::WorkingSpace::Srgb, fixed, false)
+        .expect("separates")
+}
+
+/// Each paint separates under its own intent: the graphics state's for a
+/// fill, an image's `/Intent` for an image; a fixed intent serves every
+/// paint.
+#[test]
+fn a_paint_separates_under_its_own_intent() {
+    use crate::RenderingIntent::{Perceptual, RelativeColorimetric, Saturation};
+    let doc = page_doc("", "");
+    let content = b"0.1 0.5 0.3 rg 0 0 3 10 re f /Perceptual ri 3 0 3 10 re f \
+          q 4 0 0 10 6 0 cm BI /W 1 /H 1 /CS /RGB /BPC 8 /Intent /Saturation ID \x1a\x80\x4d EI Q";
+    let rgb = [26u8, 128, 77];
+    for (fixed, want) in [
+        (None, [RelativeColorimetric, Perceptual, Saturation]),
+        (Some(Saturation), [Saturation; 3]),
+    ] {
+        let separation = printer_separation(fixed);
+        let Separation::Profile(press) = &separation else {
+            panic!("a profile separation")
+        };
+        let request = CanvasRequest::Cmyk {
+            overprint: false,
+            separation: separation.clone(),
+        };
+        let page = render(&doc, (10, SampleDepth::Eight), &request, content);
+        for (x, intent) in [1, 4, 8].into_iter().zip(want) {
+            let ink = press.table(intent).ink(rgb).map(u16::from);
+            assert_eq!(at(&page, x, 5), ink, "{fixed:?}: pixel {x}, {intent}");
+        }
+    }
+}

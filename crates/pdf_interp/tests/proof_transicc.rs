@@ -27,7 +27,7 @@ use common::{
 };
 use raster::Bitmap;
 use rasterrocket_interp::renderer::{CanvasBuffers, FinishedCanvas};
-use rasterrocket_interp::{OutputProfile, ProofIntent, RenderingIntent, Separation, SoftProof};
+use rasterrocket_interp::{OutputProfile, ProofIntent, RenderingIntent, SoftProof};
 
 /// The largest ΔE00 accepted for the chart at 8 bits: the page's ink and
 /// its display values are each rounded to 8 bits, two quantisations
@@ -123,12 +123,9 @@ fn separated(
     chart: &[[f64; 3]],
     bits: u8,
 ) -> Vec<[f64; 4]> {
-    let Separation::Profile(table) = press
-        .separation(rasterrocket_interp::WorkingSpace::Srgb, intent, bpc)
-        .expect("separates")
-    else {
-        panic!("a profile separation")
-    };
+    let table = press
+        .separation_table(rasterrocket_interp::WorkingSpace::Srgb, intent, bpc)
+        .expect("separates");
     chart
         .iter()
         .map(|rgb| {

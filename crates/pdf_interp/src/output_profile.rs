@@ -22,8 +22,8 @@
 //! A CMYK profile does not convert finished pages: a page rendered as CMYK
 //! paints its process colours as they are, a CMYK device's values, and
 //! separates every other colour as it is painted, through the profile's
-//! conversion of the page's working space tabulated by
-//! [`OutputProfile::separation`].
+//! conversion of the page's working space under the paint's intent,
+//! tabulated by [`OutputProfile::separation_table`].
 
 mod proof;
 mod source;
@@ -40,7 +40,7 @@ use moxcms::{
 use raster::Bitmap;
 
 use crate::renderer::{CanvasBuffers, FinishedCanvas};
-use crate::separation::{PROFILE_GRID, ProfileSeparation, Separation};
+use crate::separation::{PROFILE_GRID, PressSeparation, ProfileSeparation, Separation};
 use crate::{RenderingIntent, WorkingSpace};
 
 /// The colour space of an output profile's device values.
@@ -285,10 +285,28 @@ impl OutputProfile {
     }
 
     /// The separation of colours from the working space `space` to the CMYK
+    /// of `profile`, under `intent` for every paint when given, else under
+    /// each paint's own intent (see [`PressSeparation`]), with black-point
+    /// compensation when `bpc`.  The table of `intent`, else of relative
+    /// colorimetry, is tabulated now.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::separation_table`].
+    pub fn separation(
+        profile: &Arc<Self>,
+        space: WorkingSpace,
+        intent: Option<RenderingIntent>,
+        bpc: bool,
+    ) -> Result<Separation, OutputProfileError> {
+        PressSeparation::new(Arc::clone(profile), space, intent, bpc)
+            .map(|press| Separation::Profile(Arc::new(press)))
+    }
+
+    /// The separation of colours from the working space `space` to the CMYK
     /// of the profile under `intent`, with black-point compensation when
-    /// `bpc`,
-    /// tabulated on first use: [`PROFILE_GRID`]³ nodes, each a 16-bit
-    /// conversion.
+    /// `bpc`, tabulated on first use: [`PROFILE_GRID`]³ nodes, each a
+    /// 16-bit conversion.
     ///
     /// # Errors
     ///
@@ -296,12 +314,12 @@ impl OutputProfile {
     /// [`OutputProfileError::Transform`] or
     /// [`OutputProfileError::Conversion`] when the conversion cannot be
     /// built or run, kept and returned again on every later call.
-    pub fn separation(
+    pub fn separation_table(
         &self,
         space: WorkingSpace,
         intent: RenderingIntent,
         bpc: bool,
-    ) -> Result<Separation, OutputProfileError> {
+    ) -> Result<Arc<ProfileSeparation>, OutputProfileError> {
         if self.space != OutputSpace::Cmyk {
             return Err(OutputProfileError::Mismatch(self.space));
         }
@@ -311,7 +329,6 @@ impl OutputProfile {
                 tabulate(&*xform, space).map(Arc::new)
             })
             .clone()
-            .map(Separation::Profile)
     }
 
     /// `canvas`, a canvas of the working space `space`, converted to the

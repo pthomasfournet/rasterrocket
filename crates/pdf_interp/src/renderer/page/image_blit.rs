@@ -19,6 +19,7 @@ use super::image_sampler::{
 };
 use super::pixel_rect::PixelRect;
 use crate::resources::{ImageColorSpace, ImageDescriptor, SoftMask, TintData};
+use crate::separation::Separator;
 
 impl PageRenderer<'_> {
     /// Whether image decodes keep their colorant tints: on an ink canvas,
@@ -165,6 +166,7 @@ impl PageRenderer<'_> {
         }
 
         let source = self.image_source(decoded, colorants.as_ref(), plan.as_ref(), img, name);
+        let separator = self.image_separator(decoded, img);
 
         // The image is one object under the soft mask in effect, unless its
         // own `/SMask` replaces that mask.
@@ -175,9 +177,14 @@ impl PageRenderer<'_> {
                     r.composite_ink_image(ink, img, &ctm, mask, &grid, &mut grid_clip);
                     Ok(())
                 }
-                ImageSource::Samples(overprint) => {
-                    r.composite_image(img, &ctm, mask, &grid, &mut grid_clip, *overprint)
-                }
+                ImageSource::Samples(overprint) => r.composite_image(
+                    img,
+                    &ctm,
+                    mask,
+                    &grid,
+                    &mut grid_clip,
+                    (*overprint, &separator),
+                ),
             };
             if let Err(reason) = drawn {
                 r.record_image_failure(name, reason);
@@ -229,6 +236,23 @@ impl PageRenderer<'_> {
             }
             None => ImageSource::Samples(None),
         }
+    }
+
+    /// The separator of `img`, the samples of `decoded`: a stencil paints
+    /// the fill colour; an image's samples separate as grays or as colours,
+    /// under the intent they were converted under.
+    fn image_separator(
+        &self,
+        decoded: &crate::resources::DecodedImage,
+        img: &ImageDescriptor,
+    ) -> Separator {
+        if img.color_space == ImageColorSpace::Mask {
+            return self.fill_separator();
+        }
+        self.separator_for(
+            img.color_space == ImageColorSpace::Gray,
+            Some(decoded.intent),
+        )
     }
 
     /// The plan by which the colorant tints of `decoded` paint on the ink
@@ -432,6 +456,8 @@ impl PageRenderer<'_> {
     /// within `grid_clip`; `mask` is its soft mask with the matrix that
     /// draws it.  An image's samples write the channels `overprint`, every
     /// channel for `None`; a stencil writes those of the fill colour.
+    /// Colours not given as ink are separated by `separator` on an ink
+    /// canvas.
     /// `Err` carries the reason a decoded image cannot be drawn, for the
     /// caller to record against the image's name.
     pub(super) fn composite_image(
@@ -441,7 +467,7 @@ impl PageRenderer<'_> {
         mask: Option<(&SoftMask, Ctm)>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
-        overprint: Option<ChannelMask>,
+        (overprint, separator): (Option<ChannelMask>, &Separator),
     ) -> Result<(), String> {
         // GPU image-blit path: device-resident pixels sampled by the blit
         // kernel of the cache's backend through the same grid, composited onto `bitmap` before
@@ -457,12 +483,12 @@ impl PageRenderer<'_> {
         if self.canvas.kind().depth() == color::SampleDepth::Sixteen
             && let Some(host) = self.host_copy(img, "a 16-bit canvas")
         {
-            return self.composite_image(&host, ctm, mask, grid, grid_clip, overprint);
+            return self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator));
         }
         #[cfg(feature = "cache")]
         if let crate::resources::image::ImageData::Gpu(cached) = &img.data {
             debug_assert!(img.smask.is_none(), "device-resident images carry no mask");
-            match self.try_gpu_blit_image(cached, grid, grid_clip, overprint) {
+            match self.try_gpu_blit_image(cached, grid, grid_clip, (overprint, separator)) {
                 BlitOutcome::Drawn => {
                     self.diag.device_image_blits = self.diag.device_image_blits.saturating_add(1);
                     return Ok(());
@@ -471,7 +497,14 @@ impl PageRenderer<'_> {
                 // read-back succeeds, draws the image through the CPU path.
                 BlitOutcome::NotStarted => {
                     if let Some(host) = self.host_copy(img, "a failed device blit") {
-                        return self.composite_image(&host, ctm, mask, grid, grid_clip, overprint);
+                        return self.composite_image(
+                            &host,
+                            ctm,
+                            mask,
+                            grid,
+                            grid_clip,
+                            (overprint, separator),
+                        );
                     }
                     return Err("the device blit and the host read-back failed".to_owned());
                 }
@@ -519,16 +552,30 @@ impl PageRenderer<'_> {
         let mask = mask.as_ref();
         match (wide, bytes, deep) {
             (Some(s), _, true) => {
-                self.composite_host::<_, u16>(img, s, mask, grid, grid_clip, overprint);
+                self.composite_host::<_, u16>(
+                    img,
+                    s,
+                    mask,
+                    grid,
+                    grid_clip,
+                    (overprint, separator),
+                );
             }
             (Some(s), _, false) => {
-                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, overprint);
+                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, (overprint, separator));
             }
             (None, Some(s), true) => {
-                self.composite_host::<_, u16>(img, s, mask, grid, grid_clip, overprint);
+                self.composite_host::<_, u16>(
+                    img,
+                    s,
+                    mask,
+                    grid,
+                    grid_clip,
+                    (overprint, separator),
+                );
             }
             (None, Some(s), false) => {
-                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, overprint);
+                self.composite_host::<_, u8>(img, s, mask, grid, grid_clip, (overprint, separator));
             }
             (None, None, _) => {}
         }
@@ -551,7 +598,7 @@ impl PageRenderer<'_> {
         mask: Option<&MaskSampler<'_>>,
         grid: &SampleGrid,
         grid_clip: &mut GridClip<'_>,
-        overprint: Option<ChannelMask>,
+        (overprint, separator): (Option<ChannelMask>, &Separator),
     ) {
         let bpp = img.color_space.bytes_per_pixel();
         let painted_fill = self.gstate.current().painted_fill_color();
@@ -584,16 +631,8 @@ impl PageRenderer<'_> {
                 std::array::from_fn(|c| T::lookup(tables[c], px[c]))
             })
         };
-        // A stencil paints the fill colour; an image's samples separate as
-        // grays or as colours.
-        let separator = if stencil {
-            self.fill_separator()
-        } else {
-            self.separator(img.color_space == ImageColorSpace::Gray)
-        };
-        let mut compositor = with_canvas!(&self.canvas, |b| ImageCompositor::new(
-            b, &paint, &separator
-        ));
+        let mut compositor =
+            with_canvas!(&self.canvas, |b| ImageCompositor::new(b, &paint, separator));
         // On an ink canvas a stencil paints the fill colour as its ink, on
         // a 16-bit canvas as its 16-bit colour; there the samples map
         // through the 16-bit tables once widened.

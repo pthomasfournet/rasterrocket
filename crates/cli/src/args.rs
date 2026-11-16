@@ -269,9 +269,9 @@ pub(crate) struct Args {
     /// `perceptual`, `relative` (relative colorimetric), `saturation` or
     /// `absolute` (absolute colorimetric).  Default: the one intent a
     /// page's content uses (`ri`, `/RI`, an image's `/Intent`), else
-    /// relative colorimetric; for a CMYK profile, relative colorimetric.
-    /// Under --proof, the intent of the separation to the press, default
-    /// relative colorimetric.
+    /// relative colorimetric; a CMYK profile, and under --proof the press,
+    /// separates each object under its own intent.  Given, one intent for
+    /// every object.
     #[arg(long = "intent", value_name = "INTENT", value_enum)]
     pub intent: Option<IntentArg>,
 

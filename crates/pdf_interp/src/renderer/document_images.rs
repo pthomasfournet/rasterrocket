@@ -337,6 +337,7 @@ pub(crate) mod tests {
             partial: None,
             tints: None,
             kept_tints: false,
+            intent: crate::RenderingIntent::RelativeColorimetric,
         }
     }
 

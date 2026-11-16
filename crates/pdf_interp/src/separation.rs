@@ -15,12 +15,18 @@
 //! conversion of ISO 32000-2 §10.4.2 under the graphics state's black
 //! generation and undercolour removal.  The separator of a paint is the
 //! page's with the graphics state's parameters taken in (see
-//! [`Separator::with_black`]).
+//! [`Separator::for_paint`]): its black-generation and undercolour-removal
+//! functions, and the rendering intent a profile separates it under.
+
+mod press;
+
+pub use press::PressSeparation;
 
 use std::sync::Arc;
 
 use color::Sample;
 
+use crate::RenderingIntent;
 use crate::resources::black_generation::DeviceBlack;
 
 /// The canvas a page is painted on and the pixels it finishes as.
@@ -97,9 +103,10 @@ pub enum Separation {
     /// black ink alone, and RGB loses its gray component to black.
     #[default]
     Device,
-    /// The conversion of a CMYK output profile from the working space
+    /// The conversion of a CMYK output profile from the working space,
+    /// under the intent of each paint
     /// (see [`OutputProfile::separation`](crate::OutputProfile::separation)).
-    Profile(Arc<ProfileSeparation>),
+    Profile(Arc<PressSeparation>),
 }
 
 impl Separation {
@@ -108,7 +115,7 @@ impl Separation {
     pub fn space(&self) -> crate::WorkingSpace {
         match self {
             Self::Device => crate::WorkingSpace::Srgb,
-            Self::Profile(table) => table.space,
+            Self::Profile(press) => press.space(),
         }
     }
 
@@ -116,7 +123,41 @@ impl Separation {
     fn separator(&self) -> Separator {
         match self {
             Self::Device => Separator::Device(DeviceBlack::default()),
-            Self::Profile(table) => Separator::Profile(Arc::clone(table)),
+            Self::Profile(press) => Separator::Profile(ProfileInk::new(
+                press,
+                RenderingIntent::RelativeColorimetric,
+            )),
+        }
+    }
+}
+
+/// The separation of a paint through a CMYK output profile: the table of
+/// the intent the paint separates under.
+#[derive(Clone, Debug)]
+pub(crate) struct ProfileInk {
+    press: Arc<PressSeparation>,
+    intent: RenderingIntent,
+    table: Arc<ProfileSeparation>,
+}
+
+impl PartialEq for ProfileInk {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.press, &other.press)
+            && self.intent == other.intent
+            && Arc::ptr_eq(&self.table, &other.table)
+    }
+}
+
+impl Eq for ProfileInk {}
+
+impl ProfileInk {
+    /// The separation through `press` of a paint under `intent`.
+    fn new(press: &Arc<PressSeparation>, intent: RenderingIntent) -> Self {
+        let intent = press.intent(intent);
+        Self {
+            press: Arc::clone(press),
+            intent,
+            table: press.table(intent),
         }
     }
 }
@@ -224,8 +265,8 @@ pub(crate) enum Separator {
     /// functions ([`DeviceBlack::separate`]); under the device's own,
     /// [`color::cmyk::rgb_to_device_cmyk`].
     Device(DeviceBlack),
-    /// An output profile's conversion.
-    Profile(Arc<ProfileSeparation>),
+    /// An output profile's conversion under one intent.
+    Profile(ProfileInk),
 }
 
 impl Separator {
@@ -245,7 +286,7 @@ impl Separator {
     pub(crate) fn space(&self) -> crate::WorkingSpace {
         match self {
             Self::Model | Self::Device(_) => crate::WorkingSpace::Srgb,
-            Self::Profile(table) => table.space,
+            Self::Profile(ink) => ink.table.space,
         }
     }
 
@@ -256,20 +297,22 @@ impl Separator {
         match self {
             Self::Model => color::cmyk::rgb_to_ink_at(rgb),
             Self::Device(black) => black.separate(rgb),
-            Self::Profile(table) => table.ink(rgb),
+            Self::Profile(ink) => ink.table.ink(rgb),
         }
     }
 
     /// The separator of a paint under `black`, the graphics state's
-    /// black-generation and undercolour-removal functions: the device
-    /// conversion under them; any other separator as it is.  A colour of a
-    /// gray source takes the device's own functions, under which gray is
-    /// black ink alone.
+    /// black-generation and undercolour-removal functions, and `intent`:
+    /// the device conversion under the functions, a profile's conversion
+    /// under the intent the paint separates under
+    /// ([`PressSeparation::intent`]); the preview's model as it is.
     #[must_use]
-    pub(crate) fn with_black(&self, black: &DeviceBlack) -> Self {
+    pub(crate) fn for_paint(&self, black: &DeviceBlack, intent: RenderingIntent) -> Self {
         match self {
+            Self::Model => Self::Model,
             Self::Device(_) => Self::Device(black.clone()),
-            other => other.clone(),
+            Self::Profile(ink) if ink.press.intent(intent) == ink.intent => self.clone(),
+            Self::Profile(ink) => Self::Profile(ProfileInk::new(&ink.press, intent)),
         }
     }
 }

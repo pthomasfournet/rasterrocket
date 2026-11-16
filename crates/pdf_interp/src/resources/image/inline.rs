@@ -97,6 +97,7 @@ pub(crate) fn decode_inline_image<
             partial: decoded.partial,
             tints: decoded.tints,
             kept_tints: ctx.keep_tints,
+            intent: ctx.target.intent.intent,
         }),
         Err(e) => failed(e),
     }
