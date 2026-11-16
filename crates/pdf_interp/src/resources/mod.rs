@@ -43,21 +43,9 @@ pub use image::{
     DecodedImage, IMAGE_FILTER_COUNT, ImageColorSpace, ImageDescriptor, ImageFilter, ImageRequest,
     ImageResolution, ImageTints, SoftMask, TintData, resolve_image,
 };
-pub use page_resources::{FormXObject, PageResources, ResourceIdentity, ResourceKey};
-
-/// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
-#[non_exhaustive]
-pub struct ShadingPattern {
-    /// The pattern's shading, placed by `matrix`.
-    pub shading: shading::ResolvedShading,
-    /// The pattern's `ExtGState`: graphics state parameters in effect while
-    /// the shading is painted.
-    pub ext_gstate: Option<ExtGStateParams>,
-    /// The pattern matrix concatenated onto the default coordinate space of
-    /// the pattern's parent content stream: pattern space to device space,
-    /// before the device y-flip.
-    pub matrix: [f64; 6],
-}
+pub use page_resources::{
+    FormXObject, PageResources, ResourceIdentity, ResourceKey, ShadingPattern,
+};
 
 /// The attributes of a transparency group dictionary (PDF §11.6.6), of a
 /// form `XObject` or of a page.
