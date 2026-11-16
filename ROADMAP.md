@@ -2974,6 +2974,27 @@ M and Y for its colour within the press's ink limit. K-only agrees with
 `-t13..15` on 96–99.7 % of them, and is nearer the colorimetric colour on
 the rest, where Little CMS's Newton iteration stops early.
 
+**Unreleased on master: the CMYK input grid follows the profile's CLUT.**
+The input grid's cells now subdivide the profile's CLUT cells along each
+ink (an 11-node CLUT gets 20 cells, a 9-node one 16, a 16-node one 15)
+instead of a fixed 16, so no grid cell straddles a CLUT node; a CMYK table
+with non-identity input curves is also tabulated over the curves' outputs
+and keeps whichever grid differs less from the table at 4 096 fixed
+device values (a gamma-like curve leaves shaped cells wide in the
+shadows; RGB grids stay unshaped, keeping the neutral axis). Against
+`transicc` on a K ramp and a 9⁴ lattice offset by half a step (new
+off-node charts in `input_profile_transicc`) the worst ΔE00 at 16 bits
+falls from 0.23 to 0.13 (K ramp) and 0.94 to 0.68 (lattice) on the US
+Supreme Court profile, 0.52 to 0.34 and 1.65 to 1.03 on the v4 test
+printer, and by 0.1–0.4 on the three archive profiles with input curves;
+mean ΔE00 off the nodes falls 1.5–4×. What remains is mostly colour that
+clips in sRGB inside a grid cell. Per pixel: 5.8 / 5.1 ns at 8 / 16 bits
+(was 5.5 / 4.95), 6.1 / 5.4 for shaped grids; tabulation 21–46 ms per
+conversion. On the 24 archive documents with CMYK `ICCBased` content,
+pages 1–10 at 50 dpi, 3 of 236 pages change (127 468 pixels, mean ΔE00
+0.46, max 2.4); K-only text is unchanged, its antialiased edges being
+blends of the converted solid ink.
+
 **Unreleased on master: colour conversions agree with Little CMS to its
 precision.** Three corrections, each measured against `transicc`
 (`input_profile_transicc`, `output_profile_transicc`, ignored tests that
