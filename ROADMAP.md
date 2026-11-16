@@ -3035,6 +3035,51 @@ on ISO Coated v2 (up to 4.4 % ink, about 11 levels of an 8-bit channel, at
 black), and from L* 8.0 to 11.1 on the synthetic test press; `--cmyk` without
 `--bpc`, and RGB and gray output profiles, are unchanged.
 
+**Unreleased on master: a wide working space under an output profile.**
+A page rendered at 16 bits under `--output-profile` is composited in a wide
+working space, the ROMM RGB primaries with the D50 white and the sRGB tone
+curve (`WorkingSpace::Wide`), instead of sRGB, so colours outside sRGB reach
+the printer conversion unclipped: on device grids through Little CMS it holds
+100 % of ISO Coated v2 and of an averaged 6-colour photo inkjet
+(PhotoGamutRGB avg6c), where sRGB holds 92.5 % and 49 % (clipping up to ΔE00
+16) and Rec. 2020 88 % (up to 4.2, in the cyan-greens). Device colours keep
+their sRGB meaning: their value converts through one 16-bit table conversion
+shared by fills and images; neutrals keep their value exactly (gray content
+and black-text antialiasing are unchanged), and every white (DeviceRGB,
+DeviceGray, an sRGB-tagged image, `0 0 0 0 k`, Lab `100 0 0`) is the working
+white. CalRGB, CalGray, Lab and ICC colours convert through the PCS into the
+wide space; 8-bit images of three or four components convert at 16 bits.
+Blending, transparency groups, antialiased edges, shading and image
+interpolation and transfer functions act on wide values, which moves mixtures
+of colours: against compositing in sRGB, colour over white at 50 % coverage
+by mean ΔE00 2.3 (p95 5.5), random colour pairs at 50 % alpha by 3.6,
+Multiply by 6.3 (neutral mixtures by 0). Group `/CS` stays unread for
+blending, and a wide page whose group declares one warns; soft-mask groups
+are still painted in sRGB, and overprint-preview pages are composited in sRGB
+and warn. The output conversion and CMYK separation from the wide space
+evaluate in floating point with tetrahedral interpolation at full weight
+precision: against Little CMS, sRGB colours printed through the wide space to
+the RGB test printers within ΔE00 0.60 (1.03 on PhotoGamutRGB avg6c), the
+wide chart within 0.99. On the 34-PDF gate corpus (pages 1–2, 50 dpi) at 16
+bits under the RGB test printer, every page file differs from before: text
+pages by at most 1.6 8-bit steps; the most-moved pixels of flat colour areas
+match Little CMS's conversion of their sRGB value as before (mean ΔE76 0.13,
+0.15 before); antialiased edges and transparency move by up to ΔE76 16. `--working-space
+srgb|wide` (`SessionConfig::working_space`, `None` automatic) chooses; `wide`
+without an output profile or at 8 bits is refused, and the first 8-bit page
+under an output profile warns that it is composited in sRGB. `--gpu-pages`,
+the device JPEG cache and the GPU ICC CLUT, all 8-bit sRGB, are not used for
+wide pages. Without an output profile, at 8 bits, and with `--working-space
+srgb`, output is byte-identical: 0 of the corpus's files differ under 15
+modes (RGB, gray and CMYK at both depths, overprint, proofs with and without
+a display profile, RGB, gray and CMYK profiles at 8 bits, `--gpu-pages`).
+Not done: the wide space at 8 bits, group blending spaces, and the sRGB
+output conversion's 8-bit-precise table interpolation. API changes:
+`WorkingSpace`, `ColourTarget` (replaces `ColourIntent` as the conversion
+argument of `ColorSpace::convert_to_rgb`), `CanvasRequest::WideRgb`,
+`SessionConfig::working_space`, `page_group_declares_space`;
+`OutputProfile::{convert, separation, prepare}` take the working space.
+
 **Unreleased on master: forced-CUDA deskew, deep forms, JPEG 2000 matte
 and truncation, Type 3 without `/FontMatrix`.**  Under `--backend cuda` a
 deskew rotation that fails on the GPU is `RasterError::BackendUnavailable`
