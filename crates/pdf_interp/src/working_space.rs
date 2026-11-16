@@ -166,6 +166,21 @@ pub(crate) fn encode16(lin: f32) -> u16 {
     level
 }
 
+/// The luminance `Y` of the sRGB colour `rgb` (CIE 1931 XYZ, relative to
+/// the white of the PCS): the `Y` row of the sRGB colorants, scaled to sum
+/// to 1 so that white is 1, applied to its linear components.
+pub(crate) fn srgb_luminance<S: Sample>(rgb: [S; 3]) -> S {
+    let table = srgb_linear();
+    let row = crate::resources::icc_shaper::SRGB_D50_COLORANTS[1];
+    let sum: f64 = row.iter().sum();
+    let y: f64 = rgb
+        .iter()
+        .zip(row)
+        .map(|(v, w)| f64::from(table[usize::from(u16::from_sample(*v))]) * w)
+        .sum();
+    S::from_unit(y / sum)
+}
+
 /// The linear value of every 16-bit sRGB level.
 fn srgb_linear() -> &'static Arc<[f32]> {
     static TABLE: OnceLock<Arc<[f32]>> = OnceLock::new();
@@ -314,6 +329,18 @@ pub(crate) fn encode_wide<S: Sample>(lin: [f64; 3]) -> [S; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_luminance_of_white_is_one_and_of_a_mid_gray_its_linear_value() {
+        assert_eq!(srgb_luminance([u16::MAX; 3]), u16::MAX);
+        assert_eq!(srgb_luminance([255u8; 3]), 255);
+        assert_eq!(srgb_luminance([0u8; 3]), 0);
+        // sRGB 128 is linear 0.2158.
+        assert_eq!(srgb_luminance([128u8; 3]), 55);
+        // Green carries most of the luminance, blue the least.
+        assert!(srgb_luminance([0u8, 255, 0]) > srgb_luminance([255u8, 0, 0]));
+        assert!(srgb_luminance([255u8, 0, 0]) > srgb_luminance([0u8, 0, 255]));
+    }
 
     #[test]
     fn the_romm_white_is_the_pcs_white() {

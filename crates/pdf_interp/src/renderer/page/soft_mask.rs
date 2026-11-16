@@ -133,7 +133,13 @@ impl PageRenderer<'_> {
         let function = transfer.map(|f| Function::load(self.resources.doc(), f));
         let reduce = match (luminosity, cmyk) {
             (true, true) => Reduce::DeviceGray(mask_backdrop_ink(backdrop)),
-            (true, false) => Reduce::Luminosity(self.mask_backdrop_rgb(group, backdrop)),
+            (true, false) => {
+                let space = self.mask_group_space(group);
+                Reduce::Luminosity {
+                    backdrop: self.mask_backdrop_rgb(space.as_ref(), backdrop),
+                    luminance: matches!(space, Some(colorspace::ColorSpace::Cal(_))),
+                }
+            }
             (false, _) => Reduce::Alpha,
         };
         let map = std::rc::Rc::clone(&self.ink_map);
@@ -160,17 +166,23 @@ impl PageRenderer<'_> {
         })
     }
 
-    /// The backdrop colour `BC` of the mask group `group` as sRGB at the
-    /// page's depth: `BC` is given in the group's colour space (`/Group
-    /// /CS`, PDF §11.6.5.2).  A group without a space of `BC`'s component
-    /// count reads `BC` by its count (see [`backdrop_rgb`]).
-    fn mask_backdrop_rgb(&self, group: pdf::ObjectId, bc: &[f64]) -> Srgb {
+    /// The colour space of the mask group `group`, its `/Group /CS`.
+    fn mask_group_space(&self, group: pdf::ObjectId) -> Option<colorspace::ColorSpace> {
         let doc = self.resources.doc();
-        let space = doc.get_object(group).ok().and_then(|obj| {
+        doc.get_object(group).ok().and_then(|obj| {
             let group_dict = obj.as_stream()?.dict.get(b"Group")?;
             let cs = resolve_dict(doc, group_dict)?.get(b"CS")?.clone();
             Some(colorspace::resolve(doc, &cs))
-        });
+        })
+    }
+
+    /// The backdrop colour `BC` of a mask group of colour space `space`
+    /// as sRGB at the page's depth: `BC` is given in the group's colour
+    /// space (`/Group /CS`, PDF §11.6.5.2).  A group without a space of
+    /// `BC`'s component count reads `BC` by its count (see
+    /// [`backdrop_rgb`]).
+    fn mask_backdrop_rgb(&self, space: Option<&colorspace::ColorSpace>, bc: &[f64]) -> Srgb {
+        let doc = self.resources.doc();
         match space {
             Some(space) if !bc.is_empty() && space.ncomponents() == bc.len() => {
                 let target = crate::ColourTarget::new(
@@ -499,8 +511,16 @@ const fn mask_backdrop_ink(bc: &[f64]) -> [f64; 4] {
 /// How a mask group's canvas reduces to mask values.
 #[derive(Clone, Copy)]
 enum Reduce {
-    /// The luminosity of an sRGB group over the opaque backdrop colour.
-    Luminosity(Srgb),
+    /// The luminosity of an sRGB group over the opaque backdrop colour:
+    /// its luminance `Y` for a group of a `CalRGB` or `CalGray` space
+    /// (ISO 32000-1 §11.5.3), the `DeviceRGB` → `DeviceGray` weights of
+    /// its samples otherwise.
+    Luminosity {
+        /// The backdrop colour.
+        backdrop: Srgb,
+        /// Whether the luminosity is the luminance `Y`.
+        luminance: bool,
+    },
     /// The conventional gray of an ink group over the opaque backdrop ink.
     DeviceGray([f64; 4]),
     /// The group's alpha.
@@ -523,7 +543,19 @@ where
 {
     let mut values = mask_plane::<P::Sample>(group.width, group.height)?;
     match reduce {
-        Reduce::Luminosity(bc) => luminosity_values(group, bc.at(), &mut values),
+        Reduce::Luminosity {
+            backdrop,
+            luminance: false,
+        } => luminosity_values(group, backdrop.at(), luma, &mut values),
+        Reduce::Luminosity {
+            backdrop,
+            luminance: true,
+        } => luminosity_values(
+            group,
+            backdrop.at(),
+            crate::working_space::srgb_luminance,
+            &mut values,
+        ),
         Reduce::DeviceGray(bc) => {
             device_gray_values(group, bc.map(P::Sample::from_unit), spots, &mut values);
         }
@@ -548,10 +580,21 @@ fn sample_index<S: Sample>(v: S) -> usize {
     usize::try_from(v.signed()).unwrap_or(0)
 }
 
+/// The luminosity of the sRGB colour `rgb` by the `DeviceRGB` →
+/// `DeviceGray` weights ([`color::convert::luminosity_at`]).
+fn luma<S: Sample>([r, g, b]: [S; 3]) -> S {
+    color::convert::luminosity_at(r, g, b)
+}
+
 /// Append to `out` the luminosity mask values: each pixel of `group`
 /// composited over the opaque backdrop `bc`, reduced to its luminosity by
-/// [`color::convert::luminosity_at`] (PDF §11.3.5.3).
-fn luminosity_values<P: Pixel>(group: &Bitmap<P>, bc: [P::Sample; 3], out: &mut Vec<P::Sample>) {
+/// `luminosity` (ISO 32000-1 §11.5.3).
+fn luminosity_values<P: Pixel>(
+    group: &Bitmap<P>,
+    bc: [P::Sample; 3],
+    luminosity: impl Fn([P::Sample; 3]) -> P::Sample,
+    out: &mut Vec<P::Sample>,
+) {
     let w = group.width as usize;
     for y in 0..group.height {
         let row = group.row_samples(y);
@@ -561,7 +604,7 @@ fn luminosity_values<P: Pixel>(group: &Bitmap<P>, bc: [P::Sample; 3], out: &mut 
             let ia = P::Sample::max_wide() - a;
             let px = &row[x * 3..x * 3 + 3];
             let ch = |i: usize| P::Sample::div_max(px[i].wide() * a + bc[i].wide() * ia);
-            out.push(color::convert::luminosity_at(ch(0), ch(1), ch(2)));
+            out.push(luminosity([ch(0), ch(1), ch(2)]));
         }
     }
 }
@@ -639,7 +682,7 @@ mod tests {
             .copy_from_slice(&[255, 255, 0]);
         let values = |bc| {
             let mut out = mask_plane::<u8>(3, 1).unwrap();
-            luminosity_values(&bmp, bc, &mut out);
+            luminosity_values(&bmp, bc, luma, &mut out);
             out
         };
         // White, pure red, and a transparent pixel showing the backdrop.
@@ -668,17 +711,15 @@ mod tests {
             ),
         ]);
         let renderer = PageRenderer::new(1, 1, &doc, (4, 0));
-        let white = renderer.mask_backdrop_rgb((5, 0), &[100.0, 0.0, 0.0]).bytes;
+        let backdrop = |group, bc: &[f64]| {
+            let space = renderer.mask_group_space(group);
+            renderer.mask_backdrop_rgb(space.as_ref(), bc).bytes
+        };
+        let white = backdrop((5, 0), &[100.0, 0.0, 0.0]);
         assert!(white.iter().all(|&v| v >= 250), "{white:?}");
         // A count that does not match the group's space falls back to it.
-        assert_eq!(
-            renderer.mask_backdrop_rgb((5, 0), &[1.0]).bytes,
-            [255, 255, 255]
-        );
-        assert_eq!(
-            renderer.mask_backdrop_rgb((9, 0), &[1.0, 0.0, 0.0]).bytes,
-            [255, 0, 0]
-        );
+        assert_eq!(backdrop((5, 0), &[1.0]), [255, 255, 255]);
+        assert_eq!(backdrop((9, 0), &[1.0, 0.0, 0.0]), [255, 0, 0]);
     }
 
     #[test]

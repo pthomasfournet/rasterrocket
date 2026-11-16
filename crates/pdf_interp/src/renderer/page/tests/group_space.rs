@@ -457,7 +457,8 @@ fn a_default_rgb_space_replaces_a_device_group_space() {
 }
 
 /// Page `(4, 0)` whose `/M` is a luminosity soft mask of backdrop entries
-/// `bc` whose group (5), of `/CS space`, draws `content` over the page.
+/// `bc` whose group (5), of `/CS space`, draws `content` over the page;
+/// `/C` names the group's space in the group's resources.
 fn mask_doc(space: &str, bc: &str, content: &str) -> Document {
     crate::test_helpers::make_doc_with_objects(&[
         (
@@ -473,7 +474,8 @@ fn mask_doc(space: &str, bc: &str, content: &str) -> Document {
             stream(
                 &format!(
                     "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
-                     /Group << /S /Transparency /CS {space} >>"
+                     /Group << /S /Transparency /CS {space} >> \
+                     /Resources << /ColorSpace << /C {space} >> >>"
                 ),
                 content.as_bytes(),
             ),
@@ -521,4 +523,28 @@ fn a_cmyk_mask_backdrop_is_ink() {
     assert_eq!(masked("/DeviceCMYK", "/BC [0 0 0 0]", ""), 0);
     assert_eq!(masked("/DeviceCMYK", "", ""), 255);
     assert_eq!(masked("/DeviceCMYK", "/BC [0 0 0 0.5]", ""), 128);
+}
+
+/// A mask group of a `CalRGB` or `CalGray` space takes the luminance `Y`
+/// of its colour (ISO 32000-1 §11.5.3): a gray of 0.5 under a gamma of
+/// 2.2 is a mask of 0.5^2.2 = 0.218, where the luma of its encoded value
+/// is about 0.5.  A device space takes the luma of its components.
+#[test]
+fn a_cal_luminosity_mask_takes_the_luminance_of_its_colour() {
+    let srgb = "/Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505]";
+    for (space, colour) in [
+        (
+            "[/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 2.2 >>]",
+            "0.5",
+        ),
+        (
+            &*format!("[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [2.2 2.2 2.2] {srgb} >>]"),
+            "0.5 0.5 0.5",
+        ),
+    ] {
+        let got = masked(space, "", &format!("/C cs {colour} sc 0 0 10 10 re f"));
+        assert!(got.abs_diff(200) <= 1, "{space}: {got}");
+    }
+    let device = masked("/DeviceRGB", "", "/C cs 0.5 0.5 0.5 sc 0 0 10 10 re f");
+    assert!(device.abs_diff(128) <= 1, "{device}");
 }
