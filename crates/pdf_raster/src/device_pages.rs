@@ -4,11 +4,13 @@
 //! Unless the session holds a device of its own, the device is opened on a
 //! thread of its own when the first page that qualifies asks for it, so the
 //! workers keep rendering meanwhile and a job none of whose pages qualifies
-//! never opens it; until it is open every page renders on the CPU.  The
-//! device takes one page at a time: a worker whose page
-//! qualifies claims it while it is idle, records the page's paint commands
-//! and renders them on it, and a worker that finds it busy, or a page that
-//! does not qualify, renders on the CPU.  Pages are returned by index, so
+//! never opens it; until it is open every page renders on the CPU.  Up to
+//! [`IN_FLIGHT`] pages hold the device at once: a worker whose page
+//! qualifies claims it while fewer hold it, records the page's paint
+//! commands and renders them on it, the device rendering one page at a
+//! time, so that one page is recorded while another is rendered; a worker
+//! that finds the device fully claimed, or a page that does not qualify,
+//! renders on the CPU.  Pages are returned by index, so
 //! the output order does not depend on where a page rendered.
 //!
 //! A device error retires the device for the session: every later page
@@ -17,7 +19,7 @@
 //!
 //! [`SessionConfig::gpu_pages`]: crate::SessionConfig::gpu_pages
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
@@ -28,14 +30,18 @@ use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRende
 use crate::RasterError;
 use crate::render::PageJob;
 
+/// The most pages that hold a session's GPU page device at once: while
+/// one is rendered on it, the next is recorded.
+const IN_FLIGHT: usize = 2;
+
 /// The device of a session's GPU pages, and whether a page holds it.
 pub(crate) struct DevicePages {
     /// The device once its opening has finished: `None` when it failed.
     device: Arc<OnceLock<Option<Arc<VulkanBackend>>>>,
     /// The opening of the device.
     opener: Mutex<Opener>,
-    /// Set while a page holds the device.
-    busy: AtomicBool,
+    /// The pages holding the device, at most [`IN_FLIGHT`].
+    in_flight: AtomicUsize,
     /// Set once the device has failed; it is offered no page afterwards.
     retired: AtomicBool,
     /// Set once a page of the wide working space has been rendered on the
@@ -88,7 +94,7 @@ pub(crate) struct Claim<'a> {
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        self.pages.busy.store(false, Ordering::Release);
+        let _ = self.pages.in_flight.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -118,7 +124,7 @@ impl DevicePages {
         Self {
             device: Arc::new(device),
             opener: Mutex::new(opener),
-            busy: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
             retired: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
             #[cfg(test)]
@@ -170,8 +176,8 @@ impl DevicePages {
         };
     }
 
-    /// The device, if it is open, in service and no page holds it.  A call
-    /// before the device is open starts opening it.
+    /// The device, if it is open, in service and fewer than [`IN_FLIGHT`]
+    /// pages hold it.  A call before the device is open starts opening it.
     pub(crate) fn try_claim(&self) -> Option<Claim<'_>> {
         if self.retired.load(Ordering::Acquire) {
             return None;
@@ -181,10 +187,12 @@ impl DevicePages {
             return None;
         };
         let backend = device.as_deref()?;
-        self.busy
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        self.in_flight
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |n| {
+                (n < IN_FLIGHT).then_some(n + 1)
+            })
             .is_ok()
-            .then_some(Claim {
+            .then(|| Claim {
                 pages: self,
                 backend,
             })
@@ -392,7 +400,7 @@ mod tests {
 
     use gpu::backend::BackendError;
 
-    use super::{DevicePages, Opener};
+    use super::{DevicePages, IN_FLIGHT, Opener};
     use crate::test_pdf::{assemble, stream};
     use crate::{
         BackendPolicy, CancelToken, DevicePage, RasterError, RasterSession, RenderParams,
@@ -459,6 +467,28 @@ mod tests {
         render(&session, page, &RenderParams::new(2.0))
             .expect("CPU render")
             .0
+    }
+
+    /// At most `IN_FLIGHT` pages hold the device; a claim that fails takes
+    /// nothing from those that hold it, and a released claim frees a place.
+    #[test]
+    fn at_most_in_flight_pages_hold_the_device() {
+        let Some(session) = gpu_session(pdf(&[DEVICE])) else {
+            return;
+        };
+        let pages = device_pages(&session);
+        let mut claims: Vec<_> = (0..IN_FLIGHT)
+            .map(|_| pages.try_claim().expect("a free place"))
+            .collect();
+        for _ in 0..3 {
+            assert!(pages.try_claim().is_none(), "past IN_FLIGHT");
+        }
+        assert_eq!(pages.in_flight.load(Ordering::Relaxed), IN_FLIGHT);
+        drop(claims.pop());
+        let again = pages.try_claim().expect("a released place");
+        assert!(pages.try_claim().is_none(), "past IN_FLIGHT");
+        drop((again, claims));
+        assert_eq!(pages.in_flight.load(Ordering::Relaxed), 0);
     }
 
     /// A device error renders the page on the CPU, identically, and
