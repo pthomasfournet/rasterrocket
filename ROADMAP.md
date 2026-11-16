@@ -3919,6 +3919,28 @@ The command format, binning and the kernel's host model
 a session holding several devices would reuse them. Neither exists, and
 none of this has been tested on datacenter hardware.
 
+**Unreleased on master: two GPU pages in flight, compact outline tiles.**
+`--gpu-pages` now lets two pages hold the device at once, so one records
+its paint commands while the other rasterises. This also fixes the claim:
+every failed claim used to release the device, so the one-page limit was
+never kept. Whole process, 400 star pages at 150 dpi, CPU / one page /
+two pages in flight: 2926 / 2134 / 1702 ms on the RTX 5070 and 2926 / 2463
+/ 1966 ms on RADV at four threads, and 3955 / 3114 / 2614 ms on the A18
+Pro at six. A third page gains at most 5 % and loses 20 % on RADV, whose
+raster is the bottleneck. An outline tile now holds its backdrop in the
+tile item when the backdrop is the same on every row (99.9 % of them on
+page-wide outlines), and holds its segment there when it lists only one.
+The command-list budget also counts only the items that occlusion keeps.
+A 120-outline A1 page at 360 dpi drops from 217 MB of device inputs to
+115 MB, under the 128 MB limit, and renders on the GPU instead of the
+CPU: 674 ms against 3607 ms whole process on the RTX, 2068 on RADV. The
+recording canvas, which the device overwrites, is no longer cleared:
+recording that page with 24 outlines takes 50 ms instead of 106 on both
+Linux GPUs. Whole process it gains 9 % on the RTX and loses 26 % on RADV,
+where the unwritten canvas takes three times the page faults. Pages
+larger than `--band-mib` (64 MiB by default) still render in CPU bands.
+Output is byte-identical to `--backend cpu` at 8 and 16 bits.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
