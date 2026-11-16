@@ -18,15 +18,6 @@
 use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16};
 use raster::Bitmap;
 
-/// `DeviceRGB` → `DeviceGray` weights in 1.15 fixed point; they sum to
-/// exactly `1 << LUMA_SHIFT`.
-const LUMA_R: u32 = 9830;
-const LUMA_G: u32 = 19333;
-const LUMA_B: u32 = 3605;
-/// Round-half-up bias (`0.5` in 1.15 fixed point).
-const LUMA_BIAS: u32 = 16384;
-const LUMA_SHIFT: u32 = 15;
-
 /// Convert an RGB bitmap to grayscale with the `DeviceRGB` → `DeviceGray`
 /// weights of ISO 32000-1 §10.3.3.
 #[must_use]
@@ -110,14 +101,7 @@ pub fn rgb16_to_gray16(src: &Bitmap<Rgb16>) -> Bitmap<Gray16> {
 /// One row of [`rgb16_to_gray16`].
 fn convert_row16(src_row: &[u16], dst_row: &mut [u16]) {
     for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.as_chunks::<3>().0) {
-        let (r, g, b) = (u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]));
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "sum ≤ 65535 by the coefficient-sum identity"
-        )]
-        {
-            *dst_px = ((LUMA_R * r + LUMA_G * g + LUMA_B * b + LUMA_BIAS) >> LUMA_SHIFT) as u16;
-        }
+        *dst_px = color::convert::gray_at(*rgb);
     }
 }
 
@@ -153,14 +137,7 @@ fn convert_row(src_row: &[u8], dst_row: &mut [u8]) {
 /// Scalar reference: one pixel at a time.
 fn convert_row_scalar(src_row: &[u8], dst_row: &mut [u8]) {
     for (dst_px, rgb) in dst_row.iter_mut().zip(src_row.as_chunks::<3>().0.iter()) {
-        let (r, g, b) = (u32::from(rgb[0]), u32::from(rgb[1]), u32::from(rgb[2]));
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "sum ≤ 255 by the coefficient-sum identity"
-        )]
-        {
-            *dst_px = ((LUMA_R * r + LUMA_G * g + LUMA_B * b + LUMA_BIAS) >> LUMA_SHIFT) as u8;
-        }
+        *dst_px = color::convert::gray_at(*rgb);
     }
 }
 
@@ -168,7 +145,7 @@ fn convert_row_scalar(src_row: &[u8], dst_row: &mut [u8]) {
 ///
 /// Deinterleaves each channel with three `pshufb` masks per channel,
 /// pairs the channels as `[r, g]` / `[b, 1]` 16-bit lanes, and reduces
-/// with `_mm_madd_epi16` against `[LUMA_R, LUMA_G]` / `[LUMA_B,
+/// with `_mm_madd_epi16` against `[R, G]` / `[B,
 /// LUMA_BIAS]` — the `1` in the data lane turns the bias coefficient
 /// into the round-half-up addend. All intermediates fit their lanes:
 /// coefficients < 2¹⁵ as i16, per-pair dot products ≤ 32768·255 +
@@ -196,6 +173,7 @@ fn convert_row_scalar(src_row: &[u8], dst_row: &mut [u8]) {
 )]
 #[target_feature(enable = "ssse3", enable = "sse4.1")]
 unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
+    use color::convert::{GRAY_BIAS as LUMA_BIAS, GRAY_SHIFT as LUMA_SHIFT, GRAY_WEIGHTS};
     use std::arch::x86_64::{
         __m128i, _mm_add_epi32, _mm_loadu_si128, _mm_madd_epi16, _mm_or_si128, _mm_packus_epi16,
         _mm_packus_epi32, _mm_set1_epi8, _mm_set1_epi32, _mm_setzero_si128, _mm_shuffle_epi8,
@@ -246,8 +224,8 @@ unsafe fn convert_row_sse41(src_row: &[u8], dst_row: &mut [u8]) {
         reason = "packed coefficient constants are < 2^31"
     )]
     let (rg_coef, b1_coef) = (
-        _mm_set1_epi32(((LUMA_G << 16) | LUMA_R) as i32),
-        _mm_set1_epi32(((LUMA_BIAS << 16) | LUMA_B) as i32),
+        _mm_set1_epi32(((GRAY_WEIGHTS[1] << 16) | GRAY_WEIGHTS[0]) as i32),
+        _mm_set1_epi32(((LUMA_BIAS << 16) | GRAY_WEIGHTS[2]) as i32),
     );
     let ones = _mm_set1_epi8(1);
     let zero = _mm_setzero_si128();

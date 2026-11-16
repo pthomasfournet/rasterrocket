@@ -956,3 +956,16 @@ fn ink_reproducing_at_16_bits_follows_the_8_bit_solve() {
         }
     }
 }
+
+#[test]
+fn device_gray_is_the_conventional_conversion() {
+    use super::device_gray_at;
+    assert_eq!(device_gray_at([0u8, 0, 0, 0]), 255);
+    assert_eq!(device_gray_at([0u8, 0, 0, 255]), 0);
+    assert_eq!(device_gray_at([255u8, 255, 255, 0]), 0);
+    // 1 − (0.59 + 0.11) of solid magenta and yellow.
+    assert_eq!(device_gray_at([0u8, 255, 255, 0]), 76);
+    // The sum clamps at full ink.
+    assert_eq!(device_gray_at([255u8, 255, 255, 255]), 0);
+    assert_eq!(device_gray_at([0u16, 0, 0, 32_768]), 32_767);
+}

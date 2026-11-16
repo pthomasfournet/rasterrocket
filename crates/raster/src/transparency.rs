@@ -142,6 +142,20 @@ impl<S: Sample> Backdrop<S> {
         }
     }
 
+    /// The backdrop with each pixel's colour of `from` samples converted
+    /// by `convert` to `to` samples; the alpha is kept.
+    fn converted(self, from: usize, to: usize, mut convert: impl FnMut(&[S], &mut [S])) -> Self {
+        let mut colour = vec![S::default(); self.width * self.height * to];
+        for (src, dst) in self
+            .colour
+            .chunks_exact(from)
+            .zip(colour.chunks_exact_mut(to))
+        {
+            convert(src, dst);
+        }
+        Self { colour, ..self }
+    }
+
     /// The backdrop as the pipe consults it.
     #[must_use]
     pub fn as_pipe_backdrop(&self) -> GroupBackdrop<'_, S> {
@@ -208,9 +222,50 @@ pub fn begin_group<P: Pixel>(
     parent: &Bitmap<P>,
     parent_backdrop: Option<&Backdrop<P::Sample>>,
     clip: &Clip,
-    mut params: GroupParams,
+    params: GroupParams,
     bitmap: Bitmap<P>,
 ) -> GroupBitmap<P> {
+    open_group(parent, clip, params, bitmap, |region| {
+        Backdrop::copy(parent, parent_backdrop, region)
+    })
+}
+
+/// [`begin_group`] on `bitmap`, of pixels `Q` that hold the colours of
+/// another space than the parent's.
+///
+/// A non-isolated group's backdrop is the
+/// parent's, composited over `parent_backdrop`, each pixel's colour
+/// converted by `convert` from the parent's `P::NCOMPS` samples to the
+/// group's `Q::NCOMPS`.  The backdrop is read by blend modes inside the
+/// group alone, so its conversion never reaches a pixel the group leaves
+/// unpainted.
+///
+/// # Panics
+///
+/// As [`begin_group`].
+#[must_use]
+pub fn begin_group_converted<P: Pixel, Q: Pixel<Sample = P::Sample>>(
+    parent: &Bitmap<P>,
+    parent_backdrop: Option<&Backdrop<P::Sample>>,
+    clip: &Clip,
+    params: GroupParams,
+    bitmap: Bitmap<Q>,
+    convert: impl FnMut(&[P::Sample], &mut [P::Sample]),
+) -> GroupBitmap<Q> {
+    open_group(parent, clip, params, bitmap, |region| {
+        Backdrop::copy(parent, parent_backdrop, region).converted(P::NCOMPS, Q::NCOMPS, convert)
+    })
+}
+
+/// Open a group on `bitmap` over `parent` (see [`begin_group`]), its
+/// backdrop, when it is not isolated, made by `backdrop` from its region.
+fn open_group<P: Pixel, Q: Pixel<Sample = P::Sample>>(
+    parent: &Bitmap<P>,
+    clip: &Clip,
+    mut params: GroupParams,
+    bitmap: Bitmap<Q>,
+    backdrop: impl FnOnce((u32, u32, u32, u32)) -> Backdrop<P::Sample>,
+) -> GroupBitmap<Q> {
     debug_assert!(
         params.x_min <= params.x_max,
         "begin_group: inverted x range [{}, {}]",
@@ -241,7 +296,7 @@ pub fn begin_group<P: Pixel>(
         backdrop: None,
     };
     if !group.params.isolated {
-        group.backdrop = Some(Backdrop::copy(parent, parent_backdrop, group.region()));
+        group.backdrop = Some(backdrop(group.region()));
     }
     group
 }

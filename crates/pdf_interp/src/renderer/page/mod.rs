@@ -66,6 +66,7 @@ mod devices;
 mod diagnostics;
 mod fill_stroke;
 mod form_memo;
+mod group_space;
 mod image_blit;
 mod image_compositor;
 mod image_memo;
@@ -80,6 +81,7 @@ mod patterns;
 mod pixel_rect;
 mod shading_paint;
 mod soft_mask;
+mod space_convert;
 mod text;
 mod text_census;
 mod text_context;
@@ -100,7 +102,9 @@ pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 #[cfg(feature = "cache")]
 use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
-pub use diagnostics::{DevicePage, GlyphCounts, ImageFailure, PageDiagnostics, RenderAbort};
+pub use diagnostics::{
+    DevicePage, GlyphCounts, GroupSpaceApproximations, ImageFailure, PageDiagnostics, RenderAbort,
+};
 #[cfg(feature = "cache")]
 pub(crate) use image_reduce::draw_reduces;
 use paint::components_to_color;
@@ -1071,6 +1075,9 @@ impl<'doc> PageRenderer<'doc> {
             parent.budget_exceeded.clone_from(&self.budget_exceeded);
         }
         let diag = &mut parent.diag;
+        diag.approximated_group_spaces = diag
+            .approximated_group_spaces
+            .union(self.diag.approximated_group_spaces);
         for failure in &self.diag.image_failures {
             if !diag.image_failures.contains(failure) {
                 diag.image_failures.push(failure.clone());

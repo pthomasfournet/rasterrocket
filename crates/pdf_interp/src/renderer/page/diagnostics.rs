@@ -22,6 +22,48 @@ pub(crate) fn source_ppi(image_width_px: u32, page_width_pts: f64) -> Option<f32
     (ppi.is_finite() && ppi > 0.0).then_some(ppi)
 }
 
+/// The transparency-group colour spaces a page composited in an
+/// approximation.
+///
+/// A CMYK ICC space over an RGB canvas composites as
+/// `DeviceCMYK` does, through the process-ink model; a `CalRGB` or an RGB
+/// ICC space that is not sRGB composites in the RGB working space of its
+/// canvas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GroupSpaceApproximations {
+    /// A CMYK ICC group space composited through the process-ink model.
+    pub cmyk_profile: bool,
+    /// A non-sRGB RGB group space composited in the canvas's RGB space.
+    pub rgb_profile: bool,
+}
+
+impl GroupSpaceApproximations {
+    /// Record that a group of `space` was composited in an approximation.
+    pub(crate) const fn record(&mut self, space: crate::resources::GroupSpace) {
+        match space {
+            crate::resources::GroupSpace::Cmyk { .. } => self.cmyk_profile = true,
+            crate::resources::GroupSpace::Rgb(_) => self.rgb_profile = true,
+            _ => {}
+        }
+    }
+
+    /// The approximations of `self` and of `other`.
+    #[must_use]
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self {
+            cmyk_profile: self.cmyk_profile || other.cmyk_profile,
+            rgb_profile: self.rgb_profile || other.rgb_profile,
+        }
+    }
+
+    /// Whether any group space was approximated.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.cmyk_profile || self.rgb_profile
+    }
+}
+
 /// Lightweight page metadata collected at zero extra cost during rendering.
 ///
 /// Returned alongside the finished bitmap from [`PageRenderer::finish`].
@@ -80,6 +122,9 @@ pub struct PageDiagnostics {
     /// that process colour rather than as a separate ink.  Empty when
     /// every spot had a channel, and on a page without overprint.
     pub unslotted_spots: Vec<String>,
+    /// The transparency-group colour spaces the page composited in an
+    /// approximation of their own (see [`GroupSpaceApproximations`]).
+    pub approximated_group_spaces: GroupSpaceApproximations,
     /// The document's interactive form type.  [`FormType::XfaFull`] marks
     /// a dynamic XFA form, whose rendered pages are the placeholder content
     /// stored in the file rather than the form.

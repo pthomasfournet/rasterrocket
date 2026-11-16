@@ -338,6 +338,24 @@ pub fn cmyk_to_rgb_at<S: Sample>(c: S, m: S, y: S, k: S) -> [S; 3] {
     )
 }
 
+/// The gray of a CMYK pixel by the conventional conversion.
+///
+/// That is the `DeviceCMYK` → `DeviceGray` conversion of ISO 32000-2
+/// §10.4.2.4, `1 − min(1, 0.3 C + 0.59 M + 0.11 Y + K)`, with the weights
+/// of [`crate::convert::GRAY_WEIGHTS`], rounded half up.
+#[must_use]
+pub fn device_gray_at<S: Sample>([c, m, y, k]: [S; 4]) -> S {
+    use crate::convert::{GRAY_BIAS, GRAY_SHIFT, GRAY_WEIGHTS};
+    let ink: i64 = [c, m, y]
+        .iter()
+        .zip(GRAY_WEIGHTS)
+        .map(|(v, w)| v.signed() * i64::from(w))
+        .sum::<i64>()
+        + (k.signed() << GRAY_SHIFT);
+    let ink = ((ink + i64::from(GRAY_BIAS)) >> GRAY_SHIFT).min(S::MAX.signed());
+    S::from_signed(S::MAX.signed() - ink)
+}
+
 /// [`cmyk_f64_to_rgb`] at the depth of `S`: the 8-bit conversion itself for
 /// `u8`; for `u16`, the components quantised to weights on `[0, 65536]`.
 #[must_use]

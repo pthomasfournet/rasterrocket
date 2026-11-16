@@ -254,6 +254,40 @@ pub(crate) fn from_srgb16(px: [u16; 3]) -> [u16; 3] {
     srgb_to_wide().convert(px)
 }
 
+/// The conversion of 16-bit wide values to sRGB, the inverse of
+/// [`srgb_to_wide`]; colours outside sRGB clip to its cube.
+fn wide_to_srgb() -> &'static LinearRgb {
+    static CONVERSION: OnceLock<LinearRgb> = OnceLock::new();
+    CONVERSION.get_or_init(|| {
+        let table = srgb_linear();
+        let to_srgb = mat_inverse(&wide_composite(&SRGB_D50_COLORANTS))
+            .expect("the sRGB to wide matrix is non-singular");
+        LinearRgb::new(
+            [Arc::clone(table), Arc::clone(table), Arc::clone(table)],
+            &to_srgb,
+        )
+    })
+}
+
+/// The sRGB value of the 16-bit wide value `px`, clipped to the sRGB
+/// cube; equal components are returned as they are.
+pub(crate) fn to_srgb16(px: [u16; 3]) -> [u16; 3] {
+    if px[0] == px[1] && px[1] == px[2] {
+        return px;
+    }
+    wide_to_srgb().convert(px)
+}
+
+/// The sRGB value at the depth of `S` of the colour of `space` value
+/// `rgb`, at any depth: `rgb` itself in sRGB; in the wide space
+/// [`to_srgb16`] of `rgb` at 16 bits, narrowed to `S`.
+pub(crate) fn to_srgb<S: Sample, T: Sample>(space: WorkingSpace, rgb: [T; 3]) -> [S; 3] {
+    match space {
+        WorkingSpace::Srgb => rgb.map(S::from_sample),
+        WorkingSpace::Wide => to_srgb16(rgb.map(u16::from_sample)).map(S::from_sample),
+    }
+}
+
 /// Convert packed 16-bit sRGB pixels in place to the wide space.  A
 /// trailing partial pixel is left untouched.
 pub(crate) fn from_srgb16_in_place(samples: &mut [u16]) {
@@ -311,6 +345,30 @@ mod tests {
             let got = f64::from(encode16(lin as f32));
             assert!((got - want).abs() <= 0.51, "{lin}: {got} vs {want}");
         }
+    }
+
+    /// The round trip holds within 32 counts of 65 535, an eighth of an
+    /// 8-bit level: the wide value is rounded to 16 bits, and a channel
+    /// near black converts back through the sRGB curve's slope of 12.92.
+    #[test]
+    fn srgb_round_trips_through_the_wide_space() {
+        for r in (0..=65_535u32).step_by(4369) {
+            for g in (0..=65_535u32).step_by(4369) {
+                for b in (0..=65_535u32).step_by(4369) {
+                    let px = [r, g, b].map(|v| u16::try_from(v).unwrap());
+                    let back = to_srgb16(from_srgb16(px));
+                    let off = px.iter().zip(back).map(|(a, b)| a.abs_diff(b)).max();
+                    assert!(off <= Some(32), "{px:?} → {back:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_colour_outside_srgb_clips() {
+        let green = to_srgb16([0, 65_535, 0]);
+        assert_eq!(green[1], 65_535);
+        assert_eq!(green[0], 0, "{green:?}");
     }
 
     #[test]

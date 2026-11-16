@@ -397,18 +397,12 @@ impl PageRenderer<'_> {
         // Transparency group: render into an intermediate bitmap, then
         // composite it back onto the page.  A group bitmap the allocator
         // refuses stops the render, so the form's content executes nothing.
-        let mut group = form
-            .transparency
-            .and_then(|tg| self.group_params(form.bbox, tg))
-            .and_then(|params| {
-                let bitmap = self.group_bitmap()?;
-                Some(self.canvas.begin_group(
-                    self.group.backdrop.as_deref(),
-                    &self.gstate.current().clip,
-                    params,
-                    bitmap,
-                ))
-            });
+        // A group painted in another space than its parent's is opened on
+        // a canvas of that space (see the `group_space` module).
+        let (mut group, target) = form.transparency.map_or((None, None), |tg| {
+            let (group, target) = self.open_form_group(tg, form.bbox);
+            (group, Some(target))
+        });
 
         // Swap in the group bitmap when present.  PDF §11.6.6: the alpha
         // constants and blend mode start at their initial values inside a
@@ -424,8 +418,9 @@ impl PageRenderer<'_> {
         // pixels for a non-isolated group, nothing for an isolated one; and
         // its objects knock out one another when it is a knockout group,
         // whatever the enclosing group is.
-        let parent_group = group.as_mut().map(|g| {
-            self.canvas.swap_group(g);
+        let mut switched = None;
+        let parent_group = group.as_mut().zip(target).map(|(g, target)| {
+            switched = self.enter_form_group(g, target);
             let (x0, y0, x1, y1) = g.region();
             let gs = self.gstate.current_mut();
             gs.fill_alpha = 255;
@@ -449,9 +444,13 @@ impl PageRenderer<'_> {
         // Swap the group bitmap back and composite it as one object of the
         // parent group, using the parent's opacity/blend (captured before
         // gstate.save() — the form's own state is irrelevant here).
-        if let (Some(mut g), Some(parent_group)) = (group, parent_group) {
-            self.canvas.swap_group(&mut g);
+        let group = group
+            .zip(target)
+            .and_then(|(g, target)| self.leave_form_group(g, target, switched));
+        if let Some(parent_group) = parent_group {
             self.group = parent_group;
+        }
+        if let Some(g) = group {
             // The group's paints recorded the channels their colours carry.
             let paint = self.paint_params(
                 parent_fill_alpha,

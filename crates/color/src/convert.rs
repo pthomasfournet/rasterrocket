@@ -127,6 +127,29 @@ pub fn rgb_to_bytes(r: f64, g: f64, b: f64) -> [u8; 3] {
     [gray_to_u8(r), gray_to_u8(g), gray_to_u8(b)]
 }
 
+/// The weights `[R, G, B]` of the `DeviceRGB` → `DeviceGray` conversion,
+/// `0.30 R + 0.59 G + 0.11 B` (ISO 32000-2 §10.4.2.2), in 1.15 fixed
+/// point; they sum to exactly `1 << GRAY_SHIFT`, so a neutral maps to
+/// itself.
+pub const GRAY_WEIGHTS: [u32; 3] = [9830, 19333, 3605];
+/// The rounding bias of [`GRAY_WEIGHTS`]: one half in 1.15 fixed point.
+pub const GRAY_BIAS: u32 = 1 << (GRAY_SHIFT - 1);
+/// The fraction bits of [`GRAY_WEIGHTS`].
+pub const GRAY_SHIFT: u32 = 15;
+
+/// The gray of an RGB pixel at the depth of `S` by [`GRAY_WEIGHTS`],
+/// rounded half up: `(9830 R + 19333 G + 3605 B + 16384) >> 15`.
+#[inline]
+#[must_use]
+pub fn gray_at<S: Sample>(rgb: [S; 3]) -> S {
+    let sum: i64 = rgb
+        .iter()
+        .zip(GRAY_WEIGHTS)
+        .map(|(v, w)| v.signed() * i64::from(w))
+        .sum();
+    S::from_signed((sum + i64::from(GRAY_BIAS)) >> GRAY_SHIFT)
+}
+
 /// The luminosity of an 8-bit RGB pixel, `0.30 R + 0.59 G + 0.11 B`
 /// rounded to the nearest level (PDF §11.3.5.3).
 #[inline]
@@ -243,6 +266,17 @@ pub fn round_half_up_i32(x: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gray_weights_sum_to_one_and_keep_neutrals() {
+        assert_eq!(GRAY_WEIGHTS.iter().sum::<u32>(), 1 << GRAY_SHIFT);
+        for v in 0..=255u8 {
+            assert_eq!(gray_at([v; 3]), v);
+        }
+        assert_eq!(gray_at([65_535u16, 0, 0]), 19_660);
+        assert_eq!(gray_at([255u8, 0, 0]), 76);
+        assert_eq!(gray_at([0u8, 60, 10]), 36);
+    }
 
     #[test]
     fn ycbcr_neutral_axis_is_gray() {
