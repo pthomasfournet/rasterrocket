@@ -21,6 +21,9 @@ categories  = ["parser-implementations", "rendering", "multimedia::images"]
 # the gpu crate's default (no-feature) surface (`GpuCtx`, the ICC CLUT kernel).
 nvjpeg           = ["dep:gpu", "gpu/nvjpeg"]
 nvjpeg2k         = ["dep:gpu", "gpu/nvjpeg2k"]
+# Tests that need a CUDA device and fail without one (the nvJPEG2000
+# 16-bit equivalence gate, with `nvjpeg2k`).
+gpu-validation   = ["dep:gpu", "gpu/gpu-validation"]
 vaapi            = ["dep:gpu", "gpu/vaapi"]
 gpu-icc          = ["dep:gpu"]
 cache            = ["dep:gpu", "gpu/cache"]

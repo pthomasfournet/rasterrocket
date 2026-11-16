@@ -303,6 +303,26 @@ impl<'a> Image<'a> {
     /// colour conversion, alpha channel, palette or channel definition
     /// applied after them; otherwise the first property that fails.
     pub fn plain_u8(&self) -> core::result::Result<(), NotPlain> {
+        self.plain(8..=8)
+    }
+
+    /// [`Image::plain_u8`] for components of 9 to 16 bits: `Ok` when
+    /// [`Image::decode`] returns the codestream's components as
+    /// reconstructed, one or three, each unsigned, of 9 to 16 bits and on
+    /// the image grid, with no colour conversion, alpha channel, palette or
+    /// channel definition applied after them; otherwise the first property
+    /// that fails.
+    pub fn plain_wide(&self) -> core::result::Result<(), NotPlain> {
+        self.plain(9..=16)
+    }
+
+    /// `Ok` when the decoded components are the codestream's as
+    /// reconstructed, one or three, unsigned, on the image grid, each of a
+    /// precision in `precisions`.
+    fn plain(
+        &self,
+        precisions: core::ops::RangeInclusive<u8>,
+    ) -> core::result::Result<(), NotPlain> {
         if let Some(transform) = self.sample_transform() {
             return Err(transform);
         }
@@ -312,7 +332,7 @@ impl<'a> Image<'a> {
         }
         for c in components {
             let size = &c.size_info;
-            if size.precision != 8 {
+            if !precisions.contains(&size.precision) {
                 return Err(NotPlain::Precision(size.precision));
             }
             if size.signed {
@@ -449,8 +469,9 @@ pub(crate) fn resolve_alpha_and_color_space(
 }
 
 /// The first property of an image that keeps the samples of
-/// [`Image::decode_u8`] from being its codestream's components as
-/// reconstructed (see [`Image::plain_u8`]).
+/// [`Image::decode_u8`] or [`Image::decode`] from being its codestream's
+/// components as reconstructed (see [`Image::plain_u8`] and
+/// [`Image::plain_wide`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotPlain {
     /// The colour specification calls for a conversion of the components
@@ -464,7 +485,8 @@ pub enum NotPlain {
     ChannelDefinitions,
     /// The codestream has this many components, neither one nor three.
     Components(usize),
-    /// A component has this precision in bits, not 8.
+    /// A component has this precision in bits, outside the range asked
+    /// for (8 for [`Image::plain_u8`], 9 to 16 for [`Image::plain_wide`]).
     Precision(u8),
     /// A component is signed.
     Signed,

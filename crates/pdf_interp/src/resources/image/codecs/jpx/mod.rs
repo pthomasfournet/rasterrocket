@@ -26,8 +26,9 @@ pub(crate) use device::{DeviceJpx, Jpeg2kSource};
 /// PDF JPEG 2000 streams may be raw codestreams (`.j2k`) or full JP2 container
 /// format (`.jp2`).  Both paths auto-detect the format from the stream.
 ///
-/// Samples of any precision are scaled to 8 bits; sub-sampled components are
-/// upsampled to the image grid.  `opts` carries what the image dictionary
+/// Samples of any precision are scaled to 8 bits, or to 16 for a
+/// codestream of more than 8 bits under `opts.wide`; sub-sampled
+/// components are upsampled to the image grid.  `opts` carries what the image dictionary
 /// decides about the codestream: see [`JpxOptions`].  An ICC profile the
 /// codestream's colour specification carries is returned with the samples
 /// (`Samples::embedded_profile`) for an image dictionary that names no
@@ -72,10 +73,11 @@ pub(in crate::resources::image) fn decode_jpx(
     };
 
     // ── Device path ──────────────────────────────────────────────────────────
-    // The device returns 8-bit samples: a codestream of more than 8 bits
-    // kept at 16 (samples whose two bytes each exceed the budget are kept
-    // at 8), and one under a colour key, which compares the samples at
-    // their own precision, decode on the CPU.
+    // A codestream of more than 8 bits is kept at 16 (samples whose two
+    // bytes each exceed the budget are kept at 8); the device then returns
+    // the components at their own precision, widened as the CPU path
+    // widens them.  One under a colour key, which compares the samples at
+    // their own precision, decodes on the CPU.
     let wide = opts.wide
         && img.original_bit_depth() > 8
         && jpx_budget(&img, 2)
@@ -84,16 +86,16 @@ pub(in crate::resources::image) fn decode_jpx(
             })
             .is_ok();
     #[cfg(feature = "nvjpeg2k")]
-    if let Some(device) = gpu.filter(|_| !opts.colour_key && !wide)
+    if let Some(device) = gpu.filter(|_| !opts.colour_key)
         && jpx_area_dispatches(pdf_w, pdf_h, device.threshold())
         && let Ok(survey) = img.survey()
     {
-        match device::takes(&img, &survey) {
+        match device::takes(&img, &survey, wide) {
             // A codestream that ends early decodes on the CPU, which draws
             // the packets present and judges the loss (`judged`).
             Ok(()) if !survey.completeness.is_complete() => {}
             Ok(()) => {
-                if let Some(mut samples) = device::decode(data, pdf_w, pdf_h, device) {
+                if let Some(mut samples) = device::decode(data, (pdf_w, pdf_h), wide, device) {
                     samples.embedded_profile = embedded_profile;
                     return Ok(samples);
                 }
@@ -256,28 +258,38 @@ fn matte_samples<S: color::Sample>(matte: Option<&[f64]>, channels: usize) -> Ve
     }
 }
 
+/// The factor [`widen`] scales a sample of `bits` bits by:
+/// `65535 / (2^bits − 1)`.
+fn widen_scale(bits: u8) -> f64 {
+    65_535.0 / f64::from(u32::MAX >> (32 - u32::from(bits).clamp(1, 32)))
+}
+
+/// The sample `v` of a component of the precision `scale` stands for
+/// ([`widen_scale`]) at 16 bits: `round(v · 65535 / (2^bits − 1))`,
+/// clamped to `0..=65535`.
+fn widen(v: f64, scale: f64) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=65535 before the cast"
+    )]
+    let w = (v * scale).round().clamp(0.0, 65_535.0) as u16;
+    w
+}
+
 /// Every component of `decoded`, interleaved, each scaled from its own
-/// precision to 16 bits: `round(v · 65535 / (2^bits − 1))`.
+/// precision to 16 bits ([`widen`]).
 fn wide_samples(decoded: &hayro_jpeg2000::DecodedImage<'_>) -> Vec<u16> {
     let components = decoded.components();
     let len = components.first().map_or(0, |c| c.samples().len());
     let scales: Vec<f64> = components
         .iter()
-        .map(|c| 65_535.0 / f64::from(u32::MAX >> (32 - u32::from(c.bit_depth()).clamp(1, 32))))
+        .map(|c| widen_scale(c.bit_depth()))
         .collect();
     let mut out = Vec::with_capacity(len * components.len());
     for i in 0..len {
-        for (c, scale) in components.iter().zip(&scales) {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "clamped to 0..=65535 before the cast"
-            )]
-            out.push(
-                (f64::from(c.samples()[i]) * scale)
-                    .round()
-                    .clamp(0.0, 65_535.0) as u16,
-            );
+        for (c, &scale) in components.iter().zip(&scales) {
+            out.push(widen(f64::from(c.samples()[i]), scale));
         }
     }
     out

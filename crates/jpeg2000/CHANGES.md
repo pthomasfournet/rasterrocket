@@ -159,6 +159,11 @@ byte-identical on the benchmark images and passes the full test suite.
   palette, a channel definition, a component count other than one or
   three, a precision other than 8 bits, a signed or a sub-sampled
   component.  The private `fused_u8_path` shares its box checks.
+  `Image::plain_wide` is the same test for components of 9 to 16 bits,
+  the samples `decode` returns; the two share a private `plain`, and
+  `NotPlain::Precision` names a precision outside the range asked for.
+  `Survey::irreversible` reports whether the 9-7 wavelet is in force for
+  some component of some tile.
 - `j2c/codestream.rs`: the signedness bit of `Ssiz`, read and dropped
   before, and the raw code-block style byte are kept.  The decoder still
   reconstructs signed components as unsigned.  Decoded output is

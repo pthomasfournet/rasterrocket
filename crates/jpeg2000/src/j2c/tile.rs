@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 
 use super::build::{PrecinctData, SubBandType};
 use super::codestream::{
-    ComponentInfo, Header, ProgressionChange, ProgressionOrder, markers, skip_marker_segment,
+    ComponentInfo, Header, ProgressionChange, ProgressionOrder, WaveletTransform, markers,
+    skip_marker_segment,
 };
 use super::rect::IntRect;
 use crate::error::{MarkerError, Result, TileError, ValidationError, bail, err};
@@ -231,16 +232,19 @@ pub struct Survey {
     /// every component of every tile, from the COD and COC markers of the
     /// main header and of the tile-part headers.
     pub code_block_styles: u8,
+    /// Whether the irreversible 9-7 wavelet transform is in force for some
+    /// component of some tile (`SPcod`/`SPcoc` transformation 0).
+    pub irreversible: bool,
 }
 
 impl Survey {
     pub(crate) fn of(tiles: &[Tile<'_>]) -> Self {
+        let components = || tiles.iter().flat_map(|t| &t.component_infos);
         Self {
             completeness: Completeness::of(tiles),
-            code_block_styles: tiles
-                .iter()
-                .flat_map(|t| &t.component_infos)
-                .fold(0, |acc, c| acc | c.code_block_style().raw),
+            code_block_styles: components().fold(0, |acc, c| acc | c.code_block_style().raw),
+            irreversible: components()
+                .any(|c| c.wavelet_transform() == WaveletTransform::Irreversible97),
         }
     }
 }
