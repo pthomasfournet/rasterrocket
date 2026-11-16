@@ -317,6 +317,12 @@ pub(super) struct SpotTables<'a> {
 /// colorant's table belongs to its slot for the whole page, whatever the
 /// intent of the operators painting it, and converts under the initial
 /// intent, relative colorimetric, into the separator's working space.
+///
+/// The table is folded into every pixel of the page, painted or not, so
+/// tint 0 is no ink: the ink of the alternate colour at tint 0, the paper,
+/// which a profile may separate to a little ink, is removed from the ink
+/// of every tint as the probabilistic union adds it, `(u − p) / (1 − p)`
+/// for a channel of ink `u` over paper `p`.
 struct SpotTint<'a> {
     doc: &'a Document,
     space: &'a ColorSpace,
@@ -324,11 +330,27 @@ struct SpotTint<'a> {
     comps: Vec<f64>,
     separator: &'a Separator,
     reproduced: &'a mut Reproduced,
+    /// The ink of tint 0, each channel of `[0, 1]`.
+    paper: [f64; 4],
 }
 
 impl SpotTint<'_> {
-    /// The process ink of tint `t` ([0, 1]) at the depth of `S`.
+    /// The process ink of tint `t` ([0, 1]) at the depth of `S`, the paper's
+    /// removed.
     fn ink<S: Sample>(&mut self, t: f64) -> [S; 4] {
+        let ink = self.raw::<u16>(t);
+        std::array::from_fn(|i| {
+            let (u, p) = (ink[i].to_unit(), self.paper[i]);
+            if p <= 0.0 || p >= 1.0 {
+                S::from_unit(u)
+            } else {
+                S::from_unit(((u - p) / (1.0 - p)).clamp(0.0, 1.0))
+            }
+        })
+    }
+
+    /// The process ink of tint `t` as the alternate colour separates.
+    fn raw<S: Sample>(&mut self, t: f64) -> [S; 4] {
         if let Some(c) = self.comps.get_mut(self.component) {
             *c = t;
         }
@@ -387,14 +409,17 @@ fn spot_tint<'a>(
         "{:?} is not a spot colorant of {space:?}",
         String::from_utf8_lossy(name)
     );
-    SpotTint {
+    let mut tint = SpotTint {
         doc,
         space,
         component: component.unwrap_or(0),
         comps: vec![0.0; space.ncomponents()],
         separator,
         reproduced,
-    }
+        paper: [0.0; 4],
+    };
+    tint.paper = tint.raw::<u16>(0.0).map(Sample::to_unit);
+    tint
 }
 
 #[cfg(test)]

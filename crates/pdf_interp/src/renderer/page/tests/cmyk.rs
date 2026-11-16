@@ -493,3 +493,37 @@ fn a_paint_separates_under_its_own_intent() {
         }
     }
 }
+
+/// A spot colorant folds into its process equivalent where it is painted:
+/// where the page is not painted, and where the spot's tint is 0, it adds
+/// no ink, even when its alternate colour at tint 0, white, separates to
+/// a little ink, as the test printer's paper white does.
+#[test]
+fn a_spot_adds_no_ink_where_its_tint_is_zero() {
+    let space = "/Spot [/Separation /Spot /DeviceRGB \
+        << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>]";
+    let doc = page_doc("", space);
+    let request = CanvasRequest::Cmyk {
+        overprint: false,
+        separation: printer_separation(None),
+    };
+    let Separation::Profile(press) = printer_separation(None) else {
+        panic!("a profile separation")
+    };
+    let table = press.table(crate::RenderingIntent::RelativeColorimetric);
+    assert_ne!(
+        table.ink([255u8; 3]),
+        [0; 4],
+        "the printer's white is a little ink"
+    );
+    let page = render(
+        &doc,
+        (10, SampleDepth::Eight),
+        &request,
+        b"/Spot cs 1 scn 0 0 5 10 re f 0 scn 5 0 2 10 re f",
+    );
+    assert_eq!(at(&page, 8, 5), [0; 4], "unpainted");
+    assert_eq!(at(&page, 6, 5), [0; 4], "tint 0");
+    let red = at(&page, 2, 5);
+    assert!(red[1] > 200 && red[2] > 200, "{red:?}");
+}
