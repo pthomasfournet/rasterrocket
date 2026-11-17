@@ -458,6 +458,7 @@ fn open_session_with_doc(
 
     check_backend_compiled(config.policy)?;
     config.check()?;
+    crate::decoders::warn_inert_jpx_threshold(config.policy);
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
     #[cfg(feature = "vulkan")]
@@ -667,14 +668,10 @@ pub(crate) fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuC
         Err(e) => {
             if matches!(policy, BackendPolicy::ForceCuda) {
                 Err(RasterError::BackendUnavailable(format!(
-                    "CUDA GPU context required but unavailable: {e}. \
-                     Verify with `nvidia-smi` that the driver is loaded."
+                    "CUDA GPU context required but unavailable: {e}"
                 )))
             } else {
-                log::warn!(
-                    "rasterrocket: GPU initialisation failed ({e}); \
-                     falling back to CPU. Run `nvidia-smi` to verify the driver is loaded."
-                );
+                log::warn!("rasterrocket: CUDA initialisation failed ({e}); falling back to CPU");
                 Ok(None)
             }
         }

@@ -31,6 +31,14 @@
 pub(crate) mod cuda;
 
 pub mod backend;
+#[cfg_attr(
+    ptx_placeholder,
+    expect(
+        dead_code,
+        reason = "the context init that uses it is skipped on placeholder PTX"
+    )
+)]
+mod cuda_diag;
 mod lib_kernels;
 mod live;
 
@@ -198,12 +206,27 @@ impl GpuCtx {
     /// in `init` doesn't get tangled with the success path's borrow scopes.
     #[cfg(not(ptx_placeholder))]
     fn init_inner() -> Result<Self, Box<dyn std::error::Error>> {
-        let ctx: Arc<CudaContext> = CudaContext::new(0)?;
+        if !cuda_diag::driver_library_present() {
+            return Err(cuda_diag::NO_DRIVER_LIBRARY.into());
+        }
+        let driver = cuda_diag::driver_cuda_version();
+        let ctx: Arc<CudaContext> =
+            CudaContext::new(0).map_err(|e| cuda_diag::context_failure(e, driver))?;
+        let device = ctx
+            .compute_capability()
+            .ok()
+            .and_then(|(m, n)| Some((u32::try_from(m).ok()?, u32::try_from(n).ok()?)));
 
         let load =
             |ptx_src: &str, name: &str| -> Result<CudaFunction, Box<dyn std::error::Error>> {
+                let header = cuda_diag::ptx_header(ptx_src);
+                if let Some(message) = device.and_then(|d| cuda_diag::arch_mismatch(&header, d)) {
+                    return Err(message.into());
+                }
                 let ptx = Ptx::from_src(ptx_src);
-                let module: Arc<CudaModule> = ctx.load_module(ptx)?;
+                let module: Arc<CudaModule> = ctx
+                    .load_module(ptx)
+                    .map_err(|e| cuda_diag::load_failure(e, &header, driver, device))?;
                 Ok(module.load_function(name)?)
             };
 

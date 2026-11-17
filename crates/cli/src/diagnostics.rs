@@ -89,12 +89,11 @@ fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env
 }
 
 fn print_cuda_hint() {
-    eprintln!("        --backend cuda requires a working CUDA driver and GPU.");
-    eprintln!("        Run `nvidia-smi` to verify the driver is loaded.");
-    eprintln!(
-        "        Use --backend auto to fall back to Vulkan / CPU silently, \
-         or --backend cpu to skip GPU entirely."
-    );
+    eprintln!("        --backend cuda requires a CUDA driver and GPU that load this");
+    eprintln!("        build's kernels; the error above names what failed.");
+    eprintln!("        --backend auto renders on the CPU (and on Vulkan under --gpu-pages)");
+    eprintln!("        and starts CUDA only for PDF_RASTER_JPX_THRESHOLD; --backend cpu");
+    eprintln!("        skips every GPU.");
 }
 
 #[cfg(feature = "vaapi")]
