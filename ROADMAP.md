@@ -4009,6 +4009,16 @@ corpus-06 (half its 160 pages masked), single-threaded at 150 dpi, takes
 two are level. Output is byte-identical to `--backend cpu` at 8 and 16 bits
 on the RTX 5070, RADV and the A18 Pro.
 
+**Unreleased on master: the Vulkan device is destroyed with its sessions.**
+A Vulkan backend was held by a process-wide registry for the life of the
+process, so its device and instance were never destroyed. On the RTX 5070,
+`--backend vulkan --gpu-pages` then left the driver's shader-compiler threads
+running while the process exited, and about one run in twelve crashed in the
+driver after every page was written. The registry now holds backends weakly:
+sessions open at the same time share one device, and the last of them to drop
+destroys it, for the CLI as for `raster_pdf`, `render_channel` and
+`open_session`. A session opened after that builds the device again.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
