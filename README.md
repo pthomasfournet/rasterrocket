@@ -36,6 +36,41 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new in v2.4.0
+
+**Input conversions under the rendering intent, a wide working space, soft
+proofing, transparency groups in their own colour space, OCR preparation of
+scans, and a Vulkan page raster that renders every fixture page; the API
+changes in several places.** `release_gpu_decoders` is renamed
+`release_gpu_thread_state`, `deskew::apply` takes a backend policy and
+returns the skew, and the `gpu-jpeg-huffman` feature is removed; the full
+list is in [ROADMAP.md](ROADMAP.md). Defaults stay on the CPU: every GPU
+path is opt-in.
+
+- **Colour.** Input ICC conversions run under each object's rendering
+  intent, with black-point compensation as the document asks, and agree
+  with Little CMS to its precision. Under `--output-profile`, pages
+  composite in a wide (ROMM-primaries) working space at 16 bits
+  (`--working-space`); `--proof` shows a page as the press its
+  `/OutputIntents` names prints it. CMYK output applies `BG`/`UCR`,
+  converts ICC CMYK of another press and paints Indexed images' ink.
+- **Transparency groups** composite in the colour space they declare;
+  overprint under blend modes follows ISO 32000-1 §11.7.4.3.
+- **Scans.** `--deskew` declines pages without a confident angle;
+  `--clean-borders`, `--clean-background` and `--threshold fixed|sauvola`
+  prepare scans for OCR; comic input, camera stages and deskew work at
+  `--depth 16`; PNG and JPEG record the resolution, and `--mono --png`
+  writes 1-bit PNG.
+- **GPU (opt-in).** `--gpu-pages` computes exact-area coverage on the device
+  and draws text, images, forms, path clips and soft masks, byte-identical to
+  `--backend cpu`. GPU devices close with their last session. A CUDA context
+  that cannot start names the cause; GPUs below the CUDA toolkit's oldest
+  architecture are refused; `CUDA_ARCH` defaults to `sm_75`.
+- **Fixes.** Clips take effect after the paint that ends their path; folded
+  patches, sub-pixel images, words split across strings, installed fonts by
+  name, Link borders, `/MaxLen`, deep forms, JPEG 2000 matte and truncation;
+  the parser reads more damaged files.
+
 ## What's new in v2.3.0
 
 **Exact-area antialiasing, large-format pages, 16 bits per sample, output
