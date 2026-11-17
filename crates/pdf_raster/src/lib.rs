@@ -128,6 +128,8 @@ mod output;
 pub(crate) mod page;
 mod page_buffer;
 mod proof;
+#[cfg(any(feature = "vulkan", feature = "gpu-icc", feature = "cache"))]
+mod registry;
 mod render;
 mod request;
 #[cfg(test)]
@@ -219,54 +221,59 @@ pub use render::{
 };
 pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 
-/// Eagerly release GPU decoders on every rayon worker thread.
+/// Release the GPU state the calling thread holds: its nvJPEG and
+/// nvJPEG2000 decoders, and its CUDA streams, page-locked staging buffers
+/// and NPP rotator.
 ///
-/// Call this via `pool.broadcast` **before** dropping `pool` or allowing
-/// process exit to proceed:
+/// Call it on every thread of a pool, via `pool.broadcast`, **before**
+/// dropping the pool or letting the process exit:
 ///
 /// ```rust,no_run
-/// # use rasterrocket::release_gpu_decoders;
+/// # use rasterrocket::release_gpu_thread_state;
 /// # let pool: rayon::ThreadPool = todo!();
-/// let _ = pool.broadcast(|_| release_gpu_decoders());
+/// let _ = pool.broadcast(|_| release_gpu_thread_state());
 /// drop(pool);
 /// ```
 ///
-/// This drops each thread's `NvJpegDecoder` / `NvJpeg2kDecoder` while the CUDA driver is still fully alive.  Without
-/// this call, all workers call their destructors concurrently at process
-/// exit into a driver that has already started its own `atexit` shutdown,
-/// causing undefined behaviour (typically a segfault or hang).
+/// This state is otherwise destroyed when its thread exits.  A dropped
+/// pool's threads are not joined, so they can exit while the process runs
+/// its exit handlers, calling into a CUDA driver that has begun its own
+/// `atexit` shutdown (undefined behaviour, typically a segfault or hang).
+/// A thread's streams also hold their CUDA context: the context of the
+/// last session to drop is released only once no thread holds a stream
+/// on it.  Each object is created again on the thread's next use.
 ///
-/// After this call the TLS slots hold `Uninitialised`, so their own
-/// destructors at process exit are no-ops.
-///
-/// # When to call
-///
-/// - Multi-page pipelines that use an explicit `rayon::ThreadPool` — call
-///   once on the pool after rendering completes, before dropping the pool.
-/// - Single-page or short runs using the global rayon pool — calling is
-///   optional but harmless; `raster_pdf` and `render_channel` do not call
-///   it automatically (they don't own the pool).
+/// `raster_pdf` and `render_channel` do not call it: they do not own the
+/// pool they render on.
 ///
 /// # No-op builds
 ///
-/// When neither GPU decoder feature (`nvjpeg`, `nvjpeg2k`) is compiled in, this function is a
-/// no-op and can be omitted entirely.  It is always safe to call.
+/// Without a CUDA feature (`nvjpeg`, `nvjpeg2k`, `gpu-icc`, `cache`,
+/// `gpu-deskew`) this function does nothing.  It is always safe to call.
 ///
 /// # Panics
 ///
 /// Never panics.
 #[cfg_attr(
-    not(any(feature = "nvjpeg", feature = "nvjpeg2k")),
+    not(any(
+        feature = "nvjpeg",
+        feature = "nvjpeg2k",
+        feature = "gpu-icc",
+        feature = "cache",
+        feature = "gpu-deskew"
+    )),
     expect(
         clippy::missing_const_for_fn,
-        reason = "body collapses to empty when no GPU-decoder feature is on"
+        reason = "body collapses to empty when no CUDA feature is on"
     )
 )]
-pub fn release_gpu_decoders() {
+pub fn release_gpu_thread_state() {
     #[cfg(feature = "nvjpeg")]
     gpu_init::release_nvjpeg_this_thread();
     #[cfg(feature = "nvjpeg2k")]
     gpu_init::release_nvjpeg2k_this_thread();
+    #[cfg(any(feature = "gpu-icc", feature = "cache", feature = "gpu-deskew"))]
+    gpu::release_thread_state();
 }
 
 /// True when the PDF at `path` is encrypted (uses the PDF Standard

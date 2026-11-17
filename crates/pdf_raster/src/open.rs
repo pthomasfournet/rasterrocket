@@ -623,26 +623,21 @@ fn new_vulkan_image_cache(
     gpu::cache::DeviceImageCache::new(Arc::clone(backend), vram, gpu::cache::HostBudget::DEFAULT)
 }
 
-/// Initialise the CUDA GPU context for ICC colour transforms and image blits.
+/// The CUDA GPU context for ICC colour transforms and image blits.
 ///
 /// Returns `None` on `Auto`, `CpuOnly` and `ForceVulkan`.  Errors loudly on
 /// `ForceCuda` if init fails; logs a warning and returns `None` on
 /// `ForceVaapi` if init fails.
 ///
-/// The CUDA context, stream, and PTX modules cost ~240 ms warm /
-/// ~1100 ms cold to build, and are process-wide state — there is no
-/// per-session work hidden inside.  We therefore cache the init result
-/// in a process-wide `OnceLock` so workloads that open many short-lived
-/// sessions (e.g. one page per archive across 100 archives) pay the
-/// cost once instead of once per `open_session` call.
+/// The context, with its kernel modules and scratch buffers, is shared by
+/// every session alive at once and freed with the last of them
+/// ([`crate::registry`]); a later session builds it again.
 ///
-/// Failures are also cached: on `ForceVaapi` we retain the
-/// fallback `None` so we don't re-attempt CUDA init every session and
-/// log the same warning hundreds of times.  `ForceCuda` still surfaces
-/// the cached error message verbatim because the caller asked us to
-/// fail loud rather than fall back.
+/// A failure is retained and not re-attempted: `ForceCuda` returns its
+/// message verbatim, `ForceVaapi` falls back to the CPU.
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
-static GPU_CTX: std::sync::OnceLock<Result<Arc<gpu::GpuCtx>, String>> = std::sync::OnceLock::new();
+static GPU_CTX: crate::registry::Registry<(), gpu::GpuCtx, String> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
 fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
@@ -653,13 +648,12 @@ fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, Raste
         return Ok(None);
     }
 
-    let cached = GPU_CTX.get_or_init(|| match gpu::GpuCtx::init() {
-        Ok(ctx) => Ok(Arc::new(ctx)),
-        Err(e) => Err(e.to_string()),
+    let cached = crate::registry::shared(&GPU_CTX, (), || {
+        gpu::GpuCtx::init().map(Arc::new).map_err(|e| e.to_string())
     });
 
     match cached {
-        Ok(ctx) => Ok(Some(Arc::clone(ctx))),
+        Ok(ctx) => Ok(Some(ctx)),
         Err(e) => {
             if matches!(policy, BackendPolicy::ForceCuda) {
                 Err(RasterError::BackendUnavailable(format!(

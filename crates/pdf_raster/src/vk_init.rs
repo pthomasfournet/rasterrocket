@@ -10,8 +10,9 @@
 //!
 //! [`SessionConfig::vulkan_device`]: crate::SessionConfig::vulkan_device
 
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::registry::{Registry, shared};
 use crate::{BackendPolicy, RasterError};
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
@@ -36,12 +37,9 @@ impl From<BackendError> for InitError {
     }
 }
 
-type Entry = (Option<String>, Result<Weak<VulkanBackend>, InitError>);
-
 /// Constructed backends keyed by selector, held weakly, and the selectors
 /// whose construction failed; `None` keys the automatically ranked device.
-/// A linear scan suffices: a process names a handful of selectors at most.
-static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+static BACKENDS: Registry<Option<String>, VulkanBackend, InitError> = Mutex::new(Vec::new());
 
 /// Return the Vulkan backend for `selector` under `policy`.
 ///
@@ -124,25 +122,9 @@ pub(crate) fn open_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>,
 /// or else a backend constructed now.  The lock is held across
 /// construction so concurrent first sessions build one device.
 fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
-    let mut cache = BACKENDS.lock().unwrap_or_else(PoisonError::into_inner);
-    let key = selector.map(str::to_owned);
-    if let Some(at) = cache.iter().position(|(k, _)| *k == key) {
-        match &cache[at].1 {
-            Ok(backend) => {
-                if let Some(backend) = backend.upgrade() {
-                    return Ok(backend);
-                }
-                drop(cache.swap_remove(at));
-            }
-            Err(e) => return Err(e.clone()),
-        }
-    }
-    let backend = construct(selector);
-    cache.push((
-        key,
-        backend.as_ref().map(Arc::downgrade).map_err(Clone::clone),
-    ));
-    backend
+    shared(&BACKENDS, selector.map(str::to_owned), || {
+        construct(selector)
+    })
 }
 
 /// The value `cache` holds for `key`, computed by `make` and retained on

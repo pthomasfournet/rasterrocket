@@ -309,11 +309,11 @@ fn main() -> ExitCode {
         |spool| spool.render_in_order(&print_pages, &pages, &pool, render_one),
     );
 
-    // Eagerly drop GPU decoders on every worker thread while the CUDA driver is
-    // still fully live, before the pool drops.  Avoids the process-exit teardown
-    // race where all workers call nvjpegJpegStateDestroy concurrently into a
-    // driver that has already started its own atexit shutdown sequence.
-    let _ = pool.broadcast(|_| pdf_raster::release_gpu_decoders());
+    // Every worker's GPU state is destroyed here, while the session holds the
+    // CUDA context: the pool's threads are not joined when it drops, and
+    // their thread-local destructors would otherwise call into the driver
+    // concurrently with the process's exit handlers.
+    let _ = pool.broadcast(|_| pdf_raster::release_gpu_thread_state());
 
     if let Some(spool) = spool {
         // Page errors are reported whether or not the spool failed.

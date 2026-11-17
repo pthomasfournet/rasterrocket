@@ -3,8 +3,8 @@
 //! driver thread runs while the process exits.
 //!
 //! [`gpu::backend::vulkan::open_devices`] counts the devices alive in the
-//! process; this file is its own test binary and its tests hold [`SERIAL`],
-//! so the count is theirs alone.  `PDF_RASTER_VULKAN_DEVICE` picks the
+//! process; this file is its own test binary and its tests hold
+//! [`teardown::serial`], so the count is theirs alone.  `PDF_RASTER_VULKAN_DEVICE` picks the
 //! device.  The tests skip when no Vulkan device opens.
 //!
 //! Run with:
@@ -17,39 +17,15 @@
     reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
+mod teardown;
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use common::{SCALE, stream_object, with_page_tree};
 use gpu::backend::vulkan::open_devices;
-use rasterrocket::{
-    BackendPolicy, RasterOptions, RasterSession, SessionConfig, open_session_from_bytes,
-    raster_pdf, render_channel, render_page_rgb,
+use rasterrocket::{BackendPolicy, RasterSession, open_session_from_bytes};
+use teardown::{
+    assert_library_entry_points_close, config, in_child_under, page_pdf, render, serial,
 };
-
-/// Held by every test: the device count is process-wide.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A one-page PDF of a filled rectangle, a page the GPU page raster renders.
-fn page_pdf() -> Vec<u8> {
-    with_page_tree(&[
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec(),
-        stream_object("", b"0.2 0.4 0.8 rg 20.5 30.25 120 90 re f\n"),
-    ])
-}
-
-/// A config of `policy` on the device `PDF_RASTER_VULKAN_DEVICE` names.
-fn config(policy: BackendPolicy, gpu_pages: bool) -> SessionConfig {
-    let mut config = SessionConfig::with_policy(policy);
-    config.vulkan_device = SessionConfig::vulkan_device_from_env();
-    config.gpu_pages = gpu_pages;
-    config
-}
 
 /// A `ForceVulkan` session over [`page_pdf`], or `None` (the test is
 /// skipped) when no Vulkan device opens.
@@ -57,10 +33,6 @@ fn vulkan_session() -> Option<RasterSession> {
     open_session_from_bytes(page_pdf(), &config(BackendPolicy::ForceVulkan, true))
         .inspect_err(|e| eprintln!("skipping: no Vulkan device: {e}"))
         .ok()
-}
-
-fn render(session: &RasterSession) {
-    let _ = render_page_rgb(session, 1, SCALE).expect("render page");
 }
 
 #[test]
@@ -124,57 +96,16 @@ fn a_device_opened_for_gpu_pages_is_destroyed_with_its_session() {
     assert_eq!(open_devices(), 0, "the device outlived its session");
 }
 
-/// Set in the child process that [`the_library_entry_points_destroy_the_device`]
-/// runs under `PDF_RASTER_BACKEND=vulkan`.
-const CHILD: &str = "RASTERROCKET_VULKAN_TEARDOWN_CHILD";
-
 /// `raster_pdf` and `render_channel` take their policy from
 /// `PDF_RASTER_BACKEND`; the test runs itself again with it set.
 #[test]
 fn the_library_entry_points_destroy_the_device() {
     let _serial = serial();
-    if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "the_library_entry_points_destroy_the_device",
-                "--exact",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("PDF_RASTER_BACKEND", "vulkan")
-            .status()
-            .expect("run the test under PDF_RASTER_BACKEND=vulkan");
-        assert!(status.success(), "the child test failed: {status}");
+    if !in_child_under("the_library_entry_points_destroy_the_device", "vulkan") {
         return;
     }
     if vulkan_session().is_none() {
         return;
     }
-    let scratch = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("vulkan_teardown_{}.pdf", std::process::id()));
-    std::fs::write(&scratch, page_pdf()).expect("write the PDF");
-    let opts = RasterOptions::new(72.0);
-
-    let mut pages = raster_pdf(&scratch, &opts);
-    let (_, first) = pages.next().expect("a page");
-    let _ = first.expect("raster_pdf renders the page");
-    assert_eq!(open_devices(), 1, "raster_pdf opened no device");
-    assert!(pages.next().is_none());
-    assert_eq!(
-        open_devices(),
-        0,
-        "raster_pdf kept its device past the last page"
-    );
-    drop(pages);
-
-    let pages = render_channel(&scratch, &opts, 2);
-    let rendered: Vec<_> = pages.iter().collect();
-    assert_eq!(rendered.len(), 1);
-    assert!(rendered[0].1.is_ok(), "render_channel: {:?}", rendered[0].1);
-    assert_eq!(
-        open_devices(),
-        0,
-        "render_channel's device outlived the channel"
-    );
-    let _ = std::fs::remove_file(&scratch);
+    assert_library_entry_points_close(open_devices);
 }
