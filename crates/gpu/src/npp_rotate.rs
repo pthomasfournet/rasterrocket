@@ -675,6 +675,16 @@ thread_local! {
     static ROTATOR: RefCell<RotatorSlot> = const { RefCell::new(RotatorSlot::Uninit) };
 }
 
+/// Drop the calling thread's rotator, releasing its stream and context;
+/// the next rotation on the thread builds a new one.  A failed
+/// initialisation stays recorded.
+pub(crate) fn release_thread_rotator() {
+    let ready = ROTATOR.with_borrow_mut(|slot| {
+        matches!(slot, RotatorSlot::Ready(_)).then(|| std::mem::replace(slot, RotatorSlot::Uninit))
+    });
+    drop(ready);
+}
+
 /// Rotate a single-channel 8-bit grayscale image by `angle_deg` (clockwise
 /// positive) on the GPU.
 ///

@@ -32,6 +32,7 @@ pub(crate) mod cuda;
 
 pub mod backend;
 mod lib_kernels;
+mod live;
 
 #[cfg(feature = "cache")]
 pub mod blit;
@@ -52,6 +53,7 @@ pub(crate) mod traits;
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 pub use decode_queue::{DecodeQueue, JpegQueueHandle};
 pub use jpeg_sof::{JpegSof, JpegVariant, jpeg_sof_info, jpeg_sof_type};
+pub use live::{open_contexts, release_thread_state};
 pub use traits::{DecodedImage, GpuDecodeError, GpuJpeg2kDecoder, GpuJpegDecoder};
 
 #[cfg(feature = "nvjpeg")]
@@ -121,7 +123,10 @@ pub(crate) struct GpuKernels {
 
 /// An initialised CUDA context and compiled kernel set.
 ///
-/// Create once per process with [`GpuCtx::init`] and share across threads via `Arc`.
+/// Created with [`GpuCtx::init`] and shared across threads via `Arc`.  Its
+/// kernels and scratch buffers are freed when it drops; the CUDA context
+/// itself is released once the threads' streams on it are dropped too
+/// ([`release_thread_state`], or a thread's next stream on another context).
 ///
 /// # Concurrency
 ///
@@ -140,6 +145,8 @@ thread_local! {
     /// The calling thread's stream for each [`GpuCtx`] context it has used,
     /// created on first use.  Each stream holds an `Arc` to its context, so a
     /// context cannot be freed (and its address reused) while an entry names it.
+    /// A stream whose context no live [`GpuCtx`] holds is dropped when the
+    /// thread next creates one ([`live`]).
     static THREAD_STREAMS: RefCell<Vec<Arc<CudaStream>>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -200,15 +207,17 @@ impl GpuCtx {
                 Ok(module.load_function(name)?)
             };
 
+        let kernels = GpuKernels {
+            icc_cmyk_matrix: load(PTX_ICC_CLUT, "icc_cmyk_matrix")?,
+            icc_cmyk_clut: load(PTX_ICC_CLUT, "icc_cmyk_clut")?,
+            #[cfg(feature = "cache")]
+            blit_image: load(PTX_BLIT_IMAGE, "blit_image")?,
+        };
+        live::register(&ctx);
         Ok(Self {
-            cuda: Arc::clone(&ctx),
+            cuda: ctx,
             scratch: backend::DeviceScratch::new(),
-            kernels: GpuKernels {
-                icc_cmyk_matrix: load(PTX_ICC_CLUT, "icc_cmyk_matrix")?,
-                icc_cmyk_clut: load(PTX_ICC_CLUT, "icc_cmyk_clut")?,
-                #[cfg(feature = "cache")]
-                blit_image: load(PTX_BLIT_IMAGE, "blit_image")?,
-            },
+            kernels,
         })
     }
 
@@ -241,6 +250,7 @@ impl GpuCtx {
             {
                 return Arc::clone(s);
             }
+            live::retain_live(streams, |s| s.context());
             let stream = self.cuda.new_stream().unwrap_or_else(|e| {
                 log::warn!(
                     "gpu: per-thread stream creation failed ({e}); using the default stream"
@@ -262,6 +272,12 @@ impl GpuCtx {
     /// Returns the driver error if stream creation fails.
     pub fn new_stream(&self) -> Result<Arc<CudaStream>, cudarc::driver::DriverError> {
         self.cuda.new_stream()
+    }
+}
+
+impl Drop for GpuCtx {
+    fn drop(&mut self) {
+        live::unregister(&self.cuda);
     }
 }
 

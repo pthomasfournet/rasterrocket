@@ -11,7 +11,8 @@
 //! The buffers are allocated without write-combining, so host reads of a
 //! band run at cached-memory speed.  They are created on first use, grown
 //! to one row when a row exceeds [`BAND_BYTES`], and released at thread
-//! exit.  A range of at most [`DIRECT_MAX_BYTES`] is copied in one
+//! exit, by [`release_thread_staging`], or, once no live `GpuCtx` holds
+//! their context, when the thread next allocates a set.  A range of at most [`DIRECT_MAX_BYTES`] is copied in one
 //! synchronous transfer into a pageable buffer instead, and so is any range
 //! when page-locked allocation fails.
 
@@ -68,6 +69,7 @@ fn take_staging(ctx: &Arc<CudaContext>, bytes: usize) -> Option<Staging> {
     if let Some(s) = held.filter(|s| s.capacity() >= bytes) {
         return Some(s);
     }
+    STAGING.with_borrow_mut(|sets| crate::live::retain_live(sets, |s| s.bufs[0].context()));
     Staging::new(ctx, bytes.max(BAND_BYTES))
         .map_err(|e| log::debug!("gpu: page-locked staging allocation failed ({e})"))
         .ok()
@@ -75,6 +77,11 @@ fn take_staging(ctx: &Arc<CudaContext>, bytes: usize) -> Option<Staging> {
 
 fn return_staging(staging: Staging) {
     STAGING.with_borrow_mut(|sets| sets.push(staging));
+}
+
+/// Free the calling thread's staging buffers.
+pub(crate) fn release_thread_staging() {
+    drop(STAGING.take());
 }
 
 /// Copy `src`, `src.len() / row_bytes` rows of `row_bytes` bytes, to the
