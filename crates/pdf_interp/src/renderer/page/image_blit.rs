@@ -491,15 +491,11 @@ impl PageRenderer<'_> {
         #[cfg(all(feature = "cache", feature = "vulkan"))]
         if self.device_recording() && matches!(img.data, crate::resources::image::ImageData::Gpu(_))
         {
-            return match self.host_copy(img, "a recorded page") {
-                Some(host) => {
-                    self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator))
-                }
-                None => {
-                    self.refuse_device("device-resident image");
-                    Ok(())
-                }
+            let Some(host) = self.host_copy(img, "a recorded page") else {
+                self.refuse_device("device-resident image");
+                return Ok(());
             };
+            return self.composite_image(&host, ctm, mask, grid, grid_clip, (overprint, separator));
         }
         // Device-resident samples are drawn by the device blit, or through
         // the CPU path below from their host copy.
