@@ -41,13 +41,13 @@
 //! # OCR integration
 //!
 //! `rasterrocket` is a rasteriser, not an OCR framework.  For Tesseract, ocrs,
-//! Google Cloud Vision, OpenAI and Mistral integration patterns — including one
+//! Google Cloud Vision, `OpenAI` and Mistral integration patterns — including one
 //! Tesseract instance per thread, given the raw pixels — see the project wiki:
 //!
 //! - [OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/OCR-Integration)
 //!   (Tesseract via `leptess`, ocrs)
 //! - [LLM Vision OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/LLM-Vision-OCR-Integration)
-//!   (Google Cloud Vision, OpenAI, Mistral)
+//!   (Google Cloud Vision, `OpenAI`, Mistral)
 //!
 //! # Streaming: render and process pages in parallel
 //!
