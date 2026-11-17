@@ -526,7 +526,7 @@ is **untested**: it is expected to work, nothing more.
 | AMD Raphael iGPU (the 9900X3D's), same machine | Vulkan through RADV; VA-API JPEG decode (VCN 4.0, Mesa radeonsi) |
 | llvmpipe (Mesa's CPU Vulkan driver), on both Linux machines | Vulkan, including `--gpu-pages` |
 | Intel Core i7-8700K (Coffee Lake, AVX2, no AVX-512), Linux x86-64 | the AVX2 and SSE tiers, the fixture byte comparisons and timings |
-| NVIDIA RTX 2080 SUPER (Turing, `sm_75`), driver 570, same machine | Vulkan, including `--gpu-pages`; CUDA ICC lookup-table kernels (built with Ubuntu's nvcc 12.4, no nvJPEG2000) |
+| NVIDIA RTX 2080 SUPER (Turing, `sm_75`), driver 570, same machine | Vulkan, including `--gpu-pages`. CUDA only from a build with Ubuntu's nvcc 12.4 (ICC lookup table, nvJPEG, NPP deskew, image cache; no nvJPEG2000): a CUDA 13 build, the toolkit this project builds with, fails to load its kernels on driver 570 (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`; CUDA 13 needs driver 580 or later) |
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
 | GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
@@ -594,7 +594,7 @@ The `CUDA_ARCH` environment variable controls which Compute Capability the PTX k
 | GPU generation | Architecture | `CUDA_ARCH` | Tested |
 |---|---|---|---|
 | GTX 10-series | Pascal | `sm_61` | no; CUDA 13 no longer targets Pascal |
-| RTX 20-series, Quadro RTX | Turing | `sm_75` | RTX 2080 SUPER, driver 570: the ICC lookup-table kernels (2026-11); nvJPEG2000 untested |
+| RTX 20-series, Quadro RTX | Turing | `sm_75` | RTX 2080 SUPER (2026-11), built with nvcc 12.4 on driver 570: ICC, nvJPEG, NPP and image-cache kernels; a CUDA 13 build needs driver 580 or later; nvJPEG2000 untested |
 | RTX 30-series, A100 | Ampere | `sm_80` / `sm_86` | no |
 | RTX 40-series | Ada Lovelace | `sm_89` | no |
 | H100 / Hopper | Hopper | `sm_90` | no |
