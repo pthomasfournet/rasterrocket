@@ -2,13 +2,15 @@
 //!
 //! A backend owns a logical device and its compiled pipelines, so it is
 //! built once per distinct [`SessionConfig::vulkan_device`] value and shared
-//! by every session that names the same selector.  Construction results,
-//! failures included, are retained: repeated sessions neither rebuild the
-//! device nor retry an init that already failed.
+//! by every session alive at once that names the same selector.  The
+//! registry holds a backend weakly: it is destroyed, its device and instance
+//! with it, when the last session holding it drops, and a later session
+//! builds it anew.  Failures are retained: repeated sessions do not retry an
+//! init that already failed.
 //!
 //! [`SessionConfig::vulkan_device`]: crate::SessionConfig::vulkan_device
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::{BackendPolicy, RasterError};
 use gpu::backend::BackendError;
@@ -34,11 +36,11 @@ impl From<BackendError> for InitError {
     }
 }
 
-type Entry = (Option<String>, Result<Arc<VulkanBackend>, InitError>);
+type Entry = (Option<String>, Result<Weak<VulkanBackend>, InitError>);
 
-/// Constructed backends keyed by selector; `None` keys the automatically
-/// ranked device.  A linear scan suffices: a process names a handful of
-/// selectors at most.
+/// Constructed backends keyed by selector, held weakly, and the selectors
+/// whose construction failed; `None` keys the automatically ranked device.
+/// A linear scan suffices: a process names a handful of selectors at most.
 static BACKENDS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
 /// Return the Vulkan backend for `selector` under `policy`.
@@ -105,8 +107,8 @@ fn checked_selector(selector: &str) -> Result<(), InitError> {
     })
 }
 
-/// The backend for `selector`, opened on first use and shared by every
-/// session naming the same selector, under any policy.
+/// The backend for `selector`, opened unless a live session holds it and
+/// shared by every session naming the same selector, under any policy.
 ///
 /// # Errors
 ///
@@ -118,12 +120,29 @@ pub(crate) fn open_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>,
     })
 }
 
-/// Look up or construct the backend for `selector`.  The lock is held
-/// across construction so concurrent first sessions build one device.
+/// The live backend for `selector`, or the failure of its construction,
+/// or else a backend constructed now.  The lock is held across
+/// construction so concurrent first sessions build one device.
 fn cached_backend(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
-    memo(&BACKENDS, selector.map(str::to_owned), || {
-        construct(selector)
-    })
+    let mut cache = BACKENDS.lock().unwrap_or_else(PoisonError::into_inner);
+    let key = selector.map(str::to_owned);
+    if let Some(at) = cache.iter().position(|(k, _)| *k == key) {
+        match &cache[at].1 {
+            Ok(backend) => {
+                if let Some(backend) = backend.upgrade() {
+                    return Ok(backend);
+                }
+                drop(cache.swap_remove(at));
+            }
+            Err(e) => return Err(e.clone()),
+        }
+    }
+    let backend = construct(selector);
+    cache.push((
+        key,
+        backend.as_ref().map(Arc::downgrade).map_err(Clone::clone),
+    ));
+    backend
 }
 
 /// The value `cache` holds for `key`, computed by `make` and retained on
