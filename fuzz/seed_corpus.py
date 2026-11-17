@@ -5,8 +5,9 @@
 
 Writes OUT_DIR/<target>/ for every target in fuzz/fuzz_targets, from:
 
-- files committed to this repository (JPEG / JPEG 2000 test images, test
-  fonts, hand-written content streams, CMaps and functions);
+- files committed to this repository (JPEG / JPEG 2000 test images, ICC
+  profiles, comic archives and page images, test fonts, hand-written
+  content streams, CMaps and functions) and synthetic camera captures;
 - the thirteen encrypted variants of the encryption integration suite,
   produced with qpdf (skipped with a note when qpdf is absent);
 - with --pdfium, the PDFs under PDFIUM_SRC/testing/resources (BSD-3-Clause,
@@ -189,6 +190,142 @@ def image_seeds(out: pathlib.Path) -> None:
     write(out, "fuzz_image", bytes([0, 0, 0, 15, 15, 1, 0, 0]) + raw[:32])
 
 
+# Component selector of an ICC profile, by a word of its file name: 0, 1
+# and 2 select 1, 3 and 4 components in `fuzz_icc` and `fuzz_image`.
+ICC_SPACES = (("gray", 0), ("rgb", 1), ("cmyk", 2))
+
+
+def icc_profiles() -> list[tuple[bytes, int]]:
+    """Return the committed ICC profiles with their component selectors.
+
+    A profile whose name names no space (the Lab and CGATS profiles) is
+    given three components.
+    """
+    found = []
+    for pattern in ("tests/fixtures/icc/*.icc", "crates/jpeg2000/assets/*.icc"):
+        for f in committed(pattern):
+            name = f.name.lower()
+            space = next((n for key, n in ICC_SPACES if key in name), 1)
+            found.append((f.read_bytes(), space))
+    return found
+
+
+def icc_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_icc` seeds and the ICC-based `fuzz_image` seeds.
+
+    `fuzz_icc` selector: [space, flags]; `fuzz_image` as in `image_seeds`.
+    """
+    raw = bytes(range(256)) * 3
+    for profile, space in icc_profiles():
+        for flags in (0, 1):
+            write(out, "fuzz_icc", bytes([space, flags]) + profile)
+        if len(profile) < 1 << 16:
+            sel = bytes([0, 3 | space << 4, 3, 15, 15, 0]) + len(profile).to_bytes(2, "big")
+            write(out, "fuzz_image", sel + profile + raw)
+
+
+def jpeg_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_jpeg` seeds, and `fuzz_image` seeds of the same streams.
+
+    Selector: [mode] (output space, strictness).
+    """
+    files = committed("tests/fixtures/jpeg/*.jpg") + committed("crates/zune_jpeg/tests/images/**/*.jpg")
+    for jpg in files:
+        data = jpg.read_bytes()
+        name = jpg.name.lower()
+        mode = 2 if "cmyk" in name else 0 if "gray" in name else 1
+        write(out, "fuzz_jpeg", bytes([mode]) + data)
+        write(out, "fuzz_jpeg", bytes([mode | 4]) + data)
+        write(out, "fuzz_image", bytes([1, mode, 3, 15, 15, 0, 0, 0]) + data)
+
+
+def jpeg2000_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_jpeg2000` seeds, and `fuzz_image` seeds of the HTJ2K streams.
+
+    Selector: [mode, size].
+    """
+    files = committed("crates/jpeg2000/tests/streams/*") + committed(
+        "crates/pdf_interp/src/resources/image/testdata/*.j*2*"
+    )
+    for f in files:
+        data = f.read_bytes()
+        write(out, "fuzz_jpeg2000", bytes([0, 0]) + data)
+        write(out, "fuzz_jpeg2000", bytes([8, 16]) + data)
+        if f.name.startswith("ht_"):
+            write(out, "fuzz_image", bytes([2, 1, 3, 15, 15, 0, 0, 0]) + data)
+
+
+# Container selector of `fuzz_comic`, by archive suffix.
+COMIC_CONTAINERS = {".cbz": 0, ".cb7": 1, ".cbt": 2, ".cbr": 3}
+
+
+def comic_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_comic` and `fuzz_comic_page` seeds.
+
+    Selectors: [container, flags] and [flags].
+    """
+    for f in committed("crates/comic/tests/data/one-page*"):
+        data = f.read_bytes()
+        for flags in (0, 1, 6):
+            write(out, "fuzz_comic", bytes([COMIC_CONTAINERS[f.suffix], flags]) + data)
+    pages = [
+        f
+        for pattern in ("*.avif", "*.jxl", "*.png", "*.webp", "*.tif")
+        for f in committed(f"crates/comic/tests/data/{pattern}")
+    ] + committed("tests/fixtures/jpeg/*.jpg")
+    for f in pages:
+        data = f.read_bytes()
+        for flags in (0, 1, 6):
+            write(out, "fuzz_comic_page", bytes([flags]) + data)
+
+
+def camera_capture(width: int, height: int, spread: bool) -> bytes:
+    """Return a synthetic 8-bit camera capture of `width` x `height`.
+
+    A light page whose corners a perspective pulls inwards lies on a darker
+    desk; it carries rows of dark text and, for a spread, a dark gutter down
+    the middle.
+    """
+    corners = [(0.12, 0.08), (0.9, 0.12), (0.86, 0.92), (0.1, 0.88)]
+    quad = [(x * width, y * height) for x, y in corners]
+
+    def inside(px: float, py: float) -> bool:
+        # The quad is convex, its corners clockwise on screen (y down).
+        for (x0, y0), (x1, y1) in zip(quad, quad[1:] + quad[:1]):
+            if (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0) < 0:
+                return False
+        return True
+
+    samples = bytearray()
+    for y in range(height):
+        for x in range(width):
+            if not inside(x + 0.5, y + 0.5):
+                v = 40 + (x * 7 + y * 3) % 20
+            elif spread and abs(x - width // 2) < 2:
+                v = 60
+            elif (y // 4) % 3 == 0 and (x // 3) % 4 != 3 and 0.2 < x / width < 0.8:
+                v = 30
+            else:
+                v = 225
+            samples.append(v)
+    return bytes(samples)
+
+
+def camera_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_camera` seeds.
+
+    Selector: [width_lo, width_hi, stride_pad, stages, threshold].
+    """
+    for width, height, spread in ((96, 64, False), (160, 100, True)):
+        image = camera_capture(width, height, spread)
+        w = (width - 1).to_bytes(2, "little")
+        for stages, threshold in ((0x1F, 64), (0x2E, 140), (0x0F, 200)):
+            write(out, "fuzz_camera", w + bytes([0, stages, threshold]) + image)
+    image = camera_capture(64, 48, False)
+    padded = b"".join(image[y * 64 : (y + 1) * 64] + bytes(5) for y in range(48))
+    write(out, "fuzz_camera", (63).to_bytes(2, "little") + bytes([5, 0x0F, 100]) + padded)
+
+
 def font_seeds(out: pathlib.Path) -> None:
     """Write `fuzz_font` seeds.  Selector: [face_index, size]."""
     for pattern in (
@@ -221,6 +358,11 @@ def filter_seeds(out: pathlib.Path) -> None:
 def repo_seeds(out: pathlib.Path) -> None:
     """Write the seeds built from files committed to this repository."""
     image_seeds(out)
+    icc_seeds(out)
+    jpeg_seeds(out)
+    jpeg2000_seeds(out)
+    comic_seeds(out)
+    camera_seeds(out)
     font_seeds(out)
     filter_seeds(out)
     for c in CONTENT_SEEDS:

@@ -31,16 +31,22 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - fuzz_camera
           - fuzz_ccitt
           - fuzz_cmap
+          - fuzz_comic
+          - fuzz_comic_page
           - fuzz_content
           - fuzz_decrypt
           - fuzz_document
           - fuzz_filters
           - fuzz_font
           - fuzz_function
+          - fuzz_icc
           - fuzz_image
           - fuzz_jbig2
+          - fuzz_jpeg
+          - fuzz_jpeg2000
           - fuzz_parse
     env:
       SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}

@@ -14,17 +14,28 @@ cargo-fuzz = true
 # this package.
 [workspace]
 
+# The local zune-jpeg fork also decodes the JPEG strips the tiff crate
+# reads, as in the main workspace.
+[patch.crates-io]
+zune-jpeg = { path = "../crates/zune_jpeg" }
+
 [lib]
 path = "src/lib.rs"
 test = false
 doc = false
 
 [dependencies]
-libfuzzer-sys = "0.4"
-font          = { package = "rasterrocket-font", path = "../crates/font" }
-pdf_interp    = { package = "rasterrocket-interp", path = "../crates/pdf_interp" }
-pdf           = { package = "rasterrocket-parser", path = "../crates/pdf" }
-rasterrocket  = { path = "../crates/pdf_raster" }
+libfuzzer-sys  = "0.4"
+font           = { package = "rasterrocket-font", path = "../crates/font" }
+pdf_interp     = { package = "rasterrocket-interp", path = "../crates/pdf_interp" }
+pdf            = { package = "rasterrocket-parser", path = "../crates/pdf" }
+rasterrocket   = { path = "../crates/pdf_raster" }
+camera         = { package = "rasterrocket-camera", path = "../crates/camera" }
+# Without the AV1 decoder's assembly kernels: the sanitizer instruments the
+# Rust decoder, and the build needs no nasm.
+comic          = { package = "rasterrocket-comic", path = "../crates/comic", default-features = false }
+hayro-jpeg2000 = { path = "../crates/jpeg2000" }
+zune-jpeg      = { path = "../crates/zune_jpeg" }
 
 [[bin]]
 name = "fuzz_ccitt"
@@ -99,6 +110,48 @@ bench = false
 [[bin]]
 name = "fuzz_image"
 path = "fuzz_targets/fuzz_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_camera"
+path = "fuzz_targets/fuzz_camera.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_comic"
+path = "fuzz_targets/fuzz_comic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_comic_page"
+path = "fuzz_targets/fuzz_comic_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_icc"
+path = "fuzz_targets/fuzz_icc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jpeg"
+path = "fuzz_targets/fuzz_jpeg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jpeg2000"
+path = "fuzz_targets/fuzz_jpeg2000.rs"
 test = false
 doc = false
 bench = false
