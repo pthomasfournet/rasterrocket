@@ -1,6 +1,11 @@
 # cargo-release configuration
-# Run:  cargo release minor --execute   (new features)
-#       cargo release patch --execute   (bug fixes)
+# Run in steps so the release commit carries fuzz/Cargo.lock (it pins the
+# workspace versions and CI checks it with --locked):
+#   cargo release version minor --execute --no-confirm   (or patch)
+#   cargo +nightly metadata --offline --manifest-path fuzz/Cargo.toml
+#   cargo release commit --execute --no-confirm
+#   cargo release tag --execute --no-confirm
+#   cargo release push --execute --no-confirm
 
 # Push tag and commits automatically after release commit
 push = true

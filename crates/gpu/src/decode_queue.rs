@@ -14,7 +14,7 @@
 //! eliminated.
 //!
 //! The same generic type works for any `D: GpuJpegDecoder + Send + 'static`, so
-//! it can serve both VA-API and (if needed in future) nvJPEG.
+//! it serves VA-API and any other `GpuJpegDecoder`.
 
 #[cfg(any(feature = "nvjpeg", feature = "vaapi"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
