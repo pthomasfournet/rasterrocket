@@ -462,7 +462,7 @@ fn pick_physical_device(
     if selector.is_none() {
         for (i, c) in candidates.iter().enumerate() {
             if let Err(why) = c.compute_queue {
-                log::info!("vulkan: device {i} \"{}\" skipped: {why}", c.name);
+                log::warn!("vulkan: device {i} \"{}\" skipped: {why}", c.name);
             }
         }
     }

@@ -76,7 +76,7 @@ pub(crate) fn driver_cuda_version() -> Option<(u32, u32)> {
 
 /// The message for a missing driver library.
 pub(crate) const NO_DRIVER_LIBRARY: &str = "the CUDA driver library (libcuda) is not installed \
-     or not on the loader path: install the NVIDIA driver";
+     or not on the loader path: install the NVIDIA driver of a CUDA-capable GPU";
 
 /// The message for `err`, returned while creating the context.
 pub(crate) fn context_failure(err: DriverError, driver: Option<(u32, u32)>) -> String {
@@ -98,17 +98,45 @@ pub(crate) fn context_failure(err: DriverError, driver: Option<(u32, u32)>) -> S
     }
 }
 
+/// The oldest architecture a toolkit of major release `major` compiles
+/// for (`sm_N` as `N`): CUDA 13 dropped Maxwell, Pascal and Volta, CUDA 12
+/// Kepler.  `None` for a release outside the table.
+const fn oldest_target(major: u32) -> Option<u32> {
+    match major {
+        13.. => Some(75),
+        12 => Some(50),
+        11 => Some(35),
+        _ => None,
+    }
+}
+
 /// The message for kernels that target a newer architecture than the
 /// device, or `None` when the header and the device do not show that.
+///
+/// A device older than every target of the toolkit that compiled the
+/// kernels cannot run this build's CUDA kernels at all; any other is told
+/// the `CUDA_ARCH` to rebuild with.
 pub(crate) fn arch_mismatch(header: &PtxHeader, device: (u32, u32)) -> Option<String> {
     let target = header.sm?;
     let device_sm = device.0 * 10 + device.1;
     (target > device_sm).then(|| {
-        format!(
-            "the CUDA kernels were compiled for sm_{target}, newer than this GPU (sm_{device_sm}, \
-             compute capability {}.{}): rebuild with CUDA_ARCH=sm_{device_sm}",
+        let gpu = format!(
+            "sm_{device_sm}, compute capability {}.{}",
             device.0, device.1
-        )
+        );
+        match header.toolkit {
+            Some((major, minor)) if oldest_target(major).is_some_and(|o| device_sm < o) => {
+                format!(
+                    "the CUDA kernels were compiled for sm_{target} by CUDA {major}.{minor}, \
+                     which compiles for no GPU as old as this one ({gpu}): this GPU cannot run \
+                     this build's CUDA kernels; use the Vulkan backend or the CPU"
+                )
+            }
+            _ => format!(
+                "the CUDA kernels were compiled for sm_{target}, newer than this GPU ({gpu}): \
+                 rebuild with CUDA_ARCH=sm_{device_sm}"
+            ),
+        }
     })
 }
 
@@ -132,9 +160,9 @@ pub(crate) fn load_failure(
                 format!(" one that supports CUDA {m}.{n} or later")
             });
             format!(
-                "the CUDA kernels were compiled by {built}, newer than this NVIDIA driver{} \
-                 supports ({err:?}): update the driver to{needs}",
-                driver_suffix(driver)
+                "the CUDA kernels were compiled by {built}, newer than this NVIDIA driver \
+                 supports{} ({err:?}): update the driver to{needs}",
+                driver.map_or_else(String::new, |(m, n)| format!(" (up to CUDA {m}.{n})"))
             )
         }
         CUresult::CUDA_ERROR_INVALID_PTX | CUresult::CUDA_ERROR_NO_BINARY_FOR_GPU => {
@@ -194,13 +222,35 @@ mod tests {
         assert_eq!(arch_mismatch(&PtxHeader::default(), (7, 5)), None);
     }
 
+    /// A GPU older than every target of the build's toolkit is told it
+    /// cannot run the kernels, not to rebuild for it.
+    #[test]
+    fn a_gpu_the_toolkit_dropped_is_told_to_use_vulkan_or_the_cpu() {
+        let cuda13 = PtxHeader {
+            toolkit: Some((13, 3)),
+            isa: Some((9, 3)),
+            sm: Some(80),
+        };
+        let m = arch_mismatch(&cuda13, (6, 1)).expect("sm_80 on a 6.1 device");
+        assert!(m.contains("cannot run") && m.contains("Vulkan"), "{m}");
+        assert!(!m.contains("CUDA_ARCH"), "{m}");
+        let m = arch_mismatch(&cuda13, (7, 5)).expect("sm_80 on a 7.5 device");
+        assert!(m.contains("CUDA_ARCH=sm_75"), "{m}");
+        let cuda12 = PtxHeader {
+            toolkit: Some((12, 4)),
+            ..cuda13
+        };
+        let m = arch_mismatch(&cuda12, (6, 1)).expect("sm_80 on a 6.1 device");
+        assert!(m.contains("CUDA_ARCH=sm_61"), "{m}");
+    }
+
     #[test]
     fn a_newer_toolkit_than_the_driver_names_both() {
         let h = ptx_header(HEADER);
         let e = DriverError(CUresult::CUDA_ERROR_UNSUPPORTED_PTX_VERSION);
         let m = load_failure(e, &h, Some((12, 8)), Some((7, 5)));
         assert!(m.contains("CUDA 13.3 (PTX ISA 9.3)"), "{m}");
-        assert!(m.contains("supports CUDA 12.8"), "{m}");
+        assert!(m.contains("up to CUDA 12.8"), "{m}");
         assert!(m.contains("CUDA 13.3 or later"), "{m}");
     }
 
