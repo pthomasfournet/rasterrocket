@@ -50,6 +50,23 @@ fn write_temp_cbz(name: &str, bytes: &[u8]) -> (tempfile::TempDir, std::path::Pa
     (dir, path)
 }
 
+/// An archive held in memory opens as the file would, its container
+/// chosen by the extension of the name given, in any case.
+#[test]
+fn open_comic_bytes_reads_an_archive_in_memory() {
+    let cbz = make_cbz(&[("1.jpg", &jpeg_page(4, 4, 50))]);
+    let opts = ComicOptions::default();
+    let pages: Vec<_> = open_comic_bytes("Book.CBZ", cbz.clone(), &opts)
+        .unwrap()
+        .collect();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].1.as_ref().unwrap().width, 4);
+    assert!(matches!(
+        open_comic_bytes("book.cbt", cbz, &opts),
+        Err(ComicError::BadArchive(_))
+    ));
+}
+
 #[test]
 fn open_comic_yields_ordered_pages() {
     // Two solid pages + one non-image entry; names out of natural order.
@@ -380,4 +397,53 @@ fn images_win_over_pdf() {
         (4, 4),
         "the rendered page is the 4×4 image, not a 612×792-pt PDF page"
     );
+}
+
+/// The one-page archives of `tests/data`, one per container (RAR in its
+/// 4 and 5 formats), each hold an 8 × 8 JPEG page and a `ComicInfo.xml`.
+#[test]
+fn committed_archives_open_in_every_container() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    for name in [
+        "one-page.cbz",
+        "one-page.cb7",
+        "one-page.cbt",
+        "one-page-rar4.cbr",
+        "one-page-rar5.cbr",
+    ] {
+        let pages: Vec<_> = open_comic(&dir.join(name), &ComicOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .collect();
+        assert_eq!(pages.len(), 1, "{name}");
+        let page = pages[0]
+            .1
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((page.width, page.height), (8, 8), "{name}");
+    }
+}
+
+/// The PNG, WebP and TIFF pages of `tests/data` decode, a two-page TIFF to
+/// two pages.
+#[test]
+fn committed_page_images_decode() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    for (name, count) in [
+        ("rgb-16x8.png", 1),
+        ("rgb-16x8-lossless.webp", 1),
+        ("rgb-16x8-lossy.webp", 1),
+        ("gray-16x8-packbits.tif", 1),
+        ("gray-16x8-two-pages.tif", 2),
+    ] {
+        let image = std::fs::read(dir.join(name)).expect("fixture");
+        let cbz = make_cbz(&[(name, &image)]);
+        let pages: Vec<_> = open_comic_bytes("book.cbz", cbz, &ComicOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .collect();
+        assert_eq!(pages.len(), count, "{name}");
+        for (_, page) in &pages {
+            let page = page.as_ref().unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!((page.width, page.height), (16, 8), "{name}");
+        }
+    }
 }

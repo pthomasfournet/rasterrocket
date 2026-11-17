@@ -311,7 +311,21 @@ pub fn open_comic(path: &Path, opts: &ComicOptions) -> Result<ComicPages, ComicE
         .and_then(|n| n.to_str())
         .ok_or_else(|| ComicError::BadArchive("input path has no file name".to_owned()))?;
     let bytes = std::fs::read(path).map_err(ComicError::Open)?;
+    open_comic_bytes(file_name, bytes, opts)
+}
 
+/// [`open_comic`] on the archive `bytes`, whose container is chosen by the
+/// extension of `file_name` (`.cbz`, `.cb7`, `.cbt` or `.cbr`, in any case).
+///
+/// # Errors
+///
+/// As [`open_comic`], except that there is no file to open.
+pub fn open_comic_bytes(
+    file_name: &str,
+    bytes: Vec<u8>,
+    opts: &ComicOptions,
+) -> Result<ComicPages, ComicError> {
+    validate_options(opts)?;
     let budget = archive::ArchiveBudget::new(opts.max_archive_bytes);
     let mut archive = archive::open_archive_from_ext(file_name, bytes, budget)?;
 
