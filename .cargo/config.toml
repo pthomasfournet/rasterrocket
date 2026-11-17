@@ -5,8 +5,9 @@ jobs = 6
 # Compile for the host CPU by default.  The explicit SIMD paths in raster/
 # and gpu/ already use is_x86_feature_detected! for runtime dispatch, but
 # this lets LLVM auto-vectorise the rest of the code with the host's full
-# vector width.  Override per-machine when building for a different target
-# (e.g. on the i7-8700K testbench: RUSTFLAGS="-C target-cpu=skylake").
+# vector width.  A binary built this way runs only on CPUs with the build
+# host's features: for a portable binary set RUSTFLAGS="-C target-cpu=generic"
+# (or a named baseline such as x86-64-v3).
 #
 # Cargo precedence note: the RUSTFLAGS env var fully *replaces* this value
 # (it does not append).  If a script needs to add flags (e.g. `-D warnings`),
@@ -27,9 +28,3 @@ SCCACHE_CACHE_MULTIARCH = "1"
 # Single codegen unit per crate in test builds.  The test binary for
 # pdf_interp grows to ~96 MiB with the default split; one CGU halves that.
 codegen-units = 1
-
-[test]
-# Run tests serially to prevent concurrent large allocations from OOMing.
-# pdf_interp has tests with multi-hundred-MiB working sets; parallelism kills
-# the machine under cargo test --lib.
-test-threads = 1
