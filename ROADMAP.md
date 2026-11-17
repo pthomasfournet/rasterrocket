@@ -3992,6 +3992,23 @@ image documents (RADV, A18 Pro); with all threads the CPU still wins. Output
 is byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
 and the A18 Pro.
 
+**Unreleased on master: path clips and soft masks on GPU pages.**
+`--gpu-pages` no longer refuses a page for a path clip, a clipping text mode
+or a soft mask, so every one of the 3 824 fixture pages now renders on the
+GPU (3 737 before). A path clip goes to the device as the coverage tables
+the CPU computed for it, held once per page, and the device scales each
+paint by them exactly as the CPU does (fills region by region, glyphs and
+images by the clip's coverage). Clipping text modes become ordinary path
+clips. A soft mask is still rendered on the CPU when `gs` sets it, its
+backdrop and transfer function included; the page holds only the part of
+it that is not uniform, and the device blends each masked object back by it.
+A masked page no longer pays for a refused recording and then a CPU render:
+corpus-06 (half its 160 pages masked), single-threaded at 150 dpi, takes
+2351 ms on the RTX 5070 (3314 before, 2537 on the CPU) and 3012 ms on RADV
+(3554 before); with all threads the CPU still wins, and on the A18 Pro the
+two are level. Output is byte-identical to `--backend cpu` at 8 and 16 bits
+on the RTX 5070, RADV and the A18 Pro.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in
