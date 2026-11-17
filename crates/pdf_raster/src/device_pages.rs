@@ -414,8 +414,8 @@ mod tests {
     /// Fills and strokes the device renders.
     const DEVICE: &str = "0 0 1 rg 10.3 10.7 60.2 50.1 re f 1 0 0 RG 3 w 5 5 m 90 70 l S";
 
-    /// A paint under a path clip, which the recording refuses.
-    const CLIPPED: &str = "10 10 m 90 10 l 50 90 l h W n 0 0 1 rg 0 0 100 100 re f";
+    /// A translucent hairline, which the recording refuses.
+    const REFUSED: &str = "/T gs 0 0 1 RG 0 w 10 10 m 90 90 l S";
 
     /// A PDF of 100 × 100 pt pages, page `i` painting `contents[i]`.
     fn pdf(contents: &[&str]) -> Vec<u8> {
@@ -430,7 +430,8 @@ mod tests {
         ];
         for (i, content) in contents.iter().enumerate() {
             objects.push(format!(
-                "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {} 0 R>>",
+                "<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+                 /Resources <</ExtGState <</T <</CA 0.5>> >> >> /Contents {} 0 R>>",
                 4 + 2 * i
             ));
             objects.push(stream(content));
@@ -546,13 +547,13 @@ mod tests {
     /// is reported cancelled without rendering the page again.
     #[test]
     fn a_cancelled_recording_is_not_rendered_again() {
-        let doc = pdf(&[CLIPPED, DEVICE]);
+        let doc = pdf(&[REFUSED, DEVICE]);
         let Some(session) = gpu_session(doc.clone()) else {
             return;
         };
         let pages = device_pages(&session);
         let (page, outcome) = render(&session, 1, &RenderParams::new(2.0)).expect("render");
-        assert_eq!(outcome, DevicePage::Ineligible("path clip"));
+        assert_eq!(outcome, DevicePage::Ineligible("translucent hairline"));
         assert_eq!(page, cpu(doc, 1));
         assert_eq!(pages.faults.cpu_reruns.load(Ordering::Relaxed), 1);
 
