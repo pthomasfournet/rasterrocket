@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.1] - 2026-11-17
+
+### Bug Fixes
+
+- A hairline's row crossings stay within its end columns
+
 ## [2.4.0] - 2026-11-17
 
 ### Bug Fixes
@@ -90,6 +96,7 @@ All notable changes to this project will be documented in this file.
 - Untrack .clangd and the .gitkeep placeholders
 - Drop the [test] table cargo never read, say how to build portably
 - Mark the vendored forks for GitHub's language statistics
+- Release v2.4.0
 
 ### Documentation
 
@@ -163,6 +170,7 @@ All notable changes to this project will be documented in this file.
 - OpenAI as code in the crate docs (doc_markdown)
 - Changelog lists the unreleased changes since v2.3.0
 - V2.4.0 notes cover the fuzz findings, the outline fallback and the new fuzz targets
+- Changelog for v2.4.0
 
 ### Features
 

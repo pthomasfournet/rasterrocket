@@ -49,6 +49,15 @@ v1.2.0 and exists only as a pixel-diff reference baseline.
 
 ## Release history
 
+### v2.4.1 (November 2026)
+
+**A hairline fix.** On the last row of a sloped hairline segment, the
+crossing computed from the slope could round past the segment's end column
+and paint a pixel beyond it, so a clip rectangle masked the hairline
+differently from the unclipped stroke. Crossings now stay within the
+columns of the segment's ends. The property test that clips hairlines found
+it on the v2.4.0 release commit's CI run; the rest of v2.4.0 is unchanged.
+
 ### v2.4.0 (November 2026)
 
 **Soft proofing, a wide working space, input conversions under the
@@ -3147,6 +3156,12 @@ codes the trace expands to several characters, and by 61 glyphs of two
 running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
+
+**Released in v2.4.1: hairline row crossings stay within the segment's end
+columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
+of the segment's ends; in floating point it could round one column past
+them (0.9999 for 1.0), outside the pixel rectangle the clip test classified.
+A regression test in `crates/raster/src/proptests.rs` pins the case.
 
 **Released in v2.4.0: two fuzz findings fixed, six new fuzz targets.** The
 weekly fuzz run found a 9 KB font whose VARC region list claimed about 4.3
