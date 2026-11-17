@@ -771,6 +771,20 @@ mod tests {
     /// writes an all-black destination of the same size, which the thread's
     /// rotator reuses as the next same-size destination, so an uncleared
     /// destination reads 0 at the corners.
+    /// `release_thread_state` drops the thread's rotator, and the next
+    /// rotation on the thread builds a new one.
+    #[test]
+    fn release_thread_state_drops_the_rotator() {
+        let ready = || ROTATOR.with_borrow(|slot| matches!(slot, RotatorSlot::Ready(_)));
+        let white = vec![255u8; 64 * 64];
+        let _ = rotate_gray8(&white, 64, 64, 64, 1.0).expect("rotate");
+        assert!(ready(), "a rotation left no rotator");
+        crate::release_thread_state();
+        assert!(!ready(), "release_thread_state kept the rotator");
+        let _ = rotate_gray8(&white, 64, 64, 64, 1.0).expect("rotate after the release");
+        assert!(ready());
+    }
+
     #[test]
     fn uncovered_corners_are_white() {
         const W: u32 = 512;
