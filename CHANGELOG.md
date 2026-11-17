@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.4.0] - 2026-11-17
 
 ### Bug Fixes
 
@@ -80,6 +80,8 @@ All notable changes to this project will be documented in this file.
 - Refuse a GPU below the CUDA toolkit's oldest architecture
 - An empty PDF_RASTER_CACHE_DIR warns that it names no cache root
 - Register only exists where GpuCtx can start (not under placeholder PTX)
+- Bound the VARC scalar cache by the region list's length
+- Bound glyph bitmaps by their span in ems, fill larger glyphs as outlines
 
 ### Chores
 
@@ -159,6 +161,8 @@ All notable changes to this project will be documented in this file.
 - Refresh month-old comments (package name, CPU JPEG 2000 fallback, stepwise release)
 - OCR pointers match the refreshed wiki; the roadmap snippet uses page.dpi
 - OpenAI as code in the crate docs (doc_markdown)
+- Changelog lists the unreleased changes since v2.3.0
+- V2.4.0 notes cover the fuzz findings, the outline fallback and the new fuzz targets
 
 ### Features
 
@@ -215,11 +219,13 @@ All notable changes to this project will be documented in this file.
 - Count the Vulkan devices the process holds open
 - Release a thread's CUDA state, and drop it once its context ends
 - DeviceHold keeps a configuration's GPU devices open
+- Open_comic_bytes opens an archive held in memory
 
 ### Other
 
 - CUDA_ARCH defaults to sm_75
 - Libc only with the vulkan feature
+- Move upload-artifact to v7, which runs on Node.js 24
 
 ### Performance
 
@@ -290,6 +296,7 @@ All notable changes to this project will be documented in this file.
 - Release_thread_state drops the thread's NPP rotator
 - Spell dictionary in two test names
 - Fit substitute widths against the compiled-in sans, not an installed face
+- Targets for JPEG, JPEG 2000, comic archives and pages, ICC profiles and camera cleanup
 
 ## [2.3.0] - 2026-11-15
 
