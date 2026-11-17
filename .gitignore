@@ -104,3 +104,7 @@ __pycache__/
 # differs from its golden is written next to it as `.trace.actual`.
 tests/fixtures/traces/
 *.trace.actual
+
+# Local editor config for the CUDA kernels (clangd); empty-directory placeholders.
+.clangd
+.gitkeep
