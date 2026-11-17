@@ -30,19 +30,10 @@ Phase 5 is complete. The API exists and is integrated.
 
 ## Known issues
 
-**CMYK output has gaps.** `--cmyk` / `--jpegcmyk` ignore `BG`/`UCR`, do
-not convert ICC-based CMYK content to a different CMYK output profile, and
-separate indexed images over a CMYK base through sRGB; see
-[Current status](#current-status-2026-11-15).
-
 **GPU JPEG decode is off.** nvJPEG and VA-API JPEG share one size gate,
 `GPU_JPEG_THRESHOLD_PX = u32::MAX`, so builds with `nvjpeg` or `vaapi`
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
-
-**Overprint simulation has one gap.** Under `--overprint`, transparency
-groups as a whole knock out instead of overprinting; see
-[Current status](#current-status-2026-11-15).
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -57,6 +48,203 @@ v1.2.0 and exists only as a pixel-diff reference baseline.
 ---
 
 ## Release history
+
+### v2.4.0 (November 2026)
+
+**Soft proofing, a wide working space, input conversions under the
+rendering intent, transparency groups composited in their own colour
+space, OCR preparation of scans and 16-bit comic and camera input;
+`--gpu-pages` renders every fixture page; the API changes in several
+places.** Colour management is completed on the input side: ICC
+conversions honour each object's rendering intent and black-point
+compensation and agree with Little CMS to its precision, CMYK output
+performs every conversion it skipped, and a document can be proofed
+against the press its output intent names. Default RGB output changes
+on pages with table-based CMYK profiles, CMYK page groups and some ICC
+content, by the amounts the Current status section gives for each. The
+Vulkan page raster computes exact-area coverage on the device and draws
+text, images, forms, path clips and soft masks. GPU devices close with
+their last session. The API changes are listed below as they are, without
+compatibility shims.
+
+**Colour.**
+- **Input ICC conversions** run under the intent each object is painted
+  with (`ri`, `/RI`, an image's `/Intent`), through the profile's matching
+  `AToB` table, with black-point compensation as `/UseBlackPtComp` asks
+  and absolute colorimetry scaled by the media white. Table profiles
+  evaluate in floating point; RGB and CMYK tables convert through one
+  device grid interpolated in simplices, its cells following the
+  profile's CLUT and its nodes held unclipped. Against `transicc` the
+  worst ΔE00 at 16 bits is 0.07 for RGB tables (was 1.8–4.4) and 0.13–0.68
+  for CMYK tables between nodes; 19 archive documents whose CMYK profile
+  compensates render their dark text deeper (luminance 54 → 40).
+- **Wide working space.** Under `--output-profile` a page composites in
+  ROMM RGB primaries with the sRGB curve (`--working-space srgb|wide`,
+  `SessionConfig::working_space`) on a 16-bit canvas at either output
+  depth, so colours outside sRGB reach the printer unclipped (100 % of ISO
+  Coated v2, where sRGB holds 92.5 %). Without an output profile, output
+  is byte-identical.
+- **Soft proofing.** `--proof[=relative|absolute]` (`SessionConfig::proof`,
+  `RasterOptions::proof`) paints each page in the ink of the CMYK press its
+  `/OutputIntents` names and converts that ink to the display or an RGB or
+  gray output profile, within ΔE00 1 of `transicc -p` at 16 bits. A
+  document without a CMYK output intent is refused at session open.
+- **CMYK output completes its conversions.** `BG`/`UCR` functions apply
+  without an output profile; ICC CMYK of another press converts to the
+  output profile's ink; Indexed images over ink paint their palette's ink;
+  each object separates under its own intent; separation tables evaluate
+  the profile's `BToA` at each node. `--preserve-black[=k-only|k-plane]`
+  keeps black ink black between presses. Black-point compensation to a
+  CMYK profile maps to the black of its perceptual round trip, so
+  `--cmyk --bpc` shadows get lighter.
+- **Transparency groups** composite in their `/CS`: CMYK groups over RGB
+  pages in ink (ICC CMYK ones in their profile's ink), gray groups in
+  gray (blend modes included), `CalRGB` and non-sRGB RGB groups in their
+  own space, images and shadings of that space keeping their components;
+  on ink pages RGB groups keep spot channels. Page groups choose the
+  canvas. CMYK luminosity masks take the ink gray; `CalRGB`/`CalGray`
+  masks take the luminance Y. Overprint under a blend mode blends the
+  colorants it does not paint (ISO 32000-1 §11.7.4.3), and spot channels
+  take white-preserving modes. 105 archive pages with CMYK page groups
+  change under default output (mean ΔE76 1.00).
+- 16-bit DeviceCMYK interpolates corners converted at 16 bits; the
+  overprint ink solve no longer stalls beside a bound.
+
+**Rendering and parsing.**
+- A `W`/`W*` clip takes effect after the paint that ends its path, so
+  `re W S` keeps its outer half and an antialiased `W f` is not covered
+  twice.
+- A folded Coons or tensor patch shows its largest parameters; curved
+  patches subdivide until flat to 0.25 px; an image axis thinner than a
+  pixel spans one pixel; mesh shadings bound the work of converting
+  vertex colours.
+- A word split between show strings or faces is fitted to `/Widths` as
+  one run. A non-embedded font draws with the installed face its name
+  names. Link annotations without an appearance draw their border; text
+  fields show at most `/MaxLen` characters. A Type 3 font without a valid
+  `/FontMatrix` uses the identity.
+- A form nested past `MAX_FORM_DEPTH` (now 40) is skipped and reported
+  in `PageDiagnostics::forms_too_deep` rather than losing the page. A JPEG
+  2000 `/SMaskInData 2` image un-premultiplies against its `/Matte`; a
+  truncated codestream is drawn as far as it decodes and reported
+  partial, or skipped when a tile holds no data. A colour-key `/Mask`
+  longer than needed is keyed on its first 2·n entries.
+- The parser reads a run of leading signs as its last sign, a `%PDF`
+  header without a version, an unclosed dictionary, a page tree whose
+  `/Count` is wrong, direct page-tree nodes, and a stream whose `/Length`
+  misses its `endstream`; a misdirected object names the damage.
+
+**Scans and camera input.** `--deskew` straightens gray pages and
+declines pages without a confident angle (a ratio of 3 between the
+sweep's best and worst scores), so photographs, blank pages and pages
+tilted past ±6.75° are left as they are. `--clean-borders`,
+`--clean-background` and `--threshold fixed|sauvola` prepare scans for
+OCR (`rasterrocket-camera`'s `find_border_junk`, `measure_background`,
+`binarize`). Comic pages, the camera stages and deskew work at
+`--depth 16`. PNG and JPEG output records the render resolution, so their
+bytes change; `--mono --png` writes a 1-bit PNG.
+
+**GPU.** Default renders stay on the CPU; every item here is opt-in.
+- **Page raster** (`--gpu-pages`, Vulkan). It computes exact-area
+  coverage on the device from outlines binned into 16 × 16 tiles, and now
+  draws text (the CPU's glyph bitmaps), images (the CPU's decodes, sampled
+  with its integer arithmetic), forms, annotation appearances, path clips
+  and soft masks, at 8 and 16 bits, byte-identical to `--backend cpu`:
+  every one of the 3 824 fixture pages renders on the device. Two pages
+  are in flight, the device opens only for a page that may use it, and
+  `VulkanBackend::render_page_timed` reports per-stage times. A GPU page
+  usually costs less than a CPU page; beside all CPU workers the CPU still
+  wins or ties.
+- **Device lifetime.** The Vulkan device and the CUDA context are shared
+  by the sessions alive at once and destroyed with the last of them,
+  which removes a driver crash at exit on the RTX 5070 (about one run in
+  twelve). `release_gpu_thread_state` (renamed from
+  `release_gpu_decoders`) also drops a thread's CUDA streams, staging
+  buffers and NPP rotator. `DeviceHold` keeps a configuration's devices
+  open across sessions.
+- **CUDA diagnostics.** A context that does not start names the cause: no
+  driver library, no device, mismatched driver components, a driver older
+  than the toolkit, a kernel architecture newer than the device, or a
+  device below the toolkit's oldest architecture. `CUDA_ARCH` defaults to
+  `sm_75`. Skipped Vulkan devices, and a `PDF_RASTER_JPX_THRESHOLD` that
+  cannot act, are logged at warn.
+- **JPEG 2000 and JPEG.** nvJPEG2000 is dormant under `auto` (its
+  threshold is `u32::MAX`; `--backend cuda` keeps 2 097 152 px, and
+  `PDF_RASTER_JPX_THRESHOLD` overrides both), declines from the
+  codestream's headers before a decoder is built, and decodes 9–16-bit
+  codestreams under the 5-3 wavelet. The GPU parallel-Huffman JPEG
+  decoder is deleted; it lost to the CPU by about 10×.
+- **16 bits and ICC.** The device ICC CMYK conversion interpolates the
+  CPU's own grid in integers, so a GPU session is byte-identical to a CPU
+  one, and writes 16-bit output; NPP rotates 16-bit pages under
+  `--backend cuda`, and AVX-512/NEON row kernels rotate them on the CPU.
+  Deskew rotates on the GPU only under `--backend cuda`.
+- README names the hardware every result was measured on (RTX 5070, RTX
+  2080 SUPER, the RADV iGPU, llvmpipe, the A18 Pro) and marks the rest
+  untested.
+
+**Other.** `--ram-path` works on Windows. A paint trace
+(`PageRenderer::set_paint_trace`, the doc-hidden
+`rasterrocket::dev::paint_trace`, the `paint_trace` dev binary) records a
+page's painting operations as text, as a pixel-independent regression
+oracle. The comparison harness judges the worst per-channel tile delta,
+and its expected-failures registry carries a reason for every entry.
+
+**API changes** (breaking, in `rasterrocket` and the lower crates; the
+Current status section below lists every item).
+- `release_gpu_decoders` is `release_gpu_thread_state`; `DeviceHold` is
+  new. The `gpu-jpeg-huffman` feature is removed from every crate, with
+  `rasterrocket_gpu::jpeg_decoder`, the scan, Huffman and IDCT parameter
+  types, `rasterrocket_interp::huffman_threshold`,
+  `DeviceKernel::HuffmanJpeg`, `PageRenderer::{set,take}_jpeg_{gpu,vk}`
+  and the `B: GpuBackend` parameter of `resolve_image` and
+  `PageResources::image`.
+- `deskew::apply` takes a `BackendPolicy`, is generic over `DeskewPixel`
+  (`Gray8`, `Gray16`) and returns `Option<Skew>`; `deskew::detect` and
+  `Skew` are new; `DeskewError` is an enum (`TooLarge`, `GpuRotation`);
+  `RenderedPage::skew` and `PageInfo::skew` are new.
+- `RasterOptions` gains `preserve_black` and `proof`; `SessionConfig`
+  gains `proof`, `working_space` and, with `cache`, `prefetch_scale`;
+  `RenderParams` gains `with_preserve_black`; `RasterError::OutputIntent`
+  is new; `PreserveBlack`, `ProofIntent`, `WorkingSpace`,
+  `OutputIntentError`, `GroupSpaceApproximations`, `MAX_FORM_DEPTH`,
+  `rgb16_into_gray16` and `gray16_into_rendered_page` are exported.
+  `PageDiagnostics` gains `forms_too_deep` and `approximated_group_spaces`.
+- `rasterrocket-interp`: `ColourTarget` replaces `ColourIntent` as the
+  argument of `ColorSpace::convert_to_rgb`; `CanvasRequest::ProcessRgb {
+  overprint }` replaces `OverprintPreview`, and `WideRgb` and `ProfileRgb`
+  are new; `page_group_space` replaces `page_group_declares_space`, and
+  `page_group` / `transparent_page_group` return the declared space;
+  `OutputProfile::separation` takes an optional intent and returns
+  `Separation::Profile(Arc<PressSeparation>)`, and `convert`, `separation`
+  and `prepare` take the working space; `RenderAbort::FormDepth` is
+  removed; `DeviceKernel::NvJpeg2kOnDemand` and `NvJpeg2kAttached` are new
+  and `device_kernel_enabled` is not `const`; `ImageDecodeCtx::keep_tints`
+  and `DecodedImage::kept_tints` are `KeptTints`; `FaceInfo::postscript`,
+  `FontDescriptor::face_name` and `PageRenderer::set_paint_trace` are new.
+- `rasterrocket-gpu`: `icc_cmyk_to_rgb_cpu` and `GpuCompute` are removed;
+  `icc_clut` and `GpuCtx::icc_cmyk_to_rgb` take a `&CmykGrid`, and
+  `icc_clut16`, `IccClutParams::wide` and `npp_rotate::rotate_gray16` are
+  new; `GpuBackend::upload`, `record_zero_buffer`, `record_copy_to_device`
+  and the written buffers of `BlitParams` and `IccClutParams` take `&mut`;
+  `PageCommands::new` takes a `SampleDepth` and `u16` paper, gains area
+  paths, masks, images, clips and mask planes, and
+  `VulkanBackend::render_page` is generic over `PageSample`;
+  `render_page_timed`, `PageTimes`, `release_thread_state`,
+  `open_contexts`, `vulkan::open_devices` and
+  `NvJpeg2kDecoder::decode_sync_u16` are new.
+- `rasterrocket-render`: `Clip::path_regions`, `Clip::path_key`,
+  `RegionKey`, `GrayBlend`, `PipeState::gray`, `Bitmap::converted`,
+  `Bitmap::try_converted_in`, `AreaOutline`, `aa_fill_outlines`,
+  `transparency::begin_group_converted` and the `fnv` module are new.
+- `rasterrocket-encode`: `write_png`, `PngWriter::new` and `write_jpeg`
+  take a resolution; `write_png_bilevel` and `PngColor::Bilevel` are new.
+- `rasterrocket-camera`: `GrayView` and `GrayPage` take a sample
+  parameter (`Sample`, sealed); the OCR-preparation items and
+  `CameraError::ZeroSize` are new. `rasterrocket-comic`: `ComicOptions::depth`.
+- `rasterrocket-parser`: `MAX_OBJECT_NUMBER` is new; page ids may name a
+  direct page-tree node numbered above it. `rasterrocket-color`: the `grid`
+  module (`CmykGrid`) and `cmyk::CORNERS16` are new.
 
 ### v2.3.0 (November 2026)
 
@@ -2734,7 +2922,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-15)
+## Current status (2026-11-16)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
@@ -2949,7 +3137,7 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
-**Unreleased on master: CMYK input tables on the shared grid, and black
+**Released in v2.4.0: CMYK input tables on the shared grid, and black
 preservation between presses.** `ICCBased` CMYK now converts through the
 same floating-point table evaluator and 17⁴-node device grid as RGB
 (interpolated in its 4-simplices at both depths), not the converter's
@@ -2977,7 +3165,7 @@ M and Y for its colour within the press's ink limit. K-only agrees with
 `-t13..15` on 96–99.7 % of them, and is nearer the colorimetric colour on
 the rest, where Little CMS's Newton iteration stops early.
 
-**Unreleased on master: the CMYK input grid follows the profile's CLUT.**
+**Released in v2.4.0: the CMYK input grid follows the profile's CLUT.**
 The input grid's cells now subdivide the profile's CLUT cells along each
 ink (an 11-node CLUT gets 20 cells, a 9-node one 16, a 16-node one 15)
 instead of a fixed 16, so no grid cell straddles a CLUT node; a CMYK table
@@ -2998,7 +3186,7 @@ pages 1–10 at 50 dpi, 3 of 236 pages change (127 468 pixels, mean ΔE00
 0.46, max 2.4); K-only text is unchanged, its antialiased edges being
 blends of the converted solid ink.
 
-**Unreleased on master: unclipped ICC grid nodes, and a GPU ICC session
+**Released in v2.4.0: unclipped ICC grid nodes, and a GPU ICC session
 equal to a CPU one.** The CMYK and RGB input grids hold each node's
 working-space value unclipped (the sRGB curve extended beyond `[0, 1]`, in
 `[−1/2, 3/2]` at one bit less precision) and clip after interpolation, so
@@ -3024,7 +3212,7 @@ rounding. API changes: `gpu::icc_cmyk_to_rgb_cpu` and the `GpuCompute`
 trait are removed; `gpu::backend::icc_clut` and `GpuCtx::icc_cmyk_to_rgb`
 take a `&CmykGrid`.
 
-**Unreleased on master: colour conversions agree with Little CMS to its
+**Released in v2.4.0: colour conversions agree with Little CMS to its
 precision.** Three corrections, each measured against `transicc`
 (`input_profile_transicc`, `output_profile_transicc`, ignored tests that
 now assert every case they printed):
@@ -3062,7 +3250,7 @@ now assert every case they printed):
   at 50 dpi, in about 5 % of pixels by exactly 1/255 (ΔE00 mean 0.7, max
   1.18).
 
-**Unreleased on master: input ICC conversions honour the rendering intent
+**Released in v2.4.0: input ICC conversions honour the rendering intent
 and compensate the black point.**
 An `ICCBased` colour converts to sRGB under the intent it is painted with
 (ISO 32000-1 §8.6.5.8): the graphics state's (`ri`, `gs /RI`, initially
@@ -3097,7 +3285,7 @@ Previously every conversion used the profile's perceptual table.
   8 bits and 1.0 at 16 under every compensated intent (`transicc -b`) and
   under absolute colorimetry (`input_profile_transicc`, ignored).
 
-**Unreleased on master: OCR preparation of scans.**  `rasterrocket-camera`
+**Released in v2.4.0: OCR preparation of scans.**  `rasterrocket-camera`
 gains three operations measured on 8-bit luma, in integer arithmetic so
 their output is identical on every platform.  `measure_background` /
 `Background::normalize` divide out uneven lighting so paper becomes white
@@ -3122,7 +3310,7 @@ error-diffusion dither, packed 1-bpp morphology, text-or-photo detection,
 2× upscale before threshold, despeckle, PDF output with G4/DCT, and dewarp
 model sharing.
 
-**Unreleased on master: soft proofing against the output intent.**
+**Released in v2.4.0: soft proofing against the output intent.**
 `rrocket --proof[=relative|absolute]` (`SessionConfig::proof`,
 `RasterOptions::proof`, `ProofIntent`) shows how a document prints on the
 press its `/OutputIntents` names: the page's own (PDF 2.0), else the
@@ -3153,7 +3341,7 @@ on ISO Coated v2 (up to 4.4 % ink, about 11 levels of an 8-bit channel, at
 black), and from L* 8.0 to 11.1 on the synthetic test press; `--cmyk` without
 `--bpc`, and RGB and gray output profiles, are unchanged.
 
-**Unreleased on master: a wide working space under an output profile.**
+**Released in v2.4.0: a wide working space under an output profile.**
 A page rendered at 16 bits under `--output-profile` is composited in a wide
 working space, the ROMM RGB primaries with the D50 white and the sRGB tone
 curve (`WorkingSpace::Wide`), instead of sRGB, so colours outside sRGB reach
@@ -3205,7 +3393,7 @@ argument of `ColorSpace::convert_to_rgb`), `CanvasRequest::WideRgb`,
 `SessionConfig::working_space`; `OutputProfile::{convert, separation,
 prepare}` take the working space.
 
-**Unreleased on master: CMYK output completes its conversions.**
+**Released in v2.4.0: CMYK output completes its conversions.**
 - **Black generation and undercolour removal.** Without an output profile,
   `--cmyk` separates RGB-family colours under the `ExtGState` `BG2`/`BG` and
   `UCR2`/`UCR` functions (ISO 32000-2 §8.4.5, §10.4.2): `C = c − UCR(k)`,
@@ -3255,7 +3443,7 @@ prepare}` take the working space.
   of a CMYK or proofed page is `--intent`, else the page's one content
   intent.
 
-**Unreleased on master: forced-CUDA deskew, deep forms, JPEG 2000 matte
+**Released in v2.4.0: forced-CUDA deskew, deep forms, JPEG 2000 matte
 and truncation, Type 3 without `/FontMatrix`.**  Under `--backend cuda` a
 deskew rotation that fails on the GPU is `RasterError::BackendUnavailable`
 instead of a silent CPU rotation (`deskew::DeskewError` is now an enum,
@@ -3276,7 +3464,7 @@ expected image; `jpxdecode_smask_in_data_2` is reclassified as a divergence
 (its references draw the colour opaque, ignoring alpha) and `bug_1128284`
 now draws two of its three marks.
 
-**Unreleased on master: Link borders, `/MaxLen`, installed faces by name,
+**Released in v2.4.0: Link borders, `/MaxLen`, installed faces by name,
 curved patches.**  A Link annotation without an appearance stream draws its
 border: `/Rect` inset by half the width (`/BS /W`, else `/Border`, default
 1) and stroked in `/C` with its dash, the bottom side alone for `/BS /S /U`;
@@ -3298,7 +3486,7 @@ expected image, `bug_1072440`, `bug_846`, `bug_41010502_2` and
 its curved patches (tile 161 to 98); patches whose sides loop from a shared
 corner still paint their surface where both references fill the outline.
 
-**Unreleased on master: a clip takes effect after the paint that ends its
+**Released in v2.4.0: a clip takes effect after the paint that ends its
 path.** A `W`/`W*` followed by a painting operator (`W f`, `W S`, `W B`,
 `W b` and their even-odd forms) now paints the path unclipped by it, then
 intersects it into the clip (ISO 32000-1 §8.5.4). Previously the clip was
@@ -3309,7 +3497,7 @@ lists such a paint before its clip. No pixel changes on the repository
 fixtures (all 3,824 pages at 50 dpi gray, and
 ab_render's 215 outputs, byte for byte as before).
 
-**Unreleased on master: a more lenient parser.** Four damaged-file shapes
+**Released in v2.4.0: a more lenient parser.** Four damaged-file shapes
 that pdfium or pdftoppm read now parse. A number with a run of leading
 signs takes its last one (`--10.12` is -10.12; it was 0). A header of
 `%PDF` without a version is accepted with a warning, and an unclosed
@@ -3330,7 +3518,7 @@ defects, 10 now render pdfium's page up to glyph antialiasing, and
 three documents pdfium refuses or draws no page for now open on one blank
 page; the full corpus shows no new failure.
 
-**Unreleased on master: deskew confidence, `--deskew`, resolution in
+**Released in v2.4.0: deskew confidence, `--deskew`, resolution in
 PNG and JPEG, 1-bit mono PNG.**  Deskew now declines a page without a
 confident angle: the ratio of the best to the worst score of its angle
 sweep must reach 3 (0 for a flat profile), and a best angle within one
@@ -3353,7 +3541,7 @@ resolution), so PNG and JPEG bytes change; `--mono --png` writes a PNG of
 bit depth 1 (`write_png_bilevel`, `PngColor::Bilevel`) where it wrote 8-bit
 gray holding two levels.  PPM, TIFF, fax and print output are unchanged.
 
-**Unreleased on master: 16-bit comic input, camera stages and deskew.**
+**Released in v2.4.0: 16-bit comic input, camera stages and deskew.**
 `--depth 16` now combines with comic-archive input and with `--crop`,
 `--rectify`, `--split-spreads` and `--dewarp`.  Comic pages decode at
 `ComicOptions::depth`: a PNG, TIFF, JPEG XL or AVIF image of more than 8
@@ -3369,7 +3557,7 @@ the CPU.  New: `rgb16_into_gray16`, `gray16_into_rendered_page`,
 digests).  The GPU paths stay on the CPU at 16 bits, and `--gpu-pages`
 stays refused there.
 
-**Unreleased on master: 16-bit DeviceCMYK corners and an ink-solve
+**Released in v2.4.0: 16-bit DeviceCMYK corners and an ink-solve
 stall.** At 16 bits the DeviceCMYK model interpolates `color::cmyk::CORNERS16`,
 the sixteen corners converted at 16 bits from the same characterisation
 (FOGRA39 as ISO Coated v2 300 %, media-relative colorimetric with black
@@ -3382,7 +3570,7 @@ when an ink sat just inside a bound (13 of 40 000 random cases), now sets
 such an ink to the bound and continues; results change only where it had
 stalled, each to a lower cost.
 
-**Unreleased on master: reviewed expected-failures registry.** The
+**Released in v2.4.0: reviewed expected-failures registry.** The
 comparison harness judges a page by its worst per-channel tile delta
 (≤ 12, so colour errors a gray metric hid now count) and judges RMSE only
 against pdfium; `compare.sh` renders under `target/compare` on disk.
@@ -3390,7 +3578,7 @@ Re-seeded, the pdftoppm suite falls from 2,889 registered pages to 27 and
 the pdfium suite holds 186; every entry carries a reason: antialiasing,
 a named divergence with its evidence, or a defect with its audit ticket.
 
-**Unreleased on master: JPEG 2000 device threshold and prefetch scale.**
+**Released in v2.4.0: JPEG 2000 device threshold and prefetch scale.**
 `GPU_JPEG2K_THRESHOLD_PX` rises from 262 144 to 2 097 152 px, from an
 end-to-end sweep of real archive codestreams by area and bytes per pixel
 (RTX 5070, 24 threads, whole-process wall time, cold decoder build
@@ -3404,7 +3592,7 @@ overrides the area. `--prefetch` at a fixed resolution no longer decodes a
 JPEG every draw of which on its page is smaller than the image
 (`SessionConfig::prefetch_scale`).
 
-**Unreleased on master: GPU-session fallbacks and Windows RAM output.**
+**Released in v2.4.0: GPU-session fallbacks and Windows RAM output.**
 In a session holding a GPU backend, an ICC-based CMYK image the device does
 not convert (below `GPU_ICC_CLUT_THRESHOLD`, or declined) now takes the
 profile transform a CPU-only session uses instead of the scalar CPU table
@@ -3415,7 +3603,7 @@ Windows, `--ram-path` works (available memory is read through
 `GlobalMemoryStatusEx`); `--ram` alone is still refused there, having no
 `/dev/shm`.
 
-**Unreleased on master: the GPU parallel-Huffman JPEG decoder is removed.**
+**Released in v2.4.0: the GPU parallel-Huffman JPEG decoder is removed.**
 It was dormant (reached only through `PDF_RASTER_HUFFMAN_THRESHOLD`) and lost
 to the multi-threaded CPU decoder on every measured workload, by about 10×
 whole-process on gray scans, so the decoder, its CPU pre-pass, the
@@ -3436,7 +3624,7 @@ constants; `rasterrocket_interp::huffman_threshold` and
 argument of `resolve_image` and `PageResources::image`; and the
 `PDF_RASTER_HUFFMAN_THRESHOLD` variable, which is now ignored.
 
-**Unreleased on master: nvJPEG2000 declines before the decoder is built.**
+**Released in v2.4.0: nvJPEG2000 declines before the decoder is built.**
 The device JPEG 2000 path now decides from the codestream's headers, before
 a thread's nvJPEG2000 decoder is built, whether the device returns the
 samples the CPU decoder does: one or three unsigned 8-bit components on the
@@ -3454,7 +3642,7 @@ a warning, when the render scale depends on the page. Auto's job-level outcome
 (single pages lose about 3x to the cold start, 24-page runs win only
 sometimes) made the decoder dormant under Auto (see below).
 
-**Unreleased on master: paint trace.** A pixel-independent regression
+**Released in v2.4.0: paint trace.** A pixel-independent regression
 oracle: `PageRenderer::set_paint_trace` (library: the doc-hidden, unstable
 `rasterrocket::dev::paint_trace`) records one line of text per painting
 operation of a page, in its device space: path fills and strokes with
@@ -3478,7 +3666,7 @@ two renders differ at to the operation that paints them
 (`tests/compare/trace_blame.sh`).  No pixel changes (ab_render: 0 of 215
 fixture outputs).
 
-**Unreleased on master: direct page-tree nodes and a damaged-object
+**Released in v2.4.0: direct page-tree nodes and a damaged-object
 message.** A catalog whose `/Pages` is a direct dictionary, and a `/Kids`
 array holding dictionaries rather than references, now give pages (pdfium's
 `bug_828049`, its registry entry removed). Such a node gets an object number
@@ -3497,7 +3685,7 @@ cross-reference offset N and no `1836 0 obj` header elsewhere in the file
 still fails, no blank page stands in. pdfium corpus: 0 FAIL, 0 XPASS. All
 1168 archive PDFs open with page counts identical to before.
 
-**Unreleased on master: transparency groups composite in their colour
+**Released in v2.4.0: transparency groups composite in their colour
 space.** A group's `/CS` (ISO 32000-2 §11.3.4, §11.4.7, §11.6.6) is the
 space its colours convert into, its objects composite in and its result
 converts out of.
@@ -3559,7 +3747,7 @@ converts out of.
   GRAY_SHIFT, gray_at}`, `color::cmyk::device_gray_at` and
   `raster::transparency::begin_group_converted` are new.
 
-**Unreleased on master: a folded patch shows its larger parameters.** Where a
+**Released in v2.4.0: a folded patch shows its larger parameters.** Where a
 Coons or tensor patch surface folds over itself, the point painted is the one
 with the largest `v`, then the largest `u` (ISO 32000 §8.7.4.5.7); the
 tessellation emitted its sub-patches in depth-first order, which let the
@@ -3570,7 +3758,7 @@ the region the boundary encloses instead, so pdfium's `shade-tensor` is
 registered as a divergence (RMSE 29.4, tile 97.8). A patch that does not fold
 covers the same pixels as before.
 
-**Unreleased on master: nvJPEG2000 is dormant under Auto.**
+**Released in v2.4.0: nvJPEG2000 is dormant under Auto.**
 Under `auto` no JPEG 2000 image goes to the device and no thread builds an
 nvJPEG2000 decoder, unless `PDF_RASTER_JPX_THRESHOLD` sets a pixel area:
 `GPU_JPEG2K_THRESHOLD_PX` is now `u32::MAX`, as nvJPEG's is. `--backend
@@ -3590,7 +3778,7 @@ now the CPU's: byte-identical on qsj-0616 p. 10 and Halbwachs pp. 1–24.
 API changes: `DeviceKernel::NvJpeg2kOnDemand` and `NvJpeg2kAttached` are
 new; `device_kernel_enabled` is no longer `const`.
 
-**Unreleased on master: an image thinner than a pixel draws.** The blit
+**Released in v2.4.0: an image thinner than a pixel draws.** The blit
 paints the pixels whose centres an image covers, so an image (seen with
 1-bit Type 3 glyph masks) whose device extent along one axis was below one
 pixel and lay between two pixel centres painted nothing. Such an axis now
@@ -3604,7 +3792,7 @@ as a divergence (RMSE 3.56 → 3.35). An axis of a pixel or more is untouched:
 the ten corpus fixtures and 20 image-heavy archive documents, pages 1–3 at
 50 dpi, render byte-identical.
 
-**Unreleased on master: the wide working space at 8 bits.** Under an
+**Released in v2.4.0: the wide working space at 8 bits.** Under an
 output profile a page of the wide working space is painted on a 16-bit
 canvas at `--depth 8` too, and rounded to 8 bits after the conversion to
 the profile (or the proof's conversion to the display, or the CMYK
@@ -3637,7 +3825,7 @@ Against before, at 8 bits: RGB mean 0.07, p99 0.77, max 12.1; gray max
 API changes: `FinishedCanvas::narrowed` and `Bitmap::try_converted_in` are
 new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
 
-**Unreleased on master: blend modes in gray groups, luminance of Cal masks.**
+**Released in v2.4.0: blend modes in gray groups, luminance of Cal masks.**
 - **Gray groups.** A blend mode other than `Normal` inside a gray group
   blends the gray of its colour with the gray of what it is painted over.
   Before, it blended the colour's components before the group's reduction to
@@ -3667,7 +3855,7 @@ new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
   `page_group` and `transparent_page_group` now return the space the page
   declares.
 
-**Unreleased on master: ICC CMYK groups in their profile's ink, spots through
+**Released in v2.4.0: ICC CMYK groups in their profile's ink, spots through
 additive groups.**
 - **ICC CMYK groups.** A transparency group whose `/CS` is an ICC CMYK space,
   over an RGB canvas, is painted in its profile's ink instead of the
@@ -3714,7 +3902,7 @@ additive groups.**
   `{ profiled: bool }`, and `GroupSpace::approximated` covers non-sRGB RGB
   spaces only; `CanvasRequest::ProfileRgb { profile, space }` is new.
 
-**Unreleased on master: the GPU and SIMD paths at 16 bits.**
+**Released in v2.4.0: the GPU and SIMD paths at 16 bits.**
 - **SIMD 16-bit deskew rotation.** The AVX-512 and NEON row kernels of the
   bilinear rotation are generic over the sample depth (`deskew/simd.rs`) and
   bit-exact with the scalar kernel at 8 and 16 bits, padded or not. On
@@ -3744,7 +3932,7 @@ additive groups.**
 - **API changes.** `IccClutParams` has a `wide` field;
   `gpu::npp_rotate::rotate_gray16` and `gpu::backend::icc_clut16` are new.
 
-**Unreleased on master: 16-bit GPU pages and 16-bit nvJPEG2000.**
+**Released in v2.4.0: 16-bit GPU pages and 16-bit nvJPEG2000.**
 `--gpu-pages` now renders `--depth 16` pages: the Vulkan page raster takes
 the bits per sample as a push constant, widens the CPU's coverage byte to
 the shape 257 · cov and composites with the 16-bit `div_max`, as the CPU's
@@ -3764,7 +3952,7 @@ and `u16` samples, `VulkanBackend::render_page` is generic over
 `SampleDepth::max_sample` are new, and `DecodedJpeg2k` carries the
 components' precisions.
 
-**Unreleased on master: CalRGB and non-sRGB RGB groups composite in their
+**Released in v2.4.0: CalRGB and non-sRGB RGB groups composite in their
 own space.** A transparency group whose `/CS` is `CalRGB` or an RGB ICC
 profile other than sRGB (also through `DefaultRGB`) no longer blends in its
 canvas's RGB working space: it is painted on an additive ink canvas holding
@@ -3790,7 +3978,7 @@ RGB ICC form groups are byte-identical at 50 dpi, as is the 34-PDF gate in
 `Icc(ObjectId)` and `Cal(CalSpace)`, and `GroupSpace::approximated` is
 removed.
 
-**Unreleased on master: a word split between strings or faces is fitted as
+**Released in v2.4.0: a word split between strings or faces is fitted as
 the whole word.** A substitute fitted to a non-standard font's `/Widths`
 centred and condensed each shaped run alone, so a word split by a `TJ`
 adjustment, `Tf` or consecutive `Tj`s, or by a fallback face inside one
@@ -3806,7 +3994,7 @@ right-to-left documents and three Latin ones are byte-identical at 100 dpi
 (their RTL text is embedded or in standard-named fonts); only synthetic
 documents change.
 
-**Unreleased on master: images and shadings of an RGB group's own space
+**Released in v2.4.0: images and shadings of an RGB group's own space
 keep their components.** Inside a `CalRGB` or non-sRGB ICC RGB group, an
 image, an `Indexed` image over the space, or a shading given in the
 group's own space now paints its components on the group canvas, as fills
@@ -3826,7 +4014,7 @@ groups are byte-identical. API change: `ImageDecodeCtx::keep_tints` and
 `DecodedImage::kept_tints` are now `KeptTints` (`None`, `Ink`,
 `InkAndRgb`), not `bool`.
 
-**Unreleased on master: overprint under blend modes, and spot colorants
+**Released in v2.4.0: overprint under blend modes, and spot colorants
 under blend modes.** An object that overprints under a blend mode other
 than Normal is now composited as ISO 32000-1 §11.7.4.3 defines: painted
 with `CompatibleOverprint` in an implicit non-isolated group whose result
@@ -3851,7 +4039,7 @@ combine blend modes with overprint or spot colours are byte-identical at
 40 dpi plain, with `--overprint` and as overprinted CMYK. No archive page
 overprints under a blend mode.
 
-**Unreleased on master: per-stage times of a GPU page, and a benchmark of
+**Released in v2.4.0: per-stage times of a GPU page, and a benchmark of
 the production GPU page path.** `VulkanBackend::render_page_timed` renders
 a page as `render_page` does and returns `PageTimes`: the host stages
 (binning and table packing, input writes, recording, submit and wait, the
@@ -3870,7 +4058,7 @@ takes 25.8 ms on the RTX 5070 (raster 0.44 ms) and 39.1 ms on RADV (raster
 both. `--gpu-pages` and plain renders of the fixtures are byte-identical to
 before on both GPUs.
 
-**Unreleased on master: `--gpu-pages` opens its device only for a page
+**Released in v2.4.0: `--gpu-pages` opens its device only for a page
 that may use it.** Under `auto`, the GPU page device was opened at session
 open and joined when the session closed, so every `--gpu-pages` process
 paid the whole Vulkan open, also when no page could render on the device.
@@ -3889,7 +4077,7 @@ than the CPU's whole page (28 ms against 20 ms on the A18 Pro, 23 against
 GPUs. Output is byte-identical to before, plain and with `--gpu-pages`
 under `auto` and `--backend vulkan`, on the RTX 5070 and on RADV.
 
-**Unreleased on master: GPU pages compute exact-area coverage on the
+**Released in v2.4.0: GPU pages compute exact-area coverage on the
 device.** A GPU page records each solid fill and stroke as the outline the
 CPU's exact-area rasteriser would rasterise, not as its coverage table.
 The host bins each outline into 16 × 16 tiles, each with the segments that
@@ -3919,7 +4107,7 @@ The command format, binning and the kernel's host model
 a session holding several devices would reuse them. Neither exists, and
 none of this has been tested on datacenter hardware.
 
-**Unreleased on master: two GPU pages in flight, compact outline tiles.**
+**Released in v2.4.0: two GPU pages in flight, compact outline tiles.**
 `--gpu-pages` now lets two pages hold the device at once, so one records
 its paint commands while the other rasterises. This also fixes the claim:
 every failed claim used to release the device, so the one-page limit was
@@ -3941,7 +4129,7 @@ where the unwritten canvas takes three times the page faults. Pages
 larger than `--band-mib` (64 MiB by default) still render in CPU bands.
 Output is byte-identical to `--backend cpu` at 8 and 16 bits.
 
-**Unreleased on master: the RADV loss of the uncleared canvas is gone.**
+**Released in v2.4.0: the RADV loss of the uncleared canvas is gone.**
 The loss was not the page faults themselves. The CLI's allocator marks
 its memory for transparent huge pages, and the kernel then compacts
 memory synchronously whenever such a fault finds no free 2 MiB page. On
@@ -3957,7 +4145,7 @@ would also remove the stalls, but it makes the CPU 14-17 % slower on the
 same pages, so it was not done. Output is byte-identical; on macOS the
 change does nothing.
 
-**Unreleased on master: text on GPU pages.** `--gpu-pages` no longer
+**Released in v2.4.0: text on GPU pages.** `--gpu-pages` no longer
 refuses a page for its text. The CPU draws a glyph from a cached coverage
 bitmap; the page now holds each such bitmap once as a mask on the device,
 and each glyph places it, so the device composites the CPU's own coverage
@@ -3973,7 +4161,7 @@ ms, about the recording plus one device round trip. Output is
 byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
 and the A18 Pro.
 
-**Unreleased on master: images and forms on GPU pages.** `--gpu-pages` no
+**Released in v2.4.0: images and forms on GPU pages.** `--gpu-pages` no
 longer refuses a page for its image or form XObjects. The CPU still decodes,
 colour-converts and downsamples an image and builds its sampling tables; the
 page then holds the samples once and the device samples every pixel with the
@@ -3992,7 +4180,7 @@ image documents (RADV, A18 Pro); with all threads the CPU still wins. Output
 is byte-identical to `--backend cpu` at 8 and 16 bits on the RTX 5070, RADV
 and the A18 Pro.
 
-**Unreleased on master: path clips and soft masks on GPU pages.**
+**Released in v2.4.0: path clips and soft masks on GPU pages.**
 `--gpu-pages` no longer refuses a page for a path clip, a clipping text mode
 or a soft mask, so every one of the 3 824 fixture pages now renders on the
 GPU (3 737 before). A path clip goes to the device as the coverage tables
@@ -4009,7 +4197,7 @@ corpus-06 (half its 160 pages masked), single-threaded at 150 dpi, takes
 two are level. Output is byte-identical to `--backend cpu` at 8 and 16 bits
 on the RTX 5070, RADV and the A18 Pro.
 
-**Unreleased on master: the Vulkan device is destroyed with its sessions.**
+**Released in v2.4.0: the Vulkan device is destroyed with its sessions.**
 A Vulkan backend was held by a process-wide registry for the life of the
 process, so its device and instance were never destroyed. On the RTX 5070,
 `--backend vulkan --gpu-pages` then left the driver's shader-compiler threads
@@ -4019,7 +4207,7 @@ sessions open at the same time share one device, and the last of them to drop
 destroys it, for the CLI as for `raster_pdf`, `render_channel` and
 `open_session`. A session opened after that builds the device again.
 
-**Unreleased on master: the CUDA context is freed with its sessions, and
+**Released in v2.4.0: the CUDA context is freed with its sessions, and
 `DeviceHold`.** The CUDA context, with its kernel modules and scratch
 buffers, was held for the life of the process; it is now shared by the
 sessions alive at once and freed with the last of them, as the Vulkan device
@@ -4035,6 +4223,58 @@ Vulkan on the RTX 5070, 50–65 ms on RADV, 52–62 ms for CUDA —, so
 `DeviceHold::open(&config)` keeps a configuration's devices open across
 sessions; it holds only references, and the devices close once it and the
 sessions have dropped.
+
+**Released in v2.4.0: CUDA start-up diagnostics.** `GpuCtx::init` names
+why a CUDA context does not start instead of reporting every failure as a
+driver that is not loaded: a missing driver library (which cudarc answered
+with a panic, an abort in release builds), no visible device, a kernel
+module and user-space driver of different versions, kernels built by a
+newer toolkit than the driver supports (both CUDA versions named, from the
+PTX header and `cuDriverGetVersion`), and kernels for a newer architecture
+than the device (checked before the module loads, with the `CUDA_ARCH` to
+rebuild with). A device below the oldest architecture of the toolkit that
+compiled the kernels (sm_75 for CUDA 13, sm_50 for 12, sm_35 for 11; a
+Pascal GPU under a CUDA 13 build) is refused with the floor and the device
+named, and pointed at the Vulkan backend or the CPU. `CUDA_ARCH` now
+defaults to `sm_75`, the oldest architecture CUDA 13 compiles for, so a
+default build runs on every GPU CUDA 13 supports (the driver compiles the
+PTX for newer devices at load); under the old `sm_80` default a Turing card
+was refused. A Vulkan device passed over for its API version, a feature or
+its queues is logged at warn instead of info. A set
+`PDF_RASTER_JPX_THRESHOLD` that cannot act (a build without `nvjpeg2k`, or
+the `cpu`, `vulkan` or `vaapi` backend) is reported at warn once per
+process. Seen on an RTX 2080 SUPER under driver 570, where a CUDA 13.3
+build failed with `UNSUPPORTED_PTX_VERSION` and an sm_80 build with
+`INVALID_PTX`; README's tested-hardware table now lists that card (Vulkan
+and `--gpu-pages`; CUDA from an nvcc 12.4 build, a CUDA 13 build needing
+driver 580) and llvmpipe beside the RTX 5070, RADV and the A18 Pro, and
+marks the rest untested.
+
+**Released in v2.4.0: smaller fixes.**
+- **Deskew under the backend policy.** A `gpu-deskew` build rotated every
+  deskewed page with CUDA NPP whatever the session's `BackendPolicy`, so
+  `--backend cpu`, `vulkan` and `vaapi` created a CUDA context. Only
+  `ForceCuda` now rotates on the GPU; `Auto` rotates on the CPU.
+  `deskew::apply` takes the policy.
+- **Mesh shadings.** A Type 4–7 mesh whose vertices carry colour-space
+  components charges each vertex's conversion against the exact-work
+  budget of Type 1 shadings, so a stream of vertices that each run a tint
+  transform or the ink solve no longer spends tens of seconds in one
+  resolve; past the budget the mesh keeps the triangles formed so far,
+  with a warning. Meshes within it are byte-identical.
+- **Colour-key masks.** A `/Mask` array longer than the 2·n entries an
+  n-component image needs is keyed on its first 2·n with a warning instead
+  of refused (an Indexed image with `/Mask [0 0 0 0 0 0]` painted its
+  keyed-out pixels over the page).
+- **Gray profiles under absolute colorimetry** keep the media white of the
+  profile instead of converting it to white.
+- **Installed faces by name** resolve and log once per font library, not
+  once per page, when pages render in parallel.
+- **CUDA write ordering.** Every kernel launch, upload, zero fill and
+  device copy takes the buffers it writes by `&mut`, so cudarc records a
+  write event and a reader on another stream waits for it (a page read on
+  a second stream could see the blit's zero fill). The renderer read on
+  the writer's stream and was not affected.
 
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
