@@ -316,7 +316,7 @@ that rendered visibly wrong.
   The device now evaluates the CPU rasteriser's own scanline table, so the
   output matches the CPU byte for byte. The path ships dormant because it was
   slower than the CPU at every size measured. `PDF_RASTER_AA_FILL_THRESHOLD=0`
-  enables it.
+  enabled it. (The device AA fill and the variable were removed in v2.3.0.)
 - **Performance.** VBMI/AVX-512 rewrites of four CPU hot paths (AA gamma map
   n=2500: 924 → 12 ns), and dormant-path GPU JPEG Phase 2 convergence from
   thousands of host passes to a handful.
@@ -380,7 +380,7 @@ unchanged, and `rrocket` accepts these archives as input directly.
   and the mechanism behind PDF-in-archive support.
 - **`rrocket book.cbz out`** — comic archives reuse the exact same output
   encoder and page selector as the PDF path, so `--gray`, `--mono`, the output
-  format, `--first-page`/`--last-page`, and `--odd`/`--even`/`--single` all
+  format, `--first-page`/`--last-page`, and `--odd`/`--even`/`--singlefile` all
   behave identically across input types.
 
 The new archive and image-decode paths parse untrusted input and are hardened
@@ -537,12 +537,12 @@ is **untested**: it is expected to work, nothing more.
   alone.
 - **Intel GPUs** (UHD/Iris iGPUs, Arc): Vulkan through ANV and VA-API on the
   Intel media driver are untested.
-- **Intel CPUs:** untested since the i7-8700K testbench was retired
-  (2026-07); the AVX2 tiers still run on the Ryzen and on CI's x86-64
-  runners, whose CPU model GitHub does not fix.
-- **NVIDIA GPUs other than the RTX 5070**: other `CUDA_ARCH` targets
-  (see [the table](#picking-cuda_arch-for-your-gpu)) and datacenter cards
-  (A100, H100).
+- **Intel CPUs other than the i7-8700K**; CI's x86-64 runners also run
+  the AVX2 tiers, on a CPU model GitHub does not fix.
+- **NVIDIA GPUs other than the RTX 5070 and the RTX 2080 SUPER**: other
+  `CUDA_ARCH` targets (see [the table](#picking-cuda_arch-for-your-gpu))
+  and datacenter cards (A100, H100); on the RTX 2080 SUPER, a CUDA 13
+  build and nvJPEG2000.
 - **Native Windows hardware:** Windows runs only in CI; GPU code is not
   tested on Windows.
 - **aarch64 Linux hardware** other than CI's arm64 runner (Raspberry Pi,
@@ -558,8 +558,8 @@ is **untested**: it is expected to work, nothing more.
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. Tested on the hardware above; the platform guides list what each CI leg runs.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070 only.
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070; on the RTX 2080 SUPER only from an nvcc 12.4 build (see [Tested hardware](#tested-hardware)).
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages composited in the wide working space (under an output profile), pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -608,7 +608,7 @@ The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels
 | Flag | What it enables | Required runtime |
 |---|---|---|
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
-| `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode` | `libnvjpeg2k.so` |
+| `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode`: dormant under `auto` unless `PDF_RASTER_JPX_THRESHOLD` sets a pixel area; under `--backend cuda`, images of at least 2 097 152 px | `libnvjpeg2k.so` |
 | `gpu-icc` | GPU CMYK→RGB ICC transform through the grid of the profile's tabulated table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU conversion | CUDA, or Vulkan with `vulkan` |
 | `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
@@ -744,4 +744,4 @@ Per-version regression history and the full pdftoppm comparison are in **[the Be
 | 1836 scan, DCT | 490 | 71 s | 356 s | **5.0×** |
 | Scan, JBIG2+JPX | 576 | 19.6 s | 148.9 s | **7.6×** |
 
-Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](../../wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison from the since-retired testbench.
+Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](../../wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison.

@@ -1,8 +1,9 @@
 # rasterrocket on Linux
 
 Linux is the primary platform: every feature, including every GPU backend,
-is developed and tested on it, on one x86-64 machine (Ryzen 9 9900X3D, RTX
-5070, the CPU's AMD Raphael iGPU). Other hardware is untested; see
+is developed and tested on it, on an x86-64 machine with a Ryzen 9 9900X3D,
+an RTX 5070 and the CPU's AMD Raphael iGPU, and in part on a second one with
+an i7-8700K (AVX2) and an RTX 2080 SUPER. Other hardware is untested; see
 [Tested hardware](../../README.md#tested-hardware).
 
 - **CI:** each push runs the test suite on x86-64 (`ubuntu-latest`),
@@ -39,8 +40,8 @@ device is present.
 
 | Backend | Feature flags | Needs | Tested on |
 |---|---|---|---|
-| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver | RTX 5070 (`sm_120`); other NVIDIA GPUs untested |
-| Vulkan compute | `vulkan` | the LunarG SDK (`slangc`) to build; a Vulkan 1.3 driver to run | RTX 5070 (NVIDIA driver), AMD Raphael iGPU (RADV), llvmpipe; Intel (ANV) untested |
+| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver | RTX 5070 (`sm_120`); RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build only, its driver 570 being older than CUDA 13 needs; other NVIDIA GPUs untested |
+| Vulkan compute | `vulkan` | the LunarG SDK (`slangc`) to build; a Vulkan 1.3 driver to run | RTX 5070 and RTX 2080 SUPER (NVIDIA driver), AMD Raphael iGPU (RADV), llvmpipe; Intel (ANV) untested |
 | VA-API JPEG decode | `vaapi` | `libva` | AMD Raphael iGPU (VCN 4.0, Mesa radeonsi); Intel untested |
 
 See [Getting Started](../getting-started.md#gpu-optional) for what each

@@ -15,7 +15,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 **x86-64:**
 - AVX2 SIMD paths are runtime-detected with a scalar fallback.
 - AVX-512 (`avx512f/bw/vl/dq/vnni/vpopcntdq` and extensions) is active when built with `-C target-cpu=native` on a compatible CPU. Developed and benchmarked on an AMD Ryzen 9900X3D.
-- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only. Intel CPUs are untested since the i7-8700K testbench was retired (2026-07).
+- All Intel consumer CPUs (Alder/Raptor/Arrow Lake) have AVX2; AVX-512 is disabled on them — Xeon only. Of Intel CPUs only an i7-8700K (Coffee Lake, AVX2) is tested.
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
@@ -25,12 +25,12 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 Three GPU backends are available on Linux:
 
-**NVIDIA (CUDA 13.0–13.3):** tested on an RTX 5070 (`sm_120`) only; other NVIDIA GPUs are untested.
+**NVIDIA (CUDA 13.0–13.3):** tested on an RTX 5070 (`sm_120`), and on an RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build only, since its driver 570 predates CUDA 13 (see the README's [Tested hardware](../README.md#tested-hardware)); other NVIDIA GPUs are untested.
 
 | Feature | Minimum GPU | Library required |
 |---|---|---|
 | `nvjpeg` | Any CUDA-capable NVIDIA GPU | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
-| `nvjpeg2k` | Any CUDA-capable NVIDIA GPU | `libnvjpeg2k.so` (separate download; build script probes `/13` then `/12`) |
+| `nvjpeg2k` | Any CUDA-capable NVIDIA GPU | `libnvjpeg2k.so` (separate download; the build looks under `/usr/lib/x86_64-linux-gnu/libnvjpeg2k/13`, headers under `/usr/include/libnvjpeg2k/13` unless `NVJPEG2K_INCLUDE_DIR` names another directory) |
 | `gpu-icc` | Any CUDA-capable NVIDIA GPU | CUDA runtime |
 | `gpu-deskew` | Any CUDA-capable NVIDIA GPU | CUDA NPP (`libnppig.so`, `libnppc.so`) |
 | `cache` | Any CUDA-capable NVIDIA GPU, or a Vulkan 1.3+ device with `vulkan` | CUDA runtime or Vulkan ICD; opt-in disk-tier persistence via `PDF_RASTER_CACHE_DIR` |
@@ -43,7 +43,7 @@ Three GPU backends are available on Linux:
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc and overprint simulation stay on the CPU. It is off by default: it beats the CPU single-threaded on most vector and image documents measured, but is level or slower beside all CPU workers.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs (ANV), M-series Macs and datacenter GPUs are untested.
+With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, the wide working space of an output profile, pages past 128 MiB of device commands and pages rendered in bands stay on the CPU. It is off by default: it beats the CPU single-threaded on most vector and image documents measured, but is level or slower beside all CPU workers.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs (ANV), M-series Macs and datacenter GPUs are untested.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN; Intel Quick Sync and Intel Arc untested):**
 
@@ -59,7 +59,7 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 
 | Operating system | CPU | GPU | Status | Guide |
 |---|---|---|---|---|
-| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; tested on a Ryzen 9 9900X3D with an RTX 5070 and its AMD iGPU; CI runs the test suite | [Linux](platforms/linux.md) |
+| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; tested on a Ryzen 9 9900X3D with an RTX 5070 and its AMD iGPU, and on an i7-8700K with an RTX 2080 SUPER; CI runs the test suite | [Linux](platforms/linux.md) |
 | Linux aarch64 | NEON | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests on GitHub's arm64 runner; no other hardware tested | [Linux](platforms/linux.md) |
 | macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU; tested on the A18 Pro only); no Metal backend | **Supported**; tested on an A18 Pro; CI runs clippy and the renderer, interpreter and library suites; untested on M-series hardware | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
@@ -97,7 +97,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", feature
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
-For reproducible builds pin the dependency to a release tag (`tag = "v2.0.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
+For reproducible builds pin the dependency to a release tag (`tag = "v2.3.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
 
 ## Quickstart
 
@@ -384,7 +384,7 @@ cargo build --release -p rasterrocket-cli --features vulkan
 
 The CLI crate forwards each of these feature names to the library.
 
-`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series; only `sm_120` is tested). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
+`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series; `sm_120` and `sm_75` are tested, the latter from an nvcc 12.4 build). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
 ### Dependencies
 
