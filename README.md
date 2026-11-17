@@ -47,7 +47,8 @@ take rows; the full list is in [ROADMAP.md](ROADMAP.md).
 - **Antialiasing.** Fills, clips, strokes and glyphs take exact-area
   coverage from one integer rasteriser (`raster::coverage`, 1/256 px), in
   place of 4 × 4 supersampling; the device AA fill and the `gpu-aa` feature
-  are removed, and `--gpu-pages` composites the CPU's coverage.
+  are removed, and `--gpu-pages` composites the CPU's coverage. (After
+  v2.3.0, GPU pages compute the same exact-area coverage on the device.)
 - **Large pages.** A page byte budget (`--max-page-mib`,
   `max_page_bytes`, default 1.8 GB) replaces the pixel caps; larger pages
   render in bands (`render_page_bands`, `--band-mib`) and are written as
@@ -98,7 +99,9 @@ backend-neutral cache. The full list is in
   a transparency group as a whole is not simulated.
 - **GPU.** `--gpu-pages` / `SessionConfig::gpu_pages` renders pages made of
   solid fills and strokes whole on a Vulkan GPU beside the CPU workers,
-  byte-identical to the CPU (`vulkan` build). The image cache and the ICC
+  byte-identical to the CPU (`vulkan` build). (After v2.3.0, GPU pages also
+  take text, images, forms, annotation appearances, path clips and soft
+  masks.) The image cache and the ICC
   CMYK conversion run on Vulkan as well as CUDA, the latter byte-identical
   to the CPU; the device ICC threshold is 128 000 px
   (`PDF_RASTER_ICC_CLUT_THRESHOLD`). `auto` renders
@@ -462,7 +465,7 @@ and the page/annotation JavaScript-disclosure work).
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
 - **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel (untested), or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
-- **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document.
+- **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document. Changed after v2.3.0 for Vulkan: sessions open at the same time share one Vulkan device, the last of them to drop destroys it, and a later session builds it again; the CUDA context is still initialised once per process.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed after v2.3.0: it lost to the multi-threaded CPU decoder on every measured workload.
 - **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (Since v2.0.0 the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` does not compile outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
@@ -553,7 +556,7 @@ is **untested**: it is expected to work, nothing more.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070 only.
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. Tested on an RTX 5070, on an AMD integrated GPU (RADV), on llvmpipe and on an A18 Pro's GPU (MoltenVK); untested on Intel GPUs (ANV) and on M-series Macs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, on an AMD integrated GPU (RADV) and on an A18 Pro's GPU (MoltenVK); the Vulkan backend also runs on llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
@@ -606,7 +609,7 @@ Only `sm_120` is tested; the other rows are untested. Look up your card's exact 
 | `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (tested on an AMD iGPU; untested on Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
-| `vulkan` | Vulkan compute backend (cross-vendor; see [Tested hardware](#tested-hardware)) for whole-page rendering (`--gpu-pages`), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `vulkan` | Vulkan compute backend (cross-vendor; see [Tested hardware](#tested-hardware)) for whole-page rendering (`--gpu-pages`: fills, strokes, text, images, forms, path clips and soft masks, byte-identical to the CPU), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
@@ -619,7 +622,7 @@ The runtime backend is chosen from three sources, in priority order:
 2. The `PDF_RASTER_BACKEND` environment variable (same valid values).
 3. The compile-time default — `auto`.
 
-`auto` initialises no GPU backend at start-up: it is a CPU session, with no Vulkan device, CUDA context, image cache or nvJPEG decoder (nvJPEG2000 is dormant under `auto`: in an `nvjpeg2k` build, only a pixel area set in `PDF_RASTER_JPX_THRESHOLD` makes a thread build its decoder, when it first draws a `JPXDecode` image of that area at more than half its size; `--gpu-pages` opens a Vulkan device of its own). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. `--backend cuda` / `--backend vulkan` initialise their backend and fail loudly when its runtime is unavailable; `--backend cuda` decodes a `JPXDecode` image of at least 2 097 152 px on the GPU (`PDF_RASTER_JPX_THRESHOLD` overrides the area).
+`auto` initialises no GPU backend at start-up: it is a CPU session, with no Vulkan device, CUDA context, image cache or nvJPEG decoder (nvJPEG2000 is dormant under `auto`: in an `nvjpeg2k` build, only a pixel area set in `PDF_RASTER_JPX_THRESHOLD` makes a thread build its decoder, when it first draws a `JPXDecode` image of that area at more than half its size; `--gpu-pages` opens a Vulkan device of its own when the first page that may render on it is reached, so a one-page job never uses it). A GPU session's start-up costs more than the image cache and the ICC lookup table save on every document measured. `--backend cuda` / `--backend vulkan` initialise their backend and fail loudly when its runtime is unavailable; `--backend cuda` decodes a `JPXDecode` image of at least 2 097 152 px on the GPU (`PDF_RASTER_JPX_THRESHOLD` overrides the area).
 
 ```bash
 # Select a backend per process:

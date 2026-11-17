@@ -564,7 +564,7 @@ pub(crate) struct Args {
     ///
     /// `auto`   — CPU; no Vulkan device or CUDA context is opened at
     ///            start-up; --gpu-pages opens a Vulkan device once a page
-    ///            may render on it.  A binary built with `nvjpeg2k` decodes JPEG 2000 on the GPU only
+    ///            may render on it, and later pages use it.  A binary built with `nvjpeg2k` decodes JPEG 2000 on the GPU only
     ///            when `PDF_RASTER_JPX_THRESHOLD` sets a pixel area.  This is
     ///            the default.
     /// `cpu`    — CPU only; all GPU init is skipped.
@@ -609,11 +609,17 @@ pub(crate) struct Args {
     ///
     /// Under --backend auto the device opens in the background when the
     /// first page that may render on it is reached, so a document with no
-    /// such page opens none; once open, a page made only of
-    /// solid fills and strokes (rectangle clips, Normal blend, constant
-    /// alpha) renders on it while it is idle, every other page on the CPU,
-    /// with identical output.  Needs a build with the `vulkan` feature,
-    /// --backend auto or vulkan, and --aaVector yes.
+    /// such page opens none, and pages reached before it is open (all of a
+    /// one-page job) render on the CPU.  Two pages hold the device at once,
+    /// one recorded while the other rasterises.  Fills, strokes, text,
+    /// images, forms, annotations, path clips and soft masks render on it,
+    /// byte-identical to the CPU at 8 and 16 bits.  A page with a
+    /// transparency-group form, a blend mode other than Normal, a pattern
+    /// or shading, a Type 3 glyph that runs its `CharProc`, overprint
+    /// simulation, or more than 128 MiB of device commands renders on the
+    /// CPU, as does a page rendered in bands (larger than --band-mib).
+    /// Needs a build with the `vulkan` feature, --backend auto or vulkan,
+    /// and --aaVector yes.
     #[arg(long = "gpu-pages", verbatim_doc_comment)]
     pub gpu_pages: bool,
 

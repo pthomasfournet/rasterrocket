@@ -154,9 +154,13 @@ writes in place, so no data is copied to or from the GPU.
 A `vulkan,gpu-icc` build converts ICC-based CMYK images of at least
 128 000 px through the profile's lookup table on the device, and a
 `vulkan,cache` build keeps decoded images in the device image cache.
-`--gpu-pages` renders pages made only of solid fills and strokes whole on
-the device, beside the CPU workers. Under the default `--backend auto`, no
-Vulkan device is opened unless `--gpu-pages` is given.
+`--gpu-pages` renders pages whole on the device, beside the CPU workers:
+fills, strokes, text, images, forms, annotation appearances, path clips and
+soft masks, byte-identical to the CPU at 8 and 16 bits (see the
+[CLI reference](../cli-reference.md#backend-selection) for what stays on the
+CPU). Under the default `--backend auto`, no Vulkan device is opened unless
+`--gpu-pages` is given, and then only once a page that may render on it is
+reached, so a one-page job never uses it.
 
 Measured on an A18 Pro (macOS 27.2, MoltenVK 1.4.2): the fixtures render
 byte-identically on the GPU and the CPU. MoltenVK on an M-series GPU is

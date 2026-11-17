@@ -554,8 +554,10 @@ renderer/
                        the clip, on the CPU or the device blit kernel
     device_blit.rs   — a device-resident image through the blit kernel of the
                        image cache's backend, or read back to the host
-    device_page.rs   — record_for_device: a page's solid fills and strokes
-                       recorded as PageCommands for the GPU page raster
+    device_page.rs   — record_for_device: a page's paints (fills, strokes,
+                       glyphs, images, forms, path clips, soft-masked
+                       objects) recorded as PageCommands for the GPU page
+                       raster
     diagnostics.rs   — PageDiagnostics, DevicePage, ImageFailure, RenderAbort
     text_census.rs   — GlyphCounts: shown glyphs by text rendering mode, or
                        by why a glyph cannot mark the page
@@ -947,51 +949,80 @@ renders whole pages (*Page raster* below).
 **Backend start-up under `Auto`.**  A session under `BackendPolicy::Auto`
 initialises no GPU backend, image cache or nvJPEG decoder: it renders on the
 CPU, except JPEG 2000 images for which, when `PDF_RASTER_JPX_THRESHOLD` sets a
-pixel area, a thread's nvJPEG2000 decoder is built on demand, and pages `gpu_pages` sends to a Vulkan device it opens itself.
+pixel area, a thread's nvJPEG2000 decoder is built on demand, and pages `gpu_pages` sends to a Vulkan device it opens when the first page that may render on it is reached.
 `ForceCuda` / `ForceVulkan` initialise their backend.
 
 **Kernel inventory.**  Two kernel sources exist in **both** `.cu` (CUDA, compiled to
 PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature; `page_raster` exists in Slang only.
+time, gated on the `vulkan` feature; `page_raster` exists in Slang only, compiled twice.
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
 | `icc_cmyk_clut` | icc_clut.cu | icc_clut.slang | ICC CMYK→RGB through a tabulated conversion's grid, in its simplices in integers (byte-identical to `CmykGrid::convert`) | 128 000 px |
 | `icc_cmyk_matrix` | icc_clut.cu | — | profile-free CMYK→RGB by the process-ink model; not dispatched by the renderer | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image sampling onto an RGBA target (`cache` feature) | always |
-| `page_raster` | — | page_raster.slang | Whole page from a `PageCommands` list, one workgroup per 16-px tile | `gpu_pages` |
+| `page_raster` | — | page_raster.slang (+ page_image.slang, page_modifiers.slang) | Whole page from a `PageCommands` list, one workgroup per 16-px tile: coverage tables, glyph masks, images, path clips and soft-masked objects | `gpu_pages`, device without `shaderInt64` |
+| `page_raster_paths` | — | page_raster.slang with `PAGE_PATHS` | As `page_raster`, and computes the exact-area coverage of outlines with the CPU rasteriser's integer walk; needs 64-bit integers | `gpu_pages`, device with `shaderInt64` |
 
 Four kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (ICC
 grid and blit) run the Vulkan kernel against the CUDA kernel or the host
 evaluator and require byte-equal output.
 
 **Page raster** (`gpu::page`, `backend/vulkan/page.rs`, Vulkan only).  A
-`PageCommands` list holds a page as paint commands: one colour at a constant
-alpha over an opaque RGB page, per-pixel coverage from a coverage table the
-CPU's exact-area rasteriser computed (`CoverageRows`), limited to an
-inclusive pixel rectangle, painted in push order.  Every command's table is copied into
-one shared pair of buffers, and the device inputs, binning included, are
-bounded by `PAGE_COMMANDS_MAX_BYTES` (128 MiB): a push past it fails and
-leaves the list unchanged.  The host bins the commands into 16-pixel tiles
-(`PageCommands::bin`); `VulkanBackend::render_page` stages the inputs, runs
-one workgroup per tile that walks its commands in order and composites each
-pixel's coverage as the CPU's `aa` pipe does, and reads the page back, in
-one submission and one wait.  The interpreter records a page
-(`PageRenderer::record_for_device`, `renderer/page/device_page.rs`): each
-fill or stroke of a solid colour is scan-converted by the CPU's own geometry
-stages (`raster::fill::aa_fill_coverage`, `raster::aa_stroke_coverage`,
-`raster::hairline_runs`) and appended with the colour, constant alpha and
-clip rectangle the CPU's `aa` pipe would composite with.  The first paint
-outside that model — text, XObjects, annotation appearances, inline images,
-shadings, patterns, a blend mode other than `Normal`, soft masks, path
-clips, translucent hairlines or fill-and-stroke — refuses the recording with
-a reason and stops the content stream.  An ink canvas, a page group,
-vector antialiasing off, or a content-stream operator that paints other
-than by a path rule the page out before interpretation
-(`renderer::device_page_ineligible`); a CMYK page is on an ink canvas, and
-the page queue keeps a 16-bit render on the CPU.  A recorded page is therefore
-byte-identical to the CPU page.  The queue that offers
-pages to the device is `rasterrocket`'s (§3.7).
+`PageCommands` list holds a page as paint commands over an opaque RGB page
+of 8 or 16 bits per sample, each limited to an inclusive pixel rectangle and
+painted in push order: one colour at a constant alpha whose per-pixel
+coverage is a coverage table the CPU's exact-area rasteriser computed
+(`CoverageRows`), a closed outline whose coverage the device computes with
+that rasteriser's integer walk (`AreaPath`), or a coverage mask the page
+holds once and any number of commands place (`MaskId`, the glyph cache's
+bitmaps); or an image sampled per pixel through the CPU image sampler's
+tables (`ImageDraw`).  A command may be clipped by the coverage tables of
+the CPU's path-clip regions (`ClipId`), and the commands of an object
+painted under a soft mask are blended back toward the pixels before them by
+the mask's plane (`PlaneId`).  Tables, outlines, masks and samples are
+copied into shared flat arrays, and the device inputs, binning included,
+are bounded by `PAGE_COMMANDS_MAX_BYTES` (128 MiB): a push past it fails
+and leaves the list unchanged.  The host bins the commands into 16-pixel
+tiles (`PageCommands::bin`); an outline's tile lists the segments that may
+deposit a cell in it and its backdrop, and an outline tile covered fully
+and opaquely hides the items below it.  `VulkanBackend::render_page` stages
+the inputs, runs one workgroup per tile that walks its items in order and
+composites each pixel as the CPU's `aa` pipe (or, for an image at full
+opacity, the CPU's direct image composite) does, and reads the page back,
+in one submission and one wait.  Outlines need `shaderInt64`
+(`page_raster_paths`); on a device without it an outline is recorded as
+its coverage table and the page runs `page_raster`, and so is an outline
+past the device's integer range (`PATH_COORD_LIMIT`, `PATH_SEGMENTS`,
+`PATH_TILE_SEGMENTS`).  `gpu::page::reference`
+is the host model of the kernel, independent of the backend.
+
+The interpreter records a page (`PageRenderer::record_for_device`,
+`renderer/page/device_page.rs` and its `glyphs`, `images`, `clips` and
+`soft_masks` modules) instead of painting it.  A fill or stroke of a solid
+colour is appended as the outlines the CPU's rasteriser would rasterise
+(`raster::fill::aa_fill_outlines`, `raster::aa_stroke_outline`), an opaque
+hairline as the runs it paints (`raster::hairline_runs`); a glyph drawn from
+a cached coverage bitmap (cached glyph strokes and cached Type 3 glyphs
+included) as a mask command; an image, inline image or stencil mask, which
+the CPU decodes, colour-converts and downsamples as usual, as an image
+command; a form `XObject` or annotation appearance as the paints of its
+content; a path clip as its regions' coverage tables, the clipping text
+modes 4–7 becoming ordinary path clips at `ET`; a soft mask as the plane
+the CPU renders when `gs` sets it, holding only its non-uniform part.  A
+paint outside that model — a pattern or shading, a blend mode other than
+`Normal`, a transparency-group form, a Type 3 glyph whose CharProc runs, a
+translucent hairline or translucent fill-and-stroke, a transfer function on
+an image — refuses the recording with a reason and stops the content
+stream, and so does a page past the command budget ("command list size").
+An ink canvas (overprint simulation; a CMYK page is on one), a page group,
+vector antialiasing off, or a content-stream operator that paints by a
+shading or runs a Type 3 CharProc rule the page out before interpretation
+(`renderer::device_page_ineligible`), and the page queue keeps a page of
+the wide working space on the CPU.  The device composites every command
+with the CPU's arithmetic, so a recorded page is byte-identical to the CPU
+page at 8 and 16 bits.  The queue that offers pages to the device is
+`rasterrocket`'s (§3.7).
 
 **Build-script model.**  `crates/gpu/build.rs` probes `nvcc --version` directly:
 when nvcc works, real PTX is compiled regardless of features.  When nvcc fails
@@ -1120,19 +1151,30 @@ entry points.
 
 **GPU page queue** (`device_pages.rs`). With `SessionConfig::gpu_pages`
 (requires the `vulkan` feature, policy `Auto` or `ForceVulkan`, and vector
-antialiasing; otherwise `open_session` returns `InvalidOptions`), the Vulkan
-device is opened on a thread of its own when the session opens, and every
-page renders on the CPU until it is open. The device takes one page at a
-time: a worker whose page is not ruled out (`device_page_ineligible`) claims
-it while it is idle, records the page and renders it there; a busy device or
-an ineligible page renders on the CPU. A page whose recording is refused, or
-which the device fails on, is executed again on the CPU in the first pass's
-bitmap buffers, sharing the page's deadline, with its own operator budget.
-A device error retires the device for the session; a page beyond the
-device's limits renders on the CPU and leaves it in service. Pages are
-returned by index, so output order does not depend on where a page
-rendered; `PageDiagnostics::device_page` (`DevicePage`) records the
-outcome.
+antialiasing; otherwise `open_session` returns `InvalidOptions`), pages
+render on the session's Vulkan device under `ForceVulkan`; under `Auto` the
+device is opened on a thread of its own when the first page that is not
+ruled out (`device_page_ineligible`) asks for it, and every page renders on
+the CPU until it is open, so a job none of whose pages qualifies opens
+nothing and a one-page job never uses it. Up to two pages (`IN_FLIGHT`)
+hold the device at once: a worker whose page is not ruled out claims it
+while fewer hold it, records the page and renders it there, the device
+rasterising one page at a time, so one page is recorded while the other
+rasterises; a worker that finds the device fully claimed, or a page ruled
+out, renders on the CPU, as does a page of the wide working space. The
+page canvas is faulted in before any device buffer is allocated, and not
+cleared: the device writes every sample. A page whose recording is
+refused, or which the device fails on, is executed again on the CPU in the
+first pass's bitmap buffers, drawing the images the first pass decoded,
+sharing the page's deadline, with its own operator budget. A device error
+retires the device for the session; a page beyond the device's limits
+renders on the CPU and leaves it in service. `render_page_bands` renders
+on the CPU, so a page the CLI renders in bands (larger than `--band-mib`)
+does not reach the device. Pages are returned by index, so output order
+does not depend on where a page rendered; `PageDiagnostics::device_page`
+(`DevicePage`) records the outcome. The device is the process-wide Vulkan
+backend of its selector (`vk_init.rs`), held weakly: sessions open at once
+share it, and the last of them to drop destroys it.
 
 `render_channel` spawns a Rayon background task and feeds pages into a bounded
 `sync_channel`. Typical use: `capacity=4`, Tesseract consumes from the other end
@@ -1421,9 +1463,10 @@ main thread
   │     ├── worker 1: render page N+1 ─── TLS NvJpegDecoder
   │     └── ...
   │
-  ├── GPU page device opener (gpu_pages only): opens the Vulkan device, then
-  │     exits; the open device renders one claimed page at a time, on the
-  │     claiming worker's thread
+  ├── GPU page device opener (gpu_pages under Auto only): started by the
+  │     first page that may use the device, opens it, then exits (joined
+  │     when the session drops); up to two workers claim the open device,
+  │     one recording while the other's page rasterises on it
   │
   │   pool.install() blocks until all pages done
   │
