@@ -325,7 +325,7 @@ pub struct SessionConfig {
     pub text_antialias: bool,
     /// Whether path fills, strokes and clips are antialiased.
     ///
-    /// Default `true`: coverage is sampled on a 4 × 4 grid per pixel.
+    /// Default `true`: each pixel takes the exact area of it the path covers.
     /// `false` scan-converts at pixel centres, giving hard bilevel edges;
     /// such fills always run on the CPU.
     pub vector_antialias: bool,
