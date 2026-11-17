@@ -551,3 +551,28 @@ proptest! {
         }
     }
 }
+
+/// A sloped hairline whose last-row crossing rounds past its end column
+/// paints, unclipped, only the columns its ends span, so a clip rectangle
+/// that excludes them masks it as it masks the unclipped hairline.
+#[test]
+fn a_hairline_crossing_stays_within_its_end_columns() {
+    let (w, h) = (15, 19);
+    let path = build(&[Subpath {
+        start: (-0.0625, 0.0),
+        segs: vec![Seg::Line((1.0, 9.0)), Seg::Line((4.4375, 3.0625))],
+    }]);
+    let clip = Clip::new(0.0, 0.0625, 0.0625, 9.0625, false);
+    let clipped = hairline(&path, &clip, w, h);
+    let free = hairline(&path, &whole(w, h, false), w, h);
+    for (i, (&c, &f)) in clipped.iter().zip(&free).enumerate() {
+        let (x, y) = at(i, w);
+        let inside = (clip.x_min_i..=clip.x_max_i).contains(&x)
+            && (clip.y_min_i..=clip.y_max_i).contains(&y);
+        assert_eq!(c, inside && f, "pixel ({x}, {y})");
+    }
+    assert!(
+        !free[9 * w as usize],
+        "pixel (0, 9) lies left of both segments"
+    );
+}

@@ -327,17 +327,17 @@ fn narrow_runs(
             // ends where the segment crosses its bottom edge, and the
             // direction is that of the whole segment, all as in the
             // unclipped walk, so a drawn row has the unclipped row's pixels.
+            // A crossing lies within the columns of the segment's ends: in
+            // floating point it can round past one of them, outside the
+            // pixel rectangle the clip test above classified.
+            let cross = |y: f64| floor_i32((y - sy0).mul_add(dxdy, sx0)).clamp(xl, xr);
             let cy0 = y0.max(clip.y_min_i);
             let cy1 = y1.min(clip.y_max_i);
-            let mut xa = if cy0 > y0 {
-                floor_i32((f64::from(cy0) - sy0).mul_add(dxdy, sx0))
-            } else {
-                x0
-            };
+            let mut xa = if cy0 > y0 { cross(f64::from(cy0)) } else { x0 };
             let left_to_right = x0 <= x1;
             for y in cy0..=cy1 {
                 let xb = if y < y1 {
-                    floor_i32((f64::from(y) + 1.0 - sy0).mul_add(dxdy, sx0))
+                    cross(f64::from(y) + 1.0)
                 } else if left_to_right {
                     x1 + 1
                 } else {
