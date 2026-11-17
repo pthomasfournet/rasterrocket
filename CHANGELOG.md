@@ -2,6 +2,295 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Trace a Type 3 string's text state before it is shown
+- Don't prefetch JPEGs that every draw reduces
+- Render on disk, and decrypt pdfium's encrypted documents
+- Deskew rotation honours the backend policy
+- The ink-reproducing solve no longer stalls beside a bound
+- The blit records a write event on its destination page
+- Every kernel takes the buffers it writes by &mut
+- Uploads, zero fills and device copies take their target by &mut
+- Deskew only pages with a confident angle
+- Record the resolution in PNG and JPEG; 1-bit PNG for --mono
+- Gray profiles under absolute colorimetry keep the media white
+- Bound the vertex colour conversion of mesh shadings
+- A W/W* clip takes effect after the paint that ends its path
+- Key a colour-key /Mask on its first 2·n entries
+- Compensate to a CMYK profile's perceptual-black round trip
+- A failed GPU rotation under --backend cuda is an error
+- Skip a form nested past the depth bound instead of aborting the page
+- Un-premultiply a /SMaskInData 2 codestream against its /Matte
+- Build the image decode context under the nvjpeg2k feature
+- Refuse a JPX codestream that holds no data for a tile
+- A Type 3 font without /FontMatrix maps glyph space unscaled
+- Read a run of leading signs in a number as its last sign
+- Accept a version-less %PDF header; end a dictionary at the next object
+- Count the pages a page tree holds, not its root's /Count
+- Find a stream's end by keyword when its /Length is wrong
+- Take an endobj-anchored endstream after any byte
+- Draw the border of a Link annotation without an appearance
+- Show at most /MaxLen characters of a text field value
+- Subdivide a patch until it is its corner quadrilateral
+- Resolve and log a face name once under concurrent pages
+- The working-space messages' line breaks, and test the CLI refusals
+- Convert 8-bit ICC, Lab and CMYK images at 16 bits on 16-bit canvases
+- Decline the GPU Huffman decode for a draw at half size or less
+- Resume Phase 2 after error-point left inputs; 1024-bit subsequences
+- An Indexed image over a space of ink paints its palette's ink
+- Evaluate a CMYK separation at each node's exact PCS value
+- A spot colorant adds no ink where its tint is zero
+- Decide the nvJPEG2000 decline before building the decoder, and report it
+- Judge a JPEG 2000 codestream that ends early before the device decode
+- Prefetch images drawn in forms, and nothing at an unknown scale
+- Convert three-channel ICC tables without a cast at neutrals
+- Convert sRGB to an output profile at 16-bit precision
+- Find table profiles' black points through their tables
+- Read page-tree nodes written as direct dictionaries
+- Say when a misdirected object has no header in the file
+- Convert CMYK ICC tables through the tabulated grid
+- Read a transparency group's blending colour space
+- Convert inherited colours again when the working space changes
+- Blend nested transparency groups in their colour space
+- Take a CMYK luminosity mask in its group's colour space
+- Composite a page in its page group's colour space
+- Paint a folded patch's larger parameters last
+- Align the CMYK input grid with the profile's CLUT cells
+- Widen an image axis shorter than a pixel to one pixel
+- Blend modes inside a gray group blend in gray
+- A CalRGB or CalGray luminosity mask takes the luminance Y
+- Hold the ICC input grid's nodes unclipped, clip after interpolation
+- Interpolate the CPU's ICC grid on the device, byte for byte
+- ICC CMYK transparency groups composite in their profile's ink
+- Spot colours keep their channels through additive groups on ink pages
+- A 16-bit canvas never takes the 8-bit device image blit
+- Fit a word split between strings or faces as the whole word
+- Draw marks over the next string's letter where its fitted glyph lies
+- Images and shadings of a CalRGB or ICC RGB group's space paint their components
+- Overprint under a blend mode blends unpainted colorants; spots take white-preserving modes
+- GPU pages open their device for the first page that may use it
+- Destroy the Vulkan device when its last session drops
+- Free the CUDA context when its last session drops
+- Name the cause when the CUDA context fails to start
+- Warn when PDF_RASTER_JPX_THRESHOLD cannot act
+- Name a GPU that no CUDA rebuild can serve, and warn on skipped Vulkan devices
+- Refuse a GPU below the CUDA toolkit's oldest architecture
+- An empty PDF_RASTER_CACHE_DIR warns that it names no cache root
+- Register only exists where GpuCtx can start (not under placeholder PTX)
+
+### Chores
+
+- Drop the dead nightly-sve2 feature
+- Upstream reviewed through 7fd6c70b
+- Untrack .clangd and the .gitkeep placeholders
+- Drop the [test] table cargo never read, say how to build portably
+- Mark the vendored forks for GitHub's language statistics
+
+### Documentation
+
+- The paint trace
+- GPU-session fallbacks and Windows RAM output
+- The per-channel tile delta, RMSE not judged, reason kinds
+- The reviewed expected-failures registry
+- 16-bit comic input, camera stages and deskew
+- Deskew confidence, --deskew, PNG and JPEG resolution
+- OCR preparation of scans
+- Input ICC conversions honour the rendering intent
+- Input black-point compensation and its pixel impact
+- A clip takes effect after the paint that ends its path
+- Soft proofing and the CMYK compensation black
+- Forced-CUDA deskew, deep forms, JPX matte and truncation, Type 3 matrix
+- A more lenient parser
+- Link borders, /MaxLen, installed faces by name, curved patches
+- The wide working space under an output profile
+- Parallel-Huffman convergence and draw size
+- CMYK output completes its conversions
+- NvJPEG2000 declines, truncation and form-aware prefetch
+- Colour conversions agree with Little CMS to its precision
+- Drop the parallel-Huffman JPEG decoder from CI and the docs
+- Direct page-tree nodes and the damaged-object message
+- CMYK input tables on the shared grid; --preserve-black
+- Transparency groups composite in their colour space
+- A folded patch shows its larger parameters
+- NvJPEG2000 dormant under Auto
+- The CMYK input grid follows the profile's CLUT
+- An image thinner than a pixel draws
+- The wide working space at 8 bits
+- Blend modes in gray groups, luminance of Cal masks
+- Unclipped ICC grid nodes, and a GPU ICC session equal to a CPU one
+- ICC CMYK groups in their profile's ink, spots through additive groups
+- The GPU and SIMD paths at 16 bits
+- 16-bit GPU pages and 16-bit nvJPEG2000
+- Name the image modules the split created
+- The image colour module is a directory
+- CalRGB and non-sRGB RGB groups composite in their own space
+- A word split between strings or faces is fitted as the whole word
+- Images and shadings of an RGB group's own space keep their components
+- Overprint and spot colorants under blend modes; groups keep painting every colorant
+- Per-stage times of a GPU page; the page benchmark runs the production path
+- GPU pages open their device on demand; two device slots measured and dropped
+- Name the tested hardware; mark the rest untested
+- GPU pages compute exact-area coverage on the device
+- Two GPU pages in flight, compact outline tiles
+- GPU page canvas faulted in before its device buffers
+- Text on GPU pages
+- Images and forms on GPU pages
+- Path clips and soft masks on GPU pages
+- The Vulkan device is destroyed with its sessions
+- Describe GPU pages as they render on master
+- GPU pages tested on an RTX 2080 SUPER and on llvmpipe
+- CUDA ICC kernels tested on an RTX 2080 SUPER
+- A CUDA 13 build needs driver 580 on the RTX 2080 SUPER
+- NPP deskew on the RTX 2080 SUPER differs from the CPU at the page edge
+- GPU contexts close with their sessions; DeviceHold and release_gpu_thread_state
+- V2.4.0 release notes in the roadmap
+- Rustdoc builds without broken or private intra-doc links
+- Vector_antialias names exact-area coverage
+- --working-space, the environment variables, current backend wording
+- Working_space, preserve_black and the PageDiagnostics fields
+- The i7-8700K and RTX 2080 SUPER are tested; nvJPEG2000 build paths
+- The causes a --backend cuda error names
+- The clip module's FOLD_DEPTH is private, so not a link
+- --working-space leaves groups that declare a space in it
+- What's new in v2.4.0
+- Refresh month-old comments (package name, CPU JPEG 2000 fallback, stepwise release)
+- OCR pointers match the refreshed wiki; the roadmap snippet uses page.dpi
+- OpenAI as code in the crate docs (doc_markdown)
+
+### Features
+
+- Paint trace of a page's operations
+- Rasterrocket::dev::paint_trace and paint-trace goldens
+- Paint_trace dump, diff and blame
+- Read available memory on Windows, so --ram-path works there
+- PDF_RASTER_JPX_THRESHOLD overrides the nvJPEG2000 area threshold
+- Judge the tile delta per channel, and RMSE only on request
+- 16-bit DeviceCMYK corners
+- Replay the measured geometry on 16-bit samples
+- Deskew 16-bit gray pages; 16-bit gray page helpers
+- Decode comic pages at 16 bits per sample
+- Camera stages and comic input at --depth 16
+- Background normalisation
+- Sauvola binarisation
+- Scan border cleanup
+- --deskew straightens gray pages
+- --clean-borders, --clean-background and --threshold sauvola
+- Compile ICC input conversions per rendering intent
+- Convert colours under the graphics state's rendering intent
+- Images, shadings and mattes convert under their intent
+- Black-point compensation for input ICC conversions
+- Read a document's and a page's output intents
+- Convert a press's ink to a display as a soft proof
+- Soft-proof a session's pages against their output intent
+- --proof[=relative|absolute] soft-proofs against the output intent
+- Draw a non-embedded font with the installed face it names
+- A wide working space for pages under an output profile
+- Black generation and undercolour removal in the device separation
+- Separate each object under its own rendering intent
+- Convert ICC CMYK of another profile to the CMYK output profile
+- Preserve black in CMYK-to-CMYK conversion (--preserve-black)
+- Narrow a finished 16-bit canvas to 8 bits
+- Composite in the wide working space at --depth 8
+- The ICC CMYK grid kernel converts to 16-bit samples
+- A 16-bit page rotates through NPP under --backend cuda
+- The Vulkan page raster composites 16-bit pages
+- NvJPEG2000 decodes 16-bit codestreams under the 5-3 wavelet
+- CalRGB and non-sRGB ICC RGB groups composite in their own space
+- Render_page_timed reports the duration of each stage of a page
+- Dev::device_page_commands returns a page's GPU page recording
+- The page raster computes exact-area coverage on the device
+- Page_gpu_bench --pdf renders a given document
+- Coverage masks on the page raster
+- Record glyphs for the GPU page raster
+- Record cached Type 3 glyphs for the GPU page raster
+- Image commands on the page raster
+- Record image draws for the GPU page raster
+- Record form XObjects for the GPU page raster
+- Export a clip's path regions and their identities
+- Path clips and soft-masked objects on the page raster
+- Record path clips and soft masks for the GPU page raster
+- Count the Vulkan devices the process holds open
+- Release a thread's CUDA state, and drop it once its context ends
+- DeviceHold keeps a configuration's GPU devices open
+
+### Other
+
+- CUDA_ARCH defaults to sm_75
+- Libc only with the vulkan feature
+
+### Performance
+
+- ICC CMYK images the device does not convert take the profile transform
+- Refuse unsupported JPEGs from their headers, before the entropy pre-pass
+- Raise the nvJPEG2000 threshold to 2 097 152 px
+- Make nvJPEG2000 dormant under Auto
+- AVX-512 and NEON row kernels rotate 16-bit gray
+- NEON rotation forms its footprint indices lane-wise
+- Build coverage tables without byte-by-byte scans or row copies
+- Stage a GPU page's table input from its arrays in place
+- Two GPU pages in flight, one recorded while one rasterises
+- Hold uniform backdrops and single segments in the tile items
+- Leave unpainted the recording canvas the GPU page overwrites
+- Fault in the page raster's destination before its device buffers
+
+### Refactor
+
+- One FNV-1a helper
+- Split the paint trace into a directory module
+- Bitmap::converted between sample depths
+- Drop the border-junk area limit
+- Drop the GPU parallel-Huffman JPEG wiring
+- Delete the parallel-Huffman JPEG decoder
+- Split image colorspace.rs into a colorspace/ directory
+- Split resolution and conversion out of colorspace.rs
+- Move function-based shadings into shading/type1.rs
+- Move ExtGState parsing into resources/ext_gstate.rs
+- Move PageResources into resources/page_resources.rs
+- Move XObject lookups into page_resources/xobject.rs
+- Move colour-space lookups into page_resources/color.rs
+- Move pattern and shading lookups into page_resources/pattern.rs
+- Move transparency groups into resources/transparency_group.rs
+- Share the repeated PageResources lookups
+- Move the GPU image thresholds into image/thresholds.rs
+- Move the image filter helpers into image/filters.rs
+- Move the image decode limits into image/limits.rs
+- Build try_filled on try_with_capacity
+- Move the public image types into image/types.rs
+- Move resolve_image into image/resolve.rs
+- Page_gpu_bench runs the production GPU page path
+- The exact-area rasteriser's input as an AreaOutline
+- One SplitMix64 and polygon helper for the page raster's tests
+- Split the page command list along its seams
+- Let-else for a recorded page's host copy
+- Split clip into intersect, query and rows modules
+- Split image_sampler into filter, taps, grid, inverse, mask and grid_clip
+- Split image_blit into ink and composite modules
+
+### Testing
+
+- Re-seed the pdftoppm suite under tile<=12
+- Classify the 27 pdftoppm-suite entries
+- Re-register the pdfium corpus under the per-channel tile delta
+- Classify the pdfium-suite entries
+- Point bug_828049 at its remaining defect
+- Register type3_xobject under the unscaled Type 3 matrix
+- Lab and the CMYK separation from the wide space against transicc
+- Run the debug-assertion packing test only where the assertion exists
+- Register pdfium's shade-tensor as a spec divergence
+- CMYK charts between the table nodes against transicc
+- Device ICC tolerance against the simplex transform
+- A shared ink map at finish holds in both profiles
+- A run of leading signs in a content-stream number is its last sign
+- An object over tiles on the device
+- Clipped pages render on the device
+- A translucent hairline as the refused recording
+- Release_thread_state drops the thread's NPP rotator
+- Spell dictionary in two test names
+- Fit substitute widths against the compiled-in sans, not an installed face
+
 ## [2.3.0] - 2026-11-15
 
 ### Bug Fixes
@@ -52,12 +341,16 @@ All notable changes to this project will be documented in this file.
 - Decode raw codestreams with the image dictionary's channels (upstream #1821)
 - Paint the top row of a flat-top Gouraud triangle
 - Round the IDCT and YCbCr conversion as libjpeg's accurate decode
+- The Vulkan build compiles again
+- The 16-bit --print tests run where --print exists
 
 ### Chores
 
 - Record the upstream review through 064a610b9
 - Record the upstream review through 73fab6938
 - Record the upstream review through 26f5a7682
+- Accept the AAT trak table name
+- Release v2.3.0
 
 ### Documentation
 
@@ -77,6 +370,7 @@ All notable changes to this project will be documented in this file.
 - CMYK JPEG and TIFF, 16-bit TIFF, BigTIFF, CMYK profiles
 - Crate docs for the new outputs, Pixels, backend order
 - Misplaced and stale doc comments
+- Prep v2.3.0 release notes
 
 ### Features
 
