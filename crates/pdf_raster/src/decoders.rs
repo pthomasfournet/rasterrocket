@@ -139,6 +139,42 @@ fn nvjpeg2k_supply(
     }
 }
 
+/// Why a JPEG 2000 dispatch threshold in the environment has no effect on
+/// a session of `policy`, or `None` when the session can use it.
+///
+/// The threshold steers the nvJPEG2000 decoder, which exists only with the
+/// `nvjpeg2k` feature and runs only under the policies that may start a
+/// CUDA context (`Auto`, `ForceCuda`).
+const fn inert_jpx_threshold(policy: BackendPolicy) -> Option<&'static str> {
+    if !cfg!(feature = "nvjpeg2k") {
+        return Some("this build has no `nvjpeg2k` feature");
+    }
+    match policy {
+        BackendPolicy::Auto | BackendPolicy::ForceCuda => None,
+        BackendPolicy::CpuOnly => Some("backend `cpu` starts no CUDA context"),
+        BackendPolicy::ForceVulkan => Some("backend `vulkan` starts no CUDA context"),
+        #[cfg(feature = "vaapi")]
+        BackendPolicy::ForceVaapi => Some("backend `vaapi` starts no CUDA context"),
+    }
+}
+
+/// Warn, once per process, when `PDF_RASTER_JPX_THRESHOLD` is set but a
+/// session of `policy` cannot use it ([`inert_jpx_threshold`]).
+pub(crate) fn warn_inert_jpx_threshold(policy: BackendPolicy) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if std::env::var_os("PDF_RASTER_JPX_THRESHOLD").is_none() {
+        return;
+    }
+    if let Some(reason) = inert_jpx_threshold(policy) {
+        WARNED.call_once(|| {
+            log::warn!(
+                "rasterrocket: PDF_RASTER_JPX_THRESHOLD is set but has no effect: {reason}; \
+                 JPEG 2000 images decode on the CPU"
+            );
+        });
+    }
+}
+
 /// Return GPU JPEG decoders from the renderer back into TLS slots for reuse.
 ///
 /// The VA-API path is omitted here: `JpegQueueHandle` is cheaply cloneable and
@@ -264,5 +300,25 @@ mod cuda_decoder_tests {
             nvjpeg2k_supply(BackendPolicy::Auto, enabled),
             Nvjpeg2kSupply::None
         );
+    }
+}
+
+#[cfg(test)]
+mod inert_jpx_tests {
+    use super::inert_jpx_threshold;
+    use crate::BackendPolicy;
+
+    /// The threshold acts only with the decoder compiled in and under a
+    /// policy that may start CUDA.
+    #[test]
+    fn a_jpx_threshold_is_inert_without_the_decoder_or_a_cuda_policy() {
+        let decoder = cfg!(feature = "nvjpeg2k");
+        assert_eq!(inert_jpx_threshold(BackendPolicy::Auto).is_none(), decoder);
+        assert_eq!(
+            inert_jpx_threshold(BackendPolicy::ForceCuda).is_none(),
+            decoder
+        );
+        assert!(inert_jpx_threshold(BackendPolicy::CpuOnly).is_some());
+        assert!(inert_jpx_threshold(BackendPolicy::ForceVulkan).is_some());
     }
 }

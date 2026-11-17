@@ -1492,5 +1492,5 @@ hardware. Under `Auto` nvJPEG2000 is dormant too: a thread's decoder build
 costs more process time than the device saves on a single page, and over
 runs of pages the device wins on some documents and ties or loses on others.
 Set `PDF_RASTER_JPX_THRESHOLD` to a pixel area to enable it. `ForceCuda`,
-which asks for the device, keeps the 2 097 152 px area threshold.
+which asks for the device, keeps the 2 097 152 px area threshold. A session for which a set `PDF_RASTER_JPX_THRESHOLD` cannot act (a build without `nvjpeg2k`, or the `cpu`, `vulkan` or `vaapi` backend) logs a warning saying so, once per process.
 
