@@ -44,6 +44,14 @@ release). It is not published and changes are not sent upstream.
   there are no metrics, so outlines are not shifted. Test:
   `outline::tests::outlines_without_horizontal_metrics`.
 
+- `outline::varc`: the scalar cache of a `VARC` glyph draw holds one
+  entry per region of the `MultiItemVariationStore`'s region list, and
+  the list's declared count is accepted only when its region offsets lie
+  within the table; a larger count is `DrawError::Malformed`. Upstream
+  sized the cache by the declared 32-bit count, so a font of a few KB
+  could allocate 16 GiB. Test:
+  `outline::varc::tests::draw_varc_with_overstated_region_count_is_malformed`.
+
 ## Glyph name iteration
 
 - `GlyphNames::iter` over a version 2.0 `post` table splits the string

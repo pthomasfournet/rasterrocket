@@ -743,11 +743,19 @@ impl<'a> Outlines<'a> {
         // cache is correct: any component that references variation data will fail
         // gracefully when it resolves the missing store, rather than us
         // panicking here.
+        //
+        // The cache holds one scalar per region the list declares, so the
+        // declared count is accepted only when its offsets lie within the
+        // table: the cache is then at most as large as the font data.
         let region_count = match store {
-            Some(store) => store
-                .region_list()
-                .map_err(|_| DrawError::Malformed)?
-                .region_count() as usize,
+            Some(store) => {
+                let regions = store.region_list().map_err(|_| DrawError::Malformed)?;
+                let offsets = regions.region_offsets().len();
+                if u32::try_from(offsets).ok() != Some(regions.region_count()) {
+                    return Err(DrawError::Malformed);
+                }
+                offsets
+            }
             None => 0,
         };
         Ok(ScalarCache::new(region_count))
@@ -1647,6 +1655,42 @@ mod tests {
             DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
             &mut pen,
         );
+    }
+
+    /// A region list whose declared count exceeds the offsets its table holds
+    /// is malformed: drawing fails without sizing a scalar cache by the count.
+    #[test]
+    fn draw_varc_with_overstated_region_count_is_malformed() {
+        use crate::{instance::LocationRef, outline::DrawSettings, MetadataProvider};
+        use read_fonts::types::Tag;
+
+        let mut bytes = font_test_data::varc::CJK_6868.to_vec();
+        let varc_off = {
+            let font = FontRef::new(&bytes).unwrap();
+            font.table_directory()
+                .table_records()
+                .iter()
+                .find(|rec| rec.tag() == Tag::new(b"VARC"))
+                .expect("VARC table present")
+                .offset() as usize
+        };
+        let be32 = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        // VARC: version (4), coverage offset (4), multi_var_store offset (4).
+        let store = varc_off + be32(varc_off + 8);
+        // MultiItemVariationStore: format (2), region list offset (4).
+        let regions = store + be32(store + 2);
+        bytes[regions..regions + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+
+        let font = FontRef::new(&bytes).unwrap();
+        let outlines = font.outline_glyphs();
+        let gid = font.cmap().unwrap().map_codepoint(0x6868_u32).unwrap();
+        let glyph = outlines.get(gid).expect("covered VARC glyph");
+        let mut pen = Vec::<PathElement>::new();
+        let result = glyph.draw(
+            DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+            &mut pen,
+        );
+        assert!(matches!(result, Err(DrawError::Malformed)), "{result:?}");
     }
 
     fn first_nested_varc_edge(outlines: &Outlines<'_>) -> Option<(GlyphId, u32)> {

@@ -21,7 +21,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 
 use read_fonts::ps::UnicodeCharmap as Charmap;
 use read_fonts::ps::cff::charset::Charset;
@@ -162,6 +162,8 @@ pub struct FontProgram {
     /// The layout-table state and the shape plans [`Self::shape`] reads,
     /// built on first use by an sfnt program.
     shaper: OnceLock<shape::Shaping>,
+    /// Run on the first glyph [`Self::draw`] fails on, to report it.
+    draw_failure: Once,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -266,6 +268,7 @@ impl FontProgram {
             vertical_forms: OnceLock::new(),
             gid_to_cid: OnceLock::new(),
             shaper: OnceLock::new(),
+            draw_failure: Once::new(),
         };
         let mut table = [0u32; 256];
         for (code, slot) in (0u32..).zip(table.iter_mut()) {
@@ -466,7 +469,7 @@ impl FontProgram {
             Outlines::Sfnt { .. } => {
                 let outline = self.sfnt_outlines()?.get(glyph)?;
                 let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
-                let metrics = outline.draw(settings, pen).ok()?;
+                let metrics = self.drawn(gid, outline.draw(settings, pen))?;
                 Some(metrics.advance_width)
             }
             Outlines::Cff => {
@@ -480,17 +483,33 @@ impl FontProgram {
                     .get(usize::from(index))?
                     .get_or_init(|| cff.subfont(index, &[]).ok())
                     .as_ref()?;
-                cff.draw(subfont, glyph, &[], None, pen).ok()
+                self.drawn(gid, cff.draw(subfont, glyph, &[], None, pen))
             }
             Outlines::Type1(font) => {
                 if gid >= font.num_glyphs() {
                     return None;
                 }
-                font.draw(glyph, None, pen).ok()
+                self.drawn(gid, font.draw(glyph, None, pen))
             }
             // Out-of-range CIDs and CIDs without a glyph are errors.
             Outlines::CidType1(font) => font.draw(glyph, None, pen).ok(),
         }
+    }
+
+    /// The value of `result`, the drawing of glyph `gid`; on its error,
+    /// `None`, and a warning for the first glyph of the program that fails.
+    fn drawn<T, E: std::fmt::Display>(&self, gid: u32, result: Result<T, E>) -> Option<T> {
+        result
+            .map_err(|e| {
+                self.draw_failure.call_once(|| {
+                    log::warn!(
+                        "font: glyph {gid} of a {:?} program cannot be drawn ({e}); \
+                         the glyphs of the program that fail to draw paint nothing",
+                        self.format()
+                    );
+                });
+            })
+            .ok()
     }
 
     /// `true` for a TrueType program whose glyphs take their shape from the
