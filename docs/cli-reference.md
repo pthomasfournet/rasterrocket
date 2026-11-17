@@ -293,8 +293,10 @@ rrocket --jpegcmyk --jpegopt quality=95 --output-profile coated.icc press.pdf ou
 
 ## Colour management
 
-Pages are composited in sRGB.  With an output profile each page is then
-converted, once composited and band by band, to the profile's device values,
+Pages are composited in a working space (`--working-space`): sRGB, or under
+an output profile by default a wide RGB space.  With an output profile each
+page is then converted, once composited and band by band, to the profile's
+device values,
 and the output is tagged with the profile so that a colour-managed RIP or
 viewer reads the values for what they are.
 
@@ -304,13 +306,17 @@ viewer reads the values for what they are.
 | `--intent INTENT` | the content's, else `relative` | The rendering intent of the conversion (of the separation, for a CMYK profile, which by default separates each object under its own intent): `perceptual`, `relative` (relative colorimetric), `saturation` or `absolute` (absolute colorimetric: the source white is reproduced on the paper, its tint simulated). Without it, a page converts under the one intent its content paints with (`ri`, an `ExtGState` `/RI`, an image's `/Intent`; relative colorimetric where it sets none), and a page that mixes intents converts relative colorimetric, with one warning naming the intents seen. With it, the conversion is compiled at start-up, so a profile that cannot convert under it fails before anything renders. Under `--proof`, the intent of the separation to the press (default each object's own). Needs `--output-profile` or `--proof`. |
 | `--bpc` | off | Black-point compensation (ISO 18619): the page's black maps to the profile's darkest neutral, so shadow detail is kept on a paper whose black is lighter than the page's. A perceptual or saturation conversion to an ICC v4 profile always compensates, as the v4 perceptual connection space requires. To a CMYK profile the black is the one the profile reaches as a conversion source, the round trip of its perceptual black under relative colorimetry. Under `--proof`, compensation of the separation to the press. Needs `--output-profile` or `--proof`; refused with `--intent absolute`. |
 | `--preserve-black[=MODE]` | off | Keep black ink black where `ICCBased` CMYK of another profile converts to the ink of a CMYK `--output-profile` (under `--proof`, of the press), as Little CMS's black-preserving intents do. `k-only` (the bare flag): a colour of black ink alone (C = M = Y = 0) prints as black ink alone, its K through the K → K curve that matches the two profiles' blacks by L\*, so K-only text stays K-only; every other colour converts as without the flag. `k-plane`: in addition every other colour takes the curve's K and its C, M and Y are solved so that the press prints its colour, scaled down to the press's total ink limit; a colour that K cannot print within ΔE76 1 converts as without the flag. The `=` is required. Needs `--cmyk` or `--jpegcmyk` with `--output-profile`, or `--proof`; refused with `--intent absolute`. |
+| `--working-space SPACE` | `wide` with `--output-profile`, else `srgb` | The RGB space the pages are composited in before the conversion to `--output-profile`: `wide`, the ROMM RGB primaries with the D50 white and the sRGB tone curve, which keeps colours outside sRGB (wide-gamut images, saturated `Lab` and CMYK colours) up to the conversion, or `srgb`. `DeviceRGB`, `DeviceCMYK` and the other device colours keep their sRGB meaning in either. Blending, and transparency groups that declare no colour space of their own, composite in the working space, and transfer functions map its components. `wide` is painted at 16 bits at either `--depth`, so its canvas counts 6 bytes a pixel against `--max-page-mib`; an 8-bit page is rounded to 8 bits after the conversion. `srgb` is painted at the `--depth` given. Pages simulating overprint (`--overprint`) are composited in sRGB, and `--gpu-pages` renders wide pages on the CPU. `wide` without `--output-profile` is refused at start-up ("--working-space wide carries its gamut to the conversion to the output profile: add --output-profile"), exit status 1. |
 | `--proof[=INTENT]` | off | Soft-proof the pages: show how they print on the press their output intent names (see [Soft proofing](#soft-proofing)). `relative` (the bare flag): the paper maps to white; `absolute`: the paper's white and the press's black as measured ("simulate paper white"). The `=` is required. |
 
 The conversion matches Little CMS (`transicc`) within ΔE00 1 on every patch
 of a test chart, for every intent with and without `--bpc`, at 8 and 16 bits.
-A page's colours outside sRGB are clipped to it before the conversion, and a
-page converts under a single intent: objects of different intents on one page
-share it.
+In the sRGB working space a page's colours outside sRGB are clipped to it
+before the conversion; the wide working space keeps them up to it.  An RGB
+or gray profile converts a page under a single intent: objects of different
+intents on one page share it.  A CMYK profile, and the press under
+`--proof`, separates each object under its own intent unless `--intent` is
+given.
 
 ### Soft proofing
 
@@ -545,7 +551,7 @@ A built-in spill policy reads the kernel's available-memory estimate before each
 
 | Flag | Default | Description |
 |---|---|---|
-| `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and GPU fills. |
+| `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and the GPU kernels. |
 | `--vaapi-device PATH\|auto` | `auto` | VA-API DRM render node; `auto` probes for one (only used with `auto` or `vaapi`). |
 | `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
 | `--gpu-pages` | off | Render qualifying pages whole on a Vulkan GPU beside the CPU workers, byte-identical to the CPU. Needs a build with the `vulkan` feature, `--backend auto` or `vulkan`, and `--aaVector yes`; see below. |
@@ -559,7 +565,7 @@ unrecognised value warns and means `auto`); if neither is set the backend is `au
 
 **`cpu`** — CPU only. All GPU init is skipped entirely. Use this for benchmarking, debugging, or on machines without a GPU.
 
-**`cuda`** — Require CUDA. Exits with an error if the CUDA context cannot be initialised, or if the binary was built without the `gpu-icc` and `cache` features (the CUDA paths that need a context). Use this to confirm the GPU path is actually active rather than silently falling back.
+**`cuda`** — Require CUDA. Exits with an error if the CUDA context cannot be initialised, or if the binary was built with neither the `gpu-icc` nor the `cache` feature (the CUDA paths that need a context). Use this to confirm the GPU path is actually active rather than silently falling back.
 
 **`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  In a build with `cache`, the device-resident image cache keeps its images on the Vulkan device and draws them with the Vulkan blit kernel (a JPEG drawn below its resolution is not cached, under `--backend cuda` too); with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
 
@@ -586,9 +592,9 @@ available Vulkan devices:
   2: llvmpipe (LLVM 21.1.8, 256 bits) (CPU, 30471 MiB device-local)
 ```
 
-That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU with a Vulkan kernel enabled, pass `--vulkan-device` to choose the device, or `--backend cuda` to run on CUDA. With every GPU kernel dormant, `auto` leaves Vulkan idle and renders on the CPU. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
+That error is fatal under `--backend auto` as well, because a selector that matches nothing is a typo, not missing hardware. When `--vulkan-device` is omitted, the `PDF_RASTER_VULKAN_DEVICE` environment variable is read (same syntax). Without either, rrocket prefers a discrete GPU, then integrated, virtual, and CPU devices; a device it passes over (an API version below 1.3, a missing feature or no compute queue) is named in a warning. Among devices of the same type it takes the one with more device-local memory, then the lower PCI address, then the lower device UUID, so the choice does not depend on the order the driver lists devices in. No vendor is preferred: on a host with an NVIDIA and a non-NVIDIA discrete GPU with a Vulkan kernel enabled, pass `--vulkan-device` to choose the device, or `--backend cuda` to run on CUDA. With every GPU kernel dormant, `auto` leaves Vulkan idle and renders on the CPU. `RUST_LOG=debug` logs the chosen device and how it was chosen. `--vulkan-device` is rejected with `--backend cpu`, `cuda` or `vaapi`.
 
-**`--gpu-pages`** opens a Vulkan device beside the CPU workers (the backend's own device under `--backend vulkan`, else the one `--vulkan-device` or `PDF_RASTER_VULKAN_DEVICE` names, else the automatically ranked one). Under `--backend auto` the device opens in the background when the first page that may render on it is reached, so a document with no such page opens none, and until it is open every page renders on the CPU: a one-page job never uses it. Once it is open, two pages hold it at once, one recorded while the other rasterises. The device computes exact-area coverage with the CPU's integer arithmetic and renders fills, strokes, text (glyph masks from the glyph cache, cached Type 3 glyphs included), images and inline images (decoded, colour-converted and downsampled on the CPU), form XObjects, annotation appearances, path clips (text clip modes 4–7 included) and soft masks (each mask rendered on the CPU), byte-identical to `--backend cpu` at 8 and 16 bits. A page renders on the CPU, with identical output, when it draws a transparency-group form, uses a blend mode other than Normal, paints with a pattern or shading, shows a Type 3 glyph that runs its CharProc, is one whose overprint `--overprint` simulates (an ink canvas), is composited in the wide working space (`--working-space wide`), needs more than 128 MiB of device commands ("command list size"), or finds both device slots held. A page larger than one `--band-mib` band (64 MiB by default) renders in bands on the CPU, so large pages need a larger `--band-mib` to render on the device. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so it is off by default. It is tested on an RTX 5070, an AMD Raphael iGPU (RADV) and an A18 Pro (MoltenVK); Intel, M-series and datacenter GPUs are untested. The flag is refused when the arguments are checked, before a password prompt and for comic input as well, with exit status 1: in a build without `vulkan` ("GPU page rendering (`gpu_pages`, --gpu-pages) needs a build with the `vulkan` feature; …"), with `--backend cpu`, `cuda` or `vaapi`, or the same value in `PDF_RASTER_BACKEND` ("… runs on Vulkan, which backend `cpu` (`policy`, --backend cpu or PDF_RASTER_BACKEND=cpu) does not use; use --backend auto or --backend vulkan, or drop --gpu-pages"), and with `--aaVector no` ("… paints antialiased vector paths only, and vector antialiasing is off (`vector_antialias`, --aaVector no); use --aaVector yes or drop --gpu-pages"). A device that does not open is logged at `error` and every page renders on the CPU. A page beyond the device's limits renders on the CPU with a warning and leaves the device in service; any other device error retires the device for the session with one warning, and that page and every later one render on the CPU. `RUST_LOG=rasterrocket=debug` logs each page the device renders, with its command count, and why each page it declines renders on the CPU.
+**`--gpu-pages`** opens a Vulkan device beside the CPU workers (the backend's own device under `--backend vulkan`, else the one `--vulkan-device` or `PDF_RASTER_VULKAN_DEVICE` names, else the automatically ranked one). Under `--backend auto` the device opens in the background when the first page that may render on it is reached, so a document with no such page opens none, and until it is open every page renders on the CPU: a one-page job never uses it. Once it is open, two pages hold it at once, one recorded while the other rasterises. The device computes exact-area coverage with the CPU's integer arithmetic and renders fills, strokes, text (glyph masks from the glyph cache, cached Type 3 glyphs included), images and inline images (decoded, colour-converted and downsampled on the CPU), form XObjects, annotation appearances, path clips (text clip modes 4–7 included) and soft masks (each mask rendered on the CPU), byte-identical to `--backend cpu` at 8 and 16 bits. A page renders on the CPU, with identical output, when it draws a transparency-group form, uses a blend mode other than Normal, paints with a pattern or shading, shows a Type 3 glyph that runs its CharProc, is one whose overprint `--overprint` simulates (an ink canvas), is composited in the wide working space (`--working-space wide`), needs more than 128 MiB of device commands ("command list size"), or finds both device slots held. A page larger than one `--band-mib` band (64 MiB by default) renders in bands on the CPU, so large pages need a larger `--band-mib` to render on the device. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so it is off by default. It is tested on an RTX 5070, an RTX 2080 SUPER, an AMD Raphael iGPU (RADV), an A18 Pro (MoltenVK) and llvmpipe; Intel, M-series and datacenter GPUs are untested. The flag is refused when the arguments are checked, before a password prompt and for comic input as well, with exit status 1: in a build without `vulkan` ("GPU page rendering (`gpu_pages`, --gpu-pages) needs a build with the `vulkan` feature; …"), with `--backend cpu`, `cuda` or `vaapi`, or the same value in `PDF_RASTER_BACKEND` ("… runs on Vulkan, which backend `cpu` (`policy`, --backend cpu or PDF_RASTER_BACKEND=cpu) does not use; use --backend auto or --backend vulkan, or drop --gpu-pages"), and with `--aaVector no` ("… paints antialiased vector paths only, and vector antialiasing is off (`vector_antialias`, --aaVector no); use --aaVector yes or drop --gpu-pages"). A device that does not open is logged at `error` and every page renders on the CPU. A page beyond the device's limits renders on the CPU with a warning and leaves the device in service; any other device error retires the device for the session with one warning, and that page and every later one render on the CPU. `RUST_LOG=rasterrocket=debug` logs each page the device renders, with its command count, and why each page it declines renders on the CPU.
 
 ```bash
 # Confirm CUDA is active (fails loudly if no NVIDIA GPU)
@@ -606,6 +612,36 @@ rrocket --backend vulkan --vulkan-device radv document.pdf out
 # Use VA-API on a specific render node instead of the probed one
 rrocket --backend vaapi --vaapi-device /dev/dri/renderD129 document.pdf out
 ```
+
+---
+
+## Environment variables
+
+Read at run time:
+
+| Variable | Build | Effect |
+|---|---|---|
+| `PDF_RASTER_BACKEND` | any | The backend when `--backend` is not given: `auto`, `cpu`, `cuda`, `vulkan`, or `vaapi` in a `vaapi` build. An unrecognised value warns and means `auto`. |
+| `PDF_RASTER_VULKAN_DEVICE` | `vulkan` | The Vulkan device when `--vulkan-device` is not given, in the same syntax. |
+| `PDF_RASTER_JPX_THRESHOLD` | `nvjpeg2k` | A pixel area, in decimal: `JPXDecode` images of at least that area decode on nvJPEG2000, under `auto` (otherwise dormant) and under `cuda` (otherwise 2 097 152 px). A value that is not a non-negative integer warns and keeps the default. Set where it cannot act (a build without `nvjpeg2k`, or `--backend cpu`, `vulkan` or `vaapi`), it draws one warning. |
+| `PDF_RASTER_ICC_CLUT_THRESHOLD` | `gpu-icc` | The pixel area from which an ICC CMYK image converts on the GPU backend (default 128 000; `0` every image). A value that is not a non-negative integer warns and keeps the default. |
+| `PDF_RASTER_CACHE_DIR` | `cache` | Enables the image cache's disk tier, rooted at this directory (created if missing). Unset, the cache keeps its device and host tiers only. |
+| `PDF_RASTER_CACHE_BYTES` | `cache` | The disk tier's byte budget; unset or `0`, unbounded. A value that is not an integer warns and means unbounded. |
+| `RROCKET_FONT_DIR` | any | Extra font directories, searched first, in `PATH` syntax; see [Rendering](#rendering). |
+| `RROCKET_DECRYPT_OWNED` | any | `1` authorises decryption as `--decrypt-owned` does; any other value does not. |
+| `TMPDIR` | any | The directory of the `--print` spool; unset, `/var/tmp` where it exists, else the system's temporary directory. |
+| `VULKAN_SDK` | `vulkan`, macOS | An absolute path whose `lib/libvulkan.1.dylib` is tried when the default Vulkan loader is not found; see [macOS](platforms/macos.md#vulkan-through-moltenvk). |
+| `XDG_CACHE_HOME`, `HOME` | `vulkan` | The Vulkan pipeline cache is kept at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`, else under `$HOME/.cache`; with neither set, no pipeline cache is kept. |
+| `RUST_LOG` | any | The log filter (`env_logger` syntax); default `warn`. `RUST_LOG=debug` adds the device choices, `RUST_LOG=rasterrocket=debug` where each `--gpu-pages` page rendered. |
+
+Read when building the `rasterrocket-gpu` crate (the CUDA and Vulkan features):
+
+| Variable | Effect |
+|---|---|
+| `CUDA_ARCH` | The PTX target architecture, default `sm_75`; see the README's [Picking `CUDA_ARCH`](../README.md#picking-cuda_arch-for-your-gpu). |
+| `NVCC` | The `nvcc` to run; default `/usr/local/cuda/bin/nvcc` when it exists, else `nvcc` on `PATH`. |
+| `NVJPEG2K_INCLUDE_DIR` | The nvJPEG2000 header directory (`nvjpeg2k` builds); default `/usr/include/libnvjpeg2k/13`. |
+| `SLANGC` | The Slang compiler that builds the Vulkan shaders (`vulkan` builds); default `slangc` on `PATH`. |
 
 ---
 
@@ -738,7 +774,7 @@ Each document and page is classified; a document that renders is an observed pas
 
 Both harnesses exit 1 on any `FAIL`; a surprise pass is reported, and is fatal only with `--strict` (`-S`). The summary row of `compare.sh -s` carries the worst verdict in its status column, and `pdfium_corpus.py` adds a `verdict` column to its tables.
 
-`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL`, or one with an outcome other than the registered one, becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values over the suite's limits, rounded up to 0.01; a `FAIL` worse than registered, of the registered outcome, gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` `differs` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in, and a registered limit at or above the suite's own is dropped once its metric is within the suite's limit; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause: `aa: …` (edge coverage only), `divergence: <cause>; <evidence>` (a reference behaviour not followed, with the arithmetic or a second reference that agrees with this render), or `defect: audit/<file>` (a bug with its own ticket).
+`--update-expectations` (`-U`) rewrites the registry from the run instead of failing: each new `FAIL`, or one with an outcome other than the registered one, becomes an entry with the reason `unclassified (seeded YYYY-MM-DD)` and limits 2 % above the observed values over the suite's limits, rounded up to 0.01; a `FAIL` worse than registered, of the registered outcome, gets those limits but keeps its reason, followed by `(worsened YYYY-MM-DD)`; an `XFAIL` `differs` entry's limits are lowered to 2 % above the observed values where that is lower, so an improvement is locked in, and a registered limit at or above the suite's own is dropped once its metric is within the suite's limit; each `XPASS` entry is removed; and entries for documents or pages the run did not cover are kept. Concurrent `-U` runs on one registry are serialised by a lock on `.expectations.json.lock` beside it, so parallel runs over different PDFs lose no entry. Review the diff, and replace each seeded reason with the actual cause: `aa: …` (edge coverage only), `divergence: <cause>; <evidence>` (a reference behaviour not followed, with the arithmetic or a second reference that agrees with this render), or `defect: <cause>` (a rendering bug not yet fixed).
 
 ```bash
 # Seed or refresh the entries for the corpus fixtures
