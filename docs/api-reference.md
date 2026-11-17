@@ -878,20 +878,34 @@ The `deskew::rotate` submodule is `pub(crate)` and not part of the public API.
 
 ---
 
-### `release_gpu_decoders`
+### `release_gpu_thread_state`
 
 ```rust
-pub fn release_gpu_decoders()
+pub fn release_gpu_thread_state()
 ```
 
-Eagerly drops GPU decoder state (nvJPEG, nvJPEG2000) on the calling rayon worker thread. Call via `pool.broadcast` before dropping the pool:
+Drops the GPU state of the calling thread: its nvJPEG and nvJPEG2000 decoders, CUDA streams, page-locked staging buffers and NPP rotator. Call via `pool.broadcast` before dropping the pool:
 
 ```rust
-let _ = pool.broadcast(|_| rasterrocket::release_gpu_decoders());
+let _ = pool.broadcast(|_| rasterrocket::release_gpu_thread_state());
 drop(pool);
 ```
 
-No-op when neither GPU decoder feature (`nvjpeg`, `nvjpeg2k`) is compiled in. Never panics.
+A dropped pool's threads are not joined, so without it their thread-local destructors can call into the CUDA driver while the process runs its exit handlers. A thread's streams also hold their CUDA context, which is released only once no thread holds a stream on it. No-op without a CUDA feature (`nvjpeg`, `nvjpeg2k`, `gpu-icc`, `cache`, `gpu-deskew`). Never panics.
+
+---
+
+### `DeviceHold`
+
+```rust
+pub struct DeviceHold { /* … */ }
+impl DeviceHold {
+    pub fn open(config: &SessionConfig) -> Result<Self, RasterError>;
+    pub fn is_empty(&self) -> bool;
+}
+```
+
+A session holds its GPU devices only while it lives: sessions alive at once share one Vulkan device per `vulkan_device` selector and one CUDA context, the last of them to drop destroys it, and the next session builds it again (measured 74–89 ms for the Vulkan device on an RTX 5070, 50–65 ms on RADV, 52–62 ms for the CUDA context). `DeviceHold::open` opens what a session of `config` opens up front — the Vulkan device under `ForceVulkan`, the CUDA context under `ForceCuda` and `ForceVaapi` — and, under `Auto` with `gpu_pages`, the GPU-page device a session opens on its first page; every session opened while the hold lives, under a configuration naming the same devices (including `raster_pdf` and `render_channel` under the same `PDF_RASTER_BACKEND`), shares them, and they are destroyed once the hold and those sessions have dropped. It fails as `open_session` fails for the configuration before reading a document; a GPU-page device that does not open under `Auto` is logged at `error` and not held. Under any other configuration it holds nothing (`is_empty`).
 
 ---
 

@@ -4019,6 +4019,23 @@ sessions open at the same time share one device, and the last of them to drop
 destroys it, for the CLI as for `raster_pdf`, `render_channel` and
 `open_session`. A session opened after that builds the device again.
 
+**Unreleased on master: the CUDA context is freed with its sessions, and
+`DeviceHold`.** The CUDA context, with its kernel modules and scratch
+buffers, was held for the life of the process; it is now shared by the
+sessions alive at once and freed with the last of them, as the Vulkan device
+is. `release_gpu_decoders` is renamed `release_gpu_thread_state` and also
+drops the thread's CUDA streams, staging buffers and NPP rotator; the CLI
+broadcasts it to its workers before the session and pool drop, so no CUDA
+call of ours runs while the process exits (before, a `--backend cuda
+--deskew` worker released its rotator's context during exit, which a driver
+570 box logs as `CUDA_ERROR_DEINITIALIZED`). A thread's stream and staging
+set on an ended context are dropped when it next creates one. A session
+opened after the last one dropped builds the device again — 74–89 ms for
+Vulkan on the RTX 5070, 50–65 ms on RADV, 52–62 ms for CUDA —, so
+`DeviceHold::open(&config)` keeps a configuration's devices open across
+sessions; it holds only references, and the devices close once it and the
+sessions have dropped.
+
 **Shipped in v2.2.0 (2026-11-14).** A reduced image draw builds its resampling plan
 once, and the vertical pass reads only the source columns the horizontal
 pass uses (54d8712e); renders unchanged. `--print` no longer renders in

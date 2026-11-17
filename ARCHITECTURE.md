@@ -872,9 +872,16 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   image's host copy.
 - Whole page: `PageRenderer::record_for_device` (see §3.6, *Page raster*).
 
-GPU decoders live in thread-local storage on rayon worker threads (one per thread).
-They are torn down eagerly via `rasterrocket::release_gpu_decoders()` broadcast before
-the rayon pool drops — this avoids the CUDA driver teardown race at process exit.
+GPU decoders, CUDA streams, page-locked staging buffers and the NPP rotator live in
+thread-local storage on rayon worker threads (one set per thread). They are torn down
+eagerly via a `rasterrocket::release_gpu_thread_state()` broadcast before the rayon
+pool drops — this avoids the CUDA driver teardown race at process exit. A thread's
+stream or staging set on a context whose `GpuCtx` has dropped is also dropped when the
+thread next creates one (`gpu::live`).
+
+The CUDA context (`GpuCtx`) and the Vulkan backends are held weakly by process-wide
+registries (`registry::shared`): sessions alive at once share them, the last to drop
+destroys them, and a `DeviceHold` keeps them open across sessions.
 
 **Error handling**
 - Malformed operators — silently discarded (lenient parsing; real PDFs have junk)
@@ -1090,7 +1097,8 @@ session.page_geometry(page_num) → Result<PageGeometry, RasterError>   // size,
 session.unsupported_features() → &[UnsupportedFeature]
 prescan_session(session, page_num) → Result<PageDiagnostics, RasterError>
 encode_for_gcv(page, budget) → Result<GcvImage, GcvError>   // Cloud Vision input
-release_gpu_decoders()   // call via pool.broadcast() before pool drops
+release_gpu_thread_state()   // call via pool.broadcast() before pool drops
+DeviceHold::open(&config)    // keep the config's GPU devices open across sessions
 ```
 
 The `*_from_bytes` variants render an in-memory PDF with no temp file, with
@@ -1250,7 +1258,7 @@ clap args → SessionConfig → open_session → rayon ThreadPool
                     render_page_bands (streamed outputs) or render_page_canvas,
                     tone (gray, mono, invert) per band,
                     encode::PnmWriter / PngWriter / TiffStream / write_jpeg)
-  → pool.broadcast(release_gpu_decoders)    // teardown before pool drops
+  → pool.broadcast(release_gpu_thread_state) // teardown before pool drops
   → main returns ExitCode                   // RAM-output guard and pool drop
 ```
 
@@ -1470,7 +1478,7 @@ main thread
   │
   │   pool.install() blocks until all pages done
   │
-  ├── pool.broadcast(release_gpu_decoders)   ← explicit teardown while driver live
+  ├── pool.broadcast(release_gpu_thread_state) ← explicit teardown while driver live
   │
   └── pool dropped
 ```
@@ -1480,11 +1488,12 @@ Each rayon worker thread lazily initialises a `NvJpegDecoder` on first use and
 stores it in thread-local storage (under `Auto`, only when the nvJPEG
 threshold enables it; a thread's `NvJpeg2kDecoder` is built when its first
 qualifying JPEG 2000 image is drawn, and only while `PDF_RASTER_JPX_THRESHOLD`
-enables it under `Auto`). At process exit all TLS destructors fire
-concurrently, which races with the CUDA driver's own atexit shutdown. The fix:
-call `release_gpu_decoders()` via `pool.broadcast()` after `pool.install()` returns.
-This drops each decoder while the driver is still fully live; the TLS destructors
-see `Uninitialised` and are no-ops.
+enables it under `Auto`); its CUDA streams, staging buffers and NPP rotator are
+thread-local as well. A dropped pool's threads are not joined, so their TLS
+destructors can run while the process runs its exit handlers, racing the CUDA
+driver's own atexit shutdown. The fix: call `release_gpu_thread_state()` via
+`pool.broadcast()` after `pool.install()` returns. This drops each object while the
+driver is still fully live; the TLS destructors find nothing to destroy.
 
 **Font engine**
 Each page renderer owns its `FontEngine`. What depends only on an indirect font

@@ -19,7 +19,7 @@ use crate::{RasterError, SessionConfig};
 /// device of [`SessionConfig::vulkan_device`] under
 /// [`ForceVulkan`](crate::BackendPolicy::ForceVulkan), the CUDA context
 /// under [`ForceCuda`](crate::BackendPolicy::ForceCuda) and
-/// [`ForceVaapi`](crate::BackendPolicy::ForceVaapi), and, under
+/// `ForceVaapi`, and, under
 /// [`Auto`](crate::BackendPolicy::Auto) with
 /// [`SessionConfig::gpu_pages`], the device of the GPU pages, which a
 /// session opens when a page first asks for it.  It holds nothing under
