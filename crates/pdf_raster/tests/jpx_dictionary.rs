@@ -113,7 +113,7 @@ fn codestream_alpha_follows_smask_in_data() {
 /// dictionary's `/Matte` (§11.6.5.3): c = m + (c' − m)/α, clamped, then
 /// composited.
 #[test]
-fn smask_in_data_2_unmattes_against_the_dictionarys_matte() {
+fn smask_in_data_2_unmattes_against_the_dictionary_matte() {
     let rgb = "/ColorSpace /DeviceRGB /SMaskInData 2";
     // c' = (200, 100, 50) at α 127: against m = (0, 1, 0) the colour is
     // (255, 0, 100), over white (255, 128, 178).

@@ -701,7 +701,7 @@ mod tests {
     /// dictionary's `/Matte`, 0 in every component when it is absent or
     /// of a length other than the colour channels'.
     #[test]
-    fn split_alpha_unmattes_against_the_dictionarys_matte() {
+    fn split_alpha_unmattes_against_the_dictionary_matte() {
         // One RGB pixel stored as m + α·(c − m) with c = (0, 0, 0),
         // m = (0, 1, 0) and α = 0.2: (0, 204, 0) at alpha 51.
         let samples = vec![0u8, 204, 0, 51];
