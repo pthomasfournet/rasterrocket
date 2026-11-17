@@ -328,8 +328,9 @@ pub(crate) struct Args {
     /// or `srgb`.  Default: `wide` under --output-profile, `srgb`
     /// otherwise.  `wide` is painted at 16 bits at either --depth, an
     /// 8-bit page rounded to 8 bits after the conversion; `srgb` at the
-    /// --depth given.  Blending and transparency groups composite in the
-    /// working space, and transfer functions map its components;
+    /// --depth given.  Blending, and transparency groups that declare no
+    /// colour space of their own, composite in the working space, and
+    /// transfer functions map its components;
     /// overprint-preview pages (--overprint) are composited in sRGB.
     /// `wide` needs --output-profile.
     #[arg(long = "working-space", value_name = "SPACE", value_enum)]
