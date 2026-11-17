@@ -38,6 +38,10 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 
 ## What's new in v2.4.0
 
+v2.4.1 fixes a hairline that, on rare slopes, painted one pixel past its
+end, so a clip masked it differently from the unclipped stroke; it is
+otherwise v2.4.0.
+
 **Input conversions under the rendering intent, a wide working space, soft
 proofing, transparency groups in their own colour space, OCR preparation of
 scans, and a Vulkan page raster that renders every fixture page; the API
@@ -85,8 +89,8 @@ take rows; the full list is in [ROADMAP.md](ROADMAP.md).
 - **Antialiasing.** Fills, clips, strokes and glyphs take exact-area
   coverage from one integer rasteriser (`raster::coverage`, 1/256 px), in
   place of 4 × 4 supersampling; the device AA fill and the `gpu-aa` feature
-  are removed, and `--gpu-pages` composites the CPU's coverage. (After
-  v2.3.0, GPU pages compute the same exact-area coverage on the device.)
+  are removed, and `--gpu-pages` composites the CPU's coverage. (Since
+  v2.4.0, GPU pages compute the same exact-area coverage on the device.)
 - **Large pages.** A page byte budget (`--max-page-mib`,
   `max_page_bytes`, default 1.8 GB) replaces the pixel caps; larger pages
   render in bands (`render_page_bands`, `--band-mib`) and are written as
@@ -137,7 +141,7 @@ backend-neutral cache. The full list is in
   a transparency group as a whole is not simulated.
 - **GPU.** `--gpu-pages` / `SessionConfig::gpu_pages` renders pages made of
   solid fills and strokes whole on a Vulkan GPU beside the CPU workers,
-  byte-identical to the CPU (`vulkan` build). (After v2.3.0, GPU pages also
+  byte-identical to the CPU (`vulkan` build). (Since v2.4.0, GPU pages also
   take text, images, forms, annotation appearances, path clips and soft
   masks.) The image cache and the ICC
   CMYK conversion run on Vulkan as well as CUDA, the latter byte-identical
@@ -503,9 +507,9 @@ and the page/annotation JavaScript-disclosure work).
 
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
 - **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel (untested), or Apple via `MoltenVK`. Runs on an RTX 5070 and on an AMD integrated GPU (RADV); select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
-- **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document. Changed after v2.3.0: sessions open at the same time share one Vulkan device and one CUDA context, the last of them to drop destroys it, and a later session builds it again; a `DeviceHold` keeps them open across sessions.
+- **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document. Changed in v2.4.0: sessions open at the same time share one Vulkan device and one CUDA context, the last of them to drop destroys it, and a later session builds it again; a `DeviceHold` keeps them open across sessions.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
-- **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed after v2.3.0: it lost to the multi-threaded CPU decoder on every measured workload.
+- **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed in v2.4.0: it lost to the multi-threaded CPU decoder on every measured workload.
 - **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (Since v2.0.0 the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` does not compile outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
 

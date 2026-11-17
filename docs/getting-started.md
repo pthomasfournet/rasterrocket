@@ -97,7 +97,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", feature
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
-For reproducible builds pin the dependency to a release tag (`tag = "v2.3.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
+For reproducible builds pin the dependency to a release tag (`tag = "v2.4.1"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
 
 ## Quickstart
 
