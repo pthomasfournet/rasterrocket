@@ -1,2 +1,14 @@
 # Paint-trace goldens are compared byte for byte on every platform.
 *.trace text eol=lf
+
+# Local forks of third-party crates: counted as vendored, so GitHub's
+# language statistics describe this project's own code.
+crates/rav1d/** linguist-vendored
+crates/read_fonts/** linguist-vendored
+crates/skrifa/** linguist-vendored
+crates/font_test_data/** linguist-vendored
+crates/harfrust/** linguist-vendored
+crates/zune_jpeg/** linguist-vendored
+crates/jpeg2000/** linguist-vendored
+crates/jbig2/** linguist-vendored
+crates/ccitt/** linguist-vendored
