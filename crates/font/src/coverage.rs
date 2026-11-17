@@ -27,26 +27,28 @@ const FLATTEN_TOLERANCE: f64 = 0.05;
 /// Upper bound on the line segments one cubic flattens into.
 const MAX_CURVE_SEGMENTS: u32 = 256;
 
-/// Rasterise `path` into a coverage bitmap.
+/// Rasterise `path` into a coverage bitmap of at most `max_side` pixels a
+/// side.
 ///
 /// Returns `None` when the outline is empty, has zero width or height,
-/// contains non-finite coordinates, or exceeds [`MAX_GLYPH_DIM`] /
-/// [`MAX_GLYPH_AREA`].
+/// contains non-finite coordinates, or exceeds `max_side`,
+/// [`MAX_GLYPH_DIM`] or [`MAX_GLYPH_AREA`].
 #[must_use]
-pub(crate) fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
+pub(crate) fn rasterize(path: &Path, aa: bool, max_side: u32) -> Option<GlyphBitmap> {
     let segments = flatten(path);
     let bounds = Bounds::of(&segments)?;
     let width = bounds.width()?;
     let height = bounds.height()?;
-    if width > MAX_GLYPH_DIM
-        || height > MAX_GLYPH_DIM
+    let max_side = max_side.min(MAX_GLYPH_DIM);
+    if width > max_side
+        || height > max_side
         || u64::from(width) * u64::from(height) > MAX_GLYPH_AREA
     {
         log::debug!("font: glyph bitmap {width}×{height} exceeds the rasteriser budget");
         return None;
     }
 
-    // Both bounds lie within MAX_GLYPH_DIM, checked above.
+    // Both sides lie within MAX_GLYPH_DIM, checked above.
     #[expect(
         clippy::cast_possible_wrap,
         reason = "width and height are at most MAX_GLYPH_DIM"
@@ -233,6 +235,11 @@ fn cubic_point(p0: PathPoint, p1: PathPoint, p2: PathPoint, p3: PathPoint, t: f6
 mod tests {
     use super::*;
     use raster::path::PathBuilder;
+
+    /// [`super::rasterize`] under the rasteriser's own bounds alone.
+    fn rasterize(path: &Path, aa: bool) -> Option<GlyphBitmap> {
+        super::rasterize(path, aa, MAX_GLYPH_DIM)
+    }
 
     fn polygon(points: &[(f64, f64)]) -> Path {
         let mut b = PathBuilder::new();

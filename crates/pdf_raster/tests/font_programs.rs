@@ -169,3 +169,33 @@ fn cid_keyed_type1_glyphs_render() {
     assert!(has_run(&runs, 102, 117), "CID 3: {runs:?}");
     assert!(page.diagnostics.has_vector_text);
 }
+
+/// `program` with its `head` table's `unitsPerEm` set to `upem`.
+fn with_units_per_em(program: &[u8], upem: u16) -> Vec<u8> {
+    let mut out = program.to_vec();
+    let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
+    let record = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&r| &program[r..r + 4] == b"head")
+        .expect("a head table");
+    let offset = u32::from_be_bytes(
+        program[record + 8..record + 12]
+            .try_into()
+            .expect("4 bytes"),
+    );
+    let at = usize::try_from(offset).expect("offset fits") + 18;
+    out[at..at + 2].copy_from_slice(&upem.to_be_bytes());
+    out
+}
+
+/// A glyph whose outline spans more ems than a glyph bitmap may fills as
+/// its outline.  At 30 units per em the square (x 100..400, y 0..300) is
+/// 10 em a side; at 40 px per em it covers columns 143..543 from pen 10,
+/// clipped to the 200 px page.
+#[test]
+fn glyphs_wider_than_the_bitmap_budget_fill_as_outlines() {
+    let program = with_units_per_em(NO_CMAP, 30);
+    let runs = ink_columns(&render_gray(symbolic_truetype_page(&program, 1)));
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(has_run(&runs, 143, 199), "{runs:?}");
+}

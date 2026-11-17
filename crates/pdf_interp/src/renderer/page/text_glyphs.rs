@@ -135,8 +135,8 @@ impl GlyphSink {
     /// device space,
     /// condensed by `x_scale` to the document's advance: its bitmap when
     /// filling with bitmaps, its cached stroke coverage when stroking, and
-    /// its outline when clipping, stroking without cached coverage or
-    /// filling as a path.  `code` is the shown code that selects a glyph
+    /// its outline when clipping, stroking without cached coverage, filling
+    /// as a path or filling a glyph that has no bitmap.  `code` is the shown code that selects a glyph
     /// whose selector is no glyph index.
     ///
     /// The selector of a simple font's glyph (`by_gid == false`) is its
@@ -165,6 +165,9 @@ impl GlyphSink {
         } else {
             None
         };
+        // A glyph the fill has no bitmap of, one past the bitmap budget of
+        // its face, fills as its outline.
+        let fill_outline = self.fill_as_path || (fill_as_bitmap && bmp.is_none());
         if let Some(bitmap) = bmp {
             self.records.push(GlyphRecord {
                 pen_x,
@@ -214,7 +217,7 @@ impl GlyphSink {
                 bitmap,
             });
         }
-        if !(self.mode.clip || stroke_path || self.fill_as_path) {
+        if !(self.mode.clip || stroke_path || fill_outline) {
             return;
         }
         // The glyph outline in the page's device space, translated by the
@@ -233,7 +236,7 @@ impl GlyphSink {
         if stroke_path {
             self.stroke_outline.append(&path);
         }
-        if self.fill_as_path {
+        if fill_outline {
             self.fill_paths.push(path);
         }
     }

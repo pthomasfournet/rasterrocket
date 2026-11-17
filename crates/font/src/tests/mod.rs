@@ -499,3 +499,32 @@ fn sfnt_coverage_reads_a_format0_unicode_subtable() {
     assert!(!set.contains(8), "code 8 maps to .notdef");
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+/// `font` with the `unitsPerEm` of its `head` table set to `upem`.
+fn with_units_per_em(font: &[u8], upem: u16) -> Vec<u8> {
+    let head = sfnt::table(font, *b"head");
+    let at = font
+        .windows(head.len())
+        .position(|w| w == head.as_slice())
+        .expect("the head table")
+        + 18;
+    let mut out = font.to_vec();
+    out[at..at + 2].copy_from_slice(&upem.to_be_bytes());
+    out
+}
+
+/// A glyph spanning more than [`crate::face::MAX_BITMAP_EMS`] ems has no
+/// bitmap, however small its pixels, and keeps its outline.  At 16 units
+/// per em the 500 × 700 unit box spans 31 × 44 ems, 781 × 1094 px at
+/// 25 px per em; at 1000 units per em it renders.
+#[test]
+fn glyphs_wider_than_the_bitmap_budget_have_no_bitmap() {
+    let font = sfnt::box_font(&sfnt::mac_only_cmap());
+    let face = face_at(&with_units_per_em(&font, 16), 25.0);
+    assert!(face.make_glyph(7, 0).is_none());
+    assert!(face.make_glyph_by_gid(1, 0).is_none());
+    let (x0, y0, x1, y1) = bounds(&face.glyph_path(7).expect("outline"));
+    assert!((x1 - x0 - 781.25).abs() < 1e-6 && (y1 - y0 - 1093.75).abs() < 1e-6);
+    let bitmap = face_at(&font, 25.0).make_glyph(7, 0).expect("bitmap");
+    assert_eq!((bitmap.width, bitmap.height), (13, 18));
+}

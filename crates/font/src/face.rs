@@ -31,6 +31,10 @@ pub type FontMatrix = [f64; 4];
 /// bitmaps by preference; see [`FontFace::prefers_path_fill`].
 pub const MAX_BITMAP_EM_PX: f64 = 2048.0;
 
+/// Largest side of a glyph bitmap, in ems of its face: a glyph whose
+/// outline spans more has no bitmap and is drawn as a path.
+pub const MAX_BITMAP_EMS: f64 = 8.0;
+
 /// A font program bound to one em → device matrix.
 pub struct FontFace {
     /// Opaque identifier for this face (for cache keying).
@@ -146,7 +150,9 @@ impl FontFace {
     ///
     /// `x_frac` is a sub-pixel x offset in `[0, FRACTION)` quarter pixels.
     /// Returns `None` for a glyph without outline (`.notdef` in an empty
-    /// subset, a space) or one that fails to load.
+    /// subset, a space), one that fails to load, and one whose bitmap would
+    /// span more than [`MAX_BITMAP_EMS`] ems or the rasteriser's budget, which
+    /// [`Self::glyph_path`] still draws.
     #[must_use]
     pub fn make_glyph(&self, char_code: u32, x_frac: u8) -> Option<GlyphBitmap> {
         self.render_gid(self.glyph_index(char_code), x_frac, 1.0)
@@ -342,7 +348,26 @@ impl FontFace {
 
     fn render_gid(&self, gid: u32, x_frac: u8, x_scale: f64) -> Option<GlyphBitmap> {
         let shift = f64::from(u32::from(x_frac) % FRACTION) / f64::from(FRACTION);
-        rasterize(&self.outline(gid, shift, x_scale)?, self.aa)
+        rasterize(
+            &self.outline(gid, shift, x_scale)?,
+            self.aa,
+            self.max_bitmap_side(),
+        )
+    }
+
+    /// The largest glyph bitmap side of this face, in pixels:
+    /// [`MAX_BITMAP_EMS`] ems along the longer matrix axis, plus the pixel
+    /// each edge may round outwards to.
+    fn max_bitmap_side(&self) -> u32 {
+        let [a, b, c, d] = self.matrix;
+        let side = (a.hypot(b).max(c.hypot(d)) * MAX_BITMAP_EMS).ceil() + 2.0;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the matrix is finite (checked in `new`) and the side is clamped to u32"
+        )]
+        let side = side.min(f64::from(u32::MAX)) as u32;
+        side
     }
 
     /// The matrix mapping glyph units at `units_per_em` to device pixels:
