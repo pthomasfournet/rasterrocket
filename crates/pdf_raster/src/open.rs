@@ -435,6 +435,17 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     }
 }
 
+/// [`uncompiled_backend`] as an error.
+///
+/// # Errors
+///
+/// [`RasterError::BackendUnavailable`] for a forced backend not compiled in.
+pub(crate) fn check_backend_compiled(policy: BackendPolicy) -> Result<(), RasterError> {
+    uncompiled_backend(policy).map_or(Ok(()), |reason| {
+        Err(RasterError::BackendUnavailable(reason.to_owned()))
+    })
+}
+
 /// Shared session assembly from an already-opened document — the backend init,
 /// image cache, doc id, prefetcher, and `RasterSession` construction common to
 /// both the path and in-memory entry points.
@@ -445,9 +456,7 @@ fn open_session_with_doc(
     let doc = Arc::new(doc);
     let total_pages = doc.page_count_fast();
 
-    if let Some(reason) = uncompiled_backend(config.policy) {
-        return Err(RasterError::BackendUnavailable(reason.to_owned()));
-    }
+    check_backend_compiled(config.policy)?;
     config.check()?;
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
@@ -631,7 +640,8 @@ fn new_vulkan_image_cache(
 ///
 /// The context, with its kernel modules and scratch buffers, is shared by
 /// every session alive at once and freed with the last of them
-/// ([`crate::registry`]); a later session builds it again.
+/// ([`crate::registry`]); a later session builds it again, unless a
+/// [`crate::DeviceHold`] holds it.
 ///
 /// A failure is retained and not re-attempted: `ForceCuda` returns its
 /// message verbatim, `ForceVaapi` falls back to the CPU.
@@ -640,7 +650,7 @@ static GPU_CTX: crate::registry::Registry<(), gpu::GpuCtx, String> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
-fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
+pub(crate) fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
     if matches!(
         policy,
         BackendPolicy::Auto | BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan

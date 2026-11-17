@@ -98,6 +98,26 @@ impl Drop for Claim<'_> {
     }
 }
 
+/// The GPU-page device of `selector`, or `None`, logged at `error`, when
+/// it does not open.
+pub(crate) fn open_device(selector: Option<&str>) -> Option<Arc<VulkanBackend>> {
+    let started = std::time::Instant::now();
+    crate::vk_init::open_backend(selector)
+        .inspect(|_| {
+            log::debug!(
+                "rasterrocket: GPU page device open after {:.0} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        })
+        .inspect_err(|e| {
+            log::error!(
+                "rasterrocket: GPU page rendering was requested, but the Vulkan \
+                 device did not open ({e}); every page renders on the CPU"
+            );
+        })
+        .ok()
+}
+
 impl DevicePages {
     /// The GPU pages of a session opened with `config` that holds
     /// `backend`: `None` unless the config asks for them, on `backend`
@@ -145,21 +165,7 @@ impl DevicePages {
         let spawned = std::thread::Builder::new()
             .name("rrocket-gpu-pages".to_owned())
             .spawn(move || {
-                let started = std::time::Instant::now();
-                let backend = crate::vk_init::open_backend(selector.as_deref())
-                    .inspect(|_| {
-                        log::debug!(
-                            "rasterrocket: GPU page device open after {:.0} ms",
-                            started.elapsed().as_secs_f64() * 1e3
-                        );
-                    })
-                    .inspect_err(|e| {
-                        log::error!(
-                            "rasterrocket: GPU page rendering was requested, but the Vulkan \
-                             device did not open ({e}); every page renders on the CPU"
-                        );
-                    })
-                    .ok();
+                let backend = open_device(selector.as_deref());
                 // The slot is set by this thread alone.
                 drop(slot.set(backend));
             });

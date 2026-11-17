@@ -123,6 +123,7 @@ mod error;
 pub(crate) mod gcv;
 pub(crate) mod gpu_init;
 mod gray;
+mod hold;
 mod open;
 mod output;
 pub(crate) mod page;
@@ -190,6 +191,7 @@ pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, S
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::{rgb_into_gray, rgb_to_gray, rgb16_into_gray16, rgb16_to_gray16};
+pub use hold::DeviceHold;
 pub use open::{
     RasterSession, open_session, open_session_from_bytes, open_session_from_reader,
     open_session_from_shared, prescan_session,

@@ -22,7 +22,7 @@ mod teardown;
 use std::time::{Duration, Instant};
 
 use gpu::backend::vulkan::open_devices;
-use rasterrocket::{BackendPolicy, RasterSession, open_session_from_bytes};
+use rasterrocket::{BackendPolicy, DeviceHold, RasterSession, open_session_from_bytes};
 use teardown::{
     assert_library_entry_points_close, config, in_child_under, page_pdf, render, serial,
 };
@@ -94,6 +94,57 @@ fn a_device_opened_for_gpu_pages_is_destroyed_with_its_session() {
     render(&session);
     drop(session);
     assert_eq!(open_devices(), 0, "the device outlived its session");
+}
+
+/// A hold keeps the device open across sessions that do not overlap, and
+/// the device is destroyed once the hold and the sessions have dropped.
+#[test]
+fn a_hold_keeps_the_device_across_sessions() {
+    let _serial = serial();
+    if vulkan_session().is_none() {
+        return;
+    }
+    let hold = DeviceHold::open(&config(BackendPolicy::ForceVulkan, true)).expect("a hold");
+    assert!(!hold.is_empty());
+    assert_eq!(open_devices(), 1);
+    for _ in 0..2 {
+        let session = vulkan_session().expect("a session on the held device");
+        render(&session);
+        drop(session);
+        assert_eq!(open_devices(), 1, "the held device closed with a session");
+    }
+    let last = vulkan_session().expect("a session on the held device");
+    drop(hold);
+    assert_eq!(open_devices(), 1, "the device closed under a live session");
+    drop(last);
+    assert_eq!(
+        open_devices(),
+        0,
+        "the device outlived its hold and sessions"
+    );
+}
+
+/// Under `Auto`, a hold of a configuration with GPU pages opens their
+/// device, which a session opens only when a page asks for it.
+#[test]
+fn an_auto_hold_opens_the_gpu_page_device() {
+    let _serial = serial();
+    if vulkan_session().is_none() {
+        return;
+    }
+    let hold = DeviceHold::open(&config(BackendPolicy::Auto, true)).expect("a hold");
+    assert_eq!(open_devices(), 1, "the hold opened no GPU-page device");
+    let session = open_session_from_bytes(page_pdf(), &config(BackendPolicy::Auto, true))
+        .expect("an Auto session");
+    render(&session);
+    drop(session);
+    assert_eq!(open_devices(), 1);
+    drop(hold);
+    assert_eq!(open_devices(), 0);
+
+    let hold = DeviceHold::open(&config(BackendPolicy::Auto, false)).expect("a hold");
+    assert!(hold.is_empty(), "Auto without GPU pages held {hold:?}");
+    assert_eq!(open_devices(), 0);
 }
 
 /// `raster_pdf` and `render_channel` take their policy from
