@@ -69,7 +69,10 @@ path is opt-in.
 - **Fixes.** Clips take effect after the paint that ends their path; folded
   patches, sub-pixel images, words split across strings, installed fonts by
   name, Link borders, `/MaxLen`, deep forms, JPEG 2000 matte and truncation;
-  the parser reads more damaged files.
+  the parser reads more damaged files. Glyphs too large for a bitmap fill
+  as outlines; two fuzz findings in fonts are fixed, and six new fuzz
+  targets cover the JPEG and JPEG 2000 decoders, comic input, ICC profiles
+  and the camera stages.
 
 ## What's new in v2.3.0
 

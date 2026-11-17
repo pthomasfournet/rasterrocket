@@ -133,6 +133,15 @@ compatibility shims.
   header without a version, an unclosed dictionary, a page tree whose
   `/Count` is wrong, direct page-tree nodes, and a stream whose `/Length`
   misses its `endstream`; a misdirected object names the damage.
+- A glyph bitmap spans at most 8 ems of its face; a larger glyph, and any
+  glyph past the rasteriser's budget, fills as its outline instead of
+  disappearing. A VARC glyph whose region list claims more regions than
+  its table holds is malformed rather than sizing a cache by the claim (a
+  9 KB font asked for 17 GB), and the first glyph of a font that fails to
+  draw logs a warning. Both were found by the weekly fuzz run; six new
+  fuzz targets cover the JPEG and JPEG 2000 forks, comic archives and
+  their pages (PNG, WebP, TIFF, JPEG XL, AVIF), ICC profiles and the
+  camera stages.
 
 **Scans and camera input.** `--deskew` straightens gray pages and
 declines pages without a confident angle (a ratio of 3 between the
@@ -241,7 +250,9 @@ Current status section below lists every item).
   take a resolution; `write_png_bilevel` and `PngColor::Bilevel` are new.
 - `rasterrocket-camera`: `GrayView` and `GrayPage` take a sample
   parameter (`Sample`, sealed); the OCR-preparation items and
-  `CameraError::ZeroSize` are new. `rasterrocket-comic`: `ComicOptions::depth`.
+  `CameraError::ZeroSize` are new. `rasterrocket-comic`:
+  `ComicOptions::depth`; `open_comic_bytes` (an archive held in memory) is
+  new.
 - `rasterrocket-parser`: `MAX_OBJECT_NUMBER` is new; page ids may name a
   direct page-tree node numbered above it. `rasterrocket-color`: the `grid`
   module (`CmykGrid`) and `cmyk::CORNERS16` are new.
@@ -2922,7 +2933,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-16)
+## Current status (2026-11-17)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
@@ -3136,6 +3147,21 @@ codes the trace expands to several characters, and by 61 glyphs of two
 running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
+
+**Released in v2.4.0: two fuzz findings fixed, six new fuzz targets.** The
+weekly fuzz run found a 9 KB font whose VARC region list claimed about 4.3
+billion regions, so drawing one glyph sized a 17 GB scalar cache; the skrifa
+fork now accepts the count only when its offsets lie within the table, and
+the glyph is a `Malformed` draw error (`crates/skrifa/CHANGES.md`). It also
+found a CFF font of 6 units per em whose glyphs, 133 ems wide at 25 px, took
+20 s to rasterise; a glyph bitmap now spans at most `MAX_BITMAP_EMS` (8) ems
+of its face, and a glyph without a bitmap, past either budget, fills as its
+outline clipped to the page instead of painting nothing. The first glyph of
+a font that fails to draw logs a warning. New targets: `fuzz_jpeg`,
+`fuzz_jpeg2000`, `fuzz_comic`, `fuzz_comic_page`, `fuzz_icc` and
+`fuzz_camera`, seeded from committed test data by `fuzz/seed_corpus.py`;
+`rasterrocket-comic` gains `open_comic_bytes` for them. `upload-artifact`
+moves to v7 (Node.js 24).
 
 **Released in v2.4.0: CMYK input tables on the shared grid, and black
 preservation between presses.** `ICCBased` CMYK now converts through the
