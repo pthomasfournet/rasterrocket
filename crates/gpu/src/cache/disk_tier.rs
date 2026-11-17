@@ -67,14 +67,18 @@ const HEADER_LEN: usize = 24;
 /// Format byte value for raw pixel bytes (no compression).
 const FORMAT_RAW: u8 = 0;
 
-/// Resolve cache root from `PDF_RASTER_CACHE_DIR`.
-///
-/// `try_new()` already gates on the env var being set, so this is
-/// never `None` in practice — the `Option` return is kept so the
-/// signature mirrors the previous fallback shape (and so the
-/// gating decision lives in one place).
+/// The cache root named by `PDF_RASTER_CACHE_DIR`: `None` when the variable
+/// is unset, or set to the empty string, which names no directory and is
+/// reported at warn.
 fn resolve_root() -> Option<PathBuf> {
-    std::env::var_os("PDF_RASTER_CACHE_DIR").map(PathBuf::from)
+    let root = std::env::var_os("PDF_RASTER_CACHE_DIR")?;
+    if root.is_empty() {
+        log::warn!(
+            "disk-tier: PDF_RASTER_CACHE_DIR is empty, so it names no cache root — disk tier disabled"
+        );
+        return None;
+    }
+    Some(PathBuf::from(root))
 }
 
 /// Resolve the budget from `PDF_RASTER_CACHE_BYTES`, defaulting to
@@ -206,14 +210,11 @@ impl DiskTier {
     /// can carry it.
     ///
     /// Returns `None` when:
-    /// - `PDF_RASTER_CACHE_DIR` is unset (the opt-in gate);
+    /// - `PDF_RASTER_CACHE_DIR` is unset or empty (the opt-in gate);
     /// - the cache root can't be created;
     /// - the writer thread fails to spawn.
     #[must_use]
     pub fn try_new() -> Option<Self> {
-        // Opt-in gate.  Without an explicit cache dir, the disk
-        // tier is disabled.  See the type docs for rationale.
-        let _ = std::env::var_os("PDF_RASTER_CACHE_DIR")?;
         let root = resolve_root()?;
         if let Err(e) = fs::create_dir_all(&root) {
             log::warn!(

@@ -625,7 +625,7 @@ Read at run time:
 | `PDF_RASTER_VULKAN_DEVICE` | `vulkan` | The Vulkan device when `--vulkan-device` is not given, in the same syntax. |
 | `PDF_RASTER_JPX_THRESHOLD` | `nvjpeg2k` | A pixel area, in decimal: `JPXDecode` images of at least that area decode on nvJPEG2000, under `auto` (otherwise dormant) and under `cuda` (otherwise 2 097 152 px). A value that is not a non-negative integer warns and keeps the default. Set where it cannot act (a build without `nvjpeg2k`, or `--backend cpu`, `vulkan` or `vaapi`), it draws one warning. |
 | `PDF_RASTER_ICC_CLUT_THRESHOLD` | `gpu-icc` | The pixel area from which an ICC CMYK image converts on the GPU backend (default 128 000; `0` every image). A value that is not a non-negative integer warns and keeps the default. |
-| `PDF_RASTER_CACHE_DIR` | `cache` | Enables the image cache's disk tier, rooted at this directory (created if missing). Unset, the cache keeps its device and host tiers only. |
+| `PDF_RASTER_CACHE_DIR` | `cache` | Enables the image cache's disk tier, rooted at this directory (created if missing). Unset, the cache keeps its device and host tiers only; set but empty, it warns and does the same. |
 | `PDF_RASTER_CACHE_BYTES` | `cache` | The disk tier's byte budget; unset or `0`, unbounded. A value that is not an integer warns and means unbounded. |
 | `RROCKET_FONT_DIR` | any | Extra font directories, searched first, in `PATH` syntax; see [Rendering](#rendering). |
 | `RROCKET_DECRYPT_OWNED` | any | `1` authorises decryption as `--decrypt-owned` does; any other value does not. |
