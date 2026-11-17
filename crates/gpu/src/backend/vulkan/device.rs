@@ -17,7 +17,7 @@ use ash::khr::{portability_enumeration, portability_subset};
 use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::{BackendError, Result};
@@ -93,7 +93,19 @@ impl Drop for DeviceCtx {
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
+        let _ = OPEN_DEVICES.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// The [`DeviceCtx`]s alive in the process: incremented when one is
+/// built, decremented once its device and instance are destroyed.
+static OPEN_DEVICES: AtomicUsize = AtomicUsize::new(0);
+
+/// The logical devices, each with its instance, that the process holds:
+/// one per live backend.  A device counts until `vkDestroyInstance` has
+/// returned for it.
+pub(super) fn open_devices() -> usize {
+    OPEN_DEVICES.load(Ordering::Acquire)
 }
 
 /// Serialises instance creation and destruction across the process.
@@ -145,6 +157,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
     let buffer_heaps = buffer_heaps(&mem_props, integrated);
     let vram_total = heap_bytes(&mem_props, buffer_heaps);
 
+    let _ = OPEN_DEVICES.fetch_add(1, Ordering::AcqRel);
     Ok(Arc::new(DeviceCtx {
         device,
         compute_queue_family,

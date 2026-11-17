@@ -183,6 +183,14 @@ impl VulkanBackend {
     }
 }
 
+/// The Vulkan devices the process holds open: one for each
+/// [`VulkanBackend`] alive, none once every backend has dropped and its
+/// device and instance are destroyed.
+#[must_use]
+pub fn open_devices() -> usize {
+    device::open_devices()
+}
+
 /// The backend of the device `PDF_RASTER_VULKAN_DEVICE` names, or of the
 /// automatically ranked one when it is unset or empty; `None` (the calling
 /// test is skipped) when no Vulkan device opens.
