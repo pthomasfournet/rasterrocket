@@ -15,7 +15,7 @@
 //!
 //! Vertex colours are `N` bytes, interpolated channel by channel: sRGB by
 //! default.  [`gouraud_triangle_fill`] composites RGB vertices onto an
-//! [`Rgb8`] bitmap; [`gouraud_triangle_spans`] yields the interpolated
+//! [`Rgb8`](color::Rgb8) bitmap; [`gouraud_triangle_spans`] yields the interpolated
 //! spans of vertices of any width for a caller painting another pixel type.
 
 use crate::bitmap::Bitmap;

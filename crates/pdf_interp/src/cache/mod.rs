@@ -2,7 +2,7 @@
 //! the image decode pipeline (so they live in `rasterrocket-interp` rather
 //! than `gpu`).
 //!
-//! Currently exposes the [`prefetch`] module — a background worker
+//! Currently exposes the `prefetch` module — a background worker
 //! that walks every page's `/XObject` resource dict, decodes each
 //! `/DCTDecode`-filtered image once, and primes
 //! the session's [`gpu::cache::ImageCache`] so the renderer thread sees

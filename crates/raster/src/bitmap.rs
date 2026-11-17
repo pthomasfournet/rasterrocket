@@ -4,7 +4,7 @@
 //! - Rows are stored top to bottom with a positive stride.
 //! - Typed row access via [`bytemuck::cast_slice`] — zero-copy, no mode switch.
 //! - Colour and alpha are held as samples of the pixel type's
-//!   [`Sample`](color::Sample): bytes for the 8-bit types, `u16` for the
+//!   [`color::Sample`]: bytes for the 8-bit types, `u16` for the
 //!   16-bit ones.
 //! - Alpha is an optional separate plane, one sample per pixel.
 

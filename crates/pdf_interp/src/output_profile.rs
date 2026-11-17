@@ -11,7 +11,7 @@
 //! the 8-bit result within rounding of the 16-bit one.  The source of
 //! every conversion is the working space the page was composited in
 //! ([`WorkingSpace`]), with the intent's adjustments folded in (see
-//! [`source`]); a conversion is compiled per working space.
+//! `source`); a conversion is compiled per working space.
 //!
 //! [`OutputProfile::convert`] converts a [`FinishedCanvas`] in place for an
 //! RGB profile and into a gray bitmap for a gray one, row by row, the
@@ -324,9 +324,9 @@ impl OutputProfile {
 
     /// The separation of colours from the working space `space` to the CMYK
     /// of the profile under `intent`, with black-point compensation when
-    /// `bpc`, tabulated on first use: [`PROFILE_GRID`]³ nodes, each the
+    /// `bpc`, tabulated on first use: `PROFILE_GRID`³ nodes, each the
     /// profile's PCS → CMYK table evaluated in floating point at the node's
-    /// PCS value (see [`separate`]); a profile whose table that evaluation
+    /// PCS value (see `separate`); a profile whose table that evaluation
     /// does not read separates through the converter's 16-bit transform.
     ///
     /// # Errors

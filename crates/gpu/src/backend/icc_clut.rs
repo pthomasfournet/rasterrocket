@@ -173,7 +173,7 @@ fn probe_pixels() -> Vec<u8> {
 /// Whether [`icc_clut`] and [`icc_clut16`] on `backend` reproduce
 /// [`CmykGrid::convert`] and [`CmykGrid::convert16`] value for value.
 ///
-/// The check converts the [`probe_pixels`] through a [`random_grid`] of
+/// The check converts the `probe_pixels` through a [`random_grid`] of
 /// uneven spans in the extended range, whose outputs clamp at both ends.
 /// The interpolation is in integers, so a device differs only where its
 /// storage, integer arithmetic or kernel compilation is faulty.

@@ -113,7 +113,7 @@ impl GpuBackend for CudaBackend {
         // of scope.
     }
 
-    /// Host-cached for either direction ([`alloc_pinned`]).
+    /// Host-cached for either direction (`alloc_pinned`).
     fn alloc_host_pinned(&self, size: usize) -> Result<Self::HostBuffer> {
         alloc_pinned(&self.ctx.cuda, size, "alloc_host_pinned")
     }

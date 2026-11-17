@@ -379,7 +379,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     /// A mapped buffer (integrated GPU) is written in place under
-    /// [`recorder::PageRecorder::with_quiescent`]: earlier pages read the old
+    /// `recorder::PageRecorder::with_quiescent`: earlier pages read the old
     /// bytes, later ones the new, as with the staged copy.
     fn upload(&self, dst: &mut Self::DeviceBuffer, src: &[u8]) -> Result<()> {
         if !dst.is_mapped() {
@@ -393,7 +393,7 @@ impl GpuBackend for VulkanBackend {
 
     /// A mapped buffer in `HOST_CACHED` memory (an integrated GPU's
     /// read-back buffers) is read in place under
-    /// [`recorder::PageRecorder::with_quiescent`]: no page writes it while
+    /// `recorder::PageRecorder::with_quiescent`: no page writes it while
     /// the host reads.  Any other buffer, a mapped one in uncached memory
     /// included, is copied by the device into a `HOST_CACHED` staging
     /// buffer and read from there: host reads of uncached memory run at a

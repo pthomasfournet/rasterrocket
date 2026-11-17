@@ -112,7 +112,7 @@ impl ColorSpace {
     /// an `Indexed` base or a `Separation`/`DeviceN` alternate; every other
     /// conversion is independent of it.  A device colour keeps its sRGB
     /// meaning: in the wide space its sRGB value converts through
-    /// [`crate::working_space::from_srgb16`] at 16 bits.
+    /// `crate::working_space::from_srgb16` at 16 bits.
     ///
     /// # Variant behaviour
     ///

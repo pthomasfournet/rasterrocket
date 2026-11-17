@@ -671,7 +671,7 @@ impl<'doc> PageRenderer<'doc> {
 
     /// [`Self::try_with_page_group_in`] without a page group, for a page
     /// whose every canvas sample a device page paints
-    /// ([`Self::paint_device_page`]): the canvas's samples are unspecified
+    /// (`Self::paint_device_page`): the canvas's samples are unspecified
     /// until then.  [`Self::paint_paper`] gives the renderer of
     /// [`Self::try_with_page_group_in`], for a page painted otherwise.
     ///

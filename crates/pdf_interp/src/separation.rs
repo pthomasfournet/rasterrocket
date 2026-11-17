@@ -8,19 +8,19 @@
 //! and CMYK output, which finishes as the page's process ink, its spots
 //! folded in.  A colour given as ink — `DeviceCMYK`, the colorants of a
 //! `Separation` or `DeviceN` space — paints its own ink on either.  Any
-//! other colour is converted from its sRGB value by a [`Separator`]: the
+//! other colour is converted from its sRGB value by a `Separator`: the
 //! inverse of the process-ink model for the preview, so that the preview
 //! reproduces the colour, and for CMYK output the conversion of the
 //! output profile ([`ProfileSeparation`]) or, without one, the device
 //! conversion of ISO 32000-2 §10.4.2 under the graphics state's black
 //! generation and undercolour removal.  The separator of a paint is the
 //! page's with the graphics state's parameters taken in (see
-//! [`Separator::for_paint`]): its black-generation and undercolour-removal
+//! `Separator::for_paint`): its black-generation and undercolour-removal
 //! functions, and the rendering intent a profile separates it under.  A
 //! transparency group of an ICC CMYK space over an RGB canvas is painted
-//! in its profile's ink, separated by the profile ([`GroupInk`]); one of a
+//! in its profile's ink, separated by the profile (`GroupInk`); one of a
 //! `CalRGB` or non-sRGB ICC RGB space, in the complements of its own
-//! components ([`GroupRgb`]).
+//! components (`GroupRgb`).
 
 mod group;
 mod group_rgb;
@@ -63,7 +63,7 @@ pub enum CanvasRequest {
     /// `space` through its profile: a page whose transparency group
     /// composites in the CMYK space of profile stream `profile`, colours
     /// not given in it separated into its ink from `space` (see
-    /// [`GroupInk`]).  A profile that cannot separate paints as
+    /// `GroupInk`).  A profile that cannot separate paints as
     /// [`Self::ProcessRgb`] without overprint does, finished as RGB of
     /// `space`, which the page's diagnostics report
     /// ([`GroupSpaceApproximations::cmyk_profile`](crate::renderer::GroupSpaceApproximations::cmyk_profile)).

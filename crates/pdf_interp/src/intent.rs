@@ -19,7 +19,7 @@ pub enum RenderingIntent {
 }
 
 impl RenderingIntent {
-    /// Every intent, in the order of [`Self::bit`].
+    /// Every intent, in the order of `Self::bit`.
     pub const ALL: [Self; 4] = [
         Self::RelativeColorimetric,
         Self::AbsoluteColorimetric,
@@ -188,7 +188,7 @@ pub enum ProofIntent {
 }
 
 impl ProofIntent {
-    /// Both intents, in the order of [`Self::index`].
+    /// Both intents, in the order of `Self::index`.
     pub const ALL: [Self; 2] = [Self::RelativeColorimetric, Self::AbsoluteColorimetric];
 
     /// The rendering intent of the conversion.

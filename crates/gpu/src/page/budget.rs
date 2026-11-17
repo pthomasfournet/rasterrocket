@@ -67,7 +67,7 @@ impl Counts {
 
 impl PageCommands {
     /// Bytes of the page's device inputs: the commands, their tables and
-    /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`].
+    /// their tile lists.  At most [`PAGE_COMMANDS_MAX_BYTES`](crate::page::PAGE_COMMANDS_MAX_BYTES).
     #[must_use]
     pub const fn bytes(&self) -> usize {
         self.bytes_with(Counts::ZERO)

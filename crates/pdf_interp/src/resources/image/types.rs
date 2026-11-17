@@ -58,7 +58,7 @@ pub struct DecodedImage {
     /// space, kept when the decode was asked to keep them.
     pub tints: Option<ImageTints>,
     /// The tints the decode was asked to keep
-    /// ([`ImageDecodeCtx::keep_tints`]): `tints` is then present for every
+    /// (`ImageDecodeCtx::keep_tints`): `tints` is then present for every
     /// image they apply to.
     pub kept_tints: KeptTints,
     /// The rendering intent the image's colours were converted under,
@@ -351,7 +351,7 @@ impl<'a> ImageRequest<'a> {
 
 /// Decoded image data, ready for blitting onto the page bitmap.
 ///
-/// See the table of the [`image`](super) module for the exact byte layout
+/// See the table of the `image` module for the exact byte layout
 /// per [`ImageColorSpace`].
 #[derive(Debug)]
 pub struct ImageDescriptor {
@@ -362,7 +362,7 @@ pub struct ImageDescriptor {
     /// Colour interpretation of `data`.
     pub color_space: ImageColorSpace,
     /// Pixel storage — host or (in future) device-resident.  Layout defined
-    /// by `color_space` (see the [`image`](super) module).
+    /// by `color_space` (see the `image` module).
     pub data: ImageData,
     /// Optional mask (`/SMask`, `/Mask`, or an embedded alpha channel) over
     /// the same unit square, at its own resolution, which need not be the

@@ -148,7 +148,7 @@ impl PageRenderer<'_> {
     ///
     /// When set, ICC CMYK→RGB conversions run on it, ahead of any CUDA
     /// context.  Image blits run on the backend of
-    /// the attached image cache ([`Self::set_image_cache`]).
+    /// the attached image cache (`Self::set_image_cache`).
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {
         self.vk_backend = backend;

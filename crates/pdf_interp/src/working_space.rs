@@ -11,18 +11,18 @@
 //! value of the D50 XYZ `X` is `M_w⁻¹ · X`, `M_w` the matrix whose columns
 //! are the ROMM colorants.  An RGB matrix/TRC source of colorant matrix
 //! `M_s` converts through the composite `M_w⁻¹ · M_s`
-//! ([`wide_composite`]); when its rows sum to 1 within
-//! [`IDENTITY_MATRIX_TOLERANCE`], the source's white is the D50 white within
+//! (`wide_composite`); when its rows sum to 1 within
+//! `IDENTITY_MATRIX_TOLERANCE`, the source's white is the D50 white within
 //! the precision of its encoding, and each row is scaled to sum to 1
 //! exactly, so the source's white maps to the working white and its
 //! neutrals to neutrals.
 //!
-//! The 16-bit conversion of a linearised source ([`LinearRgb`]) looks each
+//! The 16-bit conversion of a linearised source (`LinearRgb`) looks each
 //! component up in a table of the linear value of every 16-bit level, forms
 //! the matrix product in `f32`, and encodes the result by linear
-//! interpolation in a table of the curve at [`ENCODE_STEPS`] + 1 points,
+//! interpolation in a table of the curve at `ENCODE_STEPS` + 1 points,
 //! which is within 0.01 of a 16-bit level of the curve.  The conversion of
-//! sRGB values ([`from_srgb16`]) is the one such conversion every sRGB
+//! sRGB values (`from_srgb16`) is the one such conversion every sRGB
 //! colour takes, a fill's components quantised to 16 bits first, so a fill
 //! and an image of the same sRGB colour convert alike; it returns equal
 //! components unchanged.

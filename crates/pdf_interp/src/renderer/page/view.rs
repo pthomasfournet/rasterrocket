@@ -104,7 +104,7 @@ pub(super) fn initial_gstate(width: u32, height: u32, ctm: Ctm, antialias: bool)
 /// renderer's bitmap covers the window `[x, x + width) × [y, y + height)`; its
 /// initial CTM is the whole page's, and device coordinates are computed in
 /// the whole page's device space and translated into the window last (see
-/// [`page_to_window`]), so a window draws the device pixels the whole-page
+/// `page_to_window`), so a window draws the device pixels the whole-page
 /// render places there.
 ///
 /// The page's pixel extent is its geometry's [`PageGeometry::size_px`] at

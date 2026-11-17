@@ -8,7 +8,7 @@ use super::{KIND_PATH, PAGE_TILE, PageCommands, PageCommandsError, PixelBounds, 
 ///
 /// An item is `[command, list, len, backdrop]`: the command's index, and
 /// for an outline's command the tile's segments and backdrop, as
-/// [`PageCommands::table_parts`] lays them out.  The low 14 bits of `len`
+/// `PageCommands::table_parts` lays them out.  The low 14 bits of `len`
 /// count the segments: the one segment of index `list` when it is 1, else
 /// `segment_lists[list..][..len]`.  With bit 31 of `len` set, `backdrop`
 /// is the two's-complement cover of every row of the tile; otherwise it
