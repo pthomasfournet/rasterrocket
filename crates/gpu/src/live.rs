@@ -28,6 +28,7 @@ fn live() -> std::sync::MutexGuard<'static, Vec<usize>> {
 }
 
 /// List `ctx` as held by a live [`GpuCtx`](crate::GpuCtx).
+#[cfg(not(ptx_placeholder))]
 pub(crate) fn register(ctx: &Arc<CudaContext>) {
     live().push(address(ctx));
 }
