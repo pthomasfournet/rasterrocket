@@ -110,33 +110,38 @@ const fn oldest_target(major: u32) -> Option<u32> {
     }
 }
 
-/// The message for kernels that target a newer architecture than the
-/// device, or `None` when the header and the device do not show that.
+/// The message for a device older than the oldest architecture the
+/// toolkit that compiled the kernels supports, or `None` for a device at or
+/// above that floor, or when the header names no toolkit in the table.
 ///
-/// A device older than every target of the toolkit that compiled the
-/// kernels cannot run this build's CUDA kernels at all; any other is told
-/// the `CUDA_ARCH` to rebuild with.
+/// No build of that toolkit runs on such a device, so the device is refused
+/// before any kernel is loaded.
+pub(crate) fn below_toolkit_floor(header: &PtxHeader, device: (u32, u32)) -> Option<String> {
+    let (major, minor) = header.toolkit?;
+    let floor = oldest_target(major)?;
+    let device_sm = device.0 * 10 + device.1;
+    (device_sm < floor).then(|| {
+        format!(
+            "CUDA {major}.{minor}, which compiled this build's kernels, supports sm_{floor} and \
+             newer; this GPU is sm_{device_sm} (compute capability {}.{}), so CUDA cannot be \
+             used on it: use the Vulkan backend or the CPU",
+            device.0, device.1
+        )
+    })
+}
+
+/// The message for kernels that target a newer architecture than a device
+/// at or above the toolkit's floor ([`below_toolkit_floor`]), or `None`
+/// when the header and the device do not show that.
 pub(crate) fn arch_mismatch(header: &PtxHeader, device: (u32, u32)) -> Option<String> {
     let target = header.sm?;
     let device_sm = device.0 * 10 + device.1;
     (target > device_sm).then(|| {
-        let gpu = format!(
-            "sm_{device_sm}, compute capability {}.{}",
+        format!(
+            "the CUDA kernels were compiled for sm_{target}, newer than this GPU (sm_{device_sm}, \
+             compute capability {}.{}): rebuild with CUDA_ARCH=sm_{device_sm}",
             device.0, device.1
-        );
-        match header.toolkit {
-            Some((major, minor)) if oldest_target(major).is_some_and(|o| device_sm < o) => {
-                format!(
-                    "the CUDA kernels were compiled for sm_{target} by CUDA {major}.{minor}, \
-                     which compiles for no GPU as old as this one ({gpu}): this GPU cannot run \
-                     this build's CUDA kernels; use the Vulkan backend or the CPU"
-                )
-            }
-            _ => format!(
-                "the CUDA kernels were compiled for sm_{target}, newer than this GPU ({gpu}): \
-                 rebuild with CUDA_ARCH=sm_{device_sm}"
-            ),
-        }
+        )
     })
 }
 
@@ -222,26 +227,31 @@ mod tests {
         assert_eq!(arch_mismatch(&PtxHeader::default(), (7, 5)), None);
     }
 
-    /// A GPU older than every target of the build's toolkit is told it
-    /// cannot run the kernels, not to rebuild for it.
+    /// A GPU below the floor of the build's toolkit is refused outright,
+    /// whatever the kernels target; one at or above it is not.
     #[test]
-    fn a_gpu_the_toolkit_dropped_is_told_to_use_vulkan_or_the_cpu() {
+    fn a_gpu_below_the_toolkit_floor_is_refused() {
         let cuda13 = PtxHeader {
             toolkit: Some((13, 3)),
             isa: Some((9, 3)),
-            sm: Some(80),
+            sm: Some(75),
         };
-        let m = arch_mismatch(&cuda13, (6, 1)).expect("sm_80 on a 6.1 device");
-        assert!(m.contains("cannot run") && m.contains("Vulkan"), "{m}");
+        let m = below_toolkit_floor(&cuda13, (6, 1)).expect("a 6.1 device under CUDA 13");
+        assert!(m.contains("sm_75 and newer") && m.contains("Vulkan"), "{m}");
         assert!(!m.contains("CUDA_ARCH"), "{m}");
-        let m = arch_mismatch(&cuda13, (7, 5)).expect("sm_80 on a 7.5 device");
-        assert!(m.contains("CUDA_ARCH=sm_75"), "{m}");
+        assert!(below_toolkit_floor(&cuda13, (7, 0)).is_some(), "Volta");
+        assert_eq!(below_toolkit_floor(&cuda13, (7, 5)), None);
+        assert_eq!(below_toolkit_floor(&cuda13, (12, 0)), None);
         let cuda12 = PtxHeader {
             toolkit: Some((12, 4)),
             ..cuda13
         };
-        let m = arch_mismatch(&cuda12, (6, 1)).expect("sm_80 on a 6.1 device");
-        assert!(m.contains("CUDA_ARCH=sm_61"), "{m}");
+        assert_eq!(below_toolkit_floor(&cuda12, (6, 1)), None);
+        assert!(
+            below_toolkit_floor(&cuda12, (3, 5)).is_some(),
+            "Kepler under CUDA 12"
+        );
+        assert_eq!(below_toolkit_floor(&PtxHeader::default(), (3, 0)), None);
     }
 
     #[test]

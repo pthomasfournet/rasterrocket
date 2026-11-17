@@ -217,6 +217,12 @@ impl GpuCtx {
             .ok()
             .and_then(|(m, n)| Some((u32::try_from(m).ok()?, u32::try_from(n).ok()?)));
 
+        if let Some(message) = device
+            .and_then(|d| cuda_diag::below_toolkit_floor(&cuda_diag::ptx_header(PTX_ICC_CLUT), d))
+        {
+            return Err(message.into());
+        }
+
         let load =
             |ptx_src: &str, name: &str| -> Result<CudaFunction, Box<dyn std::error::Error>> {
                 let header = cuda_diag::ptx_header(ptx_src);
