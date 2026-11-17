@@ -267,7 +267,12 @@ pub fn dark_pixels(pdf: Vec<u8>) -> Vec<(usize, usize)> {
 /// `(left, width)` in device pixels of the dark pixels of page 1 of `pdf`
 /// (see [`dark_pixels`]); `(0, 0)` when there are none.
 pub fn ink_span(pdf: Vec<u8>) -> (usize, usize) {
-    let dark = dark_pixels(pdf);
+    ink_span_with(pdf, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
+}
+
+/// [`ink_span`] under `config`.
+pub fn ink_span_with(pdf: Vec<u8>, config: &SessionConfig) -> (usize, usize) {
+    let dark = dark_pixels_with(pdf, config);
     let left = dark.iter().map(|&(x, _)| x).min().unwrap_or(0);
     let right = dark.iter().map(|&(x, _)| x).max().map_or(0, |r| r + 1);
     (left, right - left)

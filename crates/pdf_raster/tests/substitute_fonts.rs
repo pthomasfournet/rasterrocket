@@ -10,7 +10,7 @@
 mod common;
 
 use common::{
-    dark_pixels, dark_pixels_with, font_dir, font_page, ink_span, isolated_fonts, render_gray,
+    dark_pixels, dark_pixels_with, font_dir, font_page, ink_span_with, isolated_fonts, render_gray,
     stream_object, text_page,
 };
 
@@ -76,9 +76,13 @@ fn missing_font_resource_draws_helvetica() {
 
 /// A substitute's glyph is fitted to the advance the document specifies:
 /// condensed when the advance is narrower than the glyph, centred in the
-/// advance when wider.
+/// advance when wider.  The substitute is the compiled-in sans: an
+/// installed face of the same name (Arial Narrow on macOS) would be
+/// narrow unfitted.
 #[test]
 fn substitute_glyphs_are_fitted_to_the_pdf_widths() {
+    let config = isolated_fonts(Vec::new());
+    let ink_span = |pdf| ink_span_with(pdf, &config);
     let narrow = "<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow \
                   /FirstChar 77 /LastChar 77 /Widths [300] /Encoding /WinAnsiEncoding \
                   /FontDescriptor << /Type /FontDescriptor /FontName /ArialNarrow /Flags 32 \
