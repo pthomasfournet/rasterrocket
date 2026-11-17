@@ -255,11 +255,12 @@ fn nvcc_works(nvcc: &str) -> bool {
 
 /// Compile every kernel's `.cu` source to PTX via `nvcc`.
 ///
-/// `CUDA_ARCH` env var overrides the target architecture (e.g. `sm_75` for
-/// Turing, `sm_120` for Blackwell).  Default `sm_80` covers Ampere through
-/// Blackwell.
+/// `CUDA_ARCH` env var overrides the target architecture (e.g. `sm_120` for
+/// Blackwell).  The default, `sm_75` (Turing), is the oldest architecture
+/// CUDA 13 compiles for; the driver compiles its PTX for every newer device
+/// when the module loads.
 fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str) {
-    let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_80".to_owned());
+    let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_75".to_owned());
 
     for kernel in KERNELS {
         let src = kernels_dir.join(format!("{kernel}.cu"));

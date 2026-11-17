@@ -575,7 +575,8 @@ cargo build --release -p rasterrocket-cli
 cargo build --release -p rasterrocket-cli --no-default-features --features bundled-fonts
 
 # With all GPU features (CUDA 13 toolkit, NVIDIA GPU required)
-# Default CUDA_ARCH is sm_80 (Ampere); override for older or newer GPUs.
+# Default CUDA_ARCH is sm_75 (Turing), which runs on every GPU CUDA 13 supports;
+# set it to your card's architecture for code compiled for it ahead of time.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
   --features "nvjpeg,nvjpeg2k,gpu-icc,gpu-deskew,cache"
 
@@ -589,7 +590,7 @@ The CLI crate forwards each feature name to the `rasterrocket` library.
 
 ### Picking `CUDA_ARCH` for your GPU
 
-The `CUDA_ARCH` environment variable controls which Compute Capability the PTX kernels target. Mismatched arch flags produce kernels the GPU can't load at runtime. Set it to your card's CC (e.g. `sm_75`, `sm_86`, `sm_120`).
+The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels target. PTX runs on its target and every newer architecture (the driver compiles it for the device when it loads), never on an older one: a GPU older than the target is refused with the `CUDA_ARCH` to rebuild with, and one older than the toolkit supports (below `sm_75` for CUDA 13) is refused outright.
 
 | GPU generation | Architecture | `CUDA_ARCH` | Tested |
 |---|---|---|---|
@@ -600,7 +601,7 @@ The `CUDA_ARCH` environment variable controls which Compute Capability the PTX k
 | H100 / Hopper | Hopper | `sm_90` | no |
 | RTX 50-series | Blackwell | `sm_120` | yes, RTX 5070 |
 
-Only `sm_120` is tested; the other rows are untested. Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). The build defaults to `sm_80` if `CUDA_ARCH` is unset; that's a reasonable fallback for any Ampere-or-later card thanks to PTX forward-compatibility, but matching your hardware exactly produces better-optimised code.
+`sm_120` (RTX 5070) and `sm_75` (RTX 2080 SUPER) are tested; the other rows are untested. Look up your card's exact Compute Capability at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). The build defaults to `sm_75` if `CUDA_ARCH` is unset, the oldest architecture CUDA 13 compiles for, so a default build runs on every GPU CUDA 13 supports; setting your card's own architecture lets nvcc compile the kernels for it ahead of time instead of the driver at load.
 
 ### Feature flags
 

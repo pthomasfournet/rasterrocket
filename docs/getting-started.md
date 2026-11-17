@@ -374,7 +374,7 @@ input.
 cargo build --release -p rasterrocket-cli
 
 # With all GPU features
-# Default CUDA_ARCH is sm_80 (Ampere); override to match your card.
+# Default CUDA_ARCH is sm_75 (Turing): it runs on every GPU CUDA 13 supports.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
   --features "nvjpeg,nvjpeg2k,gpu-icc,gpu-deskew,cache"
 
