@@ -167,7 +167,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bench"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "bytemuck",
  "rasterrocket",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "base64",
  "flate2",
@@ -1607,14 +1607,14 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-camera"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "rasterrocket-cli"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "clap",
  "env_logger",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-color"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "bytemuck",
  "proptest",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-comic"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "image-webp",
  "jxl",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-encode"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-font"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "font-test-data",
  "harfrust",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-gpu"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "ash",
  "blake3",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-interp"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "env_logger",
  "hayro-ccitt",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-parser"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "aes",
  "brotli-decompressor",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "rasterrocket-render"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "bitflags",
  "bytemuck",
