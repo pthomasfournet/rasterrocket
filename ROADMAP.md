@@ -19,7 +19,7 @@ for (page_num, result) in rasterrocket::raster_pdf(path, &opts) {
     let gray = page.pixels.as_u8().expect("8-bit render");
     tess = tess
         .set_frame(gray, page.width as i32, page.height as i32, 1, page.width as i32)?
-        .set_source_resolution(page.effective_dpi as i32);
+        .set_source_resolution(page.dpi as i32);
     let text = tess.get_text()?;
 }
 ```

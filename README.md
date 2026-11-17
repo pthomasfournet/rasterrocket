@@ -516,7 +516,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
     let page = result?;
     // page.pixels.as_u8() — 8-bit greyscale, width × height, top-to-bottom
     // page.dpi — pixels per physical inch; pass it to your OCR engine
-    // See the OCR Integration wiki for Tesseract, ocrs, Google Cloud Vision, and GPT-5 patterns.
+    // See the OCR Integration wiki for Tesseract and ocrs, and the LLM Vision wiki for cloud OCR.
 }
 ```
 
@@ -528,9 +528,9 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | Platform guides: [Linux](docs/platforms/linux.md), [macOS](docs/platforms/macos.md), [BSD and Windows](docs/platforms/other.md) | Installing, fonts, RAM output, GPU support and known gaps on each operating system |
 | [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, `rasterrocket-comic`'s `open_comic`, `rasterrocket-camera`, feature flags, GPU dispatch thresholds |
 | [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, size limits, examples, pixel-diff comparison |
-| [Benchmarks](../../wiki/Benchmarks) | Methodology, 10-document corpus results, CPU-only AVX-512 vs AVX2, GPU-accelerated, reproduction steps |
-| [OCR Integration](../../wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, zero-copy patterns, DPI wiring, multi-threaded examples |
-| [LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) | Google Cloud Vision and GPT-5 — encoding helper, Rust + Python examples, cost and latency guidance |
+| [Benchmarks](../../wiki/Benchmarks) | Current results (CPU defaults, GPU start-up, `--gpu-pages`), dated historical tables, reproduction steps |
+| [OCR Integration](../../wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, raw-pixel input, DPI wiring, multi-threaded examples, preparing scans |
+| [LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) | Google Cloud Vision, OpenAI and Mistral — encoding helper, Rust and Python examples |
 
 ## Crates
 

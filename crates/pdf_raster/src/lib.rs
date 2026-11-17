@@ -21,7 +21,7 @@
 //!     match result {
 //!         Ok(page) => {
 //!             // page.pixels.as_u8(): 8-bit grayscale, width × height, top-to-bottom
-//!             // pass to tesseract::ocr_from_frame(pixels, page.width, page.height, 1, page.width, "eng")
+//!             // page.dpi: pass it to the OCR engine as the source resolution
 //!         }
 //!         Err(e) => eprintln!("page {page_num}: {e}"),
 //!     }
@@ -41,14 +41,13 @@
 //! # OCR integration
 //!
 //! `rasterrocket` is a rasteriser, not an OCR framework.  For Tesseract, ocrs,
-//! Google Cloud Vision, GPT-5, and Mistral integration patterns — including the
-//! `TessApi`-per-thread reuse pattern and zero-copy `set_image_from_mem` — see
-//! the project wiki:
+//! Google Cloud Vision, OpenAI and Mistral integration patterns — including one
+//! Tesseract instance per thread, given the raw pixels — see the project wiki:
 //!
 //! - [OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/OCR-Integration)
 //!   (Tesseract via `leptess`, ocrs)
 //! - [LLM Vision OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/LLM-Vision-OCR-Integration)
-//!   (Google Cloud Vision, GPT-5, Mistral)
+//!   (Google Cloud Vision, OpenAI, Mistral)
 //!
 //! # Streaming: render and process pages in parallel
 //!
