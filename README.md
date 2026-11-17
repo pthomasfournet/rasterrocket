@@ -513,8 +513,9 @@ crates.io (see the note at the top).
 
 ### Tested hardware
 
-Current results in these docs come from the machines below (older benchmark
-records also name an i7-8700K + RTX 2080 SUPER testbench, retired 2026-07).
+Current results in these docs come from the machines below (benchmark
+records from 2026-05 to 2026-07 also name the i7-8700K + RTX 2080 SUPER
+machine, which is back in service since 2026-11).
 Code for other hardware is written and built, but a target not listed here
 is **untested**: it is expected to work, nothing more.
 
@@ -523,7 +524,9 @@ is **untested**: it is expected to work, nothing more.
 | AMD Ryzen 9 9900X3D (Zen 5, AVX-512), Linux x86-64 | everything: the test suites, the AVX-512, AVX2 and scalar tiers, the benchmarks |
 | NVIDIA RTX 5070 (Blackwell, `sm_120`), same machine | CUDA 13 (nvJPEG, nvJPEG2000, ICC lookup table, NPP deskew, image cache) and Vulkan |
 | AMD Raphael iGPU (the 9900X3D's), same machine | Vulkan through RADV; VA-API JPEG decode (VCN 4.0, Mesa radeonsi) |
-| llvmpipe (Mesa's CPU Vulkan driver), same machine | Vulkan |
+| llvmpipe (Mesa's CPU Vulkan driver), on both Linux machines | Vulkan, including `--gpu-pages` |
+| Intel Core i7-8700K (Coffee Lake, AVX2, no AVX-512), Linux x86-64 | the AVX2 and SSE tiers, the fixture byte comparisons and timings |
+| NVIDIA RTX 2080 SUPER (Turing, `sm_75`), driver 570, same machine | Vulkan, including `--gpu-pages` (its driver is older than CUDA 13 needs) |
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
 | GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
@@ -556,7 +559,7 @@ is **untested**: it is expected to work, nothing more.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070 only.
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, on an AMD integrated GPU (RADV) and on an A18 Pro's GPU (MoltenVK); the Vulkan backend also runs on llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
 All GPU features fall back to CPU automatically when unavailable.  AMD/Radeon ROCm and Apple Metal-native backends are not implemented (Vulkan covers Apple via `MoltenVK`).
