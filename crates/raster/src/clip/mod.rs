@@ -9,7 +9,7 @@
 //! was intersected onto.  [`Clip::clone_shared`] (a graphics-state save) copies the
 //! head pointer, so a save costs O(1) whatever the number of path clips, and
 //! an intersection allocates one node shared by no other clip.  A list that
-//! reaches [`FOLD_DEPTH`] nodes is replaced by one node holding their
+//! reaches `FOLD_DEPTH` nodes is replaced by one node holding their
 //! intersection, so a list never holds more than `FOLD_DEPTH - 1` nodes.
 //! The regions are immutable after construction, so sharing
 //! across threads and across `clone_shared` copies is safe: there is no

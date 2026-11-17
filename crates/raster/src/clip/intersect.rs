@@ -21,7 +21,7 @@ impl Clip {
     /// axis-aligned), it is reduced to `clip_to_rect`. Otherwise its region
     /// over the clip rectangle, a coverage table when the clip is
     /// antialiased and a scanner otherwise, is pushed onto the list, and a
-    /// list that reaches [`FOLD_DEPTH`] regions is folded.
+    /// list that reaches `FOLD_DEPTH` regions is folded.
     ///
     /// An empty path forces the clip to be empty (nothing passes through).
     pub fn clip_to_path(&mut self, xpath: &XPath, eo: bool) {
