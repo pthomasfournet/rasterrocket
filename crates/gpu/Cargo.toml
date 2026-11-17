@@ -47,7 +47,7 @@ cache = ["dep:blake3", "dep:dashmap"]
 # Vulkan compute backend.  Compiles `.slang` kernels to SPIR-V
 # at build time via `slangc` (LunarG SDK), pulls in `ash` for runtime
 # Vulkan, and exposes `VulkanBackend` implementing `GpuBackend`.
-vulkan = ["dep:ash", "dep:gpu-allocator"]
+vulkan = ["dep:ash", "dep:gpu-allocator", "dep:libc"]
 
 [dependencies]
 cudarc   = { version = "0.19", features = ["cuda-13030"] }
@@ -66,7 +66,7 @@ gpu-allocator = { version = "0.28", optional = true, default-features = false, f
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # madvise(MADV_POPULATE_WRITE) of the page raster's host destination.
-libc     = "0.2"
+libc     = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # Disk-tier tests want isolated cache dirs.
