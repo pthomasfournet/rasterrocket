@@ -765,6 +765,8 @@ fn store<'a>(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     fn segment(idx: u8, coding_pases: u8, data: &[u8]) -> Segment<'_> {

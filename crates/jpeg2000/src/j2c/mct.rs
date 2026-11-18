@@ -136,19 +136,16 @@ fn into_rgb8_impl<S: Simd>(
         .zip(s2.as_chunks::<16>().0)
         .zip(head.as_chunks_mut::<{ 16 * 3 }>().0)
     {
-        let mut planes = [[0.0_f32; 16]; 3];
-        for half in [0, 8] {
-            let inverse = inverse_chunk(
+        let [low, high] = [0, 8].map(|half| {
+            inverse_chunk(
                 simd,
                 pending,
                 f32x8::from_slice(simd, &y0[half..half + 8]),
                 f32x8::from_slice(simd, &y1[half..half + 8]),
                 f32x8::from_slice(simd, &y2[half..half + 8]),
-            );
-            for (plane, v) in planes.iter_mut().zip(inverse) {
-                v.store(&mut plane[half..]);
-            }
-        }
+            )
+        });
+        let planes: [[f32; 16]; 3] = core::array::from_fn(|c| math::join16([low[c], high[c]]));
         let [r, g, b] = &planes;
         math::round_and_interleave(simd, [r, g, b], 1.0, rgb);
     }

@@ -1052,6 +1052,9 @@ impl<'a, 'b> BlockDecoder<'a, 'b> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     use super::{Forward, HtBlock, HtDecodeContext, HtError, MAX_BITPLANES, Reverse, decode};
 
     /// A block of `width` × `height` with a cleanup segment `cleanup`.

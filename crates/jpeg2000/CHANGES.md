@@ -147,6 +147,8 @@ byte-identical on the benchmark images and passes the full test suite.
   on one core: 48 RGB 9-7 codestreams of a scanned book 2 271 → 2 060 ms
   (reduced: 541 → 475 ms), 63 gray codestreams of a layered scan 232 →
   202 ms (83 → 75 ms), 40 RGB photographs 558 → 528 ms (312 → 305 ms).
+  Both stage their two 8-lane vectors per 16-sample block through
+  `math::join16`.
 
 ## Truncation report
 
@@ -192,6 +194,10 @@ byte-identical on the benchmark images and passes the full test suite.
 
 - `Cargo.toml` allows `clippy::too_many_arguments` for upstream code we have
   not changed (`bitplane.rs`).
+- Without the default features (`std`, `simd`) the crate and its tests
+  build and lint clean: the scalar `f32x8` scales its lanes by iterator
+  (`needless_range_loop`), and the test modules of `j2c/ht.rs` and
+  `j2c/decode.rs` import `vec!` and `Vec` from `alloc`.
 
 ## Upstream changes brought over
 

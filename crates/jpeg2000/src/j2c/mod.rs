@@ -88,10 +88,9 @@ fn shifted_u8_impl<S: Simd>(simd: S, samples: &[f32], offset: f32, out: &mut [u8
         .iter()
         .zip(out.as_chunks_mut::<16>().0)
     {
-        let mut shifted = [0.0_f32; 16];
-        for half in [0, 8] {
-            (f32x8::from_slice(simd, &block[half..half + 8]) + offset).store(&mut shifted[half..]);
-        }
+        let shifted = crate::math::join16(
+            [0, 8].map(|half| f32x8::from_slice(simd, &block[half..half + 8]) + offset),
+        );
         crate::math::round_and_interleave(simd, [&shifted], 1.0, out);
     }
     for (&v, out) in samples[blocks..].iter().zip(&mut out[blocks..]) {

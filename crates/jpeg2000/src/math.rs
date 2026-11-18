@@ -453,8 +453,8 @@ mod inner {
     impl<S: Simd> MulAssign<f32> for f32x8<S> {
         #[inline(always)]
         fn mul_assign(&mut self, rhs: f32) {
-            for i in 0..SIMD_WIDTH {
-                self.val[i] *= rhs;
+            for v in &mut self.val {
+                *v *= rhs;
             }
         }
     }
@@ -462,8 +462,8 @@ mod inner {
     impl<S: Simd> DivAssign<f32> for f32x8<S> {
         #[inline(always)]
         fn div_assign(&mut self, rhs: f32) {
-            for i in 0..SIMD_WIDTH {
-                self.val[i] /= rhs;
+            for v in &mut self.val {
+                *v /= rhs;
             }
         }
     }
@@ -540,6 +540,17 @@ pub(crate) fn floor_f32(x: f32) -> f32 {
         let xf = xi as f32;
         if x < xf { xf - 1.0 } else { xf }
     }
+}
+
+/// The 16 lanes of `halves`, the first vector's lanes first: the block
+/// layout `round_and_interleave` takes.
+#[inline(always)]
+pub(crate) fn join16<S: Simd>(halves: [f32x8<S>; 2]) -> [f32; 16] {
+    let mut block = [0.0_f32; 16];
+    let (low, high) = block.split_at_mut(SIMD_WIDTH);
+    halves[0].store(low);
+    halves[1].store(high);
+    block
 }
 
 #[inline(always)]
