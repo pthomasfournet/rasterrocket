@@ -3381,10 +3381,34 @@ vector) at 600 and 1200 dpi, whole (`--band-mib 65536`), under `--gpu-pages`:
 all on the device, byte-identical, no device lost; the slowest, `corpus-09`
 at 1200 dpi (17 040 × 31 080, 1.6 GB RGB), takes 3.7 s for the whole
 process (CPU 9 s), measured beside another render job.
-The machine's Intel UHD 630 has driver 26.20.100.7642 (January 2020),
-which reports Vulkan 1.1; the backend needs 1.3, so the device is listed
-as unusable and skipped, and `--gpu-devices` across two Windows devices,
-like Intel's later 1.3 drivers, is untested.
+The machine's Intel UHD 630 had driver 26.20.100.7642 (January 2020),
+which reports Vulkan 1.1; the backend needs 1.3, so the device was listed
+as unusable and skipped (see the UHD 630 entry below).
+
+**Unreleased on master: Vulkan on an Intel GPU (UHD 630, Windows).** With
+Intel's driver 31.0.101.2141 (Vulkan 1.3.215) the i7-8700K's UHD 630 is
+usable, the first Intel GPU tested. It has `shaderInt64` (paths kernel),
+32 KiB of shared memory, subgroups of 8 to 32 and one 16 GB device-local
+heap shared with the host; nothing in the backend needed changing. With
+`PDF_RASTER_VULKAN_DEVICE=intel`, the GPU crate's Vulkan tests (the iGPU
+tests now run on it instead of skipping), `cu_vs_slang_parity` and the
+GPU-page, image-cache, ICC and teardown suites pass. At 150 dpi, RGB and
+gray, 8 and 16 bits, every one of the 3 024 fixture pages under
+`--backend vulkan --vulkan-device intel` (ICC lookup table, image cache),
+`--backend vulkan --gpu-pages --vulkan-device intel` and `--gpu-pages
+--gpu-devices all` is byte-identical to `--backend cpu` (12 096 pages per
+variant); every page offered renders on the device, and across both
+devices the RTX 2080 SUPER took 7 442 pages and the UHD 630 4 654, none on
+the CPU. Its `maxStorageBufferRange` is 1 GiB (1 073 741 820 bytes), so a
+page whose device pixels (RGB, gray included) exceed it renders on the CPU
+after a warning naming the limit: `corpus-09` page 415 at 1200 dpi
+(1.6 GB), and at 1000 dpi in 16-bit gray. TDR gate, whole pages
+(`--band-mib 65536`) under `--gpu-pages` on the UHD 630: `corpus-09`
+page 415 at 600 and 950 dpi (1.0 GB, the largest that fits) and at 670 dpi
+in 16 bits, `corpus-06` page 2 (3 188 commands) and `corpus-02` page 3
+(1 702) at 600 and 1200 dpi, and at 1200 dpi in 16 bits: all byte-identical, no
+device lost, each whole process under 3 s on the device (CPU fallbacks
+up to 6 s), so no submission needs splitting.
 
 **Unreleased on master: `--print` on Windows.** `--print`, `--printer`,
 `--copies`, `--duplex` and `--list-printers` work on Windows, through GDI

@@ -1,7 +1,8 @@
 # rasterrocket on the BSDs and Windows
 
 Windows is built and tested in CI, on GitHub's Windows runner, and its
-CUDA and Vulkan features on one machine of our own, with an RTX 2080 SUPER (see
+CUDA and Vulkan features on one machine of our own, with an RTX 2080 SUPER
+and, for Vulkan, an Intel UHD 630 (see
 [Windows](#windows)). The BSDs are not tested, and no CI
 job covers them. The code has no Linux-only dependency in its render path: it is
 Rust, plus two C libraries that `cargo` builds, libdeflate for compression
@@ -83,13 +84,25 @@ tested. Please report what you find.
   `--gpu-pages`, are byte-identical too and lose no device to the Windows
   GPU timeout (TDR): the 1200 dpi `corpus-09` page, 1.6 GB of RGB, takes
   3.7 s for the whole process.
-  The Intel UHD 630 beside it is not used: its driver, 26.20.100.7642
-  (January 2020), reports Vulkan 1.1, and the backend needs 1.3, so it is
-  listed as unusable (`Vulkan API below 1.3`), skipped with a warning by
-  automatic selection and `--gpu-devices all`, and an error when named.
-  Intel's later drivers for that GPU report Vulkan 1.3 and are untested, as
-  are other GPUs under Windows and therefore `--gpu-devices` across two
-  Windows devices.
+  The Intel UHD 630 beside it, with driver 31.0.101.2141 (Vulkan 1.3.215),
+  passes the same runs: the GPU crate's Vulkan tests and the GPU-page,
+  image-cache, ICC and teardown suites with `PDF_RASTER_VULKAN_DEVICE=intel`
+  (the iGPU tests run on it), and every fixture page under
+  `--backend vulkan --vulkan-device intel`, `--backend vulkan --gpu-pages
+  --vulkan-device intel` and `--gpu-pages --gpu-devices all`, byte-identical
+  to `--backend cpu` (12 096 pages per variant). It has `shaderInt64`, so it
+  takes the paths kernel, and renders every page offered under
+  `--gpu-pages`; across both devices the 2080 SUPER took 7 442 pages and
+  the UHD 630 4 654, none on the CPU. Its `maxStorageBufferRange` is 1 GiB:
+  a page whose RGB pixels exceed it (the device renders gray pages as RGB),
+  such as `corpus-09` page 415 at 1200 dpi (1.6 GB), renders on the CPU
+  after a warning naming the limit. The TDR gate on it, the same pages
+  whole at 600 and 1200 dpi plus `corpus-09` at 950 dpi (1.0 GB, the
+  largest that fits) and `corpus-06` and `corpus-02` at 1200 dpi in 16 bits
+  (0.8 GB), is byte-identical and loses no device; no whole process took
+  over 3 s on the device. Its older driver, 26.20.100.7642, reports
+  Vulkan 1.1 and is listed as unusable (`Vulkan API below 1.3`). Other GPUs
+  under Windows are untested.
 - **Printing:** `--print` sends the pages to the printer's driver through
   GDI, fitting, centring and turning each page to the sheet itself (see
   [Printing on Windows](../cli-reference.md#printing-on-windows));
