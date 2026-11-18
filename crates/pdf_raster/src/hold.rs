@@ -51,11 +51,11 @@ impl DeviceHold {
         config.check()?;
         #[cfg(feature = "vulkan")]
         let vulkan = {
-            let mut held: Vec<_> =
-                crate::vk_init::init_vk_backend(config.policy, config.vulkan_device.as_deref())?
-                    .into_iter()
-                    .collect();
-            held.extend(crate::device_pages::open_all(config)?);
+            let session =
+                crate::vk_init::init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
+            let mut held = crate::device_pages::open_all(config, session.as_ref())?;
+            let session = session.filter(|s| !held.iter().any(|h| Arc::ptr_eq(h, s)));
+            held.extend(session);
             held
         };
         Ok(Self {
@@ -96,5 +96,33 @@ impl std::fmt::Debug for DeviceHold {
         f.debug_struct("DeviceHold")
             .field("held", &self.held())
             .finish()
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::DeviceHold;
+    use crate::{BackendPolicy, SessionConfig};
+
+    /// Under `ForceVulkan` with every GPU listed, the hold holds one
+    /// backend per device: the session's own device is not opened a second
+    /// time under its index.
+    #[test]
+    fn a_hold_opens_each_gpu_page_device_once() {
+        let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
+        config.gpu_pages = true;
+        config.gpu_devices = vec!["all".to_owned()];
+        let hold = match DeviceHold::open(&config) {
+            Ok(hold) => hold,
+            Err(e) => {
+                eprintln!("skipping: no Vulkan device: {e}");
+                return;
+            }
+        };
+        let mut indices: Vec<usize> = hold.vulkan.iter().map(|b| b.device_index()).collect();
+        let count = indices.len();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(indices.len(), count, "a device is held twice");
     }
 }

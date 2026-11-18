@@ -115,31 +115,66 @@ fn selectors(config: &crate::SessionConfig) -> Result<Vec<Option<String>>, Raste
     }
 }
 
-/// The GPU page devices of `config` opened now: under
-/// [`BackendPolicy::ForceVulkan`] every one, or the error of the first that
-/// does not open; under `Auto` with [`crate::SessionConfig::gpu_pages`]
-/// those that open, each that does not being logged at `error`; otherwise
-/// none.
+/// An open GPU page device and the selector it is opened with.
+type OpenDevice = (Option<String>, Arc<VulkanBackend>);
+
+/// The GPU page devices of `config` under [`BackendPolicy::ForceVulkan`],
+/// with the selector each is opened with: `session`, the session's own
+/// device, for the entry that names it (or for
+/// [`crate::SessionConfig::vulkan_device`] when
+/// [`crate::SessionConfig::gpu_devices`] is empty), each other one opened
+/// now.
 ///
 /// # Errors
 ///
-/// As [`selectors`]; under `ForceVulkan`, as
-/// [`crate::vk_init::init_vk_backend`].
+/// As [`selectors`] and [`crate::vk_init::init_vk_backend`].
+fn forced_backends(
+    config: &crate::SessionConfig,
+    session: &Arc<VulkanBackend>,
+) -> Result<Vec<OpenDevice>, RasterError> {
+    if config.gpu_devices.is_empty() {
+        return Ok(vec![(config.vulkan_device.clone(), Arc::clone(session))]);
+    }
+    let own = Some(session.device_index().to_string());
+    selectors(config)?
+        .into_iter()
+        .map(|s| {
+            if s == own {
+                return Ok((s, Arc::clone(session)));
+            }
+            crate::vk_init::init_vk_backend(BackendPolicy::ForceVulkan, s.as_deref())?
+                .map(|b| (s, b))
+                .ok_or_else(|| {
+                    RasterError::BackendUnavailable(
+                        "the Vulkan backend opened no GPU page device".to_owned(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// The GPU page devices of `config` opened now, beside `session`, the
+/// session's own device: under [`BackendPolicy::ForceVulkan`] every one
+/// ([`forced_backends`]), or the error of the first that does not open;
+/// under `Auto` with [`crate::SessionConfig::gpu_pages`] those that open,
+/// each that does not being logged at `error`; otherwise none.
+///
+/// # Errors
+///
+/// As [`selectors`]; under `ForceVulkan`, as [`forced_backends`].
 pub(crate) fn open_all(
     config: &crate::SessionConfig,
+    session: Option<&Arc<VulkanBackend>>,
 ) -> Result<Vec<Arc<VulkanBackend>>, RasterError> {
     if !config.gpu_pages {
         return Ok(Vec::new());
     }
-    let selectors = selectors(config)?;
-    match config.policy {
-        BackendPolicy::ForceVulkan => selectors
-            .iter()
-            .filter_map(|s| {
-                crate::vk_init::init_vk_backend(config.policy, s.as_deref()).transpose()
-            })
-            .collect(),
-        BackendPolicy::Auto => Ok(selectors
+    match (config.policy, session) {
+        (BackendPolicy::ForceVulkan, Some(session)) => Ok(forced_backends(config, session)?
+            .into_iter()
+            .map(|(_, backend)| backend)
+            .collect()),
+        (BackendPolicy::Auto, _) => Ok(selectors(config)?
             .iter()
             .filter_map(|s| open_device(s.as_deref()))
             .collect()),
@@ -150,15 +185,13 @@ pub(crate) fn open_all(
 impl DevicePages {
     /// The GPU pages of a session opened with `config` that holds
     /// `backend`: `None` unless the config asks for them.  Under
-    /// [`BackendPolicy::ForceVulkan`] the devices are open: `backend` when
-    /// [`crate::SessionConfig::gpu_devices`] is empty, else each listed
-    /// device, `backend` for its own device and the others opened now;
-    /// otherwise each is opened when a page first asks for one.
+    /// [`BackendPolicy::ForceVulkan`] the devices are open
+    /// ([`forced_backends`]); otherwise each is opened when a page first
+    /// asks for one.
     ///
     /// # Errors
     ///
-    /// As [`selectors`]; under `ForceVulkan`, as
-    /// [`crate::vk_init::init_vk_backend`].
+    /// As [`selectors`]; under `ForceVulkan`, as [`forced_backends`].
     pub(crate) fn for_session(
         config: &crate::SessionConfig,
         backend: Option<&Arc<VulkanBackend>>,
@@ -166,28 +199,15 @@ impl DevicePages {
         if !config.gpu_pages {
             return Ok(None);
         }
-        let selectors = selectors(config)?;
-        let devices = match (backend, config.gpu_devices.is_empty()) {
-            (Some(backend), true) => vec![Device::open(
-                config.vulkan_device.clone(),
-                Arc::clone(backend),
-            )],
-            (Some(session), false) => selectors
+        let devices = match backend {
+            Some(session) => forced_backends(config, session)?
                 .into_iter()
-                .map(|s| {
-                    if s == Some(session.device_index().to_string()) {
-                        return Ok(Device::open(s, Arc::clone(session)));
-                    }
-                    crate::vk_init::init_vk_backend(BackendPolicy::ForceVulkan, s.as_deref())?
-                        .map(|b| Device::open(s, b))
-                        .ok_or_else(|| {
-                            RasterError::BackendUnavailable(
-                                "the Vulkan backend opened no GPU page device".to_owned(),
-                            )
-                        })
-                })
-                .collect::<Result<_, _>>()?,
-            (None, _) => selectors.into_iter().map(Device::deferred).collect(),
+                .map(|(s, b)| Device::open(s, b))
+                .collect(),
+            None => selectors(config)?
+                .into_iter()
+                .map(Device::deferred)
+                .collect(),
         };
         Ok(Some(Self::new(devices)))
     }
