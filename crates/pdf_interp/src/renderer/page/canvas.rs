@@ -228,6 +228,17 @@ impl PageCanvas {
         })
     }
 
+    /// Return the canvas's storage to the buffers of `buffers` for its
+    /// kind.
+    pub(super) fn reclaim_into(self, buffers: &mut CanvasBuffers) {
+        match self {
+            Self::Rgb(b) => buffers.rgb.reclaim(b),
+            Self::Rgb16(b) => buffers.rgb16.reclaim(b),
+            Self::Ink(b) => buffers.ink.reclaim(b),
+            Self::Ink16(b) => buffers.ink16.reclaim(b),
+        }
+    }
+
     /// Paint every sample of the opaque canvas paper white.
     pub(super) fn paint_paper(&mut self) {
         fn fill<P: Pixel>(bitmap: &mut Bitmap<P>) {

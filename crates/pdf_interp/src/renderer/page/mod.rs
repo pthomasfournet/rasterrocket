@@ -247,7 +247,8 @@ pub(super) const MAX_WARNED_UNKNOWN_OPS: usize = 256;
 /// [`PageRenderer::try_with_page_group_in`] builds the page's canvas in
 /// them, and [`PageRenderer::try_finish_keeping`] returns those the
 /// finished bitmap does not hold: the ink canvas, and the alpha plane of a
-/// page group composited onto paper.  Reclaiming the bitmap's own storage
+/// page group composited onto paper.  [`PageRenderer::into_buffers`]
+/// returns all of them from a page that is not finished.  Reclaiming the bitmap's own storage
 /// into [`rgb`](Self::rgb) ([`raster::BitmapBuffers::reclaim`]) completes
 /// the set for the next page.
 #[derive(Debug, Default)]
@@ -1316,6 +1317,21 @@ impl<'doc> PageRenderer<'doc> {
             finished.zero_transparent_colour();
         }
         Ok((finished, Self::finish_diagnostics(diag, ink_map), buffers))
+    }
+
+    /// The storage the renderer holds, the canvas's among it, for a page
+    /// that is not finished: the [`CanvasBuffers`] the next renderer is
+    /// built in.  The samples it holds are not a canvas: a renderer built
+    /// in it paints every sample before it reads one.
+    #[must_use]
+    pub fn into_buffers(self) -> CanvasBuffers {
+        let Self {
+            canvas,
+            mut buffers,
+            ..
+        } = self;
+        canvas.reclaim_into(&mut buffers);
+        buffers
     }
 
     /// The finished canvas, with the storage not in it, the ink map, shared

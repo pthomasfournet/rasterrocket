@@ -46,8 +46,12 @@ use crate::{
 /// rejected before anything is drawn.
 ///
 /// The methods take `&mut self`: a thread rendering pages in parallel keeps
-/// its own `PageBuffer`.  A render that fails releases the canvas, which
-/// the next render allocates again.
+/// its own `PageBuffer`.  A render that fails keeps the storage for the
+/// next render, which paints the canvas anew, when it fails while the page
+/// is drawn: cancelled, over its operator budget or deadline, refused a
+/// bitmap the drawing needs, or for a strict session's failure.  A render
+/// whose page canvas or finished bitmap cannot be allocated releases it,
+/// and the next render allocates it again.
 #[derive(Debug, Default)]
 pub struct PageBuffer {
     /// The page canvas's storage between renders.
@@ -365,6 +369,47 @@ mod tests {
         render(&mut buffer, 2);
         assert_eq!(buffer.canvas.ink.data.as_ptr(), ink, "ink canvas reused");
         assert_eq!(buffer.canvas.rgb.alpha.as_ptr(), alpha, "alpha plane kept");
+    }
+
+    /// A cancelled render keeps the canvas, and the next render paints it
+    /// anew: its pixels are those of a render on a fresh buffer.
+    #[test]
+    fn a_failed_render_keeps_the_canvas() {
+        let config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        let session = open_session_from_bytes(group_and_overprint_pages(), &config).unwrap();
+        let opts = RasterOptions::new(72.0);
+        let render = |buffer: &mut PageBuffer, opts: &RasterOptions, out: &mut [u8]| {
+            buffer
+                .render_rgba_into(&session, 1, opts, out, 50 * 4)
+                .map(|info| (info.width, info.height))
+        };
+        let mut want = vec![0; 50 * 40 * 4];
+        assert_eq!(
+            render(&mut PageBuffer::new(), &opts, &mut want).unwrap(),
+            (50, 40)
+        );
+
+        let mut buffer = PageBuffer::new();
+        let mut out = vec![0; 50 * 40 * 4];
+        assert_eq!(render(&mut buffer, &opts, &mut out).unwrap(), (50, 40));
+        let canvas = buffer.canvas.rgb.data.as_ptr();
+        let cancel = crate::CancelToken::new();
+        cancel.cancel();
+        let cancelled = RasterOptions {
+            cancel: Some(cancel),
+            ..RasterOptions::new(72.0)
+        };
+        assert!(matches!(
+            render(&mut buffer, &cancelled, &mut out),
+            Err(RasterError::Cancelled)
+        ));
+        assert!(buffer.canvas.rgb.data.capacity() >= 50 * 40 * 3);
+        assert_eq!(buffer.canvas.rgb.data.as_ptr(), canvas, "canvas kept");
+
+        out.fill(7);
+        assert_eq!(render(&mut buffer, &opts, &mut out).unwrap(), (50, 40));
+        assert_eq!(buffer.canvas.rgb.data.as_ptr(), canvas, "canvas reused");
+        assert_eq!(out, want);
     }
 
     #[test]

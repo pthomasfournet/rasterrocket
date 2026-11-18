@@ -644,16 +644,22 @@ fn render_job(
     let (session, params) = (job.session, job.params);
     let (page_num, page_id) = (job.page_num, job.page_id);
     #[cfg(feature = "vulkan")]
-    let (mut renderer, device_page) = crate::device_pages::render(job, std::mem::take(buffers))?;
+    let (mut renderer, device_page) = crate::device_pages::render(job, buffers)?;
     #[cfg(not(feature = "vulkan"))]
-    let mut renderer = job.run(std::mem::take(buffers))?;
+    let mut renderer = job.run(buffers)?;
 
     // A budget breach takes precedence over image failures: the page may not
     // have finished rendering at all.
-    check_aborted(&renderer)?;
+    if let Err(e) = check_aborted(&renderer) {
+        *buffers = renderer.into_buffers();
+        return Err(e);
+    }
     log_failures(page_num, &content_failures);
     renderer.record_content_failures(content_failures);
-    check_strict(session, &renderer)?;
+    if let Err(e) = check_strict(session, &renderer) {
+        *buffers = renderer.into_buffers();
+        return Err(e);
+    }
     log_failures(page_num, renderer.image_failures());
 
     let (mut bitmap, mut diag, spare) = renderer
@@ -945,14 +951,30 @@ impl<'a> PageJob<'a> {
         Ok(())
     }
 
-    /// A renderer that has executed the page.
+    /// A renderer that has executed the page, built in the storage of
+    /// `buffers`, which an execution that fails returns there.
     pub(crate) fn run(
         &self,
-        buffers: CanvasBuffers,
+        buffers: &mut CanvasBuffers,
     ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
-        let mut renderer = self.renderer(buffers)?;
-        self.execute(&mut renderer)?;
-        Ok(renderer)
+        let renderer = self.renderer(std::mem::take(buffers))?;
+        self.executed(renderer, buffers)
+    }
+
+    /// `renderer` once it has executed the page (see [`Self::execute`]);
+    /// when that fails, its storage is returned to `buffers`.
+    pub(crate) fn executed(
+        &self,
+        mut renderer: pdf_interp::renderer::PageRenderer<'a>,
+        buffers: &mut CanvasBuffers,
+    ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
+        match self.execute(&mut renderer) {
+            Ok(()) => Ok(renderer),
+            Err(e) => {
+                *buffers = renderer.into_buffers();
+                Err(e)
+            }
+        }
     }
 }
 

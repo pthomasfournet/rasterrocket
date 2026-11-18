@@ -3190,6 +3190,15 @@ so the GPU rotation is not byte-identical to the CPU's, as every other GPU
 path is; that would take a CUDA kernel of the CPU's arithmetic in place of
 NPP.
 
+**Unreleased on master: a failed `PageBuffer` render keeps its canvas.**
+A render cancelled, stopped by its operator budget or deadline, refused a
+bitmap the drawing needs, or failed by a strict session returns the page
+canvas's storage to the `PageBuffer` instead of dropping it, so the next
+render does not allocate the page again; that render paints every sample anew. Only a page canvas or
+finished bitmap the allocator refuses is still released.
+`PageRenderer::into_buffers` in `rasterrocket-interp` returns an unfinished
+renderer's storage.
+
 **Unreleased on master: gray and alpha over a transparent backdrop.**
 `--transparent --gray`, refused before, writes a gray and alpha PNG (colour
 type 4) or TIFF (a gray and an unassociated-alpha sample, `ExtraSamples` 2)

@@ -502,7 +502,7 @@ pub(crate) fn record(
 /// As [`PageJob::run`].
 pub(crate) fn render<'a>(
     job: &PageJob<'a>,
-    buffers: CanvasBuffers,
+    buffers: &mut CanvasBuffers,
 ) -> Result<(PageRenderer<'a>, DevicePage), RasterError> {
     let Some(pages) = job.session.device_pages.as_ref() else {
         return Ok((job.run(buffers)?, DevicePage::NotOffered));
@@ -532,20 +532,20 @@ pub(crate) fn render<'a>(
     };
     // The device paints every sample of the canvas; a page it does not
     // paint is painted paper white first.
-    let mut renderer = job.unpainted_renderer(buffers)?;
+    let mut renderer = job.unpainted_renderer(std::mem::take(buffers))?;
     if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
         drop(claim);
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
         pages.count(Outcome::Ineligible(reason));
         renderer.paint_paper();
-        job.execute(&mut renderer)?;
+        let renderer = job.executed(renderer, buffers)?;
         return Ok((renderer, DevicePage::Ineligible(reason)));
     }
     #[cfg(test)]
     if let Some(token) = TestFaults::take(&pages.faults.cancel_recording) {
         token.cancel();
     }
-    job.execute(&mut renderer)?;
+    let mut renderer = job.executed(renderer, buffers)?;
     let recording = renderer.take_device_recording();
     if renderer.budget_status().is_some() {
         pages.count(Outcome::Stopped);
@@ -582,17 +582,9 @@ pub(crate) fn render<'a>(
     #[cfg(test)]
     let _ = pages.faults.cpu_reruns.fetch_add(1, Ordering::Relaxed);
     let fallback = renderer.take_device_fallback();
-    let buffers = renderer.try_finish_keeping(false).map_or_else(
-        |_| CanvasBuffers::default(),
-        |(canvas, _, mut spare)| {
-            canvas.reclaim_into(&mut spare);
-            spare
-        },
-    );
-    let mut cpu = job.renderer(buffers)?;
+    let mut cpu = job.renderer(renderer.into_buffers())?;
     cpu.resume_after_device(fallback);
-    job.execute(&mut cpu)?;
-    Ok((cpu, outcome))
+    Ok((job.executed(cpu, buffers)?, outcome))
 }
 
 #[cfg(test)]
