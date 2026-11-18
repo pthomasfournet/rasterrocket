@@ -6,26 +6,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use pdf_raster::{
-    BackendPolicy, PageDiagnostics, RenderParams, SessionConfig, open_session_from_bytes,
+    BackendPolicy, RenderParams, SessionConfig, open_session_from_bytes,
     render_page_rgb_with_diagnostics, rgb_into_gray,
 };
 
 /// Outcome of one rep: pages rendered, wall microseconds, and how many pages
 /// reported diagnostics (a skipped image or content stream, a form past the
 /// depth limit, a missing font, an unsupported feature).
+#[derive(Debug)]
 pub(crate) struct Rep {
     pub pages: u32,
     pub wall_us: u64,
     pub degraded: u32,
-}
-
-/// Whether a page rendered with something left out or substituted.
-fn is_degraded(d: &PageDiagnostics) -> bool {
-    !(d.image_failures.is_empty()
-        && d.content_failures.is_empty()
-        && d.forms_too_deep.is_empty()
-        && d.missing_fonts.is_empty()
-        && d.unsupported_features.is_empty())
 }
 
 /// A document and the inclusive page range to render.  A bare path covers
@@ -122,19 +114,10 @@ fn micros(start: Instant) -> u64 {
 
 /// Open the document from memory and render its range with `threads` workers.
 /// The file is read before the clock starts; the session open is timed.
-/// Returns (pages rendered, wall microseconds).  With `page_times`, each
+/// Returns the pages rendered and wall microseconds.  With `page_times`, each
 /// page's render time is appended as (page, microseconds).
+/// Pages that reported omissions are counted, not failed.
 pub(crate) fn library_rep(
-    doc: &DocRange,
-    dpi: f64,
-    threads: usize,
-    page_times: Option<&mut Vec<(u32, u64)>>,
-) -> Result<(u32, u64), String> {
-    library_rep_diag(doc, dpi, threads, page_times).map(|r| (r.pages, r.wall_us))
-}
-
-/// [`library_rep`] that also counts the pages that reported diagnostics.
-pub(crate) fn library_rep_diag(
     doc: &DocRange,
     dpi: f64,
     threads: usize,
@@ -169,7 +152,7 @@ pub(crate) fn library_rep_diag(
                     match render_page_rgb_with_diagnostics(&session, page, &params) {
                         Ok((bitmap, diag)) => {
                             drop(bitmap);
-                            if is_degraded(&diag) {
+                            if diag.has_omissions() {
                                 degraded.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -216,14 +199,9 @@ pub(crate) fn library_rep_diag(
 }
 
 /// Render each page, convert to gray outside the clock, and time only the
-/// CPU deskew, summed over pages.  Returns (pages, summed microseconds).  The
+/// CPU deskew, summed over pages (`wall_us` is that sum).  The
 /// timed span covers skew detection and, where a skew is found, the rotation.
-pub(crate) fn deskew_rep(doc: &DocRange, dpi: f64) -> Result<(u32, u64), String> {
-    deskew_rep_diag(doc, dpi).map(|r| (r.pages, r.wall_us))
-}
-
-/// [`deskew_rep`] that also counts the pages that reported diagnostics.
-pub(crate) fn deskew_rep_diag(doc: &DocRange, dpi: f64) -> Result<Rep, String> {
+pub(crate) fn deskew_rep(doc: &DocRange, dpi: f64) -> Result<Rep, String> {
     let bytes = doc.read()?;
     let name = doc.file_name();
     let session =
@@ -236,7 +214,7 @@ pub(crate) fn deskew_rep_diag(doc: &DocRange, dpi: f64) -> Result<Rep, String> {
     for page in first..=last {
         let (rgb, diag) = render_page_rgb_with_diagnostics(&session, page, &params)
             .map_err(|e| format!("{name} page {page}: {e}"))?;
-        degraded += u32::from(is_degraded(&diag));
+        degraded += u32::from(diag.has_omissions());
         let mut gray = rgb_into_gray(rgb);
         let start = Instant::now();
         pdf_raster::deskew::apply(&mut gray, BackendPolicy::CpuOnly)
@@ -349,11 +327,12 @@ mod tests {
     fn library_rep_renders_every_page_of_an_in_memory_pdf() {
         let path = fixture("all");
         let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
-        let (pages, wall_us) = library_rep(&doc, 72.0, 2, None).unwrap();
+        let r = library_rep(&doc, 72.0, 2, None).unwrap();
+        let (pages, wall_us) = (r.pages, r.wall_us);
         assert_eq!(pages, 2);
         assert!(wall_us > 0);
         let mut v = Vec::new();
-        let (pages, _) = library_rep(&doc, 72.0, 2, Some(&mut v)).unwrap();
+        let pages = library_rep(&doc, 72.0, 2, Some(&mut v)).unwrap().pages;
         assert_eq!(pages, 2);
         let mut nums: Vec<u32> = v.iter().map(|&(p, _)| p).collect();
         nums.sort_unstable();
@@ -396,7 +375,20 @@ mod tests {
     fn a_clean_document_reports_no_degraded_pages() {
         let path = fixture("clean");
         let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
-        assert_eq!(library_rep_diag(&doc, 72.0, 2, None).unwrap().degraded, 0);
+        assert_eq!(library_rep(&doc, 72.0, 2, None).unwrap().degraded, 0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_page_selecting_an_undefined_font_counts_as_degraded() {
+        let pdf = String::from_utf8(two_page_pdf())
+            .unwrap()
+            .replace("10 10 m 90 90 l S", "BT /F9 12 Tf 10 50 Td (x) Tj ET");
+        let path = fixture("nofont");
+        std::fs::write(&path, pdf).unwrap();
+        let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
+        let r = library_rep(&doc, 72.0, 1, None).unwrap();
+        assert_eq!((r.pages, r.degraded), (2, 1));
         cleanup(&path);
     }
 
@@ -404,7 +396,7 @@ mod tests {
     fn doc_range_last_is_clamped_to_the_page_count() {
         let path = fixture("clamp");
         let doc = DocRange::parse(&format!("{}:1-9", path.display())).unwrap();
-        let (pages, _) = library_rep(&doc, 72.0, 1, None).unwrap();
+        let pages = library_rep(&doc, 72.0, 1, None).unwrap().pages;
         assert_eq!(pages, 2);
         cleanup(&path);
     }

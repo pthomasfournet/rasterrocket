@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use library::{DocRange, Sample, deskew_rep_diag, library_rep_diag};
+use library::{DocRange, Sample, deskew_rep, library_rep};
 
 /// Parsed `library` command line.
 struct LibraryArgs {
@@ -106,9 +106,9 @@ fn run_library(args: &LibraryArgs) -> Result<(), String> {
             let mut times = Vec::new();
             let (r, threads) = if args.deskew {
                 // Detection runs on the global pool; the row times one worker.
-                (deskew_rep_diag(doc, args.dpi)?, 1)
+                (deskew_rep(doc, args.dpi)?, 1)
             } else {
-                let r = library_rep_diag(
+                let r = library_rep(
                     doc,
                     args.dpi,
                     args.threads,
