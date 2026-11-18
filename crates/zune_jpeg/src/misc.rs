@@ -413,3 +413,29 @@ pub fn fill_default_mjpeg_tables(
         );
     }
 }
+
+/// The environment variable that, set to any value, keeps decodes off the
+/// AVX-512 kernels, so that the AVX2 kernels can be checked end to end on
+/// a CPU that has both.  Read once per process.
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    feature = "x86",
+    feature = "std"
+))]
+pub(crate) const NO_AVX512_ENV: &str = "ZUNE_JPEG_NO_AVX512";
+
+/// Whether the AVX-512 kernels may run: `options` allows AVX2, the CPU has
+/// AVX-512 F and BW, and [`NO_AVX512_ENV`] is not set.  A kernel that needs
+/// a further extension checks it beside this.
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    feature = "x86",
+    feature = "std"
+))]
+pub(crate) fn avx512_allowed(options: &zune_core::options::DecoderOptions) -> bool {
+    static OPTED_OUT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    options.use_avx2()
+        && is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw")
+        && !*OPTED_OUT.get_or_init(|| std::env::var_os(NO_AVX512_ENV).is_some())
+}

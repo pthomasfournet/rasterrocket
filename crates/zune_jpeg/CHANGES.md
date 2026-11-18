@@ -185,7 +185,12 @@ unless the entry says otherwise.
   `upsampler/avx512.rs`; output unchanged). Chosen at run time, with the
   `std` feature, where AVX2 is allowed (`DecoderOptions::use_avx2`) and
   the CPU has AVX-512 F and BW (and VBMI for the colour conversion);
-  otherwise the AVX2 tier as before. Each computes the AVX2 tier's
+  otherwise the AVX2 tier as before. The three dispatchers share one gate,
+  `misc::avx512_allowed`, which the environment variable
+  `ZUNE_JPEG_NO_AVX512` (any value, read once per process) closes, so that
+  the AVX2 tier runs end to end on a CPU that has both; the whole test
+  suite passes either way on an AVX-512 machine. Every AVX-512 kernel is an
+  `unsafe fn` the dispatcher wraps in a closure. Each computes the AVX2 tier's
   operations per sample on 512-bit vectors: the 8×8 IDCT holds two rows
   to a register, its passes regrouped (wrapping sums do not depend on
   their order) and its transposes eight `vpermt2d` each; YCbCr to RGB

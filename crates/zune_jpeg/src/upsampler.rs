@@ -99,15 +99,9 @@ mod neon;
 mod portable_simd;
 mod scalar;
 
-/// Whether the AVX-512 filters may run: AVX2 is allowed and the CPU has
-/// AVX-512 F and BW.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[cfg(all(feature = "x86", feature = "std"))]
-fn avx512_allowed(options: &DecoderOptions) -> bool {
-    options.use_avx2()
-        && is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw")
-}
+use crate::misc::avx512_allowed;
 
 // choose the best possible implementation for this platform
 #[allow(unused_variables)]

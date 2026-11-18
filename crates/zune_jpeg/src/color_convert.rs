@@ -108,7 +108,14 @@ pub fn choose_ycbcr_to_rgb_convert_func(
 /// has one: AVX-512 (F, BW and VBMI) to RGB, where AVX2 is allowed.  Its
 /// output equals that of [`choose_ycbcr_to_rgb_convert_func`]'s conversion
 /// of the two halves.
-#[allow(unused_variables)]
+#[cfg_attr(
+    not(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        feature = "x86",
+        feature = "std"
+    )),
+    expect(unused_variables, reason = "used only by the x86 AVX-512 branch")
+)]
 pub fn choose_ycbcr_to_rgb_convert_func_32(
     type_need: ColorSpace,
     options: &DecoderOptions,
@@ -120,12 +127,14 @@ pub fn choose_ycbcr_to_rgb_convert_func_32(
     ))]
     {
         if type_need == ColorSpace::RGB
-            && options.use_avx2()
-            && is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw")
+            && crate::misc::avx512_allowed(options)
             && is_x86_feature_detected!("avx512vbmi")
         {
-            return Some(avx512::ycbcr_to_rgb_avx512);
+            return Some(|y, cb, cr, out| {
+                // SAFETY: `avx512_allowed` holds only if AVX-512 F and BW are
+                // supported, and VBMI is checked beside it.
+                unsafe { avx512::ycbcr_to_rgb_avx512(y, cb, cr, out) }
+            });
         }
     }
     None

@@ -63,13 +63,10 @@ pub fn choose_idct_func(options: &DecoderOptions) -> IDCTPtr {
     #[cfg(feature = "x86")]
     {
         #[cfg(feature = "std")]
-        if options.use_avx2()
-            && is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw")
-        {
+        if crate::misc::avx512_allowed(options) {
             debug!("Using AVX-512 integer IDCT");
             return |a: &mut [i32; 64], b: &mut [i16], c: usize| {
-                // SAFETY: chosen only when the CPU supports AVX-512 F and BW.
+                // SAFETY: `avx512_allowed` holds only if AVX-512 F and BW are supported.
                 unsafe { avx512::idct_avx512(a, b, c) }
             };
         }

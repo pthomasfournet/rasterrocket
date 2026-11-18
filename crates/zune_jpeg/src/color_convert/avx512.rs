@@ -45,20 +45,19 @@ static RGB_INDEX: [[u8; 64]; 2] = [rgb_index(0), rgb_index(64)];
 
 /// Convert 32 YCbCr pixels to 96 bytes of RGB at the start of `out`.
 ///
-/// Handed out by [`super::choose_ycbcr_to_rgb_convert_func_32`] only when
-/// the CPU has AVX-512 F, BW and VBMI.
+/// # Safety
+/// The CPU must support AVX-512 F, BW and VBMI.
 ///
 /// # Panics
 /// When `out` is shorter than 96 bytes.
 #[inline(always)]
-pub fn ycbcr_to_rgb_avx512(y: &[i16; 32], cb: &[i16; 32], cr: &[i16; 32], out: &mut [u8]) {
+pub unsafe fn ycbcr_to_rgb_avx512(y: &[i16; 32], cb: &[i16; 32], cr: &[i16; 32], out: &mut [u8]) {
     let out: &mut [u8; 96] = out
         .get_mut(..96)
         .expect("Slice to small cannot write")
         .try_into()
         .unwrap();
-    // SAFETY: the dispatcher hands this function out only when the CPU
-    // supports AVX-512 F, BW and VBMI.
+    // SAFETY: the caller guarantees AVX-512 F, BW and VBMI.
     unsafe { ycbcr_to_rgb_avx512_inner(y, cb, cr, out) }
 }
 
@@ -146,7 +145,8 @@ mod tests {
                     let cb: [i16; 32] = core::array::from_fn(|i| (cb0 + i as i16 * 37) & 255);
                     let cr: [i16; 32] = core::array::from_fn(|i| (cr0 + i as i16 * 101) & 255);
                     let mut got = [0xa5_u8; 100];
-                    ycbcr_to_rgb_avx512(y, &cb, &cr, &mut got);
+                    // SAFETY: `supported` checked AVX-512 F, BW and VBMI.
+                    unsafe { ycbcr_to_rgb_avx512(y, &cb, &cr, &mut got) };
                     assert_eq!(got[96..], [0xa5; 4]);
                     let mut want = [0_u8; 128];
                     for half in 0..2 {
