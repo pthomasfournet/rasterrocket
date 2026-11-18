@@ -594,15 +594,20 @@ pub(super) fn blend<S: Sample>(src: S, dst: S, alpha: S) -> S {
     S::from_wide((src.wide() * alpha.wide() + dst.wide() * ia) / S::max_wide())
 }
 
-/// Make the pixels of `region` transparent: colour and alpha zero.
+/// Make the pixels of `region` transparent: colour and alpha zero, and no
+/// channels painted when the bitmap tracks them.
 pub(super) fn clear<P: Pixel>(bitmap: &mut Bitmap<P>, region: PixelRect) {
     let PixelRect { x0, y0, x1, y1 } = region;
     let n = P::NCOMPS;
+    let (x0, x1) = (x0 as usize, x1 as usize);
     for y in y0..y1 {
-        let (row, alpha) = bitmap.row_and_alpha_mut(y);
-        row[x0 as usize * n..x1 as usize * n].fill(P::Sample::default());
+        let (row, alpha, painted) = bitmap.row_planes_mut(y);
+        row[x0 * n..x1 * n].fill(P::Sample::default());
         if let Some(alpha) = alpha {
-            alpha[x0 as usize..x1 as usize].fill(P::Sample::default());
+            alpha[x0..x1].fill(P::Sample::default());
+        }
+        if let Some(painted) = painted {
+            painted[x0..x1].fill(0);
         }
     }
 }

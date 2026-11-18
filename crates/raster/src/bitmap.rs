@@ -547,7 +547,8 @@ impl<P: Pixel> Bitmap<P> {
 
     // ── Bulk operations ───────────────────────────────────────────────────────
 
-    /// Fill the entire bitmap with a solid colour and an alpha value.
+    /// Fill the entire bitmap with a solid colour and an alpha value; a
+    /// painted-channels plane is reset to no channels.
     ///
     /// `alpha` is ignored if the bitmap has no alpha plane.
     pub fn clear(&mut self, color: P, alpha: P::Sample) {
@@ -578,6 +579,9 @@ impl<P: Pixel> Bitmap<P> {
         if let Some(ref mut a) = self.alpha {
             a.fill(alpha);
         }
+        if let Some(painted) = &mut self.painted {
+            painted.fill(0);
+        }
     }
 
     /// Total sample count of the colour data buffer (its byte size for an
@@ -607,7 +611,8 @@ impl<P: Pixel> Bitmap<P> {
 
     /// Consume the bitmap and return its colour buffer and alpha plane for
     /// reuse by [`Bitmap::try_new_filled_in`]; the alpha buffer is empty
-    /// when the bitmap has no alpha plane.
+    /// when the bitmap has no alpha plane.  A painted-channels plane is
+    /// dropped.
     #[must_use]
     pub fn into_buffers(self) -> BitmapBuffers<P::Sample> {
         BitmapBuffers {
@@ -644,7 +649,8 @@ impl<P: Pixel> Bitmap<P> {
     /// The bitmap's pixels with every sample on the scale of `Q`'s samples
     /// ([`Sample::from_sample`]): the same values at the same depth,
     /// widened exactly from 8 bits, narrowed to the nearest 8-bit level.
-    /// Packed, without the alpha plane.  `Q` has the components of `P`.
+    /// Packed, without the alpha plane or the painted-channels plane.  `Q`
+    /// has the components of `P`.
     #[must_use]
     pub fn converted<Q: Pixel>(&self) -> Bitmap<Q> {
         const { assert!(P::NCOMPS == Q::NCOMPS, "a conversion keeps the components") };
@@ -661,9 +667,10 @@ impl<P: Pixel> Bitmap<P> {
     }
 
     /// The bitmap's pixels and alpha plane with every sample on the scale
-    /// of `Q`'s samples, as [`Self::converted`] maps them, in a bitmap of
-    /// rows padded to 1 built in `buffers` ([`Self::try_new_filled_in`]).
-    /// `Q` has the components of `P`.
+    /// of `Q`'s samples, as [`Self::converted`] maps them, and its
+    /// painted-channels plane as it is, in a bitmap of rows padded to 1
+    /// built in `buffers` ([`Self::try_new_filled_in`]).  `Q` has the
+    /// components of `P`.
     ///
     /// # Errors
     ///
@@ -692,6 +699,17 @@ impl<P: Pixel> Bitmap<P> {
             for (d, &s) in to.iter_mut().zip(from) {
                 *d = Q::Sample::from_sample(s);
             }
+        }
+        if let Some(from) = self.painted_plane() {
+            let mut painted = Vec::new();
+            painted
+                .try_reserve_exact(from.len())
+                .map_err(|_| BitmapAllocError {
+                    width: self.width,
+                    height: self.height,
+                })?;
+            painted.extend_from_slice(from);
+            out.painted = Some(painted);
         }
         Ok(out)
     }
@@ -823,6 +841,20 @@ mod tests {
         let mut bm = Bitmap::<Rgb8>::new(0, 3, 1, true);
         bm.clear(Rgb8 { r: 1, g: 2, b: 3 }, 9);
         assert_eq!(bm.data_len(), 0);
+    }
+
+    #[test]
+    fn clear_resets_and_conversion_keeps_the_painted_channels() {
+        use color::{Gray8, Gray16};
+        let mut bm = Bitmap::<Gray8>::new(2, 1, 1, true);
+        bm.track_painted().unwrap();
+        bm.painted_row_mut(0).unwrap().copy_from_slice(&[0b101, 0]);
+        let wide = bm
+            .try_converted_in::<Gray16>(BitmapBuffers::default())
+            .unwrap();
+        assert_eq!(wide.painted_plane(), Some(&[0b101, 0][..]));
+        bm.clear(Gray8 { v: 0 }, 0);
+        assert_eq!(bm.painted_plane(), Some(&[0, 0][..]));
     }
 
     #[test]
