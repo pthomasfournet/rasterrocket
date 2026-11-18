@@ -73,7 +73,7 @@ impl DocRange {
     }
 
     /// The effective inclusive range once the page count is known.
-    fn clamp(&self, total: u32) -> Result<(u32, u32), String> {
+    pub(crate) fn clamp(&self, total: u32) -> Result<(u32, u32), String> {
         let last = self.last.min(total);
         if self.first > last {
             return Err(format!(

@@ -5,16 +5,24 @@
 //!     [--page-times FILE] PDF[:FIRST-LAST]...` — in-memory library renders;
 //!     one tab-separated sample line per rep and document on stdout.
 //!
+//!   - `process --group G --row R --rrocket PATH --dpi D --threads N --reps K
+//!     (--disk DIR | --ram ROOT | --none) [--invocations M] [--expect-pages]
+//!     [PDF[:FIRST-LAST]...] [-- EXTRA...]` — child-process rows.
+//!
 //! The caller sets `RAYON_NUM_THREADS`; the harness never does.
 
 mod library;
+mod process;
 
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use library::{DocRange, Sample, deskew_rep, library_rep};
+use pdf_raster::{BackendPolicy, SessionConfig, open_session};
+use process::{Sink, process_rep, rrocket_argv};
 
 /// Parsed `library` command line.
 struct LibraryArgs {
@@ -144,13 +152,194 @@ fn run_library(args: &LibraryArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Parsed `process` command line.
+struct ProcessArgs {
+    group: String,
+    row: String,
+    rrocket: PathBuf,
+    dpi: u32,
+    threads: usize,
+    reps: u32,
+    /// `None` for `--none`.
+    sink: Option<Sink>,
+    invocations: u32,
+    expect_pages: bool,
+    docs: Vec<DocRange>,
+    extra: Vec<OsString>,
+}
+
+/// Empty directory whose `p` prefix RAM rows hand the child as its spill
+/// fallback, under the bench output directory.
+fn spill_dir() -> PathBuf {
+    PathBuf::from("target").join("os-bench").join("spill")
+}
+
+fn parse_process(mut args: impl Iterator<Item = String>) -> Result<ProcessArgs, String> {
+    let (mut group, mut row, mut rrocket, mut dpi, mut threads, mut reps) =
+        (None, None, None, None, None, None);
+    let mut sink: Option<Option<Sink>> = None;
+    let mut invocations = None;
+    let mut expect_pages = false;
+    let mut docs = Vec::new();
+    let mut extra = Vec::new();
+    let mut set_sink = |s: Option<Sink>, flag: &str| {
+        if sink.replace(s).is_some() {
+            Err(format!("{flag}: only one of --disk, --ram, --none"))
+        } else {
+            Ok(())
+        }
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => {
+                extra.extend(args.by_ref().map(OsString::from));
+            }
+            "--group" => group = Some(value(&mut args, &arg)?),
+            "--row" => row = Some(value(&mut args, &arg)?),
+            "--rrocket" => rrocket = Some(PathBuf::from(value(&mut args, &arg)?)),
+            "--dpi" => dpi = Some(number::<u32>(&value(&mut args, &arg)?, &arg)?),
+            "--threads" => threads = Some(number::<usize>(&value(&mut args, &arg)?, &arg)?),
+            "--reps" => reps = Some(number::<u32>(&value(&mut args, &arg)?, &arg)?),
+            "--invocations" => invocations = Some(number::<u32>(&value(&mut args, &arg)?, &arg)?),
+            "--expect-pages" => expect_pages = true,
+            "--disk" => {
+                let dir = PathBuf::from(value(&mut args, &arg)?);
+                set_sink(Some(Sink::Disk { dir }), &arg)?;
+            }
+            "--ram" => {
+                let root = PathBuf::from(value(&mut args, &arg)?);
+                set_sink(
+                    Some(Sink::Ram {
+                        root,
+                        spill: spill_dir(),
+                    }),
+                    &arg,
+                )?;
+            }
+            "--none" => set_sink(None, &arg)?,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}")),
+            _ => docs.push(DocRange::parse(&arg)?),
+        }
+    }
+    let sink = sink.ok_or("one of --disk, --ram, --none is required")?;
+    let dpi = dpi.ok_or("--dpi is required")?;
+    let threads = threads.ok_or("--threads is required")?;
+    let reps = reps.ok_or("--reps is required")?;
+    let invocations = invocations.unwrap_or(1);
+    if dpi == 0 || threads == 0 || reps == 0 || invocations == 0 {
+        return Err("--dpi, --threads, --reps and --invocations must be at least 1".to_owned());
+    }
+    if sink.is_none() && !docs.is_empty() {
+        return Err("--none runs rrocket with EXTRA alone; no PDF may be given".to_owned());
+    }
+    if sink.is_some() && docs.is_empty() {
+        return Err("no PDF given".to_owned());
+    }
+    if sink.is_none() && expect_pages {
+        return Err("--expect-pages needs a PDF".to_owned());
+    }
+    Ok(ProcessArgs {
+        group: group.ok_or("--group is required")?,
+        row: row.ok_or("--row is required")?,
+        rrocket: rrocket.ok_or("--rrocket is required")?,
+        dpi,
+        threads,
+        reps,
+        sink,
+        invocations,
+        expect_pages,
+        docs,
+        extra,
+    })
+}
+
+fn run_process(args: &ProcessArgs) -> Result<(), String> {
+    let emit = |doc: &str, pages: u32, rep: u32, wall_us: u64| {
+        let sample = Sample {
+            group: args.group.clone(),
+            row: args.row.clone(),
+            doc: doc.to_owned(),
+            pages,
+            threads: args.threads,
+            rep,
+            wall_us,
+        };
+        println!("{}", sample.tsv_line());
+    };
+    let Some(sink) = &args.sink else {
+        // No document: one child run per invocation, nothing to count.
+        for rep in 1..=args.reps {
+            let mut sum = 0u64;
+            for _ in 0..args.invocations {
+                sum += process_rep(&args.rrocket, &args.extra, None, None)?;
+            }
+            emit(
+                "-",
+                args.invocations,
+                rep,
+                sum / u64::from(args.invocations),
+            );
+        }
+        return Ok(());
+    };
+    if let Sink::Ram { root, .. } = sink {
+        std::fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    }
+    for doc in &args.docs {
+        let name = doc.file_name();
+        // The page count is read before any clock starts.
+        let total = open_session(
+            &doc.path,
+            &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+        )
+        .map_err(|e| format!("{name}: {e}"))?
+        .total_pages();
+        let (first, last) = doc.clamp(total)?;
+        let range_pages = last - first + 1;
+        let expect = match sink {
+            Sink::Disk { .. } => args.expect_pages.then_some(range_pages),
+            Sink::Ram { .. } => Some(0),
+        };
+        for rep in 1..=args.reps {
+            let mut sum = 0u64;
+            for n in 0..args.invocations {
+                let (command, out_dir) =
+                    rrocket_argv(doc, args.dpi, args.threads, sink, rep, n, &args.extra);
+                if let Sink::Ram { root, .. } = sink {
+                    let fresh = root.join(format!("r{rep}-{n}"));
+                    if fresh.exists() {
+                        return Err(format!("{}: RAM path already exists", fresh.display()));
+                    }
+                }
+                sum += process_rep(&args.rrocket, &command, Some(&out_dir), expect)
+                    .map_err(|e| format!("{name} rep {rep}: {e}"))?;
+            }
+            if args.invocations > 1 {
+                emit(
+                    &name,
+                    args.invocations,
+                    rep,
+                    sum / u64::from(args.invocations),
+                );
+            } else {
+                emit(&name, range_pages, rep, sum);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("library") => parse_library(args).and_then(|a| run_library(&a)),
+        Some("process") => parse_process(args).and_then(|a| run_process(&a)),
         _ => Err(
             "usage: os_bench library --group G --row R --dpi D --threads N --reps K \
-             [--deskew] [--page-times FILE] PDF[:FIRST-LAST]..."
+             [--deskew] [--page-times FILE] PDF[:FIRST-LAST]...\n       \
+             os_bench process --group G --row R --rrocket PATH --dpi D --threads N --reps K \
+             (--disk DIR | --ram ROOT | --none) [--invocations M] [--expect-pages] \
+             [PDF[:FIRST-LAST]...] [-- EXTRA...]"
                 .to_owned(),
         ),
     };
