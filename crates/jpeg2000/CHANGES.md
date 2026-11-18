@@ -134,6 +134,19 @@ byte-identical on the benchmark images and passes the full test suite.
   dpi, 24 threads: 0.70 s → 0.66 s and 0.76 s → 0.74 s in two interleaved
   10-run sets; one thread 3.74 s → 3.61 s. No change at 150 dpi, where the
   images are decoded reduced.
+- `mct::into_rgb8_impl` and `ComponentData::shifted_u8` (the fused paths of
+  `decode_u8`): round blocks of 16 pixels through upstream's
+  `math::round_and_interleave` (scale 1, three-way interleave for RGB, one
+  channel for gray) instead of `round_to_u8` per sample; the last
+  `pixels % 16` take the scalar rounding as before. `to_u8` clamps to
+  [0, 255] (NaN to 0) and truncates, as the saturating cast of `round_to_u8`
+  does, and scale 1 leaves every sample unchanged, so the bytes are the
+  same. Checked on 246 codestreams extracted from two fixtures and two
+  scanned books (FNV-1a hash of each output at full size and at a third of
+  each side: identical) and by the `decode_u8` equivalence test. `decode_u8`
+  on one core: 48 RGB 9-7 codestreams of a scanned book 2 271 → 2 060 ms
+  (reduced: 541 → 475 ms), 63 gray codestreams of a layered scan 232 →
+  202 ms (83 → 75 ms), 40 RGB photographs 558 → 528 ms (312 → 305 ms).
 
 ## Truncation report
 

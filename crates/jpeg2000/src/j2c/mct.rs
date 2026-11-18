@@ -123,13 +123,45 @@ fn into_rgb8_impl<S: Simd>(
     s2: &[f32],
     out: &mut [u8],
 ) {
+    // Blocks of 16 pixels: two chunks of eight through the inverse, then
+    // `round_and_interleave`, whose bytes equal `round_to_u8`'s (scale 1
+    // leaves every sample unchanged).
+    let blocks = out.len() / 3 / 16;
+    let (head, tail) = out.split_at_mut(blocks * 16 * 3);
+    for (((y0, y1), y2), rgb) in s0
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(s1.as_chunks::<16>().0)
+        .zip(s2.as_chunks::<16>().0)
+        .zip(head.as_chunks_mut::<{ 16 * 3 }>().0)
+    {
+        let mut planes = [[0.0_f32; 16]; 3];
+        for half in [0, 8] {
+            let inverse = inverse_chunk(
+                simd,
+                pending,
+                f32x8::from_slice(simd, &y0[half..half + 8]),
+                f32x8::from_slice(simd, &y1[half..half + 8]),
+                f32x8::from_slice(simd, &y2[half..half + 8]),
+            );
+            for (plane, v) in planes.iter_mut().zip(inverse) {
+                v.store(&mut plane[half..]);
+            }
+        }
+        let [r, g, b] = &planes;
+        math::round_and_interleave(simd, [r, g, b], 1.0, rgb);
+    }
+
+    let done = blocks * 16;
+    let (s0, s1, s2) = (&s0[done..], &s1[done..], &s2[done..]);
     for (((y0, y1), y2), rgb) in s0
         .as_chunks::<8>()
         .0
         .iter()
         .zip(s1.as_chunks::<8>().0)
         .zip(s2.as_chunks::<8>().0)
-        .zip(out.chunks_mut(8 * 3))
+        .zip(tail.chunks_mut(8 * 3))
     {
         let [i0, i1, i2] = inverse_chunk(
             simd,

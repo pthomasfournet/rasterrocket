@@ -13,6 +13,9 @@ mod segment;
 mod tag_tree;
 mod tile;
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::jp2::ImageBoxes;
 use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
 use crate::error::{FormatError, MarkerError, Result, TileError, ValidationError, bail};
@@ -20,7 +23,7 @@ use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
 
-use crate::math::{SIMD_WIDTH, SimdBuffer};
+use crate::math::{Level, SIMD_WIDTH, Simd, SimdBuffer, dispatch, f32x8};
 pub(crate) use bitplane::BITPLANE_BIT_SIZE;
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
@@ -65,10 +68,34 @@ impl ComponentData {
     /// `DecodedImage::data_u8` rounds a single 8-bit component.  Each byte
     /// is the one adding `offset` in place and then converting would give.
     pub(crate) fn shifted_u8(&self, offset: f32) -> Vec<u8> {
-        self.samples()
-            .iter()
-            .map(|&v| crate::math::round_to_u8(v + offset))
-            .collect()
+        let samples = self.samples();
+        let mut out = vec![0_u8; samples.len()];
+        dispatch!(Level::new(), simd => shifted_u8_impl(simd, samples, offset, &mut out));
+        out
+    }
+}
+
+/// `samples` plus `offset`, rounded to `out` as `round_to_u8` rounds: blocks
+/// of 16 through `round_and_interleave` (whose bytes equal
+/// `round_to_u8`'s; scale 1 leaves every sample unchanged), the rest one by
+/// one.
+#[inline(always)]
+fn shifted_u8_impl<S: Simd>(simd: S, samples: &[f32], offset: f32, out: &mut [u8]) {
+    let blocks = samples.len().min(out.len()) / 16 * 16;
+    for (block, out) in samples[..blocks]
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<16>().0)
+    {
+        let mut shifted = [0.0_f32; 16];
+        for half in [0, 8] {
+            (f32x8::from_slice(simd, &block[half..half + 8]) + offset).store(&mut shifted[half..]);
+        }
+        crate::math::round_and_interleave(simd, [&shifted], 1.0, out);
+    }
+    for (&v, out) in samples[blocks..].iter().zip(&mut out[blocks..]) {
+        *out = crate::math::round_to_u8(v + offset);
     }
 }
 
