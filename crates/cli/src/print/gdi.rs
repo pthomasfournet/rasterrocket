@@ -647,6 +647,18 @@ mod tests {
         assert_eq!(device.after_merge((Some(3), Some(true))), device);
         assert_eq!(device.after_merge((Some(1), Some(true))), Copies::Replay(3));
         assert_eq!(device.after_merge((Some(3), None)), Copies::Replay(3));
+        // Sent again stays sent again, whatever a later answer holds: the
+        // upright and the turned sheet's answers are both applied.
+        assert_eq!(
+            Copies::Replay(3).after_merge((Some(1), Some(true))),
+            Copies::Replay(3)
+        );
+        assert_eq!(
+            device
+                .after_merge((Some(3), Some(true)))
+                .after_merge((Some(1), Some(true))),
+            Copies::Replay(3)
+        );
         assert_eq!(
             Copies::Device(1).after_merge((None, None)),
             Copies::Device(1)

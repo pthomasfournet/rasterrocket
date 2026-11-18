@@ -509,44 +509,60 @@ fn info_surface(printer: &Printer, devmode: &DevMode) -> Result<Surface, String>
     result
 }
 
-/// The driver's DEVMODE for the job `settings` describes on an upright
-/// sheet, and how its copies are made, once the driver's answer is
-/// checked: two-sided printing it dropped is refused, copies it did not
-/// keep are sent again, and paper it did not take is refused.
+/// Refuse a merged DEVMODE of the driver of `printer` that dropped the
+/// two-sided printing or the paper `settings` asks for.
+///
+/// # Errors
+///
+/// The message naming the printer and the setting dropped.
+fn check_merged(printer: &str, settings: &Settings, merged: &DevMode) -> Result<(), String> {
+    gdi::check_duplex_merged(printer, settings.duplex, merged.duplex())?;
+    match settings.paper {
+        Some(paper) if merged.paper() != Some(paper) => Err(format!(
+            "the driver of {printer:?} did not take paper {paper}: it holds {:?}",
+            merged.paper()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The driver's DEVMODEs for the job `settings` describes on an upright
+/// and on a turned sheet, and how its copies are made, once each of the
+/// driver's answers is checked ([`check_merged`]): copies either answer did
+/// not keep are sent again, the request then asking the driver for one.
 fn settle(
     printer: &Printer,
     settings: &Settings,
     claims: Claims,
-) -> Result<(DevMode, Copies), String> {
+) -> Result<(DevMode, DevMode, Copies), String> {
     let name = &printer.name;
     let mut copies = Copies::plan(settings.copies, claims);
     let mut request = printer.devmode(None)?;
-    request.ask(settings, copies);
-    let mut merged = printer.devmode(Some(&request))?;
-    gdi::check_duplex_merged(name, settings.duplex, merged.duplex())?;
-    let kept = copies.after_merge(merged.copies());
-    if kept != copies {
-        copies = kept;
+    loop {
         request.ask(settings, copies);
-        merged = printer.devmode(Some(&request))?;
+        let portrait = printer.devmode(Some(&request))?;
+        let mut turned = portrait.clone();
+        turned.set_orientation(Orientation::Landscape);
+        let landscape = printer.devmode(Some(&turned))?;
+        check_merged(name, settings, &portrait)?;
+        check_merged(name, settings, &landscape)?;
+        let kept = copies
+            .after_merge(portrait.copies())
+            .after_merge(landscape.copies());
+        if kept == copies {
+            if copies.passes() > 1 {
+                log::info!(
+                    "{name:?} makes at most {} copies, collated: {}; the pages are sent {} \
+                     times",
+                    claims.max_copies,
+                    claims.collate,
+                    copies.passes()
+                );
+            }
+            return Ok((portrait, landscape, copies));
+        }
+        copies = kept;
     }
-    if let Some(paper) = settings.paper
-        && merged.paper() != Some(paper)
-    {
-        return Err(format!(
-            "the driver of {name:?} did not take paper {paper}: it holds {:?}",
-            merged.paper()
-        ));
-    }
-    if copies.passes() > 1 {
-        log::info!(
-            "{name:?} makes at most {} copies, collated: {}; the pages are sent {} times",
-            claims.max_copies,
-            claims.collate,
-            copies.passes()
-        );
-    }
-    Ok((merged, copies))
 }
 
 /// A device context on `printer` under `devmode`.
@@ -765,10 +781,7 @@ impl Job {
         let claims = printer.claims(&port);
         log::debug!("{name:?} on port {port}: {claims:?}");
         gdi::check_duplex_claimed(&name, settings.duplex, claims.duplex)?;
-        let (portrait, copies) = settle(&printer, settings, claims)?;
-        let mut turned = portrait.clone();
-        turned.set_orientation(Orientation::Landscape);
-        let landscape = printer.devmode(Some(&turned))?;
+        let (portrait, landscape, copies) = settle(&printer, settings, claims)?;
         let landscape_surface = info_surface(&printer, &landscape)?;
         let dc = create_dc(&printer, &portrait)?;
         let mut job = Self {
