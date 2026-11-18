@@ -4,7 +4,7 @@
 
 The `rasterrocket` crate is the integration entry point. It wraps `rasterrocket-interp` and `rasterrocket-render` behind a simple, stable API.
 
-**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `DevicePage`, `ImageFilter`, `PixelFormat`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageInfo`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `GlyphCounts` (an output); `ColorModel`, `OutputProfileError` and `OutputIntentError` (match them with a `_` arm); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle, `Rotation` a closed set of quarter turns and `InvalidRotation` carries the rejected degrees; all three stay exhaustive, as do `Pixels`, `SampleDepth`, `FinishedCanvas`, `BandBitmap`, `Band`, `BandError`, `CanvasLayout`, `RenderingIntent`, `ProofIntent`, `IntentSet` and `OutputSpace`. `BackendPolicy::name()` is the inverse of its `FromStr`.
+**Extensibility.** These public types are `#[non_exhaustive]`, so fields and variants can be added in a minor release: `RasterError`, `BackendPolicy`, `RenderPurpose`, `PageBox`, `FormType`, `UnsupportedFeature`, `ScriptLocation`, `MediaKind`, `DevicePage`, `ImageFilter`, `PixelFormat`, `GcvError` (match them with a `_` arm); `RenderedPage`, `PageInfo`, `PageDiagnostics`, `ImageFailure`, `ContentFailure`, `PageGeometry`, `GcvImage` (outputs: read their fields, do not construct them); `GlyphCounts` and `DevicePageCounts` (outputs); `ColorModel`, `OutputProfileError` and `OutputIntentError` (match them with a `_` arm); `RasterOptions`, `SessionConfig`, `RenderParams`, `GcvBudget` (inputs: start from `RasterOptions::new(dpi)`, `SessionConfig::with_policy`, `RenderParams::new`, or `Default`, then assign fields). `RenderRegion` is a plain rectangle, `Rotation` a closed set of quarter turns and `InvalidRotation` carries the rejected degrees; all three stay exhaustive, as do `Pixels`, `SampleDepth`, `FinishedCanvas`, `BandBitmap`, `Band`, `BandError`, `CanvasLayout`, `RenderingIntent`, `ProofIntent`, `IntentSet` and `OutputSpace`. `BackendPolicy::name()` is the inverse of its `FromStr`.
 
 ---
 
@@ -395,6 +395,8 @@ impl RasterSession {
     pub fn page_size_px(&self, page_num: u32, dpi: f32) -> Result<(u32, u32), RasterError>
     #[cfg(feature = "cache")]
     pub const fn image_cache(&self) -> Option<&gpu::cache::ImageCache>  // diagnostics; CUDA or Vulkan
+    #[cfg(feature = "vulkan")]
+    pub fn device_page_counts(&self) -> Option<DevicePageCounts>     // where gpu_pages sent each page; None without gpu_pages
     // doc() and resolve_page() are #[doc(hidden)] — use prescan_session instead
 }
 ```
@@ -670,6 +672,8 @@ pub enum DevicePage {
 ```
 
 Every `DevicePage` outcome yields the same bytes. The reasons `Ineligible` names: before interpretation, `"overprint simulation"` (an ink canvas), `"page group"`, `"aliased vector paint"`, `"the wide working space"`, `"shading"` (`sh`) and `"Type 3 glyph"` (a CharProc's `d0`/`d1`, which only a Type 3 glyph's own description runs); while recording, `"pattern"`, `"blend mode"` (other than `Normal`), `"transparency group"` (a form), `"translucent hairline"`, `"translucent fill and stroke"`, `"image transfer function"`, `"image sampling range"`, `"device-resident image"` (an image-cache image whose host copy cannot be read), `"aliased path clip"`, `"soft mask depth"`, `"soft mask range"`, `"outline range"`, `"command list size"` (more than `PAGE_COMMANDS_MAX_BYTES`, 128 MiB, of device inputs) and `"command list allocation"`.
+
+`RasterSession::device_page_counts()` (`vulkan` feature) totals the session's pages so far as a `DevicePageCounts` (`#[non_exhaustive]`, an output): `rendered` (on the device), `ineligible` (`Vec<(&'static str, u32)>`, by the reasons above, in order of first occurrence), the `NotOffered` pages split into `busy` (both device slots held), `opening` (the device not yet open), `no_device` (it did not open), `retired` (after a device error) and `stopped` (a recording stopped by the work budget, deadline or cancellation), and `failed`. `cpu()` sums the pages rendered on the CPU; `Display` gives the line the session logs at `info` when it drops, e.g. `121 on the device, 480 on the CPU (device busy: 242, device opening: 238)`. `None` for a session without `gpu_pages`.
 
 ```rust
 #[non_exhaustive]

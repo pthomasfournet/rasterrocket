@@ -3157,6 +3157,18 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: where GPU pages went.** A `--gpu-pages` session
+counts every page under the place it rendered and why:
+`RasterSession::device_page_counts()` (`vulkan` feature) returns a
+`DevicePageCounts` of pages the device rendered, pages ineligible by reason,
+pages that found the device busy, still opening, never opened or retired,
+pages it failed on and recordings stopped by a budget or cancellation. The
+session logs the counts at `info` when it drops (`rasterrocket: GPU pages:
+121 on the device, 480 on the CPU (device busy: 242, device opening: 238)`
+for `corpus-05` at 300 dpi on the RTX 5070), and each page sent to the CPU
+logs why at `debug`. Before, a page that found the device busy or not yet
+open went to the CPU without a log line.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

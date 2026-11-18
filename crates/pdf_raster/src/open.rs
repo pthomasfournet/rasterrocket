@@ -235,6 +235,18 @@ impl RasterSession {
         self.image_cache.as_ref()
     }
 
+    /// Where the pages rendered so far went, on the GPU page device or the
+    /// CPU and why ([`SessionConfig::gpu_pages`]); `None` when the session
+    /// renders no GPU pages.  The same counts are logged at `info` when
+    /// the session drops.
+    #[cfg(feature = "vulkan")]
+    #[must_use]
+    pub fn device_page_counts(&self) -> Option<crate::DevicePageCounts> {
+        self.device_pages
+            .as_ref()
+            .map(crate::device_pages::DevicePages::counts)
+    }
+
     /// Resolve a 1-based page number to its [`pdf::ObjectId`].
     ///
     /// Each call performs one logarithmic page-tree descent.  Per-render

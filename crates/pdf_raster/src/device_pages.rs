@@ -17,6 +17,9 @@
 //! renders on the CPU.  A page too large for the device's limits renders
 //! on the CPU and leaves the device in service.
 //!
+//! Where every page offered went is counted for the session
+//! ([`DevicePageCounts`]) and logged at `info` when the session drops.
+//!
 //! [`SessionConfig::gpu_pages`]: crate::SessionConfig::gpu_pages
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -47,6 +50,8 @@ pub(crate) struct DevicePages {
     /// Set once a page of the wide working space has been rendered on the
     /// CPU in its place.
     wide_declined: AtomicBool,
+    /// Where the pages offered went.
+    counts: Mutex<DevicePageCounts>,
     /// Test hooks.
     #[cfg(test)]
     faults: TestFaults,
@@ -63,6 +68,152 @@ enum Opener {
     /// Nothing to open or to join: the device came with the session, or
     /// its opening could not start.
     Settled,
+}
+
+/// Where the pages of a GPU-page session went
+/// ([`RasterSession::device_page_counts`](crate::RasterSession::device_page_counts)).
+///
+/// Every page the session rendered, or stopped rendering, is counted once,
+/// under the first of these that applies to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DevicePageCounts {
+    /// Pages the device rendered.
+    pub rendered: u32,
+    /// Pages painting with something the GPU page raster does not render,
+    /// by reason, in the order each reason first occurred; rendered on the
+    /// CPU.
+    pub ineligible: Vec<(&'static str, u32)>,
+    /// Pages rendered on the CPU while the most pages the device takes at
+    /// once held it.
+    pub busy: u32,
+    /// Pages rendered on the CPU while the device was being opened.
+    pub opening: u32,
+    /// Pages rendered on the CPU because the device did not open.
+    pub no_device: u32,
+    /// Pages rendered on the CPU after a device error retired the device.
+    pub retired: u32,
+    /// Pages the device failed on, or which exceed its limits; rendered on
+    /// the CPU.
+    pub failed: u32,
+    /// Pages whose recording stopped on their work budget, deadline or
+    /// cancellation; neither the device nor the CPU completed them.
+    pub stopped: u32,
+}
+
+impl DevicePageCounts {
+    /// Pages rendered on the CPU: every page counted but those the device
+    /// rendered and those stopped.
+    #[must_use]
+    pub fn cpu(&self) -> u32 {
+        self.ineligible
+            .iter()
+            .fold(0u32, |n, &(_, k)| n.saturating_add(k))
+            .saturating_add(self.busy)
+            .saturating_add(self.opening)
+            .saturating_add(self.no_device)
+            .saturating_add(self.retired)
+            .saturating_add(self.failed)
+    }
+
+    /// Count one page under `outcome`.
+    fn add(&mut self, outcome: Outcome) {
+        let slot = match outcome {
+            Outcome::Rendered => &mut self.rendered,
+            Outcome::Ineligible(reason) => {
+                let i = self
+                    .ineligible
+                    .iter()
+                    .position(|&(r, _)| r == reason)
+                    .unwrap_or_else(|| {
+                        self.ineligible.push((reason, 0));
+                        self.ineligible.len() - 1
+                    });
+                &mut self.ineligible[i].1
+            }
+            Outcome::Missed(Miss::Busy) => &mut self.busy,
+            Outcome::Missed(Miss::Opening) => &mut self.opening,
+            Outcome::Missed(Miss::NoDevice) => &mut self.no_device,
+            Outcome::Missed(Miss::Retired) => &mut self.retired,
+            Outcome::Failed => &mut self.failed,
+            Outcome::Stopped => &mut self.stopped,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
+impl std::fmt::Display for DevicePageCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} on the device, {} on the CPU",
+            self.rendered,
+            self.cpu()
+        )?;
+        let misses = [
+            ("device busy", self.busy),
+            ("device opening", self.opening),
+            ("no device", self.no_device),
+            ("device retired", self.retired),
+            ("device failed", self.failed),
+        ];
+        let mut parts = self
+            .ineligible
+            .iter()
+            .copied()
+            .chain(misses)
+            .filter(|&(_, n)| n > 0)
+            .peekable();
+        if parts.peek().is_some() {
+            f.write_str(" (")?;
+            for (i, (what, n)) in parts.enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{what}: {n}")?;
+            }
+            f.write_str(")")?;
+        }
+        if self.stopped > 0 {
+            write!(f, "; {} stopped", self.stopped)?;
+        }
+        Ok(())
+    }
+}
+
+/// Why [`DevicePages::try_claim`] did not give the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Miss {
+    /// [`IN_FLIGHT`] pages hold the device.
+    Busy,
+    /// The device is being opened.
+    Opening,
+    /// The device did not open.
+    NoDevice,
+    /// A device error retired the device.
+    Retired,
+}
+
+impl Miss {
+    /// The miss as the page's debug log names it.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::Busy => "the device is busy",
+            Self::Opening => "the device is being opened",
+            Self::NoDevice => "the device did not open",
+            Self::Retired => "the device is retired",
+        }
+    }
+}
+
+/// Where one page went, as [`DevicePageCounts`] counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Rendered,
+    Ineligible(&'static str),
+    Missed(Miss),
+    Failed,
+    Stopped,
 }
 
 /// See [`DevicePages::faults`].
@@ -147,6 +298,7 @@ impl DevicePages {
             in_flight: AtomicUsize::new(0),
             retired: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
+            counts: Mutex::new(DevicePageCounts::default()),
             #[cfg(test)]
             faults: TestFaults::default(),
         }
@@ -183,25 +335,42 @@ impl DevicePages {
     }
 
     /// The device, if it is open, in service and fewer than [`IN_FLIGHT`]
-    /// pages hold it.  A call before the device is open starts opening it.
-    pub(crate) fn try_claim(&self) -> Option<Claim<'_>> {
+    /// pages hold it, or why not.  A call before the device is open starts
+    /// opening it.
+    pub(crate) fn try_claim(&self) -> Result<Claim<'_>, Miss> {
         if self.retired.load(Ordering::Acquire) {
-            return None;
+            return Err(Miss::Retired);
         }
         let Some(device) = self.device.get() else {
             self.start_opening();
-            return None;
+            return Err(Miss::Opening);
         };
-        let backend = device.as_deref()?;
+        let backend = device.as_deref().ok_or(Miss::NoDevice)?;
         self.in_flight
             .try_update(Ordering::Acquire, Ordering::Relaxed, |n| {
                 (n < IN_FLIGHT).then_some(n + 1)
             })
-            .is_ok()
-            .then(|| Claim {
+            .map(|_| Claim {
                 pages: self,
                 backend,
             })
+            .map_err(|_| Miss::Busy)
+    }
+
+    /// Count one page under `outcome`.
+    fn count(&self, outcome: Outcome) {
+        self.counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add(outcome);
+    }
+
+    /// Where the pages offered so far went.
+    pub(crate) fn counts(&self) -> DevicePageCounts {
+        self.counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Account for the device failing on page `page_num` with `error`: a
@@ -238,6 +407,13 @@ impl DevicePages {
 
 impl Drop for DevicePages {
     fn drop(&mut self) {
+        let counts = self
+            .counts
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *counts != DevicePageCounts::default() {
+            log::info!("rasterrocket: GPU pages: {counts}");
+        }
         let opener = std::mem::replace(
             self.opener
                 .get_mut()
@@ -333,6 +509,7 @@ pub(crate) fn render<'a>(
     };
     if let Some(reason) = ruled_out(job) {
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+        pages.count(Outcome::Ineligible(reason));
         if let Some(warning) = (reason == WIDE)
             .then(|| pages.wide_declined(job.page_num))
             .flatten()
@@ -341,8 +518,17 @@ pub(crate) fn render<'a>(
         }
         return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
     }
-    let Some(claim) = pages.try_claim() else {
-        return Ok((job.run(buffers)?, DevicePage::NotOffered));
+    let claim = match pages.try_claim() {
+        Ok(claim) => claim,
+        Err(miss) => {
+            log::debug!(
+                "page {}: rendered on the CPU: {}",
+                job.page_num,
+                miss.describe()
+            );
+            pages.count(Outcome::Missed(miss));
+            return Ok((job.run(buffers)?, DevicePage::NotOffered));
+        }
     };
     // The device paints every sample of the canvas; a page it does not
     // paint is painted paper white first.
@@ -350,6 +536,7 @@ pub(crate) fn render<'a>(
     if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
         drop(claim);
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+        pages.count(Outcome::Ineligible(reason));
         renderer.paint_paper();
         job.execute(&mut renderer)?;
         return Ok((renderer, DevicePage::Ineligible(reason)));
@@ -361,6 +548,7 @@ pub(crate) fn render<'a>(
     job.execute(&mut renderer)?;
     let recording = renderer.take_device_recording();
     if renderer.budget_status().is_some() {
+        pages.count(Outcome::Stopped);
         renderer.paint_paper();
         return Ok((renderer, DevicePage::NotOffered));
     }
@@ -373,16 +561,19 @@ pub(crate) fn render<'a>(
                         "page {}: rendered on the GPU from {commands} commands",
                         job.page_num
                     );
+                    pages.count(Outcome::Rendered);
                     return Ok((renderer, DevicePage::Rendered { commands }));
                 }
                 Err(e) => {
                     pages.fail(job.page_num, &e);
+                    pages.count(Outcome::Failed);
                     DevicePage::Failed
                 }
             }
         }
         Some(DeviceRecording::Refused(reason)) => {
             log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+            pages.count(Outcome::Ineligible(reason));
             DevicePage::Ineligible(reason)
         }
         None => unreachable!("a renderer recording for the device yields its recording"),
@@ -410,7 +601,7 @@ mod tests {
 
     use gpu::backend::BackendError;
 
-    use super::{DevicePages, IN_FLIGHT, Opener};
+    use super::{DevicePageCounts, DevicePages, IN_FLIGHT, Miss, Opener, Outcome};
     use crate::test_pdf::{assemble, stream};
     use crate::{
         BackendPolicy, CancelToken, DevicePage, RasterError, RasterSession, RenderParams,
@@ -492,12 +683,12 @@ mod tests {
             .map(|_| pages.try_claim().expect("a free place"))
             .collect();
         for _ in 0..3 {
-            assert!(pages.try_claim().is_none(), "past IN_FLIGHT");
+            assert_eq!(pages.try_claim().err(), Some(Miss::Busy), "past IN_FLIGHT");
         }
         assert_eq!(pages.in_flight.load(Ordering::Relaxed), IN_FLIGHT);
         drop(claims.pop());
         let again = pages.try_claim().expect("a released place");
-        assert!(pages.try_claim().is_none(), "past IN_FLIGHT");
+        assert_eq!(pages.try_claim().err(), Some(Miss::Busy), "past IN_FLIGHT");
         drop((again, claims));
         assert_eq!(pages.in_flight.load(Ordering::Relaxed), 0);
     }
@@ -520,6 +711,9 @@ mod tests {
         let (later, outcome) = render(&session, 2, &params).expect("render");
         assert_eq!(outcome, DevicePage::NotOffered);
         assert_eq!(later, cpu(doc, 2));
+        let counts = session.device_page_counts().expect("a GPU-page session");
+        assert_eq!((counts.failed, counts.retired, counts.cpu()), (1, 1, 2));
+        assert_eq!(counts.rendered, 0);
     }
 
     /// A page beyond the device's limits renders on the CPU and leaves the
@@ -571,6 +765,9 @@ mod tests {
             Err(RasterError::Cancelled)
         ));
         assert_eq!(pages.faults.cpu_reruns.load(Ordering::Relaxed), 1);
+        let counts = pages.counts();
+        assert_eq!(counts.ineligible, [("translucent hairline", 1)]);
+        assert_eq!((counts.stopped, counts.cpu(), counts.rendered), (1, 1, 0));
     }
 
     /// Pages rendered at once by several threads each take the device or
@@ -611,6 +808,14 @@ mod tests {
                 .any(|o| matches!(o, DevicePage::Rendered { .. })),
             "{outcomes:?}"
         );
+        let on_device = outcomes
+            .iter()
+            .filter(|o| matches!(o, DevicePage::Rendered { .. }))
+            .count();
+        let counts = device_pages(&session).counts();
+        assert_eq!(counts.rendered as usize, on_device, "{counts}");
+        assert_eq!(counts.busy, counts.cpu(), "{counts}");
+        assert_eq!(counts.rendered + counts.busy, PAGES, "{counts}");
     }
 
     /// A page of the wide working space renders on the CPU, as a CPU
@@ -680,6 +885,7 @@ mod tests {
             matches!(*pages.opener.lock().expect("lock"), Opener::Deferred(_)),
             "the opening started"
         );
+        assert_eq!(pages.counts().ineligible, [("shading", 2)]);
     }
 
     /// Under `Auto`, the first page the device could take starts opening
@@ -705,16 +911,66 @@ mod tests {
         thread.join().expect("the opener");
         let device_open = matches!(pages.device.get(), Some(Some(_)));
         let (page, outcome) = render(&session, 2, &params).expect("render");
+        let counts = pages.counts();
+        assert_eq!(counts.opening, 1, "{counts}");
         if device_open {
             assert!(
                 matches!(outcome, DevicePage::Rendered { .. }),
                 "{outcome:?}"
             );
+            assert_eq!(counts.rendered, 1, "{counts}");
         } else {
             eprintln!("no Vulkan device opened");
             assert_eq!(outcome, DevicePage::NotOffered);
+            assert_eq!(counts.no_device, 1, "{counts}");
         }
         assert_eq!(page, cpu(doc, 2));
+    }
+
+    /// Each outcome is counted under its own field, ineligible pages by
+    /// reason in order of first occurrence, and the summary names every
+    /// non-zero count.
+    #[test]
+    fn counts_tally_and_summarise_every_outcome() {
+        let mut counts = DevicePageCounts::default();
+        assert_eq!(counts.to_string(), "0 on the device, 0 on the CPU");
+        for outcome in [
+            Outcome::Rendered,
+            Outcome::Rendered,
+            Outcome::Ineligible("shading"),
+            Outcome::Ineligible("translucent hairline"),
+            Outcome::Ineligible("shading"),
+            Outcome::Missed(Miss::Busy),
+            Outcome::Missed(Miss::Opening),
+            Outcome::Missed(Miss::NoDevice),
+            Outcome::Missed(Miss::Retired),
+            Outcome::Failed,
+            Outcome::Stopped,
+        ] {
+            counts.add(outcome);
+        }
+        assert_eq!(
+            counts.ineligible,
+            [("shading", 2), ("translucent hairline", 1)]
+        );
+        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 8, 1));
+        assert_eq!(
+            counts.to_string(),
+            "2 on the device, 8 on the CPU (shading: 2, translucent hairline: 1, \
+             device busy: 1, device opening: 1, no device: 1, device retired: 1, \
+             device failed: 1); 1 stopped"
+        );
+    }
+
+    /// A session without GPU pages has no counts.
+    #[test]
+    fn a_cpu_session_has_no_device_page_counts() {
+        let session = open_session_from_bytes(
+            pdf(&[DEVICE]),
+            &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+        )
+        .expect("CPU session");
+        assert_eq!(session.device_page_counts(), None);
     }
 
     /// GPU pages are refused at open without vector antialiasing, which

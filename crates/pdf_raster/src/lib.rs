@@ -187,6 +187,8 @@ pub mod dev {
 pub use bands::{Band, BandBitmap, BandError, render_page_bands};
 pub use color::SampleDepth;
 pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
+#[cfg(feature = "vulkan")]
+pub use device_pages::DevicePageCounts;
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};
 pub use gray::{rgb_into_gray, rgb_to_gray, rgb16_into_gray16, rgb16_to_gray16};
