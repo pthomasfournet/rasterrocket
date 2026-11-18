@@ -559,9 +559,7 @@ impl SlabAllocator {
         };
         if let Err(code) = bind_result {
             free_buffer(&self.inner, buffer, allocation, "create_and_bind rollback");
-            return Err(BackendError::msg(format!(
-                "vkBindBufferMemory failed: {code:?}"
-            )));
+            return Err(vk_err("vkBindBufferMemory")(code));
         }
 
         Ok((buffer, allocation))
