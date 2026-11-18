@@ -158,6 +158,18 @@ unless the entry says otherwise.
   markers between scans do. Test:
   `intact_rows::a_dnl_segment_after_the_first_scan_is_skipped`.
 
+- **A refinement correction bit past a marker is a counted fill bit.**
+  Every correction bit of a successive-approximation refinement (DC, AC,
+  and AC inside an end-of-band run) is read by
+  `BitStreamHuffman::refine_bit`: a refill that stops at a marker with no
+  bit left is followed by one that supplies counted fill bits, as past the
+  end of the data elsewhere, so the block's rows are not counted intact.
+  Upstream failed the scan there for the DC and AC reads (ending a decode
+  that is not strict with the scans before it drawn), and inside an
+  end-of-band run read the bit as an uncounted zero, which left a block
+  short of its last correction reported intact. Test:
+  `bitstream::refine_tests::a_correction_bit_past_a_marker_is_a_fill_bit`.
+
 - **`JpegDecoder::set_max_coefficient_bytes` (new API): a limit on the
   coefficients a frame holds whole.** A progressive frame, and a
   sequential frame whose components are coded in several scans, keep two

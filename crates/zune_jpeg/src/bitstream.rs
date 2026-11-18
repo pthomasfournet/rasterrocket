@@ -282,6 +282,25 @@ impl BitStreamHuffman {
         self.ac_run_past_block()
     }
 
+    /// The next correction bit of a successive-approximation refinement.
+    /// A refill that stops at a marker with no bit left is followed by one
+    /// that supplies counted fill bits (the marker being recorded), so a
+    /// correction bit read past the scan's data is a fill bit, as every
+    /// other bit read there, and the block's rows are not counted intact.
+    #[inline(always)]
+    fn refine_bit<T>(&mut self, reader: &mut ZReader<T>) -> Result<u8, DecodeErrors>
+    where
+        T: ZByteReaderTrait,
+    {
+        if self.bits_left < 1 {
+            self.refill(reader)?;
+            if self.bits_left < 1 {
+                self.refill(reader)?;
+            }
+        }
+        Ok(self.get_bit())
+    }
+
     #[cold]
     fn ac_run_past_block(&mut self) -> Result<usize, DecodeErrors> {
         if self.strict {
@@ -935,18 +954,7 @@ impl BitStream for BitStreamHuffman {
         T: ZByteReaderTrait,
     {
         // refinement scan
-        if self.bits_left < 1 {
-            self.refill(reader)?;
-            // if we find a marker, it may happens we don't refill.
-            // So let's confirm again that refill worked
-            if self.bits_left < 1 {
-                return Err(DecodeErrors::Format(
-                    "Marker found where not expected in refine bit".to_string(),
-                ));
-            }
-        }
-
-        if self.get_bit() == 1 {
+        if self.refine_bit(reader)? == 1 {
             *block = block.wrapping_add(self.successive_low_mask);
         }
 
@@ -1073,15 +1081,7 @@ impl BitStream for BitStreamHuffman {
                         let coefficient = &mut block[UN_ZIGZAG[k as usize & 63] & 63];
 
                         if *coefficient != 0 {
-                            if self.bits_left < 1 {
-                                self.refill(reader)?;
-                                if self.bits_left < 1 && self.marker.is_some() {
-                                    return Err(DecodeErrors::Format(
-                                        "Marker found where not expected in refine bit".to_string(),
-                                    ));
-                                }
-                            }
-                            if self.get_bit() == 1 && (*coefficient & bit) == 0 {
+                            if self.refine_bit(reader)? == 1 && (*coefficient & bit) == 0 {
                                 if *coefficient > 0 {
                                     *coefficient = coefficient.wrapping_add(bit);
                                 } else {
@@ -1127,11 +1127,8 @@ impl BitStream for BitStreamHuffman {
                     let coefficient = &mut block[UN_ZIGZAG[k as usize & 63] & 63];
 
                     if *coefficient != 0 {
-                        // Zero coefficients consume no correction bit, so do not refill for them.
-                        if self.bits_left < 1 {
-                            self.refill(reader)?;
-                        }
-                        if self.get_bit() == 1 {
+                        // Zero coefficients consume no correction bit.
+                        if self.refine_bit(reader)? == 1 {
                             // check if we already modified it, if so do nothing, otherwise
                             // append the correction bit.
                             if (*coefficient & bit) == 0 {
@@ -1197,6 +1194,46 @@ const fn has_byte(b: u32, val: u8) -> bool {
     // Retrieved from Stanford bithacks
     // @ https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
     has_zero(b ^ ((!0_u32 / 255) * (val as u32)))
+}
+
+#[cfg(test)]
+mod refine_tests {
+    use zune_core::bytestream::ZReader;
+
+    use super::{BitStream, BitStreamHuffman};
+    use crate::huffman::HuffmanTable;
+    use crate::misc::UN_ZIGZAG;
+
+    /// Refine, inside an end-of-band run, a block of `nonzero` nonzero AC
+    /// coefficients from 32 correction bits followed by a restart marker;
+    /// whether the decode then reports data short.
+    fn refine_before_marker(nonzero: usize) -> bool {
+        let data = [0, 0, 0, 0, 0xFF, 0xD0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut reader = ZReader::new(std::io::Cursor::new(&data[..]));
+        let mut codes = [0_u8; 17];
+        codes[1] = 1;
+        let mut table = HuffmanTable::new_unfilled(&codes, &[0], false, true).unwrap();
+        let mut block = [0_i16; 64];
+        for &pos in &UN_ZIGZAG[1..=nonzero] {
+            block[pos] = 2;
+        }
+        let before = block;
+        let mut stream = BitStreamHuffman::new_progressive(0, 1, 63);
+        stream.eob_run = 1;
+        assert!(stream
+            .decode_mcu_ac_refine(&mut reader, &mut table, &mut block)
+            .unwrap());
+        assert_eq!(block, before, "zero correction bits change nothing");
+        stream.take_data_short()
+    }
+
+    /// The 33rd correction bit of a block lies past the marker that ends
+    /// the scan's 32 bits: it is a counted fill bit, so the block is short.
+    #[test]
+    fn a_correction_bit_past_a_marker_is_a_fill_bit() {
+        assert!(!refine_before_marker(32));
+        assert!(refine_before_marker(33));
+    }
 }
 
 // mod tests {
