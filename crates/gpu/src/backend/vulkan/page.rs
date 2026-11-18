@@ -258,11 +258,28 @@ impl VulkanBackend {
     ) -> Result<()> {
         let mut laps = Laps::new(times.is_some());
         let (width, height) = (page.width() as usize, page.height() as usize);
-        let row = width * 3;
-        let row_bytes = row * S::DEPTH.bytes() as usize;
         if width == 0 || height == 0 {
             return Err(BackendError::msg("render_page: the page has no pixel"));
         }
+        let overflow = || {
+            BackendError::msg(format!(
+                "render_page: a {width}×{height} page of {}-bit samples at stride {stride} \
+                 exceeds the address space",
+                S::DEPTH.bits()
+            ))
+        };
+        // The samples of a row, the bytes of the packed page, and the
+        // samples of `out` the page spans: the last row ends `row` samples
+        // after the start of row `height - 1`.
+        let row = width.checked_mul(3).ok_or_else(overflow)?;
+        let row_bytes = row
+            .checked_mul(S::DEPTH.bytes() as usize)
+            .ok_or_else(overflow)?;
+        let page_len = row_bytes.checked_mul(height).ok_or_else(overflow)?;
+        let span = stride
+            .checked_mul(height - 1)
+            .and_then(|n| n.checked_add(row))
+            .ok_or_else(overflow)?;
         if page.depth() != S::DEPTH {
             return Err(BackendError::msg(format!(
                 "render_page: a {}-bit page does not render into {}-bit samples",
@@ -270,7 +287,7 @@ impl VulkanBackend {
                 S::DEPTH.bits()
             )));
         }
-        if stride < row || out.len() < stride * (height - 1) + row {
+        if stride < row || out.len() < span {
             return Err(BackendError::msg(format!(
                 "render_page: a {width}×{height} page does not fit {} samples at stride {stride}",
                 out.len()
@@ -288,11 +305,10 @@ impl VulkanBackend {
         };
         // Before any device buffer of the page is allocated: see
         // `host_pages`.
-        super::host_pages::populate_for_write(&mut out[..stride * (height - 1) + row]);
+        super::host_pages::populate_for_write(&mut out[..span]);
         let bins = page.bin().map_err(BackendError::new)?;
         let (table, bases) = page.table_parts();
         let push = push_constants(page, &bins, bases);
-        let page_len = row_bytes * height;
         let inputs: [(&'static str, &[&[u8]]); 5] = [
             ("render_page commands", &[bytemuck::cast_slice(page.cmds())]),
             ("render_page coverage table", &table),
@@ -774,6 +790,25 @@ mod tests {
             .render_page(&page, &mut out, 19 * 3)
             .expect("render_page");
         assert!(out.as_chunks::<3>().0.iter().all(|&p| p == [1, 2, 3]));
+    }
+
+    /// A stride whose span past the last row overflows `usize` is an
+    /// error naming the page, not a wrapped bound and a panicking slice.
+    #[test]
+    fn a_stride_past_the_address_space_is_refused() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let page = PageCommands::new(4, 3, SampleDepth::Eight, [1, 2, 3]);
+        let mut out = vec![0u8; 4 * 3 * 3];
+        let err = backend
+            .render_page(&page, &mut out, usize::MAX / 2 + 1)
+            .expect_err("an overflowing stride");
+        assert!(
+            err.to_string().contains("exceeds the address space"),
+            "{err}"
+        );
+        assert!(out.iter().all(|&s| s == 0), "out is unchanged");
     }
 
     #[test]
