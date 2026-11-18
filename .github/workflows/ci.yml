@@ -324,11 +324,14 @@ jobs:
 
       # The --print tests print to Microsoft Print to PDF where the runner
       # has it and skip otherwise; this shows which, and the printers.
+      # pipefail: the step fails with cargo, not with grep alone.
       - name: Printers and the Print to PDF tests (Windows)
         if: runner.os == 'Windows'
+        shell: bash
         run: |
+          set -o pipefail
           powershell -NoProfile -Command "Get-Printer | Format-Table -AutoSize Name, PortName, DriverName" || echo "the printers could not be listed"
-          cargo test -p rasterrocket-cli --bin rrocket -- print_to_pdf --nocapture 2>&1 | grep -E "ran$|skipped:|test result"
+          cargo test -p rasterrocket-cli --bin rrocket --test end_to_end -- print_to_pdf --nocapture 2>&1 | grep -E "ran$|skipped:|test result"
 
       - name: Test rasterrocket-parser
         if: runner.os == 'Windows'
