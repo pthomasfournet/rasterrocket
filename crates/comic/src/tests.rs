@@ -94,6 +94,50 @@ fn open_comic_yields_ordered_pages() {
     assert_eq!((p1.width, p1.height), (4, 4));
 }
 
+/// Pages taken as jobs and rendered on other threads, last first, equal
+/// the iterator's pages, for page images and for an embedded PDF.
+#[test]
+fn page_jobs_render_on_other_threads_as_the_iterator_does() {
+    let avif: &[u8] = include_bytes!("../tests/data/rgb-8x4.avif");
+    let images = make_cbz(&[
+        ("1.jpg", &jpeg_page(4, 4, 30)),
+        ("2.avif", avif),
+        ("3.jpg", &jpeg_page(6, 2, 220)),
+        ("4.jpg", b"not a jpeg after all"),
+    ]);
+    let pdf = make_cbz(&[("book.pdf", &minimal_pdf())]);
+    let summary = |page: &(u32, Result<RenderedPage, ComicError>)| match &page.1 {
+        Ok(p) => (
+            page.0,
+            Ok((p.width, p.height, p.pixels.as_u8().unwrap().to_vec())),
+        ),
+        Err(e) => (page.0, Err(e.to_string())),
+    };
+    for cbz in [images, pdf] {
+        let opts = ComicOptions::new(72.0);
+        let want: Vec<_> = open_comic_bytes("b.cbz", cbz.clone(), &opts)
+            .unwrap()
+            .map(|page| summary(&page))
+            .collect();
+        let mut pages = open_comic_bytes("b.cbz", cbz, &opts).unwrap();
+        let jobs: Vec<PageJob> = std::iter::from_fn(|| pages.next_job()).collect();
+        assert_eq!(pages.len(), 0);
+        let mut got: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .into_iter()
+                .rev()
+                .map(|job| scope.spawn(move || (job.page(), job.render())))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| summary(&h.join().unwrap()))
+                .collect()
+        });
+        got.reverse();
+        assert_eq!(got, want);
+    }
+}
+
 #[test]
 fn an_avif_page_renders_from_a_cbz() {
     // 8 × 4 lossless, pixel (30x, 60y, 255 − 30x): see avif-fixtures.py.

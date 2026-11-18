@@ -72,24 +72,99 @@ pub(crate) fn run(
     // any is decoded; `selected` is ascending.
     pages.retain(|page| i32::try_from(page).is_ok_and(|p| selected.binary_search(&p).is_ok()));
 
-    let mut written = 0usize;
-    let mut failed = 0usize;
-    for (page_num, result) in pages {
-        match result {
-            Ok(page) => match write_page(args, spill, page, total) {
-                Ok(()) => written += 1,
-                Err(e) => {
-                    eprintln!("rrocket: page {page_num}: {e}");
-                    failed += 1;
-                }
-            },
+    let pool = crate::render_pool(args.num_threads)
+        .map_err(|e| ComicError::BadArchive(format!("cannot start the render thread pool: {e}")))?;
+    let (mut written, mut failed) = (0usize, 0usize);
+    render_in_order(
+        &mut pages,
+        &pool,
+        |job| {
+            let page_num = job.page();
+            let outcome = job
+                .render()
+                .map_err(|e| e.to_string())
+                .and_then(|page| write_page(args, spill, page, total).map_err(|e| e.to_string()));
+            (page_num, outcome)
+        },
+        |(page_num, outcome)| match outcome {
+            Ok(()) => written += 1,
             Err(e) => {
                 eprintln!("rrocket: page {page_num}: {e}");
                 failed += 1;
             }
+        },
+    );
+    // As on the PDF path: each worker's GPU state (an embedded PDF's) is
+    // destroyed while its session is alive.
+    let _ = pool.broadcast(|_| pdf_raster::release_gpu_thread_state());
+    Ok((written, failed))
+}
+
+/// How many pages per pool thread may be taken past the first page whose
+/// outcome has not been reported.
+const PAGES_AHEAD_PER_THREAD: usize = 2;
+
+/// Run `work` on every remaining page of `pages` on `pool`, and hand each
+/// outcome to `report` on the calling thread in reading order.  A page is
+/// taken only while it lies fewer than [`PAGES_AHEAD_PER_THREAD`] × threads
+/// pages past the first unreported one, which bounds the pages (and their
+/// pixel buffers) held at once.  Once a page's `work` unwinds, no further
+/// page is taken or reported, and the pool's scope resumes the unwind when
+/// the pages in flight have finished.
+fn render_in_order<T: Send>(
+    pages: &mut comic::ComicPages,
+    pool: &rayon::ThreadPool,
+    work: impl Fn(comic::PageJob) -> T + Sync,
+    mut report: impl FnMut(T),
+) {
+    /// Sends its slot's outcome on drop: `None` if `work` unwound.
+    struct Slot<T> {
+        index: usize,
+        outcome: Option<T>,
+        tx: std::sync::mpsc::Sender<(usize, Option<T>)>,
+    }
+    impl<T> Drop for Slot<T> {
+        fn drop(&mut self) {
+            let _ = self.tx.send((self.index, self.outcome.take()));
         }
     }
-    Ok((written, failed))
+
+    let ahead = pool.current_num_threads().max(1) * PAGES_AHEAD_PER_THREAD;
+    let work = &work;
+    pool.in_place_scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut ready = std::collections::BTreeMap::new();
+        let (mut started, mut reported) = (0usize, 0usize);
+        loop {
+            while started < reported + ahead {
+                let Some(job) = pages.next_job() else { break };
+                let tx = tx.clone();
+                let index = started;
+                scope.spawn(move |_| {
+                    let mut slot = Slot {
+                        index,
+                        outcome: None,
+                        tx,
+                    };
+                    slot.outcome = Some(work(job));
+                });
+                started += 1;
+            }
+            if reported == started {
+                return;
+            }
+            // Every spawned slot sends exactly once, and `tx` outlives the
+            // loop, so `recv` returns while `reported < started`.
+            let Ok((index, Some(outcome))) = rx.recv() else {
+                return;
+            };
+            let _ = ready.insert(index, outcome);
+            while let Some(outcome) = ready.remove(&reported) {
+                report(outcome);
+                reported += 1;
+            }
+        }
+    });
 }
 
 /// Write the 8- or 16-bit luma [`RenderedPage`] `page` through the shared page writer

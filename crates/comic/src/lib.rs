@@ -32,9 +32,72 @@ use raster::Bitmap;
 /// embedded PDF is held whole and its pages rendered from it.  [`len`](ExactSizeIterator::len)
 /// is the number of pages still to be yielded, and [`retain`](Self::retain)
 /// drops pages before any of them is rendered.
+///
+/// [`next_job`](Self::next_job) takes the next page as a [`PageJob`]
+/// instead, which renders it on any thread; the iterator is
+/// `next_job` followed by [`PageJob::render`].
 pub struct ComicPages {
-    opts: ComicOptions,
+    opts: Arc<ComicOptions>,
     source: Source,
+}
+
+/// One page of a [`ComicPages`], taken by [`ComicPages::next_job`] and not
+/// yet rendered.
+///
+/// It owns what the page is rendered from (a share of the entry's bytes, or
+/// of the embedded PDF's session), so it may be sent to another thread and
+/// rendered there, independently of the other pages.
+pub struct PageJob {
+    page: u32,
+    opts: Arc<ComicOptions>,
+    work: Work,
+}
+
+/// What a [`PageJob`] renders.
+enum Work {
+    Image {
+        name: String,
+        bytes: Result<Arc<Vec<u8>>, ComicError>,
+        index: usize,
+    },
+    Pdf(Arc<pdf_raster::RasterSession>),
+}
+
+impl PageJob {
+    /// The page's 1-based number.
+    #[must_use]
+    pub const fn page(&self) -> u32 {
+        self.page
+    }
+
+    /// Render the page: the item [`ComicPages`] yields for it.
+    ///
+    /// # Errors
+    ///
+    /// The per-page error that replaces the page, as the iterator yields it.
+    pub fn render(self) -> Result<RenderedPage, ComicError> {
+        let Self { page, opts, work } = self;
+        match work {
+            Work::Image { name, bytes, index } => {
+                bytes.and_then(|bytes| render_one(&name, &bytes, index, page, &opts))
+            }
+            Work::Pdf(session) => {
+                let mut ropts = pdf_raster::RasterOptions::new(opts.dpi);
+                ropts.deskew = opts.deskew;
+                ropts.depth = opts.depth;
+                pdf_raster::render_page_gray(&session, page, &ropts)
+                    .map_err(|e| ComicError::Pdf(e.to_string()))
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for PageJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageJob")
+            .field("page", &self.page)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One page of a page-image entry, rendered on demand.
@@ -55,7 +118,7 @@ enum Source {
     Images(VecDeque<ImagePage>),
     /// The archive's single embedded PDF and the page numbers to render.
     Pdf {
-        session: Box<pdf_raster::RasterSession>,
+        session: Arc<pdf_raster::RasterSession>,
         pages: VecDeque<u32>,
     },
 }
@@ -69,13 +132,11 @@ impl ComicPages {
             Source::Pdf { pages, .. } => pages.retain(|page| keep(*page)),
         }
     }
-}
 
-impl Iterator for ComicPages {
-    type Item = (u32, Result<RenderedPage, ComicError>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.source {
+    /// Take the next page, in reading order, unrendered; `None` once every
+    /// page has been taken or yielded.
+    pub fn next_job(&mut self) -> Option<PageJob> {
+        let (page, work) = match &mut self.source {
             Source::Images(entries) => {
                 let ImagePage {
                     page,
@@ -83,20 +144,24 @@ impl Iterator for ComicPages {
                     bytes,
                     index,
                 } = entries.pop_front()?;
-                let rendered =
-                    bytes.and_then(|bytes| render_one(&name, &bytes, index, page, &self.opts));
-                Some((page, rendered))
+                (page, Work::Image { name, bytes, index })
             }
-            Source::Pdf { session, pages } => {
-                let page = pages.pop_front()?;
-                let mut ropts = pdf_raster::RasterOptions::new(self.opts.dpi);
-                ropts.deskew = self.opts.deskew;
-                ropts.depth = self.opts.depth;
-                let rendered = pdf_raster::render_page_gray(session, page, &ropts)
-                    .map_err(|e| ComicError::Pdf(e.to_string()));
-                Some((page, rendered))
-            }
-        }
+            Source::Pdf { session, pages } => (pages.pop_front()?, Work::Pdf(Arc::clone(session))),
+        };
+        Some(PageJob {
+            page,
+            opts: Arc::clone(&self.opts),
+            work,
+        })
+    }
+}
+
+impl Iterator for ComicPages {
+    type Item = (u32, Result<RenderedPage, ComicError>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let job = self.next_job()?;
+        Some((job.page, job.render()))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -419,7 +484,7 @@ pub fn open_comic_bytes(
         return Err(ComicError::NoImages);
     }
     Ok(ComicPages {
-        opts: opts.clone(),
+        opts: Arc::new(opts.clone()),
         source: Source::Images(entries),
     })
 }
@@ -530,9 +595,9 @@ fn render_embedded_pdf(
         )));
     }
     Ok(ComicPages {
-        opts: opts.clone(),
+        opts: Arc::new(opts.clone()),
         source: Source::Pdf {
-            session: Box::new(session),
+            session: Arc::new(session),
             pages,
         },
     })

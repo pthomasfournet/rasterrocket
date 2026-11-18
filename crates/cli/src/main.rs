@@ -54,6 +54,25 @@ fn read_stdin_pdf() -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// The page-render thread pool of `num_threads` workers (0: one per CPU),
+/// shared by the PDF and comic paths.
+///
+/// 8 MiB of stack per worker: path flattening and Bézier subdivision
+/// recurse deeply on degenerate inputs and overflow the 2 MiB rayon default.
+///
+/// # Errors
+///
+/// The pool's threads could not be started.
+pub(crate) fn render_pool(
+    num_threads: usize,
+) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .thread_name(|i| format!("raster-worker-{i}"))
+        .stack_size(8 * 1024 * 1024)
+        .build()
+}
+
 /// Every exit path returns through here rather than `std::process::exit`,
 /// so the RAM output guard and the thread pool are dropped before the
 /// process ends.
@@ -164,14 +183,7 @@ fn main() -> ExitCode {
         session_config.decrypt_authorized = true;
     }
 
-    let pool = match rayon::ThreadPoolBuilder::new()
-        .num_threads(args.num_threads)
-        .thread_name(|i| format!("raster-worker-{i}"))
-        // 8 MiB per worker: path flattening and Bézier subdivision recurse deeply
-        // on degenerate inputs and overflow the 2 MiB rayon default.
-        .stack_size(8 * 1024 * 1024)
-        .build()
-    {
+    let pool = match render_pool(args.num_threads) {
         Ok(pool) => pool,
         Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
     };
