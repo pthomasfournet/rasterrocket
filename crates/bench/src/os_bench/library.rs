@@ -6,8 +6,27 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use pdf_raster::{
-    BackendPolicy, SessionConfig, open_session_from_bytes, render_page_rgb, rgb_into_gray,
+    BackendPolicy, PageDiagnostics, RenderParams, SessionConfig, open_session_from_bytes,
+    render_page_rgb_with_diagnostics, rgb_into_gray,
 };
+
+/// Outcome of one rep: pages rendered, wall microseconds, and how many pages
+/// reported diagnostics (a skipped image or content stream, a form past the
+/// depth limit, a missing font, an unsupported feature).
+pub(crate) struct Rep {
+    pub pages: u32,
+    pub wall_us: u64,
+    pub degraded: u32,
+}
+
+/// Whether a page rendered with something left out or substituted.
+fn is_degraded(d: &PageDiagnostics) -> bool {
+    !(d.image_failures.is_empty()
+        && d.content_failures.is_empty()
+        && d.forms_too_deep.is_empty()
+        && d.missing_fonts.is_empty()
+        && d.unsupported_features.is_empty())
+}
 
 /// A document and the inclusive page range to render.  A bare path covers
 /// `1..=u32::MAX`; the upper bound is clamped to the page count at run time.
@@ -111,9 +130,20 @@ pub(crate) fn library_rep(
     threads: usize,
     page_times: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(u32, u64), String> {
+    library_rep_diag(doc, dpi, threads, page_times).map(|r| (r.pages, r.wall_us))
+}
+
+/// [`library_rep`] that also counts the pages that reported diagnostics.
+pub(crate) fn library_rep_diag(
+    doc: &DocRange,
+    dpi: f64,
+    threads: usize,
+    page_times: Option<&mut Vec<(u32, u64)>>,
+) -> Result<Rep, String> {
     let bytes = doc.read()?;
     let name = doc.file_name();
-    let scale = dpi / 72.0;
+    let params = RenderParams::new(dpi / 72.0);
+    let degraded = AtomicU32::new(0);
     let want_times = page_times.is_some();
 
     let start = Instant::now();
@@ -136,8 +166,13 @@ pub(crate) fn library_rep(
                         break;
                     }
                     let t = Instant::now();
-                    match render_page_rgb(&session, page, scale) {
-                        Ok(bitmap) => drop(bitmap),
+                    match render_page_rgb_with_diagnostics(&session, page, &params) {
+                        Ok((bitmap, diag)) => {
+                            drop(bitmap);
+                            if is_degraded(&diag) {
+                                degraded.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                         Err(e) => {
                             stop.store(true, Ordering::Relaxed);
                             let mut slot = failure
@@ -173,29 +208,46 @@ pub(crate) fn library_rep(
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
     }
-    Ok((last - first + 1, wall_us))
+    Ok(Rep {
+        pages: last - first + 1,
+        wall_us,
+        degraded: degraded.into_inner(),
+    })
 }
 
 /// Render each page, convert to gray outside the clock, and time only the
-/// CPU deskew, summed over pages.  Returns (pages, summed microseconds).
+/// CPU deskew, summed over pages.  Returns (pages, summed microseconds).  The
+/// timed span covers skew detection and, where a skew is found, the rotation.
 pub(crate) fn deskew_rep(doc: &DocRange, dpi: f64) -> Result<(u32, u64), String> {
+    deskew_rep_diag(doc, dpi).map(|r| (r.pages, r.wall_us))
+}
+
+/// [`deskew_rep`] that also counts the pages that reported diagnostics.
+pub(crate) fn deskew_rep_diag(doc: &DocRange, dpi: f64) -> Result<Rep, String> {
     let bytes = doc.read()?;
     let name = doc.file_name();
     let session =
         open_session_from_bytes(bytes, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
             .map_err(|e| format!("{name}: {e}"))?;
     let (first, last) = doc.clamp(session.total_pages())?;
+    let params = RenderParams::new(dpi / 72.0);
     let mut total = 0_u64;
+    let mut degraded = 0_u32;
     for page in first..=last {
-        let rgb = render_page_rgb(&session, page, dpi / 72.0)
+        let (rgb, diag) = render_page_rgb_with_diagnostics(&session, page, &params)
             .map_err(|e| format!("{name} page {page}: {e}"))?;
+        degraded += u32::from(is_degraded(&diag));
         let mut gray = rgb_into_gray(rgb);
         let start = Instant::now();
         pdf_raster::deskew::apply(&mut gray, BackendPolicy::CpuOnly)
             .map_err(|e| format!("{name} page {page}: {e}"))?;
         total += micros(start);
     }
-    Ok((last - first + 1, total))
+    Ok(Rep {
+        pages: last - first + 1,
+        wall_us: total,
+        degraded,
+    })
 }
 
 #[cfg(test)]
@@ -306,6 +358,45 @@ mod tests {
         let mut nums: Vec<u32> = v.iter().map(|&(p, _)| p).collect();
         nums.sort_unstable();
         assert_eq!(nums, [1, 2]);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_first_page_past_the_page_count_is_an_error_naming_the_file() {
+        let path = fixture("past");
+        let doc = DocRange::parse(&format!("{}:3-3", path.display())).unwrap();
+        let e = library_rep(&doc, 72.0, 1, None).unwrap_err();
+        assert!(e.contains("two.pdf"), "{e}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_naming_the_path() {
+        let doc = DocRange::parse("no/such/dir/absent.pdf").unwrap();
+        let e = library_rep(&doc, 72.0, 1, None).unwrap_err();
+        assert!(e.contains("absent.pdf"), "{e}");
+        assert!(deskew_rep(&doc, 72.0).is_err());
+    }
+
+    #[test]
+    fn a_page_that_cannot_be_rendered_fails_the_rep_naming_doc_and_page() {
+        // The page tree promises two pages but lists one kid.
+        let pdf = String::from_utf8(two_page_pdf())
+            .unwrap()
+            .replace("[3 0 R 5 0 R]", "[3 0 R 99 0 R]");
+        let path = fixture("badpage");
+        std::fs::write(&path, pdf).unwrap();
+        let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
+        let e = library_rep(&doc, 72.0, 2, None).unwrap_err();
+        assert!(e.starts_with("two.pdf page 2:"), "{e}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_clean_document_reports_no_degraded_pages() {
+        let path = fixture("clean");
+        let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
+        assert_eq!(library_rep_diag(&doc, 72.0, 2, None).unwrap().degraded, 0);
         cleanup(&path);
     }
 

@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use library::{DocRange, Sample, deskew_rep, library_rep};
+use library::{DocRange, Sample, deskew_rep_diag, library_rep_diag};
 
 /// Parsed `library` command line.
 struct LibraryArgs {
@@ -65,6 +65,14 @@ fn parse_library(mut args: impl Iterator<Item = String>) -> Result<LibraryArgs, 
     if threads == 0 || reps == 0 {
         return Err("--threads and --reps must be at least 1".to_owned());
     }
+    if deskew && page_times.is_some() {
+        return Err("--deskew cannot be combined with --page-times".to_owned());
+    }
+    if deskew && threads != 1 {
+        return Err(format!(
+            "--deskew runs one worker; --threads {threads} conflicts"
+        ));
+    }
     if docs.is_empty() {
         return Err("no PDF given".to_owned());
     }
@@ -82,52 +90,53 @@ fn parse_library(mut args: impl Iterator<Item = String>) -> Result<LibraryArgs, 
 
 fn run_library(args: &LibraryArgs) -> Result<(), String> {
     let mut sink = match &args.page_times {
-        Some(path) => Some(
-            OpenOptions::new()
+        Some(path) => {
+            let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
-                .map_err(|e| format!("{}: {e}", path.display()))?,
-        ),
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            Some((path, file))
+        }
         None => None,
     };
     for doc in &args.docs {
         let name = doc.file_name();
         for rep in 1..=args.reps {
             let mut times = Vec::new();
-            let (pages, wall_us, threads) = if args.deskew {
+            let (r, threads) = if args.deskew {
                 // Detection runs on the global pool; the row times one worker.
-                let (p, w) = deskew_rep(doc, args.dpi)?;
-                (p, w, 1)
+                (deskew_rep_diag(doc, args.dpi)?, 1)
             } else {
-                let (p, w) = library_rep(
+                let r = library_rep_diag(
                     doc,
                     args.dpi,
                     args.threads,
                     sink.is_some().then_some(&mut times),
                 )?;
-                (p, w, args.threads)
+                (r, args.threads)
             };
             let sample = Sample {
                 group: args.group.clone(),
                 row: args.row.clone(),
                 doc: name.clone(),
-                pages,
+                pages: r.pages,
                 threads,
                 rep,
-                wall_us,
+                wall_us: r.wall_us,
             };
             println!("{}", sample.tsv_line());
-            if let (Some(file), path) = (sink.as_mut(), &args.page_times) {
+            if r.degraded > 0 {
+                eprintln!(
+                    "os_bench: {name} rep {rep}: {} of {} page(s) reported diagnostics",
+                    r.degraded, r.pages
+                );
+            }
+            if let Some((path, file)) = sink.as_mut() {
                 times.sort_unstable();
                 for (page, us) in &times {
-                    writeln!(file, "{}\t{name}\t{page}\t{us}", args.row).map_err(|e| {
-                        format!(
-                            "{}: {e}",
-                            path.as_ref()
-                                .map_or_else(String::new, |p| p.display().to_string())
-                        )
-                    })?;
+                    writeln!(file, "{}\t{name}\t{page}\t{us}", args.row)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
                 }
             }
         }
