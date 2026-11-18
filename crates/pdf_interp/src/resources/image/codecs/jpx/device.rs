@@ -69,10 +69,12 @@ pub(super) enum Decline {
     NotPlain(hayro_jpeg2000::NotPlain),
     /// Code-block style bits other than predictable termination.
     CodeBlockStyle(u8),
-    /// The irreversible 9-7 wavelet on components of more than 8 bits,
-    /// whose samples the device rounds to integers before they are widened
-    /// to 16 bits, where the CPU widens the reconstructed values.
-    IrreversibleWide,
+    /// The irreversible 9-7 wavelet, under which the device's dequantised,
+    /// inverse-transformed samples differ from the CPU decoder's by a few
+    /// levels at 8 bits; at more than 8 bits it also rounds them to
+    /// integers before they are widened to 16 bits, where the CPU widens
+    /// the reconstructed values.
+    Irreversible,
 }
 
 impl Decline {
@@ -89,7 +91,7 @@ impl Decline {
             Self::NotPlain(N::Signed) => 6,
             Self::NotPlain(N::SubSampled) => 7,
             Self::CodeBlockStyle(_) => 8,
-            Self::IrreversibleWide => 9,
+            Self::Irreversible => 9,
         };
         1 << bit
     }
@@ -100,9 +102,7 @@ impl std::fmt::Display for Decline {
         match self {
             Self::NotPlain(why) => why.fmt(f),
             Self::CodeBlockStyle(style) => write!(f, "code-block style {style:#04x}"),
-            Self::IrreversibleWide => {
-                f.write_str("the irreversible 9-7 wavelet on components of more than 8 bits")
-            }
+            Self::Irreversible => f.write_str("the irreversible 9-7 wavelet"),
         }
     }
 }
@@ -115,7 +115,7 @@ static REPORTED: AtomicU16 = AtomicU16::new(0);
 /// `survey` (see [`hayro_jpeg2000::Image::survey`]): it returns the
 /// reconstructed components of a codestream of one or three unsigned
 /// components on the image grid, of 8 bits, or of 9 to 16 bits when the
-/// samples are kept at 16 (`wide`) and the reversible 5-3 wavelet is in
+/// samples are kept at 16 (`wide`), under the reversible 5-3 wavelet in
 /// force throughout; and it parses no code-block style but predictable
 /// termination.
 pub(super) fn takes(
@@ -125,11 +125,11 @@ pub(super) fn takes(
 ) -> Result<(), Decline> {
     if wide {
         img.plain_wide().map_err(Decline::NotPlain)?;
-        if survey.irreversible {
-            return Err(Decline::IrreversibleWide);
-        }
     } else {
         img.plain_u8().map_err(Decline::NotPlain)?;
+    }
+    if survey.irreversible {
+        return Err(Decline::Irreversible);
     }
     let styles = survey.code_block_styles & !DEVICE_CODE_BLOCK_STYLES;
     if styles != 0 {
@@ -198,6 +198,7 @@ pub(super) fn decode(
              {width}×{height}; drawing at the codestream's size"
         );
     }
+    log::debug!("image: JPXDecode: {width}×{height} decoded on nvJPEG2000");
     let layout = match color_space {
         Jpeg2kColorSpace::Gray => Layout::Color(1),
         Jpeg2kColorSpace::Rgb => Layout::Color(3),
@@ -270,6 +271,24 @@ mod tests {
         assert_eq!(verdict(include_bytes!("../../testdata/gray8.jp2")), Ok(()));
     }
 
+    /// Codestreams of 8 bits under the irreversible wavelet decline, one
+    /// component or three under the irreversible colour transform.
+    #[test]
+    fn eight_bit_codestreams_under_the_irreversible_wavelet_decline() {
+        assert_eq!(
+            verdict(include_bytes!(
+                "../../../../../../jpeg2000/tests/streams/quantization_irreversible.j2k"
+            )),
+            Err(Decline::Irreversible)
+        );
+        assert_eq!(
+            verdict(include_bytes!(
+                "../../../../../../jpeg2000/tests/streams/mct_ict.j2k"
+            )),
+            Err(Decline::Irreversible)
+        );
+    }
+
     /// Codestreams of 9 to 16 bits kept at 16 are taken under the
     /// reversible wavelet, and declined under the irreversible one; an
     /// 8-bit codestream kept at 16 is not a wide one.
@@ -291,7 +310,7 @@ mod tests {
             wide(include_bytes!(
                 "../../../../../../jpeg2000/tests/streams/quantization_irreversible_12bit.j2k"
             )),
-            Err(Decline::IrreversibleWide)
+            Err(Decline::Irreversible)
         );
         assert_eq!(
             wide(include_bytes!("../../testdata/rgb8.j2k")),
@@ -440,7 +459,7 @@ mod tests {
             Decline::NotPlain(N::Signed),
             Decline::NotPlain(N::SubSampled),
             Decline::CodeBlockStyle(1),
-            Decline::IrreversibleWide,
+            Decline::Irreversible,
         ];
         let union = all.iter().fold(0u16, |acc, d| {
             assert_eq!(acc & d.kind(), 0, "{d}");
@@ -481,21 +500,7 @@ mod tests {
             "gray16.jp2".to_owned(),
             include_bytes!("../../testdata/gray16.jp2").to_vec(),
         ));
-        if let Ok(dir) = std::env::var("RR_JPX_GATE_DIR") {
-            let mut extra: Vec<_> = std::fs::read_dir(dir)
-                .expect("RR_JPX_GATE_DIR")
-                .map(|e| e.expect("entry").path())
-                .collect();
-            extra.sort();
-            for path in extra {
-                let name = path
-                    .file_name()
-                    .expect("name")
-                    .to_string_lossy()
-                    .into_owned();
-                fixtures.push((name, std::fs::read(&path).expect("read")));
-            }
-        }
+        fixtures.extend(gate_dir_streams());
         let opts = super::super::JpxOptions {
             indices: false,
             smask_in_data: 0,
@@ -512,7 +517,7 @@ mod tests {
             let survey = img.survey().expect("tile-part headers parse");
             let verdict = takes(&img, &survey, true);
             if let Err(why) = &verdict
-                && *why != Decline::IrreversibleWide
+                && *why != Decline::Irreversible
             {
                 eprintln!("{name}: not compared ({why})");
                 continue;
@@ -543,7 +548,7 @@ mod tests {
                     differing > 0,
                     "{name}: equal under 9-7, which takes declines"
                 );
-                assert_eq!(takes(&img, &survey, true), Err(Decline::IrreversibleWide));
+                assert_eq!(takes(&img, &survey, true), Err(Decline::Irreversible));
             } else {
                 reversible += 1;
                 assert_eq!(differing, 0, "{name}: the device differs under 5-3");
@@ -554,5 +559,210 @@ mod tests {
             reversible >= 5 && irreversible >= 2,
             "{reversible} / {irreversible}"
         );
+    }
+
+    /// The files of the directory `RR_JPX_GATE_DIR` names, by name; none
+    /// when it is unset.
+    #[cfg(feature = "gpu-validation")]
+    fn gate_dir_streams() -> Vec<(String, Vec<u8>)> {
+        let Ok(dir) = std::env::var("RR_JPX_GATE_DIR") else {
+            return Vec::new();
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .expect("RR_JPX_GATE_DIR")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .into_owned();
+                let bytes = std::fs::read(&path).expect("read");
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    /// The `JPXDecode` streams of the image `XObject`s the pages of the PDF
+    /// at `path` name, each once, by object number; none when the file is
+    /// absent.
+    #[cfg(feature = "gpu-validation")]
+    fn pdf_jpx_streams(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        use pdf::Object;
+        if !path.exists() {
+            eprintln!("skipping {}: absent", path.display());
+            return Vec::new();
+        }
+        let doc = pdf::Document::open(path).expect("the PDF opens");
+        let jpx = |dict: &pdf::Dictionary| match dict.get(b"Filter") {
+            Some(Object::Name(n)) => n == b"JPXDecode",
+            Some(Object::Array(a)) => a.iter().any(|f| f.as_name() == Some(b"JPXDecode")),
+            _ => false,
+        };
+        let mut visited = std::collections::BTreeSet::new();
+        let mut streams = Vec::new();
+        for (_, page) in doc.get_pages() {
+            let xobjects = doc
+                .get_page_resource_dict(page, b"XObject")
+                .expect("resources");
+            for (_, value) in &xobjects {
+                let Object::Reference(id) = value else {
+                    continue;
+                };
+                if !visited.insert(id.0) {
+                    continue;
+                }
+                if let Ok(obj) = doc.get_object(*id)
+                    && let Object::Stream(stream) = &*obj
+                    && jpx(&stream.dict)
+                {
+                    streams.push((id.0, stream.content.clone()));
+                }
+            }
+        }
+        streams.sort_by_key(|&(num, _)| num);
+        streams
+            .into_iter()
+            .map(|(num, bytes)| (format!("object {num}"), bytes))
+            .collect()
+    }
+
+    /// The files of the JPEG 2000 decoder's test streams, by name.
+    #[cfg(feature = "gpu-validation")]
+    fn decoder_test_streams() -> Vec<(String, Vec<u8>)> {
+        const STREAMS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../jpeg2000/tests/streams/");
+        let mut paths: Vec<_> = std::fs::read_dir(STREAMS)
+            .expect("test streams")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .map(|p| {
+                let name = p.file_name().expect("name").to_string_lossy().into_owned();
+                (name, std::fs::read(p).expect("read"))
+            })
+            .collect()
+    }
+
+    /// The samples of the codestream `bytes` of a `w × h` image at 8 bits,
+    /// as the CPU path and as the device decode them: `(differing samples,
+    /// largest difference, samples)`.  `None` when the CPU path refuses the
+    /// codestream or the device decode fails.
+    #[cfg(feature = "gpu-validation")]
+    fn compare_eight_bit(
+        bytes: &[u8],
+        (w, h): (u32, u32),
+        decoder: &mut Option<NvJpeg2kDecoder>,
+    ) -> Option<(usize, u8, usize)> {
+        use crate::resources::image::ImageData;
+        let opts = super::super::JpxOptions {
+            indices: false,
+            smask_in_data: 0,
+            matte: None,
+            colour_key: false,
+            wide: false,
+            channels: None,
+        };
+        let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).ok()?;
+        let mut device = DeviceJpx::new(decoder, None, 0).expect("a decoder");
+        let gpu = decode(bytes, (w, h), false, &mut device)?;
+        let (ImageData::Cpu(cpu), ImageData::Cpu(gpu)) = (&cpu.data, &gpu.data) else {
+            panic!("8-bit samples on both paths");
+        };
+        assert_eq!(cpu.len(), gpu.len(), "sample count");
+        let deltas = cpu.iter().zip(gpu.iter()).map(|(a, b)| a.abs_diff(*b));
+        let differing = deltas.clone().filter(|&d| d > 0).count();
+        Some((differing, deltas.max().unwrap_or(0), cpu.len()))
+    }
+
+    /// The equivalence gate of the 8-bit device path: every codestream
+    /// `takes` accepts at 8 bits decodes on the device to the samples the
+    /// CPU path returns, or the device decode fails and the CPU decodes
+    /// it; and under the irreversible wavelet, which `takes` declines, the
+    /// device samples differ for some codestream of each source compared.
+    /// The codestreams are the JPEG 2000 decoder's test streams, the image
+    /// streams of `corpus-10-scan-jbig2-jpx.pdf` when the fixture is
+    /// present, and those of the directory `RR_JPX_GATE_DIR` names, if any.
+    /// Needs a CUDA device.
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn eight_bit_device_samples_equal_the_cpu_samples_or_decline() {
+        /// Declined codestreams of a source decoded on both paths, at most.
+        const DECLINED_COMPARED: usize = 4;
+        const CORPUS_10: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/corpus-10-scan-jbig2-jpx.pdf"
+        );
+        let sources = [
+            ("test streams", decoder_test_streams()),
+            (
+                "corpus-10",
+                pdf_jpx_streams(std::path::Path::new(CORPUS_10)),
+            ),
+            ("RR_JPX_GATE_DIR", gate_dir_streams()),
+        ];
+        let mut decoder =
+            Some(NvJpeg2kDecoder::new(0).expect("gpu-validation needs a CUDA device"));
+        let mut taken = 0;
+        for (source, fixtures) in &sources {
+            let (mut declined, mut compared, mut differing_streams) = (0, 0, 0);
+            for (name, bytes) in fixtures {
+                let settings = hayro_jpeg2000::DecodeSettings::default();
+                let Ok(img) = hayro_jpeg2000::Image::new(bytes, &settings) else {
+                    continue;
+                };
+                let Ok(survey) = img.survey() else {
+                    continue;
+                };
+                let verdict = takes(&img, &survey, false);
+                match &verdict {
+                    Ok(()) if survey.completeness.is_complete() => {}
+                    Err(Decline::Irreversible) => {
+                        declined += 1;
+                        if compared == DECLINED_COMPARED {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+                let size = (img.width(), img.height());
+                let Some((differing, max_delta, samples)) =
+                    compare_eight_bit(bytes, size, &mut decoder)
+                else {
+                    eprintln!("{source}: {name}: not decoded on both paths");
+                    continue;
+                };
+                if verdict.is_ok() {
+                    taken += 1;
+                    assert_eq!(
+                        differing, 0,
+                        "{source}: {name}: taken, and {differing} samples differ \
+                         (max delta {max_delta})"
+                    );
+                } else {
+                    compared += 1;
+                    differing_streams += usize::from(differing > 0);
+                    eprintln!(
+                        "{source}: {name}: 9-7, declined; {differing} of {samples} samples \
+                         differ (max delta {max_delta})"
+                    );
+                }
+            }
+            eprintln!(
+                "{source}: {} codestreams, {declined} declined under 9-7 ({compared} compared, \
+                 {differing_streams} differing), {taken} taken in all so far",
+                fixtures.len()
+            );
+            assert!(
+                compared == 0 || differing_streams > 0,
+                "{source}: every declined 9-7 codestream compared decodes equal"
+            );
+        }
+        assert!(taken >= 20, "{taken} codestreams taken");
     }
 }

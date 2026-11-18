@@ -61,8 +61,9 @@ tested. Please report what you find.
   0.12.0: the GPU crate's suite with every CUDA feature, the deskew and ICC
   suites, and `--backend cuda` against `--backend cpu` on every fixture
   page at 150 dpi, RGB and gray, byte-identical but for nvJPEG2000's JPEG
-  2000 decodes (up to 19 levels, as on Linux) and `--deskew`, within 1
-  level. Other NVIDIA GPUs on Windows are untested.
+  2000 decodes (up to 19 levels, as on Linux; those codestreams, under the
+  irreversible 9-7 wavelet, now decode on the CPU, verified on the
+  RTX 5070 only) and `--deskew`, within 1 level. Other NVIDIA GPUs on Windows are untested.
 - **GPU (Vulkan):** untested on Windows.
 - **Printing and fax:** `--print` and `--fax-to` are refused: both submit
   through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.

@@ -3354,6 +3354,26 @@ above every image the pages are identical). `--deskew` on the scans
 (`corpus-08`–`10`, 1 456 pages) differs by at most 1 level, on 738 pages.
 Vulkan on Windows is untested.
 
+**Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
+too.** The device's header checks took 8-bit codestreams under the
+irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one
+level apart from the CPU decoder: every one of `corpus-10`'s 1 148
+codestreams (JP2, three 8-bit components, 9-7 with the irreversible colour
+transform, five levels, 64 × 64 code-blocks, scalar-expounded
+quantisation; 572 of at least 2 097 152 px) and the decoder's 8-bit 9-7
+test streams differ by 1 in under 0.2 % of their samples. With the draw
+fix below and 9-7 still taken, `corpus-10` at 300 dpi, where its large
+images decode at full resolution, differed on 29 of its first 32 pages.
+Any codestream under 9-7 now decodes on the CPU, at every precision, with
+a one-time warning; under the reversible 5-3 wavelet the device still
+decodes. A device test (`gpu-validation`) decodes every codestream the
+checks take at 8 bits on both paths and requires equal samples: 62 of the
+decoder's test streams and the 693 5-3 codestreams of three archive scans
+(`RR_JPX_GATE_DIR`), all equal (48 more test streams the checks take do
+not decode on both paths, most failing on the device, POC, PPM, PPT and
+SOP among them, and decode on the CPU after a warning, as before); it also
+reads `corpus-10`'s codestreams, all declined. Verified on the RTX 5070 only.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past
