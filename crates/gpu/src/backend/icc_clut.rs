@@ -82,9 +82,14 @@ fn convert<B: GpuBackend>(
     wide: bool,
 ) -> Result<Vec<u8>> {
     const KIND: &str = "IccClutInvariantViolation";
-    let invariant = |detail| BackendError::InvariantViolation { kind: KIND, detail };
     if !cmyk.len().is_multiple_of(4) {
-        return Err(invariant("cmyk buffer length is not a multiple of 4"));
+        return Err(BackendError::invariant(
+            KIND,
+            format!(
+                "cmyk buffer length {} bytes is not a multiple of 4",
+                cmyk.len()
+            ),
+        ));
     }
     let n = cmyk.len() / 4;
     if n == 0 {
@@ -93,7 +98,15 @@ fn convert<B: GpuBackend>(
     let n_pixels = u32::try_from(n)
         .ok()
         .filter(|&n| n <= MAX_KERNEL_PIXELS)
-        .ok_or_else(|| invariant("n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)"))?;
+        .ok_or_else(|| {
+            BackendError::invariant(
+                KIND,
+                format!(
+                    "n_pixels {n} exceeds MAX_KERNEL_PIXELS {MAX_KERNEL_PIXELS} \
+                     (32-bit byte addressing)"
+                ),
+            )
+        })?;
     let table = grid.as_bytes();
     let sample_bytes = if wide { 2 } else { 1 };
     let rgb_len = n * 3 * sample_bytes;

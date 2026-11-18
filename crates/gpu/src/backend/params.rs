@@ -104,38 +104,46 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
     /// Returns a `BackendError` if any documented invariant is violated.
     pub fn validate(&self, backend: &B) -> super::Result<()> {
         const KIND: &str = "BlitInvariantViolation";
-        let invariant =
-            |detail: &'static str| super::BackendError::InvariantViolation { kind: KIND, detail };
+        let invariant = |detail: String| super::BackendError::invariant(KIND, detail);
+        let fixed = |detail: &'static str| super::BackendError::invariant(KIND, detail);
         if self.src_w == 0 || self.src_h == 0 {
-            return Err(invariant("src dimensions must be > 0"));
+            return Err(fixed("src dimensions must be > 0"));
         }
         if self.dst_w == 0 || self.dst_h == 0 {
-            return Err(invariant("dst dimensions must be > 0"));
+            return Err(fixed("dst dimensions must be > 0"));
         }
         let [x0, y0, x1, y1] = self.bbox;
         if x0 > x1 || y0 > y1 {
-            return Err(invariant("bbox must satisfy x0 <= x1 and y0 <= y1"));
+            return Err(fixed("bbox must satisfy x0 <= x1 and y0 <= y1"));
         }
         // Table coverage: the kernel indexes `cols` by `dx - x0` and `rows`
         // by `dy - y0` without a bounds check of its own.
         let width = usize::try_from(x1.saturating_sub(x0)).unwrap_or(0);
         let height = usize::try_from(y1.saturating_sub(y0)).unwrap_or(0);
-        if backend.device_buffer_len(self.cols) < width.saturating_mul(Self::TABLE_ENTRY_BYTES) {
-            return Err(invariant("cols table shorter than bbox width × 16 bytes"));
-        }
-        if backend.device_buffer_len(self.rows) < height.saturating_mul(Self::TABLE_ENTRY_BYTES) {
-            return Err(invariant("rows table shorter than bbox height × 16 bytes"));
+        let tables = [
+            ("cols", "width", self.cols, width),
+            ("rows", "height", self.rows, height),
+        ];
+        for (name, extent, table, entries) in tables {
+            let have = backend.device_buffer_len(table);
+            let need = entries.saturating_mul(Self::TABLE_ENTRY_BYTES);
+            if have < need {
+                return Err(invariant(format!(
+                    "{name} table of {have} bytes is shorter than the {need} bytes of \
+                     bbox {extent} {entries} × 16"
+                )));
+            }
         }
         // src_layout: 0 = RGB, 1 = Gray. Anything else (especially 2 = Mask)
         // would fall through the kernel's `if (src_layout == 0) { RGB } else { Gray }`
         // dispatch and silently produce wrong pixels.
         if self.src_layout > 1 {
-            return Err(invariant(
+            return Err(fixed(
                 "src_layout must be 0 (RGB) or 1 (Gray); Mask layout is CPU-only",
             ));
         }
         if self.filter & !(BLIT_FILTER_X | BLIT_FILTER_Y) != 0 {
-            return Err(invariant(
+            return Err(fixed(
                 "filter has bits beyond BLIT_FILTER_X | BLIT_FILTER_Y",
             ));
         }
@@ -144,14 +152,29 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
             self.src_layout,
             (self.dst_w, self.dst_h),
         )
-        .ok_or_else(|| invariant("src or dst exceeds the kernels' 32-bit offset range"))?;
-        if backend.device_buffer_len(self.src) < super::layout::word_padded(src_bytes) {
-            return Err(invariant(
-                "src buffer shorter than src_w × src_h × bpp rounded up to a multiple of 4",
-            ));
+        .ok_or_else(|| {
+            invariant(format!(
+                "src {} × {} (layout {}) or dst {} × {} exceeds the kernels' 32-bit offset range",
+                self.src_w, self.src_h, self.src_layout, self.dst_w, self.dst_h
+            ))
+        })?;
+        let (src_have, src_need) = (
+            backend.device_buffer_len(self.src),
+            super::layout::word_padded(src_bytes),
+        );
+        if src_have < src_need {
+            return Err(invariant(format!(
+                "src buffer of {src_have} bytes is shorter than the {src_need} bytes of \
+                 src_w × src_h × bpp = {src_bytes} rounded up to a multiple of 4"
+            )));
         }
-        if backend.device_buffer_len(self.dst) < dst_bytes {
-            return Err(invariant("dst buffer shorter than dst_w × dst_h × 4"));
+        let dst_have = backend.device_buffer_len(self.dst);
+        if dst_have < dst_bytes {
+            return Err(invariant(format!(
+                "dst buffer of {dst_have} bytes is shorter than the {dst_bytes} bytes of \
+                 dst_w × dst_h × 4 = {} × {} × 4",
+                self.dst_w, self.dst_h
+            )));
         }
         Ok(())
     }
@@ -163,22 +186,33 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
 pub const MAX_KERNEL_PIXELS: u32 = u32::MAX / 4;
 
 /// Check that `n_pixels` is addressable by a per-pixel kernel and that each
-/// `(buffer, bytes per pixel, message)` holds `n_pixels × bytes` bytes.
+/// `(buffer, bytes per pixel, name)` holds `n_pixels × bytes` bytes.
 fn validate_per_pixel<B: GpuBackend + ?Sized>(
     backend: &B,
     kind: &'static str,
     n_pixels: u32,
     buffers: &[(&B::DeviceBuffer, usize, &'static str)],
 ) -> super::Result<()> {
-    let invariant = |detail: &'static str| super::BackendError::InvariantViolation { kind, detail };
     if n_pixels > MAX_KERNEL_PIXELS {
-        return Err(invariant(
-            "n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)",
+        return Err(super::BackendError::invariant(
+            kind,
+            format!(
+                "n_pixels {n_pixels} exceeds MAX_KERNEL_PIXELS {MAX_KERNEL_PIXELS} \
+                 (32-bit byte addressing)"
+            ),
         ));
     }
-    for &(buf, bytes_per_pixel, detail) in buffers {
-        if backend.device_buffer_len(buf) < (n_pixels as usize).saturating_mul(bytes_per_pixel) {
-            return Err(invariant(detail));
+    for &(buf, bytes_per_pixel, name) in buffers {
+        let have = backend.device_buffer_len(buf);
+        let need = (n_pixels as usize).saturating_mul(bytes_per_pixel);
+        if have < need {
+            return Err(super::BackendError::invariant(
+                kind,
+                format!(
+                    "{name} buffer of {have} bytes is shorter than the {need} bytes of \
+                     n_pixels × {bytes_per_pixel} = {n_pixels} × {bytes_per_pixel}"
+                ),
+            ));
         }
     }
     Ok(())
@@ -232,37 +266,32 @@ impl<B: GpuBackend + ?Sized> IccClutParams<'_, B> {
     pub fn validate(&self, backend: &B) -> super::Result<u32> {
         const KIND: &str = "IccClutInvariantViolation";
         if self.wide && self.n_pixels > MAX_WIDE_CLUT_PIXELS {
-            return Err(super::BackendError::InvariantViolation {
-                kind: KIND,
-                detail: "n_pixels exceeds MAX_WIDE_CLUT_PIXELS (32-bit byte addressing)",
-            });
+            return Err(super::BackendError::invariant(
+                KIND,
+                format!(
+                    "n_pixels {} exceeds MAX_WIDE_CLUT_PIXELS {MAX_WIDE_CLUT_PIXELS} \
+                     (32-bit byte addressing)",
+                    self.n_pixels
+                ),
+            ));
         }
-        let (rgb_bytes, rgb_short) = if self.wide {
-            (
-                4 * super::layout::device_pixel_words(2),
-                "rgb buffer shorter than n_pixels × 8 bytes",
-            )
-        } else {
-            (
-                4 * super::layout::device_pixel_words(1),
-                "rgb buffer shorter than n_pixels × 4 bytes",
-            )
-        };
+        let rgb_bytes = 4 * super::layout::device_pixel_words(if self.wide { 2 } else { 1 });
         validate_per_pixel(
             backend,
             KIND,
             self.n_pixels,
-            &[
-                (self.cmyk, 4, "cmyk buffer shorter than n_pixels × 4 bytes"),
-                (&*self.rgb, rgb_bytes, rgb_short),
-            ],
+            &[(self.cmyk, 4, "cmyk"), (&*self.rgb, rgb_bytes, "rgb")],
         )?;
-        color::grid::CmykGrid::node_count(backend.device_buffer_len(self.clut)).ok_or(
-            super::BackendError::InvariantViolation {
-                kind: KIND,
-                detail: "clut length is not that of a grid of at most i32::MAX bytes",
-            },
-        )
+        let clut_len = backend.device_buffer_len(self.clut);
+        color::grid::CmykGrid::node_count(clut_len).ok_or_else(|| {
+            super::BackendError::invariant(
+                KIND,
+                format!(
+                    "clut length {clut_len} bytes is not that of a grid of at most \
+                     i32::MAX bytes"
+                ),
+            )
+        })
     }
 }
 
@@ -566,7 +595,10 @@ mod tests {
         .validate(&FakeBackend)
         .unwrap_err()
         .to_string();
-        assert!(err.contains("dst buffer"), "{err}");
+        assert!(
+            err.contains("dst buffer of 159999 bytes is shorter than the 160000 bytes"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -591,7 +623,10 @@ mod tests {
             .validate(&FakeBackend)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("src buffer"), "{err}");
+        assert!(
+            err.contains("src buffer of 3 bytes is shorter than the 4 bytes"),
+            "{err}"
+        );
         assert!(err.contains("multiple of 4"), "{err}");
         gray_3x1(&PADDED)
             .validate(&FakeBackend)
@@ -685,7 +720,13 @@ mod tests {
                 .validate(&FakeBackend)
                 .unwrap_err()
                 .to_string();
-            assert!(e.contains("rgb buffer"), "{e}");
+            assert!(
+                e.contains(&format!(
+                    "rgb buffer of {} bytes is shorter than the {device} bytes",
+                    device - 1
+                )),
+                "{e}"
+            );
         }
     }
 }

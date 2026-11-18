@@ -28,6 +28,7 @@ pub mod params;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
@@ -69,12 +70,13 @@ pub enum BackendError {
     },
     /// A `*Params::validate` invariant failed. `kind` names which
     /// invariant family (`"BlitInvariantViolation"`, …); `detail` is
-    /// the human-readable "why".
+    /// the human-readable "why", with the sizes involved when the
+    /// invariant compares sizes.
     InvariantViolation {
         /// Stable name of the invariant family for `matches!` ergonomics.
         kind: &'static str,
         /// Human-readable description of the specific violation.
-        detail: &'static str,
+        detail: Cow<'static, str>,
     },
     /// A buffer the work needs exceeds a limit of the device: the work is
     /// too large for it, and the device itself is sound.
@@ -143,6 +145,15 @@ impl BackendError {
     #[must_use]
     pub fn msg(message: impl Into<String>) -> Self {
         Self::Other(Box::new(MsgError(message.into())))
+    }
+
+    /// An [`Self::InvariantViolation`] of the family `kind`.
+    #[must_use]
+    pub fn invariant(kind: &'static str, detail: impl Into<Cow<'static, str>>) -> Self {
+        Self::InvariantViolation {
+            kind,
+            detail: detail.into(),
+        }
     }
 }
 

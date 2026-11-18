@@ -105,7 +105,7 @@ pub fn blit_image_box<'s, B: GpuBackend>(
     filter: u32,
 ) -> Result<&'s [u8]> {
     const KIND: &str = "BlitInvariantViolation";
-    let invariant = |detail| BackendError::InvariantViolation { kind: KIND, detail };
+    let invariant = |detail: &'static str| BackendError::invariant(KIND, detail);
     let [x0, y0, x1, y1] = bbox;
     if x0 > x1 || y0 > y1 {
         return Err(invariant("bbox must satisfy x0 <= x1 and y0 <= y1"));
@@ -116,8 +116,17 @@ pub fn blit_image_box<'s, B: GpuBackend>(
         return Ok(&[]);
     }
     let entry_words = BlitParams::<B>::TABLE_ENTRY_BYTES / size_of::<u32>();
-    if cols.len() != width as usize * entry_words || rows.len() != height as usize * entry_words {
-        return Err(invariant("sampling tables do not cover the bbox"));
+    let (cols_need, rows_need) = (width as usize * entry_words, height as usize * entry_words);
+    if cols.len() != cols_need || rows.len() != rows_need {
+        return Err(BackendError::invariant(
+            KIND,
+            format!(
+                "sampling tables of {} and {} words do not cover the {width} × {height} bbox \
+                 ({cols_need} and {rows_need} words)",
+                cols.len(),
+                rows.len()
+            ),
+        ));
     }
     let (_, target_len) = blit_extents((src.width, src.height), src.layout, (width, height))
         .ok_or_else(|| invariant("src or bbox exceeds the kernels' 32-bit offset range"))?;
