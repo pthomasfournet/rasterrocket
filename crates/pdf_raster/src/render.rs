@@ -9,6 +9,7 @@ use raster::Bitmap;
 
 use crate::decoders::{DecoderReclaim, lend_decoders};
 use crate::gray::{rgb_into_gray, rgb16_into_gray16};
+use crate::page::gray_alpha_rendered_page;
 use crate::{RasterError, RasterOptions, RasterSession, RenderParams, RenderRegion, RenderedPage};
 
 /// Render one whole page to an RGB bitmap at `scale` device pixels per point.
@@ -181,7 +182,10 @@ fn reject_rgb_profile(session: &RasterSession) -> Result<(), RasterError> {
 /// [`RenderedPage`] that [`raster_pdf`](crate::raster_pdf) yields for it.
 ///
 /// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
-/// [`depth`](RasterOptions::depth), [`deskew`](RasterOptions::deskew) and
+/// [`depth`](RasterOptions::depth), [`deskew`](RasterOptions::deskew),
+/// [`intent`](RasterOptions::intent),
+/// [`black_point_compensation`](RasterOptions::black_point_compensation),
+/// [`preserve_black`](RasterOptions::preserve_black) and
 /// [`cancel`](RasterOptions::cancel);
 /// [`transparent_background`](RasterOptions::transparent_background) is
 /// [`render_page_rgba`]'s.
@@ -267,9 +271,12 @@ fn deskewed<P: crate::deskew::DeskewPixel>(
 /// premultiplied, or [`PixelFormat::Rgba16`](crate::PixelFormat::Rgba16)
 /// at [`RasterOptions::depth`] 16.
 ///
-/// Of `opts`, only [`dpi`](RasterOptions::dpi),
-/// [`depth`](RasterOptions::depth) and [`cancel`](RasterOptions::cancel)
-/// apply.
+/// Of `opts`, only the per-page fields apply: [`dpi`](RasterOptions::dpi),
+/// [`depth`](RasterOptions::depth), [`intent`](RasterOptions::intent),
+/// [`black_point_compensation`](RasterOptions::black_point_compensation),
+/// [`preserve_black`](RasterOptions::preserve_black) and
+/// [`cancel`](RasterOptions::cancel); [`deskew`](RasterOptions::deskew) is
+/// refused.
 ///
 /// # Errors
 ///
@@ -308,9 +315,7 @@ pub fn render_page_rgba(
 /// output profile; its alpha is that page's, the gray not premultiplied
 /// by it.  Where the alpha is 255 the gray is [`render_page_gray`]'s.
 ///
-/// Of `opts`, only [`dpi`](RasterOptions::dpi),
-/// [`depth`](RasterOptions::depth) and [`cancel`](RasterOptions::cancel)
-/// apply.
+/// Of `opts`, the fields that apply are [`render_page_rgba`]'s.
 ///
 /// [`rgb_to_gray`]: crate::rgb_to_gray
 ///
@@ -327,48 +332,14 @@ pub fn render_page_gray_alpha(
     let dpi = opts.dpi;
     let (canvas, diagnostics) = render_transparent(session, page_num, opts)?;
     Ok(match canvas {
-        FinishedCanvas::Rgb8(mut rgb) => {
-            let alpha = rgb.take_alpha_plane();
-            let gray = rgb_into_gray(rgb);
-            crate::page::gray8_alpha_rendered_page(
-                &gray,
-                alpha.as_deref(),
-                page_num,
-                dpi,
-                diagnostics,
-            )
+        FinishedCanvas::Rgb8(rgb) => {
+            gray_alpha_rendered_page(&rgb_into_gray(rgb), page_num, dpi, diagnostics)
         }
-        FinishedCanvas::Gray8(mut gray) => {
-            let alpha = gray.take_alpha_plane();
-            crate::page::gray8_alpha_rendered_page(
-                &gray,
-                alpha.as_deref(),
-                page_num,
-                dpi,
-                diagnostics,
-            )
+        FinishedCanvas::Gray8(gray) => gray_alpha_rendered_page(&gray, page_num, dpi, diagnostics),
+        FinishedCanvas::Rgb16(rgb) => {
+            gray_alpha_rendered_page(&rgb16_into_gray16(rgb), page_num, dpi, diagnostics)
         }
-        FinishedCanvas::Rgb16(mut rgb) => {
-            let alpha = rgb.take_alpha_plane();
-            let gray = rgb16_into_gray16(rgb);
-            crate::page::gray16_alpha_rendered_page(
-                &gray,
-                alpha.as_deref(),
-                page_num,
-                dpi,
-                diagnostics,
-            )
-        }
-        FinishedCanvas::Gray16(mut gray) => {
-            let alpha = gray.take_alpha_plane();
-            crate::page::gray16_alpha_rendered_page(
-                &gray,
-                alpha.as_deref(),
-                page_num,
-                dpi,
-                diagnostics,
-            )
-        }
+        FinishedCanvas::Gray16(gray) => gray_alpha_rendered_page(&gray, page_num, dpi, diagnostics),
         FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
     })
 }

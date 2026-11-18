@@ -14,6 +14,9 @@
 //! be byte-exact with the scalar reference: `_mm_madd_epi16` produces
 //! the dot product directly and a single shift replaces the decimal
 //! divide (the parity test is exhaustive over all 2²⁴ inputs).
+//!
+//! Every conversion keeps the alpha plane of its source, unchanged: the
+//! gray of a pixel is not premultiplied by its alpha.
 
 use color::{Gray8, Gray16, Pixel, Rgb8, Rgb16};
 use pdf_interp::renderer::FinishedCanvas;
@@ -57,7 +60,7 @@ pub(crate) fn rgb_rows_to_gray(src: &Bitmap<Rgb8>, out: &mut [u8], stride: usize
 ///
 /// The packed gray rows are written over the front of the colour buffer,
 /// which is truncated to `width * height` bytes and keeps its capacity. The
-/// alpha plane, if any, is dropped.
+/// alpha plane, if any, is kept.
 #[must_use]
 pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8> {
     into_gray(src, convert_row)
@@ -70,17 +73,37 @@ pub fn rgb16_into_gray16(src: Bitmap<Rgb16>) -> Bitmap<Gray16> {
     into_gray(src, convert_row16)
 }
 
+/// [`rgb_to_gray`] with each gray sample followed by its alpha, opaque
+/// for a bitmap without an alpha plane: row `y` at
+/// `out[y * stride..y * stride + width * 2]`.
+///
+/// `out` must hold `(height - 1) * stride + width * 2` bytes and
+/// `stride ≥ width * 2`.
+pub(crate) fn rgb_rows_to_gray_alpha(src: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
+    let w = src.width as usize;
+    let mut gray = vec![0; w];
+    for y in 0..src.height {
+        convert_row(&src.row_bytes(y)[..w * 3], &mut gray);
+        raster::interleave_alpha::<u8, 1>(
+            &gray,
+            src.alpha_row(y),
+            &mut out[y as usize * stride..][..w * 2],
+        );
+    }
+}
+
 /// The packed gray bitmap of `src`, each row converted by `convert` over
-/// the front of the colour buffer.
+/// the front of the colour buffer, with the alpha plane of `src`.
 ///
 /// Gray row `y` occupies samples `[y·w, y·w + w)` and RGB row `y` starts at
 /// `y·stride ≥ 3·y·w`, so for `y ≥ 1` the destination row ends at or before
 /// the source row begins and the two are disjoint halves of one
 /// `split_at_mut`. Row 0 overlaps itself and is converted from a copy.
 fn into_gray<S: color::Sample, C: Pixel<Sample = S>, G: Pixel<Sample = S>>(
-    src: Bitmap<C>,
+    mut src: Bitmap<C>,
     convert: fn(&[S], &mut [S]),
 ) -> Bitmap<G> {
+    let alpha = src.take_alpha_plane();
     let (width, height, stride) = (src.width, src.height, src.stride);
     let w = width as usize;
     let mut data = src.into_data();
@@ -93,7 +116,7 @@ fn into_gray<S: color::Sample, C: Pixel<Sample = S>, G: Pixel<Sample = S>>(
         }
     }
     data.truncate(w * height as usize);
-    Bitmap::from_packed(width, height, data)
+    Bitmap::from_packed(width, height, data).with_alpha_plane(alpha)
 }
 
 /// [`rgb_to_gray`] at 16 bits: the same 1.15 weights applied to 16-bit

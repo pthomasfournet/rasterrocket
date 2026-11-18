@@ -6,7 +6,7 @@ use pdf_interp::renderer::CanvasBuffers;
 use raster::Bitmap;
 
 use crate::CanvasLayout;
-use crate::gray::{rgb_into_gray, rgb_rows_to_gray};
+use crate::gray::{rgb_into_gray, rgb_rows_to_gray, rgb_rows_to_gray_alpha};
 use crate::page::{rgb_rows_copy, rgb_rows_to_rgba};
 use crate::render::{check_scale, page_view, render_page_canvas_with_geom, rgb8};
 use crate::{
@@ -33,7 +33,9 @@ use crate::{
 /// [`render_gray_into`](Self::render_gray_into) writes the pixels of
 /// [`render_page_gray`](crate::render_page_gray),
 /// [`render_rgba_into`](Self::render_rgba_into) those of
-/// [`render_page_rgba`](crate::render_page_rgba) and
+/// [`render_page_rgba`](crate::render_page_rgba),
+/// [`render_gray_alpha_into`](Self::render_gray_alpha_into) those of
+/// [`render_page_gray_alpha`](crate::render_page_gray_alpha) and
 /// [`render_rgb_into`](Self::render_rgb_into) those of
 /// [`render_page_rgb`](crate::render_page_rgb) at `opts.dpi / 72`.
 ///
@@ -93,7 +95,9 @@ impl PageBuffer {
     ///
     /// The pixels are those of [`render_page_gray`](crate::render_page_gray)
     /// with the same `opts`, of which only [`dpi`](RasterOptions::dpi),
-    /// [`deskew`](RasterOptions::deskew) and
+    /// [`deskew`](RasterOptions::deskew), [`intent`](RasterOptions::intent),
+    /// [`black_point_compensation`](RasterOptions::black_point_compensation),
+    /// [`preserve_black`](RasterOptions::preserve_black) and
     /// [`cancel`](RasterOptions::cancel) apply.
     ///
     /// # Errors
@@ -112,7 +116,7 @@ impl PageBuffer {
     ) -> Result<PageInfo, RasterError> {
         let format = PixelFormat::Gray8;
         let (rgb, diagnostics) =
-            self.render_canvas(session, page_num, opts, format, false, out.len(), stride)?;
+            self.render_canvas(session, page_num, opts, format, out.len(), stride)?;
         let (width, height) = (rgb.width, rgb.height);
         let skew = if opts.deskew {
             let gray = rgb_into_gray(rgb);
@@ -139,7 +143,10 @@ impl PageBuffer {
     /// bytes per pixel, into `out`, row `y` at `out[y * stride..]`.
     ///
     /// The pixels are those of [`render_page_rgb`](crate::render_page_rgb)
-    /// at `opts.dpi / 72`.  Of `opts`, only [`dpi`](RasterOptions::dpi) and
+    /// at `opts.dpi / 72`.  Of `opts`, only [`dpi`](RasterOptions::dpi),
+    /// [`intent`](RasterOptions::intent),
+    /// [`black_point_compensation`](RasterOptions::black_point_compensation),
+    /// [`preserve_black`](RasterOptions::preserve_black) and
     /// [`cancel`](RasterOptions::cancel) apply.
     ///
     /// # Errors
@@ -165,7 +172,10 @@ impl PageBuffer {
     /// into `out`, row `y` at `out[y * stride..]`.
     ///
     /// The pixels are those of [`render_page_rgba`](crate::render_page_rgba)
-    /// with the same `opts`, of which only [`dpi`](RasterOptions::dpi) and
+    /// with the same `opts`, of which only [`dpi`](RasterOptions::dpi),
+    /// [`intent`](RasterOptions::intent),
+    /// [`black_point_compensation`](RasterOptions::black_point_compensation),
+    /// [`preserve_black`](RasterOptions::preserve_black) and
     /// [`cancel`](RasterOptions::cancel) apply.
     ///
     /// # Errors
@@ -184,7 +194,43 @@ impl PageBuffer {
         self.render_colour_into(session, page_num, opts, PixelFormat::Rgba8, out, stride)
     }
 
-    /// [`Self::render_rgb_into`] or [`Self::render_rgba_into`], by `format`.
+    /// Render page `page_num` (1-based) of `session` over a transparent
+    /// backdrop as gray and alpha, two bytes per pixel with the gray not
+    /// premultiplied, into `out`, row `y` at `out[y * stride..]`.
+    ///
+    /// The pixels are those of
+    /// [`render_page_gray_alpha`](crate::render_page_gray_alpha) with the
+    /// same `opts`, of which only [`dpi`](RasterOptions::dpi),
+    /// [`intent`](RasterOptions::intent),
+    /// [`black_point_compensation`](RasterOptions::black_point_compensation),
+    /// [`preserve_black`](RasterOptions::preserve_black) and
+    /// [`cancel`](RasterOptions::cancel) apply.
+    ///
+    /// # Errors
+    ///
+    /// As [`render_page_rgba`](crate::render_page_rgba), plus the output
+    /// buffer errors of [`render_gray_into`](Self::render_gray_into) with
+    /// `width * 2` bytes per row.
+    pub fn render_gray_alpha_into(
+        &mut self,
+        session: &RasterSession,
+        page_num: u32,
+        opts: &RasterOptions,
+        out: &mut [u8],
+        stride: usize,
+    ) -> Result<PageInfo, RasterError> {
+        self.render_colour_into(
+            session,
+            page_num,
+            opts,
+            PixelFormat::GrayAlpha8,
+            out,
+            stride,
+        )
+    }
+
+    /// [`Self::render_rgb_into`], [`Self::render_rgba_into`] or
+    /// [`Self::render_gray_alpha_into`], by `format`.
     fn render_colour_into(
         &mut self,
         session: &RasterSession,
@@ -197,20 +243,12 @@ impl PageBuffer {
         if opts.deskew {
             return Err(RasterError::deskew_needs_gray());
         }
-        let transparent = format == PixelFormat::Rgba8;
-        let (rgb, diagnostics) = self.render_canvas(
-            session,
-            page_num,
-            opts,
-            format,
-            transparent,
-            out.len(),
-            stride,
-        )?;
-        if transparent {
-            rgb_rows_to_rgba(&rgb, out, stride);
-        } else {
-            rgb_rows_copy(&rgb, out, stride);
+        let (rgb, diagnostics) =
+            self.render_canvas(session, page_num, opts, format, out.len(), stride)?;
+        match format {
+            PixelFormat::Rgba8 => rgb_rows_to_rgba(&rgb, out, stride),
+            PixelFormat::GrayAlpha8 => rgb_rows_to_gray_alpha(&rgb, out, stride),
+            _ => rgb_rows_copy(&rgb, out, stride),
         }
         let (width, height) = (rgb.width, rgb.height);
         self.canvas.rgb.reclaim(rgb);
@@ -227,22 +265,18 @@ impl PageBuffer {
 
     /// Check an output buffer of `out_len` bytes at `stride` against the
     /// page in `format`, then render the page whole at `opts.dpi` on the
-    /// canvas held by `self`, over a transparent backdrop when
-    /// `transparent`.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one private helper behind the three public entry points"
-    )]
+    /// canvas held by `self`, over a transparent backdrop for a format with
+    /// alpha.
     fn render_canvas(
         &mut self,
         session: &RasterSession,
         page_num: u32,
         opts: &RasterOptions,
         format: PixelFormat,
-        transparent: bool,
         out_len: usize,
         stride: usize,
     ) -> Result<(Bitmap<Rgb8>, PageDiagnostics), RasterError> {
+        let transparent = matches!(format, PixelFormat::Rgba8 | PixelFormat::GrayAlpha8);
         if opts.depth != color::SampleDepth::Eight {
             return Err(RasterError::InvalidOptions(
                 "a page buffer holds 8-bit pixels: render 16-bit samples with \
@@ -410,6 +444,28 @@ mod tests {
         assert_eq!(render(&mut buffer, &opts, &mut out).unwrap(), (50, 40));
         assert_eq!(buffer.canvas.rgb.data.as_ptr(), canvas, "canvas reused");
         assert_eq!(out, want);
+    }
+
+    /// A gray and alpha page rendered into a padded buffer holds the
+    /// samples of the owned-buffer render, row by row.
+    #[test]
+    fn gray_alpha_into_matches_the_owned_render() {
+        let config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        let session = open_session_from_bytes(group_and_overprint_pages(), &config).unwrap();
+        let opts = RasterOptions::new(72.0);
+        let want = crate::render_page_gray_alpha(&session, 1, &opts).unwrap();
+        let crate::Pixels::U8(want) = want.pixels else {
+            panic!("an 8-bit page");
+        };
+        let stride = 50 * 2 + 3;
+        let mut out = vec![0; stride * 40];
+        let info = PageBuffer::new()
+            .render_gray_alpha_into(&session, 1, &opts, &mut out, stride)
+            .unwrap();
+        assert_eq!(info.format, PixelFormat::GrayAlpha8);
+        for (row, want) in out.chunks(stride).zip(want.chunks(50 * 2)) {
+            assert_eq!(&row[..50 * 2], want);
+        }
     }
 
     #[test]

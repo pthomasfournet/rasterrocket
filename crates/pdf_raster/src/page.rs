@@ -199,49 +199,44 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
     }
 }
 
-/// The samples of the gray bitmap `gray`, rows packed, each followed by
-/// its sample of `alpha` (`width × height` samples), opaque without one.
-fn gray_alpha_samples<P: Pixel>(gray: &Bitmap<P>, alpha: Option<&[P::Sample]>) -> Vec<P::Sample> {
+/// A gray pixel of a gray and alpha [`RenderedPage`], of either depth.
+pub(crate) trait GrayAlphaPixel: Pixel {
+    /// The page's format.
+    const FORMAT: PixelFormat;
+    /// The page's samples as [`Pixels`].
+    fn pixels(samples: Vec<Self::Sample>) -> Pixels;
+}
+
+impl GrayAlphaPixel for Gray8 {
+    const FORMAT: PixelFormat = PixelFormat::GrayAlpha8;
+    fn pixels(samples: Vec<u8>) -> Pixels {
+        Pixels::U8(samples)
+    }
+}
+
+impl GrayAlphaPixel for Gray16 {
+    const FORMAT: PixelFormat = PixelFormat::GrayAlpha16;
+    fn pixels(samples: Vec<u16>) -> Pixels {
+        Pixels::U16(samples)
+    }
+}
+
+/// A [`PixelFormat::GrayAlpha8`] or [`PixelFormat::GrayAlpha16`]
+/// [`RenderedPage`] of `gray`: rows packed, each gray sample followed by
+/// its alpha, opaque for a bitmap without an alpha plane.
+pub(crate) fn gray_alpha_rendered_page<G: GrayAlphaPixel>(
+    gray: &Bitmap<G>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
     let w = gray.width as usize;
     let mut samples = Vec::with_capacity(w * 2 * gray.height as usize);
     for y in 0..gray.height {
-        let alpha = alpha.map(|a| &a[y as usize * w..][..w]);
-        raster::push_with_alpha::<_, 1>(&gray.row_samples(y)[..w], alpha, &mut samples);
+        let row = &gray.row_samples(y)[..w];
+        raster::push_with_alpha::<_, 1>(row, gray.alpha_row(y), &mut samples);
     }
-    samples
-}
-
-/// A [`PixelFormat::GrayAlpha8`] [`RenderedPage`] of `gray` and its
-/// `alpha` plane, opaque without one.
-pub(crate) fn gray8_alpha_rendered_page(
-    gray: &Bitmap<Gray8>,
-    alpha: Option<&[u8]>,
-    page_num: u32,
-    dpi: f32,
-    diagnostics: PageDiagnostics,
-) -> RenderedPage {
-    let samples = gray_alpha_samples(gray, alpha);
-    let pixels = (Pixels::U8(samples), PixelFormat::GrayAlpha8);
-    rendered_page(
-        (gray.width, gray.height),
-        pixels,
-        page_num,
-        dpi,
-        diagnostics,
-    )
-}
-
-/// [`gray8_alpha_rendered_page`] at 16 bits: a
-/// [`PixelFormat::GrayAlpha16`] page.
-pub(crate) fn gray16_alpha_rendered_page(
-    gray: &Bitmap<Gray16>,
-    alpha: Option<&[u16]>,
-    page_num: u32,
-    dpi: f32,
-    diagnostics: PageDiagnostics,
-) -> RenderedPage {
-    let samples = gray_alpha_samples(gray, alpha);
-    let pixels = (Pixels::U16(samples), PixelFormat::GrayAlpha16);
+    let pixels = (G::pixels(samples), G::FORMAT);
     rendered_page(
         (gray.width, gray.height),
         pixels,
@@ -509,24 +504,18 @@ mod tests {
         let mut gray = Bitmap::<Gray8>::new(2, 2, 4, false);
         gray.row_bytes_mut(0)[..2].copy_from_slice(&[1, 2]);
         gray.row_bytes_mut(1)[..2].copy_from_slice(&[3, 4]);
-        let page = gray8_alpha_rendered_page(
-            &gray,
-            Some(&[10, 20, 30, 40]),
-            1,
-            72.0,
-            PageDiagnostics::default(),
-        );
-        assert_eq!(page.format, PixelFormat::GrayAlpha8);
-        assert_eq!(page.format.bytes_per_pixel(), 2);
-        assert_eq!(page.pixels, Pixels::U8(vec![1, 10, 2, 20, 3, 30, 4, 40]));
-        let opaque = gray8_alpha_rendered_page(&gray, None, 1, 72.0, PageDiagnostics::default());
+        let opaque = gray_alpha_rendered_page(&gray, 1, 72.0, PageDiagnostics::default());
         assert_eq!(
             opaque.pixels,
             Pixels::U8(vec![1, 255, 2, 255, 3, 255, 4, 255])
         );
-        let wide = Bitmap::<Gray16>::from_packed(1, 1, vec![300]);
-        let page =
-            gray16_alpha_rendered_page(&wide, Some(&[7]), 1, 72.0, PageDiagnostics::default());
+        let gray = gray.with_alpha_plane(Some(vec![10, 20, 30, 40]));
+        let page = gray_alpha_rendered_page(&gray, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(page.format, PixelFormat::GrayAlpha8);
+        assert_eq!(page.format.bytes_per_pixel(), 2);
+        assert_eq!(page.pixels, Pixels::U8(vec![1, 10, 2, 20, 3, 30, 4, 40]));
+        let wide = Bitmap::<Gray16>::from_packed(1, 1, vec![300]).with_alpha_plane(Some(vec![7]));
+        let page = gray_alpha_rendered_page(&wide, 1, 72.0, PageDiagnostics::default());
         assert_eq!(
             (page.format, page.pixels),
             (PixelFormat::GrayAlpha16, Pixels::U16(vec![300, 7]))

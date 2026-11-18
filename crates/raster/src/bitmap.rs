@@ -439,6 +439,24 @@ impl<P: Pixel> Bitmap<P> {
         self.alpha.take()
     }
 
+    /// The bitmap with the alpha plane `alpha` (`width × height` samples,
+    /// top-down), or with none for `None`, in place of its own.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `alpha` does not hold `width × height` samples.
+    #[must_use]
+    pub fn with_alpha_plane(mut self, alpha: Option<Vec<P::Sample>>) -> Self {
+        assert!(
+            alpha.as_ref().is_none_or(|a| {
+                Some(a.len()) == u32_to_usize(self.width).checked_mul(u32_to_usize(self.height))
+            }),
+            "Bitmap::with_alpha_plane: the plane must hold width * height samples"
+        );
+        self.alpha = alpha;
+        self
+    }
+
     /// Give the bitmap a painted-channels plane, all zero: one byte per
     /// pixel (`width × height`, top-down) that the paints composited
     /// through [`render_bitmap_span`](crate::pipe::render_bitmap_span) set
