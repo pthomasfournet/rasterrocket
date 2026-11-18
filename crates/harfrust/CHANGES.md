@@ -136,3 +136,18 @@ Not applicable:
 - #611's CI workflow change: not vendored.
 
 Rejected: none.
+
+## Upstream review (2026-11-18)
+
+Upstream history after `26f5a7682` through `f33cff93f` (2026-11-16, on
+0.16.0) was reviewed; the base in `UPSTREAM.toml` is unchanged.
+
+Ported:
+
+- #612 (f33cff93f): `morx` / `mort` chain subtables and `kerx` format 1
+  and 4 subtables whose state machine can act only on a glyph of a
+  completer class are skipped when the buffer holds none; a machine whose
+  end-of-text or out-of-bounds transition acts, a legacy one, or one with
+  fewer than 4 or more than 512 classes is not gated.  Applied as
+  upstream wrote it, with its unit tests, which read the already copied
+  `TestMORXOne.ttf`.
