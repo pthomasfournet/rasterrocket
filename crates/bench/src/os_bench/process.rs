@@ -23,6 +23,15 @@ pub(crate) enum Sink {
     Ram { root: PathBuf, spill: PathBuf },
 }
 
+/// The in-memory output path of invocation `n` of repetition `rep`.
+pub(crate) fn ram_path(root: &Path, rep: u32, n: u32) -> PathBuf {
+    root.join(format!("r{rep}-{n}"))
+}
+
+/// Marker file naming a directory as the harness's own; only such a directory
+/// (or an empty one) is ever emptied.
+const MARKER: &str = ".os_bench";
+
 /// Build the child's arguments and return them with the directory the pages
 /// land in (for `Ram`, the spill directory, which must hold no files after
 /// the run).  A range ending at `u32::MAX` omits `-l`: the child then renders
@@ -52,7 +61,7 @@ pub(crate) fn rrocket_argv(
         }
         Sink::Ram { root, spill } => {
             argv.push("--ram-path".into());
-            argv.push(root.join(format!("r{rep}-{n}")).into_os_string());
+            argv.push(ram_path(root, rep, n).into_os_string());
             (spill.clone(), spill.join("p"))
         }
     };
@@ -67,19 +76,50 @@ fn count_files(dir: &Path) -> Result<usize, String> {
     let mut n = 0;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        if entry.file_name() != MARKER && !entry.file_type().is_ok_and(|t| t.is_dir()) {
             n += 1;
         }
     }
     Ok(n)
 }
 
-/// Remove everything under `dir` (creating it if absent) and check it is empty.
+/// Empty `dir` (creating it if absent) and check it is empty.  The directory
+/// is marked as the harness's own; a non-empty directory without the marker,
+/// `.`, the working directory and any ancestor of it are refused.
 fn empty_dir(dir: &Path) -> Result<(), String> {
     let err = |e: std::io::Error| format!("{}: {e}", dir.display());
+    if dir.as_os_str().is_empty() || dir == Path::new(".") {
+        return Err(format!(
+            "{}: refusing to empty the working directory",
+            dir.display()
+        ));
+    }
     fs::create_dir_all(dir).map_err(err)?;
+    let real = fs::canonicalize(dir).map_err(err)?;
+    let cwd = std::env::current_dir()
+        .and_then(fs::canonicalize)
+        .map_err(|e| format!("working directory: {e}"))?;
+    if cwd.starts_with(&real) {
+        return Err(format!(
+            "{}: refusing to empty the working directory or one of its ancestors",
+            dir.display()
+        ));
+    }
+    let marker = dir.join(MARKER);
+    if !marker.exists() {
+        if fs::read_dir(dir).map_err(err)?.next().is_some() {
+            return Err(format!(
+                "{}: refusing to empty a non-empty directory without the {MARKER} marker",
+                dir.display()
+            ));
+        }
+        fs::write(&marker, b"").map_err(|e| format!("{}: {e}", marker.display()))?;
+    }
     for entry in fs::read_dir(dir).map_err(err)? {
         let path = entry.map_err(err)?.path();
+        if path == marker {
+            continue;
+        }
         if path.is_dir() {
             fs::remove_dir_all(&path).map_err(err)?;
         } else {
@@ -87,10 +127,11 @@ fn empty_dir(dir: &Path) -> Result<(), String> {
         }
     }
     match fs::read_dir(dir).map_err(err)?.count() {
-        0 => Ok(()),
+        1 => Ok(()),
         left => Err(format!(
-            "{}: {left} entries remain after emptying",
-            dir.display()
+            "{}: {} entries remain after emptying",
+            dir.display(),
+            left.saturating_sub(1)
         )),
     }
 }
@@ -224,12 +265,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_dir_refuses_an_unmarked_non_empty_dir_and_the_cwd() {
+        let dir = scratch("marker");
+        let other = dir.join("foreign");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("keep"), b"x").unwrap();
+        let err = empty_dir(&other).unwrap_err();
+        assert!(err.contains("foreign") && err.contains(MARKER), "{err}");
+        assert!(other.join("keep").exists());
+        assert!(empty_dir(Path::new(".")).is_err());
+        assert!(empty_dir(&std::env::current_dir().unwrap()).is_err());
+        let own = dir.join("own");
+        empty_dir(&own).unwrap();
+        assert!(own.join(MARKER).exists());
+        fs::write(own.join("x"), b"x").unwrap();
+        empty_dir(&own).unwrap();
+        assert!(!own.join("x").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn process_row_starts_each_rep_on_an_empty_dir() {
         let dir = scratch("empty");
+        empty_dir(&dir).unwrap();
         fs::write(dir.join("stale"), b"x").unwrap();
         fs::create_dir(dir.join("sub")).unwrap();
         process_rep(&cargo(), &["--version".into()], Some(&dir), Some(0)).unwrap();
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1); // the marker only
         fs::remove_dir_all(&dir).unwrap();
     }
 }
