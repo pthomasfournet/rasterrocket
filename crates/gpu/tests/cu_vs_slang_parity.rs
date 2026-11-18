@@ -27,6 +27,7 @@
 mod common;
 
 use rasterrocket_gpu::backend::GpuBackend;
+use rasterrocket_gpu::backend::layout::word_padded;
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BLIT_FILTER_Y, BlitParams};
 
 // ── icc_cmyk_clut ───────────────────────────────────────────────────
@@ -214,7 +215,9 @@ fn run_blit_vulkan(
     let dst_bytes = (page_w * page_h * 4) as usize;
     let cols_bytes: &[u8] = bytemuck::cast_slice(cols);
     let rows_bytes: &[u8] = bytemuck::cast_slice(rows);
-    let mut d_src = backend.alloc_device(src.len()).expect("alloc src");
+    let mut d_src = backend
+        .alloc_device(word_padded(src.len()))
+        .expect("alloc src");
     let mut d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
     let mut d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
     let mut d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
@@ -344,4 +347,38 @@ fn blit_gray_layout() {
         |py| (0.0, py),
         "blit gray-layout",
     );
+}
+
+#[test]
+fn blit_reads_an_unpadded_tail_source_exactly() {
+    // Sources whose bytes end inside a word: the last word's unused bytes
+    // are padding.  Each is blitted at identity and scaled 2×, each
+    // nearest-neighbour and interpolated on both axes.
+    let gray_1x1 = [0xA7_u8];
+    let rgb_3x1: Vec<u8> = (0..9).map(|i| 0x31 + 0x17 * i).collect();
+    for (src, src_w, layout, what) in [
+        (&gray_1x1[..], 1, 1, "1×1 gray"),
+        (&rgb_3x1[..], 3, 0, "3×1 RGB"),
+    ] {
+        check_blit_parity(
+            src,
+            src_w,
+            1,
+            layout,
+            src_w,
+            |px| (px, 0.0),
+            |py| (0.0, py),
+            &format!("{what} identity"),
+        );
+        check_blit_parity(
+            src,
+            src_w,
+            1,
+            layout,
+            2 * src_w,
+            |px| (px / 2.0, 0.0),
+            |py| (0.0, py / 2.0),
+            &format!("{what} 2×"),
+        );
+    }
 }

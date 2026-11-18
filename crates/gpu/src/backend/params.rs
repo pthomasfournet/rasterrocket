@@ -51,15 +51,20 @@ pub fn blit_extents(src: (u32, u32), src_layout: u32, dst: (u32, u32)) -> Option
 /// - `cols` holds at least `(x1 - x0)` entries and `rows` at least
 ///   `(y1 - y0)` entries of 16 bytes each
 /// - `filter` has no bits beyond [`BLIT_FILTER_X`] | [`BLIT_FILTER_Y`]
-/// - the source and destination fit the kernels' 32-bit offsets and `src`
-///   and `dst` hold the bytes they address (see [`blit_extents`])
+/// - the source and destination fit the kernels' 32-bit offsets (see
+///   [`blit_extents`]); `dst` holds the bytes it addresses, and `src`
+///   holds `src_w × src_h × bpp` bytes rounded up to a whole 32-bit word
+///   ([`super::layout::word_padded`]), since the kernels may read the
+///   source in words
 ///
 /// Backends should call `validate()` at record time. Violating these
 /// invariants would read past a sampling table, route Mask images through
 /// the Gray code path silently, or produce garbage pixels (or panics in
 /// debug builds via `debug_assert`).
 pub struct BlitParams<'a, B: GpuBackend + ?Sized> {
-    /// Source image in device memory.
+    /// Source image in device memory: `src_w × src_h × bpp` bytes,
+    /// row-major, then the bytes up to the next multiple of 4, whose values
+    /// do not affect the result.
     pub src: &'a B::DeviceBuffer,
     /// Destination page buffer in device memory.
     pub dst: &'a mut B::DeviceBuffer,
@@ -140,8 +145,10 @@ impl<B: GpuBackend + ?Sized> BlitParams<'_, B> {
             (self.dst_w, self.dst_h),
         )
         .ok_or_else(|| invariant("src or dst exceeds the kernels' 32-bit offset range"))?;
-        if backend.device_buffer_len(self.src) < src_bytes {
-            return Err(invariant("src buffer shorter than src_w × src_h × bpp"));
+        if backend.device_buffer_len(self.src) < super::layout::word_padded(src_bytes) {
+            return Err(invariant(
+                "src buffer shorter than src_w × src_h × bpp rounded up to a multiple of 4",
+            ));
         }
         if backend.device_buffer_len(self.dst) < dst_bytes {
             return Err(invariant("dst buffer shorter than dst_w × dst_h × 4"));
@@ -560,6 +567,35 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("dst buffer"), "{err}");
+    }
+
+    #[test]
+    fn blit_params_require_a_word_padded_source() {
+        static TABLE: usize = 3 * 16;
+        static EXACT: usize = 3;
+        static PADDED: usize = 4;
+        let gray_3x1 = |src: &'static usize| BlitParams::<FakeBackend> {
+            src,
+            dst: fake_out(),
+            cols: &TABLE,
+            rows: &TABLE,
+            src_w: 3,
+            src_h: 1,
+            src_layout: 1,
+            dst_w: 3,
+            dst_h: 3,
+            bbox: [0, 0, 3, 3],
+            filter: 0,
+        };
+        let err = gray_3x1(&EXACT)
+            .validate(&FakeBackend)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("src buffer"), "{err}");
+        assert!(err.contains("multiple of 4"), "{err}");
+        gray_3x1(&PADDED)
+            .validate(&FakeBackend)
+            .expect("a source padded to a whole word is valid");
     }
 
     #[test]

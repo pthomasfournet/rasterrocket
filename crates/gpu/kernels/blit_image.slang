@@ -15,6 +15,10 @@
 // are blended per channel as `((p00·(256−wx) + p10·wx)·(256−wy) +
 // (p01·(256−wx) + p11·wx)·wy + 2^15) >> 16`.
 //
+// The source is read in 32-bit words: byte `o` is bits `8·(o & 3)` and up
+// of word `o >> 2`.  Its buffer holds the image's bytes rounded up to a
+// whole word, so the word holding the last byte lies within it.
+//
 // Scalars travel via push constants (40 bytes); the tables are storage
 // buffers because their size scales with the bounding box.
 
@@ -37,14 +41,21 @@ void axis_taps(int i, uint frac, int n, bool blend, out int lo, out int hi, out 
     w = (lo == hi) ? 0u : ((frac - HALF_SAMPLE) >> 24);
 }
 
+// Byte `o` of the word-addressed source.
+uint src_byte(StructuredBuffer<uint> src, int o)
+{
+    uint u = uint(o);
+    return (src[u >> 2] >> ((u & 3u) * 8u)) & 0xFFu;
+}
+
 // Weighted mean of byte `ch` at the four tap offsets, rounded to nearest.
 uint blend_taps(
-    StructuredBuffer<uint8_t> src, int ch,
+    StructuredBuffer<uint> src, int ch,
     int o00, int o10, int o01, int o11,
     uint wx, uint wy)
 {
-    uint r0 = uint(src[o00 + ch]) * (WEIGHT_ONE - wx) + uint(src[o10 + ch]) * wx;
-    uint r1 = uint(src[o01 + ch]) * (WEIGHT_ONE - wx) + uint(src[o11 + ch]) * wx;
+    uint r0 = src_byte(src, o00 + ch) * (WEIGHT_ONE - wx) + src_byte(src, o10 + ch) * wx;
+    uint r1 = src_byte(src, o01 + ch) * (WEIGHT_ONE - wx) + src_byte(src, o11 + ch) * wx;
     return (r0 * (WEIGHT_ONE - wy) + r1 * wy + 0x8000u) >> 16;
 }
 
@@ -52,7 +63,7 @@ uint blend_taps(
 [numthreads(16, 16, 1)]
 void blit_image(
     uint3 gid : SV_DispatchThreadID,
-    uniform StructuredBuffer<uint8_t> src,
+    uniform StructuredBuffer<uint> src,          // source bytes, little-endian in words
     uniform RWStructuredBuffer<uint> dst_rgba,   // one RGBA8 pixel per word, R in the low byte
     uniform StructuredBuffer<uint> cols,
     uniform StructuredBuffer<uint> rows,

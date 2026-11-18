@@ -6,6 +6,10 @@
 //! word, the bytes past the third sample zero.  One-byte samples take one
 //! word (`s0 | s1 << 8 | s2 << 16`), two-byte samples two
 //! (`s0 | s1 << 16`, then `s2`).
+//!
+//! A byte buffer a kernel reads as words, such as a blit source, holds
+//! `word_padded(len)` bytes: its `len` bytes, then up to three bytes the
+//! kernel loads with the last word and never uses.
 
 /// The 32-bit words of one three-sample device pixel whose samples are
 /// `sample_bytes` bytes each: 1 for 1-byte samples, 2 for 2-byte samples.
@@ -19,6 +23,21 @@ pub const fn device_pixel_words(sample_bytes: usize) -> usize {
         1 => 1,
         2 => 2,
         _ => panic!("device pixels hold 1- or 2-byte samples"),
+    }
+}
+
+/// The smallest multiple of 4 that is at least `len`: the bytes of a
+/// buffer holding `len` bytes as whole 32-bit words.
+///
+/// # Panics
+///
+/// When the result exceeds `usize::MAX` (at compile time in a const
+/// context).
+#[must_use]
+pub const fn word_padded(len: usize) -> usize {
+    match len.checked_next_multiple_of(4) {
+        Some(padded) => padded,
+        None => panic!("word_padded: length overflows usize"),
     }
 }
 
@@ -69,6 +88,19 @@ mod tests {
     #[should_panic(expected = "1- or 2-byte samples")]
     fn device_pixel_words_rejects_other_widths() {
         let _ = device_pixel_words(3);
+    }
+
+    #[test]
+    fn word_padded_rounds_up_to_whole_words() {
+        let padded: Vec<usize> = (0..=9).map(word_padded).collect();
+        assert_eq!(padded, [0, 4, 4, 4, 4, 8, 8, 8, 8, 12]);
+        assert_eq!(word_padded(usize::MAX - 3), usize::MAX - 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "length overflows usize")]
+    fn word_padded_rejects_an_overflowing_length() {
+        let _ = word_padded(usize::MAX);
     }
 
     #[test]

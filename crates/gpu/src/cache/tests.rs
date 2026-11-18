@@ -331,6 +331,37 @@ mod device {
             "promoted bytes must match the originally inserted pixels",
         );
     }
+
+    /// A 3×1 RGB image of 9 bytes is held in a slab of 12, as a blit
+    /// source requires, both when inserted and when promoted back from
+    /// the host tier.  The cache must budget VRAM for one such image and
+    /// host RAM for its demoted copy.
+    pub(super) fn slabs_hold_whole_words<B: CacheBackend>(cache: &DeviceImageCache<B>) {
+        fn rgb_3x1(obj: u32, h: ContentHash, pixels: &[u8]) -> InsertRequest<'_> {
+            InsertRequest {
+                width: 3,
+                height: 1,
+                ..req(obj, h, ImageLayout::Rgb, pixels)
+            }
+        }
+        let pixels_a: Vec<u8> = (1..=9).collect();
+        let pixels_b = vec![0xCD_u8; 9];
+        let (h_a, h_b) = (ContentHash::of(&pixels_a), ContentHash::of(&pixels_b));
+        let check = |entry: &CachedDeviceImage<B>, what: &str| {
+            let len = B::slab_len(cache.device(), &entry.device_ptr);
+            assert_eq!(len, 12, "{what}: slab of {len} bytes for 9 pixel bytes");
+            assert_eq!(cache.download(entry).expect("download"), pixels_a, "{what}");
+        };
+        let entry_a = cache.insert(rgb_3x1(1, h_a, &pixels_a)).expect("insert a");
+        check(&entry_a, "inserted");
+        drop(entry_a);
+        drop(cache.insert(rgb_3x1(2, h_b, &pixels_b)).expect("insert b"));
+        assert_eq!(cache.host.len(), 1, "a was not demoted to the host tier");
+        check(
+            &cache.lookup_by_hash(&h_a).expect("promote hit"),
+            "promoted",
+        );
+    }
 }
 
 /// Defines one test per device check, each on a cache built by
@@ -370,6 +401,13 @@ macro_rules! device_tests {
         fn concurrent_inserts_stay_within_budget() {
             if let Some(cache) = $mk(4 * 256, 0) {
                 super::device::concurrent_inserts_stay_within_budget(&cache);
+            }
+        }
+
+        #[test]
+        fn slabs_hold_whole_words() {
+            if let Some(cache) = $mk(12, 1 << 20) {
+                super::device::slabs_hold_whole_words(&cache);
             }
         }
 

@@ -18,7 +18,9 @@ use crate::RGBA_BPP;
 /// The source of a blit: a device buffer of `width × height` samples in
 /// the layout `layout` ([`BlitParams::src_layout`]).
 pub struct BlitSource<'a, B: GpuBackend> {
-    /// The samples, row-major.
+    /// The samples, row-major, in a buffer of at least `width × height ×
+    /// bpp` bytes rounded up to a multiple of 4
+    /// ([`super::layout::word_padded`], [`BlitParams::src`]).
     pub pixels: &'a B::DeviceBuffer,
     /// Width in samples.
     pub width: u32,
@@ -164,6 +166,7 @@ pub fn blit_image_box<'s, B: GpuBackend>(
 
 #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
 mod tests {
+    use super::super::layout::word_padded;
     use super::*;
 
     /// Sampling-table entry of the integer coordinate `v` along x (`x`
@@ -181,7 +184,9 @@ mod tests {
     /// earlier blit wrote beyond the box's length.
     fn check_box_blit<B: GpuBackend>(backend: &B) {
         let image: Vec<u8> = (0..3 * 2 * 3).map(|i| 10 + i).collect();
-        let mut src_buf = backend.alloc_device(image.len()).expect("alloc");
+        let mut src_buf = backend
+            .alloc_device(word_padded(image.len()))
+            .expect("alloc");
         backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {
             pixels: &src_buf,
@@ -232,7 +237,9 @@ mod tests {
     /// to the backend's pool, buffers kept.
     fn check_pooled_blit<B: GpuBackend>(backend: &B) {
         let image = [7_u8, 8, 9];
-        let mut src_buf = backend.alloc_device(image.len()).expect("alloc");
+        let mut src_buf = backend
+            .alloc_device(word_padded(image.len()))
+            .expect("alloc");
         backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {
             pixels: &src_buf,

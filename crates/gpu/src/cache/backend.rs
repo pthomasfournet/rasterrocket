@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaStream, PinnedHostSlice};
+use cudarc::driver::{CudaSlice, CudaStream, HostSlice, PinnedHostSlice};
 
 use super::CacheError;
 use crate::backend::GpuBackend;
 use crate::backend::cuda::CudaBackend;
+use crate::backend::layout::word_padded;
 
 /// A backend the device image cache keeps its slabs on.
 ///
@@ -30,7 +31,10 @@ pub trait CacheBackend: GpuBackend {
     /// Host memory holding a demoted slab's bytes in the host tier.
     type HostSlab: Send + Sync;
 
-    /// A new slab holding `pixels`; `pixels` is not empty.
+    /// A new slab holding `pixels`, then up to three bytes of padding to the
+    /// next multiple of 4 ([`word_padded`]), as a blit source requires
+    /// ([`crate::backend::params::BlitParams::src`]); `pixels` is not
+    /// empty.
     ///
     /// # Errors
     /// The backend's error when the allocation or the copy fails.
@@ -75,7 +79,8 @@ pub trait CacheBackend: GpuBackend {
         bytes: usize,
     ) -> Result<Self::HostSlab, CacheError>;
 
-    /// A new slab holding the bytes of `host`.
+    /// A new slab holding the bytes of `host`, padded as
+    /// [`Self::upload_slab`] pads.
     ///
     /// # Errors
     /// The backend's error when the allocation or the copy fails.
@@ -97,7 +102,7 @@ impl CacheBackend for CudaBackend {
     type HostSlab = PinnedHostSlice<u8>;
 
     fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
-        device.clone_htod(pixels).map_err(CacheError::Cuda)
+        upload_padded(device, pixels)
     }
 
     fn download_slab(
@@ -158,8 +163,28 @@ impl CacheBackend for CudaBackend {
         device: &Self::Device,
         host: &Self::HostSlab,
     ) -> Result<Self::DeviceBuffer, CacheError> {
-        device.clone_htod(host).map_err(CacheError::Cuda)
+        upload_padded(device, host)
     }
+}
+
+/// A zeroed slab of `src.len()` bytes rounded up to a multiple of 4
+/// ([`word_padded`]) whose first `src.len()` bytes are a stream-ordered
+/// copy of `src`.
+///
+/// cudarc records the copy against `src`, so a page-locked `src` dropped
+/// while the copy is in flight waits for it.
+fn upload_padded<Src: HostSlice<u8> + ?Sized>(
+    device: &Arc<CudaStream>,
+    src: &Src,
+) -> Result<CudaSlice<u8>, CacheError> {
+    let len = src.len();
+    let mut slab = device
+        .alloc_zeros::<u8>(word_padded(len))
+        .map_err(CacheError::Cuda)?;
+    device
+        .memcpy_htod(src, &mut slab.slice_mut(..len))
+        .map_err(CacheError::Cuda)?;
+    Ok(slab)
 }
 
 /// The Vulkan cache issues its transfers through the backend's synchronous
@@ -173,7 +198,7 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
     type HostSlab = Box<[u8]>;
 
     fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
-        let mut slab = device.alloc_device(pixels.len())?;
+        let mut slab = device.alloc_device(word_padded(pixels.len()))?;
         device.upload(&mut slab, pixels)?;
         Ok(slab)
     }

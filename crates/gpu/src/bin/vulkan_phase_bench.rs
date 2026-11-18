@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use bench_common::smooth_cmyk;
-use rasterrocket_gpu::backend::layout::unpad_pixels;
+use rasterrocket_gpu::backend::layout::{unpad_pixels, word_padded};
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BlitParams, IccClutParams};
 use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
 use rasterrocket_gpu::backend::{
@@ -366,7 +366,7 @@ fn bench_blit(backend: &VulkanBackend, cfg: &Config) {
     header("blit_image_box split (prep = table writes, read = box copy-out)");
     let (sw, sh) = (2550_u32, 3300_u32);
     let image = noise((sw * sh * 3) as usize, 3);
-    let mut src_buf = ok(backend.alloc_device(image.len()), "alloc src");
+    let mut src_buf = ok(backend.alloc_device(word_padded(image.len())), "alloc src");
     ok(backend.upload(&mut src_buf, &image), "upload src");
     for (bw, bh) in [(256_u32, 256_u32), (850, 1100), (1275, 1650), (2550, 3300)] {
         let cols = table(bw, sw, true);
@@ -445,7 +445,7 @@ fn bench_lock(backend: &VulkanBackend, cfg: &Config) {
     println!("\n== concurrent blit_image_box: wall ms for 96 blits (median) ==");
     let (sw, sh) = (1700_u32, 2200_u32);
     let image = noise((sw * sh * 3) as usize, 5);
-    let mut src_buf = ok(backend.alloc_device(image.len()), "alloc src");
+    let mut src_buf = ok(backend.alloc_device(word_padded(image.len())), "alloc src");
     ok(backend.upload(&mut src_buf, &image), "upload src");
     let src = BlitSource::<VulkanBackend> {
         pixels: &src_buf,
