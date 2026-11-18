@@ -29,6 +29,11 @@ use super::timestamps::StageClock;
 /// range, and the kernel reads no element of an empty array.
 const EMPTY_INPUT: [u8; 4] = [0; 4];
 
+/// The buffer sets of the page raster a backend keeps, one per page
+/// between binning and the end of its read-back: while one page is on the
+/// device, the others stage their inputs or read their pixels.
+pub(super) const PAGE_SETS: usize = 3;
+
 /// The buffers of the page raster, kept between pages.
 #[derive(Default)]
 pub(super) struct PageScratch {
@@ -138,8 +143,10 @@ impl VulkanBackend {
     /// `out[y × stride..][..width × 3]`, `stride` in samples.  Samples
     /// between rows are left unchanged.
     ///
-    /// Concurrent calls run one at a time; other kernels' pages may run
-    /// between them.
+    /// Concurrent calls stage their inputs and read their pixels in
+    /// parallel, up to three at once (each with buffers of its own, the
+    /// others waiting for one), and run on the device one at a
+    /// time; other kernels' pages may run between them.
     ///
     /// # Errors
     ///
@@ -248,10 +255,7 @@ impl VulkanBackend {
         self.device
             .check_storage_range("render_page pixels", device_size(page_len))?;
 
-        let mut scratch = self
-            .page_scratch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut scratch = self.page_scratch.lend();
         let PageScratch {
             inputs: slots,
             target,
@@ -285,7 +289,7 @@ impl VulkanBackend {
         };
         let mut record = Duration::ZERO;
         // SAFETY (the recorded copies and the read below): the scratch is
-        // held under its lock for this whole call, and `run_page` returns
+        // lent to this call alone for its whole duration, and `run_page` returns
         // only once its page has completed or, on failure, been waited on;
         // nothing touches the buffers in between.
         self.run_page(|backend| {
@@ -534,6 +538,50 @@ mod tests {
         };
         page_raster_matches_the_host_composite_at::<u8>(&backend);
         page_raster_matches_the_host_composite_at::<u16>(&backend);
+    }
+
+    /// Pages of different sizes rendered at once from more threads than
+    /// the backend has buffer sets each get their own pixels.
+    #[test]
+    fn concurrent_pages_each_get_their_own_pixels() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let pages: Vec<(u32, u32, Vec<HostCmd>)> = (0..12u32)
+            .map(|i| {
+                let mut rng = Rng(100 + u64::from(i));
+                let (width, height) = (40 + 17 * i, 30 + 11 * (i % 5));
+                let cmds = (0..60)
+                    .map(|_| random_cmd(&mut rng, width, height, 255))
+                    .collect();
+                (width, height, cmds)
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for (width, height, cmds) in &pages {
+                let backend = &backend;
+                let _ = scope.spawn(move || {
+                    let paper = [250, 240, 230];
+                    let mut page = PageCommands::new(*width, *height, SampleDepth::Eight, paper);
+                    for c in cmds {
+                        page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
+                            .expect("push");
+                    }
+                    let want = host_page::<u8>(*width, *height, paper, cmds);
+                    for _ in 0..3 {
+                        let mut out = vec![0u8; want.len()];
+                        backend
+                            .render_page(&page, &mut out, *width as usize * 3)
+                            .expect("render_page");
+                        assert_eq!(out, want, "{width}×{height}");
+                    }
+                });
+            }
+        });
+        assert!(
+            backend.page_scratch.idle_len() <= super::PAGE_SETS,
+            "more buffer sets than the bound"
+        );
     }
 
     #[test]

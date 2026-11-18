@@ -51,8 +51,9 @@ pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
     scratch: crate::backend::DeviceScratch<Self>,
-    /// Buffers of [`Self::render_page`], kept between pages.
-    page_scratch: std::sync::Mutex<page::PageScratch>,
+    /// Buffers of [`Self::render_page`], kept between pages: one set per
+    /// page being staged, rendered or read back.
+    page_scratch: crate::backend::ScratchPool<page::PageScratch>,
     /// Whether the ICC grid kernel reproduces the host on this device;
     /// measured on first use ([`Self::icc_clut_is_exact`]).
     icc_clut_exact: std::sync::OnceLock<bool>,
@@ -99,7 +100,7 @@ impl VulkanBackend {
         let transfer = transfer::TransferContext::new(device.clone())?;
         Ok(Self {
             scratch: crate::backend::DeviceScratch::new(),
-            page_scratch: std::sync::Mutex::default(),
+            page_scratch: crate::backend::ScratchPool::bounded(page::PAGE_SETS),
             icc_clut_exact: std::sync::OnceLock::new(),
             transfer,
             recorder,
