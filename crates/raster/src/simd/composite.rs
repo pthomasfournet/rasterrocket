@@ -99,7 +99,8 @@ fn composite_scalar(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
 
 // ── AVX-512 tier ──────────────────────────────────────────────────────────────
 
-/// Pixels per AVX-512 block.
+/// Pixels per block of the AVX-512 and AVX2 tiers: 96 destination bytes,
+/// three 32-byte thirds.
 #[cfg(target_arch = "x86_64")]
 const BLOCK_PX: usize = 32;
 
@@ -289,10 +290,6 @@ const fn widened_byte(j: usize, high: bool) -> usize {
     (j / 8) * 16 + (j % 8) + if high { 8 } else { 0 }
 }
 
-/// Pixels per AVX2 block; shorter spans take the scalar loop.
-#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
-const AVX2_BLOCK_PX: usize = 32;
-
 /// AVX2 tier: 32 pixels (96 destination bytes) per block.  A span of
 /// fewer than 32 pixels takes the scalar loop.  A remainder of 1–31 pixels
 /// is covered by one more block ending at the span's last pixel, computed
@@ -322,7 +319,7 @@ unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]
 
     // Only pixels that both slices cover are processed.
     let n = shape.len().min(dst.len() / 3);
-    if n < AVX2_BLOCK_PX {
+    if n < BLOCK_PX {
         composite_scalar(dst, src, a_input, shape);
         return;
     }
@@ -350,6 +347,7 @@ unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]
     let dp = dst.as_mut_ptr();
     // The composited 96 bytes of the block of pixels `px .. px + 32`.
     let block = |px: usize| -> [__m256i; 3] {
+        debug_assert!(px + BLOCK_PX <= n, "block past the span: px={px} n={n}");
         // SAFETY: px + 32 ≤ n ≤ shape.len() and 3(px + 32) ≤ 3n ≤ dst.len().
         unsafe {
             let cov = _mm256_loadu_si256(sp.add(px).cast());
@@ -386,16 +384,17 @@ unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]
         }
     };
     let store = |px: usize, out: [__m256i; 3]| {
+        debug_assert!(px + BLOCK_PX <= n, "block past the span: px={px} n={n}");
         for (g, v) in out.into_iter().enumerate() {
             // SAFETY: 3(px + 32) ≤ 3n ≤ dst.len().
             unsafe { _mm256_storeu_si256(dp.add(px * 3 + g * 32).cast(), v) };
         }
     };
 
-    let last = n - AVX2_BLOCK_PX;
-    let tail = (!n.is_multiple_of(AVX2_BLOCK_PX)).then(|| block(last));
-    for b in 0..n / AVX2_BLOCK_PX {
-        let px = b * AVX2_BLOCK_PX;
+    let last = n - BLOCK_PX;
+    let tail = (!n.is_multiple_of(BLOCK_PX)).then(|| block(last));
+    for b in 0..n / BLOCK_PX {
+        let px = b * BLOCK_PX;
         store(px, block(px));
     }
     if let Some(out) = tail {
@@ -417,7 +416,7 @@ fn dispatch_composite(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
         return;
     }
     #[cfg(feature = "simd-avx2")]
-    if shape.len() >= AVX2_BLOCK_PX && is_x86_feature_detected!("avx2") {
+    if shape.len() >= BLOCK_PX && is_x86_feature_detected!("avx2") {
         // SAFETY: avx2 confirmed present.
         unsafe { composite_avx2(dst, src, a_input, shape) };
         return;
@@ -529,25 +528,30 @@ mod tests {
         }
     }
 
-    /// Direct call into the AVX-512 tier for every span length 0..=64 —
-    /// whole blocks, masked remainders of every size and the one-pixel
-    /// scalar remainder — against the scalar tier, over pseudorandom
+    /// A tier's entry point, as the dispatcher calls it.
+    #[cfg(target_arch = "x86_64")]
+    type Tier = unsafe fn(&mut [u8], [u8; 3], u8, &[u8]);
+
+    /// Call `tier` directly for every span length of `lengths`, 16 trials
+    /// each from `seed`, against the scalar tier, over pseudorandom
     /// coverage, destination, source colour and opacity.  Both slices sit
     /// between guard bytes: destination guards must come back unchanged, and
     /// full-coverage guards around the coverage slice make any coverage byte
-    /// read past the span change the output.  Skipped where the CPU lacks
-    /// AVX-512 BW+VL.
+    /// read past the span change the output.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must have the features `tier` is compiled for.
     #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn avx512_tier_matches_scalar_at_every_length() {
+    unsafe fn assert_tier_matches_scalar(
+        lengths: impl IntoIterator<Item = usize>,
+        seed: u32,
+        tier: Tier,
+    ) {
         const GUARD: usize = 64;
-        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512vl") {
-            return;
-        }
-        for n in 0..=64usize {
+        for n in lengths {
             for trial in 0..16u32 {
-                #[expect(clippy::cast_possible_truncation, reason = "n ≤ 64")]
-                let seed = 0x9e37_79b9 ^ ((n as u32) << 8) ^ trial;
+                let seed = seed ^ (u32::try_from(n).unwrap() << 8) ^ trial;
                 let mut shape = vec![0xFFu8; GUARD + n + GUARD];
                 shape[GUARD..GUARD + n].copy_from_slice(&pseudorandom(n, seed));
                 let shape = &shape[GUARD..GUARD + n];
@@ -561,10 +565,8 @@ mod tests {
 
                 let mut buf = vec![0xA5u8; GUARD + n * 3 + GUARD];
                 buf[GUARD..GUARD + n * 3].copy_from_slice(&initial);
-                // SAFETY: avx512bw + avx512vl confirmed present above.
-                unsafe {
-                    composite_avx512(&mut buf[GUARD..GUARD + n * 3], src, a_input, shape);
-                }
+                // SAFETY: the caller guarantees the tier's features.
+                unsafe { tier(&mut buf[GUARD..GUARD + n * 3], src, a_input, shape) };
 
                 assert_eq!(
                     &buf[GUARD..GUARD + n * 3],
@@ -582,53 +584,35 @@ mod tests {
         }
     }
 
-    /// Direct call into the AVX2 tier for every span length 0..=100 and a
-    /// few long ones — the scalar fallback below one block, whole 32-pixel
-    /// blocks and every overlapping remainder — against the scalar tier,
-    /// with the guards and pseudorandom inputs of the AVX-512 test.
-    /// Skipped where the CPU lacks AVX2.
+    /// The AVX-512 tier for every span length 0..=64: whole blocks, masked
+    /// remainders of every size and the one-pixel scalar remainder.
+    /// Skipped where the CPU lacks AVX-512 BW+VL.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512_tier_matches_scalar_at_every_length() {
+        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        // SAFETY: avx512bw + avx512vl confirmed present above.
+        unsafe { assert_tier_matches_scalar(0..=64, 0x9e37_79b9, composite_avx512) };
+    }
+
+    /// The AVX2 tier for every span length 0..=100 and a few long ones: the
+    /// scalar fallback below one block, whole 32-pixel blocks and every
+    /// overlapping remainder.  Skipped where the CPU lacks AVX2.
     #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     #[test]
     fn avx2_tier_matches_scalar_at_every_length() {
-        const GUARD: usize = 64;
         if !is_x86_feature_detected!("avx2") {
             return;
         }
-        for n in (0..=100usize).chain([1000, 1001, 1023]) {
-            for trial in 0..16u32 {
-                #[expect(clippy::cast_possible_truncation, reason = "n ≤ 1023")]
-                let seed = 0x7f4a_7c15 ^ ((n as u32) << 8) ^ trial;
-                let mut shape = vec![0xFFu8; GUARD + n + GUARD];
-                shape[GUARD..GUARD + n].copy_from_slice(&pseudorandom(n, seed));
-                let shape = &shape[GUARD..GUARD + n];
-                let initial = pseudorandom(n * 3, seed.rotate_left(11));
-                let params = pseudorandom(4, seed.rotate_left(23));
-                let src = [params[0], params[1], params[2]];
-                let a_input = params[3];
-
-                let mut want = initial.clone();
-                composite_scalar(&mut want, src, a_input, shape);
-
-                let mut buf = vec![0xA5u8; GUARD + n * 3 + GUARD];
-                buf[GUARD..GUARD + n * 3].copy_from_slice(&initial);
-                // SAFETY: avx2 confirmed present above.
-                unsafe {
-                    composite_avx2(&mut buf[GUARD..GUARD + n * 3], src, a_input, shape);
-                }
-
-                assert_eq!(
-                    &buf[GUARD..GUARD + n * 3],
-                    want.as_slice(),
-                    "n={n} trial={trial} src={src:?} a_input={a_input}"
-                );
-                assert!(
-                    buf[..GUARD]
-                        .iter()
-                        .chain(&buf[GUARD + n * 3..])
-                        .all(|&b| b == 0xA5),
-                    "n={n} trial={trial}: bytes outside the span were written"
-                );
-            }
+        // SAFETY: avx2 confirmed present above.
+        unsafe {
+            assert_tier_matches_scalar(
+                (0..=100).chain([1000, 1001, 1023]),
+                0x7f4a_7c15,
+                composite_avx2,
+            );
         }
     }
 
