@@ -13,6 +13,7 @@
 
 mod library;
 mod process;
+mod summary;
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -23,6 +24,7 @@ use std::process::ExitCode;
 use library::{DocRange, Sample, deskew_rep, library_rep};
 use pdf_raster::{BackendPolicy, SessionConfig, open_session};
 use process::{Sink, process_rep, ram_path, rrocket_argv};
+use summary::{noisy_lines, read_dir, render_table};
 
 /// Parsed `library` command line.
 struct LibraryArgs {
@@ -350,17 +352,45 @@ fn run_process(args: &ProcessArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// `summarize DIR_A DIR_B`: the cross-OS table on stdout.
+fn summarize(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (Some(a), Some(b), None) = (args.next(), args.next(), args.next()) else {
+        return Err("summarize takes exactly two directories".to_owned());
+    };
+    let (env_a, stats_a) = read_dir(a.as_ref())?;
+    let (env_b, stats_b) = read_dir(b.as_ref())?;
+    print!(
+        "{}",
+        render_table((&env_a, &stats_a), (&env_b, &stats_b))
+            .map_err(|e| format!("{a} against {b}: {e}"))?
+    );
+    Ok(())
+}
+
+/// `noisy DIR`: one `row\tdoc` line per noisy row.
+fn noisy(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (Some(dir), None) = (args.next(), args.next()) else {
+        return Err("noisy takes exactly one directory".to_owned());
+    };
+    print!("{}", noisy_lines(&read_dir(dir.as_ref())?.1));
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("library") => parse_library(args).and_then(|a| run_library(&a)),
         Some("process") => parse_process(args).and_then(|a| run_process(&a)),
+        Some("summarize") => summarize(args),
+        Some("noisy") => noisy(args),
         _ => Err(
             "usage: os_bench library --group G --row R --dpi D --threads N --reps K \
              [--deskew] [--page-times FILE] PDF[:FIRST-LAST]...\n       \
              os_bench process --group G --row R --rrocket PATH --dpi D --threads N --reps K \
              (--disk DIR | --ram ROOT | --none) [--invocations M] [--expect-pages] \
-             [PDF[:FIRST-LAST]...] [-- EXTRA...]"
+             [PDF[:FIRST-LAST]...] [-- EXTRA...]\n       \
+             os_bench summarize DIR_UBUNTU DIR_WINDOWS\n       \
+             os_bench noisy DIR"
                 .to_owned(),
         ),
     };
