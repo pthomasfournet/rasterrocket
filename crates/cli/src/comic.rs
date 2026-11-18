@@ -97,16 +97,18 @@ pub(crate) fn run(
     pages.retain(|page| i32::try_from(page).is_ok_and(|p| selected.binary_search(&p).is_ok()));
 
     let pool = crate::pool::RenderPool::new(args.num_threads).map_err(RunError::Pool)?;
+    let log = crate::progress::PageLog::new(args.timings, args.progress, selected.len());
     let (mut written, mut failed) = (0usize, 0usize);
     let unreported = crate::pool::run_in_order(
         &pool,
         std::iter::from_fn(|| pages.next_job()),
         |job| {
             let page_num = job.page();
-            let outcome = job
-                .render()
-                .map_err(|e| e.to_string())
-                .and_then(|page| write_page(args, spill, page, total).map_err(|e| e.to_string()));
+            let outcome = log.page(page_num, || {
+                job.render().map_err(|e| e.to_string()).and_then(|page| {
+                    write_page(args, spill, page, total).map_err(|e| e.to_string())
+                })
+            });
             (page_num, outcome)
         },
         |_, (page_num, outcome)| {

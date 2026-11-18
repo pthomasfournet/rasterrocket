@@ -10,13 +10,13 @@ mod naming;
 mod ocr_prep;
 mod pool;
 mod print;
+mod progress;
 mod ram;
 mod render;
 mod tone;
 
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use args::Args;
 use clap::Parser;
@@ -199,8 +199,7 @@ fn main() -> ExitCode {
     }
 
     let n_pages = pages.len();
-    let done = AtomicU32::new(0);
-    let start = Instant::now();
+    let log = progress::PageLog::new(args.timings, args.progress, n_pages);
 
     #[expect(
         clippy::cast_sign_loss,
@@ -208,7 +207,6 @@ fn main() -> ExitCode {
     )]
     let total_u32 = total as u32;
 
-    let timings = args.timings;
     if args.fax && u16::try_from(n_pages).is_err() {
         return fail(format_args!(
             "a fax document holds at most 65535 pages; {n_pages} are selected"
@@ -246,50 +244,19 @@ fn main() -> ExitCode {
             return None;
         }
 
-        let t0 = timings.then(Instant::now);
-        let result = render::render_page(
-            &session,
-            page_u32,
-            total_u32,
-            &args,
-            &spill_policy,
-            document,
-        );
+        let result = log.page(page_num, || {
+            render::render_page(
+                &session,
+                page_u32,
+                total_u32,
+                &args,
+                &spill_policy,
+                document,
+            )
+        });
         if whole_document && result.is_err() {
             document_failed.store(true, Ordering::Relaxed);
         }
-        if let Some(t0) = t0 {
-            let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            let tid = rayon::current_thread_index().unwrap_or(99);
-            eprintln!("timing: page {page_num:4}  {ms:7.1}ms  thread {tid}");
-        }
-
-        if args.progress {
-            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let elapsed = start.elapsed().as_secs_f64();
-            let completed_usize = usize::try_from(completed).unwrap_or(n_pages);
-            let remaining = n_pages.saturating_sub(completed_usize);
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "ETA display; ±1s accuracy is sufficient"
-            )]
-            let eta_str = if elapsed > 0.5 && completed >= 2 {
-                let rate = f64::from(completed) / elapsed;
-                let eta_s = remaining as f64 / rate;
-                if eta_s.is_finite() {
-                    format!("~{eta_s:.1}s remaining")
-                } else {
-                    "~?s remaining".to_owned()
-                }
-            } else {
-                "~?s remaining".to_owned()
-            };
-            eprintln!(
-                "rrocket: page {page_num} done  [{completed}/{n_pages}]  \
-                         {elapsed:.1}s elapsed  {eta_str}"
-            );
-        }
-
         result.err().map(|e| (page_num, e))
     };
 
