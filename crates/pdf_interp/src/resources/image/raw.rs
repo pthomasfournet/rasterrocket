@@ -438,7 +438,7 @@ mod tests {
     fn rgb_and_cmyk_keep_their_components() {
         let s = raw("/DeviceRGB", 8, &[255, 0, 0, 0, 255, 0, 0, 0, 255], 3, 1);
         assert_eq!(s.layout, Layout::Color(3));
-        assert_eq!(s.data.len(), 9);
+        assert_eq!(s.data.heap_bytes(), 9);
         let s = raw("/DeviceCMYK", 8, &[0, 0, 0, 0], 1, 1);
         assert_eq!(s.layout, Layout::Color(4));
     }

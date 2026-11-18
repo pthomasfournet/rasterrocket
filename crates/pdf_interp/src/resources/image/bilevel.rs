@@ -145,6 +145,14 @@ impl Bilevel {
         }
     }
 
+    /// The bytes of memory the bits and their expansion to bytes occupy:
+    /// the expansion is counted whether made yet or not, as every draw
+    /// through [`Self::samples`] makes and keeps it.
+    #[must_use]
+    pub(crate) const fn heap_bytes(&self) -> usize {
+        size_of::<u64>() * self.bits.len() + self.sample_count()
+    }
+
     /// The number of samples, `width × height`.
     #[must_use]
     pub(crate) const fn sample_count(&self) -> usize {
@@ -248,6 +256,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn heap_bytes_counts_the_bits_and_their_expansion() {
+        let b = Bilevel::new(130, 3, 0x00, 0xFF).unwrap();
+        // Three 64-bit words a row, three rows, and a byte a sample.
+        assert_eq!(b.heap_bytes(), 3 * 3 * 8 + 130 * 3);
+        let data = super::super::ImageData::Bilevel(Box::new(b));
+        assert_eq!(data.heap_bytes(), 3 * 3 * 8 + 130 * 3);
     }
 
     #[test]

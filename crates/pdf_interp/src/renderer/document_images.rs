@@ -305,7 +305,7 @@ impl State {
 /// nothing.
 pub(crate) fn host_bytes(image: &DecodedImage) -> usize {
     let data = &image.image.data;
-    let pixels = if data.is_host() { data.len() } else { 0 };
+    let pixels = if data.is_host() { data.heap_bytes() } else { 0 };
     let mask = image.image.smask.as_ref().map_or(0, |m| {
         m.alpha().len() + m.alpha16().map_or(0, |a| a.len() * 2)
     });

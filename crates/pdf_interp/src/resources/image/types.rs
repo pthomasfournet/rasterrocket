@@ -340,23 +340,20 @@ impl ImageData {
         }
     }
 
-    /// Length in bytes of the underlying pixel storage.  Cheap for either
-    /// variant — no host memory access required for the GPU variant.
+    /// The bytes of memory the samples occupy once drawn, host or device:
+    /// those of a bilevel image are its bits and their expansion to bytes,
+    /// which the first [`Self::as_cpu`] makes and keeps
+    /// ([`super::Bilevel::heap_bytes`]).  No host memory is read for a
+    /// device-resident image.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn heap_bytes(&self) -> usize {
         match self {
             Self::Cpu(bytes) => bytes.len(),
-            Self::Cpu16(samples) => samples.len() * 2,
-            Self::Bilevel(bits) => bits.sample_count(),
+            Self::Cpu16(samples) => size_of_val(samples.as_slice()),
+            Self::Bilevel(bits) => bits.heap_bytes(),
             #[cfg(feature = "cache")]
             Self::Gpu(cached) => usize::try_from(cached.vram_bytes()).unwrap_or(usize::MAX),
         }
-    }
-
-    /// Whether the underlying pixel storage is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 

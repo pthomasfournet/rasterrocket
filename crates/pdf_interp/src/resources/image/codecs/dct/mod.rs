@@ -684,7 +684,7 @@ mod tests {
             let result = decode_dct_gpu_path(&[], 2, 2, &mut dec);
             let img = result.expect("should succeed");
             assert_eq!(img.layout, Layout::Color(3));
-            assert_eq!(img.data.len(), 12);
+            assert_eq!(img.data.heap_bytes(), 12);
         }
 
         #[test]
