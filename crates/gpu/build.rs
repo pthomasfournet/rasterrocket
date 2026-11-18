@@ -128,6 +128,25 @@ fn find_nvcc() -> String {
         .unwrap_or_else(|| "nvcc".to_owned())
 }
 
+/// The slangc to run: `SLANGC` if set, else the `LunarG` Vulkan SDK's
+/// (`$VULKAN_SDK/bin/slangc`; `%VULKAN_SDK%\Bin\slangc.exe` on Windows) if
+/// it exists, else `slangc` from `PATH`.  slangc runs on the build host, so
+/// the executable suffix is the host's.
+fn find_slangc() -> String {
+    if let Ok(slangc) = env::var("SLANGC") {
+        return slangc;
+    }
+    env::var_os("VULKAN_SDK")
+        .map(|sdk| {
+            PathBuf::from(sdk)
+                .join("bin")
+                .join(format!("slangc{}", env::consts::EXE_SUFFIX))
+        })
+        .filter(|p| p.is_file())
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "slangc".to_owned())
+}
+
 /// The host C++ compiler nvcc runs: extra nvcc arguments, and the
 /// environment the compiler needs.  Empty where nvcc finds its host compiler
 /// itself.
@@ -245,6 +264,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=NVJPEG2K_PATH");
     println!("cargo:rerun-if-env-changed=NVJPEG2K_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=SLANGC");
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
     let nvcc_path = find_nvcc();
     let nvcc = &nvcc_path;
@@ -466,11 +486,9 @@ fn write_placeholder_ptx(out_dir: &Path) {
 ///
 /// Every kernel compiles against [`SLANG_PROFILE`].
 ///
-/// `slangc` is bundled with the `LunarG` Vulkan SDK and ships in the
-/// Ubuntu `slang` package; falls back to PATH lookup.  Override with
-/// the `SLANGC` env var.
+/// The slangc run is [`find_slangc`]'s.
 fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
-    let slangc = env::var("SLANGC").unwrap_or_else(|_| "slangc".to_owned());
+    let slangc = find_slangc();
 
     for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
         let (source, defines) = slang_source(kernel);
@@ -498,7 +516,8 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
             .output()
             .unwrap_or_else(|e| {
                 panic!(
-                    "failed to run slangc ({slangc}): {e} — install the Vulkan SDK or `apt install slang`"
+                    "failed to run slangc ({slangc}): {e} — install the LunarG Vulkan SDK \
+                     (it sets VULKAN_SDK), `apt install slang`, or name slangc in SLANGC"
                 )
             });
 
