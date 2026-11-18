@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use gpu::backend::BackendError;
 
-use super::DevicePages;
-use super::devices::Device;
+use super::devices::{Device, Load};
+use super::{DevicePages, choose};
 use crate::test_pdf::{assemble, stream};
 use crate::{
     BackendPolicy, CancelToken, DevicePage, RasterError, RasterSession, RenderParams,
@@ -351,32 +351,57 @@ fn two_device_session(pdf: Vec<u8>) -> Option<RasterSession> {
     Some(session)
 }
 
-/// A page takes the open device the fewest pages hold, the first listed
-/// among equals.
+/// A page goes where its expected wait is shortest: held pages and itself
+/// times the mean run, a device without runs taking the shortest known
+/// mean, the first device among equals.
 #[test]
-fn a_page_takes_the_device_the_fewest_pages_hold() {
+fn a_page_goes_where_it_expects_the_shortest_wait() {
+    let load = |held, mean: Option<u128>| Load {
+        held,
+        mean_nanos: mean,
+    };
+    assert_eq!(choose(&[]), None);
+    assert_eq!(choose(&[load(0, None), load(0, None)]), Some(0));
+    assert_eq!(choose(&[load(1, None), load(0, None)]), Some(1));
+    // Three pages on a 2 ms device wait less than one on a 7 ms device;
+    // four do not.
+    let (fast, slow) = (Some(2_000_000), Some(7_000_000));
+    assert_eq!(choose(&[load(2, fast), load(0, slow)]), Some(0));
+    assert_eq!(choose(&[load(3, fast), load(0, slow)]), Some(1));
+    // A device without runs counts the fastest known mean.
+    assert_eq!(choose(&[load(2, fast), load(2, None)]), Some(0));
+    assert_eq!(choose(&[load(2, fast), load(1, None)]), Some(1));
+    assert_eq!(
+        choose(&[load(0, slow), load(1, None), load(0, fast)]),
+        Some(2)
+    );
+    assert_eq!(load(usize::MAX, Some(u128::MAX)).wait(1), u128::MAX);
+}
+
+/// Each claim takes the device where one more page expects the shortest
+/// wait, so the pages held on a device push later claims to the other one;
+/// released claims free their device.
+#[test]
+fn held_pages_push_claims_to_the_other_device() {
     let Some(session) = two_device_session(pdf(&[DEVICE])) else {
         return;
     };
     let pages = device_pages(&session);
-    let first = pages.claim().expect("a device");
-    let second = pages.claim().expect("a device");
-    let third = pages.claim().expect("a device");
-    assert!(std::ptr::eq(first.device, &raw const pages.devices[0]));
-    assert!(std::ptr::eq(second.device, &raw const pages.devices[1]));
-    assert!(std::ptr::eq(third.device, &raw const pages.devices[0]));
-    assert_eq!(
-        (pages.devices[0].in_flight(), pages.devices[1].in_flight()),
-        (2, 1)
+    let mut claims = Vec::new();
+    for _ in 0..64 {
+        claims.push(pages.claim().expect("a device"));
+        if pages.devices.iter().all(|d| d.in_flight() > 0) {
+            break;
+        }
+    }
+    assert!(
+        pages.devices.iter().all(|d| d.in_flight() > 0),
+        "64 held pages stayed on one device"
     );
-    drop(first);
-    let fourth = pages.claim().expect("a device");
-    assert!(std::ptr::eq(fourth.device, &raw const pages.devices[0]));
-    drop((second, third, fourth));
-    assert_eq!(
-        (pages.devices[0].in_flight(), pages.devices[1].in_flight()),
-        (0, 0)
-    );
+    let held: usize = pages.devices.iter().map(Device::in_flight).sum();
+    assert_eq!(held, claims.len());
+    drop(claims);
+    assert!(pages.devices.iter().all(|d| d.in_flight() == 0));
 }
 
 /// Pages rendered at once on two devices all render on a device, with the
@@ -436,8 +461,13 @@ fn a_failed_device_leaves_the_others_in_service() {
     }
     let counts = pages.counts();
     assert_eq!((counts.failed, counts.rendered), (1, 2), "{counts}");
-    assert_eq!(counts.by_device[0].1, 0, "{counts}");
-    assert_eq!(counts.by_device[1].1, 2, "{counts}");
+    let failed = pages
+        .devices
+        .iter()
+        .position(Device::is_retired)
+        .expect("a retired device");
+    assert_eq!(counts.by_device[failed].1, 0, "{counts}");
+    assert_eq!(counts.by_device[1 - failed].1, 2, "{counts}");
 }
 
 /// A device list naming one device twice is refused at open.

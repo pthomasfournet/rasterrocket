@@ -630,7 +630,8 @@ pub(crate) struct Args {
     /// substrings, as --vulkan-device takes, or `all` for every usable
     /// GPU (not a CPU implementation such as llvmpipe).
     ///
-    /// Each page takes the open device that the fewest pages hold, so a
+    /// Each page takes the open device where it expects the shortest wait
+    /// (the pages the device holds, times its mean time per page), so a
     /// faster device takes more pages; every device renders the CPU's
     /// bytes.  A list naming one device twice, or an entry matching no
     /// device or several, is an error that lists the devices.  Needs

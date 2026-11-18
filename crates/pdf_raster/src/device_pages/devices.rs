@@ -78,8 +78,8 @@ impl Openings {
 
 /// What a device can do for a page now.
 pub(super) enum State<'a> {
-    /// Open and in service, with this many pages holding it.
-    Open(&'a VulkanBackend, usize),
+    /// Open and in service, with its load.
+    Open(&'a VulkanBackend, Load),
     /// Still opening, or not yet asked to.
     Opening,
     /// Did not open.
@@ -128,7 +128,10 @@ impl Device {
         match self.slot.get() {
             None => State::Opening,
             Some(None) => State::NoDevice,
-            Some(Some(backend)) => State::Open(backend, self.in_flight.load(Ordering::Relaxed)),
+            Some(Some(backend)) => State::Open(
+                backend,
+                Load::of(self.in_flight.load(Ordering::Relaxed), backend),
+            ),
         }
     }
 
@@ -252,10 +255,45 @@ impl Device {
         self.slot.get().is_some()
     }
 
+    /// Whether a failure retired the device.
+    #[cfg(test)]
+    pub(super) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
     /// The pages holding the device.
     #[cfg(test)]
     pub(super) fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
+    }
+}
+
+/// The load of an open device: the pages holding it and its mean time
+/// per run, unknown before its first run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Load {
+    pub(super) held: usize,
+    pub(super) mean_nanos: Option<u128>,
+}
+
+impl Load {
+    fn of(held: usize, backend: &VulkanBackend) -> Self {
+        let (runs, time) = backend.device_time();
+        Self {
+            held,
+            mean_nanos: time.as_nanos().checked_div(u128::from(runs)),
+        }
+    }
+
+    /// The expected wait of one more page, in nanoseconds: the held pages
+    /// and that page times the mean run, `fallback` (at least 1) when the
+    /// mean is unknown.
+    pub(super) fn wait(self, fallback: u128) -> u128 {
+        let mean = self.mean_nanos.unwrap_or(fallback).max(1);
+        u128::try_from(self.held)
+            .unwrap_or(u128::MAX)
+            .saturating_add(1)
+            .saturating_mul(mean)
     }
 }
 

@@ -7,8 +7,9 @@
 //! qualifies asks for one, so a job none of whose pages qualifies opens
 //! none.  Every page that qualifies renders on a device: its worker waits
 //! until a device is open (at most [`OPEN_WAIT`]), takes the open device in
-//! service that the fewest pages hold, records the page's paint commands
-//! and renders them on it.  The workers record in parallel; each device
+//! service where it expects the shortest wait (the pages holding the
+//! device and itself, times the device's mean time per run: [`choose`]),
+//! records the page's paint commands and renders them on it.  The workers record in parallel; each device
 //! renders one page at a time while others stage their inputs or read
 //! their pixels back.  A page that does not qualify renders on the CPU.
 //! Pages are returned by index, so the output order does not depend on
@@ -40,7 +41,7 @@ use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRende
 pub use counts::DevicePageCounts;
 use counts::{Miss, Outcome};
 pub(crate) use devices::open_device;
-use devices::{Claim, Device, Openings, State};
+use devices::{Claim, Device, Load, Openings, State};
 
 use crate::render::PageJob;
 use crate::{BackendPolicy, RasterError};
@@ -194,25 +195,22 @@ impl DevicePages {
         }
     }
 
-    /// The open device in service that the fewest pages hold, the first
-    /// listed among equals; else whether one may still open (`Ok(None)`)
-    /// or why none will.
+    /// The open device in service where one more page expects the
+    /// shortest wait ([`choose`]), the first listed among equals; else
+    /// whether one may still open (`Ok(None)`) or why none will.
     fn pick(&self) -> Result<Option<Claim<'_>>, Miss> {
-        let mut best: Option<(&Device, &VulkanBackend, usize)> = None;
+        let mut open: Vec<(&Device, &VulkanBackend, Load)> = Vec::new();
         let (mut opening, mut retired) = (false, false);
         for device in &self.devices {
             match device.state() {
-                State::Open(backend, held) => {
-                    if best.is_none_or(|(_, _, least)| held < least) {
-                        best = Some((device, backend, held));
-                    }
-                }
+                State::Open(backend, load) => open.push((device, backend, load)),
                 State::Opening => opening = true,
                 State::Retired => retired = true,
                 State::NoDevice => {}
             }
         }
-        match best {
+        let loads: Vec<Load> = open.iter().map(|&(_, _, load)| load).collect();
+        match choose(&loads).map(|i| open[i]) {
             Some((device, backend, _)) => Ok(Some(device.claim(backend))),
             None if opening => Ok(None),
             None if retired => Err(Miss::Retired),
@@ -289,6 +287,20 @@ impl DevicePages {
             )
         })
     }
+}
+
+/// The index of the load where one more page expects the shortest wait,
+/// the first among equals: the held pages and that page times the device's
+/// mean run, the shortest mean known for a device that has not run yet
+/// (1 ns when none has), so a new device takes pages in turn with the
+/// fastest until its own runs give it a mean.
+fn choose(loads: &[Load]) -> Option<usize> {
+    let fallback = loads.iter().filter_map(|l| l.mean_nanos).min().unwrap_or(1);
+    loads
+        .iter()
+        .enumerate()
+        .min_by_key(|&(i, l)| (l.wait(fallback), i))
+        .map(|(i, _)| i)
 }
 
 impl Drop for DevicePages {
