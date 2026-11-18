@@ -90,7 +90,7 @@ fn main() -> ExitCode {
     if args.list_printers {
         return match print::list_printers() {
             Ok(list) if list.is_empty() => {
-                eprintln!("rrocket: CUPS has no printers");
+                eprintln!("rrocket: {}", print::NO_PRINTERS);
                 ExitCode::SUCCESS
             }
             Ok(list) => match print::write_printer_list(&mut std::io::stdout().lock(), &list) {
@@ -236,7 +236,7 @@ fn main() -> ExitCode {
         .fax
         .then(|| fax::FaxDocument::new(args.tiff_compression(), args.dpi()));
     let mut spool = if args.print {
-        match print::Spool::create(args.depth(), args.output_icc.as_ref()) {
+        match print::begin(&mut args) {
             Ok(spool) => Some(spool),
             Err(e) => return fail(format_args!("nothing printed: {e}")),
         }
@@ -318,7 +318,7 @@ fn main() -> ExitCode {
             let errors: Vec<_> = pool.install(|| pages.par_iter().filter_map(render_one).collect());
             (errors, None)
         },
-        |spool| spool.render_in_order(&print_pages, &pages, &pool, render_one),
+        |spool| spool.render_job(&print_pages, &pages, &pool, render_one),
     );
 
     // Every worker's GPU state is destroyed here, while the session holds the
@@ -333,20 +333,14 @@ fn main() -> ExitCode {
         let status = diagnostics::report_errors(errors, &args);
         if let Some(e) = spool_error {
             return fail(format_args!(
-                "nothing printed: the print document was not written: {e}"
+                "nothing printed: the print job was not written: {e}"
             ));
         }
         if pages_failed {
             eprintln!("rrocket: nothing printed: pages failed to render");
             return status;
         }
-        let submission = print::Submission {
-            printer: args.printer.as_deref(),
-            copies: args.copies,
-            duplex: args.duplex,
-            title: print::job_title(args.input()),
-        };
-        if let Err(e) = spool.submit(&submission) {
+        if let Err(e) = print::complete(spool, &args) {
             return fail(format_args!("nothing printed: {e}"));
         }
         return ExitCode::SUCCESS;

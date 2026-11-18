@@ -8,7 +8,7 @@ license.workspace    = true
 repository.workspace = true
 readme               = "README.md"
 publish     = false
-description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a CUPS printer, with pdftoppm-style flags. Pure Rust, zero Poppler."
+description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a printer, with pdftoppm-style flags. Pure Rust, zero Poppler."
 keywords    = ["pdf", "raster", "cli", "pdftoppm", "renderer"]
 categories  = ["command-line-utilities", "multimedia::images", "rendering"]
 
@@ -54,8 +54,15 @@ tempfile    = { workspace = true }
 libc        = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# GlobalMemoryStatusEx: the available-memory probe of RAM output.
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+# GlobalMemoryStatusEx: the available-memory probe of RAM output.  The
+# spooler (winspool) and GDI: --print and --list-printers.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Storage_Xps",
+    "Win32_System_SystemInformation",
+] }
 
 [dev-dependencies]
 # Reads TIFF output back in the end-to-end tests: an independent decoder.
@@ -63,7 +70,8 @@ tiff = { workspace = true }
 
 [lints.rust]
 # Scoped `#[expect]`s read the macOS memory sysctls and the Windows memory
-# status; nothing else is unsafe.
+# status, and call the Windows spooler and GDI for --print; nothing else is
+# unsafe.
 unsafe_code    = "deny"
 missing_docs   = "allow"   # binary crate; public docs are not required
 unused_results = "warn"

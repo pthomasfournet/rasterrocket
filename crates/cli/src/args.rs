@@ -76,7 +76,7 @@ pub(crate) struct Args {
 
     /// Output filename prefix (page number and extension are appended).
     /// Not given with --print, which writes no files.
-    #[arg(required_unless_present_any = ["print", "printer", "list_printers"])]
+    #[arg(required_unless_present_any = ["print", "printer", "print_file", "list_printers"])]
     pub output_prefix: Option<String>,
 
     // ── Page range ──────────────────────────────────────────────────────────
@@ -393,23 +393,36 @@ pub(crate) struct Args {
     )]
     pub invert: Option<InvertWhen>,
 
-    /// Print the pages through the system's print service: CUPS's `lp`
-    /// takes them as one PDF of page images at the resolution flags
-    /// (default 600 dpi, 360 dpi for a page larger than A0), colour, or
-    /// gray with --gray and --mono, and fits
-    /// them to the printer.  Pages render for printing unless --purpose
+    /// Print the pages through the system's print service, colour, or
+    /// gray with --gray and --mono.  On Linux and macOS CUPS's `lp` takes
+    /// them as one PDF of page images at the resolution flags (default
+    /// 600 dpi, 360 dpi for a page larger than A0) and fits them to the
+    /// printer.  On Windows they go to the printer's driver through GDI,
+    /// each page turned to the sheet's orientation, fitted to the printable
+    /// area when larger and centred, rendered at the printer's resolution
+    /// within the same default.  Pages render for printing unless --purpose
     /// says otherwise.  No `OUTPUT_PREFIX` is given.
     #[arg(long)]
     pub print: bool,
 
-    /// The printer --print submits to, a CUPS queue (`lp -d NAME`), else
-    /// the default destination.  Implies --print.
-    #[arg(long = "printer", value_name = "NAME", value_parser = crate::deliver::parse_queue)]
+    /// The printer --print submits to, else the default one: a CUPS queue
+    /// (`lp -d NAME`), or on Windows a printer's name as --list-printers
+    /// writes it.  Implies --print.
+    #[arg(long = "printer", value_name = "NAME", value_parser = crate::print::parse_printer)]
     pub printer: Option<String>,
 
-    /// List the printers --printer can name, the CUPS queues, one per line,
-    /// the default destination followed by a tab and `default`; then exit.
-    /// Takes no input or other option.
+    /// Windows: the file a printer that prints to a file writes (one whose
+    /// port is `PORTPROMPT:`, `FILE:` or a path, as Microsoft Print to
+    /// PDF), which would otherwise ask for it in a dialog.  Such a printer
+    /// is refused without it, and it is refused for any other printer.
+    /// Implies --print.
+    #[arg(long = "print-file", value_name = "PATH")]
+    pub print_file: Option<std::path::PathBuf>,
+
+    /// List the printers --printer can name, one per line, the default one
+    /// followed by a tab and `default`; then exit: the CUPS queues, or on
+    /// Windows the local and connected printers.  Takes no input or other
+    /// option.
     #[arg(long = "list-printers", exclusive = true)]
     pub list_printers: bool,
 
@@ -550,6 +563,12 @@ pub(crate) struct Args {
     /// chosen per page.
     #[arg(skip)]
     pub print_resolution_per_page: bool,
+
+    /// The printable areas of the Windows printer the job prints on, set
+    /// when its job begins (see [`crate::print::begin`]).
+    #[cfg(windows)]
+    #[arg(skip)]
+    pub print_surfaces: Option<crate::print::gdi::Surfaces>,
 
     /// The most memory a band of a page holds while it renders, in MiB
     /// (default 64; 1 to 65536).  A page larger than one band renders in
@@ -1573,7 +1592,7 @@ impl Args {
     /// Whether the pages are printed: `--print`, or `--printer`, which
     /// implies it.
     pub(crate) const fn printing(&self) -> bool {
-        self.print || self.printer.is_some()
+        self.print || self.printer.is_some() || self.print_file.is_some()
     }
 
     /// Refuse the flags `--print` excludes, and the print-only flags
@@ -1586,10 +1605,10 @@ impl Args {
                 _ => Ok(()),
             };
         }
-        if cfg!(windows) {
+        if !cfg!(windows) && self.print_file.is_some() {
             return Err(
-                "--print submits through CUPS's lp, which Windows does not have; render the \
-                 pages to files and print them from an application"
+                "--print-file names the file of a Windows printer that prints to one; a CUPS \
+                 queue writes no file of rrocket's naming"
                     .to_owned(),
             );
         }
@@ -1645,11 +1664,17 @@ impl Args {
 
     /// The resolution `(x, y)` of a page of `width_pts × height_pts`: the
     /// print default for its size under `--print` without a resolution
-    /// flag, else the run's ([`Self::dpi`]).
+    /// flag, else the run's ([`Self::dpi`]).  On a Windows printer the
+    /// default is at most the printer's resolution, times the page's fit
+    /// scale ([`crate::print::gdi::Surfaces::render_dpi`]).
     pub(crate) fn page_dpi(&self, page_pts: (f64, f64)) -> (f64, f64) {
         if self.print_resolution_per_page {
             let layout = pdf_raster::CanvasLayout::new(self.canvas_depth(), false);
             let dpi = crate::print::default_dpi(page_pts, layout.bytes_per_px());
+            #[cfg(windows)]
+            let dpi = self
+                .print_surfaces
+                .map_or(dpi, |surfaces| surfaces.render_dpi(page_pts, dpi));
             (dpi, dpi)
         } else {
             self.dpi()
@@ -1680,8 +1705,9 @@ impl Args {
         }
         if cfg!(windows) && self.fax_to.is_some() {
             return Err(
-                "--fax-to submits through lp or sendfax, which Windows has neither of; write the \
-                 document with --fax and send it with Windows Fax and Scan"
+                "--fax-to submits through lp or sendfax, which Windows has neither of, and \
+                 Windows documents no way to hand an IPP Fax Out printer a fax number; write \
+                 the document with --fax and send it with a fax service"
                     .to_owned(),
             );
         }
@@ -2454,10 +2480,8 @@ mod page_list_tests {
             args_with(&["--depth", "16"]).depth(),
             pdf_raster::SampleDepth::Sixteen
         );
-        if cfg!(not(windows)) {
-            let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
-            assert!(print.validate_format_flags().is_ok());
-        }
+        let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
+        assert!(print.validate_format_flags().is_ok());
         assert!(
             args_with(&["--depth", "16", "--overprint"])
                 .validate_format_flags()
@@ -2498,7 +2522,6 @@ mod page_list_tests {
         assert!(comic.validate_format_flags().is_ok());
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn print_resolution_keeps_its_byte_budget_at_16_bits() {
         // 36 × 44 in at 600 dpi: 570 Mpx, under the 8-bit threshold, over
@@ -2645,21 +2668,34 @@ mod page_list_tests {
         assert!(err.contains("drop --png"), "{err}");
     }
 
-    /// Windows has neither `lp` nor `sendfax`: `--fax-to`, `--print` and
-    /// `--printer` are refused before any other check, naming the
-    /// alternative.
+    /// Windows has neither `lp` nor `sendfax`, nor a documented way to
+    /// hand a fax number to an IPP Fax Out printer: `--fax-to` is refused
+    /// before any other check, naming the missing piece.
     #[cfg(windows)]
     #[test]
-    fn submission_flags_are_refused_on_windows() {
+    fn fax_to_is_refused_on_windows() {
         let err = args_with(&["--fax-to", "5550100", "--png"])
             .validate_format_flags()
             .unwrap_err();
-        assert!(err.contains("Windows Fax and Scan"), "{err}");
-        for flags in [&["--print"][..], &["--printer", "Office"]] {
-            let err = print_args(flags).unwrap_err();
-            assert!(err.contains("Windows does not have"), "{flags:?}: {err}");
+        assert!(err.contains("IPP Fax Out"), "{err}");
+    }
+
+    /// `--print-file` implies `--print` on Windows, where a printer that
+    /// prints to a file takes it, and is refused elsewhere.
+    #[test]
+    fn print_file_is_a_windows_print_flag() {
+        let printed = print_args(&["--print-file", "out.pdf"]);
+        if cfg!(windows) {
+            let args = printed.unwrap();
+            assert!(args.print);
+            assert_eq!(
+                args.print_file.as_deref(),
+                Some(std::path::Path::new("out.pdf"))
+            );
+        } else {
+            let err = printed.unwrap_err();
+            assert!(err.contains("Windows printer"), "{err}");
         }
-        assert!(crate::print::list_printers().is_err());
     }
 
     #[test]
@@ -2766,7 +2802,6 @@ mod page_list_tests {
         Ok(parsed)
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn print_needs_no_prefix_and_defaults_to_600_dpi_for_printing() {
         let args = print_args(&["--print"]).unwrap();
@@ -2792,7 +2827,6 @@ mod page_list_tests {
         assert!(Args::try_parse_from(["rrocket", "in.pdf"]).is_err());
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn print_refuses_file_output_and_print_flags_need_it() {
         for (flags, message) in [

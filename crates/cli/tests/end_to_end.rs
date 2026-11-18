@@ -1066,6 +1066,73 @@ fn depth_16_prints_a_spool_of_16_bit_images() {
     );
 }
 
+/// The Windows printer that writes a PDF.
+#[cfg(windows)]
+const PRINT_TO_PDF: &str = "Microsoft Print to PDF";
+
+/// Whether `--list-printers` lists Microsoft Print to PDF.  Its absence
+/// skips the test, logged, unless `RR_REQUIRE_PRINT_TO_PDF=1` makes it a
+/// failure.
+#[cfg(windows)]
+fn print_to_pdf(test: &str) -> bool {
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .arg("--list-printers")
+        .output()
+        .expect("run rrocket");
+    let list = String::from_utf8_lossy(&out.stdout);
+    if list
+        .lines()
+        .any(|l| l.split('\t').next() == Some(PRINT_TO_PDF))
+    {
+        eprintln!("{test}: ran");
+        return true;
+    }
+    let reason = format!(
+        "{PRINT_TO_PDF:?} is not listed: {list:?}, {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::env::var_os("RR_REQUIRE_PRINT_TO_PDF").is_none_or(|v| v != "1"),
+        "RR_REQUIRE_PRINT_TO_PDF=1: {reason}"
+    );
+    eprintln!("{test}: skipped: {reason}");
+    false
+}
+
+/// `--print` on Windows: Microsoft Print to PDF, a printer that prints to
+/// a file, is refused without `--print-file`, writing nothing, and with it
+/// writes the pages as a PDF.
+#[cfg(windows)]
+#[test]
+fn print_to_pdf_writes_the_pages_to_the_print_file() {
+    if !print_to_pdf("print_to_pdf_writes_the_pages_to_the_print_file") {
+        return;
+    }
+    let (dir, input) = workdir(&two_page_pdf());
+    let print = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rrocket"))
+            .args(["--backend", "cpu", "--printer", PRINT_TO_PDF])
+            .args(extra)
+            .arg(&input)
+            .output()
+            .expect("run rrocket")
+    };
+    let refused = print(&[]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--print-file PATH"), "{stderr}");
+    let file = dir.path().join("printed.pdf");
+    assert_success(&print(&[
+        "--print-file",
+        file.to_str().unwrap(),
+        "-r",
+        "150",
+    ]));
+    let pdf = std::fs::read(&file).expect("the print file is written");
+    let session = open_session_from_bytes(pdf, &SessionConfig::default()).expect("a PDF");
+    assert_eq!(session.total_pages(), 2);
+}
+
 /// `--depth 16` is refused, at startup and writing nothing, with the flags
 /// whose pages are 8-bit or bilevel; a comic archive renders at 16 bits.
 #[test]

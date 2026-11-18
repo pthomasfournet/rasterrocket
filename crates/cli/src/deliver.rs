@@ -112,6 +112,7 @@ pub(crate) fn submit(
 ///
 /// The program could not be run, reported a failure, or wrote output that
 /// is not UTF-8; the message carries what it wrote to standard error.
+#[cfg(not(windows))]
 pub(crate) fn query(program: &str, argv: &[&str], missing: &str) -> Result<String, String> {
     let output = Command::new(program)
         .args(argv)

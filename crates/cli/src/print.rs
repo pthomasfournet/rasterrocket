@@ -1,30 +1,36 @@
-//! The `--print` output: the rendered pages as one PDF, each page a single
-//! image at the render resolution (see [`encode::PdfWriter`]), handed to a
-//! CUPS queue with `lp`.  The queue's filters fit the images to the
-//! printer: media and orientation, colour, resolution and two-sided
-//! sheets; the pages are not rendered again.
+//! The `--print` output.  On Linux and macOS the pages go to a CUPS queue
+//! as one PDF of page images (see [`cups`]), whose filters fit them to the
+//! printer.  On Windows they go to the queue's driver through GDI (see
+//! `windows`), and rrocket fits them to the sheet itself by the rules of
+//! `gdi`.
 //!
 //! Each page is compressed on the worker that rendered it into a
 //! [`PageSink`] and appended to the [`Spool`] once every page before it is
 //! done.  Pages start in page order, at most a fixed number per thread past
 //! the first page not yet appended, so at most that many encoded pages are
 //! held in memory; a slow page delays the appending of the pages after it
-//! and the start of those more than that number past it.  The
-//! spool is an anonymous temporary file, private to the process and freed
-//! however it ends; `lp` reads it as its standard input.
+//! and the start of those more than that number past it.  Pages are
+//! appended on the thread that runs [`Spool::render_job`], which on Windows
+//! owns the printer's device context.
 
-use std::fs::File;
-use std::io::{self, BufWriter, Seek, Write};
+#[cfg(not(windows))]
+mod cups;
+#[cfg(any(windows, test))]
+pub(crate) mod gdi;
+#[cfg(windows)]
+mod windows;
+
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 
 use color::SampleDepth;
-use encode::{IccProfile, PdfPage, PdfPageEncoder, PdfWriter, RowImage, RowLayout};
+use encode::{PdfPage, PdfPageEncoder, RowImage, RowLayout};
 
+use crate::args::Args;
 use crate::cleanup::{Page, SpreadHalf};
-use crate::deliver;
-use crate::render::{OUTPUT_BUFFER_BYTES, PageCollector, RenderError, lock};
+use crate::render::{PageCollector, RenderError, lock};
 
 /// The resolution of a printed page when no resolution flag is given, up
 /// to [`LARGE_FORMAT_PX`].
@@ -71,28 +77,6 @@ pub(crate) enum Duplex {
     Short,
 }
 
-impl Duplex {
-    /// The IPP `sides` keyword.
-    const fn sides(self) -> &'static str {
-        match self {
-            Self::Long => "two-sided-long-edge",
-            Self::Short => "two-sided-short-edge",
-        }
-    }
-}
-
-/// What `lp` is told about the job; an option not given leaves the
-/// queue's default.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Submission<'a> {
-    /// The queue, else the default destination.
-    pub printer: Option<&'a str>,
-    pub copies: Option<u32>,
-    pub duplex: Option<Duplex>,
-    /// The job's name (see [`job_title`]).
-    pub title: String,
-}
-
 /// The job name for the input `input`: its file name, `rrocket` for
 /// standard input, with control characters replaced by spaces and cut to
 /// [`MAX_TITLE_BYTES`] on a character boundary.
@@ -111,24 +95,6 @@ pub(crate) fn job_title(input: &str) -> String {
     }
     title.truncate(cut);
     title
-}
-
-/// The options of `lp` for `job`, the document read from standard input.
-fn lp_options(job: &Submission<'_>) -> Vec<String> {
-    let mut options = Vec::new();
-    if let Some(copies) = job.copies {
-        options.extend(["-n".to_owned(), copies.to_string()]);
-    }
-    options.extend([
-        "-t".to_owned(),
-        job.title.clone(),
-        "-o".to_owned(),
-        "document-format=application/pdf".to_owned(),
-    ]);
-    if let Some(duplex) = job.duplex {
-        options.extend(["-o".to_owned(), format!("sides={}", duplex.sides())]);
-    }
-    options
 }
 
 /// The position of a page in the document: its page number, then the left
@@ -260,49 +226,113 @@ impl Drop for PageDone<'_> {
     }
 }
 
-/// The print document being written.
-pub(crate) struct Spool {
-    writer: PdfWriter<BufWriter<File>>,
-}
-
-impl Spool {
-    /// Open an anonymous temporary file in [`spool_dir`] and begin the PDF,
-    /// whose pages hold images of samples of `depth`, each tagged with
-    /// `icc` when given.
+/// Where a [`Spool`] sends its pages, in page order.
+pub(crate) trait PageOut {
+    /// Send `page`, the next page of the job.
     ///
     /// # Errors
     ///
-    /// The file could not be created or its first bytes written.
-    pub(crate) fn create(
-        depth: SampleDepth,
-        icc: Option<&IccProfile>,
-    ) -> Result<Self, RenderError> {
-        let dir = spool_dir();
-        let file = tempfile::tempfile_in(&dir).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("cannot create a spool file in {}: {e}", dir.display()),
-            )
-        })?;
-        let writer = PdfWriter::new(
-            BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file),
-            depth,
-            icc,
-        )?;
-        Ok(Self { writer })
-    }
+    /// The page could not be sent; the job is then abandoned.
+    fn write_page(&mut self, page: &PdfPage) -> Result<(), RenderError>;
 
+    /// How many times the job's pages are sent: more than once when the
+    /// printer cannot make the copies asked for itself.
+    fn passes(&self) -> u32 {
+        1
+    }
+}
+
+/// The print job being written.
+pub(crate) struct Spool<W> {
+    out: W,
+}
+
+/// The print job of this platform's route.
+#[cfg(not(windows))]
+pub(crate) type PrintSpool = Spool<cups::Document>;
+/// The print job of this platform's route.
+#[cfg(windows)]
+pub(crate) type PrintSpool = Spool<windows::Job>;
+
+/// Begin the print job `args` asks for.  On Windows this opens the printer
+/// and starts the job, and records the printer's sheet in `args` for the
+/// resolution of each page (see [`Args::page_dpi`]).
+///
+/// # Errors
+///
+/// The job could not be begun: on Linux and macOS the spool file could not
+/// be made; on Windows the printer could not be opened or cannot print the
+/// job as asked.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "on Windows the job records the printer's sheet in `args`"
+    )
+)]
+pub(crate) fn begin(args: &mut Args) -> Result<PrintSpool, String> {
+    #[cfg(not(windows))]
+    {
+        cups::begin(args)
+    }
+    #[cfg(windows)]
+    {
+        windows::begin(args, None)
+    }
+}
+
+/// Complete the print job: on Linux and macOS submit the document with
+/// `lp`, on Windows end the job.
+///
+/// # Errors
+///
+/// No page was written, or the job was refused.
+pub(crate) fn complete(spool: PrintSpool, args: &Args) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        cups::complete(spool, args)
+    }
+    #[cfg(windows)]
+    {
+        let _ = args;
+        spool.out.finish()
+    }
+}
+
+impl<W: PageOut> Spool<W> {
     /// Append the pages `sink` holds for document pages up to `last`
     /// inclusive, in page order.
     ///
     /// # Errors
     ///
-    /// The spool could not be written.
+    /// The page could not be appended.
     pub(crate) fn write_through(&mut self, sink: &PageSink, last: i32) -> Result<(), RenderError> {
         for page in sink.pages.take_through((last, u8::MAX)) {
-            self.writer.write_page(&page)?;
+            self.out.write_page(&page)?;
         }
         Ok(())
+    }
+
+    /// [`Self::render_in_order`] once for each of the job's passes (see
+    /// [`PageOut::passes`]), until a pass fails.
+    pub(crate) fn render_job<F>(
+        &mut self,
+        sink: &PageSink,
+        pages: &[i32],
+        pool: &rayon::ThreadPool,
+        render: F,
+    ) -> (Vec<(i32, RenderError)>, Option<RenderError>)
+    where
+        F: Fn(&i32) -> Option<(i32, RenderError)> + Sync,
+    {
+        let mut result = (Vec::new(), None);
+        for _ in 0..self.out.passes() {
+            result = self.render_in_order(sink, pages, pool, &render);
+            if !result.0.is_empty() || result.1.is_some() {
+                break;
+            }
+        }
+        result
     }
 
     /// Render `pages`, strictly ascending page numbers, with `render` on
@@ -384,80 +414,50 @@ impl Spool {
         let errors = std::mem::take(&mut lock(&job.progress).errors);
         (errors, write_error)
     }
-
-    /// Complete the document and its file, rewound to its start.
-    fn finish(self) -> Result<File, String> {
-        let mut file = self
-            .writer
-            .finish()
-            .map_err(|e| e.to_string())?
-            .into_inner()
-            .map_err(|e| e.error().to_string())?;
-        file.rewind().map_err(|e| e.to_string())?;
-        Ok(file)
-    }
-
-    /// Complete the document and submit it as `job`, `lp` reading it from
-    /// its standard input.
-    ///
-    /// # Errors
-    ///
-    /// No page was written, the document could not be completed, or `lp`
-    /// refused it.
-    pub(crate) fn submit(self, job: &Submission<'_>) -> Result<(), String> {
-        let file = self
-            .finish()
-            .map_err(|e| format!("the print document was not written: {e}"))?;
-        deliver::submit(
-            "lp",
-            &deliver::lp_args(job.printer, lp_options(job), None),
-            file.into(),
-            "the print job",
-            None,
-            CUPS_CLIENT_HINT,
-        )
-        .map_err(|e| refusal_hint(e, job.printer.is_some()))
-    }
 }
 
-/// What to do when `lp` or `lpstat` is not installed.
-const CUPS_CLIENT_HINT: &str =
-    "install the CUPS client (cups-client on Debian and Ubuntu, cups on Fedora and Arch)";
-
-/// The message for a print job `lp` did not take, with a pointer to the
-/// queues when `lp` ran and refused it: `named` is whether `--printer` chose
-/// the queue, else the job went to the default destination, which may be
-/// unset.
-fn refusal_hint(e: deliver::SubmitError, named: bool) -> String {
-    match e {
-        deliver::SubmitError::NotStarted(msg) => msg,
-        deliver::SubmitError::Refused(msg) if named => {
-            format!("{msg}; --list-printers lists the queues")
-        }
-        deliver::SubmitError::Refused(msg) => format!(
-            "{msg}; when no default destination is set, name a queue with --printer; \
-             --list-printers lists them"
-        ),
-    }
-}
-
-/// What `--list-printers` writes: the CUPS destinations, one per line, the
-/// default one followed by a tab and `default`.
+/// What `--list-printers` writes: the printers `--printer` can name, one
+/// per line, the default one followed by a tab and `default`.
 ///
 /// # Errors
 ///
-/// `lpstat` is not installed or cannot reach the scheduler.
+/// The print service could not be asked.
 pub(crate) fn list_printers() -> Result<String, String> {
-    if cfg!(windows) {
-        return Err(
-            "--list-printers asks CUPS for its queues, which Windows does not have".to_owned(),
-        );
+    #[cfg(not(windows))]
+    {
+        cups::list_printers()
     }
-    let lpstat_e = deliver::query("lpstat", &["-e"], CUPS_CLIENT_HINT)?;
-    let lpstat_d = deliver::query("lpstat", &["-d"], CUPS_CLIENT_HINT)?;
-    let queues = queue_names(&lpstat_e);
-    let default = default_destination(&lpstat_d, &queues);
-    Ok(printer_list(&queues, default))
+    #[cfg(windows)]
+    {
+        windows::list_printers()
+    }
+}
+
+/// The message for a listing that names no printer.
+pub(crate) const NO_PRINTERS: &str = if cfg!(windows) {
+    "Windows has no printers"
+} else {
+    "CUPS has no printers"
+};
+
+/// Parse a `--printer` value: a CUPS queue name (see
+/// [`crate::deliver::parse_queue`]); on Windows a printer name, which may
+/// hold spaces but no control character and is not empty.
+///
+/// # Errors
+///
+/// The value cannot name a printer.
+pub(crate) fn parse_printer(s: &str) -> Result<String, String> {
+    if !cfg!(windows) {
+        return crate::deliver::parse_queue(s);
+    }
+    if s.trim().is_empty() {
+        return Err("a printer name is not empty".to_owned());
+    }
+    if let Some(c) = s.chars().find(|c| c.is_control()) {
+        return Err(format!("{s:?} is not a printer name: it holds {c:?}"));
+    }
+    Ok(s.to_owned())
 }
 
 /// Write the `--list-printers` listing to `out` and flush it.  A reader
@@ -472,40 +472,6 @@ pub(crate) fn write_printer_list(out: &mut impl Write, list: &str) -> io::Result
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         result => result,
     }
-}
-
-/// The destinations `lpstat -e` reports, one per line.
-fn queue_names(lpstat_e: &str) -> Vec<&str> {
-    lpstat_e
-        .lines()
-        .map(str::trim)
-        .filter(|q| !q.is_empty())
-        .collect()
-}
-
-/// The queue of `queues` that `lpstat -d` names as the default
-/// destination, if any.  The `-d` line ends with `: ` and the queue name in
-/// every locale, so the match does not depend on the wording before it; the
-/// longest matching name wins, so `Office/duplex` is not taken for a queue
-/// `duplex`.  Output that names no queue and is not the C locale's
-/// no-default line is logged.
-fn default_destination<'q>(lpstat_d: &str, queues: &[&'q str]) -> Option<&'q str> {
-    let line = lpstat_d.trim();
-    let default = queues
-        .iter()
-        .filter(|q| {
-            line.strip_suffix(**q)
-                .is_some_and(|head| head.trim_end().ends_with(':'))
-        })
-        .max_by_key(|q| q.len())
-        .copied();
-    if default.is_none() && !line.is_empty() && line != "no system default destination" {
-        log::warn!(
-            "lpstat -d reported {line:?}, which names none of the queues; \
-             no queue is marked default"
-        );
-    }
-    default
 }
 
 /// The listing of `queues`, one per line, `default` marked.
@@ -523,32 +489,75 @@ fn printer_list(queues: &[&str], default: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Read};
+    use std::io;
 
-    use color::{Gray8, SampleDepth};
+    use color::Gray8;
+    use encode::PdfPage;
     use raster::Bitmap;
 
     use super::{
-        Duplex, PAGES_AHEAD_PER_THREAD, PageSink, Spool, Submission, default_destination,
-        job_title, lp_options, printer_list, queue_names, refusal_hint, write_printer_list,
+        PAGES_AHEAD_PER_THREAD, PageOut, PageSink, Spool, job_title, parse_printer, printer_list,
+        write_printer_list,
     };
     use crate::cleanup::{Page, SpreadHalf};
-    use crate::deliver::SubmitError;
     use crate::render::RenderError;
+
+    /// The image sizes of the pages sent, in order, the job sent `passes`
+    /// times.
+    struct Sizes {
+        sent: Vec<(u32, u32)>,
+        passes: u32,
+    }
+
+    impl PageOut for Sizes {
+        fn write_page(&mut self, page: &PdfPage) -> Result<(), RenderError> {
+            self.sent.push(page.size());
+            Ok(())
+        }
+
+        fn passes(&self) -> u32 {
+            self.passes
+        }
+    }
+
+    fn spool(passes: u32) -> Spool<Sizes> {
+        Spool {
+            out: Sizes {
+                sent: Vec::new(),
+                passes,
+            },
+        }
+    }
 
     #[test]
     fn printers_are_listed_one_per_line_with_the_default_marked() {
-        let queues = queue_names("Office\nOffice/duplex\n duplex \n\nLab\n");
-        assert_eq!(queues, ["Office", "Office/duplex", "duplex", "Lab"]);
+        let queues = ["Office", "Microsoft Print to PDF", "Lab"];
         assert_eq!(
-            printer_list(&queues, Some("Office/duplex")),
-            "Office\nOffice/duplex\tdefault\nduplex\nLab\n"
+            printer_list(&queues, Some("Microsoft Print to PDF")),
+            "Office\nMicrosoft Print to PDF\tdefault\nLab\n"
         );
         assert_eq!(
             printer_list(&queues, None),
-            "Office\nOffice/duplex\nduplex\nLab\n"
+            "Office\nMicrosoft Print to PDF\nLab\n"
         );
         assert_eq!(printer_list(&[], None), "");
+    }
+
+    /// A printer name is a CUPS queue name, except on Windows, whose
+    /// printer names hold spaces.
+    #[test]
+    fn printer_names_follow_the_platform() {
+        for name in ["Office", "Office/duplex"] {
+            assert_eq!(parse_printer(name).as_deref(), Ok(name));
+        }
+        for bad in ["", "a\nb", "a\tb"] {
+            assert!(parse_printer(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            parse_printer("Microsoft Print to PDF").is_ok(),
+            cfg!(windows)
+        );
+        assert!(parse_printer("   ").is_err());
     }
 
     /// A writer whose every write fails with `kind`.
@@ -580,82 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn the_default_destination_is_found_in_any_locale() {
-        let queues = ["Office", "Office/duplex", "duplex", "Lab"];
-        for (lpstat_d, default) in [
-            (
-                "system default destination: Office/duplex\n",
-                Some("Office/duplex"),
-            ),
-            ("system default destination: duplex\n", Some("duplex")),
-            ("destination système par défaut : Lab\n", Some("Lab")),
-            ("Standardziel des Systems: Office\n", Some("Office")),
-            ("no system default destination\n", None),
-            ("system default destination: Gone\n", None),
-            ("", None),
-        ] {
-            assert_eq!(
-                default_destination(lpstat_d, &queues),
-                default,
-                "{lpstat_d:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_refused_job_points_at_the_queues_and_a_job_lp_never_saw_does_not() {
-        let refused = || SubmitError::Refused("lp refused the print job".to_owned());
-        assert_eq!(
-            refusal_hint(refused(), true),
-            "lp refused the print job; --list-printers lists the queues"
-        );
-        let default = refusal_hint(refused(), false);
-        assert!(
-            default.contains("--printer") && default.contains("--list-printers"),
-            "{default}"
-        );
-        let missing = "lp is not installed: install the CUPS client";
-        assert_eq!(
-            refusal_hint(SubmitError::NotStarted(missing.to_owned()), true),
-            missing
-        );
-    }
-
-    #[test]
-    fn lp_gets_copies_title_format_and_sides_only_when_given() {
-        let job = Submission {
-            printer: Some("Office"),
-            copies: Some(2),
-            duplex: Some(Duplex::Long),
-            title: "report.pdf".to_owned(),
-        };
-        assert_eq!(
-            lp_options(&job),
-            [
-                "-n",
-                "2",
-                "-t",
-                "report.pdf",
-                "-o",
-                "document-format=application/pdf",
-                "-o",
-                "sides=two-sided-long-edge",
-            ]
-        );
-        let default = Submission {
-            printer: None,
-            copies: None,
-            duplex: None,
-            title: "-o".to_owned(),
-        };
-        // The title is the value of -t, never an option of its own.
-        assert_eq!(
-            lp_options(&default),
-            ["-t", "-o", "-o", "document-format=application/pdf"]
-        );
-    }
-
-    #[test]
     fn titles_are_file_names_without_control_characters_within_255_bytes() {
         assert_eq!(job_title("/docs/report.pdf"), "report.pdf");
         assert_eq!(job_title("-"), "rrocket");
@@ -669,25 +602,10 @@ mod tests {
         Page::Gray(Bitmap::<Gray8>::new(w, h, 1, false))
     }
 
-    /// The `(width, height)` of each image in a PDF, in file order.
-    fn image_sizes(pdf: &[u8]) -> Vec<(u32, u32)> {
-        let text = String::from_utf8_lossy(pdf);
-        text.match_indices("/Width ")
-            .map(|(at, _)| {
-                let mut fields = text[at..]
-                    .split('/')
-                    .skip(1)
-                    .take(2)
-                    .map(|f| f.split(' ').nth(1).unwrap().parse::<u32>().unwrap());
-                (fields.next().unwrap(), fields.next().unwrap())
-            })
-            .collect()
-    }
-
     #[test]
     fn pages_spool_in_page_order() {
         let sink = PageSink::new();
-        let mut spool = Spool::create(SampleDepth::Eight, None).unwrap();
+        let mut spool = spool(1);
         sink.add((2, None), &gray(4, 6), (72.0, 72.0)).unwrap();
         sink.add((1, Some(SpreadHalf::Right)), &gray(3, 5), (72.0, 72.0))
             .unwrap();
@@ -695,38 +613,14 @@ mod tests {
             .unwrap();
         sink.add((3, None), &gray(8, 5), (72.0, 72.0)).unwrap();
         spool.write_through(&sink, 2).unwrap();
+        assert_eq!(spool.out.sent, [(2, 5), (3, 5), (4, 6)]);
         spool.write_through(&sink, 3).unwrap();
-        let mut pdf = Vec::new();
-        let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
-        assert_eq!(n, pdf.len());
-        assert_eq!(image_sizes(&pdf), [(2, 5), (3, 5), (4, 6), (8, 5)]);
-    }
-
-    /// A spool made with an output profile holds it once and tags every
-    /// page image with it.
-    #[test]
-    fn a_spool_tags_its_pages_with_the_output_profile() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/icc/printer-gray-v4.icc"
-        );
-        let icc = encode::IccProfile::new(std::fs::read(path).unwrap()).unwrap();
-        let sink = PageSink::new();
-        let mut spool = Spool::create(SampleDepth::Eight, Some(&icc)).unwrap();
-        sink.add((1, None), &gray(4, 6), (72.0, 72.0)).unwrap();
-        sink.add((2, None), &gray(3, 5), (72.0, 72.0)).unwrap();
-        spool.write_through(&sink, 2).unwrap();
-        let mut pdf = Vec::new();
-        let _ = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
-        let text = String::from_utf8_lossy(&pdf);
-        assert!(text.starts_with("%PDF-1.7"), "a v4.3 profile needs PDF 1.7");
-        assert_eq!(text.matches("/N 1/Alternate/DeviceGray").count(), 1);
-        assert_eq!(text.matches("/ColorSpace[/ICCBased 3 0 R]").count(), 2);
+        assert_eq!(spool.out.sent, [(2, 5), (3, 5), (4, 6), (8, 5)]);
     }
 
     /// What [`render_pages`] observed.
     struct Rendered {
-        /// The spooled image widths, empty when a page failed.
+        /// The sent image widths, empty when a page failed.
         widths: Vec<u32>,
         /// The pages that failed.
         failed: Vec<i32>,
@@ -736,10 +630,10 @@ mod tests {
         renders: usize,
     }
 
-    /// Render `n` pages on two threads, page `p` a `p × 1` image, the
-    /// early pages slowest; page `fail` fails at once and page `panic`
-    /// panics.
-    fn render_pages(n: i32, fail: Option<i32>, panic: Option<i32>) -> Rendered {
+    /// Render `n` pages on two threads in `passes` passes, page `p` a
+    /// `p × 1` image, the early pages slowest; page `fail` fails at once
+    /// and page `panic` panics.
+    fn render_pages(n: i32, passes: u32, fail: Option<i32>, panic: Option<i32>) -> Rendered {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let pool = rayon::ThreadPoolBuilder::new()
@@ -747,7 +641,7 @@ mod tests {
             .build()
             .unwrap();
         let sink = PageSink::new();
-        let mut spool = Spool::create(SampleDepth::Eight, None).unwrap();
+        let mut spool = spool(passes);
         let pages: Vec<i32> = (1..=n).collect();
         let (peak, renders) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let render = |&page: &i32| {
@@ -764,14 +658,11 @@ mod tests {
             let _ = peak.fetch_max(sink.pages.len(), Ordering::Relaxed);
             None
         };
-        let (errors, write_error) = spool.render_in_order(&sink, &pages, &pool, render);
+        let (errors, write_error) = spool.render_job(&sink, &pages, &pool, render);
         assert!(write_error.is_none());
         let failed: Vec<i32> = errors.iter().map(|&(page, _)| page).collect();
         let widths = if failed.is_empty() {
-            let mut pdf = Vec::new();
-            let n = spool.finish().unwrap().read_to_end(&mut pdf).unwrap();
-            assert_eq!(n, pdf.len());
-            image_sizes(&pdf).into_iter().map(|(w, _)| w).collect()
+            spool.out.sent.iter().map(|&(w, _)| w).collect()
         } else {
             Vec::new()
         };
@@ -785,7 +676,7 @@ mod tests {
 
     #[test]
     fn pages_spool_in_page_order_as_they_finish_with_bounded_holding() {
-        let run = render_pages(24, None, None);
+        let run = render_pages(24, 1, None, None);
         assert_eq!(run.widths, (1..=24).collect::<Vec<u32>>());
         assert_eq!(run.failed, Vec::<i32>::new());
         assert_eq!(run.renders, 24);
@@ -796,11 +687,20 @@ mod tests {
         );
     }
 
+    /// A job of three passes sends its pages three times, each pass in
+    /// page order: collated copies.
+    #[test]
+    fn each_pass_sends_every_page_in_order() {
+        let run = render_pages(5, 3, None, None);
+        assert_eq!(run.widths, [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]);
+        assert_eq!(run.renders, 15);
+    }
+
     #[test]
     fn a_failed_page_stops_new_pages_and_is_reported() {
         // Pages 1–4 are queued at once; page 1 fails while page 2 renders,
-        // so pages 3 and 4 are skipped.
-        let run = render_pages(24, Some(1), None);
+        // so pages 3 and 4 are skipped, and no second pass begins.
+        let run = render_pages(24, 2, Some(1), None);
         assert_eq!(run.failed, [1]);
         assert!(
             run.renders <= 2,
@@ -811,18 +711,8 @@ mod tests {
 
     #[test]
     fn a_panicking_page_propagates_instead_of_hanging() {
-        let run = std::panic::catch_unwind(|| render_pages(24, None, Some(2)));
+        let run = std::panic::catch_unwind(|| render_pages(24, 1, None, Some(2)));
         assert!(run.is_err(), "the panic of page 2 reaches the caller");
-    }
-
-    #[test]
-    fn an_empty_document_is_refused() {
-        assert!(
-            Spool::create(SampleDepth::Eight, None)
-                .unwrap()
-                .finish()
-                .is_err()
-        );
     }
 
     /// A page larger than A0 prints at 360 dpi without a resolution flag;
