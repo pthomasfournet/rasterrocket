@@ -6,7 +6,8 @@
 //! already, each is opened on a thread of its own when the first page that
 //! qualifies asks for one, so a job none of whose pages qualifies opens
 //! none.  Every page that qualifies renders on a device: its worker waits
-//! until a device is open (at most [`OPEN_WAIT`]), takes the open device in
+//! until a device is open (until [`OPEN_WAIT`] after the first page that
+//! waited), takes the open device in
 //! service where it expects the shortest wait (the pages holding the
 //! device and itself, times the device's mean time per run: [`choose`]),
 //! records the page's paint commands and renders them on it.  The workers record in parallel; each device
@@ -30,7 +31,7 @@ mod counts;
 mod devices;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -44,11 +45,16 @@ pub(crate) use devices::open_device;
 use devices::{Claim, Device, Load, Openings, State};
 
 use crate::render::PageJob;
-use crate::{BackendPolicy, RasterError};
+use crate::{BackendPolicy, CancelToken, RasterError};
 
-/// The longest a page waits for a device to open before it renders on the
-/// CPU.
-const OPEN_WAIT: Duration = Duration::from_secs(30);
+/// The longest the pages of a session wait for a device to open, from the
+/// first page that waits; pages render on the CPU afterwards while none is
+/// open.
+const OPEN_WAIT: Duration = crate::GPU_PAGE_OPEN_WAIT;
+
+/// The interval at which a page waiting for a device to open checks its
+/// cancellation.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// The devices of a session's GPU pages.
 pub(crate) struct DevicePages {
@@ -56,9 +62,12 @@ pub(crate) struct DevicePages {
     devices: Vec<Device>,
     /// The wake-up of pages waiting for a device to open.
     openings: Arc<Openings>,
-    /// The longest a page waits for a device to open: [`OPEN_WAIT`].
+    /// The longest the pages wait for a device to open: [`OPEN_WAIT`].
     open_wait: Duration,
-    /// Set once a page has stopped waiting for a device to open.
+    /// The instant after which no page waits for a device to open: set by
+    /// the first page that waits, `open_wait` later.
+    open_deadline: OnceLock<Instant>,
+    /// Set once a page has found `open_deadline` passed.
     open_timed_out: AtomicBool,
     /// Set once a page of the wide working space has been rendered on the
     /// CPU in its place.
@@ -187,6 +196,7 @@ impl DevicePages {
             devices,
             openings: Arc::default(),
             open_wait: OPEN_WAIT,
+            open_deadline: OnceLock::new(),
             open_timed_out: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
             counts: Mutex::new(DevicePageCounts::default()),
@@ -218,22 +228,33 @@ impl DevicePages {
         }
     }
 
-    /// A device for a page, or why there is none.  While no device is open
-    /// but one may still open, every device not yet opening starts opening
-    /// and the call waits for one, at most [`OPEN_WAIT`]; the first call
-    /// that stops waiting is logged at `warn`.
-    pub(crate) fn claim(&self) -> Result<Claim<'_>, Miss> {
+    /// A device for a page, or why there is none.
+    ///
+    /// While no device is open but one may still open, every device not
+    /// yet opening starts opening and the call waits for one, until
+    /// [`OPEN_WAIT`] after the first call that waited: the deadline is the
+    /// session's, so once it has passed a call returns [`Miss::Opening`]
+    /// at once while no device is open, and a device that opens later is
+    /// still taken.  The first call that finds the deadline passed is
+    /// logged at `warn`.  The wait polls `cancel` every [`CANCEL_POLL`] and
+    /// returns [`Miss::Cancelled`] once it is raised.
+    pub(crate) fn claim(&self, cancel: Option<&CancelToken>) -> Result<Claim<'_>, Miss> {
         if let Some(claim) = self.pick()? {
             return Ok(claim);
         }
         for device in &self.devices {
             device.start_opening(&self.openings);
         }
-        let deadline = Instant::now() + self.open_wait;
+        let deadline = *self
+            .open_deadline
+            .get_or_init(|| Instant::now() + self.open_wait);
         let mut guard = self.openings.lock();
         loop {
             if let Some(claim) = self.pick()? {
                 return Ok(claim);
+            }
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(Miss::Cancelled);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -247,7 +268,12 @@ impl DevicePages {
                 }
                 return Err(Miss::Opening);
             }
-            guard = self.openings.wait(guard, left);
+            let slice = if cancel.is_some() {
+                left.min(CANCEL_POLL)
+            } else {
+                left
+            };
+            guard = self.openings.wait(guard, slice);
         }
     }
 
@@ -392,7 +418,7 @@ pub(crate) fn render<'a>(
         }
         return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
     }
-    let claim = match pages.claim() {
+    let claim = match pages.claim(job.params.cancel.as_ref()) {
         Ok(claim) => claim,
         Err(miss) => {
             log::debug!(

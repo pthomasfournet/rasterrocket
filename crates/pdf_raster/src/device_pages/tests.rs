@@ -73,25 +73,63 @@ fn cpu(pdf: Vec<u8>, page: u32) -> Vec<u8> {
         .0
 }
 
-/// A page that waited its time for a device still opening renders on
-/// the CPU, counted under `opening`, and warns once.
+/// The first page waits for a device still opening until the session's
+/// deadline and renders on the CPU, counted under `opening`, with one
+/// warning; a later page finds the deadline passed and does not wait.
 #[test]
-fn a_page_renders_on_the_cpu_once_its_wait_for_the_opening_is_over() {
+fn pages_render_on_the_cpu_once_the_session_wait_for_the_opening_is_over() {
     let doc = pdf(&[DEVICE, DEVICE]);
     let mut session = auto_session(doc.clone(), None);
     let mut pages = DevicePages::new(vec![Device::never_opening()]);
-    pages.open_wait = Duration::from_millis(30);
+    pages.open_wait = Duration::from_millis(300);
     session.device_pages = Some(pages);
     for page in 1..=2 {
         let started = Instant::now();
         let (bitmap, outcome) = render(&session, page, &RenderParams::new(2.0)).expect("render");
-        assert!(started.elapsed() >= Duration::from_millis(30));
+        let waited = started.elapsed();
+        if page == 1 {
+            assert!(
+                waited >= Duration::from_millis(300),
+                "page 1 waited {waited:?}"
+            );
+        } else {
+            assert!(
+                waited < Duration::from_millis(300),
+                "page 2 waited {waited:?}"
+            );
+        }
         assert_eq!(outcome, DevicePage::NotOffered);
         assert_eq!(bitmap, cpu(doc.clone(), page));
     }
     let pages = device_pages(&session);
     assert!(pages.open_timed_out.load(Ordering::Relaxed));
     assert_eq!(pages.counts().opening, 2);
+}
+
+/// A page cancelled while it waits for a device to open stops waiting,
+/// returns the cancellation and is counted as stopped.
+#[test]
+fn a_cancelled_page_stops_waiting_for_the_opening() {
+    let doc = pdf(&[DEVICE]);
+    let mut session = auto_session(doc, None);
+    session.device_pages = Some(DevicePages::new(vec![Device::never_opening()]));
+    let token = CancelToken::new();
+    let cancel = token.clone();
+    let started = Instant::now();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.cancel();
+    });
+    let result = render(&session, 1, &RenderParams::new(2.0).with_cancel(token));
+    canceller.join().expect("the cancelling thread");
+    assert!(
+        matches!(result, Err(RasterError::Cancelled)),
+        "expected Cancelled, got {:?}",
+        result.map(|(_, outcome)| outcome)
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let counts = device_pages(&session).counts();
+    assert_eq!((counts.stopped, counts.opening), (1, 0));
 }
 
 /// A device error renders the page on the CPU, identically, and
@@ -389,7 +427,7 @@ fn held_pages_push_claims_to_the_other_device() {
     let pages = device_pages(&session);
     let mut claims = Vec::new();
     for _ in 0..64 {
-        claims.push(pages.claim().expect("a device"));
+        claims.push(pages.claim(None).expect("a device"));
         if pages.devices.iter().all(|d| d.in_flight() > 0) {
             break;
         }

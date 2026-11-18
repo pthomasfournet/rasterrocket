@@ -20,8 +20,9 @@ pub struct DevicePageCounts {
     /// by reason, in the order each reason first occurred; rendered on the
     /// CPU.
     pub ineligible: Vec<(&'static str, u32)>,
-    /// Pages rendered on the CPU because no device had opened after they
-    /// waited 30 seconds for one.
+    /// Pages rendered on the CPU because no device had opened by
+    /// [`GPU_PAGE_OPEN_WAIT`](crate::GPU_PAGE_OPEN_WAIT) after the first
+    /// page waited for one.
     pub opening: u32,
     /// Pages rendered on the CPU because no device opened.
     pub no_device: u32,
@@ -32,7 +33,8 @@ pub struct DevicePageCounts {
     /// the CPU.
     pub failed: u32,
     /// Pages whose recording stopped on their work budget, deadline or
-    /// cancellation; neither a device nor the CPU completed them.
+    /// cancellation, or which were cancelled while they waited for a
+    /// device to open; neither a device nor the CPU completed them.
     pub stopped: u32,
 }
 
@@ -69,7 +71,7 @@ impl DevicePageCounts {
             Outcome::Missed(Miss::NoDevice) => &mut self.no_device,
             Outcome::Missed(Miss::Retired) => &mut self.retired,
             Outcome::Failed => &mut self.failed,
-            Outcome::Stopped => &mut self.stopped,
+            Outcome::Stopped | Outcome::Missed(Miss::Cancelled) => &mut self.stopped,
         };
         *slot = slot.saturating_add(1);
     }
@@ -127,8 +129,11 @@ impl std::fmt::Display for DevicePageCounts {
 /// Why [`DevicePages::claim`](super::DevicePages::claim) gave no device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Miss {
-    /// No device opened within [`OPEN_WAIT`](super::OPEN_WAIT).
+    /// No device opened within [`OPEN_WAIT`](super::OPEN_WAIT) of the
+    /// first page that waited.
     Opening,
+    /// The page was cancelled while it waited for a device to open.
+    Cancelled,
     /// No device opened.
     NoDevice,
     /// Device errors retired every device that opened.
@@ -140,6 +145,7 @@ impl Miss {
     pub(super) const fn describe(self) -> &'static str {
         match self {
             Self::Opening => "no device has opened yet",
+            Self::Cancelled => "cancelled while waiting for a device to open",
             Self::NoDevice => "no device opened",
             Self::Retired => "every device is retired",
         }
@@ -178,6 +184,7 @@ mod tests {
             Outcome::Missed(Miss::Retired),
             Outcome::Failed,
             Outcome::Stopped,
+            Outcome::Missed(Miss::Cancelled),
         ] {
             counts.add(outcome);
         }
@@ -185,12 +192,12 @@ mod tests {
             counts.ineligible,
             [("shading", 2), ("translucent hairline", 1)]
         );
-        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 7, 1));
+        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 7, 2));
         assert_eq!(
             counts.to_string(),
             "2 on the device, 7 on the CPU (shading: 2, translucent hairline: 1, \
              device opening: 1, no device: 1, device retired: 1, \
-             device failed: 1); 1 stopped"
+             device failed: 1); 2 stopped"
         );
     }
 

@@ -189,6 +189,13 @@ impl std::str::FromStr for BackendPolicy {
 /// whose driver supports VA-API baseline JPEG decode.
 pub const DEFAULT_VAAPI_DEVICE: &str = "auto";
 
+/// The longest the GPU pages of a session wait for a device to open.
+///
+/// Under [`BackendPolicy::Auto`] with [`SessionConfig::gpu_pages`] the
+/// wait is counted from the first page that waits; while no device is open
+/// afterwards, pages render on the CPU.
+pub const GPU_PAGE_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Configuration for opening a [`RasterSession`].
 ///
 /// Passed to [`open_session`].  Use [`Default::default()`] for the standard
@@ -415,9 +422,10 @@ pub struct SessionConfig {
     /// strokes and text in solid colours, images, forms and annotation
     /// appearances, under path clips and soft masks, `Normal` blend) is
     /// rendered on it, byte-identical to the CPU at 8 and 16 bits: its
-    /// thread waits for the device to open (at most 30 seconds, after
-    /// which the page renders on the CPU, with a warning), records the
-    /// page and waits for the device, which renders one page at a time
+    /// thread waits for the device to open (until
+    /// [`GPU_PAGE_OPEN_WAIT`] after the first page waited, with a
+    /// warning then; while no device is open afterwards, pages render on
+    /// the CPU), records the page and waits for the device, which renders one page at a time
     /// while up to two others stage their inputs or read their pixels
     /// back.  Every other page, and every band of
     /// [`render_page_bands`](crate::render_page_bands), renders on the

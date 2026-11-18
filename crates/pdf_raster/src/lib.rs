@@ -187,7 +187,9 @@ pub mod dev {
 
 pub use bands::{Band, BandBitmap, BandError, render_page_bands};
 pub use color::SampleDepth;
-pub use config::{BackendPolicy, DEFAULT_VAAPI_DEVICE, ParseBackendPolicyError, SessionConfig};
+pub use config::{
+    BackendPolicy, DEFAULT_VAAPI_DEVICE, GPU_PAGE_OPEN_WAIT, ParseBackendPolicyError, SessionConfig,
+};
 #[cfg(feature = "vulkan")]
 pub use device_pages::DevicePageCounts;
 pub use error::RasterError;
