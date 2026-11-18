@@ -3272,6 +3272,61 @@ beats the CPU (724 vs 793 ms). Making pages wait for a free place while
 keeping two places (measured, dropped) was the slowest option: the two
 held pages record serially (corpus-07 300 dpi, 1687 ms). Defaults stay CPU.
 
+**Unreleased on master: GPU pages on several devices.**
+`SessionConfig::gpu_devices` / `rrocket --gpu-devices LIST|all` spreads the
+GPU pages of one session over several Vulkan devices: selectors in the
+`--vulkan-device` syntax, or `all` for every usable GPU (llvmpipe and other
+CPU implementations left out). The list is resolved once per process
+against the enumerated devices without opening one
+(`VulkanBackend::resolve_devices` / `usable_gpus`): an entry matching none
+or several, two entries naming one device, or `all` without a GPU is
+`InvalidOptions` listing the devices. Each page takes the open device where
+it expects the shortest wait, the pages the device holds and itself times
+its mean time per run (`VulkanBackend::device_time`; a device that has run
+nothing counts the fastest known mean). A device error retires that device
+alone. Under Auto the devices open on threads of their own when the first
+page asks (device creation is serialised in the process) and pages wait for
+the first; under `--backend vulkan` all open with the session, which reuses
+its own device for the index that names it. `DevicePageCounts::by_device`
+and the info line name each device's pages; `DeviceHold` holds them all.
+Parity with the RTX 5070 and the RADV iGPU both active, `--backend cpu`
+against `--gpu-pages --gpu-devices all` at 24 threads: every fixture page at
+50 dpi at 8 and 16 bits, under Auto and under `--backend vulkan` (3 824 × 4,
+all on the devices), and 745 pages of seven fixtures at 150 dpi at both
+depths (`--backend vulkan`), 0 differ. Choosing the device by the
+pages it holds alone, measured first, over-fed the slower RADV on image
+pages (corpus-07 300 dpi: 926 ms against 847 on the RTX alone); weighing by
+the mean run gives 861. Whole process, `--backend vulkan`, 24 threads,
+median of 5, ms (CPU / RTX alone / both, count / both, weighted; RTX : RADV
+pages):
+| doc | 150 dpi | 300 dpi | split at 300 |
+|---|---|---|---|
+| corpus-03 | 148 / 685 / 463 / 481 | 367 / 1269 / 1050 / 1075 | 138 : 116 |
+| corpus-04 | 132 / 433 / 392 / 403 | 379 / 1071 / 1033 / 1029 | 230 : 128 |
+| corpus-05 | 101 / 510 / 425 / 442 | 338 / 1387 / 1188 / 1178 | 343 : 258 |
+| corpus-07 | 397 / 565 / 593 / 579 | 768 / 847 / 926 / 861 | 126 : 36 |
+RADV alone at 300 dpi: corpus-04 2314, corpus-05 1782, corpus-07 2113;
+corpus-10 (JBIG2/JPX scans) at 150 dpi: CPU 6960, RTX 7601, RADV 7475, both
+7663. **Can CPU recording keep N devices busy?** (300 dpi, CPU / RTX / both,
+ms, by `--threads`; device busy = the time a device holds its page lock,
+temporary instrumentation):
+| doc | 1 | 2 | 4 | 8 | 12 | 24 |
+|---|---|---|---|---|---|---|
+| corpus-05 | 1772 / 2384 / 2341 | 957 / 1852 / 1593 | 632 / 1393 / 1391 | 328 / 1337 / 1078 | 271 / 1335 / 1055 | 320 / 1341 / 1169 |
+| corpus-03 | 1337 / 2241 / 2242 | 876 / 1528 / 1546 | 563 / 1222 / 1183 | 344 / 1193 / 1000 | 329 / 1218 / 1002 | 355 / 1225 / 1044 |
+| corpus-07 | 7973 / 3087 / 3026 | 4163 / 1816 / 1832 | 2154 / 1161 / 1115 | 1109 / 835 / 856 | 791 / 831 / 834 | 746 / 840 / 850 |
+On text pages recording is cheap: four threads keep the RTX busy 99 % of
+the time and eight keep both devices 83–90 % busy; more threads add
+nothing. A device's time per 300-dpi page is mostly the 15 MB read-back and
+the submit round trip (RTX ~2 ms, RADV ~3.6 ms), not the raster. On image
+pages the recording (image decode) is the bottleneck: 24 threads keep the
+RTX ~60 % busy on corpus-07 and ~15 % on corpus-10, so a second device adds
+nothing there. The knee on this box is about four recording threads per
+RTX-class device on text pages. Everything datacenter-specific is untested:
+H100-class cards and their Vulkan driver, more than two devices, many
+devices of one kind, 80 GB pages, and a CUDA twin of the page raster (there
+is none; the page raster is Vulkan only).
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past
