@@ -2,10 +2,12 @@
 //!
 //! Used by both `npp_rotate` (`gpu-deskew` feature) and `nvjpeg2k` (`nvjpeg2k`
 //! feature).  Extracted to avoid duplicating the eight-symbol FFI block and the
-//! five-step init sequence in each consumer.
+//! six-step init sequence in each consumer.
 
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 // ── CUDA driver API (libcuda.so) ──────────────────────────────────────────────
 
@@ -31,6 +33,44 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> i32;
     fn cudaFree(dev_ptr: *mut c_void) -> i32;
+    fn cudaGetLastError() -> i32;
+}
+
+/// `cudaErrorInsufficientDriver`.
+const CUDA_ERROR_INSUFFICIENT_DRIVER: i32 = 35;
+
+/// How long [`init_runtime`] retries [`CUDA_ERROR_INSUFFICIENT_DRIVER`].
+const RUNTIME_INIT_RETRY: Duration = Duration::from_secs(2);
+
+/// The outcome of the process's CUDA runtime initialisation.
+static RUNTIME_INIT: OnceLock<Result<(), i32>> = OnceLock::new();
+
+/// Initialise the CUDA runtime once per process, with a context current on
+/// the calling thread, by `cudaFree(NULL)`.
+///
+/// On Windows, a runtime first used while other threads of the process use
+/// the driver can answer every call with [`CUDA_ERROR_INSUFFICIENT_DRIVER`]
+/// for tens of milliseconds before it succeeds; that code is retried for
+/// [`RUNTIME_INIT_RETRY`].  Any other error, or that one past the deadline,
+/// is the outcome for the whole process.  The runtime's last-error state is
+/// cleared on success.
+fn init_runtime() -> Result<(), i32> {
+    *RUNTIME_INIT.get_or_init(|| {
+        let deadline = Instant::now() + RUNTIME_INIT_RETRY;
+        loop {
+            // SAFETY: cudaFree(NULL) frees nothing; it initialises the runtime.
+            let code = unsafe { cudaFree(ptr::null_mut()) };
+            if code == 0 {
+                // SAFETY: reads and resets the calling thread's runtime error.
+                let _ = unsafe { cudaGetLastError() };
+                return Ok(());
+            }
+            if code != CUDA_ERROR_INSUFFICIENT_DRIVER || Instant::now() >= deadline {
+                return Err(code);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })
 }
 
 // ── DeviceBuf ─────────────────────────────────────────────────────────────────
@@ -83,10 +123,11 @@ unsafe impl Send for DeviceBuf {}
 
 // ── Init helper ───────────────────────────────────────────────────────────────
 
-/// CUDA driver error: which init step failed and the raw driver error code.
+/// CUDA init error: which init step failed and the raw driver or runtime
+/// error code.
 #[derive(Debug)]
 pub(crate) struct CudaInitError {
-    /// Name of the CUDA driver call that returned non-zero.
+    /// Name of the CUDA call that returned non-zero.
     ///
     /// Used by `npp_rotate` (`gpu-deskew` feature) to build a human-readable
     /// error string; unused when only `nvjpeg2k` is compiled.
@@ -106,7 +147,7 @@ pub(crate) struct CudaInit {
     pub stream: CUstream,
 }
 
-/// Run the five-step CUDA primary-context init sequence for `device_ordinal`.
+/// Run the six-step CUDA primary-context init sequence for `device_ordinal`.
 ///
 /// Steps, in order:
 /// 1. `cuInit(0)` — load and initialise the CUDA driver (idempotent).
@@ -114,17 +155,18 @@ pub(crate) struct CudaInit {
 ///    Negative values or out-of-range ordinals return `CUDA_ERROR_INVALID_VALUE`.
 /// 3. `cuDevicePrimaryCtxRetain` — acquire (ref-count) the primary context.
 /// 4. `cuCtxSetCurrent` — bind the primary context to the calling thread.
-/// 5. `cuStreamCreate` — create a new stream within that context.
+/// 5. [`init_runtime`] — initialise the CUDA runtime (once per process).
+/// 6. `cuStreamCreate` — create a new stream within that context.
 ///
 /// On failure at step 3, nothing is cleaned up (no retain was taken).
-/// On failure at step 4 or 5, the retained primary context is released and the
+/// On failure at step 4, 5 or 6, the retained primary context is released and the
 /// calling thread's context binding is cleared (`cuCtxSetCurrent(null)`) to
 /// avoid leaving a dangling context on the thread.
 ///
 /// # Errors
 ///
 /// Returns [`CudaInitError`] with the failing step name and error code if any
-/// CUDA driver call returns non-zero.
+/// CUDA call returns non-zero.
 ///
 /// # Panics
 ///
@@ -185,7 +227,19 @@ pub(crate) fn init_primary_ctx_and_stream(device_ordinal: i32) -> Result<CudaIni
         });
     }
 
-    // Step 5 — create a stream in the now-current context.
+    // Step 5 — initialise the runtime the callers' cudaMalloc and NPP use.
+    if let Err(code) = init_runtime() {
+        unsafe {
+            let _ = cuDevicePrimaryCtxRelease(device);
+            let _ = cuCtxSetCurrent(ptr::null_mut());
+        }
+        return Err(CudaInitError {
+            step: "cudaFree (runtime initialisation)",
+            code,
+        });
+    }
+
+    // Step 6 — create a stream in the now-current context.
     let mut stream: CUstream = ptr::null_mut();
     let r = unsafe { cuStreamCreate(&raw mut stream, 0) };
     if r != 0 {
