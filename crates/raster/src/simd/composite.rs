@@ -17,9 +17,18 @@
 //!    byte masks (`vmovdqu8` with a lane mask: unselected bytes are neither
 //!    read nor written); a single remaining pixel goes through the scalar
 //!    loop.
-//! 2. **Scalar** per-pixel loop, also the tier for every other architecture
-//!    and for one-pixel spans.  LLVM auto-vectorises it under
-//!    `-C target-cpu=native`.
+//! 2. **AVX2** (with the `simd-avx2` feature), spans ≥ 32 px: 32 pixels (96
+//!    destination bytes) per iteration, the destination again kept
+//!    interleaved.  The block's 32 `a_src` values are packed to bytes and
+//!    each 32-byte third takes its per-byte alpha by an in-lane byte
+//!    shuffle (`vpshufb`, byte `b` of third `g` from pixel `(32g + b) / 3`)
+//!    of a fixed arrangement of the alpha vector's 128-bit halves; the
+//!    per-lane source colour of each third is a constant vector.  A
+//!    remainder of 1–31 pixels is one more block ending at the span's last
+//!    pixel, overlapping the previous block.
+//! 3. **Scalar** per-pixel loop, also the tier for every other architecture,
+//!    for one-pixel spans and, under AVX2 only, for spans below 32 px.
+//!    LLVM auto-vectorises it under `-C target-cpu=native`.
 //!
 //! # div255
 //!
@@ -245,6 +254,155 @@ unsafe fn composite_avx512(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u
     }
 }
 
+// ── AVX2 tier ─────────────────────────────────────────────────────────────────
+
+/// Byte-shuffle tables for the three 32-byte thirds of a 32-pixel block:
+/// byte `b` of third `g` belongs to pixel `q = (32g + b) / 3`, which sits at
+/// byte `q % 16` of 128-bit half `q / 16` of the alpha vector.  Third 0
+/// draws on half 0 only, third 2 on half 1 only, third 1 on half 0 in its
+/// low lane and half 1 in its high lane, so each third shuffles a fixed
+/// arrangement of the alpha halves within its lanes.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+const SHUFFLE_PIXEL: [[u8; 32]; 3] = {
+    let mut t = [[0u8; 32]; 3];
+    let mut g = 0;
+    while g < 3 {
+        let mut b = 0;
+        while b < 32 {
+            #[expect(clippy::cast_possible_truncation, reason = "every entry is < 16")]
+            {
+                t[g][b] = (((32 * g + b) / 3) % 16) as u8;
+            }
+            b += 1;
+        }
+        g += 1;
+    }
+    t
+};
+
+/// Byte position, within a 32-byte third, of u16 lane `j` of the low
+/// (`high = false`) or high widening of that third: the in-lane byte
+/// unpacks take bytes 0–7 and 16–23 to the low widening, 8–15 and 24–31 to
+/// the high one.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+const fn widened_byte(j: usize, high: bool) -> usize {
+    (j / 8) * 16 + (j % 8) + if high { 8 } else { 0 }
+}
+
+/// Pixels per AVX2 block; shorter spans take the scalar loop.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+const AVX2_BLOCK_PX: usize = 32;
+
+/// AVX2 tier: 32 pixels (96 destination bytes) per block.  A span of
+/// fewer than 32 pixels takes the scalar loop.  A remainder of 1–31 pixels
+/// is covered by one more block ending at the span's last pixel, computed
+/// from the destination before any block is stored and stored last: each
+/// output pixel depends only on its own input, so the pixels it shares
+/// with the preceding block receive the same values twice.
+///
+/// Bytes are widened to u16 with in-lane unpacks against zero and narrowed
+/// back with an in-lane unsigned pack, which restores their order, so no
+/// lane crossing is needed except to arrange the alpha halves per third.
+/// `div255` here is `mulhi_u16(v + 0x80, 257)`: for `t = v + 0x80 < 2¹⁶`,
+/// `⌊257t / 2¹⁶⌋ = ⌊(t + t/256) / 256⌋ = ⌊(t + ⌊t/256⌋) / 256⌋`, the
+/// scalar formula.
+///
+/// # Safety
+///
+/// Caller must ensure `avx2` is available.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_add_epi16, _mm256_loadu_si256, _mm256_mulhi_epu16, _mm256_mullo_epi16,
+        _mm256_packus_epi16, _mm256_permute2x128_si256, _mm256_set1_epi16, _mm256_setzero_si256,
+        _mm256_shuffle_epi8, _mm256_storeu_si256, _mm256_sub_epi16, _mm256_unpackhi_epi8,
+        _mm256_unpacklo_epi8,
+    };
+
+    // Only pixels that both slices cover are processed.
+    let n = shape.len().min(dst.len() / 3);
+    if n < AVX2_BLOCK_PX {
+        composite_scalar(dst, src, a_input, shape);
+        return;
+    }
+
+    let zero = _mm256_setzero_si256();
+    let a_in = _mm256_set1_epi16(i16::from(a_input));
+    let v255 = _mm256_set1_epi16(255);
+    let v128 = _mm256_set1_epi16(0x80);
+    let v257 = _mm256_set1_epi16(257);
+    let div255 = |v: __m256i| _mm256_mulhi_epu16(_mm256_add_epi16(v, v128), v257);
+    // The per-lane source colour of each third's low and high widening.
+    let colour = |g: usize, high: bool| -> [i16; 16] {
+        std::array::from_fn(|j| i16::from(src[(32 * g + widened_byte(j, high)) % 3]))
+    };
+    let colours: [[[i16; 16]; 2]; 3] = std::array::from_fn(|g| [colour(g, false), colour(g, true)]);
+    // SAFETY: each shuffle and colour table is exactly 32 bytes.
+    let (pixel_of, src_of) = unsafe {
+        (
+            SHUFFLE_PIXEL.map(|t| _mm256_loadu_si256(t.as_ptr().cast())),
+            colours.map(|c| c.map(|t| _mm256_loadu_si256(t.as_ptr().cast()))),
+        )
+    };
+
+    let sp = shape.as_ptr();
+    let dp = dst.as_mut_ptr();
+    // The composited 96 bytes of the block of pixels `px .. px + 32`.
+    let block = |px: usize| -> [__m256i; 3] {
+        // SAFETY: px + 32 ≤ n ≤ shape.len() and 3(px + 32) ≤ 3n ≤ dst.len().
+        unsafe {
+            let cov = _mm256_loadu_si256(sp.add(px).cast());
+            let lo = div255(_mm256_mullo_epi16(_mm256_unpacklo_epi8(cov, zero), a_in));
+            let hi = div255(_mm256_mullo_epi16(_mm256_unpackhi_epi8(cov, zero), a_in));
+            let a_src = _mm256_packus_epi16(lo, hi);
+            let halves = [
+                _mm256_permute2x128_si256::<0x00>(a_src, a_src),
+                a_src,
+                _mm256_permute2x128_si256::<0x11>(a_src, a_src),
+            ];
+            let mix = |a: __m256i, d: __m256i, s: __m256i| {
+                let inv = _mm256_sub_epi16(v255, a);
+                div255(_mm256_add_epi16(
+                    _mm256_mullo_epi16(inv, d),
+                    _mm256_mullo_epi16(a, s),
+                ))
+            };
+            std::array::from_fn(|g| {
+                let a = _mm256_shuffle_epi8(halves[g], pixel_of[g]);
+                let d = _mm256_loadu_si256(dp.add(px * 3 + g * 32).cast());
+                let lo = mix(
+                    _mm256_unpacklo_epi8(a, zero),
+                    _mm256_unpacklo_epi8(d, zero),
+                    src_of[g][0],
+                );
+                let hi = mix(
+                    _mm256_unpackhi_epi8(a, zero),
+                    _mm256_unpackhi_epi8(d, zero),
+                    src_of[g][1],
+                );
+                _mm256_packus_epi16(lo, hi)
+            })
+        }
+    };
+    let store = |px: usize, out: [__m256i; 3]| {
+        for (g, v) in out.into_iter().enumerate() {
+            // SAFETY: 3(px + 32) ≤ 3n ≤ dst.len().
+            unsafe { _mm256_storeu_si256(dp.add(px * 3 + g * 32).cast(), v) };
+        }
+    };
+
+    let last = n - AVX2_BLOCK_PX;
+    let tail = (!n.is_multiple_of(AVX2_BLOCK_PX)).then(|| block(last));
+    for b in 0..n / AVX2_BLOCK_PX {
+        let px = b * AVX2_BLOCK_PX;
+        store(px, block(px));
+    }
+    if let Some(out) = tail {
+        store(last, out);
+    }
+}
+
 // ── Per-arch dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -256,9 +414,15 @@ fn dispatch_composite(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
     {
         // SAFETY: both features confirmed present.
         unsafe { composite_avx512(dst, src, a_input, shape) };
-    } else {
-        composite_scalar(dst, src, a_input, shape);
+        return;
     }
+    #[cfg(feature = "simd-avx2")]
+    if shape.len() >= AVX2_BLOCK_PX && is_x86_feature_detected!("avx2") {
+        // SAFETY: avx2 confirmed present.
+        unsafe { composite_avx2(dst, src, a_input, shape) };
+        return;
+    }
+    composite_scalar(dst, src, a_input, shape);
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -414,6 +578,129 @@ mod tests {
                         .all(|&b| b == 0xA5),
                     "n={n} trial={trial}: bytes outside the span were written"
                 );
+            }
+        }
+    }
+
+    /// Direct call into the AVX2 tier for every span length 0..=100 and a
+    /// few long ones — the scalar fallback below one block, whole 32-pixel
+    /// blocks and every overlapping remainder — against the scalar tier,
+    /// with the guards and pseudorandom inputs of the AVX-512 test.
+    /// Skipped where the CPU lacks AVX2.
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+    #[test]
+    fn avx2_tier_matches_scalar_at_every_length() {
+        const GUARD: usize = 64;
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for n in (0..=100usize).chain([1000, 1001, 1023]) {
+            for trial in 0..16u32 {
+                #[expect(clippy::cast_possible_truncation, reason = "n ≤ 1023")]
+                let seed = 0x7f4a_7c15 ^ ((n as u32) << 8) ^ trial;
+                let mut shape = vec![0xFFu8; GUARD + n + GUARD];
+                shape[GUARD..GUARD + n].copy_from_slice(&pseudorandom(n, seed));
+                let shape = &shape[GUARD..GUARD + n];
+                let initial = pseudorandom(n * 3, seed.rotate_left(11));
+                let params = pseudorandom(4, seed.rotate_left(23));
+                let src = [params[0], params[1], params[2]];
+                let a_input = params[3];
+
+                let mut want = initial.clone();
+                composite_scalar(&mut want, src, a_input, shape);
+
+                let mut buf = vec![0xA5u8; GUARD + n * 3 + GUARD];
+                buf[GUARD..GUARD + n * 3].copy_from_slice(&initial);
+                // SAFETY: avx2 confirmed present above.
+                unsafe {
+                    composite_avx2(&mut buf[GUARD..GUARD + n * 3], src, a_input, shape);
+                }
+
+                assert_eq!(
+                    &buf[GUARD..GUARD + n * 3],
+                    want.as_slice(),
+                    "n={n} trial={trial} src={src:?} a_input={a_input}"
+                );
+                assert!(
+                    buf[..GUARD]
+                        .iter()
+                        .chain(&buf[GUARD + n * 3..])
+                        .all(|&b| b == 0xA5),
+                    "n={n} trial={trial}: bytes outside the span were written"
+                );
+            }
+        }
+    }
+
+    /// Every (coverage, destination) byte pair, in every channel, through
+    /// the AVX2 tier against the scalar tier, over a spread of opacities
+    /// and source colours.  Skipped where the CPU lacks AVX2.
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+    #[test]
+    fn avx2_tier_matches_scalar_on_every_coverage_destination_pair() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the high byte of i < 65536"
+        )]
+        let shape: Vec<u8> = (0..65_536u32).map(|i| (i >> 8) as u8).collect();
+        #[expect(clippy::cast_possible_truncation, reason = "the low byte is wanted")]
+        let initial: Vec<u8> = (0..65_536u32)
+            .flat_map(|i| {
+                let d = i as u8;
+                [d, d.wrapping_mul(7), !d]
+            })
+            .collect();
+        for a_input in (0..=255u8).step_by(5).chain([1, 254]) {
+            for s in (0..=255u8).step_by(15) {
+                let src = [s, 255 - s, s.wrapping_mul(3)];
+                let mut want = initial.clone();
+                composite_scalar(&mut want, src, a_input, &shape);
+                let mut got = initial.clone();
+                // SAFETY: avx2 confirmed present above.
+                unsafe { composite_avx2(&mut got, src, a_input, &shape) };
+                assert!(got == want, "a_input={a_input} src={src:?}");
+            }
+        }
+    }
+
+    /// Timing of the scalar, AVX2 and AVX-512 tiers on spans of 4 to 1 920
+    /// pixels.  Always passes; run with `--ignored --nocapture` in a release
+    /// build to see the times.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "manual perf smoke test; run with `--ignored --nocapture` for timing"]
+    fn composite_tier_timing() {
+        const TOTAL_PX: usize = 200_000_000;
+        for n in [4usize, 13, 40, 200, 1920] {
+            let shape = pseudorandom(n, 1);
+            let mut dst = pseudorandom(n * 3, 2);
+            let iters = TOTAL_PX / n;
+            let mut run = |name: &str, f: &dyn Fn(&mut [u8], &[u8])| {
+                f(&mut dst, &shape);
+                let t0 = std::time::Instant::now();
+                for _ in 0..iters {
+                    f(std::hint::black_box(&mut dst), std::hint::black_box(&shape));
+                }
+                #[expect(clippy::cast_precision_loss, reason = "timing display only")]
+                let ns_px = t0.elapsed().as_secs_f64() * 1e9 / (iters * n) as f64;
+                println!("n={n} {name}: {ns_px:.3} ns/px");
+            };
+            run("scalar", &|d, s| composite_scalar(d, [7, 250, 128], 200, s));
+            #[cfg(feature = "simd-avx2")]
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: avx2 confirmed present.
+                run("avx2", &|d, s| unsafe {
+                    composite_avx2(d, [7, 250, 128], 200, s);
+                });
+            }
+            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl") {
+                // SAFETY: both features confirmed present.
+                run("avx512", &|d, s| unsafe {
+                    composite_avx512(d, [7, 250, 128], 200, s);
+                });
             }
         }
     }
