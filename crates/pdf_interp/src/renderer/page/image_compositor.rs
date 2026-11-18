@@ -193,7 +193,7 @@ impl<'a> ImageCompositor<'a> {
         let solid = self
             .solid
             .map(|c| P::Sample::solid(c, P::MODE, self.separator));
-        let (row, mut alpha_row) = bitmap.row_and_alpha_mut(y);
+        let (row, mut alpha_row, mut painted) = bitmap.row_planes_mut(y);
         let x0 = x0 as usize;
         let columns = (row.len() / n).saturating_sub(x0).min(shape.len());
         let (colours, shape) = (&colours[..columns * sample_n], &shape[..columns]);
@@ -239,16 +239,26 @@ impl<'a> ImageCompositor<'a> {
                 clippy::cast_possible_truncation,
                 reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
             )]
+            let span = (c0 as i32, (c1 - 1) as i32, y as i32);
             raster::pipe::render_span::<P>(
                 &pipe,
                 &src,
                 &mut row[c0 * n..c1 * n],
                 alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
                 Some(&shape[a..b]),
-                c0 as i32,
-                (c1 - 1) as i32,
-                y as i32,
+                span.0,
+                span.1,
+                span.2,
             );
+            if let Some(painted) = painted.as_deref_mut() {
+                raster::pipe::mark_painted::<P>(
+                    &mut painted[c0..c1],
+                    &pipe,
+                    &src,
+                    Some(&shape[a..b]),
+                    span,
+                );
+            }
             start = b;
         }
     }

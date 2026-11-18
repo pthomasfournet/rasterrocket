@@ -212,8 +212,8 @@ thread_local! {
 
 /// A [`Pattern`] of 8-bit samples served at the depth of `S`, each sample
 /// widened exactly by [`Sample::from_u8`]; at 8 bits the inner pattern
-/// fills the span itself.  Coverage and the static-colour hint are the
-/// inner pattern's.
+/// fills the span itself.  Coverage, the static-colour hint and the record
+/// of painted channels are the inner pattern's.
 pub(super) struct Widened<'a, S> {
     inner: &'a dyn Pattern<u8>,
     _sample: std::marker::PhantomData<fn() -> S>,
@@ -269,6 +269,10 @@ impl<S: Sample> Pattern<S> for Widened<'_, S> {
             widen(colour, out);
             widen(shape, coverage);
         });
+    }
+
+    fn fill_span_channels(&self, y: i32, x0: i32, x1: i32, channels: &mut [u8]) -> bool {
+        self.inner.fill_span_channels(y, x0, x1, channels)
     }
 }
 

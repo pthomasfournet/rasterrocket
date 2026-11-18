@@ -788,6 +788,55 @@ fn tiling_cells_keep_spots_and_their_own_overprint() {
     }
 }
 
+/// A coloured tiling cell that paints black alone under overprint in its
+/// left half and cyan in its right half writes, at each pixel, only the
+/// channels painted there: the cyan backdrop stays under the black half,
+/// whether the cyan paint knocks out or overprints, and whether the cell
+/// is composited at lattice points or rendered in place.
+#[test]
+fn tiling_cells_overprint_the_channels_painted_at_each_pixel() {
+    let doc = |cyan_op: bool, cells: f64| {
+        let half = cells / 2.0;
+        let cell = format!(
+            "/K gs 0 0 0 1 k 0 0 {half} {cells} re f \
+             /C gs 0.5 0 0 0 k {half} 0 {half} {cells} re f"
+        );
+        crate::test_helpers::make_doc_with_objects(&[
+            (
+                4,
+                "<< /Type /Page /Resources << /Pattern << /P 5 0 R >> >> >>".to_owned(),
+            ),
+            (
+                5,
+                format!(
+                    "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 {cells} {cells}] \
+                     /XStep {cells} /YStep {cells} /Resources << /ExtGState << \
+                     /K << /op true /OPM 1 >> /C << /op {cyan_op} /OPM 1 >> >> >> \
+                     /Length {} >>\nstream\n{cell}\nendstream",
+                    cell.len()
+                ),
+            ),
+        ])
+    };
+    // Columns of the black and the cyan half, per cell size; the fill's
+    // height, below the cell's for the cell rendered in place.
+    for (cells, black, cyan, height) in [(10.0, 2, 7, 10), (4.0, 1, 3, 10), (10.0, 2, 7, 5)] {
+        for cyan_op in [false, true] {
+            let paint = format!("{CYAN_PAGE} /Pattern cs /P scn 0 0 10 {height} re f");
+            let ink = render_ink(&doc(cyan_op, cells), paint.as_bytes());
+            let case = format!("cells {cells}, height {height}, cyan op {cyan_op}");
+            assert_eq!(
+                ink_at(&ink, black, 7),
+                [255, 0, 0, 255, 0, 0, 0, 0],
+                "{case}"
+            );
+            let px = ink_at(&ink, cyan, 7);
+            assert!(px[0].abs_diff(128) <= 1, "{case}: {px:?}");
+            assert_eq!(px[1..], [0; 7], "{case}: {px:?}");
+        }
+    }
+}
+
 /// An `ICCBased` CMYK colour prints on an ink canvas as the process ink
 /// reproducing the profile's colour, with the colour's zero components:
 /// a black from the profile stays black ink alone and keeps the cyan

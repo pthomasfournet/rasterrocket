@@ -140,6 +140,16 @@ impl Tile {
         }
     }
 
+    /// Whether the tile records the channels its cell's content painted
+    /// at each pixel (see [`TiledPattern::screen`]).
+    pub(super) fn records_channels(&self) -> bool {
+        match self {
+            Self::Rgb(_) | Self::Rgb16(_) => false,
+            Self::Ink { pattern, .. } => pattern.records_channels(),
+            Self::Ink16 { pattern, .. } => pattern.records_channels(),
+        }
+    }
+
     /// The channels that carry the tile's colours on an ink canvas: those
     /// its cell's content carried for a tile of ink, every channel for one
     /// of sRGB.
@@ -737,6 +747,12 @@ impl PageRenderer<'_> {
         let mut child = self.try_child(P::KIND, width, height, desc.stream_id)?;
         // One level deeper, bounded by MAX_PATTERN_DEPTH.
         child.pattern_depth = self.pattern_depth.saturating_add(1);
+        if self.simulates_overprint()
+            && let Err(e) = child.canvas.track_painted()
+        {
+            self.abort_allocation(e);
+            return None;
+        }
 
         // A pattern without resources of its own inherits the resources in
         // effect, whichever dictionary they came from.

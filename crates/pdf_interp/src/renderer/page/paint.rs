@@ -383,12 +383,14 @@ impl PageRenderer<'_> {
 
     /// The channels a paint of the tiling pattern `tile` writes on an ink
     /// canvas that simulates overprint, `None` for every channel: those
-    /// its cell's content painted.  The cell's own paints carry their
-    /// overprint, whatever the overprint state of the paint that uses the
-    /// pattern.
+    /// its cell's content painted, narrowed at each pixel to those painted
+    /// there for a tile that records them.  The cell's own paints carry
+    /// their overprint, whatever the overprint state of the paint that
+    /// uses the pattern.
     pub(super) fn tile_overprint(&self, tile: &Tile) -> Option<ChannelMask> {
         let paints = tile.paints();
-        (self.simulates_overprint() && paints != ChannelMask::ALL).then_some(paints)
+        (self.simulates_overprint() && (paints != ChannelMask::ALL || tile.records_channels()))
+            .then_some(paints)
     }
 
     /// Whether the canvas is of ink and simulates overprint.

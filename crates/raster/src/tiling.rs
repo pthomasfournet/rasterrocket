@@ -148,7 +148,9 @@ fn source_over<S: Sample>() -> PipeState<'static, S> {
 }
 
 /// Composite `cell` onto `screen` with its top-left pixel at `(sx, sy)`,
-/// restricted to the part of the cell inside the screen.
+/// restricted to the part of the cell inside the screen.  Where both track
+/// their painted channels, those of each pixel of the cell with nonzero
+/// alpha are added to the screen pixel's.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -192,6 +194,14 @@ fn stamp<P: Pixel>(
             (x_b - 1) as i32,
             y as i32,
         );
+        if let (Some(from), Some(to)) = (cell.painted_row(cy), screen.painted_row_mut(y as u32)) {
+            let to = &mut to[x_a as usize..x_b as usize];
+            for (i, (t, &f)) in to.iter_mut().zip(&from[cx_a..cx_b]).enumerate() {
+                if shape.is_none_or(|s| s[i] != P::Sample::default()) {
+                    *t |= f;
+                }
+            }
+        }
     }
 }
 
@@ -248,6 +258,13 @@ impl<P: Pixel> TiledPattern<P> {
         })
     }
 
+    /// Whether the pattern has a per-pixel record of its channels (see
+    /// [`Self::screen`]).
+    #[must_use]
+    pub fn records_channels(&self) -> bool {
+        matches!(&self.source, Source::Screen { bitmap, .. } if bitmap.painted_plane().is_some())
+    }
+
     /// This pattern moved by `dx` columns and `dy` rows: the pixel it served
     /// at `(x, y)` it serves at `(x + dx, y + dy)`.
     #[must_use]
@@ -273,11 +290,29 @@ impl<P: Pixel> TiledPattern<P> {
     /// The pattern painted on `bitmap`, whose top-left pixel is device
     /// pixel `(x0, y0)` and whose alpha plane, when present, is the
     /// coverage of each pixel; a bitmap without one is fully covered.
+    ///
+    /// The bitmap's painted-channels plane, when it tracks one
+    /// ([`Bitmap::track_painted`]), is the pattern's per-pixel record of
+    /// its channels ([`Pattern::fill_span_channels`]), unless it holds the
+    /// same value at every pixel of nonzero coverage, when the pattern has
+    /// no record.
     #[must_use]
-    pub fn screen(bitmap: Bitmap<P>, x0: i32, y0: i32) -> Self {
+    pub fn screen(mut bitmap: Bitmap<P>, x0: i32, y0: i32) -> Self {
         let fully_covered = bitmap
             .alpha_plane()
             .is_none_or(|a| a.iter().all(|&c| c == P::Sample::MAX));
+        if bitmap.painted_plane().is_some_and(|p| {
+            let mut covered = p.iter().enumerate().filter(|&(i, _)| {
+                bitmap
+                    .alpha_plane()
+                    .is_none_or(|a| a[i] != P::Sample::default())
+            });
+            covered
+                .next()
+                .is_none_or(|(_, &first)| covered.all(|(_, &v)| v == first))
+        }) {
+            bitmap.untrack_painted();
+        }
         Self {
             source: Source::Screen {
                 bitmap,
@@ -343,6 +378,9 @@ impl<P: Pixel> TiledPattern<P> {
                         None => return Ok(None),
                     },
                 };
+                if bitmap.painted_plane().is_some() {
+                    screen.track_painted()?;
+                }
                 stamp(&mut screen, bitmap, sx, sy, &pipe);
             }
         }
@@ -411,6 +449,28 @@ impl<P: Pixel> Pattern<P::Sample> for TiledPattern<P> {
         matches!(self.source, Source::Uniform { .. })
     }
 
+    fn fill_span_channels(&self, y: i32, x0: i32, x1: i32, channels: &mut [u8]) -> bool {
+        let Source::Screen {
+            bitmap,
+            x0: sx0,
+            y0: sy0,
+            ..
+        } = &self.source
+        else {
+            return false;
+        };
+        if bitmap.painted_plane().is_none() {
+            return false;
+        }
+        channels.fill(0);
+        if let Some((row, lx, off, n)) = screen_run(bitmap, *sx0, *sy0, y, x0, x1)
+            && let Some(painted) = bitmap.painted_row(row)
+        {
+            channels[off..off + n].copy_from_slice(&painted[lx..lx + n]);
+        }
+        true
+    }
+
     fn may_leave_unpainted(&self) -> bool {
         match &self.source {
             Source::Uniform { coverage, .. } => *coverage != P::Sample::MAX,
@@ -476,6 +536,50 @@ mod tests {
             col_step: (step, 0.0),
             row_step: (0.0, step),
         }
+    }
+
+    /// [`cell`] recording `painted` as the channels of its pixels.
+    fn recording_cell(painted: [u8; 4]) -> Rc<Bitmap<Rgb8>> {
+        let mut c = cell();
+        c.track_painted().unwrap();
+        for y in 0..2 {
+            c.painted_row_mut(y)
+                .unwrap()
+                .copy_from_slice(&painted[y as usize * 2..y as usize * 2 + 2]);
+        }
+        Rc::new(c)
+    }
+
+    /// The composited screen records the channels of each covered cell
+    /// pixel at its lattice position, and drops a record that is the same
+    /// at every covered pixel.
+    #[test]
+    fn composed_cells_carry_their_painted_channels() {
+        let compose_cell = |c: &Rc<Bitmap<Rgb8>>| {
+            TiledPattern::compose(
+                |_| Some(Rc::clone(c)),
+                (2, 2),
+                &axis_aligned(2.0),
+                0,
+                0,
+                4,
+                2,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        // The transparent pixel's record is not the pattern's.
+        let pattern = compose_cell(&recording_cell([8, 1, 8, 4]));
+        assert!(pattern.records_channels());
+        let mut channels = [0xAA; 5];
+        assert!(pattern.fill_span_channels(1, -1, 3, &mut channels));
+        assert_eq!(channels, [0, 8, 0, 8, 0]);
+        assert!(!compose_cell(&recording_cell([8, 8, 8, 4])).records_channels());
+        assert!(
+            !compose(&axis_aligned(2.0), 0, 0, 4, 2)
+                .unwrap()
+                .records_channels()
+        );
     }
 
     #[test]

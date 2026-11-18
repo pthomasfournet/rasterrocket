@@ -106,6 +106,11 @@ fn refill<S: Sample>(mut buf: Vec<S>, len: usize, value: S) -> Option<Vec<S>> {
     Some(buf)
 }
 
+/// The mutable rows of one pixel row of a [`Bitmap`]: its samples, its
+/// alpha when the bitmap has an alpha plane, and its painted channels when
+/// the bitmap tracks them.
+pub type RowPlanes<'a, S> = (&'a mut [S], Option<&'a mut [S]>, Option<&'a mut [u8]>);
+
 // ── Bitmap ────────────────────────────────────────────────────────────────────
 
 /// A typed, top-down pixel buffer.
@@ -126,6 +131,7 @@ pub struct Bitmap<P: Pixel> {
     pub stride: usize,
     data: Vec<P::Sample>,
     alpha: Option<Vec<P::Sample>>,
+    painted: Option<Vec<u8>>,
     _marker: PhantomData<P>,
 }
 
@@ -168,6 +174,7 @@ impl<P: Pixel> Bitmap<P> {
             stride,
             data: vec![fill; data_len],
             alpha: alpha_len.map(|len| vec![P::Sample::default(); len]),
+            painted: None,
             _marker: PhantomData,
         }
     }
@@ -235,6 +242,7 @@ impl<P: Pixel> Bitmap<P> {
             stride,
             data,
             alpha,
+            painted: None,
             _marker: PhantomData,
         })
     }
@@ -275,6 +283,7 @@ impl<P: Pixel> Bitmap<P> {
             stride,
             data,
             alpha: None,
+            painted: None,
             _marker: PhantomData,
         })
     }
@@ -430,6 +439,85 @@ impl<P: Pixel> Bitmap<P> {
         self.alpha.take()
     }
 
+    /// Give the bitmap a painted-channels plane, all zero: one byte per
+    /// pixel (`width × height`, top-down) that the paints composited
+    /// through [`render_bitmap_span`](crate::pipe::render_bitmap_span) set
+    /// to the union of the channel masks they wrote at the pixel (see
+    /// [`mark_painted`](crate::pipe::mark_painted)).  An existing plane is
+    /// kept.
+    ///
+    /// # Errors
+    ///
+    /// [`BitmapAllocError`] when the plane cannot be allocated.
+    pub fn track_painted(&mut self) -> Result<(), BitmapAllocError> {
+        if self.painted.is_some() {
+            return Ok(());
+        }
+        let error = BitmapAllocError {
+            width: self.width,
+            height: self.height,
+        };
+        let len = u32_to_usize(self.width)
+            .checked_mul(u32_to_usize(self.height))
+            .ok_or(error)?;
+        self.painted = Some(refill(Vec::new(), len, 0).ok_or(error)?);
+        Ok(())
+    }
+
+    /// The painted-channels plane (see [`Self::track_painted`]); `None`
+    /// for a bitmap that does not track them.
+    #[must_use]
+    pub fn painted_plane(&self) -> Option<&[u8]> {
+        self.painted.as_deref()
+    }
+
+    /// Row `y` of the painted-channels plane, `width` bytes; `None` for a
+    /// bitmap that does not track them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    #[must_use]
+    pub fn painted_row(&self, y: u32) -> Option<&[u8]> {
+        self.assert_row_in_bounds(y);
+        let w = u32_to_usize(self.width);
+        let off = u32_to_usize(y) * w;
+        self.painted.as_ref().map(|p| &p[off..off + w])
+    }
+
+    /// Mutable row `y` of the painted-channels plane; `None` for a bitmap
+    /// that does not track them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    pub fn painted_row_mut(&mut self, y: u32) -> Option<&mut [u8]> {
+        self.row_planes_mut(y).2
+    }
+
+    /// [`Self::row_and_alpha_mut`] with the row of the painted-channels
+    /// plane, when the bitmap tracks them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    pub fn row_planes_mut(&mut self, y: u32) -> RowPlanes<'_, P::Sample> {
+        self.assert_row_in_bounds(y);
+        let w = u32_to_usize(self.width);
+        let off = u32_to_usize(y) * w;
+        let pixels_off = u32_to_usize(y) * self.stride;
+        let pixels = &mut self.data[pixels_off..pixels_off + self.stride];
+        let alpha = self.alpha.as_mut().map(|a| &mut a[off..off + w]);
+        let painted = self.painted.as_mut().map(|p| &mut p[off..off + w]);
+        (pixels, alpha, painted)
+    }
+
+    /// Remove the painted-channels plane: the bitmap no longer tracks
+    /// them.
+    pub fn untrack_painted(&mut self) {
+        self.painted = None;
+    }
+
     /// Simultaneous mutable access to the pixel row and the alpha row.
     ///
     /// Returns `(pixel_row_samples, Some(alpha_row))` or `(pixel_row_samples, None)`.
@@ -544,6 +632,7 @@ impl<P: Pixel> Bitmap<P> {
             stride,
             data,
             alpha: None,
+            painted: None,
             _marker: PhantomData,
         }
     }

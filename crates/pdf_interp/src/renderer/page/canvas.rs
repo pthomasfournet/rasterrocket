@@ -300,6 +300,12 @@ impl PageCanvas {
         with_canvas!(self, |b| clear(b, region));
     }
 
+    /// Track the channels the paints onto the canvas write at each pixel
+    /// (see [`raster::Bitmap::track_painted`]).
+    pub(super) fn track_painted(&mut self) -> Result<(), raster::BitmapAllocError> {
+        with_canvas!(self, |b| b.track_painted())
+    }
+
     /// Fill one Gouraud-shaded triangle of 8-bit sRGB vertices through
     /// `pipe`, clipped to `clip`.  The interpolated sRGB spans reach an ink
     /// canvas converted to ink by `separator` and mapped through
@@ -826,7 +832,8 @@ impl<S: CanvasSample> Pattern<S> for InkPattern<'_, S> {
 
 /// A [`Pattern`] of ink whose pixels map, in the channels that carry the
 /// pattern's colorants, through the ink tables of a transfer function, if
-/// any.  Coverage and the static-colour hint are the inner pattern's.
+/// any.  Coverage, the static-colour hint and the record of painted
+/// channels are the inner pattern's.
 pub(super) struct TransferredInk<'a, S: Sample = u8> {
     pattern: &'a dyn Pattern<S>,
     transfer: Option<&'a Transfer>,
@@ -875,6 +882,10 @@ impl<S: CanvasSample> Pattern<S> for TransferredInk<'_, S> {
     fn fill_span_coverage(&self, y: i32, x0: i32, x1: i32, out: &mut [S], coverage: &mut [S]) {
         self.pattern.fill_span_coverage(y, x0, x1, out, coverage);
         self.map(out);
+    }
+
+    fn fill_span_channels(&self, y: i32, x0: i32, x1: i32, channels: &mut [u8]) -> bool {
+        self.pattern.fill_span_channels(y, x0, x1, channels)
     }
 }
 

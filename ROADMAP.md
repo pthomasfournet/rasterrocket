@@ -3215,6 +3215,23 @@ an alpha plane is stored under them, and `write_png` writes a gray
 bitmap's alpha plane. `RowLayout` is exhaustive, so a match on it needs the
 new arms.
 
+**Unreleased on master: tiling cells overprint per pixel.** Under
+`--overprint`, a coloured tiling pattern on an ink page wrote, at every
+pixel of its tile, the union of the channels its cell's paints wrote, so
+a cell that painted black alone under overprint in one place and cyan in
+another knocked the backdrop's cyan out under the black too. A cell
+canvas on such a page now records the channels painted at each pixel
+(`Bitmap::track_painted`, set by `render_bitmap_span` through
+`pipe::mark_painted`), the composited tile keeps that record
+(`TiledPattern::records_channels`), and `render_span` paints each run of
+equal channels through its own mask (`Pattern::fill_span_channels`). A
+cell that writes the same channels at every covered pixel paints as
+before. Group composites still paint every colorant (ISO 32000-1 Table
+149). At 100 dpi, the fixtures (3 024 pages each by default, under
+`--overprint` and under `--cmyk --overprint`) and 289 pages of 102
+archive PDFs that set `OP`, the one coloured-pattern page among them
+included, render byte-identical to before in all three modes.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past
