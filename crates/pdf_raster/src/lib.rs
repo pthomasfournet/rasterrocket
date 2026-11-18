@@ -663,6 +663,11 @@ pub enum PixelFormat {
     Rgb8,
     /// One 16-bit sample of gray per pixel, 0 black.
     Gray16,
+    /// Two bytes per pixel, `[Y, A]`, gray 0 black; alpha 0 is
+    /// transparent and the gray is not premultiplied by it.
+    GrayAlpha8,
+    /// Two 16-bit samples per pixel, `[Y, A]`, alpha not premultiplied.
+    GrayAlpha16,
     /// Three 16-bit samples per pixel, `[R, G, B]` in sRGB.
     Rgb16,
     /// Four 16-bit samples per pixel, `[R, G, B, A]` in sRGB, alpha not
@@ -670,11 +675,6 @@ pub enum PixelFormat {
     Rgba16,
     /// Four bytes per pixel, `[C, M, Y, K]`, 0 no ink.
     Cmyk8,
-    /// Two bytes per pixel, `[Y, A]`, gray 0 black; alpha 0 is
-    /// transparent and the gray is not premultiplied by it.
-    GrayAlpha8,
-    /// Two 16-bit samples per pixel, `[Y, A]`, alpha not premultiplied.
-    GrayAlpha16,
     /// Four 16-bit samples per pixel, `[C, M, Y, K]`, 0 no ink.
     Cmyk16,
 }
