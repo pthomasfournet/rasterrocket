@@ -3184,8 +3184,9 @@ sampled range, `O(width + height)` samples. The page now differs in 957
 samples, all by 1 level; at `--depth 16`, before 256 632 samples up to
 46 656 levels, now 253 297 up to 7 levels of 65 535 (the CPU maps
 coordinates in `f32`, so the interior difference grows with the page's
-size). The documented bound is 2 levels at 8 bits and 2 × 257 at 16 bits
-at every sample; the new device tests assert 2 levels at both depths, at
+size). The bound documented then was 2 levels at 8 bits and 2 × 257 at 16 bits
+at every sample, and the device tests asserted 2 levels at both depths (the
+16-bit bound is now 8 levels of 65 535: see below), at
 every sample, on random images up to 257 pixels a side at random angles
 within ±7° and at 0°, 45°, −90° and 180°. The interior stays NPP's bilinear,
 so the GPU rotation is not byte-identical to the CPU's, as every other GPU
@@ -3236,7 +3237,8 @@ included, render byte-identical to before in all three modes.
 
 **Unreleased on master: GPU pages wait for the device.** Every page that
 may render on the device now does: its thread waits for the device to open
-(at most 30 s, then the page renders on the CPU with one warning) and for
+(at most 30 s a page, then the page renders on the CPU with one warning;
+the wait is now the session's: see below) and for
 the device itself, instead of rendering on the CPU while the device was
 opening or both of its two places were held. Under `--backend auto` a
 one-page job and a short job now render on the device too (before, every
@@ -3284,8 +3286,9 @@ against the enumerated devices without opening one
 or several, two entries naming one device, or `all` without a GPU is
 `InvalidOptions` listing the devices. Each page takes the open device where
 it expects the shortest wait, the pages the device holds and itself times
-its mean time per run (`VulkanBackend::device_time`; a device that has run
-nothing counts the fastest known mean). A device error retires that device
+its mean time per run (`VulkanBackend::device_time`, since replaced by a recent mean of page
+rasters: see below; a device that has run nothing counts the fastest known
+mean). A device error retires that device
 alone. Under Auto the devices open on threads of their own when the first
 page asks (device creation is serialised in the process) and pages wait for
 the first; under `--backend vulkan` all open with the session, which reuses
@@ -3489,6 +3492,104 @@ size against the CPU decode. `--backend cuda` against `--backend cpu` at
 decodes (872 pages; 361 device decodes in each mode), and on
 `corpus-10`'s first 64 pages at 300 dpi, whose 9-7 images are declined.
 Verified on the RTX 5070 only.
+
+**Unreleased on master: one session-wide, cancellable wait for a GPU page
+device.** The 30 s wait for a device to open was computed per page, so with
+a device that never opened every qualifying page waited the full 30 s, and
+it ignored the page's cancel token. The deadline is now the session's, set
+by the first page that waits and exposed as the public constant
+`GPU_PAGE_OPEN_WAIT`; once it has passed, pages render on the CPU at once
+while no device is open, and a device that opens later is still taken. The
+wait polls the cancel token every 100 ms, and a page cancelled while
+waiting returns the cancellation and counts as stopped.
+`DevicePageCounts::opening` counts pages that found the device still
+opening when the wait ended. Dropping a session still joins the threads
+opening its devices without a bound; one still opening is logged at `warn`
+before the join.
+
+**Unreleased on master: GPU page devices are chosen by a recent mean.** A
+device's expected wait used its lifetime mean over every `run_page`: ICC
+conversions, image blits, the one-time ICC probe, failed runs and the cold
+first run with the driver's first dispatch, so one slow first run starved a
+device for the session, its mean changing only when it ran.
+`VulkanBackend::page_mean` replaces `device_time`: an exponentially weighted
+mean (newest run 1/8) of the page rasters that succeeded, the backend's
+first excluded, kept in one atomic so a reader never sees a time without
+its count. A page still claims its device before recording, since what it
+records depends on the device.
+
+**Unreleased on master: out of device memory is a page-sized failure.** A
+failed Vulkan allocation came back as a generic error, and the GPU page
+queue retired the device on anything but `DeviceLimit`, so a page whose
+buffers did not fit beside the three buffer sets of the page raster took
+the device out of service for the session. `BackendError::OutOfMemory
+{ what, bytes }` now carries the allocator's and `vkCreateBuffer`'s
+out-of-memory codes; the page raster grows every buffer of a page before
+writing any and, when memory runs out, frees the idle buffer sets
+(`ScratchPool::free_idle`) and retries once. The queue treats
+`OutOfMemory` as `DeviceLimit`: the page renders on the CPU and the device
+stays in service. `render_page` also checks the arithmetic of its row, page
+and output spans: a caller-supplied stride that wrapped passed the length
+check and then panicked, and a page near `u32::MAX` a side overflowed the
+packed length; either is now an error naming the page's size, depth and
+stride (reachable only by direct callers of the gpu crate, since sessions
+bound pages by `max_page_bytes`).
+
+**Unreleased on master: a `DeviceHold` opens the session's own device
+once.** Under `--backend vulkan` with `gpu_devices`, a session reuses its
+own backend for the list entry naming its device, but `DeviceHold::open`
+opened every entry through the registry, keyed by selector, so the
+session's device was opened a second time under its index (`None` against
+`"0"`): a second `VkDevice` with its pipelines and memory on the same GPU.
+Session and hold now share `forced_backends`, which reuses the session's
+backend for its own device, and the hold holds the backend it opened once.
+
+**Unreleased on master: the 16-bit NPP deskew bound is 8 levels.** The
+bound the module documented for the NPP rotation at 16 bits, 2 × 257
+levels, and the device test's 2 levels were both below the difference
+measured on a real scan (`corpus-09` page 3: 7 levels of 65 535). The bound
+is now 8 levels of 65 535 at 16 bits (`GPU_ROTATION_BOUND_16` in the test),
+stated in the module documentation and in `docs/api-reference.md`; the 8-bit
+bound stays 2 levels. The rotation copies the NPP output into the bitmap
+once, through `fill_from`, which holds the length check, instead of through a
+temporary `Vec`, and the CPU border pass keeps a row's four column spans in a
+fixed array, not a `Vec` allocated per row (up to 32 768 a page). The AVX2
+and AVX-512 gather kernels share one `GatherGeometry`.
+
+**Unreleased on master: `PageDiagnostics::has_omissions`.** `has_omissions()`
+is `true` when a page was drawn with something left out or substituted: a
+skipped image or content stream, a form past the depth limit, a font that
+resolved to nothing or an unsupported feature (the five lists
+`image_failures`, `content_failures`, `forms_too_deep`, `missing_fonts` and
+`unsupported_features`; a partial entry counts).
+
+**Unreleased on master: comic input reports progress, and its errors say
+what failed.** `--progress` and `--timings` now report comic pages as they
+report PDF pages (the per-page line and the ETA arithmetic moved into
+`progress::PageLog`, shared by both paths, the ETA a tested function). A
+page selection that selects nothing or contradicts the page count prints
+the PDF path's text, and a pool that cannot start says so, instead of either
+reading as a malformed archive; archive failures keep the comic crate's
+message. The comic path's channel driver and the print spool's `Condvar`
+driver are one ordered, bounded `pool::run_in_order`, whose ordering, bound,
+stop and unwind behaviour are tested on it, and `pool::RenderPool` releases
+every worker's GPU thread state when it drops.
+
+**Unreleased on master: JPEG fixes in the local `zune-jpeg` fork.** A
+progressive refinement correction bit read past a marker, inside an
+end-of-band run, was an uncounted zero, so a block short of its last
+correction was reported intact; all three successive-approximation
+correction-bit reads (DC and AC included, which failed the scan there) now
+take a second refill that supplies counted fill bits, as everywhere else
+past the end of the data, and `JpegDecoder::intact_rows` reports the
+affected rows as not intact (an image so affected is `partial`). The IDCT,
+up-sampler and colour dispatchers share one AVX-512 gate, and
+`ZUNE_JPEG_NO_AVX512` (any value, read once per process) closes it, so
+the AVX2 kernels can be run end to end on an AVX-512 CPU; output is
+identical. Housekeeping: the JPEG 2000 fork's fused 8-bit paths stage
+samples through one `join16` and the crate builds without its default
+features, the composite tiers share one `BLOCK_PX`, and two fork
+documentation comments (JBIG2, text shaper) were reworded.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns

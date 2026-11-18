@@ -37,6 +37,26 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
+## What's new on master (unreleased)
+
+- **Library.** `PageDiagnostics::has_omissions()` is `true` when a page was
+  drawn with a skipped image or content stream, a form past the depth limit,
+  a missing font or an unsupported feature.
+- **Comic input** honours `--progress` and `--timings`; a page selection
+  that selects nothing, or contradicts the page count, no longer reports a
+  malformed archive.
+- **JPEG.** A progressive refinement bit read past a marker is a counted
+  fill bit, so the rows it affects are reported as not intact (the image
+  `partial`). `ZUNE_JPEG_NO_AVX512` keeps JPEG decodes on the AVX2 kernels
+  of an AVX-512 CPU.
+- **GPU pages.** A session waits once, cancellably, for a device to open
+  (`GPU_PAGE_OPEN_WAIT`, 30 s from the first page that waits) and then
+  renders on the CPU while none is open. A device is chosen by a recent mean
+  of its page rasters, a page that does not fit in device memory renders on
+  the CPU and leaves the device in service (`BackendError::OutOfMemory`), and
+  a `DeviceHold` reuses the session's own device. The NPP deskew's
+  16-bit bound is stated as 8 levels of 65 535.
+
 ## What's new in v2.4.0
 
 v2.4.1 fixes a hairline that, on rare slopes, painted one pixel past its
