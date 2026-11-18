@@ -200,30 +200,13 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
 }
 
 /// The samples of the gray bitmap `gray`, rows packed, each followed by
-/// its sample of `alpha` (`width × height` samples), or by `opaque`
-/// without one.
-fn gray_alpha_samples<P: Pixel>(
-    gray: &Bitmap<P>,
-    alpha: Option<&[P::Sample]>,
-    opaque: P::Sample,
-) -> Vec<P::Sample> {
+/// its sample of `alpha` (`width × height` samples), opaque without one.
+fn gray_alpha_samples<P: Pixel>(gray: &Bitmap<P>, alpha: Option<&[P::Sample]>) -> Vec<P::Sample> {
     let w = gray.width as usize;
     let mut samples = Vec::with_capacity(w * 2 * gray.height as usize);
     for y in 0..gray.height {
-        let row = &gray.row_samples(y)[..w];
-        match alpha {
-            Some(alpha) => {
-                let alpha = &alpha[y as usize * w..][..w];
-                for (&v, &a) in row.iter().zip(alpha) {
-                    samples.extend_from_slice(&[v, a]);
-                }
-            }
-            None => {
-                for &v in row {
-                    samples.extend_from_slice(&[v, opaque]);
-                }
-            }
-        }
+        let alpha = alpha.map(|a| &a[y as usize * w..][..w]);
+        raster::push_with_alpha::<_, 1>(&gray.row_samples(y)[..w], alpha, &mut samples);
     }
     samples
 }
@@ -237,7 +220,7 @@ pub(crate) fn gray8_alpha_rendered_page(
     dpi: f32,
     diagnostics: PageDiagnostics,
 ) -> RenderedPage {
-    let samples = gray_alpha_samples(gray, alpha, u8::MAX);
+    let samples = gray_alpha_samples(gray, alpha);
     let pixels = (Pixels::U8(samples), PixelFormat::GrayAlpha8);
     rendered_page(
         (gray.width, gray.height),
@@ -257,7 +240,7 @@ pub(crate) fn gray16_alpha_rendered_page(
     dpi: f32,
     diagnostics: PageDiagnostics,
 ) -> RenderedPage {
-    let samples = gray_alpha_samples(gray, alpha, u16::MAX);
+    let samples = gray_alpha_samples(gray, alpha);
     let pixels = (Pixels::U16(samples), PixelFormat::GrayAlpha16);
     rendered_page(
         (gray.width, gray.height),
@@ -363,16 +346,11 @@ pub(crate) fn rgb16_to_rgba16_rendered_page(
     let w = bmp.width as usize;
     let mut pixels = Vec::with_capacity(w * 4 * bmp.height as usize);
     for y in 0..bmp.height {
-        let alpha = bmp.alpha_row(y);
-        for (x, rgb) in bmp.row_samples(y)[..w * 3]
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .enumerate()
-        {
-            pixels.extend_from_slice(rgb);
-            pixels.push(alpha.map_or(u16::MAX, |a| a[x]));
-        }
+        raster::push_with_alpha::<u16, 3>(
+            &bmp.row_samples(y)[..w * 3],
+            bmp.alpha_row(y),
+            &mut pixels,
+        );
     }
     RenderedPage {
         page_num,
@@ -395,7 +373,7 @@ pub(crate) fn rgb16_to_rgba16_rendered_page(
 pub(crate) fn rgb_rows_to_rgba(bmp: &Bitmap<Rgb8>, out: &mut [u8], stride: usize) {
     let w = bmp.width as usize;
     for y in 0..bmp.height {
-        raster::interleave_rgba(
+        raster::interleave_alpha::<u8, 3>(
             &bmp.row_bytes(y)[..w * 3],
             bmp.alpha_row(y),
             &mut out[y as usize * stride..][..w * 4],

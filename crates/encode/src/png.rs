@@ -206,7 +206,7 @@ fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
     for y in 0..bitmap.height {
         source.convert(bitmap.row_bytes(y), &mut rgb);
         match bitmap.alpha_row(y) {
-            Some(alpha) => crate::push_rgba(&rgb, alpha, &mut buf),
+            Some(alpha) => raster::push_with_alpha::<u8, 3>(&rgb, Some(alpha), &mut buf),
             None => buf.extend_from_slice(&rgb),
         }
     }
@@ -245,11 +245,7 @@ fn write_png_gray<P: Pixel<Sample = u8>, W: Write>(
     let w = bitmap.width as usize;
     let mut buf = Vec::with_capacity(image_len(bitmap, 2)?);
     for y in 0..bitmap.height {
-        let gray = &bitmap.row_bytes(y)[..w];
-        let alpha = bitmap.alpha_row(y).unwrap_or_default();
-        for (&v, &a) in gray.iter().zip(alpha) {
-            buf.extend_from_slice(&[v, a]);
-        }
+        raster::push_with_alpha::<u8, 1>(&bitmap.row_bytes(y)[..w], bitmap.alpha_row(y), &mut buf);
     }
     writer.write_image_data(&buf)?;
     Ok(())

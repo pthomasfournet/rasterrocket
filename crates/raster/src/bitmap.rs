@@ -695,27 +695,52 @@ impl<P: Pixel> Bitmap<P> {
 
 // ── Row interleaving ──────────────────────────────────────────────────────────
 
-/// Interleave the packed RGB pixels of `rgb` with the alpha bytes of
-/// `alpha` into the RGBA pixels of `out`, alpha not premultiplied; every
-/// pixel is opaque when `alpha` is `None`.
+/// Interleave the packed pixels of `colour` with the samples of `alpha`.
 ///
-/// The pixel count is that of the shortest input: `out.len() / 4`,
-/// `rgb.len() / 3` and `alpha.len()`.
-pub fn interleave_rgba(rgb: &[u8], alpha: Option<&[u8]>, out: &mut [u8]) {
-    let rgb = rgb.as_chunks::<3>().0;
-    let out = out.as_chunks_mut::<4>().0;
+/// Each pixel of `colour` is `N` samples; each of `out` is `N + 1`, the
+/// alpha last and not premultiplied. Every pixel is opaque
+/// ([`Sample::MAX`]) when `alpha` is `None`.
+///
+/// The pixel count is that of the shortest input: `out.len() / (N + 1)`,
+/// `colour.len() / N` and `alpha.len()`.
+pub fn interleave_alpha<S: Sample, const N: usize>(
+    colour: &[S],
+    alpha: Option<&[S]>,
+    out: &mut [S],
+) {
+    let colour = colour.as_chunks::<N>().0;
+    let out = out.chunks_exact_mut(N + 1);
     match alpha {
         Some(alpha) => {
-            for ((d, px), &a) in out.iter_mut().zip(rgb).zip(alpha) {
-                *d = [px[0], px[1], px[2], a];
+            for ((d, px), &a) in out.zip(colour).zip(alpha) {
+                d[..N].copy_from_slice(px);
+                d[N] = a;
             }
         }
         None => {
-            for (d, px) in out.iter_mut().zip(rgb) {
-                *d = [px[0], px[1], px[2], u8::MAX];
+            for (d, px) in out.zip(colour) {
+                d[..N].copy_from_slice(px);
+                d[N] = S::MAX;
             }
         }
     }
+}
+
+/// Append the pixels of `colour`, `N` samples each, to `out` with the
+/// samples of `alpha` interleaved ([`interleave_alpha`]): `N + 1`
+/// samples for each whole pixel of `colour`.
+pub fn push_with_alpha<S: Sample, const N: usize>(
+    colour: &[S],
+    alpha: Option<&[S]>,
+    out: &mut Vec<S>,
+) {
+    debug_assert!(
+        alpha.is_none_or(|a| a.len() * N >= colour.len()),
+        "an alpha row shorter than its colour row"
+    );
+    let start = out.len();
+    out.resize(start + colour.len() / N * (N + 1), S::ZERO);
+    interleave_alpha::<S, N>(colour, alpha, &mut out[start..]);
 }
 
 #[cfg(test)]
@@ -871,16 +896,28 @@ mod tests {
     }
 
     #[test]
-    fn interleave_rgba_pairs_each_pixel_with_its_alpha() {
+    fn interleave_alpha_pairs_each_pixel_with_its_alpha() {
         let rgb = [1, 2, 3, 4, 5, 6];
         let mut out = [0; 8];
-        interleave_rgba(&rgb, Some(&[7, 8]), &mut out);
+        interleave_alpha::<u8, 3>(&rgb, Some(&[7, 8]), &mut out);
         assert_eq!(out, [1, 2, 3, 7, 4, 5, 6, 8]);
-        interleave_rgba(&rgb, None, &mut out);
+        interleave_alpha::<u8, 3>(&rgb, None, &mut out);
         assert_eq!(out, [1, 2, 3, 255, 4, 5, 6, 255]);
         let mut short = [0; 4];
-        interleave_rgba(&rgb, Some(&[7, 8]), &mut short);
+        interleave_alpha::<u8, 3>(&rgb, Some(&[7, 8]), &mut short);
         assert_eq!(short, [1, 2, 3, 7]);
+    }
+
+    #[test]
+    fn push_with_alpha_appends_gray_and_alpha_at_either_depth() {
+        let mut out = vec![9u8];
+        push_with_alpha::<u8, 1>(&[1, 2], Some(&[7, 8]), &mut out);
+        push_with_alpha::<u8, 1>(&[3], None, &mut out);
+        assert_eq!(out, [9, 1, 7, 2, 8, 3, 255]);
+        let mut wide = Vec::new();
+        push_with_alpha::<u16, 1>(&[1, 2], None, &mut wide);
+        push_with_alpha::<u16, 3>(&[1, 2, 3], Some(&[4]), &mut wide);
+        assert_eq!(wide, [1, u16::MAX, 2, u16::MAX, 1, 2, 3, 4]);
     }
 
     #[test]

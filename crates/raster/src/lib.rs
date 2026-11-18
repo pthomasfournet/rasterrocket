@@ -53,7 +53,7 @@ pub mod xpath;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use bitmap::{Bitmap, BitmapAllocError, BitmapBuffers, interleave_rgba};
+pub use bitmap::{Bitmap, BitmapAllocError, BitmapBuffers, interleave_alpha, push_with_alpha};
 pub use clip::{Clip, ClipResult, ClipRows, RegionKey, RowClip};
 pub use fill::{eo_fill, fill, fill_area};
 pub use glyph::{GlyphBitmap, blit_glyph, fill_glyph};

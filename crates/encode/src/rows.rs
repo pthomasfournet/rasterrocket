@@ -9,7 +9,9 @@
 use color::{Cmyk8, Cmyk16, Gray8, Gray16, Rgb8, Rgb16, SampleDepth};
 use raster::Bitmap;
 
-use crate::{EncodeError, pack_bilevel_row, push_rgba};
+use raster::push_with_alpha;
+
+use crate::{EncodeError, pack_bilevel_row};
 
 /// A band of an image: whole rows, the full width of the image.
 #[derive(Clone, Copy)]
@@ -183,26 +185,14 @@ impl RowImage<'_> {
             }
             (Self::Rgb(b), RowLayout::Rgba) => {
                 let rgb = &b.row_bytes(y)[..b.width as usize * 3];
-                match b.alpha_row(y) {
-                    Some(alpha) => push_rgba(rgb, alpha, out),
-                    None => {
-                        for px in rgb.as_chunks::<3>().0 {
-                            out.extend_from_slice(px);
-                            out.push(u8::MAX);
-                        }
-                    }
-                }
+                push_with_alpha::<u8, 3>(rgb, b.alpha_row(y), out);
             }
             (Self::Gray(b) | Self::Bilevel(b), RowLayout::Gray) => {
                 out.extend_from_slice(&b.row_bytes(y)[..b.width as usize]);
             }
             (Self::Gray(b), RowLayout::GrayAlpha) => {
                 let gray = &b.row_bytes(y)[..b.width as usize];
-                let alpha = b.alpha_row(y);
-                out.reserve(gray.len() * 2);
-                for (i, &v) in gray.iter().enumerate() {
-                    out.extend_from_slice(&[v, alpha.map_or(u8::MAX, |a| a[i])]);
-                }
+                push_with_alpha::<u8, 1>(gray, b.alpha_row(y), out);
             }
             (Self::Gray(b) | Self::Bilevel(b), RowLayout::Bilevel) => {
                 let start = out.len();
@@ -213,21 +203,19 @@ impl RowImage<'_> {
                 order.push(&b.row_samples(y)[..b.width as usize * 3], out);
             }
             (Self::Rgb16(b), RowLayout::Rgba16) => {
-                let rgb = b.row_samples(y)[..b.width as usize * 3].as_chunks::<3>().0;
-                let alpha = b.alpha_row(y);
-                for (i, px) in rgb.iter().enumerate() {
-                    let a = alpha.map_or(u16::MAX, |a| a[i]);
-                    order.push(&[px[0], px[1], px[2], a], out);
-                }
+                let mut rgba = Vec::new();
+                let rgb = &b.row_samples(y)[..b.width as usize * 3];
+                push_with_alpha::<u16, 3>(rgb, b.alpha_row(y), &mut rgba);
+                order.push(&rgba, out);
             }
             (Self::Gray16(b), RowLayout::Gray16) => {
                 order.push(&b.row_samples(y)[..b.width as usize], out);
             }
             (Self::Gray16(b), RowLayout::GrayAlpha16) => {
-                let alpha = b.alpha_row(y);
-                for (i, &v) in b.row_samples(y)[..b.width as usize].iter().enumerate() {
-                    order.push(&[v, alpha.map_or(u16::MAX, |a| a[i])], out);
-                }
+                let mut gray_alpha = Vec::new();
+                let gray = &b.row_samples(y)[..b.width as usize];
+                push_with_alpha::<u16, 1>(gray, b.alpha_row(y), &mut gray_alpha);
+                order.push(&gray_alpha, out);
             }
             (Self::Cmyk(b), RowLayout::Cmyk) => {
                 out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 4]);
