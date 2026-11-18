@@ -827,10 +827,12 @@ impl Job {
     /// [`gdi::MAX_BAND_BYTES`], each a bottom-up bitmap.
     #[expect(unsafe_code, reason = "StretchDIBits draws the page's bands")]
     fn draw(&self, page: &PdfPage, placement: &Placement) -> Result<(), String> {
+        if page.depth() != SampleDepth::Eight {
+            return Err("a 16-bit page cannot be drawn: GDI print bitmaps are 8-bit".to_owned());
+        }
         let rgb = page.is_rgb();
-        let sixteen = page.depth() == SampleDepth::Sixteen;
         let format = DibFormat::of(rgb, self.mono && !rgb);
-        let bpp = (if rgb { 3 } else { 1 }) * (if sixteen { 2 } else { 1 });
+        let bpp = format.source_bpp();
         let (width, height) = page.size();
         let (out_w, out_h) = if placement.rotate {
             (height, width)
@@ -846,11 +848,17 @@ impl Job {
             let _ = SetStretchBltMode(self.dc, if stretched { HALFTONE } else { COLORONCOLOR });
             let _ = SetBrushOrgEx(self.dc, 0, 0, ptr::null_mut());
         }
-        let read_error = |e: io::Error| format!("cannot read the page's image back: {e}");
+        let read_error = |e: io::Error| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                format!("the page's image read back short of its {width} × {height} pixels")
+            } else {
+                format!("cannot read the page's image back: {e}")
+            }
+        };
         let mut rows = page.rows().map_err(read_error)?;
         let whole = if placement.rotate {
-            let mut image = Vec::with_capacity(width as usize * height as usize * bpp);
-            let _ = rows.read_to_end(&mut image).map_err(read_error)?;
+            let mut image = vec![0; width as usize * height as usize * bpp];
+            rows.read_exact(&mut image).map_err(read_error)?;
             Some(image)
         } else {
             None
@@ -867,7 +875,7 @@ impl Job {
                     None => rows.read_exact(&mut row).map_err(read_error)?,
                 }
                 let at = (n - 1 - i) * stride;
-                gdi::dib_row(&row, (rgb, sixteen), format, &mut bits[at..at + stride]);
+                gdi::dib_row(&row, format, &mut bits[at..at + stride]);
             }
             let (y, dest_h) = gdi::band_dest(&range, out_h, (placement.y, placement.height));
             if dest_h > 0 {

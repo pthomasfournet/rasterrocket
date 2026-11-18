@@ -1643,6 +1643,30 @@ impl Args {
                 "--print sends page images measured by their resolution; drop {flag}"
             ));
         }
+        if cfg!(windows) {
+            return self.validate_gdi_print_flags();
+        }
+        Ok(())
+    }
+
+    /// Refuse the flags whose pages the Windows print route cannot carry:
+    /// it hands the driver 8-bit bitmaps, which the driver reads as sRGB.
+    fn validate_gdi_print_flags(&self) -> Result<(), String> {
+        if self.output_profile.is_some() {
+            return Err(
+                "--output-profile is refused with --print on Windows: the pages go to the \
+                 driver as sRGB bitmaps, which would print the profile's values as sRGB; drop \
+                 --output-profile (and --working-space wide, which needs it)"
+                    .to_owned(),
+            );
+        }
+        if self.depth == DepthArg::Sixteen {
+            return Err(
+                "--depth 16 is refused with --print on Windows: GDI has no 16-bit print \
+                 bitmap, so the pages go to the driver at 8 bits; drop --depth 16"
+                    .to_owned(),
+            );
+        }
         Ok(())
     }
 
@@ -2480,8 +2504,9 @@ mod page_list_tests {
             args_with(&["--depth", "16"]).depth(),
             pdf_raster::SampleDepth::Sixteen
         );
+        // The Windows print route takes 8-bit pages only.
         let print = Args::parse_from(["rrocket", "--print", "--depth", "16", "in.pdf"]);
-        assert!(print.validate_format_flags().is_ok());
+        assert_eq!(print.validate_format_flags().is_ok(), !cfg!(windows));
         assert!(
             args_with(&["--depth", "16", "--overprint"])
                 .validate_format_flags()
@@ -2522,6 +2547,8 @@ mod page_list_tests {
         assert!(comic.validate_format_flags().is_ok());
     }
 
+    /// The Windows print route refuses `--depth 16` and `--output-profile`.
+    #[cfg(not(windows))]
     #[test]
     fn print_resolution_keeps_its_byte_budget_at_16_bits() {
         // 36 × 44 in at 600 dpi: 570 Mpx, under the 8-bit threshold, over
@@ -2800,6 +2827,35 @@ mod page_list_tests {
         parsed.validate_format_flags()?;
         parsed.apply_print_preset();
         Ok(parsed)
+    }
+
+    /// The Windows print route hands the driver 8-bit sRGB bitmaps: it
+    /// refuses `--output-profile` and `--depth 16`, which CUPS takes.
+    #[test]
+    fn windows_printing_refuses_profiles_and_16_bit_pages() {
+        for (flags, needle) in [
+            (
+                &["--print", "--output-profile", "p.icc"][..],
+                "drop --output-profile",
+            ),
+            (
+                &[
+                    "--print",
+                    "--output-profile",
+                    "p.icc",
+                    "--working-space",
+                    "wide",
+                ],
+                "drop --output-profile",
+            ),
+            (&["--print", "--depth", "16"], "drop --depth 16"),
+        ] {
+            let result = print_args(flags);
+            assert_eq!(result.is_err(), cfg!(windows), "{flags:?}");
+            if let Err(err) = result {
+                assert!(err.contains(needle), "{flags:?}: {err}");
+            }
+        }
     }
 
     #[test]

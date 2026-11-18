@@ -238,49 +238,41 @@ impl DibFormat {
     pub(crate) const fn stride(self, width: u32) -> usize {
         (width as usize * self.bits() as usize).div_ceil(32) * 4
     }
-}
 
-/// The bytes of a source pixel: `channels` samples of `bytes_per_sample`.
-const fn source_bpp(rgb: bool, sixteen: bool) -> usize {
-    (if rgb { 3 } else { 1 }) * (if sixteen { 2 } else { 1 })
-}
-
-/// A 16-bit sample narrowed to 8 bits by rounding.
-fn narrow(hi: u8, lo: u8) -> u8 {
-    let v = u32::from(u16::from_be_bytes([hi, lo]));
-    u8::try_from((v * 255 + 32_767) / 65_535).unwrap_or(u8::MAX)
-}
-
-/// Write `src`, a row of pixels as [`encode::PdfPage::rows`] yields them
-/// (RGB when `rgb`, else gray; 16-bit big-endian samples when `sixteen`),
-/// into `out`, a bitmap row of `format` at least as long as its stride.
-/// Bytes past the pixels are zero.
-pub(crate) fn dib_row(src: &[u8], (rgb, sixteen): (bool, bool), format: DibFormat, out: &mut [u8]) {
-    out.fill(0);
-    let sample = |px: &[u8], i: usize| {
-        if sixteen {
-            narrow(px[2 * i], px[2 * i + 1])
-        } else {
-            px[i]
+    /// The bytes of a pixel of the 8-bit page image the format is made
+    /// from: RGB for [`Self::Bgr24`], gray otherwise.
+    pub(crate) const fn source_bpp(self) -> usize {
+        match self {
+            Self::Bgr24 => 3,
+            Self::Gray8 | Self::Mono1 => 1,
         }
-    };
-    let pixels = src.chunks_exact(source_bpp(rgb, sixteen));
+    }
+}
+
+/// Write `src`, a row of 8-bit pixels as [`encode::PdfPage::rows`] yields
+/// them (RGB for [`DibFormat::Bgr24`], else gray), into `out`, a bitmap row
+/// of `format` at least as long as its stride.  Bytes past the pixels are
+/// zero.
+pub(crate) fn dib_row(src: &[u8], format: DibFormat, out: &mut [u8]) {
+    out.fill(0);
     match format {
         DibFormat::Bgr24 => {
-            for (px, bgr) in pixels.zip(out.as_chunks_mut::<3>().0) {
-                bgr[0] = sample(px, 2);
-                bgr[1] = sample(px, 1);
-                bgr[2] = sample(px, 0);
+            for (rgb, bgr) in src
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(out.as_chunks_mut::<3>().0)
+            {
+                *bgr = [rgb[2], rgb[1], rgb[0]];
             }
         }
         DibFormat::Gray8 => {
-            for (px, gray) in pixels.zip(out.iter_mut()) {
-                *gray = sample(px, 0);
-            }
+            let n = src.len().min(out.len());
+            out[..n].copy_from_slice(&src[..n]);
         }
         DibFormat::Mono1 => {
-            for (x, px) in pixels.enumerate() {
-                if sample(px, 0) >= encode::BLACK_BELOW {
+            for (x, &gray) in src.iter().enumerate() {
+                if gray >= encode::BLACK_BELOW {
                     out[x / 8] |= 0x80 >> (x % 8);
                 }
             }
@@ -579,27 +571,17 @@ mod tests {
         assert_eq!(DibFormat::of(false, true), DibFormat::Mono1);
         assert_eq!(DibFormat::Gray8.stride(5), 8);
         assert_eq!(DibFormat::Mono1.stride(33), 8);
+        assert_eq!(DibFormat::Bgr24.source_bpp(), 3);
+        assert_eq!(DibFormat::Mono1.source_bpp(), 1);
         let mut out = [0xEE; 8];
-        dib_row(
-            &[1, 2, 3, 4, 5, 6],
-            (true, false),
-            DibFormat::Bgr24,
-            &mut out,
-        );
+        dib_row(&[1, 2, 3, 4, 5, 6], DibFormat::Bgr24, &mut out);
         assert_eq!(out, [3, 2, 1, 6, 5, 4, 0, 0]);
-        // 16-bit samples round to 8 bits.
-        let mut out = [0; 4];
-        dib_row(
-            &[0xFF, 0xFF, 0x80, 0x80, 0x00, 0x81, 0x00, 0x80],
-            (false, true),
-            DibFormat::Gray8,
-            &mut out,
-        );
-        assert_eq!(out, [255, 128, 1, 0]);
+        let mut out = [0xEE; 8];
+        dib_row(&[9, 8, 7, 6, 5], DibFormat::Gray8, &mut out);
+        assert_eq!(out, [9, 8, 7, 6, 5, 0, 0, 0]);
         let mut out = [0; 4];
         dib_row(
             &[0, 255, 255, 0, 127, 128, 0, 0, 255],
-            (false, false),
             DibFormat::Mono1,
             &mut out,
         );
