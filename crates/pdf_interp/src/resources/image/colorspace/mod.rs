@@ -277,10 +277,6 @@ impl ImageColour {
     /// are only produced for an [`identity`](Self::identity) colour.
     /// Colours convert to `target` (see [`ColorSpace::convert_to_rgb`]),
     /// for a canvas of samples of `depth`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one arm per sample storage, each converting through its own helper"
-    )]
     pub(super) fn convert(
         &self,
         doc: &Document,
@@ -331,75 +327,98 @@ impl ImageColour {
             && (target.space == WorkingSpace::Wide
                 || (depth == color::SampleDepth::Sixteen && !device_rgb));
         let decoded = Decoded::new(doc, target, space, decode, max_sample, profile, budget);
-        let bytes = match data {
-            ImageData::Cpu(bytes) if at16 => {
-                let (cs, wide) = decoded.convert_bytes16(
+        let converted = match data {
+            ImageData::Cpu(bytes) if at16 => decoded
+                .convert_bytes16(
                     n,
                     &bytes,
                     #[cfg(feature = "gpu-icc")]
                     icc,
-                )?;
-                return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
-            }
-            ImageData::Cpu(bytes) => bytes,
-            ImageData::Bilevel(bits) if n == 1 => {
-                let converted = convert_bilevel(&decoded, bits);
-                if let Some(budget) = budget {
-                    budget.spend(decoded.spent.get());
-                }
-                let (cs, data) = converted?;
-                return Some(descriptor(width, height, cs, data, smask));
-            }
-            ImageData::Bilevel(bits) => bits.into_samples()?,
-            ImageData::Cpu16(wide) => {
-                let (cs, wide) = convert16(&decoded, n, wide)?;
-                return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
-            }
-            #[cfg(feature = "cache")]
-            ImageData::Gpu(cached) => {
-                let identity = match n {
-                    1 => matches!(decoded.lut(), Some(Lut::Identity)),
-                    3 => {
-                        decoded.identity_decode()
-                            && matches!(decoded.rgb_convert(), RgbConvert::Identity)
-                    }
-                    _ => false,
-                };
-                debug_assert!(
-                    identity,
-                    "device-resident samples are only cached for an identity colour"
-                );
-                if !identity {
-                    log::warn!(
-                        "image: device-resident samples in {space:?} drawn without colour conversion"
-                    );
-                }
-                let cs = if n == 1 {
-                    ImageColorSpace::Gray
-                } else {
-                    ImageColorSpace::Rgb
-                };
-                return Some(descriptor(width, height, cs, ImageData::Gpu(cached), smask));
-            }
-        };
-        let converted = match n {
-            1 => decoded.convert_one(bytes),
-            3 => decoded.convert_rgb(bytes),
-            4 => decoded.convert_cmyk(
+                )
+                .map(|(cs, wide)| (cs, ImageData::Cpu16(wide))),
+            ImageData::Cpu(bytes) => convert_bytes(
+                &decoded,
+                n,
                 bytes,
                 #[cfg(feature = "gpu-icc")]
                 icc,
             ),
-            _ => decoded
-                .convert_memo(&bytes, n)
-                .map(|rgb| (ImageColorSpace::Rgb, rgb)),
+            ImageData::Bilevel(bits) if n == 1 => convert_bilevel(&decoded, bits),
+            ImageData::Bilevel(bits) => bits.into_samples().and_then(|bytes| {
+                convert_bytes(
+                    &decoded,
+                    n,
+                    bytes,
+                    #[cfg(feature = "gpu-icc")]
+                    icc,
+                )
+            }),
+            ImageData::Cpu16(wide) => {
+                convert16(&decoded, n, wide).map(|(cs, wide)| (cs, ImageData::Cpu16(wide)))
+            }
+            #[cfg(feature = "cache")]
+            ImageData::Gpu(cached) => Some(convert_device(&decoded, n, space, cached)),
         };
         if let Some(budget) = budget {
             budget.spend(decoded.spent.get());
         }
-        let (cs, bytes) = converted?;
-        Some(descriptor(width, height, cs, ImageData::Cpu(bytes), smask))
+        let (cs, data) = converted?;
+        Some(descriptor(width, height, cs, data, smask))
     }
+}
+
+/// Byte samples of `n` components a pixel through `decoded`: gray for one
+/// component, RGB otherwise.  `None` when the converted samples cannot be
+/// allocated or the work left cannot convert them.
+fn convert_bytes(
+    decoded: &Decoded<'_>,
+    n: usize,
+    bytes: Vec<u8>,
+    #[cfg(feature = "gpu-icc")] icc: &super::IccHandles<'_>,
+) -> Option<(ImageColorSpace, ImageData)> {
+    let (cs, bytes) = match n {
+        1 => decoded.convert_one(bytes),
+        3 => decoded.convert_rgb(bytes),
+        4 => decoded.convert_cmyk(
+            bytes,
+            #[cfg(feature = "gpu-icc")]
+            icc,
+        ),
+        _ => decoded
+            .convert_memo(&bytes, n)
+            .map(|rgb| (ImageColorSpace::Rgb, rgb)),
+    }?;
+    Some((cs, ImageData::Cpu(bytes)))
+}
+
+/// Device-resident samples of `n` components a pixel in `space`, drawn as
+/// they are: the device image cache holds only samples of an identity
+/// colour, so any other colour is drawn unconverted, with a warning.
+#[cfg(feature = "cache")]
+fn convert_device(
+    decoded: &Decoded<'_>,
+    n: usize,
+    space: &ColorSpace,
+    cached: gpu::cache::CachedImage,
+) -> (ImageColorSpace, ImageData) {
+    let identity = match n {
+        1 => matches!(decoded.lut(), Some(Lut::Identity)),
+        3 => decoded.identity_decode() && matches!(decoded.rgb_convert(), RgbConvert::Identity),
+        _ => false,
+    };
+    debug_assert!(
+        identity,
+        "device-resident samples are only cached for an identity colour"
+    );
+    if !identity {
+        log::warn!("image: device-resident samples in {space:?} drawn without colour conversion");
+    }
+    let cs = if n == 1 {
+        ImageColorSpace::Gray
+    } else {
+        ImageColorSpace::Rgb
+    };
+    (cs, ImageData::Gpu(cached))
 }
 
 /// One-component bilevel samples through the table of `decoded`: a gray
