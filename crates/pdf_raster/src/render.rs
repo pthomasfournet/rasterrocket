@@ -611,22 +611,18 @@ fn render_job(
     let (session, params) = (job.session, job.params);
     let (page_num, page_id) = (job.page_num, job.page_id);
     #[cfg(feature = "vulkan")]
-    let (mut renderer, device_page) = crate::device_pages::render(job, buffers)?;
+    let (renderer, device_page) = crate::device_pages::render(job, buffers)?;
     #[cfg(not(feature = "vulkan"))]
-    let mut renderer = job.run(buffers)?;
+    let renderer = job.run(buffers)?;
 
-    // A budget breach takes precedence over image failures: the page may not
-    // have finished rendering at all.
-    if let Err(e) = check_aborted(&renderer) {
-        *buffers = renderer.into_buffers();
-        return Err(e);
-    }
-    log_failures(page_num, &content_failures);
-    renderer.record_content_failures(content_failures);
-    if let Err(e) = check_strict(session, &renderer) {
-        *buffers = renderer.into_buffers();
-        return Err(e);
-    }
+    let renderer = checked(renderer, buffers, |renderer| {
+        // A budget breach takes precedence over image failures: the page may
+        // not have finished rendering at all.
+        check_aborted(renderer)?;
+        log_failures(page_num, &content_failures);
+        renderer.record_content_failures(content_failures);
+        check_strict(session, renderer)
+    })?;
     log_failures(page_num, renderer.image_failures());
 
     let (mut bitmap, mut diag, spare) = renderer
@@ -652,6 +648,22 @@ fn render_job(
         diag.device_page = device_page;
     }
     Ok((bitmap, diag))
+}
+
+/// `renderer` when `check` passes it; otherwise its storage returns to
+/// `buffers` for the next render and the error is returned.
+pub(crate) fn checked<'a>(
+    mut renderer: pdf_interp::renderer::PageRenderer<'a>,
+    buffers: &mut CanvasBuffers,
+    check: impl FnOnce(&mut pdf_interp::renderer::PageRenderer<'a>) -> Result<(), RasterError>,
+) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
+    match check(&mut renderer) {
+        Ok(()) => Ok(renderer),
+        Err(e) => {
+            *buffers = renderer.into_buffers();
+            Err(e)
+        }
+    }
 }
 
 /// The error of a render that `renderer` stopped early: cancelled, out of
@@ -932,16 +944,10 @@ impl<'a> PageJob<'a> {
     /// when that fails, its storage is returned to `buffers`.
     pub(crate) fn executed(
         &self,
-        mut renderer: pdf_interp::renderer::PageRenderer<'a>,
+        renderer: pdf_interp::renderer::PageRenderer<'a>,
         buffers: &mut CanvasBuffers,
     ) -> Result<pdf_interp::renderer::PageRenderer<'a>, RasterError> {
-        match self.execute(&mut renderer) {
-            Ok(()) => Ok(renderer),
-            Err(e) => {
-                *buffers = renderer.into_buffers();
-                Err(e)
-            }
-        }
+        checked(renderer, buffers, |renderer| self.execute(renderer))
     }
 }
 
