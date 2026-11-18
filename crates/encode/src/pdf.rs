@@ -17,6 +17,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 use flate2::Compression;
+use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 
 use crate::EncodeError;
@@ -101,6 +102,50 @@ impl PdfPage {
         let mut encoder = PdfPageEncoder::new(image.size(), layout, dpi, None)?;
         encoder.push(image)?;
         encoder.finish()
+    }
+
+    /// The image's width and height in pixels.
+    #[must_use]
+    pub const fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Whether the image is RGB; else it is gray.
+    #[must_use]
+    pub const fn is_rgb(&self) -> bool {
+        self.rgb
+    }
+
+    /// The depth of the image's samples.
+    #[must_use]
+    pub const fn depth(&self) -> SampleDepth {
+        self.depth
+    }
+
+    /// The page's width and height in points: the image's size at its
+    /// resolution.
+    #[must_use]
+    pub const fn size_pts(&self) -> (f64, f64) {
+        self.size_pts
+    }
+
+    /// The image's rows, decompressed, top row first: per pixel R, G and B
+    /// for an RGB image and one gray sample (0 black) otherwise, a 16-bit
+    /// sample most significant byte first, rows unpadded.
+    ///
+    /// # Errors
+    ///
+    /// A spilled image's file could not be rewound.
+    pub fn rows(&self) -> io::Result<impl Read + '_> {
+        let data: Box<dyn Read + '_> = match &self.data {
+            PageData::Memory(data) => Box::new(data.as_slice()),
+            PageData::Spilled { file, len } => {
+                let mut file = file;
+                let _: u64 = file.seek(SeekFrom::Start(0))?;
+                Box::new(file.take(*len))
+            }
+        };
+        Ok(ZlibDecoder::new(data))
     }
 }
 
@@ -529,6 +574,36 @@ mod tests {
             .unwrap();
         assert_eq!(n, 850 * 1100);
         assert_eq!(&pixels[850 * 3..850 * 4], &bmp.row_bytes(3)[..850]);
+    }
+
+    /// A page reads back as its rows, held in memory or in a spill file,
+    /// with its size, colour, depth and size in points; a spilled page
+    /// reads back more than once.
+    #[test]
+    fn a_page_reads_back_as_its_rows() {
+        let bmp = gray(5, 3, |x, y| u8::try_from(x * 10 + y).unwrap());
+        let mut encoder = super::PdfPageEncoder::new(
+            (5, 3),
+            crate::RowLayout::Gray,
+            (144.0, 72.0),
+            Some(tempfile::tempfile().unwrap()),
+        )
+        .unwrap();
+        encoder.push(RowImage::Gray(&bmp)).unwrap();
+        let spilled = encoder.finish().unwrap();
+        let memory = PdfPage::encode(RowImage::Gray(&bmp), (144.0, 72.0)).unwrap();
+        let want: Vec<u8> = (0..3)
+            .flat_map(|y| bmp.row_bytes(y)[..5].to_vec())
+            .collect();
+        for page in [&memory, &spilled, &spilled] {
+            assert_eq!(page.size(), (5, 3));
+            assert!(!page.is_rgb());
+            assert_eq!(page.depth(), SampleDepth::Eight);
+            assert_eq!(page.size_pts(), (2.5, 3.0));
+            let mut rows = Vec::new();
+            let _ = page.rows().unwrap().read_to_end(&mut rows).unwrap();
+            assert_eq!(rows, want);
+        }
     }
 
     #[test]
