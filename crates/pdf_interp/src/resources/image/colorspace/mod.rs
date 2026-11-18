@@ -45,8 +45,9 @@ use pdf::{Dictionary, Document, Object};
 pub(crate) use budget::TintBudget;
 use decode_array::{decode_luts, decode_wide, pairs_equal, parse_decode};
 use decoded::Decoded;
+use decoded::Lut;
 #[cfg(feature = "cache")]
-use decoded::{Lut, RgbConvert};
+use decoded::RgbConvert;
 pub(super) use samples::{KeySamples, Layout, Samples};
 use wide::convert16;
 
@@ -276,6 +277,10 @@ impl ImageColour {
     /// are only produced for an [`identity`](Self::identity) colour.
     /// Colours convert to `target` (see [`ColorSpace::convert_to_rgb`]),
     /// for a canvas of samples of `depth`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per sample storage, each converting through its own helper"
+    )]
     pub(super) fn convert(
         &self,
         doc: &Document,
@@ -337,6 +342,15 @@ impl ImageColour {
                 return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
             }
             ImageData::Cpu(bytes) => bytes,
+            ImageData::Bilevel(bits) if n == 1 => {
+                let converted = convert_bilevel(&decoded, bits);
+                if let Some(budget) = budget {
+                    budget.spend(decoded.spent.get());
+                }
+                let (cs, data) = converted?;
+                return Some(descriptor(width, height, cs, data, smask));
+            }
+            ImageData::Bilevel(bits) => bits.into_samples()?,
             ImageData::Cpu16(wide) => {
                 let (cs, wide) = convert16(&decoded, n, wide)?;
                 return Some(descriptor(width, height, cs, ImageData::Cpu16(wide), smask));
@@ -385,6 +399,28 @@ impl ImageColour {
         }
         let (cs, bytes) = converted?;
         Some(descriptor(width, height, cs, ImageData::Cpu(bytes), smask))
+    }
+}
+
+/// One-component bilevel samples through the table of `decoded`: a gray
+/// table maps the two values to two grays, which the bits keep; a table to
+/// colour takes the samples as bytes.  `None` when the table cannot be made
+/// or the samples cannot be allocated.
+fn convert_bilevel(
+    decoded: &Decoded<'_>,
+    mut bits: Box<super::Bilevel>,
+) -> Option<(ImageColorSpace, ImageData)> {
+    match decoded.lut()? {
+        Lut::Identity => Some((ImageColorSpace::Gray, ImageData::Bilevel(bits))),
+        Lut::Gray(table) => {
+            let (set, clear) = (bits.set(), bits.clear());
+            bits.relabel(table[usize::from(set)], table[usize::from(clear)]);
+            Some((ImageColorSpace::Gray, ImageData::Bilevel(bits)))
+        }
+        lut @ Lut::Rgb(_) => {
+            let (cs, bytes) = Decoded::apply_lut(lut, bits.into_samples()?)?;
+            Some((cs, ImageData::Cpu(bytes)))
+        }
     }
 }
 

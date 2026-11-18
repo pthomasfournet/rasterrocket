@@ -45,6 +45,7 @@
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
+mod bilevel;
 pub(crate) mod bitpack;
 pub(crate) mod codecs;
 pub(crate) mod colorspace;
@@ -60,6 +61,7 @@ pub(crate) mod smask;
 mod thresholds;
 mod types;
 
+pub(crate) use bilevel::Bilevel;
 #[cfg(feature = "nvjpeg2k")]
 pub(crate) use codecs::{DeviceJpx, Jpeg2kSource};
 pub(crate) use filters::filter_name;

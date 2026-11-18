@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use pdf::{Document, Object};
 
+use crate::resources::image::Bilevel;
 use crate::resources::image::colorspace::{Layout, Samples};
 
 // ── JBIG2Decode ──────────────────────────────────────────────────────────────
@@ -86,7 +87,6 @@ pub(in crate::resources::image) fn decode_jbig2(
         log::warn!("image: JBIG2Decode page {e}");
         return None;
     }
-    let n_pixels = (jw as usize).checked_mul(jh as usize)?;
     let mut ctx = hayro_jbig2::DecoderContext::default();
     let bitmap = img
         .decode(&mut ctx)
@@ -100,61 +100,36 @@ pub(in crate::resources::image) fn decode_jbig2(
         );
         return None;
     }
-    let mut data = crate::resources::image::try_with_capacity(n_pixels)?;
-    data.resize(n_pixels, 0xFF);
-    expand_rows(bitmap.rows(), jw as usize, &mut data);
+    // Both output conventions share one polarity: `ImageColorSpace::Gray`
+    // (0x00 = black) and `ImageColorSpace::Mask` (0x00 = paint) take JBIG2
+    // black (1) to 0x00 and white (0) to 0xFF.
+    let mut bits = Bilevel::new(jw, jh, 0x00, 0xFF)?;
+    for (y, row) in bitmap.rows().enumerate() {
+        pack_row(row, jw, bits.row_mut(y));
+    }
 
     let layout = if is_mask {
         Layout::Mask
     } else {
         Layout::Color(1)
     };
-    Some(Samples::cpu(jw, jh, layout, data))
+    Some(Samples::bilevel(layout, bits))
 }
 
-/// The 8 samples of a byte of 8 packed pixels, first pixel in the most
-/// significant bit: a set bit (JBIG2 black) is 0x00, a clear one 0xFF.
-static BYTE_SAMPLES: [[u8; 8]; 256] = {
-    let mut table = [[0xFF; 8]; 256];
-    let mut byte = 0;
-    while byte < 256 {
-        let mut bit = 0;
-        while bit < 8 {
-            if byte & (0x80 >> bit) != 0 {
-                table[byte][bit] = 0x00;
-            }
-            bit += 1;
-        }
-        byte += 1;
+/// Pack a JBIG2 row (32-bit words, first pixel in the most significant
+/// bit, bits past `width` unspecified) into the 64-bit words of a
+/// [`Bilevel`] row, with the bits past `width` clear.
+fn pack_row(row: &[u32], width: u32, out: &mut [u64]) {
+    for (k, word) in out.iter_mut().enumerate() {
+        let hi = row.get(2 * k).copied().unwrap_or(0);
+        let lo = row.get(2 * k + 1).copied().unwrap_or(0);
+        *word = u64::from(hi) << 32 | u64::from(lo);
     }
-    table
-};
-
-/// Write the pixels of `rows` (JBIG2 words, 1 = black, first pixel in the
-/// most significant bit, bits past `width` ignored) into `out`, `width`
-/// samples a row, which holds 0xFF on entry.
-///
-/// Both output conventions share one polarity: `ImageColorSpace::Gray`
-/// (0x00 = black) and `ImageColorSpace::Mask` (0x00 = paint) take JBIG2
-/// black (1) to 0x00 and white (0) to 0xFF.
-fn expand_rows<'a>(rows: impl Iterator<Item = &'a [u32]>, width: usize, out: &mut [u8]) {
-    if width == 0 {
-        return;
-    }
-    for (row, out) in rows.zip(out.chunks_exact_mut(width)) {
-        for (&word, out) in row.iter().zip(out.chunks_mut(32)) {
-            match word {
-                0 => {}
-                u32::MAX => out.fill(0x00),
-                _ => {
-                    for (byte, out) in word.to_be_bytes().into_iter().zip(out.chunks_mut(8)) {
-                        if byte != 0 {
-                            out.copy_from_slice(&BYTE_SAMPLES[usize::from(byte)][..out.len()]);
-                        }
-                    }
-                }
-            }
-        }
+    let tail = width % 64;
+    if tail != 0
+        && let Some(last) = out.last_mut()
+    {
+        *last &= u64::MAX << (64 - tail);
     }
 }
 
@@ -162,28 +137,26 @@ fn expand_rows<'a>(rows: impl Iterator<Item = &'a [u32]>, width: usize, out: &mu
 mod tests {
     use super::*;
 
-    /// Expand rows given as strings of `'0'`/`'1'`, one word per 32 pixels,
-    /// with `pad` set past the width.
-    fn expand(rows: &[&str], pad: bool) -> Vec<u8> {
+    /// Pack rows given as strings of `'0'`/`'1'`, one JBIG2 word per 32
+    /// pixels, with `pad` set past the width, and expand the result.
+    fn pack(rows: &[&str], pad: bool) -> Vec<u8> {
         let width = rows[0].len();
-        let words: Vec<Vec<u32>> = rows
-            .iter()
-            .map(|r| {
-                let mut row = vec![if pad { u32::MAX } else { 0 }; width.div_ceil(32)];
-                for (x, c) in r.bytes().enumerate() {
-                    let bit = 0x8000_0000 >> (x % 32);
-                    if c == b'1' {
-                        row[x / 32] |= bit;
-                    } else {
-                        row[x / 32] &= !bit;
-                    }
+        let height = u32::try_from(rows.len()).unwrap();
+        let width_u32 = u32::try_from(width).unwrap();
+        let mut bits = Bilevel::new(width_u32, height, 0x00, 0xFF).unwrap();
+        for (y, r) in rows.iter().enumerate() {
+            let mut row = vec![if pad { u32::MAX } else { 0 }; width.div_ceil(32)];
+            for (x, c) in r.bytes().enumerate() {
+                let bit = 0x8000_0000 >> (x % 32);
+                if c == b'1' {
+                    row[x / 32] |= bit;
+                } else {
+                    row[x / 32] &= !bit;
                 }
-                row
-            })
-            .collect();
-        let mut out = vec![0xFF; width * rows.len()];
-        expand_rows(words.iter().map(Vec::as_slice), width, &mut out);
-        out
+            }
+            pack_row(&row, width_u32, bits.row_mut(y));
+        }
+        bits.into_samples().unwrap()
     }
 
     /// The samples of `rows`, pixel by pixel: black (1) is 0x00.
@@ -194,10 +167,10 @@ mod tests {
     }
 
     #[test]
-    fn expand_rows_matches_pixel_by_pixel() {
+    fn packed_rows_match_pixel_by_pixel() {
         // Widths around the byte and word edges; all-white, all-black and
         // mixed words and bytes; padding bits set and clear.
-        for width in [1, 7, 8, 9, 31, 32, 33, 64, 70] {
+        for width in [1, 7, 8, 9, 31, 32, 33, 63, 64, 65, 70, 100] {
             let patterns: [&dyn Fn(usize) -> bool; 4] =
                 [&|_| false, &|_| true, &|x| x % 3 == 0, &|x| {
                     (x / 8) % 2 == 0
@@ -208,7 +181,7 @@ mod tests {
                 .collect();
             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
             for pad in [false, true] {
-                assert_eq!(expand(&rows, pad), reference(&rows), "width {width}");
+                assert_eq!(pack(&rows, pad), reference(&rows), "width {width}");
             }
         }
     }

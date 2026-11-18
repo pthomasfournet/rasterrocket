@@ -3,6 +3,7 @@
 use pdf::Object;
 
 use crate::resources::dict_ext::DictExt;
+use crate::resources::image::Bilevel;
 use crate::resources::image::colorspace::{Layout, Samples};
 
 // ── CCITTFaxDecode ─────────────────────────────────────────────────────────────
@@ -23,7 +24,7 @@ use crate::resources::image::colorspace::{Layout, Samples};
 /// - `EndOfBlock`: the stream may end with EOFB / RTC (default `true`).
 /// - `BlackIs1`: 1 bits are black, so output samples are inverted.
 ///
-/// The output is exactly `width × height` bytes, `0x00` black and `0xFF`
+/// The output is `width × height` bilevel samples, `0x00` black and `0xFF`
 /// white (swapped under `BlackIs1`).  A stream that ends early or fails
 /// part-way keeps its decoded rows and pads the rest white; one that yields
 /// no row at all returns `None`.
@@ -60,7 +61,6 @@ pub(in crate::resources::image) fn decode_ccitt(
     let rows = positive(b"Rows").map_or(height, |r| r.min(height));
     let columns = positive(b"Columns").unwrap_or(width);
 
-    let capacity = (width as usize).checked_mul(height as usize)?;
     // White in the output convention: 0xFF, or 0x00 when 1 bits are black.
     let white = if black_is_1 { 0x00 } else { 0xFF };
     let run = |aligned: bool| {
@@ -69,7 +69,7 @@ pub(in crate::resources::image) fn decode_ccitt(
         settings.end_of_line = flag(b"EndOfLine", false);
         settings.rows_are_byte_aligned = aligned;
         settings.encoding = encoding;
-        let mut collector = HayroCcittCollector::new(capacity, width, columns, white)?;
+        let mut collector = HayroCcittCollector::new(width, height, columns, white)?;
         let mut ctx = DecoderContext::new(settings);
         let result = hayro_ccitt::decode(data, &mut collector, &mut ctx);
         Some((collector, result))
@@ -104,16 +104,8 @@ pub(in crate::resources::image) fn decode_ccitt(
     }
 
     let rows_decoded = collector.rows_decoded();
-    let mut data_out = collector.finish();
-    if data_out.len() > capacity {
-        log::debug!(
-            "image: CCITTFaxDecode: output too long ({} > {capacity}), truncating",
-            data_out.len()
-        );
-        data_out.truncate(capacity);
-    } else if data_out.len() < capacity {
+    if rows_decoded < height {
         log::debug!("image: CCITTFaxDecode: got {rows_decoded}/{height} rows, padding remainder");
-        data_out.resize(capacity, white);
     }
 
     let layout = if is_mask {
@@ -121,7 +113,7 @@ pub(in crate::resources::image) fn decode_ccitt(
     } else {
         Layout::Color(1)
     };
-    let mut samples = Samples::cpu(width, height, layout, data_out);
+    let mut samples = Samples::bilevel(layout, collector.finish());
     if rows_decoded < height {
         samples.partial = Some(format!(
             "CCITTFaxDecode: {rows_decoded} of {height} rows decoded; the rest are white"
@@ -130,30 +122,26 @@ pub(in crate::resources::image) fn decode_ccitt(
     Some(samples)
 }
 
-/// [`hayro_ccitt::Decoder`] that expands each row of colour changes into one
-/// byte per pixel: `white` for white runs and its complement for black runs.
+/// [`hayro_ccitt::Decoder`] that sets the bits of each row's black runs in
+/// a `width × height` [`Bilevel`] image whose set bits are black, the
+/// complement of `white`, and clear bits `white`.
 ///
-/// Every row is exactly `width` bytes.  Decoded rows span `columns` pixels:
-/// a narrower row is padded with `white`, a wider one is clipped.  Rows
-/// past the reserved capacity are counted but not stored, so the output
-/// never exceeds it.
+/// Decoded rows span `columns` pixels: a narrower row is padded white, a
+/// wider one is clipped.  Rows past the height are counted but not stored;
+/// rows never decoded stay white.
 struct HayroCcittCollector {
-    out: Vec<u8>,
-    width: u32,
+    bits: Bilevel,
     /// The pixel at which an unterminated black run ends: `min(columns, width)`.
     row_end: u32,
-    white: u8,
     rows: u32,
 }
 
 impl HayroCcittCollector {
-    /// `None` when `capacity` bytes cannot be allocated.
-    fn new(capacity: usize, width: u32, columns: u32, white: u8) -> Option<Self> {
+    /// `None` when the image cannot be allocated.
+    fn new(width: u32, height: u32, columns: u32, white: u8) -> Option<Self> {
         Some(Self {
-            out: crate::resources::image::try_with_capacity(capacity)?,
-            width,
+            bits: Bilevel::new(width, height, !white, white)?,
             row_end: columns.min(width),
-            white,
             rows: 0,
         })
     }
@@ -162,26 +150,24 @@ impl HayroCcittCollector {
         self.rows
     }
 
-    fn finish(self) -> Vec<u8> {
-        self.out
+    fn finish(self) -> Bilevel {
+        self.bits
     }
 }
 
 impl hayro_ccitt::Decoder for HayroCcittCollector {
     fn push_row(&mut self, changes: &[u32]) {
+        let y = self.rows;
         self.rows += 1;
-        let start = self.out.len();
-        if self.out.capacity() - start < self.width as usize {
+        if y >= self.bits.height() {
             return;
         }
-        self.out.resize(start + self.width as usize, self.white);
-        let row = &mut self.out[start..];
         // Changes alternate white→black and black→white; an odd count leaves
         // the row black to its end.
         for run in changes.chunks(2) {
             let from = run[0].min(self.row_end) as usize;
             let to = run.get(1).map_or(self.row_end, |&x| x.min(self.row_end)) as usize;
-            row[from..to].fill(!self.white);
+            self.bits.set_run(y as usize, from, to);
         }
     }
 }
@@ -303,7 +289,7 @@ mod tests {
 
     #[test]
     fn ccitt_collector_expands_changes_and_clamps_to_the_width() {
-        let mut c = HayroCcittCollector::new(12, 4, 9, 0xFF).expect("collector");
+        let mut c = HayroCcittCollector::new(4, 3, 9, 0xFF).expect("collector");
         // Black from 0 to 3.
         hayro_ccitt::Decoder::push_row(&mut c, &[0, 3]);
         // Black from 2 to a change past the width (`Columns` > width).
@@ -312,7 +298,7 @@ mod tests {
         hayro_ccitt::Decoder::push_row(&mut c, &[1]);
         assert_eq!(c.rows_decoded(), 3);
         assert_eq!(
-            c.finish(),
+            c.finish().samples().expect("samples"),
             [
                 0x00, 0x00, 0x00, 0xFF, //
                 0xFF, 0xFF, 0x00, 0x00, //
@@ -321,14 +307,15 @@ mod tests {
         );
     }
 
-    /// Rows past the reserved capacity are not stored.
+    /// Rows past the height are counted but not stored.
     #[test]
-    fn ccitt_collector_stops_at_its_capacity() {
-        let mut c = HayroCcittCollector::new(8, 4, 4, 0xFF).expect("collector");
+    fn ccitt_collector_stops_at_its_height() {
+        let mut c = HayroCcittCollector::new(4, 2, 4, 0xFF).expect("collector");
         for _ in 0..5 {
             hayro_ccitt::Decoder::push_row(&mut c, &[0, 1]);
         }
-        assert_eq!(c.finish().len(), 8);
+        assert_eq!(c.rows_decoded(), 5);
+        assert_eq!(c.finish().samples().map(<[u8]>::len), Some(8));
     }
 
     /// A `/Rows` larger than the image decodes only the image's rows: one

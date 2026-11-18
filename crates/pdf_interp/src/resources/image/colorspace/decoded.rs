@@ -213,8 +213,14 @@ impl<'a> Decoded<'a> {
     /// One-component samples through the table; `None` when the table
     /// cannot be made (see [`Self::lut`]) or the widened output cannot be
     /// allocated.
-    pub(super) fn convert_one(&self, mut bytes: Vec<u8>) -> Option<(ImageColorSpace, Vec<u8>)> {
-        Some(match self.lut()? {
+    pub(super) fn convert_one(&self, bytes: Vec<u8>) -> Option<(ImageColorSpace, Vec<u8>)> {
+        Self::apply_lut(self.lut()?, bytes)
+    }
+
+    /// One-component samples through `lut`, a table of [`Self::lut`];
+    /// `None` when the converted samples cannot be allocated.
+    pub(super) fn apply_lut(lut: Lut, mut bytes: Vec<u8>) -> Option<(ImageColorSpace, Vec<u8>)> {
+        Some(match lut {
             Lut::Identity => (ImageColorSpace::Gray, bytes),
             Lut::Gray(table) => {
                 for b in &mut bytes {

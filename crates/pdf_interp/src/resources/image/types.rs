@@ -254,6 +254,10 @@ pub enum ImageData {
     /// the samples of a stream of more than 8 bits a sample, decoded for a
     /// 16-bit render ([`ImageDecodeCtx::depth`]).
     Cpu16(Vec<u16>),
+    /// Host-resident samples of two values, one bit each, of a
+    /// one-byte-per-pixel [`ImageColorSpace`]; [`Self::as_cpu`] expands
+    /// them to bytes.
+    Bilevel(Box<super::Bilevel>),
     /// Device-resident image, owned by the device image cache.  The handle
     /// keeps the slab alive past in-flight kernel reads even if the
     /// cache evicts; see `gpu::cache::CachedDeviceImage` docs.
@@ -263,11 +267,13 @@ pub enum ImageData {
 
 impl ImageData {
     /// Borrow the host-resident pixel bytes if this is a CPU-backed image.
-    /// Returns `None` for variants whose pixels live in device memory.
+    /// Returns `None` for variants whose pixels live in device memory, and
+    /// for bilevel samples whose bytes cannot be allocated.
     #[must_use]
-    pub const fn as_cpu(&self) -> Option<&[u8]> {
+    pub fn as_cpu(&self) -> Option<&[u8]> {
         match self {
             Self::Cpu(bytes) => Some(bytes.as_slice()),
+            Self::Bilevel(bits) => bits.samples(),
             Self::Cpu16(_) => None,
             #[cfg(feature = "cache")]
             Self::Gpu(_) => None,
@@ -277,7 +283,7 @@ impl ImageData {
     /// Whether the samples are host-resident, of either depth.
     #[must_use]
     pub const fn is_host(&self) -> bool {
-        matches!(self, Self::Cpu(_) | Self::Cpu16(_))
+        matches!(self, Self::Cpu(_) | Self::Cpu16(_) | Self::Bilevel(_))
     }
 
     /// The host-resident 16-bit samples of a [`Self::Cpu16`] image
@@ -286,6 +292,22 @@ impl ImageData {
     pub(crate) fn narrow(&mut self) {
         if let Self::Cpu16(wide) = self {
             *self = Self::Cpu(wide.iter().map(|&v| color::Sample::to_u8(v)).collect());
+        }
+    }
+
+    /// The host-resident bytes of a [`Self::Cpu`] image to modify, those
+    /// of a [`Self::Bilevel`] image expanded first; `None` for any other
+    /// variant, or when the expanded bytes cannot be allocated, which
+    /// leaves the image empty.
+    pub(crate) fn as_cpu_mut(&mut self) -> Option<&mut Vec<u8>> {
+        if matches!(self, Self::Bilevel(_))
+            && let Self::Bilevel(bits) = std::mem::replace(self, Self::Cpu(Vec::new()))
+        {
+            *self = Self::Cpu(bits.into_samples()?);
+        }
+        match self {
+            Self::Cpu(bytes) => Some(bytes),
+            _ => None,
         }
     }
 
@@ -301,17 +323,11 @@ impl ImageData {
     /// Length in bytes of the underlying pixel storage.  Cheap for either
     /// variant — no host memory access required for the GPU variant.
     #[must_use]
-    #[cfg_attr(
-        not(feature = "cache"),
-        expect(
-            clippy::missing_const_for_fn,
-            reason = "the cache-feature path calls a non-const method of the cached image; keep one signature"
-        )
-    )]
     pub fn len(&self) -> usize {
         match self {
             Self::Cpu(bytes) => bytes.len(),
             Self::Cpu16(samples) => samples.len() * 2,
+            Self::Bilevel(bits) => bits.sample_count(),
             #[cfg(feature = "cache")]
             Self::Gpu(cached) => usize::try_from(cached.vram_bytes()).unwrap_or(usize::MAX),
         }

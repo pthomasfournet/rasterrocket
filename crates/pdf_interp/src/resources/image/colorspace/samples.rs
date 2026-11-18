@@ -1,6 +1,6 @@
 //! The samples a codec yields, before colour conversion.
 
-use crate::resources::image::{ImageData, SoftMask};
+use crate::resources::image::{Bilevel, ImageData, SoftMask};
 
 /// The sample layout a codec yields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +74,15 @@ impl Samples {
     ) -> Self {
         Self {
             data: ImageData::Cpu16(data),
+            ..Self::cpu(width, height, layout, Vec::new())
+        }
+    }
+
+    /// Host-resident bilevel samples of `layout`: `Mask`, or `Color(1)`.
+    pub(in crate::resources::image) fn bilevel(layout: Layout, bits: Bilevel) -> Self {
+        let (width, height) = (bits.width(), bits.height());
+        Self {
+            data: ImageData::Bilevel(Box::new(bits)),
             ..Self::cpu(width, height, layout, Vec::new())
         }
     }

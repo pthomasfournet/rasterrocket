@@ -41,6 +41,8 @@
 
 use color::{Sample, Wide};
 
+mod bilevel;
+
 use crate::renderer::gstate::Ctm;
 use crate::resources::SoftMask;
 use crate::resources::image::{ImageData, ImageDescriptor, ImageFilter};
@@ -117,6 +119,7 @@ pub(super) fn reduce_for_draw(
     let bpp = img.color_space.bytes_per_pixel();
     let data = match &img.data {
         ImageData::Cpu16(src) => ImageData::Cpu16(plan.resample(src, bpp)?),
+        ImageData::Bilevel(src) if bpp == 1 => ImageData::Cpu(plan.resample_bilevel(src)?),
         data => ImageData::Cpu(plan.resample(data.as_cpu()?, bpp)?),
     };
     Some((
@@ -492,25 +495,40 @@ impl Plan {
                 }
                 0
             };
-            match &self.cols {
-                Some(cols) => {
-                    // At most MID_BITS fraction bits enter the second pass.
-                    let shift = frac.saturating_sub(MID_BITS);
-                    if shift > 0 {
-                        for a in window {
-                            *a = (*a + w(1 << (shift - 1))) >> shift;
-                        }
+            self.finish_row(&mut acc, span.clone(), frac, bpp, out_row);
+        }
+        Some(out)
+    }
+
+    /// Make output row `out` from `acc`, the vertical pass's row carrying
+    /// `frac` fraction bits over the samples `span`: through the column
+    /// filter, or rounded where the columns are kept.
+    fn finish_row<S: Sample>(
+        &self,
+        acc: &mut [S::Wide],
+        span: std::ops::Range<usize>,
+        frac: u32,
+        bpp: usize,
+        out: &mut [S],
+    ) {
+        let w = <S::Wide as Wide>::of;
+        match &self.cols {
+            Some(cols) => {
+                // At most MID_BITS fraction bits enter the second pass.
+                let shift = frac.saturating_sub(MID_BITS);
+                if shift > 0 {
+                    for a in &mut acc[span] {
+                        *a = (*a + w(1 << (shift - 1))) >> shift;
                     }
-                    reduce_row(&acc, cols, bpp, out_row, frac - shift + WEIGHT_BITS);
                 }
-                None => {
-                    for (o, &a) in out_row.iter_mut().zip(&acc) {
-                        *o = round_shift(a, frac);
-                    }
+                reduce_row(acc, cols, bpp, out, frac - shift + WEIGHT_BITS);
+            }
+            None => {
+                for (o, &a) in out.iter_mut().zip(&*acc) {
+                    *o = round_shift(a, frac);
                 }
             }
         }
-        Some(out)
     }
 }
 

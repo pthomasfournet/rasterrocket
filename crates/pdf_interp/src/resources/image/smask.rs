@@ -465,6 +465,11 @@ pub(super) fn remove_matte(
         );
         return;
     }
+    // Un-matting rewrites the samples, which bilevel samples cannot hold.
+    if matches!(img.data, ImageData::Bilevel(_)) && img.data.as_cpu_mut().is_none() {
+        log::warn!("image: /Matte: the expanded samples cannot be allocated; drawing as stored");
+        return;
+    }
     match &mut img.data {
         ImageData::Cpu(bytes) => {
             let rgb = cs.convert_to_rgb(doc, target, matte);
@@ -481,6 +486,7 @@ pub(super) fn remove_matte(
             };
             unmatte(samples, alpha, &rgb[..channels]);
         }
+        ImageData::Bilevel(_) => {}
         #[cfg(feature = "cache")]
         ImageData::Gpu(_) => {
             log::warn!("image: /Matte needs host-resident samples; drawing as stored");
