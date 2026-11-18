@@ -339,7 +339,8 @@ const _: fn() = || {
 ///   was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
 ///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
-///   `config.vulkan_device` matches no usable Vulkan device or several.
+///   `config.vulkan_device` matches no usable Vulkan device or several, or
+///   an entry of `config.gpu_devices` does, or two name the same device.
 pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
@@ -364,7 +365,8 @@ pub fn open_session(
 ///   was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
 ///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
-///   `config.vulkan_device` matches no usable Vulkan device or several.
+///   `config.vulkan_device` matches no usable Vulkan device or several, or
+///   an entry of `config.gpu_devices` does, or two name the same device.
 pub fn open_session_from_bytes(
     bytes: Vec<u8>,
     config: &SessionConfig,
@@ -476,7 +478,7 @@ fn open_session_with_doc(
     #[cfg(feature = "vulkan")]
     let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
     #[cfg(feature = "vulkan")]
-    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref());
+    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
 
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     let gpu_ctx = init_gpu_ctx(config.policy)?;

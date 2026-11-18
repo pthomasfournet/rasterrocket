@@ -158,6 +158,66 @@ pub(super) fn pick(
     )
 }
 
+/// The candidates `selectors` name, in their order, each resolved as
+/// [`pick`] resolves one.
+///
+/// # Errors
+///
+/// [`BackendError::DeviceSelection`] when `selectors` is empty, when one
+/// of them does not resolve, or when two resolve to the same device; the
+/// message lists every enumerated device.
+pub(super) fn pick_many(
+    cands: &[Candidate],
+    selectors: &[DeviceSelector],
+) -> Result<Vec<usize>, BackendError> {
+    let fail = |reason: String| {
+        BackendError::DeviceSelection(format!(
+            "{reason}\navailable Vulkan devices:\n{}",
+            describe(cands)
+        ))
+    };
+    if selectors.is_empty() {
+        return Err(fail("the Vulkan device list is empty".to_owned()));
+    }
+    let mut picked: Vec<usize> = Vec::with_capacity(selectors.len());
+    for sel in selectors {
+        let idx = resolve_selector(cands, sel)
+            .map_err(|reason| fail(format!("Vulkan device selector {sel}: {reason}")))?;
+        if let Some(first) = picked.iter().position(|&i| i == idx) {
+            return Err(fail(format!(
+                "Vulkan device selectors {} and {sel} both name device {idx} \"{}\"",
+                selectors[first], cands[idx].name
+            )));
+        }
+        picked.push(idx);
+    }
+    Ok(picked)
+}
+
+/// Every eligible candidate that is a GPU (discrete, integrated or
+/// virtual; not a CPU implementation), in enumeration order.
+///
+/// # Errors
+///
+/// [`BackendError::DeviceSelection`] when there is none; the message lists
+/// every enumerated device.
+pub(super) fn usable_gpus(cands: &[Candidate]) -> Result<Vec<usize>, BackendError> {
+    let gpus: Vec<usize> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.compute_queue.is_ok() && device_type_rank(c.device_type) <= 2)
+        .map(|(i, _)| i)
+        .collect();
+    if gpus.is_empty() {
+        return Err(BackendError::DeviceSelection(format!(
+            "no usable Vulkan GPU (API 1.3+, a compute queue family and the required \
+             features, not a CPU implementation) was found; enumerated:\n{}",
+            describe(cands)
+        )));
+    }
+    Ok(gpus)
+}
+
 /// The eligible candidate that sorts first by, in order: device-type rank;
 /// larger device-local memory; known PCI address before unknown, then
 /// ascending PCI address; ascending device UUID.  Every key is a property
@@ -516,5 +576,55 @@ mod tests {
         assert!(msg.contains("device 0"), "{msg}");
         assert!(msg.contains("not usable: Vulkan API below 1.3"), "{msg}");
         assert!(msg.contains(", unusable: Vulkan API below 1.3"), "{msg}");
+    }
+
+    fn many_error(cands: &[Candidate], sels: &[&str]) -> String {
+        let sels: Vec<DeviceSelector> = sels.iter().map(|s| sel(s)).collect();
+        match pick_many(cands, &sels) {
+            Err(BackendError::DeviceSelection(msg)) => msg,
+            other => panic!("expected DeviceSelection error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_device_list_resolves_each_selector_in_order() {
+        let sels = [sel("radv"), sel("0"), sel("5070")];
+        assert_eq!(pick_many(&host(), &sels).unwrap(), [1, 0, 2]);
+    }
+
+    #[test]
+    fn a_device_list_naming_one_device_twice_is_an_error() {
+        let msg = many_error(&host(), &["5070", "2"]);
+        assert!(
+            msg.contains("\"5070\" and \"2\" both name device 2"),
+            "{msg}"
+        );
+        assert!(msg.contains("available Vulkan devices"), "{msg}");
+    }
+
+    #[test]
+    fn a_device_list_with_an_unresolved_or_ineligible_selector_is_an_error() {
+        let msg = many_error(&host(), &["5070", "no-such-gpu"]);
+        assert!(msg.contains("\"no-such-gpu\": no device name"), "{msg}");
+        let mut cands = host();
+        cands[1].compute_queue = Err(Ineligible::NoComputeQueue);
+        let msg = many_error(&cands, &["5070", "radv"]);
+        assert!(msg.contains("not usable: no compute queue family"), "{msg}");
+        assert!(many_error(&host(), &[]).contains("list is empty"));
+    }
+
+    #[test]
+    fn usable_gpus_are_the_eligible_non_cpu_devices_in_enumeration_order() {
+        assert_eq!(usable_gpus(&host()).unwrap(), [1, 2]);
+        let mut cands = host();
+        cands[2].compute_queue = Err(Ineligible::ApiBelow13);
+        assert_eq!(usable_gpus(&cands).unwrap(), [1]);
+        cands[1].compute_queue = Err(Ineligible::ApiBelow13);
+        match usable_gpus(&cands) {
+            Err(BackendError::DeviceSelection(msg)) => {
+                assert!(msg.contains("no usable Vulkan GPU"), "{msg}");
+            }
+            other => panic!("expected DeviceSelection error, got {other:?}"),
+        }
     }
 }

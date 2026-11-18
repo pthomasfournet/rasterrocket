@@ -105,6 +105,57 @@ fn checked_selector(selector: &str) -> Result<(), InitError> {
     })
 }
 
+/// The device indices a device list resolves to, or why it does not.
+type Resolution = Result<Vec<usize>, InitError>;
+
+/// Device lists already resolved by [`resolve_page_devices`], with the
+/// outcome.
+static RESOLVED: Mutex<Vec<(Vec<String>, Resolution)>> = Mutex::new(Vec::new());
+
+/// The selectors of the GPU page devices `list` names
+/// ([`crate::SessionConfig::gpu_devices`], not empty): each device's
+/// enumeration index, which names it for the rest of the process, resolved
+/// once per list per process without opening a device.  `all` is every
+/// usable GPU.  Under `Auto` an unavailable Vulkan is not an error: the
+/// entries are returned as given (`all` as the automatically ranked
+/// device), and their opening fails, logged, when a page asks for them.
+///
+/// # Errors
+///
+/// [`RasterError::InvalidOptions`] listing the enumerated devices when an
+/// entry does not resolve, two name the same device, or `all` finds no
+/// GPU; [`RasterError::BackendUnavailable`] for an unavailable Vulkan
+/// under `ForceVulkan`.
+pub(crate) fn resolve_page_devices(
+    policy: BackendPolicy,
+    list: &[String],
+) -> Result<Vec<Option<String>>, RasterError> {
+    let all = list.len() == 1 && crate::config::is_all(&list[0]);
+    let outcome = memo(&RESOLVED, list.to_vec(), || {
+        if all {
+            VulkanBackend::usable_gpus()
+        } else {
+            list.iter()
+                .map(|s| s.parse::<DeviceSelector>())
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|selectors| VulkanBackend::resolve_devices(&selectors))
+        }
+        .map_err(InitError::from)
+    });
+    match outcome {
+        Ok(indices) => Ok(indices.into_iter().map(|i| Some(i.to_string())).collect()),
+        Err(InitError::Selection(msg)) => Err(RasterError::InvalidOptions(msg)),
+        Err(InitError::Unavailable(e)) if policy == BackendPolicy::ForceVulkan => {
+            Err(RasterError::BackendUnavailable(format!(
+                "Vulkan backend required but unavailable: {e}. \
+                 Verify with `vulkaninfo` that a Vulkan 1.3+ device is present."
+            )))
+        }
+        Err(InitError::Unavailable(_)) if all => Ok(vec![None]),
+        Err(InitError::Unavailable(_)) => Ok(list.iter().map(|s| Some(s.clone())).collect()),
+    }
+}
+
 /// The backend for `selector`, opened unless a live session holds it and
 /// shared by every session naming the same selector, under any policy.
 ///

@@ -625,6 +625,26 @@ pub(crate) struct Args {
     #[arg(long = "gpu-pages", verbatim_doc_comment)]
     pub gpu_pages: bool,
 
+    /// The Vulkan devices --gpu-pages renders on: a comma-separated list
+    /// of device indices (from 0, in enumeration order) or name
+    /// substrings, as --vulkan-device takes, or `all` for every usable
+    /// GPU (not a CPU implementation such as llvmpipe).
+    ///
+    /// Each page takes the open device that the fewest pages hold, so a
+    /// faster device takes more pages; every device renders the CPU's
+    /// bytes.  A list naming one device twice, or an entry matching no
+    /// device or several, is an error that lists the devices.  Needs
+    /// --gpu-pages; under --backend auto it replaces --vulkan-device.
+    /// Tested on two devices (an NVIDIA and an AMD GPU); more devices and
+    /// datacenter GPUs are untested.
+    #[arg(
+        long = "gpu-devices",
+        value_name = "LIST|all",
+        value_delimiter = ',',
+        verbatim_doc_comment
+    )]
+    pub gpu_devices: Vec<String>,
+
     /// Fail a page when one of its images or content streams cannot be
     /// decoded or drawn.
     ///
@@ -1921,11 +1941,15 @@ impl Args {
         if let Some(node) = &self.vaapi_device {
             config.vaapi_device.clone_from(node);
         }
-        config.vulkan_device = self
-            .vulkan_device
-            .clone()
-            .or_else(SessionConfig::vulkan_device_from_env);
+        // Under `auto` the GPU page devices replace the Vulkan device, so
+        // the environment's device is not read beside them.
+        config.vulkan_device = self.vulkan_device.clone().or_else(|| {
+            (self.gpu_devices.is_empty() || policy != BackendPolicy::Auto)
+                .then(SessionConfig::vulkan_device_from_env)
+                .flatten()
+        });
         config.gpu_pages = self.gpu_pages;
+        config.gpu_devices.clone_from(&self.gpu_devices);
         config.font_dirs = SessionConfig::font_dirs_from_env();
         config.system_fonts = !self.no_system_fonts;
         config.strict = self.strict;
@@ -2151,6 +2175,44 @@ mod page_list_tests {
                 .session_config()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn gpu_devices_reach_session_config_and_are_refused_without_gpu_pages() {
+        let config = args_with(&["--gpu-pages", "--gpu-devices", "5070,radv"]).session_config();
+        if cfg!(feature = "vulkan") {
+            let config = config.expect("a device list");
+            assert_eq!(config.gpu_devices, ["5070", "radv"]);
+            assert_eq!(config.vulkan_device, None);
+        } else {
+            assert!(config.is_err());
+        }
+        let err = args_with(&["--gpu-devices", "all"])
+            .session_config()
+            .unwrap_err();
+        assert!(
+            err.contains("--gpu-devices") && err.contains("--gpu-pages"),
+            "{err}"
+        );
+        if cfg!(feature = "vulkan") {
+            let err = args_with(&["--gpu-pages", "--gpu-devices", "0", "--vulkan-device", "1"])
+                .session_config()
+                .unwrap_err();
+            assert!(err.contains("--vulkan-device"), "{err}");
+            assert!(
+                args_with(&[
+                    "--gpu-pages",
+                    "--backend",
+                    "vulkan",
+                    "--gpu-devices",
+                    "0",
+                    "--vulkan-device",
+                    "1"
+                ])
+                .session_config()
+                .is_ok()
+            );
+        }
     }
 
     #[test]

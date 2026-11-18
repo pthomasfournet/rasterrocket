@@ -72,6 +72,9 @@ pub(super) struct DeviceCtx {
     /// Whether `shaderInt64` is enabled: kernels declaring the `Int64`
     /// capability are built only when it is.
     pub(super) has_int64: bool,
+    /// The physical device's position in `vkEnumeratePhysicalDevices`
+    /// order.
+    pub(super) index: usize,
     /// Borrowed PFNs onto the live instance for runtime queries (e.g. memory budget).
     pub(super) instance: ash::Instance,
     /// Vulkan loader; must outlive instance.
@@ -134,6 +137,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         entry,
         instance,
         phys,
+        index,
         chosen,
         compute_queue_family,
     } = open_and_pick(selector)?;
@@ -172,6 +176,7 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         has_memory_budget: setup.has_memory_budget(),
         integrated,
         has_int64: setup.int64,
+        index,
         instance,
         entry,
     }))
@@ -247,6 +252,37 @@ pub(super) fn check_selector(selector: &DeviceSelector) -> Result<()> {
     Ok(())
 }
 
+/// The enumeration indices of the devices `selectors` name, in their
+/// order, or of every usable GPU when `selectors` is `None`, without
+/// creating a logical device: an instance is created, the devices are
+/// enumerated as [`init`] does, and the instance is destroyed.
+///
+/// # Errors
+/// [`BackendError::DeviceSelection`] as [`select::pick_many`] and
+/// [`select::usable_gpus`] report it; the loader's or the instance's
+/// error when Vulkan itself is unavailable.
+pub(super) fn resolve_devices(selectors: Option<&[DeviceSelector]>) -> Result<Vec<usize>> {
+    let _lifecycle = instance_lifecycle();
+    let entry = load_entry()?;
+    let instance = create_instance(&entry)?;
+    let picked = (|| {
+        let physicals = unsafe { instance.enumerate_physical_devices() }
+            .map_err(vk_err("vkEnumeratePhysicalDevices"))?;
+        let candidates = physicals
+            .iter()
+            .map(|&p| describe_physical_device(&instance, p))
+            .collect::<Result<Vec<_>>>()?;
+        selectors.map_or_else(
+            || select::usable_gpus(&candidates),
+            |selectors| select::pick_many(&candidates, selectors),
+        )
+    })();
+    // Safety: the instance has no child objects; physical-device handles
+    // are not owned.
+    unsafe { instance.destroy_instance(None) };
+    picked
+}
+
 /// A loaded loader, an instance on it, and the physical device chosen on
 /// that instance, with the lifecycle lock still held.
 struct Picked {
@@ -254,6 +290,8 @@ struct Picked {
     entry: ash::Entry,
     instance: ash::Instance,
     phys: vk::PhysicalDevice,
+    /// The position of `phys` in enumeration order.
+    index: usize,
     chosen: Candidate,
     compute_queue_family: u32,
 }
@@ -265,13 +303,13 @@ fn open_and_pick(selector: Option<&DeviceSelector>) -> Result<Picked> {
     let lifecycle = instance_lifecycle();
     let entry = load_entry()?;
     let instance = create_instance(&entry)?;
-    let (phys, chosen, compute_queue_family) = destroy_instance_on_err(
+    let (phys, index, chosen, compute_queue_family) = destroy_instance_on_err(
         &instance,
-        pick_physical_device(&instance, selector).and_then(|(phys, chosen)| {
+        pick_physical_device(&instance, selector).and_then(|(phys, index, chosen)| {
             let family = chosen
                 .compute_queue
                 .map_err(|why| BackendError::msg(format!("picked an unusable device: {why}")))?;
-            Ok((phys, chosen, family))
+            Ok((phys, index, chosen, family))
         }),
     )?;
     Ok(Picked {
@@ -279,6 +317,7 @@ fn open_and_pick(selector: Option<&DeviceSelector>) -> Result<Picked> {
         entry,
         instance,
         phys,
+        index,
         chosen,
         compute_queue_family,
     })
@@ -444,11 +483,12 @@ fn create_instance(entry: &ash::Entry) -> Result<ash::Instance> {
 }
 
 /// Enumerate physical devices, reduce each to a [`Candidate`], and return
-/// the handle and candidate of the one [`select::pick`] chooses.
+/// the handle, enumeration index and candidate of the one [`select::pick`]
+/// chooses.
 fn pick_physical_device(
     instance: &ash::Instance,
     selector: Option<&DeviceSelector>,
-) -> Result<(vk::PhysicalDevice, Candidate)> {
+) -> Result<(vk::PhysicalDevice, usize, Candidate)> {
     let physicals = unsafe { instance.enumerate_physical_devices() }
         .map_err(vk_err("vkEnumeratePhysicalDevices"))?;
     if physicals.is_empty() {
@@ -470,7 +510,7 @@ fn pick_physical_device(
     let chosen = candidates.into_iter().nth(idx).ok_or_else(|| {
         BackendError::msg("device selection returned an index past the enumerated devices")
     })?;
-    Ok((physicals[idx], chosen))
+    Ok((physicals[idx], idx, chosen))
 }
 
 /// Feature support of a device, as far as the backend reads it.

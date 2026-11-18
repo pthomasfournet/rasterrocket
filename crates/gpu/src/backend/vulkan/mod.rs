@@ -124,6 +124,41 @@ impl VulkanBackend {
         device::check_selector(selector)
     }
 
+    /// The enumeration indices of the devices `selectors` name, in their
+    /// order, without opening any: each resolves as in
+    /// [`Self::with_selector`], and the index, as a selector, names the
+    /// same device for the rest of the process.
+    ///
+    /// # Errors
+    /// [`BackendError::DeviceSelection`] when `selectors` is empty, one
+    /// does not resolve, or two name the same device; the loader's or
+    /// instance's error when Vulkan is unavailable.
+    ///
+    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
+    pub fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
+        device::resolve_devices(Some(selectors))
+    }
+
+    /// The enumeration indices of every device that can host the backend
+    /// and is a GPU (discrete, integrated or virtual, not a CPU
+    /// implementation), without opening any.
+    ///
+    /// # Errors
+    /// [`BackendError::DeviceSelection`] when there is none; the loader's
+    /// or instance's error when Vulkan is unavailable.
+    ///
+    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
+    pub fn usable_gpus() -> Result<Vec<usize>> {
+        device::resolve_devices(None)
+    }
+
+    /// The device's position in Vulkan enumeration order: as a selector,
+    /// it names this device.
+    #[must_use]
+    pub fn device_index(&self) -> usize {
+        self.device.index
+    }
+
     /// The device's `deviceName`.
     #[must_use]
     pub fn device_name(&self) -> String {

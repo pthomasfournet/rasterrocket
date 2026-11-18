@@ -147,6 +147,59 @@ fn an_auto_hold_opens_the_gpu_page_device() {
     assert_eq!(open_devices(), 0);
 }
 
+/// The GPU page devices of a session on every usable GPU are destroyed
+/// with it, under `Auto` (opened when a page asks for one) and
+/// `ForceVulkan` (opened with the session), and a hold of that
+/// configuration holds every one.  Skipped with fewer than two GPUs.
+#[test]
+fn several_gpu_page_devices_are_destroyed_with_their_session() {
+    let _serial = serial();
+    let gpus = match gpu::backend::vulkan::VulkanBackend::usable_gpus() {
+        Ok(gpus) if gpus.len() >= 2 => gpus.len(),
+        _ => {
+            eprintln!("skipping: fewer than two usable Vulkan GPUs");
+            return;
+        }
+    };
+    let all = |policy| {
+        let mut config = rasterrocket::SessionConfig::with_policy(policy);
+        config.gpu_pages = true;
+        config.gpu_devices = vec!["all".to_owned()];
+        config
+    };
+    assert_eq!(open_devices(), 0);
+    let session =
+        open_session_from_bytes(page_pdf(), &all(BackendPolicy::Auto)).expect("an Auto session");
+    assert_eq!(open_devices(), 0, "Auto opened a device at session open");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while open_devices() < gpus {
+        assert!(
+            Instant::now() < deadline,
+            "the GPU page devices never opened"
+        );
+        render(&session);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(session);
+    assert_eq!(open_devices(), 0, "a device outlived its session");
+
+    let session = open_session_from_bytes(page_pdf(), &all(BackendPolicy::ForceVulkan))
+        .expect("a ForceVulkan session");
+    assert_eq!(
+        open_devices(),
+        gpus,
+        "the session's device and its page devices are not one per GPU"
+    );
+    render(&session);
+    drop(session);
+    assert_eq!(open_devices(), 0, "a device outlived its session");
+
+    let hold = DeviceHold::open(&all(BackendPolicy::Auto)).expect("a hold");
+    assert_eq!(open_devices(), gpus, "the hold did not open every GPU");
+    drop(hold);
+    assert_eq!(open_devices(), 0);
+}
+
 /// `raster_pdf` and `render_channel` take their policy from
 /// `PDF_RASTER_BACKEND`; the test runs itself again with it set.
 #[test]

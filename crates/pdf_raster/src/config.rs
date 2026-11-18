@@ -433,6 +433,36 @@ pub struct SessionConfig {
     /// [`open_session`] returns [`RasterError::InvalidOptions`] (see
     /// [`check_gpu_pages`](Self::check_gpu_pages)).
     pub gpu_pages: bool,
+    /// The Vulkan devices the GPU pages ([`gpu_pages`](Self::gpu_pages))
+    /// render on, each a selector as [`vulkan_device`](Self::vulkan_device)
+    /// takes, or the one entry `all`: every usable GPU (discrete,
+    /// integrated or virtual, not a CPU implementation of Vulkan).
+    ///
+    /// Default empty: the GPU pages render on the device of
+    /// [`vulkan_device`](Self::vulkan_device) (under
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), the session's device).
+    /// With several devices each page takes the open device that the
+    /// fewest pages hold, so a faster device takes more pages; every
+    /// device renders the CPU's bytes.  Under
+    /// [`Auto`](BackendPolicy::Auto) the devices are opened, each on a
+    /// thread of its own, when the first page that may render on one asks
+    /// for one, and a page waits for the first to open; under
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) [`open_session`] opens
+    /// every one and fails as it fails for its own device.
+    /// [`RasterSession::device_page_counts`](crate::RasterSession::device_page_counts)
+    /// counts the pages each device rendered.  Tested with two devices
+    /// (a discrete and an integrated GPU of different vendors); more
+    /// devices, and datacenter GPUs, are untested.
+    ///
+    /// [`open_session`] resolves the list against the enumerated devices
+    /// and returns [`RasterError::InvalidOptions`] listing them when an
+    /// entry matches no usable device or several, or two entries name the
+    /// same device; [`check_gpu_pages`](Self::check_gpu_pages) refuses a
+    /// non-empty list without [`gpu_pages`](Self::gpu_pages), `all` beside
+    /// other entries, an empty entry, and under
+    /// [`Auto`](BackendPolicy::Auto) a list beside
+    /// [`vulkan_device`](Self::vulkan_device), which it replaces there.
+    pub gpu_devices: Vec<String>,
     /// The ICC profile every page is converted to once composited, its
     /// device values the pages' pixels.
     ///
@@ -522,6 +552,7 @@ impl SessionConfig {
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             gpu_pages: false,
+            gpu_devices: Vec::new(),
             output_profile: None,
             proof: None,
             working_space: None,
@@ -604,7 +635,15 @@ impl SessionConfig {
     /// their `rrocket` flags (`--gpu-pages`, `--backend`, `--aaVector`).
     pub fn check_gpu_pages(&self) -> Result<(), RasterError> {
         if !self.gpu_pages {
-            return Ok(());
+            if self.gpu_devices.is_empty() {
+                return Ok(());
+            }
+            return Err(RasterError::InvalidOptions(
+                "the GPU page devices (`gpu_devices`, --gpu-devices) are the devices of GPU \
+                 pages, which are off (`gpu_pages`, --gpu-pages); add --gpu-pages or drop \
+                 --gpu-devices"
+                    .to_owned(),
+            ));
         }
         let refuse = |why: String| {
             Err(RasterError::InvalidOptions(format!(
@@ -634,6 +673,33 @@ impl SessionConfig {
                 "paints antialiased vector paths only, and vector antialiasing is off \
                  (`vector_antialias`, --aaVector no); use --aaVector yes or drop --gpu-pages"
                     .to_owned(),
+            );
+        }
+        self.check_gpu_devices()
+    }
+
+    /// The part of [`check_gpu_pages`](Self::check_gpu_pages) that needs
+    /// no device: the shape of [`gpu_devices`](Self::gpu_devices).
+    fn check_gpu_devices(&self) -> Result<(), RasterError> {
+        let refuse = |why: &str| {
+            Err(RasterError::InvalidOptions(format!(
+                "the GPU page devices (`gpu_devices`, --gpu-devices) {why}"
+            )))
+        };
+        if self.gpu_devices.iter().any(|d| d.trim().is_empty()) {
+            return refuse("include an empty entry; name each device by index or name");
+        }
+        if self.gpu_devices.len() > 1 && self.gpu_devices.iter().any(|d| is_all(d)) {
+            return refuse("name `all` beside other devices; give `all` alone or list the devices");
+        }
+        if !self.gpu_devices.is_empty()
+            && self.vulkan_device.is_some()
+            && self.policy == BackendPolicy::Auto
+        {
+            return refuse(
+                "replace the Vulkan device (`vulkan_device`, --vulkan-device or \
+                 PDF_RASTER_VULKAN_DEVICE) under backend `auto`, where it has no other use; \
+                 drop one of them",
             );
         }
         Ok(())
@@ -676,6 +742,11 @@ impl SessionConfig {
                 .collect()
         })
     }
+}
+
+/// Whether the [`SessionConfig::gpu_devices`] entry `entry` is `all`.
+pub(crate) fn is_all(entry: &str) -> bool {
+    entry.trim().eq_ignore_ascii_case("all")
 }
 
 /// Environment variable read by [`SessionConfig::vulkan_device_from_env`].
