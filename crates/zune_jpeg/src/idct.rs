@@ -49,6 +49,8 @@ const SCALE_BITS: i32 = (1 << (OUTPUT_SHIFT - 1)) + (128 << OUTPUT_SHIFT);
 
 #[cfg(feature = "x86")]
 pub mod avx2;
+#[cfg(all(feature = "x86", feature = "std"))]
+pub mod avx512;
 #[cfg(feature = "neon")]
 pub mod neon;
 
@@ -60,6 +62,17 @@ pub fn choose_idct_func(options: &DecoderOptions) -> IDCTPtr {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[cfg(feature = "x86")]
     {
+        #[cfg(feature = "std")]
+        if options.use_avx2()
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+        {
+            debug!("Using AVX-512 integer IDCT");
+            return |a: &mut [i32; 64], b: &mut [i16], c: usize| {
+                // SAFETY: chosen only when the CPU supports AVX-512 F and BW.
+                unsafe { avx512::idct_avx512(a, b, c) }
+            };
+        }
         if options.use_avx2() {
             debug!("Using vector integer IDCT");
             return |a: &mut [i32; 64], b: &mut [i16], c: usize| {

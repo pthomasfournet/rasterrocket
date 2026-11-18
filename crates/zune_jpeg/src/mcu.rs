@@ -996,7 +996,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                     }
                     color_convert(
                         &raw_samples,
-                        self.color_convert_16,
+                        (self.color_convert_16, self.color_convert_32),
                         self.input_colorspace,
                         self.options.jpeg_get_out_colorspace(),
                         output,

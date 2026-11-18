@@ -89,6 +89,9 @@ use crate::components::UpSampler;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[cfg(feature = "x86")]
 mod avx2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(feature = "x86", feature = "std"))]
+mod avx512;
 #[cfg(target_arch = "aarch64")]
 #[cfg(feature = "neon")]
 mod neon;
@@ -96,9 +99,27 @@ mod neon;
 mod portable_simd;
 mod scalar;
 
+/// Whether the AVX-512 filters may run: AVX2 is allowed and the CPU has
+/// AVX-512 F and BW.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(feature = "x86", feature = "std"))]
+fn avx512_allowed(options: &DecoderOptions) -> bool {
+    options.use_avx2()
+        && is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw")
+}
+
 // choose the best possible implementation for this platform
 #[allow(unused_variables)]
 pub fn choose_horizontal_samp_function(options: &DecoderOptions) -> UpSampler {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(all(feature = "x86", feature = "std"))]
+    if avx512_allowed(options) {
+        return |a: &[i16], b: &[i16], c: &[i16], d: &mut [i16], e: &mut [i16]| {
+            // SAFETY: `avx512_allowed` holds only if AVX-512 F and BW are supported.
+            unsafe { avx512::upsample_horizontal_avx512(a, b, c, d, e) }
+        };
+    }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[cfg(feature = "x86")]
     if options.use_avx2() {
@@ -123,6 +144,14 @@ pub fn choose_horizontal_samp_function(options: &DecoderOptions) -> UpSampler {
 #[allow(unused_variables)]
 pub fn choose_hv_samp_function(options: &DecoderOptions) -> UpSampler {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(all(feature = "x86", feature = "std"))]
+    if avx512_allowed(options) {
+        return |a: &[i16], b: &[i16], c: &[i16], d: &mut [i16], e: &mut [i16]| {
+            // SAFETY: `avx512_allowed` holds only if AVX-512 F and BW are supported.
+            unsafe { avx512::upsample_hv_avx512(a, b, c, d, e) }
+        };
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[cfg(feature = "x86")]
     if options.use_avx2() {
         return |a: &[i16], b: &[i16], c: &[i16], d: &mut [i16], e: &mut [i16]| {
@@ -145,6 +174,14 @@ pub fn choose_hv_samp_function(options: &DecoderOptions) -> UpSampler {
 
 #[allow(unused_variables)]
 pub fn choose_v_samp_function(options: &DecoderOptions) -> UpSampler {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(all(feature = "x86", feature = "std"))]
+    if avx512_allowed(options) {
+        return |a: &[i16], b: &[i16], c: &[i16], d: &mut [i16], e: &mut [i16]| {
+            // SAFETY: `avx512_allowed` holds only if AVX-512 F and BW are supported.
+            unsafe { avx512::upsample_vertical_avx512(a, b, c, d, e) }
+        };
+    }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[cfg(feature = "x86")]
     if options.use_avx2() {

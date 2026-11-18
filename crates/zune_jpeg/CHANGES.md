@@ -168,6 +168,31 @@ unless the entry says otherwise.
   otherwise. Both allocation sites share `JpegDecoder::coefficient_planes`.
   Test: `invalid_images::coefficients_over_the_limit_are_not_allocated`.
 
+- **An AVX-512 tier for the IDCT, YCbCr to RGB and the up-sampling
+  filters** (new files `idct/avx512.rs`, `color_convert/avx512.rs`,
+  `upsampler/avx512.rs`; output unchanged). Chosen at run time, with the
+  `std` feature, where AVX2 is allowed (`DecoderOptions::use_avx2`) and
+  the CPU has AVX-512 F and BW (and VBMI for the colour conversion);
+  otherwise the AVX2 tier as before. Each computes the AVX2 tier's
+  operations per sample on 512-bit vectors: the 8×8 IDCT holds two rows
+  to a register, its passes regrouped (wrapping sums do not depend on
+  their order) and its transposes eight `vpermt2d` each; YCbCr to RGB
+  converts 32 pixels at a time (`ColorConvert32Ptr`,
+  `JpegDecoder::color_convert_32`, used by `color_convert_ycbcr` for the
+  whole chunks of 32, the rest through the 16-pixel converter as before)
+  and interleaves the channels with two `vpermt2b`; the filters step 32
+  samples. The 4×4 and DC-only IDCTs are unchanged. Tests, each calling
+  the new code directly against the scalar and AVX2 code:
+  `idct::avx512::tests` (200 000 blocks, dense to DC-only, magnitudes to
+  2^20, three strides; the two transposes), `color_convert::avx512::tests`
+  (every Cb/Cr pair at three luma rows), `upsampler::avx512::tests` (every
+  width from 3 to 300, horizontal, vertical and both). Over 40 baseline
+  4:2:0 frames of corpus-07 (223 Mpx), one core: 475 → 448 ms (−5.8 %);
+  over 40 progressive 4:4:4 frames of corpus-08: 522 → 490 ms (−6.1 %);
+  checksums identical. Rendered at 150 dpi, one thread: corpus-07
+  20.4 → 19.8 G user cycles (−2.7 %), corpus-08 and -09 (pages 1–60)
+  −0.5 %; page hashes identical.
+
 ## Upstream review (9706202c..7fd6c70b)
 
 The 139 upstream commits to the crate after the base were read; the fixes

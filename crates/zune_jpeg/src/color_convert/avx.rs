@@ -52,11 +52,11 @@ pub union YmmRegister {
     array: [i16; 16],
 }
 
-const R_AVX_COEF: i32 =
+pub(super) const R_AVX_COEF: i32 =
     i32::from_ne_bytes([CR_FRAC.to_ne_bytes()[0], CR_FRAC.to_ne_bytes()[1], 0, 0]);
-const B_AVX_COEF: i32 =
+pub(super) const B_AVX_COEF: i32 =
     i32::from_ne_bytes([0, 0, CB_FRAC.to_ne_bytes()[0], CB_FRAC.to_ne_bytes()[1]]);
-const G_COEF_AVX_COEF: i32 = i32::from_ne_bytes([
+pub(super) const G_COEF_AVX_COEF: i32 = i32::from_ne_bytes([
     C_G_CR_FRAC.to_ne_bytes()[0],
     C_G_CR_FRAC.to_ne_bytes()[1],
     C_G_CB_FRAC.to_ne_bytes()[0],

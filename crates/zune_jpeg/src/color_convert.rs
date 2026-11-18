@@ -54,9 +54,11 @@ use zune_core::options::DecoderOptions;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[cfg(feature = "x86")]
 pub use crate::color_convert::avx::{ycbcr_to_rgb_avx2, ycbcr_to_rgba_avx2};
-use crate::decoder::ColorConvert16Ptr;
+use crate::decoder::{ColorConvert16Ptr, ColorConvert32Ptr};
 
 mod avx;
+#[cfg(feature = "std")]
+mod avx512;
 mod neon64;
 mod scalar;
 
@@ -100,6 +102,33 @@ pub fn choose_ycbcr_to_rgb_convert_func(
         ColorSpace::BGR => Some(scalar::ycbcr_to_rgb_inner_16_scalar::<true>),
         _ => None,
     };
+}
+
+/// A conversion of 32 YCbCr pixels at a time to `type_need`, when the CPU
+/// has one: AVX-512 (F, BW and VBMI) to RGB, where AVX2 is allowed.  Its
+/// output equals that of [`choose_ycbcr_to_rgb_convert_func`]'s conversion
+/// of the two halves.
+#[allow(unused_variables)]
+pub fn choose_ycbcr_to_rgb_convert_func_32(
+    type_need: ColorSpace,
+    options: &DecoderOptions,
+) -> Option<ColorConvert32Ptr> {
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        feature = "x86",
+        feature = "std"
+    ))]
+    {
+        if type_need == ColorSpace::RGB
+            && options.use_avx2()
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vbmi")
+        {
+            return Some(avx512::ycbcr_to_rgb_avx512);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

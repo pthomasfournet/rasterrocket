@@ -17,7 +17,7 @@ use zune_core::colorspace::ColorSpace;
 
 use crate::color_convert::ycbcr_to_grayscale;
 use crate::components::{Components, SampleRatios};
-use crate::decoder::{ColorConvert16Ptr, MAX_COMPONENTS};
+use crate::decoder::{ColorConvert16Ptr, ColorConvert32Ptr, MAX_COMPONENTS};
 use crate::errors::DecodeErrors;
 
 /// fast 0..255 * 0..255 => 0..255 rounded multiplication
@@ -33,7 +33,7 @@ fn blinn_8x8(in_val: u8, y: u8) -> u8 {
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 pub(crate) fn color_convert(
     unprocessed: &[&[i16]; MAX_COMPONENTS],
-    color_convert_16: ColorConvert16Ptr,
+    converters: (ColorConvert16Ptr, Option<ColorConvert32Ptr>),
     input_colorspace: ColorSpace,
     output_colorspace: ColorSpace,
     output: &mut [u8],
@@ -63,7 +63,7 @@ pub(crate) fn color_convert(
                 width,
                 padded_width,
                 output_colorspace,
-                color_convert_16,
+                converters,
                 output,
             );
         }
@@ -73,7 +73,7 @@ pub(crate) fn color_convert(
                 width,
                 padded_width,
                 output_colorspace,
-                color_convert_16,
+                converters,
                 output,
             );
         }
@@ -84,7 +84,7 @@ pub(crate) fn color_convert(
                 width,
                 padded_width,
                 output_colorspace,
-                color_convert_16,
+                converters,
                 output,
             );
         }
@@ -265,7 +265,7 @@ fn color_convert_ycck_to_rgb<const NUM_COMPONENTS: usize>(
     width: usize,
     padded_width: usize,
     output_colorspace: ColorSpace,
-    color_convert_16: ColorConvert16Ptr,
+    converters: (ColorConvert16Ptr, Option<ColorConvert32Ptr>),
     output: &mut [u8],
 ) {
     color_convert_ycbcr(
@@ -273,7 +273,7 @@ fn color_convert_ycck_to_rgb<const NUM_COMPONENTS: usize>(
         width,
         padded_width,
         output_colorspace,
-        color_convert_16,
+        converters,
         output,
     );
     for (pix_w, m_w) in output
@@ -344,7 +344,7 @@ fn color_convert_ycbcr(
     width: usize,
     padded_width: usize,
     output_colorspace: ColorSpace,
-    color_convert_16: ColorConvert16Ptr,
+    (color_convert_16, color_convert_32): (ColorConvert16Ptr, Option<ColorConvert32Ptr>),
     output: &mut [u8],
 ) {
     let num_components = output_colorspace.num_components();
@@ -382,14 +382,29 @@ fn color_convert_ycbcr(
             continue;
         }
 
-        // Chunk in outputs of 16 to pass to color_convert as an array of 16 i16's.
-        for (((y, cb), cr), out_c) in y_width
+        // Chunks of 32 pixels through the 32-pixel conversion, if any, and
+        // the rest in chunks of 16, as arrays of i16's.
+        let mut done = 0;
+        if let Some(color_convert_32) = color_convert_32 {
+            for (((y, cb), cr), out_c) in y_width
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .zip(cb_width.as_chunks::<32>().0.iter())
+                .zip(cr_width.as_chunks::<32>().0.iter())
+                .zip(out.chunks_exact_mut(32 * num_components))
+            {
+                (color_convert_32)(y, cb, cr, out_c);
+            }
+            done = width / 32 * 32;
+        }
+        for (((y, cb), cr), out_c) in y_width[done..]
             .as_chunks::<16>()
             .0
             .iter()
-            .zip(cb_width.as_chunks::<16>().0.iter())
-            .zip(cr_width.as_chunks::<16>().0.iter())
-            .zip(out.chunks_exact_mut(16 * num_components))
+            .zip(cb_width[done..].as_chunks::<16>().0.iter())
+            .zip(cr_width[done..].as_chunks::<16>().0.iter())
+            .zip(out[done * num_components..].chunks_exact_mut(16 * num_components))
         {
             (color_convert_16)(y, cb, cr, out_c, &mut 0);
         }

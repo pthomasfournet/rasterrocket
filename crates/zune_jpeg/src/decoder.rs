@@ -21,7 +21,7 @@ use zune_core::options::DecoderOptions;
 use crate::bitstream::BitStreamHuffman;
 #[cfg(feature = "arith")]
 use crate::bitstream_arith::{ArithACTables, ArithDCTables, BitStreamArithmetic};
-use crate::color_convert::choose_ycbcr_to_rgb_convert_func;
+use crate::color_convert::{choose_ycbcr_to_rgb_convert_func, choose_ycbcr_to_rgb_convert_func_32};
 use crate::components::{Components, SampleRatios};
 use crate::errors::{DecodeErrors, UnsupportedSchemes};
 #[cfg(feature = "arith")]
@@ -64,6 +64,8 @@ pub(crate) const MAX_DIMENSIONS: usize = 1 << 27;
 /// 1. Carry out color conversion
 /// 2. Update `&mut usize` with the new position
 pub type ColorConvert16Ptr = fn(&[i16; 16], &[i16; 16], &[i16; 16], &mut [u8], &mut usize);
+/// Converts 32 pixels of Y, Cb and Cr samples to the start of the output.
+pub type ColorConvert32Ptr = fn(&[i16; 32], &[i16; 32], &[i16; 32], &mut [u8]);
 
 /// IDCT  function prototype
 ///
@@ -161,6 +163,9 @@ pub struct JpegDecoder<T> {
     pub(crate) idct_1x1_func: IDCTPtr,
     // Color convert function which acts on 16 YCbCr values
     pub(crate) color_convert_16: ColorConvert16Ptr,
+    /// A conversion of 32 pixels at a time to the output colour space, when
+    /// the CPU has one; its output equals `color_convert_16`'s.
+    pub(crate) color_convert_32: Option<ColorConvert32Ptr>,
     pub(crate) z_order: [usize; MAX_COMPONENTS],
     /// restart markers
     pub(crate) restart_interval: usize,
@@ -246,6 +251,7 @@ where
             idct_4x4_func: choose_idct_4x4_func(&options),
             idct_1x1_func: choose_idct_1x1_func(&options),
             color_convert_16: color_convert,
+            color_convert_32: None,
             input_colorspace: ColorSpace::YCbCr,
             adobe_transform: None,
             z_order: [0; MAX_COMPONENTS],
@@ -576,6 +582,10 @@ where
                 &self.options,
             )
             .unwrap();
+            self.color_convert_32 = choose_ycbcr_to_rgb_convert_func_32(
+                self.options.jpeg_get_out_colorspace(),
+                &self.options,
+            );
         }
         // First two bytes should be jpeg soi marker
         let magic_bytes = self.stream.get_u16_be_err()?;
