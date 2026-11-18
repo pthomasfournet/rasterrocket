@@ -4,7 +4,7 @@
 use color::{Pixel, PixelMode, Sample};
 use raster::{
     Bitmap,
-    pipe::{ChannelMask, Pattern, PipeSrc, RowPattern},
+    pipe::{ChannelMask, Pattern, PipeSrc, RowPattern, Span},
     types::BlendMode,
 };
 
@@ -199,6 +199,10 @@ impl<'a> ImageCompositor<'a> {
         let (colours, shape) = (&colours[..columns * sample_n], &shape[..columns]);
         let Some(paint) = self.paint else {
             debug_assert!(!ink_bitmap, "the direct blend writes RGB");
+            debug_assert!(
+                painted.is_none(),
+                "the direct blend records no painted channels"
+            );
             let dst = &mut row[x0 * 3..(x0 + columns) * 3];
             for ((dst, src), &coverage) in dst
                 .as_chunks_mut::<3>()
@@ -239,26 +243,14 @@ impl<'a> ImageCompositor<'a> {
                 clippy::cast_possible_truncation,
                 reason = "columns and rows lie within the bitmap, whose dimensions are below 2^31"
             )]
-            let span = (c0 as i32, (c1 - 1) as i32, y as i32);
-            raster::pipe::render_span::<P>(
-                &pipe,
-                &src,
-                &mut row[c0 * n..c1 * n],
-                alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
-                Some(&shape[a..b]),
-                span.0,
-                span.1,
-                span.2,
-            );
-            if let Some(painted) = painted.as_deref_mut() {
-                raster::pipe::mark_painted::<P>(
-                    &mut painted[c0..c1],
-                    &pipe,
-                    &src,
-                    Some(&shape[a..b]),
-                    span,
-                );
-            }
+            let xs = (c0 as i32, (c1 - 1) as i32, y as i32);
+            let span = Span {
+                dst: &mut row[c0 * n..c1 * n],
+                alpha: alpha_row.as_deref_mut().map(|al| &mut al[c0..c1]),
+                shape: Some(&shape[a..b]),
+            };
+            let painted = painted.as_deref_mut().map(|p| &mut p[c0..c1]);
+            raster::pipe::render_span_marked::<P>(&pipe, &src, span, painted, xs);
             start = b;
         }
     }

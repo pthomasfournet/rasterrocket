@@ -443,8 +443,12 @@ impl<P: Pixel> Bitmap<P> {
     /// pixel (`width × height`, top-down) that the paints composited
     /// through [`render_bitmap_span`](crate::pipe::render_bitmap_span) set
     /// to the union of the channel masks they wrote at the pixel (see
-    /// [`mark_painted`](crate::pipe::mark_painted)).  An existing plane is
-    /// kept.
+    /// [`render_span_marked`](crate::pipe::render_span_marked)).  An
+    /// existing plane is kept.
+    ///
+    /// Only those paints write the plane exactly; any other writer of the
+    /// bitmap's samples may at most add channels to it, never remove them,
+    /// so the plane holds a superset of the channels painted at each pixel.
     ///
     /// # Errors
     ///

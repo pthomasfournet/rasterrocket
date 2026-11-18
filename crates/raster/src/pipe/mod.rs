@@ -43,13 +43,15 @@ pub enum PipeSrc<'a, S: Sample = u8> {
 /// Implementors write device-space samples of type `S` into the provided
 /// buffer.  The buffer length is `(x1 - x0 + 1) * ncomps` where `ncomps` is
 /// the channel count of the target bitmap's pixel type.
+///
+/// No method may composite through the pipe ([`render_span`] and the
+/// functions built on it): each runs while the pipe holds its
+/// thread-local span buffers, and a nested composite would borrow them
+/// again, which panics.
 pub trait Pattern<S: Sample = u8>: Send + Sync {
     /// Fill `out` with colour samples for pixels `x0..=x1` on scanline `y`.
     ///
     /// `out.len()` is guaranteed to be `(x1 - x0 + 1) * ncomps`.
-    ///
-    /// Must not composite: `fill_span` runs while the pipe holds its
-    /// thread-local span buffers, so a nested composite would re-enter them.
     fn fill_span(&self, y: i32, x0: i32, x1: i32, out: &mut [S]);
 
     /// Return `true` if this pattern yields the same colour at every coordinate.
@@ -177,10 +179,6 @@ thread_local! {
     static COVERAGE_SHAPE: Scratch = const { Scratch::new() };
     /// The per-pixel channels a pattern recorded over a span.
     static SPAN_CHANNELS: Scratch = const { Scratch::new() };
-    /// A pattern's colour over a span whose paint is recorded.
-    static MARK_COLOUR: Scratch = const { Scratch::new() };
-    /// A pattern's coverage over a span whose paint is recorded.
-    static MARK_COVERAGE: Scratch = const { Scratch::new() };
 }
 
 /// Immutable parameters for one paint operation, built once per fill/stroke/glyph call.
@@ -397,12 +395,48 @@ pub fn render_span<P: Pixel>(
     pipe: &PipeState<'_, P::Sample>,
     src: &PipeSrc<'_, P::Sample>,
     dst_pixels: &mut [P::Sample],
-    mut dst_alpha: Option<&mut [P::Sample]>,
+    dst_alpha: Option<&mut [P::Sample]>,
     shape: Option<&[P::Sample]>,
     x0: i32,
     x1: i32,
     y: i32,
 ) {
+    let span = Span {
+        dst: dst_pixels,
+        alpha: dst_alpha,
+        shape,
+    };
+    render_span_marked::<P>(pipe, src, span, None, (x0, x1, y));
+}
+
+/// [`render_span`] of the destination `span`, recording the paint in
+/// `painted` when given: the painted-channels bytes of the span's pixels
+/// (see [`Bitmap::track_painted`]).
+///
+/// At each pixel the source reaches with nonzero alpha (constant alpha,
+/// shape and a pattern's coverage all nonzero), the channels it writes
+/// there are added to `painted`: the pipe's
+/// [`overprint`](PipeState::overprint) mask, narrowed by a pattern's
+/// [per-pixel record](Pattern::fill_span_channels) as the composite
+/// narrows it, and every channel for `None`.  The record is made from the
+/// coverage the composite evaluates, in the same pass.
+///
+/// # Panics
+///
+/// As [`render_span`], and if `painted` does not hold exactly the span's
+/// pixels.
+pub fn render_span_marked<P: Pixel>(
+    pipe: &PipeState<'_, P::Sample>,
+    src: &PipeSrc<'_, P::Sample>,
+    span: Span<'_, P::Sample>,
+    mut painted: Option<&mut [u8]>,
+    (x0, x1, y): (i32, i32, i32),
+) {
+    let Span {
+        dst: dst_pixels,
+        alpha: mut dst_alpha,
+        shape,
+    } = span;
     assert!(x0 <= x1, "render_span: x0={x0} > x1={x1}");
     assert!(
         P::NCOMPS > 0,
@@ -420,6 +454,10 @@ pub fn render_span<P: Pixel>(
         dst_alpha.as_ref().is_none_or(|a| a.len() == count)
             && shape.is_none_or(|s| s.len() == count),
         "render_span: alpha or shape length differs from the {count}-pixel span"
+    );
+    assert!(
+        painted.as_ref().is_none_or(|p| p.len() == count),
+        "render_span: the painted-channels row differs from the {count}-pixel span"
     );
 
     debug_assert!(
@@ -441,6 +479,7 @@ pub fn render_span<P: Pixel>(
                         alpha: dst_alpha.as_deref_mut(),
                         shape,
                     },
+                    painted.as_deref_mut(),
                     (x0, y),
                 );
                 true
@@ -450,7 +489,39 @@ pub fn render_span<P: Pixel>(
             return;
         }
     }
-    render_masked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
+    let record = painted.map(|painted| PaintRecord {
+        painted,
+        channels: pipe.overprint.unwrap_or(ChannelMask::ALL).bits(),
+    });
+    let span = Span {
+        dst: dst_pixels,
+        alpha: dst_alpha,
+        shape,
+    };
+    render_masked::<P>(pipe, src, span, record, (x0, x1, y));
+}
+
+/// The painted-channels bytes of a run of pixels, and the channels a paint
+/// over the run adds where it reaches.
+struct PaintRecord<'a> {
+    painted: &'a mut [u8],
+    channels: u8,
+}
+
+impl PaintRecord<'_> {
+    /// Add the channels at each pixel a paint of constant alpha `a_input`
+    /// reaches through `shape` and the source's `coverage`: every factor
+    /// nonzero, a missing one full.
+    fn add<S: Sample>(self, a_input: S, shape: Option<&[S]>, coverage: Option<&[S]>) {
+        if a_input == S::ZERO {
+            return;
+        }
+        for (i, p) in self.painted.iter_mut().enumerate() {
+            if shape.is_none_or(|s| s[i] != S::ZERO) && coverage.is_none_or(|c| c[i] != S::ZERO) {
+                *p |= self.channels;
+            }
+        }
+    }
 }
 
 /// The channels painted at a pixel by a paint through `mask` of a pattern
@@ -463,12 +534,14 @@ const fn pixel_channels(mask: u8, recorded: u8) -> u8 {
 /// `channels`, through `mask`: each run of pixels painting the same
 /// channels (see [`pixel_channels`]) through a pipe of that mask, and a
 /// run painting every channel of `P` as an unmasked paint, whose `Normal`
-/// composite consults no backdrop.
+/// composite consults no backdrop.  Each run's channels are recorded in
+/// `painted` when given ([`render_span_marked`]).
 fn render_channel_runs<P: Pixel>(
     pipe: &PipeState<'_, P::Sample>,
     (mask, channels): (ChannelMask, &[u8]),
     src: &PipeSrc<'_, P::Sample>,
     span: Span<'_, P::Sample>,
+    mut painted: Option<&mut [u8]>,
     (x0, y): (i32, i32),
 ) {
     let Span {
@@ -502,53 +575,41 @@ fn render_channel_runs<P: Pixel>(
             reason = "a < b ≤ count = x1 − x0 + 1, which fits in i32"
         )]
         let (run_x0, run_x1) = (x0 + a as i32, x0 + b as i32 - 1);
-        render_masked::<P>(
-            &run_pipe,
-            src,
-            &mut dst[a * ncomps..b * ncomps],
-            dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
-            shape.map(|s| &s[a..b]),
-            run_x0,
-            run_x1,
-            y,
-        );
+        let run_span = Span {
+            dst: &mut dst[a * ncomps..b * ncomps],
+            alpha: dst_alpha.as_deref_mut().map(|al| &mut al[a..b]),
+            shape: shape.map(|s| &s[a..b]),
+        };
+        let record = painted.as_deref_mut().map(|p| PaintRecord {
+            painted: &mut p[a..b],
+            channels: run,
+        });
+        render_masked::<P>(&run_pipe, src, run_span, record, (run_x0, run_x1, y));
         a = b;
     }
 }
 
 /// Composite a validated span through the pipe's overprint mask (see
-/// [`render_span`]).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "forwards the render_span arguments"
-)]
+/// [`render_span`]), recording the paint in `record` when given.
 fn render_masked<P: Pixel>(
     pipe: &PipeState<'_, P::Sample>,
     src: &PipeSrc<'_, P::Sample>,
-    dst_pixels: &mut [P::Sample],
-    mut dst_alpha: Option<&mut [P::Sample]>,
-    shape: Option<&[P::Sample]>,
-    x0: i32,
-    x1: i32,
-    y: i32,
+    span: Span<'_, P::Sample>,
+    record: Option<PaintRecord<'_>>,
+    (x0, x1, y): (i32, i32, i32),
 ) {
     // A mask covering every channel of `P` writes the whole pixel.
     let full = u8::MAX >> (8 - P::NCOMPS);
     match pipe.overprint {
         Some(mask) if mask.bits() & full != full && pipe.blend_mode != BlendMode::Normal => {
-            render_blended_unpainted::<P>(
-                pipe,
-                mask,
-                src,
-                Span {
-                    dst: dst_pixels,
-                    alpha: dst_alpha,
-                    shape,
-                },
-                (x0, x1, y),
-            );
+            render_blended_unpainted::<P>(pipe, mask, src, span, record, (x0, x1, y));
         }
         Some(mask) if mask.bits() & full != full => {
+            let Span {
+                dst: dst_pixels,
+                alpha: mut dst_alpha,
+                shape,
+            } = span;
             let saved_len = dst_pixels.len() + dst_alpha.as_ref().map_or(0, |a| a.len());
             MASKED_SPAN.with(|scratch| {
                 scratch.with::<P::Sample, ()>(saved_len, |saved| {
@@ -557,16 +618,12 @@ fn render_masked<P: Pixel>(
                     if let Some(a) = dst_alpha.as_deref() {
                         old_alpha.copy_from_slice(a);
                     }
-                    render_unmasked::<P>(
-                        pipe,
-                        src,
-                        dst_pixels,
-                        dst_alpha.as_deref_mut(),
+                    let span = Span {
+                        dst: &mut *dst_pixels,
+                        alpha: dst_alpha.as_deref_mut(),
                         shape,
-                        x0,
-                        x1,
-                        y,
-                    );
+                    };
+                    render_unmasked::<P>(pipe, src, span, record, (x0, x1, y));
                     restore_unpainted::<P>(
                         pipe,
                         mask,
@@ -580,7 +637,7 @@ fn render_masked<P: Pixel>(
                 });
             });
         }
-        _ => render_unmasked::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y),
+        _ => render_unmasked::<P>(pipe, src, span, record, (x0, x1, y)),
     }
 }
 
@@ -606,6 +663,7 @@ fn render_blended_unpainted<P: Pixel>(
     mask: ChannelMask,
     src: &PipeSrc<'_, P::Sample>,
     span: Span<'_, P::Sample>,
+    record: Option<PaintRecord<'_>>,
     (x0, x1, y): (i32, i32, i32),
 ) {
     let Span { dst, alpha, shape } = span;
@@ -619,16 +677,8 @@ fn render_blended_unpainted<P: Pixel>(
                 x0,
                 ncomps: P::NCOMPS,
             };
-            render_unmasked::<P>(
-                pipe,
-                &PipeSrc::Pattern(&source),
-                dst,
-                alpha,
-                shape,
-                x0,
-                x1,
-                y,
-            );
+            let span = Span { dst, alpha, shape };
+            render_unmasked::<P>(pipe, &PipeSrc::Pattern(&source), span, record, (x0, x1, y));
         });
     });
 }
@@ -825,28 +875,26 @@ fn solve_own_colour<S: Sample>(
     Some(out)
 }
 
-/// Composite a validated span, writing every colour channel.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "forwards the render_span arguments"
-)]
+/// Composite a validated span, writing every colour channel, recording
+/// the paint in `record` when given.
 fn render_unmasked<P: Pixel>(
     pipe: &PipeState<'_, P::Sample>,
     src: &PipeSrc<'_, P::Sample>,
-    dst_pixels: &mut [P::Sample],
-    dst_alpha: Option<&mut [P::Sample]>,
-    shape: Option<&[P::Sample]>,
-    x0: i32,
-    x1: i32,
-    y: i32,
+    span: Span<'_, P::Sample>,
+    record: Option<PaintRecord<'_>>,
+    (x0, x1, y): (i32, i32, i32),
 ) {
     if let PipeSrc::Pattern(pat) = src
         && pat.may_leave_unpainted()
     {
-        render_painted_runs::<P>(pipe, *pat, dst_pixels, dst_alpha, shape, x0, x1, y);
+        render_painted_runs::<P>(pipe, *pat, span, record, (x0, x1, y));
         return;
     }
-    dispatch_span::<P>(pipe, src, dst_pixels, dst_alpha, shape, x0, x1, y);
+    let Span { dst, alpha, shape } = span;
+    if let Some(record) = record {
+        record.add(pipe.a_input, shape, None);
+    }
+    dispatch_span::<P>(pipe, src, dst, alpha, shape, x0, x1, y);
 }
 
 /// Composite the pixels `x0..=x1` of row `y` of `bitmap` through
@@ -854,7 +902,7 @@ fn render_unmasked<P: Pixel>(
 ///
 /// The span takes the row's alpha when the bitmap has an alpha plane, and
 /// the paint is recorded in its painted channels when it tracks them
-/// ([`mark_painted`]).
+/// ([`render_span_marked`]).
 ///
 /// # Panics
 ///
@@ -880,93 +928,13 @@ pub fn render_bitmap_span<P: Pixel>(
         bitmap.width
     );
     let (pixels, alpha, painted) = bitmap.row_planes_mut(row);
-    render_span::<P>(
-        pipe,
-        src,
-        &mut pixels[col0 * P::NCOMPS..(col1 + 1) * P::NCOMPS],
-        alpha.map(|a| &mut a[col0..=col1]),
+    let span = Span {
+        dst: &mut pixels[col0 * P::NCOMPS..(col1 + 1) * P::NCOMPS],
+        alpha: alpha.map(|a| &mut a[col0..=col1]),
         shape,
-        x0,
-        x1,
-        y,
-    );
-    if let Some(painted) = painted {
-        mark_painted::<P>(&mut painted[col0..=col1], pipe, src, shape, (x0, x1, y));
-    }
-}
-
-/// Record a paint of `src` through `pipe` with `shape` in `painted`.
-///
-/// `painted` holds the painted-channels bytes of the pixels `x0..=x1` of
-/// row `y` (see [`Bitmap::track_painted`]).  At each pixel the source
-/// reaches with nonzero alpha (constant alpha, shape and the pattern's
-/// coverage all nonzero), the channels it writes there are added: the
-/// pipe's [`overprint`](PipeState::overprint) mask, narrowed by a
-/// pattern's [per-pixel record](Pattern::fill_span_channels) as
-/// [`render_span`] narrows it, and every channel for `None`.
-///
-/// # Panics
-///
-/// Panics if `x0 > x1`, or if `painted` or `shape` does not hold exactly
-/// the span's `x1 − x0 + 1` pixels.
-pub fn mark_painted<P: Pixel>(
-    painted: &mut [u8],
-    pipe: &PipeState<'_, P::Sample>,
-    src: &PipeSrc<'_, P::Sample>,
-    shape: Option<&[P::Sample]>,
-    (x0, x1, y): (i32, i32, i32),
-) {
-    assert!(x0 <= x1, "mark_painted: x0={x0} > x1={x1}");
-    let count = painted.len();
-    assert!(
-        i64::try_from(count).is_ok_and(|n| n == i64::from(x1) - i64::from(x0) + 1)
-            && shape.is_none_or(|s| s.len() == count),
-        "mark_painted: the painted row or shape differs from the span"
-    );
-    let zero = P::Sample::default();
-    if pipe.a_input == zero {
-        return;
-    }
-    let mask = pipe.overprint.unwrap_or(ChannelMask::ALL).bits();
-    let pattern = match src {
-        PipeSrc::Pattern(pattern) => Some(*pattern),
-        PipeSrc::Solid(_) => None,
     };
-    let reached = |i: usize, coverage: Option<&[P::Sample]>| {
-        shape.is_none_or(|s| s[i] != zero) && coverage.is_none_or(|c| c[i] != zero)
-    };
-    let mut record = |coverage: Option<&[P::Sample]>| {
-        SPAN_CHANNELS.with(|scratch| {
-            scratch.with::<u8, ()>(count, |channels| {
-                let recorded = pipe.overprint.is_some()
-                    && pattern.is_some_and(|p| p.fill_span_channels(y, x0, x1, channels));
-                for (i, p) in painted.iter_mut().enumerate() {
-                    if reached(i, coverage) {
-                        *p |= if recorded {
-                            pixel_channels(mask, channels[i])
-                        } else {
-                            mask
-                        };
-                    }
-                }
-            });
-        });
-    };
-    match pattern {
-        Some(p) if p.may_leave_unpainted() => {
-            MARK_COLOUR.with(|colour| {
-                colour.with::<P::Sample, ()>(count * P::NCOMPS, |colour| {
-                    MARK_COVERAGE.with(|coverage| {
-                        coverage.with::<P::Sample, ()>(count, |coverage| {
-                            p.fill_span_coverage(y, x0, x1, colour, coverage);
-                            record(Some(coverage));
-                        });
-                    });
-                });
-            });
-        }
-        _ => record(None),
-    }
+    let painted = painted.map(|p| &mut p[col0..=col1]);
+    render_span_marked::<P>(pipe, src, span, painted, (x0, x1, y));
 }
 
 /// [`render_bitmap_span`] with the shape given as 8-bit coverage (see
@@ -999,23 +967,17 @@ pub fn render_bitmap_span_coverage<P: Pixel>(
 /// pixels with non-zero coverage is then composited by [`dispatch_span`]
 /// from the precomputed colours.  A fully covered run keeps the span's shape; a partially
 /// covered run takes the product of shape and coverage as its shape.
-/// Unpainted pixels are not touched.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "forwards the render_span arguments"
-)]
+/// Unpainted pixels are not touched.  The paint is recorded in `record`, when
+/// given, from the evaluated coverage.
 fn render_painted_runs<P: Pixel>(
     pipe: &PipeState<'_, P::Sample>,
     pat: &dyn Pattern<P::Sample>,
-    dst_pixels: &mut [P::Sample],
-    dst_alpha: Option<&mut [P::Sample]>,
-    shape: Option<&[P::Sample]>,
-    x0: i32,
-    x1: i32,
-    y: i32,
+    span: Span<'_, P::Sample>,
+    record: Option<PaintRecord<'_>>,
+    (x0, x1, y): (i32, i32, i32),
 ) {
     let ncomps = P::NCOMPS;
-    let count = dst_pixels.len() / ncomps;
+    let count = span.dst.len() / ncomps;
     COVERAGE_COLOUR.with(|colour| {
         colour.with::<P::Sample, ()>(count * ncomps, |colour| {
             COVERAGE_VALUES.with(|coverage| {
@@ -1023,15 +985,14 @@ fn render_painted_runs<P: Pixel>(
                     COVERAGE_SHAPE.with(|combined| {
                         combined.with::<P::Sample, ()>(count, |combined| {
                             pat.fill_span_coverage(y, x0, x1, colour, coverage);
+                            if let Some(record) = record {
+                                record.add(pipe.a_input, span.shape, Some(coverage));
+                            }
                             composite_painted_runs::<P>(
                                 pipe,
                                 &EvaluatedSpan { colour, coverage },
                                 combined,
-                                Span {
-                                    dst: dst_pixels,
-                                    alpha: dst_alpha,
-                                    shape,
-                                },
+                                span,
                                 (x0, y),
                             );
                         });
@@ -1050,10 +1011,14 @@ struct EvaluatedSpan<'a, S> {
 
 /// The destination of a span: its colour, its alpha when the bitmap has an
 /// alpha plane, and the shape painted on it.
-struct Span<'a, S> {
-    dst: &'a mut [S],
-    alpha: Option<&'a mut [S]>,
-    shape: Option<&'a [S]>,
+pub struct Span<'a, S> {
+    /// The colour samples of the span's pixels.
+    pub dst: &'a mut [S],
+    /// The alpha of the span's pixels, `None` for a bitmap without an
+    /// alpha plane, which is opaque.
+    pub alpha: Option<&'a mut [S]>,
+    /// The shape of each pixel, `None` for full coverage.
+    pub shape: Option<&'a [S]>,
 }
 
 /// The run loop of [`render_painted_runs`] over the evaluated span `src`
