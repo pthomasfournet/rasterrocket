@@ -14,7 +14,7 @@
 //! objects that follow the previous page's.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Write};
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -65,9 +65,7 @@ impl PageData {
         match self {
             Self::Memory(data) => out.write_all(data),
             Self::Spilled { file, len } => {
-                let mut file = file;
-                let _: u64 = file.seek(SeekFrom::Start(0))?;
-                let copied = io::copy(&mut file.take(*len), out)?;
+                let copied = io::copy(&mut SpillReader::new(file, *len), out)?;
                 if copied == *len {
                     Ok(())
                 } else {
@@ -79,6 +77,47 @@ impl PageData {
             }
         }
     }
+}
+
+/// The first `len` bytes of a spilled page's `file`, read by positional
+/// reads, which neither use nor move the file's cursor on Unix and do not
+/// depend on it on Windows: readers of one page, alive at once, do not
+/// move each other.
+struct SpillReader<'a> {
+    file: &'a File,
+    at: u64,
+    len: u64,
+}
+
+impl<'a> SpillReader<'a> {
+    const fn new(file: &'a File, len: u64) -> Self {
+        Self { file, at: 0, len }
+    }
+}
+
+impl Read for SpillReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = usize::try_from(self.len - self.at).unwrap_or(usize::MAX);
+        let want = left.min(buf.len());
+        if want == 0 {
+            return Ok(0);
+        }
+        let read = read_at(self.file, &mut buf[..want], self.at)?;
+        self.at += u64::try_from(read).map_err(io::Error::other)?;
+        Ok(read)
+    }
+}
+
+/// Read into `buf` from `file` at byte `at`.
+#[cfg(unix)]
+fn read_at(file: &File, buf: &mut [u8], at: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, at)
+}
+
+/// Read into `buf` from `file` at byte `at`.
+#[cfg(windows)]
+fn read_at(file: &File, buf: &mut [u8], at: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, at)
 }
 
 impl PdfPage {
@@ -131,21 +170,15 @@ impl PdfPage {
 
     /// The image's rows, decompressed, top row first: per pixel R, G and B
     /// for an RGB image and one gray sample (0 black) otherwise, a 16-bit
-    /// sample most significant byte first, rows unpadded.
-    ///
-    /// # Errors
-    ///
-    /// A spilled image's file could not be rewound.
-    pub fn rows(&self) -> io::Result<impl Read + '_> {
+    /// sample most significant byte first, rows unpadded.  Any number of
+    /// readers of one page may be alive at once.
+    #[must_use]
+    pub fn rows(&self) -> impl Read + '_ {
         let data: Box<dyn Read + '_> = match &self.data {
             PageData::Memory(data) => Box::new(data.as_slice()),
-            PageData::Spilled { file, len } => {
-                let mut file = file;
-                let _: u64 = file.seek(SeekFrom::Start(0))?;
-                Box::new(file.take(*len))
-            }
+            PageData::Spilled { file, len } => Box::new(SpillReader::new(file, *len)),
         };
-        Ok(ZlibDecoder::new(data))
+        ZlibDecoder::new(data)
     }
 }
 
@@ -601,9 +634,35 @@ mod tests {
             assert_eq!(page.depth(), SampleDepth::Eight);
             assert_eq!(page.size_pts(), (2.5, 3.0));
             let mut rows = Vec::new();
-            let _ = page.rows().unwrap().read_to_end(&mut rows).unwrap();
+            let _ = page.rows().read_to_end(&mut rows).unwrap();
             assert_eq!(rows, want);
         }
+    }
+
+    /// Two readers of one spill file, read in turns a byte at a time, each
+    /// read its bytes whole: neither moves the other.
+    #[test]
+    fn readers_of_one_spill_file_do_not_move_each_other() {
+        use std::io::Write as _;
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"abcdefg").unwrap();
+        let (mut a, mut b) = (
+            super::SpillReader::new(&file, 6),
+            super::SpillReader::new(&file, 6),
+        );
+        let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
+        let mut byte = [0];
+        for _ in 0..8 {
+            if a.read(&mut byte).unwrap() == 1 {
+                got_a.push(byte[0]);
+            }
+            let mut pair = [0; 2];
+            let n = b.read(&mut pair).unwrap();
+            got_b.extend_from_slice(&pair[..n]);
+        }
+        assert_eq!(got_a, b"abcdef");
+        assert_eq!(got_b, b"abcdef");
     }
 
     #[test]

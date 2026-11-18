@@ -944,7 +944,7 @@ impl Job {
                 format!("cannot read the page's image back: {e}")
             }
         };
-        let mut rows = page.rows().map_err(read_error)?;
+        let mut rows = page.rows();
         let whole = if placement.rotate {
             let mut image = vec![0; width as usize * height as usize * bpp];
             rows.read_exact(&mut image).map_err(read_error)?;
