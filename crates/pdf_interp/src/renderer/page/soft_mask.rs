@@ -111,6 +111,7 @@ impl PageRenderer<'_> {
         }
         let enclosing = std::mem::take(&mut self.group);
         let page = std::mem::replace(&mut self.canvas, mask);
+        self.canvas_swaps += 1;
         let space = std::mem::replace(&mut self.space, crate::WorkingSpace::Srgb);
         let ink = cmyk.then(|| {
             let device = InkSetup {
@@ -134,6 +135,7 @@ impl PageRenderer<'_> {
         }
         self.space = space;
         let canvas = std::mem::replace(&mut self.canvas, page);
+        self.canvas_swaps -= 1;
         self.group = enclosing;
         self.gstate.restore();
 

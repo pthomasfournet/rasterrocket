@@ -361,6 +361,10 @@ pub struct PageRenderer<'doc> {
     /// tile renderers carry this incremented; capped at `MAX_PATTERN_DEPTH`
     /// to break self-referential pattern cycles (see `resolve_fill_pattern`).
     pub(super) pattern_depth: u32,
+    /// The number of canvases set aside for a group's or a soft mask's
+    /// canvas and not yet restored: 0 between operators of the page's own
+    /// content, so the canvas is the page's.
+    canvas_swaps: u32,
     /// The page's initial CTM: user space to the whole page's device space.
     initial_ctm: Ctm,
     /// The matrix from the default coordinate space of the content stream
@@ -807,6 +811,7 @@ impl<'doc> PageRenderer<'doc> {
             active_forms: Vec::new(),
             rotate_cw,
             pattern_depth: 0,
+            canvas_swaps: 0,
             initial_ctm,
             pattern_ctm: initial_ctm,
             group: GroupContext::default(),
@@ -1325,6 +1330,10 @@ impl<'doc> PageRenderer<'doc> {
     /// in it paints every sample before it reads one.
     #[must_use]
     pub fn into_buffers(self) -> CanvasBuffers {
+        debug_assert_eq!(
+            self.canvas_swaps, 0,
+            "into_buffers: a group or soft-mask canvas is still swapped in"
+        );
         let Self {
             canvas,
             mut buffers,

@@ -188,6 +188,7 @@ impl<'doc> PageRenderer<'doc> {
         group: &mut CanvasGroup,
         target: &GroupTarget,
     ) -> Option<SwitchedParent> {
+        self.canvas_swaps += 1;
         if target.space == self.canvas_space() {
             self.canvas.swap_group(group);
             None
@@ -207,6 +208,7 @@ impl<'doc> PageRenderer<'doc> {
         target: &GroupTarget,
         switched: Option<SwitchedParent>,
     ) -> Option<CanvasGroup> {
+        self.canvas_swaps -= 1;
         if let Some(parent) = switched {
             return self.leave_group_in(group, parent);
         }
