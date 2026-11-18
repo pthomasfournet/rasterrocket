@@ -187,17 +187,11 @@ pub(super) fn rotate_border_scalar<P: DeskewPixel>(
     let (wf, hf) = (src.width as f32, src.height as f32);
     let bands = |end: f32| [(-BORDER, BORDER), (end - 1.0 - BORDER, end + BORDER)];
     rotate_rows(src, angle_deg, dst, stride, |row, src, p| {
-        let mut spans: Vec<std::ops::Range<usize>> = bands(wf)
-            .into_iter()
-            .map(|band| columns_within(p.cos_a, p.sx_base, band, w))
-            .chain(
-                bands(hf)
-                    .into_iter()
-                    .map(|band| columns_within(p.sin_a, p.sy_base, band, w)),
-            )
-            .filter(|span| !span.is_empty())
-            .collect();
+        let [x_low, x_high] = bands(wf).map(|band| columns_within(p.cos_a, p.sx_base, band, w));
+        let [y_low, y_high] = bands(hf).map(|band| columns_within(p.sin_a, p.sy_base, band, w));
+        let mut spans = [x_low, x_high, y_low, y_high];
         spans.sort_unstable_by_key(|span| span.start);
+        // An empty span has `start >= end`, so `first < span.end` skips it.
         let mut done = 0;
         for span in spans {
             let first = span.start.max(done);
