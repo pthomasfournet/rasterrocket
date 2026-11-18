@@ -1,6 +1,6 @@
 //! Generic regions (6.2): templates, adaptive template pixels, TPGDON and MMR.
 
-use crate::{Collector, check, check_crop, page_information, region_info, segment};
+use crate::{check, check_crop, page_information, region_info, segment};
 
 #[test]
 fn template0() {
@@ -150,7 +150,5 @@ fn region_location_beyond_i32_is_off_page() {
     data.extend(segment(1, 38, &region));
 
     let page = Page::new_embedded(&data, None, &DecodeSettings::default()).unwrap();
-    let mut collector = Collector::default();
-    page.decode(&mut collector).unwrap();
-    assert_eq!(collector.rows, vec![vec![false; 8]]);
+    assert_eq!(crate::decode(&page).unwrap(), vec![vec![false; 8]]);
 }

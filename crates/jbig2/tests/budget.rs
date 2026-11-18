@@ -3,7 +3,7 @@
 
 use hayro_jbig2::{DecodeError, DecodeSettings, Globals, OverflowError, Page};
 
-use crate::{Collector, page_information, pattern_dictionary, region_info, segment};
+use crate::{Bitmap, page_information, pattern_dictionary, region_info, segment};
 
 /// An embedded segment (7.2) like [`segment`], referring to segment
 /// `referred` (at most 255).
@@ -38,11 +38,9 @@ fn halftone_page(pattern_size: u8, grid_width: u32, grid_height: u32) -> Vec<u8>
     data
 }
 
-fn decode(data: &[u8], strict: bool) -> Result<Collector, DecodeError> {
+fn decode(data: &[u8], strict: bool) -> Result<Bitmap, DecodeError> {
     let page = Page::new_embedded(data, None, &DecodeSettings { strict }).unwrap();
-    let mut collector = Collector::default();
-    page.decode(&mut collector)?;
-    Ok(collector)
+    crate::decode(&page)
 }
 
 /// The gray-scale image of a 16 384 × 16 384 halftone grid holds a bit

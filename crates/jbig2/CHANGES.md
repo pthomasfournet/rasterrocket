@@ -172,6 +172,15 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   counts as exhausted after 64 bytes past its data. Tests:
   `text::many_instances`, `malformed::symbol_dictionary_garbage_data`,
   `decode::text::tests::exhausted_data_ends_the_region`.
+- `fdbe2a38c` (#1783) `Page::decode` decodes into the page bitmap of a
+  `DecoderContext` and returns it as a `PageBitmap` (rows of `u32` words,
+  first pixel in the most significant bit, 1 = black), with `data_u8` and
+  `store_u8_into` for 8-bit samples; the `Decoder` trait, which received
+  the page pixel by pixel and in 8-pixel chunks, and `Page::decode_with`
+  are gone. Decoding is unchanged. The renderer expands the returned rows
+  to bytes itself, by table: on the 224 JBIG2 pages of a 200 dpi book,
+  single-threaded, 7.6 → 7.1 G user cycles (−7 %), with identical page
+  hashes. The tests decode through `PageBitmap::rows`.
 
 ## Upstream review (2026-10-30)
 
@@ -194,8 +203,8 @@ a page and of the globals, cumulatively, and the work besides). Upstream's
 relaxed side limit of #1789 (sides up to 2^22 for every bitmap, bounded
 by area) is left out: sides above 65 535 stay refused. Not applicable:
 #1761 and #1798 (cancellation; no caller decodes under a cancellation
-signal), #1783 (`Page::decode` returning the page bitmap instead of
-pushing pixels to a `Decoder`: an API change, and the renderer consumes
-the pushed pixels), #1786 and #1787 (the public decoder contexts made
+signal), #1786 and #1787 (the public decoder contexts made
 private: API changes with no decoding change), #1850 (comments and docs
-trimmed).
+trimmed). #1783, first left out as an API change, was brought over on
+2026-11-18 (above): the pixel-by-pixel hand-over it removes cost as much
+as the generic-region decode on the renderer's JBIG2 pages.

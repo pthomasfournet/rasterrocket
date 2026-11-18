@@ -43,15 +43,7 @@ fn symbol_dictionary_garbage_data() {
 /// decoding 2^28 pixels from nothing.
 #[test]
 fn generic_region_without_data_stops_when_the_decoder_is_exhausted() {
-    use hayro_jbig2::{DecodeSettings, Decoder, Page};
-
-    struct Discard;
-
-    impl Decoder for Discard {
-        fn push_pixel(&mut self, _: bool) {}
-        fn push_pixel_chunk(&mut self, _: bool, _: u32) {}
-        fn next_line(&mut self) {}
-    }
+    use hayro_jbig2::{DecodeSettings, DecoderContext, Page};
 
     // GBTEMPLATE 0 with its default AT pixels (7.4.6.3).
     let mut region = region_info(16_384, 16_384, 0, 0, 0);
@@ -61,7 +53,7 @@ fn generic_region_without_data_stops_when_the_decoder_is_exhausted() {
 
     let page = Page::new_embedded(&data, None, &DecodeSettings::default()).unwrap();
     let start = std::time::Instant::now();
-    page.decode(&mut Discard).unwrap();
+    page.decode(&mut DecoderContext::default()).unwrap();
     // Decoding all rows takes seconds in a debug build; stopping at
     // exhaustion takes milliseconds.
     assert!(

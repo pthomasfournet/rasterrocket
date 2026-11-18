@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use hayro_jbig2::Decoder as Jbig2Decoder;
 use pdf::{Document, Object};
 
 use crate::resources::image::colorspace::{Layout, Samples};
@@ -88,98 +87,74 @@ pub(in crate::resources::image) fn decode_jbig2(
         return None;
     }
     let n_pixels = (jw as usize).checked_mul(jh as usize)?;
-    let mut collector = Jbig2Collector::new(n_pixels);
-
-    img.decode(&mut collector)
+    let mut ctx = hayro_jbig2::DecoderContext::default();
+    let bitmap = img
+        .decode(&mut ctx)
         .map_err(|e| log::warn!("image: JBIG2Decode decode error: {e}"))
         .ok()?;
-
-    if collector.data.len() != n_pixels {
+    if (bitmap.width(), bitmap.height()) != (jw, jh) {
         log::warn!(
-            "image: JBIG2Decode produced {} pixels, expected {n_pixels} — skipping",
-            collector.data.len()
+            "image: JBIG2Decode produced a {}×{} bitmap, expected {jw}×{jh} — skipping",
+            bitmap.width(),
+            bitmap.height()
         );
         return None;
     }
+    let mut data = crate::resources::image::try_with_capacity(n_pixels)?;
+    data.resize(n_pixels, 0xFF);
+    expand_rows(bitmap.rows(), jw as usize, &mut data);
 
     let layout = if is_mask {
         Layout::Mask
     } else {
         Layout::Color(1)
     };
-    Some(Samples::cpu(jw, jh, layout, collector.data))
+    Some(Samples::cpu(jw, jh, layout, data))
 }
 
-/// Pixel collector for `hayro_jbig2::Decoder`.
+/// The 8 samples of a byte of 8 packed pixels, first pixel in the most
+/// significant bit: a set bit (JBIG2 black) is 0x00, a clear one 0xFF.
+static BYTE_SAMPLES: [[u8; 8]; 256] = {
+    let mut table = [[0xFF; 8]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut bit = 0;
+        while bit < 8 {
+            if byte & (0x80 >> bit) != 0 {
+                table[byte][bit] = 0x00;
+            }
+            bit += 1;
+        }
+        byte += 1;
+    }
+    table
+};
+
+/// Write the pixels of `rows` (JBIG2 words, 1 = black, first pixel in the
+/// most significant bit, bits past `width` ignored) into `out`, `width`
+/// samples a row, which holds 0xFF on entry.
 ///
-/// JBIG2 convention: 0 = white, 1 = black.
-/// `ImageColorSpace::Gray` convention: 0x00 = black, 0xFF = white.
-/// `ImageColorSpace::Mask` convention: 0x00 = paint (== JBIG2 black), 0xFF = transparent.
-///
-/// Both output conventions share the same polarity flip: JBIG2 black (1) → 0x00,
-/// JBIG2 white (0) → 0xFF.  `ImageColorSpace` selection is handled by the caller.
-struct Jbig2Collector {
-    data: Vec<u8>,
-    /// Total expected pixel count — used to cap `push_pixel_chunk` so a stream
-    /// whose run lengths aren't a multiple of 8 doesn't overflow the buffer.
-    n_pixels: usize,
-    /// The page buffer could not be reserved; every pixel is dropped, so
-    /// the collected length falls short and the image is refused.
-    alloc_failed: bool,
-}
-
-impl Jbig2Collector {
-    const fn new(n_pixels: usize) -> Self {
-        Self {
-            data: Vec::new(),
-            n_pixels,
-            alloc_failed: false,
-        }
+/// Both output conventions share one polarity: `ImageColorSpace::Gray`
+/// (0x00 = black) and `ImageColorSpace::Mask` (0x00 = paint) take JBIG2
+/// black (1) to 0x00 and white (0) to 0xFF.
+fn expand_rows<'a>(rows: impl Iterator<Item = &'a [u32]>, width: usize, out: &mut [u8]) {
+    if width == 0 {
+        return;
     }
-
-    /// Reserves the whole page on the first emitted pixel, and reports
-    /// whether the page buffer is held.  The decoder emits only after it
-    /// has allocated the page bitmap, so `n_pixels` — taken from the
-    /// stream's page information segment — is known to be a dimension the
-    /// decoder accepted by the time it is reserved.
-    fn reserve_page(&mut self) -> bool {
-        if self.data.capacity() == 0
-            && !self.alloc_failed
-            && self.n_pixels > 0
-            && let Err(e) = self.data.try_reserve_exact(self.n_pixels)
-        {
-            log::warn!(
-                "image: JBIG2Decode: cannot allocate {} bytes: {e}",
-                self.n_pixels
-            );
-            self.alloc_failed = true;
+    for (row, out) in rows.zip(out.chunks_exact_mut(width)) {
+        for (&word, out) in row.iter().zip(out.chunks_mut(32)) {
+            match word {
+                0 => {}
+                u32::MAX => out.fill(0x00),
+                _ => {
+                    for (byte, out) in word.to_be_bytes().into_iter().zip(out.chunks_mut(8)) {
+                        if byte != 0 {
+                            out.copy_from_slice(&BYTE_SAMPLES[usize::from(byte)][..out.len()]);
+                        }
+                    }
+                }
+            }
         }
-        !self.alloc_failed
-    }
-}
-
-impl Jbig2Decoder for Jbig2Collector {
-    fn push_pixel(&mut self, black: bool) {
-        if self.reserve_page() && self.data.len() < self.n_pixels {
-            self.data.push(if black { 0x00 } else { 0xFF });
-        }
-    }
-
-    fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
-        if !self.reserve_page() {
-            return;
-        }
-        let byte = if black { 0x00 } else { 0xFF };
-        // chunk_count is in 8-pixel chunks; cap to the remaining pixels so that
-        // run lengths that aren't an exact multiple of 8 don't produce a short
-        // buffer (which would cause the caller to discard the image entirely).
-        let remaining = self.n_pixels.saturating_sub(self.data.len());
-        let n = (chunk_count as usize).saturating_mul(8).min(remaining);
-        self.data.extend(std::iter::repeat_n(byte, n));
-    }
-
-    fn next_line(&mut self) {
-        // Row boundary — nothing to do; pixels are already stored flat.
     }
 }
 
@@ -187,33 +162,55 @@ impl Jbig2Decoder for Jbig2Collector {
 mod tests {
     use super::*;
 
-    #[test]
-    fn jbig2_collector_push_pixel_grayscale() {
-        // JBIG2: black=true → Gray 0x00, black=false → Gray 0xFF.
-        let mut c = Jbig2Collector::new(2);
-        Jbig2Decoder::push_pixel(&mut c, true);
-        Jbig2Decoder::push_pixel(&mut c, false);
-        assert_eq!(c.data, [0x00, 0xFF]);
+    /// Expand rows given as strings of `'0'`/`'1'`, one word per 32 pixels,
+    /// with `pad` set past the width.
+    fn expand(rows: &[&str], pad: bool) -> Vec<u8> {
+        let width = rows[0].len();
+        let words: Vec<Vec<u32>> = rows
+            .iter()
+            .map(|r| {
+                let mut row = vec![if pad { u32::MAX } else { 0 }; width.div_ceil(32)];
+                for (x, c) in r.bytes().enumerate() {
+                    let bit = 0x8000_0000 >> (x % 32);
+                    if c == b'1' {
+                        row[x / 32] |= bit;
+                    } else {
+                        row[x / 32] &= !bit;
+                    }
+                }
+                row
+            })
+            .collect();
+        let mut out = vec![0xFF; width * rows.len()];
+        expand_rows(words.iter().map(Vec::as_slice), width, &mut out);
+        out
+    }
+
+    /// The samples of `rows`, pixel by pixel: black (1) is 0x00.
+    fn reference(rows: &[&str]) -> Vec<u8> {
+        rows.iter()
+            .flat_map(|r| r.bytes().map(|c| if c == b'1' { 0x00 } else { 0xFF }))
+            .collect()
     }
 
     #[test]
-    fn jbig2_collector_push_pixel_chunk() {
-        let mut c = Jbig2Collector::new(16);
-        // chunk_count=2 → 16 pixels of white (0xFF each).
-        Jbig2Decoder::push_pixel_chunk(&mut c, false, 2);
-        assert_eq!(c.data.len(), 16);
-        assert!(c.data.iter().all(|&b| b == 0xFF));
-    }
-
-    #[test]
-    fn jbig2_collector_push_pixel_chunk_overrun() {
-        // A chunk whose pixel count overshoots n_pixels (a page width that
-        // is not a multiple of 8) is capped at the page.
-        let mut c = Jbig2Collector::new(10);
-        // chunk_count=2 → 16 pixels, but n_pixels=10 — must cap at 10.
-        Jbig2Decoder::push_pixel_chunk(&mut c, false, 2);
-        assert_eq!(c.data.len(), 10);
-        assert!(c.data.iter().all(|&b| b == 0xFF));
+    fn expand_rows_matches_pixel_by_pixel() {
+        // Widths around the byte and word edges; all-white, all-black and
+        // mixed words and bytes; padding bits set and clear.
+        for width in [1, 7, 8, 9, 31, 32, 33, 64, 70] {
+            let patterns: [&dyn Fn(usize) -> bool; 4] =
+                [&|_| false, &|_| true, &|x| x % 3 == 0, &|x| {
+                    (x / 8) % 2 == 0
+                }];
+            let rows: Vec<String> = patterns
+                .iter()
+                .map(|p| (0..width).map(|x| if p(x) { '1' } else { '0' }).collect())
+                .collect();
+            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+            for pad in [false, true] {
+                assert_eq!(expand(&rows, pad), reference(&rows), "width {width}");
+            }
+        }
     }
 
     #[test]
