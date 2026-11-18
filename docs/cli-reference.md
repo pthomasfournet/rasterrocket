@@ -3,6 +3,7 @@
 ```
 rrocket [OPTIONS] <INPUT> <OUTPUT_PREFIX>
 rrocket --print [OPTIONS] <INPUT>
+rrocket --printer NAME [--print-file PATH] [OPTIONS] <INPUT>
 rrocket --list-printers
 ```
 
@@ -199,7 +200,7 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 | `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the page budget at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
 | `--fax-resolution fine\|standard` | `fine` | Fax lines per inch: 196 (`fine`) or 98 (`standard`). Needs `--fax`. |
-| `--fax-to NUMBER` | | Send the fax document once written, through the operating system's fax service: the CUPS fax queue `--fax-queue` names (`lp -d NAME -o phone=DIAL`), else HylaFAX (`sendfax -n -d DIAL`). Implies `--fax`. The number is dial characters — digits, `+`, `*`, `#`, the pause `,` — and the separators space, `-`, `.`, `(`, `)`, beginning with a digit, `+`, `*` or `#`; the dial string handed to the service drops the separators (`"+1 (555) 010-9999"` dials `+15550109999`). rrocket waits for the service to accept the job, the service's output going to standard error; a refusal or a missing service exits with status 1, naming where the document is. No modem code: dialling is the service's. Refused on Windows, where neither service exists: write the document with `--fax` and send it with Windows Fax and Scan. |
+| `--fax-to NUMBER` | | Send the fax document once written, through the operating system's fax service: the CUPS fax queue `--fax-queue` names (`lp -d NAME -o phone=DIAL`), else HylaFAX (`sendfax -n -d DIAL`). Implies `--fax`. The number is dial characters — digits, `+`, `*`, `#`, the pause `,` — and the separators space, `-`, `.`, `(`, `)`, beginning with a digit, `+`, `*` or `#`; the dial string handed to the service drops the separators (`"+1 (555) 010-9999"` dials `+15550109999`). rrocket waits for the service to accept the job, the service's output going to standard error; a refusal or a missing service exits with status 1, naming where the document is. No modem code: dialling is the service's. Refused on Windows, where neither service exists and Windows documents no way to hand an IPP Fax Out printer the number: write the document with `--fax` and send it with a fax service. |
 | `--fax-queue NAME` | | The CUPS fax queue `--fax-to` submits to: a name without white space or control characters, not beginning with `-`. Needs `--fax-to`. |
 | `--dither METHOD` | | How `--mono` and `--fax` render intermediate grays: `none` (default), a 50% threshold that keeps text, line art and scanned text sharp, or `halftone`, dot patterns that keep photographs and shading legible but also dot text that is gray rather than black (a photographed or scanned page): a 4 × 4 dispersed ordered dither below 300 dpi, a stochastic clustered dot at 300 dpi or more. Needs `--mono` or `--fax`. |
 | `--invert[=WHEN]` | | Invert the page's tones, as a negative, before encoding: `always` (also `--invert` alone), `never` (default; `auto` under `--fax`), or `auto`, only pages reversed out of a flat dark ground — over three fifths of the pixels within one band of 32 luma levels below mid-gray, as light text on a black or dark-coloured ground. A dark photograph or a page of saturated colours spreads over many bands and is left as it is. Applies to every format; with `--gray` / `--mono` the test and the inversion use the luma. The value takes `=`: `--invert auto` reads `auto` as the input file. |
@@ -375,11 +376,12 @@ rrocket --print --output-profile paper.icc --bpc art.pdf
 
 | Flag | Default | Description |
 |---|---|---|
-| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi, or 360 dpi for a page whose 600 dpi canvas would hold more than the 1.8 GB of a 600 MP 8-bit RGB page: at 8 bits a page of more than about 1 667 sq in, larger than A0 or 36 × 44 in; under `--depth 16`, half that area), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. Pages are begun in page order and appended to the spool in page order as they finish, a page once it and every page before it are done; no page is begun more than two per render thread past the first page not yet appended, so a long document is not held in memory. The spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. Refused on Windows, which has no `lp`. |
-| `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`; `--list-printers` lists them. Implies `--print`. When `lp` refuses the job, the message points at `--list-printers`. |
-| `--list-printers` | | List the CUPS destinations `--printer` can name (`lpstat -e`), one per line, the default destination (`lpstat -d`) followed by a tab and `default`, then exit. Takes no input, output prefix or other flag. With no queues, writes nothing to standard output and says so on standard error. Refused on Windows. |
-| `--copies N` | the queue's setting | Copies (1–9999), `lp -n N`. Needs `--print`. |
-| `--duplex long\|short` | the printer's setting | Two-sided printing, the sheet turning on its long or short edge (`-o sides=two-sided-long-edge` / `two-sided-short-edge`). Needs `--print`. |
+| `--print` | | Print the selected pages through the operating system's print service instead of writing files; no `OUTPUT_PREFIX` is given. The pages are rendered at `-r` / `--rx` / `--ry` (default 600 dpi, or 360 dpi for a page whose 600 dpi canvas would hold more than the 1.8 GB of a 600 MP 8-bit RGB page: at 8 bits a page of more than about 1 667 sq in, larger than A0 or 36 × 44 in; under `--depth 16`, half that area), in colour, or gray with `--gray` / `--mono`, for printing (`--purpose print` unless `--purpose` is given), and written as one PDF holding each page as a single image at that resolution, which CUPS's `lp` submits. The queue's filters fit the images to the printer — media and orientation, colour, resolution and two-sided sheets — without rendering the pages again. On Windows the pages go to the printer's driver through GDI instead (see [Printing on Windows](#printing-on-windows)). Pages are begun in page order and appended to the spool in page order as they finish, a page once it and every page before it are done; no page is begun more than two per render thread past the first page not yet appended, so a long document is not held in memory. On Linux and macOS the spool is an anonymous temporary file, readable by no other user and gone however rrocket ends, in `$TMPDIR` when set, else `/var/tmp`; `lp` reads it as its standard input. If any page fails to render, nothing is submitted (on Windows the job is aborted) and the pages not yet started are skipped. rrocket waits for `lp` to accept the job, `lp`'s output going to standard error; a refusal exits with status 1. The job is named after the input file. Refuses `--png`, `--jpeg`, `--tiff`, `--singlefile`, `--fax`, `--ram` / `--ram-path` / `--no-ram`, `--sep`, `--forcenum` and the `--scale-to` flags. PDF input only. |
+| `--printer NAME` | default destination | The CUPS destination (`lp -d NAME`), a queue or `queue/instance`; on Windows a printer's name as `--list-printers` writes it (`"Microsoft Print to PDF"`). `--list-printers` lists them. Implies `--print`. When `lp` refuses the job, the message points at `--list-printers`. |
+| `--print-file PATH` | | Windows: the file a printer that prints to a file writes — one whose port is `PORTPROMPT:` or `FILE:` or a path, as Microsoft Print to PDF and the XPS Document Writer — which it would otherwise ask for in a dialog. Such a printer is refused without it, before anything renders, and it is refused with any other printer and on Linux and macOS. A relative path is taken from the working directory. Implies `--print`. If the job fails, the file is removed. |
+| `--list-printers` | | List the printers `--printer` can name, one per line, the default one followed by a tab and `default`, then exit: the CUPS destinations (`lpstat -e`, the default from `lpstat -d`), or on Windows the local and connected printers (`EnumPrintersW`, the default from `GetDefaultPrinterW`). Takes no input, output prefix or other flag. With no printers, writes nothing to standard output and says so on standard error. |
+| `--copies N` | the queue's setting | Copies (1–9999), `lp -n N`. On Windows the driver makes them, collated, when it says it can make that many collated and keeps them in its settings; otherwise rrocket renders and sends the pages N times in one job, in order (logged at `info`). Needs `--print`. |
+| `--duplex long\|short` | the printer's setting | Two-sided printing, the sheet turning on its long or short edge (`-o sides=two-sided-long-edge` / `two-sided-short-edge`; on Windows `dmDuplex` `DMDUP_VERTICAL` / `DMDUP_HORIZONTAL`). On Windows a printer whose driver does not print two-sided, or drops the setting, is refused before anything renders. Needs `--print`. |
 
 ```bash
 # The queues --printer can name
@@ -390,14 +392,59 @@ rrocket --print -l 4 document.pdf
 
 # Two copies, two-sided, gray, on the queue "Office"
 rrocket --printer Office --copies 2 --duplex long --gray document.pdf
+
+# Windows: Microsoft Print to PDF, writing report-printed.pdf
+rrocket --printer "Microsoft Print to PDF" --print-file report-printed.pdf report.pdf
 ```
 
+### Printing on Windows
+
+On Windows nothing fits the pages to the printer for rrocket, so it does
+what CUPS's filters do, page by page:
+
+- **Paper:** the printer's default paper for the user (there is no
+  `--media`, as on CUPS).
+- **Orientation:** a page wider than tall is printed on the sheet turned to
+  landscape (`dmOrientation`, `ResetDCW` between pages), a page not wider
+  than tall on the upright sheet; mixed sizes and orientations in one job are
+  handled page by page. Where the driver does not turn the sheet, rrocket
+  turns the page a quarter counter-clockwise, its top to the sheet's left
+  edge.
+- **Fit:** a page larger than the printable area (`HORZRES` × `VERTRES`)
+  is scaled down to fit it, keeping its aspect; a smaller page prints at its
+  size. Either is centred on the printable area.
+- **Resolution:** without a resolution flag each page renders at the
+  printer's resolution (`LOGPIXELSX`/`LOGPIXELSY`, the lower of the two), at
+  most the 600 / 360 dpi default above, times the fit scale, so the copy to
+  the device is 1:1; a resolution flag renders at that resolution, and the
+  page is stretched to its place (`HALFTONE`).
+- **Bitmaps:** colour pages go out as 24-bit bitmaps, gray pages as 8-bit
+  ones with a gray palette, `--mono` pages as 1-bit ones; 16-bit pages are
+  rounded to 8 bits, GDI having no 16-bit print bitmap. A page is sent with
+  `StretchDIBits` in bands of at most 16 MiB of bitmap; a band the driver
+  does not draw aborts the job, naming the rows.
+- **Colour:** `--gray` and `--mono` ask the driver for monochrome
+  (`dmColor`); colour pages leave the printer's setting.
+- **Order:** pages are drawn in page order by one thread, which owns the
+  printer's device context; the render threads never touch it.
+
+The job starts before the first page renders and ends after the last; a
+page that fails to render, or a run that ends early, aborts it, and the
+`--print-file` it was writing is removed. rrocket never shows a print dialog.
+Print to PDF writes the file before rrocket exits on the machine tested.
+
 Printing is tested through a CUPS `everywhere` queue on `ippeveprinter`, a
-virtual IPP printer, on Linux; no physical printer has been tested, so
+virtual IPP printer, on Linux, and on Windows 11 through Microsoft Print to
+PDF with `--print-file` (A4 and Letter paper, mixed page sizes and
+orientations, the fit and centring checked by rendering the PDF it wrote,
+`--copies 2` sent twice). No physical printer has been tested, so
 `--duplex` back-side orientation and `--copies` on a printer without copy
-support are untested. `--fax-to` is tested only against a stand-in `sendfax` and by checking the
-`lp` command line it builds; no fax has been sent through a CUPS fax queue or
-HylaFAX.
+support are untested, and on Windows duplex and driver-made copies are
+untested (Print to PDF prints one-sided, one copy at a time). PDF
+pass-through to IPP printers is not used on Windows: every printer goes
+through GDI. `--fax-to` is tested only against a stand-in `sendfax` and by
+checking the `lp` command line it builds; no fax has been sent through a
+CUPS fax queue or HylaFAX.
 
 ---
 

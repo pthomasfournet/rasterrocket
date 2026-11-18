@@ -20,7 +20,8 @@ cd rasterrocket && cargo build --release -p rasterrocket-cli
 Besides image files (PPM, PGM, PBM, PNG, JPEG, TIFF; 16-bit with `--depth 16`,
 from PDFs and comic archives alike,
 CMYK TIFF and JPEG with `--cmyk`), `rrocket` prints
-through the system's print service (`--print`, CUPS) and writes or sends fax
+through the system's print service (`--print`: CUPS on Linux and macOS, GDI
+on Windows) and writes or sends fax
 documents (`--fax`, `--fax-to`); see the [CLI reference](docs/cli-reference.md#printing).
 Pages larger than memory, such as large-format posters and roll banners,
 render in horizontal bands written as they complete (`--band-mib`,
@@ -574,6 +575,7 @@ is **untested**: it is expected to work, nothing more.
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
 | GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
+| Windows 11 Pro (build 26200) on the i7-8700K machine | `--print` through GDI to Microsoft Print to PDF with `--print-file`, A4 and Letter |
 
 **Untested:**
 - **M-series Macs** (M1–M4 and later): no hands-on run; only CI's

@@ -90,7 +90,18 @@ tested. Please report what you find.
   Intel's later drivers for that GPU report Vulkan 1.3 and are untested, as
   are other GPUs under Windows and therefore `--gpu-devices` across two
   Windows devices.
-- **Printing and fax:** `--print` and `--fax-to` are refused: both submit
-  through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.
-  Render to files and print them from an application, or write a fax
-  document with `--fax` and send it with Windows Fax and Scan.
+- **Printing:** `--print` sends the pages to the printer's driver through
+  GDI, fitting, centring and turning each page to the sheet itself (see
+  [Printing on Windows](../cli-reference.md#printing-on-windows));
+  `--list-printers` lists the local and connected printers. A printer that
+  prints to a file, such as Microsoft Print to PDF, needs `--print-file
+  PATH`, which names the file instead of a save dialog:
+  `rrocket --printer "Microsoft Print to PDF" --print-file out.pdf in.pdf`.
+  Tested on Windows 11 Pro (build 26200) through Microsoft Print to PDF;
+  no physical printer has been tested on Windows. The tests that print to
+  it skip, saying so, where it is missing; `RR_REQUIRE_PRINT_TO_PDF=1` makes
+  that a failure.
+- **Fax:** `--fax-to` is refused: it submits through CUPS's `lp` or
+  HylaFAX's `sendfax`, which Windows does not have, and Windows documents
+  no way to hand an IPP Fax Out printer the number. Write the document with
+  `--fax` and send it with a fax service.

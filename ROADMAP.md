@@ -2851,8 +2851,8 @@ Vector output (PostScript, SVG or PDF, as `pdftocairo` writes) and dynamic XFA f
 
 **Status: in progress; what exists shipped in v2.1.0.** The four fax layers are on
 master (2026-11-01), with `--jpeg` and `--jpegopt` (as `pdftoppm -jpeg`,
-colour or gray), and printing through CUPS (2026-11-04); the Windows
-spooler is not started.
+colour or gray), and printing through CUPS (2026-11-04); printing
+through GDI on Windows is on master, unreleased (2026-11-18).
 
 **Printing through the OS spooler.** No device or driver code of our own.
 **Done on Linux and macOS:** `rrocket --print [--printer NAME] [--copies N]
@@ -2870,7 +2870,9 @@ resolution, landscape pages are turned, and the page images round-trip
 pixel-exact. `--list-printers` lists the CUPS queues (`lpstat -e`), the
 default one marked. **Untested:** printing from macOS, and any physical printer
 (back-side orientation under `--duplex`, `--copies` on a printer without copy
-support). **Not done:** the Win32 spooler, behind a feature, on Windows.
+support). **Done on Windows (unreleased):** GDI printing, with
+`--print-file` for printers that print to a file (see Current status).
+**Not done:** PDF pass-through to IPP printers on Windows, and Windows fax.
 Parity gap: poppler's `pdftocairo` has `-print` / `-printer` on Windows,
 and pdfium renders into a Windows printer context.
 
@@ -2945,7 +2947,7 @@ derived from it for vertical forms.
 ## Current status (2026-11-17)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
-Phase 13 above, of which the Windows spooler is still to do; Phase 14 shipped in v2.1.0.
+Phase 13 above, of which Windows PDF pass-through and fax are still to do; Phase 14 shipped in v2.1.0.
 
 **Released in v2.1.0 (2026-11-04), since v2.0.0 (2026-10-31):** Phase 13's fax output,
 `--print` through CUPS and `--jpeg` / `--jpegopt`, Phase 14's text shaping, the font-substitution
@@ -3383,6 +3385,46 @@ The machine's Intel UHD 630 has driver 26.20.100.7642 (January 2020),
 which reports Vulkan 1.1; the backend needs 1.3, so the device is listed
 as unusable and skipped, and `--gpu-devices` across two Windows devices,
 like Intel's later 1.3 drivers, is untested.
+
+**Unreleased on master: `--print` on Windows.** `--print`, `--printer`,
+`--copies`, `--duplex` and `--list-printers` work on Windows, through GDI
+with `windows-sys` and no feature flag: `EnumPrintersW` and
+`GetDefaultPrinterW` list the printers; the driver's DEVMODE
+(`DocumentPropertiesW`) carries copies, two-sided printing, monochrome for
+gray pages and each page's orientation, and is read back after the driver
+merged it; `StartDocW`, then per page `StartPage`, `StretchDIBits` in bands
+of at most 16 MiB of bitmap and `EndPage`, then `EndDoc`, all on the thread
+that appends pages in order. rrocket does what CUPS's filters did: a page
+wider than tall takes the sheet turned to landscape (`ResetDCW` between
+pages; the page is turned itself where the driver does not turn the
+sheet), a page larger than the printable area is fitted keeping its
+aspect, a smaller one prints at its size, either centred, and each page
+renders at the printer's resolution within the 600 / 360 dpi default,
+times its fit scale, so the copy is 1:1. `--duplex` on a printer that does
+not print two-sided (`DC_DUPLEX`) or whose driver dropped it is refused;
+`--copies N` beyond what the driver makes collated (`DC_COPIES`,
+`DC_COLLATE`, or dropped in its answer) is sent N times in one job. The new
+`--print-file PATH` names the file of a printer that prints to one (port
+`PORTPROMPT:`, `FILE:` or a path), via `DOCINFO.lpszOutput`, so Microsoft
+Print to PDF runs without its save dialog; such a printer is refused without
+it, and it is refused for any other printer and on CUPS. A failed job is
+aborted and its file removed. `--fax-to` stays refused on Windows, its
+message naming the missing IPP Fax Out mechanism. `PdfPage` gained
+`size`, `is_rgb`, `depth`, `size_pts` and `rows` (the image read back), and
+the print module is split into the shared spool, `cups`, the pure GDI rules
+(`gdi`, unit-tested on every OS) and the Windows FFI. Tested on Windows 11
+Pro (build 26200) through Print to PDF: no dialog over SSH; on A4 and Letter
+a four-page job of A5, A3 and two landscape pages comes out with the source
+page count, sheets of 595 × 842 / 612 × 792 pt (landscape pages on turned
+sheets), and, re-rendered, ink fitted, at 100 % for the small pages and
+centred within 2 pt; `--copies 2` writes the pages twice in order (the
+driver claims one copy and no duplex, so `--duplex` is refused there); a
+printed `corpus-01` page matches the source's render within a pixel at
+600 dpi. The tests skip, saying so, where Print to PDF is missing, unless
+`RR_REQUIRE_PRINT_TO_PDF=1`; CI's Windows leg lists the runner's printers
+and runs them. Untested: any physical printer on Windows (driver copies,
+duplex, back sides); PDF pass-through to IPP printers is not built (a spike
+on calling it from an unpackaged process comes first).
 
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
