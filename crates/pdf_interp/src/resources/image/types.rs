@@ -265,6 +265,11 @@ pub enum ImageData {
     Gpu(gpu::cache::CachedImage),
 }
 
+/// The reason bilevel samples have no bytes: their expansion, one byte a
+/// sample, cannot be allocated.
+pub(crate) const BILEVEL_EXPANSION_REFUSED: &str =
+    "bilevel samples cannot be expanded to bytes: allocation refused";
+
 impl ImageData {
     /// Borrow the host-resident pixel bytes if this is a CPU-backed image.
     /// Returns `None` for variants whose pixels live in device memory, and
@@ -277,6 +282,22 @@ impl ImageData {
             Self::Cpu16(_) => None,
             #[cfg(feature = "cache")]
             Self::Gpu(_) => None,
+        }
+    }
+
+    /// The host-resident bytes ([`Self::as_cpu`]), or the reason there are
+    /// none.
+    ///
+    /// # Errors
+    /// The reason: 16-bit samples, device-resident samples, or bilevel
+    /// samples whose bytes cannot be allocated.
+    pub(crate) fn cpu_bytes(&self) -> Result<&[u8], &'static str> {
+        match self {
+            Self::Cpu(bytes) => Ok(bytes.as_slice()),
+            Self::Bilevel(bits) => bits.samples().ok_or(BILEVEL_EXPANSION_REFUSED),
+            Self::Cpu16(_) => Err("16-bit samples where 8-bit samples are needed"),
+            #[cfg(feature = "cache")]
+            Self::Gpu(_) => Err("pixels device-resident but GPU dispatch unavailable"),
         }
     }
 
@@ -298,12 +319,11 @@ impl ImageData {
     /// The host-resident bytes of a [`Self::Cpu`] image to modify, those
     /// of a [`Self::Bilevel`] image expanded first; `None` for any other
     /// variant, or when the expanded bytes cannot be allocated, which
-    /// leaves the image empty.
+    /// leaves the bilevel image as it is.
     pub(crate) fn as_cpu_mut(&mut self) -> Option<&mut Vec<u8>> {
-        if matches!(self, Self::Bilevel(_))
-            && let Self::Bilevel(bits) = std::mem::replace(self, Self::Cpu(Vec::new()))
-        {
-            *self = Self::Cpu(bits.into_samples()?);
+        if let Self::Bilevel(bits) = self {
+            let bytes = bits.take_samples()?;
+            *self = Self::Cpu(bytes);
         }
         match self {
             Self::Cpu(bytes) => Some(bytes),

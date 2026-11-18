@@ -279,10 +279,7 @@ const ALLOCATION_FAILED: &str = "allocation failed";
 /// overflows `usize`, or the buffer is short: a decode failure, never
 /// silently-wrong alpha.
 fn host_samples(desc: &ImageDescriptor, components: usize) -> Result<&[u8], String> {
-    let bytes = desc
-        .data
-        .as_cpu()
-        .ok_or("decoded samples are not host-resident")?;
+    let bytes = desc.data.cpu_bytes()?;
     let expected = (desc.width as usize)
         .checked_mul(desc.height as usize)
         .and_then(|n| n.checked_mul(components))
@@ -465,16 +462,7 @@ pub(super) fn remove_matte(
         );
         return;
     }
-    // Un-matting rewrites the samples, which bilevel samples cannot hold.
-    if matches!(img.data, ImageData::Bilevel(_)) && img.data.as_cpu_mut().is_none() {
-        log::warn!("image: /Matte: the expanded samples cannot be allocated; drawing as stored");
-        return;
-    }
     match &mut img.data {
-        ImageData::Cpu(bytes) => {
-            let rgb = cs.convert_to_rgb(doc, target, matte);
-            unmatte(bytes, mask.alpha(), &rgb[..channels]);
-        }
         ImageData::Cpu16(samples) => {
             let rgb = cs.convert::<u16>(doc, target, matte);
             let widened: Vec<u16>;
@@ -486,10 +474,22 @@ pub(super) fn remove_matte(
             };
             unmatte(samples, alpha, &rgb[..channels]);
         }
-        ImageData::Bilevel(_) => {}
         #[cfg(feature = "cache")]
         ImageData::Gpu(_) => {
             log::warn!("image: /Matte needs host-resident samples; drawing as stored");
+        }
+        // Un-matting rewrites the samples, so bilevel samples are expanded
+        // to bytes first.
+        data => {
+            if let Some(bytes) = data.as_cpu_mut() {
+                let rgb = cs.convert_to_rgb(doc, target, matte);
+                unmatte(bytes, mask.alpha(), &rgb[..channels]);
+            } else {
+                log::warn!(
+                    "image: /Matte: {}; drawing as stored",
+                    super::types::BILEVEL_EXPANSION_REFUSED
+                );
+            }
         }
     }
 }

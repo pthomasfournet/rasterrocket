@@ -131,10 +131,18 @@ impl Bilevel {
 
     /// The samples, one byte each ([`Self::samples`]), owned.
     pub(crate) fn into_samples(mut self) -> Option<Vec<u8>> {
-        if let Some(bytes) = self.bytes.take() {
-            return bytes;
+        self.take_samples()
+    }
+
+    /// The samples, one byte each ([`Self::samples`]), moved out of the
+    /// expansion kept by [`Self::samples`] or expanded afresh; the bits are
+    /// left intact, so a `None` (the bytes cannot be allocated) loses
+    /// nothing.
+    pub(crate) fn take_samples(&mut self) -> Option<Vec<u8>> {
+        match self.bytes.take() {
+            Some(Some(bytes)) => Some(bytes),
+            _ => self.expand(),
         }
-        self.expand()
     }
 
     /// The number of samples, `width × height`.
@@ -240,6 +248,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn take_samples_keeps_the_bits() {
+        let mut b = Bilevel::from_rows(&["0110"], 0x00, 0xFF);
+        assert_eq!(b.samples().unwrap(), [0xFF, 0x00, 0x00, 0xFF]);
+        assert_eq!(b.take_samples().unwrap(), [0xFF, 0x00, 0x00, 0xFF]);
+        assert_eq!(b.take_samples().unwrap(), [0xFF, 0x00, 0x00, 0xFF]);
     }
 
     #[test]

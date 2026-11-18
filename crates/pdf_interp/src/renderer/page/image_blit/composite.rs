@@ -32,15 +32,17 @@ impl PageRenderer<'_> {
     /// resident.
     ///
     /// # Errors
-    /// The reason, when the stencil's samples cannot hold its dimensions.
+    /// The reason, when the stencil's samples have no bytes or cannot hold
+    /// its dimensions.
     pub(super) fn fill_stencil_with_pattern(
         &mut self,
         img: &crate::resources::ImageDescriptor,
         grid: &SampleGrid,
     ) -> Result<bool, String> {
-        let Some(bytes) = img.data.as_cpu() else {
+        if !img.data.is_host() {
             return Ok(false);
-        };
+        }
+        let bytes = img.data.cpu_bytes()?;
         verify_sample_len(img, bytes.len())?;
         let Some(rect) = PixelRect::new(grid.x0, grid.y0, grid.x1, grid.y1) else {
             return Ok(true);
@@ -99,17 +101,11 @@ impl PageRenderer<'_> {
         }
 
         // CPU path: needs host-resident pixels.
-        let wide = img.data.as_cpu16();
-        let bytes = img.data.as_cpu();
-        let len = match (wide, bytes) {
-            (Some(wide), _) => wide.len(),
-            (None, Some(bytes)) => bytes.len(),
-            // Decoded pixels exist but are device-resident with no GPU
-            // dispatch available to blit them — unrenderable, not absent.
-            (None, None) => {
-                return Err("pixels device-resident but GPU dispatch unavailable".to_owned());
-            }
+        let (wide, bytes) = match img.data.as_cpu16() {
+            Some(wide) => (Some(wide), None),
+            None => (None, Some(img.data.cpu_bytes()?)),
         };
+        let len = wide.map_or_else(|| bytes.map_or(0, <[u8]>::len), <[u16]>::len);
         verify_sample_len(img, len)?;
         let mask = match mask {
             Some((m, mask_ctm)) => {
