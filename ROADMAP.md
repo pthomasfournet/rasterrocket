@@ -3374,6 +3374,26 @@ not decode on both paths, most failing on the device, POC, PPM, PPT and
 SOP among them, and decode on the CPU after a warning, as before); it also
 reads `corpus-10`'s codestreams, all declined. Verified on the RTX 5070 only.
 
+**Unreleased on master: an attached nvJPEG2000 decoder declines reduced
+draws.** Under `--backend cuda` the attached decoder was offered every
+`JPXDecode` draw, including one at half the image's size or less on both
+axes, which the CPU decoder decodes at a reduced resolution level: the
+device decoded the full resolution and the host resampled it, so the page
+differed. This, not the wavelet above, was `corpus-10`'s difference at
+150 dpi (up to 19 levels on 571 of 576 pages): with the draw fix alone and
+9-7 still taken, all 576 pages are identical and no image reaches the
+device. The draw rule `Auto` applied before the decoder is built
+(`xobject_takes_device_jpx`) now applies to an attached decoder too, and
+the device decode is used only when its dimensions are those of the CPU
+decode at the draw's level, else the CPU decodes, with a one-time warning
+(`Decline::Reduced`). A device test checks draws at, below and above half
+size against the CPU decode. `--backend cuda` against `--backend cpu` at
+150 dpi, RGB and gray, is byte-identical on every page of the 16 fixtures
+(3 858 pages) and of three archive scans with 5-3 images, which the device
+decodes (872 pages; 361 device decodes in each mode), and on
+`corpus-10`'s first 64 pages at 300 dpi, whose 9-7 images are declined.
+Verified on the RTX 5070 only.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

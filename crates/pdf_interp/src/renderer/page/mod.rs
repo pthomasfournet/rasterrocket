@@ -150,12 +150,12 @@ use gpu::nvjpeg2k::NvJpeg2kDecoder;
 #[cfg(feature = "nvjpeg2k")]
 #[derive(Clone, Copy)]
 enum Nvjpeg2kSupply {
-    /// The attached decoder, if any, is offered every decode.
+    /// The attached decoder, if any, is offered the draws
+    /// `PageRenderer::nvjpeg2k_offered` selects.
     Attached,
-    /// The decoder is offered only the draws
-    /// `PageRenderer::nvjpeg2k_offered` selects, and is obtained from the
-    /// source, while it is `Some`, by the first decode of theirs that uses
-    /// it and finds none attached.
+    /// The decoder is offered the draws `PageRenderer::nvjpeg2k_offered`
+    /// selects, and is obtained from the source, while it is `Some`, by
+    /// the first decode of theirs that uses it and finds none attached.
     OnDemand(Option<crate::resources::image::Jpeg2kSource>),
 }
 

@@ -100,19 +100,17 @@ impl PageRenderer<'_> {
     }
 
     /// Whether the decode of image `XObject` `name` drawn at `draw_size`
-    /// is offered the GPU JPEG 2000 decoder (see
-    /// [`Self::set_nvjpeg2k_source`]).  Without a source every decode is
-    /// offered it.
+    /// is offered the GPU JPEG 2000 decoder, attached or from a source
+    /// (see [`Self::set_nvjpeg2k_source`]): a `JPXDecode` image of at
+    /// least the supply's threshold whose draw the CPU decodes at full
+    /// resolution, the device decoding only at full resolution.
     #[cfg(feature = "nvjpeg2k")]
     pub(super) fn nvjpeg2k_offered(&self, name: &[u8], draw_size: Option<(u32, u32)>) -> bool {
-        match self.nvjpeg2k_supply {
-            super::Nvjpeg2kSupply::Attached => true,
-            super::Nvjpeg2kSupply::OnDemand(_) => self.resources.xobject_takes_device_jpx(
-                name,
-                draw_size,
-                self.nvjpeg2k_supply.jpx_threshold(),
-            ),
-        }
+        self.resources.xobject_takes_device_jpx(
+            name,
+            draw_size,
+            self.nvjpeg2k_supply.jpx_threshold(),
+        )
     }
 
     /// Detach and return the nvJPEG decoder so the caller can reuse it.

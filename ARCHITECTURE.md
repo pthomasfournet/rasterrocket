@@ -853,9 +853,10 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   `GPU_JPEG2K_ATTACHED_THRESHOLD_PX` (2 097 152) for the decoder `ForceCuda`
   attaches, or `GPU_JPEG2K_THRESHOLD_PX` (dormant: `u32::MAX`, so no
   decoder is built) under `Auto`; `PDF_RASTER_JPX_THRESHOLD` overrides both;
-  under `Auto` only when the draw
-  does not reduce the image to half its size or less on both axes, and the
-  thread's decoder is then built on demand
+  under either only when the draw does not reduce the image to half its
+  size or less on both axes (the CPU decoder then skips a resolution level
+  the device would decode), and under `Auto` the thread's decoder is then
+  built on demand
 - ICC CMYK→RGB: with a GPU backend in the session, an image of at least
   `GPU_ICC_CLUT_THRESHOLD` pixels (128 000; `PDF_RASTER_ICC_CLUT_THRESHOLD`
   overrides) whose conversion is tabulated converts through the table's

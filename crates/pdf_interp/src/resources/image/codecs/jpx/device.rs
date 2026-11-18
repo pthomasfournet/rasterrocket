@@ -75,6 +75,9 @@ pub(super) enum Decline {
     /// integers before they are widened to 16 bits, where the CPU widens
     /// the reconstructed values.
     Irreversible,
+    /// A draw the CPU decodes at a reduced resolution level, of other
+    /// dimensions than the device's full-resolution decode.
+    Reduced,
 }
 
 impl Decline {
@@ -92,6 +95,7 @@ impl Decline {
             Self::NotPlain(N::SubSampled) => 7,
             Self::CodeBlockStyle(_) => 8,
             Self::Irreversible => 9,
+            Self::Reduced => 10,
         };
         1 << bit
     }
@@ -103,6 +107,7 @@ impl std::fmt::Display for Decline {
             Self::NotPlain(why) => why.fmt(f),
             Self::CodeBlockStyle(style) => write!(f, "code-block style {style:#04x}"),
             Self::Irreversible => f.write_str("the irreversible 9-7 wavelet"),
+            Self::Reduced => f.write_str("a draw decoded at a reduced resolution level"),
         }
     }
 }
@@ -155,12 +160,14 @@ pub(super) fn report(why: &Decline) {
 /// Decode the codestream `data` of a `pdf_w × pdf_h` image dictionary on
 /// the device, obtaining the decoder from `device` first: into 8-bit
 /// samples, or with `wide` into 16-bit ones, each component's samples
-/// widened from its precision as the CPU path widens them.  `None`, after
-/// a warning, when no decoder is available or the decode fails; the
-/// caller decodes on the CPU.
+/// widened from its precision as the CPU path widens them.  `None` when
+/// no decoder is available, and after a warning when the decode fails or
+/// its dimensions are not `cpu_size`, those of the CPU decode at the
+/// draw's resolution level; the caller decodes on the CPU.
 pub(super) fn decode(
     data: &[u8],
     (pdf_w, pdf_h): (u32, u32),
+    cpu_size: (u32, u32),
     wide: bool,
     device: &mut DeviceJpx<'_>,
 ) -> Option<Samples> {
@@ -192,6 +199,10 @@ pub(super) fn decode(
             return None;
         }
     };
+    if (width, height) != cpu_size {
+        report(&Decline::Reduced);
+        return None;
+    }
     if width != pdf_w || height != pdf_h {
         log::debug!(
             "image: JPXDecode: the image dictionary says {pdf_w}×{pdf_h} and nvJPEG2000 \
@@ -460,6 +471,7 @@ mod tests {
             Decline::NotPlain(N::SubSampled),
             Decline::CodeBlockStyle(1),
             Decline::Irreversible,
+            Decline::Reduced,
         ];
         let union = all.iter().fold(0u16, |acc, d| {
             assert_eq!(acc & d.kind(), 0, "{d}");
@@ -525,7 +537,7 @@ mod tests {
             let (w, h) = (img.width(), img.height());
             let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).expect("CPU decode");
             let mut device = DeviceJpx::new(&mut decoder, None, 0).expect("a decoder");
-            let gpu = decode(bytes, (w, h), true, &mut device).expect("device decode");
+            let gpu = decode(bytes, (w, h), (w, h), true, &mut device).expect("device decode");
             let (ImageData::Cpu16(cpu), ImageData::Cpu16(gpu)) = (&cpu.data, &gpu.data) else {
                 panic!("{name}: 16-bit samples on both paths");
             };
@@ -670,7 +682,7 @@ mod tests {
         };
         let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).ok()?;
         let mut device = DeviceJpx::new(decoder, None, 0).expect("a decoder");
-        let gpu = decode(bytes, (w, h), false, &mut device)?;
+        let gpu = decode(bytes, (w, h), (w, h), false, &mut device)?;
         let (ImageData::Cpu(cpu), ImageData::Cpu(gpu)) = (&cpu.data, &gpu.data) else {
             panic!("8-bit samples on both paths");
         };
@@ -764,5 +776,39 @@ mod tests {
             );
         }
         assert!(taken >= 20, "{taken} codestreams taken");
+    }
+
+    /// A draw at half the image's size or less, which the CPU decodes at a
+    /// reduced resolution level, returns the CPU's samples with a decoder
+    /// attached; a larger draw decodes on the device, to the same samples.
+    /// Needs a CUDA device.
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn a_draw_the_cpu_decodes_reduced_returns_the_cpu_samples() {
+        use crate::resources::image::ImageData;
+        let bytes = include_bytes!("../../../../../../jpeg2000/tests/streams/mct_rct.j2k");
+        let opts = super::super::JpxOptions {
+            indices: false,
+            smask_in_data: 0,
+            matte: None,
+            colour_key: false,
+            wide: false,
+            channels: None,
+        };
+        let mut decoder =
+            Some(NvJpeg2kDecoder::new(0).expect("gpu-validation needs a CUDA device"));
+        for draw in [(64, 48), (40, 30), (65, 49), (128, 96)] {
+            let cpu = super::super::decode_jpx(bytes, 128, 96, Some(draw), &opts, None)
+                .expect("CPU decode");
+            let mut device = DeviceJpx::new(&mut decoder, None, 0).expect("a decoder");
+            let got =
+                super::super::decode_jpx(bytes, 128, 96, Some(draw), &opts, Some(&mut device))
+                    .expect("decode");
+            assert_eq!((got.width, got.height), (cpu.width, cpu.height), "{draw:?}");
+            let (ImageData::Cpu(cpu), ImageData::Cpu(got)) = (&cpu.data, &got.data) else {
+                panic!("8-bit samples");
+            };
+            assert!(cpu == got, "{draw:?}: the samples differ");
+        }
     }
 }

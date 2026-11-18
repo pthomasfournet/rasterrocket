@@ -17,8 +17,9 @@ pub(crate) use device::{DeviceJpx, Jpeg2kSource};
 ///
 /// When the `nvjpeg2k` feature is active and `gpu` is `Some`, an image of
 /// at least `gpu`'s threshold in pixels whose codestream nvJPEG2000
-/// reconstructs as the CPU decoder does (`device::takes`), and which
-/// holds all the tile data its headers declare, is decoded on the device,
+/// reconstructs as the CPU decoder does (`device::takes`), which holds
+/// all the tile data its headers declare, and whose draw the CPU decodes
+/// at full resolution, is decoded on the device,
 /// the decoder being obtained from `gpu` only then.  Every
 /// other image, and one whose device decode fails, decodes on the CPU; a
 /// codestream the device does not take is reported (`device::report`).
@@ -95,7 +96,10 @@ pub(in crate::resources::image) fn decode_jpx(
             // the packets present and judges the loss (`judged`).
             Ok(()) if !survey.completeness.is_complete() => {}
             Ok(()) => {
-                if let Some(mut samples) = device::decode(data, (pdf_w, pdf_h), wide, device) {
+                let cpu_size = (img.width(), img.height());
+                if let Some(mut samples) =
+                    device::decode(data, (pdf_w, pdf_h), cpu_size, wide, device)
+                {
                     samples.embedded_profile = embedded_profile;
                     return Ok(samples);
                 }
