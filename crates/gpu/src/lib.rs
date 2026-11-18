@@ -28,6 +28,7 @@
 //!   and Intel iGPU/discrete hardware.  Requires `libva.so.2` and `libva-drm.so.2`
 //!   at link time.
 
+#[cfg(any(feature = "gpu-deskew", feature = "nvjpeg2k"))]
 pub(crate) mod cuda;
 
 pub mod backend;

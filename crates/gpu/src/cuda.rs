@@ -9,16 +9,12 @@ use std::ptr;
 
 // ── CUDA driver API (libcuda.so) ──────────────────────────────────────────────
 
-/// Opaque CUDA stream handle (`CUstream` / `cudaStream_t` — same ABI on Linux).
+/// Opaque CUDA stream handle (`CUstream` / `cudaStream_t` — the same ABI).
 pub(crate) type CUstream = *mut c_void;
 
 /// Opaque CUDA context handle (`CUcontext`).
 pub(crate) type CUcontext = *mut c_void;
 
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 unsafe extern "C" {
     pub(crate) fn cuInit(flags: u32) -> i32;
     pub(crate) fn cuDeviceGet(device: *mut i32, ordinal: i32) -> i32;
@@ -32,10 +28,6 @@ unsafe extern "C" {
 
 // ── CUDA runtime API (libcudart.so) ──────────────────────────────────────────
 
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 unsafe extern "C" {
     fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> i32;
     fn cudaFree(dev_ptr: *mut c_void) -> i32;
@@ -48,18 +40,10 @@ unsafe extern "C" {
 /// The pointer is always non-null after successful construction (enforced by
 /// `alloc`).  Freed on drop; failures are logged via `log::warn!` since they
 /// cannot be propagated from `Drop`.
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 pub(crate) struct DeviceBuf {
     pub ptr: *mut c_void,
 }
 
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 impl DeviceBuf {
     /// Allocate `size` bytes of device memory on the current CUDA device.
     ///
@@ -100,10 +84,6 @@ unsafe impl Send for DeviceBuf {}
 // ── Init helper ───────────────────────────────────────────────────────────────
 
 /// CUDA driver error: which init step failed and the raw driver error code.
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 #[derive(Debug)]
 pub(crate) struct CudaInitError {
     /// Name of the CUDA driver call that returned non-zero.
@@ -117,10 +97,6 @@ pub(crate) struct CudaInitError {
 }
 
 /// Successful result of [`init_primary_ctx_and_stream`].
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 pub(crate) struct CudaInit {
     /// Retained primary CUDA context for `device`.
     pub cu_ctx: CUcontext,
@@ -155,10 +131,6 @@ pub(crate) struct CudaInit {
 /// Panics if `cuDevicePrimaryCtxRetain` or `cuStreamCreate` reports success
 /// but returns a null handle — this indicates a CUDA driver bug and cannot be
 /// triggered by valid input or malformed PDFs.
-#[cfg_attr(
-    not(any(feature = "gpu-deskew", feature = "nvjpeg2k")),
-    allow(dead_code)
-)]
 pub(crate) fn init_primary_ctx_and_stream(device_ordinal: i32) -> Result<CudaInit, CudaInitError> {
     // Step 1 — load the CUDA driver.  cuInit is idempotent: calling it on a
     // thread that already initialised CUDA is a no-op returning CUDA_SUCCESS.
