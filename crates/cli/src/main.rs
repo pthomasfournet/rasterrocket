@@ -278,6 +278,9 @@ fn main() -> ExitCode {
         // Page errors are reported whether or not the spool failed.
         let pages_failed = !errors.is_empty();
         let status = diagnostics::report_errors(errors, &args);
+        if print::interrupted() {
+            return fail("nothing printed: interrupted; the print job is aborted");
+        }
         if let Some(e) = spool_error {
             return fail(format_args!(
                 "nothing printed: the print job was not written: {e}"

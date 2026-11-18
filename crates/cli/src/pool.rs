@@ -11,10 +11,15 @@ use std::collections::BTreeMap;
 use std::ops::{ControlFlow, Deref};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 /// How many jobs per pool thread may be begun past the first job whose
 /// outcome has not been reported.
 pub(crate) const JOBS_AHEAD_PER_THREAD: usize = 2;
+
+/// How often [`run_in_order_until`], waiting for an outcome, asks whether
+/// the run is cancelled.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// The page-render thread pool.  Dropping it destroys every worker's GPU
 /// thread state (see [`pdf_raster::release_gpu_thread_state`]); the pool is
@@ -100,7 +105,23 @@ pub(crate) fn run_in_order<J: Send, T: Send>(
     pool: &rayon::ThreadPool,
     jobs: impl IntoIterator<Item = J>,
     work: impl Fn(J) -> T + Sync,
+    report: impl FnMut(usize, T) -> ControlFlow<()>,
+) -> Vec<T> {
+    run_in_order_until(pool, jobs, work, report, || false)
+}
+
+/// [`run_in_order`], stopped as by a [`ControlFlow::Break`] of `report`
+/// once `cancelled` returns `true`.  `cancelled` is asked on the calling
+/// thread before jobs are taken and at least every [`CANCEL_POLL`] while
+/// the driver waits for an outcome, so a cancellation is seen while jobs
+/// run; the caller tells a cancelled run from a finished one by its own
+/// state.
+pub(crate) fn run_in_order_until<J: Send, T: Send>(
+    pool: &rayon::ThreadPool,
+    jobs: impl IntoIterator<Item = J>,
+    work: impl Fn(J) -> T + Sync,
     mut report: impl FnMut(usize, T) -> ControlFlow<()>,
+    cancelled: impl Fn() -> bool,
 ) -> Vec<T> {
     let ahead = pool.current_num_threads().max(1) * JOBS_AHEAD_PER_THREAD;
     let mut jobs = jobs.into_iter();
@@ -113,6 +134,10 @@ pub(crate) fn run_in_order<J: Send, T: Send>(
         let (mut started, mut received, mut reported) = (0usize, 0usize, 0usize);
         let mut broken = false;
         loop {
+            if !broken && cancelled() {
+                broken = true;
+                stop.store(true, Ordering::Relaxed);
+            }
             while !broken && started < reported + ahead {
                 let Some(job) = jobs.next() else { break };
                 let tx = tx.clone();
@@ -136,9 +161,12 @@ pub(crate) fn run_in_order<J: Send, T: Send>(
                 return;
             }
             // Every spawned slot sends exactly once, and `tx` outlives the
-            // loop, so `recv` returns while `received < started`.
-            let Ok((index, outcome)) = rx.recv() else {
-                return;
+            // loop, so the channel is not disconnected while
+            // `received < started`.
+            let (index, outcome) = match rx.recv_timeout(CANCEL_POLL) {
+                Ok(received) => received,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
             received += 1;
             match outcome {
@@ -169,7 +197,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{JOBS_AHEAD_PER_THREAD, run_in_order};
+    use super::{JOBS_AHEAD_PER_THREAD, run_in_order, run_in_order_until};
 
     const THREADS: usize = 2;
 
@@ -258,6 +286,45 @@ mod tests {
         assert!(unreported.is_sorted(), "{unreported:?}");
         assert!(unreported.iter().all(|&job| (1..taken).contains(&job)));
         assert_eq!(unreported.len() + 1, ran.into_inner());
+    }
+
+    /// A cancellation while job 2 runs: at most one window of jobs is
+    /// taken, nothing is reported after it is seen, and the outcomes of the
+    /// jobs that ran and were not reported come back in job order.
+    #[test]
+    fn a_cancellation_stops_taking_and_reporting_jobs() {
+        use std::sync::atomic::AtomicBool;
+
+        let n = 100;
+        let (cancel, taken) = (AtomicBool::new(false), AtomicUsize::new(0));
+        let jobs = (0..n).inspect(|_| {
+            let _ = taken.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut reported = Vec::new();
+        let unreported = run_in_order_until(
+            &pool(),
+            jobs,
+            |job| {
+                if job == 2 {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+                job
+            },
+            |index, outcome| {
+                reported.push((index, outcome));
+                ControlFlow::Continue(())
+            },
+            || cancel.load(Ordering::SeqCst),
+        );
+        let taken = taken.into_inner();
+        assert!(
+            taken <= 2 * THREADS * JOBS_AHEAD_PER_THREAD,
+            "{taken} jobs taken"
+        );
+        assert!(reported.len() < 3, "{reported:?}");
+        assert!(unreported.is_sorted(), "{unreported:?}");
+        assert!(unreported.contains(&2), "{unreported:?}");
     }
 
     #[test]

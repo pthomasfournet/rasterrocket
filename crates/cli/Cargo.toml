@@ -55,12 +55,14 @@ libc        = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # GlobalMemoryStatusEx: the available-memory probe of RAM output.  The
-# spooler (winspool) and GDI: --print and --list-printers.
+# spooler (winspool) and GDI: --print and --list-printers.  The console
+# control handler: an interrupted print job is aborted.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Printing",
     "Win32_Storage_Xps",
+    "Win32_System_Console",
     "Win32_System_SystemInformation",
 ] }
 
@@ -70,8 +72,8 @@ tiff = { workspace = true }
 
 [lints.rust]
 # Scoped `#[expect]`s read the macOS memory sysctls and the Windows memory
-# status, and call the Windows spooler and GDI for --print; nothing else is
-# unsafe.
+# status, and call the Windows spooler, GDI and console for --print;
+# nothing else is unsafe.
 unsafe_code    = "deny"
 missing_docs   = "allow"   # binary crate; public docs are not required
 unused_results = "warn"

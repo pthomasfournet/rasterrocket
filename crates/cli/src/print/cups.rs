@@ -100,7 +100,7 @@ fn create(depth: SampleDepth, icc: Option<&IccProfile>) -> Result<Spool<Document
         depth,
         icc,
     )?;
-    Ok(Spool { out })
+    Ok(Spool::new(out))
 }
 
 /// Complete the document and its file, rewound to its start.

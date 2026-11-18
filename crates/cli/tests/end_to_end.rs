@@ -1158,6 +1158,90 @@ fn print_to_pdf_writes_the_pages_to_the_print_file() {
     assert_eq!(session.total_pages(), 2);
 }
 
+/// `pages` A4 pages, each painted black whole.
+#[cfg(windows)]
+fn black_a4_pages(pages: usize) -> Vec<u8> {
+    let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 3 + i)).collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        )
+        .into_bytes(),
+    ];
+    let content = 3 + pages;
+    for _ in 0..pages {
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents {content} 0 R >>"
+            )
+            .into_bytes(),
+        );
+    }
+    objects.push(stream_object("", b"0 g 0 0 595 842 re f"));
+    assemble_pdf(&objects)
+}
+
+/// Ctrl-Break during a print job to Microsoft Print to PDF: rrocket begins
+/// no further page, aborts the job, exits with status 1 naming the
+/// interrupt, and removes the file the printer was writing.  rrocket runs
+/// in a process group of its own, which Ctrl-Break reaches alone.
+#[cfg(windows)]
+#[test]
+#[expect(
+    unsafe_code,
+    reason = "GenerateConsoleCtrlEvent sends the console control event"
+)]
+fn print_to_pdf_interrupted_aborts_the_job_and_removes_its_file() {
+    use std::io::{BufRead as _, BufReader, Read as _};
+    use std::os::windows::process::CommandExt as _;
+    use std::process::Stdio;
+
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+
+    /// `CREATE_NEW_PROCESS_GROUP`.
+    const NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    if !print_to_pdf("print_to_pdf_interrupted_aborts_the_job_and_removes_its_file") {
+        return;
+    }
+    let (dir, input) = workdir(&black_a4_pages(60));
+    let file = dir.path().join("interrupted.pdf");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .args(["--backend", "cpu", "--threads", "1", "--progress"])
+        .args(["--printer", PRINT_TO_PDF, "--print-file"])
+        .arg(&file)
+        .arg(&input)
+        .creation_flags(NEW_PROCESS_GROUP)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rrocket");
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let mut seen = String::new();
+    while !seen.contains("rrocket: page 1 done") {
+        let read = stderr.read_line(&mut seen).expect("read stderr");
+        assert!(read > 0, "rrocket ended before page 1 was done: {seen}");
+    }
+    // SAFETY: a plain call; the group is the child's process id.
+    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } == 0 {
+        let error = std::io::Error::last_os_error();
+        child.kill().expect("end rrocket");
+        let _ = child.wait();
+        eprintln!("skipped: no console to send Ctrl-Break through: {error}");
+        return;
+    }
+    let _ = stderr.read_to_string(&mut seen).expect("read stderr");
+    let status = child.wait().expect("wait for rrocket");
+    assert_eq!(status.code(), Some(1), "{seen}");
+    assert!(seen.contains("nothing printed: interrupted"), "{seen}");
+    assert!(
+        !seen.contains("page 60 done"),
+        "every page rendered: {seen}"
+    );
+    assert!(!file.exists(), "the print file is left: {seen}");
+}
+
 /// `--depth 16` is refused, at startup and writing nothing, with the flags
 /// whose pages are 8-bit or bilevel; a comic archive renders at 16 bits.
 #[test]

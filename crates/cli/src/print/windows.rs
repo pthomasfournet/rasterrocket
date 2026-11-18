@@ -10,14 +10,16 @@
 //! writing is removed.
 
 use std::ffi::OsStr;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::PathBuf;
 use std::ptr;
 
 use color::SampleDepth;
 use encode::PdfPage;
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SHARING_VIOLATION,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLORONCOLOR, CreateDCW, CreateICW, DEVMODEW,
     DEVMODEW_0_0, DIB_RGB_COLORS, DM_COLLATE, DM_COLOR, DM_COPIES, DM_DUPLEX, DM_FORMNAME,
@@ -35,6 +37,8 @@ use windows_sys::Win32::Storage::Xps::{
     AbortDoc, DC_COLLATE, DC_COPIES, DC_DUPLEX, DOCINFOW, DeviceCapabilitiesW, EndDoc, EndPage,
     StartDocW, StartPage,
 };
+use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+use windows_sys::core::BOOL;
 
 use super::gdi::{self, Claims, Copies, DibFormat, Orientation, Placement, Surface, Surfaces};
 use super::{Duplex, PageOut, Spool};
@@ -80,7 +84,7 @@ unsafe fn from_wide(p: *const u16) -> String {
     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
 }
 
-/// Whether the last error of the calling thread is `code`.
+/// Whether `error` is the system error `code`.
 fn last_error_is(error: &io::Error, code: u32) -> bool {
     error.raw_os_error() == i32::try_from(code).ok()
 }
@@ -610,9 +614,55 @@ impl Settings {
 /// The printer could not be opened, cannot print the job as asked, or the
 /// job could not be started.
 pub(crate) fn begin(args: &mut Args, paper: Option<i16>) -> Result<Spool<Job>, String> {
+    catch_interrupts();
     let job = Job::open(&Settings::of(args, paper))?;
     args.print_surfaces = Some(job.surfaces);
-    Ok(Spool { out: job })
+    Ok(Spool::new(job))
+}
+
+/// Install [`on_console_event`] as a console control handler of the
+/// process.  A failure is logged: the job then prints, and an interrupted
+/// run leaves it to the spooler.
+#[expect(
+    unsafe_code,
+    reason = "SetConsoleCtrlHandler installs the console control handler"
+)]
+fn catch_interrupts() {
+    // SAFETY: the handler is a function that lives as long as the process
+    // and touches only an atomic flag and standard error.
+    if unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) } == 0 {
+        log::warn!(
+            "cannot catch Ctrl-C: {}; an interrupted run leaves its print job to the spooler",
+            io::Error::last_os_error()
+        );
+    }
+}
+
+/// The console control handler of a print run.  The first Ctrl-C or
+/// Ctrl-Break, the console's closing, the user's logging off and the
+/// system's shutting down mark the run interrupted ([`super::interrupt`]):
+/// no further page is begun, and `main` returns through the job's `Drop`,
+/// which aborts it and removes the file it was writing.  A later Ctrl-C or
+/// Ctrl-Break goes on to the default handler, which ends the process at
+/// once.  On the other events the system ends the process when the handler
+/// returns, so it does not return: the process ends when `main` does or
+/// when the system's grace period runs out.
+extern "system" fn on_console_event(event: u32) -> BOOL {
+    let first = super::interrupt();
+    match event {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+            if first {
+                let _ = writeln!(
+                    io::stderr(),
+                    "rrocket: interrupted: aborting the print job; interrupt again to quit at once"
+                );
+            }
+            BOOL::from(first)
+        }
+        _ => loop {
+            std::thread::park();
+        },
+    }
 }
 
 /// A print job being drawn.
@@ -654,18 +704,44 @@ impl Drop for Job {
         reason = "the job is aborted and its device context deleted once"
     )]
     fn drop(&mut self) {
-        if self.phase == Phase::Started {
+        let abort = self.phase == Phase::Started;
+        if abort {
             // SAFETY: the job was started on `dc` and not ended.
             let _ = unsafe { AbortDoc(self.dc) };
-            if let Some(file) = &self.output
-                && let Err(e) = std::fs::remove_file(file)
-                && e.kind() != io::ErrorKind::NotFound
-            {
-                log::warn!("could not remove the incomplete {}: {e}", file.display());
-            }
         }
         // SAFETY: `dc` was created by `CreateDCW` and is deleted only here.
         let _ = unsafe { DeleteDC(self.dc) };
+        if abort && let Some(file) = &self.output {
+            remove_incomplete(file);
+        }
+    }
+}
+
+/// How long [`remove_incomplete`] waits for the spooler to let go of an
+/// aborted job's file.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Remove `file`, the output of an aborted job.  The spooler closes the
+/// file some time after the job is aborted; until then removing it fails
+/// with a sharing violation, and it is retried for up to [`RELEASE_WAIT`].
+/// A file that is still held, or cannot be removed, is logged.
+fn remove_incomplete(file: &std::path::Path) {
+    let deadline = std::time::Instant::now() + RELEASE_WAIT;
+    loop {
+        match std::fs::remove_file(file) {
+            Ok(()) => return,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+            Err(e)
+                if last_error_is(&e, ERROR_SHARING_VIOLATION)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                log::warn!("could not remove the incomplete {}: {e}", file.display());
+                return;
+            }
+        }
     }
 }
 

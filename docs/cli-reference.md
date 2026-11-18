@@ -435,8 +435,14 @@ what CUPS's filters do, page by page:
   printer's device context; the render threads never touch it.
 
 The job starts before the first page renders and ends after the last; a
-page that fails to render, or a run that ends early, aborts it, and the
-`--print-file` it was writing is removed. rrocket never shows a print dialog.
+page that fails to render, a page the driver refuses, or an interrupt
+aborts it, and the `--print-file` it was writing is removed. An interrupt is
+Ctrl-C or Ctrl-Break, the console closing, the user logging off or the
+system shutting down: no further page is begun, the pages rendering finish,
+and rrocket exits with status 1 ("nothing printed: interrupted"). A second
+Ctrl-C quits at once, and the console closing gives rrocket only the
+system's few seconds of grace; either can leave the incomplete job to the
+spooler and the file in place. rrocket never shows a print dialog.
 Print to PDF writes the file before rrocket exits on the machine tested.
 
 Printing is tested through a CUPS `everywhere` queue on `ippeveprinter`, a

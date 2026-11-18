@@ -23,6 +23,7 @@ mod windows;
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use color::SampleDepth;
 use encode::{PdfPage, PdfPageEncoder, RowImage, RowLayout};
@@ -184,6 +185,23 @@ fn spool_dir() -> PathBuf {
     }
 }
 
+/// Set once the run is interrupted: on Windows by the console control
+/// handler of `windows`.  A print job then begins no further page, and
+/// [`Spool::render_in_order`] returns an [`io::ErrorKind::Interrupted`]
+/// error, upon which the job is abandoned.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Mark the run interrupted; whether it was not already.
+#[cfg(windows)]
+fn interrupt() -> bool {
+    !INTERRUPTED.swap(true, Ordering::Relaxed)
+}
+
+/// Whether the run is interrupted.
+pub(crate) fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
 /// Where a [`Spool`] sends its pages, in page order.
 pub(crate) trait PageOut {
     /// Send `page`, the next page of the job.
@@ -212,6 +230,18 @@ pub(crate) trait PageOut {
 /// The print job being written.
 pub(crate) struct Spool<W> {
     out: W,
+    /// The flag that marks the run interrupted: [`INTERRUPTED`].
+    interrupted: &'static AtomicBool,
+}
+
+impl<W> Spool<W> {
+    /// The job written to `out`, abandoned once [`INTERRUPTED`] is set.
+    const fn new(out: W) -> Self {
+        Self {
+            out,
+            interrupted: &INTERRUPTED,
+        }
+    }
 }
 
 /// The print job of this platform's route.
@@ -314,6 +344,9 @@ impl<W: PageOut> Spool<W> {
     /// bounds the encoded pages held in memory).  Once a page fails, a
     /// render unwinds or the spool cannot be written, no further page is
     /// begun: pages already queued are skipped, and pages rendering finish.
+    /// So too once the run is interrupted (see [`INTERRUPTED`],
+    /// [`crate::pool::run_in_order_until`]), the spool's error then of kind
+    /// [`io::ErrorKind::Interrupted`].
     ///
     /// Returns the pages that failed, with their errors, and the spool's
     /// write error.
@@ -332,20 +365,34 @@ impl<W: PageOut> Spool<W> {
             "print pages must be strictly ascending: the spool takes pages by number"
         );
         let (mut errors, mut write_error) = (Vec::new(), None);
-        let unreported = crate::pool::run_in_order(pool, pages, render, |index, failed| {
-            if let Some(error) = failed {
-                errors.push(error);
-                return ControlFlow::Break(());
-            }
-            self.write_through(sink, pages[index]).map_or_else(
-                |e| {
-                    write_error = Some(e);
-                    ControlFlow::Break(())
-                },
-                |()| ControlFlow::Continue(()),
-            )
-        });
+        let flag = self.interrupted;
+        let interrupted = || flag.load(Ordering::Relaxed);
+        let unreported = crate::pool::run_in_order_until(
+            pool,
+            pages,
+            render,
+            |index, failed| {
+                if let Some(error) = failed {
+                    errors.push(error);
+                    return ControlFlow::Break(());
+                }
+                self.write_through(sink, pages[index]).map_or_else(
+                    |e| {
+                        write_error = Some(e);
+                        ControlFlow::Break(())
+                    },
+                    |()| ControlFlow::Continue(()),
+                )
+            },
+            interrupted,
+        );
         errors.extend(unreported.into_iter().flatten());
+        if write_error.is_none() && interrupted() {
+            write_error = Some(RenderError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the run was interrupted",
+            )));
+        }
         (errors, write_error)
     }
 }
@@ -460,12 +507,10 @@ mod tests {
     }
 
     fn spool(passes: u32) -> Spool<Sizes> {
-        Spool {
-            out: Sizes {
-                sent: Vec::new(),
-                passes,
-            },
-        }
+        Spool::new(Sizes {
+            sent: Vec::new(),
+            passes,
+        })
     }
 
     #[test]
@@ -657,6 +702,45 @@ mod tests {
             "{} pages rendered after page 1 failed",
             run.renders
         );
+    }
+
+    /// An interrupt while page 3 renders: no page is begun after one
+    /// window, no second pass begins, at most the pages before it are
+    /// sent, and the spool's error is of kind `Interrupted`.
+    #[test]
+    fn an_interrupt_stops_the_job_with_an_interrupted_error() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let sink = PageSink::new();
+        let mut spool = spool(2);
+        spool.interrupted = flag;
+        let pages: Vec<i32> = (1..=24).collect();
+        let renders = AtomicUsize::new(0);
+        let (errors, write_error) = spool.render_job(&sink, &pages, &pool, |&page: &i32| {
+            let _ = renders.fetch_add(1, Ordering::Relaxed);
+            if page == 3 {
+                flag.store(true, Ordering::Relaxed);
+            }
+            sink.add((page, None), &gray(page.unsigned_abs(), 1), (72.0, 72.0))
+                .unwrap();
+            None
+        });
+        assert!(errors.is_empty());
+        let Some(RenderError::Io(e)) = write_error else {
+            panic!("{write_error:?}");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        let renders = renders.into_inner();
+        assert!(
+            renders <= 2 * JOBS_AHEAD_PER_THREAD,
+            "{renders} pages rendered"
+        );
+        assert!(spool.out.sent.len() < 3, "{:?}", spool.out.sent);
     }
 
     #[test]
