@@ -118,9 +118,7 @@ fn check_compensation(params: &RenderParams) -> Result<(), RasterError> {
 /// Refuse a CMYK page that `session` and `params` cannot render.
 fn check_cmyk(session: &RasterSession, params: &RenderParams) -> Result<(), RasterError> {
     if params.transparent_background {
-        return Err(RasterError::InvalidOptions(
-            "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
-        ));
+        return Err(RasterError::cmyk_is_opaque());
     }
     if session
         .output_profile

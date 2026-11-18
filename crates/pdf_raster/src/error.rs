@@ -193,6 +193,23 @@ impl std::fmt::Display for RasterError {
 }
 
 impl RasterError {
+    /// The refusal of a gray page in a session whose output profile is
+    /// RGB.
+    pub(crate) fn gray_page_of_rgb_profile() -> Self {
+        Self::InvalidOptions(
+            "a gray page of an RGB output profile's device values has no meaning: give the \
+             session a gray output profile, or render the page in colour"
+                .to_owned(),
+        )
+    }
+
+    /// The refusal of a transparent backdrop for a CMYK page.
+    pub(crate) fn cmyk_is_opaque() -> Self {
+        Self::InvalidOptions(
+            "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
+        )
+    }
+
     /// The refusal of deskew for a render whose output is not gray.
     pub(crate) fn deskew_needs_gray() -> Self {
         Self::InvalidOptions(

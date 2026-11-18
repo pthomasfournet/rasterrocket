@@ -169,11 +169,7 @@ fn reject_rgb_profile(session: &RasterSession) -> Result<(), RasterError> {
         .as_ref()
         .is_some_and(|p| p.space() == pdf_interp::OutputSpace::Rgb);
     if rgb_profile {
-        return Err(RasterError::InvalidOptions(
-            "a gray page of an RGB output profile's device values has no meaning: give the \
-             session a gray output profile, or render the page in colour"
-                .to_owned(),
-        ));
+        return Err(RasterError::gray_page_of_rgb_profile());
     }
     Ok(())
 }

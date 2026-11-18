@@ -78,14 +78,13 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
         return Some(RasterError::deskew_needs_gray());
     }
     if opts.color == crate::ColorModel::Cmyk && opts.deskew {
-        return Some(RasterError::InvalidOptions(
-            "deskew operates on gray pages: CMYK pages are not deskewed".to_owned(),
-        ));
+        return Some(RasterError::deskew_needs_gray());
     }
     if opts.color == crate::ColorModel::Cmyk && opts.transparent_background {
-        return Some(RasterError::InvalidOptions(
-            "a CMYK page is opaque: render it without a transparent backdrop".to_owned(),
-        ));
+        return Some(RasterError::cmyk_is_opaque());
+    }
+    if let Some(error) = profile_conflict(opts) {
+        return Some(error);
     }
     if opts.pages.is_none() {
         if opts.first_page == 0 {
@@ -101,6 +100,27 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
         }
     }
     None
+}
+
+/// The refusal of a page kind the output profile of `opts` cannot give,
+/// checked once before any page is rendered: a gray page (opaque, or with
+/// [`gray_alpha`](RasterOptions::gray_alpha)) of an RGB profile, and an
+/// RGBA page of a gray profile.
+fn profile_conflict(opts: &RasterOptions) -> Option<RasterError> {
+    use pdf_interp::OutputSpace;
+    if opts.color == crate::ColorModel::Cmyk {
+        return None;
+    }
+    let rgba = opts.transparent_background && !opts.gray_alpha;
+    match opts.output_profile.as_ref()?.space() {
+        OutputSpace::Rgb if !rgba => Some(RasterError::gray_page_of_rgb_profile()),
+        OutputSpace::Gray if rgba => Some(RasterError::InvalidOptions(
+            "the output profile is gray, so a page over a transparent backdrop is gray and \
+             alpha: set gray_alpha too"
+                .to_owned(),
+        )),
+        _ => None,
+    }
 }
 
 /// The [`SessionConfig`] behind the [`RasterOptions`]-driven entry points:
@@ -536,6 +556,35 @@ mod channel_tests {
             panic!("channel returned wrong variant: {chan_err:?}")
         };
         assert_eq!(i, c, "validation error messages must be identical");
+    }
+
+    /// A page kind the output profile cannot give is refused before any
+    /// page renders; the kinds it gives pass.
+    #[test]
+    fn profile_conflicts_are_refused_up_front() {
+        let profile = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/icc")
+                .join(name);
+            let bytes = std::fs::read(path).unwrap();
+            Some(std::sync::Arc::new(
+                pdf_interp::OutputProfile::from_bytes(bytes).unwrap(),
+            ))
+        };
+        let opts = |name: &str, transparent: bool, gray_alpha: bool| RasterOptions {
+            output_profile: profile(name),
+            transparent_background: transparent,
+            gray_alpha,
+            ..RasterOptions::new(72.0)
+        };
+        let refused =
+            |o: &RasterOptions| matches!(validate_opts(o), Some(RasterError::InvalidOptions(_)));
+        assert!(refused(&opts("printer-rgb-v4.icc", false, false)));
+        assert!(refused(&opts("printer-rgb-v4.icc", true, true)));
+        assert!(refused(&opts("printer-gray-v4.icc", true, false)));
+        assert!(validate_opts(&opts("printer-rgb-v4.icc", true, false)).is_none());
+        assert!(validate_opts(&opts("printer-gray-v4.icc", false, false)).is_none());
+        assert!(validate_opts(&opts("printer-gray-v4.icc", true, true)).is_none());
     }
 
     #[test]
