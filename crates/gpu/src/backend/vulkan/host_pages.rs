@@ -18,46 +18,47 @@
 /// Linux and Android only (`MADV_POPULATE_WRITE`, Linux 5.14); elsewhere,
 /// or when the kernel refuses the advice, the pages fault in on first
 /// write instead.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) fn populate_for_write<T>(buf: &mut [T]) {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        // SAFETY: sysconf reads a constant of the system.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        let Ok(page) = usize::try_from(page) else {
-            return;
-        };
-        if !page.is_power_of_two() {
-            return;
-        }
-        let start = buf.as_mut_ptr().cast::<u8>() as usize;
-        let end = start + std::mem::size_of_val(buf);
-        let first = start.next_multiple_of(page);
-        let last = end & !(page - 1);
-        if last <= first {
-            return;
-        }
-        // SAFETY: `[first, last)` lies within `buf`, which is writable
-        // memory borrowed exclusively for this call; MADV_POPULATE_WRITE
-        // only faults in its pages, as a write would, and changes no byte
-        // of them.
-        let rc = unsafe {
-            libc::madvise(
-                first as *mut libc::c_void,
-                last - first,
-                libc::MADV_POPULATE_WRITE,
-            )
-        };
-        if rc != 0 {
-            log::debug!(
-                "vulkan: MADV_POPULATE_WRITE of {} bytes: {}",
-                last - first,
-                std::io::Error::last_os_error()
-            );
-        }
+    // SAFETY: sysconf reads a constant of the system.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let Ok(page) = usize::try_from(page) else {
+        return;
+    };
+    if !page.is_power_of_two() {
+        return;
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let _ = buf;
+    let start = buf.as_mut_ptr().cast::<u8>() as usize;
+    let end = start + std::mem::size_of_val(buf);
+    let first = start.next_multiple_of(page);
+    let last = end & !(page - 1);
+    if last <= first {
+        return;
+    }
+    // SAFETY: `[first, last)` lies within `buf`, which is writable
+    // memory borrowed exclusively for this call; MADV_POPULATE_WRITE
+    // only faults in its pages, as a write would, and changes no byte
+    // of them.
+    let rc = unsafe {
+        libc::madvise(
+            first as *mut libc::c_void,
+            last - first,
+            libc::MADV_POPULATE_WRITE,
+        )
+    };
+    if rc != 0 {
+        log::debug!(
+            "vulkan: MADV_POPULATE_WRITE of {} bytes: {}",
+            last - first,
+            std::io::Error::last_os_error()
+        );
+    }
 }
+
+/// [`populate_for_write`] where `MADV_POPULATE_WRITE` does not exist: the
+/// pages fault in on first write.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(super) const fn populate_for_write<T>(_buf: &mut [T]) {}
 
 #[cfg(test)]
 mod tests {
