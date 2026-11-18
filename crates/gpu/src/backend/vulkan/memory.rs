@@ -499,14 +499,21 @@ impl SlabAllocator {
         location: MemoryLocation,
         name: &'static str,
     ) -> Result<(vk::Buffer, Allocation)> {
+        let bytes = u64::try_from(size).expect("size fits u64");
+        let out_of_memory = || BackendError::OutOfMemory { what: name, bytes };
         let create_info = vk::BufferCreateInfo::default()
-            .size(u64::try_from(size).expect("size fits u64"))
+            .size(bytes)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         // Safety: create_info outlives this call.
         let buffer = unsafe { self.inner.device.device.create_buffer(&create_info, None) }
-            .map_err(vk_err("vkCreateBuffer"))?;
+            .map_err(|code| match code {
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
+                    out_of_memory()
+                }
+                code => vk_err("vkCreateBuffer")(code),
+            })?;
 
         // Safety: `buffer` is freshly created and unbound.
         let requirements = unsafe {
@@ -538,7 +545,10 @@ impl SlabAllocator {
                     unsafe {
                         self.inner.device.device.destroy_buffer(buffer, None);
                     }
-                    return Err(BackendError::msg(format!("gpu_allocator::allocate: {e}")));
+                    return Err(match e {
+                        gpu_allocator::AllocationError::OutOfMemory => out_of_memory(),
+                        e => BackendError::msg(format!("gpu_allocator::allocate: {e}")),
+                    });
                 }
             }
         };

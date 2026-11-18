@@ -86,6 +86,15 @@ pub enum BackendError {
         /// The device limit, in bytes.
         max: u64,
     },
+    /// The device or the host had no memory left for a buffer the work
+    /// needs: the work does not fit beside what is allocated now, and the
+    /// device itself is sound.
+    OutOfMemory {
+        /// The buffer, for diagnostic context.
+        what: &'static str,
+        /// Bytes the buffer needs.
+        bytes: u64,
+    },
     /// An explicit device selector did not resolve to exactly one usable
     /// device.  The message names the selector, the reason, and every
     /// enumerated device.  Distinct from [`BackendError::Other`] so callers
@@ -155,6 +164,9 @@ impl fmt::Display for BackendError {
                 f,
                 "{what} need {need} bytes, above the device's {limit} of {max} bytes"
             ),
+            Self::OutOfMemory { what, bytes } => {
+                write!(f, "{what}: out of memory for {bytes} bytes")
+            }
             Self::DeviceSelection(msg) => f.write_str(msg),
             Self::Other(e) => fmt::Display::fmt(e, f),
         }

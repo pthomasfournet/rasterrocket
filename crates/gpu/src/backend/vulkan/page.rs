@@ -211,9 +211,12 @@ impl VulkanBackend {
     ///
     /// [`BackendError::DeviceLimit`] when an input or the page exceeds the
     /// device's `maxStorageBufferRange`, before anything is allocated;
-    /// otherwise an error when the page has no pixel, its depth is not
-    /// that of `S`, `out` or `stride` is too small for it, an allocation
-    /// fails, or the device reports an error.  `out` is unchanged then.
+    /// [`BackendError::OutOfMemory`] when the page's buffers do not fit in
+    /// the memory left, also once the idle buffer sets of other pages are
+    /// freed; otherwise an error when the page has no pixel, its depth is
+    /// not that of `S`, `out` or `stride` is too small for it, an
+    /// allocation fails otherwise, or the device reports an error.  `out`
+    /// is unchanged then.
     pub fn render_page<S: PageSample>(
         &self,
         page: &PageCommands,
@@ -326,6 +329,22 @@ impl VulkanBackend {
             (Some(_), clock @ None) => Some(&*clock.insert(StageClock::new(self.device.clone())?)),
         };
         let prepare = laps.lap();
+        let staged_len = |parts: &[&[u8]]| input_len(parts).max(EMPTY_INPUT.len());
+        // Every buffer of the page is grown before any is written; when
+        // memory runs out, the idle buffer sets are freed and the growth is
+        // retried once.  Staging then allocates nothing.
+        let reserve = |slots: &mut [Option<Staged<Self>>; 5], target: &mut Option<Staged<Self>>| {
+            for (slot, (_, parts)) in slots.iter_mut().zip(inputs) {
+                ensure(self, slot, staged_len(parts), Direction::ToDevice).map(drop)?;
+            }
+            ensure(self, target, page_len, Direction::ToHost).map(drop)
+        };
+        match reserve(slots, target) {
+            Err(BackendError::OutOfMemory { .. }) if self.page_scratch.free_idle() > 0 => {
+                reserve(slots, target)?;
+            }
+            reserved => reserved?,
+        }
         let mut staged = Vec::with_capacity(slots.len());
         for (slot, (_, parts)) in slots.iter_mut().zip(inputs) {
             let parts = if input_len(parts) == 0 {

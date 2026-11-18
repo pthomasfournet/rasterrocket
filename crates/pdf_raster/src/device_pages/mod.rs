@@ -19,8 +19,8 @@
 //!
 //! A device error retires that device for the session: later pages render
 //! on the session's other devices, or on the CPU once none is in service.
-//! A page too large for a device's limits renders on the CPU and leaves the
-//! device in service.
+//! A page too large for a device's limits, or for the memory it has left,
+//! renders on the CPU and leaves the device in service.
 //!
 //! Where every page offered went is counted for the session
 //! ([`DevicePageCounts`]) and logged at `info` when the session drops.

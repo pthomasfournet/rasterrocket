@@ -129,6 +129,23 @@ impl<T> ScratchPool<T> {
         }
     }
 
+    /// Drop the idle scratches, freeing what they hold, and return how
+    /// many were dropped; the pool makes new ones on demand.  A scratch is
+    /// idle only once the operation it was lent to has returned, so no
+    /// device work refers to its buffers.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn free_idle(&self) -> usize {
+        let idle = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let idle = std::mem::take(&mut state.idle);
+            state.made -= idle.len();
+            idle
+        };
+        // Waiters may now make new scratches in place of those dropped.
+        self.returned.notify_all();
+        idle.len()
+    }
+
     /// Scratches currently idle in the pool.
     #[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
     pub(crate) fn idle_len(&self) -> usize {
@@ -220,6 +237,23 @@ mod tests {
         let pushes: usize = state.idle.iter().map(Vec::len).sum();
         drop(state);
         assert_eq!(pushes, 8, "every borrower used one of the two scratches");
+    }
+
+    /// Freeing the idle scratches drops them and lets the pool make new
+    /// ones in their place, up to its limit; a lent scratch is kept.
+    #[test]
+    #[cfg(feature = "vulkan")]
+    fn freeing_the_idle_scratches_lets_the_pool_make_new_ones() {
+        let pool = ScratchPool::<Vec<u8>>::bounded(2);
+        let mut kept = pool.lend();
+        kept.push(1);
+        pool.with(|scratch| scratch.push(2));
+        assert_eq!(pool.free_idle(), 1);
+        assert_eq!(pool.free_idle(), 0);
+        pool.with(|scratch| assert!(scratch.is_empty(), "a new scratch"));
+        drop(kept);
+        let state = pool.state.lock().expect("lock");
+        assert_eq!((state.made, state.idle.len()), (2, 2));
     }
 
     /// A scratch whose borrower panics is returned to the pool.

@@ -155,8 +155,8 @@ fn a_device_failure_renders_on_the_cpu_and_retires_the_device() {
     assert_eq!(counts.rendered, 0);
 }
 
-/// A page beyond the device's limits renders on the CPU and leaves the
-/// device in service.
+/// A page beyond the device's limits, or beyond the memory it has left,
+/// renders on the CPU and leaves the device in service.
 #[test]
 fn a_page_beyond_the_device_limits_keeps_the_device() {
     let doc = pdf(&[DEVICE, DEVICE]);
@@ -165,21 +165,30 @@ fn a_page_beyond_the_device_limits_keeps_the_device() {
     };
     let pages = device_pages(&session);
     let params = RenderParams::new(2.0);
-    *pages.faults.fail_next.lock().expect("lock") = Some(BackendError::DeviceLimit {
-        what: "render_page pixels",
-        need: 1 << 40,
-        limit: "maxStorageBufferRange",
-        max: 1 << 27,
-    });
-    let (page, outcome) = render(&session, 1, &params).expect("render");
-    assert_eq!(outcome, DevicePage::Failed);
-    assert_eq!(page, cpu(doc.clone(), 1));
-    let (page, outcome) = render(&session, 2, &params).expect("render");
-    assert!(
-        matches!(outcome, DevicePage::Rendered { .. }),
-        "{outcome:?}"
-    );
-    assert_eq!(page, cpu(doc, 2));
+    let errors = [
+        BackendError::DeviceLimit {
+            what: "render_page pixels",
+            need: 1 << 40,
+            limit: "maxStorageBufferRange",
+            max: 1 << 27,
+        },
+        BackendError::OutOfMemory {
+            what: "render_page pixels",
+            bytes: 1 << 30,
+        },
+    ];
+    for error in errors {
+        *pages.faults.fail_next.lock().expect("lock") = Some(error);
+        let (page, outcome) = render(&session, 1, &params).expect("render");
+        assert_eq!(outcome, DevicePage::Failed);
+        assert_eq!(page, cpu(doc.clone(), 1));
+        let (page, outcome) = render(&session, 2, &params).expect("render");
+        assert!(
+            matches!(outcome, DevicePage::Rendered { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(page, cpu(doc.clone(), 2));
+    }
 }
 
 /// A refused recording renders on the CPU once; a cancelled recording

@@ -193,13 +193,17 @@ impl Device {
     }
 
     /// Account for the device failing on page `page_num` with `error`: a
-    /// page beyond the device's limits is logged at `warn`; any other error
-    /// retires the device, logged at `warn` once.
+    /// page beyond the device's limits, or beyond the memory it has left,
+    /// is logged at `warn` and leaves the device in service; any other
+    /// error retires the device, logged at `warn` once.
     pub(super) fn fail(&self, page_num: u32, error: &BackendError) {
-        if matches!(error, BackendError::DeviceLimit { .. }) {
+        if matches!(
+            error,
+            BackendError::DeviceLimit { .. } | BackendError::OutOfMemory { .. }
+        ) {
             log::warn!(
                 "page {page_num}: too large for the GPU page device {} ({error}); the page \
-                 renders on the CPU",
+                 renders on the CPU and the device stays in service",
                 self.name()
             );
         } else if !self.retired.swap(true, Ordering::AcqRel) {
