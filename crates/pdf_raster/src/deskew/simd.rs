@@ -7,6 +7,9 @@
 //!   stepping, a lane mask for the bounds test, two dword gathers for the
 //!   2×2 footprints, FMA bilinear blend, and a white fill merged in for
 //!   out-of-bounds lanes.
+//! - **x86-64 (AVX2 + FMA, runtime-detected, without AVX-512)**:
+//!   [`rotate_row_avx2`] runs the same pipeline on 8 output pixels per
+//!   iteration, with vector masks in place of lane masks.
 //! - **aarch64**: [`rotate_row_neon`] processes 8 output pixels per
 //!   iteration as two 4-lane quads: fused coordinate stepping, floor, an
 //!   unsigned bounds mask, footprint indices, fused bilinear blend and a
@@ -388,6 +391,240 @@ pub(super) unsafe fn rotate_row_avx512<P: DeskewPixel>(
     }
 }
 
+/// AVX2 inner loop: 8 output pixels per iteration, bit-exact with
+/// [`rotate_span_scalar`].
+///
+/// The pipeline of [`rotate_row_avx512`] on 256-bit vectors, with vector
+/// masks for its lane masks: FMA coordinate stepping, floor by
+/// `vroundps` and a truncating conversion (exact, the floored values being
+/// integers far inside `i32`), and the bounds test as one unsigned
+/// comparison per axis (`min_epu32(x0, max) == x0`, so a negative origin
+/// compares above the maximum).  The 2×2 footprint comes from two masked
+/// dword gathers at clamped byte offsets with the edge clamp and the
+/// rounding of the AVX-512 kernel; out-of-bounds lanes gather nothing and
+/// are blended to `Sample::MAX`.  Results are narrowed with unsigned
+/// saturating packs, exact for values in `[0, Sample::MAX]`; the last
+/// `dst_row.len() % 8` pixels are stored through a stack buffer.  A buffer
+/// shorter than one dword, or longer than `i32` byte offsets reach, takes
+/// the scalar path.
+///
+/// # Safety
+///
+/// Caller must ensure `avx2` and `fma` are available.
+#[cfg(target_arch = "x86_64")]
+#[expect(
+    unsafe_code,
+    reason = "AVX2 intrinsics for the x86-64 rotate row kernel; runtime-detected by the caller"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one SIMD pipeline per row; splitting would scatter the lane bookkeeping"
+)]
+#[expect(
+    clippy::similar_names,
+    reason = "v_sx_*/v_sy_* are paired coordinate vectors; renaming would obscure the symmetry"
+)]
+#[target_feature(enable = "avx2,fma")]
+pub(super) unsafe fn rotate_row_avx2<P: DeskewPixel>(
+    dst_row: &mut [P::Sample],
+    src: &Bitmap<P>,
+    p: &RowParams,
+) {
+    use std::arch::x86_64::{_MM_FROUND_NO_EXC, _MM_FROUND_TO_NEG_INF, _MM_FROUND_TO_ZERO};
+    const FLOOR: i32 = _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC;
+    const TRUNC: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
+    use std::arch::x86_64::{
+        __m256i, _CMP_GE_OQ, _mm_packus_epi16, _mm_storel_epi64, _mm_storeu_si128,
+        _mm256_add_epi32, _mm256_add_ps, _mm256_and_ps, _mm256_and_si256, _mm256_blendv_epi8,
+        _mm256_castsi256_ps, _mm256_castsi256_si128, _mm256_cmp_ps, _mm256_cmpeq_epi32,
+        _mm256_cmpgt_epi32, _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps,
+        _mm256_mask_i32gather_epi32, _mm256_min_epi32, _mm256_min_epu32, _mm256_movemask_ps,
+        _mm256_mullo_epi32, _mm256_packus_epi32, _mm256_permute4x64_epi64, _mm256_round_ps,
+        _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setr_ps, _mm256_setzero_si256,
+        _mm256_slli_epi32, _mm256_srlv_epi32, _mm256_sub_epi32, _mm256_sub_ps,
+    };
+
+    let data = src.data();
+    let len = size_of_val(data);
+    let Ok(len_i32) = i32::try_from(len) else {
+        rotate_span_scalar(dst_row, 0, src, p);
+        return;
+    };
+    if len < 4 {
+        // Too small for a dword gather to stay inside the buffer.
+        rotate_span_scalar(dst_row, 0, src, p);
+        return;
+    }
+    let base = data.as_ptr().cast::<u8>();
+    let w = dst_row.len();
+    let out = dst_row.as_mut_ptr().cast::<u8>();
+    let size = size_of::<P::Sample>();
+
+    // The samples of the 8 lanes of `v`, each at most `Sample::MAX`, for
+    // output columns `ox .. ox + take`.
+    let store = |ox: usize, take: usize, v: __m256i| {
+        // Lanes 0..8 as u16 in the low 128 bits: the in-lane pack gives
+        // qwords [0..4, 0..4, 4..8, 4..8], of which qwords 0 and 2 are kept.
+        let words = _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b10_00>(
+            _mm256_packus_epi32(v, v),
+        ));
+        let mut buf = [0u8; 16];
+        let dst = if take == 8 {
+            // SAFETY: ox + 8 ≤ w, so 8 samples at `out + ox · size` lie in `dst_row`.
+            unsafe { out.add(ox * size) }
+        } else {
+            buf.as_mut_ptr()
+        };
+        // SAFETY: `dst` has room for 8 samples: either inside `dst_row`
+        // (above) or the 16-byte `buf`.
+        unsafe {
+            if P::Sample::BITS == 8 {
+                _mm_storel_epi64(dst.cast(), _mm_packus_epi16(words, words));
+            } else {
+                _mm_storeu_si128(dst.cast(), words);
+            }
+            if take < 8 {
+                std::ptr::copy_nonoverlapping(buf.as_ptr(), out.add(ox * size), take * size);
+            }
+        }
+    };
+
+    let lane = _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
+    let lane_i = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let v_cos = _mm256_set1_ps(p.cos_a);
+    let v_sin = _mm256_set1_ps(p.sin_a);
+    let v_sx_base = _mm256_set1_ps(p.sx_base);
+    let v_sy_base = _mm256_set1_ps(p.sy_base);
+    let v_sx_max = _mm256_set1_epi32(p.sx_max);
+    let v_sy_max = _mm256_set1_epi32(p.sy_max);
+    let v_zero = _mm256_setzero_si256();
+    let v_one = _mm256_set1_epi32(1);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "Sample::BITS is 8 or 16 and Sample::MAX at most 65535"
+    )]
+    let (v_bits, v_sample) = (
+        _mm256_set1_epi32(P::Sample::BITS as i32),
+        _mm256_set1_epi32(P::Sample::MAX.signed() as i32),
+    );
+    let v_half = _mm256_set1_ps(0.5);
+    let v_one_f = _mm256_set1_ps(1.0);
+    // The row stride in bytes is at most len ≤ i32::MAX; a sample is 1 or 2 bytes.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "stride · size ≤ len ≤ i32::MAX and size ≤ 2"
+    )]
+    let (v_stride, v_size, v_len_m4) = (
+        _mm256_set1_epi32((src.stride * size) as i32),
+        _mm256_set1_epi32(size as i32),
+        _mm256_set1_epi32(len_i32 - 4),
+    );
+
+    let mut ox = 0usize;
+    while ox < w {
+        let take = (w - ox).min(8);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "take ≤ 8"
+        )]
+        let active = _mm256_cmpgt_epi32(_mm256_set1_epi32(take as i32), lane_i);
+
+        // sx = cos·dx + sx_base, sy = sin·dx + sy_base, dx = ox + lane.
+        // ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "ox ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
+        )]
+        let dx = _mm256_add_ps(_mm256_set1_ps(ox as f32), lane);
+        let sx = _mm256_fmadd_ps(v_cos, dx, v_sx_base);
+        let sy = _mm256_fmadd_ps(v_sin, dx, v_sy_base);
+        let x0f = _mm256_round_ps::<FLOOR>(sx);
+        let y0f = _mm256_round_ps::<FLOOR>(sy);
+        let x0 = _mm256_cvttps_epi32(x0f);
+        let y0 = _mm256_cvttps_epi32(y0f);
+
+        let in_bounds = _mm256_and_si256(
+            active,
+            _mm256_and_si256(
+                _mm256_cmpeq_epi32(_mm256_min_epu32(x0, v_sx_max), x0),
+                _mm256_cmpeq_epi32(_mm256_min_epu32(y0, v_sy_max), y0),
+            ),
+        );
+        if _mm256_movemask_ps(_mm256_castsi256_ps(in_bounds)) == 0 {
+            store(ox, take, v_sample);
+            ox += 8;
+            continue;
+        }
+
+        let fx = _mm256_sub_ps(sx, x0f);
+        let fy = _mm256_sub_ps(sy, y0f);
+
+        // Out-of-bounds lanes are zeroed so every offset below is a valid
+        // index even though the gather skips them.
+        let x0 = _mm256_and_si256(x0, in_bounds);
+        let y0 = _mm256_and_si256(y0, in_bounds);
+        let y1 = _mm256_min_epi32(_mm256_add_epi32(y0, v_one), v_sy_max);
+        let last_col = _mm256_cmpeq_epi32(x0, v_sx_max);
+
+        // Byte offsets of the origins: y · stride · size + x · size < len.
+        let x0_bytes = _mm256_mullo_epi32(x0, v_size);
+        let off0 = _mm256_add_epi32(_mm256_mullo_epi32(y0, v_stride), x0_bytes);
+        let off1 = _mm256_add_epi32(_mm256_mullo_epi32(y1, v_stride), x0_bytes);
+        let off0_c = _mm256_min_epi32(off0, v_len_m4);
+        let off1_c = _mm256_min_epi32(off1, v_len_m4);
+        let sh0 = _mm256_slli_epi32::<3>(_mm256_sub_epi32(off0, off0_c));
+        let sh1 = _mm256_slli_epi32::<3>(_mm256_sub_epi32(off1, off1_c));
+
+        // SAFETY: every active lane's offset is ≤ len − 4, so each dword read
+        // lies within `data`; inactive lanes are not read.
+        let (d0, d1) = unsafe {
+            (
+                _mm256_mask_i32gather_epi32::<1>(v_zero, base.cast(), off0_c, in_bounds),
+                _mm256_mask_i32gather_epi32::<1>(v_zero, base.cast(), off1_c, in_bounds),
+            )
+        };
+        // A shift of 32 or more bits, past the dword, gives 0; such a lane
+        // is on the last column, whose neighbour is replaced below.
+        let p00 = _mm256_and_si256(_mm256_srlv_epi32(d0, sh0), v_sample);
+        let p01 = _mm256_and_si256(_mm256_srlv_epi32(d1, sh1), v_sample);
+        let p10 = _mm256_blendv_epi8(
+            _mm256_and_si256(
+                _mm256_srlv_epi32(d0, _mm256_add_epi32(sh0, v_bits)),
+                v_sample,
+            ),
+            p00,
+            last_col,
+        );
+        let p11 = _mm256_blendv_epi8(
+            _mm256_and_si256(
+                _mm256_srlv_epi32(d1, _mm256_add_epi32(sh1, v_bits)),
+                v_sample,
+            ),
+            p01,
+            last_col,
+        );
+
+        let (f00, f10, f01, f11) = (
+            _mm256_cvtepi32_ps(p00),
+            _mm256_cvtepi32_ps(p10),
+            _mm256_cvtepi32_ps(p01),
+            _mm256_cvtepi32_ps(p11),
+        );
+        let top = _mm256_fmadd_ps(_mm256_sub_ps(f10, f00), fx, f00);
+        let bot = _mm256_fmadd_ps(_mm256_sub_ps(f11, f01), fx, f01);
+        let val = _mm256_fmadd_ps(_mm256_sub_ps(bot, top), fy, top);
+
+        let trunc = _mm256_round_ps::<TRUNC>(val);
+        let round_up = _mm256_cmp_ps::<_CMP_GE_OQ>(_mm256_sub_ps(val, trunc), v_half);
+        let rounded = _mm256_cvttps_epi32(_mm256_add_ps(trunc, _mm256_and_ps(round_up, v_one_f)));
+        store(ox, take, _mm256_blendv_epi8(v_sample, rounded, in_bounds));
+        ox += 8;
+    }
+}
+
 /// One output row through the fastest kernel of this machine.
 #[cfg(target_arch = "aarch64")]
 #[expect(
@@ -408,7 +645,7 @@ pub(super) fn dispatch_rotate_row<P: DeskewPixel>(
 #[cfg(target_arch = "x86_64")]
 #[expect(
     unsafe_code,
-    reason = "AVX-512 intrinsics for the x86-64 rotate row kernel; runtime-detected here"
+    reason = "AVX-512 and AVX2 intrinsics for the x86-64 rotate row kernels; runtime-detected here"
 )]
 #[inline]
 pub(super) fn dispatch_rotate_row<P: DeskewPixel>(
@@ -419,6 +656,9 @@ pub(super) fn dispatch_rotate_row<P: DeskewPixel>(
     if has_avx512() {
         // SAFETY: all three features confirmed present.
         unsafe { rotate_row_avx512(dst_row, src, p) }
+    } else if has_avx2() {
+        // SAFETY: avx2 and fma confirmed present.
+        unsafe { rotate_row_avx2(dst_row, src, p) }
     } else {
         rotate_span_scalar(dst_row, 0, src, p);
     }
@@ -441,6 +681,12 @@ fn has_avx512() -> bool {
     is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512bw")
         && is_x86_feature_detected!("avx512vl")
+}
+
+/// Whether the CPU has the features of [`rotate_row_avx2`].
+#[cfg(target_arch = "x86_64")]
+fn has_avx2() -> bool {
+    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
 }
 
 #[cfg(test)]
@@ -557,6 +803,29 @@ mod tests {
         check::<Gray16>();
     }
 
+    /// The AVX2 row kernel vs the scalar reference, at 8 and 16 bits,
+    /// called directly so that machines with AVX-512 test it too.
+    /// Runtime-skipped without AVX2 + FMA.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_rotate_rows_match_scalar_reference() {
+        fn check<P: DeskewPixel>() {
+            #[expect(
+                unsafe_code,
+                reason = "direct AVX2 kernel invocation under test; features confirmed by the caller"
+            )]
+            assert_rows_match_scalar::<P>("avx2", |row, s, p| {
+                // SAFETY: avx2 + fma confirmed present by the caller.
+                unsafe { rotate_row_avx2(row, s, p) }
+            });
+        }
+        if !has_avx2() {
+            return;
+        }
+        check::<Gray8>();
+        check::<Gray16>();
+    }
+
     /// The tier this machine dispatches to vs the scalar reference.
     #[test]
     fn dispatched_rotate_rows_match_scalar_reference() {
@@ -588,6 +857,19 @@ mod tests {
             run("dispatched", &|| {
                 rotate_cpu_with(&src, 1.5, super::dispatch_rotate_row)
             });
+            #[cfg(target_arch = "x86_64")]
+            if super::has_avx2() {
+                #[expect(
+                    unsafe_code,
+                    reason = "direct AVX2 kernel invocation under test; features confirmed above"
+                )]
+                run("avx2", &|| {
+                    rotate_cpu_with(&src, 1.5, |row, s, p| {
+                        // SAFETY: avx2 + fma confirmed present above.
+                        unsafe { super::rotate_row_avx2(row, s, p) }
+                    })
+                });
+            }
             run("scalar", &|| {
                 rotate_cpu_with(&src, 1.5, |row, s, p| rotate_span_scalar(row, 0, s, p))
             });
