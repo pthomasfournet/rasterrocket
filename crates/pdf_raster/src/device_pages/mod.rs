@@ -9,7 +9,8 @@
 //! until a device is open (until [`OPEN_WAIT`] after the first page that
 //! waited), takes the open device in
 //! service where it expects the shortest wait (the pages holding the
-//! device and itself, times the device's mean time per run: [`choose`]),
+//! device and itself, times the device's mean time per page raster:
+//! [`choose`]),
 //! records the page's paint commands and renders them on it.  The workers record in parallel; each device
 //! renders one page at a time while others stage their inputs or read
 //! their pixels back.  A page that does not qualify renders on the CPU.
@@ -317,9 +318,9 @@ impl DevicePages {
 
 /// The index of the load where one more page expects the shortest wait,
 /// the first among equals: the held pages and that page times the device's
-/// mean run, the shortest mean known for a device that has not run yet
-/// (1 ns when none has), so a new device takes pages in turn with the
-/// fastest until its own runs give it a mean.
+/// mean page raster, the shortest mean known for a device without one yet
+/// (1 ns when none has one), so a new device takes pages in turn with the
+/// fastest until its own page rasters give it a mean.
 fn choose(loads: &[Load]) -> Option<usize> {
     let fallback = loads.iter().filter_map(|l| l.mean_nanos).min().unwrap_or(1);
     loads

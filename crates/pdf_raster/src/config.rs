@@ -451,7 +451,7 @@ pub struct SessionConfig {
     /// [`ForceVulkan`](BackendPolicy::ForceVulkan), the session's device).
     /// With several devices each page takes the open device where it
     /// expects the shortest wait (the pages the device holds and itself,
-    /// times the device's mean time per run), so a faster device takes more
+    /// times the device's recent mean time per page raster), so a faster device takes more
     /// pages; every device renders the CPU's bytes.  Under
     /// [`Auto`](BackendPolicy::Auto) the devices are opened, each on a
     /// thread of its own, when the first page that may render on one asks

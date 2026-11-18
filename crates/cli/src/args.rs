@@ -650,8 +650,8 @@ pub(crate) struct Args {
     /// GPU (not a CPU implementation such as llvmpipe).
     ///
     /// Each page takes the open device where it expects the shortest wait
-    /// (the pages the device holds, times its mean time per page), so a
-    /// faster device takes more pages; every device renders the CPU's
+    /// (the pages it holds and this one, times its recent mean time per
+    /// page raster), so a faster device takes more pages; every device renders the CPU's
     /// bytes.  A list naming one device twice, or an entry matching no
     /// device or several, is an error that lists the devices.  Needs
     /// --gpu-pages; under --backend auto it replaces --vulkan-device.

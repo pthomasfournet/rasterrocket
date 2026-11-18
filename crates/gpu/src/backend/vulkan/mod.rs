@@ -63,10 +63,8 @@ pub struct VulkanBackend {
     /// one recording state, so pages from several threads run one at a
     /// time.
     page: std::sync::Mutex<()>,
-    /// The runs of [`GpuBackend::run_page`] completed, and the nanoseconds
-    /// they held `page` ([`Self::device_time`]).
-    runs: std::sync::atomic::AtomicU64,
-    run_nanos: std::sync::atomic::AtomicU64,
+    /// The time page rasters hold the device ([`Self::page_mean`]).
+    page_clock: page::PageClock,
     #[expect(
         dead_code,
         reason = "kept for explicit drop ordering; readers go via recorder's Arc clone"
@@ -109,8 +107,7 @@ impl VulkanBackend {
             transfer,
             recorder,
             page: std::sync::Mutex::new(()),
-            runs: std::sync::atomic::AtomicU64::new(0),
-            run_nanos: std::sync::atomic::AtomicU64::new(0),
+            page_clock: page::PageClock::default(),
             pipelines,
             memory,
             device,
@@ -217,19 +214,15 @@ impl VulkanBackend {
             })
     }
 
-    /// The device runs completed so far (one per page raster, ICC
-    /// conversion or image blit) and the time they held the device, from
-    /// recording their command buffer to the end of the wait for it: runs
-    /// hold the device one at a time, so the mean is the device's time per
-    /// run.
+    /// The mean time a page raster ([`Self::render_page`]) holds the
+    /// device, from recording its command buffer to the end of the wait
+    /// for it: an exponentially weighted mean over the page rasters that
+    /// succeeded, the newest weighing 1/8, the backend's first excluded
+    /// (it includes the driver's first dispatch of the kernel).  `None`
+    /// until a page raster after the first has succeeded.
     #[must_use]
-    pub fn device_time(&self) -> (u64, std::time::Duration) {
-        (
-            self.runs.load(std::sync::atomic::Ordering::Relaxed),
-            std::time::Duration::from_nanos(
-                self.run_nanos.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-        )
+    pub fn page_mean(&self) -> Option<std::time::Duration> {
+        self.page_clock.mean()
     }
 
     /// Queue submissions this backend has made so far: one per page, one
@@ -428,18 +421,7 @@ impl GpuBackend for VulkanBackend {
     where
         F: FnOnce(&Self) -> Result<()>,
     {
-        let _page = self
-            .page
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let started = std::time::Instant::now();
-        let run = crate::backend::run_page_steps(self, record);
-        let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        let _ = self
-            .run_nanos
-            .fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        run
+        self.run_held(record).0
     }
 
     /// A mapped buffer (integrated GPU) is written in place under

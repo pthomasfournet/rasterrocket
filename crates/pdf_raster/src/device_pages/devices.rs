@@ -19,7 +19,9 @@ pub(super) struct Device {
     /// The opening of the device.
     opener: Mutex<Opener>,
     /// The pages holding the device: recording for it, waiting for it or
-    /// rendering on it.
+    /// rendering on it.  A page claims its device before recording, since
+    /// what it records depends on the device
+    /// ([`VulkanBackend::page_paths`]).
     in_flight: AtomicUsize,
     /// Set once the device has failed; it is offered no page afterwards.
     retired: AtomicBool,
@@ -269,7 +271,8 @@ impl Device {
 }
 
 /// The load of an open device: the pages holding it and its mean time
-/// per run, unknown before its first run.
+/// per page raster ([`VulkanBackend::page_mean`]), unknown before one
+/// after its first has run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Load {
     pub(super) held: usize,
@@ -278,16 +281,15 @@ pub(super) struct Load {
 
 impl Load {
     fn of(held: usize, backend: &VulkanBackend) -> Self {
-        let (runs, time) = backend.device_time();
         Self {
             held,
-            mean_nanos: time.as_nanos().checked_div(u128::from(runs)),
+            mean_nanos: backend.page_mean().map(|mean| mean.as_nanos()),
         }
     }
 
     /// The expected wait of one more page, in nanoseconds: the held pages
-    /// and that page times the mean run, `fallback` (at least 1) when the
-    /// mean is unknown.
+    /// and that page times the mean page raster, `fallback` (at least 1)
+    /// when the mean is unknown.
     pub(super) fn wait(self, fallback: u128) -> u128 {
         let mean = self.mean_nanos.unwrap_or(fallback).max(1);
         u128::try_from(self.held)

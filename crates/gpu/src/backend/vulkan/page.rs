@@ -13,12 +13,13 @@
 //! clock between its host stages and writes device timestamps between its
 //! device stages; an untimed page does neither.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage_parts,
 };
-use crate::backend::{BackendError, GpuBackend, Result};
+use crate::backend::{BackendError, Result};
 use crate::page::{PageCommands, PageSample, TableBases, TileBins, pack_rgb};
 
 use super::VulkanBackend;
@@ -44,6 +45,48 @@ pub(super) struct PageScratch {
     target: Option<Staged<VulkanBackend>>,
     /// The timestamp queries of timed pages, created by the first.
     clock: Option<StageClock>,
+}
+
+/// The time page rasters hold the device: an exponentially weighted mean
+/// of the page rasters that succeeded, the first excluded.
+#[derive(Default)]
+pub(super) struct PageClock {
+    /// Set by the first page raster that succeeded, which is not counted.
+    warm: AtomicBool,
+    /// The mean in nanoseconds, at least 1; 0 while none is counted.
+    mean_nanos: AtomicU64,
+}
+
+impl PageClock {
+    /// The weight of the newest run is `1 / WEIGHT`.
+    const WEIGHT: u64 = 8;
+
+    /// Count a page raster that held the device for `held`.
+    fn record(&self, held: Duration) {
+        if !self.warm.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let new = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX).max(1);
+        let _ = self
+            .mean_nanos
+            .update(Ordering::Relaxed, Ordering::Relaxed, |mean| {
+                if mean == 0 {
+                    return new;
+                }
+                let total = u128::from(mean) * u128::from(Self::WEIGHT - 1) + u128::from(new);
+                u64::try_from(total / u128::from(Self::WEIGHT))
+                    .unwrap_or(u64::MAX)
+                    .max(1)
+            });
+    }
+
+    /// The mean, once a run is counted.
+    pub(super) fn mean(&self) -> Option<Duration> {
+        match self.mean_nanos.load(Ordering::Relaxed) {
+            0 => None,
+            nanos => Some(Duration::from_nanos(nanos)),
+        }
+    }
 }
 
 /// The duration of each stage of one page rendered by
@@ -130,6 +173,22 @@ fn device_size(len: usize) -> u64 {
 }
 
 impl VulkanBackend {
+    /// [`GpuBackend::run_page`] of `record` under the backend's page lock,
+    /// and the time it held the lock: page runs hold the device one at a
+    /// time, so that is the device's time for the run.
+    pub(super) fn run_held<F>(&self, record: F) -> (Result<()>, Duration)
+    where
+        F: FnOnce(&Self) -> Result<()>,
+    {
+        let _page = self
+            .page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = Instant::now();
+        let run = crate::backend::run_page_steps(self, record);
+        (run, started.elapsed())
+    }
+
     /// Whether the device rasterises outlines ([`crate::page::AreaPath`]):
     /// it supports 64-bit integers in kernels.  A page with outlines
     /// renders only on such a device.
@@ -292,7 +351,7 @@ impl VulkanBackend {
         // lent to this call alone for its whole duration, and `run_page` returns
         // only once its page has completed or, on failure, been waited on;
         // nothing touches the buffers in between.
-        self.run_page(|backend| {
+        let (run, held) = self.run_held(|backend| {
             if let Some(c) = clock {
                 backend
                     .recorder
@@ -322,7 +381,9 @@ impl VulkanBackend {
             stamp(backend, 3)?;
             record = laps.lap();
             Ok(())
-        })?;
+        });
+        run?;
+        self.page_clock.record(held);
         let submit_wait = laps.lap();
 
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
@@ -363,6 +424,27 @@ mod tests {
 
     use crate::page::test_support::Rng;
     use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
+
+    /// The clock ignores the first page raster, takes the second as its
+    /// mean, and weighs each later one by 1/8, so a slow run is forgotten.
+    #[test]
+    fn the_page_clock_skips_the_first_run_and_forgets_slow_ones() {
+        use std::time::Duration;
+        let clock = super::PageClock::default();
+        clock.record(Duration::from_millis(80));
+        assert_eq!(clock.mean(), None);
+        clock.record(Duration::from_millis(16));
+        assert_eq!(clock.mean(), Some(Duration::from_millis(16)));
+        clock.record(Duration::from_millis(80));
+        assert_eq!(clock.mean(), Some(Duration::from_millis(24)));
+        for _ in 0..64 {
+            clock.record(Duration::from_millis(2));
+        }
+        let mean = clock.mean().expect("a mean");
+        assert!(mean < Duration::from_micros(2010), "{mean:?}");
+        clock.record(Duration::ZERO);
+        assert!(clock.mean().is_some_and(|m| m > Duration::ZERO));
+    }
 
     /// One command as the host model paints it.
     struct HostCmd {
