@@ -15,6 +15,16 @@
 //! The post-rotation shift is computed to keep the image centred on its
 //! original centre point.
 //!
+//! # Edges
+//!
+//! For a destination pixel whose source position (pixel centres at
+//! integers) lies in `[-0.5, 0)` on an axis, NPP writes an edge-clamped
+//! interpolation; for one whose position lies in `(w − 1, w)` (`(h − 1, h)`
+//! vertically) it writes nothing, so the pixel keeps the white pre-fill
+//! (NPP 12.2 and 13.1).  A rotation whose border must follow another edge
+//! rule recomputes the destination pixels whose source position lies near
+//! the source's edges.
+//!
 //! # Thread safety
 //!
 //! The internal `NppRotator` (private) is `Send` but not `Sync`.  The

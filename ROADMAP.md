@@ -3169,6 +3169,27 @@ for `corpus-05` at 300 dpi on the RTX 5070), and each page sent to the CPU
 logs why at `debug`. Before, a page that found the device busy or not yet
 open went to the CPU without a log line.
 
+**Unreleased on master: the NPP deskew's border follows the CPU's.** NPP
+interpolates a destination pixel whose source position lies half a pixel
+before the source's first row or column, where the CPU rotation paints
+white, and leaves white one whose position lies past the last, where the
+CPU samples the edge. Page 3 of `corpus-09` (2133 × 3520 at 150 dpi,
+`--backend cuda --gray --deskew`) differed in 4 126 samples, up to 182
+levels, on the RTX 2080 SUPER (NPP 12.2) and identically on the RTX 5070
+(NPP 13.1). The GPU rotation now recomputes, with the scalar kernel, the
+samples whose source position lies within 2 pixels of an edge of the
+sampled range, `O(width + height)` samples. The page now differs in 957
+samples, all by 1 level; at `--depth 16`, before 256 632 samples up to
+46 656 levels, now 253 297 up to 7 levels of 65 535 (the CPU maps
+coordinates in `f32`, so the interior difference grows with the page's
+size). The documented bound is 2 levels at 8 bits and 2 × 257 at 16 bits
+at every sample; the new device tests assert 2 levels at both depths, at
+every sample, on random images up to 257 pixels a side at random angles
+within ±7° and at 0°, 45°, −90° and 180°. The interior stays NPP's bilinear,
+so the GPU rotation is not byte-identical to the CPU's, as every other GPU
+path is; that would take a CUDA kernel of the CPU's arithmetic in place of
+NPP.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

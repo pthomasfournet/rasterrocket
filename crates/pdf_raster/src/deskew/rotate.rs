@@ -16,11 +16,18 @@
 //! `nppiRotate_8u_C1R_Ctx` and `nppiRotate_16u_C1R_Ctx` with hardware
 //! bilinear via texture units.  ~0.3–0.5 ms for a 2550×3300 image
 //! on RTX 5070.  Taken only under [`BackendPolicy::ForceCuda`], where a
-//! failed GPU rotation, as without a CUDA device, is an error.
+//! failed GPU rotation, as without a CUDA device, is an error.  NPP's edge
+//! rule is not the CPU's, so the samples whose source position lies within
+//! 2 pixels of an edge of the sampled range are recomputed on the host
+//! with the scalar kernel; the border is then the CPU's, and every other
+//! sample is NPP's bilinear, within 2 levels of the CPU's at 8 bits and
+//! 2 × 257 at 16 bits.
 
 use color::Gray8;
 use raster::Bitmap;
 
+#[cfg(feature = "gpu-deskew")]
+use super::bilinear::rotate_border_scalar;
 use super::bilinear::{rotate_cpu_with, rotate_rows};
 use super::simd::dispatch_rotate_row;
 use super::{DeskewError, DeskewPixel};
@@ -118,7 +125,8 @@ pub(crate) fn rotate_cpu_into(src: &Bitmap<Gray8>, angle_deg: f32, dst: &mut [u8
 }
 
 /// GPU rotation via CUDA NPP (`nppiRotate_8u_C1R_Ctx` for 8-bit samples,
-/// `nppiRotate_16u_C1R_Ctx` for 16-bit ones).
+/// `nppiRotate_16u_C1R_Ctx` for 16-bit ones), its border then recomputed
+/// by [`rotate_border_scalar`].
 #[cfg(feature = "gpu-deskew")]
 pub(crate) fn rotate_gpu<P: DeskewPixel>(
     src: &Bitmap<P>,
@@ -149,6 +157,8 @@ pub(crate) fn rotate_gpu<P: DeskewPixel>(
         )));
     }
     dst.data_mut().copy_from_slice(&pixels);
+    let stride = dst.stride;
+    rotate_border_scalar(src, angle_deg, dst.data_mut(), stride);
     Ok(dst)
 }
 
@@ -483,71 +493,170 @@ mod tests {
         assert!(max_diff <= 2, "360° rotation max diff {max_diff} > 2");
     }
 
-    /// GPU and CPU bilinear rotation agree to within 2 grey levels at any
-    /// interior pixel for a typical deskew angle (2°).
-    ///
-    /// Gated on `gpu-validation` so it only runs when a CUDA device is
-    /// available (same gate as the other GPU-vs-CPU parity tests).
+    /// A xorshift64 generator of test inputs.
+    #[cfg(feature = "gpu-deskew")]
+    struct XorShift(u64);
+
+    #[cfg(feature = "gpu-deskew")]
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A value in `lo..=hi`.
+        fn within(&mut self, lo: u32, hi: u32) -> u32 {
+            let span = u64::from(hi - lo) + 1;
+            lo + u32::try_from(self.next() % span).expect("below the span")
+        }
+
+        /// An angle in `[-limit, limit]` degrees.
+        #[cfg(feature = "gpu-validation")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a 24-bit fraction is exact in f32"
+        )]
+        fn angle(&mut self, limit: f32) -> f32 {
+            let unit = (self.next() >> 40) as f32 / (1u32 << 24) as f32;
+            unit.mul_add(2.0 * limit, -limit)
+        }
+    }
+
+    /// A test coordinate or dimension, below 2^16, as `f32`.
+    #[cfg(feature = "gpu-deskew")]
+    fn small(v: u32) -> f32 {
+        f32::from(u16::try_from(v).expect("a test dimension"))
+    }
+
+    /// A `w × h` image of row pad `pad` whose samples are `sample()`.
+    #[cfg(feature = "gpu-deskew")]
+    fn image_of<P: DeskewPixel>(
+        (w, h): (u32, u32),
+        pad: usize,
+        mut sample: impl FnMut() -> i64,
+    ) -> Bitmap<P> {
+        let mut img = Bitmap::<P>::new(w, h, pad, false);
+        for y in 0..h {
+            for px in img.row_samples_mut(y) {
+                *px = color::Sample::from_signed(sample());
+            }
+        }
+        img
+    }
+
+    /// The border pass rewrites, with the CPU rotation's samples, every
+    /// sample whose source position lies within 1.5 pixels of an edge of
+    /// the sampled range, and no sample it does not rewrite.
+    #[test]
+    #[cfg(feature = "gpu-deskew")]
+    fn the_border_pass_rewrites_the_border_with_the_cpus_samples() {
+        /// A value no rotation of the test images yields.
+        const MARK: u8 = 7;
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for angle in [0.0, 0.3, -2.0, 6.9, -45.0, 90.0, 180.0] {
+            let (w, h) = (rng.within(1, 90), rng.within(1, 90));
+            let src: Bitmap<Gray8> = image_of((w, h), 1, || i64::from(rng.within(100, 200)));
+            let cpu = rotate_cpu(&src, angle);
+            let mut dst = vec![MARK; cpu.data().len()];
+            rotate_border_scalar(&src, angle, &mut dst, cpu.stride);
+            let (rad, cx, cy) = (
+                angle.to_radians(),
+                (small(w) - 1.0) * 0.5,
+                (small(h) - 1.0) * 0.5,
+            );
+            let near = |v: f32, end: f32| v.abs() < 1.5 || (v - end).abs() < 1.5;
+            for oy in 0..h {
+                let (got, want) = (&dst[oy as usize * cpu.stride..], cpu.row_bytes(oy));
+                for (ox, (&g, &c)) in (0u32..).zip(got.iter().zip(want)) {
+                    let (dx, dy) = (small(ox) - cx, small(oy) - cy);
+                    let sx = rad.cos().mul_add(dx, -(rad.sin() * dy)) + cx;
+                    let sy = rad.sin().mul_add(dx, rad.cos() * dy) + cy;
+                    let at = format!("{w}×{h} at {angle}°, ({ox}, {oy}), source ({sx}, {sy})");
+                    if near(sx, small(w)) || near(sy, small(h)) {
+                        assert_eq!(g, c, "{at}: not rewritten");
+                    } else {
+                        assert!(g == MARK || g == c, "{at}: {g} is neither");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every sample of the GPU rotation of random images of samples `P`,
+    /// of random sizes, row pads and angles, lies within `bound` levels of
+    /// the CPU rotation's, the border included; the histogram of the
+    /// differences.
+    #[cfg(all(feature = "gpu-deskew", feature = "gpu-validation"))]
+    fn gpu_rotation_within<P: DeskewPixel>(
+        seed: u64,
+        bound: i64,
+    ) -> std::collections::BTreeMap<i64, usize> {
+        use color::Sample as _;
+
+        let max = <P::Sample as color::Sample>::MAX.signed();
+        let mut rng = XorShift(seed);
+        let mut hist = std::collections::BTreeMap::new();
+        let fixed = [
+            0.0,
+            0.01,
+            -0.01,
+            super::super::MAX_SEARCH_DEG,
+            -super::super::MAX_SEARCH_DEG,
+            45.0,
+            -90.0,
+            180.0,
+        ];
+        let random: Vec<f32> = (0..24)
+            .map(|_| rng.angle(super::super::MAX_SEARCH_DEG))
+            .collect();
+        for angle in fixed.into_iter().chain(random) {
+            let (w, h) = (rng.within(1, 257), rng.within(1, 257));
+            let pad = [1, 4, 64][rng.within(0, 2) as usize];
+            let src: Bitmap<P> = image_of((w, h), pad, || {
+                i64::try_from(rng.next() % (max.unsigned_abs() + 1)).expect("a sample")
+            });
+            let cpu = rotate_cpu(&src, angle);
+            let gpu = rotate_gpu(&src, angle).expect("GPU rotation");
+            for y in 0..h {
+                for (x, (c, g)) in (0..).zip(cpu.row_samples(y).iter().zip(gpu.row_samples(y))) {
+                    let d = (c.signed() - g.signed()).abs();
+                    assert!(
+                        d <= bound,
+                        "{w}×{h} (pad {pad}) at {angle}°: ({x}, {y}) CPU {c:?}, GPU {g:?}"
+                    );
+                    *hist.entry(d).or_insert(0) += 1;
+                }
+            }
+        }
+        hist
+    }
+
+    /// The GPU rotation of 8-bit images agrees with the CPU's to within
+    /// 2 levels at every sample, the border included.
     #[test]
     #[cfg(all(feature = "gpu-deskew", feature = "gpu-validation"))]
     fn gpu_vs_cpu_rotation_parity() {
-        let mut src = Bitmap::<Gray8>::new(128, 128, 1, false);
-        for y in 0..128u32 {
-            let row = src.row_bytes_mut(y);
-            for (x, px) in (0usize..).zip(row.iter_mut()) {
-                *px = u8::try_from((x * 2 + y as usize * 3) % 256).expect("below 256");
-            }
-        }
-
-        let angle = 2.0_f32;
-        let cpu = rotate_cpu(&src, angle);
-        let gpu = rotate_gpu(&src, angle).expect("GPU rotate failed");
-
-        let mut max_diff = 0u8;
-        // Skip a 4-pixel border where bilinear vs NPP edge treatment may differ.
-        for y in 4..124u32 {
-            let cr = &cpu.row_bytes(y)[4..124];
-            let gr = &gpu.row_bytes(y)[4..124];
-            for (&a, &b) in cr.iter().zip(gr.iter()) {
-                max_diff = max_diff.max(a.abs_diff(b));
-            }
-        }
-        assert!(
-            max_diff <= 2,
-            "GPU vs CPU rotation max diff {max_diff} > 2 at 2°"
-        );
+        let hist = gpu_rotation_within::<Gray8>(0x2545_F491_4F6C_DD1D, 2);
+        eprintln!("8-bit |CPU - GPU| histogram: {hist:?}");
     }
 
-    /// At 16 bits, GPU and CPU bilinear rotation agree to within the
-    /// 8-bit tolerance, 2 levels of 257, at any interior pixel at 2°, on a
-    /// source whose samples use all 16 bits.
+    /// The GPU rotation of 16-bit images agrees with the CPU's to within
+    /// 2 levels of 65 535 at every sample, the border included, and keeps
+    /// 16-bit levels.
     #[test]
     #[cfg(all(feature = "gpu-deskew", feature = "gpu-validation"))]
     fn gpu_vs_cpu_rotation_parity_at_16_bits() {
+        let hist = gpu_rotation_within::<color::Gray16>(0x1234_5678_9ABC_DEF1, 2);
+        eprintln!("16-bit |CPU - GPU| histogram: {hist:?}");
         let mut src = Bitmap::<color::Gray16>::new(128, 128, 1, false);
         for y in 0..128u32 {
             for (x, px) in (0usize..).zip(src.row_samples_mut(y).iter_mut()) {
                 *px = u16::try_from((x * 523 + y as usize * 787) % 65_536).expect("below 2^16");
             }
         }
-        let angle = 2.0_f32;
-        let cpu = rotate_cpu(&src, angle);
-        let gpu = rotate_gpu(&src, angle).expect("GPU rotate failed");
-        let mut max_diff = 0u16;
-        for y in 4..124u32 {
-            let cr = &cpu.row_samples(y)[4..124];
-            let gr = &gpu.row_samples(y)[4..124];
-            for (&a, &b) in cr.iter().zip(gr.iter()) {
-                max_diff = max_diff.max(a.abs_diff(b));
-            }
-        }
-        eprintln!("16-bit GPU vs CPU rotation max diff at 2°: {max_diff}");
-        assert!(
-            max_diff <= 2 * 257,
-            "16-bit GPU vs CPU rotation max diff {max_diff} > 514 at 2°"
-        );
-        // The bilinear blend keeps 16-bit levels: the rotation is not the
-        // 8-bit one widened.
+        let gpu = rotate_gpu(&src, 2.0).expect("GPU rotate failed");
         assert!(gpu.data().iter().any(|&v| v % 257 != 0));
     }
 

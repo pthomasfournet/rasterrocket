@@ -132,6 +132,83 @@ pub(super) fn rotate_span_scalar<P: DeskewPixel>(
     }
 }
 
+/// Distance, in source pixels, from each edge of the sampled source range
+/// within which [`rotate_border_scalar`] recomputes a sample.
+#[cfg(feature = "gpu-deskew")]
+const BORDER: f32 = 2.0;
+
+/// The output columns of `0..w` whose source coordinate `k·ox + b` may lie
+/// in `[lo, hi)`, widened by a column on each side.
+#[cfg(feature = "gpu-deskew")]
+fn columns_within(k: f32, b: f32, (lo, hi): (f32, f32), w: usize) -> std::ops::Range<usize> {
+    if k == 0.0 {
+        return if (lo..hi).contains(&b) { 0..w } else { 0..0 };
+    }
+    let (t0, t1) = ((lo - b) / k, (hi - b) / k);
+    // w ≤ DESKEW_MAX_SIDE = 32768; exact in f32.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "w ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
+    )]
+    let wf = w as f32;
+    // Clamped to [0, w] before the casts; the bounds are finite for a
+    // finite angle and non-zero `k`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, w] with w ≤ 32768"
+    )]
+    let (first, end) = (
+        (t0.min(t1).floor() - 1.0).clamp(0.0, wf) as usize,
+        (t0.max(t1).ceil() + 2.0).clamp(0.0, wf) as usize,
+    );
+    first..end.max(first)
+}
+
+/// Overwrite, with the scalar kernel's samples, every sample of the rows
+/// of `dst` (`dst[oy * stride..][..width]`, a rotation of `src` by
+/// `angle_deg` computed by another kernel) whose source position lies
+/// within [`BORDER`] pixels of an edge of the sampled range
+/// `[0, w) × [0, h)`: the samples where the white background meets the
+/// edge-clamped footprint.  Every other sample is left as it is.
+#[cfg(feature = "gpu-deskew")]
+pub(super) fn rotate_border_scalar<P: DeskewPixel>(
+    src: &Bitmap<P>,
+    angle_deg: f32,
+    dst: &mut [P::Sample],
+    stride: usize,
+) {
+    let w = src.width as usize;
+    // w, h ≤ DESKEW_MAX_SIDE = 32768; exact in f32.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "image dimensions ≤ DESKEW_MAX_SIDE = 32768; exact in f32"
+    )]
+    let (wf, hf) = (src.width as f32, src.height as f32);
+    let bands = |end: f32| [(-BORDER, BORDER), (end - 1.0 - BORDER, end + BORDER)];
+    rotate_rows(src, angle_deg, dst, stride, |row, src, p| {
+        let mut spans: Vec<std::ops::Range<usize>> = bands(wf)
+            .into_iter()
+            .map(|band| columns_within(p.cos_a, p.sx_base, band, w))
+            .chain(
+                bands(hf)
+                    .into_iter()
+                    .map(|band| columns_within(p.sin_a, p.sy_base, band, w)),
+            )
+            .filter(|span| !span.is_empty())
+            .collect();
+        spans.sort_unstable_by_key(|span| span.start);
+        let mut done = 0;
+        for span in spans {
+            let first = span.start.max(done);
+            if first < span.end {
+                rotate_span_scalar(&mut row[first..span.end], first, src, p);
+                done = span.end;
+            }
+        }
+    });
+}
+
 /// [`rotate_rows`] into a new packed bitmap.
 pub(super) fn rotate_cpu_with<P: DeskewPixel>(
     src: &Bitmap<P>,
