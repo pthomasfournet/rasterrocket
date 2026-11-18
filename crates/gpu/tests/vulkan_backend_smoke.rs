@@ -401,9 +401,11 @@ fn vulkan_backend_host_buffer_round_trip() {
 /// The first integrated GPU: the default device when it is one, else a
 /// device matched by a driver name that only integrated parts carry.
 ///
-/// `None` (the caller skips) only when no device matches either name; any
-/// other failure, an ambiguous name included, fails the test, so that a
-/// broken device selection does not pass as a box without an iGPU.
+/// `None` (the caller skips) only when no device matches either name, or
+/// the one matched is ineligible (selection names the reason, which is
+/// printed); any other failure, an ambiguous name included, fails the
+/// test, so that a broken device selection does not pass as a box without
+/// an iGPU.
 fn integrated_backend() -> Option<VulkanBackend> {
     let default = VulkanBackend::new().expect("VulkanBackend::new");
     if default.is_integrated() {
@@ -417,6 +419,10 @@ fn integrated_backend() -> Option<VulkanBackend> {
             Err(BackendError::DeviceSelection(msg))
                 if msg.contains("no device name contains it") =>
             {
+                None
+            }
+            Err(BackendError::DeviceSelection(msg)) if msg.contains("is not usable") => {
+                eprintln!("skipping the {name} device: {msg}");
                 None
             }
             Err(e) => panic!("selecting the {name} device failed: {e}"),

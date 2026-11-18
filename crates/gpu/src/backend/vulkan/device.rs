@@ -981,10 +981,8 @@ mod tests {
 
     #[test]
     fn only_an_absolute_vulkan_sdk_is_used() {
-        assert_eq!(
-            absolute_sdk(Some(Path::new("/sdk"))),
-            Some(Path::new("/sdk"))
-        );
+        let sdk = Path::new(if cfg!(windows) { r"C:\sdk" } else { "/sdk" });
+        assert_eq!(absolute_sdk(Some(sdk)), Some(sdk));
         assert_eq!(absolute_sdk(Some(Path::new(""))), None);
         assert_eq!(absolute_sdk(Some(Path::new("sdk"))), None);
         assert_eq!(absolute_sdk(None), None);

@@ -537,7 +537,8 @@ mod tests {
 
     /// The first integrated GPU among the devices named by a driver that
     /// only integrated parts carry, or `None` (the test is skipped) when no
-    /// device matches either name; any other failure fails the test.
+    /// device matches either name or the one matched is ineligible (the
+    /// reason is printed); any other failure fails the test.
     fn integrated() -> Option<VulkanBackend> {
         let found = ["radv", "intel"].iter().find_map(|name| {
             let selector = name.parse().expect("non-empty selector");
@@ -546,6 +547,12 @@ mod tests {
                 Err(crate::backend::BackendError::DeviceSelection(msg))
                     if msg.contains("no device name contains it") =>
                 {
+                    None
+                }
+                Err(crate::backend::BackendError::DeviceSelection(msg))
+                    if msg.contains("is not usable") =>
+                {
+                    eprintln!("skipping the {name} device: {msg}");
                     None
                 }
                 Err(e) => panic!("selecting the {name} device failed: {e}"),
