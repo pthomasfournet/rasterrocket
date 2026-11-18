@@ -311,6 +311,18 @@ impl std::fmt::Display for ImageFailure {
 }
 
 impl PageDiagnostics {
+    /// Whether the page was drawn with something left out or substituted:
+    /// a skipped image or content stream, a form past the depth limit, a
+    /// font that resolved to nothing, or an unsupported feature.
+    #[must_use]
+    pub const fn has_omissions(&self) -> bool {
+        !(self.image_failures.is_empty()
+            && self.content_failures.is_empty()
+            && self.forms_too_deep.is_empty()
+            && self.missing_fonts.is_empty()
+            && self.unsupported_features.is_empty())
+    }
+
     /// Whether the page shows a glyph that can mark it (see
     /// [`GlyphCounts::visible`]): text drawn on the page rather than only
     /// an invisible (`3 Tr`) or clip-only layer.
@@ -498,5 +510,20 @@ impl PageRenderer<'_> {
         }
         log::warn!("rasterrocket-interp: font resource /{name} is not defined — drawing Helvetica");
         self.diag.missing_fonts.push(name.into_owned());
+    }
+}
+
+#[cfg(test)]
+mod omission_tests {
+    use super::PageDiagnostics;
+
+    #[test]
+    fn has_omissions_is_false_by_default_and_true_when_a_field_is_set() {
+        assert!(!PageDiagnostics::default().has_omissions());
+        let d = PageDiagnostics {
+            missing_fonts: vec!["F1".to_owned()],
+            ..PageDiagnostics::default()
+        };
+        assert!(d.has_omissions());
     }
 }
