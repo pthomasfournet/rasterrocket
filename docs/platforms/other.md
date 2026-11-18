@@ -1,7 +1,8 @@
 # rasterrocket on the BSDs and Windows
 
-Windows is built and tested in CI, on GitHub's Windows runner only; no
-Windows machine of our own has run it. The BSDs are not tested, and no CI
+Windows is built and tested in CI, on GitHub's Windows runner, and its
+CUDA features on one machine of our own, with an RTX 2080 SUPER (see
+[Windows](#windows)). The BSDs are not tested, and no CI
 job covers them. The code has no Linux-only dependency in its render path: it is
 Rust, plus two C libraries that `cargo` builds, libdeflate for compression
 and mimalloc, the command-line tool's allocator, and, on x86, the AV1
@@ -31,8 +32,7 @@ tested. Please report what you find.
 - **CI:** each push runs clippy on `windows-latest`, then the test suites
   of the renderer, interpreter, library, font, parser, colour, encoder,
   comic and command-line crates (the last including end-to-end runs of the
-  binary). That runner is the only Windows machine tested; GPU code is not
-  tested on Windows.
+  binary). The runner has no GPU.
 - **Build:** with the MSVC toolchain from `rustup`, the Visual Studio
   Build Tools and, on x86-64, `nasm` on `PATH` (`choco install nasm`; the
   installer leaves it in `C:\Program Files\NASM`) for the AV1 decoder's
@@ -45,8 +45,25 @@ tested. Please report what you find.
   to the current directory and `--ram` is refused. `--ram-path` writes into
   a directory on a RAM disk you have mounted, moving to disk once the
   available physical memory falls below 1 GiB.
-- **GPU:** CUDA and Vulkan are untested on Windows (the CI runner has no
-  GPU).
+- **GPU (CUDA):** the CUDA features (`nvjpeg`, `nvjpeg2k`, `gpu-icc`,
+  `gpu-deskew`, `cache`) need CUDA 13.4 or later and the Visual Studio 2026
+  Build Tools (C++ workload); CUDA 13.1's and 13.3's nvcc refuse VS 2026's
+  MSVC 14.52. A plain `cargo build` finds nvcc in `%CUDA_PATH%\bin`, which
+  the CUDA installer sets, the import libraries in `%CUDA_PATH%\lib\x64`,
+  and nvcc's host compiler `cl.exe` from the Visual Studio installation, so
+  no developer prompt is needed; `NVCC` names another nvcc and `NVCC_CCBIN`
+  another `cl.exe`. At run time the CUDA DLLs (`%CUDA_PATH%\bin\x64`, put
+  on `PATH` by the installer) must be on `PATH`. `nvjpeg2k` needs NVIDIA's
+  nvJPEG2000 Windows redistributable archive for CUDA 13, unpacked, with
+  `NVJPEG2K_PATH` naming its root (`include`, `lib`) and its `bin` on
+  `PATH`. Built and tested on an RTX 2080 SUPER (`sm_75`, driver 621.24)
+  with CUDA 13.5, the VS 2026 Build Tools (MSVC 14.52) and nvJPEG2000
+  0.12.0: the GPU crate's suite with every CUDA feature, the deskew and ICC
+  suites, and `--backend cuda` against `--backend cpu` on every fixture
+  page at 150 dpi, RGB and gray, byte-identical but for nvJPEG2000's JPEG
+  2000 decodes (up to 19 levels, as on Linux) and `--deskew`, within 1
+  level. Other NVIDIA GPUs on Windows are untested.
+- **GPU (Vulkan):** untested on Windows.
 - **Printing and fax:** `--print` and `--fax-to` are refused: both submit
   through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.
   Render to files and print them from an application, or write a fax

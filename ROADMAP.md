@@ -3327,6 +3327,33 @@ H100-class cards and their Vulkan driver, more than two devices, many
 devices of one kind, 80 GB pages, and a CUDA twin of the page raster (there
 is none; the page raster is Vulkan only).
 
+**Unreleased on master: CUDA on Windows.** The CUDA features (`nvjpeg`,
+`nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`) build and run on Windows.
+`crates/gpu/build.rs` takes nvcc and the import libraries from
+`%CUDA_PATH%` (`bin\nvcc.exe`, `lib\x64`), finds MSVC's `cl.exe` for nvcc
+from the Visual Studio installation, so no developer prompt is needed
+(`NVCC_CCBIN` names another), builds the nvJPEG2000 shim with
+`nvcc --lib`, and takes nvJPEG2000 from `%NVJPEG2K_PATH%` (the root of
+NVIDIA's Windows redistributable archive). Built and tested on the
+RTX 2080 SUPER (`sm_75`, driver 621.24) with CUDA 13.5, the Visual Studio
+2026 Build Tools (MSVC 14.52) and nvJPEG2000 0.12.0; CUDA 13.1's and 13.3's
+nvcc refuse that MSVC, so a Windows build needs CUDA 13.4 or later with
+VS 2026. Two fixes came with it: the shared CUDA driver bindings compile
+only with `gpu-deskew` or `nvjpeg2k` (MSVC's linker reported `cudaFree`
+unresolved in a `gpu-icc` build), and the CUDA runtime is initialised once
+per process, retrying `cudaErrorInsufficientDriver`, which the Windows
+runtime returned for every call for under 50 ms while other threads used
+the driver (one run of the GPU suite in three failed its NPP tests). The
+`rasterrocket-gpu` suite with all CUDA features (117 tests) passes there,
+40 runs in a row, and `--backend cuda` against `--backend cpu` at 150 dpi
+over the 3 024 fixture pages, RGB and gray, is byte-identical except for
+`corpus-10`'s JPEG 2000 images, which nvJPEG2000 decodes up to 19 levels
+apart from the CPU (571 of 576 pages; the RTX 5070 on Linux, with
+nvJPEG2000 0.11, differs the same way; with `PDF_RASTER_JPX_THRESHOLD`
+above every image the pages are identical). `--deskew` on the scans
+(`corpus-08`–`10`, 1 456 pages) differs by at most 1 level, on 738 pages.
+Vulkan on Windows is untested.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

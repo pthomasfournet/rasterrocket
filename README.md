@@ -569,6 +569,7 @@ is **untested**: it is expected to work, nothing more.
 | llvmpipe (Mesa's CPU Vulkan driver), on both Linux machines | Vulkan, including `--gpu-pages` |
 | Intel Core i7-8700K (Coffee Lake, AVX2, no AVX-512), Linux x86-64 | the AVX2 and SSE tiers, the fixture byte comparisons and timings |
 | NVIDIA RTX 2080 SUPER (Turing, `sm_75`), driver 570, same machine | Vulkan, including `--gpu-pages`. CUDA only from a build with Ubuntu's nvcc 12.4 (ICC lookup table, nvJPEG and image cache byte-identical to the CPU; NPP deskew within 2 grey levels inside the page; up to 182 at its edge before the edge was recomputed with the CPU kernel, a fix tested on the RTX 5070 only, whose NPP 13.1 gave the same differences; no nvJPEG2000): a CUDA 13 build, the toolkit this project builds with, fails to load its kernels on driver 570 (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`; CUDA 13 needs driver 580 or later) |
+| NVIDIA RTX 2080 SUPER, Windows, driver 621.24, same machine | CUDA 13.5 with the VS 2026 Build Tools (nvJPEG, nvJPEG2000 0.12.0, ICC lookup table, NPP deskew, image cache): the GPU suites, and every fixture page under `--backend cuda` byte-identical to the CPU but for nvJPEG2000's JPEG 2000 decodes (up to 19 levels; nvJPEG2000 differs on the RTX 5070 too) and `--deskew` (within 1 level). See [BSD and Windows](docs/platforms/other.md#windows) |
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
 | GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
@@ -583,10 +584,10 @@ is **untested**: it is expected to work, nothing more.
   the AVX2 tiers, on a CPU model GitHub does not fix.
 - **NVIDIA GPUs other than the RTX 5070 and the RTX 2080 SUPER**: other
   `CUDA_ARCH` targets (see [the table](#picking-cuda_arch-for-your-gpu))
-  and datacenter cards (A100, H100); on the RTX 2080 SUPER, a CUDA 13
-  build and nvJPEG2000.
-- **Native Windows hardware:** Windows runs only in CI; GPU code is not
-  tested on Windows.
+  and datacenter cards (A100, H100); on the RTX 2080 SUPER under Linux, a
+  CUDA 13 build and nvJPEG2000.
+- **Windows GPUs:** Vulkan on Windows, and CUDA on Windows on any GPU but
+  the RTX 2080 SUPER.
 - **aarch64 Linux hardware** other than CI's arm64 runner (Raspberry Pi,
   Graviton, Ampere), and the SVE2 kernels of the AV1 decoder (the A18 Pro
   has no SVE).
@@ -600,7 +601,7 @@ is **untested**: it is expected to work, nothing more.
 **CPU:** x86-64 (AMD and Intel) and `aarch64` (ARM, including Apple silicon). AVX2/AVX-512 on x86-64; NEON on aarch64. Build with `-C target-cpu=native` to enable AVX-512 or native NEON width. Tested on the hardware above; the platform guides list what each CI leg runs.
 
 **GPU (optional):**
-- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070; on the RTX 2080 SUPER only from an nvcc 12.4 build (see [Tested hardware](#tested-hardware)).
+- **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070; on the RTX 2080 SUPER from an nvcc 12.4 build under Linux and a CUDA 13.5 build under Windows (see [Tested hardware](#tested-hardware)).
 - **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages composited in the wide working space (under an output profile), pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
@@ -621,6 +622,8 @@ cargo build --release -p rasterrocket-cli --no-default-features --features bundl
 # set it to your card's architecture for code compiled for it ahead of time.
 CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
   --features "nvjpeg,nvjpeg2k,gpu-icc,gpu-deskew,cache"
+# On Windows the same command needs CUDA 13.4 or later and the Visual Studio
+# 2026 Build Tools, no developer prompt; see docs/platforms/other.md#windows.
 
 # With Vulkan compute backend (cross-vendor; no NVIDIA dependency).
 # Requires the LunarG Vulkan SDK on the build host (slangc compiles the
@@ -637,7 +640,7 @@ The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels
 | GPU generation | Architecture | `CUDA_ARCH` | Tested |
 |---|---|---|---|
 | GTX 10-series | Pascal | `sm_61` | no; CUDA 13 no longer targets Pascal |
-| RTX 20-series, Quadro RTX | Turing | `sm_75` | RTX 2080 SUPER (2026-11), built with nvcc 12.4 on driver 570: ICC, nvJPEG, NPP and image-cache kernels; a CUDA 13 build needs driver 580 or later; nvJPEG2000 untested |
+| RTX 20-series, Quadro RTX | Turing | `sm_75` | RTX 2080 SUPER (2026-11): on Linux built with nvcc 12.4 on driver 570 (ICC, nvJPEG, NPP and image-cache kernels; a CUDA 13 build needs driver 580 or later); on Windows built with CUDA 13.5 on driver 621.24, nvJPEG2000 included |
 | RTX 30-series, A100 | Ampere | `sm_80` / `sm_86` | no |
 | RTX 40-series | Ada Lovelace | `sm_89` | no |
 | H100 / Hopper | Hopper | `sm_90` | no |
