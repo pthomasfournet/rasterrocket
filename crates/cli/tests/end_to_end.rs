@@ -921,6 +921,31 @@ fn comic_embedded_pdf_honours_session_flags() {
     );
 }
 
+/// A comic run reports each page under `--progress`, writes its pages in
+/// order, and a page selection that selects nothing reads as on the PDF
+/// path, not as a malformed archive.
+#[test]
+fn comic_pages_report_progress_and_selection_errors_name_no_archive() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let input = dir.path().join("in.cbt");
+    std::fs::write(&input, tar_of("book.pdf", &two_page_pdf())).expect("write archive");
+
+    let out = rrocket(dir.path(), &input, &["-r", "36", "--gray", "--progress"]);
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for page in ["page 1 done", "page 2 done", "[2/2]"] {
+        assert!(stderr.contains(page), "no {page:?} in {stderr}");
+    }
+    assert!(dir.path().join("out-1.pgm").is_file());
+    assert!(dir.path().join("out-2.pgm").is_file());
+
+    let out = rrocket(dir.path(), &input, &["-f", "2", "-l", "1"]);
+    assert!(!out.status.success(), "an empty selection fails");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("nothing to render"), "{stderr}");
+    assert!(!stderr.contains("malformed"), "{stderr}");
+}
+
 /// A page rendered in bands writes the file it writes rendered whole, in
 /// every banded format and colour model: the seam page at 600 dpi is
 /// 1 667 × 833 px, four bands of 1 MiB.
