@@ -266,9 +266,6 @@ fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str) {
         let src = kernels_dir.join(format!("{kernel}.cu"));
         let ptx = out_dir.join(format!("{kernel}.ptx"));
 
-        // Capture stderr so a kernel-compile failure shows nvcc's actual
-        // diagnostic (e.g. "unsupported arch", missing intrinsic) rather
-        // than a bare exit-status panic.
         let output = Command::new(nvcc)
             .args([
                 "--ptx",
@@ -286,9 +283,21 @@ fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str) {
             output.status.success(),
             "nvcc failed for {kernel}.cu (arch={arch}, status={}):\n{}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim(),
+            tool_diagnostic(&output),
         );
     }
+}
+
+/// A failed tool's diagnostic: its stderr and its stdout, each trimmed, the
+/// empty ones left out.  nvcc writes some fatal errors (a host compiler
+/// missing from `PATH`) to stdout alone.
+fn tool_diagnostic(output: &std::process::Output) -> String {
+    [&output.stderr, &output.stdout]
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Write empty placeholder PTX files so the unconditional `include_str!` macros
@@ -350,7 +359,7 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
             output.status.success(),
             "slangc failed for {kernel} ({source}.slang, profile={profile}, status={}):\n{}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim(),
+            tool_diagnostic(&output),
         );
     }
 }
