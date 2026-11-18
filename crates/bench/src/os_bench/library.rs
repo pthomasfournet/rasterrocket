@@ -234,13 +234,19 @@ mod tests {
 
     /// A two-page PDF, each page one stroked line, with a correct xref.
     fn two_page_pdf() -> Vec<u8> {
+        pdf_with_contents("10 10 m 90 90 l S", "10 90 m 90 10 l S")
+    }
+
+    /// A two-page PDF whose pages draw the given content streams, with
+    /// `/Length` and the xref computed from the bytes.
+    fn pdf_with_contents(first: &str, second: &str) -> Vec<u8> {
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
             "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_owned(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>".to_owned(),
-            stream("10 10 m 90 90 l S"),
+            stream(first),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 6 0 R >>".to_owned(),
-            stream("10 90 m 90 10 l S"),
+            stream(second),
         ];
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
@@ -381,11 +387,12 @@ mod tests {
 
     #[test]
     fn a_page_selecting_an_undefined_font_counts_as_degraded() {
-        let pdf = String::from_utf8(two_page_pdf())
-            .unwrap()
-            .replace("10 10 m 90 90 l S", "BT /F9 12 Tf 10 50 Td (x) Tj ET");
         let path = fixture("nofont");
-        std::fs::write(&path, pdf).unwrap();
+        std::fs::write(
+            &path,
+            pdf_with_contents("BT /F9 12 Tf 10 50 Td (x) Tj ET", "10 90 m 90 10 l S"),
+        )
+        .unwrap();
         let doc = DocRange::parse(path.to_str().unwrap()).unwrap();
         let r = library_rep(&doc, 72.0, 1, None).unwrap();
         assert_eq!((r.pages, r.degraded), (2, 1));

@@ -515,15 +515,76 @@ impl PageRenderer<'_> {
 
 #[cfg(test)]
 mod omission_tests {
-    use super::PageDiagnostics;
+    use super::{ImageFailure, PageDiagnostics};
+
+    /// A `ContentFailure` from a page whose first `/Contents` element is not
+    /// a stream.
+    fn content_failure() -> pdf::ContentFailure {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Contents [4 0 R 5 0 R] >>",
+            "42",
+            "<< /Length 1 >>\nstream\n \nendstream",
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for o in offsets {
+            out.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
+        let doc = pdf::Document::from_bytes_owned(out).unwrap();
+        let page = doc.get_page(0).unwrap();
+        let mut failures = doc.page_content(page).unwrap().failures;
+        assert_eq!(failures.len(), 1);
+        failures.remove(0)
+    }
 
     #[test]
-    fn has_omissions_is_false_by_default_and_true_when_a_field_is_set() {
+    fn has_omissions_is_false_by_default_and_true_for_each_field() {
         assert!(!PageDiagnostics::default().has_omissions());
-        let d = PageDiagnostics {
-            missing_fonts: vec!["F1".to_owned()],
-            ..PageDiagnostics::default()
-        };
-        assert!(d.has_omissions());
+        let each = [
+            PageDiagnostics {
+                image_failures: vec![ImageFailure {
+                    name: None,
+                    reason: String::new(),
+                    partial: false,
+                }],
+                ..PageDiagnostics::default()
+            },
+            PageDiagnostics {
+                content_failures: vec![content_failure()],
+                ..PageDiagnostics::default()
+            },
+            PageDiagnostics {
+                forms_too_deep: vec![(1, 0)],
+                ..PageDiagnostics::default()
+            },
+            PageDiagnostics {
+                missing_fonts: vec!["F1".to_owned()],
+                ..PageDiagnostics::default()
+            },
+            PageDiagnostics {
+                unsupported_features: vec![crate::UnsupportedFeature::JavaScript(
+                    crate::ScriptLocation::OpenAction,
+                )],
+                ..PageDiagnostics::default()
+            },
+        ];
+        for (i, d) in each.iter().enumerate() {
+            assert!(d.has_omissions(), "field {i}");
+        }
     }
 }
