@@ -558,8 +558,9 @@ pub(crate) fn collect_second_glyphs<T: bytemuck::AnyBitPattern + FixedSize>(
     num_glyphs: u32,
     is_actionable: &dyn Fn(&StateEntry<T>) -> bool,
 ) -> Option<U32Set> {
-    // Match HarfBuzz's one-page class filter. Require the reserved columns
-    // as well, so even a degenerate machine's OUT_OF_BOUNDS clamp is covered.
+    // The classes fit one 512-class page of the class filter, and include
+    // the reserved columns, so even a degenerate machine's OUT_OF_BOUNDS
+    // clamp is covered.
     if !(4..=512).contains(&machine.n_classes) {
         return None;
     }

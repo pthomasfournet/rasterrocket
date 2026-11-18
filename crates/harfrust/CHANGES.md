@@ -150,4 +150,5 @@ Ported:
   end-of-text or out-of-bounds transition acts, a legacy one, or one with
   fewer than 4 or more than 512 classes is not gated.  Applied as
   upstream wrote it, with its unit tests, which read the already copied
-  `TestMORXOne.ttf`.
+  `TestMORXOne.ttf`, except that the comment on the class-count bound in
+  `collect_second_glyphs` states the bound without naming another shaper.
