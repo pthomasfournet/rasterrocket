@@ -144,9 +144,9 @@ pub fn render_page_rgba(
 ) -> Result<RenderedPage, RasterError>
 ```
 
-Renders one page over a transparent backdrop to the `PixelFormat::Rgba8` `RenderedPage` that `raster_pdf` yields when `opts.transparent_background` is set: `opts.dpi` and `opts.cancel` apply; `opts.deskew` is `RasterError::InvalidOptions`.
+Renders one page over a transparent backdrop to the `PixelFormat::Rgba8` (`Rgba16` at depth 16) `RenderedPage` that `raster_pdf` yields when `opts.transparent_background` is set: `opts.dpi`, `opts.depth`, `opts.intent`, `opts.black_point_compensation`, `opts.preserve_black` and `opts.cancel` apply; `opts.deskew` is `RasterError::InvalidOptions`.
 
-`render_page_gray_alpha(session, page_num, opts)` renders the `PixelFormat::GrayAlpha8` (`GrayAlpha16` at depth 16) page of `opts.gray_alpha`: `[Y, A]`, the gray `rgb_to_gray` gives of the RGBA page's straight colour (the device gray of a gray output profile), the alpha the RGBA page's. Where the alpha is full the gray is `render_page_gray`'s. An RGB output profile and `opts.deskew` are `RasterError::InvalidOptions`.
+`render_page_gray_alpha(session, page_num, opts)` renders the `PixelFormat::GrayAlpha8` (`GrayAlpha16` at depth 16) page of `opts.gray_alpha`: `[Y, A]`, the gray `rgb_to_gray` gives of the RGBA page's straight colour (the device gray of a gray output profile), the alpha the RGBA page's. Where the alpha is full the gray is `render_page_gray`'s. The `opts` fields that apply are `render_page_rgba`'s. An RGB output profile and `opts.deskew` are `RasterError::InvalidOptions`.
 
 ```rust
 pub fn render_page_cmyk(
@@ -156,7 +156,7 @@ pub fn render_page_cmyk(
 ) -> Result<RenderedPage, RasterError>
 ```
 
-Renders one page to the `PixelFormat::Cmyk8` (or, at `opts.depth` 16, `Cmyk16`) `RenderedPage` that `raster_pdf` yields when `opts.color` is `ColorModel::Cmyk` (see **CMYK pages** below): `opts.dpi`, `opts.depth`, `opts.intent`, `opts.black_point_compensation` and `opts.cancel` apply; `opts.deskew`, `opts.transparent_background` and a session output profile that is not CMYK are `RasterError::InvalidOptions`.
+Renders one page to the `PixelFormat::Cmyk8` (or, at `opts.depth` 16, `Cmyk16`) `RenderedPage` that `raster_pdf` yields when `opts.color` is `ColorModel::Cmyk` (see **CMYK pages** below): `opts.dpi`, `opts.depth`, `opts.intent`, `opts.black_point_compensation`, `opts.preserve_black` and `opts.cancel` apply; `opts.deskew`, `opts.transparent_background` and a session output profile that is not CMYK are `RasterError::InvalidOptions`.
 
 ```rust
 pub fn render_page_rgb_with(
@@ -304,7 +304,7 @@ pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8>
 pub fn rgb_into_gray(src: Bitmap<Rgb8>) -> Bitmap<Gray8>
 ```
 
-The same conversion, byte for byte, in the RGB bitmap's own allocation: the gray rows are written packed (`stride == width`) over the front of the colour buffer, which keeps its capacity; an alpha plane is dropped. No second buffer is allocated, so a gray render peaks at the memory of the RGB render. `raster_pdf`, `render_channel`, `render_page_gray`, the comic decoder and the CLI's `--gray` / `--mono` use it. `rgb16_into_gray16(src: Bitmap<Rgb16>) -> Bitmap<Gray16>` is the same at 16 bits, sample for sample `rgb16_to_gray16`. `rasterrocket_render::Bitmap::converted::<Q>()` copies a bitmap to the depth of `Q`'s samples: widened exactly from 8 bits (`v · 257`), narrowed to the nearest 8-bit level. `rasterrocket_render::Bitmap::into_data` (the colour buffer, `stride × height` bytes) and `Bitmap::from_packed(width, height, data)` (a packed bitmap over a buffer of exactly `width × height × bytes-per-pixel`; panics otherwise) move a buffer out of and into a bitmap without a copy.
+The same conversion, byte for byte, in the RGB bitmap's own allocation: the gray rows are written packed (`stride == width`) over the front of the colour buffer, which keeps its capacity; an alpha plane is kept, as `rgb_to_gray` copies it (every gray conversion keeps its source's alpha, the gray not premultiplied by it). No second buffer is allocated, so a gray render peaks at the memory of the RGB render. `raster_pdf`, `render_channel`, `render_page_gray`, the comic decoder and the CLI's `--gray` / `--mono` use it. `rgb16_into_gray16(src: Bitmap<Rgb16>) -> Bitmap<Gray16>` is the same at 16 bits, sample for sample `rgb16_to_gray16`. `rasterrocket_render::Bitmap::converted::<Q>()` copies a bitmap to the depth of `Q`'s samples: widened exactly from 8 bits (`v · 257`), narrowed to the nearest 8-bit level. `rasterrocket_render::Bitmap::into_data` (the colour buffer, `stride × height` bytes) and `Bitmap::from_packed(width, height, data)` (a packed bitmap over a buffer of exactly `width × height × bytes-per-pixel`; panics otherwise) move a buffer out of and into a bitmap without a copy; `Bitmap::with_alpha_plane(alpha)` puts an alpha plane of `width × height` samples (or none) in place of a bitmap's own, and `Bitmap::heap_bytes()` counts the bytes of its colour, alpha and painted-channels buffers. `rasterrocket_render::interleave_alpha::<S, N>(colour, alpha, out)` interleaves pixels of `N` samples with their alpha (opaque for `None`) into pixels of `N + 1`, and `push_with_alpha::<S, N>` appends them to a `Vec`; they replace `interleave_rgba`, which is `interleave_alpha::<u8, 3>`.
 
 ```rust
 pub fn prescan_session(
@@ -333,6 +333,8 @@ impl PageBuffer {
         opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
     pub fn render_rgba_into(&mut self, session: &RasterSession, page_num: u32,
         opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
+    pub fn render_gray_alpha_into(&mut self, session: &RasterSession, page_num: u32,
+        opts: &RasterOptions, out: &mut [u8], stride: usize) -> Result<PageInfo, RasterError>
 }
 
 #[derive(Debug)]
@@ -341,7 +343,7 @@ pub struct PageInfo {
     pub page_num: u32,
     pub width: u32,
     pub height: u32,
-    pub format: PixelFormat,     // Gray8, Rgb8 or Rgba8
+    pub format: PixelFormat,     // Gray8, Rgb8, Rgba8 or GrayAlpha8
     pub dpi: f32,
     pub diagnostics: PageDiagnostics,
     pub skew: Option<deskew::Skew>,  // as RenderedPage::skew
@@ -352,9 +354,10 @@ Renders whole pages at `opts.dpi` into memory the caller owns. Every page is dra
 
 | Method | Pixels written | `opts` fields used |
 |---|---|---|
-| `render_gray_into` | those of `render_page_gray`, one byte per pixel; with `deskew` the canvas is converted to gray in place and rotated straight into `out` | `dpi`, `deskew`, `cancel` |
-| `render_rgb_into` | those of `render_page_rgb` at `dpi / 72`, `[R, G, B]` | `dpi`, `cancel`; `deskew` is `InvalidOptions` |
-| `render_rgba_into` | those of `render_page_rgba`, `[R, G, B, A]` straight alpha over a transparent backdrop | `dpi`, `cancel`; `deskew` is `InvalidOptions` |
+| `render_gray_into` | those of `render_page_gray`, one byte per pixel; with `deskew` the canvas is converted to gray in place and rotated straight into `out` | `dpi`, `deskew`, `intent`, `black_point_compensation`, `preserve_black`, `cancel` |
+| `render_rgb_into` | those of `render_page_rgb` at `dpi / 72`, `[R, G, B]` | `dpi`, `intent`, `black_point_compensation`, `preserve_black`, `cancel`; `deskew` is `InvalidOptions` |
+| `render_rgba_into` | those of `render_page_rgba`, `[R, G, B, A]` straight alpha over a transparent backdrop | as `render_rgb_into` |
+| `render_gray_alpha_into` | those of `render_page_gray_alpha`, `[Y, A]`, the gray not premultiplied, over a transparent backdrop | as `render_rgb_into` |
 
 `stride` is in bytes and at least `width * format.bytes_per_pixel()`; `out` holds at least `(height - 1) * stride + width * bytes_per_pixel` bytes (the last row needs no padding); bytes between rows are left alone. A shorter stride is `RasterError::OutputStrideTooSmall`, a shorter buffer `RasterError::OutputBufferTooSmall`, both returned before anything is drawn and with `out` untouched. `RasterSession::page_size_px(page_num, dpi)` gives `(width, height)` beforehand. The methods take `&mut self`, so a thread rendering in parallel keeps its own `PageBuffer`; a render that fails while the page is drawn (cancelled, over its budget or deadline, refused a bitmap the drawing needs, or a strict session's failure) keeps the canvas for the next render, which paints it anew; one whose page canvas or finished bitmap cannot be allocated releases it.
 
@@ -473,7 +476,7 @@ pub struct RasterOptions {
 | `page_box` | — | The page boundary box each page is measured and rendered on; see [`PageBox`](#pagebox). |
 | `rotation` | — | A clockwise quarter-turn rotation added to each page's `/Rotate`; see [`Rotation`](#rotation). |
 | `depth` | — | `SampleDepth::Eight` (default) or `SampleDepth::Sixteen`, which renders at 16 bits per channel and yields `PixelFormat::Gray16` pages, or `Rgba16` with `transparent_background`, of `Pixels::U16`. |
-| `output_profile` | — | The ICC profile the pages are converted to; see [`SessionConfig`](#sessionconfig). The gray pages take a gray profile, the RGBA pages of `transparent_background` an RGB one, its gray and alpha pages (`gray_alpha`) a gray one. |
+| `output_profile` | not RGB for gray pages, not gray for RGBA pages | The ICC profile the pages are converted to; see [`SessionConfig`](#sessionconfig). The gray pages take a gray profile, the RGBA pages of `transparent_background` an RGB one, its gray and alpha pages (`gray_alpha`) a gray one; another pairing is `RasterError::InvalidOptions` before any page renders. |
 | `intent` | needs `output_profile` or `proof` | The rendering intent of the conversion (under `proof`, of the separation to the press); see `RenderParams::intent`. |
 | `black_point_compensation` | needs `output_profile` or `proof`, not with `AbsoluteColorimetric` | Black-point compensation in the conversion (under `proof`, in the separation to the press). |
 | `preserve_black` | needs `ColorModel::Cmyk` with a CMYK `output_profile`, or `proof`; not with `AbsoluteColorimetric` | Black preservation where `ICCBased` CMYK of another profile converts to the output profile's (or the press's) ink: `PreserveBlack::KOnly` keeps a colour of black ink alone (C = M = Y = 0) black ink alone, its K through the K → K curve matching the two profiles' blacks by L\*; `PreserveBlack::KPlane` also gives every other colour the curve's K and solves its C, M and Y for its colour, scaled to the destination's total ink limit (a colour that K cannot print within ΔE76 1 converts colorimetrically). `None` converts colorimetrically. See `RenderParams::preserve_black`. |
@@ -567,10 +570,12 @@ impl Pixels {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PixelFormat { Gray8, Rgba8, Rgb8, Gray16, Rgb16, Rgba16, Cmyk8, Cmyk16 }
+pub enum PixelFormat {
+    Gray8, Rgba8, Rgb8, Gray16, GrayAlpha8, GrayAlpha16, Rgb16, Rgba16, Cmyk8, Cmyk16,
+}
 impl PixelFormat {
-    pub const fn bytes_per_pixel(self) -> usize    // 1, 4, 3, 2, 6, 8, 4 or 8
-    pub const fn samples_per_pixel(self) -> usize  // 1, 3 or 4
+    pub const fn bytes_per_pixel(self) -> usize    // 1, 4, 3, 2, 2, 4, 6, 8, 4 or 8
+    pub const fn samples_per_pixel(self) -> usize  // 1, 2, 3 or 4
     pub const fn depth(self) -> SampleDepth
 }
 
@@ -969,7 +974,7 @@ carries a per-page panic caught by `render_channel`, which happens only under
 `panic = "unwind"`; with the `panic = "abort"` release profile a panic aborts
 the process.
 
-`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream. `Deskew` is returned when deskew is asked of a page larger than `deskew::DESKEW_MAX_SIDE` (32 768 px a side). `deskew` on a render whose output is not gray (`render_page_rgba`, `PageBuffer::render_rgb_into` and `render_rgba_into`, `transparent_background` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
+`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream. `Deskew` is returned when deskew is asked of a page larger than `deskew::DESKEW_MAX_SIDE` (32 768 px a side). `deskew` on a render whose output is not gray (`render_page_rgba`, `render_page_gray_alpha`, `render_page_cmyk`, `PageBuffer::render_rgb_into`, `render_rgba_into` and `render_gray_alpha_into`, `transparent_background` or `ColorModel::Cmyk` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
 
 Implements `std::error::Error` with a `source()` chain. `RasterError::Pdf(e)` has `e` as its source for chained error reporting. `BackendUnavailable` is only returned when the policy is `ForceCuda`, `ForceVaapi` or `ForceVulkan`.
 

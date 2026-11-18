@@ -3211,8 +3211,14 @@ refused before, writes the profile's gray beside the alpha. The gray is the
 page's wherever the alpha is full; the alpha is the RGBA page's. Library:
 `RasterOptions::gray_alpha` (with `transparent_background`) yields
 `PixelFormat::GrayAlpha8` / `GrayAlpha16` pages, and
-`render_page_gray_alpha` renders one; `rgb_to_gray` and `rgb16_to_gray16`
-copy the alpha plane. `rasterrocket-encode` gains `RowLayout::GrayAlpha` /
+`render_page_gray_alpha` renders one, and `PageBuffer::render_gray_alpha_into`
+writes one into the caller's buffer; every gray conversion (`rgb_to_gray`,
+`rgb_into_gray` and their 16-bit forms) keeps the alpha plane, and
+`Bitmap::with_alpha_plane` reattaches one. A gray page of an RGB output
+profile, or an RGBA page of a gray one, is refused by `raster_pdf` and
+`render_channel` once, before any page renders, instead of once per page.
+`rasterrocket_render::interleave_rgba` becomes `interleave_alpha::<S, N>`,
+with `push_with_alpha` beside it. `rasterrocket-encode` gains `RowLayout::GrayAlpha` /
 `GrayAlpha16` and `PngColor::GrayAlpha` / `GrayAlpha16`, a gray band with
 an alpha plane is stored under them, and `write_png` writes a gray
 bitmap's alpha plane. `RowLayout` is exhaustive, so a match on it needs the
@@ -3225,7 +3231,9 @@ a cell that painted black alone under overprint in one place and cyan in
 another knocked the backdrop's cyan out under the black too. A cell
 canvas on such a page now records the channels painted at each pixel
 (`Bitmap::track_painted`, set by `render_bitmap_span` through
-`pipe::mark_painted`), the composited tile keeps that record
+`pipe::render_span_marked`, which records each run's channels from the
+coverage of the same composite pass; `Bitmap::clear` resets the record and
+`try_converted_in` keeps it), the composited tile keeps that record
 (`TiledPattern::records_channels`), and `render_span` paints each run of
 equal channels through its own mask (`Pattern::fill_span_channels`). A
 cell that writes the same channels at every covered pixel paints as
@@ -3234,6 +3242,19 @@ before. Group composites still paint every colorant (ISO 32000-1 Table
 `--overprint` and under `--cmyk --overprint`) and 289 pages of 102
 archive PDFs that set `OP`, the one coloured-pattern page among them
 included, render byte-identical to before in all three modes.
+
+**Unreleased on master: bilevel images kept as bits.** A `CCITTFaxDecode`
+or `JBIG2Decode` image decodes to `ImageData::Bilevel`, one bit a sample
+with its two sample values, instead of a byte a pixel (a 600 dpi page is
+1.4 MB instead of 11 MB), and a reduced draw resamples it from the bits.
+`ImageData::as_cpu` expands the bits to bytes on first request and keeps
+them; an expansion the allocator refuses leaves the image as bits and is
+reported as such (`bilevel samples cannot be expanded to bytes: allocation
+refused`), not as device residency. `ImageData::heap_bytes` replaces
+`len` / `is_empty`: the bytes the samples occupy once drawn, a bilevel
+image's bits and their expansion, which the document and page image
+caches charge. The pattern memo charges a tiling cell its painted-channels
+plane (`Bitmap::heap_bytes`).
 
 **Unreleased on master: GPU pages wait for the device.** Every page that
 may render on the device now does: its thread waits for the device to open
