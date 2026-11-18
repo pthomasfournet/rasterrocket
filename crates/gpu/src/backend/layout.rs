@@ -9,8 +9,17 @@
 
 /// The 32-bit words of one three-sample device pixel whose samples are
 /// `sample_bytes` bytes each: 1 for 1-byte samples, 2 for 2-byte samples.
-pub(crate) const fn device_pixel_words(sample_bytes: usize) -> usize {
-    sample_bytes
+///
+/// # Panics
+///
+/// For any other sample width (at compile time in a const context).
+#[must_use]
+pub const fn device_pixel_words(sample_bytes: usize) -> usize {
+    match sample_bytes {
+        1 => 1,
+        2 => 2,
+        _ => panic!("device pixels hold 1- or 2-byte samples"),
+    }
 }
 
 /// Copies the three samples of each device pixel of `src`, the first
@@ -22,19 +31,24 @@ pub(crate) const fn device_pixel_words(sample_bytes: usize) -> usize {
 ///
 /// # Panics
 ///
-/// When `dst` does not hold whole pixels or `src` holds fewer device
-/// pixels than `dst` asks for.
-pub(crate) fn unpad_pixels(src: &[u8], dst: &mut [u8], sample_bytes: usize) {
-    let packed = 3 * sample_bytes;
+/// For a `sample_bytes` other than 1 or 2, when `dst` does not hold
+/// whole pixels, or when `src` holds fewer device pixels than `dst` asks
+/// for.
+pub fn unpad_pixels(src: &[u8], dst: &mut [u8], sample_bytes: usize) {
     let device = 4 * device_pixel_words(sample_bytes);
+    let packed = 3 * sample_bytes;
+    let (src_len, dst_len) = (src.len(), dst.len());
     assert!(
-        dst.len().is_multiple_of(packed),
-        "dst holds whole pixels of {packed} bytes"
+        dst_len.is_multiple_of(packed),
+        "unpad_pixels: dst length {dst_len} is not a whole number of \
+         {packed}-byte pixels (sample_bytes {sample_bytes}, src length {src_len})"
     );
-    let n = dst.len() / packed;
+    let n = dst_len / packed;
     assert!(
-        src.len() / device >= n,
-        "src holds {n} device pixels of {device} bytes"
+        src_len / device >= n,
+        "unpad_pixels: src length {src_len} holds fewer than the {n} \
+         {device}-byte device pixels dst length {dst_len} asks for \
+         (sample_bytes {sample_bytes})"
     );
     for (to, from) in dst.chunks_exact_mut(packed).zip(src.chunks_exact(device)) {
         to.copy_from_slice(&from[..packed]);
@@ -49,6 +63,24 @@ mod tests {
     fn device_pixel_words_of_each_sample_width() {
         assert_eq!(device_pixel_words(1), 1);
         assert_eq!(device_pixel_words(2), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "1- or 2-byte samples")]
+    fn device_pixel_words_rejects_other_widths() {
+        let _ = device_pixel_words(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "dst length 4 is not a whole number of 3-byte pixels")]
+    fn unpad_pixels_rejects_a_partial_dst_pixel() {
+        unpad_pixels(&[0; 8], &mut [0; 4], 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "src length 7 holds fewer than the 2 4-byte device pixels")]
+    fn unpad_pixels_rejects_a_short_src() {
+        unpad_pixels(&[0; 7], &mut [0; 6], 1);
     }
 
     #[test]

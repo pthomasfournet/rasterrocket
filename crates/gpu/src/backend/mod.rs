@@ -14,7 +14,8 @@
 
 #[cfg(feature = "cache")]
 mod blit_page;
-pub(crate) mod layout;
+#[doc(hidden)]
+pub mod layout;
 mod scratch;
 mod staged;
 #[cfg(feature = "cache")]

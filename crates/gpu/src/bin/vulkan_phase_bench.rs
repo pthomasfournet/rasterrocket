@@ -31,6 +31,7 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use bench_common::smooth_cmyk;
+use rasterrocket_gpu::backend::layout::unpad_pixels;
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BlitParams, IccClutParams};
 use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
 use rasterrocket_gpu::backend::{
@@ -330,14 +331,7 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                 });
                 let t = Instant::now();
                 ok(backend.download(&r, &mut words), "download");
-                for (to, from) in rgb
-                    .as_chunks_mut::<3>()
-                    .0
-                    .iter_mut()
-                    .zip(words.as_chunks::<4>().0)
-                {
-                    to.copy_from_slice(&from[..3]);
-                }
+                unpad_pixels(&words, &mut rgb, 1);
                 backend.free_device(c);
                 backend.free_device(l);
                 backend.free_device(r);
