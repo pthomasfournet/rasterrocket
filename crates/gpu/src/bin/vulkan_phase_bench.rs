@@ -303,12 +303,14 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
             .read;
             // Its steps, apart.
             let n_px = n as u32;
+            // One 32-bit word a pixel on the device.
+            let mut words = vec![0; n * 4];
             let mut rgb = vec![0; n * 3];
             let mut split = |repeats: u32| {
                 let t = Instant::now();
                 let mut c = ok(backend.alloc_device(cmyk.len()), "alloc");
                 let mut l = ok(backend.alloc_device(table.len()), "alloc");
-                let mut r = ok(backend.alloc_device_readback(n * 3), "alloc");
+                let mut r = ok(backend.alloc_device_readback(n * 4), "alloc");
                 ok(backend.upload(&mut c, &cmyk), "upload");
                 ok(backend.upload(&mut l, table), "upload");
                 let prep = ns(t);
@@ -327,7 +329,15 @@ fn bench_icc(backend: &VulkanBackend, cfg: &Config) {
                     }
                 });
                 let t = Instant::now();
-                ok(backend.download(&r, &mut rgb), "download");
+                ok(backend.download(&r, &mut words), "download");
+                for (to, from) in rgb
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(words.as_chunks::<4>().0)
+                {
+                    to.copy_from_slice(&from[..3]);
+                }
                 backend.free_device(c);
                 backend.free_device(l);
                 backend.free_device(r);

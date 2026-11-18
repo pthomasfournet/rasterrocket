@@ -4,6 +4,7 @@ use cudarc::driver::{CudaSlice, PushKernelArg};
 
 use color::grid::CmykGrid;
 
+use crate::backend::layout::{device_pixel_words, unpad_pixels};
 use crate::backend::params::MAX_KERNEL_PIXELS;
 use crate::{GPU_ICC_CLUT_THRESHOLD, GpuCtx, launch_cfg};
 
@@ -85,26 +86,32 @@ impl GpuCtx {
         let stream = self.stream();
 
         let d_cmyk = stream.clone_htod(cmyk)?;
-        // Device-side zero alloc — both kernels write every output pixel,
-        // so nothing is gained by shipping a zero Vec over PCIe.
-        let mut d_rgb = stream.alloc_zeros::<u8>(n * 3)?;
 
+        // Device-side zero allocs — both kernels write every output pixel,
+        // so nothing is gained by shipping a zero Vec over PCIe.  The
+        // matrix kernel writes packed 3-byte pixels, the grid kernel one
+        // word a pixel, which is unpadded on the host.
         match grid {
             None => {
+                let mut d_rgb = stream.alloc_zeros::<u8>(n * 3)?;
                 let d_corners = stream.clone_htod(&color::cmyk::CORNER_TABLE)?;
                 self.launch_icc_matrix_async(&d_cmyk, &mut d_rgb, &d_corners, n_u32)?;
+                stream.synchronize()?;
+                Ok(stream.clone_dtoh(&d_rgb)?)
             }
             Some(grid) => {
+                let mut d_rgb = stream.alloc_zeros::<u8>(n * 4 * device_pixel_words(1))?;
                 let bytes = grid.as_bytes();
                 let n_nodes = CmykGrid::node_count(bytes.len()).ok_or("a grid of no nodes")?;
                 let d_grid = stream.clone_htod(bytes)?;
                 self.launch_icc_clut_async(&d_cmyk, &mut d_rgb, &d_grid, n_nodes, (n_u32, false))?;
+                stream.synchronize()?;
+                let device = stream.clone_dtoh(&d_rgb)?;
+                let mut rgb = vec![0; n * 3];
+                unpad_pixels(&device, &mut rgb, 1);
+                Ok(rgb)
             }
         }
-
-        stream.synchronize()?;
-        let rgb = stream.clone_dtoh(&d_rgb)?;
-        Ok(rgb)
     }
 
     /// Async kernel launch for the profile-free CMYK→RGB kernel.
@@ -141,8 +148,9 @@ impl GpuCtx {
     /// Async kernel launch for the ICC CMYK→RGB grid kernel over
     /// `n_pixels`: `d_clut` holds the bytes of a grid of `n_nodes` nodes
     /// ([`CmykGrid::as_bytes`]); the kernel reads no node beyond them.
-    /// With `wide`, `d_rgb` receives the 16-bit outputs, two bytes each,
-    /// low first ([`CmykGrid::convert16`]); otherwise the 8-bit ones.
+    /// `d_rgb` receives one 32-bit word a pixel, `r | g << 8 | b << 16`
+    /// ([`CmykGrid::convert`]), or with `wide` two, `r | g << 16` then `b`
+    /// ([`CmykGrid::convert16`]).
     ///
     /// Caller is responsible for stream ordering and any final D→H download.
     ///

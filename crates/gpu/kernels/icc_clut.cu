@@ -16,8 +16,10 @@
 //
 // Input layout:  `n_pixels` × 4 bytes, interleaved CMYK (PDF convention:
 //                0 = no ink, 255 = full ink for DeviceCMYK).
-// Output layout: `n_pixels` × 3 bytes, interleaved RGB; the grid kernel
-//                with `wide`, `n_pixels` × 3 little-endian 16-bit values.
+// Output layout: matrix kernel, `n_pixels` × 3 bytes, interleaved RGB.
+//                Grid kernel, whole 32-bit words: pixel i is the word
+//                r | g << 8 | b << 16, or with `wide` the words
+//                2i = r | g << 16 and 2i + 1 = b.
 //
 // Thread/block layout: 256 threads/block, ceil(n_pixels/256) blocks.
 
@@ -127,18 +129,23 @@ __device__ __forceinline__ unsigned int grid_output(unsigned int acc, unsigned i
     return v;
 }
 
-// Output channel `c` of pixel `i`, the 16-bit value `v`: with `wide` its
-// two bytes, low first, at 2 (3i + c); otherwise its nearest byte at 3i + c.
+// The nearest byte of the 16-bit value `v`.
+__device__ __forceinline__ unsigned int grid_byte(unsigned int v) {
+    return (v * 255u + 32767u) / 65535u;
+}
+
+// Output pixel `i`, the 16-bit values `v0`, `v1`, `v2`: with `wide` the
+// words 2i = v0 | v1 << 16 and 2i + 1 = v2; otherwise the word of their
+// nearest bytes, b0 | b1 << 8 | b2 << 16.
 __device__ __forceinline__ void grid_store(
-    unsigned char* __restrict__ rgb, unsigned int i, unsigned int c, unsigned int v,
-    unsigned int wide
+    unsigned int* __restrict__ rgb, unsigned int i,
+    unsigned int v0, unsigned int v1, unsigned int v2, unsigned int wide
 ) {
-    unsigned int at = i * 3u + c;
     if (wide) {
-        rgb[2u * at]      = (unsigned char)(v & 0xffu);
-        rgb[2u * at + 1u] = (unsigned char)(v >> 8);
+        rgb[2u * i]      = v0 | v1 << 16;
+        rgb[2u * i + 1u] = v2;
     } else {
-        rgb[at] = (unsigned char)((v * 255u + 32767u) / 65535u);
+        rgb[i] = grid_byte(v0) | grid_byte(v1) << 8 | grid_byte(v2) << 16;
     }
 }
 
@@ -150,7 +157,7 @@ __device__ __forceinline__ void exchange(unsigned int* a, unsigned int* b) {
 }
 
 // cmyk    : interleaved input,  4 bytes per pixel
-// rgb     : interleaved output, 3 bytes per pixel, 6 with `wide`
+// rgb     : output words, one per pixel, two with `wide`
 // grid    : the grid's words
 // n_nodes : the grid's node count
 // n       : total pixel count
@@ -162,7 +169,7 @@ __device__ __forceinline__ void exchange(unsigned int* a, unsigned int* b) {
 // each weighted by the difference of successive positions.
 extern "C" __global__ void icc_cmyk_clut(
     const unsigned char* __restrict__ cmyk,
-    unsigned char*       __restrict__ rgb,
+    unsigned int*        __restrict__ rgb,
     const unsigned int*  __restrict__ grid,
     unsigned int n_nodes,
     unsigned int n,
@@ -204,7 +211,7 @@ extern "C" __global__ void icc_cmyk_clut(
     acc2 += previous * v2;
 
     unsigned int extended = __ldg(&grid[4]);
-    grid_store(rgb, i, 0u, grid_output(acc0, extended), wide);
-    grid_store(rgb, i, 1u, grid_output(acc1, extended), wide);
-    grid_store(rgb, i, 2u, grid_output(acc2, extended), wide);
+    grid_store(rgb, i,
+               grid_output(acc0, extended), grid_output(acc1, extended),
+               grid_output(acc2, extended), wide);
 }

@@ -14,6 +14,8 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
         .expect("CudaBackend::new failed — is a CUDA device available and the driver loaded?");
     let n_pixels: u32 = 1024;
     let n = n_pixels as usize;
+    // The kernel writes one 32-bit word a pixel, `r | g << 8 | b << 16`.
+    let rgb_len = n * 4;
 
     let cmyk_host: Vec<u8> = (0..n * 4)
         .map(|i| u8::try_from(i * 37 % 256).expect("below 256"))
@@ -28,19 +30,19 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
         .alloc_device(clut_host.len())
         .expect("alloc_device(clut) failed — VRAM exhausted or driver error");
     let mut rgb = backend
-        .alloc_device(n * 3)
+        .alloc_device(rgb_len)
         .expect("alloc_device(rgb) failed — VRAM exhausted or driver error");
     backend.upload(&mut cmyk, &cmyk_host).expect("upload(cmyk)");
     backend.upload(&mut clut, clut_host).expect("upload(clut)");
     backend
-        .upload(&mut rgb, &vec![0xAB; n * 3])
+        .upload(&mut rgb, &vec![0xAB; rgb_len])
         .expect("upload(rgb)");
 
     backend
         .begin_page()
         .expect("begin_page failed — recorder did not enter page-recording state");
     backend
-        .record_zero_buffer(&mut rgb, n * 3)
+        .record_zero_buffer(&mut rgb, rgb_len)
         .expect("record_zero_buffer failed — memset launch error");
     backend
         .record_icc_clut(params::IccClutParams {
@@ -61,8 +63,14 @@ fn cuda_backend_per_page_zero_fill_then_icc_clut() {
     // Both operations run in recording order under the one page fence:
     // the transform overwrites the zero fill, which overwrote the 0xAB
     // fill, so the buffer holds the transform's output.
-    let mut got = vec![0u8; n * 3];
-    backend.download(&rgb, &mut got).expect("download(rgb)");
+    let mut words = vec![0u8; rgb_len];
+    backend.download(&rgb, &mut words).expect("download(rgb)");
+    let pixels = words.as_chunks::<4>().0;
+    assert!(
+        pixels.iter().all(|p| p[3] == 0),
+        "the byte past each pixel's samples is zero"
+    );
+    let got: Vec<u8> = pixels.iter().flat_map(|p| &p[..3]).copied().collect();
     assert_eq!(got, grid.convert(&cmyk_host), "the grid's conversion");
     assert!(
         got.iter().any(|&b| b != 0),

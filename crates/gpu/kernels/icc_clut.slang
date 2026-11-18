@@ -8,7 +8,12 @@
 //     pixel's grid cell, five node lookups a pixel, in the 32-bit integer
 //     arithmetic of `CmykGrid::convert`, so the output is byte-identical to
 //     the host's on every conformant device: 8-bit, or with `wide` the 16-bit
-//     outputs of `CmykGrid::convert16`, two bytes each, low first.
+//     outputs of `CmykGrid::convert16`.
+//
+// Pixels are whole 32-bit words.  Input pixel i is the word
+// c | m << 8 | y << 16 | k << 24; output pixel i is the word
+// r | g << 8 | b << 16, or with `wide` the words 2i = r | g << 16 and
+// 2i + 1 = b.
 //
 // The profile-free conversion (the CUDA `icc_cmyk_matrix` entry) always runs
 // on the CPU and has no Slang counterpart.
@@ -67,8 +72,8 @@ void exchange(inout uint a, inout uint b)
 [numthreads(256, 1, 1)]
 void icc_cmyk_clut(
     uint3 tid : SV_DispatchThreadID,
-    uniform StructuredBuffer<uint8_t> cmyk,
-    uniform RWStructuredBuffer<uint8_t> rgb,
+    uniform StructuredBuffer<uint> cmyk,
+    uniform RWStructuredBuffer<uint> rgb,
     uniform StructuredBuffer<uint> grid,
     uniform uint n_nodes,
     uniform uint n,
@@ -77,10 +82,11 @@ void icc_cmyk_clut(
     uint i = tid.x;
     if (i >= n) return;
 
+    uint pixel = cmyk[i];
     uint key[4];
     uint base = 0;
     for (uint c = 0; c < 4; ++c) {
-        uint cell = grid[GRID_CELLS + 256 * c + uint(cmyk[i * 4 + c])];
+        uint cell = grid[GRID_CELLS + 256 * c + ((pixel >> (8 * c)) & 0xff)];
         base += (cell >> 16) * grid[c];
         key[c] = (cell & 0xffff) << 3 | c;
     }
@@ -103,17 +109,10 @@ void icc_cmyk_clut(
 
     uint3 v = grid_output(acc, grid[4]);
     if (wide != 0) {
-        // Channel c at 2 (3i + c), low byte first.
-        rgb[i * 6 + 0] = uint8_t(v.x & 0xff);
-        rgb[i * 6 + 1] = uint8_t(v.x >> 8);
-        rgb[i * 6 + 2] = uint8_t(v.y & 0xff);
-        rgb[i * 6 + 3] = uint8_t(v.y >> 8);
-        rgb[i * 6 + 4] = uint8_t(v.z & 0xff);
-        rgb[i * 6 + 5] = uint8_t(v.z >> 8);
+        rgb[2 * i] = v.x | v.y << 16;
+        rgb[2 * i + 1] = v.z;
     } else {
         uint3 b = (v * 255 + 32767) / 65535;
-        rgb[i * 3 + 0] = uint8_t(b.x);
-        rgb[i * 3 + 1] = uint8_t(b.y);
-        rgb[i * 3 + 2] = uint8_t(b.z);
+        rgb[i] = b.x | b.y << 8 | b.z << 16;
     }
 }

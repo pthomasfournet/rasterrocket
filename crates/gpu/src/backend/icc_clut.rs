@@ -8,6 +8,7 @@
 
 use color::grid::{CmykGrid, NodeRange};
 
+use super::layout::{device_pixel_words, unpad_pixels};
 use super::params::{IccClutParams, MAX_KERNEL_PIXELS};
 use super::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage, stage_exact,
@@ -73,7 +74,7 @@ pub fn icc_clut16<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> R
 }
 
 /// [`icc_clut`], the output of 16-bit values, two bytes each, low first,
-/// when `wide`.
+/// when `wide`: the device's output words, unpadded.
 fn convert<B: GpuBackend>(
     backend: &B,
     cmyk: &[u8],
@@ -94,7 +95,9 @@ fn convert<B: GpuBackend>(
         .filter(|&n| n <= MAX_KERNEL_PIXELS)
         .ok_or_else(|| invariant("n_pixels exceeds MAX_KERNEL_PIXELS (32-bit byte addressing)"))?;
     let table = grid.as_bytes();
-    let rgb_len = n * if wide { 6 } else { 3 };
+    let sample_bytes = if wide { 2 } else { 1 };
+    let rgb_len = n * 3 * sample_bytes;
+    let device_len = n * 4 * device_pixel_words(sample_bytes);
     backend.scratch().icc_clut.with(|scratch| {
         let IccClutScratch {
             cmyk: cmyk_slot,
@@ -103,7 +106,7 @@ fn convert<B: GpuBackend>(
         } = scratch;
         let d_cmyk = stage(backend, cmyk_slot, cmyk)?;
         let d_clut = stage_exact(backend, clut_slot, table)?;
-        let d_rgb = ensure(backend, rgb_slot, rgb_len, Direction::ToHost)?;
+        let d_rgb = ensure(backend, rgb_slot, device_len, Direction::ToHost)?;
         // SAFETY (the recorded copies and the read below): the scratch is
         // borrowed mutably for this whole call and `run_page` returns only
         // once its page has completed or, on failure, been waited on.
@@ -117,10 +120,12 @@ fn convert<B: GpuBackend>(
                 n_pixels,
                 wide,
             })?;
-            unsafe { record_download(backend, d_rgb, rgb_len) }
+            unsafe { record_download(backend, d_rgb, device_len) }
         })?;
-        let rgb = unsafe { host_view(backend, d_rgb) }?;
-        Ok(rgb[..rgb_len].to_vec())
+        let device = unsafe { host_view(backend, d_rgb) }?;
+        let mut rgb = vec![0; rgb_len];
+        unpad_pixels(&device[..device_len], &mut rgb, sample_bytes);
+        Ok(rgb)
     })
 }
 
