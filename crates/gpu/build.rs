@@ -7,8 +7,13 @@
 //!
 //! All artifacts land in `OUT_DIR` and are consumed by `include_str!` /
 //! `include_bytes!` in `src/lib.rs` and the backend modules.
+//!
+//! Linux takes the CUDA toolkit from `/usr/local/cuda`; Windows from
+//! `%CUDA_PATH%` (`bin\nvcc.exe`, `lib\x64\*.lib`), with nvcc's host compiler
+//! `cl.exe` located from the Visual Studio installation.
 
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,16 +22,10 @@ use std::process::Command;
 ///
 /// If none of the directories exist, emit a build warning and let the linker
 /// search its default paths (handles non-standard install locations).
-fn link_lib_in_dir(dirs: &[&str], lib: &str, warn_context: &str) {
-    let mut found = false;
-    for dir in dirs {
-        if std::path::Path::new(dir).exists() {
-            println!("cargo:rustc-link-search=native={dir}");
-            found = true;
-            break;
-        }
-    }
-    if !found {
+fn link_lib_in_dir(dirs: &[PathBuf], lib: &str, warn_context: &str) {
+    if let Some(dir) = dirs.iter().find(|d| d.exists()) {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    } else {
         println!(
             "cargo:warning={warn_context} directory not found; linker will search default paths."
         );
@@ -71,7 +70,8 @@ fn slang_source(kernel: &str) -> (&str, &'static [&'static str]) {
     }
 }
 
-/// Candidate directories for CUDA toolkit libraries, in preference order.
+/// Candidate directories for CUDA toolkit libraries on Linux, in preference
+/// order.
 ///
 /// First the generic symlink (`/usr/local/cuda`, which on Ubuntu is managed
 /// by `update-alternatives` and points at whichever toolkit is selected),
@@ -83,6 +83,155 @@ const CUDA_LIB_DIRS: &[&str] = &[
     "/usr/local/cuda/lib64",
 ];
 
+/// Whether the crate is built for Windows.  The CUDA toolkit layout, nvcc's
+/// host compiler and the static-library format follow the target; building
+/// the CUDA features for another operating system than the host's is not
+/// supported.
+fn target_is_windows() -> bool {
+    env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows")
+}
+
+/// Root of the CUDA toolkit on Windows: `CUDA_PATH`, which the toolkit
+/// installer sets machine-wide to the most recently installed version.
+fn windows_cuda_root() -> Option<PathBuf> {
+    env::var_os("CUDA_PATH").map(PathBuf::from)
+}
+
+/// Candidate directories for CUDA toolkit libraries: [`CUDA_LIB_DIRS`] on
+/// Linux, the import libraries in `%CUDA_PATH%\lib\x64` on Windows.
+fn cuda_lib_dirs() -> Vec<PathBuf> {
+    if target_is_windows() {
+        windows_cuda_root()
+            .map(|root| root.join("lib").join("x64"))
+            .into_iter()
+            .collect()
+    } else {
+        CUDA_LIB_DIRS.iter().map(PathBuf::from).collect()
+    }
+}
+
+/// The nvcc to run: `NVCC` if set, else the toolkit's own
+/// (`/usr/local/cuda/bin/nvcc` on Linux, `%CUDA_PATH%\bin\nvcc.exe` on
+/// Windows) if it exists, else `nvcc` from `PATH`.
+fn find_nvcc() -> String {
+    if let Ok(nvcc) = env::var("NVCC") {
+        return nvcc;
+    }
+    let candidate = if target_is_windows() {
+        windows_cuda_root().map(|root| root.join("bin").join("nvcc.exe"))
+    } else {
+        Some(PathBuf::from("/usr/local/cuda/bin/nvcc"))
+    };
+    candidate
+        .filter(|p| p.exists())
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "nvcc".to_owned())
+}
+
+/// The host C++ compiler nvcc runs: extra nvcc arguments, and the
+/// environment the compiler needs.  Empty where nvcc finds its host compiler
+/// itself.
+#[derive(Default)]
+struct HostCompiler {
+    args: Vec<String>,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl HostCompiler {
+    /// On Windows nvcc needs `cl.exe` together with the MSVC `INCLUDE`,
+    /// `LIB` and `PATH` environment.  `NVCC_CCBIN`, read by nvcc itself,
+    /// names the compiler explicitly and disables the lookup; otherwise the
+    /// MSVC installation is located as the `cc` crate locates it (a
+    /// developer prompt's environment first, then the Visual Studio setup
+    /// configuration) and passed to nvcc as `-ccbin` with its environment.
+    /// On other targets nvcc finds its host compiler on `PATH`.
+    fn detect() -> Self {
+        if !target_is_windows() || env::var_os("NVCC_CCBIN").is_some() {
+            return Self::default();
+        }
+        Self::detect_msvc()
+    }
+
+    #[cfg(windows)]
+    fn detect_msvc() -> Self {
+        let target = env::var("TARGET").expect("TARGET not set");
+        let Some(cl) = cc::windows_registry::find_tool(&target, "cl.exe") else {
+            println!(
+                "cargo:warning=no MSVC cl.exe found for {target}; nvcc will search PATH. \
+                 Install the Visual Studio Build Tools (C++ workload) or set NVCC_CCBIN."
+            );
+            return Self::default();
+        };
+        Self {
+            args: vec![
+                "-ccbin".to_owned(),
+                cl.path()
+                    .to_str()
+                    .expect("cl.exe path contains non-UTF-8")
+                    .to_owned(),
+            ],
+            env: cl
+                .get_envs()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn detect_msvc() -> Self {
+        println!("cargo:warning=a Windows target needs a Windows host to locate MSVC for nvcc");
+        Self::default()
+    }
+
+    /// `nvcc` with this host compiler applied.
+    fn apply<'a>(&self, nvcc: &'a mut Command) -> &'a mut Command {
+        nvcc.args(&self.args)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+/// Directories searched for the nvJPEG2000 library.
+///
+/// On Linux, the CUDA 13 package installs under `libnvjpeg2k/13`; the
+/// unversioned directory is the package's flat layout.  On Windows,
+/// `NVJPEG2K_PATH` names the root of NVIDIA's redistributable archive
+/// (`bin`, `include`, `lib`), then the CUDA toolkit's `lib\x64` is searched.
+fn nvjpeg2k_lib_dirs() -> Vec<PathBuf> {
+    if target_is_windows() {
+        env::var_os("NVJPEG2K_PATH")
+            .map(|root| PathBuf::from(root).join("lib"))
+            .into_iter()
+            .chain(cuda_lib_dirs())
+            .collect()
+    } else {
+        vec![
+            PathBuf::from("/usr/lib/x86_64-linux-gnu/libnvjpeg2k/13"),
+            PathBuf::from("/usr/lib/x86_64-linux-gnu/libnvjpeg2k"),
+        ]
+    }
+}
+
+/// The directory holding `nvjpeg2k.h`: `NVJPEG2K_INCLUDE_DIR` if set, else
+/// `/usr/include/libnvjpeg2k/13` on Linux (matching the link-time library)
+/// and `%NVJPEG2K_PATH%\include` on Windows.  `None` leaves the header to
+/// nvcc's own include path, the CUDA toolkit's.
+fn nvjpeg2k_include_dir() -> Option<String> {
+    if let Ok(dir) = env::var("NVJPEG2K_INCLUDE_DIR") {
+        return Some(dir);
+    }
+    if target_is_windows() {
+        env::var_os("NVJPEG2K_PATH").map(|root| {
+            PathBuf::from(root)
+                .join("include")
+                .to_str()
+                .expect("NVJPEG2K_PATH contains non-UTF-8")
+                .to_owned()
+        })
+    } else {
+        Some("/usr/include/libnvjpeg2k/13".to_owned())
+    }
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let kernels_dir = PathBuf::from("kernels");
@@ -90,25 +239,24 @@ fn main() {
     println!("cargo:rerun-if-changed=kernels/");
     println!("cargo:rerun-if-changed=shim/nvjpeg2k_shim.cpp");
     println!("cargo:rerun-if-env-changed=NVCC");
+    println!("cargo:rerun-if-env-changed=NVCC_CCBIN");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=NVJPEG2K_PATH");
     println!("cargo:rerun-if-env-changed=NVJPEG2K_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=SLANGC");
 
-    let nvcc_path = env::var("NVCC").unwrap_or_else(|_| {
-        let candidate = "/usr/local/cuda/bin/nvcc";
-        if PathBuf::from(candidate).exists() {
-            return candidate.to_owned();
-        }
-        "nvcc".to_owned()
-    });
+    let nvcc_path = find_nvcc();
     let nvcc = &nvcc_path;
+    let host = HostCompiler::detect();
+    let cuda_lib_dirs = cuda_lib_dirs();
 
     // nvJPEG: libnvjpeg.so ships with the CUDA toolkit.
     // On Linux this is provided by the NVIDIA driver, typically at
     // /usr/lib/x86_64-linux-gnu/libcuda.so.1 (driver-managed symlink).
     if env::var("CARGO_FEATURE_NVJPEG").is_ok() {
         link_lib_in_dir(
-            CUDA_LIB_DIRS,
+            &cuda_lib_dirs,
             "nvjpeg",
             "nvjpeg feature enabled but no CUDA lib",
         );
@@ -118,19 +266,14 @@ fn main() {
     // nvJPEG2000: libnvjpeg2k.so lives in a non-standard path (not in the CUDA
     // toolkit tree) and requires cudart for cudaMalloc / cudaMemcpy2D.
     if env::var("CARGO_FEATURE_NVJPEG2K").is_ok() {
-        // The CUDA 13 package installs under /libnvjpeg2k/13; the
-        // unversioned directory is the package's flat layout.
         link_lib_in_dir(
-            &[
-                "/usr/lib/x86_64-linux-gnu/libnvjpeg2k/13",
-                "/usr/lib/x86_64-linux-gnu/libnvjpeg2k",
-            ],
+            &nvjpeg2k_lib_dirs(),
             "nvjpeg2k",
             "nvjpeg2k feature enabled but libnvjpeg2k not found",
         );
         // cudart provides cudaMalloc / cudaFree / cudaMemcpy2D (runtime API).
         link_lib_in_dir(
-            CUDA_LIB_DIRS,
+            &cuda_lib_dirs,
             "cudart",
             "nvjpeg2k feature enabled but no CUDA lib for cudart",
         );
@@ -142,10 +285,13 @@ fn main() {
         // Rust extern "C" FFI (undefined behaviour).  The shim wraps all
         // nvjpeg2k entry points that may throw in try/catch and maps any
         // exception to NVJPEG2K_STATUS_IMPLEMENTATION_NOT_SUPPORTED (9).
-        compile_nvjpeg2k_shim(&out_dir, nvcc);
+        compile_nvjpeg2k_shim(&out_dir, nvcc, &host);
         println!("cargo:rustc-link-lib=static=nvjpeg2k_shim");
-        // The shim uses C++ exception handling; link the C++ runtime.
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+        // The shim uses C++ exception handling; link the C++ runtime.  MSVC
+        // objects name their runtime libraries themselves (`/DEFAULTLIB`).
+        if !target_is_windows() {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
     }
 
     // VA-API: libva.so.2 (core API) + libva-drm.so.2 (headless DRM connection).
@@ -173,9 +319,9 @@ fn main() {
     // in libnppc).  cudart and the driver are also required for cudaMalloc /
     // cudaMemcpy / cuStreamSynchronize.
     if env::var("CARGO_FEATURE_GPU_DESKEW").is_ok() {
-        link_lib_in_dir(CUDA_LIB_DIRS, "nppig", "gpu-deskew: libnppig not found");
-        link_lib_in_dir(CUDA_LIB_DIRS, "nppc", "gpu-deskew: libnppc not found");
-        link_lib_in_dir(CUDA_LIB_DIRS, "cudart", "gpu-deskew: libcudart not found");
+        link_lib_in_dir(&cuda_lib_dirs, "nppig", "gpu-deskew: libnppig not found");
+        link_lib_in_dir(&cuda_lib_dirs, "nppc", "gpu-deskew: libnppc not found");
+        link_lib_in_dir(&cuda_lib_dirs, "cudart", "gpu-deskew: libcudart not found");
         println!("cargo:rustc-link-lib=dylib=cuda");
     }
 
@@ -193,7 +339,7 @@ fn main() {
     // would emit placeholders and produce a binary that crashes with
     // `CUDA_ERROR_INVALID_IMAGE` the first time `GpuCtx::init` runs.
     if nvcc_works(nvcc) {
-        compile_cuda_kernels(&kernels_dir, &out_dir, nvcc);
+        compile_cuda_kernels(&kernels_dir, &out_dir, nvcc, &host);
     } else {
         println!(
             "cargo:warning=NVCC unavailable ({nvcc}); writing placeholder PTX. \
@@ -259,14 +405,15 @@ fn nvcc_works(nvcc: &str) -> bool {
 /// Blackwell).  The default, `sm_75` (Turing), is the oldest architecture
 /// CUDA 13 compiles for; the driver compiles its PTX for every newer device
 /// when the module loads.
-fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str) {
+fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str, host: &HostCompiler) {
     let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_75".to_owned());
 
     for kernel in KERNELS {
         let src = kernels_dir.join(format!("{kernel}.cu"));
         let ptx = out_dir.join(format!("{kernel}.ptx"));
 
-        let output = Command::new(nvcc)
+        let output = host
+            .apply(&mut Command::new(nvcc))
             .args([
                 "--ptx",
                 &format!("-arch={arch}"),
@@ -364,33 +511,55 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
     }
 }
 
-/// Compile `shim/nvjpeg2k_shim.cpp` into a static library `libnvjpeg2k_shim.a`
-/// placed in `OUT_DIR`.  Uses nvcc as the C++ compiler so the include path for
-/// nvjpeg2k headers is automatically available, and links with -lstdc++.
-///
-/// The include directory is `/usr/include/libnvjpeg2k/13`, matching the
-/// link-time library, unless the `NVJPEG2K_INCLUDE_DIR` environment variable
-/// names another for a non-standard installation.
-fn compile_nvjpeg2k_shim(out_dir: &Path, nvcc: &str) {
+/// Compile `shim/nvjpeg2k_shim.cpp` into a static library in `OUT_DIR`:
+/// `libnvjpeg2k_shim.a` (nvcc compiles, `ar` archives) or, for MSVC,
+/// `nvjpeg2k_shim.lib` (`nvcc --lib`).  nvcc is the C++ compiler so the CUDA
+/// headers `nvjpeg2k.h` includes are on the include path.  The MSVC build
+/// enables C++ exception handling (`/EHsc`) and links the shared C runtime
+/// (`/MD`), as Rust's MSVC targets do.
+fn compile_nvjpeg2k_shim(out_dir: &Path, nvcc: &str, host: &HostCompiler) {
     let shim_src = PathBuf::from("shim/nvjpeg2k_shim.cpp");
+    let src_s = shim_src.to_str().expect("shim source path non-UTF-8");
+    let out_dir_s = out_dir.to_str().expect("OUT_DIR path non-UTF-8");
+    let include_arg = nvjpeg2k_include_dir().map(|dir| format!("-I{dir}"));
+
+    if target_is_windows() {
+        let shim_lib = out_dir.join("nvjpeg2k_shim.lib");
+        let output = host
+            .apply(&mut Command::new(nvcc))
+            .args(["-x", "c++", "-O2", "-Xcompiler", "/EHsc,/MD"])
+            .args(&include_arg)
+            .args([
+                "--lib",
+                "-o",
+                shim_lib.to_str().expect("OUT_DIR path non-UTF-8"),
+                src_s,
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run nvcc for nvjpeg2k shim ({nvcc}): {e}"));
+        assert!(
+            output.status.success(),
+            "nvcc failed to build nvjpeg2k_shim.lib (status={}):\n{}",
+            output.status,
+            tool_diagnostic(&output),
+        );
+        println!("cargo:rustc-link-search=native={out_dir_s}");
+        return;
+    }
+
     let shim_obj = out_dir.join("nvjpeg2k_shim.o");
     let shim_lib = out_dir.join("libnvjpeg2k_shim.a");
-    let out_dir_s = out_dir.to_str().expect("OUT_DIR path non-UTF-8");
-
-    let include_dir = env::var("NVJPEG2K_INCLUDE_DIR")
-        .unwrap_or_else(|_| "/usr/include/libnvjpeg2k/13".to_owned());
 
     // Compile the C++ source to an object file.
-    let status = Command::new(nvcc)
+    let status = host
+        .apply(&mut Command::new(nvcc))
+        .args(["-x", "c++", "-O2"]) // treat as C++ (nvcc default for .cpp)
+        .args(&include_arg)
         .args([
-            "-x",
-            "c++", // treat as C++ (nvcc default for .cpp)
-            "-O2",
-            &format!("-I{include_dir}"),
             "-c",
             "-o",
             shim_obj.to_str().expect("OUT_DIR path non-UTF-8"),
-            shim_src.to_str().expect("shim source path non-UTF-8"),
+            src_s,
         ])
         .status()
         .unwrap_or_else(|e| panic!("failed to run nvcc for nvjpeg2k shim ({nvcc}): {e}"));

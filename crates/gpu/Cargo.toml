@@ -25,7 +25,8 @@ nvjpeg = []
 # Enable GPU-accelerated JPEG 2000 decoding via NVIDIA nvJPEG2000.
 # Requires libnvjpeg2k.so at link time, from the CUDA 13 package at
 # /usr/lib/x86_64-linux-gnu/libnvjpeg2k/13/ (build.rs also probes the
-# unversioned /usr/lib/x86_64-linux-gnu/libnvjpeg2k/).
+# unversioned /usr/lib/x86_64-linux-gnu/libnvjpeg2k/); on Windows
+# nvjpeg2k.lib under %NVJPEG2K_PATH%\lib (NVIDIA's redistributable archive).
 nvjpeg2k = []
 # Enable GPU rotation via CUDA NPP nppiRotate_8u_C1R_Ctx and nppiRotate_16u_C1R_Ctx.
 # Requires libnppig.so + libnppc.so + libcudart.so (all ship with the CUDA 13 toolkit).
@@ -67,6 +68,10 @@ gpu-allocator = { version = "0.28", optional = true, default-features = false, f
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # madvise(MADV_POPULATE_WRITE) of the page raster's host destination.
 libc     = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+# Locates MSVC's cl.exe and its environment for nvcc (`windows_registry`).
+cc       = { workspace = true }
 
 [dev-dependencies]
 # Disk-tier tests want isolated cache dirs.

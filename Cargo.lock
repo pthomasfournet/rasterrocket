@@ -1701,6 +1701,7 @@ dependencies = [
  "ash",
  "blake3",
  "bytemuck",
+ "cc",
  "cudarc",
  "dashmap",
  "gpu-allocator",
