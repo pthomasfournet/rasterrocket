@@ -264,8 +264,8 @@ impl GlyphCounts {
 #[non_exhaustive]
 pub enum DevicePage {
     /// The page was not offered to a device: the session renders every
-    /// page on the CPU, or the device was busy with another page, not yet
-    /// open, or retired after a failure.  Also the outcome of a recording
+    /// page on the CPU, or the device did not open, had not opened after
+    /// the page waited for it, or was retired after a failure.  Also the outcome of a recording
     /// stopped by the page's work budget or by cancellation, which the
     /// caller reports as an error.
     #[default]

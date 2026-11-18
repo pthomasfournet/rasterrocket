@@ -3161,13 +3161,13 @@ page diagnostics, so its output is unchanged.
 counts every page under the place it rendered and why:
 `RasterSession::device_page_counts()` (`vulkan` feature) returns a
 `DevicePageCounts` of pages the device rendered, pages ineligible by reason,
-pages that found the device busy, still opening, never opened or retired,
-pages it failed on and recordings stopped by a budget or cancellation. The
-session logs the counts at `info` when it drops (`rasterrocket: GPU pages:
-121 on the device, 480 on the CPU (device busy: 242, device opening: 238)`
-for `corpus-05` at 300 dpi on the RTX 5070), and each page sent to the CPU
-logs why at `debug`. Before, a page that found the device busy or not yet
-open went to the CPU without a log line.
+pages whose device did not open (in time) or was retired, pages it failed
+on and recordings stopped by a budget or cancellation. The session logs the
+counts at `info` when it drops (`rasterrocket: GPU pages: 121 on the device,
+480 on the CPU (device busy: 242, device opening: 238)` for `corpus-05` at
+300 dpi on the RTX 5070, before pages waited for the device: see below),
+and each page sent to the CPU logs why at `debug`. Before, a page that
+found the device busy or not yet open went to the CPU without a log line.
 
 **Unreleased on master: the NPP deskew's border follows the CPU's.** NPP
 interpolates a destination pixel whose source position lies half a pixel
@@ -3231,6 +3231,46 @@ before. Group composites still paint every colorant (ISO 32000-1 Table
 `--overprint` and under `--cmyk --overprint`) and 289 pages of 102
 archive PDFs that set `OP`, the one coloured-pattern page among them
 included, render byte-identical to before in all three modes.
+
+**Unreleased on master: GPU pages wait for the device.** Every page that
+may render on the device now does: its thread waits for the device to open
+(at most 30 s, then the page renders on the CPU with one warning) and for
+the device itself, instead of rendering on the CPU while the device was
+opening or both of its two places were held. Under `--backend auto` a
+one-page job and a short job now render on the device too (before, every
+page of corpus-05 at 150 dpi finished before the device opened). The
+device renders one page at a time; `render_page` keeps three buffer sets
+instead of one, so up to two other pages stage their inputs or read their
+pixels back meanwhile (all 601 pages of corpus-05 on the device at 300 dpi,
+24 threads: 2076 ms with one set, 1549 with two, 1432 with three, 1440
+unbounded). Measured first (RTX 5070, 24 threads, temporary
+instrumentation): the one device place was held 80–95 % of the time at
+300 dpi, two thirds of it copying the page out of the read-back buffer
+under the lock; a third, fourth or eighth place added 4–60 % more device
+pages and no speed. `DevicePageCounts::busy` is gone. Whole process,
+median of 5 interleaved, ms, renders discarded (every output a symlink to
+`/dev/null`), CPU / Auto before → after / `--backend vulkan` before →
+after, pages on the device after = all:
+| doc | dpi | thr | CPU | Auto | vk | device pages before (Auto / vk) |
+|---|---|---|---|---|---|---|
+| corpus-03 (254 p) | 150 | 24 | 168 | 190 → 647 | 296 → 655 | 0 / 19 |
+| corpus-03 | 300 | 24 | 420 | 456 → 1411 | 613 → 1334 | 0 / 14 |
+| corpus-04 (358 p) | 150 | 24 | 155 | 385 → 561 | 346 → 538 | 0 / 28 |
+| corpus-04 | 300 | 24 | 432 | 552 → 1151 | 600 → 1193 | 9 / 24 |
+| corpus-05 (601 p) | 150 | 24 | 115 | 178 → 482 | 254 → 478 | 0 / 41 |
+| corpus-05 | 300 | 24 | 382 | 440 → 1646 | 526 → 1455 | 14 / 37 |
+| corpus-07 (162 p) | 150 | 24 | 403 | 438 → 565 | 514 → 567 | 2 / 14 |
+| corpus-07 | 300 | 24 | 814 | 796 → 904 | 877 → 903 | 23 / 28 |
+| corpus-05 -l 120 | 150 | 1 | 155 | 204 → 314 | 307 → 325 | 48 / 120 |
+| corpus-05 -l 120 | 150 | 4 | 45 | 130 → 213 | 191 → 209 | 0 / 48 |
+| corpus-07 -l 120 | 150 | 1 | 2969 | 2140 → 2217 | 2207 → 2216 | 116 / 120 |
+| corpus-07 -l 120 | 150 | 4 | 793 | 774 → 731 | 786 → 724 | 62 / 71 |
+With every thread waiting for one device, cheap pages are paced by it: at
+24 threads the device is 1.1–4× slower than the CPU on the fixtures (a
+300-dpi page is a 15 MB read-back), and on corpus-07 at 4 threads it now
+beats the CPU (724 vs 793 ms). Making pages wait for a free place while
+keeping two places (measured, dropped) was the slowest option: the two
+held pages record serially (corpus-07 300 dpi, 1687 ms). Defaults stay CPU.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns

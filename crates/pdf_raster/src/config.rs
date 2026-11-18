@@ -409,18 +409,19 @@ pub struct SessionConfig {
     /// Default `false`.  `true` under [`Auto`](BackendPolicy::Auto) opens
     /// the device of [`vulkan_device`](Self::vulkan_device) on a thread of
     /// its own when the first page that may render on it is rendered, so a
-    /// job none of whose pages can never opens it, and the pages rendered
-    /// before it is open render on the CPU; under
+    /// job none of whose pages can never opens it; under
     /// [`ForceVulkan`](BackendPolicy::ForceVulkan) the session's device is
-    /// used.  Once the device is open, up to two pages hold it at once,
-    /// one recorded while the other is rasterised.  A page whose every
-    /// paint the GPU raster renders (fills, strokes and text in solid
-    /// colours, images, forms and annotation appearances, under path clips
-    /// and soft masks, `Normal` blend) is rendered on it, byte-identical
-    /// to the CPU at 8 and 16 bits; every other page, a page that finds
-    /// the device fully held, and every band of
-    /// [`render_page_bands`](crate::render_page_bands) render on the CPU,
-    /// with the same bytes.
+    /// used.  A page whose every paint the GPU raster renders (fills,
+    /// strokes and text in solid colours, images, forms and annotation
+    /// appearances, under path clips and soft masks, `Normal` blend) is
+    /// rendered on it, byte-identical to the CPU at 8 and 16 bits: its
+    /// thread waits for the device to open (at most 30 seconds, after
+    /// which the page renders on the CPU, with a warning), records the
+    /// page and waits for the device, which renders one page at a time
+    /// while up to two others stage their inputs or read their pixels
+    /// back.  Every other page, and every band of
+    /// [`render_page_bands`](crate::render_page_bands), renders on the
+    /// CPU, with the same bytes.
     /// [`PageDiagnostics::device_page`](crate::PageDiagnostics::device_page)
     /// reports where each page rendered and why.  A device that does not
     /// open is logged at `error` and leaves every page on the CPU.

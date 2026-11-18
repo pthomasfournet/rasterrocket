@@ -609,11 +609,11 @@ pub(crate) struct Args {
 
     /// Render pages whole on a Vulkan GPU beside the CPU workers.
     ///
-    /// Under --backend auto the device opens in the background when the
-    /// first page that may render on it is reached, so a document with no
-    /// such page opens none, and pages reached before it is open (all of a
-    /// one-page job) render on the CPU.  Two pages hold the device at once,
-    /// one recorded while the other rasterises.  Fills, strokes, text,
+    /// Under --backend auto the device opens when the first page that may
+    /// render on it is reached, so a document with no such page opens none.
+    /// Every page that may render on it does: the worker threads record
+    /// pages in parallel and wait for the device, which renders one page
+    /// at a time.  Fills, strokes, text,
     /// images, forms, annotations, path clips and soft masks render on it,
     /// byte-identical to the CPU at 8 and 16 bits.  A page with a
     /// transparency-group form, a blend mode other than Normal, a pattern

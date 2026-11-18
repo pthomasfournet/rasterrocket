@@ -2,16 +2,15 @@
 //! CPU workers ([`SessionConfig::gpu_pages`]).
 //!
 //! Unless the session holds a device of its own, the device is opened on a
-//! thread of its own when the first page that qualifies asks for it, so the
-//! workers keep rendering meanwhile and a job none of whose pages qualifies
-//! never opens it; until it is open every page renders on the CPU.  Up to
-//! [`IN_FLIGHT`] pages hold the device at once: a worker whose page
-//! qualifies claims it while fewer hold it, records the page's paint
-//! commands and renders them on it, the device rendering one page at a
-//! time, so that one page is recorded while another is rendered; a worker
-//! that finds the device fully claimed, or a page that does not qualify,
-//! renders on the CPU.  Pages are returned by index, so
-//! the output order does not depend on where a page rendered.
+//! thread of its own when the first page that qualifies asks for it, so a
+//! job none of whose pages qualifies never opens it.  Every page that
+//! qualifies renders on the device: its worker waits for the device to
+//! open (at most [`OPEN_WAIT`]), records the page's paint commands and
+//! renders them on it.  The workers record in parallel; the device renders
+//! one page at a time while others stage their inputs or read their pixels
+//! back.  A page that does not qualify renders on the CPU.  Pages are
+//! returned by index, so the output order does not depend on where a page
+//! rendered.
 //!
 //! A device error retires the device for the session: every later page
 //! renders on the CPU.  A page too large for the device's limits renders
@@ -22,9 +21,10 @@
 //!
 //! [`SessionConfig::gpu_pages`]: crate::SessionConfig::gpu_pages
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use gpu::backend::BackendError;
 use gpu::backend::vulkan::VulkanBackend;
@@ -33,20 +33,22 @@ use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRende
 use crate::RasterError;
 use crate::render::PageJob;
 
-/// The most pages that hold a session's GPU page device at once: while
-/// one is rendered on it, the next is recorded.
-const IN_FLIGHT: usize = 2;
+/// The longest a page waits for the device to open before it renders on
+/// the CPU.
+const OPEN_WAIT: Duration = Duration::from_secs(30);
 
-/// The device of a session's GPU pages, and whether a page holds it.
+/// The device of a session's GPU pages.
 pub(crate) struct DevicePages {
-    /// The device once its opening has finished: `None` when it failed.
-    device: Arc<OnceLock<Option<Arc<VulkanBackend>>>>,
+    /// The device once its opening has finished.
+    device: Arc<Opened>,
     /// The opening of the device.
     opener: Mutex<Opener>,
-    /// The pages holding the device, at most [`IN_FLIGHT`].
-    in_flight: AtomicUsize,
     /// Set once the device has failed; it is offered no page afterwards.
     retired: AtomicBool,
+    /// The longest a page waits for the device to open: [`OPEN_WAIT`].
+    open_wait: Duration,
+    /// Set once a page has stopped waiting for the device to open.
+    open_timed_out: AtomicBool,
     /// Set once a page of the wide working space has been rendered on the
     /// CPU in its place.
     wide_declined: AtomicBool,
@@ -55,6 +57,59 @@ pub(crate) struct DevicePages {
     /// Test hooks.
     #[cfg(test)]
     faults: TestFaults,
+}
+
+/// A device opened on another thread, once its opening has finished:
+/// `None` when it failed.
+#[derive(Default)]
+struct Opened {
+    slot: OnceLock<Option<Arc<VulkanBackend>>>,
+    /// Held while the slot is set; `settled` is notified once it is.
+    lock: Mutex<()>,
+    settled: Condvar,
+}
+
+impl Opened {
+    fn new(slot: OnceLock<Option<Arc<VulkanBackend>>>) -> Self {
+        Self {
+            slot,
+            ..Self::default()
+        }
+    }
+
+    /// The outcome of the opening, once it has finished.
+    fn get(&self) -> Option<&Option<Arc<VulkanBackend>>> {
+        self.slot.get()
+    }
+
+    /// Record the outcome of the opening and wake the pages waiting for
+    /// it.  Only the first outcome is kept.
+    fn settle(&self, backend: Option<Arc<VulkanBackend>>) {
+        let guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(self.slot.set(backend));
+        drop(guard);
+        self.settled.notify_all();
+    }
+
+    /// The outcome of the opening, waiting at most `wait` for it.
+    fn wait(&self, wait: Duration) -> Option<&Option<Arc<VulkanBackend>>> {
+        let deadline = Instant::now() + wait;
+        let mut guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(outcome) = self.slot.get() {
+                return Some(outcome);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            guard = self
+                .settled
+                .wait_timeout(guard, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
 }
 
 /// The opening of a session's GPU page device.
@@ -84,10 +139,8 @@ pub struct DevicePageCounts {
     /// by reason, in the order each reason first occurred; rendered on the
     /// CPU.
     pub ineligible: Vec<(&'static str, u32)>,
-    /// Pages rendered on the CPU while the most pages the device takes at
-    /// once held it.
-    pub busy: u32,
-    /// Pages rendered on the CPU while the device was being opened.
+    /// Pages rendered on the CPU because the device had not opened after
+    /// they waited 30 seconds for it.
     pub opening: u32,
     /// Pages rendered on the CPU because the device did not open.
     pub no_device: u32,
@@ -109,7 +162,6 @@ impl DevicePageCounts {
         self.ineligible
             .iter()
             .fold(0u32, |n, &(_, k)| n.saturating_add(k))
-            .saturating_add(self.busy)
             .saturating_add(self.opening)
             .saturating_add(self.no_device)
             .saturating_add(self.retired)
@@ -131,7 +183,6 @@ impl DevicePageCounts {
                     });
                 &mut self.ineligible[i].1
             }
-            Outcome::Missed(Miss::Busy) => &mut self.busy,
             Outcome::Missed(Miss::Opening) => &mut self.opening,
             Outcome::Missed(Miss::NoDevice) => &mut self.no_device,
             Outcome::Missed(Miss::Retired) => &mut self.retired,
@@ -151,7 +202,6 @@ impl std::fmt::Display for DevicePageCounts {
             self.cpu()
         )?;
         let misses = [
-            ("device busy", self.busy),
             ("device opening", self.opening),
             ("no device", self.no_device),
             ("device retired", self.retired),
@@ -181,12 +231,10 @@ impl std::fmt::Display for DevicePageCounts {
     }
 }
 
-/// Why [`DevicePages::try_claim`] did not give the device.
+/// Why [`DevicePages::claim`] did not give the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Miss {
-    /// [`IN_FLIGHT`] pages hold the device.
-    Busy,
-    /// The device is being opened.
+    /// The device did not open within [`OPEN_WAIT`].
     Opening,
     /// The device did not open.
     NoDevice,
@@ -198,8 +246,7 @@ impl Miss {
     /// The miss as the page's debug log names it.
     const fn describe(self) -> &'static str {
         match self {
-            Self::Busy => "the device is busy",
-            Self::Opening => "the device is being opened",
+            Self::Opening => "the device is still being opened",
             Self::NoDevice => "the device did not open",
             Self::Retired => "the device is retired",
         }
@@ -236,17 +283,12 @@ impl TestFaults {
     }
 }
 
-/// The device, held by one page until dropped.
+/// The device, given to one page.
 pub(crate) struct Claim<'a> {
+    #[cfg(test)]
     pages: &'a DevicePages,
     /// The device.
     pub(crate) backend: &'a VulkanBackend,
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        let _ = self.pages.in_flight.fetch_sub(1, Ordering::Release);
-    }
 }
 
 /// The GPU-page device of `selector`, or `None`, logged at `error`, when
@@ -293,10 +335,11 @@ impl DevicePages {
 
     fn new(device: OnceLock<Option<Arc<VulkanBackend>>>, opener: Opener) -> Self {
         Self {
-            device: Arc::new(device),
+            device: Arc::new(Opened::new(device)),
             opener: Mutex::new(opener),
-            in_flight: AtomicUsize::new(0),
             retired: AtomicBool::new(false),
+            open_wait: OPEN_WAIT,
+            open_timed_out: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
             counts: Mutex::new(DevicePageCounts::default()),
             #[cfg(test)]
@@ -317,9 +360,7 @@ impl DevicePages {
         let spawned = std::thread::Builder::new()
             .name("rrocket-gpu-pages".to_owned())
             .spawn(move || {
-                let backend = open_device(selector.as_deref());
-                // The slot is set by this thread alone.
-                drop(slot.set(backend));
+                slot.settle(open_device(selector.as_deref()));
             });
         *opener = match spawned {
             Ok(thread) => Opener::Running(thread),
@@ -328,33 +369,41 @@ impl DevicePages {
                     "rasterrocket: GPU page rendering was requested, but the thread that opens \
                      the Vulkan device did not start ({e}); every page renders on the CPU"
                 );
-                drop(self.device.set(None));
+                self.device.settle(None);
                 Opener::Settled
             }
         };
     }
 
-    /// The device, if it is open, in service and fewer than [`IN_FLIGHT`]
-    /// pages hold it, or why not.  A call before the device is open starts
-    /// opening it.
-    pub(crate) fn try_claim(&self) -> Result<Claim<'_>, Miss> {
+    /// The device, if it opens and is in service, or why not.  A call
+    /// before the device is open starts opening it and waits for it, at
+    /// most [`OPEN_WAIT`]; the first call that stops waiting is logged at
+    /// `warn`.
+    pub(crate) fn claim(&self) -> Result<Claim<'_>, Miss> {
         if self.retired.load(Ordering::Acquire) {
             return Err(Miss::Retired);
         }
-        let Some(device) = self.device.get() else {
+        let device = if let Some(device) = self.device.get() {
+            device
+        } else {
             self.start_opening();
-            return Err(Miss::Opening);
+            self.device.wait(self.open_wait).ok_or_else(|| {
+                if !self.open_timed_out.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "rasterrocket: the GPU page device has not opened after {:.0} s; pages \
+                         render on the CPU until it does",
+                        self.open_wait.as_secs_f64()
+                    );
+                }
+                Miss::Opening
+            })?
         };
         let backend = device.as_deref().ok_or(Miss::NoDevice)?;
-        self.in_flight
-            .try_update(Ordering::Acquire, Ordering::Relaxed, |n| {
-                (n < IN_FLIGHT).then_some(n + 1)
-            })
-            .map(|_| Claim {
-                pages: self,
-                backend,
-            })
-            .map_err(|_| Miss::Busy)
+        Ok(Claim {
+            #[cfg(test)]
+            pages: self,
+            backend,
+        })
     }
 
     /// Count one page under `outcome`.
@@ -486,8 +535,8 @@ pub(crate) fn record(
 }
 
 /// Render `job`'s page, on the session's GPU page device when it qualifies
-/// and the device is free, and on the CPU otherwise; return the renderer
-/// that executed it and how the device was used.
+/// and the device is open and in service, and on the CPU otherwise; return
+/// the renderer that executed it and how the device was used.
 ///
 /// A page whose recording is refused, or which the device fails on, is
 /// executed again on the CPU with the bitmap buffers of the first pass;
@@ -518,7 +567,7 @@ pub(crate) fn render<'a>(
         }
         return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
     }
-    let claim = match pages.try_claim() {
+    let claim = match pages.claim() {
         Ok(claim) => claim,
         Err(miss) => {
             log::debug!(
@@ -534,7 +583,6 @@ pub(crate) fn render<'a>(
     // paint is painted paper white first.
     let mut renderer = job.unpainted_renderer(std::mem::take(buffers))?;
     if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
-        drop(claim);
         log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
         pages.count(Outcome::Ineligible(reason));
         renderer.paint_paper();
@@ -578,7 +626,6 @@ pub(crate) fn render<'a>(
         }
         None => unreachable!("a renderer recording for the device yields its recording"),
     };
-    drop(claim);
     #[cfg(test)]
     let _ = pages.faults.cpu_reruns.fetch_add(1, Ordering::Relaxed);
     let fallback = renderer.take_device_fallback();
@@ -589,11 +636,13 @@ pub(crate) fn render<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
     use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use gpu::backend::BackendError;
 
-    use super::{DevicePageCounts, DevicePages, IN_FLIGHT, Miss, Opener, Outcome};
+    use super::{DevicePageCounts, DevicePages, Miss, Opened, Opener, Outcome};
     use crate::test_pdf::{assemble, stream};
     use crate::{
         BackendPolicy, CancelToken, DevicePage, RasterError, RasterSession, RenderParams,
@@ -663,26 +712,46 @@ mod tests {
             .0
     }
 
-    /// At most `IN_FLIGHT` pages hold the device; a claim that fails takes
-    /// nothing from those that hold it, and a released claim frees a place.
+    /// A wait for an opening returns its outcome once it is settled, by
+    /// another thread or before the wait, and nothing once the wait is
+    /// over.
     #[test]
-    fn at_most_in_flight_pages_hold_the_device() {
-        let Some(session) = gpu_session(pdf(&[DEVICE])) else {
-            return;
-        };
-        let pages = device_pages(&session);
-        let mut claims: Vec<_> = (0..IN_FLIGHT)
-            .map(|_| pages.try_claim().expect("a free place"))
-            .collect();
-        for _ in 0..3 {
-            assert_eq!(pages.try_claim().err(), Some(Miss::Busy), "past IN_FLIGHT");
+    fn a_wait_for_the_opening_ends_with_its_outcome_or_its_time() {
+        let opened = Opened::new(OnceLock::new());
+        let started = Instant::now();
+        assert!(opened.wait(Duration::from_millis(30)).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| opened.wait(Duration::from_secs(60)).cloned());
+            std::thread::sleep(Duration::from_millis(20));
+            opened.settle(None);
+            assert_eq!(
+                waiter.join().expect("waiter").map(|d| d.is_some()),
+                Some(false)
+            );
+        });
+        assert!(matches!(opened.wait(Duration::ZERO), Some(None)));
+    }
+
+    /// A page that waited its time for a device still opening renders on
+    /// the CPU, counted under `opening`, and warns once.
+    #[test]
+    fn a_page_renders_on_the_cpu_once_its_wait_for_the_opening_is_over() {
+        let doc = pdf(&[DEVICE, DEVICE]);
+        let session = auto_session(doc.clone(), None);
+        let mut pages = DevicePages::new(OnceLock::new(), Opener::Settled);
+        pages.open_wait = Duration::from_millis(20);
+        let mut session = session;
+        session.device_pages = Some(pages);
+        for page in 1..=2 {
+            let (bitmap, outcome) =
+                render(&session, page, &RenderParams::new(2.0)).expect("render");
+            assert_eq!(outcome, DevicePage::NotOffered);
+            assert_eq!(bitmap, cpu(doc.clone(), page));
         }
-        assert_eq!(pages.in_flight.load(Ordering::Relaxed), IN_FLIGHT);
-        drop(claims.pop());
-        let again = pages.try_claim().expect("a released place");
-        assert_eq!(pages.try_claim().err(), Some(Miss::Busy), "past IN_FLIGHT");
-        drop((again, claims));
-        assert_eq!(pages.in_flight.load(Ordering::Relaxed), 0);
+        let pages = device_pages(&session);
+        assert!(pages.open_timed_out.load(Ordering::Relaxed));
+        assert_eq!(pages.counts().opening, 2);
     }
 
     /// A device error renders the page on the CPU, identically, and
@@ -762,10 +831,10 @@ mod tests {
         assert_eq!((counts.stopped, counts.cpu(), counts.rendered), (1, 1, 0));
     }
 
-    /// Pages rendered at once by several threads each take the device or
-    /// the CPU, with the CPU's bytes either way.
+    /// Pages rendered at once by several threads all render on the device,
+    /// with the CPU's bytes.
     #[test]
-    fn concurrent_pages_share_the_device() {
+    fn concurrent_pages_all_render_on_the_device() {
         const PAGES: u32 = 12;
         let doc = pdf(&[DEVICE; PAGES as usize]);
         let Some(session) = gpu_session(doc.clone()) else {
@@ -791,23 +860,11 @@ mod tests {
         assert!(
             outcomes
                 .iter()
-                .all(|o| matches!(o, DevicePage::Rendered { .. } | DevicePage::NotOffered)),
+                .all(|o| matches!(o, DevicePage::Rendered { .. })),
             "{outcomes:?}"
         );
-        assert!(
-            outcomes
-                .iter()
-                .any(|o| matches!(o, DevicePage::Rendered { .. })),
-            "{outcomes:?}"
-        );
-        let on_device = outcomes
-            .iter()
-            .filter(|o| matches!(o, DevicePage::Rendered { .. }))
-            .count();
         let counts = device_pages(&session).counts();
-        assert_eq!(counts.rendered as usize, on_device, "{counts}");
-        assert_eq!(counts.busy, counts.cpu(), "{counts}");
-        assert_eq!(counts.rendered + counts.busy, PAGES, "{counts}");
+        assert_eq!((counts.rendered, counts.cpu()), (PAGES, 0), "{counts}");
     }
 
     /// A page of the wide working space renders on the CPU, as a CPU
@@ -881,8 +938,8 @@ mod tests {
     }
 
     /// Under `Auto`, the first page the device could take starts opening
-    /// it and renders on the CPU; once the device is open, a later page
-    /// renders on it (on the CPU when no device opens), identically.
+    /// it, waits for it and renders on it, as does a later page (on the
+    /// CPU when no device opens), identically.
     #[test]
     fn auto_opens_the_device_for_the_first_page_it_could_take() {
         let doc = pdf(&[DEVICE, DEVICE]);
@@ -893,30 +950,32 @@ mod tests {
             Opener::Deferred(_)
         ));
         let params = RenderParams::new(2.0);
-        let (page, outcome) = render(&session, 1, &params).expect("render");
-        assert_eq!(outcome, DevicePage::NotOffered);
-        assert_eq!(page, cpu(doc.clone(), 1));
-        let opener = std::mem::replace(&mut *pages.opener.lock().expect("lock"), Opener::Settled);
-        let Opener::Running(thread) = opener else {
-            panic!("the first page did not start opening the device");
-        };
-        thread.join().expect("the opener");
+        let (first, first_outcome) = render(&session, 1, &params).expect("render");
+        assert!(
+            matches!(*pages.opener.lock().expect("lock"), Opener::Running(_)),
+            "the first page did not start opening the device"
+        );
         let device_open = matches!(pages.device.get(), Some(Some(_)));
-        let (page, outcome) = render(&session, 2, &params).expect("render");
+        let (second, second_outcome) = render(&session, 2, &params).expect("render");
         let counts = pages.counts();
-        assert_eq!(counts.opening, 1, "{counts}");
+        for outcome in [first_outcome, second_outcome] {
+            if device_open {
+                assert!(
+                    matches!(outcome, DevicePage::Rendered { .. }),
+                    "{outcome:?}"
+                );
+            } else {
+                assert_eq!(outcome, DevicePage::NotOffered);
+            }
+        }
         if device_open {
-            assert!(
-                matches!(outcome, DevicePage::Rendered { .. }),
-                "{outcome:?}"
-            );
-            assert_eq!(counts.rendered, 1, "{counts}");
+            assert_eq!(counts.rendered, 2, "{counts}");
         } else {
             eprintln!("no Vulkan device opened");
-            assert_eq!(outcome, DevicePage::NotOffered);
-            assert_eq!(counts.no_device, 1, "{counts}");
+            assert_eq!(counts.no_device, 2, "{counts}");
         }
-        assert_eq!(page, cpu(doc, 2));
+        assert_eq!(first, cpu(doc.clone(), 1));
+        assert_eq!(second, cpu(doc, 2));
     }
 
     /// Each outcome is counted under its own field, ineligible pages by
@@ -932,7 +991,6 @@ mod tests {
             Outcome::Ineligible("shading"),
             Outcome::Ineligible("translucent hairline"),
             Outcome::Ineligible("shading"),
-            Outcome::Missed(Miss::Busy),
             Outcome::Missed(Miss::Opening),
             Outcome::Missed(Miss::NoDevice),
             Outcome::Missed(Miss::Retired),
@@ -945,11 +1003,11 @@ mod tests {
             counts.ineligible,
             [("shading", 2), ("translucent hairline", 1)]
         );
-        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 8, 1));
+        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 7, 1));
         assert_eq!(
             counts.to_string(),
-            "2 on the device, 8 on the CPU (shading: 2, translucent hairline: 1, \
-             device busy: 1, device opening: 1, no device: 1, device retired: 1, \
+            "2 on the device, 7 on the CPU (shading: 2, translucent hairline: 1, \
+             device opening: 1, no device: 1, device retired: 1, \
              device failed: 1); 1 stopped"
         );
     }
