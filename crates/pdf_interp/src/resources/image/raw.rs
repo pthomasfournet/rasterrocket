@@ -276,7 +276,7 @@ pub(super) fn apply_stencil_decode(samples: &mut Samples, dict: &Dictionary) {
     let bytes = match &mut samples.data {
         super::ImageData::Cpu(bytes) => bytes,
         super::ImageData::Bilevel(bits) => {
-            bits.relabel(bits.clear(), bits.set());
+            bits.relabel(!bits.set(), !bits.clear());
             return;
         }
         super::ImageData::Cpu16(_) => return,
