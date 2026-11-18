@@ -174,6 +174,49 @@ pub(super) unsafe fn rotate_row_neon<P: DeskewPixel>(
     rotate_span_scalar(tail, tail_start, src, p);
 }
 
+/// The scalars of the gather kernels ([`rotate_row_avx512`],
+/// [`rotate_row_avx2`]) over a source bitmap, as `i32` lanes.
+#[cfg(target_arch = "x86_64")]
+struct GatherGeometry {
+    /// The first byte of the pixel buffer.
+    base: *const u8,
+    /// The pixel buffer's length in bytes, less 4: the largest byte offset
+    /// a dword gather reads from without crossing its end.
+    len_m4: i32,
+    /// The row stride in bytes.
+    stride_bytes: i32,
+    /// The bytes of a sample: 1 or 2.
+    size: i32,
+    /// `Sample::BITS`: 8 or 16.
+    bits: i32,
+    /// `Sample::MAX`, the white of the background.
+    max: i32,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl GatherGeometry {
+    /// The geometry of `src`, or `None` for a pixel buffer that a dword
+    /// gather cannot address: shorter than 4 bytes, or longer than
+    /// `i32::MAX` bytes.  Every byte offset `y · stride_bytes + x · size`
+    /// of a sample of `src` is then below the buffer's length, so within
+    /// `i32`.
+    fn of<P: DeskewPixel>(src: &Bitmap<P>) -> Option<Self> {
+        let data = src.data();
+        let len = i32::try_from(size_of_val(data))
+            .ok()
+            .filter(|&len| len >= 4)?;
+        let size = size_of::<P::Sample>();
+        Some(Self {
+            base: data.as_ptr().cast::<u8>(),
+            len_m4: len - 4,
+            stride_bytes: i32::try_from(src.stride * size).ok()?,
+            size: i32::try_from(size).ok()?,
+            bits: i32::try_from(P::Sample::BITS).ok()?,
+            max: i32::try_from(P::Sample::MAX.signed()).ok()?,
+        })
+    }
+}
+
 /// AVX-512 inner loop: 16 output pixels per iteration, bit-exact with
 /// [`rotate_span_scalar`].
 ///
@@ -229,21 +272,12 @@ pub(super) unsafe fn rotate_row_avx512<P: DeskewPixel>(
         _mm512_sub_ps,
     };
 
-    let data = src.data();
-    let len = size_of_val(data);
-    let Ok(len_i32) = i32::try_from(len) else {
+    let Some(g) = GatherGeometry::of(src) else {
         rotate_span_scalar(dst_row, 0, src, p);
         return;
     };
-    if len < 4 {
-        // Too small for a dword gather to stay inside the buffer.
-        rotate_span_scalar(dst_row, 0, src, p);
-        return;
-    }
-    let base = data.as_ptr().cast::<u8>();
     let w = dst_row.len();
     let out = dst_row.as_mut_ptr();
-    let size = size_of::<P::Sample>();
 
     // The samples of the low 16 lanes of `v`, which are at most
     // `Sample::MAX`, at `out + ox` for the lanes of `k`.
@@ -270,27 +304,13 @@ pub(super) unsafe fn rotate_row_avx512<P: DeskewPixel>(
     let v_sy_max = _mm512_set1_epi32(p.sy_max);
     let v_zero = _mm512_setzero_si512();
     let v_one = _mm512_set1_epi32(1);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "Sample::BITS is 8 or 16 and Sample::MAX at most 65535"
-    )]
-    let (v_bits, v_sample) = (
-        _mm512_set1_epi32(P::Sample::BITS as i32),
-        _mm512_set1_epi32(P::Sample::MAX.signed() as i32),
-    );
+    let (v_bits, v_sample) = (_mm512_set1_epi32(g.bits), _mm512_set1_epi32(g.max));
     let v_half = _mm512_set1_ps(0.5);
     let v_one_f = _mm512_set1_ps(1.0);
-    // The row stride in bytes is at most len ≤ i32::MAX; a sample is 1 or 2 bytes.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "stride · size ≤ len ≤ i32::MAX and size ≤ 2"
-    )]
     let (v_stride, v_size, v_len_m4) = (
-        _mm512_set1_epi32((src.stride * size) as i32),
-        _mm512_set1_epi32(size as i32),
-        _mm512_set1_epi32(len_i32 - 4),
+        _mm512_set1_epi32(g.stride_bytes),
+        _mm512_set1_epi32(g.size),
+        _mm512_set1_epi32(g.len_m4),
     );
 
     let mut ox = 0usize;
@@ -348,8 +368,8 @@ pub(super) unsafe fn rotate_row_avx512<P: DeskewPixel>(
         // lies within `data`; inactive lanes are not read.
         let (d0, d1) = unsafe {
             (
-                _mm512_mask_i32gather_epi32::<1>(v_zero, in_bounds, off0_c, base.cast()),
-                _mm512_mask_i32gather_epi32::<1>(v_zero, in_bounds, off1_c, base.cast()),
+                _mm512_mask_i32gather_epi32::<1>(v_zero, in_bounds, off0_c, g.base.cast()),
+                _mm512_mask_i32gather_epi32::<1>(v_zero, in_bounds, off1_c, g.base.cast()),
             )
         };
         // A shift of 32 or more bits, past the dword, gives 0; such a lane
@@ -444,18 +464,10 @@ pub(super) unsafe fn rotate_row_avx2<P: DeskewPixel>(
         _mm256_slli_epi32, _mm256_srlv_epi32, _mm256_sub_epi32, _mm256_sub_ps,
     };
 
-    let data = src.data();
-    let len = size_of_val(data);
-    let Ok(len_i32) = i32::try_from(len) else {
+    let Some(g) = GatherGeometry::of(src) else {
         rotate_span_scalar(dst_row, 0, src, p);
         return;
     };
-    if len < 4 {
-        // Too small for a dword gather to stay inside the buffer.
-        rotate_span_scalar(dst_row, 0, src, p);
-        return;
-    }
-    let base = data.as_ptr().cast::<u8>();
     let w = dst_row.len();
     let out = dst_row.as_mut_ptr().cast::<u8>();
     let size = size_of::<P::Sample>();
@@ -499,27 +511,13 @@ pub(super) unsafe fn rotate_row_avx2<P: DeskewPixel>(
     let v_sy_max = _mm256_set1_epi32(p.sy_max);
     let v_zero = _mm256_setzero_si256();
     let v_one = _mm256_set1_epi32(1);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "Sample::BITS is 8 or 16 and Sample::MAX at most 65535"
-    )]
-    let (v_bits, v_sample) = (
-        _mm256_set1_epi32(P::Sample::BITS as i32),
-        _mm256_set1_epi32(P::Sample::MAX.signed() as i32),
-    );
+    let (v_bits, v_sample) = (_mm256_set1_epi32(g.bits), _mm256_set1_epi32(g.max));
     let v_half = _mm256_set1_ps(0.5);
     let v_one_f = _mm256_set1_ps(1.0);
-    // The row stride in bytes is at most len ≤ i32::MAX; a sample is 1 or 2 bytes.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "stride · size ≤ len ≤ i32::MAX and size ≤ 2"
-    )]
     let (v_stride, v_size, v_len_m4) = (
-        _mm256_set1_epi32((src.stride * size) as i32),
-        _mm256_set1_epi32(size as i32),
-        _mm256_set1_epi32(len_i32 - 4),
+        _mm256_set1_epi32(g.stride_bytes),
+        _mm256_set1_epi32(g.size),
+        _mm256_set1_epi32(g.len_m4),
     );
 
     let mut ox = 0usize;
@@ -582,8 +580,8 @@ pub(super) unsafe fn rotate_row_avx2<P: DeskewPixel>(
         // lies within `data`; inactive lanes are not read.
         let (d0, d1) = unsafe {
             (
-                _mm256_mask_i32gather_epi32::<1>(v_zero, base.cast(), off0_c, in_bounds),
-                _mm256_mask_i32gather_epi32::<1>(v_zero, base.cast(), off1_c, in_bounds),
+                _mm256_mask_i32gather_epi32::<1>(v_zero, g.base.cast(), off0_c, in_bounds),
+                _mm256_mask_i32gather_epi32::<1>(v_zero, g.base.cast(), off1_c, in_bounds),
             )
         };
         // A shift of 32 or more bits, past the dword, gives 0; such a lane
