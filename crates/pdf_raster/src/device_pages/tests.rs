@@ -407,19 +407,19 @@ fn a_page_goes_where_it_expects_the_shortest_wait() {
         held,
         mean_nanos: mean,
     };
-    assert_eq!(choose(&[]), None);
-    assert_eq!(choose(&[load(0, None), load(0, None)]), Some(0));
-    assert_eq!(choose(&[load(1, None), load(0, None)]), Some(1));
+    assert_eq!(choose(std::iter::empty()), None);
+    assert_eq!(choose([load(0, None), load(0, None)].into_iter()), Some(0));
+    assert_eq!(choose([load(1, None), load(0, None)].into_iter()), Some(1));
     // Three pages on a 2 ms device wait less than one on a 7 ms device;
     // four do not.
     let (fast, slow) = (Some(2_000_000), Some(7_000_000));
-    assert_eq!(choose(&[load(2, fast), load(0, slow)]), Some(0));
-    assert_eq!(choose(&[load(3, fast), load(0, slow)]), Some(1));
-    // A device without runs counts the fastest known mean.
-    assert_eq!(choose(&[load(2, fast), load(2, None)]), Some(0));
-    assert_eq!(choose(&[load(2, fast), load(1, None)]), Some(1));
+    assert_eq!(choose([load(2, fast), load(0, slow)].into_iter()), Some(0));
+    assert_eq!(choose([load(3, fast), load(0, slow)].into_iter()), Some(1));
+    // A device without a mean counts the fastest known mean.
+    assert_eq!(choose([load(2, fast), load(2, None)].into_iter()), Some(0));
+    assert_eq!(choose([load(2, fast), load(1, None)].into_iter()), Some(1));
     assert_eq!(
-        choose(&[load(0, slow), load(1, None), load(0, fast)]),
+        choose([load(0, slow), load(1, None), load(0, fast)].into_iter()),
         Some(2)
     );
     assert_eq!(load(usize::MAX, Some(u128::MAX)).wait(1), u128::MAX);

@@ -230,7 +230,7 @@ impl DevicePages {
     /// shortest wait ([`choose`]), the first listed among equals; else
     /// whether one may still open (`Ok(None)`) or why none will.
     fn pick(&self) -> Result<Option<Claim<'_>>, Miss> {
-        let mut open: Vec<(&Device, &VulkanBackend, Load)> = Vec::new();
+        let mut open: Vec<(&Device, &VulkanBackend, Load)> = Vec::with_capacity(self.devices.len());
         let (mut opening, mut retired) = (false, false);
         for device in &self.devices {
             match device.state() {
@@ -240,8 +240,7 @@ impl DevicePages {
                 State::NoDevice => {}
             }
         }
-        let loads: Vec<Load> = open.iter().map(|&(_, _, load)| load).collect();
-        match choose(&loads).map(|i| open[i]) {
+        match choose(open.iter().map(|&(_, _, load)| load)).map(|i| open[i]) {
             Some((device, backend, _)) => Ok(Some(device.claim(backend))),
             None if opening => Ok(None),
             None if retired => Err(Miss::Retired),
@@ -341,10 +340,13 @@ impl DevicePages {
 /// mean page raster, the shortest mean known for a device without one yet
 /// (1 ns when none has one), so a new device takes pages in turn with the
 /// fastest until its own page rasters give it a mean.
-fn choose(loads: &[Load]) -> Option<usize> {
-    let fallback = loads.iter().filter_map(|l| l.mean_nanos).min().unwrap_or(1);
+fn choose(loads: impl Iterator<Item = Load> + Clone) -> Option<usize> {
+    let fallback = loads
+        .clone()
+        .filter_map(|l| l.mean_nanos)
+        .min()
+        .unwrap_or(1);
     loads
-        .iter()
         .enumerate()
         .min_by_key(|&(i, l)| (l.wait(fallback), i))
         .map(|(i, _)| i)

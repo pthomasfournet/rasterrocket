@@ -216,7 +216,9 @@ impl Device {
         }
     }
 
-    /// Join the thread opening the device, if it runs.
+    /// Join the thread opening the device, if it runs; one still opening
+    /// the device is logged at `warn` first, since the join waits for the
+    /// driver without a bound.
     pub(super) fn join_opener(&mut self) {
         let opener = std::mem::replace(
             self.opener
@@ -224,9 +226,17 @@ impl Device {
                 .unwrap_or_else(PoisonError::into_inner),
             Opener::Settled,
         );
-        if let Opener::Running(opener) = opener
-            && opener.join().is_err()
-        {
+        let Opener::Running(opener) = opener else {
+            return;
+        };
+        if self.slot.get().is_none() {
+            log::warn!(
+                "rasterrocket: waiting for the GPU page device {} to finish opening before \
+                 the session closes",
+                self.name()
+            );
+        }
+        if opener.join().is_err() {
             log::warn!("rasterrocket: the thread opening a GPU page device panicked");
         }
     }
