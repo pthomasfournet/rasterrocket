@@ -177,10 +177,13 @@ wrote them with their tests. The base in `UPSTREAM.toml` is unchanged;
   first pixel in the most significant bit, 1 = black), with `data_u8` and
   `store_u8_into` for 8-bit samples; the `Decoder` trait, which received
   the page pixel by pixel and in 8-pixel chunks, and `Page::decode_with`
-  are gone. Decoding is unchanged. The renderer expands the returned rows
-  to bytes itself, by table: on the 224 JBIG2 pages of a 200 dpi book,
-  single-threaded, 7.6 → 7.1 G user cycles (−7 %), with identical page
-  hashes. The tests decode through `PageBitmap::rows`.
+  are gone. Decoding is unchanged. The renderer consumes
+  `PageBitmap::rows` directly, packing each row's words into its own
+  one-bit-per-sample image without expanding them to bytes. When the
+  renderer first took the rows (expanding them to bytes by table, since
+  replaced): on the 224 JBIG2 pages of a 200 dpi book, single-threaded,
+  7.6 → 7.1 G user cycles (−7 %), with identical page hashes. The tests
+  decode through `PageBitmap::rows`.
 
 ## Upstream review (2026-10-30)
 
