@@ -13,21 +13,23 @@
 //! `cl.exe` located from the Visual Studio installation.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Emit a `cargo:rustc-link-search` directive for the first of `dirs` that
-/// exists on the filesystem, then emit `cargo:rustc-link-lib=dylib={lib}`.
+/// exists on the filesystem, then emit `cargo:rustc-link-lib=dylib={lib}`,
+/// the library `feature` links.
 ///
 /// If none of the directories exist, emit a build warning and let the linker
 /// search its default paths (handles non-standard install locations).
-fn link_lib_in_dir(dirs: &[PathBuf], lib: &str, warn_context: &str) {
+fn link_lib_in_dir(dirs: &[PathBuf], lib: &str, feature: &str) {
     if let Some(dir) = dirs.iter().find(|d| d.exists()) {
         println!("cargo:rustc-link-search=native={}", dir.display());
     } else {
         println!(
-            "cargo:warning={warn_context} directory not found; linker will search default paths."
+            "cargo:warning={feature}: none of the directories {dirs:?} that hold {lib} exists; \
+             the linker searches its default paths"
         );
     }
     println!("cargo:rustc-link-lib=dylib={lib}");
@@ -113,9 +115,9 @@ fn cuda_lib_dirs() -> Vec<PathBuf> {
 /// The nvcc to run: `NVCC` if set, else the toolkit's own
 /// (`/usr/local/cuda/bin/nvcc` on Linux, `%CUDA_PATH%\bin\nvcc.exe` on
 /// Windows) if it exists, else `nvcc` from `PATH`.
-fn find_nvcc() -> String {
-    if let Ok(nvcc) = env::var("NVCC") {
-        return nvcc;
+fn find_nvcc() -> PathBuf {
+    if let Some(nvcc) = env::var_os("NVCC") {
+        return nvcc.into();
     }
     let candidate = if target_is_windows() {
         windows_cuda_root().map(|root| root.join("bin").join("nvcc.exe"))
@@ -124,17 +126,16 @@ fn find_nvcc() -> String {
     };
     candidate
         .filter(|p| p.exists())
-        .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_else(|| "nvcc".to_owned())
+        .unwrap_or_else(|| "nvcc".into())
 }
 
 /// The slangc to run: `SLANGC` if set, else the `LunarG` Vulkan SDK's
 /// (`$VULKAN_SDK/bin/slangc`; `%VULKAN_SDK%\Bin\slangc.exe` on Windows) if
 /// it exists, else `slangc` from `PATH`.  slangc runs on the build host, so
 /// the executable suffix is the host's.
-fn find_slangc() -> String {
-    if let Ok(slangc) = env::var("SLANGC") {
-        return slangc;
+fn find_slangc() -> PathBuf {
+    if let Some(slangc) = env::var_os("SLANGC") {
+        return slangc.into();
     }
     env::var_os("VULKAN_SDK")
         .map(|sdk| {
@@ -143,8 +144,7 @@ fn find_slangc() -> String {
                 .join(format!("slangc{}", env::consts::EXE_SUFFIX))
         })
         .filter(|p| p.is_file())
-        .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_else(|| "slangc".to_owned())
+        .unwrap_or_else(|| "slangc".into())
 }
 
 /// The host C++ compiler nvcc runs: extra nvcc arguments, and the
@@ -152,7 +152,7 @@ fn find_slangc() -> String {
 /// itself.
 #[derive(Default)]
 struct HostCompiler {
-    args: Vec<String>,
+    args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
 }
 
@@ -182,13 +182,7 @@ impl HostCompiler {
             return Self::default();
         };
         Self {
-            args: vec![
-                "-ccbin".to_owned(),
-                cl.path()
-                    .to_str()
-                    .expect("cl.exe path contains non-UTF-8")
-                    .to_owned(),
-            ],
+            args: vec!["-ccbin".into(), cl.path().into()],
             env: cl
                 .get_envs()
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -214,13 +208,14 @@ impl HostCompiler {
 /// On Linux, the CUDA 13 package installs under `libnvjpeg2k/13`; the
 /// unversioned directory is the package's flat layout.  On Windows,
 /// `NVJPEG2K_PATH` names the root of NVIDIA's redistributable archive
-/// (`bin`, `include`, `lib`), then the CUDA toolkit's `lib\x64` is searched.
-fn nvjpeg2k_lib_dirs() -> Vec<PathBuf> {
+/// (`bin`, `include`, `lib`), then `cuda_lib_dirs`, the CUDA toolkit's
+/// `lib\x64`, are searched.
+fn nvjpeg2k_lib_dirs(cuda_lib_dirs: &[PathBuf]) -> Vec<PathBuf> {
     if target_is_windows() {
         env::var_os("NVJPEG2K_PATH")
             .map(|root| PathBuf::from(root).join("lib"))
             .into_iter()
-            .chain(cuda_lib_dirs())
+            .chain(cuda_lib_dirs.iter().cloned())
             .collect()
     } else {
         vec![
@@ -234,25 +229,38 @@ fn nvjpeg2k_lib_dirs() -> Vec<PathBuf> {
 /// `/usr/include/libnvjpeg2k/13` on Linux (matching the link-time library)
 /// and `%NVJPEG2K_PATH%\include` on Windows.  `None` leaves the header to
 /// nvcc's own include path, the CUDA toolkit's.
-fn nvjpeg2k_include_dir() -> Option<String> {
-    if let Ok(dir) = env::var("NVJPEG2K_INCLUDE_DIR") {
-        return Some(dir);
+fn nvjpeg2k_include_dir() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("NVJPEG2K_INCLUDE_DIR") {
+        return Some(dir.into());
     }
     if target_is_windows() {
-        env::var_os("NVJPEG2K_PATH").map(|root| {
-            PathBuf::from(root)
-                .join("include")
-                .to_str()
-                .expect("NVJPEG2K_PATH contains non-UTF-8")
-                .to_owned()
-        })
+        env::var_os("NVJPEG2K_PATH").map(|root| PathBuf::from(root).join("include"))
     } else {
-        Some("/usr/include/libnvjpeg2k/13".to_owned())
+        Some("/usr/include/libnvjpeg2k/13".into())
     }
 }
 
+/// Run `cmd`, the build step `what`, and panic with the tool's diagnostic
+/// when it fails; `missing` is the hint added when the tool cannot be
+/// started at all.
+fn run_tool(cmd: &mut Command, what: &str, missing: &str) {
+    let output = cmd.output().unwrap_or_else(|e| {
+        panic!(
+            "failed to run {} for {what}: {e}{missing}",
+            cmd.get_program().display()
+        )
+    });
+    assert!(
+        output.status.success(),
+        "{} failed for {what} (status={}):\n{}",
+        cmd.get_program().display(),
+        output.status,
+        tool_diagnostic(&output),
+    );
+}
+
 fn main() {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
     let kernels_dir = PathBuf::from("kernels");
 
     println!("cargo:rerun-if-changed=kernels/");
@@ -267,36 +275,33 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
     let nvcc_path = find_nvcc();
-    let nvcc = &nvcc_path;
+    let nvcc = nvcc_path.as_os_str();
     let host = HostCompiler::detect();
     let cuda_lib_dirs = cuda_lib_dirs();
+    let links_cuda = ["NVJPEG", "NVJPEG2K", "GPU_DESKEW"]
+        .iter()
+        .any(|feature| env::var_os(format!("CARGO_FEATURE_{feature}")).is_some());
+    if links_cuda && target_is_windows() && windows_cuda_root().is_none() {
+        println!(
+            "cargo:warning=CUDA_PATH is not set, so the CUDA libraries cannot be found; \
+             install the CUDA toolkit (its installer sets CUDA_PATH) or set CUDA_PATH to its root"
+        );
+    }
 
     // nvJPEG: libnvjpeg.so ships with the CUDA toolkit.
     // On Linux this is provided by the NVIDIA driver, typically at
     // /usr/lib/x86_64-linux-gnu/libcuda.so.1 (driver-managed symlink).
     if env::var("CARGO_FEATURE_NVJPEG").is_ok() {
-        link_lib_in_dir(
-            &cuda_lib_dirs,
-            "nvjpeg",
-            "nvjpeg feature enabled but no CUDA lib",
-        );
+        link_lib_in_dir(&cuda_lib_dirs, "nvjpeg", "nvjpeg");
         println!("cargo:rustc-link-lib=dylib=cuda");
     }
 
     // nvJPEG2000: libnvjpeg2k.so lives in a non-standard path (not in the CUDA
     // toolkit tree) and requires cudart for cudaMalloc / cudaMemcpy2D.
     if env::var("CARGO_FEATURE_NVJPEG2K").is_ok() {
-        link_lib_in_dir(
-            &nvjpeg2k_lib_dirs(),
-            "nvjpeg2k",
-            "nvjpeg2k feature enabled but libnvjpeg2k not found",
-        );
+        link_lib_in_dir(&nvjpeg2k_lib_dirs(&cuda_lib_dirs), "nvjpeg2k", "nvjpeg2k");
         // cudart provides cudaMalloc / cudaFree / cudaMemcpy2D (runtime API).
-        link_lib_in_dir(
-            &cuda_lib_dirs,
-            "cudart",
-            "nvjpeg2k feature enabled but no CUDA lib for cudart",
-        );
+        link_lib_in_dir(&cuda_lib_dirs, "cudart", "nvjpeg2k");
         // cuStreamSynchronize / cuCtxSetCurrent live in libcuda.so (driver).
         println!("cargo:rustc-link-lib=dylib=cuda");
 
@@ -339,9 +344,9 @@ fn main() {
     // in libnppc).  cudart and the driver are also required for cudaMalloc /
     // cudaMemcpy / cuStreamSynchronize.
     if env::var("CARGO_FEATURE_GPU_DESKEW").is_ok() {
-        link_lib_in_dir(&cuda_lib_dirs, "nppig", "gpu-deskew: libnppig not found");
-        link_lib_in_dir(&cuda_lib_dirs, "nppc", "gpu-deskew: libnppc not found");
-        link_lib_in_dir(&cuda_lib_dirs, "cudart", "gpu-deskew: libcudart not found");
+        for lib in ["nppig", "nppc", "cudart"] {
+            link_lib_in_dir(&cuda_lib_dirs, lib, "gpu-deskew");
+        }
         println!("cargo:rustc-link-lib=dylib=cuda");
     }
 
@@ -362,8 +367,9 @@ fn main() {
         compile_cuda_kernels(&kernels_dir, &out_dir, nvcc, &host);
     } else {
         println!(
-            "cargo:warning=NVCC unavailable ({nvcc}); writing placeholder PTX. \
-             GpuCtx::init() will fail with a clear error if invoked at runtime."
+            "cargo:warning=NVCC unavailable ({}); writing placeholder PTX. \
+             GpuCtx::init() will fail with a clear error if invoked at runtime.",
+            nvcc_path.display()
         );
         println!("cargo:rustc-cfg=ptx_placeholder");
         write_placeholder_ptx(&out_dir);
@@ -372,7 +378,7 @@ fn main() {
     // Slang→SPIR-V kernel compile, gated on the `vulkan` feature.  Independent
     // of the PTX path: a vulkan-only build (no CUDA features) still wants the
     // .spv artifacts.  Output is one .spv per kernel in OUT_DIR; the Vulkan
-    // backend (Phase 10 Task 3) consumes them via include_bytes!.
+    // backend consumes them via include_bytes!.
     if env::var("CARGO_FEATURE_VULKAN").is_ok() {
         compile_slang_kernels(&kernels_dir, &out_dir);
     }
@@ -388,7 +394,8 @@ fn main() {
 /// treated as "no NVCC".  On probe failure we emit a `cargo:warning`
 /// with the diagnostic so the user can see *why* nvcc was rejected
 /// (spawn error vs. non-zero exit) without `--verbose` builds.
-fn nvcc_works(nvcc: &str) -> bool {
+fn nvcc_works(nvcc: &OsStr) -> bool {
+    let shown = Path::new(nvcc).display();
     match Command::new(nvcc)
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -401,19 +408,19 @@ fn nvcc_works(nvcc: &str) -> bool {
             let stderr = stderr.trim();
             if stderr.is_empty() {
                 println!(
-                    "cargo:warning=nvcc probe `{nvcc} --version` exited with {} (no stderr output)",
+                    "cargo:warning=nvcc probe `{shown} --version` exited with {} (no stderr output)",
                     o.status,
                 );
             } else {
                 println!(
-                    "cargo:warning=nvcc probe `{nvcc} --version` exited with {}: {stderr}",
+                    "cargo:warning=nvcc probe `{shown} --version` exited with {}: {stderr}",
                     o.status,
                 );
             }
             false
         }
         Err(e) => {
-            println!("cargo:warning=nvcc probe `{nvcc} --version` could not be spawned: {e}");
+            println!("cargo:warning=nvcc probe `{shown} --version` could not be spawned: {e}");
             false
         }
     }
@@ -425,32 +432,20 @@ fn nvcc_works(nvcc: &str) -> bool {
 /// Blackwell).  The default, `sm_75` (Turing), is the oldest architecture
 /// CUDA 13 compiles for; the driver compiles its PTX for every newer device
 /// when the module loads.
-fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &str, host: &HostCompiler) {
+fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &OsStr, host: &HostCompiler) {
     let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_75".to_owned());
 
     for kernel in KERNELS {
         let src = kernels_dir.join(format!("{kernel}.cu"));
         let ptx = out_dir.join(format!("{kernel}.ptx"));
-
-        let output = host
-            .apply(&mut Command::new(nvcc))
-            .args([
-                "--ptx",
-                &format!("-arch={arch}"),
-                "-O3",
-                "--use_fast_math",
-                "-o",
-                ptx.to_str().expect("OUT_DIR path contains non-UTF-8"),
-                src.to_str().expect("kernel source path contains non-UTF-8"),
-            ])
-            .output()
-            .unwrap_or_else(|e| panic!("failed to run nvcc ({nvcc}): {e}"));
-
-        assert!(
-            output.status.success(),
-            "nvcc failed for {kernel}.cu (arch={arch}, status={}):\n{}",
-            output.status,
-            tool_diagnostic(&output),
+        run_tool(
+            host.apply(&mut Command::new(nvcc))
+                .args(["--ptx", &format!("-arch={arch}"), "-O3", "--use_fast_math"])
+                .arg("-o")
+                .arg(&ptx)
+                .arg(&src),
+            &format!("{kernel}.cu (arch={arch})"),
+            "",
         );
     }
 }
@@ -500,32 +495,17 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
         );
         let spv = out_dir.join(format!("{kernel}.spv"));
         let profile = SLANG_PROFILE;
-
-        let output = Command::new(&slangc)
-            .args([
-                "-target",
-                "spirv",
-                "-profile",
-                profile,
-                "-o",
-                spv.to_str().expect("OUT_DIR path contains non-UTF-8"),
-            ])
-            .args(["-entry", slang_entry(kernel)])
-            .args(defines.iter().map(|d| format!("-D{d}")))
-            .arg(src.to_str().expect("slang source path contains non-UTF-8"))
-            .output()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "failed to run slangc ({slangc}): {e} — install the LunarG Vulkan SDK \
-                     (it sets VULKAN_SDK), `apt install slang`, or name slangc in SLANGC"
-                )
-            });
-
-        assert!(
-            output.status.success(),
-            "slangc failed for {kernel} ({source}.slang, profile={profile}, status={}):\n{}",
-            output.status,
-            tool_diagnostic(&output),
+        run_tool(
+            Command::new(&slangc)
+                .args(["-target", "spirv", "-profile", profile])
+                .arg("-o")
+                .arg(&spv)
+                .args(["-entry", slang_entry(kernel)])
+                .args(defines.iter().map(|d| format!("-D{d}")))
+                .arg(&src),
+            &format!("{kernel} ({source}.slang, profile={profile})"),
+            "; install the LunarG Vulkan SDK (it sets VULKAN_SDK), `apt install slang`, or \
+             name slangc in SLANGC",
         );
     }
 }
@@ -536,67 +516,45 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
 /// headers `nvjpeg2k.h` includes are on the include path.  The MSVC build
 /// enables C++ exception handling (`/EHsc`) and links the shared C runtime
 /// (`/MD`), as Rust's MSVC targets do.
-fn compile_nvjpeg2k_shim(out_dir: &Path, nvcc: &str, host: &HostCompiler) {
-    let shim_src = PathBuf::from("shim/nvjpeg2k_shim.cpp");
-    let src_s = shim_src.to_str().expect("shim source path non-UTF-8");
-    let out_dir_s = out_dir.to_str().expect("OUT_DIR path non-UTF-8");
-    let include_arg = nvjpeg2k_include_dir().map(|dir| format!("-I{dir}"));
+fn compile_nvjpeg2k_shim(out_dir: &Path, nvcc: &OsStr, host: &HostCompiler) {
+    let shim_src = Path::new("shim/nvjpeg2k_shim.cpp");
+    let include_arg = nvjpeg2k_include_dir().map(|dir| {
+        let mut arg = OsString::from("-I");
+        arg.push(dir);
+        arg
+    });
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
 
     if target_is_windows() {
         let shim_lib = out_dir.join("nvjpeg2k_shim.lib");
-        let output = host
-            .apply(&mut Command::new(nvcc))
-            .args(["-x", "c++", "-O2", "-Xcompiler", "/EHsc,/MD"])
-            .args(&include_arg)
-            .args([
-                "--lib",
-                "-o",
-                shim_lib.to_str().expect("OUT_DIR path non-UTF-8"),
-                src_s,
-            ])
-            .output()
-            .unwrap_or_else(|e| panic!("failed to run nvcc for nvjpeg2k shim ({nvcc}): {e}"));
-        assert!(
-            output.status.success(),
-            "nvcc failed to build nvjpeg2k_shim.lib (status={}):\n{}",
-            output.status,
-            tool_diagnostic(&output),
+        run_tool(
+            host.apply(&mut Command::new(nvcc))
+                .args(["-x", "c++", "-O2", "-Xcompiler", "/EHsc,/MD"])
+                .args(&include_arg)
+                .args(["--lib", "-o"])
+                .arg(&shim_lib)
+                .arg(shim_src),
+            "nvjpeg2k_shim.lib",
+            "",
         );
-        println!("cargo:rustc-link-search=native={out_dir_s}");
         return;
     }
 
     let shim_obj = out_dir.join("nvjpeg2k_shim.o");
     let shim_lib = out_dir.join("libnvjpeg2k_shim.a");
-
-    // Compile the C++ source to an object file.
-    let status = host
-        .apply(&mut Command::new(nvcc))
-        .args(["-x", "c++", "-O2"]) // treat as C++ (nvcc default for .cpp)
-        .args(&include_arg)
-        .args([
-            "-c",
-            "-o",
-            shim_obj.to_str().expect("OUT_DIR path non-UTF-8"),
-            src_s,
-        ])
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run nvcc for nvjpeg2k shim ({nvcc}): {e}"));
-    assert!(status.success(), "nvcc failed to compile nvjpeg2k_shim.cpp");
-
-    // Archive into a static library so cargo can link it.
-    let status = Command::new("ar")
-        .args([
-            "rcs",
-            shim_lib.to_str().expect("OUT_DIR path non-UTF-8"),
-            shim_obj.to_str().expect("OUT_DIR path non-UTF-8"),
-        ])
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run ar for nvjpeg2k shim: {e}"));
-    assert!(
-        status.success(),
-        "ar failed to archive nvjpeg2k_shim.o into libnvjpeg2k_shim.a"
+    run_tool(
+        host.apply(&mut Command::new(nvcc))
+            .args(["-x", "c++", "-O2"])
+            .args(&include_arg)
+            .args(["-c", "-o"])
+            .arg(&shim_obj)
+            .arg(shim_src),
+        "nvjpeg2k_shim.o",
+        "",
     );
-
-    println!("cargo:rustc-link-search=native={out_dir_s}");
+    run_tool(
+        Command::new("ar").arg("rcs").arg(&shim_lib).arg(&shim_obj),
+        "libnvjpeg2k_shim.a",
+        "; the archiver `ar` comes with binutils",
+    );
 }
