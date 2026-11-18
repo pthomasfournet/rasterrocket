@@ -15,6 +15,28 @@ use crate::args::Args;
 use crate::cleanup::Page;
 use crate::render::{self, RenderError};
 
+/// A failure of a whole comic run.
+#[derive(Debug)]
+pub(crate) enum RunError {
+    /// The archive could not be opened or read as a comic.
+    Archive(ComicError),
+    /// The page-selection flags select no page, or contradict the page
+    /// count.
+    Selection(String),
+    /// The render thread pool could not be started.
+    Pool(rayon::ThreadPoolBuildError),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Archive(e) => e.fmt(f),
+            Self::Selection(message) => f.write_str(message),
+            Self::Pool(e) => write!(f, "cannot start the render thread pool: {e}"),
+        }
+    }
+}
+
 /// Render a comic archive, writing each decodable page via the shared encoder;
 /// an embedded PDF opens with `session`, the PDF path's session settings.
 ///
@@ -23,13 +45,13 @@ use crate::render::{self, RenderError};
 /// errors are reported to stderr as they occur and skipped (one bad page never
 /// aborts the rest); the caller maps a non-zero `failed` to a non-zero exit code
 /// so a partial failure is observable via `$?`, matching the PDF path.
-/// Whole-archive failures surface as the outer `Err`, whose `Display` carries the user-facing
-/// message.
+/// Whole-run failures surface as the outer `Err`, whose `Display` carries the
+/// user-facing message.
 pub(crate) fn run(
     args: &Args,
     spill: &crate::ram::SpillPolicy,
     session: pdf_raster::SessionConfig,
-) -> Result<(usize, usize), ComicError> {
+) -> Result<(usize, usize), RunError> {
     // Comics carry no physical resolution, so the user's requested DPI rides
     // along on each RenderedPage purely for downstream OCR feature scaling;
     // it never changes the already-rasterised pixel dimensions. When the x
@@ -51,21 +73,22 @@ pub(crate) fn run(
         opts.max_archive_bytes = mib << 20;
     }
 
-    let mut pages = open_comic(Path::new(args.input()), &opts)?;
+    let mut pages = open_comic(Path::new(args.input()), &opts).map_err(RunError::Archive)?;
 
     // A comic with more pages than `i32::MAX` cannot be page-listed or named;
     // fail hard rather than silently mis-number, matching the PDF path.
     let total = i32::try_from(pages.len()).map_err(|_| {
-        ComicError::BadArchive(format!("archive has too many pages ({})", pages.len()))
+        RunError::Archive(ComicError::BadArchive(format!(
+            "archive has too many pages ({} > i32::MAX)",
+            pages.len()
+        )))
     })?;
 
     // Decide which page numbers to write via the SAME selector the PDF path uses
     // (`session.total_pages()` there, the full decoded count here), so
     // `--first-page`/`--last-page`/`--odd`/`--even`/`--single` and the clamp
     // warnings behave identically across input types.
-    let (selected, warnings) = args
-        .build_page_list(total)
-        .map_err(ComicError::BadArchive)?;
+    let (selected, warnings) = args.build_page_list(total).map_err(RunError::Selection)?;
     for w in &warnings {
         eprintln!("rrocket: warning: {w}");
     }
@@ -73,8 +96,7 @@ pub(crate) fn run(
     // any is decoded; `selected` is ascending.
     pages.retain(|page| i32::try_from(page).is_ok_and(|p| selected.binary_search(&p).is_ok()));
 
-    let pool = crate::pool::RenderPool::new(args.num_threads)
-        .map_err(|e| ComicError::BadArchive(format!("cannot start the render thread pool: {e}")))?;
+    let pool = crate::pool::RenderPool::new(args.num_threads).map_err(RunError::Pool)?;
     let (mut written, mut failed) = (0usize, 0usize);
     let unreported = crate::pool::run_in_order(
         &pool,
@@ -132,4 +154,21 @@ fn write_page(
         }
     };
     render::write_cleaned(luma, args, sink, page_i32, total_pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use comic::ComicError;
+
+    use super::RunError;
+
+    /// Only archive failures read as archive failures; a page-selection
+    /// failure reads as on the PDF path.
+    #[test]
+    fn only_archive_failures_name_the_archive() {
+        let selection = RunError::Selection("no pages selected".to_owned());
+        assert_eq!(selection.to_string(), "no pages selected");
+        let bad = || ComicError::BadArchive("truncated central directory".to_owned());
+        assert_eq!(RunError::Archive(bad()).to_string(), bad().to_string());
+    }
 }
