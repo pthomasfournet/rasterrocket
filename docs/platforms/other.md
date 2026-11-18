@@ -1,7 +1,7 @@
 # rasterrocket on the BSDs and Windows
 
 Windows is built and tested in CI, on GitHub's Windows runner, and its
-CUDA features on one machine of our own, with an RTX 2080 SUPER (see
+CUDA and Vulkan features on one machine of our own, with an RTX 2080 SUPER (see
 [Windows](#windows)). The BSDs are not tested, and no CI
 job covers them. The code has no Linux-only dependency in its render path: it is
 Rust, plus two C libraries that `cargo` builds, libdeflate for compression
@@ -64,7 +64,32 @@ tested. Please report what you find.
   2000 decodes (up to 19 levels, as on Linux; those codestreams, under the
   irreversible 9-7 wavelet, now decode on the CPU, verified on the
   RTX 5070 only) and `--deskew`, within 1 level. Other NVIDIA GPUs on Windows are untested.
-- **GPU (Vulkan):** untested on Windows.
+- **GPU (Vulkan):** the `vulkan` feature needs `slangc` on the build
+  host, which the LunarG Vulkan SDK for Windows installs in
+  `%VULKAN_SDK%\Bin`; the build finds it there (the installer sets
+  `VULKAN_SDK` machine-wide), else on `PATH`, and `SLANGC` names another.
+  At run time only the GPU driver's Vulkan loader (`vulkan-1.dll`) is
+  needed. Built with SDK 1.4.363.1 (slangc 2026.17) and tested on the
+  RTX 2080 SUPER (driver 621.24): the GPU crate's Vulkan tests, the
+  GPU-page, image-cache and ICC parity suites, and every fixture page at
+  150 dpi, RGB and gray, 8 and 16 bits, under `--backend vulkan` (ICC lookup
+  table, image cache), `--backend vulkan --gpu-pages` and `--gpu-pages
+  --gpu-devices all`, byte-identical to `--backend cpu`.
+  Every page rendered on the device (`DevicePageCounts`: 3 024 on the
+  device, 0 on the CPU, per mode); outline pages render there, so the
+  device takes the 64-bit (paths) kernel. The largest fixture page
+  (`corpus-09` page 415, 14.2 × 25.9 in) and the pages with the most device
+  commands, rendered whole (`--band-mib 65536`) at 600 and 1200 dpi under
+  `--gpu-pages`, are byte-identical too and lose no device to the Windows
+  GPU timeout (TDR): the 1200 dpi `corpus-09` page, 1.6 GB of RGB, takes
+  3.7 s for the whole process.
+  The Intel UHD 630 beside it is not used: its driver, 26.20.100.7642
+  (January 2020), reports Vulkan 1.1, and the backend needs 1.3, so it is
+  listed as unusable (`Vulkan API below 1.3`), skipped with a warning by
+  automatic selection and `--gpu-devices all`, and an error when named.
+  Intel's later drivers for that GPU report Vulkan 1.3 and are untested, as
+  are other GPUs under Windows and therefore `--gpu-devices` across two
+  Windows devices.
 - **Printing and fax:** `--print` and `--fax-to` are refused: both submit
   through CUPS's `lp` (or HylaFAX's `sendfax`), which Windows does not have.
   Render to files and print them from an application, or write a fax

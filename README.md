@@ -569,7 +569,8 @@ is **untested**: it is expected to work, nothing more.
 | llvmpipe (Mesa's CPU Vulkan driver), on both Linux machines | Vulkan, including `--gpu-pages` |
 | Intel Core i7-8700K (Coffee Lake, AVX2, no AVX-512), Linux x86-64 | the AVX2 and SSE tiers, the fixture byte comparisons and timings |
 | NVIDIA RTX 2080 SUPER (Turing, `sm_75`), driver 570, same machine | Vulkan, including `--gpu-pages`. CUDA only from a build with Ubuntu's nvcc 12.4 (ICC lookup table, nvJPEG and image cache byte-identical to the CPU; NPP deskew within 2 grey levels inside the page; up to 182 at its edge before the edge was recomputed with the CPU kernel, a fix tested on the RTX 5070 only, whose NPP 13.1 gave the same differences; no nvJPEG2000): a CUDA 13 build, the toolkit this project builds with, fails to load its kernels on driver 570 (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`; CUDA 13 needs driver 580 or later) |
-| NVIDIA RTX 2080 SUPER, Windows, driver 621.24, same machine | CUDA 13.5 with the VS 2026 Build Tools (nvJPEG, nvJPEG2000 0.12.0, ICC lookup table, NPP deskew, image cache): the GPU suites, and every fixture page under `--backend cuda` byte-identical to the CPU but for nvJPEG2000's JPEG 2000 decodes (up to 19 levels; nvJPEG2000 differs on the RTX 5070 too, and the codestreams concerned, under the irreversible 9-7 wavelet, now decode on the CPU; that fix is verified on the RTX 5070 only) and `--deskew` (within 1 level). See [BSD and Windows](docs/platforms/other.md#windows) |
+| NVIDIA RTX 2080 SUPER, Windows, driver 621.24, same machine | CUDA 13.5 with the VS 2026 Build Tools (nvJPEG, nvJPEG2000 0.12.0, ICC lookup table, NPP deskew, image cache): the GPU suites, and every fixture page under `--backend cuda` byte-identical to the CPU but for nvJPEG2000's JPEG 2000 decodes (up to 19 levels; nvJPEG2000 differs on the RTX 5070 too, and the codestreams concerned, under the irreversible 9-7 wavelet, now decode on the CPU; that fix is verified on the RTX 5070 only) and `--deskew` (within 1 level). Vulkan from a build with the LunarG SDK 1.4.363.1: the GPU-page, image-cache and ICC suites, and every fixture page under `--backend vulkan`, `--gpu-pages` and `--gpu-devices all` byte-identical to the CPU at 8 and 16 bits. See [BSD and Windows](docs/platforms/other.md#windows) |
+| Intel UHD 630 (the i7-8700K's), Windows, driver 26.20.100.7642 | Not usable for Vulkan: the driver reports Vulkan 1.1 and the backend needs 1.3; it is listed as unusable and skipped |
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
 | GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
@@ -579,15 +580,16 @@ is **untested**: it is expected to work, nothing more.
   virtualised runner, CPU suites only. MoltenVK has run on the A18 Pro's GPU
   alone.
 - **Intel GPUs** (UHD/Iris iGPUs, Arc): Vulkan through ANV and VA-API on the
-  Intel media driver are untested.
+  Intel media driver are untested, and so is Vulkan on Intel's Windows
+  drivers that report 1.3 (the UHD 630 tested had a 1.1 driver).
 - **Intel CPUs other than the i7-8700K**; CI's x86-64 runners also run
   the AVX2 tiers, on a CPU model GitHub does not fix.
 - **NVIDIA GPUs other than the RTX 5070 and the RTX 2080 SUPER**: other
   `CUDA_ARCH` targets (see [the table](#picking-cuda_arch-for-your-gpu))
   and datacenter cards (A100, H100); on the RTX 2080 SUPER under Linux, a
   CUDA 13 build and nvJPEG2000.
-- **Windows GPUs:** Vulkan on Windows, and CUDA on Windows on any GPU but
-  the RTX 2080 SUPER.
+- **Windows GPUs:** CUDA and Vulkan on Windows on any GPU but the RTX 2080
+  SUPER, and `--gpu-devices` across two Windows devices.
 - **aarch64 Linux hardware** other than CI's arm64 runner (Raspberry Pi,
   Graviton, Ampere), and the SVE2 kernels of the AV1 decoder (the A18 Pro
   has no SVE).
@@ -627,7 +629,9 @@ CUDA_ARCH=sm_120 cargo build --release -p rasterrocket-cli \
 
 # With Vulkan compute backend (cross-vendor; no NVIDIA dependency).
 # Requires the LunarG Vulkan SDK on the build host (slangc compiles the
-# .slang shaders to SPIR-V).  Vulkan 1.3+ ICD on the runtime host.
+# .slang shaders to SPIR-V; the build finds it through VULKAN_SDK, then PATH,
+# and SLANGC overrides both, on Linux and Windows alike).  Vulkan 1.3+ ICD on
+# the runtime host.
 cargo build --release -p rasterrocket-cli --features vulkan
 ```
 

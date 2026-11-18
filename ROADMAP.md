@@ -3352,7 +3352,37 @@ apart from the CPU (571 of 576 pages; the RTX 5070 on Linux, with
 nvJPEG2000 0.11, differs the same way; with `PDF_RASTER_JPX_THRESHOLD`
 above every image the pages are identical). `--deskew` on the scans
 (`corpus-08`–`10`, 1 456 pages) differs by at most 1 level, on 738 pages.
-Vulkan on Windows is untested.
+
+**Unreleased on master: Vulkan on Windows.** The `vulkan` feature builds and
+runs on Windows. `crates/gpu/build.rs` runs `SLANGC`, else the LunarG
+SDK's slangc (`$VULKAN_SDK/bin/slangc`, `%VULKAN_SDK%\Bin\slangc.exe`),
+else `slangc` from `PATH`; before, only `SLANGC` or `PATH`, which a shell
+opened before the SDK's install lacks. `populate_for_write` is split into
+a Linux and Android function and a no-op elsewhere, so clippy passes off
+Linux (it found a `&mut` never used mutably and a possible `const fn`), and
+a Vulkan call failing with `ERROR_DEVICE_LOST` now says the device was
+lost and, on Windows, that a GPU timeout (TDR) is the likely cause. The
+iGPU tests skip a matched iGPU that selection lists as unusable, printing
+why, instead of failing. Built with the LunarG SDK 1.4.363.1 (slangc
+2026.17) and tested on the RTX 2080 SUPER (driver 621.24): the GPU crate's
+Vulkan tests, `cu_vs_slang_parity`, and the GPU-page (every fixture's first
+pages on the device, 8 and 16 bits), image-cache, ICC and teardown suites
+pass; at 150 dpi, RGB and gray, 8 and 16 bits, every one of the 3 024
+fixture pages under `--backend vulkan` (ICC lookup table, image cache),
+`--backend vulkan --gpu-pages` and `--gpu-pages --gpu-devices all` is
+byte-identical to `--backend cpu` (12 096 pages per variant), and every
+page renders on the device (`GPU pages: N on the device, 0 on the CPU` in
+every run; outline pages included, so the paths kernel, `shaderInt64`). TDR
+gate: `corpus-09` page 415 (the largest, 14.2 × 25.9 in, one image),
+`corpus-06` page 2 (3 188 device commands) and `corpus-02` page 3 (1 702,
+vector) at 600 and 1200 dpi, whole (`--band-mib 65536`), under `--gpu-pages`:
+all on the device, byte-identical, no device lost; the slowest, `corpus-09`
+at 1200 dpi (17 040 × 31 080, 1.6 GB RGB), takes 3.7 s for the whole
+process (CPU 9 s), measured beside another render job.
+The machine's Intel UHD 630 has driver 26.20.100.7642 (January 2020),
+which reports Vulkan 1.1; the backend needs 1.3, so the device is listed
+as unusable and skipped, and `--gpu-devices` across two Windows devices,
+like Intel's later 1.3 drivers, is untested.
 
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
