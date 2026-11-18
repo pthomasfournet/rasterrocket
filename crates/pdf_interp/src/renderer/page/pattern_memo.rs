@@ -306,10 +306,10 @@ impl PatternMemo {
             | CellRaster::Mean16(..)
             | CellRaster::InkMean(..)
             | CellRaster::InkMean16(..) => 0,
-            CellRaster::Cell(bitmap) => bitmap_bytes(bitmap),
-            CellRaster::Cell16(bitmap) => bitmap_bytes(bitmap),
-            CellRaster::InkCell(bitmap, _) => bitmap_bytes(bitmap),
-            CellRaster::InkCell16(bitmap, _) => bitmap_bytes(bitmap),
+            CellRaster::Cell(bitmap) => bitmap.heap_bytes(),
+            CellRaster::Cell16(bitmap) => bitmap.heap_bytes(),
+            CellRaster::InkCell(bitmap, _) => bitmap.heap_bytes(),
+            CellRaster::InkCell16(bitmap, _) => bitmap.heap_bytes(),
         };
         if !self.rasters.contains_key(&key) && self.budget.reserve(bytes) {
             let _ = self.rasters.insert(key, raster);
@@ -317,16 +317,10 @@ impl PatternMemo {
     }
 }
 
-/// The bytes `bitmap` holds: its pixels and its alpha plane, if any.
-fn bitmap_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> usize {
-    let samples = bitmap.data().len() + bitmap.alpha_plane().map_or(0, <[P::Sample]>::len);
-    samples * size_of::<P::Sample>()
-}
-
 /// A bound on the bytes of the raster of a cell spanning `cell_w × cell_h`
 /// device pixels in `P`: one pixel more on each axis for the cell's
-/// placement within its pixels, each pixel `P::BYTES` and one byte of
-/// alpha.
+/// placement within its pixels, each pixel `P::BYTES` and one alpha
+/// sample.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -335,7 +329,7 @@ fn bitmap_bytes<P: Pixel>(bitmap: &Bitmap<P>) -> usize {
               the float-to-integer cast saturates"
 )]
 pub(super) fn cell_raster_bytes<P: Pixel>(cell_w: f64, cell_h: f64) -> usize {
-    ((cell_w + 1.0) * (cell_h + 1.0) * (P::BYTES + 1) as f64) as usize
+    ((cell_w + 1.0) * (cell_h + 1.0) * (P::BYTES + size_of::<P::Sample>()) as f64) as usize
 }
 
 impl PageRenderer<'_> {

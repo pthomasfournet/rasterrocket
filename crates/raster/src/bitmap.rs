@@ -584,6 +584,15 @@ impl<P: Pixel> Bitmap<P> {
         }
     }
 
+    /// The bytes of the bitmap's buffers: its colour samples, its alpha
+    /// plane and its painted-channels plane, each when present.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        size_of_val(self.data.as_slice())
+            + self.alpha.as_deref().map_or(0, size_of_val)
+            + self.painted.as_ref().map_or(0, Vec::len)
+    }
+
     /// Total sample count of the colour data buffer (its byte size for an
     /// 8-bit pixel type).
     #[must_use]
