@@ -21,16 +21,15 @@ pub(crate) mod gdi;
 mod windows;
 
 use std::io::{self, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, PoisonError};
 
 use color::SampleDepth;
 use encode::{PdfPage, PdfPageEncoder, RowImage, RowLayout};
 
 use crate::args::Args;
 use crate::cleanup::{Page, SpreadHalf};
-use crate::render::{PageCollector, RenderError, lock};
+use crate::render::{PageCollector, RenderError};
 
 /// The resolution of a printed page when no resolution flag is given, up
 /// to [`LARGE_FORMAT_PX`].
@@ -185,47 +184,6 @@ fn spool_dir() -> PathBuf {
     }
 }
 
-/// How many pages per pool thread may be started past the first page not
-/// yet appended to the spool.
-const PAGES_AHEAD_PER_THREAD: usize = 2;
-
-/// The pages of a print job that are done, by index in the page list, and
-/// the errors of those that failed.
-struct Progress {
-    done: Vec<bool>,
-    errors: Vec<(i32, RenderError)>,
-}
-
-/// What the workers of one print job share: its progress, the signal of a
-/// page done, and whether pages not yet begun are to be skipped.
-struct Job {
-    progress: Mutex<Progress>,
-    finished: Condvar,
-    stop: AtomicBool,
-}
-
-/// Marks page `index` of a print job done when dropped, with its error.
-/// The page counts as done even when its render unwinds; an error or an
-/// unwinding render stops the job.
-struct PageDone<'a> {
-    job: &'a Job,
-    index: usize,
-    error: Option<(i32, RenderError)>,
-}
-
-impl Drop for PageDone<'_> {
-    fn drop(&mut self) {
-        if self.error.is_some() || std::thread::panicking() {
-            self.job.stop.store(true, Ordering::Relaxed);
-        }
-        let mut state = lock(&self.job.progress);
-        state.done[self.index] = true;
-        state.errors.extend(self.error.take());
-        drop(state);
-        self.job.finished.notify_one();
-    }
-}
-
 /// Where a [`Spool`] sends its pages, in page order.
 pub(crate) trait PageOut {
     /// Send `page`, the next page of the job.
@@ -337,12 +295,10 @@ impl<W: PageOut> Spool<W> {
 
     /// Render `pages`, strictly ascending page numbers, with `render` on
     /// `pool` into `sink`, appending a page to the spool once it and every
-    /// page before it are done.  A page is begun only while it lies fewer
-    /// than [`PAGES_AHEAD_PER_THREAD`] × threads pages past the first page
-    /// not yet appended, which bounds the encoded pages held in memory.
-    /// Once a page fails, a render unwinds or the spool cannot be written,
-    /// no further page is begun: pages already queued are skipped, and
-    /// pages rendering finish.
+    /// page before it are done (see [`crate::pool::run_in_order`], which
+    /// bounds the encoded pages held in memory).  Once a page fails, a
+    /// render unwinds or the spool cannot be written, no further page is
+    /// begun: pages already queued are skipped, and pages rendering finish.
     ///
     /// Returns the pages that failed, with their errors, and the spool's
     /// write error.
@@ -360,58 +316,21 @@ impl<W: PageOut> Spool<W> {
             pages.is_sorted_by(|a, b| a < b),
             "print pages must be strictly ascending: the spool takes pages by number"
         );
-        let ahead = pool.current_num_threads() * PAGES_AHEAD_PER_THREAD;
-        let job = Job {
-            progress: Mutex::new(Progress {
-                done: vec![false; pages.len()],
-                errors: Vec::new(),
-            }),
-            finished: Condvar::new(),
-            stop: AtomicBool::new(false),
-        };
-        let mut write_error = None;
-        let (job, render) = (&job, &render);
-        pool.in_place_scope(|scope| {
-            let (mut started, mut written) = (0, 0);
-            loop {
-                while started < pages.len() && started < written + ahead {
-                    let (index, page) = (started, &pages[started]);
-                    scope.spawn(move |_| {
-                        let mut done = PageDone {
-                            job,
-                            index,
-                            error: None,
-                        };
-                        if !job.stop.load(Ordering::Relaxed) {
-                            done.error = render(page);
-                        }
-                    });
-                    started += 1;
-                }
-                let mut state = lock(&job.progress);
-                while written < started && !state.done[written] {
-                    state = job
-                        .finished
-                        .wait(state)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
-                if written == started || job.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                let ready = state.done[written..started]
-                    .iter()
-                    .take_while(|&&done| done)
-                    .count();
-                drop(state);
-                written += ready;
-                if let Err(e) = self.write_through(sink, pages[written - 1]) {
-                    job.stop.store(true, Ordering::Relaxed);
-                    write_error = Some(e);
-                    return;
-                }
+        let (mut errors, mut write_error) = (Vec::new(), None);
+        let unreported = crate::pool::run_in_order(pool, pages, render, |index, failed| {
+            if let Some(error) = failed {
+                errors.push(error);
+                return ControlFlow::Break(());
             }
+            self.write_through(sink, pages[index]).map_or_else(
+                |e| {
+                    write_error = Some(e);
+                    ControlFlow::Break(())
+                },
+                |()| ControlFlow::Continue(()),
+            )
         });
-        let errors = std::mem::take(&mut lock(&job.progress).errors);
+        errors.extend(unreported.into_iter().flatten());
         (errors, write_error)
     }
 }
@@ -496,10 +415,10 @@ mod tests {
     use raster::Bitmap;
 
     use super::{
-        PAGES_AHEAD_PER_THREAD, PageOut, PageSink, Spool, job_title, parse_printer, printer_list,
-        write_printer_list,
+        PageOut, PageSink, Spool, job_title, parse_printer, printer_list, write_printer_list,
     };
     use crate::cleanup::{Page, SpreadHalf};
+    use crate::pool::JOBS_AHEAD_PER_THREAD;
     use crate::render::RenderError;
 
     /// The image sizes of the pages sent, in order, the job sent `passes`
@@ -632,9 +551,11 @@ mod tests {
 
     /// Render `n` pages on two threads in `passes` passes, page `p` a
     /// `p × 1` image, the early pages slowest; page `fail` fails at once
-    /// and page `panic` panics.
+    /// and page `panic` panics.  Once a page has failed, pages not yet
+    /// begun return at once, as the CLI's page renderer does for a whole
+    /// document.
     fn render_pages(n: i32, passes: u32, fail: Option<i32>, panic: Option<i32>) -> Rendered {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
@@ -644,9 +565,14 @@ mod tests {
         let mut spool = spool(passes);
         let pages: Vec<i32> = (1..=n).collect();
         let (peak, renders) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let failed = AtomicBool::new(false);
         let render = |&page: &i32| {
+            if failed.load(Ordering::Relaxed) {
+                return None;
+            }
             let _ = renders.fetch_add(1, Ordering::Relaxed);
             if Some(page) == fail {
+                failed.store(true, Ordering::Relaxed);
                 return Some((page, RenderError::Io(io::Error::other("refused"))));
             }
             std::thread::sleep(std::time::Duration::from_millis(
@@ -681,7 +607,7 @@ mod tests {
         assert_eq!(run.failed, Vec::<i32>::new());
         assert_eq!(run.renders, 24);
         assert!(
-            run.peak <= 2 * PAGES_AHEAD_PER_THREAD,
+            run.peak <= 2 * JOBS_AHEAD_PER_THREAD,
             "{} pages held",
             run.peak
         );

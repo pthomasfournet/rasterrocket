@@ -8,6 +8,7 @@ mod diagnostics;
 mod fax;
 mod naming;
 mod ocr_prep;
+mod pool;
 mod print;
 mod ram;
 mod render;
@@ -52,25 +53,6 @@ fn read_stdin_pdf() -> Result<Vec<u8>, String> {
         return Err("standard input is empty; INPUT \"-\" expects a PDF on it".to_owned());
     }
     Ok(bytes)
-}
-
-/// The page-render thread pool of `num_threads` workers (0: one per CPU),
-/// shared by the PDF and comic paths.
-///
-/// 8 MiB of stack per worker: path flattening and Bézier subdivision
-/// recurse deeply on degenerate inputs and overflow the 2 MiB rayon default.
-///
-/// # Errors
-///
-/// The pool's threads could not be started.
-pub(crate) fn render_pool(
-    num_threads: usize,
-) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .thread_name(|i| format!("raster-worker-{i}"))
-        .stack_size(8 * 1024 * 1024)
-        .build()
 }
 
 /// Every exit path returns through here rather than `std::process::exit`,
@@ -183,7 +165,7 @@ fn main() -> ExitCode {
         session_config.decrypt_authorized = true;
     }
 
-    let pool = match render_pool(args.num_threads) {
+    let pool = match pool::RenderPool::new(args.num_threads) {
         Ok(pool) => pool,
         Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
     };
@@ -321,11 +303,9 @@ fn main() -> ExitCode {
         |spool| spool.render_job(&print_pages, &pages, &pool, render_one),
     );
 
-    // Every worker's GPU state is destroyed here, while the session holds the
-    // CUDA context: the pool's threads are not joined when it drops, and
-    // their thread-local destructors would otherwise call into the driver
-    // concurrently with the process's exit handlers.
-    let _ = pool.broadcast(|_| pdf_raster::release_gpu_thread_state());
+    // The workers' GPU state is destroyed while the session, declared after
+    // the pool and so dropped before it, still holds the device context.
+    drop(pool);
 
     if let Some(spool) = spool {
         // Page errors are reported whether or not the spool failed.
