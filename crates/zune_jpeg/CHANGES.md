@@ -277,6 +277,18 @@ as before unless an entry says otherwise.
   `scan_layouts::progressive_matches_sequential`, which now requires
   equal samples.
 
+- **AC refinement refills the bit buffer only for a correction bit**
+  (`2be3e47d`, brought over 2026-11-18). Inside an end-of-band run the
+  successive-approximation refinement of a block read the bit buffer's
+  refill check after every coefficient; it is now made before each
+  correction bit, which only nonzero coefficients read. The bits read are
+  the same. Over 40 progressive 4:4:4 frames of corpus-08 (59 Mpx), one
+  core: 24.38 → 22.58 G instructions (−7.4 %), user cycles within the
+  run-to-run spread (8.07–8.53 G before, 8.12–8.44 G after); output
+  checksums identical. Reading the correction bits of a block's nonzero
+  coefficients up to 32 at a time, with and without a branch per bit,
+  was tried on top: 23.49 G instructions, cycles no lower; not taken.
+
 ### Already here, in this fork's own code
 
 - Sequential frames in several scans (`0346b875`, `90b6bbca`, `dc4211c6`)
@@ -321,7 +333,7 @@ as before unless an entry says otherwise.
   do not decode (`23de4803`, `e668c57a`, `8cbb0712`), YCCK to CMYK output
   (`b39e0123`; the interpreter converts YCCK itself), `into_inner`
   (`cf820760`), SIMD for BGR and BGRA output (`f51cff38`, `ea8efb73`).
-- **No effect here**: `2be3e47d` (speed of AC refinement only), `2d27aa26`
+- **No effect here**: `2d27aa26`
   (refuses an ICC chunk numbered out of range, which decodes today),
   `43aa7a29` (a segment cut short fails either way; matters to a retry),
   `b36e7eb1` (an overflow check on an offset the fork does not compute;
