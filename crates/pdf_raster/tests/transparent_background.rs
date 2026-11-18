@@ -12,7 +12,7 @@ mod common;
 use common::{one_page, render_one, stream_object};
 use rasterrocket::{
     BackendPolicy, PixelFormat, RasterError, RasterOptions, RenderParams, RenderedPage,
-    SessionConfig, open_session_from_bytes, render_page_rgb_with,
+    SampleDepth, SessionConfig, open_session_from_bytes, render_page_rgb_with,
 };
 
 /// A 100 × 100 pt page, rendered at one pixel per point.
@@ -178,6 +178,90 @@ fn render_params_select_the_alpha_plane() {
         opaque.row_bytes(H - 1 - 40)[40 * 3..41 * 3],
         "painted colour"
     );
+}
+
+/// A page of grey, colour, half-opaque and partly covered paint, beside
+/// the blank backdrop.
+const MIXED: &str = "0.3 g 0 0 100 30 re f 0 0.6 1 rg 10 40 30 30 re f \
+                     /A gs 1 0 0 rg 50 40 30 30 re f 0 0 1 rg 50 80 m 90 80 l 50 99 l h f";
+
+/// Page 1 of `pdf` at 72 dpi at `depth`: gray and alpha over a
+/// transparent backdrop when `gray_alpha`, else the opaque gray page.
+fn gray_page(pdf: Vec<u8>, depth: SampleDepth, gray_alpha: bool) -> RenderedPage {
+    let mut opts = RasterOptions::new(72.0);
+    opts.depth = depth;
+    opts.transparent_background = gray_alpha;
+    opts.gray_alpha = gray_alpha;
+    render_one(pdf, &opts).expect("page renders")
+}
+
+/// Check each `[gray, alpha]` pair of `pairs` against the opaque `gray`
+/// page and the `rgba` page: alpha equal to the RGBA alpha, gray equal to
+/// the opaque gray where the alpha is `full` and 0 where it is 0.  Returns
+/// the count of full-alpha pixels.
+fn check_pairs<S: Copy + PartialEq + Default + std::fmt::Debug>(
+    pairs: &[[S; 2]],
+    gray: &[S],
+    rgba: &[[S; 4]],
+    full: S,
+) -> usize {
+    let mut opaque = 0;
+    for (i, (pair, rgba)) in pairs.iter().zip(rgba).enumerate() {
+        assert_eq!(pair[1], rgba[3], "alpha of pixel {i}");
+        if pair[1] == full {
+            assert_eq!(pair[0], gray[i], "gray of opaque pixel {i}");
+            opaque += 1;
+        } else if pair[1] == S::default() {
+            assert_eq!(pair[0], S::default(), "gray of blank pixel {i}");
+        }
+    }
+    opaque
+}
+
+/// The gray of a gray and alpha page is that of the opaque gray page where
+/// the alpha is full, and its alpha is the RGBA page's, at both depths.
+#[test]
+fn gray_alpha_pages_are_the_gray_page_s_gray_and_the_rgba_page_s_alpha() {
+    let pdf = || simple("/A << /ca 0.5 >>", MIXED);
+    let mut opts = RasterOptions::new(72.0);
+    opts.transparent_background = true;
+    let rgba8 = render_one(pdf(), &opts).expect("page renders");
+    opts.depth = SampleDepth::Sixteen;
+    let rgba16 = render_one(pdf(), &opts).expect("page renders");
+
+    let page = gray_page(pdf(), SampleDepth::Eight, true);
+    let gray = gray_page(pdf(), SampleDepth::Eight, false);
+    assert_eq!(page.format, PixelFormat::GrayAlpha8);
+    assert_eq!(page.pixels.len(), (W * H * 2) as usize);
+    let pairs = page.pixels.as_u8().unwrap().as_chunks::<2>().0;
+    let rgba = rgba8.pixels.as_u8().unwrap().as_chunks::<4>().0;
+    let opaque = check_pairs(pairs, gray.pixels.as_u8().unwrap(), rgba, u8::MAX);
+    assert!(
+        opaque > 0 && opaque < (W * H) as usize,
+        "{opaque} opaque pixels"
+    );
+    assert!(
+        pairs.iter().any(|p| p[1] != 0 && p[1] != u8::MAX),
+        "partial alpha"
+    );
+
+    let page = gray_page(pdf(), SampleDepth::Sixteen, true);
+    let gray = gray_page(pdf(), SampleDepth::Sixteen, false);
+    assert_eq!(page.format, PixelFormat::GrayAlpha16);
+    let pairs = page.pixels.as_u16().unwrap().as_chunks::<2>().0;
+    let rgba = rgba16.pixels.as_u16().unwrap().as_chunks::<4>().0;
+    let gray = gray.pixels.as_u16().unwrap();
+    assert_eq!(check_pairs(pairs, gray, rgba, u16::MAX), opaque);
+}
+
+#[test]
+fn gray_alpha_needs_a_transparent_background() {
+    let mut opts = RasterOptions::new(72.0);
+    opts.gray_alpha = true;
+    assert!(matches!(
+        render_one(simple("", ""), &opts),
+        Err(RasterError::InvalidOptions(_))
+    ));
 }
 
 #[test]

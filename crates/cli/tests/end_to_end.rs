@@ -254,12 +254,69 @@ fn transparent_png_and_tiff_carry_the_library_rgba() {
     }
 }
 
+/// `--transparent --gray` writes the library's gray and alpha page: a PNG
+/// of colour type 4 and a two-sample TIFF of its samples.
+#[test]
+fn transparent_gray_png_and_tiff_carry_the_library_gray_alpha() {
+    let session = open_session_from_bytes(
+        two_page_pdf(),
+        &SessionConfig::with_policy(BackendPolicy::CpuOnly),
+    )
+    .expect("open session");
+    let mut opts = rasterrocket::RasterOptions::new(72.0);
+    opts.transparent_background = true;
+    opts.gray_alpha = true;
+    let page = rasterrocket::render_page_gray_alpha(&session, 1, &opts).expect("render page 1");
+    let want = page.pixels.as_u8().expect("8-bit samples").to_vec();
+    let rgba = library_rgba();
+    let alpha: Vec<u8> = want.as_chunks::<2>().0.iter().map(|px| px[1]).collect();
+    let rgba_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
+    assert_eq!(alpha, rgba_alpha);
+    let (dir, input) = workdir(&two_page_pdf());
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &["-r", "72", "-l", "1", "--transparent", "--gray", "--png"],
+    ));
+    let png = std::fs::read(dir.path().join("out-1.png")).expect("read PNG");
+    // IHDR: bit depth 8, colour type 4 (gray and alpha), at bytes 24 and 25.
+    assert_eq!(&png[24..26], &[8, 4], "an 8-bit gray and alpha PNG");
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &[
+            "-r",
+            "72",
+            "-l",
+            "1",
+            "--transparent",
+            "--gray",
+            "--tiff",
+            "--tiffcompression",
+            "deflate",
+        ],
+    ));
+    let file = std::fs::read(dir.path().join("out-1.tif")).expect("read TIFF");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    assert_eq!(
+        decoder.colortype().expect("colour type"),
+        tiff::ColorType::Multiband {
+            bit_depth: 8,
+            num_samples: 2
+        }
+    );
+    let tiff::decoder::DecodingResult::U8(pixels) = decoder.read_image().expect("decodes") else {
+        panic!("8-bit samples");
+    };
+    assert_eq!(pixels, want);
+}
+
 #[test]
 fn transparent_refuses_outputs_without_alpha() {
     for (flags, needle) in [
         (&["--transparent"][..], "PPM has none; add --png or --tiff"),
         (&["--transparent", "--jpeg"], "JPEG has none"),
-        (&["--transparent", "--gray"], "drop --gray"),
+        (&["--transparent", "--gray"], "PGM has none"),
         (&["--transparent", "--png", "--mono"], "drop --mono"),
     ] {
         let (dir, input) = workdir(&two_page_pdf());
@@ -1203,8 +1260,7 @@ fn output_profile_converts_the_pages_and_tags_the_files() {
 fn output_profile_refusals_name_the_conflict() {
     let (dir, input) = workdir(&two_page_pdf());
     let rgb = icc_fixture("printer-rgb-v4.icc");
-    let gray = icc_fixture("printer-gray-v4.icc");
-    let (rgb, gray) = (rgb.to_str().unwrap(), gray.to_str().unwrap());
+    let rgb = rgb.to_str().unwrap();
     let cmyk = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../jpeg2000/assets/CGATS001Compat-v2-micro.icc");
     let cmyk_printer = icc_fixture("printer-cmyk-v4.icc");
@@ -1228,10 +1284,6 @@ fn output_profile_refusals_name_the_conflict() {
         (
             vec!["--output-profile", rgb, "--gray"],
             "is an RGB profile and --gray",
-        ),
-        (
-            vec!["--output-profile", gray, "--transparent", "--png"],
-            "is a gray profile and --transparent",
         ),
         (
             vec!["--output-profile", "/nonexistent.icc"],
@@ -1281,6 +1333,41 @@ fn output_profile_refusals_name_the_conflict() {
         assert!(stderr.contains(message), "{args:?}: {stderr}");
         assert!(outputs(dir.path()).is_empty(), "{args:?} wrote files");
     }
+}
+
+/// `--transparent` under a gray output profile writes gray and alpha, the
+/// alpha the library's RGBA page's.
+#[test]
+fn a_gray_output_profile_writes_transparent_pages_as_gray_and_alpha() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let gray = icc_fixture("printer-gray-v4.icc");
+    assert_success(&rrocket(
+        dir.path(),
+        &input,
+        &[
+            "-r",
+            "72",
+            "-l",
+            "1",
+            "--output-profile",
+            gray.to_str().unwrap(),
+            "--transparent",
+            "--tiff",
+        ],
+    ));
+    let file = std::fs::read(dir.path().join("out-1.tif")).expect("read TIFF");
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(file)).expect("a TIFF");
+    let tiff::decoder::DecodingResult::U8(pixels) = decoder.read_image().expect("decodes") else {
+        panic!("8-bit samples");
+    };
+    let alpha: Vec<u8> = pixels.as_chunks::<2>().0.iter().map(|px| px[1]).collect();
+    let want: Vec<u8> = library_rgba()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| px[3])
+        .collect();
+    assert_eq!(alpha, want);
 }
 
 /// A 30 × 10 pt PDF/X page on the synthetic CMYK press: paper, sRGB red

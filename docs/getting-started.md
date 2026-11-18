@@ -303,7 +303,8 @@ before its next content-stream operator.
 default. `RasterOptions` selects the others:
 
 - `transparent_background`: `Rgba8`, straight alpha over a transparent
-  backdrop.
+  backdrop; with `gray_alpha` also set, `GrayAlpha8` (`[Y, A]`), the gray of
+  the opaque gray page wherever the alpha is full.
 - `depth = SampleDepth::Sixteen`: `Gray16` (or `Rgba16`) pages whose samples
   are `Pixels::U16` (`page.pixels.as_u16()`); shadings, soft masks, colour
   conversions and images of more than 8 bits keep their levels.

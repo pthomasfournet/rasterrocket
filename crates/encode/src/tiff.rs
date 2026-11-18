@@ -79,8 +79,8 @@ const PHOTOMETRIC_RGB: u16 = 2;
 const PHOTOMETRIC_SEPARATED: u16 = 5;
 
 /// Samples per pixel, bits per sample and photometric interpretation of
-/// rows stored as `layout`.  RGBA's alpha is unassociated (`ExtraSamples`
-/// 2); a bilevel page is `WhiteIsZero`, a 1 bit black, the interpretation
+/// rows stored as `layout`.  The alpha of RGBA and of gray and alpha is
+/// unassociated (`ExtraSamples` 2); a bilevel page is `WhiteIsZero`, a 1 bit black, the interpretation
 /// the fax profile of TIFF (RFC 2306) prescribes.  CMYK is `Separated`,
 /// its ink set CMYK (`InkSet` 1).
 const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
@@ -88,10 +88,12 @@ const fn tiff_layout(layout: RowLayout) -> (u16, u16, u16) {
         RowLayout::Rgba => (4, 8, PHOTOMETRIC_RGB),
         RowLayout::Rgb => (3, 8, PHOTOMETRIC_RGB),
         RowLayout::Gray => (1, 8, PHOTOMETRIC_BLACK_IS_ZERO),
+        RowLayout::GrayAlpha => (2, 8, PHOTOMETRIC_BLACK_IS_ZERO),
         RowLayout::Bilevel => (1, 1, PHOTOMETRIC_WHITE_IS_ZERO),
         RowLayout::Rgba16 => (4, 16, PHOTOMETRIC_RGB),
         RowLayout::Rgb16 => (3, 16, PHOTOMETRIC_RGB),
         RowLayout::Gray16 => (1, 16, PHOTOMETRIC_BLACK_IS_ZERO),
+        RowLayout::GrayAlpha16 => (2, 16, PHOTOMETRIC_BLACK_IS_ZERO),
         RowLayout::Cmyk => (4, 8, PHOTOMETRIC_SEPARATED),
         RowLayout::Cmyk16 => (4, 16, PHOTOMETRIC_SEPARATED),
     }
@@ -880,8 +882,11 @@ fn entries(
     if bits == 1 {
         entries.push(shorts(266, &[1]));
     }
-    // ExtraSamples: the fourth sample of an RGB page is unassociated alpha.
-    if photometric == PHOTOMETRIC_RGB && samples == 4 {
+    // ExtraSamples: the fourth sample of an RGB page and the second of a
+    // gray one are unassociated alpha.
+    if (photometric == PHOTOMETRIC_RGB && samples == 4)
+        || (photometric == PHOTOMETRIC_BLACK_IS_ZERO && samples == 2)
+    {
         entries.push(shorts(338, &[2]));
     }
     // InkSet: the four samples of a separated page are C, M, Y and K.
@@ -970,7 +975,7 @@ mod tests {
 
     use ::tiff::decoder::{Decoder, DecodingResult};
     use ::tiff::tags::Tag;
-    use color::{Gray8, Rgb8};
+    use color::{Gray8, Gray16, Rgb8};
     use raster::Bitmap;
 
     use std::num::NonZeroU32;
@@ -1225,6 +1230,86 @@ mod tests {
                 want,
                 "{compression:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_gray_page_with_alpha_reads_back_as_gray_alpha_under_every_compression() {
+        let g = gray(9, 20);
+        let mut with_alpha = Bitmap::<Gray8>::new(9, 20, 4, true);
+        for y in 0..20 {
+            with_alpha.row_bytes_mut(y)[..9].copy_from_slice(&g.row_bytes(y)[..9]);
+        }
+        let alpha: Vec<u8> = (0..180u32).map(|i| (i * 7).to_le_bytes()[0]).collect();
+        with_alpha
+            .alpha_plane_mut()
+            .unwrap()
+            .copy_from_slice(&alpha);
+        let want: Vec<u8> = (0..20u32)
+            .flat_map(|y| {
+                let a = with_alpha.alpha_row(y).unwrap().to_vec();
+                with_alpha.row_bytes(y)[..9]
+                    .iter()
+                    .zip(a)
+                    .flat_map(|(&v, a)| [v, a])
+                    .collect::<Vec<u8>>()
+            })
+            .collect();
+        for compression in ALL {
+            let mut out = Vec::new();
+            write_tiff(
+                RowImage::Gray(&with_alpha),
+                (72.0, 72.0),
+                compression,
+                &mut out,
+            )
+            .unwrap();
+            let mut decoder = decode(&out);
+            assert_eq!(
+                decoder.colortype().unwrap(),
+                ::tiff::ColorType::Multiband {
+                    bit_depth: 8,
+                    num_samples: 2
+                },
+                "{compression:?}"
+            );
+            assert_eq!(
+                decoder.get_tag_u32(Tag::ExtraSamples).unwrap(),
+                2,
+                "{compression:?}"
+            );
+            assert_eq!(
+                bytes(decoder.read_image().unwrap()),
+                want,
+                "{compression:?}"
+            );
+        }
+        let mut wide = Bitmap::<Gray16>::new(2, 1, 1, true);
+        wide.row_samples_mut(0).copy_from_slice(&[0x0102, 0xFFFF]);
+        wide.alpha_plane_mut()
+            .unwrap()
+            .copy_from_slice(&[0x0304, 0]);
+        let mut out = Vec::new();
+        write_tiff(
+            RowImage::Gray16(&wide),
+            (72.0, 72.0),
+            TiffCompression::None,
+            &mut out,
+        )
+        .unwrap();
+        let mut decoder = decode(&out);
+        assert_eq!(
+            decoder.colortype().unwrap(),
+            ::tiff::ColorType::Multiband {
+                bit_depth: 16,
+                num_samples: 2
+            }
+        );
+        match decoder.read_image().unwrap() {
+            DecodingResult::U16(v) => {
+                assert_eq!(v, [0x0102, 0x0304, 0xFFFF, 0]);
+            }
+            _ => panic!("16-bit samples expected"),
         }
     }
 

@@ -84,8 +84,8 @@ impl BandOutput {
 enum Model {
     /// Colour, with the render's alpha plane when `alpha`.
     Rgb { alpha: bool },
-    /// Luma.
-    Gray,
+    /// Luma, with the render's alpha plane when `alpha`.
+    Gray { alpha: bool },
     /// Two levels.
     Mono,
     /// CMYK.
@@ -99,7 +99,9 @@ impl Model {
         } else if args.mono {
             Self::Mono
         } else if args.luma_output() {
-            Self::Gray
+            Self::Gray {
+                alpha: args.transparent,
+            }
         } else {
             Self::Rgb {
                 alpha: args.transparent,
@@ -135,8 +137,8 @@ impl FileWriter {
                 let kind = match (model, wide) {
                     (Model::Rgb { .. }, false) => PnmKind::Ppm,
                     (Model::Rgb { .. }, true) => PnmKind::Ppm16,
-                    (Model::Gray, false) => PnmKind::Pgm,
-                    (Model::Gray, true) => PnmKind::Pgm16,
+                    (Model::Gray { .. }, false) => PnmKind::Pgm,
+                    (Model::Gray { .. }, true) => PnmKind::Pgm16,
                     (Model::Mono, _) => PnmKind::Pbm,
                     (Model::Cmyk, _) => return Err(no_cmyk()),
                 };
@@ -147,10 +149,12 @@ impl FileWriter {
                     (Model::Rgb { alpha: false }, false) => PngColor::Rgb,
                     (Model::Rgb { alpha: true }, false) => PngColor::Rgba,
                     (Model::Mono, _) => PngColor::Bilevel,
-                    (Model::Gray, false) => PngColor::Gray,
+                    (Model::Gray { alpha: false }, false) => PngColor::Gray,
+                    (Model::Gray { alpha: true }, false) => PngColor::GrayAlpha,
                     (Model::Rgb { alpha: false }, true) => PngColor::Rgb16,
                     (Model::Rgb { alpha: true }, true) => PngColor::Rgba16,
-                    (Model::Gray, true) => PngColor::Gray16,
+                    (Model::Gray { alpha: false }, true) => PngColor::Gray16,
+                    (Model::Gray { alpha: true }, true) => PngColor::GrayAlpha16,
                     (Model::Cmyk, _) => return Err(no_cmyk()),
                 };
                 Self::Png(PngWriter::new(out, size, color, Some(dpi), icc)?)
@@ -159,7 +163,8 @@ impl FileWriter {
                 let layout = match model {
                     Model::Rgb { alpha: false } => RowLayout::Rgb,
                     Model::Rgb { alpha: true } => RowLayout::Rgba,
-                    Model::Gray => RowLayout::Gray,
+                    Model::Gray { alpha: false } => RowLayout::Gray,
+                    Model::Gray { alpha: true } => RowLayout::GrayAlpha,
                     Model::Mono => RowLayout::Bilevel,
                     Model::Cmyk => RowLayout::Cmyk,
                 };
@@ -298,10 +303,10 @@ pub(crate) fn write_whole(
     };
     let (model, depth) = match image {
         RowImage::Rgb(_) => (Model::Rgb { alpha: false }, SampleDepth::Eight),
-        RowImage::Gray(_) => (Model::Gray, SampleDepth::Eight),
+        RowImage::Gray(_) => (Model::Gray { alpha: false }, SampleDepth::Eight),
         RowImage::Bilevel(_) => (Model::Mono, SampleDepth::Eight),
         RowImage::Rgb16(_) => (Model::Rgb { alpha: false }, SampleDepth::Sixteen),
-        RowImage::Gray16(_) => (Model::Gray, SampleDepth::Sixteen),
+        RowImage::Gray16(_) => (Model::Gray { alpha: false }, SampleDepth::Sixteen),
         RowImage::Cmyk(_) => (Model::Cmyk, SampleDepth::Eight),
         RowImage::Cmyk16(_) => (Model::Cmyk, SampleDepth::Sixteen),
     };

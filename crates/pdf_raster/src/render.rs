@@ -155,9 +155,26 @@ pub(crate) fn cmyk_output() -> RasterError {
 pub(crate) fn gray_output() -> RasterError {
     RasterError::InvalidOptions(
         "the session's output profile is gray, so its pages are gray: render them with \
-         render_page_canvas, render_page_bands or render_page_gray"
+         render_page_canvas, render_page_bands or render_page_gray, or over a transparent \
+         backdrop render_page_gray_alpha"
             .to_owned(),
     )
+}
+
+/// The refusal of a gray page in a session whose output profile is RGB.
+fn reject_rgb_profile(session: &RasterSession) -> Result<(), RasterError> {
+    let rgb_profile = session
+        .output_profile
+        .as_ref()
+        .is_some_and(|p| p.space() == pdf_interp::OutputSpace::Rgb);
+    if rgb_profile {
+        return Err(RasterError::InvalidOptions(
+            "a gray page of an RGB output profile's device values has no meaning: give the \
+             session a gray output profile, or render the page in colour"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Render page `page_num` (1-based) of `session` to the grayscale
@@ -185,17 +202,7 @@ pub fn render_page_gray(
     page_num: u32,
     opts: &RasterOptions,
 ) -> Result<RenderedPage, RasterError> {
-    let rgb_profile = session
-        .output_profile
-        .as_ref()
-        .is_some_and(|p| p.space() == pdf_interp::OutputSpace::Rgb);
-    if rgb_profile {
-        return Err(RasterError::InvalidOptions(
-            "a gray page of an RGB output profile's device values has no meaning: give the \
-             session a gray output profile, or render the page in colour"
-                .to_owned(),
-        ));
-    }
+    reject_rgb_profile(session)?;
     let dpi = opts.dpi;
     let page_id = session.resolve_page(page_num)?;
     let geom = session.geometry_by_id(page_id)?;
@@ -273,27 +280,8 @@ pub fn render_page_rgba(
     page_num: u32,
     opts: &RasterOptions,
 ) -> Result<RenderedPage, RasterError> {
-    if opts.deskew {
-        return Err(RasterError::deskew_needs_gray());
-    }
     let dpi = opts.dpi;
-    let page_id = session.resolve_page(page_num)?;
-    let geom = session.geometry_by_id(page_id)?;
-    let mut params = RenderParams::new(f64::from(dpi) / 72.0)
-        .with_transparent_background()
-        .with_depth(opts.depth);
-    params.cancel.clone_from(&opts.cancel);
-    params.intent = opts.intent;
-    params.black_point_compensation = opts.black_point_compensation;
-    params.preserve_black = opts.preserve_black;
-    let (canvas, diagnostics) = render_page_canvas_with_geom(
-        session,
-        page_num,
-        page_id,
-        geom,
-        &params,
-        &mut CanvasBuffers::default(),
-    )?;
+    let (canvas, diagnostics) = render_transparent(session, page_num, opts)?;
     Ok(match canvas {
         FinishedCanvas::Rgb8(rgb) => {
             crate::page::rgb8_to_rgba_rendered_page(&rgb, page_num, dpi, diagnostics)
@@ -304,6 +292,120 @@ pub fn render_page_rgba(
         FinishedCanvas::Gray8(_) | FinishedCanvas::Gray16(_) => return Err(gray_output()),
         FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
     })
+}
+
+/// Render page `page_num` (1-based) of `session` over a transparent
+/// backdrop to a gray and alpha [`RenderedPage`].
+///
+/// The page is the one [`raster_pdf`](crate::raster_pdf) yields when
+/// [`RasterOptions::transparent_background`] and
+/// [`RasterOptions::gray_alpha`] are set:
+/// [`PixelFormat::GrayAlpha8`](crate::PixelFormat::GrayAlpha8), or
+/// [`PixelFormat::GrayAlpha16`](crate::PixelFormat::GrayAlpha16) at
+/// [`RasterOptions::depth`] 16.  Its gray is that of [`rgb_to_gray`]
+/// (or [`rgb16_to_gray16`](crate::rgb16_to_gray16)) of the colour of
+/// [`render_page_rgba`]'s page, or the device value of the session's gray
+/// output profile; its alpha is that page's, the gray not premultiplied
+/// by it.  Where the alpha is 255 the gray is [`render_page_gray`]'s.
+///
+/// Of `opts`, only [`dpi`](RasterOptions::dpi),
+/// [`depth`](RasterOptions::depth) and [`cancel`](RasterOptions::cancel)
+/// apply.
+///
+/// [`rgb_to_gray`]: crate::rgb_to_gray
+///
+/// # Errors
+///
+/// As [`render_page_rgba`], and [`RasterError::InvalidOptions`] when the
+/// session's output profile is RGB.
+pub fn render_page_gray_alpha(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<RenderedPage, RasterError> {
+    reject_rgb_profile(session)?;
+    let dpi = opts.dpi;
+    let (canvas, diagnostics) = render_transparent(session, page_num, opts)?;
+    Ok(match canvas {
+        FinishedCanvas::Rgb8(mut rgb) => {
+            let alpha = rgb.take_alpha_plane();
+            let gray = rgb_into_gray(rgb);
+            crate::page::gray8_alpha_rendered_page(
+                &gray,
+                alpha.as_deref(),
+                page_num,
+                dpi,
+                diagnostics,
+            )
+        }
+        FinishedCanvas::Gray8(mut gray) => {
+            let alpha = gray.take_alpha_plane();
+            crate::page::gray8_alpha_rendered_page(
+                &gray,
+                alpha.as_deref(),
+                page_num,
+                dpi,
+                diagnostics,
+            )
+        }
+        FinishedCanvas::Rgb16(mut rgb) => {
+            let alpha = rgb.take_alpha_plane();
+            let gray = rgb16_into_gray16(rgb);
+            crate::page::gray16_alpha_rendered_page(
+                &gray,
+                alpha.as_deref(),
+                page_num,
+                dpi,
+                diagnostics,
+            )
+        }
+        FinishedCanvas::Gray16(mut gray) => {
+            let alpha = gray.take_alpha_plane();
+            crate::page::gray16_alpha_rendered_page(
+                &gray,
+                alpha.as_deref(),
+                page_num,
+                dpi,
+                diagnostics,
+            )
+        }
+        FinishedCanvas::Cmyk8(_) | FinishedCanvas::Cmyk16(_) => return Err(cmyk_output()),
+    })
+}
+
+/// The canvas of page `page_num` of `session` rendered over a transparent
+/// backdrop under the per-page fields of `opts`, and its diagnostics.
+///
+/// # Errors
+///
+/// As [`render_page_rgb_with`], plus [`RasterError::InvalidOptions`] when
+/// [`deskew`](RasterOptions::deskew) is set: deskew operates on opaque
+/// gray pages.
+fn render_transparent(
+    session: &RasterSession,
+    page_num: u32,
+    opts: &RasterOptions,
+) -> Result<(FinishedCanvas, crate::PageDiagnostics), RasterError> {
+    if opts.deskew {
+        return Err(RasterError::deskew_needs_gray());
+    }
+    let page_id = session.resolve_page(page_num)?;
+    let geom = session.geometry_by_id(page_id)?;
+    let mut params = RenderParams::new(f64::from(opts.dpi) / 72.0)
+        .with_transparent_background()
+        .with_depth(opts.depth);
+    params.cancel.clone_from(&opts.cancel);
+    params.intent = opts.intent;
+    params.black_point_compensation = opts.black_point_compensation;
+    params.preserve_black = opts.preserve_black;
+    render_page_canvas_with_geom(
+        session,
+        page_num,
+        page_id,
+        geom,
+        &params,
+        &mut CanvasBuffers::default(),
+    )
 }
 
 /// Render page `page_num` (1-based) of `session` to the CMYK

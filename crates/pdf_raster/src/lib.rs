@@ -2,7 +2,8 @@
 //!
 //! Converts PDF pages to 8-bit grayscale pixel buffers ready for Tesseract OCR
 //! (or any other consumer) without writing files or spawning processes.
-//! [`RasterOptions`] also selects RGBA pages over a transparent backdrop,
+//! [`RasterOptions`] also selects RGBA or gray and alpha pages over a
+//! transparent backdrop,
 //! CMYK pages ([`ColorModel::Cmyk`]), 16 bits per sample
 //! ([`SampleDepth::Sixteen`]) and the conversion to an ICC output profile
 //! ([`OutputProfile`]); [`render_page_bands`] renders a page larger than
@@ -220,7 +221,8 @@ pub use pdf_interp::{
 };
 pub use render::{
     render_page_canvas, render_page_canvas_with_diagnostics, render_page_cmyk, render_page_gray,
-    render_page_rgb, render_page_rgb_with, render_page_rgb_with_diagnostics, render_page_rgba,
+    render_page_gray_alpha, render_page_rgb, render_page_rgb_with,
+    render_page_rgb_with_diagnostics, render_page_rgba,
 };
 pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 
@@ -529,17 +531,30 @@ pub struct RasterOptions {
     /// `[0, 0, 0, 0]`.  Incompatible with [`deskew`](Self::deskew).
     pub transparent_background: bool,
 
+    /// Whether the pages of
+    /// [`transparent_background`](Self::transparent_background) are gray
+    /// and alpha instead of RGBA.  Default `false`.  `true` yields
+    /// [`PixelFormat::GrayAlpha8`] pages, or [`PixelFormat::GrayAlpha16`]
+    /// at [`depth`](Self::depth) 16: the gray of the RGBA page's colour
+    /// (see [`render_page_gray_alpha`]) beside its alpha, unchanged and
+    /// not premultiplied.  Needs
+    /// [`transparent_background`](Self::transparent_background); refused
+    /// with an RGB [`output_profile`](Self::output_profile).
+    pub gray_alpha: bool,
+
     /// The depth of the pages' samples (see [`RenderParams::depth`]).
     /// Default [`SampleDepth::Eight`]; [`SampleDepth::Sixteen`] yields
-    /// [`PixelFormat::Gray16`] pages, or [`PixelFormat::Rgba16`] over a
-    /// transparent backdrop, of [`Pixels::U16`].  Incompatible with
+    /// [`PixelFormat::Gray16`] pages, or [`PixelFormat::Rgba16`] (or
+    /// [`PixelFormat::GrayAlpha16`]) over a transparent backdrop, of
+    /// [`Pixels::U16`].  Incompatible with
     /// [`deskew`](Self::deskew).
     pub depth: SampleDepth,
 
     /// The ICC profile the pages are converted to; see
     /// [`SessionConfig::output_profile`].  Default `None`.  The gray pages
     /// take a gray profile, the RGBA pages of
-    /// [`transparent_background`](Self::transparent_background) an RGB one,
+    /// [`transparent_background`](Self::transparent_background) an RGB one
+    /// (a gray one under [`gray_alpha`](Self::gray_alpha)),
     /// the CMYK pages of [`color`](Self::color) a CMYK one.
     pub output_profile: Option<std::sync::Arc<OutputProfile>>,
 
@@ -619,6 +634,7 @@ impl Default for RasterOptions {
             page_box: PageBox::Crop,
             rotation: Rotation::None,
             transparent_background: false,
+            gray_alpha: false,
             depth: SampleDepth::Eight,
             output_profile: None,
             intent: None,
@@ -652,6 +668,11 @@ pub enum PixelFormat {
     Rgba16,
     /// Four bytes per pixel, `[C, M, Y, K]`, 0 no ink.
     Cmyk8,
+    /// Two bytes per pixel, `[Y, A]`, gray 0 black; alpha 0 is
+    /// transparent and the gray is not premultiplied by it.
+    GrayAlpha8,
+    /// Two 16-bit samples per pixel, `[Y, A]`, alpha not premultiplied.
+    GrayAlpha16,
     /// Four 16-bit samples per pixel, `[C, M, Y, K]`, 0 no ink.
     Cmyk16,
 }
@@ -668,6 +689,7 @@ impl PixelFormat {
     pub const fn samples_per_pixel(self) -> usize {
         match self {
             Self::Gray8 | Self::Gray16 => 1,
+            Self::GrayAlpha8 | Self::GrayAlpha16 => 2,
             Self::Rgb8 | Self::Rgb16 => 3,
             Self::Rgba8 | Self::Rgba16 | Self::Cmyk8 | Self::Cmyk16 => 4,
         }
@@ -677,8 +699,12 @@ impl PixelFormat {
     #[must_use]
     pub const fn depth(self) -> SampleDepth {
         match self {
-            Self::Gray8 | Self::Rgb8 | Self::Rgba8 | Self::Cmyk8 => SampleDepth::Eight,
-            Self::Gray16 | Self::Rgb16 | Self::Rgba16 | Self::Cmyk16 => SampleDepth::Sixteen,
+            Self::Gray8 | Self::GrayAlpha8 | Self::Rgb8 | Self::Rgba8 | Self::Cmyk8 => {
+                SampleDepth::Eight
+            }
+            Self::Gray16 | Self::GrayAlpha16 | Self::Rgb16 | Self::Rgba16 | Self::Cmyk16 => {
+                SampleDepth::Sixteen
+            }
         }
     }
 }
@@ -736,8 +762,8 @@ impl Pixels {
     }
 }
 
-/// A single rendered page: 8-bit grayscale pixels, RGBA pixels when
-/// rendered over a transparent backdrop, or CMYK pixels under
+/// A single rendered page: 8-bit grayscale pixels, RGBA or gray and alpha
+/// pixels when rendered over a transparent backdrop, or CMYK pixels under
 /// [`ColorModel::Cmyk`].
 #[derive(Debug)]
 #[non_exhaustive]
@@ -755,10 +781,12 @@ pub struct RenderedPage {
     /// samples: `width * height` for the default gray pages.
     pub pixels: Pixels,
     /// The layout of [`pixels`](Self::pixels): [`PixelFormat::Gray8`], or
-    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`],
+    /// [`PixelFormat::Rgba8`] under [`RasterOptions::transparent_background`]
+    /// ([`PixelFormat::GrayAlpha8`] with [`RasterOptions::gray_alpha`]),
     /// or [`PixelFormat::Cmyk8`] under [`ColorModel::Cmyk`];
-    /// [`PixelFormat::Gray16`], [`PixelFormat::Rgba16`] and
-    /// [`PixelFormat::Cmyk16`] at [`RasterOptions::depth`] 16.
+    /// [`PixelFormat::Gray16`], [`PixelFormat::Rgba16`],
+    /// [`PixelFormat::GrayAlpha16`] and [`PixelFormat::Cmyk16`] at
+    /// [`RasterOptions::depth`] 16.
     pub format: PixelFormat,
     /// Physical resolution of the bitmap in pixels per inch (`opts.dpi`).
     ///

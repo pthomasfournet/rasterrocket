@@ -89,12 +89,14 @@ impl IccProfile {
 
     /// Check that the profile describes the colour of rows stored as
     /// `layout`: RGB (with or without alpha) for a profile of three
-    /// channels, gray for one of one, CMYK for one of four; a bilevel image
+    /// channels, gray (with or without alpha) for one of one, CMYK for one of four; a bilevel image
     /// takes no profile.
     pub(crate) const fn check(&self, layout: RowLayout) -> Result<(), EncodeError> {
         let channels = match layout {
             RowLayout::Rgb | RowLayout::Rgba | RowLayout::Rgb16 | RowLayout::Rgba16 => 3,
-            RowLayout::Gray | RowLayout::Gray16 => 1,
+            RowLayout::Gray | RowLayout::GrayAlpha | RowLayout::Gray16 | RowLayout::GrayAlpha16 => {
+                1
+            }
             RowLayout::Cmyk | RowLayout::Cmyk16 => 4,
             RowLayout::Bilevel => {
                 return Err(EncodeError::InvalidInput(

@@ -235,7 +235,8 @@ pub(crate) struct Args {
 
     /// Render over a transparent background instead of white paper: PNG
     /// or TIFF with an alpha channel, the page's coverage × opacity, colour
-    /// not premultiplied.  Needs --png or --tiff; not with --gray, --mono,
+    /// not premultiplied; gray and alpha with --gray or a gray
+    /// --output-profile.  Needs --png or --tiff; not with --mono,
     /// --invert, the camera cleanup flags, --fax or --print.
     #[arg(long = "transparent", visible_alias = "transp")]
     pub transparent: bool,
@@ -1229,7 +1230,6 @@ impl Args {
             return Ok(());
         }
         let opaque = [
-            (self.gray, "--gray"),
             (self.mono, "--mono"),
             (self.invert.is_some(), "--invert"),
             (self.crop, "--crop"),
@@ -1244,7 +1244,7 @@ impl Args {
         ];
         if let Some((_, flag)) = opaque.iter().find(|(set, _)| *set) {
             return Err(format!(
-                "--transparent writes colour pages with an alpha channel; drop {flag}"
+                "--transparent writes pages with an alpha channel; drop {flag}"
             ));
         }
         if self.is_comic_input() {
@@ -1256,7 +1256,13 @@ impl Args {
         if self.png || self.tiff {
             return Ok(());
         }
-        let format = if self.jpeg_output() { "JPEG" } else { "PPM" };
+        let format = if self.jpeg_output() {
+            "JPEG"
+        } else if self.luma_output() {
+            "PGM"
+        } else {
+            "PPM"
+        };
         Err(format!(
             "--transparent needs an output with an alpha channel: {format} has none; \
              add --png or --tiff"
@@ -1366,9 +1372,8 @@ impl Args {
     }
 
     /// The session's output profile, read from `--output-profile` and
-    /// checked against the output: an RGB profile refuses `--gray`, a
-    /// gray one `--transparent`; with `--intent`, its conversion is
-    /// compiled.  `None` without the flag.
+    /// checked against the output: an RGB profile refuses `--gray`; with
+    /// `--intent`, its conversion is compiled.  `None` without the flag.
     fn output_profile(&self) -> Result<Option<std::sync::Arc<pdf_raster::OutputProfile>>, String> {
         let Some(path) = &self.output_profile else {
             return Ok(None);
@@ -1401,12 +1406,6 @@ impl Args {
                 return Err(format!(
                     "--output-profile {shown} is an RGB profile and --gray writes gray pages: \
                      give a gray output profile, or drop --gray"
-                ));
-            }
-            pdf_raster::OutputSpace::Gray if self.transparent => {
-                return Err(format!(
-                    "--output-profile {shown} is a gray profile and --transparent writes colour \
-                     pages with alpha: give an RGB output profile, or drop --transparent"
                 ));
             }
             _ => {}
@@ -2631,10 +2630,12 @@ mod page_list_tests {
     }
 
     #[test]
-    fn transparent_needs_an_alpha_output_and_colour_pages() {
+    fn transparent_needs_an_alpha_output_and_continuous_tone_pages() {
         for flags in [
             &["--transparent", "--png"][..],
             &["--transp", "--tiff", "--tiffcompression", "deflate"],
+            &["--transparent", "--gray", "--png"],
+            &["--transparent", "--gray", "--tiff", "--depth", "16"],
         ] {
             let args = args_with(flags);
             assert!(args.transparent);
@@ -2643,7 +2644,7 @@ mod page_list_tests {
         for (flags, needle) in [
             (&["--transparent"][..], "PPM has none; add --png or --tiff"),
             (&["--transparent", "--jpeg"], "JPEG has none"),
-            (&["--transparent", "--gray"], "drop --gray"),
+            (&["--transparent", "--gray"], "PGM has none"),
             (&["--transparent", "--png", "--mono"], "drop --mono"),
             (&["--transparent", "--png", "--invert"], "drop --invert"),
             (&["--transparent", "--png", "--crop"], "drop --crop"),

@@ -199,6 +199,75 @@ pub(crate) fn rgb8_to_rgba_rendered_page(
     }
 }
 
+/// The samples of the gray bitmap `gray`, rows packed, each followed by
+/// its sample of `alpha` (`width × height` samples), or by `opaque`
+/// without one.
+fn gray_alpha_samples<P: Pixel>(
+    gray: &Bitmap<P>,
+    alpha: Option<&[P::Sample]>,
+    opaque: P::Sample,
+) -> Vec<P::Sample> {
+    let w = gray.width as usize;
+    let mut samples = Vec::with_capacity(w * 2 * gray.height as usize);
+    for y in 0..gray.height {
+        let row = &gray.row_samples(y)[..w];
+        match alpha {
+            Some(alpha) => {
+                let alpha = &alpha[y as usize * w..][..w];
+                for (&v, &a) in row.iter().zip(alpha) {
+                    samples.extend_from_slice(&[v, a]);
+                }
+            }
+            None => {
+                for &v in row {
+                    samples.extend_from_slice(&[v, opaque]);
+                }
+            }
+        }
+    }
+    samples
+}
+
+/// A [`PixelFormat::GrayAlpha8`] [`RenderedPage`] of `gray` and its
+/// `alpha` plane, opaque without one.
+pub(crate) fn gray8_alpha_rendered_page(
+    gray: &Bitmap<Gray8>,
+    alpha: Option<&[u8]>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let samples = gray_alpha_samples(gray, alpha, u8::MAX);
+    let pixels = (Pixels::U8(samples), PixelFormat::GrayAlpha8);
+    rendered_page(
+        (gray.width, gray.height),
+        pixels,
+        page_num,
+        dpi,
+        diagnostics,
+    )
+}
+
+/// [`gray8_alpha_rendered_page`] at 16 bits: a
+/// [`PixelFormat::GrayAlpha16`] page.
+pub(crate) fn gray16_alpha_rendered_page(
+    gray: &Bitmap<Gray16>,
+    alpha: Option<&[u16]>,
+    page_num: u32,
+    dpi: f32,
+    diagnostics: PageDiagnostics,
+) -> RenderedPage {
+    let samples = gray_alpha_samples(gray, alpha, u16::MAX);
+    let pixels = (Pixels::U16(samples), PixelFormat::GrayAlpha16);
+    rendered_page(
+        (gray.width, gray.height),
+        pixels,
+        page_num,
+        dpi,
+        diagnostics,
+    )
+}
+
 /// The samples of `bmp`'s live pixels, rows packed.
 fn packed_samples<P: Pixel>(bmp: &Bitmap<P>) -> Vec<P::Sample> {
     let live = bmp.width as usize * P::NCOMPS;
@@ -455,6 +524,35 @@ mod tests {
         assert_eq!(page.format, PixelFormat::Rgba16);
         assert_eq!(page.pixels, Pixels::U16(vec![1, 2, 3, 400]));
         assert_eq!(page.format.bytes_per_pixel(), 8);
+    }
+
+    #[test]
+    fn gray_alpha_pages_pair_each_gray_with_its_alpha() {
+        let mut gray = Bitmap::<Gray8>::new(2, 2, 4, false);
+        gray.row_bytes_mut(0)[..2].copy_from_slice(&[1, 2]);
+        gray.row_bytes_mut(1)[..2].copy_from_slice(&[3, 4]);
+        let page = gray8_alpha_rendered_page(
+            &gray,
+            Some(&[10, 20, 30, 40]),
+            1,
+            72.0,
+            PageDiagnostics::default(),
+        );
+        assert_eq!(page.format, PixelFormat::GrayAlpha8);
+        assert_eq!(page.format.bytes_per_pixel(), 2);
+        assert_eq!(page.pixels, Pixels::U8(vec![1, 10, 2, 20, 3, 30, 4, 40]));
+        let opaque = gray8_alpha_rendered_page(&gray, None, 1, 72.0, PageDiagnostics::default());
+        assert_eq!(
+            opaque.pixels,
+            Pixels::U8(vec![1, 255, 2, 255, 3, 255, 4, 255])
+        );
+        let wide = Bitmap::<Gray16>::from_packed(1, 1, vec![300]);
+        let page =
+            gray16_alpha_rendered_page(&wide, Some(&[7]), 1, 72.0, PageDiagnostics::default());
+        assert_eq!(
+            (page.format, page.pixels),
+            (PixelFormat::GrayAlpha16, Pixels::U16(vec![300, 7]))
+        );
     }
 
     #[test]

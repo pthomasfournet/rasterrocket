@@ -67,6 +67,13 @@ fn validate_opts(opts: &RasterOptions) -> Option<RasterError> {
             opts.dpi
         )));
     }
+    if opts.gray_alpha && !opts.transparent_background {
+        return Some(RasterError::InvalidOptions(
+            "gray_alpha selects the gray pages of a transparent backdrop: set \
+             transparent_background too"
+                .to_owned(),
+        ));
+    }
     if opts.deskew && opts.transparent_background {
         return Some(RasterError::deskew_needs_gray());
     }
@@ -364,6 +371,8 @@ pub(crate) fn render_channel(
 fn render_one(state: &RenderState, page_num: u32) -> Result<RenderedPage, RasterError> {
     if state.opts.color == crate::ColorModel::Cmyk {
         crate::render_page_cmyk(&state.session, page_num, &state.opts)
+    } else if state.opts.gray_alpha {
+        crate::render_page_gray_alpha(&state.session, page_num, &state.opts)
     } else if state.opts.transparent_background {
         render_page_rgba(&state.session, page_num, &state.opts)
     } else {

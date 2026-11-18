@@ -34,7 +34,7 @@ use crate::{EncodeError, pack_bilevel_row};
 ///
 /// | Mode | PNG colour type |
 /// |------|----------------|
-/// | `Mono8` | `Grayscale` (8-bit) |
+/// | `Mono8` | `Grayscale` (8-bit), or `GrayscaleAlpha` with an alpha plane |
 /// | `Rgb8`, `Bgr8`, `Xbgr8`, `Cmyk8`, `DeviceN8` | `RGB`, or `RGBA` with an alpha plane |
 ///
 /// # Errors
@@ -220,19 +220,38 @@ fn write_png_rgb<P: Pixel<Sample = u8>, W: Write>(
     Ok(())
 }
 
-/// Write a `Gray8` bitmap as PNG.
+/// Write a `Gray8` bitmap as PNG gray, or gray and alpha when it has an
+/// alpha plane.
 fn write_png_gray<P: Pixel<Sample = u8>, W: Write>(
     bitmap: &Bitmap<P>,
     out: W,
     header: Header<'_>,
 ) -> Result<(), EncodeError> {
+    let color_type = if bitmap.has_alpha() {
+        ::png::ColorType::GrayscaleAlpha
+    } else {
+        ::png::ColorType::Grayscale
+    };
     let mut writer = png_encoder(
         out,
         (bitmap.width, bitmap.height),
-        (::png::ColorType::Grayscale, ::png::BitDepth::Eight),
+        (color_type, ::png::BitDepth::Eight),
         header,
     )?;
-    writer.write_image_data(&crate::live_bytes(bitmap))?;
+    if !bitmap.has_alpha() {
+        writer.write_image_data(&crate::live_bytes(bitmap))?;
+        return Ok(());
+    }
+    let w = bitmap.width as usize;
+    let mut buf = Vec::with_capacity(image_len(bitmap, 2)?);
+    for y in 0..bitmap.height {
+        let gray = &bitmap.row_bytes(y)[..w];
+        let alpha = bitmap.alpha_row(y).unwrap_or_default();
+        for (&v, &a) in gray.iter().zip(alpha) {
+            buf.extend_from_slice(&[v, a]);
+        }
+    }
+    writer.write_image_data(&buf)?;
     Ok(())
 }
 
@@ -242,14 +261,20 @@ pub enum PngColor {
     /// Gray of bit depth 1, from gray bands: black below
     /// [`crate::BLACK_BELOW`], white otherwise.
     Bilevel,
-    /// 8-bit gray, from gray bands.
+    /// 8-bit gray, from gray bands; an alpha plane is dropped.
     Gray,
+    /// 8-bit gray and alpha, from gray bands, the alpha plane's (opaque
+    /// without one).
+    GrayAlpha,
     /// 8-bit RGB, from RGB bands; an alpha plane is dropped.
     Rgb,
     /// 8-bit RGBA, from RGB bands, the alpha plane's (opaque without one).
     Rgba,
-    /// 16-bit gray, from 16-bit gray bands.
+    /// 16-bit gray, from 16-bit gray bands; an alpha plane is dropped.
     Gray16,
+    /// 16-bit gray and alpha, from 16-bit gray bands, the alpha plane's
+    /// (opaque without one).
+    GrayAlpha16,
     /// 16-bit RGB, from 16-bit RGB bands; an alpha plane is dropped.
     Rgb16,
     /// 16-bit RGBA, from 16-bit RGB bands, the alpha plane's (opaque
@@ -262,9 +287,11 @@ impl PngColor {
         match self {
             Self::Bilevel => RowLayout::Bilevel,
             Self::Gray => RowLayout::Gray,
+            Self::GrayAlpha => RowLayout::GrayAlpha,
             Self::Rgb => RowLayout::Rgb,
             Self::Rgba => RowLayout::Rgba,
             Self::Gray16 => RowLayout::Gray16,
+            Self::GrayAlpha16 => RowLayout::GrayAlpha16,
             Self::Rgb16 => RowLayout::Rgb16,
             Self::Rgba16 => RowLayout::Rgba16,
         }
@@ -273,6 +300,7 @@ impl PngColor {
     const fn color_type(self) -> ::png::ColorType {
         match self {
             Self::Bilevel | Self::Gray | Self::Gray16 => ::png::ColorType::Grayscale,
+            Self::GrayAlpha | Self::GrayAlpha16 => ::png::ColorType::GrayscaleAlpha,
             Self::Rgb | Self::Rgb16 => ::png::ColorType::Rgb,
             Self::Rgba | Self::Rgba16 => ::png::ColorType::Rgba,
         }
@@ -281,8 +309,10 @@ impl PngColor {
     const fn bit_depth(self) -> ::png::BitDepth {
         match self {
             Self::Bilevel => ::png::BitDepth::One,
-            Self::Gray | Self::Rgb | Self::Rgba => ::png::BitDepth::Eight,
-            Self::Gray16 | Self::Rgb16 | Self::Rgba16 => ::png::BitDepth::Sixteen,
+            Self::Gray | Self::GrayAlpha | Self::Rgb | Self::Rgba => ::png::BitDepth::Eight,
+            Self::Gray16 | Self::GrayAlpha16 | Self::Rgb16 | Self::Rgba16 => {
+                ::png::BitDepth::Sixteen
+            }
         }
     }
 }
@@ -533,6 +563,66 @@ mod tests {
         assert_eq!(&pixels[4..8], &[40, 50, 60, 210]);
         assert_eq!(&pixels[8..12], &[70, 80, 90, 220]);
         assert_eq!(&pixels[12..16], &[100, 110, 120, 230]);
+    }
+
+    /// The colour type of a PNG.
+    fn color_type(data: &[u8]) -> ::png::ColorType {
+        let decoder = ::png::Decoder::new(std::io::Cursor::new(data));
+        decoder
+            .read_info()
+            .expect("png decode header")
+            .info()
+            .color_type
+    }
+
+    #[test]
+    fn gray_with_alpha_writes_gray_alpha_png() {
+        let mut bmp: Bitmap<Gray8> = Bitmap::new(3, 2, 4, true);
+        bmp.row_bytes_mut(0)[..3].copy_from_slice(&[1, 2, 3]);
+        bmp.row_bytes_mut(1)[..3].copy_from_slice(&[4, 5, 6]);
+        bmp.alpha_plane_mut()
+            .unwrap()
+            .copy_from_slice(&[0, 9, 255, 7, 8, 128]);
+        let want = [1, 0, 2, 9, 3, 255, 4, 7, 5, 8, 6, 128];
+        let mut whole = Vec::new();
+        write_png::<Gray8, _>(&bmp, None, &mut whole, None).unwrap();
+        assert_eq!(color_type(&whole), ::png::ColorType::GrayscaleAlpha);
+        assert_eq!(decode_png(&whole), (3, 2, want.to_vec()));
+        let mut streamed =
+            PngWriter::new(Vec::new(), (3, 2), PngColor::GrayAlpha, None, None).unwrap();
+        streamed.push(RowImage::Gray(&bmp)).unwrap();
+        assert_eq!(
+            decode_png(&streamed.finish().unwrap()),
+            (3, 2, want.to_vec())
+        );
+    }
+
+    #[test]
+    fn sixteen_bit_gray_alpha_stores_big_endian_pairs() {
+        use color::Gray16;
+        let mut bmp: Bitmap<Gray16> = Bitmap::new(2, 1, 1, true);
+        bmp.row_samples_mut(0).copy_from_slice(&[0x0102, 0xFFFF]);
+        bmp.alpha_plane_mut().unwrap().copy_from_slice(&[0x0304, 0]);
+        let mut png =
+            PngWriter::new(Vec::new(), (2, 1), PngColor::GrayAlpha16, None, None).unwrap();
+        png.push(RowImage::Gray16(&bmp)).unwrap();
+        let out = png.finish().unwrap();
+        assert_eq!(color_type(&out), ::png::ColorType::GrayscaleAlpha);
+        assert_eq!(decode_png(&out).2, [1, 2, 3, 4, 0xFF, 0xFF, 0, 0]);
+    }
+
+    #[test]
+    fn a_gray_band_without_alpha_is_opaque_as_gray_alpha() {
+        let bmp = make_gray_bitmap(2, 1, 40);
+        let mut png = PngWriter::new(Vec::new(), (2, 1), PngColor::GrayAlpha, None, None).unwrap();
+        png.push(RowImage::Gray(&bmp)).unwrap();
+        assert_eq!(decode_png(&png.finish().unwrap()).2, [40, 255, 40, 255]);
+        let rgb = make_rgb_bitmap(2, 1, [0, 0, 0]);
+        let mut png = PngWriter::new(Vec::new(), (2, 1), PngColor::GrayAlpha, None, None).unwrap();
+        assert!(matches!(
+            png.push(RowImage::Rgb(&rgb)),
+            Err(EncodeError::InvalidInput(_))
+        ));
     }
 
     /// CMYK converts to RGB through the process-ink model, as for PPM.

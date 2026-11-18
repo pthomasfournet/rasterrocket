@@ -3190,6 +3190,22 @@ so the GPU rotation is not byte-identical to the CPU's, as every other GPU
 path is; that would take a CUDA kernel of the CPU's arithmetic in place of
 NPP.
 
+**Unreleased on master: gray and alpha over a transparent backdrop.**
+`--transparent --gray`, refused before, writes a gray and alpha PNG (colour
+type 4) or TIFF (a gray and an unassociated-alpha sample, `ExtraSamples` 2)
+at 8 or 16 bits, and `--transparent` under a gray `--output-profile`, also
+refused before, writes the profile's gray beside the alpha. The gray is the
+`--gray` luma of the RGBA page's straight colour, so it is the opaque gray
+page's wherever the alpha is full; the alpha is the RGBA page's. Library:
+`RasterOptions::gray_alpha` (with `transparent_background`) yields
+`PixelFormat::GrayAlpha8` / `GrayAlpha16` pages, and
+`render_page_gray_alpha` renders one; `rgb_to_gray` and `rgb16_to_gray16`
+copy the alpha plane. `rasterrocket-encode` gains `RowLayout::GrayAlpha` /
+`GrayAlpha16` and `PngColor::GrayAlpha` / `GrayAlpha16`, a gray band with
+an alpha plane is stored under them, and `write_png` writes a gray
+bitmap's alpha plane. `RowLayout` is exhaustive, so a match on it needs the
+new arms.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

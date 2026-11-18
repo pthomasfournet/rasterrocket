@@ -127,7 +127,7 @@ backend-neutral cache. The full list is in
   of its `/Rotate`.
 - **Transparent output.** `--transparent` (`--transp`) /
   `transparent_background` renders over a transparent backdrop: RGBA PNG or
-  TIFF, straight alpha.
+  TIFF, straight alpha, or gray and alpha with `--gray` / `gray_alpha`.
 - **Comic archives.** `.cbr` (RAR 1.3 to 7) archives, JPEG XL and AVIF page
   images, and every page of a multi-page TIFF entry. The entries'
   decompressed total is bounded (`ComicOptions::max_archive_bytes`,

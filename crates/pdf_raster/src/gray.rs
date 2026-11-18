@@ -20,13 +20,25 @@ use pdf_interp::renderer::FinishedCanvas;
 use raster::Bitmap;
 
 /// Convert an RGB bitmap to grayscale with the `DeviceRGB` → `DeviceGray`
-/// weights of ISO 32000-1 §10.3.3.
+/// weights of ISO 32000-1 §10.3.3.  The alpha plane, if any, is copied.
 #[must_use]
 pub fn rgb_to_gray(src: &Bitmap<Rgb8>) -> Bitmap<Gray8> {
-    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, false);
+    let mut dst = Bitmap::<Gray8>::new(src.width, src.height, 1, src.has_alpha());
     let stride = dst.stride;
     rgb_rows_to_gray(src, dst.data_mut(), stride);
+    copy_alpha(src, &mut dst);
     dst
+}
+
+/// Copy the alpha plane of `src` to that of `dst`, both of one size; a
+/// bitmap without one leaves `dst` as it is.
+fn copy_alpha<S: color::Sample, C: Pixel<Sample = S>, G: Pixel<Sample = S>>(
+    src: &Bitmap<C>,
+    dst: &mut Bitmap<G>,
+) {
+    if let (Some(from), Some(to)) = (src.alpha_plane(), dst.alpha_plane_mut()) {
+        to.copy_from_slice(from);
+    }
 }
 
 /// [`rgb_to_gray`] writing gray row `y` to `out[y * stride..y * stride + width]`.
@@ -85,10 +97,11 @@ fn into_gray<S: color::Sample, C: Pixel<Sample = S>, G: Pixel<Sample = S>>(
 }
 
 /// [`rgb_to_gray`] at 16 bits: the same 1.15 weights applied to 16-bit
-/// samples, whose weighted sum `32768 · 65535 + 16384` fits `u32`.
+/// samples, whose weighted sum `32768 · 65535 + 16384` fits `u32`.  The
+/// alpha plane, if any, is copied.
 #[must_use]
 pub fn rgb16_to_gray16(src: &Bitmap<Rgb16>) -> Bitmap<Gray16> {
-    let mut dst = Bitmap::<Gray16>::new(src.width, src.height, 1, false);
+    let mut dst = Bitmap::<Gray16>::new(src.width, src.height, 1, src.has_alpha());
     let w = src.width as usize;
     for y in 0..src.height {
         convert_row16(
@@ -96,6 +109,7 @@ pub fn rgb16_to_gray16(src: &Bitmap<Rgb16>) -> Bitmap<Gray16> {
             &mut dst.row_samples_mut(y)[..w],
         );
     }
+    copy_alpha(src, &mut dst);
     dst
 }
 
@@ -389,6 +403,25 @@ mod tests {
                 "luma({px:?}) must be {want} under 15-bit fixed point"
             );
         }
+    }
+
+    #[test]
+    fn copying_conversions_keep_the_alpha_plane() {
+        let mut rgb = Bitmap::<Rgb8>::new(2, 1, 4, true);
+        rgb.row_bytes_mut(0)[..6].copy_from_slice(&[10, 10, 10, 20, 20, 20]);
+        rgb.alpha_plane_mut().unwrap().copy_from_slice(&[0, 200]);
+        let gray = rgb_to_gray(&rgb);
+        assert_eq!(&gray.row_bytes(0)[..2], &[10, 20]);
+        assert_eq!(gray.alpha_plane(), Some(&[0, 200][..]));
+        assert!(!rgb_to_gray(&bitmap_from_pixels(&[[1, 2, 3]], 1, 1)).has_alpha());
+        let mut wide = Bitmap::<Rgb16>::new(1, 1, 1, true);
+        wide.row_samples_mut(0).copy_from_slice(&[300, 300, 300]);
+        wide.alpha_plane_mut().unwrap()[0] = 9;
+        let gray = rgb16_to_gray16(&wide);
+        assert_eq!(
+            (gray.row_samples(0)[0], gray.alpha_plane()),
+            (300, Some(&[9][..]))
+        );
     }
 
     #[test]

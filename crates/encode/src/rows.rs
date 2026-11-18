@@ -17,7 +17,8 @@ pub enum RowImage<'a> {
     /// 8-bit RGB; RGBA, the alpha unassociated, when the bitmap has an
     /// alpha plane and the writer stores alpha.
     Rgb(&'a Bitmap<Rgb8>),
-    /// 8-bit gray, 0 black.
+    /// 8-bit gray, 0 black; gray and alpha, the alpha unassociated, when
+    /// the bitmap has an alpha plane and the writer stores alpha.
     Gray(&'a Bitmap<Gray8>),
     /// One bit per pixel from gray luma, 1 for black (below
     /// [`crate::BLACK_BELOW`]), rows packed most significant bit first.
@@ -25,7 +26,8 @@ pub enum RowImage<'a> {
     /// 16-bit RGB; RGBA, the alpha unassociated, when the bitmap has an
     /// alpha plane and the writer stores alpha.
     Rgb16(&'a Bitmap<Rgb16>),
-    /// 16-bit gray, 0 black.
+    /// 16-bit gray, 0 black; gray and alpha, the alpha unassociated, when
+    /// the bitmap has an alpha plane and the writer stores alpha.
     Gray16(&'a Bitmap<Gray16>),
     /// 8-bit CMYK, 0 no ink.
     Cmyk(&'a Bitmap<Cmyk8>),
@@ -64,6 +66,8 @@ pub enum RowLayout {
     Rgba,
     /// One byte a pixel.
     Gray,
+    /// Two bytes a pixel, gray then the alpha plane's.
+    GrayAlpha,
     /// One bit a pixel, rows padded to a byte.
     Bilevel,
     /// Three 16-bit samples a pixel.
@@ -72,6 +76,8 @@ pub enum RowLayout {
     Rgba16,
     /// One 16-bit sample a pixel.
     Gray16,
+    /// Two 16-bit samples a pixel, gray then the alpha plane's.
+    GrayAlpha16,
     /// Four bytes a pixel, C, M, Y and K, 0 no ink.
     Cmyk,
     /// Four 16-bit samples a pixel, C, M, Y and K, 0 no ink.
@@ -85,12 +91,12 @@ impl RowLayout {
         let w = width as usize;
         match self {
             Self::Rgb => w * 3,
-            Self::Rgba | Self::Cmyk => w * 4,
+            Self::Rgba | Self::Cmyk | Self::GrayAlpha16 => w * 4,
             Self::Gray => w,
+            Self::GrayAlpha | Self::Gray16 => w * 2,
             Self::Bilevel => w.div_ceil(8),
             Self::Rgb16 => w * 6,
             Self::Rgba16 | Self::Cmyk16 => w * 8,
-            Self::Gray16 => w * 2,
         }
     }
 
@@ -99,22 +105,25 @@ impl RowLayout {
     pub const fn bits_per_sample(self) -> u8 {
         match self {
             Self::Bilevel => 1,
-            Self::Rgb | Self::Rgba | Self::Gray | Self::Cmyk => 8,
-            Self::Rgb16 | Self::Rgba16 | Self::Gray16 | Self::Cmyk16 => 16,
+            Self::Rgb | Self::Rgba | Self::Gray | Self::GrayAlpha | Self::Cmyk => 8,
+            Self::Rgb16 | Self::Rgba16 | Self::Gray16 | Self::GrayAlpha16 | Self::Cmyk16 => 16,
         }
     }
 
     /// The layout of samples of `depth` with the colour model of `self`:
-    /// RGB, RGBA, gray or CMYK; a bilevel layout is itself at either depth.
+    /// RGB, RGBA, gray, gray and alpha or CMYK; a bilevel layout is itself
+    /// at either depth.
     #[must_use]
     pub const fn at_depth(self, depth: SampleDepth) -> Self {
         match (self, depth) {
             (Self::Rgb | Self::Rgb16, SampleDepth::Eight) => Self::Rgb,
             (Self::Rgba | Self::Rgba16, SampleDepth::Eight) => Self::Rgba,
             (Self::Gray | Self::Gray16, SampleDepth::Eight) => Self::Gray,
+            (Self::GrayAlpha | Self::GrayAlpha16, SampleDepth::Eight) => Self::GrayAlpha,
             (Self::Rgb | Self::Rgb16, SampleDepth::Sixteen) => Self::Rgb16,
             (Self::Rgba | Self::Rgba16, SampleDepth::Sixteen) => Self::Rgba16,
             (Self::Gray | Self::Gray16, SampleDepth::Sixteen) => Self::Gray16,
+            (Self::GrayAlpha | Self::GrayAlpha16, SampleDepth::Sixteen) => Self::GrayAlpha16,
             (Self::Cmyk | Self::Cmyk16, SampleDepth::Eight) => Self::Cmyk,
             (Self::Cmyk | Self::Cmyk16, SampleDepth::Sixteen) => Self::Cmyk16,
             (Self::Bilevel, _) => Self::Bilevel,
@@ -137,16 +146,19 @@ impl RowImage<'_> {
     }
 
     /// The layout the band is stored in when a writer keeps its alpha
-    /// plane: RGBA for an RGB band with one.
+    /// plane: RGBA for an RGB band with one, gray and alpha for a gray band
+    /// with one.
     #[must_use]
     pub const fn layout(&self) -> RowLayout {
         match self {
             Self::Rgb(b) if b.has_alpha() => RowLayout::Rgba,
             Self::Rgb(_) => RowLayout::Rgb,
+            Self::Gray(b) if b.has_alpha() => RowLayout::GrayAlpha,
             Self::Gray(_) => RowLayout::Gray,
             Self::Bilevel(_) => RowLayout::Bilevel,
             Self::Rgb16(b) if b.has_alpha() => RowLayout::Rgba16,
             Self::Rgb16(_) => RowLayout::Rgb16,
+            Self::Gray16(b) if b.has_alpha() => RowLayout::GrayAlpha16,
             Self::Gray16(_) => RowLayout::Gray16,
             Self::Cmyk(_) => RowLayout::Cmyk,
             Self::Cmyk16(_) => RowLayout::Cmyk16,
@@ -156,7 +168,8 @@ impl RowImage<'_> {
     /// Append the bytes of row `y` stored as `layout` to `out`: live
     /// pixels only, 16-bit samples in `order`.  An RGB band stored as
     /// [`RowLayout::Rgb`] drops its alpha plane; one stored as
-    /// [`RowLayout::Rgba`] without one is opaque; likewise at 16 bits.
+    /// [`RowLayout::Rgba`] without one is opaque; likewise for a gray band
+    /// and [`RowLayout::Gray`] and [`RowLayout::GrayAlpha`], and at 16 bits.
     ///
     /// # Panics
     ///
@@ -183,6 +196,14 @@ impl RowImage<'_> {
             (Self::Gray(b) | Self::Bilevel(b), RowLayout::Gray) => {
                 out.extend_from_slice(&b.row_bytes(y)[..b.width as usize]);
             }
+            (Self::Gray(b), RowLayout::GrayAlpha) => {
+                let gray = &b.row_bytes(y)[..b.width as usize];
+                let alpha = b.alpha_row(y);
+                out.reserve(gray.len() * 2);
+                for (i, &v) in gray.iter().enumerate() {
+                    out.extend_from_slice(&[v, alpha.map_or(u8::MAX, |a| a[i])]);
+                }
+            }
             (Self::Gray(b) | Self::Bilevel(b), RowLayout::Bilevel) => {
                 let start = out.len();
                 out.resize(start + (b.width as usize).div_ceil(8), 0);
@@ -201,6 +222,12 @@ impl RowImage<'_> {
             }
             (Self::Gray16(b), RowLayout::Gray16) => {
                 order.push(&b.row_samples(y)[..b.width as usize], out);
+            }
+            (Self::Gray16(b), RowLayout::GrayAlpha16) => {
+                let alpha = b.alpha_row(y);
+                for (i, &v) in b.row_samples(y)[..b.width as usize].iter().enumerate() {
+                    order.push(&[v, alpha.map_or(u16::MAX, |a| a[i])], out);
+                }
             }
             (Self::Cmyk(b), RowLayout::Cmyk) => {
                 out.extend_from_slice(&b.row_bytes(y)[..b.width as usize * 4]);
@@ -244,8 +271,9 @@ impl RowImage<'_> {
                     Self::Gray(_) | Self::Bilevel(_),
                     RowLayout::Gray | RowLayout::Bilevel
                 )
+                | (Self::Gray(_), RowLayout::GrayAlpha)
                 | (Self::Rgb16(_), RowLayout::Rgb16 | RowLayout::Rgba16)
-                | (Self::Gray16(_), RowLayout::Gray16)
+                | (Self::Gray16(_), RowLayout::Gray16 | RowLayout::GrayAlpha16)
                 | (Self::Cmyk(_), RowLayout::Cmyk)
                 | (Self::Cmyk16(_), RowLayout::Cmyk16)
         );
