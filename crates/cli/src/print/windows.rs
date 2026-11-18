@@ -627,11 +627,25 @@ pub(crate) struct Job {
     surface: Surface,
     copies: Copies,
     mono: bool,
+    /// Whether the sheets are printed on both sides.
+    duplex: bool,
     pages: u32,
-    /// Whether the job is started, and the file it writes.
-    started: bool,
+    /// The pages of the current pass.
+    pass_pages: u32,
+    phase: Phase,
+    /// The file the job writes.
     output: Option<PathBuf>,
-    ended: bool,
+}
+
+/// How far a [`Job`] has gone with the spooler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// `StartDocW` has not been called.
+    Opened,
+    /// The job is started and not ended: dropping it aborts it.
+    Started,
+    /// `EndDoc` handed the job to the spooler.
+    Ended,
 }
 
 impl Drop for Job {
@@ -640,7 +654,7 @@ impl Drop for Job {
         reason = "the job is aborted and its device context deleted once"
     )]
     fn drop(&mut self) {
-        if self.started && !self.ended {
+        if self.phase == Phase::Started {
             // SAFETY: the job was started on `dc` and not ended.
             let _ = unsafe { AbortDoc(self.dc) };
             if let Some(file) = &self.output
@@ -693,10 +707,11 @@ impl Job {
             surface: landscape_surface,
             copies,
             mono: settings.mono,
+            duplex: settings.duplex.is_some(),
             pages: 0,
-            started: false,
+            pass_pages: 0,
+            phase: Phase::Opened,
             output: None,
-            ended: false,
         };
         job.surface = surface(job.dc, &name)?;
         job.surfaces.portrait = job.surface;
@@ -732,7 +747,7 @@ impl Job {
                 io::Error::last_os_error()
             ));
         }
-        self.started = true;
+        self.phase = Phase::Started;
         Ok(())
     }
 
@@ -754,7 +769,7 @@ impl Job {
                 io::Error::last_os_error()
             ));
         }
-        self.ended = true;
+        self.phase = Phase::Ended;
         Ok(())
     }
 
@@ -778,14 +793,19 @@ impl Job {
         Ok(())
     }
 
-    /// Print `page` on a sheet of its own.
-    #[expect(unsafe_code, reason = "StartPage and EndPage bound the page")]
+    /// Print `page` on a side of its own.
     fn print(&mut self, page: &PdfPage) -> Result<(), String> {
         let orientation = Orientation::of_page(page.size_pts());
         if orientation != self.orientation {
             self.turn(orientation)?;
         }
         let placement = gdi::place(page.size_pts(), page.size(), &self.surface);
+        self.page(|job| job.draw(page, &placement))
+    }
+
+    /// A page drawn by `draw` between `StartPage` and `EndPage`.
+    #[expect(unsafe_code, reason = "StartPage and EndPage bound the page")]
+    fn page(&mut self, draw: impl FnOnce(&Self) -> Result<(), String>) -> Result<(), String> {
         // SAFETY: `dc` is live, the job started and no page open.
         if unsafe { StartPage(self.dc) } <= 0 {
             return Err(format!(
@@ -793,12 +813,13 @@ impl Job {
                 io::Error::last_os_error()
             ));
         }
-        self.draw(page, &placement)?;
+        draw(self)?;
         // SAFETY: the page was started above.
         if unsafe { EndPage(self.dc) } <= 0 {
             return Err(format!("cannot end a page: {}", io::Error::last_os_error()));
         }
         self.pages += 1;
+        self.pass_pages += 1;
         Ok(())
     }
 
@@ -893,6 +914,21 @@ impl PageOut for Job {
 
     fn passes(&self) -> u32 {
         self.copies.passes()
+    }
+
+    /// A two-sided pass of an odd number of pages leaves the back of its
+    /// last sheet blank, so the next pass starts on a sheet of its own.
+    fn end_pass(&mut self) -> Result<(), RenderError> {
+        if gdi::pass_needs_blank(self.duplex, self.pass_pages) {
+            self.page(|_| Ok(())).map_err(|e| {
+                RenderError::Io(io::Error::other(format!(
+                    "{:?}: the blank back of a copy's last sheet: {e}",
+                    self.printer.name
+                )))
+            })?;
+        }
+        self.pass_pages = 0;
+        Ok(())
     }
 }
 

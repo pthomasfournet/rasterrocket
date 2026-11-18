@@ -401,6 +401,13 @@ impl Copies {
     }
 }
 
+/// Whether a pass of `pages` pages, printed two-sided when `duplex`, is
+/// followed by a blank page, the back of its last sheet, so that the next
+/// pass of a replayed job starts on a sheet of its own.
+pub(crate) const fn pass_needs_blank(duplex: bool, pages: u32) -> bool {
+    duplex && pages % 2 == 1
+}
+
 /// Refuse `--duplex` on a queue whose driver does not claim two-sided
 /// printing.
 ///
@@ -444,8 +451,8 @@ pub(crate) fn check_duplex_merged(
 mod tests {
     use super::{
         Claims, Copies, DibFormat, Orientation, Placement, Surface, Surfaces, band_dest, band_rows,
-        check_duplex_claimed, check_duplex_merged, check_print_file, dib_row, is_file_port, place,
-        turned_row,
+        check_duplex_claimed, check_duplex_merged, check_print_file, dib_row, is_file_port,
+        pass_needs_blank, place, turned_row,
     };
     use crate::print::Duplex;
 
@@ -665,6 +672,17 @@ mod tests {
         assert_eq!(Copies::Replay(4).passes(), 4);
         assert_eq!(Copies::Device(4).passes(), 1);
         assert_eq!(Copies::Default.passes(), 1);
+    }
+
+    /// Replayed copies printed two-sided: a pass of an odd number of pages
+    /// is closed with a blank back; one-sided and even passes are not.
+    #[test]
+    fn an_odd_two_sided_pass_is_padded_to_whole_sheets() {
+        assert!(pass_needs_blank(true, 3));
+        assert!(pass_needs_blank(true, 1));
+        assert!(!pass_needs_blank(true, 4));
+        assert!(!pass_needs_blank(true, 0));
+        assert!(!pass_needs_blank(false, 3));
     }
 
     #[test]

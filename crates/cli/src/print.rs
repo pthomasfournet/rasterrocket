@@ -198,6 +198,15 @@ pub(crate) trait PageOut {
     fn passes(&self) -> u32 {
         1
     }
+
+    /// Close a pass that another follows, once its every page is sent.
+    ///
+    /// # Errors
+    ///
+    /// The pass could not be closed; the job is then abandoned.
+    fn end_pass(&mut self) -> Result<(), RenderError> {
+        Ok(())
+    }
 }
 
 /// The print job being written.
@@ -272,7 +281,8 @@ impl<W: PageOut> Spool<W> {
     }
 
     /// [`Self::render_in_order`] once for each of the job's passes (see
-    /// [`PageOut::passes`]), until a pass fails.
+    /// [`PageOut::passes`]), until a pass fails, each pass but the last
+    /// closed by [`PageOut::end_pass`].
     pub(crate) fn render_job<F>(
         &mut self,
         sink: &PageSink,
@@ -284,7 +294,12 @@ impl<W: PageOut> Spool<W> {
         F: Fn(&i32) -> Option<(i32, RenderError)> + Sync,
     {
         let mut result = (Vec::new(), None);
-        for _ in 0..self.out.passes() {
+        for pass in 0..self.out.passes() {
+            if pass > 0
+                && let Err(e) = self.out.end_pass()
+            {
+                return (Vec::new(), Some(e));
+            }
             result = self.render_in_order(sink, pages, pool, &render);
             if !result.0.is_empty() || result.1.is_some() {
                 break;
@@ -422,7 +437,7 @@ mod tests {
     use crate::render::RenderError;
 
     /// The image sizes of the pages sent, in order, the job sent `passes`
-    /// times.
+    /// times; a pass closed between two is recorded as `(0, 0)`.
     struct Sizes {
         sent: Vec<(u32, u32)>,
         passes: u32,
@@ -436,6 +451,11 @@ mod tests {
 
         fn passes(&self) -> u32 {
             self.passes
+        }
+
+        fn end_pass(&mut self) -> Result<(), RenderError> {
+            self.sent.push((0, 0));
+            Ok(())
         }
     }
 
@@ -614,11 +634,15 @@ mod tests {
     }
 
     /// A job of three passes sends its pages three times, each pass in
-    /// page order: collated copies.
+    /// page order: collated copies, the passes closed between them (a
+    /// width of 0 here).
     #[test]
     fn each_pass_sends_every_page_in_order() {
         let run = render_pages(5, 3, None, None);
-        assert_eq!(run.widths, [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            run.widths,
+            [1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5]
+        );
         assert_eq!(run.renders, 15);
     }
 
