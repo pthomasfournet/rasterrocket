@@ -3,7 +3,6 @@
 use color::SampleDepth;
 
 use crate::backend::page_device::PageDevice;
-use crate::backend::vulkan::test_backend;
 use crate::page::reference::render_page;
 use crate::page::test_support::{Rng, polygon, slivers, wide_rectangle};
 use crate::page::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS, PageCommands, PixelBounds};
@@ -191,23 +190,8 @@ fn backdrops_and_segments_held_in_items_match_the_host_model_on<B: PageDevice>(b
     }
 }
 
-#[test]
-fn vulkan_random_outlines_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        random_outlines_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_outlines_at_the_integer_bounds_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        outlines_at_the_integer_bounds_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_backdrops_and_segments_held_in_items_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        backdrops_and_segments_held_in_items_match_the_host_model_on(&backend);
-    }
+on_each_backend! {
+    random_outlines_match_the_host_model => random_outlines_match_the_host_model_on;
+    outlines_at_the_integer_bounds_match_the_host_model => outlines_at_the_integer_bounds_match_the_host_model_on;
+    backdrops_and_segments_held_in_items_match_the_host_model => backdrops_and_segments_held_in_items_match_the_host_model_on;
 }

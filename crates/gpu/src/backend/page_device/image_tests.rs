@@ -5,7 +5,6 @@ use color::SampleDepth;
 
 use super::path_tests::{assert_device_matches_model, random_page};
 use crate::backend::page_device::PageDevice;
-use crate::backend::vulkan::test_backend;
 use crate::page::PageCommands;
 use crate::page::test_support::{Rng, push_random_images};
 
@@ -46,16 +45,7 @@ fn images_among_outlines_match_the_host_model_on<B: PageDevice>(backend: &B) {
     }
 }
 
-#[test]
-fn vulkan_random_images_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        random_images_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_images_among_outlines_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        images_among_outlines_match_the_host_model_on(&backend);
-    }
+on_each_backend! {
+    random_images_match_the_host_model => random_images_match_the_host_model_on;
+    images_among_outlines_match_the_host_model => images_among_outlines_match_the_host_model_on;
 }

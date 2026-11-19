@@ -4,7 +4,6 @@ use color::SampleDepth;
 
 use super::path_tests::{assert_device_matches_model, random_page};
 use crate::backend::page_device::PageDevice;
-use crate::backend::vulkan::test_backend;
 use crate::page::test_support::Rng;
 use crate::page::{MaskBits, MaskId, PageCommands, PixelBounds};
 
@@ -87,16 +86,7 @@ fn masks_among_outlines_match_the_host_model_on<B: PageDevice>(backend: &B) {
     }
 }
 
-#[test]
-fn vulkan_random_masks_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        random_masks_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_masks_among_outlines_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        masks_among_outlines_match_the_host_model_on(&backend);
-    }
+on_each_backend! {
+    random_masks_match_the_host_model => random_masks_match_the_host_model_on;
+    masks_among_outlines_match_the_host_model => masks_among_outlines_match_the_host_model_on;
 }

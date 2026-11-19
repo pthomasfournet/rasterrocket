@@ -5,7 +5,6 @@ use color::SampleDepth;
 
 use super::path_tests::assert_device_matches_model;
 use crate::backend::page_device::PageDevice;
-use crate::backend::vulkan::test_backend;
 use crate::page::PageCommands;
 use crate::page::test_support::{Rng, object_over_tiles, push_random_modified};
 
@@ -51,23 +50,8 @@ fn an_object_over_tiles_matches_the_host_model_on<B: PageDevice>(backend: &B) {
     }
 }
 
-#[test]
-fn vulkan_clipped_and_masked_tables_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        clipped_and_masked_tables_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_clipped_and_masked_outlines_match_the_host_model() {
-    if let Some(backend) = test_backend() {
-        clipped_and_masked_outlines_match_the_host_model_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_an_object_over_tiles_matches_the_host_model() {
-    if let Some(backend) = test_backend() {
-        an_object_over_tiles_matches_the_host_model_on(&backend);
-    }
+on_each_backend! {
+    clipped_and_masked_tables_match_the_host_model => clipped_and_masked_tables_match_the_host_model_on;
+    clipped_and_masked_outlines_match_the_host_model => clipped_and_masked_outlines_match_the_host_model_on;
+    an_object_over_tiles_matches_the_host_model => an_object_over_tiles_matches_the_host_model_on;
 }

@@ -4,7 +4,6 @@
 use color::{Sample, SampleDepth};
 
 use super::PageDevice;
-use crate::backend::vulkan::test_backend;
 use crate::page::test_support::Rng;
 use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
 
@@ -403,23 +402,41 @@ fn a_stride_past_the_address_space_is_refused_on<B: PageDevice>(backend: &B) {
     assert!(out.iter().all(|&s| s == 0), "out is unchanged");
 }
 
-#[test]
-fn vulkan_page_raster_matches_the_host_composite() {
-    if let Some(backend) = test_backend() {
-        page_raster_matches_the_host_composite_on(&backend);
-    }
+/// A page past a device limit or the memory left keeps the device in
+/// service; any other error retires it.
+fn retires_device_on_every_error_but_limits_and_memory_of<B: PageDevice>() {
+    use crate::backend::BackendError;
+    assert!(!B::retires_device(&BackendError::DeviceLimit {
+        what: "render_page pixels",
+        need: 2,
+        limit: "a buffer limit",
+        max: 1,
+    }));
+    assert!(!B::retires_device(&BackendError::OutOfMemory {
+        what: "render_page pixels",
+        bytes: 1,
+    }));
+    assert!(B::retires_device(&BackendError::KernelFault {
+        kernel: "page_raster_paths",
+        detail: String::new(),
+    }));
+    assert!(B::retires_device(&BackendError::msg("device lost")));
 }
 
-#[test]
-fn vulkan_word_readback_keeps_stride_gaps_at_both_depths() {
-    if let Some(backend) = test_backend() {
-        word_readback_keeps_stride_gaps_at_both_depths_on(&backend);
-    }
+on_each_backend! {
+    page_raster_matches_the_host_composite => page_raster_matches_the_host_composite_on;
+    word_readback_keeps_stride_gaps_at_both_depths => word_readback_keeps_stride_gaps_at_both_depths_on;
+    a_timed_page_is_the_untimed_page => a_timed_page_is_the_untimed_page_on;
+    a_page_renders_into_samples_of_its_depth_only => a_page_renders_into_samples_of_its_depth_only_on;
+    opaque_runs_paint_whole_pixels => opaque_runs_paint_whole_pixels_on;
+    a_page_without_commands_is_paper => a_page_without_commands_is_paper_on;
+    a_stride_past_the_address_space_is_refused => a_stride_past_the_address_space_is_refused_on;
 }
 
+#[cfg(feature = "vulkan")]
 #[test]
 fn vulkan_concurrent_pages_each_get_their_own_pixels() {
-    if let Some(backend) = test_backend() {
+    if let Some(backend) = crate::backend::vulkan::test_backend() {
         concurrent_pages_each_get_their_own_pixels_on(&backend);
         assert!(
             backend.page_sets_within_bound(),
@@ -428,61 +445,9 @@ fn vulkan_concurrent_pages_each_get_their_own_pixels() {
     }
 }
 
-#[test]
-fn vulkan_a_timed_page_is_the_untimed_page() {
-    if let Some(backend) = test_backend() {
-        a_timed_page_is_the_untimed_page_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_a_page_renders_into_samples_of_its_depth_only() {
-    if let Some(backend) = test_backend() {
-        a_page_renders_into_samples_of_its_depth_only_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_opaque_runs_paint_whole_pixels() {
-    if let Some(backend) = test_backend() {
-        opaque_runs_paint_whole_pixels_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_a_page_without_commands_is_paper() {
-    if let Some(backend) = test_backend() {
-        a_page_without_commands_is_paper_on(&backend);
-    }
-}
-
-#[test]
-fn vulkan_a_stride_past_the_address_space_is_refused() {
-    if let Some(backend) = test_backend() {
-        a_stride_past_the_address_space_is_refused_on(&backend);
-    }
-}
-
-/// A page past a device limit or the memory left keeps the device in
-/// service; any other error retires it.
+#[cfg(feature = "vulkan")]
 #[test]
 fn vulkan_retires_device_on_every_error_but_limits_and_memory() {
-    use crate::backend::BackendError;
-    use crate::backend::vulkan::VulkanBackend;
-    let retires = <VulkanBackend as PageDevice>::retires_device;
-    assert!(!retires(&BackendError::DeviceLimit {
-        what: "render_page pixels",
-        need: 2,
-        limit: "maxStorageBufferRange",
-        max: 1,
-    }));
-    assert!(!retires(&BackendError::OutOfMemory {
-        what: "render_page pixels",
-        bytes: 1,
-    }));
-    assert!(retires(&BackendError::KernelFault {
-        kernel: "page_raster_paths",
-        detail: String::new(),
-    }));
-    assert!(retires(&BackendError::msg("device lost")));
+    retires_device_on_every_error_but_limits_and_memory_of::<crate::backend::vulkan::VulkanBackend>(
+    );
 }

@@ -154,6 +154,27 @@ pub trait PageDevice: GpuBackend + Sized {
     }
 }
 
+/// For each `name => body`, a test `name` on every backend this build
+/// tests: `body(&backend)` on the backend its `test_backend` opens, the
+/// test being skipped when none opens.  The tests of a backend live in a
+/// module named after it.
+#[cfg(all(test, feature = "vulkan"))]
+macro_rules! on_each_backend {
+    ($($name:ident => $body:ident;)*) => {
+        #[cfg(feature = "vulkan")]
+        mod vulkan {
+            $(
+                #[test]
+                fn $name() {
+                    if let Some(backend) = crate::backend::vulkan::test_backend() {
+                        super::$body(&backend);
+                    }
+                }
+            )*
+        }
+    };
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod image_tests;
 #[cfg(all(test, feature = "vulkan"))]
