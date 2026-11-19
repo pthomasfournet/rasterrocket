@@ -36,9 +36,10 @@
 //                 otherwise it indexes the backdrops, NO_BACKDROP standing
 //                 for zero.
 // Output:
-//   page          RGB of pc.bits bits per sample, row-major, width * 3
-//                 samples per row; a 16-bit sample is two bytes, low
-//                 byte first.
+//   page          one device pixel per pixel, row-major, width pixels
+//                 per row: at 8 bits one word r | g << 8 | b << 16, at
+//                 16 bits two words r | g << 16 and b; the bits past
+//                 the third sample are zero.
 //
 // An image command samples an image per pixel and composites the sampled
 // colour (page_image.slang); every other command paints one colour with
@@ -136,7 +137,7 @@ struct Params {
 [[vk::binding(2, 0)]] StructuredBuffer<uint> row_starts;
 [[vk::binding(3, 0)]] StructuredBuffer<uint> tile_offsets;
 [[vk::binding(4, 0)]] StructuredBuffer<uint> tile_items;
-[[vk::binding(5, 0)]] RWStructuredBuffer<uint8_t> page;
+[[vk::binding(5, 0)]] RWStructuredBuffer<uint> page;
 
 // x / M rounded to nearest, for x <= M^2, M = 2^bits - 1.
 uint div_max(uint x, uint bits)
@@ -145,14 +146,14 @@ uint div_max(uint x, uint bits)
     return min((t + (t >> bits)) >> bits, (1u << bits) - 1);
 }
 
-// Sample v of the page at sample index i, low byte first.
-void store(uint i, uint v)
+// Pixel p of the page, p = y * width + x, of samples r, g, b.
+void store_pixel(uint p, uint r, uint g, uint b)
 {
     if (pc.bits == 16) {
-        page[i * 2] = uint8_t(v & 0xFF);
-        page[i * 2 + 1] = uint8_t(v >> 8);
+        page[p * 2] = r | g << 16;
+        page[p * 2 + 1] = b;
     } else {
-        page[i] = uint8_t(v);
+        page[p] = r | g << 8 | b << 16;
     }
 }
 
@@ -581,10 +582,7 @@ void raster(uint3 lid, uint3 wid)
     switch_object(0, x, y, open, pr, pg, pb, r, g, b);
 
     if (!on_page) return;
-    uint o = (py * pc.width + px) * 3;
-    store(o, r);
-    store(o + 1, g);
-    store(o + 2, b);
+    store_pixel(py * pc.width + px, r, g, b);
 }
 
 [shader("compute")]

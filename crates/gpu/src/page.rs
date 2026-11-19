@@ -29,6 +29,8 @@ use std::fmt;
 use bytemuck::{Pod, Zeroable};
 use color::{Sample, SampleDepth};
 
+use crate::backend::layout::{device_pixel_words, unpad_pixels};
+
 mod bins;
 mod budget;
 mod clip;
@@ -244,9 +246,19 @@ pub(crate) struct TableBases {
 /// A sample type of the page raster's output: `u8` for an 8-bit page,
 /// `u16` for a 16-bit one.
 pub trait PageSample: Sample + sealed::Sealed {
-    /// `dst` from `src`, the same samples little-endian, each of the bytes
-    /// of a sample of its depth ([`SampleDepth::bytes`]).
-    fn copy_from_le(dst: &mut [Self], src: &[u8]);
+    /// The bytes of one device pixel of this depth: its three samples in
+    /// whole 32-bit words ([`device_pixel_words`]).
+    const DEVICE_PIXEL_BYTES: usize = 4 * device_pixel_words(Self::DEPTH.bytes() as usize);
+
+    /// `dst`, `3 × n` samples, from `src`, at least `n` device pixels of
+    /// [`Self::DEVICE_PIXEL_BYTES`] bytes each: the samples of each device
+    /// pixel, little-endian, without its pad bytes.
+    ///
+    /// # Panics
+    ///
+    /// When `dst` does not hold whole pixels or `src` holds fewer device
+    /// pixels than `dst` asks for.
+    fn copy_from_words(dst: &mut [Self], src: &[u8]);
 }
 
 mod sealed {
@@ -256,15 +268,16 @@ mod sealed {
 }
 
 impl PageSample for u8 {
-    fn copy_from_le(dst: &mut [Self], src: &[u8]) {
-        dst.copy_from_slice(src);
+    fn copy_from_words(dst: &mut [Self], src: &[u8]) {
+        unpad_pixels(src, dst, 1);
     }
 }
 
 impl PageSample for u16 {
-    fn copy_from_le(dst: &mut [Self], src: &[u8]) {
-        for (d, s) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
-            *d = Self::from_le_bytes(*s);
+    fn copy_from_words(dst: &mut [Self], src: &[u8]) {
+        unpad_pixels(src, bytemuck::cast_slice_mut(dst), 2);
+        for d in dst {
+            *d = Self::from_le(*d);
         }
     }
 }

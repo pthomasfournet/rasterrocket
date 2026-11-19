@@ -9,6 +9,11 @@
 //! map, a copy of the page into a host read-back buffer.  Every buffer is
 //! kept between pages and grown on demand.
 //!
+//! The device page holds one device pixel per pixel, in whole 32-bit words
+//! ([`crate::backend::layout`]); the read-back drops each pixel's pad
+//! bytes and writes each row's packed samples at its stride in the
+//! caller's buffer, leaving the samples between rows unchanged.
+//!
 //! A timed page ([`VulkanBackend::render_page_timed`]) also reads the host
 //! clock between its host stages and writes device timestamps between its
 //! device stages; an untimed page does neither.
@@ -268,14 +273,14 @@ impl VulkanBackend {
                 S::DEPTH.bits()
             ))
         };
-        // The samples of a row, the bytes of the packed page, and the
-        // samples of `out` the page spans: the last row ends `row` samples
-        // after the start of row `height - 1`.
+        // The samples of a row, the bytes of a device row and of the device
+        // page, and the samples of `out` the page spans: the last row ends
+        // `row` samples after the start of row `height - 1`.
         let row = width.checked_mul(3).ok_or_else(overflow)?;
-        let row_bytes = row
-            .checked_mul(S::DEPTH.bytes() as usize)
+        let device_row = width
+            .checked_mul(S::DEVICE_PIXEL_BYTES)
             .ok_or_else(overflow)?;
-        let page_len = row_bytes.checked_mul(height).ok_or_else(overflow)?;
+        let page_len = device_row.checked_mul(height).ok_or_else(overflow)?;
         let span = stride
             .checked_mul(height - 1)
             .and_then(|n| n.checked_add(row))
@@ -422,8 +427,8 @@ impl VulkanBackend {
         let submit_wait = laps.lap();
 
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
-        for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(row_bytes)) {
-            S::copy_from_le(&mut dst[..row], src);
+        for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(device_row)) {
+            S::copy_from_words(&mut dst[..row], src);
         }
         let read = laps.lap();
         if let (Some(times), Some(clock)) = (times, clock) {
@@ -655,6 +660,80 @@ mod tests {
         };
         page_raster_matches_the_host_composite_at::<u8>(&backend);
         page_raster_matches_the_host_composite_at::<u16>(&backend);
+    }
+
+    /// Pages at the depth of `S` whose widths make device rows of one
+    /// pixel, of an odd pixel count and of more than two tiles, each
+    /// painted whole and then by random tables, read back into rows
+    /// `width × 3 + 5` samples apart: each row is the reference raster's,
+    /// and the samples after each row keep their prior value.
+    fn word_readback_keeps_stride_gaps_at<S: PageSample>(backend: &super::VulkanBackend) {
+        let max = u16::try_from(S::MAX.signed()).unwrap();
+        let sentinel = sample::<S>(max / 3 + 1);
+        let mut rng = Rng(41);
+        for (width, height) in [(1, 1), (17, 3), (33, 17)] {
+            let mut page = PageCommands::new(width, height, S::DEPTH, [max, max - 1, max - 2]);
+            let rows = i32::try_from(height).unwrap();
+            let last = i32::try_from(width).unwrap() - 1;
+            let cover = HostCmd {
+                y_min: 0,
+                row_starts: (0..=height).collect(),
+                spans: vec![[0, last, -1]; height as usize],
+                bytes: Vec::new(),
+                bounds: PixelBounds {
+                    x0: 0,
+                    y0: 0,
+                    x1: last,
+                    y1: rows - 1,
+                },
+                rgb: [max / 5, max / 7, max / 11],
+                a_input: max / 2 + 1,
+            };
+            page.push_coverage(cover.table(), cover.bounds, cover.rgb, cover.a_input)
+                .expect("push");
+            for _ in 0..30 {
+                let c = random_cmd(&mut rng, width, height, max);
+                page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
+                    .expect("push");
+            }
+            let want: Vec<S> = crate::page::reference::render_page(&page)
+                .expect("reference")
+                .into_iter()
+                .map(sample::<S>)
+                .collect();
+            let paper = page.paper().map(sample::<S>);
+            assert!(
+                want.as_chunks::<3>().0.iter().any(|p| *p != paper),
+                "{width}×{height}: the commands paint no pixel"
+            );
+            let row = width as usize * 3;
+            let stride = row + 5;
+            let mut out = vec![sentinel; stride * height as usize];
+            backend
+                .render_page(&page, &mut out, stride)
+                .expect("render_page");
+            let bits = S::DEPTH.bits();
+            for (y, (got, want)) in out
+                .chunks_exact(stride)
+                .zip(want.chunks_exact(row))
+                .enumerate()
+            {
+                assert_eq!(&got[..row], want, "{bits} bits, {width}×{height}: row {y}");
+                assert!(
+                    got[row..].iter().all(|&s| s == sentinel),
+                    "{bits} bits, {width}×{height}: gap after row {y} written"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_readback_keeps_stride_gaps_at_both_depths() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        word_readback_keeps_stride_gaps_at::<u8>(&backend);
+        word_readback_keeps_stride_gaps_at::<u16>(&backend);
     }
 
     /// Pages of different sizes rendered at once from more threads than

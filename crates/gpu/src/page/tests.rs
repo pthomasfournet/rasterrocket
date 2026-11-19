@@ -203,3 +203,18 @@ fn a_sample_past_the_depth_is_refused() {
         255,
     );
 }
+
+#[test]
+fn copy_from_words_unpacks_both_depths() {
+    assert_eq!((u8::DEVICE_PIXEL_BYTES, u16::DEVICE_PIXEL_BYTES), (4, 8));
+    let mut eight = [0u8; 6];
+    u8::copy_from_words(&mut eight, &[1, 2, 3, 0, 4, 5, 6, 0]);
+    assert_eq!(eight, [1, 2, 3, 4, 5, 6]);
+    let words: Vec<u8> = [0x0002_0001u32, 0x0000_0003]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let mut sixteen = [0u16; 3];
+    u16::copy_from_words(&mut sixteen, &words);
+    assert_eq!(sixteen, [1, 2, 3]);
+}

@@ -3428,7 +3428,11 @@ page 415 at 600 and 950 dpi (1.0 GB, the largest that fits) and at 670 dpi
 in 16 bits, `corpus-06` page 2 (3 188 commands) and `corpus-02` page 3
 (1 702) at 600 and 1200 dpi, and at 1200 dpi in 16 bits: all byte-identical, no
 device lost, each whole process under 3 s on the device (CPU fallbacks
-up to 6 s), so no submission needs splitting.
+up to 6 s), so no submission needs splitting. These sizes are of the
+packed page, three samples per pixel; the device page now stores each
+pixel in whole 32-bit words (4 bytes at 8 bits, 8 at 16) and the host
+repacks the rows on read-back, so the largest page that fits a range
+holds three quarters as many pixels at either depth.
 
 **Unreleased on master: `--print` on Windows.** `--print`, `--printer`,
 `--copies`, `--duplex` and `--list-printers` work on Windows, through GDI
