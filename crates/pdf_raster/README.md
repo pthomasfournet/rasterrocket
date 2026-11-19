@@ -2,7 +2,7 @@
 
 The library entry point of the rasterrocket workspace: PDF pages to 8-bit
 grayscale pixel buffers (or RGB, RGBA and CMYK, at 8 or 16 bits per sample),
-in process and in pure Rust, ready for Tesseract or any other OCR engine.
+in process, ready for Tesseract or any other OCR engine.
 
 ```rust
 use std::path::Path;

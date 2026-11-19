@@ -8,7 +8,7 @@ authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
 readme.workspace     = true
-description = "Native PDF content-stream interpreter — poppler-free render path for rasterrocket"
+description = "PDF content-stream interpreter: the render path of rasterrocket"
 keywords    = ["pdf", "interpreter", "renderer", "fonts", "images"]
 categories  = ["parser-implementations", "rendering", "multimedia::images"]
 

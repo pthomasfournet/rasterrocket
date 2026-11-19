@@ -8,7 +8,7 @@ license.workspace    = true
 repository.workspace = true
 readme               = "README.md"
 publish     = false
-description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a printer, with pdftoppm-style flags. Pure Rust, zero Poppler."
+description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a printer, with pdftoppm-style flags."
 keywords    = ["pdf", "raster", "cli", "pdftoppm", "renderer"]
 categories  = ["command-line-utilities", "multimedia::images", "rendering"]
 

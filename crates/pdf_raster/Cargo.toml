@@ -8,7 +8,7 @@ license.workspace    = true
 repository.workspace = true
 readme               = "README.md"
 publish     = false
-description = "PDF to pixel buffer — pure Rust, zero Poppler. GitHub-distributed; build the `rrocket` CLI from source."
+description = "PDF pages to pixel buffers in process, at 8 or 16 bits, gray, RGB, RGBA or CMYK, on the CPU or the GPU. GitHub-distributed; build the `rrocket` CLI from source."
 keywords    = ["pdf", "raster", "ocr", "renderer", "vulkan"]
 categories  = ["multimedia::images", "rendering", "parser-implementations"]
 

@@ -1,6 +1,6 @@
 # rasterrocket
 
-Pure Rust PDF → pixels pipeline. Zero Poppler, zero subprocesses, zero Leptonica in the render path.
+Fast PDF and comic-archive rasteriser, as a Rust library and the `rrocket` command: pages go straight to pixel buffers for OCR, or to image files, a printer or a fax, on the CPU (AVX-512, AVX2, NEON) or the GPU (CUDA, Vulkan), with hostile input handled as a bounded error.
 
 Renders PDF pages to 8-bit grayscale pixel buffers for direct consumption by Tesseract OCR or any other downstream consumer. No intermediate files. Pages can also be rendered as RGB, RGBA or CMYK, at 8 or 16 bits per sample, and converted to an ICC output profile.
 
@@ -739,7 +739,7 @@ tests/compare/compare.sh -r 150 tests/fixtures/corpus-01-native-text-small.pdf
 rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture:
 
 - **Comic-archive input.** The `.cbz`/`.cb7`/`.cbt`/`.cbr` reader and the loose-image
-  decoders (`rasterrocket-comic`) are pure Rust and hold the same bar as the PDF
+  decoders (`rasterrocket-comic`) are memory-safe Rust and hold the same bar as the PDF
   path: a per-entry decompressed-size cap and a cap on the archive's
   decompressed total (`--max-archive-mib`) defuse decompression bombs, image
   dimensions are validated *before* a codec allocates its pixel buffer (defusing
@@ -749,7 +749,7 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   and 2 GiB of working memory.
 - **Memory-safe core.** The PDF parser, content interpreter, font-program
   parsing (TrueType, OpenType, CFF, Type 1) and glyph rasterisation, and the
-  JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders are pure Rust. Malformed, truncated, adversarial, or hostile input is converted to a
+  JBIG2 / CCITT / JPEG / JPEG 2000 / Flate / LZW decoders are memory-safe Rust. Malformed, truncated, adversarial, or hostile input is converted to a
   clear per-page `Err` or a bounded skip — never a silent wrong render, an
   unbounded allocation, an infinite loop, or a process abort. The render
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an
@@ -764,11 +764,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   (checked as each page is rendered; one warning per document) — is rendered
   for its static appearance and a loud warning is logged per entry point;
   detection is purely structural and no `/JS` is ever decoded or evaluated.
-- **No system C libraries in the render path.** Embedded fonts, historically
-  among the highest-CVE inputs of any PDF stack, are parsed by local forks of
+- **Native code in the build.** Embedded fonts are parsed by local forks of
   `read-fonts` / `skrifa` and rasterised by rasterrocket's own coverage
-  rasteriser; no C font library is linked. JPEG 2000 is decoded in pure Rust
-  (`hayro-jpeg2000`), JPEG by a local fork of `zune-jpeg`. The only C code
+  rasteriser; JPEG 2000 is decoded by a local fork of `hayro-jpeg2000`, JPEG
+  by a local fork of `zune-jpeg`. The only C code
   in the default build is libdeflate
   and, in the `rrocket` binary, the mimalloc allocator, both compiled from
   vendored source; AVIF comic pages are decoded by a local fork of `rav1d`,

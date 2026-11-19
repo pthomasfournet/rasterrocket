@@ -1,6 +1,6 @@
 # rasterrocket Roadmap
 
-Goal: full PDF → pixels pipeline in pure Rust. Zero poppler. Zero C++ in the render path.
+Goal: the fastest correct PDF → pixels pipeline, from a Rust library and the `rrocket` command, for OCR, image output, printing and fax.
 
 The rasterrocket-render crate is complete at the pixel level. The `rasterrocket-interp` crate is the native renderer and is now the only CLI path. The `pdf_bridge` / poppler crate is retained as a reference baseline but is no longer linked by the CLI binary.
 

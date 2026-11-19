@@ -1,6 +1,6 @@
 # Getting Started
 
-rasterrocket converts PDF pages to pixel buffers in pure Rust. No subprocesses, no Leptonica, no Poppler in the render path.
+rasterrocket renders PDF pages and comic archives to pixel buffers in process, ready for OCR, and to image files, a printer or a fax through the `rrocket` command.
 
 ## What it does
 
