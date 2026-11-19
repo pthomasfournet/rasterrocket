@@ -8,21 +8,22 @@ use std::time::Duration;
 
 use gpu::backend::BackendError;
 use gpu::backend::page_device::PageDevice;
-use gpu::backend::vulkan::VulkanBackend;
+
+use crate::device_init::SessionDevice;
 
 /// One device of a session's GPU pages.
-pub(super) struct Device {
+pub(super) struct Device<B: PageDevice> {
     /// The selector the device is opened with, as given; the automatically
     /// ranked device when `None`.
     selector: Option<String>,
     /// The device once its opening has finished: `None` when it failed.
-    slot: Arc<OnceLock<Option<Arc<VulkanBackend>>>>,
+    slot: Arc<OnceLock<Option<Arc<B>>>>,
     /// The opening of the device.
     opener: Mutex<Opener>,
     /// The pages holding the device: recording for it, waiting for it or
     /// rendering on it.  A page claims its device before recording, since
     /// what it records depends on the device
-    /// ([`VulkanBackend::page_paths`]).
+    /// ([`PageDevice::page_paths`]).
     in_flight: AtomicUsize,
     /// Set once the device has failed; it is offered no page afterwards.
     retired: AtomicBool,
@@ -53,11 +54,7 @@ pub(super) struct Openings {
 impl Openings {
     /// Set `slot` to `outcome` (only its first outcome is kept) and wake
     /// the pages waiting.
-    fn settle(
-        &self,
-        slot: &OnceLock<Option<Arc<VulkanBackend>>>,
-        outcome: Option<Arc<VulkanBackend>>,
-    ) {
+    fn settle<B>(&self, slot: &OnceLock<Option<Arc<B>>>, outcome: Option<Arc<B>>) {
         let guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         drop(slot.set(outcome));
         drop(guard);
@@ -80,9 +77,9 @@ impl Openings {
 }
 
 /// What a device can do for a page now.
-pub(super) enum State<'a> {
+pub(super) enum State<'a, B> {
     /// Open and in service, with its load.
-    Open(&'a VulkanBackend, Load),
+    Open(&'a B, Load),
     /// Still opening, or not yet asked to.
     Opening,
     /// Did not open.
@@ -91,14 +88,14 @@ pub(super) enum State<'a> {
     Retired,
 }
 
-impl Device {
+impl<B: PageDevice> Device<B> {
     /// A device opened when a page first asks for one, with `selector`.
     pub(super) fn deferred(selector: Option<String>) -> Self {
         Self::new(selector, OnceLock::new(), Opener::Deferred)
     }
 
     /// The open device `backend`, opened with `selector`.
-    pub(super) fn open(selector: Option<String>, backend: Arc<VulkanBackend>) -> Self {
+    pub(super) fn open(selector: Option<String>, backend: Arc<B>) -> Self {
         Self::new(selector, OnceLock::from(Some(backend)), Opener::Settled)
     }
 
@@ -108,11 +105,7 @@ impl Device {
         Self::new(None, OnceLock::new(), Opener::Settled)
     }
 
-    fn new(
-        selector: Option<String>,
-        slot: OnceLock<Option<Arc<VulkanBackend>>>,
-        opener: Opener,
-    ) -> Self {
+    fn new(selector: Option<String>, slot: OnceLock<Option<Arc<B>>>, opener: Opener) -> Self {
         Self {
             selector,
             slot: Arc::new(slot),
@@ -124,7 +117,7 @@ impl Device {
     }
 
     /// What the device can do for a page now.
-    pub(super) fn state(&self) -> State<'_> {
+    pub(super) fn state(&self) -> State<'_, B> {
         if self.retired.load(Ordering::Acquire) {
             return State::Retired;
         }
@@ -133,13 +126,13 @@ impl Device {
             Some(None) => State::NoDevice,
             Some(Some(backend)) => State::Open(
                 backend,
-                Load::of(self.in_flight.load(Ordering::Relaxed), backend),
+                Load::of(self.in_flight.load(Ordering::Relaxed), &**backend),
             ),
         }
     }
 
     /// The device, for a page, which holds it until the claim drops.
-    pub(super) fn claim<'a>(&'a self, backend: &'a VulkanBackend) -> Claim<'a> {
+    pub(super) fn claim<'a>(&'a self, backend: &'a B) -> Claim<'a, B> {
         let _ = self.in_flight.fetch_add(1, Ordering::Relaxed);
         Claim {
             device: self,
@@ -163,45 +156,12 @@ impl Device {
         }
     }
 
-    /// Start opening the device on a new thread unless it has been
-    /// started; `openings` is woken once it settles.  A device that does
-    /// not open, or a thread that does not start, is logged at `error`.
-    pub(super) fn start_opening(&self, openings: &Arc<Openings>) {
-        let mut opener = self.opener.lock().unwrap_or_else(PoisonError::into_inner);
-        if !matches!(*opener, Opener::Deferred) {
-            return;
-        }
-        let selector = self.selector.clone();
-        let slot = Arc::clone(&self.slot);
-        let wake = Arc::clone(openings);
-        let spawned = std::thread::Builder::new()
-            .name("rrocket-gpu-pages".to_owned())
-            .spawn(move || {
-                wake.settle(&slot, open_device(selector.as_deref()));
-            });
-        *opener = match spawned {
-            Ok(thread) => Opener::Running(thread),
-            Err(e) => {
-                log::error!(
-                    "rasterrocket: GPU page rendering was requested, but the thread that opens \
-                     the Vulkan device {} did not start ({e}); no page renders on it",
-                    self.name()
-                );
-                openings.settle(&self.slot, None);
-                Opener::Settled
-            }
-        };
-    }
-
     /// Account for the device failing on page `page_num` with `error`: a
     /// page beyond the device's limits, or beyond the memory it has left,
     /// is logged at `warn` and leaves the device in service; any other
     /// error retires the device, logged at `warn` once.
     pub(super) fn fail(&self, page_num: u32, error: &BackendError) {
-        if matches!(
-            error,
-            BackendError::DeviceLimit { .. } | BackendError::OutOfMemory { .. }
-        ) {
+        if !B::retires_device(error) {
             log::warn!(
                 "page {page_num}: too large for the GPU page device {} ({error}); the page \
                  renders on the CPU and the device stays in service",
@@ -285,8 +245,41 @@ impl Device {
     }
 }
 
+impl<B: SessionDevice> Device<B> {
+    /// Start opening the device on a new thread unless it has been
+    /// started; `openings` is woken once it settles.  A device that does
+    /// not open, or a thread that does not start, is logged at `error`.
+    pub(super) fn start_opening(&self, openings: &Arc<Openings>) {
+        let mut opener = self.opener.lock().unwrap_or_else(PoisonError::into_inner);
+        if !matches!(*opener, Opener::Deferred) {
+            return;
+        }
+        let selector = self.selector.clone();
+        let slot = Arc::clone(&self.slot);
+        let wake = Arc::clone(openings);
+        let spawned = std::thread::Builder::new()
+            .name("rrocket-gpu-pages".to_owned())
+            .spawn(move || {
+                wake.settle(&slot, open_device::<B>(selector.as_deref()));
+            });
+        *opener = match spawned {
+            Ok(thread) => Opener::Running(thread),
+            Err(e) => {
+                log::error!(
+                    "rasterrocket: GPU page rendering was requested, but the thread that opens \
+                     the {} device {} did not start ({e}); no page renders on it",
+                    B::API,
+                    self.name()
+                );
+                openings.settle(&self.slot, None);
+                Opener::Settled
+            }
+        };
+    }
+}
+
 /// The load of an open device: the pages holding it and its mean time
-/// per page raster ([`VulkanBackend::page_mean`]), unknown before one
+/// per page raster ([`PageDevice::page_mean`]), unknown before one
 /// after its first has run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Load {
@@ -295,7 +288,7 @@ pub(super) struct Load {
 }
 
 impl Load {
-    fn of(held: usize, backend: &VulkanBackend) -> Self {
+    fn of<B: PageDevice>(held: usize, backend: &B) -> Self {
         Self {
             held,
             mean_nanos: backend.page_mean().map(|mean| mean.as_nanos()),
@@ -315,13 +308,13 @@ impl Load {
 }
 
 /// A device, held by one page until dropped.
-pub(crate) struct Claim<'a> {
-    pub(super) device: &'a Device,
+pub(crate) struct Claim<'a, B: PageDevice> {
+    pub(super) device: &'a Device<B>,
     /// The device.
-    pub(crate) backend: &'a VulkanBackend,
+    pub(crate) backend: &'a B,
 }
 
-impl Drop for Claim<'_> {
+impl<B: PageDevice> Drop for Claim<'_, B> {
     fn drop(&mut self) {
         let _ = self.device.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
@@ -329,9 +322,9 @@ impl Drop for Claim<'_> {
 
 /// The GPU-page device of `selector`, or `None`, logged at `error`, when
 /// it does not open.
-pub(crate) fn open_device(selector: Option<&str>) -> Option<Arc<VulkanBackend>> {
+pub(crate) fn open_device<B: SessionDevice>(selector: Option<&str>) -> Option<Arc<B>> {
     let started = std::time::Instant::now();
-    crate::vk_init::open_backend(selector)
+    crate::device_init::open_backend::<B>(selector)
         .inspect(|backend| {
             log::debug!(
                 "rasterrocket: GPU page device {} open after {:.0} ms",
@@ -341,8 +334,9 @@ pub(crate) fn open_device(selector: Option<&str>) -> Option<Arc<VulkanBackend>> 
         })
         .inspect_err(|e| {
             log::error!(
-                "rasterrocket: GPU page rendering was requested, but the Vulkan \
+                "rasterrocket: GPU page rendering was requested, but the {} \
                  device {} did not open ({e}); no page renders on it",
+                B::API,
                 selector.map_or_else(|| "picked automatically".to_owned(), |s| format!("{s:?}"))
             );
         })

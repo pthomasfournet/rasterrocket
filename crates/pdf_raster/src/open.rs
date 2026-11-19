@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 #[cfg(feature = "vulkan")]
-use crate::vk_init::init_vk_backend;
+use crate::device_init::init_backend;
 use crate::{BackendPolicy, FormType, RasterError, SessionConfig, UnsupportedFeature};
 
 /// An opened PDF document ready for per-page rendering.
@@ -87,7 +87,8 @@ pub struct RasterSession {
     /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
     /// renders every page on the CPU.
     #[cfg(feature = "vulkan")]
-    pub(crate) device_pages: Option<crate::device_pages::DevicePages>,
+    pub(crate) device_pages:
+        Option<crate::device_pages::DevicePages<gpu::backend::vulkan::VulkanBackend>>,
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
@@ -476,7 +477,10 @@ fn open_session_with_doc(
     // The Vulkan backend initialises up front so that failures surface
     // here rather than mid-render.
     #[cfg(feature = "vulkan")]
-    let vk_backend = init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
+    let vk_backend = init_backend::<gpu::backend::vulkan::VulkanBackend>(
+        config.policy,
+        config.vulkan_device.as_deref(),
+    )?;
     #[cfg(feature = "vulkan")]
     let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
 

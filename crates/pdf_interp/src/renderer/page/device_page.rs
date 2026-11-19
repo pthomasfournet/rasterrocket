@@ -40,7 +40,6 @@ use std::rc::Rc;
 use color::{Sample, SampleDepth};
 use gpu::backend::BackendError;
 use gpu::backend::page_device::PageDevice;
-use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::{
     AreaPath, CoverageRows, PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds,
 };
@@ -347,9 +346,9 @@ impl PageRenderer<'_> {
     ///
     /// When the canvas is not an RGB canvas of the page's depth, or the
     /// device fails; the canvas is unchanged then.
-    pub fn paint_device_page(
+    pub fn paint_device_page<B: PageDevice>(
         &mut self,
-        backend: &VulkanBackend,
+        backend: &B,
         page: &PageCommands,
     ) -> Result<(), BackendError> {
         match &mut self.canvas {

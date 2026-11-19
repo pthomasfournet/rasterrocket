@@ -51,8 +51,10 @@ impl DeviceHold {
         config.check()?;
         #[cfg(feature = "vulkan")]
         let vulkan = {
-            let session =
-                crate::vk_init::init_vk_backend(config.policy, config.vulkan_device.as_deref())?;
+            let session = crate::device_init::init_backend::<gpu::backend::vulkan::VulkanBackend>(
+                config.policy,
+                config.vulkan_device.as_deref(),
+            )?;
             let mut held = crate::device_pages::open_all(config, session.as_ref())?;
             let session = session.filter(|s| !held.iter().any(|h| Arc::ptr_eq(h, s)));
             held.extend(session);

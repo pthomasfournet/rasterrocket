@@ -3731,6 +3731,9 @@ API changes in `rasterrocket-gpu` (callers bring the trait into scope):
   `backend::page_device`; neither is re-exported from `backend::vulkan`.
   An empty selector's error reads "device selector is empty" (was "Vulkan
   device selector is empty").
+- In `rasterrocket-interp`, `PageRenderer::paint_device_page` takes any
+  `PageDevice` (was `&VulkanBackend`); `rasterrocket`'s GPU page queue is
+  generic over it the same way.
 
 **Unreleased on master: Vulkan devices without 8-bit storage are
 eligible.** The Vulkan device no longer requests `storageBuffer8BitAccess`,

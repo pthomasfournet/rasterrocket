@@ -118,6 +118,8 @@ pub(crate) mod decode_queue;
 mod decoders;
 pub mod deskew;
 #[cfg(feature = "vulkan")]
+mod device_init;
+#[cfg(feature = "vulkan")]
 mod device_pages;
 mod error;
 pub(crate) mod gcv;
@@ -135,8 +137,6 @@ mod render;
 mod request;
 #[cfg(test)]
 mod test_pdf;
-#[cfg(feature = "vulkan")]
-mod vk_init;
 
 use std::path::Path;
 

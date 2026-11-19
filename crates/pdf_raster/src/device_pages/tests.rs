@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gpu::backend::BackendError;
+use gpu::backend::vulkan::VulkanBackend;
 
 use super::devices::{Device, Load};
 use super::{DevicePages, choose};
@@ -50,7 +51,7 @@ fn gpu_session(pdf: Vec<u8>) -> Option<RasterSession> {
         .ok()
 }
 
-fn device_pages(session: &RasterSession) -> &DevicePages {
+fn device_pages(session: &RasterSession) -> &DevicePages<VulkanBackend> {
     session.device_pages.as_ref().expect("a GPU-page session")
 }
 

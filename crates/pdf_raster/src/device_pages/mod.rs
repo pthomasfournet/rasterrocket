@@ -1,4 +1,4 @@
-//! The GPU page queue: pages rendered whole on Vulkan devices beside the
+//! The GPU page queue: pages rendered whole on GPU page devices beside the
 //! CPU workers ([`SessionConfig::gpu_pages`]).
 //!
 //! A session renders its GPU pages on one device, or on several
@@ -38,7 +38,6 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use gpu::backend::BackendError;
 use gpu::backend::page_device::PageDevice;
-use gpu::backend::vulkan::VulkanBackend;
 use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRenderer};
 
 pub use counts::DevicePageCounts;
@@ -46,6 +45,7 @@ use counts::{Miss, Outcome};
 pub(crate) use devices::open_device;
 use devices::{Claim, Device, Load, Openings, State};
 
+use crate::device_init::SessionDevice;
 use crate::render::PageJob;
 use crate::{BackendPolicy, CancelToken, RasterError};
 
@@ -58,10 +58,10 @@ const OPEN_WAIT: Duration = crate::GPU_PAGE_OPEN_WAIT;
 /// cancellation.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 
-/// The devices of a session's GPU pages.
-pub(crate) struct DevicePages {
+/// The devices of a session's GPU pages, of the backend `B`.
+pub(crate) struct DevicePages<B: PageDevice> {
     /// The devices, in the order of [`crate::SessionConfig::gpu_devices`].
-    devices: Vec<Device>,
+    devices: Vec<Device<B>>,
     /// The wake-up of pages waiting for a device to open.
     openings: Arc<Openings>,
     /// The longest the pages wait for a device to open: [`OPEN_WAIT`].
@@ -107,19 +107,22 @@ impl TestFaults {
 ///
 /// # Errors
 ///
-/// As [`crate::vk_init::resolve_page_devices`].
-fn selectors(config: &crate::SessionConfig) -> Result<Vec<Option<String>>, RasterError> {
+/// As [`crate::device_init::resolve_page_devices`].
+fn selectors<B: SessionDevice>(
+    config: &crate::SessionConfig,
+) -> Result<Vec<Option<String>>, RasterError> {
     if config.gpu_devices.is_empty() {
         Ok(vec![config.vulkan_device.clone()])
     } else {
-        crate::vk_init::resolve_page_devices(config.policy, &config.gpu_devices)
+        crate::device_init::resolve_page_devices::<B>(config.policy, &config.gpu_devices)
     }
 }
 
 /// An open GPU page device and the selector it is opened with.
-type OpenDevice = (Option<String>, Arc<VulkanBackend>);
+type OpenDevice<B> = (Option<String>, Arc<B>);
 
-/// The GPU page devices of `config` under [`BackendPolicy::ForceVulkan`],
+/// The GPU page devices of `config` under `B`'s forcing policy
+/// ([`SessionDevice::FORCE`]),
 /// with the selector each is opened with: `session`, the session's own
 /// device, for the entry that names it (or for
 /// [`crate::SessionConfig::vulkan_device`] when
@@ -128,74 +131,75 @@ type OpenDevice = (Option<String>, Arc<VulkanBackend>);
 ///
 /// # Errors
 ///
-/// As [`selectors`] and [`crate::vk_init::init_vk_backend`].
-fn forced_backends(
+/// As [`selectors`] and [`crate::device_init::init_backend`].
+fn forced_backends<B: SessionDevice>(
     config: &crate::SessionConfig,
-    session: &Arc<VulkanBackend>,
-) -> Result<Vec<OpenDevice>, RasterError> {
+    session: &Arc<B>,
+) -> Result<Vec<OpenDevice<B>>, RasterError> {
     if config.gpu_devices.is_empty() {
         return Ok(vec![(config.vulkan_device.clone(), Arc::clone(session))]);
     }
     let own = Some(session.device_index().to_string());
-    selectors(config)?
+    selectors::<B>(config)?
         .into_iter()
         .map(|s| {
             if s == own {
                 return Ok((s, Arc::clone(session)));
             }
-            crate::vk_init::init_vk_backend(BackendPolicy::ForceVulkan, s.as_deref())?
+            crate::device_init::init_backend::<B>(B::FORCE, s.as_deref())?
                 .map(|b| (s, b))
                 .ok_or_else(|| {
-                    RasterError::BackendUnavailable(
-                        "the Vulkan backend opened no GPU page device".to_owned(),
-                    )
+                    RasterError::BackendUnavailable(format!(
+                        "the {} backend opened no GPU page device",
+                        B::API
+                    ))
                 })
         })
         .collect()
 }
 
 /// The GPU page devices of `config` opened now, beside `session`, the
-/// session's own device: under [`BackendPolicy::ForceVulkan`] every one
+/// session's own device: under `B`'s forcing policy every one
 /// ([`forced_backends`]), or the error of the first that does not open;
 /// under `Auto` with [`crate::SessionConfig::gpu_pages`] those that open,
 /// each that does not being logged at `error`; otherwise none.
 ///
 /// # Errors
 ///
-/// As [`selectors`]; under `ForceVulkan`, as [`forced_backends`].
-pub(crate) fn open_all(
+/// As [`selectors`]; under the forcing policy, as [`forced_backends`].
+pub(crate) fn open_all<B: SessionDevice>(
     config: &crate::SessionConfig,
-    session: Option<&Arc<VulkanBackend>>,
-) -> Result<Vec<Arc<VulkanBackend>>, RasterError> {
+    session: Option<&Arc<B>>,
+) -> Result<Vec<Arc<B>>, RasterError> {
     if !config.gpu_pages {
         return Ok(Vec::new());
     }
     match (config.policy, session) {
-        (BackendPolicy::ForceVulkan, Some(session)) => Ok(forced_backends(config, session)?
+        (policy, Some(session)) if policy == B::FORCE => Ok(forced_backends(config, session)?
             .into_iter()
             .map(|(_, backend)| backend)
             .collect()),
-        (BackendPolicy::Auto, _) => Ok(selectors(config)?
+        (BackendPolicy::Auto, _) => Ok(selectors::<B>(config)?
             .iter()
-            .filter_map(|s| open_device(s.as_deref()))
+            .filter_map(|s| open_device::<B>(s.as_deref()))
             .collect()),
         _ => Ok(Vec::new()),
     }
 }
 
-impl DevicePages {
+impl<B: SessionDevice> DevicePages<B> {
     /// The GPU pages of a session opened with `config` that holds
-    /// `backend`: `None` unless the config asks for them.  Under
-    /// [`BackendPolicy::ForceVulkan`] the devices are open
+    /// `backend`: `None` unless the config asks for them.  Under the
+    /// forcing policy ([`SessionDevice::FORCE`]) the devices are open
     /// ([`forced_backends`]); otherwise each is opened when a page first
     /// asks for one.
     ///
     /// # Errors
     ///
-    /// As [`selectors`]; under `ForceVulkan`, as [`forced_backends`].
+    /// As [`selectors`]; under the forcing policy, as [`forced_backends`].
     pub(crate) fn for_session(
         config: &crate::SessionConfig,
-        backend: Option<&Arc<VulkanBackend>>,
+        backend: Option<&Arc<B>>,
     ) -> Result<Option<Self>, RasterError> {
         if !config.gpu_pages {
             return Ok(None);
@@ -205,48 +209,12 @@ impl DevicePages {
                 .into_iter()
                 .map(|(s, b)| Device::open(s, b))
                 .collect(),
-            None => selectors(config)?
+            None => selectors::<B>(config)?
                 .into_iter()
                 .map(Device::deferred)
                 .collect(),
         };
         Ok(Some(Self::new(devices)))
-    }
-
-    fn new(devices: Vec<Device>) -> Self {
-        Self {
-            devices,
-            openings: Arc::default(),
-            open_wait: OPEN_WAIT,
-            open_deadline: OnceLock::new(),
-            open_timed_out: AtomicBool::new(false),
-            wide_declined: AtomicBool::new(false),
-            counts: Mutex::new(DevicePageCounts::default()),
-            #[cfg(test)]
-            faults: TestFaults::default(),
-        }
-    }
-
-    /// The open device in service where one more page expects the
-    /// shortest wait ([`choose`]), the first listed among equals; else
-    /// whether one may still open (`Ok(None)`) or why none will.
-    fn pick(&self) -> Result<Option<Claim<'_>>, Miss> {
-        let mut open: Vec<(&Device, &VulkanBackend, Load)> = Vec::with_capacity(self.devices.len());
-        let (mut opening, mut retired) = (false, false);
-        for device in &self.devices {
-            match device.state() {
-                State::Open(backend, load) => open.push((device, backend, load)),
-                State::Opening => opening = true,
-                State::Retired => retired = true,
-                State::NoDevice => {}
-            }
-        }
-        match choose(open.iter().map(|&(_, _, load)| load)).map(|i| open[i]) {
-            Some((device, backend, _)) => Ok(Some(device.claim(backend))),
-            None if opening => Ok(None),
-            None if retired => Err(Miss::Retired),
-            None => Err(Miss::NoDevice),
-        }
     }
 
     /// A device for a page, or why there is none.
@@ -259,7 +227,7 @@ impl DevicePages {
     /// still taken.  The first call that finds the deadline passed is
     /// logged at `warn`.  The wait polls `cancel` every [`CANCEL_POLL`] and
     /// returns [`Miss::Cancelled`] once it is raised.
-    pub(crate) fn claim(&self, cancel: Option<&CancelToken>) -> Result<Claim<'_>, Miss> {
+    pub(crate) fn claim(&self, cancel: Option<&CancelToken>) -> Result<Claim<'_, B>, Miss> {
         if let Some(claim) = self.pick()? {
             return Ok(claim);
         }
@@ -295,6 +263,44 @@ impl DevicePages {
                 left
             };
             guard = self.openings.wait(guard, slice);
+        }
+    }
+}
+
+impl<B: PageDevice> DevicePages<B> {
+    fn new(devices: Vec<Device<B>>) -> Self {
+        Self {
+            devices,
+            openings: Arc::default(),
+            open_wait: OPEN_WAIT,
+            open_deadline: OnceLock::new(),
+            open_timed_out: AtomicBool::new(false),
+            wide_declined: AtomicBool::new(false),
+            counts: Mutex::new(DevicePageCounts::default()),
+            #[cfg(test)]
+            faults: TestFaults::default(),
+        }
+    }
+
+    /// The open device in service where one more page expects the
+    /// shortest wait ([`choose`]), the first listed among equals; else
+    /// whether one may still open (`Ok(None)`) or why none will.
+    fn pick(&self) -> Result<Option<Claim<'_, B>>, Miss> {
+        let mut open: Vec<(&Device<B>, &B, Load)> = Vec::with_capacity(self.devices.len());
+        let (mut opening, mut retired) = (false, false);
+        for device in &self.devices {
+            match device.state() {
+                State::Open(backend, load) => open.push((device, backend, load)),
+                State::Opening => opening = true,
+                State::Retired => retired = true,
+                State::NoDevice => {}
+            }
+        }
+        match choose(open.iter().map(|&(_, _, load)| load)).map(|i| open[i]) {
+            Some((device, backend, _)) => Ok(Some(device.claim(backend))),
+            None if opening => Ok(None),
+            None if retired => Err(Miss::Retired),
+            None => Err(Miss::NoDevice),
         }
     }
 
@@ -353,7 +359,7 @@ fn choose(loads: impl Iterator<Item = Load> + Clone) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-impl Drop for DevicePages {
+impl<B: PageDevice> Drop for DevicePages<B> {
     fn drop(&mut self) {
         let counts = self.counts();
         if counts.rendered > 0 || counts.cpu() > 0 || counts.stopped > 0 {
