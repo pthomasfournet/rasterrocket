@@ -70,14 +70,17 @@ pub(super) enum Decline {
     /// Code-block style bits other than predictable termination.
     CodeBlockStyle(u8),
     /// The irreversible 9-7 wavelet, under which the device's dequantised,
-    /// inverse-transformed samples differ from the CPU decoder's by a few
-    /// levels at 8 bits; at more than 8 bits it also rounds them to
+    /// inverse-transformed samples differ from the CPU decoder's by up to
+    /// one level at 8 bits; at more than 8 bits it also rounds them to
     /// integers before they are widened to 16 bits, where the CPU widens
     /// the reconstructed values.
     Irreversible,
     /// A draw the CPU decodes at a reduced resolution level, of other
-    /// dimensions than the device's full-resolution decode.
+    /// dimensions than the device's full-resolution decode; decided from
+    /// the headers, before the device decodes.
     Reduced,
+    /// A device decode whose dimensions are not those of the CPU decode.
+    SizeMismatch { device: (u32, u32), cpu: (u32, u32) },
 }
 
 impl Decline {
@@ -96,6 +99,7 @@ impl Decline {
             Self::CodeBlockStyle(_) => 8,
             Self::Irreversible => 9,
             Self::Reduced => 10,
+            Self::SizeMismatch { .. } => 11,
         };
         1 << bit
     }
@@ -108,6 +112,11 @@ impl std::fmt::Display for Decline {
             Self::CodeBlockStyle(style) => write!(f, "code-block style {style:#04x}"),
             Self::Irreversible => f.write_str("the irreversible 9-7 wavelet"),
             Self::Reduced => f.write_str("a draw decoded at a reduced resolution level"),
+            Self::SizeMismatch { device, cpu } => write!(
+                f,
+                "a codestream it decodes at {} × {} where the CPU decodes {} × {}",
+                device.0, device.1, cpu.0, cpu.1
+            ),
         }
     }
 }
@@ -200,7 +209,10 @@ pub(super) fn decode(
         }
     };
     if (width, height) != cpu_size {
-        report(&Decline::Reduced);
+        report(&Decline::SizeMismatch {
+            device: (width, height),
+            cpu: cpu_size,
+        });
         return None;
     }
     if width != pdf_w || height != pdf_h {
@@ -472,6 +484,10 @@ mod tests {
             Decline::CodeBlockStyle(1),
             Decline::Irreversible,
             Decline::Reduced,
+            Decline::SizeMismatch {
+                device: (2, 2),
+                cpu: (1, 1),
+            },
         ];
         let union = all.iter().fold(0u16, |acc, d| {
             assert_eq!(acc & d.kind(), 0, "{d}");
@@ -513,14 +529,7 @@ mod tests {
             include_bytes!("../../testdata/gray16.jp2").to_vec(),
         ));
         fixtures.extend(gate_dir_streams());
-        let opts = super::super::JpxOptions {
-            indices: false,
-            smask_in_data: 0,
-            matte: None,
-            colour_key: false,
-            wide: true,
-            channels: None,
-        };
+        let opts = jpx_opts(true);
         let mut decoder =
             Some(NvJpeg2kDecoder::new(0).expect("gpu-validation needs a CUDA device"));
         let (mut reversible, mut irreversible) = (0, 0);
@@ -573,6 +582,20 @@ mod tests {
         );
     }
 
+    /// The options of a plain image, its samples kept at 16 bits when
+    /// `wide`.
+    #[cfg(feature = "gpu-validation")]
+    const fn jpx_opts(wide: bool) -> super::super::JpxOptions {
+        super::super::JpxOptions {
+            indices: false,
+            smask_in_data: 0,
+            matte: None,
+            colour_key: false,
+            wide,
+            channels: None,
+        }
+    }
+
     /// The files of the directory `RR_JPX_GATE_DIR` names, by name; none
     /// when it is unset.
     #[cfg(feature = "gpu-validation")]
@@ -601,7 +624,8 @@ mod tests {
 
     /// The `JPXDecode` streams of the image `XObject`s the pages of the PDF
     /// at `path` name, each once, by object number; none when the file is
-    /// absent.
+    /// absent.  A stream whose filter chain holds more than `JPXDecode` is
+    /// skipped, named, since its content is not a codestream as stored.
     #[cfg(feature = "gpu-validation")]
     fn pdf_jpx_streams(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         use pdf::Object;
@@ -612,8 +636,14 @@ mod tests {
         let doc = pdf::Document::open(path).expect("the PDF opens");
         let jpx = |dict: &pdf::Dictionary| match dict.get(b"Filter") {
             Some(Object::Name(n)) => n == b"JPXDecode",
-            Some(Object::Array(a)) => a.iter().any(|f| f.as_name() == Some(b"JPXDecode")),
+            Some(Object::Array(a)) => {
+                a.len() == 1 && a[0].as_name() == Some(b"JPXDecode".as_slice())
+            }
             _ => false,
+        };
+        let chained = |dict: &pdf::Dictionary| {
+            matches!(dict.get(b"Filter"), Some(Object::Array(a))
+                if a.len() > 1 && a.iter().any(|f| f.as_name() == Some(b"JPXDecode".as_slice())))
         };
         let mut visited = std::collections::BTreeSet::new();
         let mut streams = Vec::new();
@@ -630,9 +660,16 @@ mod tests {
                 }
                 if let Ok(obj) = doc.get_object(*id)
                     && let Object::Stream(stream) = &*obj
-                    && jpx(&stream.dict)
                 {
-                    streams.push((id.0, stream.content.clone()));
+                    if jpx(&stream.dict) {
+                        streams.push((id.0, stream.content.clone()));
+                    } else if chained(&stream.dict) {
+                        eprintln!(
+                            "{}: object {}: skipped, a filter chain",
+                            path.display(),
+                            id.0
+                        );
+                    }
                 }
             }
         }
@@ -672,14 +709,7 @@ mod tests {
         decoder: &mut Option<NvJpeg2kDecoder>,
     ) -> Option<(usize, u8, usize)> {
         use crate::resources::image::ImageData;
-        let opts = super::super::JpxOptions {
-            indices: false,
-            smask_in_data: 0,
-            matte: None,
-            colour_key: false,
-            wide: false,
-            channels: None,
-        };
+        let opts = jpx_opts(false);
         let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).ok()?;
         let mut device = DeviceJpx::new(decoder, None, 0).expect("a decoder");
         let gpu = decode(bytes, (w, h), (w, h), false, &mut device)?;
@@ -787,14 +817,7 @@ mod tests {
     fn a_draw_the_cpu_decodes_reduced_returns_the_cpu_samples() {
         use crate::resources::image::ImageData;
         let bytes = include_bytes!("../../../../../../jpeg2000/tests/streams/mct_rct.j2k");
-        let opts = super::super::JpxOptions {
-            indices: false,
-            smask_in_data: 0,
-            matte: None,
-            colour_key: false,
-            wide: false,
-            channels: None,
-        };
+        let opts = jpx_opts(false);
         let mut decoder =
             Some(NvJpeg2kDecoder::new(0).expect("gpu-validation needs a CUDA device"));
         for draw in [(64, 48), (40, 30), (65, 49), (128, 96)] {

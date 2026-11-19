@@ -59,14 +59,7 @@ pub(in crate::resources::image) fn decode_jpx(
         target_resolution: draw_size,
         ..Default::default()
     };
-    // The image dictionary's colour space, when it names one, gives a raw
-    // codestream's colour channels; a codestream that does not match them
-    // (or a JP2 file) is read with its own colour specification.
-    let img = opts
-        .channels
-        .and_then(|n| hayro_jpeg2000::Image::from_codestream(data, n, &settings).ok())
-        .map_or_else(|| hayro_jpeg2000::Image::new(data, &settings), Ok)
-        .map_err(|e| e.to_string())?;
+    let img = open_image(data, opts.channels, &settings)?;
     jpx_budget(&img, 1)?;
     let embedded_profile = match img.color_space() {
         hayro_jpeg2000::ColorSpace::Icc { profile, .. } => Some(profile.clone()),
@@ -95,6 +88,11 @@ pub(in crate::resources::image) fn decode_jpx(
             // A codestream that ends early decodes on the CPU, which draws
             // the packets present and judges the loss (`judged`).
             Ok(()) if !survey.completeness.is_complete() => {}
+            // The device decodes every resolution level; a draw the CPU
+            // decodes at fewer is declined before the device decode.
+            Ok(()) if draw_size.is_some() && !full_resolution(data, opts.channels, &img) => {
+                device::report(&device::Decline::Reduced);
+            }
             Ok(()) => {
                 let cpu_size = (img.width(), img.height());
                 if let Some(mut samples) =
@@ -394,6 +392,31 @@ fn jpx_budget(img: &hayro_jpeg2000::Image<'_>, bytes: usize) -> Result<(), Strin
     let channels = usize::from(img.color_space().num_channels()) + usize::from(img.has_alpha());
     crate::resources::image::decode_budget(img.width(), img.height(), channels * bytes)
         .map_err(|e| format!("codestream {e}"))
+}
+
+/// The codestream `data` read with `settings`.  The image dictionary's
+/// colour space, when it names one, gives a raw codestream's colour
+/// `channels`; a codestream that does not match them (or a JP2 file) is
+/// read with its own colour specification.
+fn open_image<'a>(
+    data: &'a [u8],
+    channels: Option<u8>,
+    settings: &hayro_jpeg2000::DecodeSettings,
+) -> Result<hayro_jpeg2000::Image<'a>, String> {
+    channels
+        .and_then(|n| hayro_jpeg2000::Image::from_codestream(data, n, settings).ok())
+        .map_or_else(|| hayro_jpeg2000::Image::new(data, settings), Ok)
+        .map_err(|e| e.to_string())
+}
+
+/// Whether `img`, the codestream `data` read for a draw, has the size of
+/// the codestream read at full resolution: no resolution level is skipped.
+/// A codestream whose full-resolution headers do not read is taken as
+/// reduced.
+#[cfg(feature = "nvjpeg2k")]
+fn full_resolution(data: &[u8], channels: Option<u8>, img: &hayro_jpeg2000::Image<'_>) -> bool {
+    open_image(data, channels, &hayro_jpeg2000::DecodeSettings::default())
+        .is_ok_and(|full| (full.width(), full.height()) == (img.width(), img.height()))
 }
 
 /// What the image dictionary decides about a JPEG 2000 codestream.
