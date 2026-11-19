@@ -11,11 +11,15 @@
 #                     gpu); repeatable; default every group.
 #   --only ROW        run ROW alone (overrides -g).
 #   --reps K          repetitions per row (default 3).
-#   --smoke           one document per row, one repetition, no machine-state
-#                     checks (governor, clean tree); the RAM-root check stays.
+#   --smoke           one document per row, one repetition, and none of the
+#                     machine-state checks (governor, transparent huge pages,
+#                     clean tree).  The RUSTFLAGS check stays; a RAM root that
+#                     fails its check skips the ram rows, with a note on stderr.
 #   --ram-root DIR    root of the ram rows' --ram-path directories (default
-#                     /mnt/rr-bench-ram).  Its mount must be tmpfs of at most
-#                     4 GiB, else a ram row refuses to start.
+#                     /mnt/rr-bench-ram).  It must itself be a tmpfs
+#                     mountpoint of at most 4 GiB, writable, holding nothing
+#                     but this driver's rr-os-bench directory; otherwise a run
+#                     with ram rows refuses to start.
 #   --gpu-features L  features of the gpu build (default
 #                     nvjpeg,gpu-icc,gpu-deskew,cache,vulkan).  A list without
 #                     a CUDA feature skips the --backend cuda row, one without
@@ -35,7 +39,10 @@
 # `skipped ROW: reason` line to OUT_DIR/skipped.txt.
 #
 # Affinity: a 1-thread row runs under `taskset -c 2`, an N-thread row under
-# `taskset -c 0-(N-1)`, both with RAYON_NUM_THREADS=N.  Disk rows write under
+# `taskset -c 0-(N-1)`, both with RAYON_NUM_THREADS=N.  The start-up rows
+# (S-version, S-page, G-cuda-start, G-vulkan-start) are 1-thread rows: the
+# process, with every runtime and driver thread it starts, shares CPU 2, so
+# a G row less S-page is the backend's initialisation on one core.  Disk rows write under
 # OUT_DIR/scratch (--no-ram and a path prefix, counted with --expect-pages);
 # ram rows write to --ram-path under the RAM root and spill to an empty
 # OUT_DIR/scratch directory.  After the rows, every row `os_bench noisy` lists
@@ -43,8 +50,14 @@
 #
 # Prerequisites: cargo and rustc of the repository toolchain, git, taskset,
 # findmnt, and the fixtures named in the rows file under tests/fixtures/
-# (gitignored).  The checks a full run makes print their remedy:
+# (gitignored).  RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS must be unset, so
+# that the repository's -C target-cpu=native applies.  A full run also
+# requires the performance governor on every CPU, transparent huge pages
+# `madvise` or `never` (recorded as env key thp), and a working tree equal to
+# HEAD.  Each failed check prints its remedy; the system changes need the
+# owner's go-ahead:
 #   sudo cpupower frequency-set -g performance
+#   echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
 #   sudo mkdir -p /mnt/rr-bench-ram &&
 #     sudo mount -t tmpfs -o size=4G,mode=1777 tmpfs /mnt/rr-bench-ram
 # Where builds share a memory budget with other work, run the cargo builds
@@ -58,7 +71,12 @@
 #   build.log    output of every build step
 #   skipped.txt  rows not run and why (when any)
 #   done.flag    touched last, on success
-#   failed.flag  on any error instead, holding the failing step and command
+#   failed.flag  instead, on any error or on SIGINT/TERM/HUP once OUT_DIR is
+#                taken (a usage error or a non-empty OUT_DIR exits 2 without
+#                it), holding the first failing step and command
+# Paths in build.log and failed.flag may name the home directory: neither is
+# published.  env.tsv, results.tsv, rerun.tsv, pages.tsv and skipped.txt hold
+# no host or user name.
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
@@ -67,7 +85,9 @@ root=$(cd "$here/../.." && pwd)
 rows_file=$here/os_bench_rows.tsv
 
 ram_gib_limit=4
-ram_remedy='sudo mkdir -p /mnt/rr-bench-ram && sudo mount -t tmpfs -o size=4G,mode=1777 tmpfs /mnt/rr-bench-ram'
+ram_remedy='with the owner'"'"'s go-ahead: sudo mkdir -p /mnt/rr-bench-ram && sudo mount -t tmpfs -o size=4G,mode=1777 tmpfs /mnt/rr-bench-ram'
+thp_file=/sys/kernel/mm/transparent_hugepage/enabled
+thp_remedy="with the owner's go-ahead: echo madvise | sudo tee $thp_file"
 avx2_commits=(a5cfd530 205be502)
 cuda_features=(nvjpeg nvjpeg2k gpu-icc gpu-deskew cache)
 cuda_driver_floor=580
@@ -122,10 +142,19 @@ step="argument checks"
 flag_ok=0   # failed.flag may be written once OUT_DIR is the run's own.
 
 # fail MESSAGE: report MESSAGE on stderr and in failed.flag, then exit 1.
+# Paths in MESSAGE are shown relative to the repository and the home
+# directory.  The first report is kept: a failure inside a command
+# substitution has already written the specific message when the enclosing
+# command fails in turn.
 fail() {
-    echo "os_bench.sh: $1" >&2
+    local msg=${1//"$root/"/}
+    msg=${msg//"$HOME"/\~}
+    if ((flag_ok)) && [[ -e $out/failed.flag ]]; then
+        exit 1
+    fi
+    echo "os_bench.sh: $msg" >&2
     if ((flag_ok)); then
-        printf '%s\n' "$1" >> "$out/failed.flag"
+        printf '%s\n' "$msg" > "$out/failed.flag"
     fi
     exit 1
 }
@@ -147,6 +176,7 @@ on_err() {
 cleanup() {
     if [[ -n ${ram_made:-} ]]; then
         rm -rf -- "$ram_dir"
+        ram_made=
     fi
 }
 trap cleanup EXIT
@@ -160,6 +190,10 @@ if ((!dry)); then
     flag_ok=1
 fi
 trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
+for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064 # the signal name is bound now, by design.
+    trap "fail \"\$step: interrupted by SIG$sig\"" "$sig"
+done
 cd "$root"
 
 # ---- the rows file ------------------------------------------------------------
@@ -217,7 +251,7 @@ startup_row=$(row_index S-version)
 # ---- gpu rows that cannot run here ----------------------------------------------
 
 has_feature() {
-    local f
+    local f feats
     IFS=, read -ra feats <<< "$gpu_features"
     for f in "${feats[@]}"; do
         if [[ $f == "$1" ]]; then return 0; fi
@@ -256,6 +290,55 @@ for n in "${selected[@]}"; do
     fi
 done
 
+# ram_root_problem: why the RAM root cannot hold the ram rows, or nothing.  It
+# must be a tmpfs mountpoint of at most the limit, writable, and hold nothing
+# but this driver's own directory.
+ram_root_problem() {
+    local mount fstype size entry others
+    if ! mount=$(findmnt -bno FSTYPE,SIZE "$ram_root" 2> /dev/null); then
+        echo "$ram_root is not a mountpoint"
+        return 0
+    fi
+    read -r fstype size <<< "$mount"
+    if [[ $fstype != tmpfs ]]; then
+        echo "$ram_root is $fstype, not tmpfs"
+    elif ! [[ $size =~ ^[0-9]+$ ]] || ((size > ram_gib_limit * 1024 ** 3)); then
+        echo "$ram_root holds ${size} bytes, more than $ram_gib_limit GiB"
+    elif ! [[ -w $ram_root ]]; then
+        echo "$ram_root is not writable"
+    else
+        others=()
+        shopt -s nullglob dotglob
+        for entry in "$ram_root"/*; do
+            if [[ ${entry##*/} != "${ram_dir##*/}" ]]; then others+=("${entry##*/}"); fi
+        done
+        shopt -u nullglob dotglob
+        if ((${#others[@]})); then
+            echo "$ram_root holds other entries: ${others[*]:0:5}"
+        fi
+    fi
+    return 0
+}
+
+ram_rows=0
+for n in "${run_rows[@]}"; do
+    if [[ ${r_sink[n]} == ram ]]; then ram_rows=1; fi
+done
+if ((ram_rows && !dry)); then
+    step="RAM root check"
+    reason=$(ram_root_problem)
+    if [[ -n $reason && $smoke == 1 ]]; then
+        echo "os_bench.sh: --smoke skips the ram rows: $reason" >&2
+        kept=()
+        for n in "${run_rows[@]}"; do
+            if [[ ${r_sink[n]} != ram ]]; then kept+=("$n"); fi
+        done
+        run_rows=("${kept[@]}")
+    elif [[ -n $reason ]]; then
+        die "$reason" "$ram_remedy"
+    fi
+fi
+
 need_pre=0 need_gpu=0 need_ram=0
 for n in "${run_rows[@]}"; do
     if [[ ${r_group[n]} == avx2 ]]; then need_pre=1; fi
@@ -265,6 +348,11 @@ done
 
 # ---- checks -----------------------------------------------------------------------
 
+# thp_mode: the bracketed transparent-huge-page mode, or nothing.
+thp_mode() {
+    sed -n 's/.*\[\([a-z]*\)\].*/\1/p' "$thp_file" 2> /dev/null || true
+}
+
 step="fixture check"
 for n in "$startup_row" "${run_rows[@]}"; do
     for doc in ${r_docs[n]}; do
@@ -272,19 +360,17 @@ for n in "$startup_row" "${run_rows[@]}"; do
     done
 done
 
-if ((need_ram)); then
-    step="RAM root check"
-    if ((!dry)); then
-        [[ -d $ram_root && -w $ram_root ]] || die "$ram_root is not a writable directory" "$ram_remedy"
-        fstype=$(findmnt -no FSTYPE -T "$ram_root")
-        size=$(findmnt -bno SIZE -T "$ram_root")
-        [[ $fstype == tmpfs ]] || die "$ram_root is on $fstype, not tmpfs" "$ram_remedy"
-        ((size <= ram_gib_limit * 1024 ** 3)) || die "$ram_root holds $((size / 1024 ** 2)) MiB, more than $ram_gib_limit GiB" "$ram_remedy"
-    fi
+if ((!dry)); then
+    step="build environment check"
+    for v in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS; do
+        [[ -z ${!v:-} ]] || die "$v is set and would replace the repository's -C target-cpu=native" "unset $v"
+    done
 fi
 
 if ((!smoke && !dry)); then
     step="machine-state check"
+    thp=$(thp_mode)
+    [[ $thp != always ]] || die "transparent huge pages are 'always'; large pages must be off on both sides" "$thp_remedy"
     shopt -s nullglob
     govs=(/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor)
     shopt -u nullglob
@@ -310,7 +396,7 @@ build() {
     if ((dry)); then
         echo "(cd $(show "$dir") && $(show "$@")) >> $(show "$out/build.log") 2>&1"
     else
-        echo "== $(show "$@")  [in $dir]" >> "$out/build.log"
+        echo "== $(show "$@")  [in .${dir#"$root"}]" >> "$out/build.log"
         (cd "$dir" && "$@") >> "$out/build.log" 2>&1
     fi
 }
@@ -408,7 +494,7 @@ if ((need_pre)); then
         show git -C "$pre_dir" revert --no-commit "${avx2_commits[@]}"
     else
         if pre_current; then
-            echo "== reusing $pre_dir (HEAD with ${avx2_commits[*]} reverted)" >> "$out/build.log"
+            echo "== reusing ${pre_dir#"$root"/} (HEAD with ${avx2_commits[*]} reverted)" >> "$out/build.log"
         else
             git worktree prune
             rm -f -- "$pre_stamp"
@@ -455,6 +541,7 @@ if ((!dry)); then
     env_key cpu_model "$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo 2> /dev/null || true)"
     env_key logical_cpus "$(probe nproc --all)"
     env_key ram_gib "$(awk '/^MemTotal:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo 2> /dev/null || true)"
+    env_key thp "$(thp_mode)"
     env_key governor "$(probe cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor | sort -u | paste -sd, -)"
     env_key gpu_driver "$(probe nvidia-smi --query-gpu=driver_version --format=csv,noheader | sort -u | paste -sd, -)"
     if ((need_gpu)) && [[ -z $(skip_reason "$(row_index G-cuda-start)") ]]; then
@@ -507,6 +594,6 @@ fi
 
 step="finish"
 if ((!dry)); then
-    rm -rf -- "$scratch"
+    cleanup
     touch "$out/done.flag"
 fi

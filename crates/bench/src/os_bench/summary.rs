@@ -22,6 +22,7 @@ pub(crate) const ENV_KEYS: &[&str] = &[
     "ram_gib",
     "power",
     "governor",
+    "thp",
     "hags",
     "defender_rt",
     "defender_excl",
@@ -506,6 +507,8 @@ mod tests {
     fn summarize_rejects_unlisted_env_keys() {
         let err = read_env(&format!("{ENV}hostname\tbox\n")).unwrap_err();
         assert!(err.contains("hostname"));
+        let thp = read_env(&format!("{ENV}thp\tmadvise\n")).unwrap();
+        assert_eq!(thp.get("thp").map(String::as_str), Some("madvise"));
         assert!(read_env("os\tlinux\n").unwrap_err().contains("commit"));
     }
 
