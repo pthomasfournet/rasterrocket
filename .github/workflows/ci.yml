@@ -414,8 +414,9 @@ jobs:
   #
   # The hosted runner has no GPU, so the D3D12 tests run on the WARP
   # software adapter.  The pinned d3d10warp.dll (scripts/fetch_warp.ps1) is
-  # copied beside the test binary, which the loader prefers to the system
-  # copy; `pinned_warp_is_the_one_loaded` fails when the system one loads
+  # copied beside each test binary, the library's unit tests included, which
+  # the loader prefers to the system copy; `pinned_warp_is_the_one_loaded`
+  # and the unit tests' `test_backend` fail when the system one loads
   # instead.  slangc and DXC are the exact versions the build requires.
   d3d12-warp:
     name: Direct3D 12 on pinned WARP (windows-latest)
@@ -468,7 +469,7 @@ jobs:
           $json = cargo test --release -p rasterrocket-gpu --features d3d12 --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed ($LASTEXITCODE)" }
           $exes = @($json | ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.executable -and $_.target.name -like 'd3d12_*' } |
+            Where-Object { $_.executable -and ($_.target.name -like 'd3d12_*' -or ($_.target.kind -contains 'lib' -and $_.profile.test)) } |
             ForEach-Object { $_.executable })
           if ($exes.Count -eq 0) { throw 'no D3D12 test binary was built' }
           $dirs = @($exes | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique)
@@ -480,6 +481,8 @@ jobs:
         run: cargo test --release -p rasterrocket-gpu --features d3d12 --test 'd3d12_*' -- --nocapture --test-threads=1
 
       - name: Test the D3D12 backend's unit tests
+        env:
+          RR_WARP_VERSION: 1.0.22.0
         run: cargo test --release -p rasterrocket-gpu --features d3d12 --lib -- d3d12
 
   # ── Format and spelling check ─────────────────────────────────────────────
