@@ -392,10 +392,10 @@ fn pinned_warp_is_the_one_loaded() {
     };
     let (path, version) = loaded.expect("d3d10warp.dll is loaded");
     let exe = std::env::current_exe().expect("test binary path");
-    let dir = exe.parent().expect("test binary directory");
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
     assert_eq!(
-        path.parent().map(std::path::Path::to_path_buf).as_deref(),
-        Some(dir),
+        path.parent().and_then(canonical),
+        exe.parent().and_then(canonical),
         "the loaded WARP is not the one beside the test binary: {}",
         path.display()
     );

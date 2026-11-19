@@ -434,6 +434,21 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The debug layer (d3d12SDKLayers.dll) ships in the Graphics Tools
+      # optional feature.  With PDF_RASTER_D3D12_DEBUG=1 the tests fail when
+      # the layer is off, and every page and transfer fails on a stored
+      # validation error.
+      - name: Install Graphics Tools (the D3D12 debug layer)
+        shell: powershell
+        run: |
+          $name = 'Tools.Graphics.DirectX~~~~0.0.1.0'
+          if ((Get-WindowsCapability -Online -Name $name).State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name $name | Out-Null
+          }
+          if (-not (Test-Path "$env:WINDIR\System32\d3d12SDKLayers.dll")) { throw 'the D3D12 debug layer is not installed' }
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@v5
@@ -462,11 +477,24 @@ jobs:
           "SLANGC=$(Join-Path $tools 'slang\bin\slangc.exe')" >> $env:GITHUB_ENV
           "DXC=$(Join-Path $tools 'dxc\bin\x64\dxc.exe')" >> $env:GITHUB_ENV
 
+      # The Windows-only code (`cfg(windows)`) is linted only here.
+      - name: Clippy with the d3d12 feature
+        run: |
+          cargo clippy --locked -p rasterrocket-gpu --features d3d12,cache --tests -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "clippy rasterrocket-gpu failed ($LASTEXITCODE)" }
+          cargo clippy --locked -p rasterrocket --features d3d12,gpu-icc,cache --tests -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "clippy rasterrocket failed ($LASTEXITCODE)" }
+          cargo clippy --locked -p rasterrocket-cli --features d3d12 --tests -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "clippy rasterrocket-cli failed ($LASTEXITCODE)" }
+
+      - name: Build the CLI with the d3d12 feature
+        run: cargo build --locked --release -p rasterrocket-cli --features d3d12
+
       # Cargo places a test binary by its own layout, so the WARP copy goes
       # to the directory of the binary the build reports.
       - name: Build the D3D12 tests
         run: |
-          $json = cargo test --release -p rasterrocket-gpu --features d3d12,cache --no-run --message-format=json
+          $json = cargo test --locked --release -p rasterrocket-gpu --features d3d12,cache --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed ($LASTEXITCODE)" }
           $exes = @($json | ForEach-Object { $_ | ConvertFrom-Json } |
             Where-Object { $_.executable -and ($_.target.name -like 'd3d12_*' -or ($_.target.kind -contains 'lib' -and $_.profile.test)) } |
@@ -477,7 +505,7 @@ jobs:
 
       - name: Build the session-level parity tests
         run: |
-          $json = cargo test --release -p rasterrocket --features d3d12,gpu-icc --test gpu_page_render_parity --test gpu_icc_render_parity --no-run --message-format=json
+          $json = cargo test --locked --release -p rasterrocket --features d3d12,gpu-icc --test gpu_page_render_parity --test gpu_icc_render_parity --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed ($LASTEXITCODE)" }
           $exes = @($json | ForEach-Object { $_ | ConvertFrom-Json } |
             Where-Object { $_.executable -and $_.target.name -in 'gpu_page_render_parity', 'gpu_icc_render_parity' } |
@@ -489,12 +517,12 @@ jobs:
       - name: Test the D3D12 backend on the pinned WARP
         env:
           RR_WARP_VERSION: 1.0.22.0
-        run: cargo test --release -p rasterrocket-gpu --features d3d12,cache --test 'd3d12_*' -- --nocapture --test-threads=1
+        run: cargo test --locked --release -p rasterrocket-gpu --features d3d12,cache --test 'd3d12_*' -- --nocapture --test-threads=1
 
       - name: Test the D3D12 backend's unit tests
         env:
           RR_WARP_VERSION: 1.0.22.0
-        run: cargo test --release -p rasterrocket-gpu --features d3d12,cache --lib -- d3d12
+        run: cargo test --locked --release -p rasterrocket-gpu --features d3d12,cache --lib -- d3d12
 
       # Byte-identity of GPU pages and of the ICC conversion against the CPU.
       # The corpus tests skip here, the fixtures not being in the repository
@@ -505,7 +533,7 @@ jobs:
         env:
           RR_WARP_VERSION: 1.0.22.0
           RR_GPU_PAGE_POLICY: d3d12
-        run: cargo test --release -p rasterrocket --features d3d12,gpu-icc --test gpu_page_render_parity --test gpu_icc_render_parity -- --nocapture --test-threads=1
+        run: cargo test --locked --release -p rasterrocket --features d3d12,gpu-icc --test gpu_page_render_parity --test gpu_icc_render_parity -- --nocapture --test-threads=1
 
   # ── Format and spelling check ─────────────────────────────────────────────
   fmt:
