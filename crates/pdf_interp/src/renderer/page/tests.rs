@@ -12,6 +12,7 @@ use raster::types::BlendMode;
 
 use super::super::color::RasterColor;
 use super::super::gstate::{Ctm, ctm_transform};
+use super::ShadingFailure;
 use super::canvas::PageCanvas;
 use super::canvas::blend;
 use super::image_blit::{ImageLenError, blend_rgb, check_image_bytes_len};
@@ -2600,4 +2601,49 @@ fn a_form_too_deep_is_skipped_and_the_page_continues() {
             assert_eq!(px(x, y), want, "pixel ({x}, {y})");
         }
     }
+}
+
+/// A shading whose function yields no colour — painted by `sh` or as a
+/// shading pattern — is skipped and recorded once; a shading skipped for
+/// another cause (here a missing resource) and one that draws are not.
+#[test]
+fn a_shading_whose_function_fails_is_recorded() {
+    let axial = |function: &str| {
+        format!(
+            "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 8 0] /Function {function} >>"
+        )
+    };
+    let doc = crate::test_helpers::make_doc_with_objects(&[
+        (
+            4,
+            "<< /Type /Page /Resources << /Shading << /Bad 5 0 R /Good 6 0 R >> \
+             /Pattern << /P << /PatternType 2 /Shading 5 0 R >> >> >> >>"
+                .to_owned(),
+        ),
+        (5, axial("7 0 R")),
+        (
+            6,
+            axial("<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>"),
+        ),
+        (
+            7,
+            stream_object(
+                "/FunctionType 4 /Domain [0 1] /Range [0 1]",
+                "{ frobnicate }",
+            ),
+        ),
+    ]);
+    let mut renderer = PageRenderer::new(8, 8, &doc, (4, 0));
+    renderer.execute(&crate::content::parse(
+        b"/Bad sh /Good sh /Missing sh /Pattern cs /P scn 0 0 8 8 re f /Bad sh",
+    ));
+    let failure = |name: &str, pattern| ShadingFailure {
+        name: name.to_owned(),
+        pattern,
+    };
+    assert_eq!(
+        renderer.shading_failures(),
+        [failure("Bad", false), failure("P", true)]
+    );
+    assert!(renderer.finish().1.has_omissions());
 }

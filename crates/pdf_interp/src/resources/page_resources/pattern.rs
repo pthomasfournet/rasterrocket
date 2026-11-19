@@ -3,6 +3,7 @@
 
 use super::{Category, PageResources};
 use crate::resources::dict_ext::DictExt;
+use crate::resources::shading::Unresolved;
 use crate::resources::{ExtGStateParams, read_matrix, resolve_stream_dict, shading, tiling};
 
 /// A shading pattern (`PatternType` 2, PDF §8.7.3.3) resolved for painting.
@@ -34,17 +35,20 @@ impl PageResources<'_> {
     /// Resolve the named `Shading` resource, for an ink canvas when `ink`
     /// plans its colorants (see [`shading::resolve_shading_object`]).
     ///
-    /// Returns `None` if the name is absent, the type is unsupported, or any
-    /// required key is missing.
-    #[must_use]
+    /// # Errors
+    ///
+    /// [`Unresolved`] if the name is absent or the shading does not
+    /// resolve.
     pub(crate) fn shading(
         &self,
         name: &[u8],
         ctm: &[f64; 6],
         canvas: shading::Canvas,
         ink: Option<shading::PlanColorants<'_>>,
-    ) -> Option<shading::ResolvedShading> {
-        let shadings = self.resource_subdict(Category::Shading)?;
+    ) -> Result<shading::ResolvedShading, Unresolved> {
+        let shadings = self
+            .resource_subdict(Category::Shading)
+            .ok_or(Unresolved::Skipped)?;
         shading::resolve_shading(self, shadings, name, ctm, canvas, ink)
     }
 
@@ -54,38 +58,43 @@ impl PageResources<'_> {
     /// `pattern_ctm` maps the default coordinate space of the pattern's
     /// parent content stream to the device; the pattern's `Matrix` is
     /// concatenated onto it.  The shading is resolved for an ink canvas
-    /// when `ink` plans its colorants.  Returns `None` if the name is
-    /// absent, the pattern is not a shading pattern, or its shading does
+    /// when `ink` plans its colorants.
+    ///
+    /// # Errors
+    ///
+    /// [`Unresolved::Skipped`] if the name is absent or the pattern is not
+    /// a shading pattern; the [`Unresolved`] of its shading if that does
     /// not resolve.
-    #[must_use]
     pub(crate) fn shading_pattern(
         &self,
         name: &[u8],
         pattern_ctm: &[f64; 6],
         canvas: shading::Canvas,
         ink: Option<shading::PlanColorants<'_>>,
-    ) -> Option<ShadingPattern> {
-        let patterns = self.resource_subdict(Category::Pattern)?;
-        let pattern = resolve_stream_dict(self.doc, patterns.get(name)?)?;
+    ) -> Result<ShadingPattern, Unresolved> {
+        let patterns = self
+            .resource_subdict(Category::Pattern)
+            .ok_or(Unresolved::Skipped)?;
+        let pattern_obj = patterns.get(name).ok_or(Unresolved::Skipped)?;
+        let pattern = resolve_stream_dict(self.doc, pattern_obj).ok_or(Unresolved::Skipped)?;
         if pattern.get_i64(b"PatternType") != Some(2) {
-            return None;
+            return Err(Unresolved::Skipped);
         }
         let matrix = read_matrix(&pattern).map_or(*pattern_ctm, |m| {
             crate::renderer::gstate::ctm_multiply(&m, pattern_ctm)
         });
-        let Some(shading) =
-            shading::resolve_shading_object(self, pattern.get(b"Shading")?, &matrix, canvas, ink)
-        else {
-            log::warn!(
-                "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
-                String::from_utf8_lossy(name)
-            );
-            return None;
-        };
+        let sh_obj = pattern.get(b"Shading").ok_or(Unresolved::Skipped)?;
+        let shading = shading::resolve_shading_object(self, sh_obj, &matrix, canvas, ink)
+            .inspect_err(|_| {
+                log::warn!(
+                    "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
+                    String::from_utf8_lossy(name)
+                );
+            })?;
         let ext_gstate = pattern
             .get(b"ExtGState")
             .and_then(|obj| ExtGStateParams::from_object(self.doc, obj));
-        Some(ShadingPattern {
+        Ok(ShadingPattern {
             shading,
             ext_gstate,
             matrix,

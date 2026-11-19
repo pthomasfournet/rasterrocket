@@ -96,6 +96,13 @@ pub enum RasterError {
     /// [`PageDiagnostics::content_failures`](crate::PageDiagnostics::content_failures)
     /// and the page renders from the data that decoded.
     ContentDecodeFailed(Vec<String>),
+    /// One or more shadings on the page were not drawn because their
+    /// `Function` yields no colour, and the session is
+    /// [strict](crate::SessionConfig::strict).  Carries one message per
+    /// such shading.  Without `strict` these are reported in
+    /// [`PageDiagnostics::shading_failures`](crate::PageDiagnostics::shading_failures)
+    /// and the page renders without them.
+    ShadingFailed(Vec<String>),
     /// The page render was aborted because it exceeded the per-page operator
     /// budget or wall-clock deadline, the page being pathological (e.g. an
     /// infinite-loop content stream), or, in a
@@ -181,6 +188,7 @@ impl std::fmt::Display for RasterError {
             Self::ContentDecodeFailed(v) => {
                 write!(f, "content stream decode failed: {}", v.join("; "))
             }
+            Self::ShadingFailed(v) => write!(f, "shading not drawn: {}", v.join("; ")),
             Self::PageBudgetExceeded(msg) => write!(f, "page render budget exceeded: {msg}"),
             Self::Cancelled => f.write_str("page render cancelled"),
             Self::OutputProfile(e) => write!(f, "output profile: {e}"),

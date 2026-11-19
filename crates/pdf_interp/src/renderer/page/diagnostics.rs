@@ -5,6 +5,7 @@ use pdf::ContentFailure;
 
 use super::{MAX_FORM_DEPTH, PAGE_RENDER_DEADLINE_SECS, PageRenderer};
 use crate::resources::ImageFilter;
+use crate::resources::shading::Unresolved;
 
 /// The source-resolution estimate of an image `image_width_px` samples
 /// across on a page `page_width_pts` points wide before its rotation
@@ -113,6 +114,12 @@ pub struct PageDiagnostics {
     /// identifier.  The rest of the page rendered without them.  Empty when
     /// every form was drawn.
     pub forms_too_deep: Vec<pdf::ObjectId>,
+    /// Shadings not drawn because their `Function` yields no colour where
+    /// the shading is sampled (a function that fails to parse, or fails at
+    /// every sample of a Type 1 shading or at any sample of the others),
+    /// each once.  The rest of the page rendered without them.  Empty when
+    /// every shading's function evaluated.
+    pub shading_failures: Vec<ShadingFailure>,
     /// Font resource names (without the leading `/`) that `Tf` selected but
     /// the `/Font` resources in effect do not define.  Their text is drawn
     /// in Helvetica.  Empty when every font resolved.
@@ -283,6 +290,29 @@ pub enum DevicePage {
     Failed,
 }
 
+/// A shading the renderer skipped because its `Function` yields no colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ShadingFailure {
+    /// Resource name without the leading `/`: of the `Shading` resource an
+    /// `sh` operator paints, or, with `pattern`, of the shading `Pattern`
+    /// resource a fill or stroke paints.
+    pub name: String,
+    /// The shading is the shading of a pattern.
+    pub pattern: bool,
+}
+
+impl std::fmt::Display for ShadingFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = if self.pattern {
+            "shading pattern"
+        } else {
+            "shading"
+        };
+        write!(f, "{what} /{}: its Function yields no colour", self.name)
+    }
+}
+
 /// An image the renderer skipped because it could not be decoded or drawn,
 /// or drew only partly because its stream lacked samples.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,13 +342,14 @@ impl std::fmt::Display for ImageFailure {
 
 impl PageDiagnostics {
     /// Whether the page was drawn with something left out or substituted:
-    /// a skipped image or content stream, a form past the depth limit, a
-    /// font that resolved to nothing, or an unsupported feature.
+    /// a skipped image, content stream or shading, a form past the depth
+    /// limit, a font that resolved to nothing, or an unsupported feature.
     #[must_use]
     pub const fn has_omissions(&self) -> bool {
         !(self.image_failures.is_empty()
             && self.content_failures.is_empty()
             && self.forms_too_deep.is_empty()
+            && self.shading_failures.is_empty()
             && self.missing_fonts.is_empty()
             && self.unsupported_features.is_empty())
     }
@@ -460,6 +491,36 @@ impl PageRenderer<'_> {
         self.diag.forms_too_deep.push(id);
     }
 
+    /// Shadings skipped on this page for a `Function` that yields no
+    /// colour; also returned in [`PageDiagnostics::shading_failures`] by
+    /// [`finish`](Self::finish).
+    #[must_use]
+    pub fn shading_failures(&self) -> &[ShadingFailure] {
+        &self.diag.shading_failures
+    }
+
+    /// Record the shading `name` (of a shading pattern with `pattern`) as
+    /// skipped when `cause` is [`Unresolved::NoColour`], once per page.
+    pub(super) fn record_unresolved_shading(
+        &mut self,
+        name: &[u8],
+        pattern: bool,
+        cause: Unresolved,
+    ) {
+        if cause != Unresolved::NoColour {
+            return;
+        }
+        let failure = ShadingFailure {
+            name: String::from_utf8_lossy(name).into_owned(),
+            pattern,
+        };
+        if self.diag.shading_failures.contains(&failure) {
+            return;
+        }
+        log::warn!("rasterrocket-interp: skipped {failure}");
+        self.diag.shading_failures.push(failure);
+    }
+
     /// Content streams skipped on this page; also returned in
     /// [`PageDiagnostics::content_failures`] by [`finish`](Self::finish).
     #[must_use]
@@ -515,7 +576,7 @@ impl PageRenderer<'_> {
 
 #[cfg(test)]
 mod omission_tests {
-    use super::{ImageFailure, PageDiagnostics};
+    use super::{ImageFailure, PageDiagnostics, ShadingFailure};
 
     /// A `ContentFailure` from a page whose first `/Contents` element is not
     /// a stream.
@@ -570,6 +631,13 @@ mod omission_tests {
             },
             PageDiagnostics {
                 forms_too_deep: vec![(1, 0)],
+                ..PageDiagnostics::default()
+            },
+            PageDiagnostics {
+                shading_failures: vec![ShadingFailure {
+                    name: "Sh0".to_owned(),
+                    pattern: false,
+                }],
                 ..PageDiagnostics::default()
             },
             PageDiagnostics {

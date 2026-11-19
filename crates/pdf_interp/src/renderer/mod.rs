@@ -19,6 +19,7 @@ pub use font_cache::DocumentFonts;
 pub use page::{
     CanvasBuffers, DevicePage, FinishedCanvas, GlyphCounts, GroupSpaceApproximations, ImageFailure,
     MAX_FORM_DEPTH, PageDiagnostics, PageRenderer, PageState, PageView, PaintTrace, RenderAbort,
+    ShadingFailure,
 };
 #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 pub use page::{DeviceFallback, DeviceRecording, device_page_ineligible};

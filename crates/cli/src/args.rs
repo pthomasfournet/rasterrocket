@@ -686,9 +686,10 @@ pub(crate) struct Args {
     pub gpu_devices: Vec<String>,
 
     /// Fail a page when one of its images or content streams cannot be
-    /// decoded or drawn.
+    /// decoded or drawn, or one of its shadings has a function that yields
+    /// no colour.
     ///
-    /// By default the image or stream is skipped, the page is written
+    /// By default the image, stream or shading is skipped, the page is written
     /// without it, a warning naming the page and object goes to stderr, and
     /// the exit status is unaffected.  With `--strict` the page is not written and the run
     /// exits 1.

@@ -587,7 +587,7 @@ that says so.
 | `--forcenum DIGITS` | — | Zero-pad page numbers to at least DIGITS digits (`001`, `002`, …). |
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
-| `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn, or decodes only in part. Without it the image or stream is skipped (or drawn from the data that decoded), the page is written, and a warning naming the page and object goes to stderr. |
+| `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn, or decodes only in part, or when one of its shadings has a `Function` that yields no colour. Without it the image, stream or shading is skipped (or drawn from the data that decoded), the page is written, and a warning naming the page and object goes to stderr. |
 | `--purpose view\|print` | `view` (`print` under `--print`) | What the pages are rendered for. `view`: optional-content groups (layers) take their View usage state, and annotations flagged NoView are omitted. `print`: layers take their Print usage state, and only annotations flagged Print are drawn. Annotations flagged Hidden are never drawn. |
 
 ---

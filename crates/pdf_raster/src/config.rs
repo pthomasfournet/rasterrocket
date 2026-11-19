@@ -348,7 +348,10 @@ pub struct SessionConfig {
     /// [`RasterError::ContentDecodeFailed`] instead.  A Form `XObject`
     /// nested too deep to draw is likewise skipped and reported in
     /// [`PageDiagnostics::forms_too_deep`], or, when `true`, fails the page
-    /// with [`RasterError::PageBudgetExceeded`].
+    /// with [`RasterError::PageBudgetExceeded`]; a shading whose `Function`
+    /// yields no colour is skipped and reported in
+    /// [`PageDiagnostics::shading_failures`], or, when `true`, fails the
+    /// page with [`RasterError::ShadingFailed`].
     pub strict: bool,
     /// What the pages are rendered for: on-screen viewing (the default) or
     /// printing.

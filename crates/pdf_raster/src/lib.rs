@@ -223,7 +223,7 @@ pub use pdf::Password;
 pub use pdf_interp::renderer::FinishedCanvas;
 pub use pdf_interp::renderer::{
     ContentFailure, DOCUMENT_IMAGE_BUDGET_BYTES, DevicePage, GlyphCounts, GroupSpaceApproximations,
-    ImageFailure, MAX_FORM_DEPTH, PageDiagnostics,
+    ImageFailure, MAX_FORM_DEPTH, PageDiagnostics, ShadingFailure,
 };
 pub use pdf_interp::resources::ImageFilter;
 pub use pdf_interp::{

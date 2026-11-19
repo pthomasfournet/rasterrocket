@@ -226,12 +226,16 @@ impl PageRenderer<'_> {
         let ctm = gs.ctm;
         let flatness = gs.flatness.max(0.1);
 
-        let Some(shading) = self.memo_shading(name, &ctm) else {
-            log::warn!(
-                "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
-                String::from_utf8_lossy(name)
-            );
-            return;
+        let shading = match self.memo_shading(name, &ctm) {
+            Ok(shading) => shading,
+            Err(cause) => {
+                log::warn!(
+                    "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
+                    String::from_utf8_lossy(name)
+                );
+                self.record_unresolved_shading(name, false, cause);
+                return;
+            }
         };
         let state = self.shading_paint(false, &shading);
         let pipe = state.pipe(self.canvas.kind());

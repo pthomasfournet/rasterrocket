@@ -418,3 +418,65 @@ fn patch_mesh_starts_every_patch_on_a_byte_boundary() {
     assert_rgb_near(px[0], [255, 0, 0], 2, "first patch");
     assert_rgb_near(px[1], [0, 0, 255], 2, "second patch");
 }
+
+/// An axial gray shading across the page (shading object 6) whose Type 4
+/// function is object 7 with program `program`.
+fn type4_axial(program: &str) -> Vec<u8> {
+    page_with(
+        "/Sh0 sh",
+        b"<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 200 0] \
+           /Extend [true true] /Function 7 0 R >>",
+        &[stream_object(
+            "/FunctionType 4 /Domain [0 1] /Range [0 1]",
+            program.as_bytes(),
+        )],
+    )
+}
+
+/// A Type 4 function written as one nested `ifelse` per stop, `STOPS`
+/// deep, paints every stop: gray `(k - 1) / STOPS` below `t = k / STOPS`.
+#[test]
+fn deeply_nested_type4_stops_paint_every_stop() {
+    use std::fmt::Write as _;
+    const STOPS: u32 = 150;
+    let level = |k: u32| f64::from(k) / f64::from(STOPS);
+    let mut program = String::from("{");
+    for k in 1..STOPS {
+        write!(
+            program,
+            " dup {} lt {{ pop {} }} {{",
+            level(k),
+            level(k - 1)
+        )
+        .expect("a String accepts writes");
+    }
+    write!(program, " pop {}", level(STOPS - 1)).expect("a String accepts writes");
+    program.push_str(&" } ifelse".repeat(STOPS as usize - 1));
+    program.push_str(" }");
+    let px = rgb_at(type4_axial(&program), &[(1, 50), (101, 50), (198, 50)]);
+    assert!(px[0][0] <= 2, "the first stop: {:?}", px[0]);
+    assert!(px[1][0].abs_diff(127) <= 1, "the middle stop: {:?}", px[1]);
+    assert!(px[2][0] >= 252, "the last stop: {:?}", px[2]);
+}
+
+/// A shading whose Type 4 function does not parse is not drawn and is
+/// reported; a strict render fails the page instead.
+#[test]
+fn a_shading_whose_function_fails_is_reported_and_fails_a_strict_page() {
+    use rasterrocket::{RasterError, RasterOptions};
+    let pdf = type4_axial("{ frobnicate }");
+    let page = common::render_one(pdf.clone(), &RasterOptions::new(72.0)).expect("renders");
+    let failures: Vec<String> = page
+        .diagnostics
+        .shading_failures
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(failures, ["shading /Sh0: its Function yields no colour"]);
+    let mut strict = RasterOptions::new(72.0);
+    strict.strict = true;
+    match common::render_one(pdf, &strict) {
+        Err(RasterError::ShadingFailed(msgs)) => assert_eq!(msgs, failures),
+        other => panic!("expected ShadingFailed, got {other:?}"),
+    }
+}

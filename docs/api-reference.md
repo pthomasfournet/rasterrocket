@@ -36,7 +36,7 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 - `RasterError::PageTooLarge` / `RasterError::PageExceedsCeiling` — the bitmap exceeds the byte budget (`SessionConfig::max_page_bytes`, default 1.8 GB), or a side exceeds `MAX_PX_SIDE` (2²⁴).
 - `RasterError::PageAllocationFailed` — the page is within those limits, but the allocator refused its bitmap, or a bitmap drawn on it: a transparency group, soft mask, knockout coverage, tiling-pattern cell or screen, or Type 3 glyph bitmap, or a snapshot of the canvas.
 - `RasterError::InvalidPageGeometry` — `UserUnit` outside `[0.1, 10.0]`.
-- `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
+- `RasterError::ImageDecodeFailed` / `RasterError::ContentDecodeFailed` / `RasterError::ShadingFailed` — only when `opts.strict` is set; see [`RasterOptions`](#rasteroptions).
 - `RasterError::PageBudgetExceeded` — the page exceeded the per-page operator budget or wall-clock deadline.
 - `RasterError::Deskew` — deskew was asked of a page with a side over `deskew::DESKEW_MAX_SIDE`. A GPU rotation that fails under `BackendPolicy::ForceCuda` is `RasterError::BackendUnavailable`.
 
@@ -461,7 +461,7 @@ pub struct RasterOptions {
 | `cancel` | — | When `Some` and cancelled, the page in progress stops at its next operator and is yielded as `RasterError::Cancelled`; the iterator or channel then ends. |
 | `deskew` | — | Applies intensity-weighted projection-profile deskew to gray pages: skew within ±6.75°, measured to about 2/W radians on a page W px wide (0.05° for A4 at 300 dpi). A page without a confident angle (best-to-worst sweep score ratio below 3, e.g. a photograph or a blank page) is left as it is. The measurement is in `RenderedPage::skew`. Disable for native-text PDFs. |
 | `pages` | — | When `Some`, only the pages in the `PageSet` are rendered; `first_page`/`last_page` are ignored. |
-| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn, or is drawn only in part, returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded, or decodes only in part, returns `RasterError::ContentDecodeFailed`. When `false`, the image or stream is skipped (or drawn from the data that decoded) and listed in `PageDiagnostics::image_failures` or `PageDiagnostics::content_failures`. |
+| `strict` | — | When `true`, a page with an image that cannot be decoded or drawn, or is drawn only in part, returns `RasterError::ImageDecodeFailed`, and a page with a content stream that cannot be decoded, or decodes only in part, returns `RasterError::ContentDecodeFailed`, and a page with a shading whose `Function` yields no colour returns `RasterError::ShadingFailed`. When `false`, the image, stream or shading is skipped (or drawn from the data that decoded) and listed in `PageDiagnostics::image_failures`, `PageDiagnostics::content_failures` or `PageDiagnostics::shading_failures`. |
 | `purpose` | — | `RenderPurpose::View` (on-screen viewing) or `RenderPurpose::Print`. See [`RenderPurpose`](#renderpurpose). |
 | `annotations` | — | When `false`, annotations (form-field widgets included) are not drawn and pages show their content alone. |
 | `text_antialias` | — | When `false`, glyphs are rasterised bilevel (no partial coverage). Text drawn as paths follows `vector_antialias`. |
@@ -615,6 +615,7 @@ Collected at zero extra cost during rendering.
 | `image_failures` | `Vec<ImageFailure>` | Images that were present but could not be decoded or drawn (skipped, so the region shows whatever was painted beneath), and images drawn only partly because their stream lacked samples (`partial`). Empty on a complete render. Includes images inside tiling-pattern tiles. A JPEG is partial exactly when its entropy-coded data stops short of its last row or is damaged; it is drawn as far as it decodes. An image whose decoded samples would exceed 1 GiB (width × height × components) is refused before anything is allocated and listed here, and so is a JPEG whose coefficient planes, held whole by a progressive frame or one coded in several scans, do not fit in what its samples leave of that budget. |
 | `content_failures` | `Vec<ContentFailure>` | Elements of the page's `/Contents` that could not be decoded (or are not streams), each skipped while the page is drawn from the others, and elements that decoded only in part (`partial`), executed up to where their data was lost. Either way whatever the lost data held is missing. Empty on a complete render. A page none of whose content streams decode fails with `RasterError::Pdf` instead. |
 | `forms_too_deep` | `Vec<ObjectId>` | Form XObjects not drawn because they lie more than `MAX_FORM_DEPTH` (40) forms deep, each once, by object identifier; the rest of the page rendered without them. Under `strict` such a form fails the page with `RasterError::PageBudgetExceeded`. |
+| `shading_failures` | `Vec<ShadingFailure>` | Shadings not drawn because their `Function` yields no colour (a Type 4 program that does not parse, or a function that fails at every sample of a Type 1 shading or at any sample of the others), each once, by resource name (`name`, without the leading `/`) and whether it is a shading pattern's (`pattern`); the rest of the page rendered without them. Under `strict` such a shading fails the page with `RasterError::ShadingFailed`. |
 | `missing_fonts` | `Vec<String>` | Font resource names (without the leading `/`) that `Tf` selected but the `/Font` resources in effect do not define, once each. Their text is drawn in Helvetica, so it is present but in the wrong face. Not a `strict` failure. |
 | `unslotted_spots` | `Vec<String>` | Spot colorants that found no spot ink on a page rendered with overprint simulation (the four spot inks being held by the page's first four spots). Each printed its alternate colour in process ink, so it overprints as that process colour rather than as a separate ink. Empty on every other page. |
 | `unsupported_features` | `Vec<UnsupportedFeature>` | Features on this page the renderer ignores: JavaScript in the page's `/AA` or an annotation's `/A` or `/AA`, and 3D and multimedia annotations (`/3D`, `/RichMedia`, `/Movie`, `/Sound`, `/Screen`); see [`UnsupportedFeature`](#unsupportedfeature). Empty when there are none. The document-level ones are on the session. |
@@ -628,7 +629,7 @@ Collected at zero extra cost during rendering.
 | `output_intent` | `Option<RenderingIntent>` | The intent the page was converted to `SessionConfig::output_profile` under; `None` without a profile. |
 | `glyphs` | `GlyphCounts` | The glyphs the page's text-showing operators showed, by text rendering mode and by why a glyph cannot mark the page; see [`GlyphCounts`](#glyphcounts). All zero from `prescan_session`, which executes nothing. |
 
-`PageDiagnostics::has_omissions() -> bool` (a `const fn`) is `true` when the page was drawn with something left out or substituted: a skipped image (`image_failures`) or content stream (`content_failures`), a form past the depth limit (`forms_too_deep`), a font that resolved to nothing (`missing_fonts`) or an unsupported feature (`unsupported_features`). An entry of those lists that was drawn in part (`partial`) counts; the glyph counts and the device fields do not. Read the fields for the cause.
+`PageDiagnostics::has_omissions() -> bool` (a `const fn`) is `true` when the page was drawn with something left out or substituted: a skipped image (`image_failures`) or content stream (`content_failures`), a form past the depth limit (`forms_too_deep`), a shading whose function yields no colour (`shading_failures`), a font that resolved to nothing (`missing_fonts`) or an unsupported feature (`unsupported_features`). An entry of those lists that was drawn in part (`partial`) counts; the glyph counts and the device fields do not. Read the fields for the cause.
 
 #### `GlyphCounts`
 
@@ -961,6 +962,7 @@ pub enum RasterError {
     BackendUnavailable(String),  // forced backend failed to init
     ImageDecodeFailed(Vec<String>),
     ContentDecodeFailed(Vec<String>),
+    ShadingFailed(Vec<String>),  // strict: a shading's Function yields no colour
     PageBudgetExceeded(String),
     Cancelled,                   // stopped through a CancelToken
     OutputProfile(OutputProfileError), // the output profile admits no conversion for the page
@@ -981,7 +983,7 @@ carries a per-page panic caught by `render_channel`, which happens only under
 `panic = "unwind"`; with the `panic = "abort"` release profile a panic aborts
 the process.
 
-`ImageDecodeFailed` and `ContentDecodeFailed` are only returned under `strict`; they carry one message per failed image or content stream. `Deskew` is returned when deskew is asked of a page larger than `deskew::DESKEW_MAX_SIDE` (32 768 px a side). `deskew` on a render whose output is not gray (`render_page_rgba`, `render_page_gray_alpha`, `render_page_cmyk`, `PageBuffer::render_rgb_into`, `render_rgba_into` and `render_gray_alpha_into`, `transparent_background` or `ColorModel::Cmyk` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
+`ImageDecodeFailed`, `ContentDecodeFailed` and `ShadingFailed` are only returned under `strict`; they carry one message per failed image, content stream or shading. `Deskew` is returned when deskew is asked of a page larger than `deskew::DESKEW_MAX_SIDE` (32 768 px a side). `deskew` on a render whose output is not gray (`render_page_rgba`, `render_page_gray_alpha`, `render_page_cmyk`, `PageBuffer::render_rgb_into`, `render_rgba_into` and `render_gray_alpha_into`, `transparent_background` or `ColorModel::Cmyk` in `raster_pdf` and `render_channel`) is `InvalidOptions`, with the one message `deskew applies to gray pages only; render the page as gray (render_page_gray, render_gray_into) or turn deskew off`.
 
 Implements `std::error::Error` with a `source()` chain: `RasterError::Pdf(e)`, `OutputProfile(e)` and `OutputIntent(e)` have `e` as their source. `BackendUnavailable` is only returned when the policy is `ForceCuda`, `ForceVaapi`, `ForceVulkan` or `ForceD3d12`.
 

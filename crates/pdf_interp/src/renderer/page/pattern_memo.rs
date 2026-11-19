@@ -31,7 +31,7 @@ use super::PageRenderer;
 use super::canvas::CanvasKind;
 use crate::content::Operator;
 use crate::resources::ColorSpace;
-use crate::resources::shading::{Canvas, PlanColorants, ResolvedShading};
+use crate::resources::shading::{Canvas, PlanColorants, ResolvedShading, Unresolved};
 use crate::resources::tiling::TilingDescriptor;
 use crate::resources::{ResourceIdentity, ResourceKey, ShadingPattern};
 use crate::separation::{InkSetup, Separator};
@@ -335,49 +335,80 @@ pub(super) fn cell_raster_bytes<P: Pixel>(cell_w: f64, cell_h: f64) -> usize {
 impl PageRenderer<'_> {
     /// The named `Pattern` resource resolved as a shading pattern under the
     /// pattern matrix in effect, for the canvas, from the memo when kept.
-    pub(super) fn memo_shading_pattern(&self, name: &[u8]) -> Option<Rc<ShadingPattern>> {
+    /// A pattern that does not resolve is kept as such, and its
+    /// [`Unresolved`] cause reported only by the resolution that found it;
+    /// a kept one reports [`Unresolved::Skipped`].
+    pub(super) fn memo_shading_pattern(
+        &self,
+        name: &[u8],
+    ) -> Result<Rc<ShadingPattern>, Unresolved> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
         let pattern_ctm = self.pattern_ctm;
         let separator = self.separator(false);
         let key = PlacedKey::new(
-            self.resources.pattern_key(name)?,
+            self.resources
+                .pattern_key(name)
+                .ok_or(Unresolved::Skipped)?,
             &pattern_ctm,
             canvas,
             (kind, &separator),
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
-        self.pattern_memo.borrow_mut().shading_pattern(key, || {
-            let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
-            let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
-            resources
-                .shading_pattern(name, &pattern_ctm, canvas, ink)
-                .map(Rc::new)
-        })
+        let mut cause = Unresolved::Skipped;
+        self.pattern_memo
+            .borrow_mut()
+            .shading_pattern(key, || {
+                let doc = resources.doc();
+                let mut plan =
+                    |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
+                let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
+                resources
+                    .shading_pattern(name, &pattern_ctm, canvas, ink)
+                    .map(Rc::new)
+                    .map_err(|e| cause = e)
+                    .ok()
+            })
+            .ok_or(cause)
     }
 
     /// The named `Shading` resource resolved under `ctm`, a matrix into the
-    /// whole page's space, for the canvas, from the memo when kept.
-    pub(super) fn memo_shading(&self, name: &[u8], ctm: &[f64; 6]) -> Option<Rc<ResolvedShading>> {
+    /// whole page's space, for the canvas, from the memo when kept; an
+    /// unresolved one as [`Self::memo_shading_pattern`] reports it.
+    pub(super) fn memo_shading(
+        &self,
+        name: &[u8],
+        ctm: &[f64; 6],
+    ) -> Result<Rc<ResolvedShading>, Unresolved> {
         let canvas = self.shading_canvas();
         let kind = self.canvas.kind();
         let separator = self.separator(false);
         let key = PlacedKey::new(
-            self.resources.shading_key(name)?,
+            self.resources
+                .shading_key(name)
+                .ok_or(Unresolved::Skipped)?,
             ctm,
             canvas,
             (kind, &separator),
             self.default_spaces_context(),
         );
         let (resources, ink_map) = (&self.resources, &self.ink_map);
-        self.pattern_memo.borrow_mut().shading(key, || {
-            let doc = resources.doc();
-            let mut plan = |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
-            let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
-            resources.shading(name, ctm, canvas, ink).map(Rc::new)
-        })
+        let mut cause = Unresolved::Skipped;
+        self.pattern_memo
+            .borrow_mut()
+            .shading(key, || {
+                let doc = resources.doc();
+                let mut plan =
+                    |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
+                let ink: Option<PlanColorants<'_>> = kind.is_ink().then_some(&mut plan);
+                resources
+                    .shading(name, ctm, canvas, ink)
+                    .map(Rc::new)
+                    .map_err(|e| cause = e)
+                    .ok()
+            })
+            .ok_or(cause)
     }
 
     /// The canvas shadings are resolved for: the whole page, whose device

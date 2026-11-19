@@ -176,6 +176,17 @@ impl ResolvedShading {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
+/// Why a shading did not resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unresolved {
+    /// The shading is absent, paints nothing, or lacks or misstates an
+    /// entry it needs; logged where found.
+    Skipped,
+    /// The shading's `Function` yields no colour where the shading is
+    /// sampled, so the shading is not drawn.
+    NoColour,
+}
+
 /// The plan by which the colours of a space paint as ink on the ink canvas
 /// a shading is resolved for, `None` for a space whose colours paint their
 /// sRGB conversion (see [`resolve_shading_object`]).
@@ -185,10 +196,10 @@ pub(crate) type PlanColorants<'a> = &'a mut dyn FnMut(&ColorSpace) -> Option<Col
 /// sub-dictionary in effect, whose default colour spaces `resources`
 /// supplies.
 ///
-/// Returns `None` if the name is absent, the type is unsupported, or any
-/// required key is missing.  A warning is logged for unsupported types so the
-/// caller can fall back gracefully.
-#[must_use]
+/// # Errors
+///
+/// [`Unresolved`] if the name is absent or the shading does not resolve
+/// (see [`resolve_shading_object`]).
 pub(crate) fn resolve_shading(
     resources: &PageResources<'_>,
     shadings: &Dictionary,
@@ -196,8 +207,9 @@ pub(crate) fn resolve_shading(
     ctm: &[f64; 6],
     canvas: Canvas,
     ink: Option<PlanColorants<'_>>,
-) -> Option<ResolvedShading> {
-    resolve_shading_object(resources, shadings.get(name)?, ctm, canvas, ink)
+) -> Result<ResolvedShading, Unresolved> {
+    let sh_obj = shadings.get(name).ok_or(Unresolved::Skipped)?;
+    resolve_shading_object(resources, sh_obj, ctm, canvas, ink)
 }
 
 /// Resolve the shading `sh_obj` (a dictionary, a stream, or a reference to
@@ -209,15 +221,18 @@ pub(crate) fn resolve_shading(
 /// CMYK — converts its colours to the ink of that plan, and paints that
 /// plan's channels.
 ///
-/// Returns `None` if the type is unsupported or any required key is missing.
-#[must_use]
+/// # Errors
+///
+/// [`Unresolved::NoColour`] if the shading's function yields no colour;
+/// [`Unresolved::Skipped`] if the type is unsupported, any required key is
+/// missing, or the shading paints nothing.
 pub(crate) fn resolve_shading_object(
     resources: &PageResources<'_>,
     sh_obj: &Object,
     ctm: &[f64; 6],
     canvas: Canvas,
     ink: Option<PlanColorants<'_>>,
-) -> Option<ResolvedShading> {
+) -> Result<ResolvedShading, Unresolved> {
     let doc = resources.doc();
     let page_h = canvas.height;
     // Shading types 2–3 are plain dicts; types 4–7 are streams.
@@ -227,21 +242,22 @@ pub(crate) fn resolve_shading_object(
     let (sh_dict, stream_data): (Dictionary, Option<Vec<u8>>) = match sh_obj {
         Object::Stream(s) => (s.dict.clone(), stream_content(s)),
         Object::Reference(id) => {
-            let referent = doc.get_object(*id).ok()?;
+            let referent = doc.get_object(*id).ok().ok_or(Unresolved::Skipped)?;
             match referent.as_ref() {
                 Object::Stream(s) => (s.dict.clone(), stream_content(s)),
-                obj => (resolve_dict(doc, obj)?, None),
+                obj => (resolve_dict(doc, obj).ok_or(Unresolved::Skipped)?, None),
             }
         }
-        obj => (resolve_dict(doc, obj)?, None),
+        obj => (resolve_dict(doc, obj).ok_or(Unresolved::Skipped)?, None),
     };
 
-    let shading_type = sh_dict.get_i64(b"ShadingType")?;
+    let shading_type = sh_dict.get_i64(b"ShadingType").ok_or(Unresolved::Skipped)?;
 
-    let cs_space = resources.device_space(colorspace::resolve(doc, sh_dict.get(b"ColorSpace")?));
+    let cs_obj = sh_dict.get(b"ColorSpace").ok_or(Unresolved::Skipped)?;
+    let cs_space = resources.device_space(colorspace::resolve(doc, cs_obj));
     if matches!(cs_space, ColorSpace::Pattern { .. }) {
         log::warn!("shading: Pattern colour space is not valid for a shading — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     }
     let plan = ink.and_then(|plan| plan(&cs_space));
     let paints = match &plan {
@@ -251,7 +267,7 @@ pub(crate) fn resolve_shading_object(
     };
     if cs_space.paints_nothing() {
         log::debug!("shading: every colorant is /None — the shading paints nothing");
-        return Some(ResolvedShading {
+        return Ok(ResolvedShading {
             result: ShadingResult::Mesh(Mesh::new(Vec::new())),
             bbox: None,
             background: None,
@@ -279,7 +295,7 @@ pub(crate) fn resolve_shading_object(
     let background = read_background(&sh_dict, cs.channels());
     let (result, held_bytes, background_ink) =
         shading_colours(&source, cs, plan.as_ref(), background.as_deref())?;
-    Some(ResolvedShading {
+    Ok(ResolvedShading {
         result,
         bbox,
         background: background.as_deref().map(|c| cs.to_srgb(c, canvas.depth)),
@@ -298,8 +314,8 @@ fn shading_colours(
     cs: ShadingCs<'_>,
     plan: Option<&ColorantPlan>,
     background: Option<&[f64]>,
-) -> Option<(ShadingResult, usize, Option<Inks>)> {
-    Some(match (plan, source.canvas.depth) {
+) -> Result<(ShadingResult, usize, Option<Inks>), Unresolved> {
+    Ok(match (plan, source.canvas.depth) {
         (None, SampleDepth::Eight) => {
             let (colours, held) = source.colours::<3, u8, _>(cs)?;
             let result = match colours {
@@ -360,11 +376,11 @@ struct Source<'a> {
 
 impl Source<'_> {
     /// The shading's colours converted through `cs`, with the heap bytes
-    /// they hold; `None` when the shading cannot be resolved.
+    /// they hold; [`Unresolved`] when the shading cannot be resolved.
     fn colours<const N: usize, S: Sample, C: ShadingColour<N, S>>(
         &self,
         cs: C,
-    ) -> Option<(Colours<N, S>, usize)> {
+    ) -> Result<(Colours<N, S>, usize), Unresolved> {
         let (doc, sh, ctm) = (self.doc, self.sh, self.ctm);
         let page_h = self.canvas.height;
         let n_channels = cs.channels();
@@ -378,9 +394,9 @@ impl Source<'_> {
             shading_type @ 4..=7 => {
                 let Some(data) = &self.data else {
                     log::warn!("shading: ShadingType {shading_type} must be a stream — skipping");
-                    return None;
+                    return Err(Unresolved::Skipped);
                 };
-                let mesh_type = u8::try_from(shading_type).ok()?;
+                let mesh_type = u8::try_from(shading_type).ok().ok_or(Unresolved::Skipped)?;
                 // PDF §8.7.4.5.5: with a Function, each vertex carries one
                 // parametric value t, mapped through the function; its Decode
                 // range is the interval the function is evaluated over.
@@ -410,11 +426,11 @@ impl Source<'_> {
                 };
                 let mesh = Mesh::new(mesh);
                 let held = std::mem::size_of_val(mesh.triangles());
-                Some((Colours::Mesh(mesh), held))
+                Ok((Colours::Mesh(mesh), held))
             }
             other => {
                 log::warn!("shading: ShadingType {other} is not a shading type (1–7) — skipping");
-                None
+                Err(Unresolved::Skipped)
             }
         }
     }
@@ -498,9 +514,9 @@ fn resolve_axial<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<Box<dyn Pattern<S> + Send + Sync>> {
+) -> Result<Box<dyn Pattern<S> + Send + Sync>, Unresolved> {
     // Coords: [x0, y0, x1, y1] in user space.
-    let coords = read_f64_array(sh, b"Coords", 4)?;
+    let coords = read_f64_array(sh, b"Coords", 4).ok_or(Unresolved::Skipped)?;
 
     // Domain: [t0, t1] — defaults to [0, 1].
     let (t0, t1) = read_fn_domain(sh);
@@ -508,15 +524,22 @@ fn resolve_axial<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     // Extend: [extend_start, extend_end].
     let (ext_s, ext_e) = read_extend(sh);
 
-    let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
+    let ramp = sample_ramp(
+        doc,
+        sh.get(b"Function").ok_or(Unresolved::Skipped)?,
+        cs,
+        n,
+        t0,
+        t1,
+    )?;
 
     if !coords.iter().all(|v| v.is_finite()) {
         log::warn!("shading/axial: non-finite Coords — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     }
     let Some(inverse) = device_to_space(ctm, page_h) else {
         log::warn!("shading/axial: singular or non-finite CTM — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     };
 
     // The axis stays in the shading's target space; each device pixel is
@@ -525,7 +548,7 @@ fn resolve_axial<const N: usize, S: Sample, C: ShadingColour<N, S>>(
         ramp, coords[0], coords[1], coords[2], coords[3], ext_s, ext_e,
     )
     .in_shading_space(&inverse);
-    Some(Box::new(pattern))
+    Ok(Box::new(pattern))
 }
 
 /// Number of parameter values at which an axial or radial shading's
@@ -544,8 +567,8 @@ const fn ramp_samples(depth: SampleDepth) -> u16 {
 ///
 /// PDF §8.7.4.5.3: the colour at parameter `t` is the colour-space
 /// conversion of `Function(t)`; between samples the ramp interpolates the
-/// converted samples.  `None` when the function fails to evaluate at any
-/// sample.
+/// converted samples.  [`Unresolved::NoColour`] when the function fails to
+/// evaluate at any sample.
 fn sample_ramp<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     doc: &Document,
     fn_obj: &Object,
@@ -553,7 +576,7 @@ fn sample_ramp<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     n: usize,
     t0: f64,
     t1: f64,
-) -> Option<ColorRamp<N, S>> {
+) -> Result<ColorRamp<N, S>, Unresolved> {
     let function = Function::load(doc, fn_obj);
     let count = ramp_samples(S::DEPTH);
     let last = f64::from(count - 1);
@@ -565,9 +588,9 @@ fn sample_ramp<const N: usize, S: Sample, C: ShadingColour<N, S>>(
         .collect::<Result<Vec<_>, f64>>()
         .map_err(|t| {
             log::warn!("shading: Function yields no {n}-component colour at t = {t} — skipping");
-        })
-        .ok()?;
-    ColorRamp::from_samples(samples)
+            Unresolved::NoColour
+        })?;
+    ColorRamp::from_samples(samples).ok_or(Unresolved::Skipped)
 }
 
 // ── Radial (Type 3) ───────────────────────────────────────────────────────────
@@ -579,22 +602,29 @@ fn resolve_radial<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     n: usize,
     ctm: &[f64; 6],
     page_h: f64,
-) -> Option<Box<dyn Pattern<S> + Send + Sync>> {
+) -> Result<Box<dyn Pattern<S> + Send + Sync>, Unresolved> {
     // Coords: [x0, y0, r0, x1, y1, r1] in user space.
-    let coords = read_f64_array(sh, b"Coords", 6)?;
+    let coords = read_f64_array(sh, b"Coords", 6).ok_or(Unresolved::Skipped)?;
 
     let (t0, t1) = read_fn_domain(sh);
     let (ext_s, ext_e) = read_extend(sh);
 
-    let ramp = sample_ramp(doc, sh.get(b"Function")?, cs, n, t0, t1)?;
+    let ramp = sample_ramp(
+        doc,
+        sh.get(b"Function").ok_or(Unresolved::Skipped)?,
+        cs,
+        n,
+        t0,
+        t1,
+    )?;
 
     if !coords.iter().all(|v| v.is_finite()) {
         log::warn!("shading/radial: non-finite Coords — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     }
     let Some(inverse) = device_to_space(ctm, page_h) else {
         log::warn!("shading/radial: singular or non-finite CTM — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     };
 
     // The circles stay in the shading's target space, so the CTM draws
@@ -612,7 +642,7 @@ fn resolve_radial<const N: usize, S: Sample, C: ShadingColour<N, S>>(
         ext_e,
     )
     .in_shading_space(&inverse);
-    Some(Box::new(pattern))
+    Ok(Box::new(pattern))
 }
 
 // ── Colour conversion helpers ─────────────────────────────────────────────────

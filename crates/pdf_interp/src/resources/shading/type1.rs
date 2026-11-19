@@ -6,7 +6,7 @@ use raster::pipe::Pattern;
 use raster::shading::function::FunctionPattern;
 
 use super::function::{Function, read_f64_array};
-use super::{Canvas, ShadingColour, device_to_space, transform_point};
+use super::{Canvas, ShadingColour, Unresolved, device_to_space, transform_point};
 use crate::renderer::gstate::{ctm_multiply, ctm_transform};
 use crate::resources::colorspace::EXACT_WORK_BUDGET;
 use crate::resources::lattice::{Axis, for_each_corner};
@@ -135,8 +135,8 @@ fn type1_area(corners: &[(f64, f64)], bbox: Option<&[(f64, f64); 4]>, canvas: Ca
 /// At step 1 a point outside the Domain is never read and is left black;
 /// at a larger step it takes the colour of the nearest Domain point.
 ///
-/// `None`, logged, when the function evaluates at none of the points it was
-/// evaluated at; points where it fails take colour components 0, logged
+/// [`Unresolved::NoColour`], logged, when the function evaluates at none
+/// of the points it was evaluated at; points where it fails take colour components 0, logged
 /// once.  A lattice with no point in the Domain evaluates nothing and paints
 /// nothing.
 fn sample_lattice<const N: usize, S: Sample, C: ShadingColour<N, S>>(
@@ -146,7 +146,7 @@ fn sample_lattice<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     cs: C,
     n: usize,
     [xd0, xd1, yd0, yd1]: [f64; 4],
-) -> Option<Box<[[S; N]]>> {
+) -> Result<Box<[[S; N]]>, Unresolved> {
     let mut samples = Vec::with_capacity(lattice.cols * lattice.rows);
     let (mut evaluated, mut failures) = (0usize, 0usize);
     for row in 0..lattice.rows {
@@ -169,7 +169,7 @@ fn sample_lattice<const N: usize, S: Sample, C: ShadingColour<N, S>>(
     }
     if evaluated > 0 && failures == evaluated {
         log::warn!("shading/type1: Function evaluates at no sampled point — skipping");
-        return None;
+        return Err(Unresolved::NoColour);
     }
     if failures > 0 {
         log::warn!(
@@ -177,7 +177,7 @@ fn sample_lattice<const N: usize, S: Sample, C: ShadingColour<N, S>>(
              painting their colour components as 0"
         );
     }
-    Some(samples.into_boxed_slice())
+    Ok(samples.into_boxed_slice())
 }
 
 /// The Domain `[x0, x1, y0, y1]` of a Type 1 shading: `[0 1 0 1]` when
@@ -217,17 +217,17 @@ pub(super) fn resolve_function_based<const N: usize, S: Sample, C: ShadingColour
     ctm: &[f64; 6],
     canvas: Canvas,
     bbox: Option<&[(f64, f64); 4]>,
-) -> Option<FunctionBased<S>> {
+) -> Result<FunctionBased<S>, Unresolved> {
     let domain @ [xd0, xd1, yd0, yd1] = type1_domain(sh);
     if !domain.iter().all(|v| v.is_finite()) {
         log::warn!("shading/type1: non-finite Domain — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     }
     if xd0 >= xd1 || yd0 >= yd1 {
         log::warn!("shading/type1: degenerate Domain [{xd0},{xd1}]×[{yd0},{yd1}] — skipping");
-        return None;
+        return Err(Unresolved::Skipped);
     }
-    let function = Function::load(doc, sh.get(b"Function")?);
+    let function = Function::load(doc, sh.get(b"Function").ok_or(Unresolved::Skipped)?);
     // The point budget is the smaller of a count and the conversion work
     // budget over the cost of one point.
     let point_cost = function.cost().saturating_add(cs.conversion_cost()).max(1);
@@ -259,7 +259,7 @@ impl<C> Type1<'_, C> {
         canvas: Canvas,
         bbox: Option<&[(f64, f64); 4]>,
         max_points: usize,
-    ) -> Option<FunctionBased<S>>
+    ) -> Result<FunctionBased<S>, Unresolved>
     where
         C: ShadingColour<N, S>,
     {
@@ -267,7 +267,7 @@ impl<C> Type1<'_, C> {
         let page_h = canvas.height;
         let Some(inv) = device_to_space(&self.shading_ctm, page_h) else {
             log::warn!("shading/type1: degenerate Matrix × CTM — skipping");
-            return None;
+            return Err(Unresolved::Skipped);
         };
         // The shading-space point of device pixel (px, py) as fractions of
         // the Domain, clamped to it, and whether it lies in the Domain (PDF
@@ -295,14 +295,14 @@ impl<C> Type1<'_, C> {
             .any(|&(x, y)| !x.is_finite() || !y.is_finite())
         {
             log::warn!("shading/type1: Domain maps to non-finite device coordinates — skipping");
-            return None;
+            return Err(Unresolved::Skipped);
         }
         let Some(lattice) = Lattice::covering(type1_area(&corners, bbox, canvas), max_points)
         else {
             log::debug!(
                 "shading/type1: the Domain covers no pixel of the canvas — nothing painted"
             );
-            return Some((Box::new(FunctionPattern::<N, S>::new(|_, _| None)), 0));
+            return Ok((Box::new(FunctionPattern::<N, S>::new(|_, _| None)), 0));
         };
         if lattice.step > 1 {
             log::debug!(
@@ -337,7 +337,7 @@ impl<C> Type1<'_, C> {
             )]
             Some(colour.map(|v| S::from_signed(v.round() as i64)))
         });
-        Some((Box::new(pattern), held))
+        Ok((Box::new(pattern), held))
     }
 }
 
@@ -369,7 +369,10 @@ mod tests {
             target: crate::ColourTarget::SRGB,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        assert!(resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, CANVAS, None).is_none());
+        assert_eq!(
+            resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, CANVAS, None).err(),
+            Some(Unresolved::NoColour)
+        );
     }
 
     /// A 100 × 100 pixel canvas.
@@ -410,7 +413,7 @@ mod tests {
             target: crate::ColourTarget::SRGB,
         };
         let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        resolve_function_based(doc, &sh, cs, 1, &ctm, CANVAS, None)
+        resolve_function_based(doc, &sh, cs, 1, &ctm, CANVAS, None).ok()
     }
 
     /// The pixels of row `y` from `x0` to `x1` that `pattern` paints.

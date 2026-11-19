@@ -683,7 +683,9 @@ pub(crate) fn check_aborted(
 
 /// The error of a strict session for what `renderer` skipped:
 /// [`RasterError::ImageDecodeFailed`] when an image of the page failed,
-/// [`RasterError::PageBudgetExceeded`] when a form lay too deep to draw.
+/// [`RasterError::PageBudgetExceeded`] when a form lay too deep to draw,
+/// [`RasterError::ShadingFailed`] when a shading's function yielded no
+/// colour.
 pub(crate) fn check_strict(
     session: &RasterSession,
     renderer: &pdf_interp::renderer::PageRenderer<'_>,
@@ -702,6 +704,12 @@ pub(crate) fn check_strict(
             "Form XObject ({num}, {generation}) lies more than {} forms deep; not drawn",
             crate::MAX_FORM_DEPTH
         )));
+    }
+    let shadings = renderer.shading_failures();
+    if !shadings.is_empty() {
+        return Err(RasterError::ShadingFailed(
+            shadings.iter().map(ToString::to_string).collect(),
+        ));
     }
     Ok(())
 }

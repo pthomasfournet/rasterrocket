@@ -106,6 +106,7 @@ use devices::CacheState;
 pub(crate) use diagnostics::source_ppi;
 pub use diagnostics::{
     DevicePage, GlyphCounts, GroupSpaceApproximations, ImageFailure, PageDiagnostics, RenderAbort,
+    ShadingFailure,
 };
 pub use finished::FinishedCanvas;
 #[cfg(feature = "cache")]
@@ -1202,6 +1203,11 @@ impl<'doc> PageRenderer<'doc> {
         for &id in &self.diag.forms_too_deep {
             if !diag.forms_too_deep.contains(&id) {
                 diag.forms_too_deep.push(id);
+            }
+        }
+        for failure in &self.diag.shading_failures {
+            if !diag.shading_failures.contains(failure) {
+                diag.shading_failures.push(failure.clone());
             }
         }
         for font in &self.diag.missing_fonts {

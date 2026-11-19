@@ -448,8 +448,9 @@ impl PageRenderer<'_> {
         region: PixelRect,
         extent: u64,
     ) -> Option<PatternPaint> {
-        if let Some(shading) = self.memo_shading_pattern(name) {
-            return Some(PatternPaint::Shading(shading));
+        match self.memo_shading_pattern(name) {
+            Ok(shading) => return Some(PatternPaint::Shading(shading)),
+            Err(cause) => self.record_unresolved_shading(name, true, cause),
         }
         self.resolve_fill_pattern(name, region, extent)
             .map(PatternPaint::Tiled)
