@@ -103,8 +103,8 @@ pub enum BackendError {
     },
     /// A kernel reported, through its status words, an operation it could
     /// not complete exactly: the work's output is wrong and was discarded
-    /// before reaching the caller.  The device stays usable for other
-    /// work.
+    /// before reaching the caller.  The device's arithmetic is shown
+    /// unreliable for that operation.
     KernelFault {
         /// The kernel, for diagnostic context.
         kernel: &'static str,

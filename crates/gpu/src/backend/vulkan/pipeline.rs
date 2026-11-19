@@ -37,13 +37,22 @@ pub(super) enum KernelId {
     /// the tests; needs `shaderInt64`.
     #[cfg(test)]
     FloorDivProbe,
+    /// [`Self::FloorDivProbe`] whose first estimates are offset so that
+    /// their products wrap, for the tests of the fault check.
+    #[cfg(test)]
+    FloorDivProbePoisoned,
+    /// [`Self::PageRasterPaths`] whose floor divisions' first estimates are
+    /// offset so that their products wrap, for the tests of the fault
+    /// check.
+    #[cfg(test)]
+    PageRasterPathsPoisoned,
 }
 
 /// Total number of kernel slots, used to size the `OnceLock` array.
 #[cfg(not(test))]
 const NUM_KERNELS: usize = 4;
 #[cfg(test)]
-const NUM_KERNELS: usize = 5;
+const NUM_KERNELS: usize = 7;
 
 /// Every variant's `slot_index()` must be `< NUM_KERNELS`. Drift
 /// here would surface as a runtime panic when `self.slots[idx]` is
@@ -57,6 +66,10 @@ const _: () = {
     assert!(KernelId::PageRasterPaths.slot_index() < NUM_KERNELS);
     #[cfg(test)]
     assert!(KernelId::FloorDivProbe.slot_index() < NUM_KERNELS);
+    #[cfg(test)]
+    assert!(KernelId::FloorDivProbePoisoned.slot_index() < NUM_KERNELS);
+    #[cfg(test)]
+    assert!(KernelId::PageRasterPathsPoisoned.slot_index() < NUM_KERNELS);
 };
 
 /// SPIR-V entry-point name of every kernel: each is compiled with
@@ -109,6 +122,8 @@ impl KernelId {
         Self::PageRaster,
         Self::PageRasterPaths,
         Self::FloorDivProbe,
+        Self::FloorDivProbePoisoned,
+        Self::PageRasterPathsPoisoned,
     ];
 
     /// SPIR-V blob for this kernel, baked into the binary at build time.
@@ -124,6 +139,14 @@ impl KernelId {
             Self::FloorDivProbe => {
                 include_bytes!(concat!(env!("OUT_DIR"), "/floor_div_probe.spv"))
             }
+            #[cfg(test)]
+            Self::FloorDivProbePoisoned => {
+                include_bytes!(concat!(env!("OUT_DIR"), "/floor_div_probe_poisoned.spv"))
+            }
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => {
+                include_bytes!(concat!(env!("OUT_DIR"), "/page_raster_paths_poisoned.spv"))
+            }
         }
     }
 
@@ -137,6 +160,10 @@ impl KernelId {
             Self::PageRasterPaths => 3,
             #[cfg(test)]
             Self::FloorDivProbe => 4,
+            #[cfg(test)]
+            Self::FloorDivProbePoisoned => 5,
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => 6,
         }
     }
 
@@ -150,6 +177,10 @@ impl KernelId {
             Self::PageRasterPaths => "page_raster_paths",
             #[cfg(test)]
             Self::FloorDivProbe => "floor_div_probe",
+            #[cfg(test)]
+            Self::FloorDivProbePoisoned => "floor_div_probe_poisoned",
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => "page_raster_paths_poisoned",
         }
     }
 
@@ -169,7 +200,9 @@ impl KernelId {
             Self::PageRaster => &[0, 1, 2, 3, 4, 5],
             Self::PageRasterPaths => &[0, 1, 2, 3, 4, 5, 6],
             #[cfg(test)]
-            Self::FloorDivProbe => &[0, 1, 2],
+            Self::PageRasterPathsPoisoned => &[0, 1, 2, 3, 4, 5, 6],
+            #[cfg(test)]
+            Self::FloorDivProbe | Self::FloorDivProbePoisoned => &[0, 1, 2],
         }
     }
 
@@ -187,9 +220,11 @@ impl KernelId {
             Self::PageRaster => 6,
             // PageRaster's, then status
             Self::PageRasterPaths => 7,
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => 7,
             // (pairs, quotients, status)
             #[cfg(test)]
-            Self::FloorDivProbe => 3,
+            Self::FloorDivProbe | Self::FloorDivProbePoisoned => 3,
         }
     }
 }

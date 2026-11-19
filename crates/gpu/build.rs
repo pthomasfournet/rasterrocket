@@ -17,6 +17,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+include!("kernels/floor_div_steps.rs");
+
 /// Emit a `cargo:rustc-link-search` directive for the first of `dirs` that
 /// exists on the filesystem, then emit `cargo:rustc-link-lib=dylib={lib}`,
 /// the library `feature` links.
@@ -44,8 +46,15 @@ const KERNELS: &[&str] = &["icc_clut", "blit_image"];
 
 /// Compute kernels with a Slang source only, compiled to SPIR-V for the
 /// Vulkan backend; the CUDA backend has no twin of them.  Only the
-/// library's tests embed `floor_div_probe`.
-const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster", "page_raster_paths", "floor_div_probe"];
+/// library's tests embed the `floor_div_probe` kernels and
+/// `page_raster_paths_poisoned`.
+const VULKAN_ONLY_KERNELS: &[&str] = &[
+    "page_raster",
+    "page_raster_paths",
+    "floor_div_probe",
+    "floor_div_probe_poisoned",
+    "page_raster_paths_poisoned",
+];
 
 /// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
 /// capabilities.
@@ -58,20 +67,30 @@ fn slang_entry(kernel: &str) -> &'static str {
     match kernel {
         "icc_clut" => "icc_cmyk_clut",
         "blit_image" => "blit_image",
-        "page_raster" | "page_raster_paths" => "page_raster",
-        "floor_div_probe" => "floor_div_probe",
+        "page_raster" | "page_raster_paths" | "page_raster_paths_poisoned" => "page_raster",
+        "floor_div_probe" | "floor_div_probe_poisoned" => "floor_div_probe",
         _ => panic!("unknown kernel name: {kernel}"),
     }
 }
 
 /// The `.slang` file `kernel` is compiled from, and the preprocessor
-/// macros it is compiled with: a kernel may be a variant of another's
-/// source.
+/// macros it is compiled with besides [`slang_common_defines`]: a kernel
+/// may be a variant of another's source.  `FLOOR_DIV_POISON` offsets
+/// every floor division's first estimate so that its product wraps, for
+/// the tests of the division's fault check.
 fn slang_source(kernel: &str) -> (&str, &'static [&'static str]) {
     match kernel {
         "page_raster_paths" => ("page_raster", &["PAGE_PATHS"]),
+        "page_raster_paths_poisoned" => ("page_raster", &["PAGE_PATHS", "FLOOR_DIV_POISON"]),
+        "floor_div_probe_poisoned" => ("floor_div_probe", &["FLOOR_DIV_POISON"]),
         _ => (kernel, &[]),
     }
+}
+
+/// The preprocessor macros every Slang kernel is compiled with, as
+/// `NAME=value`: [`FLOOR_DIV_STEPS`].
+fn slang_common_defines() -> [String; 1] {
+    [format!("FLOOR_DIV_STEPS={FLOOR_DIV_STEPS}")]
 }
 
 /// Candidate directories for CUDA toolkit libraries on Linux, in preference
@@ -503,7 +522,12 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
                 .arg("-o")
                 .arg(&spv)
                 .args(["-entry", slang_entry(kernel)])
-                .args(defines.iter().map(|d| format!("-D{d}")))
+                .args(
+                    defines
+                        .iter()
+                        .map(|d| format!("-D{d}"))
+                        .chain(slang_common_defines().iter().map(|d| format!("-D{d}"))),
+                )
                 .arg(&src),
             &format!("{kernel} ({source}.slang, profile={profile})"),
             "; install the LunarG Vulkan SDK (it sets VULKAN_SDK), `apt install slang`, or \

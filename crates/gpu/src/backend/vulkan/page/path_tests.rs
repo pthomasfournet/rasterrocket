@@ -201,3 +201,33 @@ fn backdrops_and_segments_held_in_items_match_the_host_model() {
         );
     }
 }
+
+#[test]
+fn a_faulting_raster_leaves_the_page_untouched() {
+    let Some(backend) = crate::backend::vulkan::test_backend_with_int64() else {
+        return;
+    };
+    let page = random_page(&mut Rng(0xFA17), 37, 21, 30, SampleDepth::Eight);
+    let stride = 37 * 3 + 5;
+    let mut out = vec![0xA5u8; stride * 21];
+    let err = backend
+        .render_page_poisoned(&page, &mut out, stride)
+        .expect_err("a poisoned raster faults");
+    assert!(
+        matches!(
+            err,
+            crate::backend::BackendError::KernelFault {
+                kernel: "page_raster_paths_poisoned",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        out.iter().all(|&s| s == 0xA5),
+        "a faulting page wrote a sample"
+    );
+    backend
+        .render_page(&page, &mut out, stride)
+        .expect("the unpoisoned raster renders");
+}

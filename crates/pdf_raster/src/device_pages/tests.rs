@@ -198,18 +198,6 @@ fn a_page_beyond_the_memory_left_keeps_the_device() {
     });
 }
 
-/// A page whose raster reported a fault renders on the CPU and leaves the
-/// device in service.
-#[test]
-fn a_kernel_fault_keeps_the_device() {
-    assert_failure_keeps_the_device(BackendError::KernelFault {
-        kernel: "page_raster_paths",
-        detail: "floor_div(a = -1, b = 3) did not converge within 16 correction steps; \
-                 the device's float division is unreliable"
-            .to_owned(),
-    });
-}
-
 /// A refused recording renders on the CPU once; a cancelled recording
 /// is reported cancelled without rendering the page again.
 #[test]

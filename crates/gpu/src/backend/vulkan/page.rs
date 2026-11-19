@@ -182,12 +182,13 @@ fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u
     push
 }
 
-/// `Ok` when the status words of a raster with outlines record no fault.
+/// `Ok` when the status words of the raster `kernel` of a page with
+/// outlines record no fault.
 ///
 /// # Errors
-/// [`BackendError::KernelFault`] of `page_raster_paths` naming the fault.
-fn check_paths_status(words: &[u32; STATUS_WORDS]) -> Result<()> {
-    kernel_status::check(KernelId::PageRasterPaths.label(), words)
+/// [`BackendError::KernelFault`] of `kernel` naming the fault.
+fn check_paths_status(kernel: KernelId, words: &[u32; STATUS_WORDS]) -> Result<()> {
+    kernel_status::check(kernel.label(), words)
 }
 
 /// `len` bytes as a device size.
@@ -248,7 +249,7 @@ impl VulkanBackend {
         out: &mut [S],
         stride: usize,
     ) -> Result<()> {
-        self.render_page_with(page, out, stride, None)
+        self.render_page_with(page, out, stride, None, KernelId::PageRasterPaths)
     }
 
     /// As [`Self::render_page`], and return the duration of each of the
@@ -265,11 +266,18 @@ impl VulkanBackend {
         stride: usize,
     ) -> Result<PageTimes> {
         let mut times = PageTimes::default();
-        self.render_page_with(page, out, stride, Some(&mut times))?;
+        self.render_page_with(
+            page,
+            out,
+            stride,
+            Some(&mut times),
+            KernelId::PageRasterPaths,
+        )?;
         Ok(times)
     }
 
-    /// [`Self::render_page`], timed into `times` when given.
+    /// [`Self::render_page`], timed into `times` when given, a page with
+    /// outlines rasterised by the kernel `paths`.
     #[expect(
         clippy::too_many_lines,
         reason = "one page's stages in order: checks, staging, recording, read-back"
@@ -280,6 +288,7 @@ impl VulkanBackend {
         out: &mut [S],
         stride: usize,
         times: Option<&mut PageTimes>,
+        paths: KernelId,
     ) -> Result<()> {
         let mut laps = Laps::new(times.is_some());
         let (width, height) = (page.width() as usize, page.height() as usize);
@@ -324,7 +333,7 @@ impl VulkanBackend {
                     "render_page: the page has outlines, which this device does not rasterise",
                 ));
             }
-            KernelId::PageRasterPaths
+            paths
         } else {
             KernelId::PageRaster
         };
@@ -403,11 +412,10 @@ impl VulkanBackend {
             staged.push((stage_parts(self, slot, parts)?, input_len(parts)));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
-        let mut status = match kernel {
-            KernelId::PageRasterPaths => {
-                Some(ensure(self, status, STATUS_BYTES, Direction::ToHost)?)
-            }
-            _ => None,
+        let mut status = if page.has_paths() {
+            Some(ensure(self, status, STATUS_BYTES, Direction::ToHost)?)
+        } else {
+            None
         };
         let write = laps.lap();
 
@@ -475,7 +483,7 @@ impl VulkanBackend {
             let bytes = unsafe { host_view(self, status) }?
                 .first_chunk::<STATUS_BYTES>()
                 .ok_or_else(|| BackendError::msg("render_page: the status buffer is short"))?;
-            check_paths_status(&status_words(bytes))?;
+            check_paths_status(kernel, &status_words(bytes))?;
         }
         self.page_clock.record(held);
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
@@ -516,6 +524,37 @@ impl VulkanBackend {
         pairs: &[(i64, i64)],
         max_steps: u32,
     ) -> Result<FloorDivProbe> {
+        self.floor_div_probe_on(KernelId::FloorDivProbe, pairs, max_steps)
+    }
+
+    /// [`Self::floor_div_probe`] with every first estimate offset so that
+    /// its product with the divisor wraps.
+    pub(crate) fn floor_div_probe_poisoned(
+        &self,
+        pairs: &[(i64, i64)],
+        max_steps: u32,
+    ) -> Result<FloorDivProbe> {
+        self.floor_div_probe_on(KernelId::FloorDivProbePoisoned, pairs, max_steps)
+    }
+
+    /// [`Self::render_page`] with the floor divisions of its outlines'
+    /// raster poisoned as in [`Self::floor_div_probe_poisoned`].
+    pub(crate) fn render_page_poisoned<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+    ) -> Result<()> {
+        self.render_page_with(page, out, stride, None, KernelId::PageRasterPathsPoisoned)
+    }
+
+    /// [`Self::floor_div_probe`] by the probe kernel `kernel`.
+    fn floor_div_probe_on(
+        &self,
+        kernel: KernelId,
+        pairs: &[(i64, i64)],
+        max_steps: u32,
+    ) -> Result<FloorDivProbe> {
         /// The low and high words of `v`.
         fn words(v: i64) -> [u32; 2] {
             let v = v.cast_unsigned();
@@ -546,7 +585,7 @@ impl VulkanBackend {
                 .recorder
                 .record_zero_buffer(&status.device, STATUS_BYTES)?;
             backend.recorder.dispatch_kernel(
-                KernelId::FloorDivProbe,
+                kernel,
                 &[
                     input.device.handle(),
                     output.device.handle(),
@@ -1095,6 +1134,68 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_floor_div_reports_an_exhausted_upward_bound() {
+        let Some(b) = test_backend_with_int64() else {
+            return;
+        };
+        // Outside the domain: with |a / b| near 2^61 the second estimate
+        // divides a remainder of about 2^37, whose float rounding leaves
+        // r = 3 123 above the quotient after it, past 16 upward steps.
+        let pair = (2_404_050_171_065_969_715, 1);
+        let (_, fault) = b.floor_div_probe(&[pair], FLOOR_DIV_STEPS).unwrap();
+        assert_eq!(fault, Some(pair));
+    }
+
+    #[test]
+    fn the_first_faulting_division_writes_the_operands() {
+        let Some(b) = test_backend_with_int64() else {
+            return;
+        };
+        // Every pair leaves r = -1 after the estimates: all fault at once.
+        let pairs: Vec<(i64, i64)> = (0..4096)
+            .map(|k: i64| {
+                let d = 3 + k % 1000;
+                (-(k * d + 1), d)
+            })
+            .collect();
+        let (_, fault) = b.floor_div_probe(&pairs, 0).unwrap();
+        let fault = fault.expect("a fault");
+        assert!(pairs.contains(&fault), "{fault:?} is no single pair");
+    }
+
+    #[test]
+    fn a_wrapped_estimate_is_a_fault() {
+        let Some(b) = test_backend_with_int64() else {
+            return;
+        };
+        // The poisoned first estimate makes q * b wrap; the remainder
+        // correction then leaves r in [0, b), and only the wrap guard
+        // sees the wrong quotient.
+        for pair in [
+            (0, 2),
+            (-5, 3),
+            (12_345 * (1 << 31) + 7, 1 << 31),
+            (1 << 62, (1 << 32) - 1),
+        ] {
+            let (q, fault) = b
+                .floor_div_probe_poisoned(&[pair], FLOOR_DIV_STEPS)
+                .unwrap();
+            assert_ne!(
+                q[0],
+                crate::page::path::floor_div(pair.0, pair.1),
+                "{pair:?}"
+            );
+            assert_eq!(fault, Some(pair));
+        }
+        let cases: Vec<(i64, i64)> = floor_div_cases(&mut Rng(0x0bad))
+            .into_iter()
+            .filter(|&(_, d)| d >= 2)
+            .collect();
+        let (_, fault) = b.floor_div_probe_poisoned(&cases, FLOOR_DIV_STEPS).unwrap();
+        assert!(cases.contains(&fault.expect("a fault")));
+    }
+
+    #[test]
     fn a_set_status_word_fails_the_page_with_a_kernel_fault() {
         let a: i64 = -(1 << 40) + 7;
         let b: i64 = (1 << 31) + 5;
@@ -1106,7 +1207,8 @@ mod tests {
             u32::try_from(b_bits & 0xFFFF_FFFF).unwrap(),
             u32::try_from(b_bits >> 32).unwrap(),
         ];
-        let err = super::check_paths_status(&words).expect_err("a set fault code");
+        let err = super::check_paths_status(super::KernelId::PageRasterPaths, &words)
+            .expect_err("a set fault code");
         assert!(
             matches!(
                 err,
@@ -1120,6 +1222,6 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains(&format!("a = {a}")), "{message}");
         assert!(message.contains(&format!("b = {b}")), "{message}");
-        assert!(super::check_paths_status(&[0; 5]).is_ok());
+        assert!(super::check_paths_status(super::KernelId::PageRasterPaths, &[0; 5]).is_ok());
     }
 }

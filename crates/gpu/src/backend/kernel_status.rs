@@ -18,9 +18,7 @@ pub(crate) const STATUS_BYTES: usize = STATUS_WORDS * 4;
 /// remainder outside `[0, b)`.
 const FAULT_FLOOR_DIV: u32 = 1;
 
-/// The correction steps the page raster's floor division takes in each
-/// direction: `FLOOR_DIV_STEPS` of `kernels/floor_div.slang`.
-pub(crate) const FLOOR_DIV_STEPS: u32 = 16;
+include!("../../kernels/floor_div_steps.rs");
 
 /// The status words of the status buffer's bytes `bytes`, in the device's
 /// byte order, which is the host's.
@@ -102,9 +100,15 @@ pub(crate) fn floor_div_cases(rng: &mut crate::page::test_support::Rng) -> Vec<(
     for _ in 0..65_536 {
         let b_bits = rng.range(1, 33);
         let b = rng.range(1, 1 << b_bits);
-        let a_bits = rng.range(0, 62);
+        let a_bits = rng.range(0, 63);
         let bound = i64::try_from(a_limit(b).min(1 << a_bits)).expect("the bound fits i64");
-        cases.push((rng.range(-bound, bound + 1), b));
+        let magnitude = rng.range(0, bound + 1);
+        let a = if rng.next() & 1 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        };
+        cases.push((a, b));
     }
     cases
 }
