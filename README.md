@@ -320,8 +320,8 @@ behaviour change for library users (first item); otherwise no API change.
   axis-aligned rectangles fill whole pixels.
 - **In-crate font rasteriser.** Fonts (TrueType, OpenType, CFF, CID-keyed CFF,
   Type 1) are parsed by local forks of `read-fonts` / `skrifa` and rasterised
-  in-crate, unhinted. No C font library is linked; the `bundled` feature and
-  the system font library's build dependency are gone. Text is slightly lighter;
+  in-crate, unhinted, so text renders the same on every platform; the
+  `bundled` feature is gone. Text is slightly lighter;
   a glyph-by-glyph check of 16 238 embedded font programs found nothing
   lost.
 - **Hostile-PDF hardening.** The parser now inherits the workspace lints;

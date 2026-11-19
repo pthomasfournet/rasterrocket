@@ -4126,7 +4126,7 @@ now assert every case they printed):
   A colour compensated below the PCS black also keeps its a*/b*. CMYK
   separation with compensation goes from 1.27 to 0.19 ΔE00 at 16 bits,
   the CMYK → CMYK link from 1.53 to 0.06, and the special v2 bound is
-  gone. The blacks stay neutral, as they do in `transicc`'s conversions. The input-side
+  gone. The blacks stay neutral. The input-side
   black of CMYK printer profiles under relative colorimetry moves too: 21
   of the 29 archive documents with such a profile change, on pages 1–10
   at 50 dpi, in about 5 % of pixels by exactly 1/255 (ΔE00 mean 0.7, max
