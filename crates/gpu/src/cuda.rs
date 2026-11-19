@@ -42,35 +42,40 @@ const CUDA_ERROR_INSUFFICIENT_DRIVER: i32 = 35;
 /// How long [`init_runtime`] retries [`CUDA_ERROR_INSUFFICIENT_DRIVER`].
 const RUNTIME_INIT_RETRY: Duration = Duration::from_secs(2);
 
-/// The outcome of the process's CUDA runtime initialisation.
-static RUNTIME_INIT: OnceLock<Result<(), i32>> = OnceLock::new();
+/// Set once the process's CUDA runtime is initialised.
+static RUNTIME_READY: OnceLock<()> = OnceLock::new();
 
-/// Initialise the CUDA runtime once per process, with a context current on
-/// the calling thread, by `cudaFree(NULL)`.
+/// Initialise the CUDA runtime, with a context current on the calling
+/// thread, by `cudaFree(NULL)`, until it succeeds once in the process.
 ///
 /// On Windows, a runtime first used while other threads of the process use
 /// the driver can answer every call with [`CUDA_ERROR_INSUFFICIENT_DRIVER`]
 /// for tens of milliseconds before it succeeds; that code is retried for
 /// [`RUNTIME_INIT_RETRY`].  Any other error, or that one past the deadline,
-/// is the outcome for the whole process.  The runtime's last-error state is
+/// is the outcome of this call alone: a later call tries again, so a
+/// transient failure does not disable the runtime's users for the life of
+/// a long-running process.  Threads that call at once may each initialise;
+/// `cudaFree(NULL)` is idempotent.  The runtime's last-error state is
 /// cleared on success.
 fn init_runtime() -> Result<(), i32> {
-    *RUNTIME_INIT.get_or_init(|| {
-        let deadline = Instant::now() + RUNTIME_INIT_RETRY;
-        loop {
-            // SAFETY: cudaFree(NULL) frees nothing; it initialises the runtime.
-            let code = unsafe { cudaFree(ptr::null_mut()) };
-            if code == 0 {
-                // SAFETY: reads and resets the calling thread's runtime error.
-                let _ = unsafe { cudaGetLastError() };
-                return Ok(());
-            }
-            if code != CUDA_ERROR_INSUFFICIENT_DRIVER || Instant::now() >= deadline {
-                return Err(code);
-            }
-            std::thread::sleep(Duration::from_millis(5));
+    if RUNTIME_READY.get().is_some() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + RUNTIME_INIT_RETRY;
+    loop {
+        // SAFETY: cudaFree(NULL) frees nothing; it initialises the runtime.
+        let code = unsafe { cudaFree(ptr::null_mut()) };
+        if code == 0 {
+            // SAFETY: reads and resets the calling thread's runtime error.
+            let _ = unsafe { cudaGetLastError() };
+            let _ = RUNTIME_READY.set(());
+            return Ok(());
         }
-    })
+        if code != CUDA_ERROR_INSUFFICIENT_DRIVER || Instant::now() >= deadline {
+            return Err(code);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 // ── DeviceBuf ─────────────────────────────────────────────────────────────────
@@ -131,7 +136,10 @@ pub(crate) struct CudaInitError {
     ///
     /// Used by `npp_rotate` (`gpu-deskew` feature) to build a human-readable
     /// error string; unused when only `nvjpeg2k` is compiled.
-    #[cfg_attr(not(feature = "gpu-deskew"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "gpu-deskew"),
+        expect(dead_code, reason = "read only by the gpu-deskew error message")
+    )]
     pub step: &'static str,
     /// Raw CUDA driver error code (non-zero).
     pub code: i32,
@@ -155,7 +163,7 @@ pub(crate) struct CudaInit {
 ///    Negative values or out-of-range ordinals return `CUDA_ERROR_INVALID_VALUE`.
 /// 3. `cuDevicePrimaryCtxRetain` — acquire (ref-count) the primary context.
 /// 4. `cuCtxSetCurrent` — bind the primary context to the calling thread.
-/// 5. [`init_runtime`] — initialise the CUDA runtime (once per process).
+/// 5. [`init_runtime`] — initialise the CUDA runtime (until it succeeds once in the process).
 /// 6. `cuStreamCreate` — create a new stream within that context.
 ///
 /// On failure at step 3, nothing is cleaned up (no retain was taken).
