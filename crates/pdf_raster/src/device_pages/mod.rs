@@ -122,10 +122,9 @@ fn selectors<B: SessionDevice>(
 type OpenDevice<B> = (Option<String>, Arc<B>);
 
 /// The GPU page devices of `config` under `B`'s forcing policy
-/// ([`SessionDevice::FORCE`]),
-/// with the selector each is opened with: `session`, the session's own
-/// device, for the entry that names it (or for
-/// [`crate::SessionConfig::vulkan_device`] when
+/// ([`SessionDevice::FORCE`]), with the selector each is opened with:
+/// `session`, the session's own device, for the entry that names it (or
+/// for [`crate::SessionConfig::vulkan_device`] when
 /// [`crate::SessionConfig::gpu_devices`] is empty), each other one opened
 /// now.
 ///

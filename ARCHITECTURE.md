@@ -1158,7 +1158,7 @@ grown to the largest page, a render allocates no page-sized buffer: neither
 canvas, alpha plane nor output. The bytes are those of the owned-buffer
 entry points.
 
-**GPU page queue** (`device_pages.rs`). With `SessionConfig::gpu_pages`
+**GPU page queue** (`device_pages/`). With `SessionConfig::gpu_pages`
 (requires the `vulkan` feature, policy `Auto` or `ForceVulkan`, and vector
 antialiasing; otherwise `open_session` returns `InvalidOptions`), pages
 render on the session's Vulkan device under `ForceVulkan`; under `Auto` the
@@ -1181,9 +1181,10 @@ renders on the CPU and leaves it in service. `render_page_bands` renders
 on the CPU, so a page the CLI renders in bands (larger than `--band-mib`)
 does not reach the device. Pages are returned by index, so output order
 does not depend on where a page rendered; `PageDiagnostics::device_page`
-(`DevicePage`) records the outcome. The device is the process-wide Vulkan
-backend of its selector (`vk_init.rs`), held weakly: sessions open at once
-share it, and the last of them to drop destroys it.
+(`DevicePage`) records the outcome. The device is the process-wide
+backend of its selector (`device_init.rs`, generic over the session's
+device API), held weakly: sessions open at once share it, and the last of
+them to drop destroys it.
 
 `render_channel` spawns a Rayon background task and feeds pages into a bounded
 `sync_channel`. Typical use: `capacity=4`, Tesseract consumes from the other end
