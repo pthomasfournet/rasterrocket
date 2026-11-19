@@ -3512,6 +3512,16 @@ full run includes the `ram` group, so that run names its groups with `-g`;
 the Windows driver skips `R12` without `-RamRoot` and lists it in
 `skipped.txt`. The first published results carry no RAM row.
 
+**Nice to have: an OpenGL compute backend.** For machines whose GPU or driver
+offers OpenGL 4.3 compute shaders but no Vulkan (older integrated GPUs,
+virtual machines with a virtualised OpenGL device). Slang emits GLSL, so the
+kernels need not be rewritten; the backend would be a third twin of the
+Vulkan one behind `GpuBackend`. Exactness rests on the same integer kernels:
+64-bit integers are an optional extension under OpenGL
+(`GL_ARB_gpu_shader_int64`), and the page raster's table path already serves
+devices without them. Not planned before a machine that needs it is found;
+any such backend stays opt-in and byte-identical to the CPU, like the others.
+
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
 irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one
