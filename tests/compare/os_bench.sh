@@ -42,20 +42,21 @@
 # `taskset -c 0-(N-1)`, both with RAYON_NUM_THREADS=N.  The start-up rows
 # (S-version, S-page, G-cuda-start, G-vulkan-start) are 1-thread rows: the
 # process, with every runtime and driver thread it starts, shares CPU 2, so
-# a G row less S-page is the backend's initialisation on one core.  Disk rows write under
-# OUT_DIR/scratch (--no-ram and a path prefix, counted with --expect-pages);
-# ram rows write to --ram-path under the RAM root and spill to an empty
-# OUT_DIR/scratch directory.  After the rows, every row `os_bench noisy` lists
-# is run again with 5 repetitions into rerun.tsv, which supersedes its samples.
+# a G row less S-page is the backend's initialisation on one core.  Disk
+# rows write under OUT_DIR/scratch (--no-ram and a path prefix, counted
+# with --expect-pages); ram rows write to --ram-path under the RAM root and
+# spill to an empty OUT_DIR/scratch directory.  After the rows, every row
+# `os_bench noisy` lists is run again with 5 repetitions into rerun.tsv,
+# which supersedes its samples.
 #
 # Prerequisites: cargo and rustc of the repository toolchain, git, taskset,
 # findmnt, and the fixtures named in the rows file under tests/fixtures/
-# (gitignored).  RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS must be unset, so
-# that the repository's -C target-cpu=native applies.  A full run also
-# requires the performance governor on every CPU, transparent huge pages
-# `madvise` or `never` (recorded as env key thp), and a working tree equal to
-# HEAD.  Each failed check prints its remedy; the system changes need the
-# owner's go-ahead:
+# (gitignored).  RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS and
+# CARGO_BUILD_RUSTFLAGS must be unset, so that the repository's
+# -C target-cpu=native applies.  A full run also requires the performance
+# governor on every CPU, transparent huge pages `madvise` or `never`
+# (recorded as env key thp), and a working tree equal to HEAD.  Each failed
+# check prints its remedy; the system changes need the owner's go-ahead:
 #   sudo cpupower frequency-set -g performance
 #   echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
 #   sudo mkdir -p /mnt/rr-bench-ram &&
@@ -74,6 +75,9 @@
 #   failed.flag  instead, on any error or on SIGINT/TERM/HUP once OUT_DIR is
 #                taken (a usage error or a non-empty OUT_DIR exits 2 without
 #                it), holding the first failing step and command
+# SIGINT, SIGTERM and SIGHUP sent to the script alone are handled once the
+# running child (a build or a harness call) exits; Ctrl-C and a signal to the
+# whole process group stop the child as well, so they take effect at once.
 # Paths in build.log and failed.flag may name the home directory: neither is
 # published.  env.tsv, results.tsv, rerun.tsv, pages.tsv and skipped.txt hold
 # no host or user name.
@@ -148,7 +152,9 @@ flag_ok=0   # failed.flag may be written once OUT_DIR is the run's own.
 # command fails in turn.
 fail() {
     local msg=${1//"$root/"/}
-    msg=${msg//"$HOME"/\~}
+    if [[ -n ${HOME:-} && $HOME != / ]]; then
+        msg=${msg//"$HOME"/\~}
+    fi
     if ((flag_ok)) && [[ -e $out/failed.flag ]]; then
         exit 1
     fi
@@ -362,7 +368,7 @@ done
 
 if ((!dry)); then
     step="build environment check"
-    for v in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS; do
+    for v in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS; do
         [[ -z ${!v:-} ]] || die "$v is set and would replace the repository's -C target-cpu=native" "unset $v"
     done
 fi
