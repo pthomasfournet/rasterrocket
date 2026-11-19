@@ -24,6 +24,7 @@ pub(crate) const ENV_KEYS: &[&str] = &[
     "governor",
     "thp",
     "hags",
+    "priority",
     "defender_rt",
     "defender_excl",
     "gpu_driver",
@@ -509,6 +510,8 @@ mod tests {
         assert!(err.contains("hostname"));
         let thp = read_env(&format!("{ENV}thp\tmadvise\n")).unwrap();
         assert_eq!(thp.get("thp").map(String::as_str), Some("madvise"));
+        let priority = read_env(&format!("{ENV}priority\tNormal\n")).unwrap();
+        assert_eq!(priority.get("priority").map(String::as_str), Some("Normal"));
         assert!(read_env("os\tlinux\n").unwrap_err().contains("commit"));
     }
 

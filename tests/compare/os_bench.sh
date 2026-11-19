@@ -65,7 +65,8 @@
 # first under that budget's wrapper; the driver's own builds are then no-ops.
 #
 # OUT_DIR must be absent or empty.  It receives:
-#   env.tsv      key<TAB>value machine state, from a fixed key set
+#   env.tsv      key<TAB>value machine state, from a fixed key set (priority
+#                records the driver's niceness, which the rows inherit)
 #   results.tsv  one harness sample per line
 #   rerun.tsv    5-repetition re-runs of noisy rows (when any)
 #   pages.tsv    per-page render times of the rows that keep them
@@ -549,6 +550,7 @@ if ((!dry)); then
     env_key ram_gib "$(awk '/^MemTotal:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo 2> /dev/null || true)"
     env_key thp "$(thp_mode)"
     env_key governor "$(probe cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor | sort -u | paste -sd, -)"
+    env_key priority "nice $(nice)"
     env_key gpu_driver "$(probe nvidia-smi --query-gpu=driver_version --format=csv,noheader | sort -u | paste -sd, -)"
     if ((need_gpu)) && [[ -z $(skip_reason "$(row_index G-cuda-start)") ]]; then
         env_key cuda "$(probe nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')"
