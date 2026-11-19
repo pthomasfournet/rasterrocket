@@ -36,6 +36,7 @@ use std::sync::Mutex;
 
 use ash::vk;
 
+use crate::backend::layout::word_padded;
 use crate::backend::params;
 use crate::backend::{BackendError, Result};
 
@@ -370,10 +371,18 @@ impl PageRecorder {
         push[0..4].copy_from_slice(&n_nodes.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());
         push[8..12].copy_from_slice(&u32::from(p.wide).to_ne_bytes());
+        // The pixel buffers are bound over the words the kernel addresses,
+        // not their capacity, which may exceed `maxStorageBufferRange`.
+        let pixels = u64::from(p.n_pixels);
+        let rgb_words = if p.wide { 2 } else { 1 };
         self.dispatch_kernel(
             KernelId::IccClut,
             &[p.cmyk.handle(), p.rgb.handle(), p.clut.handle()],
-            &[p.cmyk.size(), p.rgb.size(), p.clut.size()],
+            &[
+                binding_range(pixels * 4, p.cmyk.size()),
+                binding_range(pixels * 4 * rgb_words, p.rgb.size()),
+                p.clut.size(),
+            ],
             &push,
             (p.n_pixels.div_ceil(256), 1, 1),
         )
@@ -415,6 +424,13 @@ impl PageRecorder {
         let groups_x = bbox_w.div_ceil(16);
         let groups_y = bbox_h.div_ceil(16);
 
+        // Each buffer is bound over the bytes the kernel addresses, which
+        // `BlitParams::validate` bounded by its length, not its capacity.
+        let (src_bytes, dst_bytes) =
+            params::blit_extents((p.src_w, p.src_h), p.src_layout, (p.dst_w, p.dst_h))
+                .ok_or_else(|| BackendError::msg("blit extents exceed the kernels' offsets"))?;
+        let entry = params::BlitParams::<super::VulkanBackend>::TABLE_ENTRY_BYTES as u64;
+        let as_u64 = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         self.dispatch_kernel(
             KernelId::BlitImage,
             &[
@@ -423,7 +439,12 @@ impl PageRecorder {
                 p.cols.handle(),
                 p.rows.handle(),
             ],
-            &[p.src.size(), p.dst.size(), p.cols.size(), p.rows.size()],
+            &[
+                binding_range(as_u64(word_padded(src_bytes)), p.src.size()),
+                binding_range(as_u64(dst_bytes), p.dst.size()),
+                binding_range(u64::from(bbox_w) * entry, p.cols.size()),
+                binding_range(u64::from(bbox_h) * entry, p.rows.size()),
+            ],
             &push,
             (groups_x, groups_y, 1),
         )
@@ -677,6 +698,13 @@ impl PageRecorder {
         s.desc_sets_in_flight = s.desc_sets_in_flight.saturating_add(1);
         Ok(())
     }
+}
+
+/// The range a storage descriptor binds for a kernel that addresses the
+/// first `used` bytes of a buffer of `size` bytes: `used`, at least 1 (a
+/// descriptor range is never empty) and at most `size`.
+fn binding_range(used: u64, size: u64) -> u64 {
+    used.max(1).min(size)
 }
 
 impl Drop for PageRecorder {

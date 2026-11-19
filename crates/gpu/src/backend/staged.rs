@@ -45,8 +45,17 @@ pub(crate) fn grown_size(capacity: usize, len: usize) -> usize {
     )
 }
 
+/// [`grown_size`], at most `limit` rounded down to a multiple of 4 unless
+/// `len` itself is larger: a buffer grown past the bytes one kernel binding
+/// addresses gains nothing a binding can use.  When `capacity` and `len`
+/// are multiples of 4, so is the result.
+pub(crate) fn grown_size_within(capacity: usize, len: usize, limit: usize) -> usize {
+    grown_size(capacity, len).min((limit & !3).max(len))
+}
+
 /// `slot`'s buffers, reallocated first when either holds fewer than
-/// `len > 0` bytes, to [`grown_size`]: a run of slowly growing transfers
+/// `len > 0` bytes, to [`grown_size_within`] the backend's
+/// [`GpuBackend::max_binding_bytes`]: a run of slowly growing transfers
 /// reallocates logarithmically often below [`GROWTH_CAP`].
 ///
 /// # Errors
@@ -61,7 +70,8 @@ pub(crate) fn ensure<'a, B: GpuBackend>(
     reject_zero_size(len, "staged transfer")?;
     let capacity = slot.as_ref().map_or(0, |s| capacity(backend, s));
     if capacity < len {
-        return replace(backend, slot, grown_size(capacity, len), direction);
+        let size = grown_size_within(capacity, len, backend.max_binding_bytes());
+        return replace(backend, slot, size, direction);
     }
     // `capacity >= len > 0` holds only for a populated slot.
     slot.as_mut()
@@ -253,6 +263,23 @@ mod tests {
         let big = 300 << 20;
         assert_eq!(grown_size(big, big + 1), big + 1 + GROWTH_CAP);
         assert_eq!(grown_size(usize::MAX - 1, usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn growth_stops_at_the_binding_limit_unless_the_request_is_larger() {
+        let limit = 1 << 27;
+        let (nine, sixteen) = (72_000_000, 128_000_000);
+        assert_eq!(grown_size(nine, sixteen), 144_000_000);
+        assert_eq!(grown_size_within(nine, sixteen, limit), limit);
+        assert_eq!(grown_size_within(0, 10, limit), 10);
+        assert_eq!(grown_size_within(100, 101, limit), 200);
+        assert_eq!(grown_size_within(limit, limit + 4, limit), limit + 4);
+        assert_eq!(grown_size_within(8, 12, 4_294_967_295), 16);
+        assert_eq!(grown_size_within(1 << 32, 1 << 33, 4_294_967_295), 1 << 33);
+        assert_eq!(
+            grown_size_within(4_249_999_996, 4_250_000_000, 4_294_967_295),
+            4_294_967_292
+        );
     }
 
     #[cfg(feature = "gpu-validation")]

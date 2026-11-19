@@ -262,6 +262,13 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// transfers without holding a parallel length field per entry.
     fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize;
 
+    /// The most bytes one kernel binding of a buffer may address on the
+    /// device; reused buffers are not grown past it beyond the length a
+    /// transfer requests.  Unbounded by default.
+    fn max_binding_bytes(&self) -> usize {
+        usize::MAX
+    }
+
     /// Free a device buffer previously returned by `alloc_device`,
     /// `alloc_device_zeroed` or `alloc_device_readback`.
     ///

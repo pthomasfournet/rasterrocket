@@ -465,6 +465,11 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
+    /// `maxStorageBufferRange`.
+    fn max_binding_bytes(&self) -> usize {
+        usize::try_from(self.device.max_storage_buffer_range).unwrap_or(usize::MAX)
+    }
+
     fn device_memory_is_host_mapped(&self) -> bool {
         self.device.integrated
     }
@@ -590,7 +595,9 @@ mod tests {
     /// last buffer, and the allocator, are gone.
     #[test]
     fn vulkan_buffers_outlive_their_backend() {
-        let Some(backend) = test_backend() else { return };
+        let Some(backend) = test_backend() else {
+            return;
+        };
         let device = backend.alloc_device(4096).expect("alloc_device");
         let host = backend.alloc_host_pinned(4096).expect("alloc_host_pinned");
         drop(backend);

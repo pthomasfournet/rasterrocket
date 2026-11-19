@@ -364,6 +364,37 @@ mod vulkan_tests {
         };
         check_above_the_dispatch_limit(&backend);
     }
+
+    /// Conversions whose output grows the pooled scratch towards the
+    /// device's `maxStorageBufferRange` all complete, and a small one
+    /// after them is the host's: the scratch is not grown past the limit,
+    /// and the kernel binds only the bytes it addresses.  Exercised on a
+    /// device whose limit is the 2^27-byte minimum (the CPU implementation
+    /// is one); skipped on others.
+    #[test]
+    fn vulkan_icc_clut_after_scratch_growth() {
+        let Some(backend) = crate::backend::vulkan::test_backend() else {
+            return;
+        };
+        let limit = backend.max_binding_bytes();
+        if limit > 1 << 28 {
+            eprintln!("skipping: maxStorageBufferRange {limit} is beyond the sizes exercised");
+            return;
+        }
+        let grid = random_grid(3, [4; 4], NodeRange::Unit);
+        for pixels in [9_000_000, 16_000_000, 200_000] {
+            let cmyk: Vec<u8> = (0..=250_u8).cycle().take(pixels * 4).collect();
+            let device =
+                icc_clut16(&backend, &cmyk, &grid).unwrap_or_else(|e| panic!("{pixels} px: {e}"));
+            if pixels == 200_000 {
+                assert!(device == grid.convert16(&cmyk), "16-bit output differs");
+            }
+            let scratch = backend.scratch().icc_clut.take_idle();
+            let rgb = scratch.rgb.as_ref().expect("the output slot is kept");
+            assert!(backend.device_buffer_len(&rgb.device) <= limit);
+            backend.scratch().icc_clut.with(|s| *s = scratch);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "d3d12", windows))]
