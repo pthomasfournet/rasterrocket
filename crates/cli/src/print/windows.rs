@@ -484,29 +484,74 @@ fn surface(dc: HDC, name: &str) -> Result<Surface, String> {
 
 /// The printable area of `printer` under `devmode`, read from an
 /// information context.
-#[expect(unsafe_code, reason = "CreateICW opens an information context")]
 fn info_surface(printer: &Printer, devmode: &DevMode) -> Result<Surface, String> {
-    let driver = wide("WINSPOOL");
-    // SAFETY: the strings are NUL-terminated and the DEVMODE the driver's.
-    let ic = unsafe {
-        CreateICW(
-            driver.as_ptr(),
-            printer.name_w.as_ptr(),
-            ptr::null(),
-            devmode.as_ptr(),
-        )
-    };
-    if ic.is_null() {
-        return Err(format!(
-            "cannot ask {:?} for its sheet: {}",
-            printer.name,
-            io::Error::last_os_error()
-        ));
+    let ic = Dc::information(printer, devmode)?;
+    surface(ic.raw(), &printer.name)
+}
+
+/// The signature of `CreateDCW` and `CreateICW`.
+type CreateContext =
+    unsafe extern "system" fn(*const u16, *const u16, *const u16, *const DEVMODEW) -> HDC;
+
+/// A device or information context on a printer, deleted when dropped.
+struct Dc {
+    raw: HDC,
+}
+
+impl Drop for Dc {
+    #[expect(unsafe_code, reason = "the context is deleted once")]
+    fn drop(&mut self) {
+        // SAFETY: `raw` was created by `CreateDCW` or `CreateICW` and is
+        // deleted only here.
+        let _ = unsafe { DeleteDC(self.raw) };
     }
-    let result = surface(ic, &printer.name);
-    // SAFETY: `ic` was created above and is deleted once.
-    let _ = unsafe { DeleteDC(ic) };
-    result
+}
+
+impl Dc {
+    /// A device context on `printer` under `devmode`, to print on.
+    fn device(printer: &Printer, devmode: &DevMode) -> Result<Self, String> {
+        Self::create(printer, devmode, CreateDCW, "open a device context on")
+    }
+
+    /// An information context on `printer` under `devmode`, to ask for
+    /// its sheet.
+    fn information(printer: &Printer, devmode: &DevMode) -> Result<Self, String> {
+        Self::create(printer, devmode, CreateICW, "ask for the sheet of")
+    }
+
+    /// The context `create` makes on `printer` under `devmode`; the error
+    /// names what could not be done (`what`).
+    #[expect(unsafe_code, reason = "CreateDCW and CreateICW open the context")]
+    fn create(
+        printer: &Printer,
+        devmode: &DevMode,
+        create: CreateContext,
+        what: &str,
+    ) -> Result<Self, String> {
+        let driver = wide("WINSPOOL");
+        // SAFETY: the strings are NUL-terminated and the DEVMODE the
+        // driver's.
+        let raw = unsafe {
+            create(
+                driver.as_ptr(),
+                printer.name_w.as_ptr(),
+                ptr::null(),
+                devmode.as_ptr(),
+            )
+        };
+        if raw.is_null() {
+            return Err(format!(
+                "cannot {what} {:?}: {}",
+                printer.name,
+                io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { raw })
+    }
+
+    const fn raw(&self) -> HDC {
+        self.raw
+    }
 }
 
 /// Refuse a merged DEVMODE of the driver of `printer` that dropped the
@@ -563,29 +608,6 @@ fn settle(
         }
         copies = kept;
     }
-}
-
-/// A device context on `printer` under `devmode`.
-#[expect(unsafe_code, reason = "CreateDCW opens the printer's device context")]
-fn create_dc(printer: &Printer, devmode: &DevMode) -> Result<HDC, String> {
-    let driver = wide("WINSPOOL");
-    // SAFETY: the strings are NUL-terminated and the DEVMODE the driver's.
-    let dc = unsafe {
-        CreateDCW(
-            driver.as_ptr(),
-            printer.name_w.as_ptr(),
-            ptr::null(),
-            devmode.as_ptr(),
-        )
-    };
-    if dc.is_null() {
-        return Err(format!(
-            "cannot open a device context on {:?}: {}",
-            printer.name,
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(dc)
 }
 
 /// What a Windows print job is asked for.
@@ -681,10 +703,14 @@ extern "system" fn on_console_event(event: u32) -> BOOL {
     }
 }
 
-/// A print job being drawn.
+/// A print job being drawn.  Its fields drop in their order: the device
+/// context, then the printer, then the file of an aborted job.
 pub(crate) struct Job {
+    dc: Dc,
     printer: Printer,
-    dc: HDC,
+    /// The file the job writes, removed when the job is dropped started
+    /// and not ended.
+    output: Incomplete,
     /// The merged DEVMODEs of an upright and a turned sheet.
     devmodes: (DevMode, DevMode),
     surfaces: Surfaces,
@@ -699,8 +725,18 @@ pub(crate) struct Job {
     /// The pages of the current pass.
     pass_pages: u32,
     phase: Phase,
-    /// The file the job writes.
-    output: Option<PathBuf>,
+}
+
+/// The file a job writes, removed ([`remove_incomplete`]) when dropped
+/// holding one.
+struct Incomplete(Option<PathBuf>);
+
+impl Drop for Incomplete {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            remove_incomplete(file);
+        }
+    }
 }
 
 /// How far a [`Job`] has gone with the spooler.
@@ -715,20 +751,16 @@ enum Phase {
 }
 
 impl Drop for Job {
-    #[expect(
-        unsafe_code,
-        reason = "the job is aborted and its device context deleted once"
-    )]
+    /// Abort a job started and not ended; its file is removed once the
+    /// device context and the printer are closed.  The file of a job not
+    /// started is not the job's, and is left.
+    #[expect(unsafe_code, reason = "the job is aborted once")]
     fn drop(&mut self) {
-        let abort = self.phase == Phase::Started;
-        if abort {
+        if self.phase == Phase::Started {
             // SAFETY: the job was started on `dc` and not ended.
-            let _ = unsafe { AbortDoc(self.dc) };
-        }
-        // SAFETY: `dc` was created by `CreateDCW` and is deleted only here.
-        let _ = unsafe { DeleteDC(self.dc) };
-        if abort && let Some(file) = &self.output {
-            remove_incomplete(file);
+            let _ = unsafe { AbortDoc(self.dc.raw()) };
+        } else {
+            self.output.0 = None;
         }
     }
 }
@@ -783,27 +815,26 @@ impl Job {
         gdi::check_duplex_claimed(&name, settings.duplex, claims.duplex)?;
         let (portrait, landscape, copies) = settle(&printer, settings, claims)?;
         let landscape_surface = info_surface(&printer, &landscape)?;
-        let dc = create_dc(&printer, &portrait)?;
+        let dc = Dc::device(&printer, &portrait)?;
+        let portrait_surface = surface(dc.raw(), &name)?;
         let mut job = Self {
-            printer,
             dc,
+            printer,
+            output: Incomplete(None),
             devmodes: (portrait, landscape),
             surfaces: Surfaces {
-                portrait: landscape_surface,
+                portrait: portrait_surface,
                 landscape: landscape_surface,
             },
             orientation: Orientation::Portrait,
-            surface: landscape_surface,
+            surface: portrait_surface,
             copies,
             mono: settings.mono,
             duplex: settings.duplex.is_some(),
             pages: 0,
             pass_pages: 0,
             phase: Phase::Opened,
-            output: None,
         };
-        job.surface = surface(job.dc, &name)?;
-        job.surfaces.portrait = job.surface;
         log::debug!("{name:?}: {:?}, copies {copies:?}", job.surfaces);
         job.start(settings)?;
         Ok(job)
@@ -813,14 +844,14 @@ impl Job {
     /// when given.
     #[expect(unsafe_code, reason = "StartDocW starts the GDI print job")]
     fn start(&mut self, settings: &Settings) -> Result<(), String> {
-        self.output = settings
+        self.output.0 = settings
             .print_file
             .as_deref()
             .map(std::path::absolute)
             .transpose()
             .map_err(|e| format!("--print-file: {e}"))?;
         let title = wide(&settings.title);
-        let output_w = self.output.as_ref().map(wide);
+        let output_w = self.output.0.as_ref().map(wide);
         let info = DOCINFOW {
             cbSize: i32::try_from(size_of::<DOCINFOW>()).unwrap_or(i32::MAX),
             lpszDocName: title.as_ptr(),
@@ -829,7 +860,7 @@ impl Job {
             fwType: 0,
         };
         // SAFETY: `info` and the strings it points at outlive the call.
-        if unsafe { StartDocW(self.dc, &raw const info) } <= 0 {
+        if unsafe { StartDocW(self.dc.raw(), &raw const info) } <= 0 {
             return Err(format!(
                 "{:?} did not start the job: {}",
                 self.printer.name,
@@ -851,7 +882,7 @@ impl Job {
             return Err("no page was printed".to_owned());
         }
         // SAFETY: the job was started on `dc`, and no page is open.
-        if unsafe { EndDoc(self.dc) } <= 0 {
+        if unsafe { EndDoc(self.dc.raw()) } <= 0 {
             return Err(format!(
                 "{:?} did not take the job: {}",
                 self.printer.name,
@@ -871,13 +902,13 @@ impl Job {
         };
         // SAFETY: `dc` is live with no page open; the DEVMODE is the
         // driver's.
-        if unsafe { ResetDCW(self.dc, devmode.as_ptr()) }.is_null() {
+        if unsafe { ResetDCW(self.dc.raw(), devmode.as_ptr()) }.is_null() {
             return Err(format!(
                 "cannot turn the sheet to {orientation:?}: {}",
                 io::Error::last_os_error()
             ));
         }
-        self.surface = surface(self.dc, &self.printer.name)?;
+        self.surface = surface(self.dc.raw(), &self.printer.name)?;
         self.orientation = orientation;
         Ok(())
     }
@@ -896,7 +927,7 @@ impl Job {
     #[expect(unsafe_code, reason = "StartPage and EndPage bound the page")]
     fn page(&mut self, draw: impl FnOnce(&Self) -> Result<(), String>) -> Result<(), String> {
         // SAFETY: `dc` is live, the job started and no page open.
-        if unsafe { StartPage(self.dc) } <= 0 {
+        if unsafe { StartPage(self.dc.raw()) } <= 0 {
             return Err(format!(
                 "cannot start a page: {}",
                 io::Error::last_os_error()
@@ -904,7 +935,7 @@ impl Job {
         }
         draw(self)?;
         // SAFETY: the page was started above.
-        if unsafe { EndPage(self.dc) } <= 0 {
+        if unsafe { EndPage(self.dc.raw()) } <= 0 {
             return Err(format!("cannot end a page: {}", io::Error::last_os_error()));
         }
         self.pages += 1;
@@ -934,8 +965,11 @@ impl Job {
         let stretched = (placement.width, placement.height) != (out_w, out_h);
         // SAFETY: `dc` is live with a page open.
         unsafe {
-            let _ = SetStretchBltMode(self.dc, if stretched { HALFTONE } else { COLORONCOLOR });
-            let _ = SetBrushOrgEx(self.dc, 0, 0, ptr::null_mut());
+            let _ = SetStretchBltMode(
+                self.dc.raw(),
+                if stretched { HALFTONE } else { COLORONCOLOR },
+            );
+            let _ = SetBrushOrgEx(self.dc.raw(), 0, 0, ptr::null_mut());
         }
         let read_error = |e: io::Error| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -973,7 +1007,7 @@ impl Job {
                 // `format`, as `info` describes with its palette.
                 let copied = unsafe {
                     StretchDIBits(
-                        self.dc,
+                        self.dc.raw(),
                         placement.x,
                         y,
                         i32::try_from(placement.width).unwrap_or(i32::MAX),
