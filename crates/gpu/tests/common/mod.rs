@@ -1,17 +1,10 @@
 //! Helpers shared by the integration tests.
 
-#![cfg(any(feature = "vulkan", all(feature = "d3d12", windows)))]
+#![cfg(feature = "vulkan")]
 
-#[cfg(all(feature = "d3d12", windows))]
-pub(crate) mod d3d12;
-
-#[cfg(feature = "vulkan")]
 use rasterrocket_gpu::backend::Result;
-#[cfg(feature = "vulkan")]
 use rasterrocket_gpu::backend::page_device::PageDevice;
-#[cfg(feature = "vulkan")]
 use rasterrocket_gpu::backend::select::DeviceSelector;
-#[cfg(feature = "vulkan")]
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
 /// A backend on the device `PDF_RASTER_VULKAN_DEVICE` names, or on the
@@ -19,7 +12,6 @@ use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 ///
 /// # Panics
 /// When the variable holds a selector that does not parse.
-#[cfg(feature = "vulkan")]
 pub(crate) fn vulkan_backend() -> Result<VulkanBackend> {
     let selector = std::env::var("PDF_RASTER_VULKAN_DEVICE")
         .ok()

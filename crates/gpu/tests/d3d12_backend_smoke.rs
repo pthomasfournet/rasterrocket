@@ -15,7 +15,8 @@
 
 #![cfg(all(feature = "d3d12", windows))]
 
-mod common;
+#[path = "common/d3d12.rs"]
+mod common_d3d12;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -36,7 +37,7 @@ fn shared() -> Option<(&'static D3d12Backend, MutexGuard<'static, ()>)> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     SHARED
-        .get_or_init(common::d3d12::test_backend)
+        .get_or_init(common_d3d12::test_backend)
         .as_ref()
         .map(|b| (b, serial))
 }
@@ -51,7 +52,7 @@ fn pattern(n: usize, seed: u8) -> Vec<u8> {
 
 #[test]
 fn d3d12_backend_is_named_and_reports_a_budget() {
-    let Some(backend) = common::d3d12::test_backend() else {
+    let Some(backend) = common_d3d12::test_backend() else {
         return;
     };
     assert_eq!(D3d12Backend::NAME, "d3d12");
@@ -278,4 +279,42 @@ fn free_device_after_wait_page_is_clean() {
         .run_page(|_| Ok(()))
         .expect("an empty page after the free");
     drop(again);
+}
+
+/// `wait_page` waits for the page in flight even when handed an earlier
+/// page's fence, which has long been reached: the page's read-back is
+/// complete when it returns.
+#[test]
+fn wait_page_with_a_stale_fence_waits_for_the_page_in_flight() {
+    const LEN: usize = 64 << 20;
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    backend.begin_page().expect("begin_page");
+    let stale = backend.submit_page().expect("submit_page");
+    backend.wait_page(stale.clone()).expect("wait_page");
+
+    let mut buf = backend.alloc_device(LEN).expect("alloc_device");
+    backend.upload(&mut buf, &[0x5A; 16]).expect("upload");
+    let mut out = backend.alloc_host_readback(LEN).expect("readback");
+    backend
+        .host_bytes_mut(&mut out)
+        .expect("host_bytes_mut")
+        .fill(0xEE);
+    backend.begin_page().expect("begin_page");
+    backend.record_zero_buffer(&mut buf, LEN).expect("fill");
+    // SAFETY: `out` is read only after `wait_page` below.
+    unsafe { backend.record_copy_to_host(&buf, &mut out, LEN) }.expect("copy");
+    let own = backend.submit_page().expect("submit_page");
+    backend
+        .wait_page(stale)
+        .expect("wait_page with an earlier fence");
+    let bytes = backend.host_bytes(&out).expect("host_bytes");
+    assert!(
+        bytes.iter().all(|&b| b == 0),
+        "the page had not completed when wait_page returned"
+    );
+    drop(own);
+    backend.free_device(buf);
+    backend.free_host_pinned(out);
 }

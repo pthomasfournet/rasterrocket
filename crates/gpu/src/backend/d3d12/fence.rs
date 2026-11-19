@@ -25,6 +25,21 @@ impl std::fmt::Debug for PageFence {
     }
 }
 
+impl PageFence {
+    /// Whether `self` and `other` are the same submission's fence.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// A failed [`Submitter::submit`].
+pub(super) struct SubmitError {
+    pub(super) error: BackendError,
+    /// Whether the list was executed before the failure: it may then still
+    /// run, and nothing it references may be released or reused.
+    pub(super) queued: bool,
+}
+
 /// The compute queue and the fence its submissions signal.
 pub(super) struct Submitter {
     device: ID3D12Device,
@@ -50,25 +65,45 @@ impl Submitter {
     }
 
     /// Execute the closed `list` and signal the next fence value after it.
-    pub(super) fn submit(&self, list: &ID3D12GraphicsCommandList) -> Result<PageFence> {
-        let list: ID3D12CommandList = list.cast().map_err(device_err(
-            &self.device,
-            "QueryInterface(ID3D12CommandList)",
-        ))?;
+    ///
+    /// # Errors
+    /// A [`SubmitError`] whose `queued` says whether the list reached the
+    /// queue: when it did and the signal failed, the list may still run and
+    /// no fence will report its completion.
+    pub(super) fn submit(
+        &self,
+        list: &ID3D12GraphicsCommandList,
+    ) -> std::result::Result<PageFence, SubmitError> {
+        let unqueued = |error| SubmitError {
+            error,
+            queued: false,
+        };
+        let list: ID3D12CommandList = list
+            .cast()
+            .map_err(device_err(
+                &self.device,
+                "QueryInterface(ID3D12CommandList)",
+            ))
+            .map_err(unqueued)?;
         let mut signalled = self
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let value = signalled
             .checked_add(1)
-            .ok_or_else(|| BackendError::msg("the D3D12 fence value overflowed u64"))?;
-        // SAFETY: `list` is closed and every resource it references is
-        // held by its recorder until the fence of this submission is
-        // waited on.
+            .ok_or_else(|| unqueued(BackendError::msg("the D3D12 fence value overflowed u64")))?;
+        // SAFETY: `list` is closed.  Its recorder holds every object the
+        // list references until a wait on this submission's fence
+        // succeeds; when the signal below fails, the caller keeps them for
+        // the life of the process (`SubmitError::queued`).
         unsafe { self.queue.ExecuteCommandLists(&[Some(list)]) };
         // SAFETY: `queue` and `fence` are live.
         unsafe { self.queue.Signal(&self.fence, value) }
-            .map_err(device_err(&self.device, "ID3D12CommandQueue::Signal"))?;
+            .map_err(device_err(&self.device, "ID3D12CommandQueue::Signal"))
+            .map_err(|error| SubmitError {
+                error,
+                queued: true,
+            })?;
         *signalled = value;
         drop(signalled);
         Ok(PageFence(Arc::new((self.fence.clone(), value))))

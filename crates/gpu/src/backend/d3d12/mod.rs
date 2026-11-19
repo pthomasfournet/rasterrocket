@@ -4,6 +4,8 @@
 //! everything that calls Direct3D 12 or DXGI builds on Windows only.
 //!
 //! Module split (all private; named here for orientation only):
+//! - `commands` — a command list, its buffer states and barriers, and the
+//!   objects it holds until its fence.
 //! - `device` — DXGI factory, adapter enumeration, device, compute queue,
 //!   debug layer.
 //! - `diag` — the loaded WARP module and the CPU's vector instruction set.
@@ -12,9 +14,12 @@
 //! - `memory` — committed device and host buffers, the view-element limit.
 //! - `pipeline` — root signatures and compute pipeline states per kernel.
 //! - `recorder` — the page's command list, buffer states and descriptor
-//!   heap; synchronous transfers.
+//!   heap.
 //! - `select` — adapter eligibility, ranking and selector resolution.
+//! - `transfer` — synchronous upload and download through staging buffers.
 
+#[cfg(windows)]
+mod commands;
 #[cfg(windows)]
 mod device;
 #[cfg(windows)]
@@ -34,6 +39,8 @@ mod recorder;
     expect(dead_code, reason = "only the Windows host code consumes it")
 )]
 mod select;
+#[cfg(windows)]
+mod transfer;
 
 #[cfg(windows)]
 pub use fence::PageFence;
@@ -57,6 +64,7 @@ mod host {
     use super::memory::{self, DeviceBuffer, HostBuffer, HostHeap};
     use super::pipeline::KernelId;
     use super::recorder::Recorder;
+    use super::transfer::Transfer;
     use crate::backend::select::DeviceSelector;
     use crate::backend::{
         DeviceScratch, GpuBackend, Result, VramBudget, params, recorded_copy_len, reject_zero_size,
@@ -75,6 +83,7 @@ mod host {
         // the queue and device they were created on.
         scratch: DeviceScratch<Self>,
         recorder: Recorder,
+        transfer: Transfer,
         /// Held for the whole of a [`GpuBackend::run_page`]: the recorder
         /// has one recording state, so pages from several threads run one
         /// at a time.
@@ -98,9 +107,11 @@ mod host {
             let device = device::open_adapter(selector)?;
             let submitter = Arc::new(Submitter::new(&device.device, &device.queue)?);
             let recorder = Recorder::new(&device.device, submitter.clone())?;
+            let transfer = Transfer::new(&device.device, submitter.clone())?;
             Ok(Self {
                 scratch: DeviceScratch::new(),
                 recorder,
+                transfer,
                 page: Mutex::new(()),
                 submitter,
                 device,
@@ -345,13 +356,13 @@ mod host {
         /// A copy through an UPLOAD staging buffer, in a submission of its
         /// own.
         fn upload(&self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<()> {
-            self.recorder.upload(dst, src)
+            self.transfer.upload(dst, src)
         }
 
         /// A copy through a READBACK staging buffer, in a submission of
         /// its own.
         fn download(&self, src: &DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-            self.recorder.download(src, dst)
+            self.transfer.download(src, dst)
         }
 
         fn scratch(&self) -> &DeviceScratch<Self> {
@@ -458,6 +469,47 @@ mod host {
             let mut words = [0xFF; STATUS_BYTES];
             backend.download(&status, &mut words).expect("status");
             assert_eq!(words, [0; STATUS_BYTES], "the probe recorded a fault");
+        }
+
+        /// The reference count of `object`.
+        fn refs(object: &windows::core::IUnknown) -> u32 {
+            let vtable = object.vtable();
+            // SAFETY: `object` is live; the reference added is released at
+            // once, and `Release` returns the count left.
+            unsafe {
+                let _added = (vtable.AddRef)(object.as_raw());
+                (vtable.Release)(object.as_raw())
+            }
+        }
+
+        /// Stranded commands refuse a new list and never release what the
+        /// list references, even when dropped; released commands do.
+        #[test]
+        fn stranded_commands_keep_their_references() {
+            use super::super::commands::Commands;
+
+            let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+            let buf = backend.alloc_device(64).expect("alloc_device");
+            let unknown: windows::core::IUnknown = buf.resource().clone().into();
+            let base = refs(&unknown);
+
+            let mut released = Commands::new(&backend.device.device).expect("commands");
+            released.begin().expect("begin");
+            released.hold(buf.resource());
+            assert_eq!(refs(&unknown), base + 1);
+            released.discard();
+            assert_eq!(refs(&unknown), base, "discard releases the hold");
+            drop(released);
+
+            let mut stranded = Commands::new(&backend.device.device).expect("commands");
+            stranded.begin().expect("begin");
+            stranded.hold(buf.resource());
+            stranded.strand();
+            stranded.release();
+            stranded.discard();
+            assert!(stranded.begin().is_err(), "stranded commands are not reset");
+            drop(stranded);
+            assert_eq!(refs(&unknown), base + 1, "the stranded hold is leaked");
         }
 
         /// Every kernel's root signature and pipeline state build.

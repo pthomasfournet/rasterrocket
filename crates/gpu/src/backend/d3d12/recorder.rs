@@ -1,51 +1,32 @@
-//! The page recorder: one command allocator and list, recorded between
-//! `begin_page` and `submit_page` under one lock, and a second pair for
-//! the synchronous transfers.
-//!
-//! Every device buffer is in `COMMON` when a submission starts and ends
-//! (a buffer decays to `COMMON` when the command list that used it
-//! completes, and each list ends with explicit transitions back to it).
-//! Within a list each buffer is transitioned to the state the next
-//! operation needs: `COPY_DEST` and `COPY_SOURCE` for copies,
-//! `NON_PIXEL_SHADER_RESOURCE` for a kernel's SRVs, `UNORDERED_ACCESS`
-//! for its UAVs.  A transition orders the operations on either side of
-//! it; two operations in the same writing state are separated by a UAV
-//! barrier (dispatches) or a transition through `COMMON` (copies).
-//!
-//! Every resource a list references is held by the recorder until the
-//! list's fence has been waited on, so a buffer freed by its owner while a
-//! page is in flight is released only after the page.
+//! The page recorder: one command allocator and list ([`Commands`]),
+//! recorded between `begin_page` and `submit_page` under one lock, with
+//! one shader-visible descriptor heap of [`MAX_BINDINGS`] views a
+//! dispatch.  A page whose completion cannot be confirmed leaves the
+//! recorder lost: its commands are stranded and no further page begins.
 
 #![expect(
     clippy::significant_drop_tightening,
     reason = "the recording state's lock is held across the D3D12 calls that record into its list"
 )]
 
-use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_BUFFER_SRV, D3D12_BUFFER_SRV_FLAG_NONE, D3D12_BUFFER_UAV, D3D12_BUFFER_UAV_FLAG_NONE,
-    D3D12_COMMAND_LIST_TYPE_COMPUTE, D3D12_CPU_DESCRIPTOR_HANDLE,
-    D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-    D3D12_DESCRIPTOR_HEAP_DESC, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_RESOURCE_BARRIER,
-    D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-    D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-    D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST,
-    D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATES,
-    D3D12_RESOURCE_TRANSITION_BARRIER, D3D12_RESOURCE_UAV_BARRIER, D3D12_SHADER_RESOURCE_VIEW_DESC,
-    D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER, D3D12_UAV_DIMENSION_BUFFER,
-    D3D12_UNORDERED_ACCESS_VIEW_DESC, D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12CommandAllocator,
-    ID3D12DescriptorHeap, ID3D12Device, ID3D12GraphicsCommandList, ID3D12PipelineState,
-    ID3D12Resource,
+    D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
+    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, D3D12_DESCRIPTOR_HEAP_DESC,
+    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+    D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE,
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    D3D12_SHADER_RESOURCE_VIEW_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER,
+    D3D12_UAV_DIMENSION_BUFFER, D3D12_UNORDERED_ACCESS_VIEW_DESC,
+    D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12DescriptorHeap, ID3D12Device, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
-use windows::core::Interface as _;
 
+use super::commands::Commands;
 use super::error::device_err;
-use super::fence::{PageFence, Submitter};
+use super::fence::{PageFence, SubmitError, Submitter};
 use super::memory::{self, DeviceBuffer, HostBuffer, HostHeap};
 use super::pipeline::{KernelId, MAX_BINDINGS, PipelineCache, Shape};
 use crate::backend::{BackendError, Result};
@@ -53,10 +34,6 @@ use crate::backend::{BackendError, Result};
 /// Dispatches one page may record: each takes [`MAX_BINDINGS`]
 /// descriptors of the page's heap.
 pub(super) const MAX_DISPATCHES_PER_PAGE: u32 = 64;
-
-/// A staging buffer of a synchronous transfer larger than this is freed
-/// after the transfer rather than kept for the next.
-const KEPT_STAGING_BYTES: usize = 16 << 20;
 
 /// The page's place in its lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,219 +44,9 @@ enum Phase {
     Recording,
     /// Submitted; only `wait_page` is valid.
     Submitted,
-}
-
-/// A buffer's state within the list being recorded.
-struct Tracked {
-    resource: ID3D12Resource,
-    state: D3D12_RESOURCE_STATES,
-    /// Whether the last operation in `state` wrote the buffer.
-    written: bool,
-}
-
-/// A command allocator, its list, and the buffers the open list uses.
-struct Commands {
-    device: ID3D12Device,
-    allocator: ID3D12CommandAllocator,
-    list: ID3D12GraphicsCommandList,
-    /// Whether `list` is open for recording.
-    open: bool,
-    /// The device buffers the list uses, with their current states.
-    tracked: Vec<Tracked>,
-    /// The other resources the list references.
-    held: Vec<ID3D12Resource>,
-    /// Barriers to record before the next operation.
-    pending: Vec<D3D12_RESOURCE_BARRIER>,
-}
-
-impl Commands {
-    fn new(device: &ID3D12Device) -> Result<Self> {
-        // SAFETY: `device` is live; the interfaces are returned by value.
-        let allocator: ID3D12CommandAllocator =
-            unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE) }
-                .map_err(device_err(device, "CreateCommandAllocator"))?;
-        // SAFETY: `allocator` is a live compute allocator.
-        let list: ID3D12GraphicsCommandList = unsafe {
-            device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                &allocator,
-                None::<&ID3D12PipelineState>,
-            )
-        }
-        .map_err(device_err(device, "CreateCommandList"))?;
-        // SAFETY: the list was created open and records nothing.
-        unsafe { list.Close() }.map_err(device_err(device, "ID3D12GraphicsCommandList::Close"))?;
-        Ok(Self {
-            device: device.clone(),
-            allocator,
-            list,
-            open: false,
-            tracked: Vec::new(),
-            held: Vec::new(),
-            pending: Vec::new(),
-        })
-    }
-
-    /// Reset the allocator and open the list.  The caller guarantees that
-    /// no submission of the list is still running.
-    fn begin(&mut self) -> Result<()> {
-        self.release();
-        // SAFETY: the list is closed and no submission of it runs.
-        unsafe { self.allocator.Reset() }
-            .map_err(device_err(&self.device, "ID3D12CommandAllocator::Reset"))?;
-        // SAFETY: as above.
-        unsafe {
-            self.list
-                .Reset(&self.allocator, None::<&ID3D12PipelineState>)
-        }
-        .map_err(device_err(&self.device, "ID3D12GraphicsCommandList::Reset"))?;
-        self.open = true;
-        Ok(())
-    }
-
-    /// Return every tracked buffer to `COMMON` and close the list.
-    fn finish(&mut self) -> Result<()> {
-        for i in 0..self.tracked.len() {
-            let before = self.tracked[i].state;
-            if before != D3D12_RESOURCE_STATE_COMMON {
-                let b = transition(
-                    &self.tracked[i].resource,
-                    before,
-                    D3D12_RESOURCE_STATE_COMMON,
-                );
-                self.pending.push(b);
-                self.tracked[i].state = D3D12_RESOURCE_STATE_COMMON;
-            }
-        }
-        self.flush();
-        self.open = false;
-        // SAFETY: the list is open.
-        unsafe { self.list.Close() }
-            .map_err(device_err(&self.device, "ID3D12GraphicsCommandList::Close"))
-    }
-
-    /// Close the list if it is open, discarding what it recorded.
-    fn discard(&mut self) {
-        self.pending.clear();
-        if self.open {
-            self.open = false;
-            // SAFETY: the list is open; a list closed in error is reset by
-            // the next `begin`.
-            if let Err(e) = unsafe { self.list.Close() } {
-                log::debug!("d3d12: closing an abandoned list: {}", e.code());
-            }
-        }
-        self.release();
-    }
-
-    /// Drop the references of the last list.  The caller guarantees that
-    /// no submission of it is still running.
-    fn release(&mut self) {
-        self.tracked.clear();
-        self.held.clear();
-        self.pending.clear();
-    }
-
-    /// Queue the barriers that bring `resource` into `want` for an
-    /// operation that writes it when `write`.
-    fn use_buffer(&mut self, resource: &ID3D12Resource, want: D3D12_RESOURCE_STATES, write: bool) {
-        let raw = resource.as_raw();
-        let i = if let Some(i) = self.tracked.iter().position(|t| t.resource.as_raw() == raw) {
-            i
-        } else {
-            self.tracked.push(Tracked {
-                resource: resource.clone(),
-                state: D3D12_RESOURCE_STATE_COMMON,
-                written: false,
-            });
-            self.tracked.len() - 1
-        };
-        let t = &self.tracked[i];
-        if t.state != want {
-            self.pending.push(transition(resource, t.state, want));
-        } else if t.written && want == D3D12_RESOURCE_STATE_UNORDERED_ACCESS {
-            self.pending.push(uav_barrier(resource));
-        } else if t.written {
-            self.pending
-                .push(transition(resource, want, D3D12_RESOURCE_STATE_COMMON));
-            self.pending
-                .push(transition(resource, D3D12_RESOURCE_STATE_COMMON, want));
-        }
-        let t = &mut self.tracked[i];
-        t.state = want;
-        t.written = write;
-    }
-
-    /// Hold `resource` until the list's fence has been waited on.
-    fn hold(&mut self, resource: &ID3D12Resource) {
-        let raw = resource.as_raw();
-        if !self.held.iter().any(|h| h.as_raw() == raw) {
-            self.held.push(resource.clone());
-        }
-    }
-
-    /// Record the queued barriers.
-    fn flush(&mut self) {
-        if !self.pending.is_empty() {
-            // SAFETY: the list is open; every resource a barrier names is
-            // held in `tracked` beyond the call.
-            unsafe { self.list.ResourceBarrier(&self.pending) };
-            self.pending.clear();
-        }
-    }
-
-    /// Record a copy of `len` bytes from the start of `src` to the start
-    /// of `dst`, after the barriers queued for it.
-    fn copy(&mut self, dst: &ID3D12Resource, src: &ID3D12Resource, len: u64) {
-        self.flush();
-        // SAFETY: the list is open; both resources are held and at least
-        // `len` bytes long, in states a copy accepts.
-        unsafe { self.list.CopyBufferRegion(dst, 0, src, 0, len) };
-    }
-}
-
-/// A transition barrier of all of `resource` from `before` to `after`.
-const fn transition(
-    resource: &ID3D12Resource,
-    before: D3D12_RESOURCE_STATES,
-    after: D3D12_RESOURCE_STATES,
-) -> D3D12_RESOURCE_BARRIER {
-    D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: borrowed(resource),
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: before,
-                StateAfter: after,
-            }),
-        },
-    }
-}
-
-/// A UAV barrier on `resource`.
-const fn uav_barrier(resource: &ID3D12Resource) -> D3D12_RESOURCE_BARRIER {
-    D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            UAV: ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
-                pResource: borrowed(resource),
-            }),
-        },
-    }
-}
-
-/// A non-owning copy of `resource`'s interface pointer, as barrier
-/// structures hold it.
-const fn borrowed(resource: &ID3D12Resource) -> ManuallyDrop<Option<ID3D12Resource>> {
-    // SAFETY: `Option<ID3D12Resource>` is a nullable interface pointer of
-    // the same layout as `ID3D12Resource`; the copy adds no reference and
-    // `ManuallyDrop` never releases one.  Barriers are recorded while the
-    // resource is held (`Commands::tracked`).
-    unsafe { std::mem::transmute_copy(resource) }
+    /// A submitted page's completion could not be confirmed: its commands
+    /// are stranded and no further page is accepted.
+    Lost,
 }
 
 /// The page's recording state.
@@ -297,21 +64,13 @@ struct Page {
     zeros: Option<DeviceBuffer>,
 }
 
-/// The synchronous transfers' state.
-struct Transfer {
-    commands: Commands,
-    upload: Option<HostBuffer>,
-    download: Option<HostBuffer>,
-}
-
-/// The per-page recorder and the synchronous transfers.
+/// The per-page recorder.
 pub(super) struct Recorder {
     device: ID3D12Device,
     submitter: Arc<Submitter>,
     pipelines: PipelineCache,
     descriptor_size: u32,
     page: Mutex<Page>,
-    transfer: Mutex<Transfer>,
 }
 
 impl Recorder {
@@ -342,11 +101,6 @@ impl Recorder {
                 submitted: None,
                 zeros: None,
             }),
-            transfer: Mutex::new(Transfer {
-                commands: Commands::new(device)?,
-                upload: None,
-                download: None,
-            }),
         })
     }
 
@@ -375,15 +129,23 @@ impl Recorder {
 
     pub(super) fn begin_page(&self) -> Result<()> {
         let mut page = self.lock();
+        if page.phase == Phase::Lost {
+            return Err(BackendError::msg(format!(
+                "begin_page: an earlier page's completion could not be confirmed; {}",
+                crate::backend::DEVICE_LOST_CAUSE
+            )));
+        }
         if page.phase != Phase::Idle {
             return Err(BackendError::msg(format!(
                 "begin_page called from {:?} state; expected Idle",
                 page.phase
             )));
         }
+        let page = &mut *page;
         page.commands.begin()?;
+        page.commands.hold(&page.heap);
         let heaps = [Some(page.heap.clone())];
-        // SAFETY: the list is open; the heap is held by the recorder.
+        // SAFETY: the list is open; the heap is held by the list's commands.
         unsafe { page.commands.list.SetDescriptorHeaps(&heaps) };
         page.dispatches = 0;
         page.phase = Phase::Recording;
@@ -395,6 +157,10 @@ impl Recorder {
         let submitted = page
             .commands
             .finish()
+            .map_err(|error| SubmitError {
+                error,
+                queued: false,
+            })
             .and_then(|()| self.submitter.submit(&page.commands.list));
         match submitted {
             Ok(fence) => {
@@ -402,23 +168,39 @@ impl Recorder {
                 page.phase = Phase::Submitted;
                 Ok(fence)
             }
-            Err(e) => {
+            Err(SubmitError {
+                error,
+                queued: true,
+            }) => {
+                page.commands.strand();
+                page.phase = Phase::Lost;
+                Err(error)
+            }
+            Err(SubmitError { error, .. }) => {
                 page.commands.discard();
                 page.phase = Phase::Idle;
-                Err(e)
+                Err(error)
             }
         }
     }
 
+    /// Wait for the submitted page: on its own fence, and on `fence` as
+    /// well when that is another submission's.
     pub(super) fn wait_page(&self, fence: &PageFence) -> Result<()> {
         let mut page = self.lock();
-        if page.phase != Phase::Submitted {
-            return Err(BackendError::msg(format!(
-                "wait_page called from {:?} state; expected Submitted",
-                page.phase
-            )));
+        let own = match (&page.phase, &page.submitted) {
+            (Phase::Submitted, Some(own)) => own.clone(),
+            _ => {
+                return Err(BackendError::msg(format!(
+                    "wait_page called from {:?} state; expected Submitted",
+                    page.phase
+                )));
+            }
+        };
+        self.submitter.wait(&own)?;
+        if !own.same(fence) {
+            self.submitter.wait(fence)?;
         }
-        self.submitter.wait(fence)?;
         page.commands.release();
         page.submitted = None;
         page.phase = Phase::Idle;
@@ -426,14 +208,21 @@ impl Recorder {
     }
 
     /// Return to `Idle`: a recording page is discarded, a submitted one is
-    /// waited for first; a failed wait is logged.
+    /// waited for first.  A failed wait is logged and strands the page's
+    /// commands; the recorder then accepts no further page.
     pub(super) fn abandon_page(&self) {
         let mut page = self.lock();
+        if page.phase == Phase::Lost {
+            return;
+        }
         if page.phase == Phase::Submitted
             && let Some(fence) = page.submitted.take()
             && let Err(e) = self.submitter.wait(&fence)
         {
             log::warn!("d3d12: abandoning a submitted page: waiting for it failed: {e}");
+            page.commands.strand();
+            page.phase = Phase::Lost;
+            return;
         }
         page.commands.discard();
         page.phase = Phase::Idle;
@@ -569,9 +358,11 @@ impl Recorder {
         for (buf, _) in uavs {
             c.use_buffer(buf.resource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
         }
+        c.hold(&pipeline.state);
+        c.hold(&pipeline.root_signature);
         c.flush();
         // SAFETY: the list is open; the pipeline objects are held by the
-        // cache, the views were written above into the bound heap, and
+        // list's commands, the views were written above into the bound heap, and
         // `constants` holds the root signature's constant words.
         unsafe {
             c.list.SetPipelineState(&pipeline.state);
@@ -656,71 +447,6 @@ impl Recorder {
             );
         }
     }
-
-    /// Copy `src` into the start of `dst` and wait for the copy.
-    pub(super) fn upload(&self, dst: &DeviceBuffer, src: &[u8]) -> Result<()> {
-        let len = crate::backend::copy_len(src.len(), dst.size(), "upload", "destination")?;
-        if len == 0 {
-            return Ok(());
-        }
-        let mut t = self.transfer.lock().unwrap_or_else(PoisonError::into_inner);
-        let t = &mut *t;
-        let staging = staging(&self.device, &mut t.upload, src.len(), HostHeap::Upload)?;
-        staging.as_mut_slice()[..src.len()].copy_from_slice(src);
-        let resource = staging.resource().clone();
-        let run = self.one_shot(&mut t.commands, |c| {
-            c.hold(&resource);
-            c.use_buffer(dst.resource(), D3D12_RESOURCE_STATE_COPY_DEST, true);
-            c.copy(dst.resource(), &resource, len);
-        });
-        trim(&mut t.upload);
-        run
-    }
-
-    /// Copy the first `dst.len()` bytes of `src` into `dst` and wait for
-    /// the copy.
-    pub(super) fn download(&self, src: &DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-        let len = crate::backend::copy_len(dst.len(), src.size(), "download", "source")?;
-        if len == 0 {
-            return Ok(());
-        }
-        let mut t = self.transfer.lock().unwrap_or_else(PoisonError::into_inner);
-        let t = &mut *t;
-        let resource = staging(&self.device, &mut t.download, dst.len(), HostHeap::Readback)?
-            .resource()
-            .clone();
-        let run = self.one_shot(&mut t.commands, |c| {
-            c.hold(&resource);
-            c.use_buffer(src.resource(), D3D12_RESOURCE_STATE_COPY_SOURCE, false);
-            c.copy(&resource, src.resource(), len);
-        });
-        if run.is_ok()
-            && let Some(staging) = &t.download
-        {
-            dst.copy_from_slice(&staging.as_slice()[..dst.len()]);
-        }
-        trim(&mut t.download);
-        run
-    }
-
-    /// Record `record` into `commands`, submit it and wait for it.
-    fn one_shot(&self, commands: &mut Commands, record: impl FnOnce(&mut Commands)) -> Result<()> {
-        commands.begin()?;
-        record(commands);
-        let run = commands
-            .finish()
-            .and_then(|()| self.submitter.submit(&commands.list))
-            .and_then(|fence| self.submitter.wait(&fence));
-        if run.is_err() {
-            // The submission may still run: wait for the queue before the
-            // allocator can be reset.
-            if let Err(e) = self.submitter.wait_idle() {
-                log::warn!("d3d12: waiting after a failed transfer failed: {e}");
-            }
-        }
-        commands.discard();
-        run
-    }
 }
 
 /// The views of a dispatch of the kernel `label`, SRVs then UAVs, after
@@ -777,31 +503,4 @@ fn check_bindings<'a>(
         }
     }
     Ok(views)
-}
-
-/// The staging buffer in `slot`, replaced by one of `len` bytes in `heap`
-/// when it is smaller.
-fn staging<'a>(
-    device: &ID3D12Device,
-    slot: &'a mut Option<HostBuffer>,
-    len: usize,
-    heap: HostHeap,
-) -> Result<&'a mut HostBuffer> {
-    if slot.as_ref().is_none_or(|s| s.as_slice().len() < len) {
-        *slot = None;
-        *slot = Some(memory::alloc_host(device, len, heap, "transfer staging")?);
-    }
-    slot.as_mut()
-        .ok_or_else(|| BackendError::msg("no staging buffer"))
-}
-
-/// Free the staging buffer in `slot` when it is larger than
-/// [`KEPT_STAGING_BYTES`].
-fn trim(slot: &mut Option<HostBuffer>) {
-    if slot
-        .as_ref()
-        .is_some_and(|s| s.as_slice().len() > KEPT_STAGING_BYTES)
-    {
-        *slot = None;
-    }
 }
