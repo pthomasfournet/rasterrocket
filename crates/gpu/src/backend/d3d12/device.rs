@@ -45,17 +45,11 @@ const SHADER_MODELS: [D3D_SHADER_MODEL; 11] = [
 /// An open adapter: its device and one compute queue.
 pub(crate) struct D3d12Device {
     /// The device, at feature level `11_0` or above.
-    #[expect(
-        dead_code,
-        reason = "held so the device stays open; nothing records on it"
-    )]
     pub(super) device: ID3D12Device,
     /// The compute queue.
-    #[expect(
-        dead_code,
-        reason = "held so the queue stays open; nothing submits to it"
-    )]
     pub(super) queue: ID3D12CommandQueue,
+    /// The adapter the device was created on.
+    pub(super) adapter: IDXGIAdapter1,
     /// The adapter's index in the enumeration selection resolves against.
     pub(super) index: usize,
     /// `DXGI_ADAPTER_DESC1::Description`.
@@ -111,6 +105,7 @@ pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Dev
     Ok(D3d12Device {
         device,
         queue,
+        adapter: adapters[index].clone(),
         index,
         name: cand.name.clone(),
         warp,

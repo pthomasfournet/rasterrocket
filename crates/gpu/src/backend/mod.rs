@@ -15,10 +15,6 @@
 #[cfg(feature = "cache")]
 mod blit_page;
 #[cfg(all(feature = "d3d12", any(test, windows)))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the DXIL has no consumer outside the tests")
-)]
 mod dxil;
 #[doc(hidden)]
 pub mod layout;
@@ -394,7 +390,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// CUDA wraps `Arc<cudaEvent_t>`; Vulkan wraps `Arc<VkFence>`.
     type PageFence: Send + Sync + Clone;
 
-    /// The backend's name in diagnostics: `"cuda"`, `"vulkan"`.
+    /// The backend's name in diagnostics: `"cuda"`, `"vulkan"`, `"d3d12"`.
     const NAME: &'static str;
 
     /// Allocate `size` bytes of device memory.

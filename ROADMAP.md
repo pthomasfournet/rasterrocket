@@ -3811,6 +3811,28 @@ A device-removed, hung or reset error names the likely TDR cause and the
 removal reason. Selection is tested on any host; the RTX 5070, the AMD
 Radeon iGPU and WARP open on Windows 11.
 
+**Unreleased on master: D3D12 buffers, recorder and root signatures behind
+`GpuBackend`.** `D3d12Backend` implements `GpuBackend`; no render path uses
+it yet. Device buffers are committed resources in the DEFAULT heap with
+unordered access, sized to whole 32-bit words and created without zeroing
+except for `alloc_device_zeroed`; host buffers sit in the UPLOAD
+(`alloc_host_pinned`) or READBACK (`alloc_host_readback`) heap, mapped for
+their whole life. `upload` and `download` copy through a staging buffer in a
+submission of their own and wait for it. A page records into one command
+list under one lock; every buffer starts and ends a submission in `COMMON`
+and is transitioned to the copy, shader-resource or unordered-access state
+each operation needs, with a UAV barrier between dispatches that write the
+same buffer. Each kernel's root signature (root constants at `b0`, a
+descriptor table of its SRVs then UAVs) and pipeline state are built from
+the register table and the DXIL on first use. A page holds at most 64
+dispatches (`DescriptorPoolExhausted` past them), a buffer view at most
+2^27 elements (`DeviceLimit`), and `record_zero_buffer` copies from a zeroed
+buffer, refusing lengths that are not a multiple of 4 (`UnalignedFill`).
+Every resource a page references is held until its fence has been waited
+on. `detect_vram_budget` reads `QueryVideoMemoryInfo` of the local segment.
+The smoke tests pass on WARP, the RTX 5070 and the AMD Radeon iGPU on
+Windows 11; the debug layer was not installed there.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

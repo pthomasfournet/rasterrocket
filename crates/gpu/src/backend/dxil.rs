@@ -5,6 +5,7 @@ include!("../../build_support/dxil_container.rs");
 
 /// The kernels of the D3D12 backend, by the names `build.rs` compiles
 /// them under.
+#[cfg(test)]
 pub(crate) const KERNELS: &[&str] = &["icc_clut", "blit_image", "page_raster", "page_raster_paths"];
 
 /// The DXIL container of `kernel`.

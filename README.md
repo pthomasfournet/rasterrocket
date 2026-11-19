@@ -663,8 +663,9 @@ The CLI crate forwards each feature name to the `rasterrocket` library.
 The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
 compiles every kernel to DXIL and checks it, on any host that runs the two
 compilers below; no render path loads the DXIL, and the CLI does not forward the
-feature.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, no
-kernel dispatch yet): a hardware adapter with shader model 6.0 or above, the
+feature.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
+implements the GPU crate's `GpuBackend` (buffers, copies, the ICC and blit kernels)
+but serves no render path yet): a hardware adapter with shader model 6.0 or above, the
 discrete one first, or the one a selector names (an index or a name substring,
 as for `--vulkan-device`, or `warp` for the WARP software adapter);
 `PDF_RASTER_D3D12_DEBUG=1` enables the Direct3D 12 debug layer.  DXC 1.9.2609 publishes builds for Linux x86-64 and Windows only: a macOS
