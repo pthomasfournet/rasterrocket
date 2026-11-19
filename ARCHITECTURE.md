@@ -1336,7 +1336,8 @@ drawing the images the first pass decoded, sharing the page's deadline,
 with its own operator budget. A device error retires that device for the
 session (later pages go to the session's other devices, or to the CPU once
 none is in service); a page beyond the device's limits, or the memory it
-has left, renders on the CPU and leaves it in service. `render_page_bands`
+has left, renders on the CPU and leaves it in service (`DevicePage::DeviceLimit`,
+counted apart from failures). `render_page_bands`
 renders on the CPU, so a page the CLI renders in bands (larger than
 `--band-mib`) does not reach a device; it is counted as ineligible,
 `"larger than one band"`, and the first such page warns. Pages are returned by index, so

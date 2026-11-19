@@ -159,9 +159,12 @@ impl<B: PageDevice> Device<B> {
     /// Account for the device failing on page `page_num` with `error`: a
     /// page beyond the device's limits, or beyond the memory it has left,
     /// is logged at `warn` and leaves the device in service; any other
-    /// error retires the device, logged at `warn` once.
-    pub(super) fn fail(&self, page_num: u32, error: &BackendError) {
-        if !B::retires_device(error) {
+    /// error retires the device, logged at `warn` once.  Whether `error`
+    /// retires the device.
+    #[must_use]
+    pub(super) fn fail(&self, page_num: u32, error: &BackendError) -> bool {
+        let retires = B::retires_device(error);
+        if !retires {
             log::warn!(
                 "page {page_num}: too large for the GPU page device {} ({error}); the page \
                  renders on the CPU and the device stays in service",
@@ -175,6 +178,7 @@ impl<B: PageDevice> Device<B> {
                 self.name()
             );
         }
+        retires
     }
 
     /// Join the thread opening the device, if it runs; one still opening

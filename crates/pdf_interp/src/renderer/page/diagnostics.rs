@@ -285,8 +285,11 @@ pub enum DevicePage {
     /// The page paints with something the GPU raster does not render,
     /// named here; it was rendered on the CPU.
     Ineligible(&'static str),
-    /// The device failed on the page, or the page exceeds the device's
-    /// limits; it was rendered on the CPU.
+    /// The page exceeds the device's limits or the memory it has left; it
+    /// was rendered on the CPU, and the device stays in service.
+    DeviceLimit,
+    /// The device failed on the page, which retired it; the page was
+    /// rendered on the CPU.
     Failed,
 }
 

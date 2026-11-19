@@ -111,8 +111,9 @@ pub(super) fn a_kernel_fault_retires_the_device<B: Api>() {
     });
 }
 
-/// A page failed with `error` renders on the CPU and leaves the device in
-/// service: the next page renders on it.
+/// A page failed with `error` renders on the CPU, counted under
+/// `device_limit` rather than `failed`, and leaves the device in service:
+/// the next page renders on it.
 fn assert_failure_keeps_the_device<B: Api>(error: BackendError) {
     let doc = pdf(&[DEVICE, DEVICE]);
     let Some(session) = gpu_session::<B>(doc.clone()) else {
@@ -122,7 +123,7 @@ fn assert_failure_keeps_the_device<B: Api>(error: BackendError) {
     let params = RenderParams::new(2.0);
     *pages.faults.fail_next.lock().expect("lock") = Some(error);
     let (page, outcome) = render(&session, 1, &params).expect("render");
-    assert_eq!(outcome, DevicePage::Failed);
+    assert_eq!(outcome, DevicePage::DeviceLimit);
     assert_eq!(page, cpu(doc.clone(), 1));
     let (page, outcome) = render(&session, 2, &params).expect("render");
     assert!(
@@ -130,6 +131,15 @@ fn assert_failure_keeps_the_device<B: Api>(error: BackendError) {
         "{outcome:?}"
     );
     assert_eq!(page, cpu(doc, 2));
+    let counts = pages.counts();
+    assert_eq!(
+        (counts.device_limit, counts.failed, counts.rendered),
+        (1, 0, 1)
+    );
+    assert_eq!(
+        counts.to_string(),
+        "1 on the device, 1 on the CPU (device limit: 1)"
+    );
 }
 
 /// A page beyond the device's limits renders on the CPU and leaves the

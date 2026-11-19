@@ -628,10 +628,13 @@ impl<B: SessionDevice> DevicePages<B> {
                         let _ = claim.device.rendered.fetch_add(1, Ordering::Relaxed);
                         return Ok((renderer, DevicePage::Rendered { commands }));
                     }
-                    Err(e) => {
-                        claim.device.fail(job.page_num, &e);
+                    Err(e) if claim.device.fail(job.page_num, &e) => {
                         self.count(Outcome::Failed);
                         DevicePage::Failed
+                    }
+                    Err(_) => {
+                        self.count(Outcome::DeviceLimit);
+                        DevicePage::DeviceLimit
                     }
                 }
             }

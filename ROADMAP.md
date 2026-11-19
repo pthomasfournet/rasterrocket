@@ -3169,6 +3169,8 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: a device-limit decline is not summarised as a failure.** A GPU page beyond a device's limits or the memory it has left (`BackendError::DeviceLimit`, `OutOfMemory`) renders on the CPU and keeps the device in service, but was counted and reported as `device failed`. It now has its own category: `DevicePageCounts::device_limit` (`device limit: N` in the `GPU pages:` summary) and `DevicePage::DeviceLimit`; `failed` and `DevicePage::Failed` keep the errors that retire a device. API: new public field and enum variant (both types are `#[non_exhaustive]`).
+
 **Unreleased on master: a banded page is counted off the GPU.** Under `gpu_pages` (`--gpu-pages`) a page larger than one band (`SessionConfig::band_bytes`, `--band-mib`) renders in bands on the CPU, as before, but was neither logged nor counted, so a one-page run printed no `GPU pages:` summary. It is now counted as ineligible, `"larger than one band"`, in `DevicePageCounts::ineligible` and `PageDiagnostics::device_page`, logged per page at `debug`, and the first such page of a session warns, naming the band size and `--band-mib`. corpus-04 p271 at 600 dpi on Vulkan: `GPU pages: 0 on the device, 1 on the CPU (larger than one band: 1)`.
 
 **Unreleased on master: the pixel-diff registry re-checked.** `compare.sh` over all 3024 fixture pages (150 dpi, pdftoppm): 3000 pass, the 24 registered divergences fail as registered, nothing unexpected and nothing registered passes. RMSE does not separate them (passing pages 0–40, divergences 5–21), so the default stays tile-judged with `-t none`.

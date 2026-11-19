@@ -29,8 +29,10 @@ pub struct DevicePageCounts {
     /// Pages rendered on the CPU after device errors retired every device
     /// that opened.
     pub retired: u32,
-    /// Pages a device failed on, or which exceed its limits; rendered on
-    /// the CPU.
+    /// Pages beyond a device's limits or the memory it had left; rendered
+    /// on the CPU, the device staying in service.
+    pub device_limit: u32,
+    /// Pages a device failed on, which retired it; rendered on the CPU.
     pub failed: u32,
     /// Pages whose recording stopped on their work budget, deadline or
     /// cancellation, or which were cancelled while they waited for a
@@ -49,6 +51,7 @@ impl DevicePageCounts {
             .saturating_add(self.opening)
             .saturating_add(self.no_device)
             .saturating_add(self.retired)
+            .saturating_add(self.device_limit)
             .saturating_add(self.failed)
     }
 
@@ -70,6 +73,7 @@ impl DevicePageCounts {
             Outcome::Missed(Miss::Opening) => &mut self.opening,
             Outcome::Missed(Miss::NoDevice) => &mut self.no_device,
             Outcome::Missed(Miss::Retired) => &mut self.retired,
+            Outcome::DeviceLimit => &mut self.device_limit,
             Outcome::Failed => &mut self.failed,
             Outcome::Stopped | Outcome::Missed(Miss::Cancelled) => &mut self.stopped,
         };
@@ -100,6 +104,7 @@ impl std::fmt::Display for DevicePageCounts {
             ("device opening", self.opening),
             ("no device", self.no_device),
             ("device retired", self.retired),
+            ("device limit", self.device_limit),
             ("device failed", self.failed),
         ];
         let mut parts = self
@@ -158,6 +163,7 @@ pub(super) enum Outcome {
     Rendered,
     Ineligible(&'static str),
     Missed(Miss),
+    DeviceLimit,
     Failed,
     Stopped,
 }
@@ -182,6 +188,7 @@ mod tests {
             Outcome::Missed(Miss::Opening),
             Outcome::Missed(Miss::NoDevice),
             Outcome::Missed(Miss::Retired),
+            Outcome::DeviceLimit,
             Outcome::Failed,
             Outcome::Stopped,
             Outcome::Missed(Miss::Cancelled),
@@ -192,12 +199,13 @@ mod tests {
             counts.ineligible,
             [("shading", 2), ("translucent hairline", 1)]
         );
-        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 7, 2));
+        assert_eq!((counts.device_limit, counts.failed), (1, 1));
+        assert_eq!((counts.rendered, counts.cpu(), counts.stopped), (2, 8, 2));
         assert_eq!(
             counts.to_string(),
-            "2 on the device, 7 on the CPU (shading: 2, translucent hairline: 1, \
+            "2 on the device, 8 on the CPU (shading: 2, translucent hairline: 1, \
              device opening: 1, no device: 1, device retired: 1, \
-             device failed: 1); 2 stopped"
+             device limit: 1, device failed: 1); 2 stopped"
         );
     }
 
