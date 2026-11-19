@@ -3211,9 +3211,11 @@ Open on Direct3D 12:
   138 982 656 device bytes, 42.6 to 42.8 ms to copy the 104 236 992 packed
   bytes on the host); reading back without that copy is not done.
 - **Start-up cost.** About 0.17 s (0.166 s) a process above Vulkan's.
-- **Debug layer.** `PDF_RASTER_D3D12_DEBUG=1` has not run on the test box
-  (Graphics Tools is not installed), so a mismatched view stride, which
-  only the debug layer sees, is unchecked there.
+- **Debug layer.** Under `PDF_RASTER_D3D12_DEBUG=1` a stored validation
+  error fails the next page or transfer on that adapter to read the info
+  queue (a device is one per adapter, so the queue is shared). The D3D12
+  tests and the page and ICC parity suites ran under the layer on WARP and
+  the RTX 5070 without a validation error; the fixture corpus has not.
 - **`d3d12-warp` CI job.** It runs the D3D12 tests on the pinned WARP and has
   not run yet.
 
@@ -3906,7 +3908,7 @@ buffer, refusing lengths that are not a multiple of 4 (`UnalignedFill`).
 Every resource a page references is held until its fence has been waited
 on. `detect_vram_budget` reads `QueryVideoMemoryInfo` of the local segment.
 The smoke tests pass on WARP, the RTX 5070 and the AMD Radeon iGPU on
-Windows 11; the debug layer was not installed there.
+Windows 11.
 
 **Unreleased on master: the image blit and the device image cache on
 D3D12.** `D3d12Backend` records `blit_image` (the source and both sampling
