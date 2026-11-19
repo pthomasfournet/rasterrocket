@@ -62,12 +62,13 @@ pub enum BackendPolicy {
     ///
     /// The session's device is the adapter
     /// [`SessionConfig::d3d12_device`] names, or the automatically chosen
-    /// hardware adapter.  The ICC CMYK→RGB CLUT kernel dispatches through
-    /// `D3d12Backend`, after the device passes the same exactness check as
-    /// a Vulkan device; images it does not convert run on the CPU.  In a
-    /// build with the `cache` feature the device-resident image cache keeps
-    /// its slabs on the adapter and the image blit kernel draws them there.
-    /// Every other kernel runs on the CPU.
+    /// hardware adapter.  On the adapter run the ICC CMYK→RGB CLUT kernel
+    /// (with the `gpu-icc` feature, once the device passes the same
+    /// exactness check as a Vulkan device; images it does not convert run
+    /// on the CPU), the device-resident image cache and the image blit
+    /// kernel that draws from it (with the `cache` feature), and GPU pages
+    /// (with [`SessionConfig::gpu_pages`]).  Every other stage runs on the
+    /// CPU.
     ForceD3d12,
 }
 
@@ -752,10 +753,17 @@ impl SessionConfig {
                 ));
             }
             _ => {
+                let (apis, backends) = if cfg!(windows) {
+                    (
+                        "Vulkan or Direct3D 12",
+                        "--backend auto, --backend vulkan or --backend d3d12",
+                    )
+                } else {
+                    ("Vulkan", "--backend auto or --backend vulkan")
+                };
                 return refuse(format!(
-                    "runs on Vulkan or Direct3D 12, which backend `{0}` (`policy`, \
-                     --backend {0} or PDF_RASTER_BACKEND={0}) does not use; use --backend \
-                     auto, --backend vulkan or --backend d3d12, or drop --gpu-pages",
+                    "runs on {apis}, which backend `{0}` (`policy`, --backend {0} or \
+                     PDF_RASTER_BACKEND={0}) does not use; use {backends}, or drop --gpu-pages",
                     self.policy.name()
                 ));
             }
@@ -980,9 +988,10 @@ mod tests {
     }
 
     /// GPU pages under a backend that renders none are refused naming the
-    /// backends that do: `auto`, `vulkan` and `d3d12`.
+    /// backends that do on the platform: `auto`, `vulkan`, and `d3d12` on
+    /// Windows only.
     #[test]
-    fn gpu_pages_are_refused_under_other_backends_naming_the_three() {
+    fn gpu_pages_are_refused_under_other_backends_naming_those_that_render() {
         use super::SessionConfig;
         use crate::RasterError;
         for policy in [BackendPolicy::CpuOnly, BackendPolicy::ForceCuda] {
@@ -996,10 +1005,14 @@ mod tests {
                     format!("--backend {}", policy.name()),
                     "--backend auto".to_owned(),
                     "--backend vulkan".to_owned(),
-                    "--backend d3d12".to_owned(),
                 ] {
                     assert!(msg.contains(&named), "{policy:?}: {msg}");
                 }
+                assert_eq!(
+                    msg.contains("d3d12"),
+                    cfg!(windows),
+                    "{policy:?}: Direct3D 12 named off Windows or omitted on it: {msg}"
+                );
             } else {
                 assert!(msg.contains("`vulkan` feature"), "{policy:?}: {msg}");
             }

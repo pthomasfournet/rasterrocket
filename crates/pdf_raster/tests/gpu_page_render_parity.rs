@@ -240,16 +240,17 @@ fn auto_opens_the_device_beside_the_renders() {
 }
 
 /// GPU pages under a backend that renders none are refused, naming the
-/// backends that do.
+/// backends that do on the platform: `d3d12` on Windows only.
 #[test]
 fn gpu_pages_need_a_gpu_page_policy() {
     let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
     config.gpu_pages = true;
     match open_session_from_bytes(page_pdf(DEVICE_CONTENT), &config) {
         Err(RasterError::InvalidOptions(msg)) => {
-            for named in ["--backend auto", "--backend vulkan", "--backend d3d12"] {
+            for named in ["--backend auto", "--backend vulkan"] {
                 assert!(msg.contains(named), "{msg}");
             }
+            assert_eq!(msg.contains("--backend d3d12"), cfg!(windows), "{msg}");
         }
         Err(other) => panic!("expected InvalidOptions, got {other:?}"),
         Ok(_) => panic!("a CPU-only session accepted GPU pages"),
