@@ -7,7 +7,8 @@ use clap::Parser;
 use pdf_raster::{BackendPolicy, PageBox, RenderPurpose, RenderRegion, Rotation, SessionConfig};
 
 /// Parse `--jpegopt`: comma-separated `quality=N` (0–100),
-/// `progressive=y|n` and `optimize=y|n`, as `pdftoppm -jpegopt` takes them.
+/// `progressive=y|n` and `optimize=y|n`; a later item overrides an earlier
+/// one of its key, and an empty item is skipped.
 fn parse_jpeg_options(s: &str) -> Result<encode::JpegOptions, String> {
     let mut options = encode::JpegOptions::default();
     for item in s.split(',').filter(|item| !item.is_empty()) {
@@ -199,8 +200,8 @@ pub(crate) struct Args {
     #[arg(long)]
     pub jpeg: bool,
 
-    /// JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default
-    /// 75), `progressive=y|n`, `optimize=y|n`, comma-separated.
+    /// JPEG options: `quality=N` (0–100, default 75), `progressive=y|n`,
+    /// `optimize=y|n`, comma-separated.
     #[arg(long = "jpegopt", value_name = "OPTIONS", value_parser = parse_jpeg_options)]
     pub jpegopt: Option<encode::JpegOptions>,
 
