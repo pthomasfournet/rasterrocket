@@ -3169,6 +3169,8 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: a short last row under a PNG predictor is kept.** When a Flate or LZW stream with a PNG predictor ends partway through a row, that last row is now decoded as far as its bytes go instead of being thrown away. Bitmap glyphs written by the dvips route with PK fonts end this way, so they lost their bottom rows ("=" drew as "−"); they now draw whole. Other files render as before (the fixtures are byte-identical).
+
 **Unreleased on master: new AVX2 and AVX-512 tiers; comic pages on the thread pool.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. Comic pages render on the thread pool.
 
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`

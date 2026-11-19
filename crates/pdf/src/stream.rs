@@ -498,31 +498,39 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
         .div_ceil(8);
     let row_len = stride + 1; // +1 for filter byte
 
-    // Tolerate truncated data — process as many full rows as we have.
-    let n_rows = data.len() / row_len;
-    if !data.len().is_multiple_of(row_len) {
+    // A final chunk shorter than `row_len` is a filter byte followed by a
+    // prefix of a row: it is undone with its filter as far as its bytes go
+    // and emitted at that length, so the output is exactly the data bytes
+    // present (filter bytes excluded) and never exceeds the input. A lone
+    // trailing filter byte contributes no output.
+    let tail = data.len() % row_len;
+    let tail_data = tail.saturating_sub(1);
+    if tail != 0 {
         log::warn!(
-            "PNG predictor: {} trailing bytes do not form a full {row_len}-byte row; \
-             emitting {n_rows} whole rows",
-            data.len() % row_len,
+            "PNG predictor: final row holds {tail_data} of {stride} data bytes; \
+             decoding it as a partial row"
         );
     }
-    // `n_rows * stride <= data.len()`, so the output is no larger than the
-    // already-bounded input.
-    let mut out = vec![0u8; n_rows * stride];
+    let n_rows = data.len() / row_len;
+    let mut out = vec![0u8; n_rows * stride + tail_data];
     let bytes_per_pixel = (colors * bits).div_ceil(8);
 
-    for row in 0..n_rows {
-        let src_row = &data[row * row_len..(row + 1) * row_len];
-        let filter_byte = src_row[0];
-        let raw = &src_row[1..];
+    for (row, src_row) in data.chunks(row_len).enumerate() {
+        let Some((&filter_byte, raw)) = src_row.split_first() else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let width = raw.len();
 
         // Split `out` into (rows written so far, current row) to satisfy the
         // borrow checker: `prev` is in the already-written prefix, `dst` is
-        // the current row being filled.
+        // the current row (whole, or the partial final row) being filled.
         let (done, rest) = out.split_at_mut(row * stride);
-        let dst = &mut rest[..stride];
-        let prev: Option<&[u8]> = (row > 0).then(|| &done[(row - 1) * stride..row * stride]);
+        let dst = &mut rest[..width];
+        let prev: Option<&[u8]> =
+            (row > 0).then(|| &done[(row - 1) * stride..(row - 1) * stride + width]);
 
         apply_png_filter(filter_byte, raw, prev, dst, bytes_per_pixel);
     }
@@ -1121,11 +1129,49 @@ mod tests {
     #[test]
     fn png_predictor_tolerates_truncated_rows() {
         // 4-byte stride + 1 filter byte per row; 7 bytes = 1 full row +
-        // 2 trailing bytes. The floor-to-whole-rows contract stands (the
-        // truncation is logged, not fatal).
+        // a filter byte and one data byte. The partial row is decoded as far
+        // as it goes (the truncation is logged, not fatal).
         let params = Params(vec![(b"Predictor", 15), (b"Columns", 4)]);
         let data = vec![0u8, 1, 2, 3, 4, 0, 9];
         let out = apply_png_predictor(data, &params).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4, 9]);
+    }
+
+    #[test]
+    fn png_predictor_decodes_partial_final_row_per_filter() {
+        // Row 0 (None) = [50, 60, 0, 200]; row 1 carries 3 of its 4 data
+        // bytes under each filter in turn.
+        let params = Params(vec![(b"Predictor", 15), (b"Columns", 4)]);
+        let cases: [(u8, [u8; 3]); 5] = [
+            (0, [100, 7, 9]),
+            (1, [100, 107, 116]),
+            (2, [150, 67, 9]),
+            (3, [125, 99, 58]),
+            (4, [150, 157, 69]),
+        ];
+        for (filter, want) in cases {
+            let data = vec![0u8, 50, 60, 0, 200, filter, 100, 7, 9];
+            let out = apply_png_predictor(data, &params).unwrap();
+            let mut expected = vec![50u8, 60, 0, 200];
+            expected.extend_from_slice(&want);
+            assert_eq!(out, expected, "filter {filter}");
+        }
+    }
+
+    #[test]
+    fn png_predictor_partial_first_row_and_multibyte_pixels() {
+        // Three 8-bit colours (bpp 3), 2 columns: stride 6. The only row is
+        // partial (5 of 6 bytes) under Sub, so the left neighbour lags by
+        // three bytes and the row above reads as zero.
+        let params = Params(vec![(b"Predictor", 11), (b"Columns", 2), (b"Colors", 3)]);
+        let out = apply_png_predictor(vec![1u8, 1, 2, 3, 4, 5], &params).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 5, 7]);
+    }
+
+    #[test]
+    fn png_predictor_lone_trailing_filter_byte_adds_nothing() {
+        let params = Params(vec![(b"Predictor", 15), (b"Columns", 4)]);
+        let out = apply_png_predictor(vec![0u8, 1, 2, 3, 4, 2], &params).unwrap();
         assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
