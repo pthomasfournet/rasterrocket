@@ -327,7 +327,9 @@ impl VulkanBackend {
                 out.len()
             )));
         }
-        let kernel = if page.has_paths() {
+        // A page with outlines runs `paths` and binds the status buffer.
+        let with_status = page.has_paths();
+        let kernel = if with_status {
             if !self.page_paths() {
                 return Err(BackendError::msg(
                     "render_page: the page has outlines, which this device does not rasterise",
@@ -391,7 +393,7 @@ impl VulkanBackend {
                 ensure(self, slot, staged_len(parts), Direction::ToDevice).map(drop)?;
             }
             ensure(self, target, page_len, Direction::ToHost).map(drop)?;
-            if kernel == KernelId::PageRasterPaths {
+            if with_status {
                 ensure(self, status, STATUS_BYTES, Direction::ToHost).map(drop)?;
             }
             Ok(())
@@ -412,7 +414,7 @@ impl VulkanBackend {
             staged.push((stage_parts(self, slot, parts)?, input_len(parts)));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
-        let mut status = if page.has_paths() {
+        let mut status = if with_status {
             Some(ensure(self, status, STATUS_BYTES, Direction::ToHost)?)
         } else {
             None
