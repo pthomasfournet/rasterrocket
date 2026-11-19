@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use ash::vk;
 
-use crate::backend::BackendError;
+use crate::backend::{BackendError, SelectionFailure};
 
 /// Explicit choice of Vulkan physical device.
 ///
@@ -32,10 +32,12 @@ impl FromStr for DeviceSelector {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if s.is_empty() {
-            return Err(BackendError::DeviceSelection(
-                "Vulkan device selector is empty; expected an index or a device-name substring"
+            return Err(BackendError::DeviceSelection {
+                failure: SelectionFailure::Invalid,
+                message: "Vulkan device selector is empty; expected an index or a device-name \
+                          substring"
                     .to_owned(),
-            ));
+            });
         }
         Ok(Self(s.to_owned()))
     }
@@ -148,11 +150,14 @@ pub(super) fn pick(
             })
         },
         |sel| {
-            resolve_selector(cands, sel).map_err(|reason| {
-                BackendError::DeviceSelection(format!(
-                    "Vulkan device selector {sel}: {reason}\navailable Vulkan devices:\n{}",
-                    describe(cands)
-                ))
+            resolve_selector(cands, sel).map_err(|(failure, reason)| {
+                BackendError::DeviceSelection {
+                    failure,
+                    message: format!(
+                        "Vulkan device selector {sel}: {reason}\navailable Vulkan devices:\n{}",
+                        describe(cands)
+                    ),
+                }
             })
         },
     )
@@ -170,24 +175,29 @@ pub(super) fn pick_many(
     cands: &[Candidate],
     selectors: &[DeviceSelector],
 ) -> Result<Vec<usize>, BackendError> {
-    let fail = |reason: String| {
-        BackendError::DeviceSelection(format!(
-            "{reason}\navailable Vulkan devices:\n{}",
-            describe(cands)
-        ))
+    let fail = |failure, reason: String| BackendError::DeviceSelection {
+        failure,
+        message: format!("{reason}\navailable Vulkan devices:\n{}", describe(cands)),
     };
     if selectors.is_empty() {
-        return Err(fail("the Vulkan device list is empty".to_owned()));
+        return Err(fail(
+            SelectionFailure::Invalid,
+            "the Vulkan device list is empty".to_owned(),
+        ));
     }
     let mut picked: Vec<usize> = Vec::with_capacity(selectors.len());
     for sel in selectors {
-        let idx = resolve_selector(cands, sel)
-            .map_err(|reason| fail(format!("Vulkan device selector {sel}: {reason}")))?;
+        let idx = resolve_selector(cands, sel).map_err(|(failure, reason)| {
+            fail(failure, format!("Vulkan device selector {sel}: {reason}"))
+        })?;
         if let Some(first) = picked.iter().position(|&i| i == idx) {
-            return Err(fail(format!(
-                "Vulkan device selectors {} and {sel} both name device {idx} \"{}\"",
-                selectors[first], cands[idx].name
-            )));
+            return Err(fail(
+                SelectionFailure::Invalid,
+                format!(
+                    "Vulkan device selectors {} and {sel} both name device {idx} \"{}\"",
+                    selectors[first], cands[idx].name
+                ),
+            ));
         }
         picked.push(idx);
     }
@@ -209,11 +219,14 @@ pub(super) fn usable_gpus(cands: &[Candidate]) -> Result<Vec<usize>, BackendErro
         .map(|(i, _)| i)
         .collect();
     if gpus.is_empty() {
-        return Err(BackendError::DeviceSelection(format!(
-            "no usable Vulkan GPU (API 1.3+, a compute queue family and the required \
-             features, not a CPU implementation) was found; enumerated:\n{}",
-            describe(cands)
-        )));
+        return Err(BackendError::DeviceSelection {
+            failure: SelectionFailure::NoneUsable,
+            message: format!(
+                "no usable Vulkan GPU (API 1.3+, a compute queue family and the required \
+                 features, not a CPU implementation) was found; enumerated:\n{}",
+                describe(cands)
+            ),
+        });
     }
     Ok(gpus)
 }
@@ -242,8 +255,12 @@ fn pick_auto(cands: &[Candidate]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// Resolve `sel` to one eligible candidate index, or a reason it does not.
-fn resolve_selector(cands: &[Candidate], sel: &DeviceSelector) -> Result<usize, String> {
+/// Resolve `sel` to one eligible candidate index, or the kind of reason it
+/// does not and the reason.
+fn resolve_selector(
+    cands: &[Candidate],
+    sel: &DeviceSelector,
+) -> Result<usize, (SelectionFailure, String)> {
     let raw = sel.0.as_str();
     let all_digits = raw.bytes().all(|b| b.is_ascii_digit());
     let as_index = if all_digits {
@@ -263,17 +280,29 @@ fn resolve_selector(cands: &[Candidate], sel: &DeviceSelector) -> Result<usize, 
             match (exact.as_slice(), partial.as_slice()) {
                 ([only], _) | ([], [only]) => *only,
                 ([], []) if all_digits => {
-                    return Err(format!(
-                        "not a device index ({} device(s) enumerated) and no device name contains it",
-                        cands.len()
+                    return Err((
+                        SelectionFailure::NoMatch,
+                        format!(
+                            "not a device index ({} device(s) enumerated) and no device name \
+                             contains it",
+                            cands.len()
+                        ),
                     ));
                 }
-                ([], []) => return Err("no device name contains it".to_owned()),
+                ([], []) => {
+                    return Err((
+                        SelectionFailure::NoMatch,
+                        "no device name contains it".to_owned(),
+                    ));
+                }
                 ([], many) | (many, _) => {
                     let list: Vec<String> = many.iter().map(usize::to_string).collect();
-                    return Err(format!(
-                        "ambiguous, matches devices {}; select by index instead",
-                        list.join(", ")
+                    return Err((
+                        SelectionFailure::Ambiguous,
+                        format!(
+                            "ambiguous, matches devices {}; select by index instead",
+                            list.join(", ")
+                        ),
                     ));
                 }
             }
@@ -281,9 +310,9 @@ fn resolve_selector(cands: &[Candidate], sel: &DeviceSelector) -> Result<usize, 
     };
     match cands[idx].compute_queue {
         Ok(_) => Ok(idx),
-        Err(why) => Err(format!(
-            "device {idx} \"{}\" is not usable: {why}",
-            cands[idx].name
+        Err(why) => Err((
+            SelectionFailure::Ineligible,
+            format!("device {idx} \"{}\" is not usable: {why}", cands[idx].name),
         )),
     }
 }
@@ -370,10 +399,36 @@ mod tests {
     }
 
     fn selection_error(cands: &[Candidate], s: &str) -> String {
+        selection_failure(cands, s).1
+    }
+
+    fn selection_failure(cands: &[Candidate], s: &str) -> (SelectionFailure, String) {
         match pick(cands, Some(&sel(s))) {
-            Err(BackendError::DeviceSelection(msg)) => msg,
+            Err(BackendError::DeviceSelection { failure, message }) => (failure, message),
             other => panic!("expected DeviceSelection error, got {other:?}"),
         }
+    }
+
+    /// Each way a selector fails is told apart by its kind, not its text.
+    #[test]
+    fn selection_failures_carry_their_kind() {
+        let mut cands = host();
+        cands[1].compute_queue = Err(Ineligible::NoComputeQueue);
+        for (selector, want) in [
+            ("no-such-gpu", SelectionFailure::NoMatch),
+            ("99", SelectionFailure::NoMatch),
+            ("radv", SelectionFailure::Ineligible),
+            ("a", SelectionFailure::Ambiguous),
+        ] {
+            assert_eq!(selection_failure(&cands, selector).0, want, "{selector}");
+        }
+        assert!(matches!(
+            "  ".parse::<DeviceSelector>(),
+            Err(BackendError::DeviceSelection {
+                failure: SelectionFailure::Invalid,
+                ..
+            })
+        ));
     }
 
     fn host() -> Vec<Candidate> {
@@ -389,7 +444,7 @@ mod tests {
         assert_eq!(sel(" 0 "), DeviceSelector("0".to_owned()));
         assert!(matches!(
             "  ".parse::<DeviceSelector>(),
-            Err(BackendError::DeviceSelection(_))
+            Err(BackendError::DeviceSelection { .. })
         ));
     }
 
@@ -581,7 +636,7 @@ mod tests {
     fn many_error(cands: &[Candidate], sels: &[&str]) -> String {
         let sels: Vec<DeviceSelector> = sels.iter().map(|s| sel(s)).collect();
         match pick_many(cands, &sels) {
-            Err(BackendError::DeviceSelection(msg)) => msg,
+            Err(BackendError::DeviceSelection { message, .. }) => message,
             other => panic!("expected DeviceSelection error, got {other:?}"),
         }
     }
@@ -621,8 +676,11 @@ mod tests {
         assert_eq!(usable_gpus(&cands).unwrap(), [1]);
         cands[1].compute_queue = Err(Ineligible::ApiBelow13);
         match usable_gpus(&cands) {
-            Err(BackendError::DeviceSelection(msg)) => {
-                assert!(msg.contains("no usable Vulkan GPU"), "{msg}");
+            Err(BackendError::DeviceSelection {
+                failure: SelectionFailure::NoneUsable,
+                message,
+            }) => {
+                assert!(message.contains("no usable Vulkan GPU"), "{message}");
             }
             other => panic!("expected DeviceSelection error, got {other:?}"),
         }

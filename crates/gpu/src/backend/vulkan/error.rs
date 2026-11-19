@@ -25,7 +25,7 @@ const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
 
 /// `call failed: CODE`, with [`DEVICE_LOST_CAUSE`] appended for
 /// `ERROR_DEVICE_LOST`.
-fn describe(call: &str, code: vk::Result) -> String {
+pub(super) fn describe(call: &str, code: vk::Result) -> String {
     if code == vk::Result::ERROR_DEVICE_LOST {
         format!("{call} failed: {code:?} ({DEVICE_LOST_CAUSE})")
     } else {

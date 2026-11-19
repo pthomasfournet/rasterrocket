@@ -20,7 +20,7 @@ use ash::vk;
 use crate::backend::{BackendError, Result};
 
 use super::device::DeviceCtx;
-use super::error::vk_err;
+use super::error::{describe, vk_err};
 
 /// Identifier for one of the compute kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -339,9 +339,9 @@ impl PipelineCache {
                         .device
                         .destroy_descriptor_set_layout(descriptor_set_layout, None);
                 }
-                return Err(BackendError::msg(format!(
-                    "vkCreateComputePipelines for {} failed: {code:?}",
-                    id.label()
+                return Err(BackendError::msg(describe(
+                    &format!("vkCreateComputePipelines for {}", id.label()),
+                    code,
                 )));
             }
         };

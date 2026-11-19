@@ -31,7 +31,7 @@ enum InitError {
 impl From<BackendError> for InitError {
     fn from(e: BackendError) -> Self {
         match e {
-            BackendError::DeviceSelection(msg) => Self::Selection(msg),
+            BackendError::DeviceSelection { message, .. } => Self::Selection(message),
             other => Self::Unavailable(other.to_string()),
         }
     }

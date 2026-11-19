@@ -526,15 +526,15 @@ mod tests {
             let selector = name.parse().expect("non-empty selector");
             match VulkanBackend::with_selector(Some(&selector)) {
                 Ok(backend) => backend.is_integrated().then_some(backend),
-                Err(crate::backend::BackendError::DeviceSelection(msg))
-                    if msg.contains("no device name contains it") =>
-                {
-                    None
-                }
-                Err(crate::backend::BackendError::DeviceSelection(msg))
-                    if msg.contains("is not usable") =>
-                {
-                    eprintln!("skipping the {name} device: {msg}");
+                Err(crate::backend::BackendError::DeviceSelection {
+                    failure: crate::backend::SelectionFailure::NoMatch,
+                    ..
+                }) => None,
+                Err(crate::backend::BackendError::DeviceSelection {
+                    failure: crate::backend::SelectionFailure::Ineligible,
+                    message,
+                }) => {
+                    eprintln!("skipping the {name} device: {message}");
                     None
                 }
                 Err(e) => panic!("selecting the {name} device failed: {e}"),

@@ -37,7 +37,7 @@ mod common;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
-use rasterrocket_gpu::backend::{BackendError, GpuBackend};
+use rasterrocket_gpu::backend::{BackendError, GpuBackend, SelectionFailure};
 
 /// Per-process `VulkanBackend`, lazy-initialised on first access.
 ///
@@ -416,13 +416,15 @@ fn integrated_backend() -> Option<VulkanBackend> {
         let selector = name.parse().expect("non-empty selector");
         match VulkanBackend::with_selector(Some(&selector)) {
             Ok(backend) => backend.is_integrated().then_some(backend),
-            Err(BackendError::DeviceSelection(msg))
-                if msg.contains("no device name contains it") =>
-            {
-                None
-            }
-            Err(BackendError::DeviceSelection(msg)) if msg.contains("is not usable") => {
-                eprintln!("skipping the {name} device: {msg}");
+            Err(BackendError::DeviceSelection {
+                failure: SelectionFailure::NoMatch,
+                ..
+            }) => None,
+            Err(BackendError::DeviceSelection {
+                failure: SelectionFailure::Ineligible,
+                message,
+            }) => {
+                eprintln!("skipping the {name} device: {message}");
                 None
             }
             Err(e) => panic!("selecting the {name} device failed: {e}"),

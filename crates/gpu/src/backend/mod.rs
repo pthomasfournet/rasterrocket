@@ -96,15 +96,35 @@ pub enum BackendError {
         bytes: u64,
     },
     /// An explicit device selector did not resolve to exactly one usable
-    /// device.  The message names the selector, the reason, and every
-    /// enumerated device.  Distinct from [`BackendError::Other`] so callers
-    /// can treat a configuration mistake as fatal even where an unavailable
-    /// backend would fall back silently.
-    DeviceSelection(String),
+    /// device, or no usable device exists.  Distinct from
+    /// [`BackendError::Other`] so callers can treat a configuration mistake
+    /// as fatal even where an unavailable backend would fall back silently.
+    DeviceSelection {
+        /// The kind of the reason.
+        failure: SelectionFailure,
+        /// The selector, the reason, and every enumerated device.
+        message: String,
+    },
     /// Catch-all for any other backend error: Vulkan FFI failures,
     /// allocator errors, init failures, numeric overflow, free-form
     /// `BackendError::msg(...)`. `source()` returns the inner error.
     Other(Box<dyn Error + Send + Sync + 'static>),
+}
+
+/// Why a device selection failed ([`BackendError::DeviceSelection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionFailure {
+    /// The selector or the selector list is malformed: empty, or naming
+    /// one device twice.
+    Invalid,
+    /// No device matches the selector.
+    NoMatch,
+    /// More than one device matches the selector.
+    Ambiguous,
+    /// The device the selector names lacks something the backend needs.
+    Ineligible,
+    /// No enumerated device is a usable GPU.
+    NoneUsable,
 }
 
 impl BackendError {
@@ -167,7 +187,7 @@ impl fmt::Display for BackendError {
             Self::OutOfMemory { what, bytes } => {
                 write!(f, "{what}: out of memory for {bytes} bytes")
             }
-            Self::DeviceSelection(msg) => f.write_str(msg),
+            Self::DeviceSelection { message, .. } => f.write_str(message),
             Self::Other(e) => fmt::Display::fmt(e, f),
         }
     }
