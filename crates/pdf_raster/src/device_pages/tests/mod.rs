@@ -68,10 +68,7 @@ impl Api for VulkanBackend {
     }
 
     fn lost_device() -> BackendError {
-        BackendError::msg(format!(
-            "vkQueueSubmit failed: ERROR_DEVICE_LOST ({})",
-            gpu::backend::DEVICE_LOST_CAUSE
-        ))
+        gpu::backend::vulkan::device_lost_error("vkQueueSubmit")
     }
 }
 

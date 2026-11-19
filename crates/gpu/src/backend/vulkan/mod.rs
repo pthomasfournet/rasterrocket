@@ -34,6 +34,14 @@ mod transfer;
 pub use memory::{DeviceBuffer, HostBuffer};
 pub use recorder::PageFence;
 
+/// The error a failed call `call` returns when it reports the device lost
+/// (`VK_ERROR_DEVICE_LOST`), as the backend builds it.
+#[doc(hidden)]
+#[must_use]
+pub fn device_lost_error(call: &'static str) -> crate::backend::BackendError {
+    error::vk_err(call)(ash::vk::Result::ERROR_DEVICE_LOST)
+}
+
 use std::sync::Arc;
 
 use crate::backend::page_device::{PageDevice, PageTimes};
