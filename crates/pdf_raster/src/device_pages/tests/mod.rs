@@ -162,17 +162,22 @@ fn gpu_session<B: Api>(pdf: Vec<u8>) -> Option<RasterSession> {
 /// A session over `pdf` rendering GPU pages on every usable GPU of `B`,
 /// opened with it, or `None` (the test is skipped) when fewer than two
 /// open.
+///
+/// # Panics
+///
+/// When fewer than two open and `B::REQUIRE` is `1`.
 fn two_device_session<B: Api>(pdf: Vec<u8>) -> Option<RasterSession> {
     let mut config = SessionConfig::with_policy(B::FORCE);
     config.gpu_pages = true;
     config.gpu_devices = vec!["all".to_owned()];
     let session = or_skip::<B, _, _>("no device opens", open_session_from_bytes(pdf, &config))?;
     let devices = device_pages::<B>(&session).devices.len();
-    if devices < 2 {
-        eprintln!("skipping: {devices} usable GPU on {}, not two", B::API);
-        return None;
-    }
-    Some(session)
+    let two = if devices < 2 {
+        Err(format!("{devices} usable GPU, not two"))
+    } else {
+        Ok(session)
+    };
+    or_skip::<B, _, _>("a two-device test cannot run", two)
 }
 
 /// A CPU-only session over `pdf` whose GPU pages are `pages`.
@@ -236,6 +241,7 @@ macro_rules! scheduler_tests {
                 held_pages_push_claims_to_the_other_device,
                 a_failed_device_leaves_the_others_in_service,
                 a_device_list_naming_one_device_twice_is_refused,
+                a_lost_only_device_retires_and_the_pages_render_on_the_cpu,
                 $($extra),*
             );
         }

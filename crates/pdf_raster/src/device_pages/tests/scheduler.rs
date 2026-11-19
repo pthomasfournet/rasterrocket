@@ -389,23 +389,20 @@ pub(super) fn a_failed_device_leaves_the_others_in_service<B: Api>() {
     assert_eq!(counts.by_device[1 - failed].1, 2, "{counts}");
 }
 
-/// A device the API reports lost ([`Api::lost_device`]) renders its page
-/// on the CPU, identically, and is retired with one warning naming it and
-/// the likely cause of the loss (a GPU timeout exactly on Windows); the
-/// next page renders on the other device.
-fn a_lost_device_is_retired_with_its_cause<B: Api>() {
-    let doc = pdf(&[DEVICE, DEVICE]);
-    let Some(session) = two_device_session::<B>(doc.clone()) else {
-        return;
-    };
-    let pages = device_pages::<B>(&session);
-    let params = RenderParams::new(2.0);
+/// Page 1 of `session`, failed by the error of a device the API reports
+/// lost ([`Api::lost_device`]): it renders on the CPU, identically to page
+/// 1 of `doc`, and one device is retired with one warning naming it and
+/// the likely cause of the loss (a GPU timeout exactly on Windows).
+/// Returns the index of the retired device.
+fn assert_lost_device_retired<B: Api>(session: &crate::RasterSession, doc: &[u8]) -> usize {
+    let pages = device_pages::<B>(session);
     *pages.faults.fail_next.lock().expect("lock") = Some(B::lost_device());
     let mut first = None;
-    let warnings = warnings_of(|| first = Some(render(&session, 1, &params).expect("render")));
+    let warnings =
+        warnings_of(|| first = Some(render(session, 1, &RenderParams::new(2.0)).expect("render")));
     let (page, outcome) = first.expect("page 1 rendered");
     assert_eq!(outcome, DevicePage::Failed);
-    assert_eq!(page, cpu(doc.clone(), 1));
+    assert_eq!(page, cpu(doc.to_vec(), 1));
     assert_eq!(pages.counts().failed, 1);
     let retired: Vec<usize> = (0..pages.devices.len())
         .filter(|&i| pages.devices[i].is_retired())
@@ -423,14 +420,45 @@ fn a_lost_device_is_retired_with_its_cause<B: Api>() {
         "{warning}"
     );
     assert_eq!(warning.contains("TDR"), cfg!(windows), "{warning}");
+    failed
+}
 
-    let (page, outcome) = render(&session, 2, &params).expect("render");
+/// A session's only device, reported lost, is retired with its cause
+/// ([`assert_lost_device_retired`]); the next page is not offered to a
+/// device and renders on the CPU, identically.
+pub(super) fn a_lost_only_device_retires_and_the_pages_render_on_the_cpu<B: Api>() {
+    let doc = pdf(&[DEVICE, DEVICE]);
+    let Some(session) = gpu_session::<B>(doc.clone()) else {
+        return;
+    };
+    assert_eq!(assert_lost_device_retired::<B>(&session, &doc), 0);
+    let (page, outcome) = render(&session, 2, &RenderParams::new(2.0)).expect("render");
+    assert_eq!(outcome, DevicePage::NotOffered);
+    assert_eq!(page, cpu(doc, 2));
+    let counts = device_pages::<B>(&session).counts();
+    assert_eq!(
+        (counts.failed, counts.retired, counts.rendered, counts.cpu()),
+        (1, 1, 0, 2),
+        "{counts}"
+    );
+}
+
+/// Of two devices, the one reported lost is retired with its cause
+/// ([`assert_lost_device_retired`]); the next page renders on the other
+/// device, identically.
+fn a_lost_device_is_retired_with_its_cause<B: Api>() {
+    let doc = pdf(&[DEVICE, DEVICE]);
+    let Some(session) = two_device_session::<B>(doc.clone()) else {
+        return;
+    };
+    let failed = assert_lost_device_retired::<B>(&session, &doc);
+    let (page, outcome) = render(&session, 2, &RenderParams::new(2.0)).expect("render");
     assert!(
         matches!(outcome, DevicePage::Rendered { .. }),
         "{outcome:?}"
     );
     assert_eq!(page, cpu(doc, 2));
-    let counts = pages.counts();
+    let counts = device_pages::<B>(&session).counts();
     assert_eq!(counts.by_device[failed].1, 0, "{counts}");
     assert_eq!(counts.by_device[1 - failed].1, 1, "{counts}");
 }
