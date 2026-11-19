@@ -1,8 +1,8 @@
 # rasterrocket
 
-Fast PDF to image conversion, as a Rust library and CLI (`rrocket`): it rasterizes PDF pages and comic archives to pixel buffers for OCR, or to PNG, JPEG, TIFF, PPM, PGM and PBM files, a printer or a fax. It runs on the CPU (AVX-512, AVX2, NEON) and, optionally, the GPU (CUDA, Vulkan, and Direct3D 12 on Windows), and handles hostile input as a bounded error.
+Fast PDF to image conversion, as a Rust library and CLI (`rrocket`): it rasterizes PDF pages and comic archives to pixel buffers for OCR, or to PNG, JPEG, TIFF, PPM, PGM and PBM files (PDF to PNG, PDF to JPEG and the rest), a printer or a fax. It runs on the CPU (AVX-512, AVX2, NEON) and, optionally, the GPU (CUDA, Vulkan, and Direct3D 12 on Windows), and handles hostile input as a bounded error.
 
-To render PDF pages for OCR, the library returns 8-bit grayscale pixel buffers for direct consumption by Tesseract or any other downstream consumer, with no intermediate files. For PDF to PNG or PDF to JPEG conversion, `rrocket` writes the pages as files. Pages can also be rendered as RGB, RGBA or CMYK, at 8 or 16 bits per sample, and converted to an ICC output profile.
+To render PDF pages for OCR, the library returns 8-bit grayscale pixel buffers for direct consumption by Tesseract or any other downstream consumer, with no intermediate files. Pages can also be rendered as RGB, RGBA or CMYK, at 8 or 16 bits per sample, and converted to an ICC output profile.
 
 ```toml
 # Cargo.toml — library (git dependency; see note below)
@@ -77,7 +77,7 @@ path is opt-in.
 
 - **Colour.** Input ICC conversions run under each object's rendering
   intent, with black-point compensation as the document asks, and agree
-  with an independent reference colour engine to its precision. Under `--output-profile`, pages
+  with an independent colour engine to its precision. Under `--output-profile`, pages
   composite in a wide (ROMM-primaries) working space at 16 bits
   (`--working-space`); `--proof` shows a page as the press its
   `/OutputIntents` names prints it. CMYK output applies `BG`/`UCR`,
@@ -281,7 +281,7 @@ once.** The full list, with migration notes, is in
 
 ## What's new in v1.5.0
 
-**Pages that rendered wrong now render right, and the C font library is gone.** One
+**Pages that rendered wrong now render right, and fonts are rasterised in-crate.** One
 behaviour change for library users (first item); otherwise no API change.
 
 - **A broken image no longer costs its page.** An image that cannot be
@@ -318,10 +318,10 @@ behaviour change for library users (first item); otherwise no API change.
 - **Cleaner edges.** Images clipped by a path are antialiased along the clip
   edge, a shape's top edge no longer loses a quarter of its coverage, and
   axis-aligned rectangles fill whole pixels.
-- **C font library removed.** Fonts (TrueType, OpenType, CFF, CID-keyed CFF,
+- **In-crate font rasteriser.** Fonts (TrueType, OpenType, CFF, CID-keyed CFF,
   Type 1) are parsed by local forks of `read-fonts` / `skrifa` and rasterised
-  in-crate, unhinted. No C font library is linked, the `bundled` feature and
-  system font-library build dependency are gone. Text is slightly lighter;
+  in-crate, unhinted. No C font library is linked; the `bundled` feature and
+  the system font library's build dependency are gone. Text is slightly lighter;
   a glyph-by-glyph check of 16 238 embedded font programs found nothing
   lost.
 - **Hostile-PDF hardening.** The parser now inherits the workspace lints;
@@ -530,7 +530,7 @@ and the page/annotation JavaScript-disclosure work).
 
 ## What's new in v1.0.0
 
-- **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over the font program's own metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: average RMSE against the reference renders dropped 17–19 points on corpus-05 and corpus-14.
+- **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over the font program's own metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: average RMSE against pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
 - **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070, an AMD integrated GPU (RADV) and, under Windows, an RTX 2080 SUPER and an Intel UHD 630; select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document. Changed in v2.4.0: sessions open at the same time share one Vulkan device and one CUDA context, the last of them to drop destroys it, and a later session builds it again; a `DeviceHold` keeps them open across sessions.
 - **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`, `d3d12`. The CLI `--backend` flag takes precedence.
@@ -593,7 +593,7 @@ is **untested**: it is expected to work, nothing more.
 | AMD Raphael iGPU (the 9900X3D's), same machine | Vulkan through RADV; VA-API JPEG decode (VCN 4.0, Mesa radeonsi) |
 | llvmpipe (Mesa's CPU Vulkan driver), on both Linux machines | Vulkan, including `--gpu-pages` |
 | Intel Core i7-8700K (Coffee Lake, AVX2, no AVX-512), Linux x86-64 | the AVX2 and SSE tiers, the fixture byte comparisons and timings |
-| NVIDIA RTX 2080 SUPER (Turing, `sm_75`), Linux, driver 570 for the runs below (the machine has had driver 620.70 and CUDA 13.5 since 2026-11-18; no CUDA 13 run is recorded on Linux yet), same machine | Vulkan, including `--gpu-pages`. CUDA only from a build with Ubuntu's nvcc 12.4 (ICC lookup table, nvJPEG and image cache byte-identical to the CPU; NPP deskew within 2 grey levels inside the page; up to 182 at its edge before the edge was recomputed with the CPU kernel, a fix tested on the RTX 5070 only, whose NPP 13.1 gave the same differences; no nvJPEG2000): a CUDA 13 build, the toolkit this project builds with, fails to load its kernels on driver 570 (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`; CUDA 13 needs driver 580 or later) |
+| NVIDIA RTX 2080 SUPER (Turing, `sm_75`), Linux, driver 570 for the runs in this row (the machine has had driver 620.70 and CUDA 13.5 since 2026-11-18; no CUDA 13 run is recorded on Linux yet), same machine | Vulkan, including `--gpu-pages`. CUDA only from a build with Ubuntu's nvcc 12.4 (ICC lookup table, nvJPEG and image cache byte-identical to the CPU; NPP deskew within 2 grey levels inside the page; up to 182 at its edge before the edge was recomputed with the CPU kernel, a fix tested on the RTX 5070 only, whose NPP 13.1 gave the same differences; no nvJPEG2000): a CUDA 13 build, the toolkit this project builds with, fails to load its kernels on driver 570 (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`; CUDA 13 needs driver 580 or later) |
 | NVIDIA RTX 2080 SUPER, Windows, driver 621.24, same machine | CUDA 13.5 with the VS 2026 Build Tools (nvJPEG, nvJPEG2000 0.12.0, ICC lookup table, NPP deskew, image cache): the GPU suites, and every fixture page under `--backend cuda` byte-identical to the CPU but for nvJPEG2000's JPEG 2000 decodes (up to 19 levels; nvJPEG2000 differs on the RTX 5070 too, and the codestreams concerned, under the irreversible 9-7 wavelet, now decode on the CPU; that fix is verified on the RTX 5070 only) and `--deskew` (within 1 level). Vulkan from a build with the LunarG SDK 1.4.363.1: the GPU-page, image-cache and ICC suites, and every fixture page under `--backend vulkan`, `--gpu-pages` and `--gpu-devices all` byte-identical to the CPU at 8 and 16 bits. See [BSD and Windows](docs/platforms/other.md#windows) |
 | NVIDIA RTX 5070, AMD Radeon iGPU (the 9900X3D's) and WARP 1.0.22, Windows 11, on the 9900X3D machine | Direct3D 12 (`--backend d3d12`): the GPU crate's D3D12 tests and the ICC, image-cache and GPU-page parity suites on all three, and every fixture page (corpus-01 to 11, 8 and 16 bits, RGB and gray, 12 096 per variant) byte-identical to `--backend cpu` under `--backend d3d12`, with and without `--gpu-pages`, on the RTX 5070 and on the Radeon, and under `--gpu-pages --gpu-devices all` with both; WARP ran corpus-01 only. The debug layer has not run (Graphics Tools is not installed on the box) |
 | Intel UHD 630 (the i7-8700K's), Windows, driver 31.0.101.2141 (Vulkan 1.3.215) | Vulkan: the GPU crate's Vulkan tests and the GPU-page, image-cache, ICC and teardown suites on it, and every fixture page under `--backend vulkan`, `--gpu-pages` and `--gpu-devices all` (with the RTX 2080 SUPER) byte-identical to the CPU at 8 and 16 bits; it has `shaderInt64`, so it takes the paths kernel. Its `maxStorageBufferRange` is 1 GiB, so a page whose device pixels exceed it (4 bytes a pixel at 8 bits, 8 at 16, gray included) renders on the CPU, with a warning. The TDR gate ran before the device stored whole-word pixels: its largest pages then, `corpus-09` at 950 dpi (1.0 GB at three samples a pixel) and `corpus-06` / `corpus-02` at 1200 dpi in 16 bits (0.8 GB), now exceed the limit and render on the CPU. The 26.20.100.7642 driver it had before reports Vulkan 1.1 and is listed as unusable |
