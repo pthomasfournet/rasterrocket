@@ -645,4 +645,68 @@ mod tests {
         assert_eq!(back[0].wall_us, 9);
         assert!(read_results("a\tb\n").unwrap_err().contains("line 1"));
     }
+
+    /// A scratch result directory under the target tree, removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::path::PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../target/os-bench-test"
+            ))
+            .join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("env.tsv"), ENV).unwrap();
+            Self(dir)
+        }
+
+        fn results(&self, lines: &[&str]) -> &std::path::Path {
+            std::fs::write(self.0.join("results.tsv"), lines.join("\n")).unwrap();
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn read_dir_needs_exactly_one_startup_key() {
+        let rows = |extra: &[&'static str]| {
+            let mut v = vec!["L\tL12\td\t2\t4\t1\t500"];
+            v.extend_from_slice(extra);
+            v
+        };
+        let zero = Scratch::new("read_dir_zero");
+        let err = read_dir(zero.results(&rows(&[]))).unwrap_err();
+        assert!(err.contains("read_dir_zero") && err.contains("exactly one S-version"));
+
+        let one = Scratch::new("read_dir_one");
+        let (_, stats) = read_dir(one.results(&rows(&[
+            "S\tS-version\t-\t1\t1\t1\t90",
+            "S\tS-version\t-\t1\t1\t2\t100",
+        ])))
+        .unwrap();
+        assert_eq!(stats.iter().filter(|s| s.row == "S-version").count(), 1);
+
+        let two = Scratch::new("read_dir_two");
+        let err = read_dir(two.results(&rows(&[
+            "S\tS-version\t-\t1\t1\t1\t90",
+            "T\tS-version\t-\t1\t1\t1\t90",
+        ])))
+        .unwrap_err();
+        assert!(err.contains("read_dir_two") && err.contains("2 (group, row)"));
+
+        let threads = Scratch::new("read_dir_two_threads");
+        let err = read_dir(threads.results(&rows(&[
+            "S\tS-version\t-\t1\t1\t1\t90",
+            "S\tS-version\t-\t1\t2\t1\t90",
+        ])))
+        .unwrap_err();
+        assert!(err.contains("2 (row, doc, threads)"));
+    }
 }
