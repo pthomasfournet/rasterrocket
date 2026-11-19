@@ -226,6 +226,15 @@ pub(crate) fn band_rows(stride: usize, height: u32) -> u32 {
         .clamp(1, height.max(1))
 }
 
+/// The source rows a band of image rows `rows` is sent with: `overlap`
+/// rows past each edge of the band that is not the image's own edge, of
+/// an image of `height` rows.  With an overlap the band is clipped to its
+/// own device rows ([`band_dest`] of `rows`), so a stretch filter sees the
+/// rows across the band's edges.
+pub(crate) fn band_source(rows: &Range<u32>, overlap: u32, height: u32) -> Range<u32> {
+    rows.start.saturating_sub(overlap)..rows.end.saturating_add(overlap).min(height)
+}
+
 /// The device rows `(y, height)` that the image rows `rows` of an image of
 /// `image_height` rows cover in a placement of `dest_height` rows from
 /// `dest_y`.  Consecutive bands abut, and at 1:1 each image row is one
@@ -484,8 +493,8 @@ pub(crate) fn check_duplex_merged(
 mod tests {
     use super::{
         Claims, Copies, DibFormat, Orientation, Placement, Surface, Surfaces, band_dest, band_rows,
-        centre, check_duplex_claimed, check_duplex_merged, check_print_file, dib_row, is_file_port,
-        pass_needs_blank, place, turned_row,
+        band_source, centre, check_duplex_claimed, check_duplex_merged, check_print_file, dib_row,
+        is_file_port, pass_needs_blank, place, turned_row,
     };
     use crate::print::Duplex;
 
@@ -648,6 +657,15 @@ mod tests {
             next = y + h;
         }
         assert_eq!(next, 7 + 25);
+        // An overlapping band reaches a row past each inner edge, and its
+        // device rows hold the clipped band's.
+        assert_eq!(band_source(&(0..3), 1, 10), 0..4);
+        assert_eq!(band_source(&(3..7), 1, 10), 2..8);
+        assert_eq!(band_source(&(7..10), 1, 10), 6..10);
+        assert_eq!(band_source(&(3..7), 0, 10), 3..7);
+        let (outer_y, outer_h) = band_dest(&(2..8), 10, (7, 25));
+        let (inner_y, inner_h) = band_dest(&(3..7), 10, (7, 25));
+        assert!(outer_y <= inner_y && inner_y + inner_h <= outer_y + outer_h);
     }
 
     #[test]

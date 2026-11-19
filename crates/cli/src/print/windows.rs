@@ -25,8 +25,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW_0_0, DIB_RGB_COLORS, DM_COLLATE, DM_COLOR, DM_COPIES, DM_DUPLEX, DM_FORMNAME,
     DM_IN_BUFFER, DM_ORIENTATION, DM_OUT_BUFFER, DM_PAPERLENGTH, DM_PAPERSIZE, DM_PAPERWIDTH,
     DMCOLLATE_TRUE, DMCOLOR_MONOCHROME, DeleteDC, GDI_ERROR, GetDeviceCaps, HALFTONE, HDC, HORZRES,
-    LOGPIXELSX, LOGPIXELSY, PHYSICALHEIGHT, PHYSICALOFFSETX, PHYSICALOFFSETY, PHYSICALWIDTH,
-    RGBQUAD, ResetDCW, SRCCOPY, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, VERTRES,
+    IntersectClipRect, LOGPIXELSX, LOGPIXELSY, PHYSICALHEIGHT, PHYSICALOFFSETX, PHYSICALOFFSETY,
+    PHYSICALWIDTH, RGBQUAD, ResetDCW, RestoreDC, SRCCOPY, SaveDC, SetBrushOrgEx, SetStretchBltMode,
+    StretchDIBits, VERTRES,
 };
 use windows_sys::Win32::Graphics::Printing::{
     ClosePrinter, DocumentPropertiesW, EnumPrintersW, GetDefaultPrinterW, GetPrinterW,
@@ -959,8 +960,11 @@ impl Job {
     }
 
     /// Draw `page` at `placement` in bands of at most
-    /// [`gdi::MAX_BAND_BYTES`], each a bottom-up bitmap.
-    #[expect(unsafe_code, reason = "StretchDIBits draws the page's bands")]
+    /// [`gdi::MAX_BAND_BYTES`], each a bottom-up bitmap.  A stretched page's
+    /// band carries a source row past each inner edge
+    /// ([`gdi::band_source`]) and is clipped to its own device rows, so the
+    /// halftone filter sees the rows across the edge.
+    #[expect(unsafe_code, reason = "the stretch mode and brush origin of the bands")]
     fn draw(&self, page: &PdfPage, placement: &Placement) -> Result<(), String> {
         if page.depth() != SampleDepth::Eight {
             return Err("a 16-bit page cannot be drawn: GDI print bitmaps are 8-bit".to_owned());
@@ -975,9 +979,12 @@ impl Job {
             (width, height)
         };
         let stride = format.stride(out_w);
-        let band = gdi::band_rows(stride, out_h);
         let mut info = DibInfo::new(format, out_w);
         let stretched = (placement.width, placement.height) != (out_w, out_h);
+        let overlap = u32::from(stretched);
+        let band = gdi::band_rows(stride, out_h)
+            .saturating_sub(2 * overlap)
+            .max(1);
         // SAFETY: `dc` is live with a page open.
         unsafe {
             let _ = SetStretchBltMode(
@@ -1002,54 +1009,130 @@ impl Job {
             None
         };
         let mut row = vec![0; out_w as usize * bpp];
-        let mut bits = vec![0u8; stride * band as usize];
+        let mut bits = vec![0u8; stride * (band + 2 * overlap) as usize];
+        // The bitmap rows of the band before that the next one reads
+        // again, and how many source rows have been read.
+        let mut carry: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut fetched = 0;
         let mut start = 0;
         while start < out_h {
             let range = start..(start + band).min(out_h);
-            let n = (range.end - range.start) as usize;
-            for (i, r) in range.clone().enumerate() {
+            let src = gdi::band_source(&range, overlap, out_h);
+            let n = (src.end - src.start) as usize;
+            for (i, r) in src.clone().enumerate() {
+                let at = (n - 1 - i) * stride;
+                let out = &mut bits[at..at + stride];
+                if let Some((_, kept)) = carry.iter().find(|(k, _)| *k == r) {
+                    out.copy_from_slice(kept);
+                    continue;
+                }
+                debug_assert_eq!(r, fetched, "source rows are read in order");
                 match &whole {
                     Some(image) => gdi::turned_row(image, (width, height), bpp, r, &mut row),
                     None => rows.read_exact(&mut row).map_err(read_error)?,
                 }
-                let at = (n - 1 - i) * stride;
-                gdi::dib_row(&row, format, &mut bits[at..at + stride]);
+                fetched += 1;
+                gdi::dib_row(&row, format, out);
             }
-            let (y, dest_h) = gdi::band_dest(&range, out_h, (placement.y, placement.height));
-            if dest_h > 0 {
+            carry = (src.end.saturating_sub(2 * overlap).max(src.start)..src.end)
+                .map(|r| {
+                    let at = (n - 1 - (r - src.start) as usize) * stride;
+                    (r, bits[at..at + stride].to_vec())
+                })
+                .collect();
+            let (y, dest_h) = gdi::band_dest(&src, out_h, (placement.y, placement.height));
+            let (clip_y, clip_h) = gdi::band_dest(&range, out_h, (placement.y, placement.height));
+            if clip_h > 0 {
                 info.header.biHeight = i32::try_from(n).unwrap_or(i32::MAX);
-                // SAFETY: `bits` holds `n` rows of `stride` bytes of
-                // `format`, as `info` describes with its palette.
-                let copied = unsafe {
-                    StretchDIBits(
-                        self.dc.raw(),
-                        placement.x,
-                        y,
-                        i32::try_from(placement.width).unwrap_or(i32::MAX),
-                        dest_h,
-                        0,
-                        0,
-                        i32::try_from(out_w).unwrap_or(i32::MAX),
-                        i32::try_from(n).unwrap_or(i32::MAX),
-                        bits.as_ptr().cast(),
-                        (&raw const info).cast::<BITMAPINFO>(),
-                        DIB_RGB_COLORS,
-                        SRCCOPY,
-                    )
+                let band = Band {
+                    bits: &bits,
+                    info: &info,
+                    size: (out_w, n),
+                    dest: (y, dest_h),
+                    clip: (clip_y, clip_h),
                 };
-                if copied == 0 || copied == GDI_ERROR {
-                    return Err(format!(
-                        "StretchDIBits drew none of rows {}..{} of the page: {}",
-                        range.start,
-                        range.end,
-                        io::Error::last_os_error()
-                    ));
-                }
+                self.blit(&band, placement).map_err(|e| {
+                    format!(
+                        "StretchDIBits drew none of rows {}..{} of the page: {e}",
+                        range.start, range.end
+                    )
+                })?;
             }
             start = range.end;
         }
         Ok(())
     }
+
+    /// Draw `band` at its device rows within `placement`, clipped to its
+    /// own rows.
+    ///
+    /// # Errors
+    ///
+    /// The driver drew none of it.
+    #[expect(
+        unsafe_code,
+        reason = "StretchDIBits draws the band, clipped through SaveDC, IntersectClipRect \
+                  and RestoreDC"
+    )]
+    fn blit(&self, band: &Band<'_>, placement: &Placement) -> io::Result<()> {
+        let dc = self.dc.raw();
+        let width = i32::try_from(placement.width).unwrap_or(i32::MAX);
+        let (clip_y, clip_h) = band.clip;
+        // SAFETY: `dc` is live with a page open; the state saved here is
+        // restored below.
+        let saved = unsafe {
+            let saved = SaveDC(dc);
+            let _ = IntersectClipRect(
+                dc,
+                placement.x,
+                clip_y,
+                placement.x.saturating_add(width),
+                clip_y.saturating_add(clip_h),
+            );
+            saved
+        };
+        // SAFETY: `bits` holds `size.1` bitmap rows of `size.0` pixels as
+        // `info` describes, with its palette.
+        let copied = unsafe {
+            StretchDIBits(
+                dc,
+                placement.x,
+                band.dest.0,
+                width,
+                band.dest.1,
+                0,
+                0,
+                i32::try_from(band.size.0).unwrap_or(i32::MAX),
+                i32::try_from(band.size.1).unwrap_or(i32::MAX),
+                band.bits.as_ptr().cast(),
+                (&raw const *band.info).cast::<BITMAPINFO>(),
+                DIB_RGB_COLORS,
+                SRCCOPY,
+            )
+        };
+        let error = io::Error::last_os_error();
+        if saved != 0 {
+            // SAFETY: restores the state `SaveDC` saved above.
+            let _ = unsafe { RestoreDC(dc, saved) };
+        }
+        if copied == 0 || copied == GDI_ERROR {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+/// One band of a page as [`Job::blit`] draws it.
+struct Band<'a> {
+    /// The bitmap rows, bottom-up.
+    bits: &'a [u8],
+    info: &'a DibInfo,
+    /// The bitmap's width and rows.
+    size: (u32, usize),
+    /// The device rows `(y, height)` the bitmap's rows cover.
+    dest: (i32, i32),
+    /// The device rows `(y, height)` drawn: the band's own.
+    clip: (i32, i32),
 }
 
 impl PageOut for Job {

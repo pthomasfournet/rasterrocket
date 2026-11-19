@@ -430,8 +430,10 @@ what CUPS's filters do, page by page:
 - **Bitmaps:** colour pages go out as 24-bit bitmaps, gray pages as 8-bit
   ones with a gray palette, `--mono` pages as 1-bit ones. GDI has no 16-bit
   print bitmap, so `--depth 16` is refused with `--print` on Windows. A page is sent with
-  `StretchDIBits` in bands of at most 16 MiB of bitmap; a band the driver
-  does not draw aborts the job, naming the rows.
+  `StretchDIBits` in bands of at most 16 MiB of bitmap; a page stretched to
+  its place sends each band with a row past each inner edge and clips it to
+  its own rows, so the `HALFTONE` filter shows no seam between bands. A band
+  the driver does not draw aborts the job, naming the rows.
 - **Colour:** `--gray` and `--mono` ask the driver for monochrome
   (`dmColor`); colour pages leave the printer's setting. The bitmaps reach
   the driver as sRGB, so `--output-profile` (and with it `--working-space
