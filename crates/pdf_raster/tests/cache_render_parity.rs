@@ -431,6 +431,79 @@ on_each_backend!(
 /// 40×21 RGB JPEG with `/Interpolate true`) on the CPU and on `backend` and
 /// assert the pages are byte-identical and the image came from the cache.
 fn assert_cached_draw_identical(backend: Backend, draw: &str) {
+    let pdf = magnified_images_pdf(draw);
+    let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
+    let Some(session) = backend.session_from_bytes(pdf) else {
+        return;
+    };
+    let gpu = render(&session, 1);
+    assert_identical(&cpu, &gpu, draw);
+    assert_eq!(
+        session.image_cache().expect("image cache").len(),
+        1,
+        "{draw}: the image should be drawn from the cache"
+    );
+}
+
+/// A page recorded for the device raster draws its device-resident images
+/// from host copies read back from the cache: with GPU pages on, a page
+/// drawing two cached JPEGs, one twice, under a fill and a stroke renders
+/// on the device, byte-identically to the CPU, both when its images enter
+/// the cache and when they are found there.
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+fn cached_images_on_a_device_page_render_identically(backend: Backend) {
+    let pdf = magnified_images_pdf(
+        "q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q\n\
+         q 190.3 0 0 101.7 10.6 30.2 cm /ImD Do Q\n\
+         q 70 0 0 38.4 150.4 5 cm /ImB Do Q\n\
+         0 0 1 rg 60 150 80 50 re f\n\
+         0.9 0.1 0.1 RG 4 w 10 120 m 290 230 l S\n",
+    );
+    let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
+    assert!(cpu.2.iter().any(|&b| b != 0xff), "blank on the CPU");
+    let mut config = backend.config();
+    config.gpu_pages = true;
+    let Some(session) = backend.session(open_session_from_bytes(pdf, &config)) else {
+        return;
+    };
+    let cache = session.image_cache().expect("image cache");
+    assert!(cache.is_empty(), "cache must start empty");
+    for pass in ["cold cache", "warm cache"] {
+        let (page, diag) = render_diagnosed(&session, 1);
+        assert!(
+            matches!(diag.device_page, rasterrocket::DevicePage::Rendered { .. }),
+            "{pass}: the device did not render the page: {:?}",
+            diag.device_page
+        );
+        assert!(
+            diag.image_failures.is_empty(),
+            "{pass}: {:?}",
+            diag.image_failures
+        );
+        assert_identical(&cpu, &page, pass);
+        assert_eq!(
+            cache.len(),
+            2,
+            "{pass}: both JPEGs are drawn from the cache"
+        );
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn cached_images_on_a_vulkan_device_page_render_identically() {
+    cached_images_on_a_device_page_render_identically(Backend::Vulkan);
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+#[test]
+fn cached_images_on_a_d3d12_device_page_render_identically() {
+    cached_images_on_a_device_page_render_identically(Backend::D3d12);
+}
+
+/// A 300×240 pt page running `draw`, whose resources name `/ImB`, a 50×80
+/// gray JPEG, and `/ImD`, a 40×21 RGB JPEG with `/Interpolate true`.
+fn magnified_images_pdf(draw: &str) -> Vec<u8> {
     let content = draw.as_bytes();
     let objects = vec![
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 240] \
@@ -449,18 +522,7 @@ fn assert_cached_draw_identical(backend: Backend, draw: &str) {
             &jpeg(40, 21, false),
         ),
     ];
-    let pdf = with_page_tree(&objects);
-    let cpu = render(&session(pdf.clone(), BackendPolicy::CpuOnly), 1);
-    let Some(session) = backend.session_from_bytes(pdf) else {
-        return;
-    };
-    let gpu = render(&session, 1);
-    assert_identical(&cpu, &gpu, draw);
-    assert_eq!(
-        session.image_cache().expect("image cache").len(),
-        1,
-        "{draw}: the image should be drawn from the cache"
-    );
+    with_page_tree(&objects)
 }
 
 /// Render `pages` of a corpus fixture at `dpi` on the CPU and on `backend`
