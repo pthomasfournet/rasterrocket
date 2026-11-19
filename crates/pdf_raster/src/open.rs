@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 use crate::device_init::{SessionDevice, init_backend};
 use crate::{BackendPolicy, FormType, RasterError, SessionConfig, UnsupportedFeature};
 
@@ -93,7 +93,7 @@ pub struct RasterSession {
     pub(crate) d3d12_backend: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
     /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
     /// renders every page on the CPU.
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     pub(crate) device_pages: Option<crate::device_pages::SessionDevicePages>,
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
@@ -247,7 +247,7 @@ impl RasterSession {
     /// CPU and why ([`SessionConfig::gpu_pages`]); `None` when the session
     /// renders no GPU pages.  The same counts are logged at `info` when
     /// the session drops.
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     #[must_use]
     pub fn device_page_counts(&self) -> Option<crate::DevicePageCounts> {
         self.device_pages
@@ -512,7 +512,7 @@ fn open_session_with_doc(
         config.policy,
         gpu::backend::d3d12::D3d12Backend::session_selector(config),
     )?;
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     let device_pages = crate::device_pages::SessionDevicePages::for_session(
         config,
         #[cfg(feature = "vulkan")]
@@ -594,7 +594,7 @@ fn open_session_with_doc(
         vk_backend,
         #[cfg(all(windows, feature = "d3d12"))]
         d3d12_backend,
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         device_pages,
         #[cfg(feature = "vaapi")]
         vaapi_queue,
@@ -698,10 +698,7 @@ fn new_cuda_image_cache(ctx: &gpu::GpuCtx) -> gpu::cache::DeviceImageCache {
 /// A device image cache on `backend` (Vulkan, Direct3D 12), under the
 /// VRAM budget the device reports ([`gpu::cache::VramBudget::from_backend`]),
 /// or the default one when the query fails.
-#[cfg(all(
-    feature = "cache",
-    any(feature = "vulkan", all(windows, feature = "d3d12"))
-))]
+#[cfg(all(feature = "cache", device_pages))]
 fn new_device_image_cache<B: gpu::cache::CacheBackend<Device = Arc<B>>>(
     backend: &Arc<B>,
 ) -> gpu::cache::DeviceImageCache<B> {

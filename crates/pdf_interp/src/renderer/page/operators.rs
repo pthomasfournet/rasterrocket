@@ -80,7 +80,7 @@ impl PageRenderer<'_> {
         if self.marked_content.hidden() {
             return;
         }
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() && self.refuse_device_operator(op) {
             return;
         }

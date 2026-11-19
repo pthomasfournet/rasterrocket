@@ -158,7 +158,7 @@ pub trait PageDevice: GpuBackend + Sized {
 /// tests: `body(&backend)` on the backend its `test_backend` opens, the
 /// test being skipped when none opens.  The tests of a backend live in a
 /// module named after it.
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 macro_rules! on_each_backend {
     ($($name:ident => $body:ident;)*) => {
         #[cfg(feature = "vulkan")]
@@ -187,13 +187,13 @@ macro_rules! on_each_backend {
     };
 }
 
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 mod image_tests;
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 mod mask_tests;
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 mod modifier_tests;
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 pub(crate) mod path_tests;
-#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
+#[cfg(all(test, device_pages))]
 mod tests;

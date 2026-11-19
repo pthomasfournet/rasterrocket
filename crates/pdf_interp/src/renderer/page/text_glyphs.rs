@@ -9,7 +9,7 @@ use super::super::color::RasterColor;
 use super::PageRenderer;
 use super::canvas::with_canvas;
 use super::canvas::{CanvasPipe, CanvasSource};
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 use super::device_page::PlacedGlyph;
 use super::paint::PaintParams;
 use super::pixel_rect::PixelRect;
@@ -337,7 +337,7 @@ impl PageRenderer<'_> {
         paint: &PaintParams,
         (colour, stroking): (&RasterColor, bool),
     ) {
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() {
             let glyphs = records.iter().map(|rec| PlacedGlyph {
                 pen_x: rec.pen_x,

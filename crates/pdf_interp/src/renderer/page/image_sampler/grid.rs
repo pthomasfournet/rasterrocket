@@ -184,7 +184,7 @@ impl SampleGrid {
     }
 
     /// The width and height in samples of the image the grid samples.
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     pub(in crate::renderer::page) const fn source_size(&self) -> (u32, u32) {
         (self.img_w, self.img_h)
     }

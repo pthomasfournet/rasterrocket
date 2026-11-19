@@ -123,10 +123,10 @@ impl PageRenderer<'_> {
         });
         self.reconvert_colours(|_| true);
         // The mask group paints its own canvas, never the recorded page.
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         let recording = self.device_page.take();
         self.without_glyph_census(|r| r.do_form_xobject(&form));
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         {
             self.device_page = recording;
         }
@@ -229,7 +229,7 @@ impl PageRenderer<'_> {
             paint(self);
             return;
         };
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() {
             self.record_through_soft_mask(&mask, region, paint);
             self.gstate.current_mut().soft_mask = Some(mask);

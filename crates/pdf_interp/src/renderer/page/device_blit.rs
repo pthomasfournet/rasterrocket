@@ -4,12 +4,12 @@
 
 #![cfg(feature = "cache")]
 
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 use std::sync::Arc;
 
 use gpu::GpuCtx;
 use gpu::blit::BlitBbox;
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 use gpu::cache::{CacheBackend, DeviceImageCache, ImageCache};
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
 use raster::pipe::ChannelMask;
@@ -313,7 +313,7 @@ fn blit_on_cuda(
 /// kernel and the target's download run as one page on `cache`'s backend
 /// ([`gpu::backend::blit_image`], with buffers pooled on the backend), and
 /// the box is passed to `composite` whole.
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 fn blit_on_device<B: CacheBackend<Device = Arc<B>>>(
     cache: &DeviceImageCache<B>,
     image: &CachedDeviceImage<B>,
@@ -356,7 +356,7 @@ fn blit_on_device<B: CacheBackend<Device = Arc<B>>>(
 }
 
 /// The outcome of an image whose backend is not that of the page's cache.
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 fn backend_mismatch() -> BlitOutcome {
     log::warn!("blit_image: an image reached a cache of another backend");
     BlitOutcome::NotStarted

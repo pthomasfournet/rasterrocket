@@ -29,14 +29,7 @@
 //!   `PDF_RASTER_D3D12_DEVICE=warp cargo test -p rasterrocket --features d3d12,gpu-icc --test gpu_icc_render_parity`
 //!   `cargo test -p rasterrocket --features gpu-icc,gpu-validation --test gpu_icc_render_parity`
 
-#![cfg(all(
-    feature = "gpu-icc",
-    any(
-        feature = "vulkan",
-        all(windows, feature = "d3d12"),
-        feature = "gpu-validation"
-    )
-))]
+#![cfg(all(feature = "gpu-icc", any(device_pages, feature = "gpu-validation")))]
 
 #[expect(
     dead_code,
@@ -51,7 +44,7 @@ use std::fmt::Write as _;
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 use common::device::DeviceApi;
 use common::{assemble_pdf, assert_identical, stream_object};
 use rasterrocket::{

@@ -27,7 +27,7 @@ pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(any(feature = "vulkan", all(windows, feature = "d3d12"), test)),
+    not(any(device_pages, test)),
     expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 mod kernel_status;
@@ -39,7 +39,7 @@ pub mod d3d12;
 pub mod page_device;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(any(feature = "vulkan", all(windows, feature = "d3d12"))),
+    not(device_pages),
     expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 mod page_job;
@@ -92,7 +92,7 @@ pub(crate) fn copy_len(
 /// above its maximum.
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(any(feature = "vulkan", all(windows, feature = "d3d12"), test)),
+    not(any(device_pages, test)),
     expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 pub(crate) fn check_dispatch_groups(
@@ -524,7 +524,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
 /// over: the lock guards no data.
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(any(feature = "vulkan", all(windows, feature = "d3d12"))),
+    not(device_pages),
     expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 pub(crate) fn run_page_held<B, F>(

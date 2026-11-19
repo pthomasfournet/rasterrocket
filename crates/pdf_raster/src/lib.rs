@@ -117,9 +117,9 @@ mod config;
 pub(crate) mod decode_queue;
 mod decoders;
 pub mod deskew;
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 mod device_init;
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 mod device_pages;
 mod error;
 pub(crate) mod gcv;
@@ -131,12 +131,7 @@ mod output;
 pub(crate) mod page;
 mod page_buffer;
 mod proof;
-#[cfg(any(
-    feature = "vulkan",
-    all(windows, feature = "d3d12"),
-    feature = "gpu-icc",
-    feature = "cache"
-))]
+#[cfg(any(device_pages, feature = "gpu-icc", feature = "cache"))]
 mod registry;
 mod render;
 mod request;
@@ -176,7 +171,7 @@ pub mod dev {
     /// # Errors
     ///
     /// As [`crate::render_page_canvas`], for the page's recording.
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     pub fn device_page_commands(
         session: &RasterSession,
         page_num: u32,
@@ -203,7 +198,7 @@ pub use color::SampleDepth;
 pub use config::{
     BackendPolicy, DEFAULT_VAAPI_DEVICE, GPU_PAGE_OPEN_WAIT, ParseBackendPolicyError, SessionConfig,
 };
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 pub use device_pages::DevicePageCounts;
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};

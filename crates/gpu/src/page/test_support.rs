@@ -418,7 +418,7 @@ pub(crate) fn push_fill(
 /// planes and rectangles, and fills (outlines unless `tables`), masks,
 /// images and opaque runs at random alphas.
 #[cfg_attr(
-    not(any(feature = "vulkan", all(windows, feature = "d3d12"))),
+    not(device_pages),
     expect(dead_code, reason = "only the device tests use it")
 )]
 pub(crate) fn push_random_modified(rng: &mut Rng, page: &mut PageCommands, n: usize, tables: bool) {

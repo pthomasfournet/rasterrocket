@@ -195,7 +195,7 @@ impl PageRenderer<'_> {
         if self.gstate.current().fill_color_space.paints_nothing() {
             return true;
         }
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() {
             let glyph = super::device_page::PlacedGlyph {
                 pen_x: frame.pen_x,

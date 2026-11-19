@@ -166,7 +166,7 @@ impl ImageCache {
             (Self::Vulkan(c), CachedImage::Vulkan(i)) => c.download(i),
             #[cfg(all(windows, feature = "d3d12"))]
             (Self::D3d12(c), CachedImage::D3d12(i)) => c.download(i),
-            #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+            #[cfg(device_pages)]
             _ => Err(CacheError::BackendMismatch),
         }
     }

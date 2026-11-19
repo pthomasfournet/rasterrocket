@@ -450,7 +450,7 @@ fn assert_cached_draw_identical(backend: Backend, draw: &str) {
 /// drawing two cached JPEGs, one twice, under a fill and a stroke renders
 /// on the device, byte-identically to the CPU, both when its images enter
 /// the cache and when they are found there.
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 fn cached_images_on_a_device_page_render_identically(backend: Backend) {
     let pdf = magnified_images_pdf(
         "q 60.5 15.25 -10.75 75.5 200.33 140.17 cm /ImB Do Q\n\

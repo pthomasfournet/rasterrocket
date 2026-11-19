@@ -6,6 +6,7 @@
 //! - `.slang` → HLSL via `slangc`, then DXIL via `dxc`, for the D3D12 backend
 //!   (when `d3d12` is on; `build_support/dxil_build.rs`).
 //! - Emits `cargo:rustc-link-{search,lib}` directives per active GPU feature.
+//! - Emits the `device_pages` cfg ([`emit_device_pages_cfg`]).
 //!
 //! All artifacts land in `OUT_DIR` and are consumed by `include_str!` /
 //! `include_bytes!` in `src/lib.rs` and the backend modules.
@@ -273,9 +274,26 @@ fn run_tool(cmd: &mut Command, what: &str, missing: &str) {
     );
 }
 
+/// Emit the `device_pages` cfg: set when the crate is built with a backend
+/// that renders whole pages on the device, i.e. when
+/// `any(feature = "vulkan", all(windows, feature = "d3d12"))` holds.  The
+/// `d3d12` backend compiles to nothing off Windows, so the feature counts
+/// only on a Windows target.  The cfg applies to every target of the
+/// package and is declared to `check-cfg`.
+fn emit_device_pages_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(device_pages)");
+    let feature = |name: &str| env::var_os(format!("CARGO_FEATURE_{name}")).is_some();
+    let windows = env::var_os("CARGO_CFG_WINDOWS").is_some();
+    if feature("VULKAN") || (windows && feature("D3D12")) {
+        println!("cargo::rustc-cfg=device_pages");
+    }
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
     let kernels_dir = PathBuf::from("kernels");
+
+    emit_device_pages_cfg();
 
     println!("cargo:rerun-if-changed=kernels/");
     println!("cargo:rerun-if-changed=shim/nvjpeg2k_shim.cpp");

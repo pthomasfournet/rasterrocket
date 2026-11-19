@@ -38,7 +38,7 @@ impl PageRenderer<'_> {
             self.stroke_path(path);
             return;
         };
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() {
             self.refuse_device("translucent fill and stroke");
             return;

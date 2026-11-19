@@ -21,6 +21,6 @@ pub use page::{
     MAX_FORM_DEPTH, PageDiagnostics, PageRenderer, PageState, PageView, PaintTrace, RenderAbort,
     ShadingFailure,
 };
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 pub use page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 pub use pdf::ContentFailure;

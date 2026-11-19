@@ -14,7 +14,7 @@
 //!   `cargo test -p rasterrocket --features vulkan --test gpu_page_render_parity`
 //!   `RR_GPU_PAGE_POLICY=d3d12 cargo test -p rasterrocket --features d3d12 --test gpu_page_render_parity`
 
-#![cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#![cfg(device_pages)]
 
 #[expect(
     dead_code,

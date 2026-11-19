@@ -190,7 +190,7 @@ fn upload_padded<Src: HostSlice<u8> + ?Sized>(
 /// `CacheBackend` for a backend whose cache transfers go through its own
 /// synchronous [`GpuBackend::upload`] and [`GpuBackend::download`] and
 /// whose host tier holds ordinary host memory (`Box<[u8]>`).
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 macro_rules! host_staged_cache_backend {
     ($backend:ty) => {
         impl CacheBackend for $backend {
@@ -267,7 +267,7 @@ host_staged_cache_backend!(crate::backend::d3d12::D3d12Backend);
 ///
 /// # Errors
 /// [`CacheError::HostAlloc`] when the allocator refuses the size.
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 fn boxed_host_slab(bytes: usize) -> Result<Box<[u8]>, CacheError> {
     let mut slab = Vec::new();
     slab.try_reserve_exact(bytes)

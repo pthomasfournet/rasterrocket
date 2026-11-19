@@ -60,7 +60,7 @@ mod canvas;
 mod colour_set;
 pub(crate) mod depth;
 mod device_blit;
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 mod device_page;
 mod devices;
 mod diagnostics;
@@ -99,7 +99,7 @@ mod xobject;
 
 pub use band::PageState;
 use canvas::{CanvasKind, PageCanvas};
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 pub use device_page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 #[cfg(feature = "cache")]
 use devices::CacheState;
@@ -503,7 +503,7 @@ pub struct PageRenderer<'doc> {
     cache_state: Option<CacheState>,
     /// The page's paint commands while it is recorded for the device page
     /// raster instead of painted; see [`Self::record_for_device`].
-    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    #[cfg(device_pages)]
     device_page: Option<Box<device_page::Recording>>,
 }
 
@@ -867,7 +867,7 @@ impl<'doc> PageRenderer<'doc> {
             d3d12_backend: None,
             #[cfg(feature = "cache")]
             cache_state: None,
-            #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+            #[cfg(device_pages)]
             device_page: None,
         };
         renderer.group = renderer.page_group_context(group);
@@ -1398,7 +1398,7 @@ impl<'doc> PageRenderer<'doc> {
             if self.budget_exceeded.is_some() {
                 return;
             }
-            #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+            #[cfg(device_pages)]
             if self.device_refused() {
                 return;
             }
@@ -1488,7 +1488,7 @@ impl<'doc> PageRenderer<'doc> {
         self.text_clip = None;
         self.text_tail = None;
         self.marked_content = operators::MarkedContent::default();
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_refused() {
             return;
         }

@@ -1003,7 +1003,7 @@ mod tests {
             let Err(RasterError::InvalidOptions(msg)) = config.check_gpu_pages() else {
                 panic!("{policy:?}: GPU pages accepted");
             };
-            if cfg!(any(feature = "vulkan", all(windows, feature = "d3d12"))) {
+            if cfg!(device_pages) {
                 for named in [
                     format!("--backend {}", policy.name()),
                     "--backend auto".to_owned(),

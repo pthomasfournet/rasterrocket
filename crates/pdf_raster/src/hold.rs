@@ -111,7 +111,7 @@ impl DeviceHold {
 ///
 /// As [`crate::device_init::init_backend`] and
 /// [`crate::device_pages::open_all`].
-#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+#[cfg(device_pages)]
 fn held_devices<B: crate::device_init::SessionDevice>(
     config: &SessionConfig,
 ) -> Result<Vec<Arc<B>>, RasterError> {

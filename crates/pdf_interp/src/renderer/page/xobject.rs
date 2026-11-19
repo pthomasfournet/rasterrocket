@@ -355,7 +355,7 @@ impl PageRenderer<'_> {
     /// [`Self::do_form_xobject`], with the form's operators taken from
     /// `source`.
     fn run_form_xobject(&mut self, form: &FormXObject, source: FormContent<'_>) {
-        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+        #[cfg(device_pages)]
         if self.device_recording() && form.transparency.is_some() {
             self.refuse_device("transparency group");
             return;
