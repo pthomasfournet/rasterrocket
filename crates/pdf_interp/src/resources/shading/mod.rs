@@ -89,6 +89,27 @@ pub(crate) struct Canvas {
     pub height: f64,
     pub depth: SampleDepth,
     pub target: crate::ColourTarget,
+    /// The pixels the shading's colours are read at, as inclusive bounds
+    /// `[x0, y0, x1, y1]`; `None` for every pixel.  A function-based
+    /// shading evaluates its function only where these pixels need it
+    /// (see [`ResolvedShading::region`]).
+    pub region: Option<[i64; 4]>,
+}
+
+impl Canvas {
+    /// Whether colours resolved for the pixels `held` (`None`: every
+    /// pixel) serve the pixels of this canvas's region.
+    pub(crate) const fn served_by(&self, held: Option<[i64; 4]>) -> bool {
+        let Some([hx0, hy0, hx1, hy1]) = held else {
+            return true;
+        };
+        match self.region {
+            None => false,
+            Some([x0, y0, x1, y1]) => {
+                x1 < x0 || y1 < y0 || (x0 >= hx0 && y0 >= hy0 && x1 <= hx1 && y1 <= hy1)
+            }
+        }
+    }
 }
 
 /// The colour source of a resolved shading.
@@ -149,6 +170,11 @@ pub struct ResolvedShading {
     /// Heap bytes `result` holds: a mesh's triangles or a function-based
     /// shading's samples.
     pub held_bytes: usize,
+    /// The pixels `result` paints as resolved for the whole canvas, as
+    /// inclusive bounds `[x0, y0, x1, y1]`: the [`Canvas::region`] a
+    /// function-based shading was sampled for.  `None` when it paints every
+    /// pixel so.
+    pub region: Option<[i64; 4]>,
     /// Whether the shading's colour space is a gray one
     /// ([`ColorSpace::is_gray`]), whose colours separate to black ink
     /// alone.
@@ -274,6 +300,7 @@ pub(crate) fn resolve_shading_object(
             background_ink: None,
             paints,
             held_bytes: 0,
+            region: None,
             gray: cs_space.is_gray(),
         });
     }
@@ -302,6 +329,13 @@ pub(crate) fn resolve_shading_object(
         background_ink,
         paints,
         held_bytes,
+        // Only a function-based shading samples its colours ahead of the
+        // reads, over the canvas's region.
+        region: if shading_type == 1 {
+            canvas.region
+        } else {
+            None
+        },
         gray: cs_space.is_gray(),
     })
 }

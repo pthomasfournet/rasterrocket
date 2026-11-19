@@ -439,8 +439,9 @@ impl CellGeometry {
 
 impl PageRenderer<'_> {
     /// Resolve the named `Pattern` resource as a shading or tiling pattern.
-    /// A tiling pattern is composited over `region`, the device pixels the
-    /// painting operator can touch; `extent` is the pixel area of the
+    /// A shading pattern's colours are read, and a tiling pattern is
+    /// composited, over `region`, the device pixels the painting operator
+    /// can touch; `extent` is the pixel area of the
     /// operator's object on the whole page (see [`Self::page_extent`]).
     pub(super) fn resolve_pattern(
         &mut self,
@@ -448,7 +449,7 @@ impl PageRenderer<'_> {
         region: PixelRect,
         extent: u64,
     ) -> Option<PatternPaint> {
-        match self.memo_shading_pattern(name) {
+        match self.memo_shading_pattern(name, Some(region)) {
             Ok(shading) => return Some(PatternPaint::Shading(shading)),
             Err(cause) => self.record_unresolved_shading(name, true, cause),
         }

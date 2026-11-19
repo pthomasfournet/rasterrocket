@@ -29,6 +29,7 @@ use raster::{Bitmap, CellPhase};
 use super::super::color::{InkChannels, RasterColor};
 use super::PageRenderer;
 use super::canvas::CanvasKind;
+use super::pixel_rect::PixelRect;
 use crate::content::Operator;
 use crate::resources::ColorSpace;
 use crate::resources::shading::{Canvas, PlanColorants, ResolvedShading, Unresolved};
@@ -198,23 +199,36 @@ impl Budget {
         }
         fits
     }
+
+    /// Return `bytes` reserved earlier.
+    const fn release(&mut self, bytes: usize) {
+        self.used = self.used.saturating_sub(bytes);
+    }
 }
 
-/// The value kept at `key` in `map`, else `resolve()`, kept when its
-/// `bytes` fit `budget`.  `None`, an object that does not resolve, is kept
-/// as well.
+/// The value kept at `key` in `map` when it `serves` the use at hand, else
+/// `resolve(whole)`, kept in its place when its `bytes` fit `budget`.
+/// `None`, an object that does not resolve, is kept as well and serves
+/// every use.  `whole` is `true` when a kept value fell short, so a value
+/// resolved for every use replaces it rather than one more partial value.
 fn kept_or<K: Eq + Hash, V>(
     map: &mut HashMap<K, Option<Rc<V>>>,
     budget: &mut Budget,
     key: K,
-    bytes: impl FnOnce(&V) -> usize,
-    resolve: impl FnOnce() -> Option<Rc<V>>,
+    (bytes, serves): (impl Fn(&V) -> usize, impl FnOnce(&V) -> bool),
+    resolve: impl FnOnce(bool) -> Option<Rc<V>>,
 ) -> Option<Rc<V>> {
-    if let Some(kept) = map.get(&key) {
-        return kept.clone();
+    let short = match map.get(&key) {
+        Some(Some(kept)) if !serves(kept) => Some(bytes(kept)),
+        Some(kept) => return kept.clone(),
+        None => None,
+    };
+    let value = resolve(short.is_some());
+    if let Some(held) = short {
+        let _ = map.remove(&key);
+        budget.release(held);
     }
-    let value = resolve();
-    if budget.reserve(value.as_deref().map_or(0, bytes)) {
+    if budget.reserve(value.as_deref().map_or(0, &bytes)) {
         let _ = map.insert(key, value.clone());
     }
     value
@@ -239,32 +253,41 @@ impl PatternMemo {
         }
     }
 
-    /// The shading pattern at `key`, kept or from `resolve`.
+    /// The shading pattern at `key` for the pixels of `canvas`'s region,
+    /// kept or from `resolve` (see [`kept_or`]).
     pub(super) fn shading_pattern(
         &mut self,
         key: PlacedKey,
-        resolve: impl FnOnce() -> Option<Rc<ShadingPattern>>,
+        canvas: &Canvas,
+        resolve: impl FnOnce(bool) -> Option<Rc<ShadingPattern>>,
     ) -> Option<Rc<ShadingPattern>> {
         kept_or(
             &mut self.shading_patterns,
             &mut self.budget,
             key,
-            |p| shading_bytes(&p.shading),
+            (
+                |p: &ShadingPattern| shading_bytes(&p.shading),
+                |p: &ShadingPattern| canvas.served_by(p.shading.region),
+            ),
             resolve,
         )
     }
 
-    /// The shading at `key`, kept or from `resolve`.
+    /// The shading at `key` for the pixels of `canvas`'s region, kept or
+    /// from `resolve` (see [`kept_or`]).
     pub(super) fn shading(
         &mut self,
         key: PlacedKey,
-        resolve: impl FnOnce() -> Option<Rc<ResolvedShading>>,
+        canvas: &Canvas,
+        resolve: impl FnOnce(bool) -> Option<Rc<ResolvedShading>>,
     ) -> Option<Rc<ResolvedShading>> {
         kept_or(
             &mut self.shadings,
             &mut self.budget,
             key,
-            shading_bytes,
+            (shading_bytes, |s: &ResolvedShading| {
+                canvas.served_by(s.region)
+            }),
             resolve,
         )
     }
@@ -337,12 +360,14 @@ impl PageRenderer<'_> {
     /// pattern matrix in effect, for the canvas, from the memo when kept.
     /// A pattern that does not resolve is kept as such, and its
     /// [`Unresolved`] cause reported only by the resolution that found it;
-    /// a kept one reports [`Unresolved::Skipped`].
+    /// a kept one reports [`Unresolved::Skipped`].  The pattern's colours
+    /// are read at the window pixels of `region` alone.
     pub(super) fn memo_shading_pattern(
         &self,
         name: &[u8],
+        region: Option<PixelRect>,
     ) -> Result<Rc<ShadingPattern>, Unresolved> {
-        let canvas = self.shading_canvas();
+        let canvas = self.shading_canvas(region);
         let kind = self.canvas.kind();
         let pattern_ctm = self.pattern_ctm;
         let separator = self.separator(false);
@@ -359,7 +384,11 @@ impl PageRenderer<'_> {
         let mut cause = Unresolved::Skipped;
         self.pattern_memo
             .borrow_mut()
-            .shading_pattern(key, || {
+            .shading_pattern(key, &canvas, |whole| {
+                let canvas = Canvas {
+                    region: canvas.region.filter(|_| !whole),
+                    ..canvas
+                };
                 let doc = resources.doc();
                 let mut plan =
                     |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
@@ -375,13 +404,15 @@ impl PageRenderer<'_> {
 
     /// The named `Shading` resource resolved under `ctm`, a matrix into the
     /// whole page's space, for the canvas, from the memo when kept; an
-    /// unresolved one as [`Self::memo_shading_pattern`] reports it.
+    /// unresolved one as [`Self::memo_shading_pattern`] reports it.  The
+    /// shading's colours are read at the window pixels of `region` alone.
     pub(super) fn memo_shading(
         &self,
         name: &[u8],
         ctm: &[f64; 6],
+        region: Option<PixelRect>,
     ) -> Result<Rc<ResolvedShading>, Unresolved> {
-        let canvas = self.shading_canvas();
+        let canvas = self.shading_canvas(region);
         let kind = self.canvas.kind();
         let separator = self.separator(false);
         let key = PlacedKey::new(
@@ -397,7 +428,11 @@ impl PageRenderer<'_> {
         let mut cause = Unresolved::Skipped;
         self.pattern_memo
             .borrow_mut()
-            .shading(key, || {
+            .shading(key, &canvas, |whole| {
+                let canvas = Canvas {
+                    region: canvas.region.filter(|_| !whole),
+                    ..canvas
+                };
                 let doc = resources.doc();
                 let mut plan =
                     |space: &ColorSpace| ink_map.borrow_mut().plan(doc, space, &separator);
@@ -414,13 +449,28 @@ impl PageRenderer<'_> {
     /// The canvas shadings are resolved for: the whole page, whose device
     /// space every CTM maps to.  A window paints a shading resolved there,
     /// moved by the window's origin last (see `Self::page_origin`), so it
-    /// receives the colours the whole page computes for its pixels.
-    fn shading_canvas(&self) -> Canvas {
+    /// receives the colours the whole page computes for its pixels.  Its
+    /// region is the page's image of the window pixels `region`, empty for
+    /// `None`.
+    fn shading_canvas(&self, region: Option<PixelRect>) -> Canvas {
+        let (ox, oy) = (
+            i64::from(self.window_origin.0),
+            i64::from(self.window_origin.1),
+        );
+        let region = region.map_or([0, 0, -1, -1], |r| {
+            [
+                i64::from(r.x0) + ox,
+                i64::from(r.y0) + oy,
+                i64::from(r.x1) - 1 + ox,
+                i64::from(r.y1) - 1 + oy,
+            ]
+        });
         Canvas {
             width: f64::from(self.page_width),
             height: f64::from(self.page_height),
             depth: self.canvas.kind().depth(),
             target: self.colour_target(),
+            region: Some(region),
         }
     }
 
@@ -509,6 +559,7 @@ mod tests {
             background_ink: None,
             paints: raster::pipe::ChannelMask::ALL,
             held_bytes,
+            region: None,
             gray: false,
         })
     }
@@ -516,14 +567,21 @@ mod tests {
     const ID: ObjectId = (5, 0);
     const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+    /// A 100-pixel-square canvas whose colours are read at every pixel.
+    const ANY: Canvas = Canvas {
+        width: 100.0,
+        height: 100.0,
+        depth: color::SampleDepth::Eight,
+        target: crate::ColourTarget::SRGB,
+        region: None,
+    };
+
     /// The key of `id` under `matrix` on a canvas 100 pixels wide and
     /// `page_h` high.
     fn placed(id: ObjectId, matrix: &[f64; 6], page_h: f64) -> PlacedKey {
         let canvas = Canvas {
-            width: 100.0,
             height: page_h,
-            depth: color::SampleDepth::Eight,
-            target: crate::ColourTarget::SRGB,
+            ..ANY
         };
         PlacedKey::new(
             ResourceKey::Object(id),
@@ -537,7 +595,7 @@ mod tests {
     /// Whether `memo` holds the shading at `key`: a lookup that would
     /// otherwise resolve to `None`.
     fn holds(memo: &mut PatternMemo, key: PlacedKey) -> bool {
-        memo.shading(key, || None).is_some()
+        memo.shading(key, &ANY, |_| None).is_some()
     }
 
     /// A cell raster's bound counts each pixel's bytes in the pixel type
@@ -603,7 +661,7 @@ mod tests {
     fn a_shading_is_kept_per_matrix_and_page_height() {
         let mut memo = PatternMemo::with_budget(BUDGET_BYTES);
         assert!(
-            memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(1)))
+            memo.shading(placed(ID, &IDENTITY, 100.0), &ANY, |_| Some(mesh(1)))
                 .is_some()
         );
         assert!(holds(&mut memo, placed(ID, &IDENTITY, 100.0)));
@@ -617,11 +675,11 @@ mod tests {
     fn an_unresolvable_shading_is_kept_as_none() {
         let mut memo = PatternMemo::with_budget(0);
         assert!(
-            memo.shading(placed(ID, &IDENTITY, 100.0), || None)
+            memo.shading(placed(ID, &IDENTITY, 100.0), &ANY, |_| None)
                 .is_none()
         );
         assert!(
-            memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(0)))
+            memo.shading(placed(ID, &IDENTITY, 100.0), &ANY, |_| Some(mesh(0)))
                 .is_none(),
             "the kept None answers"
         );
@@ -631,8 +689,8 @@ mod tests {
     fn a_mesh_over_the_budget_is_not_kept() {
         let size = std::mem::size_of::<[GouraudVertex; 3]>();
         let mut memo = PatternMemo::with_budget(size * 3);
-        let _ = memo.shading(placed(ID, &IDENTITY, 100.0), || Some(mesh(2)));
-        let _ = memo.shading(placed((6, 0), &IDENTITY, 100.0), || Some(mesh(2)));
+        let _ = memo.shading(placed(ID, &IDENTITY, 100.0), &ANY, |_| Some(mesh(2)));
+        let _ = memo.shading(placed((6, 0), &IDENTITY, 100.0), &ANY, |_| Some(mesh(2)));
         assert!(holds(&mut memo, placed(ID, &IDENTITY, 100.0)));
         assert!(
             !holds(&mut memo, placed((6, 0), &IDENTITY, 100.0)),

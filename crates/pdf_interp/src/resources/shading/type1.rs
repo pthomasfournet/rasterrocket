@@ -91,6 +91,90 @@ impl Lattice {
             Axis::at((py - self.y0 as f64) / step, self.rows, self.cols),
         ]
     }
+
+    /// The window of the lattice points that interpolate the device pixels
+    /// of `region`, the inclusive bounds `[x0, y0, x1, y1]`; an empty
+    /// window when the region is empty.  [`Self::axes`] is monotone in
+    /// each coordinate, so the axes of the region's corners bound those of
+    /// every pixel within it.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the region holds pixels of the page, far below 2^52"
+    )]
+    fn window(self, [x0, y0, x1, y1]: [i64; 4]) -> Window {
+        if x1 < x0 || y1 < y0 {
+            return Window::EMPTY;
+        }
+        let [lo_x, lo_y] = self.axes(x0 as f64, y0 as f64);
+        let [hi_x, hi_y] = self.axes(x1 as f64, y1 as f64);
+        Window {
+            col0: lo_x.lo,
+            row0: lo_y.lo,
+            cols: hi_x.hi - lo_x.lo + 1,
+            rows: hi_y.hi - lo_y.lo + 1,
+        }
+    }
+}
+
+/// A rectangle of a [`Lattice`]'s points: `cols × rows` of them from
+/// column `col0` and row `row0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    col0: usize,
+    row0: usize,
+    cols: usize,
+    rows: usize,
+}
+
+impl Window {
+    /// The window of no point.
+    const EMPTY: Self = Self {
+        col0: 0,
+        row0: 0,
+        cols: 0,
+        rows: 0,
+    };
+
+    /// The window over every point of `lattice`.
+    const fn whole(lattice: Lattice) -> Self {
+        Self {
+            col0: 0,
+            row0: 0,
+            cols: lattice.cols,
+            rows: lattice.rows,
+        }
+    }
+
+    /// Whether lattice point `(col, row)` lies in the window.
+    const fn holds(self, col: usize, row: usize) -> bool {
+        col >= self.col0
+            && col < self.col0 + self.cols
+            && row >= self.row0
+            && row < self.row0 + self.rows
+    }
+
+    /// The lattice axes `[x, y]` re-indexed into the window's samples,
+    /// stored row by row; `None` when a corner they name lies outside it.
+    /// The positions and weights are unchanged.
+    const fn rebase(self, [x, y]: [Axis; 2]) -> Option<[Axis; 2]> {
+        if !(self.holds(x.lo, y.lo) && self.holds(x.hi, y.hi)) {
+            return None;
+        }
+        Some([
+            Axis {
+                lo: x.lo - self.col0,
+                hi: x.hi - self.col0,
+                stride: 1,
+                ..x
+            },
+            Axis {
+                lo: y.lo - self.row0,
+                hi: y.hi - self.row0,
+                stride: self.cols,
+                ..y
+            },
+        ])
+    }
 }
 
 /// The inclusive integer pixel bounds `[x0, y0, x1, y1]` of the device
@@ -129,42 +213,80 @@ fn type1_area(corners: &[(f64, f64)], bbox: Option<&[(f64, f64); 4]>, canvas: Ca
     [x0, y0, x1, y1]
 }
 
-/// The colours of a Type 1 shading at the points of `lattice`, row by row:
-/// `function` at the shading-space point of each, its fractions of the
-/// Domain `[x0, x1, y0, y1]` given by `domain_at`, converted through `cs`.
-/// At step 1 a point outside the Domain is never read and is left black;
-/// at a larger step it takes the colour of the nearest Domain point.
+#[cfg(test)]
+thread_local! {
+    /// The Function evaluations [`sample_lattice`] has made on this thread.
+    static EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The colours of a Type 1 shading at the points of `window` of
+/// `lattice`, row by row: `function` at the shading-space point of each,
+/// its fractions of the Domain `[x0, x1, y0, y1]` given by `domain_at`,
+/// converted through `cs`.  At step 1 a point outside the Domain is never
+/// read and is left black; at a larger step it takes the colour of the
+/// nearest Domain point.
 ///
 /// [`Unresolved::NoColour`], logged, when the function evaluates at none
-/// of the points it was evaluated at; points where it fails take colour components 0, logged
-/// once.  A lattice with no point in the Domain evaluates nothing and paints
-/// nothing.
+/// of the lattice points it is evaluated at; points where it fails take
+/// colour components 0, logged once.  The decision covers the whole
+/// lattice, not the window alone: when the function fails at every point
+/// of the window it reaches, the points outside the window are evaluated
+/// until one succeeds.  A lattice with no point in the Domain evaluates
+/// nothing and paints nothing.
 fn sample_lattice<const N: usize, S: Sample, C: ShadingColour<N, S>>(
-    lattice: Lattice,
+    (lattice, window): (Lattice, Window),
     domain_at: &impl Fn(f64, f64) -> (f64, f64, bool),
     function: &Function,
     cs: C,
     n: usize,
     [xd0, xd1, yd0, yd1]: [f64; 4],
 ) -> Result<Box<[[S; N]]>, Unresolved> {
-    let mut samples = Vec::with_capacity(lattice.cols * lattice.rows);
+    // The function's outputs at lattice point `(col, row)`: `None` for a
+    // point not evaluated, `Some(None)` where the function fails.
+    let eval = |col: usize, row: usize| -> Option<Option<Vec<f64>>> {
+        let (px, py) = lattice.pixel(col, row);
+        let (tx, ty, inside) = domain_at(px, py);
+        if lattice.step == 1 && !inside {
+            return None;
+        }
+        let sx = tx.mul_add(xd1 - xd0, xd0);
+        let sy = ty.mul_add(yd1 - yd0, yd0);
+        #[cfg(test)]
+        EVALUATIONS.with(|count| count.set(count.get() + 1));
+        Some(function.eval_n(&[sx, sy], n))
+    };
+    let mut samples = Vec::with_capacity(window.cols * window.rows);
     let (mut evaluated, mut failures) = (0usize, 0usize);
-    for row in 0..lattice.rows {
-        for col in 0..lattice.cols {
-            let (px, py) = lattice.pixel(col, row);
-            let (tx, ty, inside) = domain_at(px, py);
-            if lattice.step == 1 && !inside {
+    for row in window.row0..window.row0 + window.rows {
+        for col in window.col0..window.col0 + window.cols {
+            let Some(outputs) = eval(col, row) else {
                 samples.push([S::ZERO; N]);
                 continue;
-            }
-            let sx = tx.mul_add(xd1 - xd0, xd0);
-            let sy = ty.mul_add(yd1 - yd0, yd0);
+            };
             evaluated += 1;
-            let channels = function.eval_n(&[sx, sy], n).unwrap_or_else(|| {
+            let channels = outputs.unwrap_or_else(|| {
                 failures += 1;
                 vec![0.0; n]
             });
             samples.push(cs.convert(&channels));
+        }
+    }
+    if failures == evaluated && window != Window::whole(lattice) {
+        let outside = (0..lattice.rows)
+            .flat_map(|row| (0..lattice.cols).map(move |col| (col, row)))
+            .filter(|&(col, row)| !window.holds(col, row));
+        for (col, row) in outside {
+            match eval(col, row) {
+                None => {}
+                Some(None) => {
+                    evaluated += 1;
+                    failures += 1;
+                }
+                Some(Some(_)) => {
+                    evaluated += 1;
+                    break;
+                }
+            }
         }
     }
     if evaluated > 0 && failures == evaluated {
@@ -254,6 +376,12 @@ impl<C> Type1<'_, C> {
     /// within `bbox`: at every pixel, which the pattern then reads
     /// unchanged, unless that exceeds `max_points`, when every `step`-th
     /// pixel is sampled and the pixels between are interpolated.
+    ///
+    /// The lattice depends on the Domain, canvas and `bbox` alone.  With a
+    /// `canvas.region`, only the lattice points that interpolate a pixel of
+    /// the region are evaluated and held; the pattern paints those pixels
+    /// as the whole lattice would, and leaves unpainted any pixel that
+    /// interpolates a point not held.
     fn pattern<const N: usize, S: Sample>(
         &self,
         canvas: Canvas,
@@ -311,8 +439,11 @@ impl<C> Type1<'_, C> {
                 lattice.cols * lattice.rows
             );
         }
+        let window = canvas
+            .region
+            .map_or_else(|| Window::whole(lattice), |region| lattice.window(region));
         let samples = sample_lattice(
-            lattice,
+            (lattice, window),
             &domain_at,
             self.function,
             self.cs,
@@ -324,9 +455,10 @@ impl<C> Type1<'_, C> {
             if !domain_at(px, py).2 {
                 return None;
             }
+            let axes = window.rebase(lattice.axes(px, py))?;
             let level = |v: S| f64::from(u32::try_from(v.signed()).unwrap_or(0));
             let mut colour = [0.0_f64; N];
-            for_each_corner(&lattice.axes(px, py), |index, weight| {
+            for_each_corner(&axes, |index, weight| {
                 for (acc, &v) in colour.iter_mut().zip(&samples[index]) {
                     *acc = weight.mul_add(level(v), *acc);
                 }
@@ -373,6 +505,83 @@ mod tests {
             resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, CANVAS, None).err(),
             Some(Unresolved::NoColour)
         );
+        // Read only where the Domain does not reach, it is skipped all the
+        // same: the decision covers the whole lattice.
+        let elsewhere = Canvas {
+            region: Some([500, 500, 510, 510]),
+            ..CANVAS
+        };
+        assert_eq!(
+            resolve_function_based::<3, u8, _>(&doc, &sh, cs, 1, &ctm, elsewhere, None).err(),
+            Some(Unresolved::NoColour)
+        );
+    }
+
+    /// A Type 4 function of `(x, y)` returning grey `(x + y) / 2`.
+    fn ramp_grey() -> Object {
+        let program = b"{ add 0.5 mul }".to_vec();
+        let mut dict = Dictionary::new();
+        dict.set("FunctionType", Object::Integer(4));
+        dict.set("Domain", reals(&[0.0, 1.0, 0.0, 1.0]));
+        dict.set("Range", reals(&[0.0, 1.0]));
+        dict.set("Length", Object::Integer(program.len().try_into().unwrap()));
+        Object::Stream(Stream::new(dict, program))
+    }
+
+    /// The colours and coverage `pattern` paints in rows `y0..=y1`,
+    /// columns `x0..=x1`.
+    fn paint(pattern: &dyn Pattern, [x0, y0, x1, y1]: [i32; 4]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let n = usize::try_from(x1 - x0 + 1).unwrap();
+        (y0..=y1)
+            .map(|y| {
+                let (mut out, mut coverage) = (vec![0; n * 3], vec![0; n]);
+                pattern.fill_span_coverage(y, x0, x1, &mut out, &mut coverage);
+                (out, coverage)
+            })
+            .collect()
+    }
+
+    /// A Type 1 shading over the whole canvas, read in a 10 × 5 pixel
+    /// region, evaluates its function only at the lattice points that
+    /// region interpolates, and paints the region exactly as the shading
+    /// sampled over the whole canvas does: at every pixel and on a coarse
+    /// lattice.
+    #[test]
+    fn a_type1_shading_is_evaluated_only_where_its_region_is_read() {
+        let doc = empty_doc();
+        let function = Function::load(&doc, &ramp_grey());
+        let shading = Type1 {
+            function: &function,
+            cs: ShadingCs {
+                doc: &doc,
+                space: &ColorSpace::DeviceGray,
+                target: crate::ColourTarget::SRGB,
+            },
+            n: 1,
+            domain: [0.0, 1.0, 0.0, 1.0],
+            shading_ctm: [100.0, 0.0, 0.0, 100.0, 0.0, 0.0],
+        };
+        let region = [20, 30, 29, 34];
+        let read = Canvas {
+            region: Some(region.map(i64::from)),
+            ..CANVAS
+        };
+        let evaluations = |canvas: Canvas, max_points: usize| {
+            EVALUATIONS.with(|count| count.set(0));
+            let (pattern, _) = shading
+                .pattern::<3, u8>(canvas, None, max_points)
+                .expect("resolves");
+            (pattern, EVALUATIONS.with(std::cell::Cell::get))
+        };
+        // The window holds the upper neighbour of the last row and column.
+        for (max_points, bound) in [(TYPE1_LATTICE_MAX, 11 * 6), (400, 4 * 3)] {
+            let (whole, all) = evaluations(CANVAS, max_points);
+            let (part, some) = evaluations(read, max_points);
+            assert!(some <= bound, "{some} evaluations at budget {max_points}");
+            assert!(all > 10 * some, "{all} evaluations over the canvas");
+            assert_eq!(paint(&*part, region), paint(&*whole, region));
+            assert_eq!(painted(&*part, 60, 0, 99), 0, "row 60 is not read");
+        }
     }
 
     /// A 100 × 100 pixel canvas.
@@ -381,6 +590,7 @@ mod tests {
         width: 100.0,
         height: 100.0,
         depth: SampleDepth::Eight,
+        region: None,
     };
 
     /// The array of the reals `values`.

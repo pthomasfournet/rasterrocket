@@ -225,8 +225,10 @@ impl PageRenderer<'_> {
         let gs = self.gstate.current();
         let ctm = gs.ctm;
         let flatness = gs.flatness.max(0.1);
+        // The shading paints no pixel outside the clip in effect.
+        let reach = self.clip_rect();
 
-        let shading = match self.memo_shading(name, &ctm) {
+        let shading = match self.memo_shading(name, &ctm, reach) {
             Ok(shading) => shading,
             Err(cause) => {
                 if cause == Unresolved::Skipped {
