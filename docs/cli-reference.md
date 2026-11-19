@@ -910,3 +910,24 @@ Options: `-g GROUP` (repeatable; `library`, `startup`, `disk`, `ram`, `avx2`, `g
 
 The output directory must be new or empty. It receives `env.tsv` (machine state from a fixed key list, with no host or user name), `results.tsv`, `pages.tsv` (per-page times of `L1`), `build.log`, `skipped.txt` (rows the host cannot run, with the reason) and, last, `done.flag`. Once the run has started, any error, or an interrupt (`SIGINT`, `SIGTERM`, `SIGHUP`), writes `failed.flag` instead, holding the first failing step and command; a usage error or a non-empty output directory exits with status 2 and writes no flag. `build.log` and `failed.flag` may name the home directory and are not for publication; the TSV files and `skipped.txt` hold no host or user name.
 
+`tests/compare/os_bench.ps1` is the Windows driver, for Windows PowerShell 5.1. It reads the same rows file, builds the same three binaries (HEAD, the pre-AVX2 worktree, the GPU-feature build with `CUDA_ARCH=sm_75`) and writes the same files, with `os` set to `windows` in `env.tsv` and, in place of the Linux keys, the operating system's caption and build number (`os_build`, `kernel`), the active power scheme (`power`), hardware-accelerated GPU scheduling (`hags`: `on`, `off` or `default`), Defender real-time protection (`defender_rt`) and whether the run excluded its files from Defender (`defender_excl`). It records no `thp` key: large pages need a privilege an ordinary process does not hold. Every file it writes is ASCII without a byte-order mark. Each harness call runs as `cmd /c "start /b /wait /affinity MASK …"`, with mask `4` (logical CPU 2) for one-thread rows and `FFF` for twelve threads; the harness's standard error goes to `harness.log`, whose last lines a failure adds to `failed.flag`.
+
+```powershell
+# On the Windows machine, from the clone; -Group is repeatable or a comma list
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\compare\os_bench.ps1 -Out $HOME\rr-bench\win
+
+# Smoke test, or print the commands only
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\compare\os_bench.ps1 -Smoke -Group library -Group startup -Out $HOME\rr-bench\smoke
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\compare\os_bench.ps1 -DryRun -Group disk -Out $HOME\rr-bench\dry
+
+# Start the run as a scheduled task in the console user's session and return
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\compare\os_bench.ps1 -Launch -Out $HOME\rr-bench\win
+```
+
+```bash
+# On Linux: wait for that run's done.flag or failed.flag (absolute Windows path)
+tests/compare/os_bench_wait.sh HOST 'C:\Users\NAME\rr-bench\win' 14400
+```
+
+Options: `-Out DIR` (required), `-Group G` (repeatable, or a comma-separated list), `-Only ROW`, `-Label NAME` (with `-Only`: the samples carry `NAME`), `-Reps K`, `-Smoke`, `-RamRoot R:\`, `-DefenderExcluded`, `-GpuFeatures LIST`, `-DryRun` and `-Launch`. A full run requires the High performance or Ultimate Performance power scheme and a working tree equal to `HEAD`; `-Smoke` skips both checks, but not the check that `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS` are unset. The ram rows run only with `-RamRoot`, which must be the root of a dedicated RAM disk of at most 4 GiB, holding nothing but the driver's `rr-os-bench` directory; without it they are skipped, each with a line in `skipped.txt`. `-DefenderExcluded` takes `-Only ROW` and runs `ROW-excl` when the rows file has that row (so `-Only D12` gives `D12-excl`). It adds Defender exclusions for the output directory and `rrocket.exe` and removes them when the run ends; exclusions that were already present are left in place. It needs an elevated session. `-Launch` writes the other arguments to `DIR\launch-params.txt`. It then creates the scheduled task `rr-os-bench` (`schtasks /create … /it`, with highest privileges under `-DefenderExcluded`), which runs the driver on that file in the session of the user logged in at the console, and starts it. The task's command stays under schtasks' limit of 261 characters, and the user name is read at run time and written to no file. Ctrl-C stops the running child process tree and writes `failed.flag`, as does a cleanup step that fails (removing the RAM directory or a Defender exclusion), in place of `done.flag`. A task ended with `schtasks /end` is killed outright and leaves neither flag. `os_bench_wait.sh HOST DIR [TIMEOUT_S]` tests for the flags over `ssh` every 60 s. It exits with 0 on `done.flag`, prints `failed.flag` and exits with 2 on failure, and exits with 124 when `TIMEOUT_S` (default 14400) passes. An unreachable host is reported, and polling goes on until the deadline.
+

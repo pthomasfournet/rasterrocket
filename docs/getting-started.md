@@ -418,6 +418,7 @@ process (`--decrypt-owned`), with no external tool.
 | `pypdfium2`, `pillow` | the pdfium reference | in a venv: `uv venv tests/compare/.venv` then `uv pip install --python tests/compare/.venv/bin/python pypdfium2 pillow` | same |
 | `qpdf` | the `contest_v11` bench's archive builder | `qpdf` | `qpdf` |
 | `taskset`, `findmnt`, `cpupower` | the cross-OS benchmark driver (`os_bench.sh`, Linux only) | `util-linux`; `cpupower` in `linux-tools-$(uname -r)` on Ubuntu, `linux-cpupower` on Debian | — |
+| `ssh`, Windows PowerShell 5.1, `nasm` | the cross-OS benchmark's Windows side (`os_bench.ps1` on the Windows machine, which needs NASM for the build; `os_bench_wait.sh` on Linux, which needs `ssh` to it) | `openssh-client` | `openssh` (built in) |
 
 The release binary lands at `target/release/rrocket`. There is no `cargo install`
 path — the crates.io packages are abandoned at 1.0.1.

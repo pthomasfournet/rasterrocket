@@ -3,7 +3,9 @@
 # A field written `-` is empty (consecutive tabs would collapse in a shell
 # reader).
 #
-# os           both | linux | windows: the drivers that run the row.
+# os           both | linux | windows: the drivers that run the row.  The
+#              Windows driver runs a windows row only with -DefenderExcluded
+#              and the ram rows only with -RamRoot (a RAM disk).
 # kind         library (in-memory render) | deskew (in-memory deskew alone)
 #              | process (rrocket child processes).
 # threads      worker count; 1 pins to logical CPU 2, otherwise CPUs
@@ -24,7 +26,7 @@ startup	S-version	both	process	1	36	none	50	--version	-
 startup	S-page	both	process	1	36	disk	50	-	corpus-01-native-text-small.pdf:1-1
 disk	D12	both	process	12	150	disk	-	-	corpus-02-native-vector-text.pdf corpus-04-ebook-mixed.pdf:1-64 corpus-08-scan-dct-1927.pdf:1-64 corpus-10-scan-jbig2-jpx.pdf:1-64
 disk	D12-excl	windows	process	12	150	disk	-	-	corpus-02-native-vector-text.pdf corpus-04-ebook-mixed.pdf:1-64 corpus-08-scan-dct-1927.pdf:1-64 corpus-10-scan-jbig2-jpx.pdf:1-64
-ram	R12	linux	process	12	150	ram	-	-	corpus-02-native-vector-text.pdf corpus-04-ebook-mixed.pdf:1-64 corpus-08-scan-dct-1927.pdf:1-64 corpus-10-scan-jbig2-jpx.pdf:1-64
+ram	R12	both	process	12	150	ram	-	-	corpus-02-native-vector-text.pdf corpus-04-ebook-mixed.pdf:1-64 corpus-08-scan-dct-1927.pdf:1-64 corpus-10-scan-jbig2-jpx.pdf:1-64
 avx2	A-composite	both	library	1	300	none	-	-	corpus-02-native-vector-text.pdf
 avx2	A-deskew	both	deskew	1	300	none	-	-	corpus-08-scan-dct-1927.pdf:1-16
 gpu	G-cuda-start	both	process	1	36	disk	20	--backend cuda	corpus-01-native-text-small.pdf:1-1
