@@ -231,6 +231,39 @@ impl VulkanBackend {
     pub fn submits(&self) -> u64 {
         self.device.submits()
     }
+
+    /// Copy `src` into `dst[..src.len()]` and zeros into the bytes after it
+    /// up to the next multiple of 4
+    /// ([`word_padded`](crate::backend::layout::word_padded)), in one copy,
+    /// as [`GpuBackend::upload`] copies.
+    ///
+    /// # Errors
+    /// As [`GpuBackend::upload`], with the padded length checked against
+    /// `dst`'s capacity.
+    #[cfg(any(test, feature = "cache"))]
+    pub(crate) fn upload_word_padded(&self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<()> {
+        let zeros = crate::backend::layout::word_padded(src.len()) - src.len();
+        self.upload_zero_tail(dst, src, zeros)
+    }
+
+    /// Copy `src` into `dst[..src.len()]` and `zeros` zero bytes after it;
+    /// returns once the copy has completed.
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the copy writes `dst` through its mapping or by a device copy; the \
+                  exclusive borrow orders it against other host access, as the trait's \
+                  `upload` does"
+    )]
+    fn upload_zero_tail(&self, dst: &mut DeviceBuffer, src: &[u8], zeros: usize) -> Result<()> {
+        if !dst.is_mapped() {
+            return self.transfer.upload(&self.memory, dst, src, zeros);
+        }
+        if src.is_empty() && zeros == 0 {
+            return Ok(());
+        }
+        self.recorder
+            .with_quiescent(|| dst.write_mapped(src, zeros))?
+    }
 }
 
 /// The Vulkan devices the process holds open: one for each
@@ -428,13 +461,7 @@ impl GpuBackend for VulkanBackend {
     /// `recorder::PageRecorder::with_quiescent`: earlier pages read the old
     /// bytes, later ones the new, as with the staged copy.
     fn upload(&self, dst: &mut Self::DeviceBuffer, src: &[u8]) -> Result<()> {
-        if !dst.is_mapped() {
-            return self.transfer.upload(&self.memory, dst, src);
-        }
-        if src.is_empty() {
-            return Ok(());
-        }
-        self.recorder.with_quiescent(|| dst.write_mapped(src))?
+        self.upload_zero_tail(dst, src, 0)
     }
 
     /// A mapped buffer in `HOST_CACHED` memory (an integrated GPU's
@@ -581,6 +608,33 @@ mod tests {
             backend.transfer.download_staging_properties().is_some(),
             "the download read uncached memory in place"
         );
+    }
+
+    #[test]
+    fn vulkan_padded_upload_zeroes_the_tail() {
+        let Some(backend) = backend() else { return };
+        let mut buf = backend.alloc_device(8).expect("alloc_device");
+        let src = [1_u8, 2, 3, 4, 5];
+        let expect = [1_u8, 2, 3, 4, 5, 0, 0, 0];
+        let mut out = [0_u8; 8];
+        backend.upload(&mut buf, &[0xFF; 8]).expect("fill");
+        backend
+            .upload_word_padded(&mut buf, &src)
+            .expect("upload_word_padded");
+        backend.download(&buf, &mut out).expect("download");
+        assert_eq!(out, expect, "mapped: {}", buf.is_mapped());
+        // The staged path, whichever path the buffer takes above.
+        backend.upload(&mut buf, &[0xFF; 8]).expect("fill");
+        backend
+            .transfer
+            .upload(&backend.memory, &buf, &src, 3)
+            .expect("staged upload");
+        backend.download(&buf, &mut out).expect("download");
+        assert_eq!(out, expect, "staged");
+        let err = backend
+            .upload_word_padded(&mut buf, &[0; 9])
+            .expect_err("9 bytes pad to 12, past the 8-byte buffer");
+        assert!(err.to_string().contains("copy of 12 bytes"), "{err}");
     }
 
     #[test]

@@ -91,18 +91,21 @@ impl TransferContext {
         })
     }
 
-    /// Copy `src` into `dst[0..src.len()]` through the staging buffer and
-    /// block until the copy has completed; backs the trait's `upload`.
+    /// Copy `src` into `dst[0..src.len()]` and `zeros` zero bytes after it
+    /// through the staging buffer and block until the copy has completed; backs the trait's
+    /// `upload`.
     pub(super) fn upload(
         &self,
         allocator: &SlabAllocator,
         dst: &DeviceBuffer,
         src: &[u8],
+        zeros: usize,
     ) -> Result<()> {
-        if src.is_empty() {
+        let len = src.len().saturating_add(zeros);
+        if len == 0 {
             return Ok(());
         }
-        let len = super::copy_len(src.len(), dst.size(), "upload", "destination")?;
+        let total = super::copy_len(len, dst.size(), "upload", "destination")?;
         // Hold the staging slot for the entire operation: write the
         // payload, kick off the GPU copy, wait for completion.  Releasing
         // the lock between write and wait would let a second upload
@@ -111,11 +114,13 @@ impl TransferContext {
             .upload_staging
             .lock()
             .expect("transfer staging mutex poisoned");
-        let staging = ensure_staging(&mut staging_slot, src.len(), |n| allocator.alloc_host(n))?;
-        staging.as_mut_slice()[..src.len()].copy_from_slice(src);
+        let staging = ensure_staging(&mut staging_slot, len, |n| allocator.alloc_host(n))?;
+        let (payload, pad) = staging.as_mut_slice()[..len].split_at_mut(src.len());
+        payload.copy_from_slice(src);
+        pad.fill(0);
         let staging_handle = staging.handle();
         let dst_handle = dst.handle();
-        self.copy_via_staging(staging_handle, dst_handle, len)
+        self.copy_via_staging(staging_handle, dst_handle, total)
     }
 
     /// Synchronous download: copy `src[0..dst.len()]` into `dst`, block

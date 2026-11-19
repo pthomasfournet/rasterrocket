@@ -117,7 +117,7 @@ impl DeviceBuffer {
     }
 
     /// Copy `src` into the start of the mapped bytes through a shared
-    /// reference.
+    /// reference, and zero the `zeros` bytes after it.
     ///
     /// The trait's `upload` takes the buffer by shared reference, as the
     /// staged path, which writes it by device copy, does.  The caller runs
@@ -127,20 +127,25 @@ impl DeviceBuffer {
     /// excluded by its safety contract.
     ///
     /// # Errors
-    /// When `src` is longer than the buffer, or the buffer is not mapped.
-    pub(super) fn write_mapped(&self, src: &[u8]) -> Result<()> {
-        let len = super::copy_len(src.len(), self.size, "upload", "destination")?;
+    /// When `src.len() + zeros` is longer than the buffer, or the buffer
+    /// is not mapped.
+    pub(super) fn write_mapped(&self, src: &[u8], zeros: usize) -> Result<()> {
+        let len = src.len().saturating_add(zeros);
+        let total = super::copy_len(len, self.size, "upload", "destination")?;
         let dst = self
             .allocation
             .as_ref()
             .and_then(Allocation::mapped_ptr)
-            .ok_or_else(|| not_mapped("upload", len))?
+            .ok_or_else(|| not_mapped("upload", total))?
             .cast::<u8>();
         // SAFETY: `dst` addresses the allocation's mapping, which holds at
-        // least `self.size >= src.len()` bytes and which the device does
-        // not access (see above); the source is host memory distinct from
-        // the mapping.
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len()) };
+        // least `self.size >= src.len() + zeros` bytes (checked above) and
+        // which the device does not access (see above); the source is host
+        // memory distinct from the mapping.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len());
+            std::ptr::write_bytes(dst.as_ptr().add(src.len()), 0, zeros);
+        }
         Ok(())
     }
 

@@ -194,7 +194,7 @@ mod tests {
     fn check_box_blit<B: GpuBackend>(backend: &B) {
         let image: Vec<u8> = (0..3 * 2 * 3).map(|i| 10 + i).collect();
         let mut src_buf = backend
-            .alloc_device(word_padded(image.len()))
+            .alloc_device_zeroed(word_padded(image.len()))
             .expect("alloc");
         backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {
@@ -247,7 +247,7 @@ mod tests {
     fn check_pooled_blit<B: GpuBackend>(backend: &B) {
         let image = [7_u8, 8, 9];
         let mut src_buf = backend
-            .alloc_device(word_padded(image.len()))
+            .alloc_device_zeroed(word_padded(image.len()))
             .expect("alloc");
         backend.upload(&mut src_buf, &image).expect("upload");
         let src = BlitSource::<B> {

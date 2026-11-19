@@ -31,8 +31,8 @@ pub trait CacheBackend: GpuBackend {
     /// Host memory holding a demoted slab's bytes in the host tier.
     type HostSlab: Send + Sync;
 
-    /// A new slab holding `pixels`, then up to three bytes of padding to the
-    /// next multiple of 4 ([`word_padded`]), as a blit source requires
+    /// A new slab holding `pixels`, then up to three zero bytes of padding
+    /// to the next multiple of 4 ([`word_padded`]), as a blit source requires
     /// ([`crate::backend::params::BlitParams::src`]); `pixels` is not
     /// empty.
     ///
@@ -199,7 +199,7 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
 
     fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
         let mut slab = device.alloc_device(word_padded(pixels.len()))?;
-        device.upload(&mut slab, pixels)?;
+        device.upload_word_padded(&mut slab, pixels)?;
         Ok(slab)
     }
 

@@ -64,6 +64,7 @@ use dashmap::DashMap;
 
 use crate::backend::BackendError;
 use crate::backend::cuda::CudaBackend;
+use crate::backend::layout::word_padded;
 use dashmap::mapref::entry::Entry;
 
 /// Stable identifier for a PDF document.
@@ -143,7 +144,8 @@ pub struct CachedDeviceImage<B: CacheBackend = CudaBackend> {
     pub height: u32,
     /// Pixel layout — determines bytes per pixel and renderer interpretation.
     pub layout: ImageLayout,
-    /// Byte length of `device_ptr`.
+    /// Bytes of `device_ptr` charged to the VRAM budget: the pixel bytes
+    /// rounded up to a whole 32-bit word, as the slab holds them.
     vram_bytes: u64,
     /// LRU timestamp.  Updated on every cache hit via a single atomic store
     /// (no CAS needed; later writes always win and exact ordering doesn't
@@ -169,10 +171,20 @@ impl<B: CacheBackend> CachedDeviceImage<B> {
         }
     }
 
-    /// Bytes in VRAM occupied by this entry.  Used for budget accounting.
+    /// Bytes in VRAM occupied by this entry, its padding included.  Used
+    /// for budget accounting.
     #[must_use]
     pub const fn vram_bytes(&self) -> u64 {
         self.vram_bytes
+    }
+
+    /// Bytes of the image's pixels, `width × height × bpp`: the first
+    /// bytes of the slab.
+    #[must_use]
+    pub const fn pixel_bytes(&self) -> usize {
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(self.layout.bytes_per_pixel())
     }
 
     pub(super) fn touch(&self, tick: u64) {
@@ -582,7 +594,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
                 .saturating_mul(layout.bytes_per_pixel()),
             "pixel buffer length does not match width × height × bpp",
         );
-        let needed = pixels.len() as u64;
+        let needed = word_padded(pixels.len()) as u64;
         if needed > self.budget.vram_bytes {
             return Err(CacheError::EntryExceedsBudget {
                 needed,
@@ -643,9 +655,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
     /// # Errors
     /// The backend's error of the copy.
     pub fn download(&self, image: &CachedDeviceImage<B>) -> Result<Vec<u8>, CacheError> {
-        let len = usize::try_from(image.vram_bytes())
-            .map_err(|_| CacheError::Backend(BackendError::msg("slab exceeds usize")))?;
-        let mut pixels = vec![0u8; len];
+        let mut pixels = vec![0u8; image.pixel_bytes()];
         B::download_slab(&self.device, &image.device_ptr, &mut pixels)?;
         Ok(pixels)
     }

@@ -332,9 +332,10 @@ mod device {
         );
     }
 
-    /// A 3×1 RGB image of 9 bytes is held in a slab of 12, as a blit
-    /// source requires, both when inserted and when promoted back from
-    /// the host tier.  The cache must budget VRAM for one such image and
+    /// A 3×1 RGB image of 9 bytes is held in a slab of 12 whose pad bytes
+    /// are zero, as a blit source requires, and is charged 12 bytes of the
+    /// budget, both when inserted and when promoted back from the host
+    /// tier.  The cache must budget VRAM for one such image (12 bytes) and
     /// host RAM for its demoted copy.
     pub(super) fn slabs_hold_whole_words<B: CacheBackend>(cache: &DeviceImageCache<B>) {
         fn rgb_3x1(obj: u32, h: ContentHash, pixels: &[u8]) -> InsertRequest<'_> {
@@ -350,6 +351,10 @@ mod device {
         let check = |entry: &CachedDeviceImage<B>, what: &str| {
             let len = B::slab_len(cache.device(), &entry.device_ptr);
             assert_eq!(len, 12, "{what}: slab of {len} bytes for 9 pixel bytes");
+            assert_eq!(entry.vram_bytes(), 12, "{what}: budget charge");
+            let mut slab = [0xEE_u8; 12];
+            B::download_slab(cache.device(), &entry.device_ptr, &mut slab).expect("download slab");
+            assert_eq!(slab[9..], [0; 3], "{what}: pad bytes");
             assert_eq!(cache.download(entry).expect("download"), pixels_a, "{what}");
         };
         let entry_a = cache.insert(rgb_3x1(1, h_a, &pixels_a)).expect("insert a");

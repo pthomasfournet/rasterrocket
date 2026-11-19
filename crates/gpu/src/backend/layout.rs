@@ -10,6 +10,11 @@
 //! A byte buffer a kernel reads as words, such as a blit source, holds
 //! `word_padded(len)` bytes: its `len` bytes, then up to three bytes the
 //! kernel loads with the last word and never uses.
+//!
+//! Pad bytes of device buffers are zero on every backend: those of device
+//! pixels are written as zero by the kernels that write the pixels, and
+//! those of padded byte buffers by the upload that fills the buffer.  No
+//! kernel result depends on their value.
 
 /// The 32-bit words of one three-sample device pixel whose samples are
 /// `sample_bytes` bytes each: 1 for 1-byte samples, 2 for 2-byte samples.

@@ -12,6 +12,7 @@ use dashmap::mapref::entry::Entry;
 use super::disk_tier::LookupCallbackError;
 use super::host_tier::HostEntry;
 use super::{CacheBackend, CachedDeviceImage, ContentHash, DeviceImageCache, DocId};
+use crate::backend::layout::word_padded;
 
 impl<B: CacheBackend> DeviceImageCache<B> {
     /// Lift a host-tier entry back into VRAM and install it in the
@@ -22,7 +23,9 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         hash: &ContentHash,
     ) -> Option<Arc<CachedDeviceImage<B>>> {
         let host_entry = self.host.lookup(hash, self.next_tick())?;
-        let bytes = host_entry.host_bytes();
+        // The slab `promote` creates is padded to a whole word, as
+        // `upload_slab`'s is.
+        let bytes = word_padded(B::host_slab_len(&host_entry.pinned)) as u64;
         // Make room in the VRAM tier and reserve it.  If we can't (every
         // entry pinned by in-flight kernels), fall back to a cache miss;
         // the host entry stays in place for a future retry.

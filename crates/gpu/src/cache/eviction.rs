@@ -32,10 +32,7 @@ impl<B: CacheBackend> DeviceImageCache<B> {
         if self.host.lookup(&hash, self.next_tick()).is_some() {
             return;
         }
-        let bytes = (evicted.width as usize)
-            .saturating_mul(evicted.height as usize)
-            .saturating_mul(evicted.layout.bytes_per_pixel());
-        match B::demote(&self.device, &evicted.device_ptr, bytes) {
+        match B::demote(&self.device, &evicted.device_ptr, evicted.pixel_bytes()) {
             Ok(slab) => {
                 let host_entry =
                     HostEntry::new(slab, evicted.width, evicted.height, evicted.layout);
