@@ -49,8 +49,9 @@ parms = "parms"
 flate = "flate"
 paeth = "paeth"
 ue = "ue"
-# JPEG 2000 SIZ marker segment.
+# JPEG 2000 SIZ marker segment and the SOT segment's Psot (tile-part length).
 siz = "siz"
+psot = "psot"
 # TrueType `loca` table; Type 1 `ND` (noaccess def) procedure, also the
 # n-dimensional sampled-function evaluator and a subdivision depth.
 loca = "loca"
