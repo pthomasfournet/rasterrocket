@@ -3241,8 +3241,6 @@ Open on Direct3D 12:
   queue (a device is one per adapter, so the queue is shared). The D3D12
   tests and the page and ICC parity suites ran under the layer on WARP and
   the RTX 5070 without a validation error; the fixture corpus has not.
-- **`d3d12-warp` CI job.** It runs the D3D12 tests on the pinned WARP and has
-  not run yet.
 
 **Unreleased on master: `rrocket --backend d3d12`.** The CLI gains the
 `d3d12` feature (forwarded to `rasterrocket`), `--backend d3d12`
