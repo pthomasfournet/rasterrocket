@@ -43,8 +43,14 @@ pub(super) fn flatten_path(path: &Path, flatness: f64) -> Path {
     while i < path.pts.len() {
         let flag = path.flags[i];
         if flag.is_first() {
-            // moveTo — start a new subpath.
+            // moveTo — start a new subpath.  A point flagged both FIRST and
+            // LAST is a one-point subpath; when it is also CLOSED it stays
+            // closed, so that the next moveTo starts a subpath after it
+            // instead of replacing it.
             builder.move_to(path.pts[i].x, path.pts[i].y);
+            if flag.is_last() && flag.is_closed() {
+                let _ = builder.close(false);
+            }
             i += 1;
         } else if flag.is_curve() {
             // curveTo: pts[i], pts[i+1] are off-curve; pts[i+2] is on-curve.

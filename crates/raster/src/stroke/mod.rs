@@ -798,6 +798,63 @@ mod tests {
             "flattened curve should have at least 2 points"
         );
     }
+
+    /// `flatten_path` keeps a closed one-point subpath closed, so that the
+    /// subpaths after it are appended rather than replacing it.
+    #[test]
+    fn flatten_path_keeps_closed_dots() {
+        let mut b = PathBuilder::new();
+        for (x, y) in [(2.0, 2.0), (5.0, 5.0), (8.0, 8.0)] {
+            b.move_to(x, y);
+            b.close(false).unwrap();
+        }
+        b.move_to(1.0, 9.0);
+        b.line_to(9.0, 9.0).unwrap();
+        let path = b.build();
+        let flat = flatten_path(&path, 1.0);
+        assert_eq!(flat.pts, path.pts);
+        assert_eq!(flat.flags, path.flags);
+    }
+
+    /// Each `x y m h` dot of one round-capped stroke is painted.
+    #[test]
+    fn stroke_paints_every_closed_dot() {
+        let mut bmp: Bitmap<Rgb8> = Bitmap::new(20, 20, 4, false);
+        let clip = Clip::new(0.0, 0.0, 20.0, 20.0, true);
+        let dots: [(u32, u32); 3] = [(3, 3), (10, 10), (16, 16)];
+        let mut b = PathBuilder::new();
+        for (y, x) in dots {
+            b.move_to(f64::from(x) + 0.5, f64::from(y) + 0.5);
+            b.close(false).unwrap();
+        }
+        // A line after the last dot leaves that dot in place too.
+        b.move_to(2.0, 17.0);
+        b.line_to(6.0, 17.0).unwrap();
+        let params = StrokeParams {
+            line_width: 3.0,
+            line_cap: LineCap::Round,
+            ..default_params()
+        };
+        let white = [255u8; 3];
+        stroke::<Rgb8>(
+            &mut bmp,
+            &clip,
+            &b.build(),
+            &simple_pipe(),
+            &PipeSrc::Solid(&white),
+            &identity_matrix(),
+            &params,
+        );
+        for (y, x) in dots {
+            assert_eq!(
+                bmp.row(y)[x as usize].r,
+                255,
+                "dot at ({x}, {y}) not painted"
+            );
+        }
+        assert_eq!(bmp.row(17)[4].r, 255, "line after the dots not painted");
+        assert_eq!(bmp.row(10)[3].r, 0, "background painted");
+    }
 }
 
 #[cfg(test)]

@@ -986,6 +986,25 @@ fn rectangle_after_lone_moveto_discards_the_point() {
     assert_right_half_filled(&px);
 }
 
+/// `x y m h` closes a one-point subpath; the next `m` starts a subpath
+/// after it instead of replacing it, so each round-capped dot of one `S`
+/// is painted (ISO 32000-1 §8.5.3.2), and so is a dot before a line.
+#[test]
+fn closed_dots_before_moveto_are_all_stroked() {
+    let px = render_gray(100, b"1 J 10 w 0 g 20 50 m h 50 50 m h 80 50 m h S");
+    for x in [20, 50, 80] {
+        assert_eq!(px[50 * 100 + x], 0, "dot at x = {x}");
+    }
+    for x in [35, 65] {
+        assert_eq!(px[50 * 100 + x], 255, "gap at x = {x}");
+    }
+
+    let px = render_gray(100, b"1 J 10 w 0 g 20 50 m h 50 50 m 90 50 l S");
+    assert_eq!(px[50 * 100 + 20], 0, "dot before the line");
+    assert_eq!(px[50 * 100 + 35], 255, "gap between dot and line");
+    assert_eq!(px[50 * 100 + 70], 0, "line");
+}
+
 /// A 2×2 all-black `DeviceGray` inline image stretched over the whole
 /// 8 pt page.  Without a clip it would blacken every pixel.
 const BLACK_IMAGE_OVER_PAGE: &[u8] =
