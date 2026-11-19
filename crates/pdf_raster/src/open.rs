@@ -763,14 +763,17 @@ mod tests {
     use crate::BackendPolicy;
 
     /// A build without the D3D12 backend refuses `ForceD3d12`, naming the
-    /// feature and the platform it needs.
+    /// feature on Windows and the platform elsewhere.
     #[cfg(not(all(windows, feature = "d3d12")))]
     #[test]
     fn force_d3d12_without_the_feature_is_unavailable() {
         match check_backend_compiled(BackendPolicy::ForceD3d12) {
             Err(crate::RasterError::BackendUnavailable(msg)) => {
-                assert!(msg.contains("`d3d12`"), "{msg}");
-                assert!(msg.contains("Windows"), "{msg}");
+                if cfg!(windows) {
+                    assert!(msg.contains("`d3d12`"), "{msg}");
+                } else {
+                    assert!(msg.contains("Windows only"), "{msg}");
+                }
             }
             other => panic!("expected BackendUnavailable, got {other:?}"),
         }

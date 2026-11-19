@@ -544,7 +544,8 @@ mod tests {
                     let want = rgb_to_gray(&bmp);
                     let got = rgb_into_gray(bmp);
                     assert_eq!((got.width, got.height, got.stride), (w, h, w as usize));
-                    assert!(got.alpha_plane().is_none());
+                    assert_eq!(got.alpha_plane().is_some(), with_alpha);
+                    assert_eq!(got.alpha_plane(), want.alpha_plane());
                     for y in 0..h {
                         assert_eq!(
                             got.row_bytes(y),
@@ -581,7 +582,8 @@ mod tests {
                 let want = rgb16_to_gray16(&bmp);
                 let got = rgb16_into_gray16(bmp);
                 assert_eq!((got.width, got.height, got.stride), (w, h, w as usize));
-                assert!(got.alpha_plane().is_none());
+                assert!(got.alpha_plane().is_some());
+                assert_eq!(got.alpha_plane(), want.alpha_plane());
                 for y in 0..h {
                     assert_eq!(
                         got.row_samples(y),

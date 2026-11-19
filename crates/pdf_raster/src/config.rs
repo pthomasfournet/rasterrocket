@@ -1014,7 +1014,8 @@ mod tests {
                     "{policy:?}: Direct3D 12 named off Windows or omitted on it: {msg}"
                 );
             } else {
-                assert!(msg.contains("`vulkan` feature"), "{policy:?}: {msg}");
+                assert!(msg.contains("`vulkan`"), "{policy:?}: {msg}");
+                assert_eq!(msg.contains("`d3d12`"), cfg!(windows), "{policy:?}: {msg}");
             }
         }
     }
