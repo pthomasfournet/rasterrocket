@@ -350,7 +350,10 @@ const MAX_NESTING: usize = 256;
 ///   4. else, when no `endstream` keyword precedes it, the object's own
 ///      `endobj` between whitespace, before the `obj` of another object:
 ///      the object closes without the stream's terminator;
-///   5. else the first `endstream` bytes in any context (degenerate input —
+///   5. else the first `N G obj` header beginning a line met before any
+///      `endstream` keyword: a body never extends into another object, so it ends
+///      before that header;
+///   6. else the first `endstream` bytes in any context (degenerate input —
 ///      recover *something* rather than dropping the whole page).
 ///
 /// `endstream` is a keyword when a whitespace or delimiter byte, or the end
@@ -358,15 +361,19 @@ const MAX_NESTING: usize = 256;
 /// also needs a byte other than a delimiter before it (`(endstream` opens a
 /// string; `ETendstream` ends a body that omits the EOL).
 ///
-/// Once a candidate is known, the scan ends at the next `endobj` or
-/// `stream` keyword: past it lies another object, whose `endstream` cannot
-/// terminate this body.  A file of many streams none of whose terminators
-/// is followed by `endobj` is thereby scanned in time linear in its size
-/// rather than once to the end of the file per stream.
+/// Once a candidate or an object header is known, the scan ends at the
+/// next `endobj` or `stream` keyword: past them lies another object, whose
+/// `endstream` cannot terminate this body.  A header alone does not end the
+/// scan, since a body may hold the text `N G obj` (a string `(1 0 obj)`).  The work and the body are
+/// thereby bounded by the distance to the next object, so a file of many
+/// streams that share one terminator, or none of whose terminators is
+/// followed by `endobj`, is scanned in time linear in its size rather than
+/// once to the end of the file per stream.
 ///
-/// Returns `None` if neither `endstream` nor `endobj` is found within
-/// [`MAX_STREAM_SCAN`] of `start` (truncated / malformed object, or no
-/// terminator), so the caller fails loudly rather than scanning unbounded.
+/// Returns `None` if none of `endstream`, `endobj` or an object header is
+/// found within [`MAX_STREAM_SCAN`] of `start` (truncated / malformed
+/// object, or no terminator), so the caller fails loudly rather than
+/// scanning unbounded.
 fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
     const KW: &[u8] = b"endstream";
     if start > data.len() {
@@ -386,14 +393,38 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
     // Whether an `endobj` may still end the body: no other object's
     // `obj` keyword lies between it and the body.
     let mut endobj_ends_body = true;
+    // The start of the next object's `N G obj` header.
+    let mut next_header: Option<usize> = None;
     for rel in 0..window.len() {
         let rest = &window[rel..];
         if !rest.starts_with(KW) {
             let ws_before = byte_before(rel).is_none_or(is_ws);
-            if first_raw.is_none() && ws_before && keyword_at_rel(rel, b"obj") {
-                endobj_ends_body = false;
+            if ws_before && keyword_at_rel(rel, b"obj") {
+                if first_raw.is_none() {
+                    endobj_ends_body = false;
+                }
+                if next_header.is_none() && first_raw.is_none() {
+                    next_header = object_header_start(data, start, start + rel);
+                }
             }
             let found = first_raw.or(first_bytes).is_some();
+            // Past a header with no `endstream` keyword before it, that
+            // object's `stream` or `endobj` keyword shows the header opens
+            // another object: the body ends before it.
+            let after_header = next_header.is_some() && first_raw.is_none();
+            if after_header
+                && ws_before
+                && keyword_at_rel(rel, b"endobj")
+                && data.get(start + rel + 6).is_none_or(|&b| is_ws(b))
+            {
+                break;
+            }
+            if after_header
+                && keyword_at_rel(rel, b"stream")
+                && byte_before(rel).is_some_and(|b| is_ws(b) || b == b'>')
+            {
+                break;
+            }
             if keyword_at_rel(rel, b"endobj") {
                 // A whole-word `endobj` before any `endstream` keyword ends
                 // the body itself.
@@ -453,8 +484,43 @@ fn find_endstream(data: &[u8], start: usize) -> Option<usize> {
         }
     }
 
-    let kw = last_eol_preceded.or(first_raw).or(first_bytes)?;
-    Some(trim_eol_before(data, start, kw))
+    if let Some(kw) = last_eol_preceded.or(first_raw) {
+        return Some(trim_eol_before(data, start, kw));
+    }
+    if let Some(header) = next_header {
+        log::warn!(
+            "stream at offset {start}: no `endstream` before the next object's header \
+             at offset {header}; the body ends there"
+        );
+        return Some(trim_eol_before(data, start, header));
+    }
+    first_bytes.map(|kw| trim_eol_before(data, start, kw))
+}
+
+/// The start of the object header `N G obj` whose `obj` keyword is at
+/// `obj`, when the two tokens before it are unsigned integers separated by
+/// whitespace and the header begins a line: at `lo`, the start of the
+/// scan, or after a carriage return or line feed.
+fn object_header_start(data: &[u8], lo: usize, obj: usize) -> Option<usize> {
+    let mut p = obj;
+    // Whitespace, the generation, whitespace, the object number, backwards.
+    for _ in 0..2 {
+        let ws_end = p;
+        while p > lo && is_ws(data[p - 1]) {
+            p -= 1;
+        }
+        if p == ws_end {
+            return None;
+        }
+        let digits_end = p;
+        while p > lo && data[p - 1].is_ascii_digit() {
+            p -= 1;
+        }
+        if p == digits_end {
+            return None;
+        }
+    }
+    (p == lo || matches!(data[p - 1], b'\r' | b'\n')).then_some(p)
 }
 
 /// Where the body of a stream object lies, relative to its dictionary.
@@ -1096,13 +1162,104 @@ mod tests {
     }
 
     /// An `endobj` ends a body without `endstream` only as a whole word and
-    /// before another object's header; a later object's `endobj` does not.
+    /// before another object's header; a later object's `endobj` does not,
+    /// and the body ends before that object's header instead.
     #[test]
     fn endobj_ends_a_body_only_within_its_object() {
         let data = b"abc\nendobj\n2 0 obj";
         assert_eq!(find_endstream(data, 0), Some(3));
         assert_eq!(find_endstream(b"(endobj) x>>endobj\n", 0), None);
-        assert_eq!(find_endstream(b"abc\n2 0 obj\n<<>>\nendobj\n", 0), None);
+        assert_eq!(find_endstream(b"abc\n2 0 obj\n<<>>\nendobj\n", 0), Some(3));
+    }
+
+    /// Without an `endstream` keyword, a body ends before the next `N G obj`
+    /// header; `obj` after anything but two integers is body data.
+    #[test]
+    fn next_object_header_ends_a_body_without_endstream() {
+        let data = b"abc\r\n12 0 obj <</Length 1>>stream\nxyz\nendstream\nendobj\n";
+        assert_eq!(find_endstream(data, 0), Some(3));
+        let data = b"a obj 0 obj x1 0 obj -1 0 obj\nrest\nendstream\nendobj\n";
+        let end = find_endstream(data, 0).expect("found");
+        assert_eq!(&data[..end], b"a obj 0 obj x1 0 obj -1 0 obj\nrest");
+        // An `endstream` keyword before the header still wins.
+        let data = b"abc\nendstream junk\n3 0 obj\n";
+        assert_eq!(find_endstream(data, 0), Some(3));
+    }
+
+    /// The text `N G obj` inside a body does not end it: a content stream
+    /// under an indirect `/Length` showing the string `(1 0 obj)`, and
+    /// binary data holding a header-like run, keep their whole body.
+    #[test]
+    fn header_text_inside_a_body_does_not_end_it() {
+        let body = b"BT /F1 12 Tf 72 712 Td (1 0 obj) Tj 0 -14 Td (2 0 obj <<) Tj ET";
+        let mut src = b"4 0 obj\n<</Length 5 0 R>>\nstream\n".to_vec();
+        src.extend_from_slice(body);
+        src.extend_from_slice(b"\nendstream\nendobj\n5 0 obj\n71\nendobj\n");
+        let Some((_, Object::Stream(s))) = parse_indirect_object(&src, 0) else {
+            panic!("a stream");
+        };
+        assert_eq!(s.content, body);
+
+        let body = b"x\x9c\x01\n1 0 obj \x7f\xfe/\x00stream\x03\n3 0 obj\xff\x10";
+        let mut src = b"4 0 obj\n<</Length 5 0 R>>\nstream\n".to_vec();
+        src.extend_from_slice(body);
+        src.extend_from_slice(b"\nendstream\nendobj\n");
+        let Some((_, Object::Stream(s))) = parse_indirect_object(&src, 0) else {
+            panic!("a stream");
+        };
+        assert_eq!(s.content, body);
+    }
+
+    /// Header text within a line, followed by `stream` and `endobj` text,
+    /// keeps the body whole; a header beginning a line, followed by that
+    /// object's `stream` and no `endstream`, ends it.
+    #[test]
+    fn only_a_header_beginning_a_line_ends_a_body() {
+        let body = b"BT (1 0 obj) Tj ( stream) Tj ( endobj) Tj ET";
+        let mut src = b"4 0 obj\n<</Length 5 0 R>>\nstream\n".to_vec();
+        src.extend_from_slice(body);
+        src.extend_from_slice(b"\nendstream\nendobj\n");
+        let Some((_, Object::Stream(s))) = parse_indirect_object(&src, 0) else {
+            panic!("a stream");
+        };
+        assert_eq!(s.content, body);
+
+        let src = b"4 0 obj\n<</Length 5 0 R>>\nstream\nabc\n1 0 obj\n<<>>\nstream\nxyz\n";
+        let Some((_, Object::Stream(s))) = parse_indirect_object(src, 0) else {
+            panic!("a stream");
+        };
+        assert_eq!(s.content, b"abc");
+    }
+
+    /// Stream objects with a wrong `/Length` and no terminator of their own,
+    /// followed by one shared `endstream endobj`, each hold only their own
+    /// data: no body runs on to the shared terminator.
+    #[test]
+    fn streams_sharing_one_terminator_keep_their_own_bodies() {
+        const K: usize = 400;
+        const PAD: usize = 20_000;
+        let mut src = Vec::new();
+        let mut offsets = Vec::new();
+        for i in 0..K {
+            offsets.push(src.len());
+            src.extend_from_slice(format!("{} 0 obj <</Length 1>>stream\n", i + 1).as_bytes());
+            src.extend(std::iter::repeat_n(b'A', PAD));
+            src.push(b'\n');
+        }
+        src.extend_from_slice(b"endstream\nendobj\n");
+        let start = std::time::Instant::now();
+        for (i, &offset) in offsets.iter().enumerate() {
+            let Some((id, Object::Stream(s))) = parse_indirect_object(&src, offset) else {
+                panic!("stream {i}");
+            };
+            assert_eq!(id.0 as usize, i + 1);
+            assert_eq!(s.content.len(), PAD, "object {}", i + 1);
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     /// A flood of streams whose terminators are never followed by
