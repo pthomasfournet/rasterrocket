@@ -3675,8 +3675,15 @@ per pixel: on its 1 GiB range, `corpus-09` page 415 at 950 dpi (1.33 GB
 of device pixels now) and `corpus-06` and `corpus-02` at 1200 dpi in 16
 bits (1.11 GB now) render on the CPU, and the gate has not been rerun
 with the word layout.
-Verified on the RTX 5070: the GPU-page parity suite over the fixtures,
-at 8 and 16 bits.
+Verified on the RTX 5070 and the RTX 2080 SUPER (Windows): every page of
+14 fixtures at 150 dpi, RGB and gray at 8 and 16 bits (12 992 pages a
+backend), byte-identical to `--backend cpu` under `--gpu-pages` and under
+`--backend vulkan`, with no page more on the CPU than before. Time under
+`--gpu-pages` on the RTX 5070 (first 64 pages of each fixture, median of
+7): 0.97 of the earlier layout's summed over `corpus-01` to `corpus-11`,
+between 0.89 and 1.01 a fixture except `corpus-04` (mixed text and
+images), 1.09 in alternating runs (19 ms on 64 pages); that cost is not
+yet attributed.
 
 **Unreleased on master: the ICC lookup-table and image-blit kernels read
 and write whole words.** The grid CMYK → RGB kernel (`icc_clut`, CUDA and
