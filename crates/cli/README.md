@@ -20,7 +20,7 @@ files; a `--fax` document is always written to disk, and `--print` writes no
 files.
 
 GPU features are passed by name and forwarded to the library
-(`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`). The default
+(`--features "nvjpeg2k,gpu-icc,cache"`, `--features vulkan`, and on Windows `--features d3d12`). The default
 `av1-asm` feature builds the AV1 decoder's assembly kernels for AVIF comic
 pages, which on x86 needs `nasm` on `PATH`. The default
 `bundled-fonts` feature compiles in Noto fallback faces for Greek, Cyrillic,

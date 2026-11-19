@@ -19,13 +19,13 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 **aarch64:**
 - NEON is used unconditionally (mandatory on all ARMv8-A).
-- Tested by hand on an Apple A18 Pro (macOS). CI runs clippy and the NEON tests on GitHub's arm64 Linux runner, and clippy with the renderer, interpreter and library suites on its Apple-silicon macOS runner (a virtual machine, CPU only). No M-series Mac and no aarch64 Linux machine beyond that runner has been tested; no Apple Metal GPU backend.
+- Tested by hand on an Apple A18 Pro (macOS). CI runs clippy and the NEON tests on GitHub's arm64 Linux runner, and clippy with the renderer, interpreter, library and font suites and the memory probe on its Apple-silicon macOS runner (a virtual machine, CPU only). No M-series Mac and no aarch64 Linux machine beyond that runner has been tested; no Apple Metal GPU backend.
 
 ### GPU (optional)
 
 Three GPU backends are available on Linux:
 
-**NVIDIA (CUDA 13.0–13.3):** tested on an RTX 5070 (`sm_120`), and on an RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build only, since its driver 570 predates CUDA 13 (see the README's [Tested hardware](../README.md#tested-hardware)); other NVIDIA GPUs are untested.
+**NVIDIA (CUDA 13.x):** tested on an RTX 5070 (`sm_120`), and on an RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build under Linux and a CUDA 13.5 build under Windows (see the README's [Tested hardware](../README.md#tested-hardware)); other NVIDIA GPUs are untested.
 
 | Feature | Minimum GPU | Library required |
 |---|---|---|
@@ -45,7 +45,7 @@ Three GPU backends are available on Linux:
 
 With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, the wide working space of an output profile, pages past 128 MiB of device commands and pages rendered in bands stay on the CPU. It is off by default: it beats the CPU with few threads on most vector and image documents measured, but every page that may render on the device waits for it, so with many threads the CPU is faster.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs (ANV), M-series Macs and datacenter GPUs are untested.
 
-**Direct3D 12 compute (Windows, library only):**
+**Direct3D 12 compute (Windows):**
 
 | Feature | Supported hardware | Libraries required |
 |---|---|---|
@@ -61,18 +61,18 @@ With `cache`, the device image cache runs on the Vulkan device under `--backend 
 
 VA-API provides hardware JPEG baseline decode; CMYK and progressive JPEGs fall through to the CPU. It shares the nvJPEG size gate (`GPU_JPEG_THRESHOLD_PX`), which is `u32::MAX`, so in a default build JPEGs are decoded on the CPU even with `vaapi` enabled.
 
-All GPU features fall back to CPU automatically if initialisation fails — a message is logged but no error is returned.  Use `--backend cuda` / `--backend vulkan` / `--backend vaapi` to convert silent fallbacks into hard errors.
+All GPU features fall back to CPU automatically if initialisation fails — a message is logged but no error is returned.  Use `--backend cuda` / `--backend vulkan` / `--backend d3d12` / `--backend vaapi` to convert silent fallbacks into hard errors.
 
 ## Platform support
 
 | Operating system | CPU | GPU | Status | Guide |
 |---|---|---|---|---|
-| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; tested on a Ryzen 9 9900X3D with an RTX 5070 and its AMD iGPU, and on an i7-8700K with an RTX 2080 SUPER; CI runs the test suite | [Linux](platforms/linux.md) |
+| Linux x86-64 | AVX-512 / AVX2 | CUDA, Vulkan, VA-API | **Supported**; tested on an i7-8700K with an RTX 2080 SUPER, and (until 2026-11) on a Ryzen 9 9900X3D with an RTX 5070 and its AMD iGPU; CI runs the test suite | [Linux](platforms/linux.md) |
 | Linux aarch64 | NEON | Vulkan (untested) | **Supported**; CI runs clippy and the NEON tests on GitHub's arm64 runner; no other hardware tested | [Linux](platforms/linux.md) |
-| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU; tested on the A18 Pro only); no Metal backend | **Supported**; tested on an A18 Pro; CI runs clippy and the renderer, interpreter and library suites; untested on M-series hardware | [macOS](platforms/macos.md) |
+| macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU; tested on the A18 Pro only); no Metal backend | **Supported**; tested on an A18 Pro; CI runs clippy and the renderer, interpreter, library and font suites and the memory probe; untested on M-series hardware | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
-| Windows x86-64 | AVX-512 / AVX2 | untested | CI builds and runs clippy and the CPU test suites on GitHub's Windows runner; no other Windows machine tested | [BSD and Windows](platforms/other.md) |
+| Windows x86-64 | AVX-512 / AVX2 | CUDA 13.4+, Vulkan, Direct3D 12 (`d3d12`) | **Supported**; tested on an RTX 2080 SUPER and UHD 630 (CUDA, Vulkan), and on an RTX 5070, a Radeon iGPU and WARP (Direct3D 12); CI runs clippy and the CPU suites on GitHub's Windows runner, and the Direct3D 12 tests on pinned WARP | [BSD and Windows](platforms/other.md) |
 
 AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
 Radeon GPUs.
@@ -393,7 +393,7 @@ cargo build --release -p rasterrocket-cli --features vulkan
 
 The CLI crate forwards each of these feature names to the library.
 
-`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series; `sm_120` and `sm_75` are tested, the latter from an nvcc 12.4 build). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
+`CUDA_ARCH` must match your GPU's Compute Capability (e.g. `sm_75` for RTX 20-series, `sm_86` for RTX 30-series, `sm_89` for RTX 40-series, `sm_120` for RTX 50-series; `sm_120` and `sm_75` are tested, the latter from an nvcc 12.4 build under Linux and a CUDA 13.5 build under Windows). Look yours up at [developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). See the [README's GPU matrix](../README.md#picking-cuda_arch-for-your-gpu) for the common-case table and the [feature-flag list](../README.md#feature-flags).
 
 ### Dependencies
 

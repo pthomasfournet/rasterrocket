@@ -24,8 +24,10 @@ wiki's [Benchmarks](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmar
 
 - **Hardware.** "Dev box" runs used an AMD Ryzen 9 9900X3D with an RTX 5070.
   The "testbench" runs used an Intel i7-8700K with an RTX 2080 SUPER; that
-  machine was retired in July 2026 and the testbench numbers cannot be
-  reproduced.
+  machine was out of service from July to November 2026 and is back as the
+  Linux development machine, but the testbench numbers were taken on the
+  May 2026 software and driver stack and are not reproducible with today's
+  code.
 - **Software.** The binaries measured were the release of the directory's
   name, or the commit named in the file (`v10` and `v11*` are named after
   the roadmap stage they gated, not a release). Rendering, decoding and GPU dispatch

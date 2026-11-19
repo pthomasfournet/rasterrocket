@@ -38,8 +38,8 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
   `PageDiagnostics::unsupported_features` list the features the renderer
   ignores: JavaScript, XFA, portable collections, 3D and multimedia
   annotations.
-- `SessionConfig::gpu_pages` (`vulkan` feature) renders pages whole on a
-  Vulkan GPU beside the CPU workers (fills, strokes, text, images, forms,
+- `SessionConfig::gpu_pages` (`vulkan` feature, or `d3d12` on Windows) renders pages whole on a
+  Vulkan or Direct3D 12 GPU beside the CPU workers (fills, strokes, text, images, forms,
   path clips and soft masks), with the same bytes at 8 and 16 bits;
   `PageDiagnostics::device_page` reports where each page rendered and why
   a page stayed on the CPU.

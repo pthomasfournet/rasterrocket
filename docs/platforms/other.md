@@ -2,8 +2,8 @@
 
 Windows is built and tested in CI, on GitHub's Windows runner, and its
 CUDA and Vulkan features on one machine of our own, with an RTX 2080 SUPER
-and, for Vulkan, an Intel UHD 630 (see
-[Windows](#windows)). The BSDs are not tested, and no CI
+and an Intel UHD 630; Direct3D 12 is tested on a second one, with an RTX 5070
+and an AMD Radeon iGPU (see [Windows](#windows)). The BSDs are not tested, and no CI
 job covers them. The code has no Linux-only dependency in its render path: it is
 Rust, plus two C libraries that `cargo` builds, libdeflate for compression
 and mimalloc, the command-line tool's allocator, and, on x86, the AV1
@@ -33,7 +33,9 @@ tested. Please report what you find.
 - **CI:** each push runs clippy on `windows-latest`, then the test suites
   of the renderer, interpreter, library, font, parser, colour, encoder,
   comic and command-line crates (the last including end-to-end runs of the
-  binary). The runner has no GPU.
+  binary). The runner has no GPU; a separate job (`d3d12-warp`) runs the
+  Direct3D 12 tests on the pinned WARP software adapter, which needs slangc
+  2026.20 and DXC 1.9.2609.
 - **Build:** with the MSVC toolchain from `rustup`, the Visual Studio
   Build Tools and, on x86-64, `nasm` on `PATH` (`choco install nasm`; the
   installer leaves it in `C:\Program Files\NASM`) for the AV1 decoder's
