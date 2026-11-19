@@ -2288,9 +2288,12 @@ mod page_list_tests {
             let named = if cfg!(feature = "vulkan") {
                 named
             } else {
-                "`vulkan` feature"
+                "`vulkan`"
             };
             assert!(msg.contains("--gpu-pages") && msg.contains(named), "{msg}");
+            if !cfg!(feature = "vulkan") {
+                assert_eq!(msg.contains("`d3d12`"), cfg!(windows), "{msg}");
+            }
         }
         assert_eq!(
             args_with(&["--gpu-pages", "--backend", "vulkan"])
