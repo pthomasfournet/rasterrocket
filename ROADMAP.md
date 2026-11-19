@@ -3639,7 +3639,8 @@ than one tile it fails or, on some encoded variants, decodes to other
 samples. The checks now decline each (the decoder's `Survey` reports them),
 and the device is given the codestream of a JP2 file rather than the file,
 which it failed on for an over-long box or an enumerated ROMM-RGB or e-sRGB
-colour space. Before: 99 declined, 66 decoded on the device, 45 failed, 4
+colour space. A device failure now warns once per kind (status code), like
+a decline. Before: 99 declined, 66 decoded on the device, 45 failed, 4
 incomplete, 3 unparsed; after: 144 declined, 69 decoded on the device (all
 byte-identical to the CPU), none failed, 1 incomplete, 3 unparsed. A device test (`gpu-validation`)
 runs every test stream and `RR_JPX_GATE_DIR` through the checks and the

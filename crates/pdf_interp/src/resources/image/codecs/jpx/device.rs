@@ -186,6 +186,10 @@ impl std::fmt::Display for Decline {
 /// The kinds of [`Decline`] already reported in this process.
 static REPORTED: AtomicU32 = AtomicU32::new(0);
 
+/// The kinds of device decode failure ([`failure_kind`]) already reported
+/// in this process.
+static FAILED: AtomicU32 = AtomicU32::new(0);
+
 /// `Err` naming the first property of `img` for which nvJPEG2000 would
 /// not return the samples the CPU decoder returns, from its headers and
 /// `survey` (see [`hayro_jpeg2000::Image::survey`]): it returns the
@@ -257,6 +261,35 @@ pub(super) fn report(why: &Decline) {
     }
 }
 
+/// The bit of [`FAILED`] that stands for the kind of the device decode
+/// failure `e`: its nvJPEG2000 status, or its variant.
+fn failure_kind(e: &NvJpeg2kError) -> u32 {
+    let bit = match e {
+        NvJpeg2kError::Nvjpeg2kStatus(code) => u32::try_from(*code).map_or(15, |c| c.min(15)),
+        NvJpeg2kError::CudaError(_) => 16,
+        NvJpeg2kError::CudartError(_) => 17,
+        NvJpeg2kError::UnsupportedComponents(_) => 18,
+        NvJpeg2kError::SubSampledComponents => 19,
+        NvJpeg2kError::ZeroDimension { .. } => 20,
+        NvJpeg2kError::Overflow => 21,
+    };
+    1 << bit
+}
+
+/// Report the device decode failure `e` at warn the first time its kind
+/// occurs, at debug afterwards.
+fn report_failure(e: &NvJpeg2kError) {
+    let kind = failure_kind(e);
+    if FAILED.fetch_or(kind, Ordering::Relaxed) & kind == 0 {
+        log::warn!(
+            "image: JPXDecode: nvJPEG2000 failed ({e}); images it fails on so decode on the \
+             CPU (reported once)"
+        );
+    } else {
+        log::debug!("image: JPXDecode: nvJPEG2000 failed ({e}); decoding on the CPU");
+    }
+}
+
 /// The device decode of `codestream` by `dec`: into 8-bit samples, or with
 /// `wide` into 16-bit ones, each component's samples widened from its
 /// precision as the CPU path widens them.
@@ -290,7 +323,7 @@ fn device_decode(
 /// Decode `codestream`, from its SOC marker, of a `pdf_w × pdf_h` image
 /// dictionary on the device, obtaining the decoder from `device` first
 /// ([`device_decode`]).  `None` when no decoder is available, and after a
-/// warning when the decode fails or its dimensions are not `cpu_size`,
+/// report when the decode fails or its dimensions are not `cpu_size`,
 /// those of the CPU decode at the draw's resolution level; the caller
 /// decodes on the CPU.
 pub(super) fn decode(
@@ -304,7 +337,7 @@ pub(super) fn decode(
     let (width, height, color_space, data) = match device_decode(dec, codestream, wide) {
         Ok(img) => img,
         Err(e) => {
-            log::warn!("image: JPXDecode: nvJPEG2000 failed ({e}); decoding on the CPU");
+            report_failure(&e);
             return None;
         }
     };
@@ -559,6 +592,36 @@ mod tests {
         );
         let err = decode(133).expect_err("no tile data");
         assert!(err.contains("1 of its 1 tiles hold no data"), "{err}");
+    }
+
+    /// Each nvJPEG2000 status and each other kind of device failure is
+    /// reported at warn once; statuses past 14 share one kind.
+    #[test]
+    fn failure_kinds_are_distinct_bits() {
+        let mut all: Vec<NvJpeg2kError> = (0..15).map(NvJpeg2kError::Nvjpeg2kStatus).collect();
+        all.extend([
+            NvJpeg2kError::Nvjpeg2kStatus(15),
+            NvJpeg2kError::CudaError(1),
+            NvJpeg2kError::CudartError(2),
+            NvJpeg2kError::UnsupportedComponents(4),
+            NvJpeg2kError::SubSampledComponents,
+            NvJpeg2kError::ZeroDimension {
+                width: 0,
+                height: 1,
+            },
+            NvJpeg2kError::Overflow,
+        ]);
+        let union = all.iter().fold(0u32, |acc, e| {
+            assert_eq!(acc & failure_kind(e), 0, "{e}");
+            acc | failure_kind(e)
+        });
+        assert_eq!(union.count_ones() as usize, all.len());
+        for code in [16, 1000, -1] {
+            assert_eq!(
+                failure_kind(&NvJpeg2kError::Nvjpeg2kStatus(code)),
+                failure_kind(&NvJpeg2kError::Nvjpeg2kStatus(15))
+            );
+        }
     }
 
     /// The decoder's test stream `name`.
