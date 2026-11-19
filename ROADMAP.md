@@ -35,6 +35,8 @@ Phase 5 is complete. The API exists and is integrated.
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
+**Direct3D 12 is new and has open items.** Windows only, unreleased: page read-back goes through a host copy that dominates, process start-up is about 0.17 s above Vulkan's, and it never ran on an Intel adapter. See Current status, "the Direct3D 12 backend".
+
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
 
@@ -66,7 +68,7 @@ space, OCR preparation of scans and 16-bit comic and camera input;
 `--gpu-pages` renders every fixture page; the API changes in several
 places.** Colour management is completed on the input side: ICC
 conversions honour each object's rendering intent and black-point
-compensation and agree with Little CMS to its precision, CMYK output
+compensation and agree with the reference colour engine to its precision, CMYK output
 performs every conversion it skipped, and a document can be proofed
 against the press its output intent names. Default RGB output changes
 on pages with table-based CMYK profiles, CMYK page groups and some ICC
@@ -283,7 +285,7 @@ only follow the `RenderedPage::pixels` change.
 - **Exact-area coverage.** `raster::coverage` replaces the 4×4
   supersampled scanner and its gamma-1.5 table for fills, strokes, clips
   and glyphs. The old scanner was about 0.25 px heavy on +y and banded in
-  16 levels. Against pdfium's corpus (260 scored pages) the median RMSE
+  16 levels. Against the reference renderer's corpus (260 scored pages) the median RMSE
   falls from 4.39 to 1.45, and the fill bench runs 6.34 → 4.70 ms. The
   `--gpu-pages` raster composites the CPU's coverage and stays
   byte-identical to `--backend cpu`. The dormant device AA fill and the
@@ -314,7 +316,7 @@ only follow the `RenderedPage::pixels` change.
 - **Output ICC profiles.** `--output-profile FILE`, `--intent` and `--bpc`
   convert finished pages to an RGB, gray or CMYK printer, display or
   colour-space profile and embed it in PNG, TIFF, JPEG and the `--print`
-  spool. Worst ΔE00 against Little CMS is 0.93 over every intent, with and
+  spool. Worst ΔE00 against the reference colour engine is 0.93 over every intent, with and
   without black-point compensation, at both depths. The interpreter tracks
   each page's content rendering intents.
 - **CMYK output.** `--cmyk` with `--tiff` or `--jpeg`, and `--jpegcmyk`,
@@ -629,7 +631,7 @@ field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
 **Fixes.**
 - *Geometry.* The page box is anchored at the bitmap's top-left corner for
   every `/Rotate`; over 434 changed pages the fitted vertical offset against
-  mutool falls from 0.15 to 0.06 px and against pdfium from 0.32 to 0.20 px.
+  a second reference renderer falls from 0.15 to 0.06 px and against the reference renderer from 0.32 to 0.20 px.
   Subpaths ending in a curve no longer merge into the next; antialiased
   edges past device column 8191 are right; a sloped edge's fixed-point
   position no longer drifts by pixels for vertices far off the page; a
@@ -668,9 +670,9 @@ field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
   3000 × 3000 JPEG renders in 1.9 s instead of 4.5 s at 0.51 GB peak
   instead of 1.22 GB.
 - Synthetic-bold (`2 Tr`) text draws strokes from cached coverage (the
-  israel pages 1.32 → 0.10 s, pdfium 0.95 s); together with chord-based
+  israel pages 1.32 → 0.10 s, the reference renderer 0.95 s); together with chord-based
   curve flattening, clip-culled subpaths, an indexed cross-reference table
-  and one face lookup per text run, the two documents slower than pdfium in
+  and one face lookup per text run, the two documents slower than the reference renderer in
   the archive latency run now match or beat it.
 - A clip of more than eight paths folds into one table: 3 000 nested clips
   and 3 000 fills render in 0.31 s instead of 6.1 s, 47 MB instead of
@@ -869,7 +871,7 @@ group is bounded to its region; post-table glyph names listed in linear
 time; the jpeg2000 fork takes upstream's SIMD sample conversion. Document
 open no longer touches page objects (21 archive documents: 87 → 10 ms
 summed), and page JavaScript is checked per rendered page. Per-page latency
-over a 14 028-page archive sample is lower than pdfium's on 12 519 pages.
+over a 14 028-page archive sample is lower than the reference renderer's on 12 519 pages.
 Content-stream names and strings, and inline-image data, are borrowed from
 the stream rather than copied; a saved graphics state shares its font and
 pattern names; object resolution, font resource entries, glyph names and
@@ -971,7 +973,7 @@ latency comparison.
 
 ### v1.5.0 (October 2026)
 
-**Pages that rendered wrong now render right; FreeType is gone.** One
+**Pages that rendered wrong now render right; the external font rasteriser is gone.** One
 behaviour change for library callers; otherwise no API change for
 `rasterrocket`. 78 commits since v1.4.1.
 
@@ -1028,12 +1030,12 @@ CCITT text layer rendered washed grey, inverted, black or blank.
 - Lone axis-aligned quadrilateral fills are snapped to pixel boundaries
   (stroke adjustment for fills).
 
-**FreeType removed.** Font programs (TrueType incl. symbolic subsets,
+**External font rasteriser removed.** Font programs (TrueType incl. symbolic subsets,
 OpenType, bare and CID-keyed CFF, Type 1 PFA/PFB) are parsed by local forks of
 `read-fonts` 0.41 and `skrifa` 0.44 (`crates/read_fonts`, `crates/skrifa`,
 fixes logged in each `CHANGES.md`) and rasterised by a new in-crate coverage
 rasteriser, unhinted. The `bundled` feature and the `libfreetype6-dev` build
-dependency are gone, and with them the CVE-affected bundled FreeType 2.13.2. A
+dependency are gone, and with them the CVE-affected bundled external font rasteriser. A
 glyph-by-glyph comparison of all 16 238 embedded font programs in the mss
 archive (1.6 M glyphs) found every glyph present with bounding boxes within
 1.5 font units. Text is slightly lighter. `pdf_interp`: `PageRenderer::new` /
@@ -1110,7 +1112,7 @@ the mss archive) are no longer negatives.
 **JPEG 2000 decodes in pure Rust.** JPEG 2000 is decoded by
 `hayro-jpeg2000`, kept as a local fork in
 `crates/jpeg2000`. That removes the last C parser of untrusted image data
-from the default build (FreeType remains for fonts), along with the `image`
+from the default build (the external font rasteriser remains for fonts), along with the `image`
 crate and a duplicate `moxcms`.
 - **Memory traffic:** the fork's changes cut memory traffic under parallel
   decoding. Each change is byte-identical to the unmodified decoder, checked
@@ -1154,7 +1156,7 @@ clip:
 - **Image XObjects, inline images and stencil masks** ignored the clip
   entirely, so a `W n` before `Do` had no effect. On a ClearScan witness whose
   background image is black under the text block and clipped to the margins,
-  six pages rendered 64–77% black against pdftoppm's 6–9%. They now land within
+  six pages rendered 64–77% black against the reference renderer's 6–9%. They now land within
   0.1–0.4 points of it. Clipped image edges are hard, not antialiased.
 - **Separation images** were blitted as DeviceGray without evaluating the
   tint transform, so every `[/Separation /Black /DeviceCMYK fn]` image
@@ -1297,7 +1299,7 @@ that forced the `cuda-12080` cudarc pin is retired, so the pin moved to
 
 **Glyph cache actually consulted.** `GlyphCache` had been dead code — built per
 page, never read, so every occurrence of a character was re-rasterized through
-FreeType (98.7–98.9% of calls were redundant). `show_text` now goes through
+The external font rasteriser (98.7–98.9% of calls were redundant). `show_text` now goes through
 `FontFace::make_glyph*_cached`, and `GlyphRecord` holds a shared
 `Arc<GlyphBitmap>` instead of an owned copy of the pixels.
 
@@ -1405,7 +1407,7 @@ network round-trip. First public API addition since 1.0.
   zero-dimension malformed-payload path, an oversized-side codec-error
   leak, and a pre-existing broken intra-doc link uncovered in the process);
   hot-path copy elisions; cargo-mutants-driven test hardening of the
-  box-filter arithmetic and stride dispatch. `wiki/LLM-Vision-OCR-Integration`
+  box-filter arithmetic and stride dispatch. [the wiki's LLM-Vision-OCR-Integration page](https://github.com/pthomasfournet/rasterrocket/wiki/LLM-Vision-OCR-Integration)
   and the README document the helper.
 
 No behavioural change to the existing render path. The new API is purely
@@ -1440,8 +1442,8 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
 - **Security/robustness**: max-raster-area DoS cap (`MAX_PX_AREA`,
   `u64`-computed to avoid a latent overflow that would let a hostile
   page pass); FFI trust-boundary documented (at the time, system
-  FreeType and JPEG 2000 libraries had to be patched — `cargo audit` covers the Rust tree
-  only; the JPEG 2000 library left the render path in v1.4.1 and FreeType in v1.5.0); bounded
+  the external font rasteriser and JPEG 2000 libraries had to be patched — `cargo audit` covers the Rust tree
+  only; the JPEG 2000 library left the render path in v1.4.1 and the external font rasteriser in v1.5.0); bounded
   deterministic decoder property/fuzz harness; page-level and
   per-annotation/widget JavaScript entry points now detected (bounded,
   first-hit; structural `/S` only, `/JS` never decoded or executed).
@@ -1489,8 +1491,8 @@ All breaking API changes from the pre-1.0 cleanup are now permanent. The public 
 - **`prescan_session`** — classify a page without rendering pixels; returns `PageDiagnostics` with image/text flags and a native-PPI hint.
 - **`RasterOptions::default()`** — `dpi = 300`, all pages, no deskew.
 - **`SessionConfig::with_policy(p)`** — construct without reading `PDF_RASTER_BACKEND`.
-- **Spec-correct simple-font text** (v0.9.2) — PDF §9.2.4 `Widths`-array lookup now prevails over FreeType metrics. Academic / English-language PDFs show large RMSE improvements vs pdftoppm.
-- **Phase 11 contest** (v0.9.0) — million-page-archive workload; E1 first-pixel 35.6 ms vs mutool 93.7 ms (2.6×); E3 cross-doc 3.5 ms/archive.
+- **Spec-correct simple-font text** (v0.9.2) — PDF §9.2.4 `Widths`-array lookup now prevails over the external font rasteriser metrics. Academic / English-language PDFs show large RMSE improvements vs the reference renderer.
+- **Phase 11 contest** (v0.9.0) — million-page-archive workload; E1 first-pixel 35.6 ms vs a second reference renderer 93.7 ms (2.6×); E3 cross-doc 3.5 ms/archive.
 - **libdeflate FlateDecode** (v0.9.0, default-on) — 1.5–2.4× faster zlib decompression; `--no-default-features` falls through to flate2.
 - **In-tree `pdf` crate** (v0.6.0) — replaced lopdf; lazy mmap-backed, thread-safe per-object cache, logarithmic page-tree descent.
 - **RAM-backed output by default** (v0.6.0) — bare-stem prefixes write to `/dev/shm`; SpillPolicy falls through to disk below 1 GiB MemAvailable.
@@ -1500,17 +1502,17 @@ All breaking API changes from the pre-1.0 cleanup are now permanent. The public 
 **Spec-correctness fix on the simple-font text path — the headline.**
 
 - **PDF §9.2.4 Widths-array lookup for simple fonts**
-  (`rasterrocket-interp/resources/font.rs`). The renderer was using FreeType's
+  (`rasterrocket-interp/resources/font.rs`). The renderer was using the external font rasteriser's
   `horiAdvance` for every byte of simple-font text, but for any font
   not embedded in the PDF (most academic / English-language PDFs),
-  FreeType returns Helvetica-substitute metrics. The spec is explicit
+  the external font rasteriser returns Helvetica-substitute metrics. The spec is explicit
   that the font dict's `Widths` array MUST prevail over the font
   program's widths, "even when no font file is embedded." Fixed by
   adding `FontDescriptor::width_for_code(char_code) -> Option<i32>`
   (with `MissingWidth` fallback per PDF §9.8.2) and routing the
   per-byte advance through it; `face.glyph_advance` is now consulted
   only when the `Widths` array is absent entirely (the 14 standard
-  fonts pre-PDF-1.5). Pixel-diff against pdftoppm:
+  fonts pre-PDF-1.5). Pixel-diff against the reference renderer:
   - `corpus-05-academic-book`: avg RMSE **57.7 → 40.6** (−17.1).
   - `ritual-14th.pdf`: avg RMSE **43.1 → 24.3** (−18.8).
   - Other corpora: identical (use Type 0 or have no `Widths` array).
@@ -1644,7 +1646,7 @@ workspace; ~700 net lines removed.**
 **C++-idiom cleanup:**
 
 - **`FontFace::glyph_advance` returns `Option<f64>`** (was `-1.0`
-  sentinel).  Caller's silent `.max(0.0)` (which masked FreeType load
+  sentinel).  Caller's silent `.max(0.0)` (which masked the external font rasteriser load
   failures as zero-advance) becomes explicit `.unwrap_or(0.0)`,
   matching PDF §9.4.4 "advance even on missing glyph" semantics.
 - **`raster::stroke` module — 5 of 6 helpers demoted from `pub` to
@@ -1995,7 +1997,7 @@ Criterion 2 (≤ 30% second-render time) is just outside the threshold but the r
 
 - **`--backend auto|cpu|cuda|vaapi` flag** — `BackendPolicy` enum (`Auto`, `CpuOnly`, `ForceCuda`, `ForceVaapi`) exposed on `SessionConfig`; `RasterError::BackendUnavailable` for forced-backend failures. CLI `--backend` and `--vaapi-device` flags wired through; `vaapi` feature exposed on the CLI crate.
 - **Compositing correctness hardening** — 5 bugs in the general pipe, 4 safety assertions; AA gamma table values corrected with exhaustive test; `ncomps` parameter removed from `draw_image`/`blit_image` (derived from pixel type instead).
-- **Bug fixes** — TJ kern ignores Tz correctly; FreeType init error propagated instead of panicking; `col_to_byte` uses saturating cast; PTX compilation now triggered correctly on `gpu-aa`/`gpu-icc` builds; PDF page cache evicted before each timed bench run.
+- **Bug fixes** — TJ kern ignores Tz correctly; the external font rasteriser init error propagated instead of panicking; `col_to_byte` uses saturating cast; PTX compilation now triggered correctly on `gpu-aa`/`gpu-icc` builds; PDF page cache evicted before each timed bench run.
 - **Refactors** — `finish_pixel` helper extracted; `compute_a_src` helper extracted eliminating duplicated alpha logic; `page/mod.rs` split into focused sub-modules.
 - **CLI shared-helper refactor** — `DEFAULT_VAAPI_DEVICE` const eliminates 3 independent string literals; `diagnostics.rs` module extracted from `main.rs` (4 error display functions); `build_page_list` moved into `Args::build_page_list(&self, total) -> Result<(Vec<i32>, Vec<String>), String>` (testable, side-effect-free); `routing_hint_from_diag` + `ProgressCtx::report` moved into `page_queue.rs` (eliminating cross-module call inversion); serial prescan loop removed (recovered 15-20% performance regression); `count_filter` + `update_max_ppi` helpers extracted in `prescan.rs` (eliminated duplicate PPI/filter-count blocks); `main.rs` reduced to ~100 lines of pure orchestration; 21 new unit tests.
 - **Rayon pool hardening** — deadlock fix: `tx` now explicitly dropped inside `pool.scope` closure; single-thread pool deadlock guard (`capacity = n_pages` when `n_threads == 1`); ETA guard prevents `~0.0s remaining` on first page; `debug_assert!(n_pages >= 1)` makes invariant explicit; capacity tests now verify actual channel back-pressure behavior.
@@ -2078,7 +2080,7 @@ Initial release.  Native PDF interpreter (Phases 1–4), GPU acceleration (nvJPE
 - [x] Clip paths: `W W*` — intersected into live `Clip` with correct pending-flag semantics
 - [x] Colour operators: `g G rg RG k K sc scn SC SCN cs CS`
 - [x] Text objects + state: `BT ET Tf Tc Tw Tz TL Ts Tr Td TD Tm T*`
-- [x] Text showing: `Tj TJ ' "` via FreeType
+- [x] Text showing: `Tj TJ ' "` via the external font rasteriser
 - [x] Font encoding `Differences` array → Adobe Glyph List → GID
 - [x] `ExtGState` (`gs`): fill/stroke opacity, line width, cap, join, miter, flatness
 - [x] Form XObjects: recursive execution, resource isolation, depth limit
@@ -2136,7 +2138,7 @@ acceleration.
 
 **Decision: CPU sparse tile rasterisation is deferred.** The original item (replace flat SoA with tile records sorted by (y,x)) was motivated by cache-miss reduction. On the 9900X3D the working set fits in L3, so the scanline sweep is already compute-bound and the win would be marginal. Tile records become high-value as the **GPU dispatch format** (Phase 4), where they map directly to warp-parallel execution. Implementing them twice — once for CPU, once for GPU — is redundant; Phase 4 will do it once, correctly, for the right target.
 
-**AA quality note:** the current 4× scanline supersampling (`render_aa_line`) is an approximation. Analytical sub-pixel coverage (vello-style trapezoid integrals) is strictly better in quality and would be faster on the GPU. This is addressed in Phase 4.
+**AA quality note:** the current 4× scanline supersampling (`render_aa_line`) is an approximation. Analytical sub-pixel coverage (analytic trapezoid integrals) is strictly better in quality and would be faster on the GPU. This is addressed in Phase 4.
 
 ---
 
@@ -2182,9 +2184,11 @@ Track and close fidelity gaps against reference renderers once the native path i
 
 ## Phase 4 — GPU acceleration (cudarc)
 
-Unblocked by Phase 1 completion (the `pdf_bridge` path must be gone first). **Phase 1 is complete — Phase 4 is now unblocked.**
+Unblocked by Phase 1 completion (the `pdf_bridge` path must be gone first). **Phase 1 was completed, which unblocked Phase 4.**
 
-**Hardware context (RTX 5070, CC 12.0 Blackwell, 12 GB GDDR7):** cudarc 0.19 is already wired in `crates/gpu` with two kernels (Porter-Duff composite, soft mask) and CPU fallbacks. Target `sm_120` PTX. The GPU dispatch threshold is currently 500k pixels — validate this against actual transfer latency on this machine once the native path is hot. Do **not** use wgpu/Vello's GPU backend — CUDA is strictly better for a batch server pipeline on NVIDIA hardware.
+**Status (2026-11-19):** shipped; the device AA fill and tile fill were removed, nvJPEG and Auto nvJPEG2K are dormant; ICC CLUT and the Vulkan/D3D12 page raster are live (see Current status).
+
+**Hardware context (RTX 5070, CC 12.0 Blackwell, 12 GB GDDR7):** cudarc 0.19 is already wired in `crates/gpu` with two kernels (Porter-Duff composite, soft mask) and CPU fallbacks. Target `sm_120` PTX. The GPU dispatch threshold was 500k pixels at the time — validate this against actual transfer latency on this machine once the native path is hot. Do **not** use wgpu/Vello's GPU backend — CUDA is strictly better for a batch server pipeline on NVIDIA hardware.
 
 **Do not use DLSS, MSAA, CSAA, or TAA.** These are real-time game rendering features (temporal, triangle-mesh, depth-buffer dependent) and have no applicability to batch PDF rasterisation.
 
@@ -2195,7 +2199,7 @@ Unblocked by Phase 1 completion (the `pdf_bridge` path must be gone first). **Ph
 For scan-heavy corpora (JPEG/JBIG2/CCITT image layers + thin OCR text overlay), image decoding dominates wall-clock time. nvJPEG decodes at ~10 GB/s on the RTX 5070; the CPU JPEG path (DCTDecode) is 10–20× slower. No rasterizer changes required — wire nvJPEG into the existing `blit_image` path behind a feature flag.
 
 - [x] `gpu::nvjpeg` module: minimal raw FFI surface (no bindgen); `NvJpeg` (pub(crate)) + `NvJpegDecoder` (pub) safe wrapper; `decode_sync` blocks on `cuStreamSynchronize` after GPU DMA completes
-- [x] DCTDecode dispatch: image area ≥ `GPU_JPEG_THRESHOLD_PX` (512×512) → nvJPEG; else CPU zune-jpeg; CMYK JPEG falls through to CPU
+- [x] DCTDecode dispatch: image area ≥ `GPU_JPEG_THRESHOLD_PX` → nvJPEG (the constant is now `u32::MAX`: nvJPEG is wired but dormant); else CPU zune-jpeg; CMYK JPEG falls through to CPU
 - [x] Feature flags: `gpu/nvjpeg` + `rasterrocket-interp/nvjpeg`; zero-cost when disabled; `rasterrocket-interp` maintains `unsafe_code = "deny"`
 - [x] `NVJPEG_BACKEND_HARDWARE` (on-die engine, RTX 5070/Turing+) with automatic fallback to `NVJPEG_BACKEND_DEFAULT` on `NVJPEG_STATUS_JPEG_NOT_SUPPORTED` (progressive JPEGs); fallback is one-shot per decoder instance
 - [x] Output buffer is `PinnedBuf` via `cuMemAllocHost_v2` — declare the `_v2` symbol explicitly via `#[link_name]`; calling the old `cuMemAllocHost` symbol returns `CUDA_ERROR_INVALID_CONTEXT=201`; plain `Vec<u8>` segfaults on DMA
@@ -2221,7 +2225,7 @@ For scan-heavy corpora (JPEG/JBIG2/CCITT image layers + thin OCR text overlay), 
   - `NvJpeg2kError`: `Nvjpeg2kStatus`, `CudaError`, `CudartError`, `UnsupportedComponents`, `ZeroDimension`, `Overflow`
 - [x] **CLI wiring for nvJPEG + nvJPEG2K** — `thread_local! DecoderInit<T>` state machine per rayon worker thread in `crates/cli/src/render.rs`; lazy construction on first page; decoder moved into renderer before `execute()` and returned to the slot after `render_annotations()`; `DecoderInit::Failed` prevents retry-and-spam after a one-time init failure; `PageRenderer::take_nvjpeg` / `take_nvjpeg2k` recover the decoder after each page so the CUDA context and stream survive across pages with zero re-init cost
 
-**2. GPU supersampled AA — replaces CPU 4× scanline AA** ✓ COMPLETE
+**2. GPU supersampled AA — replaces CPU 4× scanline AA** ✓ COMPLETE, then REMOVED 2026-11-14 (the CPU's exact-area coverage left the device nothing to win; see Current status, "exact-area coverage")
 
 The current `render_aa_line` + nibble-popcount AA is the weakest part of the CPU pipeline. Replace it with a CUDA kernel doing **jittered supersampling** at 64 samples/pixel using warp-level ballot reduction:
 
@@ -2240,7 +2244,7 @@ output[py * width + px] = (uint8_t)((coverage * 255) / 32);
 - [x] Validate quality vs CPU AA on pixel-diff benchmark — pixel-identical (RMSE=0) across 41 pages / 98 GPU-dispatched fills at 600 DPI; CLI `gpu-aa` feature wires `GpuCtx` into renderer
 - [x] **Dispatch threshold calibration** (`src/bin/threshold_bench.rs`): geometric sweep 256–4M px on RTX 5070 + `PCIe` 5.0; `GPU_AA_FILL_THRESHOLD` 16 384 → **256 px** (GPU wins immediately; 2.5× at 256 px, 100× at 16 384 px)
 
-**3. Tile-parallel fill rasterisation — GPU path only** ✓ COMPLETE (kernel + Rust API; PageRenderer integration pending)
+**3. Tile-parallel fill rasterisation — GPU path only** ✓ COMPLETE, then REMOVED (the tile-fill kernel is deleted; `--gpu-pages` computes exact-area coverage in its own page raster)
 
 Tile records (sorted by (tile_y, tile_x)) are the natural GPU work unit. One 16×16 thread block per tile, independent analytical coverage accumulation per pixel, no inter-tile communication required.
 
@@ -2259,9 +2263,9 @@ CUB radix sort was evaluated and rejected for this use case: typical PDF pages h
 DeviceCMYK → DeviceRGB via two paths depending on whether a full ICC CLUT is available:
 
 - [x] **CPU matrix path** (`icc_cmyk_to_rgb_cpu`, clut=None): subtractive formula `(255−ch)*(255−K)/255` vectorised with `avx512bw` + `avx512vbmi` — 32 pixels/call via `_mm512_mullo_epi16` over interleaved `[C M Y K]` lanes, with `vpermw`/`vpermt2b` for the K broadcast and RGBx→RGB gather. VNNI was evaluated and rejected: `_mm512_dpbusds_epi32` requires compile-time constant weights; both operands are runtime pixel data here. Exact `⌊(x+127)/255⌋` divide matches scalar to the bit. Scalar fallback for non-VBMI targets and tail pixels; an earlier 16-px `avx512bw` tier and an 8-px `avx2` tier both lost to the auto-vectorised scalar loop and were deleted.
-- [x] **GPU CLUT kernel** (`kernels/icc_clut.cu`): 4D quadrilinear interpolation over a baked `grid_n⁴ × 3` byte table; one thread per pixel; threshold `GPU_ICC_CLUT_THRESHOLD = 500 000 px` (conservative placeholder; CLUT path not yet in the hot path)
+- [x] **GPU CLUT kernel** (`kernels/icc_clut.cu`): 4D quadrilinear interpolation over a baked `grid_n⁴ × 3` byte table; one thread per pixel; threshold `GPU_ICC_CLUT_THRESHOLD`, now 128 000 px
 - [x] **ICC matrix dispatch fix**: `icc_cmyk_to_rgb` short-circuits to `icc_cmyk_to_rgb_cpu` before the threshold check when `clut=None` — `threshold_bench` showed GPU matrix kernel never beats AVX-512 across all measured sizes (256–4M px); `PCIe` round-trip cost exceeds the cheap per-pixel computation
-- [x] `bake_cmyk_clut` (`rasterrocket-interp/src/resources/icc.rs`): bakes a Little CMS ICC profile into a compact `u8` CLUT for upload; `BakeError` with `InvalidGridSize` and `Cms` variants; `DEFAULT_GRID_N = 17`
+- [x] `bake_cmyk_clut` (`rasterrocket-interp/src/resources/icc.rs`): bakes a the reference colour engine ICC profile into a compact `u8` CLUT for upload; `BakeError` with `InvalidGridSize` and `Cms` variants; `DEFAULT_GRID_N = 17`
 - [x] Rounding bias fix in CUDA kernel: `((255u - c) * inv_k + 127u) / 255u` (was missing the `+127` bias)
 - [x] Parity tests: `icc_cmyk_matrix_simd_vs_scalar` asserts the dispatcher-selected SIMD tier and scalar agree byte-for-byte across a 40-pixel vector covering axis extremes and a mid-range sweep; `icc_cmyk_avx512_matches_scalar` calls the AVX-512 VBMI kernel directly against 200 pseudorandom 32-pixel blocks on machines that support it
 - [x] nvJPEG2000 for JPXDecode — implemented (see Phase 4 item 1 above)
@@ -2331,24 +2335,26 @@ Fixture PDFs are gitignored. Provide your own corpus covering these character cl
 
 ### Commands
 
+Linux benchmarking runs on the i7-8700K (AVX2, no AVX-512) with an RTX 2080 SUPER; the Ryzen 9 9900X3D + RTX 5070 machine runs Windows and is the remote target (`tests/compare/os_bench.sh` / `os_bench.ps1` compare the two).
+
 The results above were produced with scripts since retired with the
 `pdf-raster` package name (and on a build where nvJPEG was enabled; it is
 now disabled, see the GPU dispatch table); current results and the full
-reproduction notes are in the wiki's Benchmarks page (`wiki/Benchmarks.md`).
+reproduction notes are in [the wiki's Benchmarks page](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks).
 `$PDF` is any PDF; the local corpus is `tests/fixtures/corpus-01` …
 `corpus-10` (gitignored, not in the repository).
 
 ```bash
 # CPU-only release build; add e.g. --features "nvjpeg2k,gpu-icc" or
-# --features vulkan for the GPU backends (CUDA_ARCH=sm_120 for the RTX 5070)
+# --features vulkan for the GPU backends (CUDA_ARCH=sm_75 for the RTX 2080 SUPER; sm_120 for the RTX 5070)
 RUSTFLAGS="-C target-cpu=native" cargo build --release -p rasterrocket-cli
 BIN=target/release/rrocket
-mkdir -p /tmp/out /tmp/ref
+mkdir -p target/bench-out target/bench-ref
 
 # Wall clock vs pdftoppm (pass --backend cuda / vulkan to time a GPU build)
 hyperfine --warmup 3 --runs 8 \
-  "$BIN --no-ram --backend cpu -r 150 $PDF /tmp/out/p" \
-  "pdftoppm -r 150 $PDF /tmp/ref/p"
+  "$BIN --no-ram --backend cpu -r 150 $PDF target/bench-out/p" \
+  "pdftoppm -r 150 $PDF target/bench-ref/p"
 
 # Instructions retired per document, two builds compared (without --pdf or
 # --corpus-dir it renders a synthetic set built from files in the repository)
@@ -2361,17 +2367,22 @@ tests/compare/latency.sh -r 150 tests/fixtures/corpus-*.pdf
 tests/compare/compare.sh -r 150 $PDF
 
 # Flamegraph (cargo-flamegraph; release build with debug info)
-CARGO_PROFILE_RELEASE_DEBUG=true cargo flamegraph -o /tmp/flame.svg \
-  -p rasterrocket-cli --bin rrocket -- --no-ram -r 150 $PDF /tmp/out/p
+CARGO_PROFILE_RELEASE_DEBUG=true cargo flamegraph -o target/flame.svg \
+  -p rasterrocket-cli --bin rrocket -- --no-ram -r 150 $PDF target/bench-out/p
 
 # Synthetic fill microbenchmark (raster crate path-fill vs vello_cpu);
-# the bench crate has two binaries, so --bin is required
+# the bench crate has several binaries (`bench`, `contest_v11`, `os_bench`, `paint_trace`, `page_gpu_bench`), so --bin is required
 RUSTFLAGS="-C target-cpu=native" cargo run -p bench --bin bench --release -- --iters 30 --stars 200
 
-# Threshold bench — recalibrate GPU dispatch crossovers after any kernel change
-CUDA_ARCH=sm_120 cargo run -p rasterrocket-gpu --release --bin threshold_bench
+# Cross-OS and GPU-page benches (see docs/cli-reference.md)
+RUSTFLAGS="-C target-cpu=native" cargo run -p bench --release --bin os_bench
+RUSTFLAGS="-C target-cpu=native" cargo run -p bench --release --bin page_gpu_bench
 
-# L3 occupancy monitoring (9900X3D — requires resctrl mount)
+# Threshold bench — recalibrate GPU dispatch crossovers after any kernel change
+CUDA_ARCH=sm_75 cargo run -p rasterrocket-gpu --release --bin threshold_bench   # sm_75: RTX 2080 SUPER; the RTX 5070 is sm_120
+
+# L3 occupancy monitoring (Linux, CPUs with resctrl; the 9900X3D now runs Windows, so this is not run on the current Linux box)
+# requires a resctrl mount
 # mount -t resctrl resctrl /sys/fs/resctrl
 # cat /sys/fs/resctrl/mon_data/mon_L3_XX/llc_occupancy
 ```
@@ -2501,7 +2512,7 @@ Make rasterrocket the rasterise-and-preprocess stage of a production OCR
 pipeline.  The rasterise + deskew path is feature-complete;
 Phase 6 closes the remaining gaps before the first production integration.
 
-### Open work items
+### Work items (all done)
 
 - [x] **`UserUnit` support** — `page_size_pts` now reads `UserUnit`, validates
   it to `[0.1, 10.0]` (returning `RasterError::InvalidPageGeometry` for
@@ -2555,14 +2566,14 @@ Phase 6 closes the remaining gaps before the first production integration.
 
 ## Phase 7 — Heterogeneous dispatch hub
 
-**Goal:** dynamic per-page work routing across CPU threads, GPU decoders, and iGPU (VA-API) based on page content type, JPEG variant, and image size — rather than the current static pixel-area threshold.
+**Goal:** dynamic per-page work routing across CPU threads, GPU decoders, and iGPU (VA-API) based on page content type, JPEG variant, and image size — rather than the static pixel-area threshold of the time.
 
 ### Motivation
 
 Benchmarking revealed that the current threshold-only dispatch leaves significant wins on the table:
 
 - **Progressive JPEG (SOF2)** falls through VA-API entirely (VAEntrypointVLD supports baseline only) — but nvJPEG handles progressive JPEG natively. Detecting the JPEG type at parse time and routing to nvJPEG instead of CPU would recover the GPU decode win on scan corpora 08–09.
-- **Corpus 09 (490 progressive JPEG pages):** our CPU path finishes in ~12s (24 threads) while Poppler takes 10+ minutes single-threaded. A GPU path (nvJPEG progressive) would reduce this further.
+- **Corpus 09 (490 progressive JPEG pages):** our CPU path finishes in ~12s (24 threads) while a reference renderer takes 10+ minutes single-threaded. A GPU path (nvJPEG progressive) would reduce this further.
 - **Mixed workloads** waste GPU dispatch overhead on small images. A smarter router that inspects content type before dispatch avoids the penalty on dense-image-small corpora (corpus 06 is currently 0.6× on GPU).
 
 ### Design
@@ -2590,16 +2601,16 @@ Read the SOF marker byte before dispatch:
 - `0xC2` (SOF2, progressive) → nvJPEG only (VA-API skipped, no wasted parse attempt)
 - `0xC1`, `0xC3` (extended/lossless) → CPU only
 
-Currently every progressive JPEG incurs a full VA-API header parse + `BadJpeg` error + fallthrough. Detecting SOF type in ~3 bytes eliminates this overhead and routes correctly.
+At the time, every progressive JPEG incurred a full VA-API header parse + `BadJpeg` error + fallthrough. Detecting SOF type in ~3 bytes eliminates this overhead and routes correctly.
 
 ### Work items
 
 - [x] Extract SOF marker detection into `gpu::jpeg_sof_type()` — `crates/gpu/src/jpeg_sof.rs`; `JpegVariant { Baseline, Progressive, Other }`; zero-allocation marker scan; `#[must_use]`; 8 unit tests; shared by VA-API and dispatch
 - [x] Update `decode_dct` dispatch: `jpeg_variant = gpu::jpeg_sof_type(data)` before threshold check; nvJPEG accepts `Baseline | Progressive`; VA-API accepts `Baseline` only — progressive skipped entirely; `VapiJpegDecoder::decode_sync` also guards with early return; `decode_dct_gpu` + `decode_dct_vaapi` collapsed into generic `decode_dct_gpu_path<D: GpuJpegDecoder>`
-- [x] Work-stealing page queue: bounded `mpsc::sync_channel` + `rayon::scope`; `RoutingHint` extension point; back-pressure at 2× thread count; `crates/cli/src/page_queue.rs`; deadlock fix + single-thread guard; `routing_hint_from_diag` + `ProgressCtx::report` live in `page_queue.rs`
-- [x] `PageDiagnostics` pre-scan pass: `rasterrocket_interp::prescan_page` walks XObject dict + content stream operators without decoding pixels; sets `GpuJpegCandidate`/`CpuOnly` hints before enqueueing; `crates/rasterrocket-interp/src/prescan.rs`; `count_filter` + `update_max_ppi` helpers extracted
+- [x] Work-stealing page queue: bounded `mpsc::sync_channel` + `rayon::scope`; `RoutingHint` extension point; back-pressure at 2× thread count; `crates/cli/src/page_queue.rs`, since replaced by a `par_iter` over pages, commit 3a6d2ac5; `RoutingHint` and affinity dispatch were removed with it; deadlock fix + single-thread guard; `routing_hint_from_diag` + `ProgressCtx::report` live in `page_queue.rs`
+- [x] `PageDiagnostics` pre-scan pass: `rasterrocket_interp::prescan_page` walks XObject dict + content stream operators without decoding pixels; sets `GpuJpegCandidate`/`CpuOnly` hints before enqueueing; `crates/pdf_interp/src/prescan.rs`; `count_filter` + `update_max_ppi` helpers extracted
 - [x] Serial prescan loop removed from CLI render path — all pages default to `RoutingHint::Unclassified`; `routing_hint_from_diag` retained as extension point for future affinity dispatch; recovered 15-20% throughput regression
-- [x] Affinity dispatch: prescan all pages sequentially before pool start; `CpuOnly` hint → `BackendPolicy::CpuOnly` override in `render_page_rgb_hinted` → `lend_decoders` skips `ensure_nvjpeg` and `DECODER_INIT_LOCK` acquisition; `GpuJpegCandidate` uses session policy unchanged; single rayon pool (soft affinity)
+- [x] Affinity dispatch (removed with the page queue, commit 3a6d2ac5): prescan all pages sequentially before pool start; `CpuOnly` hint → `BackendPolicy::CpuOnly` override in `render_page_rgb_hinted` → `lend_decoders` skips `ensure_nvjpeg` and `DECODER_INIT_LOCK` acquisition; `GpuJpegCandidate` uses session policy unchanged; single rayon pool (soft affinity)
 - [x] Benchmark: full v0.6.0 matrix on 9900X3D + RTX 5070 (`bench/v060/results.md`) and i7-8700K + RTX 2080 SUPER testbench (`bench/v060/results-testbench-i7-8700K-rtx2080super.md`).  Target corpus 08/09 GPU speedup ≥ 5× **was not met** — nvJPEG-via-`GPU_HYBRID` is 5–13× *slower* than 24-thread zune-jpeg on every DCT-heavy corpus on both machines.  Root cause and fix scoped under Phase 8.
 - [x] ~~Re-bench with `nvjpeg-hardware` feature flag enabled (mode E, `NVJPEG_BACKEND_HARDWARE`)~~ — closed as moot.  The mode was added 2026-05-07 to measure rather than infer, but on consumer GeForce there is nothing new to time: `libnvjpeg.so` rejects `NVJPEG_BACKEND_HARDWARE` at handle creation (see the hard-blocker section below), so the feature falls back to `GPU_HYBRID`, the backend the v0.6.0 matrix already measured; and nvJPEG is disabled in every build (`GPU_JPEG_THRESHOLD_PX = u32::MAX`).  The `nvjpeg-hardware` feature remains for measuring a data-centre card.
 
@@ -2625,7 +2636,7 @@ Reverse-engineering desktop NVJPG would take a multi-month research project (cf.
 
 **Removed (2026-11-15).** The whole GPU JPEG decoder is deleted: the parallel-Huffman entropy stage, the Blelloch scan, the GPU IDCT and the CPU pre-pass that fed them, with the `gpu-jpeg-huffman` feature. It had no case to win: the CPU pre-pass already decodes every symbol of the scan to resolve the DC chain, and the CPU walks the stream again for the magnitude bits after the device returns, so the device stage replaces only table lookups between two sequential CPU walks; whole-process it lost about 10× on gray scans (Vulkan, 20 pages at 600 dpi: 2.2 s against 0.22 s for `--backend cpu`) and 1.6–8× on the A18 Pro. Master `10393d55` is the last commit with the complete decoder, converging on CUDA and Vulkan.
 
-**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path but dormant by default (`GPU_JPEG_HUFFMAN_THRESHOLD_PX = u32::MAX`). Phases B–D are closed (2026-11-12): the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
+**Status:** Phase 0 (CPU pre-pass) shipped 2026-05-06/07, since removed with the decoder; only the JPEG header utilities in `crates/gpu/src/jpeg/` remain. Phase A (the parallel-Huffman algorithm in isolation) shipped 2026-05-12 / v1.0.0 as a byte-identical CUDA+Vulkan OSS artifact, wired into the production Vulkan path, dormant by default until its removal on 2026-11-15 (see Removed above). Phases B–D are closed (2026-11-12): the bench gate confirmed 24-thread CPU wins on aggregate throughput, which is the answer to the research question, not a gap.
 
 **Why deferred:**
 
@@ -2725,7 +2736,7 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
     - **Not yet measured:** the spec's `±5%-of-pre-refactor` per-kernel bench gate. Deferred until Task 3 lands so the bench matrix runs CUDA + Vulkan together.
 - [x] **Task 2 — Slang port of all kernels** (merged via `42dc479`). All six kernels translated; `slangc -target spirv` invocation in `build.rs`; `vulkan` Cargo feature gates the SPIR-V compile; aa_fill's `WaveActiveSum` confirmed lowering to `OpGroupNonUniformIAdd Reduce` (no fallback emulation).
     - **Sub-task 2a — CPU twin per kernel.** For each kernel, ship a plain-Rust function that produces bit-identical output (or pixel-diff ≤ 1 LSB for floating-point ones) used as a correctness oracle in tests. Lets us validate Slang→SPIR-V codegen *without* a GPU, isolates "is the kernel logic right" from "is the Vulkan dispatch right" when chasing cross-backend divergence. Already partially present (`crates/gpu/src/blit.rs` has a CPU reference for `blit_image`); generalise to all five.
-- [~] **Task 3 — Vulkan backend implementation**. `VulkanBackend` ships at `crates/gpu/src/backend/vulkan/` via `ash` 0.38 + `gpu-allocator` 0.28 (pure Rust, no FFI).  Module split: `device` (instance/device/queue init, Vulkan 1.3 features incl. shaderInt8 + bufferDeviceAddress + 8-bit storage; ranks discrete > integrated > virtual > CPU when picking physical devices), `memory` (slab sub-allocator wrapping gpu-allocator with persistent-mapped host buffers and BDA-queried device buffers), `pipeline` (lazy SPIR-V→VkPipeline cache, per-kernel descriptor set layouts, on-disk `VkPipelineCache` blob at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`), `recorder` (per-page command buffer, timeline-semaphore page fence, single-page-in-flight invariant, compute→compute memory barriers between dispatches, 2D dispatch for aa_fill so images >256×256 fit the workgroup-count limit), `transfer` (synchronous upload/download via a reusable host-coherent staging buffer grown to high-water-mark).
+- [~] **Task 3 — Vulkan backend implementation**. `VulkanBackend` ships at `crates/gpu/src/backend/vulkan/` via `ash` 0.38 + `gpu-allocator` 0.28 (pure Rust, no FFI).  Module split: `device` (instance/device/queue init, Vulkan 1.3 features incl. shaderInt8 + bufferDeviceAddress + 8-bit storage (no longer requested: `shaderInt8` and 8-bit storage were dropped, see "Vulkan devices without 8-bit storage are eligible"); ranks discrete > integrated > virtual > CPU when picking physical devices), `memory` (slab sub-allocator wrapping gpu-allocator with persistent-mapped host buffers and BDA-queried device buffers), `pipeline` (lazy SPIR-V→VkPipeline cache, per-kernel descriptor set layouts, on-disk `VkPipelineCache` blob at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`), `recorder` (per-page command buffer, timeline-semaphore page fence, single-page-in-flight invariant, compute→compute memory barriers between dispatches, 2D dispatch for aa_fill so images >256×256 fit the workgroup-count limit), `transfer` (synchronous upload/download via a reusable host-coherent staging buffer grown to high-water-mark).
     - **Parity tests passing (15/15):** four `composite_rgba8`, three `apply_soft_mask`, four `aa_fill` (square / triangle / degenerate / 512×512-exceeds-1D-limit), two `icc_cmyk_clut`, two `blit_image` (RGB / Gray) — all match the CPU reference within ≤ 1 LSB per channel on the dev box's nouveau ICD.
     - **Task 3 follow-ups (perf only), measured 2026-11-13 and closed as not worth it.**  `vulkan_phase_bench` (features `vulkan,cache`) times each kernel page's steps apart (host preparation, recording, `submit_page`, `wait_page`, host read) and splits the wait into the copies-only page and the kernel's device time (per-dispatch slope of a 5-dispatch page).  Medians of 9; RTX 5070 / RADV Raphael iGPU:
         - Fixed cost of one page: record 0.4 µs, submit 1.6 / 6.6 µs, wait of an empty page 16 / 29 µs.  A page with one dispatch and its copies records in 1.6–12 µs (NVIDIA) / 0.6–8 µs (RADV), descriptor work included.
@@ -2739,7 +2750,7 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
     - **Formerly listed as blocked on external factors:**
         - ~~**`record_tile_fill` parity test.**~~ Moot: the tile-fill kernel is deleted. The single `aa_fill` kernel has a host twin and CUDA/Vulkan/twin parity tests.
         - **`OnceLock::get_or_try_init` usage.** Still waiting on the stable API (rust-lang/rust#109737).  Today's manual race-loser cleanup in `pipeline.rs::get` is correct; switch when stable.
-        - ~~**Cross-vendor smoke (AMD-RADV, Intel-ANV, lavapipe).**~~ No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` and `llvmpipe` render (v1.5.0). The byte-parity run against the CPU path is done (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe); Intel ANV remains untested.
+        - ~~**Cross-vendor smoke (AMD-RADV, Intel-ANV, lavapipe).**~~ No longer hardware-blocked: the Windows dev box has an AMD Raphael iGPU, and `--vulkan-device radv` and `llvmpipe` render (v1.5.0). The byte-parity run against the CPU path is done (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe); Intel ANV remains untested.
 - [x] **Task 4 — Renderer integration + bench gate** (~1500 LoC across `rasterrocket-interp`, `rasterrocket`, `rasterrocket-cli`).  Today the Vulkan backend exists and parity-tests against CPU references, but the renderer dispatches CUDA via `GpuCtx` directly — no end-to-end Vulkan path.  Closing the phase needs:
     - [x] **Step 1 — `BackendPolicy::ForceVulkan` plumbing + loud-error placeholder** (commits `8126100`, `aec2053`, `55b54a0`).  CLI `--backend vulkan` → `BackendArg::Vulkan` → `BackendPolicy::ForceVulkan` → `rasterrocket::render::open_session` returns `BackendUnavailable` with a directive message.  `init_gpu_ctx` short-circuits CUDA init under `ForceVulkan`.  `--vaapi-device` conflict detection extended.  Smoke-tested: `rrocket --backend vulkan <pdf> <prefix>` exits with the explanatory error rather than silently CPU-rendering.
     - [x] **Step 2 — Migrate kernel call sites in `rasterrocket-interp` to the trait surface** (commit `15dd420`, hardened in `1783d66`).  Parallel-Vulkan-branch architecture: `PageRenderer` gains an `Option<Arc<VulkanBackend>>` field beside `gpu_ctx`; the fill dispatch prefers Vulkan when set.  `rasterrocket_interp::renderer::page::vk_ops` wraps the trait surface (`alloc → upload → record_* → submit → wait → download`) for AA fill and tile fill.  Phase 9 cache stays CUDA-only by construction (Vulkan path doesn't touch `DevicePageBuffer`/`DeviceImageCache`).  ICC CMYK→RGB on Vulkan is intentionally deferred — the renderer plumbing (`resolve_image → decode_dct → cmyk_raw_to_rgb`) currently threads only `Option<&GpuCtx>`, and under `ForceVulkan` it falls through to the CPU `cmyk_to_rgb_reflectance` matrix (matches Phase 9-pre-2026-05-07 quality).  Pre-existing `crates/gpu/build.rs` bug found and fixed in the same commit: PTX compilation now keys on a real NVCC probe instead of a feature-flag heuristic that didn't include `rasterrocket-interp/gpu-aa` (the previous heuristic produced 0-byte placeholder PTX for `--features "vulkan,gpu-aa"` builds, then crashed at runtime with `CUDA_ERROR_INVALID_IMAGE`).
@@ -2835,7 +2846,7 @@ Vector output (PostScript, SVG or PDF) and dynamic XFA forms: rasterrocket rende
 
 - **Every silent-loss root fixed at the root**, not papered over with a fallback. Blank text/vector pages (indirect `/Length`, `/ObjStm` object streams, TrueType CIDFontType2), partial text drop-out, JPX+`/Mask` blank scans, page-tree "no pages", chained-filter skips, FunctionType-4 Separation tints, CFF/Type1C glyph garble, misleading errors on malformed/empty/non-PDF input, JS-bearing PDFs hard-refused, CCITTFax G3/G4 ImageMask "no rows", JPXDecode CMYK.
 - **DoS classes closed** as a deliberate hardening sweep: stack-overflow (tokenizer recursion → iteration), unbounded memory, raster-area cap (`MAX_PX_AREA`, `u64`-computed to kill a latent overflow), LZW bomb, filter-chain flood, Type-4 recursion/operand bomb, watchdog escape via tiling patterns, unbounded endstream scan.
-- **Security posture documented**: FFI trust boundary (at the time, the system FreeType and JPEG 2000 libraries had to be patched by the host — `cargo audit` covers only the Rust tree; both have since been replaced, the JPEG 2000 library by the local `hayro-jpeg2000` fork in v1.4.1 and FreeType by the local `read-fonts`/`skrifa` forks in v1.5.0, so the default build links no system C library and its only C code, libdeflate and the CLI's mimalloc allocator, is compiled from vendored source); bounded deterministic decoder property/fuzz harness; page-level and per-annotation/widget JavaScript *detection* (structural `/S /JavaScript` only — `/JS` is never decoded or executed; bounded, first-hit).
+- **Security posture documented**: FFI trust boundary (at the time, the system font rasteriser and JPEG 2000 libraries had to be patched by the host — `cargo audit` covers only the Rust tree; both have since been replaced, the JPEG 2000 library by the local `hayro-jpeg2000` fork in v1.4.1 and the external font rasteriser by the local `read-fonts`/`skrifa` forks in v1.5.0, so the default build links no system C library and its only C code, libdeflate and the CLI's mimalloc allocator, is compiled from vendored source); bounded deterministic decoder property/fuzz harness; page-level and per-annotation/widget JavaScript *detection* (structural `/S /JavaScript` only — `/JS` is never decoded or executed; bounded, first-hit).
 - **No deferred findings.** Every review finding that didn't fit its originating commit was fixed at root, not filed and forgotten — including a git-proven latent form-XObject CTM regression, 17 missing PDF Appendix D.2 encoding slots, non-deterministic catalogue selection, and a multi-backend `resolve_image` type-inference break the campaign unmasked.
 
 **Acceptance criterion (met).** The 238-PDF exhaustive corpus is 100% legible — zero silent loss, zero crash — measured by OCR against an independent reference renderer. No public API changes; decrypt stays private-copy-only behind a default-No liability gate; JavaScript is detected and disclosed but never executed.
@@ -2916,8 +2927,8 @@ the Unicode bidirectional algorithm, then shaped the same way.
 Not done: the comparison the plan called for, of non-embedded Arabic and
 Devanagari archive documents against an embedded, shaped rendering of the
 same text. The tests cover joining, letter order and vowel-sign reordering
-on the bundled faces. Runs do not cross show strings, so a word split
-across `Tj` operators is shaped piecewise.
+on the bundled faces. Runs did not cross show strings in v2.1.0; since v2.4.0 a word split
+across `Tj`/`TJ` strings is shaped and fitted as one word (see Current status).
 
 **Substitution follow-ups, in v2.1.0 (2026-11-02).** A vertical-form
 CID drawn by a substitute without a `vert`/`vrt2` form is rotated or
@@ -2941,7 +2952,7 @@ derived from it for vertical forms.
 
 ---
 
-## Current status (2026-11-17)
+## Current status (2026-11-19)
 
 Every **phase** is shipped or deferred by deliberate decision, apart from the
 Phase 13 above, of which Windows PDF pass-through and fax are still to do; Phase 14 shipped in v2.1.0.
@@ -2981,7 +2992,7 @@ coverage from one integer rasteriser (`raster::coverage`) in place of the 4×4
 supersampled scanner and its gamma-1.5 table. The scanner's inclusive bottom row
 made fills about 0.25 px heavy on +y, and its coverage was nonlinear and banded
 in 16 levels: a `1 w` stroke on a row boundary drew 165/89 where the area is
-127/127. Every antialiased path pixel changes. Against pdfium's corpus (260
+127/127. Every antialiased path pixel changes. Against the reference renderer's corpus (260
 scored pages) the median RMSE falls from 4.39 to 1.45, with 82 pages closer and
 7 slightly further, and the fill bench runs 6.34 → 4.70 ms (vello_cpu gap
 3.9× → 2.85×). Stroke pieces meet without overlap at joints and on retraced
@@ -3066,7 +3077,7 @@ mixed intents converting relative with one warning; `--bpc`
 detects it, and perceptual or saturation conversions to v4 profiles always
 compensate. Absolute colorimetry and compensation are folded into the
 working-space source profile, so the printer's tables run unchanged through
-moxcms at 16 bits. Against Little CMS's `transicc` on a 793-patch chart the
+moxcms at 16 bits. Against the reference colour engine's measurements on a 793-patch chart the
 worst ΔE00 over every intent, with and without compensation, at 8 and 16
 bits, is 0.93 (synthetic v4 and v2 table-based RGB printers and a gray
 printer, `tests/fixtures/icc`, built by `scripts/make_test_icc.py`; CI runs
@@ -3105,7 +3116,7 @@ working space, under `--intent`, default relative colorimetric, and
 §10.4.2.3 device conversion, so gray and black text are black ink alone.
 Overprint is simulated with `--overprint` and knocked out otherwise.
 Written as Separated TIFF (`InkSet` 1, 8 or 16 bits, banded, tagged with the
-profile) and Adobe YCCK JPEG (`APP14` transform 2, inverted).  Against `pdftoppm -tiff -overprint` at
+profile) and Adobe YCCK JPEG (`APP14` transform 2, inverted).  Against the reference renderer's overprint output at
 72 dpi the swatch fixture is identical in every channel; on eight pages
 of four archive documents the mean per-channel difference is 0–4.4
 levels, but 9.6 (K) on a page of an RGB JPEG cover whose page means agree
@@ -3154,6 +3165,8 @@ codes the trace expands to several characters, and by 61 glyphs of two
 running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
+
+**Unreleased on master: AVX2 and AVX-512 kernels on this CPU class.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. Comic pages render on the thread pool.
 
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
@@ -3849,13 +3862,13 @@ a build without `d3d12` needs neither DXC nor a particular slangc. Tests check t
 container is hashed, that no DXIL division is `fast`, that only the
 outline raster and its division probe declare 64-bit integers, and that no
 SPIR-V module carries an `FPFastMathMode` decoration. No render path
-loads the DXIL. Install commands for Linux and Windows are in the README's
+loaded the DXIL at this step. Install commands for Linux and Windows are in the README's
 [Build](README.md#build) section.
 
 **Unreleased on master: D3D12 adapter selection and device creation.** On
 Windows, the `d3d12` feature's `D3d12Backend` opens a DXGI adapter with a
-device at feature level 11_0 and one compute queue; it dispatches no kernel
-yet. Adapters are listed by DXGI's high-performance order, then the WARP
+device at feature level 11_0 and one compute queue; it dispatched no kernel
+at this step. Adapters are listed by DXGI's high-performance order, then the WARP
 adapter. Without a selector it takes the first hardware adapter with
 dedicated video memory, else the first hardware adapter; `usable_gpus` lists
 them all in that order. A selector is an index or a name substring, as for
@@ -3899,7 +3912,7 @@ constants, one 16 × 16 thread group per tile of the bounding box) and
 implements `CacheBackend` with `Arc<D3d12Backend>` as its handle: a slab is
 uploaded through the backend's staging buffer with zeros up to a whole
 32-bit word, in the same copy, and the host tier holds ordinary memory. No
-session uses it yet: `ImageCache` still carries the CUDA or the Vulkan
+session used it at this step: `ImageCache` still carries the CUDA or the Vulkan
 cache. The blit cases shared with the Vulkan parity tests and the box blit
 match the CPU reference byte for byte, and the cache's device tests pass,
 on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU on
@@ -4023,13 +4036,13 @@ pages in 22 documents change, 3.7 % of their pixels by at most 2/255
 antialiased edges of K-only text. `--preserve-black[=k-only|k-plane]`
 (`RenderParams::preserve_black`, `PreserveBlack`) keeps black ink black
 where ICC CMYK of one press converts to a CMYK `--output-profile`'s (or a
-proof press's) ink, as Little CMS's black-preserving intents do: K-only
+proof press's) ink, as the reference colour engine's black-preserving intents do: K-only
 text stays K-only through a K → K curve matching the two blacks by L*,
 and `k-plane` also keeps every other colour on that curve's K, solving C,
 M and Y for its colour within the press's ink limit. K-only agrees with
 `transicc -t10..12` on every patch (worst ΔE00 0.15); K-plane with
 `-t13..15` on 96–99.7 % of them, and is nearer the colorimetric colour on
-the rest, where Little CMS's Newton iteration stops early.
+the rest, where the reference colour engine's Newton iteration stops early.
 
 **Released in v2.4.0: the CMYK input grid follows the profile's CLUT.**
 The input grid's cells now subdivide the profile's CLUT cells along each
@@ -4078,7 +4091,7 @@ rounding. API changes: `gpu::icc_cmyk_to_rgb_cpu` and the `GpuCompute`
 trait are removed; `gpu::backend::icc_clut` and `GpuCtx::icc_cmyk_to_rgb`
 take a `&CmykGrid`.
 
-**Released in v2.4.0: colour conversions agree with Little CMS to its
+**Released in v2.4.0: colour conversions agree with the reference colour engine to its
 precision.** Three corrections, each measured against `transicc`
 (`input_profile_transicc`, `output_profile_transicc`, ignored tests that
 now assert every case they printed):
@@ -4094,7 +4107,7 @@ now assert every case they printed):
   carries such a profile (a scanner profile on the images of pages 244,
   253 and 254). Its pages 1–10 render byte for byte as before; those
   three pages move by at most 5/255 (ΔE00 mean 0.45–0.69, max 4.1, in
-  the dark tones), and that profile agrees with Little CMS to 0.03 at 16
+  the dark tones), and that profile agrees with the reference colour engine to 0.03 at 16
   bits instead of 2.3.
 - **sRGB to an output profile at 16-bit precision.** The conversion from
   the sRGB working space now uses the wide space's floating point,
@@ -4106,11 +4119,11 @@ now assert every case they printed):
   8-bit pixels by up to 7/255 (ΔE00 mean about 0.6, max 2.2).
 - **Black points of table profiles.** The ISO 18619 round trip that finds
   a destination black now runs through the profile's own tables. The v2
-  test printer's perceptual black was L* 1.0 where Little CMS finds 0.11.
+  test printer's perceptual black was L* 1.0 where the reference colour engine finds 0.11.
   A colour compensated below the PCS black also keeps its a*/b*. CMYK
   separation with compensation goes from 1.27 to 0.19 ΔE00 at 16 bits,
   the CMYK → CMYK link from 1.53 to 0.06, and the special v2 bound is
-  gone. The blacks stay neutral, as Little CMS's are. The input-side
+  gone. The blacks stay neutral, as the reference colour engine's are. The input-side
   black of CMYK printer profiles under relative colorimetry moves too: 21
   of the 29 archive documents with such a profile change, on pages 1–10
   at 50 dpi, in about 5 % of pixels by exactly 1/255 (ΔE00 mean 0.7, max
@@ -4130,7 +4143,7 @@ Previously every conversion used the profile's perceptual table.
   matrix/TRC model and `AToB` tables converts through the tables.
 - **Black-point compensation.** It follows the graphics state's
   `/UseBlackPtComp` (ISO 32000-2; `/ON`, `/OFF`, and `/Default`, which is
-  on, as in Acrobat and Little CMS): under relative colorimetry,
+  on, as in Acrobat and the reference colour engine): under relative colorimetry,
   perceptual and saturation, the profile's black point, found as ISO 18619
   finds it, maps to sRGB black.  A profile whose black is the PCS origin,
   such as sRGB, converts as before.
@@ -4141,13 +4154,13 @@ Previously every conversion used the profile's perceptual table.
 - **Pixel impact** (all pages, against the previous render):
   - The 4 archive documents whose US Web Coated (SWOP) v2 tables differ
     by intent move by at most 4 levels. K100 stays sRGB (35, 31, 32), as
-    Little CMS gives it with compensation; without it, it is (55, 53, 53).
+    the reference colour engine gives it with compensation; without it, it is (55, 53, 53).
   - 19 archive documents whose CMYK profile has identical tables (US
     Supreme Court slip opinions among them) render their blacks deeper, as
     compensation does: dark text goes from luminance 54 to 40, with a max
     channel delta of 16.
   - The repository fixtures render byte for byte as before.
-- **Against Little CMS.** CMYK and gray profiles agree within ΔE00 1.5 at
+- **Against the reference colour engine.** CMYK and gray profiles agree within ΔE00 1.5 at
   8 bits and 1.0 at 16 under every compensated intent (`transicc -b`) and
   under absolute colorimetry (`input_profile_transicc`, ignored).
 
@@ -4192,7 +4205,7 @@ gray `--output-profile`: relative colorimetry maps the paper to white,
 absolute reproduces the paper's white and the press's black (sRGB or a
 matrix/TRC display profile). The ink-to-display conversion is tabulated on a
 33⁴ grid (7.1 MB per press and proof intent, built on the first proofed page)
-and matches Little CMS's `transicc -p` within ΔE00 1 at 16 bits and 1.2 at 8
+and matches the reference colour engine's soft proof within ΔE00 1 at 16 bits and 1.2 at 8
 bits (two 8-bit roundings against its floating-point output; colours below the
 press black, where the two CMMs' separations differ, are left out of the 8-bit
 chart). Of the 1 168 archive PDFs, 433 carry output intents: 428 PDF/A sRGB
@@ -4200,7 +4213,7 @@ ones, which `--proof` refuses, and 5 PDF/X CMYK presses (US Web Coated SWOP
 v2 ×3, ISO Coated v2 300 % ECI, GWG Generic CMYK). Also: black-point
 compensation to a CMYK profile now maps the page's black to the black the
 profile reaches as a conversion source, the round trip of its perceptual black
-(ISO 18619, as Little CMS detects it), instead of its darkest colorant, so
+(ISO 18619, as the reference colour engine detects it), instead of its darkest colorant, so
 `--cmyk --bpc` shadows get lighter: the compensated black moves from L* 16.50
 to 16.61 on US Web Coated (SWOP) v2 (inks within 0.3 %), from L* 11.3 to 12.9
 on ISO Coated v2 (up to 4.4 % ink, about 11 levels of an 8-bit channel, at
@@ -4211,7 +4224,7 @@ black), and from L* 8.0 to 11.1 on the synthetic test press; `--cmyk` without
 A page rendered at 16 bits under `--output-profile` is composited in a wide
 working space, the ROMM RGB primaries with the D50 white and the sRGB tone
 curve (`WorkingSpace::Wide`), instead of sRGB, so colours outside sRGB reach
-the printer conversion unclipped: on device grids through Little CMS it holds
+the printer conversion unclipped: on device grids through the reference colour engine it holds
 100 % of ISO Coated v2 and of an averaged 6-colour photo inkjet
 (PhotoGamutRGB avg6c), where sRGB holds 92.5 % and 49 % (clipping up to ΔE00
 16) and Rec. 2020 88 % (up to 4.2, in the cyan-greens). Device colours keep
@@ -4230,12 +4243,12 @@ sRGB or gray composites in sRGB (see the group-colour-space paragraph below);
 soft-mask groups are painted in sRGB, and overprint-preview pages are
 composited in sRGB and warn. The output conversion and CMYK separation from the wide space
 evaluate in floating point with tetrahedral interpolation at full weight
-precision: against Little CMS, sRGB colours printed through the wide space to
+precision: against the reference colour engine, sRGB colours printed through the wide space to
 the RGB test printers within ΔE00 0.60 (1.03 on PhotoGamutRGB avg6c), the
 wide chart within 0.99. On the 34-PDF gate corpus (pages 1–2, 50 dpi) at 16
 bits under the RGB test printer, every page file differs from before: text
 pages by at most 1.6 8-bit steps; the most-moved pixels of flat colour areas
-match Little CMS's conversion of their sRGB value as before (mean ΔE76 0.13,
+match the reference colour engine's conversion of their sRGB value as before (mean ΔE76 0.13,
 0.15 before); antialiased edges and transparency move by up to ΔE76 16. `--working-space
 srgb|wide` (`SessionConfig::working_space`, `None` automatic) chooses; `wide`
 without an output profile or at 8 bits is refused, and the first 8-bit page
@@ -4272,7 +4285,7 @@ prepare}` take the working space.
   is not the output's (by tag data) converts to the output's ink: source
   `AToB` and output `BToA` evaluated in floating point, the absolute white
   scale or the ISO 18619 black map between them, on a 17⁴ table per source,
-  intent and compensation; within ΔE00 0.73 of Little CMS between the two
+  intent and compensation; within ΔE00 0.73 of the reference colour engine between the two
   test printers (1.53 for compensated perceptual/saturation to the new v2
   one). The output's own profile and `DeviceCMYK` keep their values.
 - **Indexed images over ink** (`DeviceCMYK`, ICC CMYK, `Separation`,
@@ -4284,7 +4297,7 @@ prepare}` take the working space.
   profile's `BToA` evaluated at the node's PCS value, no longer the
   converter's 33³-grid transform, and the table interpolates in tetrahedra
   so grays read the neutral axis alone: below the test press's black, sRGB
-  grays 4–16 separate as Little CMS does (cyan 0/0/0/11.2 %, was
+  grays 4–16 separate as the reference colour engine does (cyan 0/0/0/11.2 %, was
   5.3/0.1/8.0/11.4 %); the chart prints within ΔE00 0.60 of `transicc`, and
   the 8-bit proof chart, the patches below the press black now included,
   within 1.11.
@@ -4295,7 +4308,7 @@ prepare}` take the working space.
   CMYK sources): under `--cmyk --output-profile` ISO Coated v2 300 %, 36
   change on 284 of 423 pages, by up to 215 levels: SCOTUS slip opinions'
   US Web Coated (SWOP) v2 K-only text becomes ISO Coated's four-colour black
-  (C70 M61 Y60 K85, as Little CMS converts it), K-only Indexed palette
+  (C70 M61 Y60 K85, as the reference colour engine converts it), K-only Indexed palette
   entries stop printing as four-colour black. Without a profile, 8 change on
   28 pages (the Indexed images); the 9 documents with BG/UCR functions are
   unchanged on these pages. Through the SWOP press of their own content,
@@ -4325,7 +4338,7 @@ present but cut short is drawn as far as it decodes and reported partial
 (the local `hayro-jpeg2000` fork reports `DecoderContext::completeness`).
 A Type 3 font without a valid `/FontMatrix` uses the identity, not
 0.001, and logs a warning. The `nvjpeg2k` build of the interpreter compiles
-again. pdfium corpus: `bug_972999` passes and `bug_557223` matches its
+again. reference-renderer corpus: `bug_972999` passes and `bug_557223` matches its
 expected image; `jpxdecode_smask_in_data_2` is reclassified as a divergence
 (its references draw the colour opaque, ignoring alpha) and `bug_1128284`
 now draws two of its three marks.
@@ -4346,7 +4359,7 @@ gains `face_name`. A Coons or tensor patch is subdivided until it is also
 flat to 0.25 px, so a single-colour patch with curved sides keeps its
 curves instead of being drawn as its corner quadrilateral. Fixtures
 corpus-08 and corpus-09 now draw their non-embedded Carlito as Carlito and
-pass against pdftoppm; pdfium corpus: `bug_41010502_1` matches its
+pass against the reference renderer; reference-renderer corpus: `bug_41010502_1` matches its
 expected image, `bug_1072440`, `bug_846`, `bug_41010502_2` and
 `type3_xobject` are reclassified as divergences, and `shade-tensor` draws
 its curved patches (tile 161 to 98); patches whose sides loop from a shared
@@ -4364,7 +4377,7 @@ fixtures (all 3,824 pages at 50 dpi gray, and
 ab_render's 215 outputs, byte for byte as before).
 
 **Released in v2.4.0: a more lenient parser.** Four damaged-file shapes
-that pdfium or pdftoppm read now parse. A number with a run of leading
+that the reference renderers read now parse. A number with a run of leading
 signs takes its last one (`--10.12` is -10.12; it was 0). A header of
 `%PDF` without a version is accepted with a warning, and an unclosed
 dictionary ends at the next object's `obj` or at `trailer`, so the
@@ -4378,10 +4391,10 @@ entries, where shared nodes could describe 2^40 pages. A stream whose
 `/Length` misses its end is cut at an `endstream` that is a keyword
 (`endstream.` and `(endstream` are data, `ETendstream` is not), or at
 its object's `endobj`, and spaces after `stream` no longer shift the
-`/Length`. pdfium corpus: of the 11 documents registered as these
-defects, 10 now render pdfium's page up to glyph antialiasing, and
+`/Length`. reference-renderer corpus: of the 11 documents registered as these
+defects, 10 now render the reference renderer's page up to glyph antialiasing, and
 `bug_828049` (a catalog with a direct `/Pages` dictionary) still fails;
-three documents pdfium refuses or draws no page for now open on one blank
+three documents the reference renderer refuses or draws no page for now open on one blank
 page; the full corpus shows no new failure.
 
 **Released in v2.4.0: deskew confidence, `--deskew`, resolution in
@@ -4439,9 +4452,9 @@ stalled, each to a lower cost.
 **Released in v2.4.0: reviewed expected-failures registry.** The
 comparison harness judges a page by its worst per-channel tile delta
 (≤ 12, so colour errors a gray metric hid now count) and judges RMSE only
-against pdfium; `compare.sh` renders under `target/compare` on disk.
-Re-seeded, the pdftoppm suite falls from 2,889 registered pages to 27 and
-the pdfium suite holds 186; every entry carries a reason: antialiasing,
+against the reference renderer; `compare.sh` renders under `target/compare` on disk.
+Re-seeded, the reference-renderer suite falls from 2,889 registered pages to 27 and
+the reference-renderer suite holds 186; every entry carries a reason: antialiasing,
 a named divergence with its evidence, or a defect with its audit ticket.
 
 **Released in v2.4.0: JPEG 2000 device threshold and prefetch scale.**
@@ -4534,7 +4547,7 @@ fixture outputs).
 
 **Released in v2.4.0: direct page-tree nodes and a damaged-object
 message.** A catalog whose `/Pages` is a direct dictionary, and a `/Kids`
-array holding dictionaries rather than references, now give pages (pdfium's
+array holding dictionaries rather than references, now give pages (the reference renderer's
 `bug_828049`, its registry entry removed). Such a node gets an object number
 above the new `pdf::MAX_OBJECT_NUMBER` (2^31 − 1), the same on every walk,
 and `Document::get_object` returns it with `/Parent` set to the node holding
@@ -4548,7 +4561,7 @@ integers and a keyword). An xref entry that leads to no object, for a number
 whose header appears nowhere in the file, now fails with "no object at the
 cross-reference offset N and no `1836 0 obj` header elsewhere in the file
 (damaged file)" (pages 375–376 of the 1872 Pike constitutions); the page
-still fails, no blank page stands in. pdfium corpus: 0 FAIL, 0 XPASS. All
+still fails, no blank page stands in. reference-renderer corpus: 0 FAIL, 0 XPASS. All
 1168 archive PDFs open with page counts identical to before.
 
 **Released in v2.4.0: transparency groups composite in their colour
@@ -4620,7 +4633,7 @@ tessellation emitted its sub-patches in depth-first order, which let the
 smallest parameters win. Sub-patches are now emitted by their parameter
 origin, `v` then `u`. Patches whose sides loop from a shared corner keep
 painting their surface, as the spec defines a patch; both references fill
-the region the boundary encloses instead, so pdfium's `shade-tensor` is
+the region the boundary encloses instead, so the reference renderer's `shade-tensor` is
 registered as a divergence (RMSE 29.4, tile 97.8). A patch that does not fold
 covers the same pixels as before.
 
@@ -4651,8 +4664,8 @@ pixel and lay between two pixel centres painted nothing. Such an axis now
 spans the one pixel containing its centre, holding the mean of its samples
 along the axis; on a rotated or skewed draw it is sheared to one pixel
 across the other axis, so a thin band marks every row it crosses. This is
-pdfium's placement of a sub-pixel image (exact-area coverage would draw it
-lighter, over two pixels). pdfium's `bug_1128284` now matches pdfium except
+The reference renderer's placement of a sub-pixel image (exact-area coverage would draw it
+lighter, over two pixels). The reference renderer's `bug_1128284` now matches its reference except
 for its rounding of cached Type 3 glyph origins to whole pixels, registered
 as a divergence (RMSE 3.56 → 3.35). An axis of a pixel or more is untouched:
 the ten corpus fixtures and 20 image-heavy archive documents, pages 1–3 at
@@ -4702,7 +4715,7 @@ new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
 - **Cal masks.** A luminosity mask whose group is `CalRGB` or `CalGray` takes
   the luminance Y of its colour (ISO 32000-1 §11.5.3), not the luma of its
   encoded values. A gray of 0.5 under gamma 2.2 now masks 0.218, where it
-  masked 0.5. Ghostscript 10.06 agrees to a level.
+  masked 0.5. A third reference renderer agrees to a level.
 - **Unchanged.** ICC-based mask groups keep the luma. Antialiased edges on ink canvases finished
   as RGB still mix in ink:
   - On 9 of the 105 CMYK-page-group archive pages at 300 dpi, OCR word recall
@@ -4735,7 +4748,7 @@ additive groups.**
   finished as RGB of the working space. A profile that cannot separate falls
   back to the model and is reported as before. Red under blue at half alpha
   in a US Web Coated (SWOP) v2 group: 154,66,102 before, 158,70,102 now,
-  Ghostscript 10.06 158,69,102; in FOGRA39, 156,66,101 against its 156,66,100.
+  a third reference renderer 158,69,102; in FOGRA39, 156,66,101 against its 156,66,100.
 - **Spots through additive groups.** On an ink page (`--cmyk`, `--proof`, the
   overprint preview) an RGB transparency group is painted on an ink canvas
   holding the complements of its RGB beside the page's spot channels, which
@@ -4748,7 +4761,7 @@ additive groups.**
   page groups, at 100 dpi: the FOGRA39 page 9.5 % of pixels (7.3 % by more
   than 2 levels, at most 20; mean ΔE76 of changed pixels 3.7, max 8.1), the
   SWOP v2 page 24.9 % (13.6 %, at most 22; mean 3.3, max 8.9). Against
-  Ghostscript, on the changed pixels where neither render lies more than
+  a third reference renderer, on the changed pixels where neither render lies more than
   ΔE76 20 from it (its fonts differ), the mean falls from 6.0 to 5.2 and from
   3.6 to 2.2 (median 3.8 → 3.0 and 1.6 → 0.8). The other 109 pages of the 3
   documents are byte-identical, the "Generic RGB Profile" form group's page
@@ -4832,8 +4845,8 @@ profile converts through two 65³ grids on the shared grid evaluator. A
 space whose conversions do not build keeps the old approximation, with a
 warning and `approximated_group_spaces.rgb_profile`. On isolated Adobe RGB
 and `CalRGB` groups (Multiply, Screen, Luminosity, half alpha) the result
-now agrees with Ghostscript 10.06 to the 1–2 levels an sRGB group does,
-where it used to be the sRGB result, up to 40 levels off (Ghostscript
+now agrees with a third reference renderer to the 1–2 levels an sRGB group does,
+where it used to be the sRGB result, up to 40 levels off (a third reference renderer
 ignores the space of a non-isolated group, which rasterrocket converts
 like its CMYK groups). Of the 1 168 archive documents one has such a group
 (the "Generic RGB Profile" form, painting one opaque colour) and none
@@ -4869,7 +4882,7 @@ match, or when its profile stream holds the group's profile (same tag
 fingerprint), so a copy of the profile embedded beside each image counts,
 for fills too. On an isolated Adobe RGB (and `CalRGB`) group under Multiply,
 8- and 16-bit images, an `Indexed` image, an image in a second copy of the
-profile and an axial shading now agree with Ghostscript 10.06 to 1 level.
+profile and an axial shading now agree with a third reference renderer to 1 level.
 Before, they were up to 21 levels off. The pattern memo now also keys
 resolved shadings by the paint's separator and tiling-cell rasters by the
 canvas's ink setup. Without that, a shading or cell resolved on an ink page
@@ -4885,16 +4898,16 @@ than Normal is now composited as ISO 32000-1 §11.7.4.3 defines: painted
 with `CompatibleOverprint` in an implicit non-isolated group whose result
 takes the blend mode. The colorants it does not paint therefore blend with
 themselves rather than keeping the backdrop: a Screen black overprinting
-50 % cyan leaves 25 % cyan, as Ghostscript 10.06 and MuPDF 1.27 render it,
+50 % cyan leaves 25 % cyan, as two other reference renderers render it,
 where it used to leave 50 %. On the ink canvas, spot channels under a mode
 other than Normal kept the backdrop, so a spot colour painted under
 Multiply, Hue or Difference printed nothing. Now a separable
 white-preserving mode blends them and any other mode paints them as Normal
-does (§11.7.4.2), matching Ghostscript's separations. The ticket's
+does (§11.7.4.2), matching a third reference renderer's separations. The ticket's
 proposal to composite a transparency group through the colorants its
 content painted was not adopted. Table 149's last row and its NOTE 2 have
 a group paint every colorant whatever the overprint parameters, because no
-record of the painted colorants is kept. Ghostscript and MuPDF agree on 19
+record of the painted colorants is kept. Two other reference renderers agree on 19
 synthetic group cases (isolated and non-isolated groups, overprint at
 `Do`, Multiply and Screen, knockout, spot backdrop, half alpha), and the
 renderer already matched both; 18 of the cases are now pinned as tests.
@@ -5543,16 +5556,16 @@ decoded it.
 
 **Per-document latency, in v2.1.0.** The archive-wide latency
 run (50 dpi gray, one core) left two text-heavy documents slower than
-pdfium; both now match or beat it. A text run drawn with `2 Tr` (synthetic
+The reference renderer; both now match or beat it. A text run drawn with `2 Tr` (synthetic
 bold, a stroked glyph outline) draws each glyph's stroke from cached
 coverage instead of stroking the run's outlines (solid, opaque, undashed,
 normal blend, antialiased): the israel pages go from 1.32 s to 0.10 s
-against pdfium's 0.95 s. Curves flatten against the chord segment rather
+against the reference renderer's 0.95 s. Curves flatten against the chord segment rather
 than its midpoint; fills drop closed subpaths lying wholly outside the clip;
 cross-reference entries are indexed by object number; a run of
 text-showing operators resolves its face once; and a CFF program's built-in
 encoding is built in one charset walk. rosa-scheuerman renders in 0.266 s
-against pdfium's 0.261 s. **Two of these change pixels**, both approved
+against the reference renderer's 0.261 s. **Two of these change pixels**, both approved
 after a comparison against an 8× reference render: the flattening, and the
 cached glyph strokes (60 archive pages change, all stroked text; each
 glyph stroke is placed at the quarter-pixel phase of its fill). Everything
@@ -5624,9 +5637,9 @@ the leftover fraction of a pixel lying past the right and bottom edges.
 Before, the box was anchored at the bottom edge (rotations 0 and 270)
 and at the right edge (180 and 270), so content sat up to a pixel low or
 right. Over the 434 pages that change among pages 1–3 of 250 random
-archive PDFs at 150 dpi, the fitted vertical offset against mutool falls
-from 0.15 to 0.06 px on average and against pdfium from 0.32 to 0.20 px;
-pdftoppm, which places a CropBox by its MediaBox at a whole-pixel offset,
+archive PDFs at 150 dpi, the fitted vertical offset against a second reference renderer falls
+from 0.15 to 0.06 px on average and against the reference renderer from 0.32 to 0.20 px;
+The reference renderer, which places a CropBox by its MediaBox at a whole-pixel offset,
 moves from 0.38 to 0.36 px.
 
 **Many path clips fold into one, in v2.1.0.** A clip that reaches eight
@@ -5739,15 +5752,15 @@ the first pass of the day:
   locale, fails when no page was compared, and counts a render failure
   once.
 
-Phase 7's last item, the mode E re-bench, is closed as moot. v2.2.0 is
+Phase 7's last item, the mode E re-bench, is closed as moot. v2.2.0 through v2.4.1 are
 released (see the release history). The CUDA performance
 inventory is closed (2026-11-01): fills run on the backend recorder and
 transfers are blocking by design.
 
 Deferred/blocked items, in full:
 
-- **Phase 8 B–D** — closed (2026-11-12). Phase A shipped as an OSS artifact (v1.0.0) and stays wired but dormant. The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap.
-- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and so does the archive-scale run (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe). The perf-only Task 3 follow-ups were measured and closed (2026-11-13). Fills on the device run only in the `--gpu-pages` page raster, which composites the CPU's exact-area coverage. MoltenVK renders byte-identically on an A18 Pro; Intel ANV and M-series Macs are untested, for want of hardware.
+- **Phase 8 B–D** — closed (2026-11-12). Phase A shipped as an OSS artifact (v1.0.0) and was removed on 2026-11-15 with the rest of the GPU JPEG decoder (last on master at `10393d55`). The aggregate-throughput loss vs 24-thread CPU is the answer, not a gap.
+- **Phase 10 criterion 4** — cross-vendor proof of life (AMD-RADV / Intel-ANV / lavapipe). No longer hardware-blocked: the Windows dev box has an AMD Raphael iGPU, and `--vulkan-device radv` (and `llvmpipe`) render; on RADV the fixtures render byte-identically to the CPU path with the AA fill forced on (215 outputs, `tests/compare/ab_render.sh`), and so does the archive-scale run (2026-11-12: `ab_archive.sh`, fixtures plus the 150-file archive sample, 621 pages at 50 dpi gray with the AA fill forced on: 0 differences from the CPU path on RADV and on llvmpipe). The perf-only Task 3 follow-ups were measured and closed (2026-11-13). Fills on the device run only in the `--gpu-pages` page raster, which composites the CPU's exact-area coverage. MoltenVK renders byte-identically on an A18 Pro; Intel ANV and M-series Macs are untested (the Linux bench box has an Intel UHD 630 on Mesa ANV; no run is recorded).
 - **Phase 11 deferred tasks** — closed (2026-11-12): banded rendering is satisfied by `RenderRegion` tiles; the multi-resolution cache and the display-list render path are dropped; a page trace survives only as a regression oracle.
 - **Banded / clip-restricted image decoding** — deferred by measurement (2026-11-04). Every codec decodes an image whole, and the page memo and document store share that one decode between draws and pages. Over the first 40 pages of the 1 125 fixture and archive PDFs (49 661 image draws), the largest decode is 81 MiB and only 3 draws of 16 MiB or more show less than half their image (one 25 MiB JPEG), so decoding just the visible rows would save 45 MiB in all. Hostile sizes are already bounded: the 1 GiB decode budget is checked before allocation and sample buffers are allocated fallibly. Revive for a workload of very large images drawn mostly clipped.
 - **crates.io** — abandoned. `rasterrocket` and `rasterrocket-cli` were published once at 1.0.1 and are frozen there (not yanked, never updated); every other crate is `publish = false`. The project is distributed from GitHub only.
