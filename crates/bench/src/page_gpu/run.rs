@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use gpu::backend::page_device::{PageDevice, PageTimes};
 use gpu::backend::select::DeviceSelector;
-use gpu::page::PageCommands;
+use gpu::page::{PageCommands, PageSample};
 use pdf_raster::{BackendPolicy, RasterSession, RenderParams, SessionConfig};
 
 use crate::stars::{generate, write_pdf};
@@ -145,7 +145,10 @@ pub fn main() {
         "vulkan" => run::<gpu::backend::vulkan::VulkanBackend>(&cfg),
         #[cfg(all(windows, feature = "d3d12"))]
         "d3d12" => run::<gpu::backend::d3d12::D3d12Backend>(&cfg),
-        a => panic!("--api {a}: not vulkan or d3d12, or not built into this binary"),
+        a => {
+            eprintln!("--api {a}: not vulkan or d3d12, or not built into this binary");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -369,15 +372,18 @@ fn report<B: Api>(cfg: &Config, pdf: &[u8], scale: f64) {
         last = Some(page);
     }
     let last = last.expect("at least one page");
+    let source = cfg.pdf.as_ref().map_or_else(
+        || format!("{} pages x {} stars", cfg.pages, cfg.stars),
+        |path| format!("{} pages of {path}", cfg.pages),
+    );
     println!(
-        "device: {} ({} backend), page {}x{} at {} dpi, {} pages x {} stars, {} threads",
+        "device: {} ({} backend), page {}x{} at {} dpi, {}, {} threads",
         gpu.device_name(),
         cfg.api,
         last.width(),
         last.height(),
         cfg.dpi,
-        cfg.pages,
-        cfg.stars,
+        source,
         cfg.threads
     );
     println!(
@@ -462,20 +468,26 @@ fn report<B: Api>(cfg: &Config, pdf: &[u8], scale: f64) {
         "    device: page copy              {}",
         pick(|s| s.device_download)
     );
-    let page_bytes = out.len();
-    println!(
-        "\nread-back of {page_bytes} page bytes ({}x{} RGB8)",
-        last.width(),
-        last.height()
-    );
-    for (name, times) in [
-        ("device page copy", pick_ns(&steps, |s| s.device_download)),
-        ("host copy        ", pick_ns(&steps, |s| s.read)),
+    let host_bytes = out.len();
+    let device_bytes =
+        last.width() as usize * last.height() as usize * <u8 as PageSample>::DEVICE_PIXEL_BYTES;
+    println!("\nread-back of the {}x{} page", last.width(), last.height());
+    for (name, bytes, times) in [
+        (
+            "device page copy (device layout)",
+            device_bytes,
+            pick_ns(&steps, |s| s.device_download),
+        ),
+        (
+            "host copy (packed RGB8)         ",
+            host_bytes,
+            pick_ns(&steps, |s| s.read),
+        ),
     ] {
         println!(
-            "  {name} median {} ms  {:.2} GB/s",
+            "  {name} {bytes} bytes, median {} ms  {:.2} GB/s",
             ms(times),
-            gb_per_s(page_bytes, times)
+            gb_per_s(bytes, times)
         );
     }
 
