@@ -49,9 +49,9 @@ rasterrocket-color
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
   │                 └── rasterrocket-cli
-  │                       `rrocket` binary; hands fax documents to sendfax
-  │                       and print documents to lp (CUPS) or the Windows
-  │                       spooler (GDI)
+  │                       `rrocket` binary; hands fax documents to lp (a fax
+  │                       queue) or sendfax, and print documents to lp (CUPS)
+  │                       or, on Windows, to the printer's driver through GDI
   │
   ├── rasterrocket-comic  (comic-archive input: .cbz/.cb7/.cbt/.cbr → RenderedPage;
   │     │                  depends on rasterrocket + render + color; used by the CLI)
@@ -1061,9 +1061,10 @@ their backend.
 **Kernel inventory** (`kernels/kernel_list.rs`).  Two kernel sources exist in
 **both** `.cu` (CUDA, compiled to PTX by `nvcc`) and `.slang` (compiled by
 `slangc` to SPIR-V under the `vulkan` feature, and to HLSL, then DXIL by
-`dxc`, under `d3d12`); `page_raster` exists in Slang only, compiled twice
-(`page_raster`, `page_raster_paths`), and the test-only `floor_div_probe`
-kernels check the 64-bit floor division (`floor_div.slang`) the paths
+`dxc`, under `d3d12`); `page_raster` exists in Slang only, compiled as
+`page_raster` and `page_raster_paths` (and, for the tests only,
+`page_raster_paths_poisoned`, with `FLOOR_DIV_POISON`), and the test-only
+`floor_div_probe` kernels check the 64-bit floor division (`floor_div.slang`) the paths
 kernel uses.
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
@@ -1752,8 +1753,9 @@ requires no CUDA toolkit and links no NVIDIA libraries.
 `GpuCtx` is `Arc<_>`, initialised once, shared by all worker threads. PTX kernels
 are loaded at init time. The driver serialises concurrent CUDA calls internally.
 A `VulkanBackend` or `D3d12Backend` is built once per device selector and shared
-the same way; page rasters on it run one at a time (`PageDevice::render_page`),
-and the kernel pages of `GpuBackend::run_page` under its single recording state.
+the same way; its page rasters (`PageDevice::render_page`) run on the device one
+at a time, and its kernel pages (`GpuBackend::run_page`) one at a time under its
+single recording state.
 
 **SIMD dispatch is per-arch, not per-feature.**
 ARM NEON is unconditionally available on aarch64 — no runtime probe. x86 SIMD

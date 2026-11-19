@@ -796,7 +796,7 @@ if !page.diagnostics.has_images && page.diagnostics.has_vector_text {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum BackendPolicy {
-    Auto,        // the CPU: opens no GPU backend, image cache or nvJPEG decoder; with nvjpeg2k and a set PDF_RASTER_JPX_THRESHOLD a thread builds its nvJPEG2000 decoder on demand (default)
+    Auto,        // the CPU: opens no GPU backend, image cache or nvJPEG decoder at start-up; gpu_pages opens its Vulkan devices on demand, and with nvjpeg2k and a set PDF_RASTER_JPX_THRESHOLD a thread builds its nvJPEG2000 decoder on demand (default)
     CpuOnly,     // Skip all GPU init entirely
     ForceCuda,   // Require CUDA; error if unavailable
     #[cfg(feature = "vaapi")]
