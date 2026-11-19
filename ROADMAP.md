@@ -2433,16 +2433,15 @@ for (page_num, result) in rasterrocket::raster_pdf(path, &opts) {
 
 ### Deskew design (researched Apr 2026)
 
-**Goal**: beat Leptonica's `pixDeskew` in both speed and accuracy.
+**Goal**: skew detection to 0.01° in a few milliseconds a page, with no binarisation threshold to tune.
 
-**How Leptonica works (and where it fails):**
-Hierarchical differential-projection-profile sweep: binarise at threshold 160 → 4x downsample → 14-angle coarse sweep (±7°, 1° steps) → quadratic interpolation → binary search to 0.01° convergence. Accuracy: ~0.03–0.05°. Failure modes: fixed threshold 160 fails on light/dark scans; skips angles < 0.1°; single-threaded; CPU-only rotation.
+**Where a binarised projection profile fails:** the usual detector binarises at a fixed threshold (160), sweeps a downsampled profile and refines by binary search. A fixed threshold over- or under-segments light and dark scans, angles under 0.1° are commonly skipped, and the sweep and the rotation are single-threaded CPU work.
 
 **Our approach — two-phase hybrid:**
 
 **Phase A — Angle detection (CPU, intensity-weighted projection profile)**
 
-Same algorithm family as Leptonica but without the binarisation threshold:
+A differential projection profile without the binarisation threshold:
 - Use `255 - pixel` as the foreground weight on raw 8-bit gray — dark pixels count as foreground proportionally, no hard threshold, no parameter to tune
 - 4× downsample for coarse sweep (620×825 working set)
 - 28-angle coarse sweep at 0.5° steps (±7°), scored by differential square sum of weighted row sums
@@ -2452,7 +2451,7 @@ Same algorithm family as Leptonica but without the binarisation threshold:
 - **9900X3D V-Cache advantage**: 8.4MB image fits entirely in 96MB L3; stays warm through all sweep iterations — no DRAM traffic after first load
 - Target: **1–3ms** for detection
 
-Accuracy advantage over Leptonica: no binarisation threshold → correct on images where threshold 160 over- or under-segments; corrects angles < 0.1° that Leptonica skips.
+Accuracy: no binarisation threshold → correct on images where a fixed threshold over- or under-segments; angles under 0.1° are corrected.
 
 **Phase B — Rotation (GPU, CUDA texture bilinear)**
 
@@ -2475,7 +2474,7 @@ Net deskew cost per page at steady state: **~0.4ms** (rotation-bound; detection 
 - PCIe H2D (8.4MB @ 28GB/s): ~0.3ms
 - GPU rotation: ~0.4ms
 - PCIe D2H: ~0.3ms
-- Total: **~3ms** — still faster than Leptonica's ~10–15ms
+- Total: **~3ms**
 
 ### Work items
 
