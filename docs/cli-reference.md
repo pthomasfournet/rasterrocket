@@ -882,3 +882,30 @@ AFTER_FLAGS="--backend vulkan" tests/compare/ab_render.sh \
 Without a `LIST`, `ab_archive.sh` scans the repository fixtures plus a fixed sample of 150 PDFs from the directory `$AB_ARCHIVE` names. The sample is the same on every run, and the archive is skipped when `AB_ARCHIVE` is unset or names no directory. It writes `OUTPREFIX.list`, `OUTPREFIX.diffs` and `OUTPREFIX.errors`. The diffs file has a `PAGE`, `EXIT` or `COUNT` line for each difference: differing pixels on a page both sides wrote, a different exit status, or differing page counts under the same exit status. The errors file keeps the output of every render that exited non-zero. A file both builds fail on alike prints a `FAILED` line with the first line of the error.
 
 Both scripts exit with 0 when nothing differs and something was compared, 1 when something differs or nothing was compared, and 2 on bad usage. The archive sample needs `shuf` (`gshuf` from Homebrew `coreutils` on macOS).
+
+---
+
+## Cross-OS benchmark
+
+`tests/compare/os_bench.sh` is the Linux driver of a benchmark that runs the same rows on Linux and Windows on one machine and separates process start-up, per-page file cost and render time. The rows (in-memory library renders, `rrocket` start-up, whole-process renders to disk or to a RAM file system, the AVX2 tiers against a build without them, and GPU backend start-up) are listed once in `tests/compare/os_bench_rows.tsv`, and the `os_bench` harness of `crates/bench` times them.
+
+```bash
+# Build first, then run every group into a new directory
+cargo build --release -p rasterrocket-cli
+cargo build --release -p bench --bin os_bench
+tests/compare/os_bench.sh target/os-bench/linux
+
+# Check the setup: one document per row, one repetition, no machine-state checks
+tests/compare/os_bench.sh --smoke -g library -g startup target/os-bench/smoke
+
+# Print the commands only
+tests/compare/os_bench.sh --dry-run -g disk target/os-bench/dry
+
+# Two result directories (Linux first) as one Markdown table
+target/release/os_bench summarize target/os-bench/linux target/os-bench/windows
+```
+
+Options: `-g GROUP` (repeatable; `library`, `startup`, `disk`, `ram`, `avx2`, `gpu`; default all), `--only ROW`, `--reps K` (default 3), `--smoke`, `--ram-root DIR` (default `/mnt/rr-bench-ram`), `--gpu-features LIST` (default `nvjpeg,gpu-icc,gpu-deskew,cache,vulkan`) and `--dry-run`. One-thread rows run under `taskset -c 2`, N-thread rows under `taskset -c 0-(N-1)`, with `RAYON_NUM_THREADS` set to match. Disk rows write under the output directory with `--no-ram` and a path prefix; RAM rows write to `--ram-path` under the RAM root, whose mount must be a tmpfs of at most 4 GiB. A full run also requires the `performance` governor on every CPU and a working tree equal to `HEAD`; each failed check prints its remedy. A row whose spread (max − min) / median exceeds 5 % is run again with 5 repetitions into `rerun.tsv`, which replaces its samples in the summary.
+
+The output directory must be new or empty. It receives `env.tsv` (machine state from a fixed key list, with no host or user name), `results.tsv`, `pages.tsv` (per-page times of `L1`), `build.log`, `skipped.txt` (rows the host cannot run, with the reason) and, last, `done.flag`. On any error the driver writes `failed.flag`, holding the failing step and command, instead.
+
