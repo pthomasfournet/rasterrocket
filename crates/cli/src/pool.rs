@@ -112,9 +112,10 @@ pub(crate) fn run_in_order<J: Send, T: Send>(
 
 /// [`run_in_order`], stopped as by a [`ControlFlow::Break`] of `report`
 /// once `cancelled` returns `true`.  `cancelled` is asked on the calling
-/// thread before jobs are taken and at least every [`CANCEL_POLL`] while
-/// the driver waits for an outcome, so a cancellation is seen while jobs
-/// run; the caller tells a cancelled run from a finished one by its own
+/// thread before jobs are taken, before each outcome is reported and at
+/// least every [`CANCEL_POLL`] while the driver waits for an outcome, so a
+/// cancellation is seen while jobs run and no outcome is reported after
+/// it; the caller tells a cancelled run from a finished one by its own
 /// state.
 pub(crate) fn run_in_order_until<J: Send, T: Send>(
     pool: &rayon::ThreadPool,
@@ -179,7 +180,16 @@ pub(crate) fn run_in_order_until<J: Send, T: Send>(
                     return;
                 }
             }
+            // `cancelled` is asked again before each report: an outcome is
+            // received after its job's own writes, so a job that cancels
+            // the run is never reported past.
             while !broken && let Some(outcome) = ready.remove(&reported) {
+                if cancelled() {
+                    broken = true;
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = ready.insert(reported, outcome);
+                    break;
+                }
                 if report(reported, outcome).is_break() {
                     broken = true;
                     stop.store(true, Ordering::Relaxed);
@@ -325,6 +335,46 @@ mod tests {
         assert!(reported.len() < 3, "{reported:?}");
         assert!(unreported.is_sorted(), "{unreported:?}");
         assert!(unreported.contains(&2), "{unreported:?}");
+    }
+
+    /// A job that cancels the run is not reported, even when the driver is
+    /// already waiting for it: job 2 starts its cancellation only once jobs
+    /// 0 and 1 are reported, so its outcome arrives at a driver that last
+    /// asked `cancelled` before the cancellation.
+    #[test]
+    fn the_outcome_of_a_cancelling_job_is_not_reported() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
+
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let (cancel, done) = (AtomicBool::new(false), AtomicUsize::new(0));
+        let mut reported = Vec::new();
+        let unreported = run_in_order_until(
+            &one,
+            0..24,
+            |job| {
+                if job == 2 {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while done.load(Ordering::SeqCst) < 2 {
+                        assert!(Instant::now() < deadline, "jobs 0 and 1 not reported");
+                        std::thread::yield_now();
+                    }
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                job
+            },
+            |index, outcome| {
+                reported.push((index, outcome));
+                let _ = done.fetch_add(1, Ordering::SeqCst);
+                ControlFlow::Continue(())
+            },
+            || cancel.load(Ordering::SeqCst),
+        );
+        assert_eq!(reported, [(0, 0), (1, 1)]);
+        assert_eq!(unreported.first(), Some(&2), "{unreported:?}");
     }
 
     #[test]
