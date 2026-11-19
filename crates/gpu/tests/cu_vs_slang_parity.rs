@@ -199,8 +199,12 @@ fn blit_cpu_reference(
     }
 }
 
+/// Blit `src` on the Vulkan device into a zeroed `page_w × page_h` page.
+/// The source buffer is `src` followed by the bytes up to a whole word,
+/// each set to `pad`.
 fn run_blit_vulkan(
     src: &[u8],
+    pad: u8,
     src_w: u32,
     src_h: u32,
     src_layout: u32,
@@ -215,13 +219,13 @@ fn run_blit_vulkan(
     let dst_bytes = (page_w * page_h * 4) as usize;
     let cols_bytes: &[u8] = bytemuck::cast_slice(cols);
     let rows_bytes: &[u8] = bytemuck::cast_slice(rows);
-    let mut d_src = backend
-        .alloc_device(word_padded(src.len()))
-        .expect("alloc src");
+    let mut padded = src.to_vec();
+    padded.resize(word_padded(src.len()), pad);
+    let mut d_src = backend.alloc_device(padded.len()).expect("alloc src");
     let mut d_dst = backend.alloc_device(dst_bytes).expect("alloc dst");
     let mut d_cols = backend.alloc_device(cols_bytes.len()).expect("alloc cols");
     let mut d_rows = backend.alloc_device(rows_bytes.len()).expect("alloc rows");
-    backend.upload(&mut d_src, src).expect("upload src");
+    backend.upload(&mut d_src, &padded).expect("upload src");
     let zeros = vec![0u8; dst_bytes];
     backend.upload(&mut d_dst, &zeros).expect("zero dst");
     backend
@@ -256,7 +260,8 @@ fn run_blit_vulkan(
 }
 
 /// Run one blit through the CPU reference and Vulkan, nearest-neighbour
-/// and then interpolated on both axes, asserting byte equality.
+/// and then interpolated on both axes, with the source's pad bytes zero
+/// and then `0xFF`, asserting byte equality.
 fn check_blit_parity(
     src: &[u8],
     src_w: u32,
@@ -274,10 +279,12 @@ fn check_blit_parity(
         blit_cpu_reference(
             &mut cpu, page, page, src, src_w, src_h, src_layout, bbox, &cols, &rows, filter,
         );
-        let vk = run_blit_vulkan(
-            src, src_w, src_h, src_layout, page, page, bbox, &cols, &rows, filter,
-        );
-        assert_eq!(cpu, vk, "{what} (filter {filter}) diverges");
+        for pad in [0x00, 0xFF] {
+            let vk = run_blit_vulkan(
+                src, pad, src_w, src_h, src_layout, page, page, bbox, &cols, &rows, filter,
+            );
+            assert_eq!(cpu, vk, "{what} (filter {filter}, pad {pad:#04x}) diverges");
+        }
         assert!(
             cpu.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
             "{what}: no pixel was written"
@@ -352,8 +359,8 @@ fn blit_gray_layout() {
 #[test]
 fn blit_reads_an_unpadded_tail_source_exactly() {
     // Sources whose bytes end inside a word: the last word's unused bytes
-    // are padding.  Each is blitted at identity and scaled 2×, each
-    // nearest-neighbour and interpolated on both axes.
+    // are padding, zero and then 0xFF.  Each is blitted at identity and
+    // scaled 2×, each nearest-neighbour and interpolated on both axes.
     let gray_1x1 = [0xA7_u8];
     let rgb_3x1: Vec<u8> = (0..9).map(|i| 0x31 + 0x17 * i).collect();
     for (src, src_w, layout, what) in [
