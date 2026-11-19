@@ -2,9 +2,9 @@
 //! the CPU decoder does, and the decode itself, into 8-bit samples or, for
 //! a codestream of more than 8 bits kept at 16, into 16-bit ones.
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use gpu::nvjpeg2k::{Jpeg2kColorSpace, NvJpeg2kDecoder};
+use gpu::nvjpeg2k::{Jpeg2kColorSpace, NvJpeg2kDecoder, NvJpeg2kError};
 
 use super::{widen, widen_scale};
 use crate::resources::image::colorspace::{Layout, Samples};
@@ -81,11 +81,43 @@ pub(super) enum Decline {
     Reduced,
     /// A device decode whose dimensions are not those of the CPU decode.
     SizeMismatch { device: (u32, u32), cpu: (u32, u32) },
+    /// SOP marker segments allowed before the packets (`Scod` bit 1),
+    /// present or not; the library's parser fails on the codestream.
+    SopMarkers,
+    /// Packet headers packed in PPM or PPT marker segments, which the
+    /// library's parser refuses.
+    PackedPacketHeaders,
+    /// An RGN marker segment, which the library's parser refuses.
+    RegionOfInterest,
+    /// A CRG marker segment, which the library's parser refuses.
+    ComponentRegistration,
+    /// A marker of the range 0xFF30 to 0xFF3F, which the library's parser
+    /// refuses.
+    ReservedMarker,
+    /// Components of one tile with differing numbers of decomposition
+    /// levels, which the library's parser refuses.
+    ComponentLevelsDiffer,
+    /// The multiple component transformation selected for fewer than three
+    /// components, which the library's parser refuses.
+    IdleComponentTransform,
+    /// A COD, COC, QCD or QCC marker segment in a tile-part other than the
+    /// first of its tile, which the library's parser refuses.
+    LateCodingStyle,
+    /// A tile-part whose declared length ends before its SOD marker; the
+    /// library's parser fails on the codestream.
+    TilePartWithoutData,
+    /// No EOC marker after a last tile-part of declared length; the
+    /// library's parser fails on the codestream.
+    Unterminated,
+    /// An image area offset from the reference grid origin over more than
+    /// one tile, on which the library's parser fails or which it decodes
+    /// to other samples.
+    TiledImageOffset,
 }
 
 impl Decline {
     /// The bit of [`REPORTED`] that stands for the kind of the decline.
-    const fn kind(&self) -> u16 {
+    const fn kind(&self) -> u32 {
         use hayro_jpeg2000::NotPlain as N;
         let bit = match self {
             Self::NotPlain(N::ColourConversion) => 0,
@@ -100,6 +132,17 @@ impl Decline {
             Self::Irreversible => 9,
             Self::Reduced => 10,
             Self::SizeMismatch { .. } => 11,
+            Self::SopMarkers => 12,
+            Self::PackedPacketHeaders => 13,
+            Self::RegionOfInterest => 14,
+            Self::ComponentRegistration => 15,
+            Self::ReservedMarker => 16,
+            Self::ComponentLevelsDiffer => 17,
+            Self::IdleComponentTransform => 18,
+            Self::LateCodingStyle => 19,
+            Self::TilePartWithoutData => 20,
+            Self::Unterminated => 21,
+            Self::TiledImageOffset => 22,
         };
         1 << bit
     }
@@ -117,12 +160,31 @@ impl std::fmt::Display for Decline {
                 "a codestream it decodes at {} × {} where the CPU decodes {} × {}",
                 device.0, device.1, cpu.0, cpu.1
             ),
+            Self::SopMarkers => f.write_str("SOP marker segments"),
+            Self::PackedPacketHeaders => f.write_str("packed packet headers (PPM or PPT)"),
+            Self::RegionOfInterest => f.write_str("a region of interest (RGN)"),
+            Self::ComponentRegistration => f.write_str("a component registration (CRG)"),
+            Self::ReservedMarker => f.write_str("a reserved marker (0xFF30 to 0xFF3F)"),
+            Self::ComponentLevelsDiffer => {
+                f.write_str("components of one tile with differing decomposition levels")
+            }
+            Self::IdleComponentTransform => {
+                f.write_str("a component transformation selected for fewer than three components")
+            }
+            Self::LateCodingStyle => {
+                f.write_str("a coding style in a tile-part other than the first of its tile")
+            }
+            Self::TilePartWithoutData => f.write_str("a tile-part that ends before its data"),
+            Self::Unterminated => f.write_str("a codestream without an EOC marker"),
+            Self::TiledImageOffset => {
+                f.write_str("an image area offset from the grid origin over more than one tile")
+            }
         }
     }
 }
 
 /// The kinds of [`Decline`] already reported in this process.
-static REPORTED: AtomicU16 = AtomicU16::new(0);
+static REPORTED: AtomicU32 = AtomicU32::new(0);
 
 /// `Err` naming the first property of `img` for which nvJPEG2000 would
 /// not return the samples the CPU decoder returns, from its headers and
@@ -130,8 +192,9 @@ static REPORTED: AtomicU16 = AtomicU16::new(0);
 /// reconstructed components of a codestream of one or three unsigned
 /// components on the image grid, of 8 bits, or of 9 to 16 bits when the
 /// samples are kept at 16 (`wide`), under the reversible 5-3 wavelet in
-/// force throughout; and it parses no code-block style but predictable
-/// termination.
+/// force throughout; it parses no code-block style but predictable
+/// termination; and it parses none of the markers and structures of the
+/// variants of [`Decline`] from [`Decline::SopMarkers`] on.
 pub(super) fn takes(
     img: &hayro_jpeg2000::Image<'_>,
     survey: &hayro_jpeg2000::Survey,
@@ -149,7 +212,35 @@ pub(super) fn takes(
     if styles != 0 {
         return Err(Decline::CodeBlockStyle(survey.code_block_styles));
     }
-    Ok(())
+    let structures = [
+        (survey.sop_markers, Decline::SopMarkers),
+        (survey.packed_packet_headers, Decline::PackedPacketHeaders),
+        (survey.region_of_interest, Decline::RegionOfInterest),
+        (
+            survey.component_registration,
+            Decline::ComponentRegistration,
+        ),
+        (survey.reserved_markers, Decline::ReservedMarker),
+        (
+            survey.component_levels_differ,
+            Decline::ComponentLevelsDiffer,
+        ),
+        (
+            survey.idle_component_transform,
+            Decline::IdleComponentTransform,
+        ),
+        (survey.late_coding_style, Decline::LateCodingStyle),
+        (survey.tile_part_without_data, Decline::TilePartWithoutData),
+        (survey.unterminated, Decline::Unterminated),
+        (
+            survey.image_offset && survey.completeness.tiles > 1,
+            Decline::TiledImageOffset,
+        ),
+    ];
+    structures
+        .into_iter()
+        .find_map(|(present, why)| present.then_some(why))
+        .map_or(Ok(()), Err)
 }
 
 /// Report `why` at warn the first time its kind declines an image, at
@@ -166,23 +257,16 @@ pub(super) fn report(why: &Decline) {
     }
 }
 
-/// Decode the codestream `data` of a `pdf_w × pdf_h` image dictionary on
-/// the device, obtaining the decoder from `device` first: into 8-bit
-/// samples, or with `wide` into 16-bit ones, each component's samples
-/// widened from its precision as the CPU path widens them.  `None` when
-/// no decoder is available, and after a warning when the decode fails or
-/// its dimensions are not `cpu_size`, those of the CPU decode at the
-/// draw's resolution level; the caller decodes on the CPU.
-pub(super) fn decode(
-    data: &[u8],
-    (pdf_w, pdf_h): (u32, u32),
-    cpu_size: (u32, u32),
+/// The device decode of `codestream` by `dec`: into 8-bit samples, or with
+/// `wide` into 16-bit ones, each component's samples widened from its
+/// precision as the CPU path widens them.
+fn device_decode(
+    dec: &mut NvJpeg2kDecoder,
+    codestream: &[u8],
     wide: bool,
-    device: &mut DeviceJpx<'_>,
-) -> Option<Samples> {
-    let dec = device.decoder()?;
-    let decoded = if wide {
-        dec.decode_sync_u16(data).map(|img| {
+) -> Result<(u32, u32, Jpeg2kColorSpace, DeviceSamples), NvJpeg2kError> {
+    if wide {
+        dec.decode_sync_u16(codestream).map(|img| {
             let samples = widened(&img.data, &img.precisions);
             (
                 img.width,
@@ -192,7 +276,7 @@ pub(super) fn decode(
             )
         })
     } else {
-        dec.decode_sync(data).map(|img| {
+        dec.decode_sync(codestream).map(|img| {
             (
                 img.width,
                 img.height,
@@ -200,8 +284,24 @@ pub(super) fn decode(
                 DeviceSamples::Narrow(img.data),
             )
         })
-    };
-    let (width, height, color_space, data) = match decoded {
+    }
+}
+
+/// Decode `codestream`, from its SOC marker, of a `pdf_w × pdf_h` image
+/// dictionary on the device, obtaining the decoder from `device` first
+/// ([`device_decode`]).  `None` when no decoder is available, and after a
+/// warning when the decode fails or its dimensions are not `cpu_size`,
+/// those of the CPU decode at the draw's resolution level; the caller
+/// decodes on the CPU.
+pub(super) fn decode(
+    codestream: &[u8],
+    (pdf_w, pdf_h): (u32, u32),
+    cpu_size: (u32, u32),
+    wide: bool,
+    device: &mut DeviceJpx<'_>,
+) -> Option<Samples> {
+    let dec = device.decoder()?;
+    let (width, height, color_space, data) = match device_decode(dec, codestream, wide) {
         Ok(img) => img,
         Err(e) => {
             log::warn!("image: JPXDecode: nvJPEG2000 failed ({e}); decoding on the CPU");
@@ -461,6 +561,91 @@ mod tests {
         assert!(err.contains("1 of its 1 tiles hold no data"), "{err}");
     }
 
+    /// The decoder's test stream `name`.
+    fn test_stream(name: &str) -> Vec<u8> {
+        const STREAMS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../jpeg2000/tests/streams/");
+        std::fs::read(format!("{STREAMS}{name}")).expect("test stream")
+    }
+
+    /// Codestreams with a marker or structure the library's parser refuses
+    /// or fails on decline, each for its own; streams that differ from one
+    /// of them only by a structure the device decodes are taken.
+    #[test]
+    fn structures_the_device_does_not_parse_decline() {
+        let declined = [
+            ("packets_sop.j2k", Decline::SopMarkers),
+            ("packets_sop_missing.j2k", Decline::SopMarkers),
+            ("packets_ppm.j2k", Decline::PackedPacketHeaders),
+            ("packets_ppt.j2k", Decline::PackedPacketHeaders),
+            ("roi_reversible.j2k", Decline::RegionOfInterest),
+            ("roi_tile_part_override.j2k", Decline::RegionOfInterest),
+            ("codestream_crg.j2k", Decline::ComponentRegistration),
+            ("codestream_reserved_marker.j2k", Decline::ReservedMarker),
+            (
+                "codestream_levels_per_component.j2k",
+                Decline::ComponentLevelsDiffer,
+            ),
+            (
+                "mct_one_component_ignored.j2k",
+                Decline::IdleComponentTransform,
+            ),
+            (
+                "tile_parts_cod_qcd_in_later_tile_part.j2k",
+                Decline::LateCodingStyle,
+            ),
+            (
+                "tile_parts_sot_only_tile_part.j2k",
+                Decline::TilePartWithoutData,
+            ),
+            ("tile_parts_missing_eoc.j2k", Decline::Unterminated),
+            ("tile_parts_garbage_before_eoc.j2k", Decline::Unterminated),
+            ("codestream_offset_large.j2k", Decline::TiledImageOffset),
+            (
+                "codestream_tiles_offset_many.j2k",
+                Decline::TiledImageOffset,
+            ),
+        ];
+        for (name, why) in declined {
+            assert_eq!(verdict(&test_stream(name)), Err(why), "{name}");
+        }
+        for name in [
+            // SOP markers absent, EPH markers present.
+            "packets_eph.j2k",
+            // Decomposition levels that differ between tiles only.
+            "codestream_tile_cod_fewer_levels.j2k",
+            // Tile-parts of length 0, running to the end of the
+            // codestream with no EOC marker; bytes after the EOC marker.
+            "tile_parts_psot_zero.j2k",
+            "tile_parts_psot_zero_padding.j2k",
+            "tile_parts_bytes_after_eoc.j2k",
+            // An image area offset from the grid origin in one tile.
+            "codestream_offset.j2k",
+            "codestream_single_row_odd_offset.j2k",
+            // Several tile-parts of one tile, the coding style in the first.
+            "tile_parts_split_resolution.j2k",
+        ] {
+            assert_eq!(verdict(&test_stream(name)), Ok(()), "{name}");
+        }
+    }
+
+    /// The device is given the codestream of a JP2 file, from its SOC
+    /// marker, whatever the file's boxes hold; a raw codestream is given
+    /// whole.
+    #[test]
+    fn the_device_is_given_the_codestream_of_a_jp2_file() {
+        let bytes = test_stream("jp2_box_longer_than_file.jp2");
+        let img = image(&bytes);
+        let codestream = img.codestream();
+        assert_eq!(codestream[..2], [0xFF, 0x4F]);
+        let at = bytes
+            .windows(codestream.len())
+            .position(|w| w == codestream)
+            .expect("a slice of the file");
+        assert!(at > 0, "after the file's boxes");
+        let raw = include_bytes!("../../testdata/rgb8.j2k");
+        assert_eq!(image(raw).codestream(), raw);
+    }
+
     /// Without a decoder or a source there is no device to offer.
     #[test]
     fn no_device_without_a_decoder_or_a_source() {
@@ -488,8 +673,19 @@ mod tests {
                 device: (2, 2),
                 cpu: (1, 1),
             },
+            Decline::SopMarkers,
+            Decline::PackedPacketHeaders,
+            Decline::RegionOfInterest,
+            Decline::ComponentRegistration,
+            Decline::ReservedMarker,
+            Decline::ComponentLevelsDiffer,
+            Decline::IdleComponentTransform,
+            Decline::LateCodingStyle,
+            Decline::TilePartWithoutData,
+            Decline::Unterminated,
+            Decline::TiledImageOffset,
         ];
-        let union = all.iter().fold(0u16, |acc, d| {
+        let union = all.iter().fold(0u32, |acc, d| {
             assert_eq!(acc & d.kind(), 0, "{d}");
             acc | d.kind()
         });
@@ -546,7 +742,8 @@ mod tests {
             let (w, h) = (img.width(), img.height());
             let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).expect("CPU decode");
             let mut device = DeviceJpx::new(&mut decoder, None, 0).expect("a decoder");
-            let gpu = decode(bytes, (w, h), (w, h), true, &mut device).expect("device decode");
+            let gpu =
+                decode(img.codestream(), (w, h), (w, h), true, &mut device).expect("device decode");
             let (ImageData::Cpu16(cpu), ImageData::Cpu16(gpu)) = (&cpu.data, &gpu.data) else {
                 panic!("{name}: 16-bit samples on both paths");
             };
@@ -712,7 +909,8 @@ mod tests {
         let opts = jpx_opts(false);
         let cpu = super::super::decode_jpx(bytes, w, h, None, &opts, None).ok()?;
         let mut device = DeviceJpx::new(decoder, None, 0).expect("a decoder");
-        let gpu = decode(bytes, (w, h), (w, h), false, &mut device)?;
+        let img = image(bytes);
+        let gpu = decode(img.codestream(), (w, h), (w, h), false, &mut device)?;
         let (ImageData::Cpu(cpu), ImageData::Cpu(gpu)) = (&cpu.data, &gpu.data) else {
             panic!("8-bit samples on both paths");
         };
@@ -806,6 +1004,105 @@ mod tests {
             );
         }
         assert!(taken >= 20, "{taken} codestreams taken");
+    }
+
+    /// What became of a codestream offered to the device.
+    #[cfg(feature = "gpu-validation")]
+    #[derive(Debug)]
+    enum Outcome {
+        /// The headers or the tile-part headers do not parse.
+        Unparsed,
+        /// `takes` declines it.
+        Declined(String),
+        /// It ends early, so the CPU decodes it.
+        Incomplete,
+        /// The CPU path refuses it.
+        CpuRefused,
+        /// The device decode fails.
+        DeviceFailed(String),
+        /// The device decodes it to other samples or dimensions.
+        DeviceDiffers(String),
+        /// The device decodes it to the CPU's samples.
+        DeviceOk,
+    }
+
+    /// The outcome of the codestream `bytes` on the device: kept at 16
+    /// bits when its precision exceeds 8, as on a 16-bit canvas, else at 8.
+    #[cfg(feature = "gpu-validation")]
+    fn outcome(bytes: &[u8], decoder: &mut NvJpeg2kDecoder) -> Outcome {
+        use crate::resources::image::ImageData;
+        let settings = hayro_jpeg2000::DecodeSettings::default();
+        let Ok(img) = hayro_jpeg2000::Image::new(bytes, &settings) else {
+            return Outcome::Unparsed;
+        };
+        let Ok(survey) = img.survey() else {
+            return Outcome::Unparsed;
+        };
+        let wide = img.original_bit_depth() > 8;
+        match takes(&img, &survey, wide) {
+            Err(Decline::Unterminated) | Ok(()) if !survey.completeness.is_complete() => {
+                return Outcome::Incomplete;
+            }
+            Err(why) => return Outcome::Declined(why.to_string()),
+            Ok(()) => {}
+        }
+        let (w, h) = (img.width(), img.height());
+        let Ok(cpu) = super::super::decode_jpx(bytes, w, h, None, &jpx_opts(wide), None) else {
+            return Outcome::CpuRefused;
+        };
+        let (dw, dh, _, data) = match device_decode(decoder, img.codestream(), wide) {
+            Ok(d) => d,
+            Err(e) => return Outcome::DeviceFailed(e.to_string()),
+        };
+        if (dw, dh) != (cpu.width, cpu.height) {
+            return Outcome::DeviceDiffers(format!("{dw}×{dh}, CPU {}×{}", cpu.width, cpu.height));
+        }
+        let equal = match (&cpu.data, &data) {
+            (ImageData::Cpu(a), DeviceSamples::Narrow(b)) => a == b,
+            (ImageData::Cpu16(a), DeviceSamples::Wide(b)) => a == b,
+            _ => false,
+        };
+        if equal {
+            Outcome::DeviceOk
+        } else {
+            Outcome::DeviceDiffers("samples".to_owned())
+        }
+    }
+
+    /// Every one of the JPEG 2000 decoder's test streams that `takes`
+    /// accepts, complete and decoded by the CPU path, decodes on the device
+    /// to the CPU's samples: kept at 16 bits when of more than 8, else at
+    /// 8.  Needs a CUDA device.
+    #[cfg(feature = "gpu-validation")]
+    #[test]
+    fn every_test_stream_taken_decodes_on_the_device() {
+        let mut decoder = NvJpeg2kDecoder::new(0).expect("gpu-validation needs a CUDA device");
+        let mut tally = std::collections::BTreeMap::<&str, usize>::new();
+        let mut wrong = Vec::new();
+        let mut streams = decoder_test_streams();
+        streams.extend(gate_dir_streams());
+        for (name, bytes) in streams {
+            let (kind, detail) = match outcome(&bytes, &mut decoder) {
+                Outcome::Unparsed => ("unparsed", String::new()),
+                Outcome::Declined(why) => ("declined", why),
+                Outcome::Incomplete => ("incomplete", String::new()),
+                Outcome::CpuRefused => ("cpu-refused", String::new()),
+                Outcome::DeviceOk => ("device-ok", String::new()),
+                Outcome::DeviceFailed(e) => ("device-failed", e),
+                Outcome::DeviceDiffers(what) => ("device-differs", what),
+            };
+            eprintln!("{name}: {kind} {detail}");
+            if kind.starts_with("device-") && kind != "device-ok" {
+                wrong.push(format!("{name}: {kind} {detail}"));
+            }
+            *tally.entry(kind).or_default() += 1;
+        }
+        eprintln!("{tally:?}");
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert!(
+            tally.get("device-ok").copied().unwrap_or(0) >= 20,
+            "{tally:?}"
+        );
     }
 
     /// A draw at half the image's size or less, which the CPU decodes at a

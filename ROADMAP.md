@@ -3622,6 +3622,31 @@ Vulkan one behind `GpuBackend`. Exactness rests on the same integer kernels:
 devices without them. Not planned before a machine that needs it is found;
 any such backend stays opt-in and byte-identical to the CPU, like the others.
 
+**Unreleased on master: nvJPEG2000 declines the codestreams it fails on.**
+Of the decoder's 217 test streams, 45 passed the device's header checks and
+then failed on nvJPEG2000 0.12 (RTX 2080 SUPER, Linux, CUDA 13.5), each
+costing a device round trip and a CPU decode, with a warning every time.
+Classified by marker, against variants that remove one feature at a time
+(SOP markers stripped, single-tile and multi-tile offsets encoded afresh),
+the device fails on SOP markers (the `Scod` bit alone suffices; POC streams
+decode once their SOP markers are removed), PPM/PPT packed packet headers,
+RGN, CRG, reserved markers 0xFF30–0xFF3F, components of one tile with
+differing decomposition levels, the component transformation on fewer than
+three components, COD/COC/QCD/QCC in a later tile-part, a tile-part without
+data, and a missing EOC after a tile-part of declared length (one of length
+0 needs none); with an image area offset from the grid origin over more
+than one tile it fails or, on some encoded variants, decodes to other
+samples. The checks now decline each (the decoder's `Survey` reports them),
+and the device is given the codestream of a JP2 file rather than the file,
+which it failed on for an over-long box or an enumerated ROMM-RGB or e-sRGB
+colour space. Before: 99 declined, 66 decoded on the device, 45 failed, 4
+incomplete, 3 unparsed; after: 144 declined, 69 decoded on the device (all
+byte-identical to the CPU), none failed, 1 incomplete, 3 unparsed. A device test (`gpu-validation`)
+runs every test stream and `RR_JPX_GATE_DIR` through the checks and the
+device and requires each taken one to decode equal; of the synthetic
+variants only two corrupt ones (a bad stuff bit, an overflowing tile-part
+index, both declined in their SOP form) still fail on the device.
+
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
 irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one

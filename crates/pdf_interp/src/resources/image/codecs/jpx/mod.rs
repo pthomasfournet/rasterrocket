@@ -86,8 +86,9 @@ pub(in crate::resources::image) fn decode_jpx(
     {
         match device::takes(&img, &survey, wide) {
             // A codestream that ends early decodes on the CPU, which draws
-            // the packets present and judges the loss (`judged`).
-            Ok(()) if !survey.completeness.is_complete() => {}
+            // the packets present and judges the loss (`judged`), with or
+            // without an EOC marker after its last tile-part.
+            Ok(()) | Err(device::Decline::Unterminated) if !survey.completeness.is_complete() => {}
             // The device decodes every resolution level; a draw the CPU
             // decodes at fewer is declined before the device decode.
             Ok(()) if draw_size.is_some() && !full_resolution(data, opts.channels, &img) => {
@@ -96,7 +97,7 @@ pub(in crate::resources::image) fn decode_jpx(
             Ok(()) => {
                 let cpu_size = (img.width(), img.height());
                 if let Some(mut samples) =
-                    device::decode(data, (pdf_w, pdf_h), cpu_size, wide, device)
+                    device::decode(img.codestream(), (pdf_w, pdf_h), cpu_size, wide, device)
                 {
                     samples.embedded_profile = embedded_profile;
                     return Ok(samples);
