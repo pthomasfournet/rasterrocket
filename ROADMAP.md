@@ -2,15 +2,15 @@
 
 Goal: the fastest correct PDF → pixels pipeline, from a Rust library and the `rrocket` command, for OCR, image output, printing and fax.
 
-The rasterrocket-render crate is complete at the pixel level. The `rasterrocket-interp` crate is the native renderer and is now the only CLI path. The `pdf_bridge` / poppler crate is retained as a reference baseline but is no longer linked by the CLI binary.
+The rasterrocket-render crate is complete at the pixel level. The `rasterrocket-interp` crate is the native renderer and is now the only CLI path. The `pdf_bridge` crate is retained as a reference baseline but is no longer linked by the CLI binary.
 
-**Integration target (Apr 2026):** rasterrocket replaces steps 3 (pdftoppm subprocess) and 4 (Leptonica preprocessing) in an OCR pipeline:
+**Integration target (Apr 2026):** rasterrocket replaces the rasterisation subprocess and the image preprocessing steps of an OCR pipeline:
 
 ```
-pdf_oxide → [quality check fails] → rasterrocket (rasterise + deskew) → Tesseract → (LLM correct)
+text extraction → [quality check fails] → rasterrocket (rasterise + deskew) → Tesseract → (LLM correct)
 ```
 
-The caller's Tesseract step becomes a single in-process call — no subprocess, no files, no Leptonica:
+The caller's Tesseract step becomes a single in-process call — no subprocess, no files:
 
 ```rust
 for (page_num, result) in rasterrocket::raster_pdf(path, &opts) {
@@ -324,8 +324,8 @@ only follow the `RenderedPage::pixels` change.
   conversion, so black text is black ink alone. DeviceCMYK images and
   shadings now also paint their own inks under `--overprint`.
 - **JPEG decoding.** The zune-jpeg fork rounds its IDCT and YCbCr
-  conversion as libjpeg's accurate decode; gray, CMYK and 4:4:4 images now
-  match it exactly, and JPEG-heavy pages move by one or two levels.
+  conversion accurately; gray, CMYK and 4:4:4 images now
+  match an accurate reference decode exactly, and JPEG-heavy pages move by one or two levels.
 
 **Diagnostics.** `PageDiagnostics::glyphs` (`GlyphCounts`) counts a page's
 glyphs by text rendering mode and why a glyph cannot mark the page;
@@ -396,8 +396,7 @@ with the `cache` feature.
   multi-scan frame holds. An image is reported partial exactly when its
   stream lacks data (`JpegDecoder::intact_rows`), in PDFs and, as a
   warning, in comic pages.
-- **Transparent output.** `--transparent` (`--transp`), as
-  `pdftocairo -transp`, writes RGBA PNG or TIFF with unassociated alpha;
+- **Transparent output.** `--transparent` (`--transp`) writes RGBA PNG or TIFF with unassociated alpha;
   the page is painted as an isolated page group and its alpha kept.
   Formats without alpha, `--gray` and `--mono` are refused.
 - **Fax.** A `--fax` page longer than B4 (364 mm) is sent as A4-length
@@ -530,7 +529,7 @@ allocate less on overprint pages. Renders are unchanged by all of these.
   a checked-in registry of expected failures,
   `tests/compare/expectations.json` (`PASS`, `XFAIL`, `FAIL`, `XPASS`).
 - `pdf_bridge` is left out of the workspace's default members, so a bare
-  `cargo build` needs no poppler source tree; `scripts/check_vendored.py`
+  `cargo build` needs no `POPPLER_SRC`; `scripts/check_vendored.py`
   tracks the zune-jpeg and rav1d forks.
 
 **API changes** (additive in `rasterrocket` but for `image_cache`).
@@ -585,7 +584,7 @@ field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
 
 **New capabilities.**
 - **JPEG and TIFF output.** `--jpeg` with `--jpegopt quality=N,
-  progressive=y|n,optimize=y|n`, as `pdftoppm -jpeg`, colour or gray;
+  progressive=y|n,optimize=y|n`, colour or gray;
   `--tiff` with `--tiffcompression none|packbits|lzw|deflate|g3|g3-2d|g4`,
   RGB, gray or bilevel, the fax codings from a CCITT Group 3 / Group 4
   encoder added to the `crates/ccitt` fork. Fax-coded pages read back
@@ -712,8 +711,8 @@ field of a `#[non_exhaustive]` type, so a v2.0.0 caller builds unchanged.
 ### v2.0.0 (October 2026)
 
 **More of the PDF drawn, and drawn as the specification says; one API
-break.** Every capability that poppler or pdfium renders and rasterrocket did
-not was reproduced with a fixture and implemented from ISO 32000-2. The
+break.** Every capability that independent reference renderers draw and
+rasterrocket did not was reproduced with a fixture and implemented from ISO 32000-2. The
 result touches every stage, from the cross-reference reader to the
 compositor, and adds in-process decryption, optional content, annotations
 and region rendering. The release closes with a review of every file the
@@ -1108,8 +1107,8 @@ decoders and the device cache). Images with that `/Decode` render exactly as
 before; those without it (at least 16 pages across 5 PDFs in a sample of
 the mss archive) are no longer negatives.
 
-**JPEG 2000 decodes in pure Rust.** OpenJPEG (unmaintained upstream since July
-2026) is replaced by `hayro-jpeg2000`, kept as a local fork in
+**JPEG 2000 decodes in pure Rust.** JPEG 2000 is decoded by
+`hayro-jpeg2000`, kept as a local fork in
 `crates/jpeg2000`. That removes the last C parser of untrusted image data
 from the default build (FreeType remains for fonts), along with the `image`
 crate and a duplicate `moxcms`.
@@ -1119,9 +1118,10 @@ crate and a duplicate `moxcms`.
 - **Decoded at the drawn size:** images are decoded at the resolution they
   are drawn. Masked images are the exception and stay at full resolution, so
   text masks stay sharp.
-- **Fidelity:** matches OpenJPEG on 820 pages from 396 JPX-bearing PDFs.
+- **Fidelity:** checked against a reference decoder on 820 pages from 396
+  JPX-bearing PDFs.
 - **Speed:** layered scans (colour layer plus JBIG2 text mask) are about 10%
-  slower than with OpenJPEG; unmasked images drawn at half size or less are
+  slower than with the previous decoder; unmasked images drawn at half size or less are
   2–3× faster.
 
 **CCITT fax images.** All three modes now decode through `hayro-ccitt`
@@ -1377,7 +1377,7 @@ No public API changes.
 ### v1.1.0 (May 2026)
 
 **Google Cloud Vision input optimization.** A new in-process path that
-makes the rasterrocket stage of a `pdf_oxide → rasterrocket → GCV`
+makes the rasterrocket stage of a text extraction → rasterrocket → GCV
 pipeline produce an upload-ready payload guaranteed within GCV's request
 limits — deterministically, with no external `image` crate and no
 network guesswork — so the only remaining bottleneck is GCV's own
@@ -1418,7 +1418,7 @@ pages on a broad corpus were wrong after v1.0.2 — every root cause a
 *silent* total- or partial-loss on an input variant the curated test
 suite did not contain. This release fixes all of them and hardens the
 codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
-(zero silent loss, zero crash) measured by OCR against a MuPDF oracle.
+(zero silent loss, zero crash) measured by OCR against an independent reference renderer.
 
 - **Silent total/partial-loss roots (NF-1 … NF-12)**: blank text/vector
   pages (indirect `/Length`, `/ObjStm` object streams, TrueType
@@ -1440,8 +1440,8 @@ codebase per-commit. A 238-PDF exhaustive corpus is now 100% legible
 - **Security/robustness**: max-raster-area DoS cap (`MAX_PX_AREA`,
   `u64`-computed to avoid a latent overflow that would let a hostile
   page pass); FFI trust-boundary documented (at the time, system
-  FreeType/OpenJPEG had to be patched — `cargo audit` covers the Rust tree
-  only; OpenJPEG left the render path in v1.4.1 and FreeType in v1.5.0); bounded
+  FreeType and JPEG 2000 libraries had to be patched — `cargo audit` covers the Rust tree
+  only; the JPEG 2000 library left the render path in v1.4.1 and FreeType in v1.5.0); bounded
   deterministic decoder property/fuzz harness; page-level and
   per-annotation/widget JavaScript entry points now detected (bounded,
   first-hit; structural `/S` only, `/JS` never decoded or executed).
@@ -1658,7 +1658,7 @@ workspace; ~700 net lines removed.**
   4 unit tests.  Switched env-var read to `std::env::var_os` —
   unset/empty common path is zero-alloc; non-UTF-8 env values now
   emit a `log::warn!` instead of falling through silently.
-- **Stale poppler line-number refs** stripped from
+- **Stale line-number references to another codebase** stripped from
   `transparency.rs`, `glyph.rs`, `stroke/*`, `image.rs`,
   `fill/mod.rs`.  Function-name provenance retained where it
   documents the algorithmic source.
@@ -2027,7 +2027,7 @@ ARM/aarch64 platform: NEON acceleration for AA popcount, CMYK→RGB, glyph unpac
 
 ### v0.1.0 (Apr 2026)
 
-Initial release.  Native PDF interpreter (Phases 1–4), GPU acceleration (nvJPEG, nvJPEG2000, GPU AA fill, tile fill, ICC CLUT), deskew, CLI (`pdftoppm` replacement).
+Initial release.  Native PDF interpreter (Phases 1–4), GPU acceleration (nvJPEG, nvJPEG2000, GPU AA fill, tile fill, ICC CLUT), deskew, CLI.
 
 ---
 
@@ -2035,7 +2035,7 @@ Initial release.  Native PDF interpreter (Phases 1–4), GPU acceleration (nvJPE
 
 ### Tesseract integration findings (researched Apr 2026)
 
-**Tesseract 5.3.4 / Leptonica 1.82.0 on this machine.**
+**Tesseract 5.3.4 on this machine.**
 
 | Question | Answer |
 |---|---|
@@ -2045,7 +2045,7 @@ Initial release.  Native PDF interpreter (Phases 1–4), GPU acceleration (nvJPE
 | Background normalisation needed? | **No — drop it from our scope.** Tesseract does its own internal binarisation (Otsu / tiled Otsu / Sauvola, configurable). For uneven scanned backgrounds, caller sets `thresholding_method=2` (Sauvola) on the Tesseract side. |
 | Does Tesseract deskew? | **No.** Tesseract can *detect* skew angle (PSM 0/1) but the caller must rotate the image. Deskew is the **one preprocessing step we still own**. |
 | DPI handling? | Call `set_source_resolution(dpi)` explicitly after `set_frame`. Default fallback is 70 DPI which severely degrades accuracy. Pass the actual render DPI. |
-| libopenjp2 on this machine? | Yes — Leptonica 1.82.0 links libopenjp2 2.5.0. JPEG 2000 works natively. |
+| libopenjp2 on this machine? | Yes — Tesseract's image library links libopenjp2 2.5.0. JPEG 2000 works natively. |
 
 ### What exists in rasterrocket
 
@@ -2160,7 +2160,7 @@ Targeted use of AVX-512 extensions that LLVM does not auto-vectorize to. All pat
 
 ## Phase 3 — Coverage completeness ✓ COMPLETE
 
-Track and close fidelity gaps against pdftoppm once the native path is default.
+Track and close fidelity gaps against reference renderers once the native path is default.
 
 - [x] Coons patch / tensor mesh shading (Type 4–7)
 - [x] Non-axis-aligned image transforms — exact inverse-CTM nearest-neighbour sampling for arbitrary rotated/sheared images; row-constant hoisting eliminates redundant multiplies per inner loop
@@ -2176,13 +2176,13 @@ Track and close fidelity gaps against pdftoppm once the native path is default.
 ### Still open / lower priority
 
 - [x] Function-based shading (Type 1) — evaluated at every device pixel of the Domain (every k-th above 4 Mi pixels, interpolated between); BBox intersection; full CTM inversion
-- [x] nvJPEG2000 for JPXDecode — GPU fast path via `nvjpeg2k` feature; planar→interleaved copy (`cudaMemcpy2D` D→H per component); sub-sampling guard + OOM cap + zero-dimension guard; CPU `jpeg2k`/OpenJPEG fallback; threshold-gated at 512×512 px (see Phase 4 item 1 for full audit)
+- [x] nvJPEG2000 for JPXDecode — GPU fast path via `nvjpeg2k` feature; planar→interleaved copy (`cudaMemcpy2D` D→H per component); sub-sampling guard + OOM cap + zero-dimension guard; CPU `jpeg2k` fallback; threshold-gated at 512×512 px (see Phase 4 item 1 for full audit)
 
 ---
 
 ## Phase 4 — GPU acceleration (cudarc)
 
-Unblocked by Phase 1 completion (poppler must be gone first). **Phase 1 is complete — Phase 4 is now unblocked.**
+Unblocked by Phase 1 completion (the `pdf_bridge` path must be gone first). **Phase 1 is complete — Phase 4 is now unblocked.**
 
 **Hardware context (RTX 5070, CC 12.0 Blackwell, 12 GB GDDR7):** cudarc 0.19 is already wired in `crates/gpu` with two kernels (Porter-Duff composite, soft mask) and CPU fallbacks. Target `sm_120` PTX. The GPU dispatch threshold is currently 500k pixels — validate this against actual transfer latency on this machine once the native path is hot. Do **not** use wgpu/Vello's GPU backend — CUDA is strictly better for a batch server pipeline on NVIDIA hardware.
 
@@ -2192,7 +2192,7 @@ Unblocked by Phase 1 completion (poppler must be gone first). **Phase 1 is compl
 
 **1. nvJPEG image decoding — highest value, implement first** ✓ COMPLETE
 
-For scan-heavy corpora (JPEG/JBIG2/CCITT image layers + thin OCR text overlay), image decoding dominates wall-clock time. nvJPEG decodes at ~10 GB/s on the RTX 5070; the CPU JPEG path (libjpeg via DCTDecode) is 10–20× slower. No rasterizer changes required — wire nvJPEG into the existing `blit_image` path behind a feature flag.
+For scan-heavy corpora (JPEG/JBIG2/CCITT image layers + thin OCR text overlay), image decoding dominates wall-clock time. nvJPEG decodes at ~10 GB/s on the RTX 5070; the CPU JPEG path (DCTDecode) is 10–20× slower. No rasterizer changes required — wire nvJPEG into the existing `blit_image` path behind a feature flag.
 
 - [x] `gpu::nvjpeg` module: minimal raw FFI surface (no bindgen); `NvJpeg` (pub(crate)) + `NvJpegDecoder` (pub) safe wrapper; `decode_sync` blocks on `cuStreamSynchronize` after GPU DMA completes
 - [x] DCTDecode dispatch: image area ≥ `GPU_JPEG_THRESHOLD_PX` (512×512) → nvJPEG; else CPU zune-jpeg; CMYK JPEG falls through to CPU
@@ -2217,7 +2217,7 @@ For scan-heavy corpora (JPEG/JBIG2/CCITT image layers + thin OCR text overlay), 
   - Pure raw CUDA driver API (same rationale as nvJPEG): `cuInit → cuDeviceGet → cuDevicePrimaryCtxRetain → cuCtxSetCurrent → cuStreamCreate → nvjpeg2kCreateSimple`; no cudarc at runtime
   - `cuStreamSynchronize` called on error path before returning — GPU may have enqueued partial work
   - Library path: `/usr/lib/x86_64-linux-gnu/libnvjpeg2k/12/` (non-standard; explicit `rustc-link-search` in `build.rs`); `cudart` linked for `cudaMalloc`/`cudaFree`/`cudaMemcpy2D`
-  - Dispatch threshold: `GPU_JPEG2K_THRESHOLD_PX = 262_144` (512×512 px); CPU `jpeg2k`/OpenJPEG fallback for small images and unsupported sub-sampled streams
+  - Dispatch threshold: `GPU_JPEG2K_THRESHOLD_PX = 262_144` (512×512 px); CPU `jpeg2k` fallback for small images and unsupported sub-sampled streams
   - `NvJpeg2kError`: `Nvjpeg2kStatus`, `CudaError`, `CudartError`, `UnsupportedComponents`, `ZeroDimension`, `Overflow`
 - [x] **CLI wiring for nvJPEG + nvJPEG2K** — `thread_local! DecoderInit<T>` state machine per rayon worker thread in `crates/cli/src/render.rs`; lazy construction on first page; decoder moved into renderer before `execute()` and returned to the slot after `render_annotations()`; `DecoderInit::Failed` prevents retry-and-spam after a one-time init failure; `PageRenderer::take_nvjpeg` / `take_nvjpeg2k` recover the decoder after each page so the CUDA context and stream survive across pages with zero re-init cost
 
@@ -2294,7 +2294,7 @@ Glyph rasterisation is **not** a GPU target — glyphs are rasterised once per d
 | mixed-images.pdf | 11 MB | Mixed; image-heavy | 5.2 s | 44.4 s | **8.5×** |
 | scan-heavy.pdf | 50 MB | Scan-heavy JPEG/JPEG2K | 17.2 s | 155.7 s | **9.1×** |
 
-The scan-heavy corpus (JPEG/JPEG2K) shows the largest gap because nvJPEG + nvJPEG2K GPU decode replaces the CPU libjpeg/OpenJPEG path. The light-vector fixture shows the smallest gap — that workload is entirely CPU path-fill and text.
+The scan-heavy corpus (JPEG/JPEG2K) shows the largest gap because nvJPEG + nvJPEG2K GPU decode replaces the CPU decode path. The light-vector fixture shows the smallest gap — that workload is entirely CPU path-fill and text.
 
 ### Pixel diff vs poppler
 
@@ -2307,7 +2307,7 @@ The scan-heavy corpus (JPEG/JPEG2K) shows the largest gap because nvJPEG + nvJPE
 and swaps dimensions for 90°/270° rotations.  `PageRenderer::new_scaled`
 (now `PageRenderer::with_view`) applies the matching CTM so all four rotation values produce correctly-oriented
 output.  A landscape PDF with `/Rotate: 270` portrait MediaBox now renders as
-landscape, matching poppler.
+landscape, as `/Rotate` requires.
 
 ### ~~Known gap: `UserUnit` scaling~~ — RESOLVED (commits 4aa17b5 / ce10242)
 
@@ -2380,7 +2380,7 @@ CUDA_ARCH=sm_120 cargo run -p rasterrocket-gpu --release --bin threshold_bench
 
 ## Phase 5 — Public library API ✓ COMPLETE (Apr 2026)
 
-Extract the render pipeline into a reusable library crate. The caller gets 8-bit grayscale pixels in memory and passes them directly to Tesseract — no subprocess, no files, no Leptonica.
+Extract the render pipeline into a reusable library crate. The caller gets 8-bit grayscale pixels in memory and passes them directly to Tesseract — no subprocess, no files.
 
 ### Crate: `crates/rasterrocket`
 
@@ -2498,8 +2498,8 @@ Net deskew cost per page at steady state: **~0.4ms** (rotation-bound; detection 
 
 ### Goal
 
-Make rasterrocket the drop-in replacement for the pdftoppm + Leptonica preprocessing
-stack in a production OCR pipeline.  The rasterise + deskew path is feature-complete;
+Make rasterrocket the rasterise-and-preprocess stage of a production OCR
+pipeline.  The rasterise + deskew path is feature-complete;
 Phase 6 closes the remaining gaps before the first production integration.
 
 ### Open work items
@@ -2635,7 +2635,7 @@ Phase 8 was originally scoped under the assumption that we needed a GPU-resident
 The v0.6.0 baseline matrices on both 9900X3D + RTX 5070 and 8700K + RTX 2080 SUPER, plus the consumer-Blackwell NVJPG investigation, established that:
 
 - Multi-thread CPU JPEG decode (zune-jpeg, AVX-512 IDCT) at 24 threads delivers ~5 GB/s aggregate. This is the path Phase 9 keeps.
-- A custom parallel-Huffman GPU decoder, even built ideally per Wei et al. 2024, would *match or marginally beat* per-image latency but **lose on aggregate throughput** to 24-thread CPU. The 51× speedup over libjpeg-turbo in the paper is on A100 datacenter hardware against a single-thread CPU baseline; consumer Blackwell + 24-thread CPU is a different comparison.
+- A custom parallel-Huffman GPU decoder, even built ideally per Wei et al. 2024, would *match or marginally beat* per-image latency but **lose on aggregate throughput** to 24-thread CPU. The 51× speedup in the paper is on A100 datacenter hardware against a single-thread CPU baseline; consumer Blackwell + 24-thread CPU is a different comparison.
 - The architectural payoff (device-resident pixels enabling GPU AA / ICC / tile fill / composite) is achievable via Phase 9 without Phase 8.
 
 **What stays in the codebase:**
@@ -2767,9 +2767,9 @@ What was missing before Phase 9 was *the abstraction layer to even consider a ba
 
 ## Phase 11 — Million-page-archive contest (SHIPPED — see `bench/v11/results.md`)
 
-**Reframe.**  An earlier draft of this phase (titled "memory-frugal rendering and parse caching") was a feature-parity checklist of things MuPDF and PDFium have that we don't.  The first task on it was a sidecar cache for the parsed page tree.  A pre-implementation microbench killed it: the existing `Document::get_pages()` walk takes 76 µs–1.34 ms across the full corpus (16-page through 601-page documents).  Adding a 150-LoC sidecar plus an invalidation surface to save a millisecond was a textbook bad trade.
+**Reframe.**  An earlier draft of this phase (titled "memory-frugal rendering and parse caching") was a feature-parity checklist of things other renderers have that we don't.  The first task on it was a sidecar cache for the parsed page tree.  A pre-implementation microbench killed it: the existing `Document::get_pages()` walk takes 76 µs–1.34 ms across the full corpus (16-page through 601-page documents).  Adding a 150-LoC sidecar plus an invalidation surface to save a millisecond was a textbook bad trade.
 
-The actual gap was at a different layer.  MuPDF and PDFium don't *cache* the page-tree walk — they don't *do* it on open.  Their `LoadDocument` parses xref + the catalog's `/Pages` root and that's it; per-page resolution is logarithmic.  Ours was linear, eagerly populating a `BTreeMap<u32, ObjectId>` of every page in `rasterrocket::open_session` before rendering even one page.  On a 100k-page archival PDF that's millions of `get_object` calls per cold open, regardless of which page the caller asked for.
+The actual gap was at a different layer.  Other renderers don't *cache* the page-tree walk — they don't *do* it on open.  They parse xref + the catalog's `/Pages` root and that's it; per-page resolution is logarithmic.  Ours was linear, eagerly populating a `BTreeMap<u32, ObjectId>` of every page in `rasterrocket::open_session` before rendering even one page.  On a 100k-page archival PDF that's millions of `get_object` calls per cold open, regardless of which page the caller asked for.
 
 So the real Phase 11 is not "close the feature checklist" but "win a benchmark on the workload competitors weren't optimised for."  We define a four-event contest, build the harness that scores it against `mutool` and `pdftoppm`, and ship the layer changes needed to dominate it on a 10 GB synthetic archive.
 
@@ -2816,13 +2816,13 @@ The 10 GB archive run completed; `bench/v11/results.md` is written and the relea
 
 **Out of scope (re-affirming from the original):**
 
-Vector output (PostScript, SVG or PDF, as `pdftocairo` writes) and dynamic XFA forms: rasterrocket renders PDF to pixels, and a dynamic XFA form is reported (`FormType::XfaFull`) with a warning rather than laid out.  A 2-stage interpretation+render pipeline within a single document.  rasterrocket already parallelises across pages with Rayon, which dominates per-document pipelining on any multi-core machine — confirmed empirically by the May-2026 baseline matrix (3–10 % gain over serial vs. Rayon-per-page's much larger lead).  Network-streaming PDF (HTTP range requests).  Not our user; PDFium's browser use case, not a CLI tool's.  AVX-512 simdjson-style PDF lexer.  Real engineering effort with a real win, but the contest events don't bottleneck on dictionary parsing — deferred to a future phase.
+Vector output (PostScript, SVG or PDF) and dynamic XFA forms: rasterrocket renders PDF to pixels, and a dynamic XFA form is reported (`FormType::XfaFull`) with a warning rather than laid out.  A 2-stage interpretation+render pipeline within a single document.  rasterrocket already parallelises across pages with Rayon, which dominates per-document pipelining on any multi-core machine — confirmed empirically by the May-2026 baseline matrix (3–10 % gain over serial vs. Rayon-per-page's much larger lead).  Network-streaming PDF (HTTP range requests).  Not our user; PDFium's browser use case, not a CLI tool's.  AVX-512 simdjson-style PDF lexer.  Real engineering effort with a real win, but the contest events don't bottleneck on dictionary parsing — deferred to a future phase.
 
 **Rejected ideas (kept here so they don't get re-proposed under new names):**
 
 - *`io_uring` for general I/O.*  mmap is already streaming on Linux — the kernel page-faults on access.  `io_uring` only beats mmap+`MAP_POPULATE` on cold-cache reads of *known-up-front* byte ranges, which our parser cannot produce (each phase depends on bytes parsed from the previous).  `posix_fadvise(WILLNEED)` delivers the same kernel hint in a few lines.
 - *`io_uring` for E3's batch open.*  Real win in theory (100 × `open + read tail` is genuinely batchable), but `posix_fadvise` gets us most of it without an async runtime.  Kept the helper file name (`io_uring_open`) for traceability; the implementation is fadvise.
-- *`HttpRangeSource` / network-streaming PDF.*  PDFium's browser use case, not ours.
+- *`HttpRangeSource` / network-streaming PDF.*  A browser use case, not ours.
 - *AVX-512 simdjson-style lexer for PDF dictionaries.*  Real engineering with a real win, but the contest events don't bottleneck on dictionary parsing.  Deferred.
 - *Hugepages for GPU staging buffers.*  1–3% win on E2/E3.  Worth measuring after Task 11; not worth speccing now.
 
@@ -2836,10 +2836,10 @@ Vector output (PostScript, SVG or PDF, as `pdftocairo` writes) and dynamic XFA f
 
 - **Every silent-loss root fixed at the root**, not papered over with a fallback. Blank text/vector pages (indirect `/Length`, `/ObjStm` object streams, TrueType CIDFontType2), partial text drop-out, JPX+`/Mask` blank scans, page-tree "no pages", chained-filter skips, FunctionType-4 Separation tints, CFF/Type1C glyph garble, misleading errors on malformed/empty/non-PDF input, JS-bearing PDFs hard-refused, CCITTFax G3/G4 ImageMask "no rows", JPXDecode CMYK.
 - **DoS classes closed** as a deliberate hardening sweep: stack-overflow (tokenizer recursion → iteration), unbounded memory, raster-area cap (`MAX_PX_AREA`, `u64`-computed to kill a latent overflow), LZW bomb, filter-chain flood, Type-4 recursion/operand bomb, watchdog escape via tiling patterns, unbounded endstream scan.
-- **Security posture documented**: FFI trust boundary (at the time, system FreeType/OpenJPEG had to be patched by the host — `cargo audit` covers only the Rust tree; both have since been replaced, OpenJPEG by the local `hayro-jpeg2000` fork in v1.4.1 and FreeType by the local `read-fonts`/`skrifa` forks in v1.5.0, so the default build links no system C library and its only C code, libdeflate and the CLI's mimalloc allocator, is compiled from vendored source); bounded deterministic decoder property/fuzz harness; page-level and per-annotation/widget JavaScript *detection* (structural `/S /JavaScript` only — `/JS` is never decoded or executed; bounded, first-hit).
+- **Security posture documented**: FFI trust boundary (at the time, the system FreeType and JPEG 2000 libraries had to be patched by the host — `cargo audit` covers only the Rust tree; both have since been replaced, the JPEG 2000 library by the local `hayro-jpeg2000` fork in v1.4.1 and FreeType by the local `read-fonts`/`skrifa` forks in v1.5.0, so the default build links no system C library and its only C code, libdeflate and the CLI's mimalloc allocator, is compiled from vendored source); bounded deterministic decoder property/fuzz harness; page-level and per-annotation/widget JavaScript *detection* (structural `/S /JavaScript` only — `/JS` is never decoded or executed; bounded, first-hit).
 - **No deferred findings.** Every review finding that didn't fit its originating commit was fixed at root, not filed and forgotten — including a git-proven latent form-XObject CTM regression, 17 missing PDF Appendix D.2 encoding slots, non-deterministic catalogue selection, and a multi-backend `resolve_image` type-inference break the campaign unmasked.
 
-**Acceptance criterion (met).** The 238-PDF exhaustive corpus is 100% legible — zero silent loss, zero crash — measured by OCR against a MuPDF oracle. No public API changes; decrypt stays private-copy-only behind a default-No liability gate; JavaScript is detected and disclosed but never executed.
+**Acceptance criterion (met).** The 238-PDF exhaustive corpus is 100% legible — zero silent loss, zero crash — measured by OCR against an independent reference renderer. No public API changes; decrypt stays private-copy-only behind a default-No liability gate; JavaScript is detected and disclosed but never executed.
 
 **Durable lesson for future phases.** Curated fixtures prove a feature works on the inputs you thought of. They do not prove absence of silent loss. Any future codec/parser work ships with a corpus-scale OCR-vs-oracle gate, not just unit fixtures.
 
@@ -2850,8 +2850,8 @@ Vector output (PostScript, SVG or PDF, as `pdftocairo` writes) and dynamic XFA f
 ## Phase 13 — Output to the operating system: print and fax (partly shipped in v2.1.0)
 
 **Status: in progress; what exists shipped in v2.1.0.** The four fax layers are on
-master (2026-11-01), with `--jpeg` and `--jpegopt` (as `pdftoppm -jpeg`,
-colour or gray), and printing through CUPS (2026-11-04); printing
+master (2026-11-01), with `--jpeg` and `--jpegopt` (colour or
+gray), and printing through CUPS (2026-11-04); printing
 through GDI on Windows is on master, unreleased (2026-11-18).
 
 **Printing through the OS spooler.** No device or driver code of our own.
@@ -2873,12 +2873,10 @@ default one marked. **Untested:** printing from macOS, and any physical printer
 support). **Done on Windows (unreleased):** GDI printing, with
 `--print-file` for printers that print to a file (see Current status).
 **Not done:** PDF pass-through to IPP printers on Windows, and Windows fax.
-Parity gap: poppler's `pdftocairo` has `-print` / `-printer` on Windows,
-and pdfium renders into a Windows printer context.
 
 **Fax, in layers.**
 1. **Done.** TIFF output (`--tiff`, `--tiffcompression none|packbits|lzw|
-   deflate|g3|g3-2d|g4`), as `pdftoppm -tiff`; fax-coded pages read back
+   deflate|g3|g3-2d|g4`); fax-coded pages read back
    pixel-exact through libtiff and the `tiff` crate.
 2. **Done.** A CCITT Group 3 (MH, MR) and Group 4 encoder in the
    `crates/ccitt` fork, round-tripped through its decoder.
@@ -3092,7 +3090,7 @@ proofing, a wider-than-sRGB working space. API changes: `FinishedCanvas` /
 `Option<&IccProfile>`.
 
 **Released in v2.3.0: CMYK raster output.** `--cmyk` with `--tiff` or
-`--jpeg`, and `--jpegcmyk` (= `--jpeg --cmyk`, as `pdftoppm -jpegcmyk`),
+`--jpeg`, and `--jpegcmyk` (= `--jpeg --cmyk`),
 render pages in process inks (library: `ColorModel::Cmyk`,
 `RenderParams::with_cmyk`, `RasterOptions::color`, `render_page_cmyk`,
 `PixelFormat::Cmyk8`/`Cmyk16`, `FinishedCanvas`/`BandBitmap::Cmyk8`/`Cmyk16`).
@@ -3108,8 +3106,7 @@ working space, under `--intent`, default relative colorimetric, and
 §10.4.2.3 device conversion, so gray and black text are black ink alone.
 Overprint is simulated with `--overprint` and knocked out otherwise.
 Written as Separated TIFF (`InkSet` 1, 8 or 16 bits, banded, tagged with the
-profile) and Adobe YCCK JPEG (`APP14` transform 2, inverted, the layout
-`pdftoppm -jpegcmyk` writes).  Against `pdftoppm -tiff -overprint` at
+profile) and Adobe YCCK JPEG (`APP14` transform 2, inverted).  Against `pdftoppm -tiff -overprint` at
 72 dpi the swatch fixture is identical in every channel; on eight pages
 of four archive documents the mean per-channel difference is 0–4.4
 levels, but 9.6 (K) on a page of an RGB JPEG cover whose page means agree
@@ -4375,8 +4372,7 @@ new; `RenderParams::depth` no longer sets the canvas depth of a wide page.
   the luminance Y of its colour (ISO 32000-1 §11.5.3), not the luma of its
   encoded values. A gray of 0.5 under gamma 2.2 now masks 0.218, where it
   masked 0.5. Ghostscript 10.06 agrees to a level.
-- **Unchanged.** ICC-based mask groups keep the luma, as pdftoppm, pdfium,
-  mutool and Ghostscript all do. Antialiased edges on ink canvases finished
+- **Unchanged.** ICC-based mask groups keep the luma. Antialiased edges on ink canvases finished
   as RGB still mix in ink:
   - On 9 of the 105 CMYK-page-group archive pages at 300 dpi, OCR word recall
     was 2 513 of 3 815 words, against 2 516 with coverage applied in the
@@ -4917,8 +4913,7 @@ now interpolates with `fma`, byte-identical to the CUDA kernel and the CPU
 evaluator on the RTX 5070 and RADV, and a device failing a one-time
 exactness check converts on the CPU. `PageDiagnostics::device_icc_conversions`
 and `device_icc_failures` (public, additive) count the device's conversions.
-Pages render over a transparent background, for capability parity with
-`pdftocairo -transp`: `--transparent` (alias `--transp`) writes RGBA PNG
+Pages render over a transparent background, for transparent output: `--transparent` (alias `--transp`) writes RGBA PNG
 or TIFF (unassociated alpha) and refuses PPM, JPEG, `--gray` and `--mono`
 with the formats that carry alpha; `RasterOptions::transparent_background`
 yields `PixelFormat::Rgba8` pages (the new `RenderedPage::format`) through
