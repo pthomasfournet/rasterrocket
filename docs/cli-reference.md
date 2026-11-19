@@ -584,7 +584,7 @@ that says so.
 | `--band-mib MIB` | `64` | The memory of a band of a page while it renders, 1 to 65 536. A page larger than one band renders in bands written as each completes; see [Size limits](#size-limits). |
 | `--max-archive-mib MIB` | `4096` | Comic input: the most an archive's entries may decompress to in total, at least 1. An archive over it is refused whole as a possible decompression bomb (exit status 1). |
 | `--sep CHAR` | `-` | Separator between prefix and page number (`out-1.ppm`, `out_1.ppm`, etc.). |
-| `--forcenum DIGITS` | — | Zero-pad page numbers to at least DIGITS digits (`001`, `002`, …). |
+| `--forcenum DIGITS` | — | Zero-pad page numbers to at least DIGITS digits (`001`, `002`, …), 1 to 10: a page number has at most 10 digits. |
 | `-P` / `--progress` | off | Print per-page progress (page done, elapsed, ETA) to stderr. |
 | `--timings` | off | Print per-page wall time and thread index to stderr for profiling. |
 | `--strict` | off | Fail a page when one of its images or content streams cannot be decoded or drawn, or decodes only in part, or when one of its shadings has a `Function` that yields no colour. Without it the image, stream or shading is skipped (or drawn from the data that decoded), the page is written, and a warning naming the page and object goes to stderr. |

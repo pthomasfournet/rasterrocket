@@ -498,9 +498,10 @@ pub(crate) struct Args {
     #[arg(long = "sep", value_name = "CHAR", default_value = "-")]
     pub separator: char,
 
-    /// Zero-pad page numbers to at least N digits.
-    #[arg(long = "forcenum", value_name = "DIGITS")]
-    pub force_num_digits: Option<usize>,
+    /// Zero-pad page numbers to at least N digits, 1 to 10: a page number
+    /// has at most 10.
+    #[arg(long = "forcenum", value_name = "DIGITS", value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub force_num_digits: Option<u8>,
 
     // ── Progress ─────────────────────────────────────────────────────────────
     /// Print progress to stderr: pages done, elapsed time, and ETA.

@@ -59,7 +59,7 @@ pub(crate) fn output_path_with_prefix(
     }
     let digits = args
         .force_num_digits
-        .unwrap_or_else(|| digit_width(total_pages));
+        .map_or_else(|| digit_width(total_pages), usize::from);
     format!("{prefix}{sep}{page_num:0digits$}{suffix}.{ext}")
 }
 
@@ -78,7 +78,7 @@ mod tests {
 
     use crate::args::Args;
 
-    fn make_args(prefix: &str, sep: char, force: Option<usize>) -> Args {
+    fn make_args(prefix: &str, sep: char, force: Option<u8>) -> Args {
         let sep = sep.to_string();
         let digits = force.map(|n| n.to_string());
         let mut argv = vec!["rrocket", "--sep", &sep];
@@ -107,6 +107,22 @@ mod tests {
         let a = make_args("doc", '-', Some(3));
         assert_eq!(output_path(&a, 1, 5, OutputFormat::Png), "doc-001.png");
         assert_eq!(output_path(&a, 42, 5, OutputFormat::Png), "doc-042.png");
+    }
+
+    #[test]
+    fn force_num_takes_one_to_ten_digits() {
+        let parse =
+            |digits: &str| Args::try_parse_from(["rrocket", "--forcenum", digits, "in.pdf", "out"]);
+        assert_eq!(parse("1").unwrap().force_num_digits, Some(1));
+        assert_eq!(parse("10").unwrap().force_num_digits, Some(10));
+        for bad in ["0", "11", "70000", "1000000000000"] {
+            assert!(parse(bad).is_err(), "--forcenum {bad}");
+        }
+        let a = make_args("p", '-', Some(10));
+        assert_eq!(
+            output_path(&a, i32::MAX, i32::MAX, OutputFormat::Ppm),
+            "p-2147483647.ppm"
+        );
     }
 
     #[test]
