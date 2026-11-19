@@ -156,6 +156,27 @@ mod host {
             self.device.warp
         }
 
+        /// The path and file version of the `d3d10warp.dll` loaded in the
+        /// process, or `None` when none is loaded.
+        #[must_use]
+        pub fn loaded_warp() -> Option<(std::path::PathBuf, String)> {
+            super::diag::warp_module()
+        }
+
+        /// The widest vector instruction set of the host CPU (`avx512`,
+        /// `avx2`, `sse` or `neon`), which WARP runs on.
+        #[must_use]
+        pub fn cpu_tier() -> &'static str {
+            super::diag::cpu_tier()
+        }
+
+        /// Whether the debug layer is enabled: `PDF_RASTER_D3D12_DEBUG=1`
+        /// was set at the first open and the layer was available.
+        #[must_use]
+        pub fn debug_layer_enabled() -> bool {
+            device::debug_layer_enabled()
+        }
+
         /// Whether kernels may use 64-bit integers (`Int64ShaderOps`).
         #[must_use]
         pub const fn has_int64(&self) -> bool {

@@ -668,7 +668,10 @@ implements the GPU crate's `GpuBackend` (buffers, copies, the ICC and blit kerne
 but serves no render path yet): a hardware adapter with shader model 6.0 or above, the
 discrete one first, or the one a selector names (an index or a name substring,
 as for `--vulkan-device`, or `warp` for the WARP software adapter);
-`PDF_RASTER_D3D12_DEBUG=1` enables the Direct3D 12 debug layer.  DXC 1.9.2609 publishes builds for Linux x86-64 and Windows only: a macOS
+`PDF_RASTER_D3D12_DEBUG=1` enables the Direct3D 12 debug layer.  `scripts/fetch_warp.ps1 DIR` fetches the pinned WARP (NuGet
+`Microsoft.Direct3D.WARP` 1.0.22, SHA-256 checked) into `DIR`; beside a test binary it loads in
+place of the system's, as the CI job `d3d12-warp` runs the tests (`RR_WARP_VERSION=1.0.22.0` makes
+`pinned_warp_is_the_one_loaded` check it).  DXC 1.9.2609 publishes builds for Linux x86-64 and Windows only: a macOS
 or Linux aarch64 host builds DXC from the source of that release
 ([releases](https://github.com/microsoft/DirectXShaderCompiler/releases)) and names
 it in `DXC`, while slangc 2026.20 publishes builds for both

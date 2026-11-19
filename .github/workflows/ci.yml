@@ -410,6 +410,78 @@ jobs:
       - name: Check the CLI, the library and the camera crate
         run: cargo check --locked -p rasterrocket-cli -p rasterrocket -p rasterrocket-camera
 
+  # ── Direct3D 12 backend on the pinned WARP ──────────────────────────────
+  #
+  # The hosted runner has no GPU, so the D3D12 tests run on the WARP
+  # software adapter.  The pinned d3d10warp.dll (scripts/fetch_warp.ps1) is
+  # copied beside the test binary, which the loader prefers to the system
+  # copy; `pinned_warp_is_the_one_loaded` fails when the system one loads
+  # instead.  slangc and DXC are the exact versions the build requires.
+  d3d12-warp:
+    name: Direct3D 12 on pinned WARP (windows-latest)
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      PDF_RASTER_D3D12_DEVICE: warp
+      PDF_RASTER_REQUIRE_D3D12: "1"
+      PDF_RASTER_D3D12_DEBUG: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-d3d12-warp-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-d3d12-warp-
+
+      # The archives' SHA-256 are the digests of the release assets.
+      - name: Install slangc 2026.20 and DXC 1.9.2609
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'tools'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          $slang = Join-Path $tools 'slang.zip'
+          Invoke-WebRequest -UseBasicParsing -OutFile $slang -Uri 'https://github.com/shader-slang/slang/releases/download/v2026.20/slang-2026.20-windows-x86_64.zip'
+          if ((Get-FileHash -Algorithm SHA256 $slang).Hash.ToLowerInvariant() -ne 'e6dd32bbddf1720ebb4e679d55e9635ce792865a5bd84f3d2cd9af28647c0174') { throw 'slang archive hash mismatch' }
+          Expand-Archive -Path $slang -DestinationPath (Join-Path $tools 'slang')
+          $dxc = Join-Path $tools 'dxc.zip'
+          Invoke-WebRequest -UseBasicParsing -OutFile $dxc -Uri 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip'
+          if ((Get-FileHash -Algorithm SHA256 $dxc).Hash.ToLowerInvariant() -ne 'ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1') { throw 'dxc archive hash mismatch' }
+          Expand-Archive -Path $dxc -DestinationPath (Join-Path $tools 'dxc')
+          "SLANGC=$(Join-Path $tools 'slang\bin\slangc.exe')" >> $env:GITHUB_ENV
+          "DXC=$(Join-Path $tools 'dxc\bin\x64\dxc.exe')" >> $env:GITHUB_ENV
+
+      # Cargo places a test binary by its own layout, so the WARP copy goes
+      # to the directory of the binary the build reports.
+      - name: Build the D3D12 tests
+        run: |
+          $json = cargo test --release -p rasterrocket-gpu --features d3d12 --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed ($LASTEXITCODE)" }
+          $exes = @($json | ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.executable -and $_.target.name -like 'd3d12_*' } |
+            ForEach-Object { $_.executable })
+          if ($exes.Count -eq 0) { throw 'no D3D12 test binary was built' }
+          $dirs = @($exes | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique)
+          foreach ($dir in $dirs) { ./scripts/fetch_warp.ps1 $dir }
+
+      - name: Test the D3D12 backend on the pinned WARP
+        env:
+          RR_WARP_VERSION: 1.0.22.0
+        run: cargo test --release -p rasterrocket-gpu --features d3d12 --test 'd3d12_*' -- --nocapture --test-threads=1
+
+      - name: Test the D3D12 backend's unit tests
+        run: cargo test --release -p rasterrocket-gpu --features d3d12 --lib -- d3d12
+
   # ── Format and spelling check ─────────────────────────────────────────────
   fmt:
     name: Formatting and spelling

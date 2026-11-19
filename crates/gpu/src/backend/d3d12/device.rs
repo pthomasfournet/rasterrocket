@@ -2,6 +2,7 @@
 //! the capabilities selection reads, and the debug layer.
 
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{
@@ -127,6 +128,14 @@ pub(crate) fn usable_gpus() -> Result<Vec<usize>> {
     select::usable_gpus(&cands)
 }
 
+/// Whether [`enable_debug_layer`] enabled the layer.
+static DEBUG_LAYER_ON: AtomicBool = AtomicBool::new(false);
+
+/// Whether the debug layer is enabled in this process.
+pub(crate) fn debug_layer_enabled() -> bool {
+    DEBUG_LAYER_ON.load(Ordering::Acquire)
+}
+
 /// Enable the D3D12 debug layer once per process when
 /// `PDF_RASTER_D3D12_DEBUG` is `1`, and log whether it was.  Every device
 /// this module creates is created after the first call, as the layer
@@ -144,6 +153,7 @@ fn enable_debug_layer() {
                 if let Some(debug) = debug {
                     // SAFETY: `debug` is a live interface; no device exists yet.
                     unsafe { debug.EnableDebugLayer() };
+                    DEBUG_LAYER_ON.store(true, Ordering::Release);
                     log::info!("d3d12: debug layer enabled (PDF_RASTER_D3D12_DEBUG=1)");
                 }
             }

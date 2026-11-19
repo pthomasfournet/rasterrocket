@@ -318,3 +318,44 @@ fn wait_page_with_a_stale_fence_waits_for_the_page_in_flight() {
     backend.free_device(buf);
     backend.free_host_pinned(out);
 }
+
+/// The WARP the process loaded: always reported; with `RR_WARP_VERSION`
+/// set, it must be the copy beside the test binary and of that version.
+#[test]
+fn pinned_warp_is_the_one_loaded() {
+    if !std::env::var("PDF_RASTER_D3D12_DEVICE").is_ok_and(|v| v.trim() == "warp") {
+        eprintln!("skipping: PDF_RASTER_D3D12_DEVICE is not `warp`");
+        return;
+    }
+    let Some(backend) = common_d3d12::test_backend() else {
+        return;
+    };
+    assert!(backend.is_warp(), "the adapter is not WARP");
+    let loaded = D3d12Backend::loaded_warp();
+    match &loaded {
+        Some((path, version)) => eprintln!("WARP module: {} version {version}", path.display()),
+        None => eprintln!("WARP module: not loaded"),
+    }
+    eprintln!("CPU tier: {}", D3d12Backend::cpu_tier());
+    eprintln!(
+        "debug layer: {}",
+        if D3d12Backend::debug_layer_enabled() {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    let Ok(expected) = std::env::var("RR_WARP_VERSION") else {
+        return;
+    };
+    let (path, version) = loaded.expect("d3d10warp.dll is loaded");
+    let exe = std::env::current_exe().expect("test binary path");
+    let dir = exe.parent().expect("test binary directory");
+    assert_eq!(
+        path.parent().map(std::path::Path::to_path_buf).as_deref(),
+        Some(dir),
+        "the loaded WARP is not the one beside the test binary: {}",
+        path.display()
+    );
+    assert_eq!(version, expected.trim(), "WARP version");
+}
