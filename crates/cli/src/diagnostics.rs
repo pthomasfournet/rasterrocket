@@ -81,6 +81,10 @@ fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env
             source_hint("vulkan");
             print_vulkan_hint();
         }
+        BackendPolicy::ForceD3d12 => {
+            source_hint("d3d12");
+            print_d3d12_hint();
+        }
         _ => {
             eprintln!("  hint: use --backend auto to fall back to CPU when GPU is unavailable,");
             eprintln!("        or --backend cpu to force CPU-only mode.");
@@ -118,6 +122,20 @@ fn print_vulkan_hint() {
     eprintln!("        Run `vulkaninfo` to verify a usable Vulkan device is present.");
     eprintln!(
         "        Use --backend auto to fall back to CUDA / CPU silently, \
+         or --backend cpu to skip GPU entirely."
+    );
+}
+
+fn print_d3d12_hint() {
+    if cfg!(windows) {
+        eprintln!("        --backend d3d12 requires a build with the `d3d12` feature and a");
+        eprintln!("        Direct3D 12 adapter with shader model 6.0 or later, or WARP");
+        eprintln!("        (--d3d12-device warp); the error above names what failed.");
+    } else {
+        eprintln!("        --backend d3d12 is available on Windows only.");
+    }
+    eprintln!(
+        "        Use --backend auto to fall back to CPU silently, \
          or --backend cpu to skip GPU entirely."
     );
 }

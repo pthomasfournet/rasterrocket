@@ -613,11 +613,12 @@ A built-in spill policy reads the kernel's available-memory estimate before each
 
 | Flag | Default | Description |
 |---|---|---|
-| `--backend auto\|cpu\|cuda\|vaapi\|vulkan` | `auto` | Compute backend for image decoding and the GPU kernels. |
+| `--backend auto\|cpu\|cuda\|vaapi\|vulkan\|d3d12` | `auto` | Compute backend for image decoding and the GPU kernels. |
 | `--vaapi-device PATH\|auto` | `auto` | VA-API DRM render node; `auto` probes for one (only used with `auto` or `vaapi`). |
 | `--vulkan-device INDEX\|NAME` | automatic | Vulkan device, by index or name substring (only used with `auto` or `vulkan`). |
-| `--gpu-pages` | off | Render qualifying pages whole on a Vulkan GPU beside the CPU workers, byte-identical to the CPU. Needs a build with the `vulkan` feature, `--backend auto` or `vulkan`, and `--aaVector yes`; see below. |
-| `--gpu-devices LIST\|all` | the `--gpu-pages` device | The Vulkan devices `--gpu-pages` renders on: comma-separated indices or name substrings, or `all` (every usable GPU). Needs `--gpu-pages`; see below. |
+| `--d3d12-device INDEX\|NAME\|warp` | automatic | Direct3D 12 adapter, by index, name substring or `warp` for the WARP software adapter (only used with `d3d12`; `PDF_RASTER_D3D12_DEVICE` when absent). |
+| `--gpu-pages` | off | Render qualifying pages whole on a Vulkan or Direct3D 12 GPU beside the CPU workers, byte-identical to the CPU. Needs a build with the `vulkan` feature and `--backend auto` or `vulkan`, or a Windows build with the `d3d12` feature and `--backend d3d12`; and `--aaVector yes`; see below. |
+| `--gpu-devices LIST\|all` | the `--gpu-pages` device | The devices `--gpu-pages` renders on: comma-separated indices or name substrings, or `all` (every usable GPU). Needs `--gpu-pages`; see below. |
 | `--prefetch` | off | Prefetch image XObjects into the device-resident image cache when the document is opened. Present only in a binary built with the `cache` feature; worth it for long or repeated renders of one document. At a fixed resolution (no `--scale-to*`, fax or per-page print resolution) an image every draw of which on its page is smaller than the image is not prefetched: such a draw is resampled on the CPU and never reads the cache. |
 
 When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment variable is
@@ -631,6 +632,8 @@ unrecognised value warns and means `auto`); if neither is set the backend is `au
 **`cuda`** — Require CUDA. Exits with an error if the CUDA context cannot be initialised, or if the binary was built with neither the `gpu-icc` nor the `cache` feature (the CUDA paths that need a context). Use this to confirm the GPU path is actually active rather than silently falling back. The error names the cause: the driver library (`libcuda`) missing; no CUDA device visible (`nvidia-smi`; an empty or wrong `CUDA_VISIBLE_DEVICES` hides every device); a kernel module and user-space driver of different versions (reboot or reload the module after a driver update); kernels compiled by a newer CUDA than the driver supports, with both versions named; kernels compiled for a newer architecture than the GPU, with the `CUDA_ARCH` to rebuild with; or a GPU older than every architecture of the CUDA that compiled the kernels (below `sm_75` for CUDA 13), which only the Vulkan backend or the CPU can serve.
 
 **`vulkan`** — Require the Vulkan compute backend.  Exits with an error if Vulkan initialisation fails or the binary was built without `--features vulkan`.  In a build with `cache`, the device-resident image cache keeps its images on the Vulkan device and draws them with the Vulkan blit kernel (a JPEG drawn below its resolution is not cached, under `--backend cuda` too); with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device.  Cross-vendor (NVIDIA, AMD, Intel, Apple via `MoltenVK`).
+
+**`d3d12`** — Require the Direct3D 12 compute backend (Windows, `cargo build --release -p rasterrocket-cli --features d3d12`).  Exits with an error if the binary is not a Windows build with the `d3d12` feature (off Windows the error says the backend is Windows-only) or if no adapter with shader model 6.0 or later, and WARP, can be opened.  With `gpu-icc` the ICC CMYK→RGB conversion and with `cache` the device image cache run on the adapter, byte-identical to the CPU; `--gpu-pages` and `--gpu-devices` render pages whole on it.  `--d3d12-device` picks the adapter (an index, a name substring, or `warp`); without it the discrete hardware adapter is taken first.  `--d3d12-device` is rejected with any other backend, and `--vulkan-device` and `--vaapi-device` with `d3d12`.  Under `--gpu-devices`, `all` is every hardware adapter, never WARP, which only `warp` or its index names.
 
 **`vaapi`** — Require VA-API JPEG decoding (only in a binary built with the `vaapi` feature). Exits with an error if no usable render node is found or the given one cannot be opened. The decoder is opened, but VA-API dispatch shares the nvJPEG size gate (`GPU_JPEG_THRESHOLD_PX`), which is `u32::MAX`, so JPEGs are still decoded on the CPU.
 
@@ -689,7 +692,8 @@ Read at run time:
 
 | Variable | Build | Effect |
 |---|---|---|
-| `PDF_RASTER_BACKEND` | any | The backend when `--backend` is not given: `auto`, `cpu`, `cuda`, `vulkan`, `d3d12`, or `vaapi` in a `vaapi` build. An unrecognised value warns and means `auto`. `d3d12` is the library's Direct3D 12 policy; `rrocket` does not forward the `d3d12` feature, so it exits with an error naming the feature. |
+| `PDF_RASTER_BACKEND` | any | The backend when `--backend` is not given: `auto`, `cpu`, `cuda`, `vulkan`, `d3d12`, or `vaapi` in a `vaapi` build. An unrecognised value warns and means `auto`. `d3d12` needs a Windows build with the `d3d12` feature; elsewhere `rrocket` exits with an error saying so (Windows only, or the feature to rebuild with). |
+| `PDF_RASTER_D3D12_DEVICE` | `d3d12` | The Direct3D 12 adapter when `--d3d12-device` is not given, in the same syntax; read under `--backend d3d12` only (`PDF_RASTER_VULKAN_DEVICE` is read under `auto` and `vulkan` only). |
 | `PDF_RASTER_VULKAN_DEVICE` | `vulkan` | The Vulkan device when `--vulkan-device` is not given, in the same syntax. |
 | `PDF_RASTER_JPX_THRESHOLD` | `nvjpeg2k` | A pixel area, in decimal: `JPXDecode` images of at least that area decode on nvJPEG2000, under `auto` (otherwise dormant) and under `cuda` (otherwise 2 097 152 px). A value that is not a non-negative integer warns and keeps the default. Set where it cannot act (a build without `nvjpeg2k`, or `--backend cpu`, `vulkan` or `vaapi`), it draws one warning. |
 | `PDF_RASTER_ICC_CLUT_THRESHOLD` | `gpu-icc` | The pixel area from which an ICC CMYK image converts on the GPU backend (default 128 000; `0` every image). A value that is not a non-negative integer warns and keeps the default. |

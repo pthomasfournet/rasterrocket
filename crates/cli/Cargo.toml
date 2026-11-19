@@ -27,6 +27,7 @@ gpu-icc          = ["pdf_raster/gpu-icc"]
 gpu-deskew       = ["pdf_raster/gpu-deskew"]
 cache            = ["pdf_raster/cache"]
 vulkan           = ["pdf_raster/vulkan"]
+d3d12            = ["pdf_raster/d3d12"]
 gpu-validation   = ["pdf_raster/gpu-validation"]
 # Bundled Noto fallback faces; on by default, off with --no-default-features.
 default          = ["bundled-fonts", "av1-asm"]

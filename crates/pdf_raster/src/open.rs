@@ -455,10 +455,13 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
             "ForceVulkan requires the `vulkan` Cargo feature; \
              rebuild with `--features vulkan` or pick another --backend.",
         ),
-        BackendPolicy::ForceD3d12 if !d3d12 => Some(
-            "ForceD3d12 requires a Windows build with the `d3d12` Cargo feature; \
-             rebuild on Windows with `--features d3d12` or pick another --backend.",
-        ),
+        BackendPolicy::ForceD3d12 if !d3d12 => Some(if cfg!(windows) {
+            "ForceD3d12 requires the `d3d12` Cargo feature; \
+             rebuild with `--features d3d12` or pick another --backend."
+        } else {
+            "ForceD3d12 (--backend d3d12) is available on Windows only; \
+             pick another --backend."
+        }),
         BackendPolicy::ForceCuda if !cuda => Some(
             "ForceCuda requires the `gpu-icc` or `cache` Cargo feature; \
              rebuild with the desired feature set or pick another --backend.",

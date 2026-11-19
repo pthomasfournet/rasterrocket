@@ -80,6 +80,49 @@ fn rrocket_with_env(dir: &Path, input: &Path, args: &[&str], env: &[(&str, &str)
         .expect("run rrocket")
 }
 
+/// `rrocket --backend d3d12` where the backend is not compiled in (every
+/// build off Windows, a Windows build without the `d3d12` feature) exits
+/// non-zero and says what is missing, on the flag and on the environment
+/// variable alike.
+#[test]
+#[cfg(not(all(windows, feature = "d3d12")))]
+fn d3d12_backend_without_the_backend_names_what_is_missing() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let named = if cfg!(windows) {
+        "`d3d12` Cargo feature"
+    } else {
+        "Windows only"
+    };
+    let run = |flag: bool| {
+        let flags: &[&str] = if flag { &["--backend", "d3d12"] } else { &[] };
+        let env: &[(&str, &str)] = if flag {
+            &[]
+        } else {
+            &[("PDF_RASTER_BACKEND", "d3d12")]
+        };
+        Command::new(env!("CARGO_BIN_EXE_rrocket"))
+            .envs(env.iter().copied())
+            .arg("--no-ram")
+            .args(flags)
+            .arg(&input)
+            .arg(dir.path().join("out"))
+            .output()
+            .expect("run rrocket")
+    };
+    for flag in [true, false] {
+        let out = run(flag);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{stderr}");
+        assert!(stderr.contains(named), "{stderr}");
+        assert_eq!(
+            stderr.contains("PDF_RASTER_BACKEND=d3d12 is set"),
+            !flag,
+            "{stderr}"
+        );
+    }
+    assert_eq!(outputs(dir.path()), Vec::<String>::new());
+}
+
 /// The names of the files in `dir`, sorted, without `in.pdf`.
 fn outputs(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)

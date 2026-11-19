@@ -530,7 +530,7 @@ and the page/annotation JavaScript-disclosure work).
 - **Spec-correct simple-font text.** The `Widths`-array lookup now prevails over FreeType metrics for all embedded and non-embedded simple fonts, per PDF §9.2.4. Academic and English-language PDFs show the largest improvement: avg RMSE vs pdftoppm dropped 17–19 points on corpus-05 and corpus-14.
 - **Vulkan compute backend.** `--features vulkan` or `--backend vulkan` runs the GPU kernels on any Vulkan 1.3+ device — NVIDIA, AMD, Intel, or Apple via `MoltenVK`. Runs on an RTX 5070, an AMD integrated GPU (RADV) and, under Windows, an RTX 2080 SUPER and an Intel UHD 630; select one with `--vulkan-device`. (The AA-fill and parallel-Huffman JPEG kernels it shipped with have since been removed; `auto` now renders on the CPU.)
 - **Process-static GPU init.** The CUDA and Vulkan contexts are initialised once per process (not once per `open_session`). Short-lived multi-document pipelines no longer pay ~240 ms per document. Changed in v2.4.0: sessions open at the same time share one Vulkan device and one CUDA context, the last of them to drop destroys it, and a later session builds it again; a `DeviceHold` keeps them open across sessions.
-- **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`. The CLI `--backend` flag takes precedence.
+- **`PDF_RASTER_BACKEND` env var.** Switch backends at runtime without recompiling. Valid values: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan`, `d3d12`. The CLI `--backend` flag takes precedence.
 - **Parallel-Huffman JPEG.** GPU-accelerated Huffman decode (`gpu-jpeg-huffman` feature), dormant by default. Removed in v2.4.0: it lost to the multi-threaded CPU decoder on every measured workload.
 - **`RasterOptions::default()`** — `dpi = 300`, `first_page = 1`, `last_page = u32::MAX`, `deskew = false`, `pages = None`. (Since v2.0.0 the struct is `#[non_exhaustive]`, so `..RasterOptions::default()` does not compile outside the crate: start from `RasterOptions::new(dpi)` or `default()` and assign fields.)
 - **`PageSet`** — render a sparse subset of pages without visiting intermediate ones.
@@ -662,8 +662,7 @@ The CLI crate forwards each feature name to the `rasterrocket` library.
 
 The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
 compiles every kernel to DXIL and checks it, on any host that runs the two
-compilers below; the CLI does not forward the feature, so `rrocket` never loads
-the DXIL.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
+compilers below; the CLI forwards it (`--features d3d12`, `--backend d3d12`, `--d3d12-device`).  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
 implements the GPU crate's `GpuBackend` (buffers, copies, the ICC and blit kernels)
 and `PageDevice` (the whole-page raster); a `rasterrocket` session under
 `BackendPolicy::ForceD3d12` runs its ICC conversion, image cache, image blits and GPU pages on it): a hardware adapter with shader model 6.0 or above, the
@@ -736,7 +735,7 @@ The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA, Vulkan, or Direct3D 12 with `d3d12` |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (tested on an AMD iGPU; untested on Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend (cross-vendor; see [Tested hardware](#tested-hardware)) for whole-page rendering (`--gpu-pages`: fills, strokes, text, images, forms, path clips and soft masks, byte-identical to the CPU), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
-| `d3d12` (library only; Windows) | `BackendPolicy::ForceD3d12`: the Direct3D 12 compute backend, with `gpu-icc` for the ICC lookup table, `cache` for the device image cache and its blit kernel, and `SessionConfig::gpu_pages` / `gpu_devices` for whole pages on one or several adapters. The CLI does not forward it | A Direct3D 12 adapter with shader model 6.0 or later, or WARP. slangc 2026.20 and DXC 1.9.2609 at build time |
+| `d3d12` (Windows) | `BackendPolicy::ForceD3d12`: the Direct3D 12 compute backend, with `gpu-icc` for the ICC lookup table, `cache` for the device image cache and its blit kernel, and `SessionConfig::gpu_pages` / `gpu_devices` for whole pages on one or several adapters. `rrocket` forwards it (`--backend d3d12`, `--d3d12-device`) | A Direct3D 12 adapter with shader model 6.0 or later, or WARP. slangc 2026.20 and DXC 1.9.2609 at build time |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
@@ -745,7 +744,7 @@ All GPU features fall back to CPU automatically when the runtime requirement is 
 
 The runtime backend is chosen from three sources, in priority order:
 
-1. The CLI `--backend {auto,cpu,cuda,vaapi,vulkan}` flag.
+1. The CLI `--backend {auto,cpu,cuda,vaapi,vulkan,d3d12}` flag.
 2. The `PDF_RASTER_BACKEND` environment variable (same valid values).
 3. The compile-time default — `auto`.
 
@@ -761,7 +760,7 @@ PDF_RASTER_BACKEND=cuda rrocket --backend cpu input.pdf out   # uses CPU
 
 On a host with more than one Vulkan device, `--vulkan-device <index|name>` (or `PDF_RASTER_VULKAN_DEVICE`) picks one by enumeration index or by a name substring such as `5070` or `radv`; a value that matches nothing lists the available devices. See [docs/cli-reference.md](docs/cli-reference.md#backend-selection).
 
-The library also takes `PDF_RASTER_BACKEND=d3d12` (`BackendPolicy::ForceD3d12`): in a Windows build of `rasterrocket` with the `d3d12` feature, the session opens a Direct3D 12 adapter, and with `gpu-icc` converts ICC CMYK images on it, byte-identical to the CPU, after the same one-time exactness probe as Vulkan; with `cache` the device image cache keeps its slabs on the adapter and the blit kernel draws them there, byte-identical to the CPU; with `SessionConfig::gpu_pages` qualifying pages render whole on the adapter, or on the adapters `SessionConfig::gpu_devices` lists (`all`: every hardware adapter, never WARP, which only an explicit `warp` or its index names), byte-identical to the CPU. `SessionConfig::d3d12_device` (from `PDF_RASTER_D3D12_DEVICE` in `SessionConfig::default()`) names the adapter by index, name substring, or `warp` for the WARP software adapter; without it the discrete hardware adapter is taken first. Other policies never read it. A build without the feature, or for another platform, refuses `d3d12` with `BackendUnavailable` naming the feature, as does `rrocket`, which does not forward the feature.
+The library also takes `PDF_RASTER_BACKEND=d3d12` (`BackendPolicy::ForceD3d12`): in a Windows build of `rasterrocket` with the `d3d12` feature, the session opens a Direct3D 12 adapter, and with `gpu-icc` converts ICC CMYK images on it, byte-identical to the CPU, after the same one-time exactness probe as Vulkan; with `cache` the device image cache keeps its slabs on the adapter and the blit kernel draws them there, byte-identical to the CPU; with `SessionConfig::gpu_pages` qualifying pages render whole on the adapter, or on the adapters `SessionConfig::gpu_devices` lists (`all`: every hardware adapter, never WARP, which only an explicit `warp` or its index names), byte-identical to the CPU. `SessionConfig::d3d12_device` (from `PDF_RASTER_D3D12_DEVICE` in `SessionConfig::default()`) names the adapter by index, name substring, or `warp` for the WARP software adapter; without it the discrete hardware adapter is taken first. Other policies never read it. `rrocket --backend d3d12 [--d3d12-device SELECTOR] [--gpu-pages]` selects it.  A build without the feature refuses `d3d12` with `BackendUnavailable` naming the feature, and one for another platform with the same error saying Windows only, in `rrocket` too.
 
 ### Compile cache (`sccache`) — optional
 

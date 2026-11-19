@@ -595,6 +595,7 @@ pub(crate) struct Args {
     ///            exit with error if unavailable.
     /// `vaapi`  — Require VA-API JPEG; exit with error if the DRM device cannot be opened.
     /// `vulkan` — Require the Vulkan compute backend.
+    /// `d3d12`  — Require the Direct3D 12 compute backend (Windows, `d3d12` feature).
     ///
     /// When `--backend` is omitted, the `PDF_RASTER_BACKEND` environment
     /// variable is consulted (same valid values).  If neither is set,
@@ -626,7 +627,23 @@ pub(crate) struct Args {
     )]
     pub vulkan_device: Option<String>,
 
-    /// Render pages whole on a Vulkan GPU beside the CPU workers.
+    /// Direct3D 12 adapter: an index in enumeration order (from 0), a
+    /// case-insensitive substring of the adapter name, or `warp` for the
+    /// WARP software adapter.
+    ///
+    /// An all-digit value that is not a valid index is matched as a name.
+    /// A value matching no adapter, or several, is an error that lists the
+    /// available adapters.  When omitted, `PDF_RASTER_D3D12_DEVICE` is
+    /// consulted; if neither is set the adapter is picked automatically.
+    /// Only used with `--backend d3d12`.
+    #[arg(
+        long = "d3d12-device",
+        value_name = "INDEX|NAME|warp",
+        verbatim_doc_comment
+    )]
+    pub d3d12_device: Option<String>,
+
+    /// Render pages whole on a Vulkan or Direct3D 12 GPU beside the CPU workers.
     ///
     /// Under --backend auto the device opens when the first page that may
     /// render on it is reached, so a document with no such page opens none.
@@ -639,14 +656,16 @@ pub(crate) struct Args {
     /// or shading, a Type 3 glyph that runs its `CharProc`, overprint
     /// simulation, or more than 128 MiB of device commands renders on the
     /// CPU, as does a page rendered in bands (larger than --band-mib).
-    /// Needs a build with the `vulkan` feature, --backend auto or vulkan,
-    /// and --aaVector yes.
+    /// Needs a build with the `vulkan` feature and --backend auto or
+    /// vulkan, or a Windows build with the `d3d12` feature and --backend
+    /// d3d12; and --aaVector yes.
     #[arg(long = "gpu-pages", verbatim_doc_comment)]
     pub gpu_pages: bool,
 
-    /// The Vulkan devices --gpu-pages renders on: a comma-separated list
+    /// The devices --gpu-pages renders on: a comma-separated list
     /// of device indices (from 0, in enumeration order) or name
-    /// substrings, as --vulkan-device takes, or `all` for every usable
+    /// substrings, as --vulkan-device (or, under --backend d3d12,
+    /// --d3d12-device, which also takes `warp`) takes, or `all` for every usable
     /// GPU (not a CPU implementation such as llvmpipe).
     ///
     /// Each page takes the open device where it expects the shortest wait
@@ -1954,6 +1973,11 @@ pub(crate) enum BackendArg {
     /// initialisation fails.  In a build with the `cache` feature the
     /// device-resident image cache runs on the Vulkan device.
     Vulkan,
+    /// Require the Direct3D 12 compute backend — error loudly if it is
+    /// not compiled in (Windows, `d3d12` feature) or its initialisation
+    /// fails.
+    #[value(name = "d3d12")]
+    D3d12,
 }
 
 impl Args {
@@ -1967,21 +1991,26 @@ impl Args {
             #[cfg(feature = "vaapi")]
             Some(BackendArg::Vaapi) => BackendPolicy::ForceVaapi,
             Some(BackendArg::Vulkan) => BackendPolicy::ForceVulkan,
+            Some(BackendArg::D3d12) => BackendPolicy::ForceD3d12,
             None => BackendPolicy::from_env(),
         }
     }
 
     /// Build a [`SessionConfig`] from the `--backend` / `--vaapi-device` /
-    /// `--vulkan-device` flags.
+    /// `--vulkan-device` / `--d3d12-device` flags.
     ///
     /// Rejects `--vaapi-device` when combined with `--backend cpu`,
-    /// `--backend cuda` or `--backend vulkan`, and `--vulkan-device` with
-    /// any backend but `auto` and `vulkan` — those modes never touch the
-    /// device in question, so allowing the combination would silently
-    /// ignore a user expectation.  `PDF_RASTER_VULKAN_DEVICE` is consulted
-    /// only when `--vulkan-device` is absent and is never rejected.
-    /// Rejects `--gpu-pages` with a backend other than `auto` and `vulkan`,
-    /// with `--aaVector no`, and in a binary without the `vulkan` feature
+    /// `--backend cuda`, `--backend vulkan` or `--backend d3d12`,
+    /// `--vulkan-device` with any backend but `auto` and `vulkan`, and
+    /// `--d3d12-device` with any backend but `d3d12` — those modes never
+    /// touch the device in question, so allowing the combination would
+    /// silently ignore a user expectation.  `PDF_RASTER_VULKAN_DEVICE` is
+    /// consulted only under `auto` or `vulkan` and `PDF_RASTER_D3D12_DEVICE`
+    /// only under `d3d12`, each only when its flag is absent, and neither
+    /// is ever rejected.
+    /// Rejects `--gpu-pages` with a backend other than `auto`, `vulkan` and
+    /// `d3d12`, with `--aaVector no`, and in a binary without the backend's
+    /// feature (`vulkan`, or `d3d12` on Windows)
     /// ([`SessionConfig::check_gpu_pages`]), so the refusal precedes any
     /// decryption prompt and covers comic input, which opens no session.
     pub(crate) fn session_config(&self) -> Result<SessionConfig, String> {
@@ -1996,7 +2025,10 @@ impl Args {
         if self.vaapi_device.is_some()
             && matches!(
                 policy,
-                BackendPolicy::CpuOnly | BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan
+                BackendPolicy::CpuOnly
+                    | BackendPolicy::ForceCuda
+                    | BackendPolicy::ForceVulkan
+                    | BackendPolicy::ForceD3d12
             )
         {
             return Err(format!(
@@ -2016,15 +2048,30 @@ impl Args {
             ));
         }
 
+        if self.d3d12_device.is_some() && policy != BackendPolicy::ForceD3d12 {
+            return Err(format!(
+                "--d3d12-device has no effect with --backend {}.\n\
+                 Direct3D 12 is only used with --backend d3d12.",
+                policy.name()
+            ));
+        }
+
         let mut config = SessionConfig::with_policy(policy);
         if let Some(node) = &self.vaapi_device {
             config.vaapi_device.clone_from(node);
         }
         // Under `auto` the GPU page devices replace the Vulkan device, so
         // the environment's device is not read beside them.
+        // Each device variable is read only under the backend it names.
         config.vulkan_device = self.vulkan_device.clone().or_else(|| {
-            (self.gpu_devices.is_empty() || policy != BackendPolicy::Auto)
+            ((policy == BackendPolicy::Auto && self.gpu_devices.is_empty())
+                || policy == BackendPolicy::ForceVulkan)
                 .then(SessionConfig::vulkan_device_from_env)
+                .flatten()
+        });
+        config.d3d12_device = self.d3d12_device.clone().or_else(|| {
+            (policy == BackendPolicy::ForceD3d12)
+                .then(SessionConfig::d3d12_device_from_env)
                 .flatten()
         });
         config.gpu_pages = self.gpu_pages;
@@ -2336,6 +2383,87 @@ mod page_list_tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn backend_d3d12_selects_force_d3d12() {
+        assert_eq!(
+            args_with(&["--backend", "d3d12"]).policy(),
+            BackendPolicy::ForceD3d12
+        );
+        let config = args_with(&["--backend", "d3d12"]).session_config().unwrap();
+        assert_eq!(config.policy, BackendPolicy::ForceD3d12);
+    }
+
+    #[test]
+    fn vulkan_device_is_refused_with_d3d12() {
+        let err = args_with(&["--backend", "d3d12", "--vulkan-device", "0"])
+            .session_config()
+            .unwrap_err();
+        assert!(
+            err.contains("--vulkan-device has no effect with --backend d3d12"),
+            "{err}"
+        );
+        let err = args_with(&["--backend", "d3d12", "--vaapi-device", "auto"])
+            .session_config()
+            .unwrap_err();
+        assert!(
+            err.contains("--vaapi-device has no effect with --backend d3d12"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn d3d12_device_flag_reaches_session_config() {
+        for selector in ["0", "radeon", "warp"] {
+            let config = args_with(&["--backend", "d3d12", "--d3d12-device", selector])
+                .session_config()
+                .unwrap();
+            assert_eq!(config.d3d12_device.as_deref(), Some(selector));
+            assert_eq!(config.vulkan_device, None);
+        }
+    }
+
+    #[test]
+    fn d3d12_device_rejected_with_non_d3d12_backends() {
+        for backend in ["auto", "cpu", "cuda", "vulkan"] {
+            let err = args_with(&["--backend", backend, "--d3d12-device", "0"])
+                .session_config()
+                .unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "--d3d12-device has no effect with --backend {backend}"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_pages_are_accepted_with_d3d12() {
+        let config = args_with(&["--gpu-pages", "--backend", "d3d12"]).session_config();
+        if cfg!(all(windows, feature = "d3d12")) {
+            assert!(config.expect("GPU pages on D3D12").gpu_pages);
+        } else {
+            let msg = config.unwrap_err();
+            let named = if cfg!(windows) {
+                "`d3d12` feature"
+            } else {
+                "Windows only"
+            };
+            assert!(msg.contains("--gpu-pages") && msg.contains(named), "{msg}");
+        }
+        let config = args_with(&[
+            "--gpu-pages",
+            "--backend",
+            "d3d12",
+            "--gpu-devices",
+            "all",
+            "--d3d12-device",
+            "warp",
+        ])
+        .session_config();
+        assert_eq!(config.is_ok(), cfg!(all(windows, feature = "d3d12")));
     }
 
     #[test]

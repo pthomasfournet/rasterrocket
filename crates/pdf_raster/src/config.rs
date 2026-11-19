@@ -715,25 +715,39 @@ impl SessionConfig {
         };
         let vulkan = cfg!(feature = "vulkan");
         let d3d12 = cfg!(all(windows, feature = "d3d12"));
-        if !vulkan && !d3d12 {
-            return refuse(
-                "needs a build with the `vulkan` feature (or, on Windows, the `d3d12` \
-                 feature); rebuild with `--features vulkan` or drop --gpu-pages"
-                    .to_owned(),
-            );
-        }
         match self.policy {
-            BackendPolicy::Auto | BackendPolicy::ForceVulkan if vulkan => {}
             BackendPolicy::ForceD3d12 if d3d12 => {}
-            BackendPolicy::Auto | BackendPolicy::ForceVulkan | BackendPolicy::ForceD3d12 => {
-                let (api, feature) = if self.policy == BackendPolicy::ForceD3d12 {
-                    ("Direct3D 12", "a Windows build with the `d3d12` feature")
-                } else {
-                    ("Vulkan", "a build with the `vulkan` feature")
-                };
+            BackendPolicy::ForceD3d12 if cfg!(windows) => {
+                return refuse(
+                    "on Direct3D 12 (backend `d3d12`) needs a build with the `d3d12` feature; \
+                     rebuild with `--features d3d12` or drop --gpu-pages"
+                        .to_owned(),
+                );
+            }
+            BackendPolicy::ForceD3d12 => {
+                return refuse(
+                    "on Direct3D 12 (backend `d3d12`) is available on Windows only; use \
+                     --backend auto or vulkan, or drop --gpu-pages"
+                        .to_owned(),
+                );
+            }
+            _ if !vulkan && !d3d12 => {
+                return refuse(
+                    if cfg!(windows) {
+                        "needs a build with the `vulkan` or `d3d12` feature; rebuild with \
+                         `--features vulkan` or `--features d3d12`, or drop --gpu-pages"
+                    } else {
+                        "needs a build with the `vulkan` feature; rebuild with \
+                         `--features vulkan` or drop --gpu-pages"
+                    }
+                    .to_owned(),
+                );
+            }
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan if vulkan => {}
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan => {
                 return refuse(format!(
-                    "on {api} (backend `{}`) needs {feature}; rebuild with it or drop \
-                     --gpu-pages",
+                    "on Vulkan (backend `{}`) needs a build with the `vulkan` feature; \
+                     rebuild with `--features vulkan` or drop --gpu-pages",
                     self.policy.name()
                 ));
             }
@@ -954,7 +968,12 @@ mod tests {
             Ok(()) => assert!(d3d12, "accepted without the D3D12 backend"),
             Err(RasterError::InvalidOptions(msg)) => {
                 assert!(!d3d12, "{msg}");
-                assert!(msg.contains("`d3d12` feature"), "{msg}");
+                let named = if cfg!(windows) {
+                    "`d3d12` feature"
+                } else {
+                    "Windows only"
+                };
+                assert!(msg.contains(named), "{msg}");
             }
             Err(other) => panic!("expected InvalidOptions, got {other:?}"),
         }

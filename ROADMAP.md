@@ -3155,6 +3155,19 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: `rrocket --backend d3d12`.** The CLI gains the
+`d3d12` feature (forwarded to `rasterrocket`), `--backend d3d12`
+(`BackendPolicy::ForceD3d12`) and `--d3d12-device INDEX|NAME|warp`, which
+reaches `SessionConfig::d3d12_device`; `PDF_RASTER_D3D12_DEVICE` is read only
+under `d3d12`, and `PDF_RASTER_VULKAN_DEVICE` only under `auto` and `vulkan`
+(it used to be copied into the config under every backend). `--d3d12-device`
+is refused with any other backend, `--vulkan-device` and `--vaapi-device`
+with `d3d12`, and `--gpu-pages` and `--gpu-devices` are accepted with it. The
+feature-missing errors are per host: a Windows build without the feature names
+`--features d3d12`, any other host says Direct3D 12 is Windows-only; the
+`--gpu-pages` refusal reads the same way, and the open-error hint names
+`PDF_RASTER_BACKEND=d3d12` when the policy came from the environment.
+
 **Unreleased on master: where GPU pages went.** A `--gpu-pages` session
 counts every page under the place it rendered and why:
 `RasterSession::device_page_counts()` (`vulkan` feature) returns a
@@ -3882,9 +3895,8 @@ the CPU (the image cache, blits and GPU pages follow below), and no CUDA
 context or Vulkan device is opened. `d3d12_device` is read under
 `ForceD3d12` only, and `vulkan_device` never under it. A build without the
 feature, or for another platform, refuses `ForceD3d12` with
-`BackendUnavailable` naming the feature; `rrocket` does not forward it yet,
-so `PDF_RASTER_BACKEND=d3d12` now fails there instead of warning and
-rendering on `auto`. The ICC parity test passes at 8 and 16 bits, in sRGB and
+`BackendUnavailable` naming the feature (`rrocket` forwards the feature since
+the CLI entry below). The ICC parity test passes at 8 and 16 bits, in sRGB and
 the wide working space, on the RTX 5070, the AMD Radeon iGPU and the pinned
 WARP 1.0.22 on Windows 11.
 
