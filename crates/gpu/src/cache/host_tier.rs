@@ -199,6 +199,13 @@ impl<B: CacheBackend> HostTier<B> {
     /// undercount is bounded by the number of in-flight lookups and
     /// resolves the moment those `Arc`s drop.  This matches the VRAM
     /// tier's contract; both tiers charge bytes to the index.
+    ///
+    /// Every removal from the index, here and in eviction, subtracts the
+    /// bytes of the entry it removed, and every insertion adds its own:
+    /// the replaced entry is the one the map's `insert` returns, under the
+    /// map's shard lock, so concurrent inserts of one hash subtract each
+    /// displaced entry exactly once and `used_bytes` stays the sum over
+    /// the index once they return.
     pub(crate) fn insert(
         &self,
         hash: ContentHash,
@@ -217,7 +224,11 @@ impl<B: CacheBackend> HostTier<B> {
         }
         self.evict_to_fit(bytes);
         let _ = self.used_bytes.fetch_add(bytes, Ordering::Relaxed);
-        let _ = self.entries.insert(hash, arc.clone());
+        if let Some(displaced) = self.entries.insert(hash, arc.clone()) {
+            let _ = self
+                .used_bytes
+                .fetch_sub(displaced.host_bytes(), Ordering::Relaxed);
+        }
         arc
     }
 
@@ -299,6 +310,39 @@ mod tests {
         assert!(tier.is_empty());
         assert_eq!(tier.used_bytes(), 0);
         assert_eq!(tier.budget_bytes(), 1 << 20);
+    }
+
+    /// Threads inserting the same hashes at once leave `used_bytes` equal
+    /// to the bytes of the entries the index holds.  The host slabs of the
+    /// Vulkan backend are ordinary host memory, so no device is opened.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn concurrent_same_hash_inserts_keep_the_accounting_exact() {
+        use crate::backend::vulkan::VulkanBackend;
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 500;
+        let tier = HostTier::<VulkanBackend>::new(HostBudget {
+            host_bytes: 1 << 30,
+        });
+        let hashes = [ContentHash([0x21; 32]), ContentHash([0x42; 32])];
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let (tier, barrier) = (&tier, &barrier);
+                let _ = s.spawn(move || {
+                    for round in 0..ROUNDS {
+                        let _ = barrier.wait();
+                        let bytes = 64 + 16 * ((t + round) % 5);
+                        let slab = vec![0u8; bytes].into_boxed_slice();
+                        let entry = HostEntry::new(slab, 8, 8, ImageLayout::Gray);
+                        let _ = tier.insert(hashes[round % 2], entry, round as u64);
+                    }
+                });
+            }
+        });
+        let held: u64 = tier.entries.iter().map(|e| e.value().host_bytes()).sum();
+        assert_eq!(tier.len(), hashes.len());
+        assert_eq!(tier.used_bytes(), held);
     }
 
     /// GPU integration test: allocate a pinned slab, write a pattern,
