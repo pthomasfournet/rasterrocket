@@ -112,7 +112,7 @@ mod tests {
 
     fn rect_xpath(x0: f64, y0: f64, x1: f64, y1: f64) -> XPath {
         let mut b = PathBuilder::new();
-        b.move_to(x0, y0).unwrap();
+        b.move_to(x0, y0);
         b.line_to(x1, y0).unwrap();
         b.line_to(x1, y1).unwrap();
         b.line_to(x0, y1).unwrap();

@@ -134,7 +134,7 @@ fn make_raster_star(cx: f64, cy: f64, r_o: f64, r_i: f64, n: usize) -> Path {
         let r = if k % 2 == 0 { r_o } else { r_i };
         let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
         if k == 0 {
-            b.move_to(x, y).expect("move_to");
+            b.move_to(x, y);
         } else {
             b.line_to(x, y).expect("line_to");
         }

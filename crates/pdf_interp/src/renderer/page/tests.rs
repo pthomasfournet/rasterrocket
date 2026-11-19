@@ -956,6 +956,35 @@ fn render_gray_on(doc: &Document, page_id: ObjectId, size: u32, content: &[u8]) 
         .collect()
 }
 
+// ── Consecutive moveto ────────────────────────────────────────────────────
+
+/// Assert that `px` (16 × 16) is black on the right half and white on the
+/// left half: the fill of the rectangle `8 0 8 16` in user space.
+fn assert_right_half_filled(px: &[u8]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let want = if x >= 8 { 0 } else { 255 };
+            assert_eq!(px[y * 16 + x], want, "pixel ({x}, {y})");
+        }
+    }
+}
+
+/// An `m` directly after another `m` replaces the lone start point
+/// (ISO 32000-1 §8.5.2.1): the subpath starts at `(8, 0)`, not `(0, 0)`.
+#[test]
+fn consecutive_moveto_replaces_start_point() {
+    let px = render_gray(16, b"0 g 0 0 m 8 0 m 16 0 l 16 16 l 8 16 l h f");
+    assert_right_half_filled(&px);
+}
+
+/// `re` after a lone `m` begins its own subpath at the rectangle's corner;
+/// the earlier point is discarded.
+#[test]
+fn rectangle_after_lone_moveto_discards_the_point() {
+    let px = render_gray(16, b"0 g 0 0 m 8 0 8 16 re f");
+    assert_right_half_filled(&px);
+}
+
 /// A 2×2 all-black `DeviceGray` inline image stretched over the whole
 /// 8 pt page.  Without a clip it would blacken every pixel.
 const BLACK_IMAGE_OVER_PAGE: &[u8] =

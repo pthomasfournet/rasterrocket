@@ -44,7 +44,7 @@ pub(super) fn flatten_path(path: &Path, flatness: f64) -> Path {
         let flag = path.flags[i];
         if flag.is_first() {
             // moveTo — start a new subpath.
-            let _ = builder.move_to(path.pts[i].x, path.pts[i].y);
+            builder.move_to(path.pts[i].x, path.pts[i].y);
             i += 1;
         } else if flag.is_curve() {
             // curveTo: pts[i], pts[i+1] are off-curve; pts[i+2] is on-curve.
@@ -222,7 +222,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
                 if dash_dist >= seg_len {
                     if dash_on {
                         if new_path {
-                            let _ = builder.move_to(xa, ya);
+                            builder.move_to(xa, ya);
                             new_path = false;
                         }
                         let _ = builder.line_to(x1, y1);
@@ -234,7 +234,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
                     let yb = ya + (dash_dist / seg_len) * (y1 - ya);
                     if dash_on {
                         if new_path {
-                            let _ = builder.move_to(xa, ya);
+                            builder.move_to(xa, ya);
                             new_path = false;
                         }
                         let _ = builder.line_to(xb, yb);
@@ -267,7 +267,7 @@ pub(super) fn make_dashed_path(path: &Path, line_dash: &[f64], line_dash_phase: 
         let all_same = path.pts.windows(2).all(|w| w[0] == w[1]);
         if all_same {
             let mut b2 = PathBuilder::new();
-            let _ = b2.move_to(path.pts[0].x, path.pts[0].y);
+            b2.move_to(path.pts[0].x, path.pts[0].y);
             let _ = b2.line_to(path.pts[0].x, path.pts[0].y);
             return b2.build();
         }
@@ -362,7 +362,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                 let cy = path.pts[i0].y;
                 let r = 0.5 * w;
                 let bc2w = BEZIER_CIRCLE2 * w;
-                let _ = out.move_to(cx + r, cy);
+                out.move_to(cx + r, cy);
                 let _ = out.curve_to(cx + r, cy + bc2w, cx + bc2w, cy + r, cx, cy + r);
                 let _ = out.curve_to(cx - bc2w, cy + r, cx - r, cy + bc2w, cx - r, cy);
                 let _ = out.curve_to(cx - r, cy - bc2w, cx - bc2w, cy - r, cx, cy - r);
@@ -432,9 +432,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
             Some(corner) if on_plus(corner, origin) => corner,
             _ => PathPoint::new(origin.x - wdy, origin.y + wdx),
         };
-        if out.move_to(start.x, start.y).is_err() {
-            break;
-        }
+        out.move_to(start.x, start.y);
         if i0 == subpath_start0 {
             first_pt = out.pts_len() - 1;
         }
@@ -590,7 +588,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         let cy1 = path.pts[j0].y + wdx + kappa * dy;
                         let cx2 = path.pts[j0].x - wdy_next - kappa * dx_next;
                         let cy2 = path.pts[j0].y + wdx_next - kappa * dy_next;
-                        let _ = out.move_to(path.pts[j0].x, path.pts[j0].y);
+                        out.move_to(path.pts[j0].x, path.pts[j0].y);
                         let _ = out.line_to(path.pts[j0].x - wdy_next, path.pts[j0].y + wdx_next);
                         let _ = out.curve_to(
                             cx2,
@@ -619,7 +617,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                             let cy3 = yc + kappa * dy_join;
                             let cx4 = path.pts[j0].x - wdy_next - kappa * dx_next;
                             let cy4 = path.pts[j0].y + wdx_next - kappa * dy_next;
-                            let _ = out.move_to(path.pts[j0].x, path.pts[j0].y);
+                            out.move_to(path.pts[j0].x, path.pts[j0].y);
                             let _ =
                                 out.line_to(path.pts[j0].x - wdy_next, path.pts[j0].y + wdx_next);
                             let _ = out.curve_to(cx4, cy4, cx3, cy3, xc, yc);
@@ -651,7 +649,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                         let cy1 = path.pts[j0].y - wdx + kappa * dy;
                         let cx2 = path.pts[j0].x + wdy_next - kappa * dx_next;
                         let cy2 = path.pts[j0].y - wdx_next - kappa * dy_next;
-                        let _ = out.move_to(path.pts[j0].x, path.pts[j0].y);
+                        out.move_to(path.pts[j0].x, path.pts[j0].y);
                         let _ = out.line_to(path.pts[j0].x + wdy, path.pts[j0].y - wdx);
                         let _ = out.curve_to(
                             cx1,
@@ -680,7 +678,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                             let cy3 = yc + kappa * dy_join;
                             let cx4 = path.pts[j0].x + wdy_next - kappa * dx_next;
                             let cy4 = path.pts[j0].y - wdx_next - kappa * dy_next;
-                            let _ = out.move_to(path.pts[j0].x, path.pts[j0].y);
+                            out.move_to(path.pts[j0].x, path.pts[j0].y);
                             let _ = out.line_to(path.pts[j0].x + wdy, path.pts[j0].y - wdx);
                             let _ = out.curve_to(cx1, cy1, cx2, cy2, xc, yc);
                             let _ = out.curve_to(
@@ -696,7 +694,7 @@ pub(super) fn make_stroke_path(path: &Path, w: f64, params: &super::StrokeParams
                 }
             } else if has_angle {
                 // ── Miter / Bevel join ────────────────────────────────────────
-                let _ = out.move_to(path.pts[j0].x, path.pts[j0].y);
+                out.move_to(path.pts[j0].x, path.pts[j0].y);
                 if crossprod < 0.0 {
                     // Angle < 180° — outside corner is on the left.
                     let _ = out.line_to(path.pts[j0].x - wdy_next, path.pts[j0].y + wdx_next);

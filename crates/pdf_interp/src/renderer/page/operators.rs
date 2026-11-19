@@ -216,9 +216,7 @@ impl PageRenderer<'_> {
             // ── Path construction ─────────────────────────────────────────────
             Operator::MoveTo(x, y) => {
                 let (dx, dy) = self.to_device(*x, *y);
-                if let Err(e) = self.path_builder().move_to(dx, dy) {
-                    log::debug!("rasterrocket-interp: MoveTo failed: {e}");
-                }
+                self.path_builder().move_to(dx, dy);
             }
             Operator::LineTo(x, y) => {
                 let (dx, dy) = self.to_device(*x, *y);
@@ -273,9 +271,10 @@ impl PageRenderer<'_> {
                 let (x2, y2) = self.to_device(*x + *w, *y + *h);
                 let (x3, y3) = self.to_device(*x, *y + *h);
                 let b = self.path_builder();
-                // `re` is self-contained; individual segment failures are benign —
-                // a partial rectangle is better than a panic on a malformed PDF.
-                let _ = b.move_to(x0, y0);
+                // `re` opens its own subpath: the `move_to` replaces a lone
+                // preceding `m` point, and each segment then has a current
+                // point, so none of the results below is an error.
+                b.move_to(x0, y0);
                 let _ = b.line_to(x1, y1);
                 let _ = b.line_to(x2, y2);
                 let _ = b.line_to(x3, y3);

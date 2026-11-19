@@ -93,7 +93,7 @@ impl Subpath {
 fn build(subpaths: &[Subpath]) -> Path {
     let mut b = PathBuilder::new();
     for sp in subpaths {
-        b.move_to(sp.start.0, sp.start.1).expect("move_to");
+        b.move_to(sp.start.0, sp.start.1);
         for seg in &sp.segs {
             match *seg {
                 Seg::Line((x, y)) => b.line_to(x, y),

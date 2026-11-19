@@ -261,9 +261,7 @@ pub(crate) fn random_path(rng: &mut Rng, width: u32, height: u32) -> raster::Pat
         f64::from(i32::try_from(rng.range(-40, i64::from(extent) * 8 + 40)).unwrap()) / 8.0
     };
     let mut builder = raster::PathBuilder::new();
-    builder
-        .move_to(coord(rng, width), coord(rng, height))
-        .expect("move_to");
+    builder.move_to(coord(rng, width), coord(rng, height));
     for _ in 0..rng.range(2, 11) {
         builder
             .line_to(coord(rng, width), coord(rng, height))

@@ -243,7 +243,7 @@ mod tests {
 
     fn polygon(points: &[(f64, f64)]) -> Path {
         let mut b = PathBuilder::new();
-        b.move_to(points[0].0, points[0].1).unwrap();
+        b.move_to(points[0].0, points[0].1);
         for &(x, y) in &points[1..] {
             b.line_to(x, y).unwrap();
         }
@@ -312,7 +312,7 @@ mod tests {
     fn overlapping_same_direction_contours_do_not_double_cover() {
         let mut b = PathBuilder::new();
         for _ in 0..2 {
-            b.move_to(0.0, 0.0).unwrap();
+            b.move_to(0.0, 0.0);
             b.line_to(4.0, 0.0).unwrap();
             b.line_to(4.0, 4.0).unwrap();
             b.line_to(0.0, 4.0).unwrap();
@@ -330,7 +330,7 @@ mod tests {
             if rev {
                 pts.reverse();
             }
-            b.move_to(pts[0].0, pts[0].1).unwrap();
+            b.move_to(pts[0].0, pts[0].1);
             for &(x, y) in &pts[1..] {
                 b.line_to(x, y).unwrap();
             }
@@ -377,7 +377,7 @@ mod tests {
         // Circle of radius 20 from four cubic arcs: area π·r².
         let k = 0.552_284_749_831 * 20.0;
         let mut b = PathBuilder::new();
-        b.move_to(20.0, 0.0).unwrap();
+        b.move_to(20.0, 0.0);
         b.curve_to(20.0, k, k, 20.0, 0.0, 20.0).unwrap();
         b.curve_to(-k, 20.0, -20.0, k, -20.0, 0.0).unwrap();
         b.curve_to(-20.0, -k, -k, -20.0, 0.0, -20.0).unwrap();

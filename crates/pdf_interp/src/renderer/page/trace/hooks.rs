@@ -398,11 +398,11 @@ impl PageRenderer<'_> {
         let mut unit = raster::path::PathBuilder::new();
         for (i, &(x, y)) in corners.iter().enumerate() {
             let (dx, dy) = self.to_device(x, y);
-            let _ = if i == 0 {
-                unit.move_to(dx, dy)
+            if i == 0 {
+                unit.move_to(dx, dy);
             } else {
-                unit.line_to(dx, dy)
-            };
+                let _ = unit.line_to(dx, dy);
+            }
         }
         let _ = unit.close(true);
         out.push(' ');

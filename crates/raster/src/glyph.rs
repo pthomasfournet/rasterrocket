@@ -741,7 +741,7 @@ mod tests {
 
         let mut clip = Clip::new(0.0, 0.0, 16.0, 16.0, true);
         let mut builder = PathBuilder::new();
-        builder.move_to(0.0, 0.0).expect("move_to");
+        builder.move_to(0.0, 0.0);
         builder.line_to(16.0, 16.0).expect("line_to");
         builder.line_to(0.0, 16.0).expect("line_to");
         builder.close(false).expect("close");

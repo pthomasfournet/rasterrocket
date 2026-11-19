@@ -794,7 +794,7 @@ mod tests {
 
     fn triangle_xpath() -> XPath {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(4.0, 0.0).unwrap();
         b.line_to(2.0, 4.0).unwrap();
         b.close(false).unwrap();
@@ -817,7 +817,7 @@ mod tests {
     fn whole_pixel_moves_move_the_spans() {
         let triangle = |dx: f64, dy: f64| {
             let mut b = PathBuilder::new();
-            b.move_to(-15.0 + dx, 41.75 + dy).unwrap();
+            b.move_to(-15.0 + dx, 41.75 + dy);
             b.line_to(dx, dy).unwrap();
             b.line_to(42.0 + dx, 54.0 + dy).unwrap();
             b.close(false).unwrap();
@@ -847,7 +847,7 @@ mod tests {
         };
         let mut b = PathBuilder::new();
         for _ in 0..40 {
-            b.move_to(next(), next()).unwrap();
+            b.move_to(next(), next());
             b.line_to(next(), next()).unwrap();
             b.line_to(next(), next()).unwrap();
             b.close(false).unwrap();
@@ -877,7 +877,7 @@ mod tests {
         let (top, bottom) = (-1.0e6, 1000.0);
         let x_bottom = (bottom - top) * dxdy;
         let mut b = PathBuilder::new();
-        b.move_to(0.0, top).unwrap();
+        b.move_to(0.0, top);
         b.line_to(x_bottom, bottom).unwrap();
         b.line_to(500.0, bottom).unwrap();
         b.line_to(500.0, top).unwrap();
@@ -1004,7 +1004,7 @@ mod tests {
         let mut b = PathBuilder::new();
         for i in 0..=(1 << 16) {
             let x = f64::from(i) * 2.0;
-            b.move_to(x, 0.0).unwrap();
+            b.move_to(x, 0.0);
             b.line_to(x + 0.5, f64::from(rows)).unwrap();
             b.line_to(x + 1.0, 0.0).unwrap();
             b.close(false).unwrap();

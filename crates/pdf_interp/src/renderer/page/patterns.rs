@@ -822,7 +822,7 @@ impl PageRenderer<'_> {
             return;
         }
         let mut pb = PathBuilder::new();
-        let _ = pb.move_to(corners[0].0, corners[0].1);
+        pb.move_to(corners[0].0, corners[0].1);
         for (x, y) in &corners[1..] {
             let _ = pb.line_to(*x, *y);
         }

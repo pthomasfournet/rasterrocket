@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn a_small_path_prints_its_points_in_the_page_space() {
         let mut pb = raster::path::PathBuilder::new();
-        let _ = pb.move_to(1.0, 2.0);
+        pb.move_to(1.0, 2.0);
         let _ = pb.line_to(3.5, 2.0);
         let _ = pb.line_to(3.5, 4.0);
         let _ = pb.close(true);
@@ -379,7 +379,7 @@ mod tests {
     fn a_path_hash_ignores_last_bit_differences() {
         let path = |dx: f64| {
             let mut pb = raster::path::PathBuilder::new();
-            let _ = pb.move_to(1.0 + dx, 2.0);
+            pb.move_to(1.0 + dx, 2.0);
             let _ = pb.line_to(30.0, 2.0 - dx);
             pb.build()
         };

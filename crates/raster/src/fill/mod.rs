@@ -391,7 +391,6 @@ pub fn aa_fill_outlines(
 /// folds back on itself ([`fold_spikes`]), which enclose none.
 fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
     let mut lines = PathBuilder::new();
-    let mut any = false;
     let mut segs = Vec::new();
     for subpath in xpath
         .segs
@@ -401,16 +400,16 @@ fn zero_area_lines(xpath: &XPath, flatness: f64) -> Option<XPath> {
         segs.extend(subpath.iter().map(|s| ((s.x0, s.y0), (s.x1, s.y1))));
         let Some(intervals) = collinear::intervals(&segs) else {
             for (from, to) in fold_spikes(subpath) {
-                any |= add_line(&mut lines, from, to, false);
+                add_line(&mut lines, from, to, false);
             }
             continue;
         };
         let single = subpath.len() <= 2;
         for [from, to] in intervals {
-            any |= add_line(&mut lines, from, to, single);
+            add_line(&mut lines, from, to, single);
         }
     }
-    if !any {
+    if lines.pts_len() == 0 {
         return None;
     }
     let params = StrokeParams {
@@ -456,8 +455,8 @@ fn fold_spikes(segs: &[crate::xpath::XPathSeg]) -> Vec<(collinear::Point, collin
 }
 
 /// Append the open subpath `from → to` to `lines`, its ends moved to the
-/// centres of their pixels when `centre`; whether it was added.
-fn add_line(lines: &mut PathBuilder, from: (f64, f64), to: (f64, f64), centre: bool) -> bool {
+/// centres of their pixels when `centre`.
+fn add_line(lines: &mut PathBuilder, from: (f64, f64), to: (f64, f64), centre: bool) {
     let place = |p: (f64, f64)| {
         if centre {
             (p.0.floor() + 0.5, p.1.floor() + 0.5)
@@ -466,7 +465,9 @@ fn add_line(lines: &mut PathBuilder, from: (f64, f64), to: (f64, f64), centre: b
         }
     };
     let (from, to) = (place(from), place(to));
-    lines.move_to(from.0, from.1).is_ok() && lines.line_to(to.0, to.1).is_ok()
+    lines.move_to(from.0, from.1);
+    let added = lines.line_to(to.0, to.1);
+    debug_assert!(added.is_ok(), "line_to follows move_to");
 }
 
 /// Composite `coverage[i]` as the shape of pixel `(x0 + i, row)`.
@@ -641,7 +642,7 @@ mod tests {
             (2.5, 2.5, 7.5, 7.5),
             (5.0, 5.0, 10.0, 10.0),
         ] {
-            b.move_to(x0, y0).unwrap();
+            b.move_to(x0, y0);
             b.line_to(x1, y0).unwrap();
             b.line_to(x1, y1).unwrap();
             b.line_to(x0, y1).unwrap();
@@ -669,9 +670,9 @@ mod tests {
     #[test]
     fn aa_fill_of_a_zero_area_subpath_draws_a_line() {
         let mut b = PathBuilder::new();
-        b.move_to(2.0, 5.0).unwrap();
+        b.move_to(2.0, 5.0);
         b.line_to(14.0, 5.0).unwrap();
-        b.move_to(3.0, 9.0).unwrap();
+        b.move_to(3.0, 9.0);
         b.line_to(13.0, 12.0).unwrap();
         b.line_to(8.0, 10.5).unwrap();
         let path = b.build();
@@ -723,7 +724,7 @@ mod tests {
         .enumerate()
         {
             if k == 0 {
-                b.move_to(x, y).unwrap();
+                b.move_to(x, y);
             } else {
                 b.line_to(x, y).unwrap();
             }
@@ -741,7 +742,7 @@ mod tests {
     fn aa_fill_ink_equals_area() {
         let mut b = PathBuilder::new();
         let tri = [(1.3, 0.7), (29.1, 6.4), (8.2, 27.8)];
-        b.move_to(tri[0].0, tri[0].1).unwrap();
+        b.move_to(tri[0].0, tri[0].1);
         b.line_to(tri[1].0, tri[1].1).unwrap();
         b.line_to(tri[2].0, tri[2].1).unwrap();
         b.close(true).unwrap();
@@ -829,7 +830,7 @@ mod tests {
         // A triangle past device column 8192, where antialiased coordinates
         // exceed 16.16 fixed point.
         let mut b = PathBuilder::new();
-        b.move_to(9000.0, 10.0).unwrap();
+        b.move_to(9000.0, 10.0);
         b.line_to(9100.0, 10.0).unwrap();
         b.line_to(9050.0, 100.0).unwrap();
         b.close(false).unwrap();
@@ -846,7 +847,7 @@ mod tests {
     #[test]
     fn aa_coverage_matches_an_aa_fill() {
         let mut b = PathBuilder::new();
-        b.move_to(1.3, 0.6).unwrap();
+        b.move_to(1.3, 0.6);
         b.line_to(10.7, 3.2).unwrap();
         b.line_to(4.1, 9.4).unwrap();
         b.close(false).unwrap();
@@ -1024,7 +1025,7 @@ mod tests {
     fn aliased_fill_is_independent_of_orientation() {
         let triangle = |pts: [(f64, f64); 3]| {
             let mut b = PathBuilder::new();
-            b.move_to(pts[0].0, pts[0].1).unwrap();
+            b.move_to(pts[0].0, pts[0].1);
             b.line_to(pts[1].0, pts[1].1).unwrap();
             b.line_to(pts[2].0, pts[2].1).unwrap();
             b.close(false).unwrap();
@@ -1087,12 +1088,12 @@ mod tests {
 
         // Outer square 1..8, inner square 3..6.
         let mut b = PathBuilder::new();
-        b.move_to(1.0, 1.0).unwrap();
+        b.move_to(1.0, 1.0);
         b.line_to(8.0, 1.0).unwrap();
         b.line_to(8.0, 8.0).unwrap();
         b.line_to(1.0, 8.0).unwrap();
         b.close(true).unwrap();
-        b.move_to(3.0, 3.0).unwrap();
+        b.move_to(3.0, 3.0);
         b.line_to(6.0, 3.0).unwrap();
         b.line_to(6.0, 6.0).unwrap();
         b.line_to(3.0, 6.0).unwrap();
@@ -1151,7 +1152,7 @@ mod tests {
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(W, W, 1, false);
         let mut clip = crate::clip::Clip::new(0.0, 0.0, f64::from(W), f64::from(W), true);
         let mut diamond = PathBuilder::new();
-        diamond.move_to(50.0, 5.0).expect("move_to");
+        diamond.move_to(50.0, 5.0);
         diamond.line_to(95.0, 50.0).expect("line_to");
         diamond.line_to(50.0, 95.0).expect("line_to");
         diamond.line_to(5.0, 50.0).expect("line_to");

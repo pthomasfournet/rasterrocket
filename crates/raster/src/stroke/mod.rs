@@ -133,9 +133,8 @@ fn outline_of(path: &Path, params: &StrokeParams<'_>) -> Path {
                     &mut open_lines
                 };
                 for [(x0, y0), (x1, y1)] in intervals {
-                    if lines.move_to(x0, y0).is_ok() {
-                        let _ = lines.line_to(x1, y1);
-                    }
+                    lines.move_to(x0, y0);
+                    let _ = lines.line_to(x1, y1);
                 }
             }
             None => regular.append(&path.subpath(start..end)),
@@ -461,7 +460,7 @@ mod tests {
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(16, 20, 4, false);
         let clip = Clip::new(0.0, 0.0, 16.0, 20.0, true);
         let mut b = PathBuilder::new();
-        b.move_to(-2.0, at).unwrap();
+        b.move_to(-2.0, at);
         b.line_to(18.0, at).unwrap();
         let params = StrokeParams {
             line_width: w,
@@ -528,7 +527,7 @@ mod tests {
 
         // Build a diagonal path from (1,1) to (8,8).
         let mut b = PathBuilder::new();
-        b.move_to(1.0, 1.0).unwrap();
+        b.move_to(1.0, 1.0);
         b.line_to(8.0, 8.0).unwrap();
         let path = b.build();
 
@@ -562,7 +561,7 @@ mod tests {
             let src = PipeSrc::Solid(&color);
             for (x1, y1) in [(15.3, 6.6), (0.4, 7.9)] {
                 let mut b = PathBuilder::new();
-                b.move_to(4.2, 0.5).unwrap();
+                b.move_to(4.2, 0.5);
                 b.line_to(x1, y1).unwrap();
                 let flat = flatten_path(&b.build(), 1.0);
                 stroke_narrow::<Rgb8>(&mut bmp, &clip, &flat, &pipe, &src, &identity_matrix(), 1.0);
@@ -591,7 +590,7 @@ mod tests {
             let mut bmp: Bitmap<Rgb8> = Bitmap::new(24, 16, 4, false);
             let color = [255u8, 0, 0];
             let mut b = PathBuilder::new();
-            b.move_to(from.0, from.1).unwrap();
+            b.move_to(from.0, from.1);
             b.line_to(to.0, to.1).unwrap();
             let flat = flatten_path(&b.build(), 1.0);
             let src = PipeSrc::Solid(&color);
@@ -642,7 +641,7 @@ mod tests {
     fn make_stroke_path_non_degenerate() {
         // A simple horizontal segment.
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(10.0, 0.0).unwrap();
         let path = b.build();
 
@@ -668,7 +667,7 @@ mod tests {
     fn make_dashed_path_respects_dash_array() {
         // A horizontal line of length 20, dash array [4, 2] → on 4, off 2, ...
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(20.0, 0.0).unwrap();
         let path = b.build();
 
@@ -742,7 +741,7 @@ mod tests {
     #[test]
     fn odd_dash_array_with_phase_starts_off() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(20.0, 0.0).unwrap();
         let path = b.build();
 
@@ -757,7 +756,7 @@ mod tests {
     #[test]
     fn dash_count_beyond_the_budget_strokes_solid() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(1e9, 0.0).unwrap();
         let path = b.build();
         let params = StrokeParams {
@@ -770,7 +769,7 @@ mod tests {
 
         // Within the budget the same pattern still dashes.
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(4.0, 0.0).unwrap();
         let short = flattened_dashed(&b.build(), &identity_matrix(), &params).expect("dashed");
         assert_eq!(short.pts.len(), 8, "four dashes of two points");
@@ -780,7 +779,7 @@ mod tests {
     #[test]
     fn flatten_path_removes_curves() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.curve_to(1.0, 2.0, 3.0, 4.0, 4.0, 0.0).unwrap();
         let path = b.build();
 
@@ -817,7 +816,7 @@ mod overlap_tests {
         let n = 64 * scale;
         let mut bmp: Bitmap<Rgb8> = Bitmap::new(n, n, 4, false);
         let mut b = PathBuilder::new();
-        b.move_to(pts[0].0, pts[0].1).unwrap();
+        b.move_to(pts[0].0, pts[0].1);
         for p in &pts[1..] {
             b.line_to(p.0, p.1).unwrap();
         }

@@ -121,16 +121,9 @@ pub enum PathError {
     /// `lineTo`, `curveTo`, or `close` was called when there is no current
     /// point (the path is fresh or was just closed).
     ///
-    /// Callers should ensure a preceding `move_to` succeeded before calling
+    /// Callers should call `move_to` before calling
     /// drawing operators.
     NoCurPt,
-    /// `moveTo` was called while a one-point subpath is active (a `moveTo`
-    /// was immediately followed by another `moveTo` with no drawing operator
-    /// in between).
-    ///
-    /// Callers should either draw at least one segment or close the current
-    /// subpath before beginning a new one.
-    BogusPath,
 }
 
 impl std::fmt::Display for PathError {
@@ -139,10 +132,6 @@ impl std::fmt::Display for PathError {
             Self::NoCurPt => f.write_str(
                 "path error: no current point \
                  (call move_to before line_to, curve_to, or close)",
-            ),
-            Self::BogusPath => f.write_str(
-                "path error: consecutive moveTo without a drawing operator \
-                 (a one-point subpath is already active)",
             ),
         }
     }
@@ -253,7 +242,7 @@ impl Path {
             4 if !f[0].is_closed() && !f[1].is_last() && !f[2].is_last() => {
                 let mut b = PathBuilder::new();
                 let [p0, p1, p2, p3] = [self.pts[0], self.pts[1], self.pts[2], self.pts[3]];
-                b.move_to(p0.x, p0.y).ok()?;
+                b.move_to(p0.x, p0.y);
                 if f[1].is_curve() {
                     b.curve_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y).ok()?;
                 } else {
@@ -367,21 +356,21 @@ impl PathBuilder {
 
     /// Begin a new subpath at `(x, y)`. Equivalent to the PDF `m` operator.
     ///
-    /// # Errors
-    ///
-    /// Returns [`PathError::BogusPath`] if a one-point subpath is already
-    /// active (i.e. the previous operation was also a `move_to` with no
-    /// drawing operator in between). Callers must not silently ignore this
-    /// error: it indicates a malformed path construction sequence.
-    pub fn move_to(&mut self, x: f64, y: f64) -> Result<(), PathError> {
+    /// If the active subpath consists of a single point (the previous
+    /// operation was also a `move_to`), that point is replaced in place:
+    /// consecutive `m` operators leave only the last one in effect
+    /// (ISO 32000-1 §8.5.2.1).
+    pub fn move_to(&mut self, x: f64, y: f64) {
         if self.path.one_point_subpath() {
-            return Err(PathError::BogusPath);
+            let last = self.path.pts.len() - 1;
+            self.path.pts[last] = PathPoint::new(x, y);
+            self.path.flags[last] = PathFlags::FIRST | PathFlags::LAST;
+            return;
         }
         let len = self.path.pts.len();
         self.path.pts.push(PathPoint::new(x, y));
         self.path.flags.push(PathFlags::FIRST | PathFlags::LAST);
         self.path.cur_subpath = len;
-        Ok(())
     }
 
     /// Add a line segment from the current point to `(x, y)`.
@@ -391,7 +380,7 @@ impl PathBuilder {
     /// # Errors
     ///
     /// Returns [`PathError::NoCurPt`] if there is no current point. Callers
-    /// must ensure a successful [`Self::move_to`] precedes this call.
+    /// must call [`Self::move_to`] before this method.
     ///
     /// # Panics
     ///
@@ -419,7 +408,7 @@ impl PathBuilder {
     /// # Errors
     ///
     /// Returns [`PathError::NoCurPt`] if there is no current point. Callers
-    /// must ensure a successful [`Self::move_to`] precedes this call.
+    /// must call [`Self::move_to`] before this method.
     ///
     /// # Panics
     ///
@@ -585,7 +574,7 @@ mod tests {
     #[test]
     fn move_to_gives_one_point() {
         let mut b = PathBuilder::new();
-        b.move_to(1.0, 2.0).unwrap();
+        b.move_to(1.0, 2.0);
         assert!(b.path.one_point_subpath());
         assert!(!b.path.open_subpath());
     }
@@ -593,7 +582,7 @@ mod tests {
     #[test]
     fn line_to_opens_subpath() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(10.0, 0.0).unwrap();
         assert!(b.path.open_subpath());
         assert_eq!(b.path.pts.len(), 2);
@@ -604,7 +593,7 @@ mod tests {
     #[test]
     fn curve_to_adds_three_points() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.curve_to(1.0, 2.0, 3.0, 4.0, 5.0, 0.0).unwrap();
         // moveTo + 2 control points + 1 endpoint = 4
         assert_eq!(b.path.pts.len(), 4);
@@ -619,7 +608,7 @@ mod tests {
     #[test]
     fn close_sets_closed_flag() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(10.0, 0.0).unwrap();
         b.line_to(5.0, 5.0).unwrap();
         b.close(false).unwrap();
@@ -633,7 +622,7 @@ mod tests {
     #[test]
     fn after_close_current_point_is_none() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(1.0, 0.0).unwrap();
         b.close(false).unwrap();
         assert_eq!(b.path.current_point(), None);
@@ -646,7 +635,7 @@ mod tests {
     #[test]
     fn close_one_point_subpath_sets_closed_flag() {
         let mut b = PathBuilder::new();
-        b.move_to(3.0, 4.0).unwrap();
+        b.move_to(3.0, 4.0);
         assert!(b.path.one_point_subpath());
         b.close(false).unwrap();
         // The single point must carry CLOSED.
@@ -671,10 +660,20 @@ mod tests {
     }
 
     #[test]
-    fn bogus_path_on_double_moveto() {
+    fn double_moveto_replaces_point() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
-        assert_eq!(b.move_to(1.0, 1.0), Err(PathError::BogusPath));
+        b.move_to(0.0, 0.0);
+        b.line_to(5.0, 0.0).unwrap();
+        b.move_to(1.0, 1.0);
+        b.move_to(2.0, 3.0);
+        assert_eq!(b.path.pts.len(), 3);
+        assert_eq!(b.path.pts[2], PathPoint::new(2.0, 3.0));
+        assert_eq!(b.path.flags[2], PathFlags::FIRST | PathFlags::LAST);
+        assert_eq!(b.path.cur_subpath, 2);
+        assert!(b.path.one_point_subpath());
+        b.line_to(4.0, 3.0).unwrap();
+        assert_eq!(b.path.pts.len(), 4);
+        assert!(b.path.open_subpath());
     }
 
     // ── PathError::Display ────────────────────────────────────────────────────
@@ -685,12 +684,6 @@ mod tests {
         assert!(
             no_pt.contains("no current point"),
             "NoCurPt display should mention 'no current point', got: {no_pt}"
-        );
-
-        let bogus = PathError::BogusPath.to_string();
-        assert!(
-            bogus.contains("consecutive moveTo"),
-            "BogusPath display should mention 'consecutive moveTo', got: {bogus}"
         );
     }
 
@@ -727,7 +720,7 @@ mod tests {
 
     fn quad(close: bool) -> Path {
         let mut b = PathBuilder::new();
-        b.move_to(1.0, 2.0).unwrap();
+        b.move_to(1.0, 2.0);
         b.line_to(7.0, 2.0).unwrap();
         b.line_to(7.0, 6.0).unwrap();
         b.line_to(1.0, 6.0).unwrap();
@@ -754,7 +747,7 @@ mod tests {
     #[test]
     fn fill_adjust_hints_skip_other_paths() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(4.0, 0.0).unwrap();
         b.line_to(2.0, 3.0).unwrap();
         b.close(true).unwrap();
@@ -771,7 +764,7 @@ mod tests {
     #[test]
     fn append_adjusts_hints() {
         let mut a = PathBuilder::new();
-        a.move_to(0.0, 0.0).unwrap();
+        a.move_to(0.0, 0.0);
         a.line_to(1.0, 0.0).unwrap();
         let pa = a.build();
 
@@ -794,7 +787,7 @@ mod tests {
     #[test]
     fn append_empty_other_is_safe() {
         let mut base = PathBuilder::new();
-        base.move_to(0.0, 0.0).unwrap();
+        base.move_to(0.0, 0.0);
         base.line_to(1.0, 0.0).unwrap();
         let mut p = base.build();
         let original_len = p.pts.len();

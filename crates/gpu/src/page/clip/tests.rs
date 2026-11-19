@@ -257,7 +257,7 @@ fn a_clipped_opaque_outline_hides_nothing_below_it() {
         let clip = random_clip(&mut rng, width, height, n);
         // A page-covering opaque square under the clip, over a fill.
         let mut square = raster::PathBuilder::new();
-        square.move_to(-4.0, -4.0).expect("move_to");
+        square.move_to(-4.0, -4.0);
         for (x, y) in [(52.0, -4.0), (52.0, 52.0), (-4.0, 52.0)] {
             square.line_to(x, y).expect("line_to");
         }

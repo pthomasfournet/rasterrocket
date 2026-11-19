@@ -40,12 +40,12 @@ fn clip_to_bbox(mut clip: Clip, bbox: Option<[(f64, f64); 4]>, flatness: f64) ->
 pub(super) fn polygon(corners: &[(f64, f64)]) -> Path {
     let mut pb = PathBuilder::new();
     for (i, &(x, y)) in corners.iter().enumerate() {
-        let added = if i == 0 {
-            pb.move_to(x, y)
+        if i == 0 {
+            pb.move_to(x, y);
         } else {
-            pb.line_to(x, y)
-        };
-        debug_assert!(added.is_ok(), "polygon: path construction failed");
+            let added = pb.line_to(x, y);
+            debug_assert!(added.is_ok(), "polygon: path construction failed");
+        }
     }
     let closed = pb.close(true);
     debug_assert!(closed.is_ok(), "polygon: close failed");

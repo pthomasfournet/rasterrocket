@@ -43,7 +43,7 @@ pub(crate) fn make_clip(w: u32, h: u32) -> Clip {
 
 pub(crate) fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> Path {
     let mut b = PathBuilder::new();
-    b.move_to(x0, y0).expect("rect_path: move_to failed");
+    b.move_to(x0, y0);
     b.line_to(x1, y0).expect("rect_path: line_to (top) failed");
     b.line_to(x1, y1)
         .expect("rect_path: line_to (right) failed");

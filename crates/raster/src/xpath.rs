@@ -586,7 +586,7 @@ mod tests {
     /// adjusted.
     fn adjusted_rect(x0: f64, w: f64, y0: f64, y1: f64) -> Vec<(f64, f64, f64, f64)> {
         let mut b = PathBuilder::new();
-        b.move_to(x0, y0).unwrap();
+        b.move_to(x0, y0);
         b.line_to(x0 + w, y0).unwrap();
         b.line_to(x0 + w, y1).unwrap();
         b.line_to(x0, y1).unwrap();
@@ -605,7 +605,7 @@ mod tests {
         // may join them.
         let mut b = PathBuilder::new();
         for x in [0.0, 100.0] {
-            b.move_to(x, 0.0).unwrap();
+            b.move_to(x, 0.0);
             b.curve_to(x + 10.0, 0.0, x + 10.0, 10.0, x, 10.0).unwrap();
             b.curve_to(x - 10.0, 10.0, x - 10.0, 0.0, x, 0.0).unwrap();
             b.close(false).unwrap();
@@ -652,7 +652,7 @@ mod tests {
     /// when `adjust`.
     fn quad_segs(pts: [(f64, f64); 4], adjust: bool) -> Vec<(f64, f64, f64, f64)> {
         let mut b = PathBuilder::new();
-        b.move_to(pts[0].0, pts[0].1).unwrap();
+        b.move_to(pts[0].0, pts[0].1);
         for &(x, y) in &pts[1..] {
             b.line_to(x, y).unwrap();
         }
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn triangle_from_path() {
         let mut b = PathBuilder::new();
-        b.move_to(0.0, 0.0).unwrap();
+        b.move_to(0.0, 0.0);
         b.line_to(4.0, 0.0).unwrap();
         b.line_to(2.0, 4.0).unwrap();
         b.close(false).unwrap();
@@ -842,13 +842,13 @@ mod tests {
             (6.0, 6.0, 13.0, 14.0),
         ];
         for (x0, y0, x1, y1) in rects {
-            b.move_to(x0, y0).unwrap();
+            b.move_to(x0, y0);
             b.line_to(x1, y0).unwrap();
             b.line_to(x1, y1).unwrap();
             b.line_to(x0, y1).unwrap();
             b.close(false).unwrap();
         }
-        b.move_to(1.0, 1.0).unwrap();
+        b.move_to(1.0, 1.0);
         b.line_to(14.0, 3.0).unwrap();
         b.line_to(8.0, 12.0).unwrap();
         b.build()
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(within.segs.len(), n, "nothing lies outside wider bounds");
 
         let mut b = PathBuilder::new();
-        b.move_to(-30.0, 2.0).unwrap();
+        b.move_to(-30.0, 2.0);
         b.line_to(-20.0, f64::NAN).unwrap();
         b.line_to(-25.0, 9.0).unwrap();
         let mut nan = XPath::new(&b.build(), &identity(), 1.0, true);

@@ -13,7 +13,7 @@ fn aa_path_clip_selects_device_space_region() {
     // Diamond centred on (16, 16): non-axis-aligned, so it stays a
     // scanner instead of reducing to a rectangle.
     let mut builder = PathBuilder::new();
-    builder.move_to(16.0, 2.0).expect("move_to");
+    builder.move_to(16.0, 2.0);
     builder.line_to(30.0, 16.0).expect("line_to");
     builder.line_to(16.0, 30.0).expect("line_to");
     builder.line_to(2.0, 16.0).expect("line_to");
@@ -42,7 +42,7 @@ fn aa_path_clip_selects_device_space_region() {
 /// into `clip` as a path.
 fn clip_to_diamond(clip: &mut Clip, cx: f64, cy: f64, r: f64) {
     let mut builder = PathBuilder::new();
-    builder.move_to(cx, cy - r).expect("move_to");
+    builder.move_to(cx, cy - r);
     builder.line_to(cx + r, cy).expect("line_to");
     builder.line_to(cx, cy + r).expect("line_to");
     builder.line_to(cx - r, cy).expect("line_to");
@@ -80,7 +80,7 @@ fn random_polygon(seed: &mut u64) -> XPath {
         let r = next().mul_add(28.0, 20.0);
         let (x, y) = (r.mul_add(angle.cos(), 32.0), r.mul_add(angle.sin(), 32.0));
         if k == 0 {
-            builder.move_to(x, y).expect("move_to");
+            builder.move_to(x, y);
         } else {
             builder.line_to(x, y).expect("line_to");
         }

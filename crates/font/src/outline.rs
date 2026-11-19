@@ -63,11 +63,7 @@ impl PathPen {
     fn begin_segment(&mut self) -> bool {
         if let Some(p) = self.pending_move.take() {
             self.close_contour();
-            // A move-to directly after a closed or fresh path cannot fail:
-            // no one-point subpath is ever left open.
-            if self.builder.move_to(p.x, p.y).is_err() {
-                return false;
-            }
+            self.builder.move_to(p.x, p.y);
             self.open = true;
         }
         self.open
