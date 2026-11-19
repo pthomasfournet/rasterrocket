@@ -3688,12 +3688,14 @@ remainder check alone passes it). A failed check writes the operands to a
 status buffer, which the host reads before copying any pixel: the page
 fails with the new `BackendError::KernelFault`
 (`page_raster_paths: floor_div(a = …, b = …) did not converge within 16
-correction steps; the device's float division is unreliable`), renders
+correction steps; the device's float division is unreliable`, or, for a
+wrapped product, `… produced a quotient whose product with b wrapped 64
+bits; …`), renders
 on the CPU with the CPU's bytes, and the device is retired for the
 session with one `warn` naming it and the fault, since its division is
 shown unreliable. Before, an unreliable division would have looped on
-the device or written a wrong pixel. The step count has one source,
-passed to the kernels at build time. Tests compare the device's division
+the device or written a wrong pixel. The step count and the fault
+codes have one source, passed to the kernels at build time. Tests compare the device's division
 with the host's over the edge cases of its domain (`0 < b < 2^32`,
 `|a / b| < 2^40`, `|a| ≤ 2^62`) and 65 536 random pairs, check that
 exhausted bounds in both directions and wrapped products (through a

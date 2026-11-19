@@ -17,7 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-include!("kernels/floor_div_steps.rs");
+include!("kernels/floor_div_params.rs");
 
 /// Emit a `cargo:rustc-link-search` directive for the first of `dirs` that
 /// exists on the filesystem, then emit `cargo:rustc-link-lib=dylib={lib}`,
@@ -88,9 +88,13 @@ fn slang_source(kernel: &str) -> (&str, &'static [&'static str]) {
 }
 
 /// The preprocessor macros every Slang kernel is compiled with, as
-/// `NAME=value`: [`FLOOR_DIV_STEPS`].
-fn slang_common_defines() -> [String; 1] {
-    [format!("FLOOR_DIV_STEPS={FLOOR_DIV_STEPS}")]
+/// `NAME=value`: the constants of `kernels/floor_div_params.rs`.
+fn slang_common_defines() -> [String; 3] {
+    [
+        format!("FLOOR_DIV_STEPS={FLOOR_DIV_STEPS}"),
+        format!("FAULT_FLOOR_DIV={FAULT_FLOOR_DIV}"),
+        format!("FAULT_FLOOR_DIV_WRAP={FAULT_FLOOR_DIV_WRAP}"),
+    ]
 }
 
 /// Candidate directories for CUDA toolkit libraries on Linux, in preference

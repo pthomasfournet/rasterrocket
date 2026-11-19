@@ -2,9 +2,9 @@
 //! completed exactly (`kernels/floor_div.slang`), and their decoding.
 //!
 //! The words are zero before the dispatch.  Word 0 holds the fault code,
-//! zero for none; for [`FAULT_FLOOR_DIV`], words 1 and 2 hold the low and
-//! high words of the dividend and words 3 and 4 those of the divisor, of
-//! the first faulting division.
+//! zero for none; for [`FAULT_FLOOR_DIV`] and [`FAULT_FLOOR_DIV_WRAP`],
+//! words 1 and 2 hold the low and high words of the dividend and words 3
+//! and 4 those of the divisor, of the first faulting division.
 
 use super::{BackendError, Result};
 
@@ -14,11 +14,7 @@ pub(crate) const STATUS_WORDS: usize = 5;
 /// The bytes of a kernel's status buffer.
 pub(crate) const STATUS_BYTES: usize = STATUS_WORDS * 4;
 
-/// The fault code of a floor division whose bounded corrections left its
-/// remainder outside `[0, b)`.
-const FAULT_FLOOR_DIV: u32 = 1;
-
-include!("../../kernels/floor_div_steps.rs");
+include!("../../kernels/floor_div_params.rs");
 
 /// The status words of the status buffer's bytes `bytes`, in the device's
 /// byte order, which is the host's.
@@ -36,9 +32,11 @@ pub(crate) fn join(lo: u32, hi: u32) -> i64 {
 }
 
 /// The operands `(a, b)` of the faulting floor division `words` record,
-/// `None` when they record no floor-division fault.
+/// for either floor-division fault code; `None` when they record no
+/// floor-division fault.
 pub(crate) fn floor_div_fault(words: &[u32; STATUS_WORDS]) -> Option<(i64, i64)> {
-    (words[0] == FAULT_FLOOR_DIV).then(|| (join(words[1], words[2]), join(words[3], words[4])))
+    matches!(words[0], FAULT_FLOOR_DIV | FAULT_FLOOR_DIV_WRAP)
+        .then(|| (join(words[1], words[2]), join(words[3], words[4])))
 }
 
 /// `Ok` when the status words of `kernel`, whose floor divisions take
@@ -46,20 +44,23 @@ pub(crate) fn floor_div_fault(words: &[u32; STATUS_WORDS]) -> Option<(i64, i64)>
 ///
 /// # Errors
 /// [`BackendError::KernelFault`] naming `kernel` and the fault: a floor
-/// division's operands, or an unknown fault code.
+/// division's operands and whether its corrections ran out or its
+/// product wrapped, or an unknown fault code.
 pub(crate) fn check(kernel: &'static str, words: &[u32; STATUS_WORDS]) -> Result<()> {
     if words[0] == 0 {
         return Ok(());
     }
-    let detail = floor_div_fault(words).map_or_else(
-        || format!("unknown fault code {}", words[0]),
-        |(a, b)| {
-            format!(
-                "floor_div(a = {a}, b = {b}) did not converge within {FLOOR_DIV_STEPS} \
-                 correction steps; the device's float division is unreliable"
-            )
-        },
-    );
+    let detail = match (words[0], floor_div_fault(words)) {
+        (FAULT_FLOOR_DIV, Some((a, b))) => format!(
+            "floor_div(a = {a}, b = {b}) did not converge within {FLOOR_DIV_STEPS} \
+             correction steps; the device's float division is unreliable"
+        ),
+        (_, Some((a, b))) => format!(
+            "floor_div(a = {a}, b = {b}) produced a quotient whose product with b wrapped \
+             64 bits; the device's float division is unreliable"
+        ),
+        (code, None) => format!("unknown fault code {code}"),
+    };
     Err(BackendError::KernelFault { kernel, detail })
 }
 
@@ -132,6 +133,26 @@ mod tests {
         let err = check("k", &[7, 0, 0, 0, 0]).unwrap_err();
         assert!(matches!(err, BackendError::KernelFault { kernel: "k", .. }));
         assert_eq!(err.to_string(), "k: unknown fault code 7");
+    }
+
+    #[test]
+    fn each_floor_div_fault_code_has_its_message() {
+        let words = |code| [code, 7, 0, 3, 0];
+        assert_eq!(floor_div_fault(&words(FAULT_FLOOR_DIV_WRAP)), Some((7, 3)));
+        let steps = check("k", &words(FAULT_FLOOR_DIV)).unwrap_err().to_string();
+        assert_eq!(
+            steps,
+            "k: floor_div(a = 7, b = 3) did not converge within 16 correction steps; \
+             the device's float division is unreliable"
+        );
+        let wrap = check("k", &words(FAULT_FLOOR_DIV_WRAP))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            wrap,
+            "k: floor_div(a = 7, b = 3) produced a quotient whose product with b wrapped \
+             64 bits; the device's float division is unreliable"
+        );
     }
 
     #[test]

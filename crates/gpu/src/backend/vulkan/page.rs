@@ -524,21 +524,13 @@ impl VulkanBackend {
         pairs: &[(i64, i64)],
         max_steps: u32,
     ) -> Result<FloorDivProbe> {
-        self.floor_div_probe_on(KernelId::FloorDivProbe, pairs, max_steps)
-    }
-
-    /// [`Self::floor_div_probe`] with every first estimate offset so that
-    /// its product with the divisor wraps.
-    pub(crate) fn floor_div_probe_poisoned(
-        &self,
-        pairs: &[(i64, i64)],
-        max_steps: u32,
-    ) -> Result<FloorDivProbe> {
-        self.floor_div_probe_on(KernelId::FloorDivProbePoisoned, pairs, max_steps)
+        let (quotients, status) =
+            self.floor_div_probe_on(KernelId::FloorDivProbe, pairs, max_steps)?;
+        Ok((quotients, kernel_status::floor_div_fault(&status)))
     }
 
     /// [`Self::render_page`] with the floor divisions of its outlines'
-    /// raster poisoned as in [`Self::floor_div_probe_poisoned`].
+    /// raster poisoned as by [`KernelId::FloorDivProbePoisoned`].
     pub(crate) fn render_page_poisoned<S: PageSample>(
         &self,
         page: &PageCommands,
@@ -548,13 +540,14 @@ impl VulkanBackend {
         self.render_page_with(page, out, stride, None, KernelId::PageRasterPathsPoisoned)
     }
 
-    /// [`Self::floor_div_probe`] by the probe kernel `kernel`.
-    fn floor_div_probe_on(
+    /// The quotients of [`Self::floor_div_probe`] by the probe kernel
+    /// `kernel`, and the status words of the page.
+    pub(super) fn floor_div_probe_on(
         &self,
         kernel: KernelId,
         pairs: &[(i64, i64)],
         max_steps: u32,
-    ) -> Result<FloorDivProbe> {
+    ) -> Result<(Vec<i64>, [u32; STATUS_WORDS])> {
         /// The low and high words of `v`.
         fn words(v: i64) -> [u32; 2] {
             let v = v.cast_unsigned();
@@ -613,10 +606,7 @@ impl VulkanBackend {
         let status = unsafe { host_view(self, status) }?
             .first_chunk::<STATUS_BYTES>()
             .ok_or_else(|| BackendError::msg("floor_div_probe: the status buffer is short"))?;
-        Ok((
-            quotients,
-            kernel_status::floor_div_fault(&status_words(status)),
-        ))
+        Ok((quotients, status_words(status)))
     }
 }
 
@@ -634,7 +624,9 @@ mod tests {
     use color::{Sample, SampleDepth};
 
     use crate::backend::BackendError;
-    use crate::backend::kernel_status::{FLOOR_DIV_STEPS, floor_div_cases};
+    use crate::backend::kernel_status::{
+        FAULT_FLOOR_DIV, FAULT_FLOOR_DIV_WRAP, FLOOR_DIV_STEPS, floor_div_cases, floor_div_fault,
+    };
     use crate::backend::vulkan::test_backend_with_int64;
     use crate::page::test_support::Rng;
     use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
@@ -1142,8 +1134,11 @@ mod tests {
         // divides a remainder of about 2^37, whose float rounding leaves
         // r = 3 123 above the quotient after it, past 16 upward steps.
         let pair = (2_404_050_171_065_969_715, 1);
-        let (_, fault) = b.floor_div_probe(&[pair], FLOOR_DIV_STEPS).unwrap();
-        assert_eq!(fault, Some(pair));
+        let (_, status) = b
+            .floor_div_probe_on(super::KernelId::FloorDivProbe, &[pair], FLOOR_DIV_STEPS)
+            .unwrap();
+        assert_eq!(status[0], FAULT_FLOOR_DIV);
+        assert_eq!(floor_div_fault(&status), Some(pair));
     }
 
     #[test]
@@ -1168,31 +1163,45 @@ mod tests {
         let Some(b) = test_backend_with_int64() else {
             return;
         };
+        let poisoned = |pairs: &[(i64, i64)]| {
+            b.floor_div_probe_on(
+                super::KernelId::FloorDivProbePoisoned,
+                pairs,
+                FLOOR_DIV_STEPS,
+            )
+            .unwrap()
+        };
         // The poisoned first estimate makes q * b wrap; the remainder
-        // correction then leaves r in [0, b), and only the wrap guard
-        // sees the wrong quotient.
-        for pair in [
+        // correction then leaves r in [0, b), and only the wrap guard sees
+        // the wrong quotient.  Each pair runs alone, so its own fault is
+        // the one recorded.
+        let mut cases = vec![
             (0, 2),
             (-5, 3),
             (12_345 * (1 << 31) + 7, 1 << 31),
             (1 << 62, (1 << 32) - 1),
-        ] {
-            let (q, fault) = b
-                .floor_div_probe_poisoned(&[pair], FLOOR_DIV_STEPS)
-                .unwrap();
+        ];
+        let drawn = floor_div_cases(&mut Rng(0x0bad));
+        cases.extend(drawn.iter().filter(|&&(_, d)| d >= 2).step_by(997).take(64));
+        for pair in cases {
+            let (q, status) = poisoned(&[pair]);
             assert_ne!(
                 q[0],
                 crate::page::path::floor_div(pair.0, pair.1),
                 "{pair:?}"
             );
-            assert_eq!(fault, Some(pair));
+            assert_eq!(status[0], FAULT_FLOOR_DIV_WRAP, "{pair:?}");
+            assert_eq!(floor_div_fault(&status), Some(pair));
         }
-        let cases: Vec<(i64, i64)> = floor_div_cases(&mut Rng(0x0bad))
-            .into_iter()
-            .filter(|&(_, d)| d >= 2)
-            .collect();
-        let (_, fault) = b.floor_div_probe_poisoned(&cases, FLOOR_DIV_STEPS).unwrap();
-        assert!(cases.contains(&fault.expect("a fault")));
+        // Over the whole sweep the poison wrongs every quotient, and the
+        // division recorded is one of the batch's.
+        let batch: Vec<(i64, i64)> = drawn.into_iter().filter(|&(_, d)| d >= 2).collect();
+        let (q, status) = poisoned(&batch);
+        for (&(a, d), q) in batch.iter().zip(q) {
+            assert_ne!(q, crate::page::path::floor_div(a, d), "{a} / {d}");
+        }
+        assert_eq!(status[0], FAULT_FLOOR_DIV_WRAP);
+        assert!(batch.contains(&floor_div_fault(&status).expect("a fault")));
     }
 
     #[test]

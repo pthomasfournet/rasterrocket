@@ -223,6 +223,7 @@ fn a_faulting_raster_leaves_the_page_untouched() {
         ),
         "{err:?}"
     );
+    assert!(err.to_string().contains("wrapped"), "{err}");
     assert!(
         out.iter().all(|&s| s == 0xA5),
         "a faulting page wrote a sample"

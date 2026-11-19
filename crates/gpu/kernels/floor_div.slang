@@ -4,10 +4,13 @@
 //
 // The includer defines STATUS_BINDING, the binding of set 0 the status
 // buffer takes, before including this file; the build defines
-// FLOOR_DIV_STEPS (kernels/floor_div_steps.rs).
+// FLOOR_DIV_STEPS, FAULT_FLOOR_DIV and FAULT_FLOOR_DIV_WRAP
+// (kernels/floor_div_params.rs).
 //
 // Status words, zero before the dispatch:
-//   [0]        the fault code: 0 for none, FAULT_FLOOR_DIV;
+//   [0]        the fault code: 0 for none, FAULT_FLOOR_DIV when the
+//              corrections leave the remainder outside [0, b),
+//              FAULT_FLOOR_DIV_WRAP when the quotient's product wrapped;
 //   [1], [2]   the low and high words of the faulting division's a;
 //   [3], [4]   the low and high words of its b.
 // The first faulting thread claims word 0 by compare-exchange and alone
@@ -16,22 +19,21 @@
 #ifndef STATUS_BINDING
 #error "define STATUS_BINDING before including floor_div.slang"
 #endif
-#ifndef FLOOR_DIV_STEPS
-#error "FLOOR_DIV_STEPS is undefined: the build passes it (kernels/floor_div_steps.rs)"
+#if !defined(FLOOR_DIV_STEPS) || !defined(FAULT_FLOOR_DIV) || !defined(FAULT_FLOOR_DIV_WRAP)
+#error "the build passes FLOOR_DIV_STEPS and the fault codes (kernels/floor_div_params.rs)"
 #endif
-
-static const uint FAULT_FLOOR_DIV = 1;
 
 // |q * b - a| below which a quotient q is taken not to have wrapped: 2^62.
 static const float FLOOR_DIV_WRAP = 4611686018427387904.0;
 
 [[vk::binding(STATUS_BINDING, 0)]] RWStructuredBuffer<uint> status;
 
-// Record a fault of floor_div(a, b) unless an earlier one is recorded.
-void floor_div_fault(int64_t a, int64_t b)
+// Record the fault `code` of floor_div(a, b) unless an earlier one is
+// recorded.
+void floor_div_fault(uint code, int64_t a, int64_t b)
 {
     uint prev;
-    InterlockedCompareExchange(status[0], 0, FAULT_FLOOR_DIV, prev);
+    InterlockedCompareExchange(status[0], 0, code, prev);
     if (prev == 0) {
         uint64_t ua = uint64_t(a);
         uint64_t ub = uint64_t(b);
@@ -61,10 +63,15 @@ void floor_div_fault(int64_t a, int64_t b)
 // The remainder r = a - q * b is computed modulo 2^64, so r in [0, b)
 // alone proves q * b = a - r + m * 2^64 for some integer m; the wrap
 // guard, |float(q) * float(b) - float(a)| < 2^62, rejects every m != 0
-// (|q * b - a| >= 2^64 - b then, and three roundings of relative error
-// 2^-24 cannot bring that below 2^62) and every NaN, while a correct
-// quotient passes it (|q * b - a| < b, plus rounding below 2^41).  Both
-// together prove q * b - a = -r exactly, so q = floor(a / b).
+// and every NaN, and passes a correct quotient.  Five roundings enter
+// the guard: float(q), float(b), their product, float(a) and the
+// difference.  Each is at most 2^-24 relative to its operand, and the
+// operands are capped by |a| <= 2^63 (any int64) and |q * b| <=
+// |q * b - a| + 2^63; so they move the difference by less than
+// 2^-21 * |q * b - a| + 2^43.  For m != 0, |q * b - a| >= 2^64 - b
+// stays far above 2^62 after that; for a correct quotient,
+// |q * b - a| = r < b < 2^32 stays far below it.  Both checks together
+// prove q * b - a = -r exactly, so q = floor(a / b).
 int64_t floor_div(int64_t a, int64_t b, uint max_steps)
 {
     precise float fb = float(b);
@@ -88,6 +95,10 @@ int64_t floor_div(int64_t a, int64_t b, uint max_steps)
         r -= b;
     }
     precise float wrap = abs(float(q) * fb - float(a));
-    if (r < 0 || r >= b || !(wrap < FLOOR_DIV_WRAP)) floor_div_fault(a, b);
+    if (r < 0 || r >= b) {
+        floor_div_fault(FAULT_FLOOR_DIV, a, b);
+    } else if (!(wrap < FLOOR_DIV_WRAP)) {
+        floor_div_fault(FAULT_FLOOR_DIV_WRAP, a, b);
+    }
     return q;
 }
