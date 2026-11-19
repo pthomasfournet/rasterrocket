@@ -61,18 +61,19 @@ fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
-/// The string a NUL-terminated UTF-16 pointer names, empty for null.
+/// The UTF-16 units a NUL-terminated pointer names, none for null.
 ///
 /// # Safety
 ///
-/// `p` is null or points at a NUL-terminated UTF-16 string.
+/// `p` is null or points at a NUL-terminated UTF-16 string that outlives
+/// `'a`.
 #[expect(
     unsafe_code,
     reason = "the spooler returns its strings as NUL-terminated pointers"
 )]
-unsafe fn from_wide(p: *const u16) -> String {
+const unsafe fn wide_units<'a>(p: *const u16) -> &'a [u16] {
     if p.is_null() {
-        return String::new();
+        return &[];
     }
     let mut len = 0;
     // SAFETY: the string is NUL-terminated, so every unit up to the NUL is
@@ -80,8 +81,22 @@ unsafe fn from_wide(p: *const u16) -> String {
     while unsafe { *p.add(len) } != 0 {
         len += 1;
     }
-    // SAFETY: the `len` units before the NUL are readable.
-    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
+    // SAFETY: the `len` units before the NUL are readable for `'a`.
+    unsafe { std::slice::from_raw_parts(p, len) }
+}
+
+/// A printer's name from its UTF-16 `units`.  A name that is not valid
+/// UTF-16 is decoded with U+FFFD for its unpaired surrogates and logged:
+/// `--printer` takes Unicode text, so it cannot name that printer.
+fn printer_name(units: &[u16]) -> String {
+    String::from_utf16(units).unwrap_or_else(|_| {
+        let lossy = String::from_utf16_lossy(units);
+        log::warn!(
+            "the printer name {lossy:?} is not valid Unicode; --printer cannot name it, \
+             rename the printer to print to it"
+        );
+        lossy
+    })
 }
 
 /// Whether `error` is the system error `code`.
@@ -142,7 +157,7 @@ fn printer_names() -> io::Result<Vec<String>> {
     // SAFETY: each name is a NUL-terminated string within `buf`.
     Ok(infos
         .iter()
-        .map(|info| unsafe { from_wide(info.pPrinterName) })
+        .map(|info| printer_name(unsafe { wide_units(info.pPrinterName) }))
         .collect())
 }
 
@@ -170,7 +185,7 @@ fn default_printer() -> io::Result<Option<String>> {
         return Err(io::Error::last_os_error());
     }
     let end = name.iter().position(|&u| u == 0).unwrap_or(name.len());
-    Ok(Some(String::from_utf16_lossy(&name[..end])))
+    Ok(Some(printer_name(&name[..end])))
 }
 
 /// What `--list-printers` writes on Windows: the local and connected
@@ -371,7 +386,9 @@ impl Printer {
         }
         // SAFETY: the call wrote a `PRINTER_INFO_5W` at the start of the
         // aligned `buf`, whose port name points into `buf`.
-        Ok(unsafe { from_wide((*buf.as_ptr().cast::<PRINTER_INFO_5W>()).pPortName) })
+        Ok(String::from_utf16_lossy(unsafe {
+            wide_units((*buf.as_ptr().cast::<PRINTER_INFO_5W>()).pPortName)
+        }))
     }
 
     /// The driver's answer to `capability` for port `port_w`
@@ -623,7 +640,9 @@ pub(crate) struct Settings {
     pub title: String,
     /// The file a printer that prints to a file writes.
     pub print_file: Option<PathBuf>,
-    /// The `dmPaperSize` asked for, else the queue's default.
+    /// The `dmPaperSize` asked for, else the queue's default.  The CLI
+    /// has no paper flag and asks for none; the tests that print on A4
+    /// and on Letter set it.
     pub paper: Option<i16>,
 }
 
@@ -1242,6 +1261,14 @@ mod tests {
             }
         }
         ((x0, y0, x1, y1), (geometry.width_pts, geometry.height_pts))
+    }
+
+    /// A name that is not valid UTF-16 is decoded with U+FFFD, not refused.
+    #[test]
+    fn printer_names_decode_lossily_only_when_invalid() {
+        let office: Vec<u16> = "Office é".encode_utf16().collect();
+        assert_eq!(super::printer_name(&office), "Office é");
+        assert_eq!(super::printer_name(&[0x41, 0xD800, 0x42]), "A\u{FFFD}B");
     }
 
     #[test]
