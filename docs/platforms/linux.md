@@ -2,7 +2,8 @@
 
 Linux is the primary platform: every feature, including every GPU backend,
 is developed and tested on it. Current Linux testing is on an x86-64 machine
-with an i7-8700K (AVX2), an RTX 2080 SUPER and a UHD 630; results up to
+with an i7-8700K (AVX2) and an RTX 2080 SUPER (its UHD 630 is untested under
+Linux beyond the GPU-page scheduler's unit tests); results up to
 2026-11 also come from a Ryzen 9 9900X3D with an RTX 5070 and the CPU's AMD
 Raphael iGPU, which now runs Windows. Other hardware is untested; see
 [Tested hardware](../../README.md#tested-hardware).
@@ -41,7 +42,7 @@ device is present.
 
 | Backend | Feature flags | Needs | Tested on |
 |---|---|---|---|
-| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver | RTX 5070 (`sm_120`); RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build on driver 570 (a CUDA 13 build needs driver 580 or later; a CUDA 13 build on its current driver is untested); other NVIDIA GPUs untested |
+| NVIDIA CUDA 13 | `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`, … | CUDA 13 toolkit and driver | RTX 5070 (`sm_120`); RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build on driver 570; a CUDA 13 build (driver 580 or later; the card has driver 620.70 since 2026-11-18) is untested on Linux; other NVIDIA GPUs untested |
 | Vulkan compute | `vulkan` | the LunarG SDK (`slangc`) to build; a Vulkan 1.3 driver to run | RTX 5070 and RTX 2080 SUPER (NVIDIA driver), AMD Raphael iGPU (RADV), llvmpipe; Intel (ANV) untested |
 | VA-API JPEG decode | `vaapi` | `libva` | AMD Raphael iGPU (VCN 4.0, Mesa radeonsi); Intel untested |
 

@@ -72,7 +72,7 @@ All GPU features fall back to CPU automatically if initialisation fails — a me
 | macOS on Apple silicon | NEON | Vulkan through MoltenVK (slower than the CPU; tested on the A18 Pro only); no Metal backend | **Supported**; tested on an A18 Pro; CI runs clippy and the renderer, interpreter, library and font suites and the memory probe; untested on M-series hardware | [macOS](platforms/macos.md) |
 | macOS on Intel | AVX2 | none | Expected to work, untested | [macOS](platforms/macos.md) |
 | FreeBSD, OpenBSD, NetBSD | as the CPU | untested | Untested | [BSD and Windows](platforms/other.md) |
-| Windows x86-64 | AVX-512 / AVX2 | CUDA 13.4+, Vulkan, Direct3D 12 (`d3d12`) | **Supported**; tested on an RTX 2080 SUPER and UHD 630 (CUDA, Vulkan), and on an RTX 5070, a Radeon iGPU and WARP (Direct3D 12); CI runs clippy and the CPU suites on GitHub's Windows runner, and the Direct3D 12 tests on pinned WARP | [BSD and Windows](platforms/other.md) |
+| Windows x86-64 | AVX-512 / AVX2 | CUDA 13.4+, Vulkan, Direct3D 12 (`d3d12`) | **Supported**; tested on an RTX 2080 SUPER (CUDA, Vulkan) and a UHD 630 (Vulkan), and on an RTX 5070, a Radeon iGPU and WARP (Direct3D 12); CI runs clippy and the CPU suites on GitHub's Windows runner, and the Direct3D 12 tests on pinned WARP | [BSD and Windows](platforms/other.md) |
 
 AMD ROCm and a native Apple Metal backend are not implemented; Vulkan covers
 Radeon GPUs.
