@@ -1,4 +1,4 @@
-//! A device image cache, and an image cached in one, of either backend.
+//! A device image cache, and an image cached in one, of any backend.
 //!
 //! A session runs one backend, so it holds one [`ImageCache`]; every image
 //! that cache returns is a [`CachedImage`] of the same backend.  The
@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+#[cfg(all(windows, feature = "d3d12"))]
+use crate::backend::d3d12::D3d12Backend;
 #[cfg(feature = "vulkan")]
 use crate::backend::vulkan::VulkanBackend;
 
@@ -14,7 +16,7 @@ use super::{
     InsertRequest, ObjId,
 };
 
-/// A shared device image cache on the CUDA or the Vulkan backend.
+/// A shared device image cache on the CUDA, Vulkan or Direct3D 12 backend.
 ///
 /// Cloning shares the cache.
 #[derive(Clone)]
@@ -24,6 +26,9 @@ pub enum ImageCache {
     /// Slabs in Vulkan device buffers.
     #[cfg(feature = "vulkan")]
     Vulkan(Arc<DeviceImageCache<VulkanBackend>>),
+    /// Slabs in Direct3D 12 default-heap buffers.
+    #[cfg(all(windows, feature = "d3d12"))]
+    D3d12(Arc<DeviceImageCache<D3d12Backend>>),
 }
 
 /// An image held by an [`ImageCache`], of the cache's backend.
@@ -37,6 +42,9 @@ pub enum CachedImage {
     /// An image in a Vulkan device buffer.
     #[cfg(feature = "vulkan")]
     Vulkan(Arc<CachedDeviceImage<VulkanBackend>>),
+    /// An image in a Direct3D 12 default-heap buffer.
+    #[cfg(all(windows, feature = "d3d12"))]
+    D3d12(Arc<CachedDeviceImage<D3d12Backend>>),
 }
 
 /// Evaluates `$body` with `$c` bound to the [`DeviceImageCache`] of
@@ -53,6 +61,11 @@ macro_rules! with_cache {
                 let $wrap = CachedImage::Vulkan;
                 $body
             }
+            #[cfg(all(windows, feature = "d3d12"))]
+            ImageCache::D3d12($c) => {
+                let $wrap = CachedImage::D3d12;
+                $body
+            }
         }
     };
 }
@@ -65,18 +78,22 @@ macro_rules! with_image {
             CachedImage::Cuda($i) => $body,
             #[cfg(feature = "vulkan")]
             CachedImage::Vulkan($i) => $body,
+            #[cfg(all(windows, feature = "d3d12"))]
+            CachedImage::D3d12($i) => $body,
         }
     };
 }
 
 impl ImageCache {
-    /// The backend's name in diagnostics: `"cuda"`, `"vulkan"`.
+    /// The backend's name in diagnostics: `"cuda"`, `"vulkan"`, `"d3d12"`.
     #[must_use]
     pub const fn backend_name(&self) -> &'static str {
         match self {
             Self::Cuda(_) => "cuda",
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => "vulkan",
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12(_) => "d3d12",
         }
     }
 
@@ -147,7 +164,9 @@ impl ImageCache {
             (Self::Cuda(c), CachedImage::Cuda(i)) => c.download(i),
             #[cfg(feature = "vulkan")]
             (Self::Vulkan(c), CachedImage::Vulkan(i)) => c.download(i),
-            #[cfg(feature = "vulkan")]
+            #[cfg(all(windows, feature = "d3d12"))]
+            (Self::D3d12(c), CachedImage::D3d12(i)) => c.download(i),
+            #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
             _ => Err(CacheError::BackendMismatch),
         }
     }

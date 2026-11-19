@@ -10,7 +10,7 @@
 //! ([`CacheBackend`]: CUDA, Vulkan with the `vulkan` feature, and Direct3D
 //! 12 with the `d3d12` feature on Windows); the disk tier is host-only and
 //! shared by all.  [`ImageCache`] and [`CachedImage`] hold a cache and an
-//! image of the CUDA or the Vulkan backend.
+//! image of any of them.
 //!
 //! # Module layout (private; named for orientation only)
 //!

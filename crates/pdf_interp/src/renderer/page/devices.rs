@@ -162,7 +162,8 @@ impl PageRenderer<'_> {
     /// Attach a Direct3D 12 compute backend for kernel dispatch.
     ///
     /// When set, ICC CMYK→RGB conversions run on it, ahead of any CUDA
-    /// context.
+    /// context.  Image blits run on the backend of the attached image
+    /// cache (`Self::set_image_cache`).
     #[cfg(all(windows, feature = "d3d12"))]
     pub fn set_d3d12_backend(&mut self, backend: Option<Arc<D3d12Backend>>) {
         self.d3d12_backend = backend;
@@ -174,9 +175,10 @@ impl PageRenderer<'_> {
     /// hash hit returns a `CachedImage` with no decode work; a miss
     /// decodes on CPU, uploads to VRAM, caches, and returns the same
     /// handle.  The renderer dispatches `Gpu`-variant images to the blit
-    /// kernel of the cache's backend (CUDA or Vulkan), downloads the
-    /// pixels it wrote and composites them onto `bitmap` in content-stream
-    /// order, so the page renders byte-identically to the CPU-only path.
+    /// kernel of the cache's backend (CUDA, Vulkan or Direct3D 12),
+    /// downloads the pixels it wrote and composites them onto `bitmap` in
+    /// content-stream order, so the page renders byte-identically to the
+    /// CPU-only path.
     ///
     /// `doc_id` should be a stable identifier for the source PDF
     /// (typically `BLAKE3(pdf_bytes)` or similar).  It's combined

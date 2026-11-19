@@ -3878,8 +3878,8 @@ several, is `InvalidOptions` listing them; no adapter opening is
 `BackendUnavailable`. Sessions alive at once share one device per selector,
 and `DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
 adapter after the same one-time exactness probe as Vulkan, byte-identical to
-the CPU; the image cache, blits and GPU pages stay on the CPU under it, and no
-CUDA context or Vulkan device is opened. `d3d12_device` is read under
+the CPU; GPU pages stay on the CPU under it (the image cache and blits
+follow below), and no CUDA context or Vulkan device is opened. `d3d12_device` is read under
 `ForceD3d12` only, and `vulkan_device` never under it. A build without the
 feature, or for another platform, refuses `ForceD3d12` with
 `BackendUnavailable` naming the feature; `rrocket` does not forward it yet,
@@ -3887,6 +3887,19 @@ so `PDF_RASTER_BACKEND=d3d12` now fails there instead of warning and
 rendering on `auto`. The ICC parity test passes at 8 and 16 bits, in sRGB and
 the wide working space, on the RTX 5070, the AMD Radeon iGPU and the pinned
 WARP 1.0.22 on Windows 11.
+
+**Unreleased on master: image blits and the device image cache in D3D12
+sessions.** With `cache`, a `ForceD3d12` session builds its device image
+cache on the adapter (`ImageCache::D3d12`, `CachedImage::D3d12`; the VRAM
+budget the adapter reports, the disk tier under `PDF_RASTER_CACHE_DIR`), and
+the renderer draws a cached image through the same blit page as on Vulkan,
+now one function generic over the backend. The cache rules hold as on CUDA
+and Vulkan: a JPEG drawn below its resolution is not cached, nothing is
+cached for a 16-bit canvas, and a 16-bit canvas never takes the device blit.
+`cache_render_parity` gains the D3D12 cases (and its Vulkan cases now honour
+`PDF_RASTER_REQUIRE_VULKAN=1`); they pass on the RTX 5070, the AMD Radeon
+iGPU and the pinned WARP 1.0.22 on Windows 11, and the Vulkan cases on the
+RTX 2080 SUPER on Ubuntu.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns

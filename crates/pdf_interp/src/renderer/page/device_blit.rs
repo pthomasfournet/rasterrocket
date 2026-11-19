@@ -4,12 +4,12 @@
 
 #![cfg(feature = "cache")]
 
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 use std::sync::Arc;
 
 use gpu::GpuCtx;
 use gpu::blit::BlitBbox;
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 use gpu::cache::{CacheBackend, DeviceImageCache, ImageCache};
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
 use raster::pipe::ChannelMask;
@@ -146,7 +146,7 @@ impl PageRenderer<'_> {
     /// are on the host bitmap; [`BlitOutcome::NotStarted`] when a
     /// prerequisite is missing or fails before anything is composited (no
     /// CUDA context for a CUDA image, a target allocation, the kernel
-    /// dispatch, a Vulkan download); [`BlitOutcome::Partial`] when a CUDA
+    /// dispatch, a Vulkan or Direct3D 12 download); [`BlitOutcome::Partial`] when a CUDA
     /// band download fails after earlier bands were composited.
     ///
     /// Compositing before returning keeps content-stream order: anything
@@ -219,6 +219,14 @@ impl PageRenderer<'_> {
                 #[cfg(feature = "vulkan")]
                 CachedImage::Vulkan(image) => {
                     if let ImageCache::Vulkan(cache) = &cache_state.cache {
+                        blit_on_device(cache, image, &job, composite)
+                    } else {
+                        backend_mismatch()
+                    }
+                }
+                #[cfg(all(windows, feature = "d3d12"))]
+                CachedImage::D3d12(image) => {
+                    if let ImageCache::D3d12(cache) = &cache_state.cache {
                         blit_on_device(cache, image, &job, composite)
                     } else {
                         backend_mismatch()
@@ -300,12 +308,12 @@ fn blit_on_cuda(
 }
 
 /// [`PageRenderer::try_gpu_blit_image`] of an image of a backend whose
-/// cache holds the backend itself (Vulkan): the table
+/// cache holds the backend itself (Vulkan, Direct3D 12): the table
 /// uploads, the zero-fill of a target the size of the bounding box, the
 /// kernel and the target's download run as one page on `cache`'s backend
 /// ([`gpu::backend::blit_image`], with buffers pooled on the backend), and
 /// the box is passed to `composite` whole.
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 fn blit_on_device<B: CacheBackend<Device = Arc<B>>>(
     cache: &DeviceImageCache<B>,
     image: &CachedDeviceImage<B>,
@@ -348,7 +356,7 @@ fn blit_on_device<B: CacheBackend<Device = Arc<B>>>(
 }
 
 /// The outcome of an image whose backend is not that of the page's cache.
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 fn backend_mismatch() -> BlitOutcome {
     log::warn!("blit_image: an image reached a cache of another backend");
     BlitOutcome::NotStarted

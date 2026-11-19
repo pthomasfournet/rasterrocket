@@ -105,7 +105,8 @@ pub struct RasterSession {
     pub(crate) vaapi_queue: Option<Arc<gpu::DecodeQueue<gpu::vaapi::VapiJpegDecoder>>>,
     /// Device-resident image cache, on the session's GPU backend.  `Some`
     /// when the `cache` feature is enabled and the session resolved to a
-    /// Vulkan backend or a CUDA context (see [`new_image_cache`]); `None`
+    /// Vulkan or Direct3D 12 backend or a CUDA context (see
+    /// [`new_image_cache`]); `None`
     /// otherwise (CPU-only fallback).  Shared across all pages so
     /// content-hash dedup spans the whole render.
     #[cfg(feature = "cache")]
@@ -519,6 +520,8 @@ fn open_session_with_doc(
         gpu_ctx.as_deref(),
         #[cfg(feature = "vulkan")]
         vk_backend.as_ref(),
+        #[cfg(all(windows, feature = "d3d12"))]
+        d3d12_backend.as_ref(),
     );
 
     // DocId: BLAKE3 of the PDF bytes.  Stable per content; editing
@@ -534,23 +537,9 @@ fn open_session_with_doc(
     };
 
     // Spawn the prefetcher last (after the cache + doc_id are
-    // resolved).  Skipped when the user didn't opt in or when no
-    // cache exists to prefetch into.
+    // resolved).
     #[cfg(feature = "cache")]
-    let prefetch = if config.prefetch
-        && let Some(cache) = image_cache.as_ref()
-    {
-        let mut prefetch_config = pdf_interp::cache::PrefetchConfig::default();
-        prefetch_config.scale = config.prefetch_scale;
-        prefetch_config.rotation = config.rotation;
-        pdf_interp::cache::spawn_prefetch(Arc::clone(&doc), cache.clone(), doc_id, prefetch_config)
-            .inspect_err(|e| {
-                log::warn!("image prefetch disabled: cannot start its threads ({e})");
-            })
-            .ok()
-    } else {
-        None
-    };
+    let prefetch = spawn_prefetch(config, &doc, image_cache.as_ref(), doc_id);
 
     let proof = config.proof_session(&doc)?;
     let optional_content = Arc::new(pdf_interp::OptionalContent::new(&doc, config.purpose));
@@ -605,10 +594,11 @@ fn open_session_with_doc(
 }
 
 /// Build a session's device image cache on the backend the session
-/// resolved to: the Vulkan backend when it holds one, otherwise the CUDA
-/// context, otherwise none.  The two are not initialised together (see
-/// `open_session_with_doc`), so the cache follows the backend every other
-/// kernel of the session runs on.
+/// resolved to: the Vulkan or the Direct3D 12 backend when it holds one,
+/// otherwise the CUDA context, otherwise none.  Each is initialised only
+/// under its own policy (see `open_session_with_doc`), so a session holds
+/// at most one, and the cache follows the backend every other kernel of the
+/// session runs on.
 ///
 /// The disk tier is attached when `PDF_RASTER_CACHE_DIR` names its root
 /// ([`gpu::cache::DiskTier::try_new`]); otherwise the cache is in-process
@@ -617,17 +607,47 @@ fn open_session_with_doc(
 fn new_image_cache(
     ctx: Option<&gpu::GpuCtx>,
     #[cfg(feature = "vulkan")] vk_backend: Option<&Arc<gpu::backend::vulkan::VulkanBackend>>,
+    #[cfg(all(windows, feature = "d3d12"))] d3d12_backend: Option<
+        &Arc<gpu::backend::d3d12::D3d12Backend>,
+    >,
 ) -> Option<gpu::cache::ImageCache> {
     #[cfg(feature = "vulkan")]
     if let Some(backend) = vk_backend {
         return Some(gpu::cache::ImageCache::Vulkan(Arc::new(with_disk_tier(
-            new_vulkan_image_cache(backend),
+            new_device_image_cache(backend),
+        ))));
+    }
+    #[cfg(all(windows, feature = "d3d12"))]
+    if let Some(backend) = d3d12_backend {
+        return Some(gpu::cache::ImageCache::D3d12(Arc::new(with_disk_tier(
+            new_device_image_cache(backend),
         ))));
     }
     let ctx = ctx?;
     Some(gpu::cache::ImageCache::Cuda(Arc::new(with_disk_tier(
         new_cuda_image_cache(ctx),
     ))))
+}
+
+/// The image prefetcher of a session on `doc` filling `cache` under
+/// `doc_id`; `None` when `config` does not opt in, no cache exists to
+/// prefetch into, or its threads cannot start (logged).
+#[cfg(feature = "cache")]
+fn spawn_prefetch(
+    config: &SessionConfig,
+    doc: &Arc<pdf::Document>,
+    cache: Option<&gpu::cache::ImageCache>,
+    doc_id: gpu::cache::DocId,
+) -> Option<pdf_interp::cache::PrefetchHandle> {
+    let cache = cache.filter(|_| config.prefetch)?;
+    let mut prefetch_config = pdf_interp::cache::PrefetchConfig::default();
+    prefetch_config.scale = config.prefetch_scale;
+    prefetch_config.rotation = config.rotation;
+    pdf_interp::cache::spawn_prefetch(Arc::clone(doc), cache.clone(), doc_id, prefetch_config)
+        .inspect_err(|e| {
+            log::warn!("image prefetch disabled: cannot start its threads ({e})");
+        })
+        .ok()
 }
 
 /// `cache` with the disk tier attached when its root resolves.
@@ -661,15 +681,21 @@ fn new_cuda_image_cache(ctx: &gpu::GpuCtx) -> gpu::cache::DeviceImageCache {
     )
 }
 
-/// A device image cache on `backend`, under the VRAM budget the device
-/// reports ([`gpu::cache::VramBudget::from_backend`]), or the default one
-/// when the query fails.
-#[cfg(all(feature = "cache", feature = "vulkan"))]
-fn new_vulkan_image_cache(
-    backend: &Arc<gpu::backend::vulkan::VulkanBackend>,
-) -> gpu::cache::DeviceImageCache<gpu::backend::vulkan::VulkanBackend> {
+/// A device image cache on `backend` (Vulkan, Direct3D 12), under the
+/// VRAM budget the device reports ([`gpu::cache::VramBudget::from_backend`]),
+/// or the default one when the query fails.
+#[cfg(all(
+    feature = "cache",
+    any(feature = "vulkan", all(windows, feature = "d3d12"))
+))]
+fn new_device_image_cache<B: gpu::cache::CacheBackend<Device = Arc<B>>>(
+    backend: &Arc<B>,
+) -> gpu::cache::DeviceImageCache<B> {
     let vram = gpu::cache::VramBudget::from_backend(&**backend).unwrap_or_else(|e| {
-        log::warn!("rasterrocket: Vulkan VRAM budget query failed ({e}); using the default cap");
+        log::warn!(
+            "rasterrocket: {} VRAM budget query failed ({e}); using the default cap",
+            B::NAME
+        );
         gpu::cache::VramBudget::DEFAULT
     });
     gpu::cache::DeviceImageCache::new(Arc::clone(backend), vram, gpu::cache::HostBudget::DEFAULT)

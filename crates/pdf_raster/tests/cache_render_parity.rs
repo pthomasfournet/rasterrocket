@@ -1,30 +1,45 @@
 //! End-to-end render parity: a page rendered through the device-resident
-//! image cache (`--backend cuda` or `--backend vulkan` with the `cache`
-//! feature) must be byte-identical to the CPU render of the same page.
+//! image cache (`--backend cuda`, `--backend vulkan` or `--backend d3d12`
+//! with the `cache` feature) must be byte-identical to the CPU render of the
+//! same page.
 //!
 //! The cached path decodes JPEGs once, keeps the pixels in VRAM, samples
 //! them with the blit kernel, and composites the result onto the page in
 //! content-stream order.  Everything downstream of the decode differs from
 //! the CPU path, so the only meaningful check is the final page bitmap.
 //!
-//! Every test runs on CUDA (under `gpu-validation`) and on Vulkan (under
-//! `vulkan`).  The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE`
-//! names, or the automatically ranked one, and is skipped when no Vulkan
-//! device opens.
+//! Every test runs on CUDA (under `gpu-validation`), on Vulkan (under
+//! `vulkan`) and on Direct3D 12 (under `d3d12`, on Windows).  The Vulkan
+//! case runs on the device `PDF_RASTER_VULKAN_DEVICE` names and the D3D12
+//! case on the adapter `PDF_RASTER_D3D12_DEVICE` names, or the
+//! automatically chosen one; either is skipped when no device opens, unless
+//! `PDF_RASTER_REQUIRE_VULKAN=1` or `PDF_RASTER_REQUIRE_D3D12=1` requires it.
 //!
 //! Run with:
 //!   `cargo test -p rasterrocket --features cache,gpu-validation --test cache_render_parity`
 //!   `cargo test -p rasterrocket --features cache,vulkan --test cache_render_parity`
 //!   `PDF_RASTER_VULKAN_DEVICE=radv cargo test -p rasterrocket --features cache,vulkan --test cache_render_parity`
+//!   `cargo test -p rasterrocket --features cache,d3d12 --test cache_render_parity` (Windows)
 
-#![cfg(all(feature = "cache", any(feature = "gpu-validation", feature = "vulkan")))]
+#![cfg(all(
+    feature = "cache",
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(windows, feature = "d3d12")
+    )
+))]
 
 #[expect(
     dead_code,
     reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
+#[cfg(all(windows, feature = "d3d12"))]
+#[path = "common/warp.rs"]
+mod warp;
 
+use common::device::DeviceApi;
 use common::{
     assert_identical, corpus_fixture, render, render_diagnosed, session, stream_object,
     with_page_tree,
@@ -158,6 +173,8 @@ enum Backend {
     Cuda,
     #[cfg(feature = "vulkan")]
     Vulkan,
+    #[cfg(all(windows, feature = "d3d12"))]
+    D3d12,
 }
 
 impl Backend {
@@ -172,6 +189,12 @@ impl Backend {
                 config.vulkan_device = SessionConfig::vulkan_device_from_env();
                 config
             }
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12 => {
+                let mut config = SessionConfig::with_policy(BackendPolicy::ForceD3d12);
+                config.d3d12_device = SessionConfig::d3d12_device_from_env();
+                config
+            }
         }
     }
 
@@ -182,35 +205,49 @@ impl Backend {
             Self::Cuda => "cuda",
             #[cfg(feature = "vulkan")]
             Self::Vulkan => "vulkan",
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12 => "d3d12",
         }
     }
 
-    /// `opened`, or `None` (the test is skipped) for a Vulkan session that
-    /// failed to open; a CUDA session must open.  An opened session must
-    /// carry an image cache of this backend.
+    /// The API whose absence skips a session of this backend; `None` for
+    /// CUDA, whose session must open.
     #[cfg_attr(
-        not(feature = "vulkan"),
+        not(feature = "gpu-validation"),
         expect(
             clippy::unnecessary_wraps,
-            reason = "only a Vulkan session is skipped; without `vulkan` every backend must open"
+            reason = "without `gpu-validation` every backend compiled in is skippable"
         )
     )]
-    fn session(self, opened: Result<RasterSession, RasterError>) -> Option<RasterSession> {
-        match opened {
-            Ok(session) => {
-                let cache = session
-                    .image_cache()
-                    .unwrap_or_else(|| panic!("{self:?} session must carry an image cache"));
-                assert_eq!(cache.backend_name(), self.name(), "cache backend");
-                Some(session)
-            }
+    const fn skippable_api(self) -> Option<DeviceApi> {
+        match self {
+            #[cfg(feature = "gpu-validation")]
+            Self::Cuda => None,
             #[cfg(feature = "vulkan")]
-            Err(e) if matches!(self, Self::Vulkan) => {
-                eprintln!("skipping: no Vulkan session ({e})");
-                None
-            }
-            Err(e) => panic!("{self:?} session: {e}"),
+            Self::Vulkan => Some(DeviceApi::Vulkan),
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12 => Some(DeviceApi::D3d12),
         }
+    }
+
+    /// `opened`, or `None` (the test is skipped) for a Vulkan or D3D12
+    /// session that failed to open and whose API the run does not require
+    /// ([`common::device::or_skip`]); a CUDA session must open.  An opened
+    /// session must carry an image cache of this backend.
+    fn session(self, opened: Result<RasterSession, RasterError>) -> Option<RasterSession> {
+        let session = match self.skippable_api() {
+            Some(api) => common::device::or_skip(api, opened)?,
+            None => opened.unwrap_or_else(|e| panic!("{self:?} session: {e}")),
+        };
+        #[cfg(all(windows, feature = "d3d12"))]
+        if matches!(self, Self::D3d12) {
+            warp::report_loaded_warp();
+        }
+        let cache = session
+            .image_cache()
+            .unwrap_or_else(|| panic!("{self:?} session must carry an image cache"));
+        assert_eq!(cache.backend_name(), self.name(), "cache backend");
+        Some(session)
     }
 
     /// A session of this backend on the PDF `bytes`.
@@ -219,10 +256,10 @@ impl Backend {
     }
 }
 
-/// One `#[test]` per backend compiled in, named `$cuda` and `$vulkan`, each
-/// calling `$check` with its backend.
+/// One `#[test]` per backend compiled in, named `$cuda`, `$vulkan` and
+/// `$d3d12`, each calling `$check` with its backend.
 macro_rules! on_each_backend {
-    ($check:ident, $cuda:ident, $vulkan:ident) => {
+    ($check:ident, $cuda:ident, $vulkan:ident, $d3d12:ident) => {
         #[cfg(feature = "gpu-validation")]
         #[test]
         fn $cuda() {
@@ -233,6 +270,12 @@ macro_rules! on_each_backend {
         #[test]
         fn $vulkan() {
             $check(Backend::Vulkan);
+        }
+
+        #[cfg(all(windows, feature = "d3d12"))]
+        #[test]
+        fn $d3d12() {
+            $check(Backend::D3d12);
         }
     };
 }
@@ -278,7 +321,8 @@ fn synthetic_page_renders_identically(backend: Backend) {
 on_each_backend!(
     synthetic_page_renders_identically,
     synthetic_page_renders_identically_through_the_cuda_cache,
-    synthetic_page_renders_identically_through_the_vulkan_cache
+    synthetic_page_renders_identically_through_the_vulkan_cache,
+    synthetic_page_renders_identically_through_the_d3d12_cache
 );
 
 /// A page painted on the overprint canvas draws its cached images through
@@ -320,7 +364,8 @@ fn overprint_page_renders_identically(backend: Backend) {
 on_each_backend!(
     overprint_page_renders_identically,
     overprint_page_renders_identically_through_the_cuda_cache,
-    overprint_page_renders_identically_through_the_vulkan_cache
+    overprint_page_renders_identically_through_the_vulkan_cache,
+    overprint_page_renders_identically_through_the_d3d12_cache
 );
 
 /// A 16-bit page keeps its JPEGs host-resident: the blit kernel samples at
@@ -357,7 +402,8 @@ fn sixteen_bit_page_bypasses_the_cache(backend: Backend) {
 on_each_backend!(
     sixteen_bit_page_bypasses_the_cache,
     sixteen_bit_page_bypasses_the_cuda_cache,
-    sixteen_bit_page_bypasses_the_vulkan_cache
+    sixteen_bit_page_bypasses_the_vulkan_cache,
+    sixteen_bit_page_bypasses_the_d3d12_cache
 );
 
 /// Magnified draws, which the sampler interpolates: a gray JPEG drawn
@@ -377,7 +423,8 @@ fn interpolated_draws_render_identically(backend: Backend) {
 on_each_backend!(
     interpolated_draws_render_identically,
     interpolated_draws_render_identically_through_the_cuda_cache,
-    interpolated_draws_render_identically_through_the_vulkan_cache
+    interpolated_draws_render_identically_through_the_vulkan_cache,
+    interpolated_draws_render_identically_through_the_d3d12_cache
 );
 
 /// Render `draw` (which may use `/ImB`, a 50×80 gray JPEG, and `/ImD`, a
@@ -467,7 +514,8 @@ fn corpus_scan_pages_render_identically(backend: Backend) {
 on_each_backend!(
     corpus_scan_pages_render_identically,
     corpus_scan_pages_render_identically_through_the_cuda_cache,
-    corpus_scan_pages_render_identically_through_the_vulkan_cache
+    corpus_scan_pages_render_identically_through_the_vulkan_cache,
+    corpus_scan_pages_render_identically_through_the_d3d12_cache
 );
 
 /// Pages whose images must bypass the cache next to one that must not.
@@ -488,7 +536,8 @@ fn corpus_masked_flate_pages_bypass_the_cache(backend: Backend) {
 on_each_backend!(
     corpus_masked_flate_pages_bypass_the_cache,
     corpus_masked_flate_pages_render_identically_and_bypass_the_cuda_cache,
-    corpus_masked_flate_pages_render_identically_and_bypass_the_vulkan_cache
+    corpus_masked_flate_pages_render_identically_and_bypass_the_vulkan_cache,
+    corpus_masked_flate_pages_render_identically_and_bypass_the_d3d12_cache
 );
 
 /// An `Auto` session holds no image cache, as it holds no GPU backend, and

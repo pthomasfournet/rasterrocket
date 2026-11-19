@@ -64,8 +64,10 @@ pub enum BackendPolicy {
     /// [`SessionConfig::d3d12_device`] names, or the automatically chosen
     /// hardware adapter.  The ICC CMYK→RGB CLUT kernel dispatches through
     /// `D3d12Backend`, after the device passes the same exactness check as
-    /// a Vulkan device; images it does not convert, and every other kernel,
-    /// run on the CPU.
+    /// a Vulkan device; images it does not convert run on the CPU.  In a
+    /// build with the `cache` feature the device-resident image cache keeps
+    /// its slabs on the adapter and the image blit kernel draws them there.
+    /// Every other kernel runs on the CPU.
     ForceD3d12,
 }
 
