@@ -191,6 +191,14 @@ fn check_paths_status(kernel: KernelId, words: &[u32; STATUS_WORDS]) -> Result<(
     kernel_status::check(kernel.label(), words)
 }
 
+/// The bytes of a device row and of the device page of a `width` × `height`
+/// page of `S` samples, [`PageSample::DEVICE_PIXEL_BYTES`] a pixel; `None`
+/// when either overflows `usize`.
+fn device_page_bytes<S: PageSample>(width: usize, height: usize) -> Option<(usize, usize)> {
+    let row = width.checked_mul(S::DEVICE_PIXEL_BYTES)?;
+    Some((row, row.checked_mul(height)?))
+}
+
 /// `len` bytes as a device size.
 fn device_size(len: usize) -> u64 {
     u64::try_from(len).expect("usize fits u64 on supported targets")
@@ -306,10 +314,7 @@ impl VulkanBackend {
         // page, and the samples of `out` the page spans: the last row ends
         // `row` samples after the start of row `height - 1`.
         let row = width.checked_mul(3).ok_or_else(overflow)?;
-        let device_row = width
-            .checked_mul(S::DEVICE_PIXEL_BYTES)
-            .ok_or_else(overflow)?;
-        let page_len = device_row.checked_mul(height).ok_or_else(overflow)?;
+        let (device_row, page_len) = device_page_bytes::<S>(width, height).ok_or_else(overflow)?;
         let span = stride
             .checked_mul(height - 1)
             .and_then(|n| n.checked_add(row))
@@ -1102,6 +1107,37 @@ mod tests {
             matches!(err, crate::backend::BackendError::DeviceLimit { need, .. } if need == max + 1),
             "{err}"
         );
+    }
+
+    #[test]
+    fn the_page_range_check_sizes_the_word_page() {
+        let Some(backend) = super::super::test_backend() else {
+            return;
+        };
+        let max = usize::try_from(backend.device.max_storage_buffer_range)
+            .expect("u32 fits usize on supported targets");
+        // A row of `n` pixels whose packed samples fit the range and whose
+        // device words do not.
+        for (packed, n) in [(3, max / 4 + 1), (6, max / 8 + 1)] {
+            assert!(n * packed <= max, "{n} pixels of {packed} bytes fit");
+            let (_, len) = if packed == 3 {
+                super::device_page_bytes::<u8>(n, 1)
+            } else {
+                super::device_page_bytes::<u16>(n, 1)
+            }
+            .expect("no overflow");
+            let err = backend
+                .device
+                .check_storage_range("render_page pixels", super::device_size(len))
+                .expect_err("the word page exceeds the range");
+            assert!(
+                matches!(err, BackendError::DeviceLimit { need, .. } if need == super::device_size(len)),
+                "{err}"
+            );
+        }
+        assert_eq!(super::device_page_bytes::<u8>(5, 7), Some((20, 140)));
+        assert_eq!(super::device_page_bytes::<u16>(5, 7), Some((40, 280)));
+        assert_eq!(super::device_page_bytes::<u8>(usize::MAX / 2, 1), None);
     }
 
     #[test]
