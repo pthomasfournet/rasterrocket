@@ -2929,8 +2929,9 @@ the Unicode bidirectional algorithm, then shaped the same way.
 Not done: the comparison the plan called for, of non-embedded Arabic and
 Devanagari archive documents against an embedded, shaped rendering of the
 same text. The tests cover joining, letter order and vowel-sign reordering
-on the bundled faces. Runs did not cross show strings in v2.1.0; since v2.4.0 a word split
-across `Tj`/`TJ` strings is shaped and fitted as one word (see Current status).
+on the bundled faces. Runs did not cross show strings in v2.1.0; since v2.2.0 a word split
+across `Tj`/`TJ` strings is shaped as one word, and since v2.4.0 it is
+fitted as one (see Current status).
 
 **Substitution follow-ups, in v2.1.0 (2026-11-02).** A vertical-form
 CID drawn by a substitute without a `vert`/`vrt2` form is rotated or
