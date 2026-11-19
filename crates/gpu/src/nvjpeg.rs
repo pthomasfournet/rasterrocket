@@ -89,8 +89,8 @@ type nvjpegJpegState_t = *mut NvjpegJpegState_;
 )]
 type nvjpegChromaSubsampling_t = i32;
 
-/// Output format: we use `NVJPEG_OUTPUT_RGBI` (interleaved RGB, channel[0])
-/// and `NVJPEG_OUTPUT_Y` (luma-only, channel[0]).
+/// Output format: we use `NVJPEG_OUTPUT_RGBI` (interleaved RGB, `channel[0]`)
+/// and `NVJPEG_OUTPUT_Y` (luma-only, `channel[0]`).
 #[expect(
     non_camel_case_types,
     reason = "C FFI type alias; must match the nvJPEG ABI name"

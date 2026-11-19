@@ -605,9 +605,9 @@ pub struct DiskHeaderInfo {
     pub expected_pixel_bytes: usize,
 }
 
-/// Error variants for [`read_entry`] — internal type, callers see
-/// `Option<DiskEntry>` from [`DiskTier::lookup`] which logs and
-/// swallows everything except `Missing`.
+/// Error variants of reading a disk entry ([`read_entry_into`]).
+/// [`DiskTier::lookup_into`] maps every variant to `None`, logging
+/// all but `Missing` and `CallbackFailed`.
 #[derive(Debug)]
 enum DiskReadError {
     Missing,
@@ -783,7 +783,7 @@ where
 }
 
 /// Map an `io::Error` from a pixel-payload read into the appropriate
-/// `DiskReadError` variant.  Shared by [`read_entry`] and
+/// `DiskReadError` variant.  Shared by `read_entry` and
 /// [`read_entry_into`] so the truncation reporting stays consistent.
 fn map_pixel_io_err(info: &DiskHeaderInfo, e: io::Error) -> DiskReadError {
     match e.kind() {

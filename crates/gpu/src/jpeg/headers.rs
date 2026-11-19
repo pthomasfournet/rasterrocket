@@ -39,8 +39,7 @@ const MARKER_DRI: u8 = 0xDD;
 ///
 /// Lifetime is tied to the input slice: `scan_data` is a borrow of the
 /// entropy-coded segment within the original JPEG bytes, *with byte-stuffing
-/// still intact*. Use [`super::unstuff::unstuff_into`] to materialise a flat
-/// bitstream.
+/// still intact*.
 #[derive(Debug, Clone)]
 pub(crate) struct JpegHeaders<'a> {
     /// Image width in pixels, from SOF0.
@@ -54,7 +53,7 @@ pub(crate) struct JpegHeaders<'a> {
     /// Quantisation tables, indexed by table ID 0..=3.  `None` slots were
     /// never loaded from a DQT segment.
     pub quant_tables: [Option<JpegQuantTable>; 4],
-    /// All Huffman tables seen in DHT segments. Index by `(class, table_id)` via [`Self::huffman`].
+    /// All Huffman tables seen in DHT segments.
     pub huffman_tables: Vec<JpegHuffmanTable>,
     /// SOS scan header.
     pub scan: JpegScanHeader,
@@ -309,8 +308,7 @@ impl<'a> JpegHeaders<'a> {
     /// Parse a JPEG bitstream and extract every header up to (and including) SOS.
     ///
     /// `scan_data` in the returned headers is a borrow of `data` covering the
-    /// entropy-coded segment, byte-stuffing intact. Subsequent decoding stages
-    /// must call [`super::unstuff::unstuff_into`] before bit-walking it.
+    /// entropy-coded segment, byte-stuffing intact.
     ///
     /// # Errors
     ///

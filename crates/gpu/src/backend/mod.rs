@@ -640,7 +640,7 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// exceeds `src`'s device length.
     fn download(&self, src: &Self::DeviceBuffer, dst: &mut [u8]) -> Result<()>;
 
-    /// The scratch buffers of the operations this backend runs ([`icc_clut`]
+    /// The scratch buffers of the operations this backend runs ([`icc_clut()`]
     /// and, with the `cache` feature, `blit_image`).
     fn scratch(&self) -> &DeviceScratch<Self>
     where

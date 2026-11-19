@@ -180,7 +180,7 @@ pub struct DeviceScratch<B: GpuBackend> {
     /// Scratches of [`super::blit_image`].
     #[cfg(feature = "cache")]
     pub(crate) blit: ScratchPool<BlitScratch<B>>,
-    /// Scratches of [`super::icc_clut`].
+    /// Scratches of [`super::icc_clut()`].
     pub(crate) icc_clut: ScratchPool<IccClutScratch<B>>,
 }
 

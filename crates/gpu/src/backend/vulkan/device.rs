@@ -8,7 +8,7 @@
 //! - Supports every one of those features (`vkGetPhysicalDeviceFeatures2`).
 //!
 //! The device is either named by a [`DeviceSelector`] or chosen by the
-//! ranking in [`select`](super::select).
+//! ranking in [`super::select`].
 //!
 //! No surface, no graphics queue — this is a headless compute backend.
 
