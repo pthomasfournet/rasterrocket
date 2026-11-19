@@ -94,13 +94,20 @@ tested. Please report what you find.
   takes the paths kernel, and renders every page offered under
   `--gpu-pages`; across both devices the 2080 SUPER took 7 442 pages and
   the UHD 630 4 654, none on the CPU. Its `maxStorageBufferRange` is 1 GiB:
-  a page whose RGB pixels exceed it (the device renders gray pages as RGB),
-  such as `corpus-09` page 415 at 1200 dpi (1.6 GB), renders on the CPU
-  after a warning naming the limit. The TDR gate on it, the same pages
-  whole at 600 and 1200 dpi plus `corpus-09` at 950 dpi (1.0 GB, the
-  largest that fits) and `corpus-06` and `corpus-02` at 1200 dpi in 16 bits
-  (0.8 GB), is byte-identical and loses no device; no whole process took
-  over 3 s on the device. Its older driver, 26.20.100.7642, reports
+  a page whose device pixels exceed it renders on the CPU after a warning
+  naming the limit. The device stores each pixel in whole 32-bit words, 4
+  bytes at 8 bits and 8 at 16 (gray pages render as RGB), so a page fits
+  up to about 268 million pixels at 8 bits and 134 million at 16;
+  `corpus-09` page 415 at 1200 dpi (1.6 GB of RGB, 2.1 GB of device
+  pixels) does not. The TDR gate on it, the same pages whole at 600 and
+  1200 dpi plus `corpus-09` at 950 dpi and `corpus-06` and `corpus-02` at
+  1200 dpi in 16 bits, is byte-identical and loses no device; no whole
+  process took over 3 s on the device. The gate ran on 2026-11-18, before
+  the word layout, when the device stored three samples a pixel: the
+  950 dpi page (1.0 GB then, the largest that fitted) and the 16-bit pages
+  (0.8 GB then) take 1.33 GB and 1.11 GB of device pixels now, so they
+  render on the CPU; the gate has not been run with the word layout. Its
+  older driver, 26.20.100.7642, reports
   Vulkan 1.1 and is listed as unusable (`Vulkan API below 1.3`). Other GPUs
   under Windows are untested.
 - **Printing:** `--print` sends the pages to the printer's driver through

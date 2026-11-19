@@ -3671,9 +3671,43 @@ device's `maxStorageBufferRange` holds three quarters as many pixels at
 either depth; a larger page renders on the CPU after the warning naming
 the limit. The UHD 630 measurements above (the largest page that fits,
 1.0 GB at 950 dpi) were made with the earlier layout of three samples
-per pixel.
+per pixel: on its 1 GiB range, `corpus-09` page 415 at 950 dpi (1.33 GB
+of device pixels now) and `corpus-06` and `corpus-02` at 1200 dpi in 16
+bits (1.11 GB now) render on the CPU, and the gate has not been rerun
+with the word layout.
 Verified on the RTX 5070: the GPU-page parity suite over the fixtures,
 at 8 and 16 bits.
+
+**Unreleased on master: the ICC lookup-table and image-blit kernels read
+and write whole words.** The grid CMYK → RGB kernel (`icc_clut`, CUDA and
+Vulkan) reads each CMYK pixel as one 32-bit word and writes each RGB
+pixel as one word (`r | g << 8 | b << 16`) at 8 bits or two (`r | g <<
+16`, then `b`) at 16, which the host unpads; the image blit reads its
+source as words, so a source buffer is padded to a whole word with zero
+bytes. The image cache pads each device slab it uploads or promotes and
+charges the padded size against its device budget, on insertion and on
+promotion; the host and disk tiers keep the exact pixel bytes. Converted
+and blitted pixels are unchanged, byte-identical to the CPU. API changes
+in `rasterrocket-gpu`:
+- `IccClutParams::rgb` holds `n_pixels × 4` bytes, `n_pixels × 8` with
+  `wide` (was `× 3` and `× 6`), and `cmyk` is read as one word a pixel;
+  `MAX_WIDE_CLUT_PIXELS` is `u32::MAX / 8` (was `u32::MAX / 6`).
+  `icc_clut` and `icc_clut16` check that bound before staging anything.
+- `BlitParams::src` and `BlitSource::pixels` must be padded to a whole
+  word (`layout::word_padded`), and `BlitParams::validate` rejects a
+  source of the exact pixel length.
+- `CacheBackend::upload_slab` and `CacheBackend::promote` pad the slab;
+  `CachedDeviceImage::vram_bytes` is the padded size, and
+  `CachedDeviceImage::pixel_bytes()`, the exact pixel bytes, is new.
+- `PageSample::copy_from_le` is removed; `PageSample::copy_from_words`
+  and `PageSample::DEVICE_PIXEL_BYTES` are new.
+- `BackendError::InvariantViolation::detail` is a `Cow<'static, str>`
+  (was `&'static str`), which breaks a match or construction that names
+  its type; `BackendError::invariant(kind, detail)` is new, and the
+  details name the sizes compared.
+- `backend::layout` (`device_pixel_words`, `word_padded`,
+  `unpad_pixels`) is a new public module, hidden from the documentation,
+  for the crate's own integration tests and bench binary.
 
 **Unreleased on master: Vulkan devices without 8-bit storage are
 eligible.** The Vulkan device no longer requests `storageBuffer8BitAccess`,
