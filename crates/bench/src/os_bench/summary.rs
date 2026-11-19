@@ -1,11 +1,6 @@
 //! Result summaries: per-row statistics, the environment whitelist and the
 //! cross-OS table.
 
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "microsecond timings stay far below 2^52, where f64 is exact"
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -44,12 +39,21 @@ const MATCHED_KEYS: &[&str] = &["commit", "rustc", "profile"];
 /// A row is noisy when (max − min) / median exceeds this.
 const NOISE_LIMIT: f64 = 0.05;
 
-/// Drop a leading byte-order mark and split into lines without CR.
+/// Microsecond timings stay far below 2^53, where `f64` is exact.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "timings in microseconds are far below 2^53"
+)]
+const fn to_f64(v: u64) -> f64 {
+    v as f64
+}
+
+/// Drop a leading byte-order mark and split into non-empty lines (`lines`
+/// already removes the CR of a CRLF ending).
 fn clean_lines(text: &str) -> impl Iterator<Item = &str> {
     text.strip_prefix('\u{feff}')
         .unwrap_or(text)
         .lines()
-        .map(|l| l.trim_end_matches('\r'))
         .filter(|l| !l.is_empty())
 }
 
@@ -148,11 +152,11 @@ pub(crate) fn row_stats(samples: &[Sample]) -> Vec<RowStat> {
                 let (lo, hi) = (walls[n / 2 - 1], walls[n / 2]);
                 lo + (hi - lo) / 2
             };
-            let range = (walls[n - 1] - walls[0]) as f64;
+            let range = to_f64(walls[n - 1] - walls[0]);
             let spread = if median_us == 0 {
                 0.0
             } else {
-                range / median_us as f64
+                range / to_f64(median_us)
             };
             RowStat {
                 row: row.to_owned(),
@@ -202,14 +206,15 @@ fn index(stats: &[RowStat]) -> BTreeMap<Key<'_>, &RowStat> {
 }
 
 fn ms(us: u64) -> String {
-    format!("{:.2} ms", us as f64 / 1000.0)
+    format!("{:.2} ms", to_f64(us) / 1000.0)
 }
 
-fn ratio(a: u64, b: u64) -> String {
-    if a == 0 {
+/// `windows / ubuntu`, or `—` when the Ubuntu value is zero.
+fn ratio(ubuntu: u64, windows: u64) -> String {
+    if ubuntu == 0 {
         "—".to_owned()
     } else {
-        format!("{:.2}", b as f64 / a as f64)
+        format!("{:.2}", to_f64(windows) / to_f64(ubuntu))
     }
 }
 
@@ -218,23 +223,48 @@ fn startup(stats: &[RowStat]) -> Option<&RowStat> {
     stats.iter().find(|s| s.row == "S-version")
 }
 
-/// Per-page file costs per document, start-up subtracted when known.
-fn file_costs(stats: &[RowStat]) -> Result<BTreeMap<&str, i64>, String> {
-    let start = startup(stats).map_or(0, |s| s.median_us);
+/// (document, threads) to (µs per page, start-up subtracted).
+type FileCosts<'a> = BTreeMap<(&'a str, usize), (i64, bool)>;
+
+/// Per-page file costs per (document, threads).  A `D12` row pairs with the
+/// `L12` row of the same document and thread count, and with the `S-version`
+/// row of the same thread count; the start-up median is subtracted from
+/// `D12` before the per-page division, and exceeding it is an error.  The
+/// flag is false where no `S-version` row matched.
+fn file_costs(stats: &[RowStat]) -> Result<FileCosts<'_>, String> {
     let mut out = BTreeMap::new();
     for d in stats.iter().filter(|s| s.row == "D12") {
-        let Some(l) = stats.iter().find(|s| s.row == "L12" && s.doc == d.doc) else {
+        let Some(l) = stats
+            .iter()
+            .find(|s| s.row == "L12" && s.doc == d.doc && s.threads == d.threads)
+        else {
             continue;
         };
         if d.pages != l.pages {
             return Err(format!(
-                "{}: D12 has {} page(s), L12 has {}",
-                d.doc, d.pages, l.pages
+                "{}@{}: D12 has {} page(s), L12 has {}",
+                d.doc, d.threads, d.pages, l.pages
             ));
         }
+        let start = stats
+            .iter()
+            .find(|s| s.row == "S-version" && s.threads == d.threads);
         let mut adjusted = d.clone();
-        adjusted.median_us = d.median_us.saturating_sub(start);
-        out.insert(d.doc.as_str(), file_cost_us_per_page(&adjusted, l, d.pages));
+        if let Some(st) = start {
+            adjusted.median_us = d.median_us.checked_sub(st.median_us).ok_or_else(|| {
+                format!(
+                    "{}@{}: start-up median {} us exceeds D12 median {} us",
+                    d.doc, d.threads, st.median_us, d.median_us
+                )
+            })?;
+        }
+        out.insert(
+            (d.doc.as_str(), d.threads),
+            (
+                file_cost_us_per_page(&adjusted, l, d.pages),
+                start.is_some(),
+            ),
+        );
     }
     Ok(out)
 }
@@ -252,6 +282,16 @@ fn same_pages(a: &[RowStat], b: &[RowStat]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The env of both sides, key by key.
+fn render_env(out: &mut String, a: &EnvMap, b: &EnvMap) {
+    out.push_str("\n| env | Ubuntu | Windows |\n|---|---|---|\n");
+    let env_keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    for k in env_keys {
+        let show = |m: &EnvMap| m.get(k).map_or("—", String::as_str).to_owned();
+        let _ = writeln!(out, "| {k} | {} | {} |", show(a), show(b));
+    }
 }
 
 /// Markdown comparison: column A is Ubuntu, column B is Windows.  Refuses
@@ -319,19 +359,26 @@ pub(crate) fn render_table(
     }
 
     let (ca, cb) = (file_costs(a.1)?, file_costs(b.1)?);
-    let docs: BTreeSet<&str> = ca.keys().chain(cb.keys()).copied().collect();
+    let docs: BTreeSet<(&str, usize)> = ca.keys().chain(cb.keys()).copied().collect();
     out.push_str("\n**Per-page file cost** (`D12` against `L12`");
-    if startup(a.1).is_none() || startup(b.1).is_none() {
-        out.push_str("; start-up not subtracted on a side without `S-version`");
+    if ca.values().chain(cb.values()).any(|(_, sub)| !sub) {
+        out.push_str("; start-up not subtracted where no `S-version` row matched");
     }
     out.push_str("):\n");
     if docs.is_empty() {
         out.push_str("—\n");
     }
-    for d in &docs {
+    for key in &docs {
         let show =
-            |m: &BTreeMap<&str, i64>| m.get(d).map_or("—".to_owned(), |v| format!("{v} µs"));
-        let _ = writeln!(out, "- {d}: Ubuntu {}, Windows {}", show(&ca), show(&cb));
+            |m: &FileCosts<'_>| m.get(key).map_or("—".to_owned(), |v| format!("{} µs", v.0));
+        let _ = writeln!(
+            out,
+            "- {}@{}: Ubuntu {}, Windows {}",
+            key.0,
+            key.1,
+            show(&ca),
+            show(&cb)
+        );
     }
 
     out.push_str("\n**Render ratio** (`L12`, Windows/Ubuntu):\n");
@@ -339,33 +386,51 @@ pub(crate) fn render_table(
     for k in keys.iter().filter(|k| k.0 == "L12") {
         if let (Some(x), Some(y)) = (ia.get(k), ib.get(k)) {
             any = true;
-            let _ = writeln!(out, "- {}: {}", k.1, ratio(x.median_us, y.median_us));
+            let _ = writeln!(
+                out,
+                "- {}@{}: {}",
+                k.1,
+                k.2,
+                ratio(x.median_us, y.median_us)
+            );
         }
     }
     if !any {
         out.push_str("—\n");
     }
 
-    out.push_str("\n| env | Ubuntu | Windows |\n|---|---|---|\n");
-    let env_keys: BTreeSet<&String> = a.0.keys().chain(b.0.keys()).collect();
-    for k in env_keys {
-        let show = |m: &EnvMap| m.get(k).map_or("—", String::as_str).to_owned();
-        let _ = writeln!(out, "| {k} | {} | {} |", show(a.0), show(b.0));
-    }
+    render_env(&mut out, a.0, b.0);
     Ok(out)
 }
 
-/// Read `env.tsv` and `results.tsv` from a result directory.
+/// A re-run replaces the first run: every (group, row, doc, threads) key in
+/// `rerun` drops that key's samples from `first`.
+pub(crate) fn merge_rerun(first: Vec<Sample>, rerun: Vec<Sample>) -> Vec<Sample> {
+    let key = |s: &Sample| (s.group.clone(), s.row.clone(), s.doc.clone(), s.threads);
+    let replaced: BTreeSet<_> = rerun.iter().map(key).collect();
+    first
+        .into_iter()
+        .filter(|s| !replaced.contains(&key(s)))
+        .chain(rerun)
+        .collect()
+}
+
+/// Read `env.tsv`, `results.tsv` and, when present, `rerun.tsv` from a result
+/// directory.
 pub(crate) fn read_dir(dir: &std::path::Path) -> Result<(EnvMap, Vec<RowStat>), String> {
     let read = |name: &str| {
         let path = dir.join(name);
         std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
     };
+    let parse = |name: &str, text: &str| {
+        read_results(text).map_err(|e| format!("{}: {e}", dir.join(name).display()))
+    };
     let env_path = dir.join("env.tsv");
     let env = read_env(&read("env.tsv")?).map_err(|e| format!("{}: {e}", env_path.display()))?;
-    let res_path = dir.join("results.tsv");
-    let samples =
-        read_results(&read("results.tsv")?).map_err(|e| format!("{}: {e}", res_path.display()))?;
+    let mut samples = parse("results.tsv", &read("results.tsv")?)?;
+    if dir.join("rerun.tsv").exists() {
+        samples = merge_rerun(samples, parse("rerun.tsv", &read("rerun.tsv")?)?);
+    }
     Ok((env, row_stats(&samples)))
 }
 
@@ -456,6 +521,87 @@ mod tests {
         assert!(t.lines().any(|l| l.contains("L12@4") && l.contains("1.50")));
     }
 
+    fn quiet(row: &str, walls: &[u64]) -> Vec<RowStat> {
+        let s: Vec<Sample> = walls.iter().map(|&u| sample(row, "d", 1, u)).collect();
+        row_stats(&s)
+    }
+
+    #[test]
+    fn exactly_five_percent_is_not_noisy_and_even_median_is_midpoint() {
+        // Spread 5/100 is not above the limit; only "exceeds 5 %" flags.
+        assert!(!quiet("r", &[100, 100, 105])[0].noisy);
+        assert!(quiet("r", &[100, 100, 106])[0].noisy);
+        assert_eq!(quiet("r", &[10, 20, 30, 41])[0].median_us, 25);
+    }
+
+    #[test]
+    fn rustc_and_profile_mismatches_are_refused() {
+        for key in ["rustc", "profile"] {
+            let (a, mut b) = (env("aaa"), env("aaa"));
+            b.insert(key.to_owned(), "other".to_owned());
+            let err = render_table((&a, &[]), (&b, &[])).unwrap_err();
+            assert!(err.contains(key) && err.contains("other"), "{err}");
+        }
+    }
+
+    #[test]
+    fn malformed_env_lines_are_errors() {
+        let err = read_env(&format!("{ENV}os\tagain\n")).unwrap_err();
+        assert!(err.contains("twice") && err.contains("os"));
+        let err = read_env(&format!("{ENV}date\n")).unwrap_err();
+        assert!(err.contains("no tab"));
+    }
+
+    #[test]
+    fn page_count_mismatch_is_an_error() {
+        let a = [stat("L12", "d", 2, 1)];
+        let b = [stat("L12", "d", 3, 1)];
+        let err = render_table((&env("aaa"), &a), (&env("aaa"), &b)).unwrap_err();
+        assert!(err.contains("2 page") && err.contains('3'));
+    }
+
+    #[test]
+    fn noisy_lines_list_each_pair_once() {
+        let mut v = vec![stat("r", "d", 1, 1), stat("q", "e", 1, 1)];
+        v[0].noisy = true;
+        let mut w = v[0].clone();
+        w.threads = 8;
+        v.push(w);
+        assert_eq!(noisy_lines(&v), "r\td\n");
+    }
+
+    #[test]
+    fn rerun_replaces_the_key_and_leaves_others() {
+        let first = vec![
+            sample("r", "d", 1, 100),
+            sample("r", "d", 1, 900),
+            sample("q", "d", 1, 5),
+        ];
+        let rerun = vec![sample("r", "d", 1, 200)];
+        let merged = merge_rerun(first, rerun);
+        let stats = row_stats(&merged);
+        let r = stats.iter().find(|s| s.row == "r").unwrap();
+        assert_eq!((r.reps, r.median_us), (1, 200));
+        assert_eq!(stats.iter().find(|s| s.row == "q").unwrap().median_us, 5);
+    }
+
+    #[test]
+    fn startup_larger_than_d12_is_an_error_and_threads_must_match() {
+        let side = [
+            stat("S-version", "-", 1, 2_000),
+            stat("D12", "d", 2, 1_000),
+            stat("L12", "d", 2, 500),
+        ];
+        let err = render_table((&env("aaa"), &side), (&env("aaa"), &side)).unwrap_err();
+        assert!(err.contains("2000") && err.contains("1000"));
+        // An L12 at other threads is not a partner: no cost line, no error.
+        let mut other = side.clone();
+        other[2].threads = 8;
+        other[0].median_us = 1;
+        let t = render_table((&env("aaa"), &other), (&env("aaa"), &other)).unwrap();
+        assert!(!t.contains("- d@4"));
+    }
+
     #[test]
     fn file_cost_line_subtracts_startup() {
         let side = [
@@ -464,7 +610,7 @@ mod tests {
             stat("L12", "d", 10, 900_000),
         ];
         let t = render_table((&env("aaa"), &side), (&env("aaa"), &side)).unwrap();
-        assert!(t.contains("- d: Ubuntu 10000 µs, Windows 10000 µs"));
+        assert!(t.contains("- d@4: Ubuntu 10000 µs, Windows 10000 µs"));
     }
 
     #[test]

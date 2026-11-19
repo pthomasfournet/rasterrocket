@@ -9,6 +9,15 @@
 //!     (--disk DIR | --ram ROOT | --none) [--invocations M] [--expect-pages]
 //!     [PDF[:FIRST-LAST]...] [-- EXTRA...]` — child-process rows.
 //!
+//!   - `summarize DIR_UBUNTU DIR_WINDOWS` — the cross-OS Markdown table.
+//!     Each directory holds `env.tsv`, `results.tsv` and optionally
+//!     `rerun.tsv`, whose (group, row, doc, threads) keys replace those
+//!     keys' samples in `results.tsv`.  Refuses differing `commit`, `rustc`
+//!     or `profile`, and any env key outside the whitelist.
+//!
+//!   - `noisy DIR` — one `row\tdoc` line per row whose spread exceeds 5 %,
+//!     for the drivers' re-run.
+//!
 //! The caller sets `RAYON_NUM_THREADS`; the harness never does.
 
 mod library;
@@ -390,7 +399,12 @@ fn main() -> ExitCode {
              (--disk DIR | --ram ROOT | --none) [--invocations M] [--expect-pages] \
              [PDF[:FIRST-LAST]...] [-- EXTRA...]\n       \
              os_bench summarize DIR_UBUNTU DIR_WINDOWS\n       \
-             os_bench noisy DIR"
+             os_bench noisy DIR\n\
+             summarize: Ubuntu directory first; refuses differing commit, rustc or profile \
+             and env keys outside the whitelist; rerun.tsv in a directory replaces the \
+             matching (group,row,doc,threads) samples of results.tsv.\n\
+             noisy: prints `row<TAB>doc` for each row whose (max-min)/median exceeds 5 %, \
+             for the drivers' 5-rep re-run into rerun.tsv."
                 .to_owned(),
         ),
     };
