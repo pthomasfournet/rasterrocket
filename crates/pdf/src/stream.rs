@@ -506,7 +506,7 @@ fn apply_png_predictor(data: Vec<u8>, params: &dyn DictLookup) -> Result<Vec<u8>
     let tail = data.len() % row_len;
     let tail_data = tail.saturating_sub(1);
     if tail != 0 {
-        log::warn!(
+        log::debug!(
             "PNG predictor: final row holds {tail_data} of {stride} data bytes; \
              decoding it as a partial row"
         );
