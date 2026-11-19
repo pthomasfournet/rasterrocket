@@ -107,9 +107,10 @@ pub(crate) fn test_backend() -> Option<D3d12Backend> {
                 if let Ok(expected) = std::env::var("RR_WARP_VERSION") {
                     let (path, version) = loaded.expect("d3d10warp.dll is loaded");
                     let exe = std::env::current_exe().expect("test binary path");
+                    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
                     assert_eq!(
-                        path.parent(),
-                        exe.parent(),
+                        path.parent().and_then(canonical),
+                        exe.parent().and_then(canonical),
                         "the loaded WARP is not the one beside the test binary: {}",
                         path.display()
                     );

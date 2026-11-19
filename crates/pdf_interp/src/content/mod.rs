@@ -14,7 +14,7 @@ pub use tokenizer::{InlineComponents, Tokenizer};
 ///
 /// - Unrecognised operator keywords become [`Operator::Unknown`].
 /// - Operand tokens that do not match the expected type for an operator are
-///   treated as zero/empty (lenient, matching Acrobat's behaviour).
+///   treated as zero/empty (lenient).
 /// - Stray operands with no following operator are silently discarded.
 ///
 /// An inline image whose colour space is named from the resources has its

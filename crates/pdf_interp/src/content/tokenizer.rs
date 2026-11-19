@@ -571,7 +571,7 @@ const fn is_delimiter(b: u8) -> bool {
 }
 
 /// Convert a single ASCII hex character to its nibble value.
-/// Non-hex characters return 0 (matches Acrobat's lenient behaviour).
+/// Non-hex characters return 0 (lenient).
 const fn hex_nibble(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',

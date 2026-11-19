@@ -4006,7 +4006,9 @@ several, is `InvalidOptions` listing them; no adapter opening is
 `BackendUnavailable`. Sessions alive at once share one device per selector,
 and `DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
 adapter after the same one-time exactness probe as Vulkan, byte-identical to
-the CPU (the image cache, blits and GPU pages follow below), and no CUDA
+the CPU (the image cache, blits and GPU pages follow below; an image above
+65 535 dispatch groups, 16 776 960 pixels, converts in runs of that size on
+D3D12 and Vulkan alike, where it fell to the CPU before), and no CUDA
 context or Vulkan device is opened. `d3d12_device` is read under
 `ForceD3d12` only, and `vulkan_device` never under it. A build without the
 feature, or for another platform, refuses `ForceD3d12` with
