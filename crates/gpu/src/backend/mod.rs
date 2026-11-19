@@ -14,6 +14,12 @@
 
 #[cfg(feature = "cache")]
 mod blit_page;
+#[cfg(all(feature = "d3d12", any(test, windows)))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no D3D12 pipeline loads the DXIL yet")
+)]
+mod dxil;
 #[doc(hidden)]
 pub mod layout;
 mod scratch;

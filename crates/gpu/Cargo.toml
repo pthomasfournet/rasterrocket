@@ -49,6 +49,12 @@ cache = ["dep:blake3", "dep:dashmap"]
 # at build time via `slangc` (LunarG SDK), pulls in `ash` for runtime
 # Vulkan, and exposes `VulkanBackend` implementing `GpuBackend`.
 vulkan = ["dep:ash", "dep:gpu-allocator", "dep:libc"]
+# Direct3D 12 compute backend (Windows).  Compiles every `.slang` kernel to
+# DXIL at build time on any host, in two steps with pinned compilers:
+# slangc 2026.20 (HLSL and its reflection) and DXC 1.9.2609 (DXIL); the
+# build fails with their install commands when either is missing or of
+# another version.
+d3d12 = ["dep:windows", "dep:serde_json"]
 
 [dependencies]
 cudarc   = { version = "0.19", features = ["cuda-13030"] }
@@ -68,6 +74,24 @@ gpu-allocator = { version = "0.28", optional = true, default-features = false, f
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # madvise(MADV_POPULATE_WRITE) of the page raster's host destination.
 libc     = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Direct3D 12, DXGI and the Win32 calls of the `d3d12` backend.
+windows  = { version = "=0.62.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+] }
+
+[build-dependencies]
+# Reads slangc's reflection of the HLSL (`d3d12`).
+serde_json = { version = "1", optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 # Locates MSVC's cl.exe and its environment for nvcc (`windows_registry`).

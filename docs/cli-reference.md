@@ -703,14 +703,15 @@ Read at run time:
 | `XDG_CACHE_HOME`, `HOME` | `vulkan` | The Vulkan pipeline cache is kept at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`, else under `$HOME/.cache`; with neither set, no pipeline cache is kept. |
 | `RUST_LOG` | any | The log filter (`env_logger` syntax); default `warn`. `RUST_LOG=debug` adds the device choices, `RUST_LOG=rasterrocket=debug` where each `--gpu-pages` page rendered. |
 
-Read when building the `rasterrocket-gpu` crate (the CUDA and Vulkan features):
+Read when building the `rasterrocket-gpu` crate (the CUDA, Vulkan and D3D12 features):
 
 | Variable | Effect |
 |---|---|
 | `CUDA_ARCH` | The PTX target architecture, default `sm_75`; see the README's [Picking `CUDA_ARCH`](../README.md#picking-cuda_arch-for-your-gpu). |
 | `NVCC` | The `nvcc` to run; default `/usr/local/cuda/bin/nvcc` when it exists, else `nvcc` on `PATH`. |
 | `NVJPEG2K_INCLUDE_DIR` | The nvJPEG2000 header directory (`nvjpeg2k` builds); default `/usr/include/libnvjpeg2k/13`. |
-| `SLANGC` | The Slang compiler that builds the Vulkan shaders (`vulkan` builds); default `slangc` on `PATH`. |
+| `SLANGC` | The Slang compiler that builds the Vulkan shaders (`vulkan` builds) and the HLSL of the DXIL (`d3d12` builds, which require slangc 2026.20 exactly); default the Vulkan SDK's (`$VULKAN_SDK/bin/slangc`) when it exists, else `slangc` on `PATH`. |
+| `DXC` | The DirectX Shader Compiler that compiles the kernels to DXIL (`d3d12` builds, which require DXC 1.9.2609); default `dxc` on `PATH`. |
 
 ---
 

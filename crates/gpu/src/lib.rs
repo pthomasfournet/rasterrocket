@@ -32,6 +32,9 @@
 pub(crate) mod cuda;
 
 pub mod backend;
+#[cfg(test)]
+#[path = "../build_support/tools.rs"]
+mod build_tools;
 #[cfg_attr(
     ptx_placeholder,
     expect(

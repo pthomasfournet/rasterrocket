@@ -395,7 +395,9 @@ the `nasm` assembler (`nasm` on Debian/Ubuntu and in Homebrew), which assembles 
 decoder's kernels for AVIF comic pages; arm64 builds assemble theirs with the C compiler.
 `--no-default-features --features bundled-fonts` builds without those kernels and without
 `nasm`, with a slower AVIF decode. The CPU build
-needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`).
+needs nothing else; the GPU features add the CUDA 13 toolkit or the Vulkan SDK (`slangc`),
+and the GPU crate's `d3d12` feature slangc 2026.20 and DXC 1.9.2609 (install commands in the
+[README](../README.md#build)).
 Build the CLI with `-p rasterrocket-cli`.  `cargo build --workspace` also builds the
 `pdf_bridge` reference crate, which needs a poppler source tree (`POPPLER_SRC`).
 

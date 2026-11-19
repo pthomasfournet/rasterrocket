@@ -3,6 +3,8 @@
 //! Compiles compute kernels and emits link directives:
 //! - `.cu` → PTX via `nvcc` for the CUDA backend (when any CUDA feature is on).
 //! - `.slang` → SPIR-V via `slangc` for the Vulkan backend (when `vulkan` is on).
+//! - `.slang` → HLSL via `slangc`, then DXIL via `dxc`, for the D3D12 backend
+//!   (when `d3d12` is on; `build_support/dxil_build.rs`).
 //! - Emits `cargo:rustc-link-{search,lib}` directives per active GPU feature.
 //!
 //! All artifacts land in `OUT_DIR` and are consumed by `include_str!` /
@@ -18,6 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 include!("kernels/floor_div_params.rs");
+
+#[cfg(feature = "d3d12")]
+#[path = "build_support/dxil_build.rs"]
+mod dxil_build;
 
 /// Emit a `cargo:rustc-link-search` directive for the first of `dirs` that
 /// exists on the filesystem, then emit `cargo:rustc-link-lib=dylib={lib}`,
@@ -407,6 +413,11 @@ fn main() {
     if env::var("CARGO_FEATURE_VULKAN").is_ok() {
         compile_slang_kernels(&kernels_dir, &out_dir);
     }
+
+    // Slang→HLSL→DXIL kernel compile for the D3D12 backend, on every host
+    // so that the DXIL's tests run wherever the crate is tested.
+    #[cfg(feature = "d3d12")]
+    dxil_build::compile_dxil_kernels(&kernels_dir, &out_dir);
 }
 
 /// Probe whether `nvcc` is invokable.  Returns `false` when the binary
@@ -502,6 +513,28 @@ fn write_placeholder_ptx(out_dir: &Path) {
     }
 }
 
+/// `slangc`, a slangc command, with the arguments that compile `kernel`
+/// added: its source (`slang_source`), its entry point and its
+/// preprocessor macros.  The caller adds the target and the output.
+fn slang_args<'a>(slangc: &'a mut Command, kernels_dir: &Path, kernel: &str) -> &'a mut Command {
+    let (source, defines) = slang_source(kernel);
+    let src = kernels_dir.join(format!("{source}.slang"));
+    assert!(
+        src.exists(),
+        "slang source missing: {} (did you forget to add it alongside the .cu kernel?)",
+        src.display()
+    );
+    slangc
+        .args(["-entry", slang_entry(kernel)])
+        .args(
+            defines
+                .iter()
+                .map(|d| format!("-D{d}"))
+                .chain(slang_common_defines().iter().map(|d| format!("-D{d}"))),
+        )
+        .arg(&src)
+}
+
 /// Compile every kernel's `.slang` source to SPIR-V via `slangc`.
 ///
 /// Every kernel compiles against [`SLANG_PROFILE`].
@@ -511,29 +544,17 @@ fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
     let slangc = find_slangc();
 
     for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
-        let (source, defines) = slang_source(kernel);
-        let src = kernels_dir.join(format!("{source}.slang"));
-        assert!(
-            src.exists(),
-            "slang source missing: {} (did you forget to add it alongside the .cu kernel?)",
-            src.display()
-        );
         let spv = out_dir.join(format!("{kernel}.spv"));
         let profile = SLANG_PROFILE;
         run_tool(
-            Command::new(&slangc)
+            slang_args(&mut Command::new(&slangc), kernels_dir, kernel)
                 .args(["-target", "spirv", "-profile", profile])
                 .arg("-o")
-                .arg(&spv)
-                .args(["-entry", slang_entry(kernel)])
-                .args(
-                    defines
-                        .iter()
-                        .map(|d| format!("-D{d}"))
-                        .chain(slang_common_defines().iter().map(|d| format!("-D{d}"))),
-                )
-                .arg(&src),
-            &format!("{kernel} ({source}.slang, profile={profile})"),
+                .arg(&spv),
+            &format!(
+                "{kernel} ({}.slang, profile={profile})",
+                slang_source(kernel).0
+            ),
             "; install the LunarG Vulkan SDK (it sets VULKAN_SDK), `apt install slang`, or \
              name slangc in SLANGC",
         );

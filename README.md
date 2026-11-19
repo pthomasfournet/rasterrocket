@@ -660,6 +660,42 @@ cargo build --release -p rasterrocket-cli --features vulkan
 
 The CLI crate forwards each feature name to the `rasterrocket` library.
 
+The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
+compiles every kernel to DXIL, on any host, for the Direct3D 12 backend under
+construction; nothing renders through it yet, and the CLI does not forward it.
+It needs two pinned compilers, and the build fails, printing the install commands,
+when either is missing or of another version: slangc **2026.20** exactly (the
+compiler of the Vulkan shaders too; `SLANGC` names it, else the Vulkan SDK's when
+`VULKAN_SDK` is set, else `PATH`'s) and DXC **1.9.2609** (`DXC` names it, else
+`PATH`'s), whose validator library must sit beside it so the containers are signed.
+
+```bash
+# Linux x86-64: slangc and DXC under ~/.local, on PATH through ~/.local/bin
+mkdir -p ~/.local/slang ~/.local/bin && cd ~/.local/slang
+curl -LO https://github.com/shader-slang/slang/releases/download/v2026.20/slang-2026.20-linux-x86_64.tar.gz
+tar xzf slang-2026.20-linux-x86_64.tar.gz && rm slang-2026.20-linux-x86_64.tar.gz
+ln -sf ~/.local/slang/bin/slangc ~/.local/bin/slangc
+mkdir -p ~/.local/dxc && cd ~/.local/dxc
+curl -LO https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/linux_dxc_2026_09_28.x86_x64.tar.gz
+tar xzf linux_dxc_2026_09_28.x86_x64.tar.gz && rm linux_dxc_2026_09_28.x86_x64.tar.gz
+chmod +x bin/dxc bin/dxv
+ln -sf ~/.local/dxc/bin/dxc ~/.local/bin/dxc
+```
+
+```powershell
+# Windows (PowerShell): both under C:\tools, named in the user's SLANGC and DXC
+$ProgressPreference = 'SilentlyContinue'
+Invoke-WebRequest https://github.com/shader-slang/slang/releases/download/v2026.20/slang-2026.20-windows-x86_64.zip -OutFile $env:TEMP\slang.zip
+Expand-Archive $env:TEMP\slang.zip -DestinationPath C:\tools\slang -Force
+Invoke-WebRequest https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip -OutFile $env:TEMP\dxc.zip
+Expand-Archive $env:TEMP\dxc.zip -DestinationPath C:\tools\dxc -Force
+[Environment]::SetEnvironmentVariable('SLANGC', 'C:\tools\slang\bin\slangc.exe', 'User')
+[Environment]::SetEnvironmentVariable('DXC', 'C:\tools\dxc\bin\x64\dxc.exe', 'User')
+```
+
+On Windows `SLANGC` matters: the Vulkan SDK's own slangc is another release, and
+the build would otherwise take it through `VULKAN_SDK`.
+
 ### Picking `CUDA_ARCH` for your GPU
 
 The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels target. PTX runs on its target and every newer architecture (the driver compiles it for the device when it loads), never on an older one: a GPU older than the target is refused with the `CUDA_ARCH` to rebuild with, and one older than the toolkit supports (below `sm_75` for CUDA 13) is refused outright.

@@ -88,28 +88,53 @@ const CAPABILITY_STORAGE_BUFFER_8_BIT: u32 = 4448;
 #[cfg(test)]
 const CAPABILITY_UNIFORM_AND_STORAGE_BUFFER_8_BIT: u32 = 4449;
 
+/// `OpDecorate` and the `FPFastMathMode` decoration.
+#[cfg(test)]
+const OP_DECORATE: u32 = 71;
+#[cfg(test)]
+const DECORATION_FP_FAST_MATH_MODE: u32 = 40;
+
+/// The instructions of the SPIR-V module `words`, each with its operands,
+/// after the five-word header.  The walk ends at a zero instruction length
+/// or an instruction that runs past the module; a module without the
+/// SPIR-V magic number has none.
+fn spirv_instructions(words: &[u32]) -> impl Iterator<Item = &[u32]> {
+    let body = if words.first() == Some(&SPIRV_MAGIC) {
+        words.get(5..).unwrap_or_default()
+    } else {
+        &[]
+    };
+    let mut rest = body;
+    std::iter::from_fn(move || {
+        let count = (*rest.first()? >> 16) as usize;
+        if count == 0 || count > rest.len() {
+            return None;
+        }
+        let (instruction, tail) = rest.split_at(count);
+        rest = tail;
+        Some(instruction)
+    })
+}
+
 /// Whether the SPIR-V module `words` declares `OpCapability capability`.
 ///
 /// The `OpCapability` instructions are the first of a module, after the
 /// five-word header (logical layout, SPIR-V specification §2.4), so the
-/// walk stops at the first other instruction.  A module without the
-/// SPIR-V magic number, or with a zero instruction length, declares none.
+/// walk stops at the first other instruction.
 fn spirv_declares_capability(words: &[u32], capability: u32) -> bool {
-    if words.first() != Some(&SPIRV_MAGIC) {
-        return false;
-    }
-    let mut at = 5;
-    while let Some(&first) = words.get(at) {
-        let (count, opcode) = ((first >> 16) as usize, first & 0xFFFF);
-        if count == 0 || opcode != OP_CAPABILITY {
-            return false;
-        }
-        if words.get(at + 1) == Some(&capability) {
-            return true;
-        }
-        at += count;
-    }
-    false
+    spirv_instructions(words)
+        .take_while(|instruction| instruction[0] & 0xFFFF == OP_CAPABILITY)
+        .any(|instruction| instruction.get(1) == Some(&capability))
+}
+
+/// Whether the SPIR-V module `words` decorates any id `FPFastMathMode`
+/// (`OpDecorate %id FPFastMathMode`), anywhere in the module.
+#[cfg(test)]
+fn spirv_decorates_fast_math(words: &[u32]) -> bool {
+    spirv_instructions(words).any(|instruction| {
+        instruction[0] & 0xFFFF == OP_DECORATE
+            && instruction.get(2) == Some(&DECORATION_FP_FAST_MATH_MODE)
+    })
 }
 
 /// The SPIR-V words of `spirv`, decoded as `vkCreateShaderModule` takes
@@ -577,6 +602,42 @@ mod tests {
         let mut no_magic = module;
         no_magic[0] = 0;
         assert!(!spirv_declares_capability(&no_magic, 1));
+    }
+
+    #[test]
+    fn spirv_carries_no_fast_math_decoration() {
+        for &id in KernelId::ALL {
+            let words = spirv_words(id.spirv(), id.label()).unwrap();
+            let walked: usize = spirv_instructions(&words).map(<[u32]>::len).sum();
+            assert_eq!(
+                walked,
+                words.len() - 5,
+                "{} is walked to its end",
+                id.label()
+            );
+            assert!(!spirv_decorates_fast_math(&words), "{}", id.label());
+        }
+    }
+
+    #[test]
+    fn fast_math_walk_reaches_decorations_past_the_capabilities() {
+        let op = |count: u32, opcode: u32| (count << 16) | opcode;
+        let header = [SPIRV_MAGIC, 0x0001_0300, 0, 8, 0];
+        let module: Vec<u32> = header
+            .into_iter()
+            .chain([op(2, OP_CAPABILITY), 1])
+            .chain([op(3, 14), 0, 1])
+            .chain([op(3, OP_DECORATE), 7, 6])
+            .chain([op(4, OP_DECORATE), 7, DECORATION_FP_FAST_MATH_MODE, 0])
+            .collect();
+        assert!(spirv_decorates_fast_math(&module));
+        // The same decoration with another opcode, and one cut short by
+        // the module's end, are not found.
+        let mut other = module.clone();
+        other[13] = op(4, 72);
+        assert!(!spirv_decorates_fast_math(&other));
+        let truncated = &module[..module.len() - 1];
+        assert!(!spirv_decorates_fast_math(truncated));
     }
 
     /// The recorder feeds `binding_slots` to descriptor-set
