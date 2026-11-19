@@ -530,10 +530,138 @@ mod host {
         }
     }
 
+    /// The quotients of a [`D3d12Backend::floor_div_probe`], and the operands
+    /// `(a, b)` of the first division it recorded as a fault.
+    #[cfg(test)]
+    pub(crate) type FloorDivProbe = (Vec<i64>, Option<(i64, i64)>);
+
+    #[cfg(test)]
+    impl D3d12Backend {
+        /// The device's floor division of each pair `(a, b)` of `pairs`, with
+        /// `max_steps` correction steps in each direction, and the operands
+        /// of the first division it records as a fault; one page.
+        pub(crate) fn floor_div_probe(
+            &self,
+            pairs: &[(i64, i64)],
+            max_steps: u32,
+        ) -> Result<FloorDivProbe> {
+            let (quotients, status) =
+                self.floor_div_probe_on(KernelId::FloorDivProbe, pairs, max_steps)?;
+            Ok((
+                quotients,
+                crate::backend::kernel_status::floor_div_fault(&status),
+            ))
+        }
+
+        /// The quotients of [`Self::floor_div_probe`] by the probe kernel
+        /// `kernel`, and the status words of the page.  The operands go to
+        /// the read-only register and the status and quotients to the
+        /// writable ones, in the order the register tables give.
+        pub(super) fn floor_div_probe_on(
+            &self,
+            kernel: KernelId,
+            pairs: &[(i64, i64)],
+            max_steps: u32,
+        ) -> Result<(Vec<i64>, [u32; crate::backend::kernel_status::STATUS_WORDS])> {
+            use crate::backend::kernel_status::{STATUS_BYTES, status_words};
+
+            let n = u32::try_from(pairs.len()).map_err(crate::backend::BackendError::new)?;
+            let operands: Vec<u8> = pairs
+                .iter()
+                .copied()
+                .flat_map(<[i64; 2]>::from)
+                .flat_map(i64::to_le_bytes)
+                .collect();
+            let mut input = self.alloc_device(operands.len())?;
+            self.upload(&mut input, &operands)?;
+            let mut status = self.alloc_device_zeroed(STATUS_BYTES)?;
+            let mut quotients = self.alloc_device(pairs.len() * 8)?;
+            self.run_page(|b| {
+                b.recorder.dispatch(
+                    kernel,
+                    &[(&input, 4)],
+                    &[(&mut status, 4), (&mut quotients, 4)],
+                    &[n, max_steps],
+                    (n.div_ceil(64), 1, 1),
+                )
+            })?;
+            let mut out = vec![0; pairs.len() * 8];
+            self.download(&quotients, &mut out)?;
+            let quotients = out
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
+                .collect();
+            let mut words = [0; STATUS_BYTES];
+            self.download(&status, &mut words)?;
+            Ok((quotients, status_words(&words)))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::super::diag::{cpu_tier, warp_module};
         use super::*;
+
+        /// [`test_backend`] when its adapter has `Int64ShaderOps`; `None`
+        /// (the calling test is skipped) otherwise, which
+        /// `PDF_RASTER_REQUIRE_D3D12=1` turns into a failure.
+        fn test_backend_with_int64() -> Option<D3d12Backend> {
+            let backend = super::super::test_backend()?;
+            if backend.has_int64() {
+                return Some(backend);
+            }
+            assert!(
+                !std::env::var("PDF_RASTER_REQUIRE_D3D12").is_ok_and(|v| v == "1"),
+                "PDF_RASTER_REQUIRE_D3D12=1, but the adapter lacks Int64ShaderOps"
+            );
+            eprintln!("skipping: the adapter lacks Int64ShaderOps");
+            None
+        }
+
+        #[test]
+        fn d3d12_floor_div_matches_the_host_model() {
+            use crate::backend::kernel_status::{FLOOR_DIV_STEPS, floor_div_cases};
+            let Some(b) = test_backend_with_int64() else {
+                return;
+            };
+            let cases = floor_div_cases(&mut crate::page::test_support::Rng(0x5eed));
+            let (q, fault) = b.floor_div_probe(&cases, FLOOR_DIV_STEPS).unwrap();
+            assert_eq!(fault, None);
+            for (&(a, d), q) in cases.iter().zip(q) {
+                assert_eq!(q, crate::page::path::floor_div(a, d), "{a} / {d}");
+            }
+        }
+
+        #[test]
+        fn d3d12_floor_div_reports_an_exhausted_bound() {
+            let Some(b) = test_backend_with_int64() else {
+                return;
+            };
+            // Truncation toward zero leaves r = -1: one correction step is needed.
+            let (_, fault) = b.floor_div_probe(&[(-1, 3)], 0).unwrap();
+            assert_eq!(fault, Some((-1, 3)));
+        }
+
+        #[test]
+        fn d3d12_floor_div_reports_an_exhausted_upward_bound() {
+            use crate::backend::kernel_status::{
+                FAULT_FLOOR_DIV, FLOOR_DIV_STEPS, floor_div_fault,
+            };
+            let Some(b) = test_backend_with_int64() else {
+                return;
+            };
+            // Outside the domain: with |a / b| near 2^61 the second estimate
+            // divides a remainder of about 2^37, whose float rounding leaves
+            // r = 3 123 above the quotient after it, past 16 upward steps.
+            let pair = (2_404_050_171_065_969_715, 1);
+            let (_, status) = b
+                .floor_div_probe_on(KernelId::FloorDivProbe, &[pair], FLOOR_DIV_STEPS)
+                .unwrap();
+            assert_eq!(status[0], FAULT_FLOOR_DIV);
+            assert_eq!(floor_div_fault(&status), Some(pair));
+        }
 
         /// The floor-division probe binds its status at `u0` and its
         /// quotients at `u1`; a binding taken from the tables puts each
