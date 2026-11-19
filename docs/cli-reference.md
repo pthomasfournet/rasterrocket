@@ -7,10 +7,9 @@ rrocket --printer NAME [--print-file PATH] [OPTIONS] <INPUT>
 rrocket --list-printers
 ```
 
-Renders pages to image files. Flag names and output naming follow `pdftoppm`
-wherever rrocket has the same feature, so most `pdftoppm` command lines run
-unchanged; the differences are listed under each section (for one, the
-CropBox, not the MediaBox, is rendered by default).
+Renders pages to image files. Flags select the resolution, page range, scaling, output format and output
+naming; behaviour that needs care is described under each section (for one,
+the CropBox, not the MediaBox, is rendered by default).
 
 `-h` / `--help` lists the flags and `-V` / `--version` prints the version.
 
@@ -105,11 +104,10 @@ written whole.
 | Flag | Default | Description |
 |---|---|---|
 | `--box BOX` | `crop` | The page boundary box rendered: `media`, `crop`, `bleed`, `trim` or `art` (ISO 32000-2 §14.11.2). |
-| `--cropbox` | | `--box crop`, under the `pdftoppm` name. Refused together with `--box`. |
+| `--cropbox` | | An alias of `--box crop`. Refused together with `--box`. |
 
 `crop` renders the CropBox intersected with the MediaBox (the MediaBox when
-the page has no CropBox); `media` renders the whole MediaBox, which is what
-`pdftoppm` renders without `-cropbox`. `bleed`, `trim` and `art` render the
+the page has no CropBox); `media` renders the whole MediaBox. `bleed`, `trim` and `art` render the
 page's own BleedBox, TrimBox or ArtBox intersected with the MediaBox; these
 three are not inherited from the page tree, and a page without the box named
 renders its CropBox. The pixel coordinates of the crop flags, the
@@ -195,13 +193,13 @@ demand. None of these bounds fails the page; the rest of the page renders:
 | `--mono` | `.pbm` | 1-bit mono PBM (Netpbm P4): luma below 128 black, black by a local threshold with `--threshold sauvola`, or halftoned with `--dither halftone`. Can combine with `--png`, `--jpeg` and `--tiff`. |
 | `--png` | `.png` | PNG. Combine with `--gray` for grayscale PNG, `--mono` for a PNG of bit depth 1, or `--transparent` for RGBA (gray and alpha with `--gray`). A `pHYs` chunk records `-r` / `--rx` / `--ry` in pixels per metre. |
 | `--jpeg` | `.jpg` | JPEG, colour or, with `--gray` / `--mono`, gray. The JFIF density records `-r` / `--rx` / `--ry` in whole dots per inch; a resolution that does not round to 1–65 535 dpi fails the page. |
-| `--jpegopt OPTIONS` | | JPEG options, as `pdftoppm -jpegopt`: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg` or `--jpegcmyk`. |
-| `--jpegcmyk` | `.jpg` | CMYK JPEG, as `pdftoppm -jpegcmyk`: `--jpeg --cmyk`. |
+| `--jpegopt OPTIONS` | | JPEG options: `quality=N` (0–100, default 75), `progressive=y\|n`, `optimize=y\|n` (optimal Huffman tables), comma-separated, e.g. `--jpegopt quality=90,progressive=y`. Needs `--jpeg` or `--jpegcmyk`. |
+| `--jpegcmyk` | `.jpg` | CMYK JPEG: `--jpeg --cmyk`. |
 | `--cmyk` | | Render CMYK pages (see [CMYK output](#cmyk-output)) and write them as CMYK TIFF (with `--tiff`) or CMYK JPEG (with `--jpeg`). |
 | `--tiff` | `.tif` | Baseline TIFF, one file per page: RGB (RGBA with `--transparent`), gray with `--gray` (gray and alpha, two samples, with `--transparent`), or 1 bit per pixel with `--mono` (`WhiteIsZero`, the fax interpretation). The resolution tags carry `-r` / `--rx` / `--ry`. |
 | `--depth 8\|16` | | Bits per sample of the rendered pages, default `8`. `--depth 16` renders at 16 bits per channel throughout: colour conversions, shadings (evaluated straight to 16 bits), soft masks, transparency groups, blend modes, overprint simulation and images of more than 8 bits keep their levels, so smooth gradients do not band at 256 levels. Written as 16-bit PPM/PGM (maxval 65535, big-endian), PNG (bit depth 16), TIFF (`BitsPerSample` 16) or, with `--print`, a PDF 1.5 spool of `/BitsPerComponent 16` images (refused with `--print` on Windows, whose GDI print bitmaps are 8-bit). Combines with `--gray`, `--transparent`, `--invert`, `--overprint`, `--gpu-pages` (the device composites at 16 bits, byte-identical to the CPU) and the band and size flags; a 16-bit page costs twice the memory (see [Size limits](#size-limits)). Combines with `--cmyk --tiff` for 16-bit CMYK TIFF, with the camera-capture flags (`--crop`, `--rectify`, `--split-spreads`, `--dewarp`; measured on the page's 8-bit levels, resampled at 16 bits) and with comic-archive input, whose images of more than 8 bits a sample keep their levels. Refused at startup with `--mono`, `--dither`, `--fax`, `--jpeg`/`--jpegopt`/`--jpegcmyk` ("--depth 16 is refused with --mono: it writes 1-bit pages; use --gray for 16-bit gray"), exit status 1. GPU decode and conversion paths return the CPU's samples; under `--backend cuda` nvJPEG2000 decodes a JPEG 2000 image, of 8 bits a component or of 9 to 16, only under the reversible 5-3 wavelet, and one under the irreversible 9-7 wavelet decodes on the CPU (logged once). |
-| `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, as `pdftocairo -transp`: RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2); with `--gray`, or under a gray `--output-profile`, a gray and alpha PNG (colour type 4) or a TIFF of a gray and an unassociated-alpha sample, the gray the `--gray` luma of the RGBA page's colour (or the profile's gray), equal to the opaque `--gray` page wherever the alpha is full. Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--deskew`, `--clean-borders`, `--clean-background`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
-| `--tiffcompression METHOD` | | TIFF compression: `none` (default, as `pdftoppm`), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
+| `--transparent` (`--transp`) | | Render over a transparent background instead of white paper, RGBA PNG, or a TIFF with a fourth, unassociated-alpha sample (`ExtraSamples` 2); with `--gray`, or under a gray `--output-profile`, a gray and alpha PNG (colour type 4) or a TIFF of a gray and an unassociated-alpha sample, the gray the `--gray` luma of the RGBA page's colour (or the profile's gray), equal to the opaque `--gray` page wherever the alpha is full. Alpha is the page's coverage × opacity and the colour is not premultiplied by it; a pixel nothing paints is `0, 0, 0, 0`. The page is painted as an isolated transparency group (a knockout one when its `/Group` says so), so a blend mode on the page sees only what the page painted. Needs `--png` or `--tiff`: PPM and JPEG carry no alpha and are refused at startup ("--transparent needs an output with an alpha channel: PPM has none; add --png or --tiff"), exit status 1, nothing rendered. Also refused with `--mono`, `--invert`, `--crop`, `--rectify`, `--dewarp`, `--split-spreads`, `--deskew`, `--clean-borders`, `--clean-background`, `--fax`, `--print` and comic-archive input. Works with every `--backend`. |
+| `--tiffcompression METHOD` | | TIFF compression: `none` (default), `packbits`, `lzw`, `deflate`, or, with `--mono`, the CCITT fax codings `g3` (one-dimensional, MH), `g3-2d` (two-dimensional, MR; period 4 at 150 lines per inch or more, else 2) and `g4` (MMR, the most compact for bilevel pages). Fax-coded pages are one strip with byte-aligned end-of-line codes. `jpeg` is refused: use `--jpeg` for JPEG files. Needs `--tiff`. |
 | `--fax` | `.tif` | A fax document: one TIFF Class F file (RFC 2306), `OUTPUT_PREFIX.tif`, holding every selected page. Each page is 1728 pixels across (the ITU-T T.4 scan line) at 204 pixels per inch, laid by its shorter side — a landscape page is turned a quarter counterclockwise, its top edge to the left — at `--fax-resolution` lines per inch, bilevel, one strip, coded `g3` (one-dimensional, the Class F baseline every fax reader takes; the default), `g3-2d` or `g4` by `--tiffcompression`. Pages reversed out of a flat dark ground are inverted (`--invert=auto`) unless `--invert` says otherwise; `--dither halftone` applies. If any page fails to render, no document is written and the pages not yet started are skipped. A page that runs longer than 364 mm on the fax (the T.30 B4 length) is sent as consecutive fax pages of at most 297 mm (the A4 length every receiver accepts); A4, Letter, Legal, A3 and Tabloid stay whole, since only the ratio of a page's sides sets its fax length. A very long, narrow page (a receipt roll) can still exceed the page budget at fax resolution and then fails the document. The document is always written to disk, even for a bare output prefix: `--ram` and `--ram-path` are refused. Fixes the format, geometry and resolution of its pages: refuses `--png`, `--jpeg`, `--gray`, `-r`/`--rx`/`--ry`, the `--scale-to` flags, `-x`/`-y`/`-W`/`-H`, and the camera stages `--crop`, `--rectify`, `--dewarp` and `--split-spreads`. At most 65 535 fax pages, counting the pieces of cut pages. PDF input only. |
 | `--fax-resolution fine\|standard` | `fine` | Fax lines per inch: 196 (`fine`) or 98 (`standard`). Needs `--fax`. |
 | `--fax-to NUMBER` | | Send the fax document once written, through the operating system's fax service: the CUPS fax queue `--fax-queue` names (`lp -d NAME -o phone=DIAL`), else HylaFAX (`sendfax -n -d DIAL`). Implies `--fax`. The number is dial characters — digits, `+`, `*`, `#`, the pause `,` — and the separators space, `-`, `.`, `(`, `)`, beginning with a digit, `+`, `*` or `#`; the dial string handed to the service drops the separators (`"+1 (555) 010-9999"` dials `+15550109999`). rrocket waits for the service to accept the job, the service's output going to standard error; a refusal or a missing service exits with status 1, naming where the document is. No modem code: dialling is the service's. Refused on Windows, where neither service exists and Windows documents no way to hand an IPP Fax Out printer the number: write the document with `--fax` and send it with a fax service. |
@@ -265,8 +263,7 @@ A CMYK TIFF is `Separated` (Photometric 5) with `InkSet` 1, four samples of
 `--tiffcompression` but the fax codings.  A CMYK JPEG is 8-bit, written as
 Adobe JPEGs are: an `APP14` marker of colour transform 2 (YCCK), its samples
 in the inverted sense that marker implies, so that readers of Adobe CMYK
-JPEGs (Photoshop, Pillow, libjpeg-based viewers) recover the inks; this is
-the layout `pdftoppm -jpegcmyk` writes.  `--jpegopt` applies.  With a CMYK
+JPEGs (Photoshop, Pillow) recover the inks.  `--jpegopt` applies.  With a CMYK
 `--output-profile` both are tagged with it (TIFF tag 34675, JPEG `APP2`).
 
 A CMYK page is painted on a canvas of eight inks a pixel, against the page
@@ -281,10 +278,9 @@ and comic-archive input ("--cmyk is refused with
 --gray: it writes gray pages"); `--jpegcmyk` with `--depth 16`; an RGB or gray
 `--output-profile` with CMYK output, and a CMYK one without it.
 
-Differences from `pdftoppm`: `pdftoppm -tiff -overprint` writes CMYK TIFF;
-rrocket's `--tiff --overprint` stays RGB, and CMYK TIFF is `--tiff --cmyk`.
+`--tiff --overprint` writes RGB, and CMYK TIFF is `--tiff --cmyk`.
 Spot inks fold into process ink as the union of coverages
-(`a + b − a·b`), where `pdftoppm` adds and clips.
+(`a + b − a·b`).
 
 ```bash
 # CMYK TIFF of a press PDF at 300 dpi, overprint simulated

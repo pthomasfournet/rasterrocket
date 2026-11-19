@@ -53,8 +53,8 @@ enable.
 rrocket -r 300 --gray --png document.pdf ./page
 ```
 
-This writes `page-1.png`, `page-2.png`, … to the current directory. The
-flags follow `pdftoppm`; see the [CLI reference](../cli-reference.md).
+This writes `page-1.png`, `page-2.png`, … to the current directory. Flags
+select the resolution, page range, scaling and output format; see the [CLI reference](../cli-reference.md).
 
 ## Fonts
 
