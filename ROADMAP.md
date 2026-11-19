@@ -3474,6 +3474,31 @@ and runs them. Untested: any physical printer on Windows (driver copies,
 duplex, back sides); PDF pass-through to IPP printers is not built (a spike
 on calling it from an unpackaged process comes first).
 
+**Unreleased on master: Windows printing follow-ups.** Replayed copies
+under `--duplex` close a copy of an odd number of pages with a blank back,
+so the next copy starts on a sheet of its own. Ctrl-C, Ctrl-Break and the
+console closing are caught: no further page is begun, the job is aborted
+and the `--print-file` it was writing removed ("nothing printed:
+interrupted", exit 1; a second Ctrl-C quits at once); the end-to-end test
+that sends Ctrl-Break showed an aborted job's file still held by the
+spooler, so its removal now waits for the spooler to let go.
+`--output-profile` (with `--working-space wide`) and `--depth 16` are
+refused with `--print` on Windows, whose driver takes 8-bit sRGB bitmaps.
+Every merged DEVMODE, the turned sheet's and the one re-merged for sent
+copies included, is checked for dropped duplex and paper. A page cropped
+or split after rendering renders at the printer's resolution instead of
+its source page's fit scale; pages are centred on the sheet, within the
+printable area; stretched bands overlap a row and are clipped, so
+`HALFTONE` leaves no seam; a short image read-back is an error, not a
+panic; a printer name that is not valid UTF-16 is logged. Elsewhere: a
+spilled `PdfPage` reads by position, so its readers do not move each other
+(`PdfPage::rows` no longer returns a `Result`); a failed CUDA runtime
+initialisation is retried by a later call; nvJPEG2000 declines a reduced
+draw from the headers, before decoding; `BackendError::DeviceSelection`
+carries a `SelectionFailure` kind beside its message; the gpu build script
+runs every tool through one helper that reports its output, takes non-UTF-8
+paths, and says when `CUDA_PATH` is unset.
+
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
 irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one

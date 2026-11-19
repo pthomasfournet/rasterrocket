@@ -110,6 +110,10 @@ tested. Please report what you find.
   prints to a file, such as Microsoft Print to PDF, needs `--print-file
   PATH`, which names the file instead of a save dialog:
   `rrocket --printer "Microsoft Print to PDF" --print-file out.pdf in.pdf`.
+  The driver takes 8-bit sRGB bitmaps, so `--output-profile` and
+  `--depth 16` are refused with `--print`. Ctrl-C, Ctrl-Break or closing
+  the console aborts the job and removes the `--print-file` it was
+  writing; a second Ctrl-C quits at once.
   Tested on Windows 11 Pro (build 26200) through Microsoft Print to PDF;
   no physical printer has been tested on Windows. The tests that print to
   it skip, saying so, where it is missing; `RR_REQUIRE_PRINT_TO_PDF=1` makes

@@ -118,10 +118,12 @@ take rows; the full list is in [ROADMAP.md](ROADMAP.md).
   they render, TIFF as BigTIFF past 4 GiB; `--print` picks each page's
   resolution from its size.
 - **16 bits per sample.** `--depth 16` / `RasterOptions::depth` renders and
-  writes 16-bit PNG, PPM/PGM, TIFF and print spools, overprint included.
+  writes 16-bit PNG, PPM/PGM, TIFF and CUPS print spools, overprint
+  included (GDI prints 8-bit bitmaps, so Windows `--print` refuses it).
 - **Output profiles.** `--output-profile`, `--intent` and `--bpc` /
   `SessionConfig::output_profile` convert each page to an RGB, gray or CMYK
-  ICC profile, embedded in PNG, TIFF, JPEG and the print spool;
+  ICC profile, embedded in PNG, TIFF, JPEG and the CUPS print spool
+  (Windows `--print` sends sRGB bitmaps and refuses it);
   `--preserve-black` keeps K-only black K-only between two CMYK presses.
 - **CMYK output.** `--cmyk` and `--jpegcmyk` / `ColorModel::Cmyk` write
   CMYK TIFF (8 or 16 bits) and Adobe CMYK JPEG; process colours keep their
