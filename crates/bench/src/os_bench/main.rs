@@ -13,7 +13,8 @@
 //!     Each directory holds `env.tsv`, `results.tsv` and optionally
 //!     `rerun.tsv`, whose (group, row, doc, threads) keys replace those
 //!     keys' samples in `results.tsv`.  Refuses differing `commit`, `rustc`
-//!     or `profile`, and any env key outside the whitelist.
+//!     or `profile`, any env key outside the whitelist, and a directory without
+//!     exactly one `S-version` key (matched by group and row, whatever its threads).
 //!
 //!   - `noisy DIR` — one `row\tdoc` line per row whose spread exceeds 5 %,
 //!     for the drivers' re-run.
@@ -401,7 +402,7 @@ fn main() -> ExitCode {
              os_bench summarize DIR_UBUNTU DIR_WINDOWS\n       \
              os_bench noisy DIR\n\
              summarize: Ubuntu directory first; refuses differing commit, rustc or profile \
-             and env keys outside the whitelist; rerun.tsv in a directory replaces the \
+             and env keys outside the whitelist; each directory needs exactly one S-version key (matched by group and row, not threads; start-up is subtracted from D12); rerun.tsv in a directory replaces the \
              matching (group,row,doc,threads) samples of results.tsv.\n\
              noisy: prints `row<TAB>doc` for each row whose (max-min)/median exceeds 5 %, \
              for the drivers' 5-rep re-run into rerun.tsv."

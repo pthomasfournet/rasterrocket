@@ -218,19 +218,20 @@ fn ratio(ubuntu: u64, windows: u64) -> String {
     }
 }
 
-/// The side's `S-version` median, if it has one.
+/// The side's `S-version` row, if it has one.
 fn startup(stats: &[RowStat]) -> Option<&RowStat> {
     stats.iter().find(|s| s.row == "S-version")
 }
 
-/// (document, threads) to (µs per page, start-up subtracted).
-type FileCosts<'a> = BTreeMap<(&'a str, usize), (i64, bool)>;
+/// (document, threads) to µs per page.
+type FileCosts<'a> = BTreeMap<(&'a str, usize), i64>;
 
 /// Per-page file costs per (document, threads).  A `D12` row pairs with the
-/// `L12` row of the same document and thread count, and with the `S-version`
-/// row of the same thread count; the start-up median is subtracted from
-/// `D12` before the per-page division, and exceeding it is an error.  The
-/// flag is false where no `S-version` row matched.
+/// `L12` row of the same document and thread count.  Process start-up does
+/// not depend on the thread count, so the side's single `S-version` row
+/// (whatever its threads) is subtracted from `D12` before the per-page
+/// division; a side with `D12`/`L12` pairs but not exactly one `S-version`
+/// row, or a start-up median above the `D12` median, is an error.
 fn file_costs(stats: &[RowStat]) -> Result<FileCosts<'_>, String> {
     let mut out = BTreeMap::new();
     for d in stats.iter().filter(|s| s.row == "D12") {
@@ -246,24 +247,25 @@ fn file_costs(stats: &[RowStat]) -> Result<FileCosts<'_>, String> {
                 d.doc, d.threads, d.pages, l.pages
             ));
         }
-        let start = stats
-            .iter()
-            .find(|s| s.row == "S-version" && s.threads == d.threads);
+        let startups: Vec<&RowStat> = stats.iter().filter(|s| s.row == "S-version").collect();
+        let [st] = startups[..] else {
+            return Err(format!(
+                "{}@{}: expected exactly one S-version row, found {}",
+                d.doc,
+                d.threads,
+                startups.len()
+            ));
+        };
         let mut adjusted = d.clone();
-        if let Some(st) = start {
-            adjusted.median_us = d.median_us.checked_sub(st.median_us).ok_or_else(|| {
-                format!(
-                    "{}@{}: start-up median {} us exceeds D12 median {} us",
-                    d.doc, d.threads, st.median_us, d.median_us
-                )
-            })?;
-        }
+        adjusted.median_us = d.median_us.checked_sub(st.median_us).ok_or_else(|| {
+            format!(
+                "{}@{}: start-up median {} us exceeds D12 median {} us",
+                d.doc, d.threads, st.median_us, d.median_us
+            )
+        })?;
         out.insert(
             (d.doc.as_str(), d.threads),
-            (
-                file_cost_us_per_page(&adjusted, l, d.pages),
-                start.is_some(),
-            ),
+            file_cost_us_per_page(&adjusted, l, d.pages),
         );
     }
     Ok(out)
@@ -361,16 +363,13 @@ pub(crate) fn render_table(
     let (ca, cb) = (file_costs(a.1)?, file_costs(b.1)?);
     let docs: BTreeSet<(&str, usize)> = ca.keys().chain(cb.keys()).copied().collect();
     out.push_str("\n**Per-page file cost** (`D12` against `L12`");
-    if ca.values().chain(cb.values()).any(|(_, sub)| !sub) {
-        out.push_str("; start-up not subtracted where no `S-version` row matched");
-    }
+    out.push_str(", start-up subtracted");
     out.push_str("):\n");
     if docs.is_empty() {
         out.push_str("—\n");
     }
     for key in &docs {
-        let show =
-            |m: &FileCosts<'_>| m.get(key).map_or("—".to_owned(), |v| format!("{} µs", v.0));
+        let show = |m: &FileCosts<'_>| m.get(key).map_or("—".to_owned(), |v| format!("{v} µs"));
         let _ = writeln!(
             out,
             "- {}@{}: Ubuntu {}, Windows {}",
@@ -431,7 +430,21 @@ pub(crate) fn read_dir(dir: &std::path::Path) -> Result<(EnvMap, Vec<RowStat>), 
     if dir.join("rerun.tsv").exists() {
         samples = merge_rerun(samples, parse("rerun.tsv", &read("rerun.tsv")?)?);
     }
-    Ok((env, row_stats(&samples)))
+    let stats = row_stats(&samples);
+    let keys: BTreeSet<(&str, &str)> = samples
+        .iter()
+        .filter(|s| s.row == "S-version")
+        .map(|s| (s.group.as_str(), s.row.as_str()))
+        .collect();
+    let rows = stats.iter().filter(|s| s.row == "S-version").count();
+    if keys.len() != 1 || rows != 1 {
+        return Err(format!(
+            "{}: expected exactly one S-version key, found {} (group, row) and {rows} (row, doc, threads)",
+            dir.display(),
+            keys.len()
+        ));
+    }
+    Ok((env, stats))
 }
 
 #[cfg(test)]
@@ -586,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_larger_than_d12_is_an_error_and_threads_must_match() {
+    fn startup_checks_and_threads_matching() {
         let side = [
             stat("S-version", "-", 1, 2_000),
             stat("D12", "d", 2, 1_000),
@@ -594,12 +607,24 @@ mod tests {
         ];
         let err = render_table((&env("aaa"), &side), (&env("aaa"), &side)).unwrap_err();
         assert!(err.contains("2000") && err.contains("1000"));
-        // An L12 at other threads is not a partner: no cost line, no error.
-        let mut other = side.clone();
+        // Start-up is matched whatever its threads (here 1 against 4).
+        let mut ok = side.clone();
+        ok[0].median_us = 100;
+        let t = render_table((&env("aaa"), &ok), (&env("aaa"), &ok)).unwrap();
+        assert!(t.contains("- d@4: Ubuntu 200 µs"), "{t}");
+        // An L12 at other threads is not a partner: no cost line.
+        let mut other = ok.clone();
         other[2].threads = 8;
-        other[0].median_us = 1;
         let t = render_table((&env("aaa"), &other), (&env("aaa"), &other)).unwrap();
         assert!(!t.contains("- d@4"));
+        // No S-version, or two, beside a D12/L12 pair is an error.
+        let none = &ok[1..];
+        let err = render_table((&env("aaa"), none), (&env("aaa"), &ok)).unwrap_err();
+        assert!(err.contains("exactly one S-version"));
+        let mut two = ok.to_vec();
+        two.push(stat("S-version", "-", 1, 5));
+        two[3].threads = 9;
+        assert!(render_table((&env("aaa"), &two), (&env("aaa"), &ok)).is_err());
     }
 
     #[test]
