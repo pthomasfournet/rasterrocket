@@ -484,13 +484,32 @@ intent.rs            — RenderingIntent and IntentSet: the intents a page's
                        marking operators painted under
 output_profile.rs    — OutputProfile: a finished page converted to an RGB or
                        gray ICC output profile, compiled once per intent and
-                       black-point compensation (working_space.rs: the sRGB
-                       source with the intent's adjustments); a CMYK
-                       profile's separation table
+                       black-point compensation; a CMYK profile's separation
+                       table
+output_profile/      — source.rs: the working space as the conversion's
+                       source, the intent's adjustments folded in;
+                       separate.rs: a CMYK profile's separation table;
+                       link.rs: one CMYK profile's ink converted to
+                       another's; preserve.rs: black preservation in that
+                       conversion (PreserveBlack); proof.rs: SoftProof, a
+                       press's ink converted to the display space
+output_intent.rs     — output intents (§14.11.5): the press a document or
+                       page was prepared for; the soft proof's press profile
+pcs.rs, pcs/         — the ICC profile connection space and ICC-absolute
+                       colorimetry; black.rs: black points (ISO 18619);
+                       grid.rs: GridTable, a conversion tabulated over the
+                       device cube; lut.rs: ProfileLut, a profile's
+                       device ↔ PCS tables evaluated
+working_space.rs     — WorkingSpace: the RGB space pages composite in (sRGB,
+                       or the wide one of ROMM RGB primaries)
 separation.rs        — CanvasRequest (sRGB, overprint preview, CMYK) and the
                        Separator that turns non-ink colours into ink: the
                        process-ink inverse, a CMYK profile's separation, or
                        the ISO 32000-2 §10.4.2.3 device conversion
+separation/          — press.rs: the separation through a CMYK output
+                       profile, one table per intent; group.rs: the ink of
+                       a group in an ICC CMYK space; group_rgb.rs: the RGB
+                       of a group in a CalRGB or non-sRGB ICC space
 optional_content.rs  — OptionalContent: the /OCProperties /D configuration
                        resolved once per session for a RenderPurpose; OCG and
                        OCMD (/P, /VE) visibility for BDC /OC, XObject /OC and
@@ -535,6 +554,14 @@ renderer/
                        bitmap at 8 or 16 bits; with_canvas! dispatch;
                        InkPattern converts sRGB sources (shadings, tiling
                        cells, images, meshes) to ink
+    finished.rs      — FinishedCanvas, the bitmap a canvas finishes as, and
+                       its narrowing from 16 to 8 bits
+    group_space.rs   — transparency groups composited in their /CS space
+                       (ISO 32000-2 §11.3.4, §11.6.6)
+    space_convert.rs — pixels converted between canvas spaces (working-space
+                       RGB, process and spot ink, a group's own RGB)
+    colour_set.rs    — fill and stroke colours, converted under the
+                       rendering intent in effect
     depth.rs         — CanvasSample: paint sources and buffers at the
                        canvas's depth; 8-bit sources widened exactly
     band.rs          — PageState: what the renderers of one page's bands
@@ -559,13 +586,16 @@ renderer/
     device_page.rs   — record_for_device: a page's paints (fills, strokes,
                        glyphs, images, forms, path clips, soft-masked
                        objects) recorded as PageCommands for the GPU page
-                       raster
+                       raster; device_page/: clips.rs, glyphs.rs,
+                       images.rs, soft_masks.rs
     diagnostics.rs   — PageDiagnostics, DevicePage, ImageFailure, RenderAbort
     text_census.rs   — GlyphCounts: shown glyphs by text rendering mode, or
                        by why a glyph cannot mark the page
     devices.rs       — GPU decoders, kernels and image cache of a renderer
     text.rs          — show_text: a string's glyph layout, by code or by
                        shaped run
+    text_layout.rs   — glyph positions of a shown string and of its shaped
+                       runs, chains of runs fitted as one
     text_glyphs.rs   — a shown string's glyphs filled, stroked and clipped
                        as its rendering mode requires
     text_context.rs  — the neighbouring strings on a baseline that are a
@@ -613,12 +643,21 @@ renderer/
     pixel_rect.rs    — device-pixel rectangles (group and snapshot bounds)
     image_sampler.rs — fixed-point sampling grid; nearest / bilinear
     image_reduce.rs  — area-averaging of minified images
+    image_hairline.rs — an image thinner than a device pixel widened to one
+    trace/           — the paint trace: one line of text per painting
+                       operation (rasterrocket::dev::paint_trace)
     image_memo.rs    — decoded images of one page: XObjects by object,
                        inline images by context and bytes
 
 resources/
   mod.rs             — PageResources; lazy resolve_*
+  page_resources.rs  — the resource dictionaries in effect for a content
+                       stream; named-resource lookup
   dict_ext.rs        — typed accessors for `rasterrocket_parser::Dictionary`
+  ext_gstate.rs      — ExtGState dictionaries: the parameters `gs` sets
+  black_generation.rs — BG / UCR black generation and undercolour removal
+                       (§8.4.5, §10.4.2)
+  transparency_group.rs — transparency group dictionaries of forms and pages
   font/              — font dictionaries and descriptors; cid.rs: Type 0
                        fonts, CIDToGIDMap, W / W2 metrics; type3.rs: Type 3
                        fonts, each CharProc parsed once
@@ -1135,8 +1174,8 @@ RasterOptions::new(dpi)   // #[non_exhaustive]; fields: dpi, first_page, last_pa
                           // vector_antialias, overprint, decrypt_authorized, password,
                           // read_into_memory, font_dirs, system_fonts, image_budget,
                           // max_page_bytes, page_box, rotation, transparent_background,
-                          // depth, output_profile, intent, black_point_compensation,
-                          // color, cancel
+                          // gray_alpha, depth, output_profile, intent,
+                          // black_point_compensation, preserve_black, proof, color, cancel
 
 raster_pdf(path, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
 raster_pdf_from_bytes(bytes, opts) → impl Iterator<Item = (u32, Result<RenderedPage, RasterError>)>
@@ -1148,21 +1187,27 @@ open_session_from_reader(impl Read, config) → Result<RasterSession, RasterErro
 render_page_gray(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>
 render_page_rgba(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>   // transparent
 render_page_cmyk(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>   // CMYK
+render_page_gray_alpha(session, page_num, &RasterOptions) → Result<RenderedPage, RasterError>   // gray + alpha
 render_page_rgb(session, page_num, scale) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with(session, page_num, &RenderParams) → Result<Bitmap<Rgb8>, RasterError>
 render_page_rgb_with_diagnostics(session, page_num, &RenderParams)
     → Result<(Bitmap<Rgb8>, PageDiagnostics), RasterError>
     // RenderParams { scale_x, scale_y, region: Option<RenderRegion>, policy,
     //                cancel: Option<CancelToken>, transparent_background,
-    //                band_rows, depth, intent, black_point_compensation, color }
+    //                band_rows, depth, intent, black_point_compensation,
+    //                preserve_black, color }
 render_page_canvas(session, page_num, &RenderParams) → Result<FinishedCanvas, RasterError>
     // at the requested depth and colour model: Rgb8 / Rgb16 / Gray8 / Gray16 / Cmyk8 / Cmyk16
+render_page_canvas_with_diagnostics(session, page_num, &RenderParams)
+    → Result<(FinishedCanvas, PageDiagnostics), RasterError>
 render_page_bands(session, page_num, &RenderParams, sink: FnMut(Band) → Result<(), E>)
     → Result<PageDiagnostics, BandError<E>>   // a page as bands of rows
-PageBuffer::new().render_{gray,rgb,rgba}_into(session, page_num, &opts, out, stride)
+PageBuffer::new().render_{gray,rgb,rgba,gray_alpha}_into(session, page_num, &opts, out, stride)
     → Result<PageInfo, RasterError>   // into a caller-owned buffer
 session.page_geometry(page_num) → Result<PageGeometry, RasterError>   // size, rotation, boxes; size_px(sx, sy)
 session.unsupported_features() → &[UnsupportedFeature]
+session.device_page_counts() → Option<DevicePageCounts>   // gpu_pages: where pages went
+is_encrypted(path) / is_encrypted_bytes(bytes) → bool
 prescan_session(session, page_num) → Result<PageDiagnostics, RasterError>
 encode_for_gcv(page, budget) → Result<GcvImage, GcvError>   // Cloud Vision input
 release_gpu_thread_state()   // call via pool.broadcast() before pool drops
@@ -1175,7 +1220,9 @@ parses bytes the caller shares without copying them
 (`Document::from_shared`), and `open_session_from_reader` reads its source to
 the end into memory first. Every function and type
 is exported at the crate root; the modules that implement them are private,
-except `deskew`.
+except `deskew` and the hidden `dev` module (development tools of the
+library's tests and benchmarks: the paint trace, the commands the GPU page
+queue records for a page, the loaded WARP module).
 
 `RenderedPage` carries: `page_num`, `pixels: Pixels` (`U8` or `U16`, tightly
 packed, in `format`: gray, RGBA under `transparent_background`, CMYK under
@@ -1197,7 +1244,36 @@ for byte.
 page, or band, to an RGB or gray ICC profile under the page's rendering
 intent (`RenderParams::intent`, else the one intent its content used, else
 relative colorimetric), with optional black-point compensation; a CMYK
-profile separates CMYK pages as they are painted instead.
+profile separates CMYK pages as they are painted instead, each paint under
+its own intent (`separation/press.rs`). A colour given in another CMYK
+profile converts to the output profile's ink through the PCS
+(`output_profile/link.rs`), keeping its black under
+`RenderParams::preserve_black` (`PreserveBlack`, `rrocket
+--preserve-black`).
+
+**Working space.** `SessionConfig::working_space` (`WorkingSpace`, `rrocket
+--working-space`) is the RGB space pages are composited in before the
+output conversion. By default a page under an output profile composites in
+the wide space (`WorkingSpace::Wide`: ROMM RGB primaries, the sRGB tone
+curve), painted at 16 bits at either output depth, so colours outside sRGB
+keep their gamut up to the conversion; every other page composites in sRGB.
+A page painted as an overprint preview composites in sRGB. A transparency
+group whose `/CS` names a space other than its parent's composites in that
+space (`renderer/page/group_space.rs`); a space the renderer approximates
+is listed in `PageDiagnostics::approximated_group_spaces`.
+
+**Soft proof.** `SessionConfig::proof` (`ProofIntent`, `RasterOptions::proof`,
+`rrocket --proof`) shows each page as the press of its output intent prints
+it (`output_intent.rs`: the page's own `/OutputIntents`, else the
+document's; the first `GTS_PDFX` intent that embeds a profile, else the
+first that does; the profile must be CMYK, else `open_session` returns
+`RasterError::OutputIntent`). The page is painted on an ink canvas whose
+colours not given as ink are separated by the press profile, and the
+finished ink converts to the display space (the working space, or an RGB or
+gray output profile) through the press's profile, under relative or
+absolute colorimetry (`output_profile/proof.rs`). Each press profile is
+read once per session and its proof tabulated on the first page that names
+it (`proof.rs`), shared by every page that does.
 
 `PageDiagnostics::suggested_dpi(min, max)` — hint for re-rendering at native image
 resolution. Returns `None` for vector/text-only pages.
@@ -1620,6 +1696,10 @@ holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
 - a spot colorant that found no spot slot on the ink canvas and printed as
   its process equivalent — `unslotted_spots`
 - a feature the renderer ignores — `unsupported_features`
+- a form XObject nested deeper than `MAX_FORM_DEPTH` forms, not drawn —
+  `forms_too_deep`
+- a transparency group whose colour space was approximated —
+  `approximated_group_spaces`
 
 **Silent degradation** — never exposed to the caller:
 - Unrecognised PDF operators — discarded
