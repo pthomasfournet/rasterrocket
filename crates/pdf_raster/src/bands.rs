@@ -149,7 +149,9 @@ fn band_rows(session: &RasterSession, params: &RenderParams, width: u32, bytes_p
 ///
 /// A page that fits one band is rendered as [`render_page_rgb_with`]
 /// renders it (on the GPU page device when the session has one); a page of
-/// several bands is rendered on the CPU.  Every band executes the page's
+/// several bands is rendered on the CPU; a session with GPU pages counts
+/// it as ineligible, `"larger than one band"`, in `DevicePageCounts` and
+/// in [`PageDiagnostics::device_page`].  Every band executes the page's
 /// whole content stream, so a page of `n` bands interprets its content `n`
 /// times.
 ///
@@ -185,7 +187,21 @@ pub fn render_page_bands<E>(
         .map_err(BandError::Sink)?;
         return Ok(diag);
     }
-    draw_bands(session, page_num, &plan, params, false, sink).map(|(diag, _)| diag)
+    #[cfg(device_pages)]
+    let banded_off_device = session.device_pages.as_ref().map(|pages| {
+        pages.decline_banded(page_num, session.band_bytes);
+        pdf_interp::renderer::DevicePage::Ineligible(crate::device_pages::BANDED)
+    });
+    let (diag, _) = draw_bands(session, page_num, &plan, params, false, sink)?;
+    #[cfg(device_pages)]
+    let diag = {
+        let mut diag = diag;
+        if let Some(device_page) = banded_off_device {
+            diag.device_page = device_page;
+        }
+        diag
+    };
+    Ok(diag)
 }
 
 /// The paint trace of page `page_num` (1-based) rendered as `params`

@@ -1338,7 +1338,8 @@ session (later pages go to the session's other devices, or to the CPU once
 none is in service); a page beyond the device's limits, or the memory it
 has left, renders on the CPU and leaves it in service. `render_page_bands`
 renders on the CPU, so a page the CLI renders in bands (larger than
-`--band-mib`) does not reach a device. Pages are returned by index, so
+`--band-mib`) does not reach a device; it is counted as ineligible,
+`"larger than one band"`, and the first such page warns. Pages are returned by index, so
 output order does not depend on where a page rendered;
 `PageDiagnostics::device_page` (`DevicePage`) records each page's outcome,
 and `RasterSession::device_page_counts` (`DevicePageCounts`) where every

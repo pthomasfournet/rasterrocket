@@ -237,6 +237,7 @@ macro_rules! scheduler_tests {
                 a_cancelled_recording_is_not_rendered_again,
                 concurrent_pages_all_render_on_the_device,
                 a_wide_page_renders_on_the_cpu_and_warns_once,
+                a_banded_page_renders_on_the_cpu_and_is_counted,
                 gpu_pages_need_vector_antialiasing,
                 held_pages_push_claims_to_the_other_device,
                 a_failed_device_leaves_the_others_in_service,

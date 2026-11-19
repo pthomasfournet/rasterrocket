@@ -246,6 +246,56 @@ pub(super) fn a_wide_page_renders_on_the_cpu_and_warns_once<B: Api>() {
     );
 }
 
+/// A page drawn in several bands renders on the CPU, as a CPU session
+/// draws it, without asking for a device; it is counted and reported as
+/// ineligible, and the first such page warns.
+pub(super) fn a_banded_page_renders_on_the_cpu_and_is_counted<B: Api>() {
+    let doc = pdf(&[DEVICE, DEVICE]);
+    let mut session = session_with(
+        doc.clone(),
+        DevicePages::<B>::new(vec![Device::never_opening()]),
+    );
+    // 200 px rows of 3 bytes: four bands of 50 rows.
+    session.band_bytes = 200 * 3 * 50;
+    let mut cpu_session =
+        crate::open_session_from_bytes(doc, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
+            .expect("CPU session");
+    cpu_session.band_bytes = session.band_bytes;
+    let params = RenderParams::new(2.0);
+    let banded = |session: &crate::RasterSession, page| {
+        let mut rows = Vec::new();
+        let diag = crate::render_page_bands(session, page, &params, |band| {
+            let crate::BandBitmap::Rgb8(bitmap) = band.bitmap else {
+                panic!("an RGB band");
+            };
+            rows.extend_from_slice(bitmap.data());
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .expect("banded render");
+        (rows, diag.device_page)
+    };
+    let warnings = warnings_of(|| {
+        for page in 1..=2 {
+            let (rows, outcome) = banded(&session, page);
+            assert_eq!(outcome, DevicePage::Ineligible("larger than one band"));
+            assert_eq!(rows, banded(&cpu_session, page).0, "page {page}");
+        }
+    });
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("page 1 is larger than one band of 1 MiB"),
+        "{}",
+        warnings[0]
+    );
+    let counts = device_pages::<B>(&session).counts();
+    assert_eq!(counts.ineligible, [("larger than one band", 2)]);
+    assert_eq!((counts.rendered, counts.cpu(), counts.opening), (0, 2, 0));
+    assert_eq!(
+        counts.to_string(),
+        "0 on the device, 2 on the CPU (larger than one band: 2)"
+    );
+}
+
 /// GPU pages are refused at open without vector antialiasing, which
 /// the device raster needs.
 pub(super) fn gpu_pages_need_vector_antialiasing<B: Api>() {

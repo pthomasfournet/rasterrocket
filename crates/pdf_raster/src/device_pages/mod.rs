@@ -112,6 +112,17 @@ impl SessionDevicePages {
         }
     }
 
+    /// Count page `page_num`, drawn in bands of `band_bytes` bytes, as
+    /// rendered on the CPU for [`BANDED`] ([`DevicePages::decline_banded`]).
+    pub(crate) fn decline_banded(&self, page_num: u32, band_bytes: u64) {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(pages) => pages.decline_banded(page_num, band_bytes),
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12(pages) => pages.decline_banded(page_num, band_bytes),
+        }
+    }
+
     /// Render `job`'s page as [`DevicePages::render`] does.
     ///
     /// # Errors
@@ -147,6 +158,9 @@ pub(crate) struct DevicePages<B: PageDevice> {
     /// Set once a page of the wide working space has been rendered on the
     /// CPU in its place.
     wide_declined: AtomicBool,
+    /// Set once a page drawn in several bands has been rendered on the CPU
+    /// in its place.
+    banded_declined: AtomicBool,
     /// Where the pages offered went, but for [`DevicePageCounts::by_device`].
     counts: Mutex<DevicePageCounts>,
     /// Test hooks.
@@ -353,6 +367,7 @@ impl<B: PageDevice> DevicePages<B> {
             open_deadline: OnceLock::new(),
             open_timed_out: AtomicBool::new(false),
             wide_declined: AtomicBool::new(false),
+            banded_declined: AtomicBool::new(false),
             counts: Mutex::new(DevicePageCounts::default()),
             #[cfg(test)]
             faults: TestFaults::default(),
@@ -404,6 +419,22 @@ impl<B: PageDevice> DevicePages<B> {
         counts
     }
 
+    /// Count page `page_num`, which [`crate::render_page_bands`] draws in
+    /// several bands of `band_bytes` bytes on the CPU, under [`BANDED`];
+    /// the first such page of the session is logged at `warn`.
+    fn decline_banded(&self, page_num: u32, band_bytes: u64) {
+        log::debug!("page {page_num}: rendered on the CPU: {BANDED}");
+        self.count(Outcome::Ineligible(BANDED));
+        if !self.banded_declined.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                "page {page_num} is larger than one band of {} MiB, so it renders in bands on \
+                 the CPU, as does every later page past that size; a larger band budget \
+                 (SessionConfig::band_bytes, rrocket --band-mib) keeps such pages on the GPU",
+                band_bytes.div_ceil(1 << 20)
+            );
+        }
+    }
+
     /// The warning of page `page_num` of the wide working space rendered
     /// on the CPU, the first such page of the session.
     fn wide_declined(&self, page_num: u32) -> Option<String> {
@@ -450,6 +481,10 @@ impl<B: PageDevice> Drop for DevicePages<B> {
 
 /// The reason a page of the wide working space is rendered on the CPU.
 const WIDE: &str = "the wide working space";
+
+/// The reason a page that [`crate::render_page_bands`] draws in several
+/// bands is rendered on the CPU.
+pub(crate) const BANDED: &str = "larger than one band";
 
 /// Why `job`'s page cannot be recorded, known before interpretation.
 fn ruled_out(job: &PageJob<'_>) -> Option<&'static str> {
