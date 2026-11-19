@@ -1,12 +1,14 @@
 //! Type 4 (PostScript calculator) functions, PDF §7.10.5.
 //!
-//! A program is parsed once into a token tree ([`Program::parse`]) and run
-//! any number of times ([`Program::run`]).  The interpreter implements the
-//! operator set of §7.10.5 — arithmetic, relational, boolean and bitwise,
-//! stack, and the `if`/`ifelse` conditionals.  The language has no loops,
-//! definitions, strings or arrays, so a run executes each token of the
-//! program at most once, and the parser's bound on the nesting depth
-//! ([`MAX_PS_DEPTH`]) bounds the native recursion of every run.  A token
+//! A program is parsed once into a flat table of procedures
+//! ([`Program::parse`]) and run any number of times ([`Program::run`]).
+//! The interpreter implements the operator set of §7.10.5 — arithmetic,
+//! relational, boolean and bitwise, stack, and the `if`/`ifelse`
+//! conditionals.  The language has no loops, definitions, strings or
+//! arrays, so a run executes each token of the program at most once.
+//! Parsing, costing and running keep the nesting of procedures on heap
+//! stacks, never in native recursion, so the depth of nesting is bounded
+//! only by the token count ([`MAX_PS_TOKENS`]).  A token
 //! does not do bounded work, though: `n copy` pushes `n` entries and
 //! `n j roll` moves `n`, with `n` up to the depth of the operand stack,
 //! itself bounded by [`MAX_PS_STACK`].  A run therefore carries fuel: each
@@ -17,10 +19,13 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// A parsed Type 4 program: the token tree of its outermost `{ }` block.
+/// A parsed Type 4 program.
 #[derive(Debug)]
 pub(super) struct Program {
-    toks: Vec<PsTok>,
+    /// Every procedure of the program, each after the procedures it holds:
+    /// a conditional's procedures precede the procedure of the conditional,
+    /// and the outermost `{ }` block is the last.
+    procs: Vec<Vec<PsTok>>,
     /// Set by the first run that exhausts [`MAX_PS_FUEL`], which logs it.
     exhausted: AtomicBool,
 }
@@ -41,12 +46,9 @@ impl Program {
             Some((&first, body)) if first == b"{" => body,
             _ => return Err(ParseError::NoProcedure),
         };
-        let (toks, rest) = parse_block(body, 0)?;
-        if !rest.is_empty() {
-            return Err(ParseError::TrailingTokens);
-        }
+        let procs = parse_procs(body)?;
         Ok(Self {
-            toks,
+            procs,
             exhausted: AtomicBool::new(false),
         })
     }
@@ -57,17 +59,24 @@ impl Program {
     /// by the literal before the operator is read from the program; any
     /// other is bounded by [`MAX_PS_STACK`].
     pub(super) fn cost(&self) -> u64 {
-        fn tokens(toks: &[PsTok]) -> u64 {
-            toks.iter()
+        // A procedure follows the procedures it holds, so their costs are
+        // known when it is reached.
+        let mut costs: Vec<u64> = Vec::with_capacity(self.procs.len());
+        for toks in &self.procs {
+            let cost = toks
+                .iter()
                 .enumerate()
-                .map(|(i, t)| match t {
+                .map(|(i, t)| match *t {
                     PsTok::Num(_) | PsTok::Op(_) => 1 + literal_work(toks, i),
-                    PsTok::If(body) => 1 + tokens(body),
-                    PsTok::IfElse(then, other) => 1 + tokens(then) + tokens(other),
+                    PsTok::If(then) => costs[then].saturating_add(1),
+                    PsTok::IfElse(then, other) => {
+                        costs[then].saturating_add(costs[other]).saturating_add(1)
+                    }
                 })
-                .fold(0, u64::saturating_add)
+                .fold(0, u64::saturating_add);
+            costs.push(cost);
         }
-        tokens(&self.toks).min(MAX_PS_FUEL)
+        costs.last().copied().unwrap_or(0).min(MAX_PS_FUEL)
     }
 
     /// Run the program on `inputs` (already clipped to `Domain`) and return
@@ -76,11 +85,11 @@ impl Program {
     /// program), on fewer than `n` results, or on a boolean result.
     pub(super) fn run(&self, inputs: impl IntoIterator<Item = f64>, n: usize) -> Option<Vec<f64>> {
         let inputs = inputs.into_iter();
-        let run = |stack: &mut Vec<PsVal>| {
+        let run = |Scratch { stack, frames }: &mut Scratch| {
             stack.clear();
             stack.extend(inputs.map(PsVal::Num));
             let mut fuel = MAX_PS_FUEL;
-            match exec(&self.toks, stack, &mut fuel) {
+            match exec(&self.procs, stack, frames, &mut fuel) {
                 Ok(()) => {}
                 Err(Halt::Error) => return None,
                 Err(Halt::OutOfFuel) => {
@@ -102,27 +111,45 @@ impl Program {
                 })
                 .collect()
         };
-        STACK.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut stack) => {
-                let out = run(&mut stack);
-                if stack.capacity() > KEPT_STACK {
-                    stack.clear();
-                    stack.shrink_to(KEPT_STACK);
+        SCRATCH.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut scratch) => {
+                let out = run(&mut scratch);
+                if scratch.stack.capacity() > KEPT_STACK {
+                    scratch.stack.clear();
+                    scratch.stack.shrink_to(KEPT_STACK);
+                }
+                if scratch.frames.capacity() > KEPT_STACK {
+                    scratch.frames.clear();
+                    scratch.frames.shrink_to(KEPT_STACK);
                 }
                 out
             }
-            Err(_) => run(&mut Vec::new()),
+            Err(_) => run(&mut Scratch::default()),
         })
     }
 }
 
-/// Operand-stack entries a thread keeps allocated between runs.
+/// Operand-stack entries, and procedure frames, a thread keeps allocated
+/// between runs.
 const KEPT_STACK: usize = 1 << 10;
 
+/// The working storage of a run.
+#[derive(Default)]
+struct Scratch {
+    /// The operand stack.
+    stack: Vec<PsVal>,
+    /// The procedures a run has entered and not finished, outermost first,
+    /// each as its index in [`Program::procs`] and the position of its
+    /// token after the conditional that entered the next.
+    frames: Vec<(usize, usize)>,
+}
+
 thread_local! {
-    /// The operand stack of the runs on this thread, reused so that a run
-    /// allocates only its result.
-    static STACK: std::cell::RefCell<Vec<PsVal>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The working storage of the runs on this thread, reused so that a
+    /// run allocates only its result.
+    static SCRATCH: std::cell::RefCell<Scratch> = const {
+        std::cell::RefCell::new(Scratch { stack: Vec::new(), frames: Vec::new() })
+    };
 }
 
 /// Why a Type 4 program failed to parse.
@@ -143,8 +170,6 @@ pub(super) enum ParseError {
     MisplacedProcedure,
     /// More than [`MAX_PS_TOKENS`] tokens.
     TooLong(usize),
-    /// Procedures nested deeper than [`MAX_PS_DEPTH`].
-    TooDeep,
 }
 
 impl fmt::Display for ParseError {
@@ -159,7 +184,6 @@ impl fmt::Display for ParseError {
                 f.write_str("a procedure is not the operand of `if` or `ifelse`")
             }
             Self::TooLong(n) => write!(f, "{n} tokens exceed the limit of {MAX_PS_TOKENS}"),
-            Self::TooDeep => write!(f, "procedures nest deeper than {MAX_PS_DEPTH}"),
         }
     }
 }
@@ -171,10 +195,6 @@ pub(super) const MAX_PS_TOKENS: usize = 100_000;
 /// Upper bound on the fuel of one run (see the module documentation): ten
 /// times the most tokens a program holds.
 pub(super) const MAX_PS_FUEL: u64 = 1 << 20;
-
-/// Upper bound on `{ }` nesting.  Parsing and execution recurse once per
-/// nested procedure; real programs nest a handful of levels.
-pub(super) const MAX_PS_DEPTH: usize = 64;
 
 /// Upper bound on the operand stack.  `copy` pushes up to the current depth
 /// for one token, so the token bound alone does not bound the stack.
@@ -189,13 +209,13 @@ enum PsVal {
 }
 
 /// A parsed token: a literal, an operator, or a conditional with its
-/// procedure operands.
-#[derive(Debug)]
+/// procedure operands, each an index into [`Program::procs`].
+#[derive(Debug, Clone, Copy)]
 enum PsTok {
     Num(f64),
     Op(PsOp),
-    If(Vec<Self>),
-    IfElse(Vec<Self>, Vec<Self>),
+    If(usize),
+    IfElse(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -322,57 +342,66 @@ fn ps_lex(src: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-/// Parse the words after a `{` up to its matching `}`; returns the tokens
-/// and the words after the `}`.  `depth` is the nesting of this block.
-fn parse_block<'w>(
-    mut words: &'w [&'w [u8]],
-    depth: usize,
-) -> Result<(Vec<PsTok>, &'w [&'w [u8]]), ParseError> {
-    if depth > MAX_PS_DEPTH {
-        return Err(ParseError::TooDeep);
-    }
-    let mut toks = Vec::new();
-    // Procedures read but not yet consumed by `if` / `ifelse`.
-    let mut procs: Vec<Vec<PsTok>> = Vec::new();
-    loop {
-        let Some((&word, rest)) = words.split_first() else {
+/// A procedure being parsed: its tokens, and the procedures read in it but
+/// not yet consumed by `if` / `ifelse`, as indices into the finished ones.
+#[derive(Default)]
+struct OpenProc {
+    toks: Vec<PsTok>,
+    operands: Vec<usize>,
+}
+
+/// Parse the words after the `{` that opens a program, which must end at
+/// its matching `}`; returns the procedures in the order they close, the
+/// outermost last (see [`Program::procs`]).  The procedures open at a word
+/// are kept on a heap stack, so nesting costs no native stack.
+fn parse_procs(words: &[&[u8]]) -> Result<Vec<Vec<PsTok>>, ParseError> {
+    let mut done: Vec<Vec<PsTok>> = Vec::new();
+    let mut open = vec![OpenProc::default()];
+    let mut rest = words;
+    while let Some(cur) = open.last_mut() {
+        let Some((&word, tail)) = rest.split_first() else {
             return Err(ParseError::Unbalanced);
         };
-        words = rest;
+        rest = tail;
         match word {
             b"}" => {
-                return if procs.is_empty() {
-                    Ok((toks, words))
-                } else {
-                    Err(ParseError::MisplacedProcedure)
-                };
+                let closed = open.pop().unwrap_or_default();
+                if !closed.operands.is_empty() {
+                    return Err(ParseError::MisplacedProcedure);
+                }
+                if let Some(parent) = open.last_mut() {
+                    parent.operands.push(done.len());
+                }
+                done.push(closed.toks);
             }
             b"{" => {
-                if procs.len() == 2 {
+                if cur.operands.len() == 2 {
                     return Err(ParseError::MisplacedProcedure);
                 }
-                let (inner, rest) = parse_block(words, depth + 1)?;
-                procs.push(inner);
-                words = rest;
+                open.push(OpenProc::default());
             }
             b"if" => {
-                let [then] = <[_; 1]>::try_from(std::mem::take(&mut procs))
+                let [then] = <[_; 1]>::try_from(std::mem::take(&mut cur.operands))
                     .map_err(|_| ParseError::MisplacedProcedure)?;
-                toks.push(PsTok::If(then));
+                cur.toks.push(PsTok::If(then));
             }
             b"ifelse" => {
-                let [then, otherwise] = <[_; 2]>::try_from(std::mem::take(&mut procs))
+                let [then, otherwise] = <[_; 2]>::try_from(std::mem::take(&mut cur.operands))
                     .map_err(|_| ParseError::MisplacedProcedure)?;
-                toks.push(PsTok::IfElse(then, otherwise));
+                cur.toks.push(PsTok::IfElse(then, otherwise));
             }
             _ => {
-                if !procs.is_empty() {
+                if !cur.operands.is_empty() {
                     return Err(ParseError::MisplacedProcedure);
                 }
-                toks.push(parse_word(word)?);
+                cur.toks.push(parse_word(word)?);
             }
         }
     }
+    if !rest.is_empty() {
+        return Err(ParseError::TrailingTokens);
+    }
+    Ok(done)
 }
 
 /// A number or operator token.
@@ -445,37 +474,65 @@ enum Halt {
     OutOfFuel,
 }
 
-/// Execute `toks` on `stack`, spending `fuel` (see the module
-/// documentation).
-fn exec(toks: &[PsTok], stack: &mut Vec<PsVal>, fuel: &mut u64) -> Result<(), Halt> {
-    for tok in toks {
+/// Execute the outermost procedure of `procs` (see [`Program::procs`]) on
+/// `stack`, spending `fuel` (see the module documentation).  A conditional
+/// enters its procedure by pushing the place to resume on `frames`, a heap
+/// stack, rather than by native recursion; a conditional that ends its
+/// procedure pushes nothing, so a chain of conditionals each nested in the
+/// last branch of the one before runs in no frames at all.
+fn exec(
+    procs: &[Vec<PsTok>],
+    stack: &mut Vec<PsVal>,
+    frames: &mut Vec<(usize, usize)>,
+    fuel: &mut u64,
+) -> Result<(), Halt> {
+    frames.clear();
+    let Some(mut proc) = procs.len().checked_sub(1) else {
+        return Ok(());
+    };
+    let mut pc = 0;
+    loop {
+        let Some(&tok) = procs[proc].get(pc) else {
+            match frames.pop() {
+                Some(resume) => {
+                    (proc, pc) = resume;
+                    continue;
+                }
+                None => return Ok(()),
+            }
+        };
+        pc += 1;
         let work = match tok {
-            PsTok::Op(op) => 1 + op_work(*op, stack),
+            PsTok::Op(op) => 1 + op_work(op, stack),
             _ => 1,
         };
         *fuel = fuel.checked_sub(work).ok_or(Halt::OutOfFuel)?;
-        match tok {
-            PsTok::Num(n) => stack.push(PsVal::Num(*n)),
-            PsTok::Op(op) => run_op(*op, stack).ok_or(Halt::Error)?,
-            PsTok::If(then) => {
-                if pop_bool(stack).ok_or(Halt::Error)? {
-                    exec(then, stack, fuel)?;
-                }
+        let enter = match tok {
+            PsTok::Num(n) => {
+                stack.push(PsVal::Num(n));
+                None
             }
-            PsTok::IfElse(then, otherwise) => {
-                let branch = if pop_bool(stack).ok_or(Halt::Error)? {
-                    then
-                } else {
-                    otherwise
-                };
-                exec(branch, stack, fuel)?;
+            PsTok::Op(op) => {
+                run_op(op, stack).ok_or(Halt::Error)?;
+                None
             }
+            PsTok::If(then) => pop_bool(stack).ok_or(Halt::Error)?.then_some(then),
+            PsTok::IfElse(then, otherwise) => Some(if pop_bool(stack).ok_or(Halt::Error)? {
+                then
+            } else {
+                otherwise
+            }),
+        };
+        if let Some(next) = enter {
+            if pc < procs[proc].len() {
+                frames.push((proc, pc));
+            }
+            (proc, pc) = (next, 0);
         }
         if stack.len() > MAX_PS_STACK {
             return Err(Halt::Error);
         }
     }
-    Ok(())
 }
 
 /// The stack position, counted from the top, of the count operand of a
@@ -919,5 +976,83 @@ mod tests {
         assert_eq!(run("{ pop }", &[], 1), None);
         assert_eq!(run("{ 1 index }", &[0.5], 1), None);
         assert_eq!(run("{ 2 copy }", &[0.5], 1), None);
+    }
+
+    /// A chain of `levels` stops, each nested in the `else` branch of the
+    /// one before: `x <= k` yields `k` for the first such `k` in
+    /// `1..=levels`, and `levels + 1` past the last.
+    fn stop_chain(levels: usize) -> String {
+        use std::fmt::Write as _;
+        let mut opens = String::new();
+        for k in 1..=levels {
+            write!(opens, " dup {k} le {{ pop {k} }} {{").expect("a String accepts writes");
+        }
+        let closes = " } ifelse".repeat(levels);
+        format!("{{{opens} pop {}{closes} }}", levels + 1)
+    }
+
+    /// `f` on a thread whose stack is far smaller than one native frame
+    /// per nesting level would need.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow")
+    }
+
+    #[test]
+    fn a_thousand_nested_conditionals_parse_and_run() {
+        let src = stop_chain(1000);
+        let outs = on_small_stack(move || {
+            let program = Program::parse(src.as_bytes()).expect("parses");
+            [0.5, 500.5, 1000.0, 2000.0].map(|x| program.run([x], 1))
+        });
+        assert_eq!(
+            outs,
+            [
+                Some(vec![1.0]),
+                Some(vec![501.0]),
+                Some(vec![1000.0]),
+                Some(vec![1001.0])
+            ]
+        );
+    }
+
+    /// Conditionals that do not end their procedure resume it after the
+    /// nested procedure finishes, at any depth.
+    #[test]
+    fn deep_conditionals_resume_their_procedures() {
+        let depth = 1000;
+        let mut src = String::from("{");
+        src.push_str(&" true {".repeat(depth));
+        src.push_str(" 1");
+        src.push_str(&" } if 1 add".repeat(depth));
+        src.push_str(" }");
+        let out =
+            on_small_stack(move || Program::parse(src.as_bytes()).expect("parses").run([], 1));
+        assert_eq!(out, Some(vec![1001.0]));
+    }
+
+    /// Nesting is bounded by the token count alone: a program nested as
+    /// deep as the token limit allows parses, costs and runs without native
+    /// recursion, and one past the limit is refused before parsing.
+    #[test]
+    fn nesting_is_bounded_by_the_token_limit() {
+        // Ten tokens a level, four around them.
+        let within = stop_chain((MAX_PS_TOKENS - 4) / 10);
+        let past = stop_chain(MAX_PS_TOKENS / 10);
+        let (run_within, cost_within, refused) = on_small_stack(move || {
+            let program = Program::parse(within.as_bytes()).expect("parses");
+            (
+                program.run([3.5], 1),
+                program.cost(),
+                Program::parse(past.as_bytes()).err(),
+            )
+        });
+        assert_eq!(run_within, Some(vec![4.0]));
+        assert!(cost_within > 0);
+        assert!(matches!(refused, Some(ParseError::TooLong(_))));
     }
 }

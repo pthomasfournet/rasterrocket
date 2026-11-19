@@ -511,7 +511,7 @@ pub(super) fn read_f64_array(dict: &Dictionary, key: &[u8], expected: usize) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::postscript::{MAX_PS_DEPTH, MAX_PS_STACK};
+    use super::postscript::MAX_PS_STACK;
     use super::*;
 
     fn eval_function(doc: &Document, fn_obj: &Object, t: f64, n: usize) -> Option<Vec<f64>> {
@@ -1060,7 +1060,7 @@ mod tests {
         // overflow the native stack during parse or exec.  Spawn on a thread
         // with a small stack so an unbounded recursion would actually abort
         // the test rather than silently pass on a large default stack.
-        let depth = MAX_PS_DEPTH + 5_000;
+        let depth = 40_000;
         let mut prog = String::with_capacity(depth * 2 + 8);
         prog.push('{');
         for _ in 0..depth {
