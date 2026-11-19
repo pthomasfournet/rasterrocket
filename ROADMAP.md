@@ -3793,6 +3793,24 @@ SPIR-V module carries an `FPFastMathMode` decoration. No render path
 loads the DXIL. Install commands for Linux and Windows are in the README's
 [Build](README.md#build) section.
 
+**Unreleased on master: D3D12 adapter selection and device creation.** On
+Windows, the `d3d12` feature's `D3d12Backend` opens a DXGI adapter with a
+device at feature level 11_0 and one compute queue; it dispatches no kernel
+yet. Adapters are listed by DXGI's high-performance order, then the WARP
+adapter. Without a selector it takes the first hardware adapter with
+dedicated video memory, else the first hardware adapter; `usable_gpus` lists
+them all in that order. A selector is an index or a name substring, as for
+`--vulkan-device`, and `warp` (only that word) names WARP; naming another
+software adapter, or an adapter below shader model 6.0 or with no device, is
+an error that lists every adapter. The shader model and `Int64ShaderOps` are
+read from a device created and dropped for each adapter. When WARP opens,
+the path and file version of the loaded `d3d10warp.dll` and the CPU's
+vector tier (`avx512`, `avx2`, `sse`, `neon`) are logged at `info`;
+`PDF_RASTER_D3D12_DEBUG=1` enables the debug layer before the first device.
+A device-removed, hung or reset error names the likely TDR cause and the
+removal reason. Selection is tested on any host; the RTX 5070, the AMD
+Radeon iGPU and WARP open on Windows 11.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

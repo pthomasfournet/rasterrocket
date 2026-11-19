@@ -35,6 +35,14 @@ impl FromStr for DeviceSelector {
     }
 }
 
+impl DeviceSelector {
+    /// The selector text, trimmed.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Display for DeviceSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.0)
@@ -46,8 +54,8 @@ impl fmt::Display for DeviceSelector {
 /// names none and the reason.  Whether the device can host the backend is
 /// not considered.
 #[cfg_attr(
-    not(any(feature = "vulkan", test)),
-    expect(dead_code, reason = "only the Vulkan backend consumes it")
+    not(any(feature = "vulkan", all(feature = "d3d12", windows), test)),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 pub(crate) fn match_selector(
     names: &[&str],

@@ -36,6 +36,8 @@ mod icc_clut;
 mod kernel_status;
 pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu, icc_clut16, random_grid};
 pub mod cuda;
+#[cfg(feature = "d3d12")]
+pub mod d3d12;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 pub mod page_device;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
@@ -253,8 +255,8 @@ impl Error for BackendError {
 /// default), and every call on the device then fails as lost.
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(feature = "vulkan"),
-    expect(dead_code, reason = "only the Vulkan backend consumes it")
+    not(any(feature = "vulkan", all(feature = "d3d12", windows))),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 pub(crate) const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
     "the device was lost; on Windows the likely cause is a GPU timeout \
