@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Dxgi::{
 use super::diag::{cpu_tier, warp_module};
 use super::error::{describe, device_err, hr_err};
 use super::select::{self, AdapterCandidate};
+use super::validation::Validation;
 use crate::backend::Result;
 use crate::backend::select::DeviceSelector;
 
@@ -59,6 +60,8 @@ pub(crate) struct D3d12Device {
     pub(super) warp: bool,
     /// Whether kernels may use 64-bit integers (`Int64ShaderOps`).
     pub(super) int64: bool,
+    /// The debug layer's validation messages.
+    pub(super) validation: Validation,
 }
 
 /// Open the adapter `selector` names, or the automatically chosen
@@ -103,6 +106,7 @@ pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Dev
         cand.shader_model.unwrap_or_default(),
         cand.int64
     );
+    let validation = Validation::new(&device, debug_layer_enabled());
     Ok(D3d12Device {
         device,
         queue,
@@ -111,6 +115,7 @@ pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Dev
         name: cand.name.clone(),
         warp,
         int64: cand.int64,
+        validation,
     })
 }
 

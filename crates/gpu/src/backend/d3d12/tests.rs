@@ -342,3 +342,64 @@ fn warp_reopens_by_its_index() {
         [backend.device_index()]
     );
 }
+
+/// The device reads validation messages exactly when the debug layer is
+/// on, and the layer is on whenever `PDF_RASTER_D3D12_DEBUG=1` asks for
+/// it; without the layer pages and transfers run unchecked.
+#[test]
+fn validation_follows_the_debug_layer() {
+    let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+    let layer = super::device::debug_layer_enabled();
+    assert_eq!(backend.device.validation.is_active(), layer);
+    if std::env::var("PDF_RASTER_D3D12_DEBUG").is_ok_and(|v| v == "1") {
+        assert!(
+            layer,
+            "PDF_RASTER_D3D12_DEBUG=1, but the debug layer is off (Graphics Tools missing?)"
+        );
+    }
+    let mut buf = backend.alloc_device(64).expect("alloc_device");
+    backend.upload(&mut buf, &[7; 64]).expect("upload");
+    backend.begin_page().expect("begin_page");
+    backend.record_zero_buffer(&mut buf, 64).expect("fill");
+    let fence = backend.submit_page().expect("submit_page");
+    backend
+        .wait_page(fence)
+        .expect("a valid page raises no validation error");
+    let mut out = [1; 64];
+    backend.download(&buf, &mut out).expect("download");
+    assert_eq!(out, [0; 64]);
+}
+
+/// Under the debug layer, an error stored during a page fails the page
+/// with its text, and the next page runs clean.
+#[test]
+fn a_validation_error_fails_the_page() {
+    let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+    if !backend.device.validation.is_active() {
+        eprintln!("skipping: the D3D12 debug layer is off");
+        return;
+    }
+    let mut buf = backend.alloc_device(64).expect("alloc_device");
+    for injected in [true, false] {
+        backend.begin_page().expect("begin_page");
+        backend.record_zero_buffer(&mut buf, 64).expect("fill");
+        if injected {
+            backend
+                .device
+                .validation
+                .add_error("injected validation error")
+                .expect("add_error");
+        }
+        let fence = backend.submit_page().expect("submit_page");
+        let waited = backend.wait_page(fence);
+        if injected {
+            let err = waited.expect_err("the stored error fails the page");
+            assert!(
+                err.to_string().contains("injected validation error"),
+                "{err}"
+            );
+        } else {
+            waited.expect("the errors were cleared");
+        }
+    }
+}

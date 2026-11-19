@@ -19,6 +19,8 @@
 //! - `select` — adapter eligibility, ranking and selector resolution.
 //! - `timestamps` — device timestamps between the stages of a page.
 //! - `transfer` — synchronous upload and download through staging buffers.
+//! - `validation` — the debug layer's validation errors, read after each
+//!   page and transfer.
 
 #[cfg(windows)]
 mod commands;
@@ -49,6 +51,8 @@ mod tests;
 mod timestamps;
 #[cfg(windows)]
 mod transfer;
+#[cfg(windows)]
+mod validation;
 
 #[cfg(windows)]
 pub use fence::PageFence;
@@ -482,7 +486,8 @@ mod host {
         }
 
         fn wait_page(&self, fence: PageFence) -> Result<()> {
-            self.recorder.wait_page(&fence)
+            self.recorder.wait_page(&fence)?;
+            self.device.validation.check("wait_page")
         }
 
         fn abandon_page(&self) {
@@ -500,13 +505,15 @@ mod host {
         /// A copy through an UPLOAD staging buffer, in a submission of its
         /// own.
         fn upload(&self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<()> {
-            self.transfer.upload(dst, src, 0)
+            self.transfer.upload(dst, src, 0)?;
+            self.device.validation.check("upload")
         }
 
         /// A copy through a READBACK staging buffer, in a submission of
         /// its own.
         fn download(&self, src: &DeviceBuffer, dst: &mut [u8]) -> Result<()> {
-            self.transfer.download(src, dst)
+            self.transfer.download(src, dst)?;
+            self.device.validation.check("download")
         }
 
         fn scratch(&self) -> &DeviceScratch<Self> {
