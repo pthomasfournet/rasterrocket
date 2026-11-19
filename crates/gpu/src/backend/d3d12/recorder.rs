@@ -128,13 +128,16 @@ impl Recorder {
         Ok(page)
     }
 
+    /// Whether an earlier page's completion could not be confirmed: the
+    /// recorder then accepts no further page.
+    pub(super) fn is_lost(&self) -> bool {
+        self.lock().phase == Phase::Lost
+    }
+
     pub(super) fn begin_page(&self) -> Result<()> {
         let mut page = self.lock();
         if page.phase == Phase::Lost {
-            return Err(BackendError::msg(format!(
-                "begin_page: an earlier page's completion could not be confirmed; {}",
-                crate::backend::DEVICE_LOST_CAUSE
-            )));
+            return Err(lost("begin_page"));
         }
         if page.phase != Phase::Idle {
             return Err(BackendError::msg(format!(
@@ -564,6 +567,15 @@ impl Recorder {
             );
         }
     }
+}
+
+/// The error of `what` on a recorder whose earlier page's completion could
+/// not be confirmed.
+pub(super) fn lost(what: &str) -> BackendError {
+    BackendError::msg(format!(
+        "{what}: an earlier page's completion could not be confirmed; {}",
+        crate::backend::DEVICE_LOST_CAUSE
+    ))
 }
 
 /// A buffer bound to a kernel: the buffer, the stride of its elements, and

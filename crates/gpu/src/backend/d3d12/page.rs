@@ -137,6 +137,11 @@ impl D3d12Backend {
             .map(|w| u32::from_ne_bytes(*w))
             .collect();
 
+        // A lost recorder refuses the page before a buffer set is lent:
+        // a set staged now may still be referenced by the stranded page.
+        if self.recorder.is_lost() {
+            return Err(super::recorder::lost("render_page"));
+        }
         let mut scratch = self.page_scratch.lend();
         let PageScratch {
             inputs: slots,

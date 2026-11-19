@@ -194,13 +194,47 @@ fn unconfirmed_pages_keep_their_references() {
             assert!(err.to_string().contains("could not be confirmed"), "{err}");
             backend.abandon_page();
         }
+        let queue: windows::core::IUnknown = backend.device.queue.clone().into();
+        let device: windows::core::IUnknown = backend.device.device.clone().into();
         drop(backend);
         assert_eq!(
             refs(&unknown),
             base + 1,
             "waited {waited}: the list's hold on the buffer was released"
         );
+        assert!(refs(&queue) > 1, "waited {waited}: the queue was released");
+        assert!(
+            refs(&device) > 1,
+            "waited {waited}: the device was released"
+        );
     }
+}
+
+/// A page on a recorder whose earlier page could not be confirmed fails
+/// as lost before a buffer set is lent, grown or written.
+#[test]
+fn a_page_on_a_lost_recorder_fails_before_staging() {
+    let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+    let mut buf = backend.alloc_device(64).expect("alloc_device");
+    backend.begin_page().expect("begin_page");
+    backend.record_zero_buffer(&mut buf, 64).expect("fill");
+    let fence = backend.submit_page().expect("submit_page");
+    backend.submitter.fail_waits();
+    assert!(backend.wait_page(fence).is_err(), "the wait fails");
+    let page = crate::page::PageCommands::new(4, 4, color::SampleDepth::Eight, [255; 3]);
+    let mut out = vec![0_u8; 4 * 4 * 3];
+    let err = backend
+        .render_page(&page, &mut out, 4 * 3)
+        .expect_err("the recorder is lost");
+    assert!(
+        err.to_string().contains(crate::backend::DEVICE_LOST_CAUSE),
+        "{err}"
+    );
+    assert_eq!(
+        backend.page_scratch.idle_len(),
+        0,
+        "a buffer set was lent to a page on a lost recorder"
+    );
 }
 
 /// The padded upload writes zeros after the bytes up to a whole

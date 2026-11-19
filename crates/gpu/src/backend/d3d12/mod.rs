@@ -301,11 +301,17 @@ mod host {
         }
     }
 
+    /// A queue that cannot be confirmed drained may still run work: the
+    /// in-flight page's commands are stranded, and one reference each to
+    /// the queue and the device is leaked, so neither is destroyed under
+    /// that work.
     impl Drop for D3d12Backend {
         fn drop(&mut self) {
             if let Err(e) = self.submitter.wait_idle() {
                 log::warn!("d3d12: waiting for the queue to drain on drop failed: {e}");
                 self.recorder.strand_in_flight();
+                std::mem::forget(self.device.queue.clone());
+                std::mem::forget(self.device.device.clone());
             }
         }
     }
