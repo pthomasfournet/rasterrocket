@@ -416,12 +416,17 @@ what CUPS's filters do, page by page:
   edge.
 - **Fit:** a page larger than the printable area (`HORZRES` × `VERTRES`)
   is scaled down to fit it, keeping its aspect; a smaller page prints at its
-  size. Either is centred on the printable area.
+  size. Either is centred on the sheet (`PHYSICALWIDTH` × `PHYSICALHEIGHT`,
+  less `PHYSICALOFFSETX`/`Y`), as far as the printable area allows, so
+  unequal margins do not shift it.
 - **Resolution:** without a resolution flag each page renders at the
   printer's resolution (`LOGPIXELSX`/`LOGPIXELSY`, the lower of the two), at
   most the 600 / 360 dpi default above, times the fit scale, so the copy to
   the device is 1:1; a resolution flag renders at that resolution, and the
-  page is stretched to its place (`HALFTONE`).
+  page is stretched to its place (`HALFTONE`). A page whose printed size is
+  known only after it renders (`--crop`, `--rectify`, `--split-spreads`,
+  `-x`/`-y`/`-W`/`-H`) renders at the printer's resolution within the
+  default, and is scaled down to its place only where it is fitted.
 - **Bitmaps:** colour pages go out as 24-bit bitmaps, gray pages as 8-bit
   ones with a gray palette, `--mono` pages as 1-bit ones. GDI has no 16-bit
   print bitmap, so `--depth 16` is refused with `--print` on Windows. A page is sent with

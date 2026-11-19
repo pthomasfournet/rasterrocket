@@ -1690,19 +1690,47 @@ impl Args {
     /// print default for its size under `--print` without a resolution
     /// flag, else the run's ([`Self::dpi`]).  On a Windows printer the
     /// default is at most the printer's resolution, times the page's fit
-    /// scale ([`crate::print::gdi::Surfaces::render_dpi`]).
+    /// scale ([`crate::print::gdi::Surfaces::render_dpi`]); for a page
+    /// whose printed size is known only once it is rendered
+    /// ([`Self::reshapes_pages`]) it is the printer's resolution alone
+    /// ([`crate::print::gdi::Surfaces::device_dpi`]), and the page is
+    /// scaled to its place.
     pub(crate) fn page_dpi(&self, page_pts: (f64, f64)) -> (f64, f64) {
         if self.print_resolution_per_page {
             let layout = pdf_raster::CanvasLayout::new(self.canvas_depth(), false);
             let dpi = crate::print::default_dpi(page_pts, layout.bytes_per_px());
             #[cfg(windows)]
-            let dpi = self
-                .print_surfaces
-                .map_or(dpi, |surfaces| surfaces.render_dpi(page_pts, dpi));
+            let dpi = self.print_surfaces.map_or(dpi, |surfaces| {
+                if self.reshapes_pages() {
+                    surfaces.device_dpi(dpi)
+                } else {
+                    surfaces.render_dpi(page_pts, dpi)
+                }
+            });
             (dpi, dpi)
         } else {
             self.dpi()
         }
+    }
+
+    /// Whether a page's size after cleanup can differ from its rendered
+    /// size: `--crop`, `--rectify`, `--split-spreads`, or the
+    /// `-x`/`-y`/`-W`/`-H` area.
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "only the Windows print route sizes pages by the sheet"
+        )
+    )]
+    pub(crate) const fn reshapes_pages(&self) -> bool {
+        self.crop
+            || self.rectify
+            || self.split_spreads
+            || self.crop_x.is_some()
+            || self.crop_y.is_some()
+            || self.crop_w.is_some()
+            || self.crop_h.is_some()
     }
 
     /// Refuse the flags `--fax` fixes or excludes, and the fax-only flags

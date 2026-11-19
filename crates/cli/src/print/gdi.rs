@@ -8,7 +8,7 @@
 //! driver gave is turned a quarter counter-clockwise, its top to the
 //! sheet's left edge.  A page larger than the printable area is scaled to
 //! fit it, keeping its aspect; a smaller one prints at its size; either is
-//! centred on the printable area.
+//! centred on the sheet, as far as the printable area allows.
 
 use std::ops::Range;
 
@@ -63,6 +63,12 @@ pub(crate) struct Surface {
     /// The printable area's width and height in device pixels (`HORZRES`,
     /// `VERTRES`).
     pub printable: (u32, u32),
+    /// The sheet's width and height in device pixels (`PHYSICALWIDTH`,
+    /// `PHYSICALHEIGHT`).
+    pub sheet: (u32, u32),
+    /// The printable area's top-left corner on the sheet, in device pixels
+    /// (`PHYSICALOFFSETX`, `PHYSICALOFFSETY`).
+    pub offset: (u32, u32),
 }
 
 impl Surface {
@@ -125,6 +131,17 @@ impl Surfaces {
         let (_, scale) = surface.fit(page_pts);
         f64::from(surface.dpi.0.min(surface.dpi.1)).min(cap) * scale
     }
+
+    /// The resolution a page renders at whose printed size is known only
+    /// after it renders (cropped or split): the device's lowest resolution
+    /// in either orientation, at most `cap`.  The page is scaled to its
+    /// place, down where it is fitted, so it never prints upscaled from a
+    /// fit scale its source page had.
+    pub(crate) fn device_dpi(&self, cap: f64) -> f64 {
+        let (portrait, landscape) = (self.portrait.dpi, self.landscape.dpi);
+        let low = portrait.0.min(portrait.1).min(landscape.0).min(landscape.1);
+        f64::from(low).min(cap)
+    }
 }
 
 /// Where a page image goes on the printable area, in device pixels from
@@ -140,8 +157,9 @@ pub(crate) struct Placement {
 }
 
 /// The place on `surface` of a page of `page_pts`, an image of `image_px`
-/// pixels: turned when its orientation is not the sheet's, fitted and
-/// centred.  A size within a pixel of the image's, as rounding gives a
+/// pixels: turned when its orientation is not the sheet's, fitted, and
+/// centred on the sheet as far as the printable area allows (see
+/// [`centre`]).  A size within a pixel of the image's, as rounding gives a
 /// page rendered at [`Surfaces::render_dpi`], is the image's own, so the
 /// copy is 1:1.
 pub(crate) fn place(page_pts: (f64, f64), image_px: (u32, u32), surface: &Surface) -> Placement {
@@ -167,14 +185,37 @@ pub(crate) fn place(page_pts: (f64, f64), image_px: (u32, u32), surface: &Surfac
     };
     let width = device(w_pts, surface.dpi.0, image_w, surface.printable.0);
     let height = device(h_pts, surface.dpi.1, image_h, surface.printable.1);
-    let centre = |area: u32, size: u32| i32::try_from(area.saturating_sub(size) / 2).unwrap_or(0);
+    let axis = |i: usize| {
+        let pick = |pair: (u32, u32)| if i == 0 { pair.0 } else { pair.1 };
+        (
+            pick(surface.printable),
+            pick(surface.sheet),
+            pick(surface.offset),
+        )
+    };
     Placement {
         rotate,
-        x: centre(surface.printable.0, width),
-        y: centre(surface.printable.1, height),
+        x: centre(axis(0), width),
+        y: centre(axis(1), height),
         width,
         height,
     }
+}
+
+/// The offset from the printable area's edge of `size` device pixels
+/// centred on one axis of the sheet: `(area, sheet, offset)` are the
+/// printable area's length, the sheet's, and the printable area's offset
+/// on the sheet.  The result is clamped to the printable area.  A sheet
+/// that does not hold its printable area at its offset (a driver that
+/// reports no sheet) centres on the printable area.
+fn centre((area, sheet, offset): (u32, u32, u32), size: u32) -> i32 {
+    let room = i64::from(area.saturating_sub(size));
+    let at = if u64::from(sheet) >= u64::from(area) + u64::from(offset) {
+        ((i64::from(sheet) - i64::from(size)) / 2 - i64::from(offset)).clamp(0, room)
+    } else {
+        room / 2
+    };
+    i32::try_from(at).unwrap_or(0)
 }
 
 /// The rows of each band of an image of `height` rows whose bitmap rows
@@ -443,7 +484,7 @@ pub(crate) fn check_duplex_merged(
 mod tests {
     use super::{
         Claims, Copies, DibFormat, Orientation, Placement, Surface, Surfaces, band_dest, band_rows,
-        check_duplex_claimed, check_duplex_merged, check_print_file, dib_row, is_file_port,
+        centre, check_duplex_claimed, check_duplex_merged, check_print_file, dib_row, is_file_port,
         pass_needs_blank, place, turned_row,
     };
     use crate::print::Duplex;
@@ -453,11 +494,43 @@ mod tests {
     const A4_PORTRAIT: Surface = Surface {
         dpi: (600, 600),
         printable: (4760, 6815),
+        sheet: (4960, 7015),
+        offset: (100, 100),
     };
     const A4_LANDSCAPE: Surface = Surface {
         dpi: (600, 600),
         printable: (6815, 4760),
+        sheet: (7015, 4960),
+        offset: (100, 100),
     };
+
+    /// A printable area of `printable` pixels at `dpi`, the whole sheet.
+    const fn area(dpi: (u32, u32), printable: (u32, u32)) -> Surface {
+        Surface {
+            dpi,
+            printable,
+            sheet: printable,
+            offset: (0, 0),
+        }
+    }
+
+    /// Unequal margins: the page is centred on the sheet, not on the
+    /// printable area, and stays within the printable area.
+    #[test]
+    fn a_page_is_centred_on_the_sheet_within_the_printable_area() {
+        // A 5100 px sheet, printable from 100 to 4900: margins 100 and 200.
+        assert_eq!(centre((4800, 5100, 100), 3000), 950);
+        // The printable area's own centre would be 900.
+        assert_eq!(centre((4800, 4800, 0), 3000), 900);
+        // A page as large as the printable area starts at its edge.
+        assert_eq!(centre((4800, 5100, 100), 4800), 0);
+        // A large offset would push the page off the printable area.
+        assert_eq!(centre((4800, 6000, 1100), 4000), 0);
+        assert_eq!(centre((4800, 5000, 0), 4500), 250);
+        assert_eq!(centre((4800, 9000, 0), 4500), 300);
+        // A driver that reports no sheet: the printable area's centre.
+        assert_eq!(centre((4800, 0, 100), 3000), 900);
+    }
     const A4: Surfaces = Surfaces {
         portrait: A4_PORTRAIT,
         landscape: A4_LANDSCAPE,
@@ -524,12 +597,25 @@ mod tests {
         assert_eq!((turned.width, turned.height), (p.height, p.width));
     }
 
+    /// A spread split in two renders at the device's resolution, not at
+    /// the fit scale of the whole spread, which its halves would print
+    /// upscaled from.
+    #[test]
+    fn a_page_reshaped_after_rendering_renders_at_the_device_resolution() {
+        let spread = (1190.0, 842.0);
+        assert!(A4.render_dpi(spread, 600.0) < 600.0);
+        assert_eq!(A4.device_dpi(600.0), 600.0);
+        assert_eq!(A4.device_dpi(360.0), 360.0);
+        let uneven = Surfaces {
+            portrait: area((1200, 600), (9600, 6000)),
+            landscape: area((300, 1200), (6000, 9600)),
+        };
+        assert_eq!(uneven.device_dpi(600.0), 300.0);
+    }
+
     #[test]
     fn the_resolution_is_the_lower_device_one_within_the_cap() {
-        let uneven = Surface {
-            dpi: (1200, 600),
-            printable: (9600, 6000),
-        };
+        let uneven = area((1200, 600), (9600, 6000));
         let both = Surfaces {
             portrait: uneven,
             landscape: uneven,

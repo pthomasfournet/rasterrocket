@@ -481,14 +481,10 @@ fn surface(dc: HDC, name: &str) -> Result<Surface, String> {
     let surface = Surface {
         dpi: (cap(LOGPIXELSX), cap(LOGPIXELSY)),
         printable: (cap(HORZRES), cap(VERTRES)),
+        sheet: (cap(PHYSICALWIDTH), cap(PHYSICALHEIGHT)),
+        offset: (cap(PHYSICALOFFSETX), cap(PHYSICALOFFSETY)),
     };
-    log::debug!(
-        "{name:?}: {surface:?}, sheet {} × {} px, printable area from ({}, {})",
-        cap(PHYSICALWIDTH),
-        cap(PHYSICALHEIGHT),
-        cap(PHYSICALOFFSETX),
-        cap(PHYSICALOFFSETY)
-    );
+    log::debug!("{name:?}: {surface:?}");
     if surface.dpi.0 == 0
         || surface.dpi.1 == 0
         || surface.printable.0 == 0
