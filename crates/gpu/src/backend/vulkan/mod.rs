@@ -185,8 +185,8 @@ impl VulkanBackend {
     /// [`color::grid::CmykGrid::convert`] byte for byte on this device.
     ///
     /// The kernel interpolates in 32-bit integers, which every conformant
-    /// device evaluates exactly; it reads the pixels through 8-bit storage
-    /// and the grid through 32-bit storage.  The first call runs
+    /// device evaluates exactly; it reads the pixels and the grid through
+    /// 32-bit storage.  The first call runs
     /// [`crate::backend::icc_clut_matches_cpu`], which catches a device
     /// whose storage access, integer arithmetic or shader compilation is
     /// faulty, and logs a mismatch or a device error at `warn`; later calls

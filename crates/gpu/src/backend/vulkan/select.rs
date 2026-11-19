@@ -614,11 +614,11 @@ mod tests {
     #[test]
     fn auto_skips_a_device_missing_a_feature() {
         let mut cands = vec![gpu("big", 16, 1, 1), gpu("small", 8, 2, 2)];
-        cands[0].compute_queue = Err(Ineligible::MissingFeature("shaderInt8"));
+        cands[0].compute_queue = Err(Ineligible::MissingFeature("synchronization2"));
         assert_eq!(cands[pick(&cands, None).unwrap()].name, "small");
         let err = selection_error(&cands, "big");
         assert!(
-            err.contains("required feature shaderInt8 not supported"),
+            err.contains("required feature synchronization2 not supported"),
             "{err}"
         );
     }

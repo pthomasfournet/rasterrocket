@@ -3675,6 +3675,11 @@ per pixel.
 Verified on the RTX 5070: the GPU-page parity suite over the fixtures,
 at 8 and 16 bits.
 
+The Vulkan device no longer requests `storageBuffer8BitAccess`,
+`uniformAndStorageBuffer8BitAccess` or `shaderInt8`, since no kernel
+declares the matching capabilities: a Vulkan 1.3 device without 8-bit
+storage is now eligible.
+
 **Unreleased on master: the GPU outline raster reports an inexact
 division.** The `--gpu-pages` outline raster divides 64-bit integers by
 two single-precision estimates of the quotient and corrects the

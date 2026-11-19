@@ -3,7 +3,7 @@
 //! A physical device is eligible when it:
 //! - Supports compute on at least one queue family.
 //! - Reports `VK_API_VERSION_1_3` or higher (so we can rely on Vulkan 1.3
-//!   core for `synchronization2`, `timelineSemaphore`, 8-bit storage,
+//!   core for `synchronization2`, `timelineSemaphore`,
 //!   and buffer-device-address without enabling them as discrete extensions).
 //! - Supports every one of those features (`vkGetPhysicalDeviceFeatures2`).
 //!
@@ -552,12 +552,6 @@ fn missing_required(
     [
         ("bufferDeviceAddress", v12.buffer_device_address),
         ("timelineSemaphore", v12.timeline_semaphore),
-        ("storageBuffer8BitAccess", v12.storage_buffer8_bit_access),
-        (
-            "uniformAndStorageBuffer8BitAccess",
-            v12.uniform_and_storage_buffer8_bit_access,
-        ),
-        ("shaderInt8", v12.shader_int8),
         ("synchronization2", v13.synchronization2),
     ]
     .into_iter()
@@ -573,7 +567,7 @@ fn describe_physical_device(
     let name = device_name(&props);
 
     // Vulkan 1.3 core is required: synchronization2, timelineSemaphore,
-    // BDA, and 8-bit storage are used as core features.  `api_version` is
+    // and BDA are used as core features.  `api_version` is
     // the maximum version the driver supports, so one packed-integer
     // comparison suffices.
     let (features, compute_queue) = if props.api_version < vk::API_VERSION_1_3 {
@@ -679,14 +673,7 @@ fn create_device(
     // single VkPhysicalDeviceFeatures2 → 1.2 → 1.3 list.
     let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
         .buffer_device_address(true)
-        .timeline_semaphore(true)
-        .storage_buffer8_bit_access(true)
-        .uniform_and_storage_buffer8_bit_access(true)
-        // The kernels declare `OpCapability Int8` because the Slang
-        // sources use `uint8_t` for the byte-typed StructuredBuffers.
-        // Without `shader_int8`, vkCreateShaderModule fails with a
-        // missing-capability error from the validation layer.
-        .shader_int8(true);
+        .timeline_semaphore(true);
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
     let core = vk::PhysicalDeviceFeatures::default().shader_int64(setup.int64);
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
@@ -889,16 +876,15 @@ mod tests {
     fn a_missing_required_feature_is_named() {
         let v12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
-            .timeline_semaphore(true)
-            .storage_buffer8_bit_access(true)
-            .uniform_and_storage_buffer8_bit_access(true)
-            .shader_int8(true);
+            .timeline_semaphore(true);
         let v13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
         assert_eq!(missing_required(&v12, &v13), None);
-        assert_eq!(
-            missing_required(&v12.shader_int8(false), &v13),
-            Some("shaderInt8")
-        );
+        // A device with none of the 8-bit features is eligible.
+        let v12_without_8_bit = v12
+            .storage_buffer8_bit_access(false)
+            .uniform_and_storage_buffer8_bit_access(false)
+            .shader_int8(false);
+        assert_eq!(missing_required(&v12_without_8_bit, &v13), None);
         assert_eq!(
             missing_required(&v12, &v13.synchronization2(false)),
             Some("synchronization2")

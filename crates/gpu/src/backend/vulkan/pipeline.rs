@@ -81,6 +81,12 @@ const ENTRY_POINT: &CStr = c"main";
 const SPIRV_MAGIC: u32 = 0x0723_0203;
 const OP_CAPABILITY: u32 = 17;
 const CAPABILITY_INT64: u32 = 11;
+#[cfg(test)]
+const CAPABILITY_INT8: u32 = 39;
+#[cfg(test)]
+const CAPABILITY_STORAGE_BUFFER_8_BIT: u32 = 4448;
+#[cfg(test)]
+const CAPABILITY_UNIFORM_AND_STORAGE_BUFFER_8_BIT: u32 = 4449;
 
 /// Whether the SPIR-V module `words` declares `OpCapability capability`.
 ///
@@ -536,6 +542,24 @@ mod tests {
         assert!(declares(KernelId::FloorDivProbe, CAPABILITY_INT64));
         // Every module declares Shader (capability 1).
         assert!(declares(KernelId::IccClut, 1));
+    }
+
+    #[test]
+    fn no_kernel_declares_8_bit_capabilities() {
+        for &id in KernelId::ALL {
+            let words = spirv_words(id.spirv(), id.label()).unwrap();
+            for capability in [
+                CAPABILITY_INT8,
+                CAPABILITY_STORAGE_BUFFER_8_BIT,
+                CAPABILITY_UNIFORM_AND_STORAGE_BUFFER_8_BIT,
+            ] {
+                assert!(
+                    !spirv_declares_capability(&words, capability),
+                    "{} declares capability {capability}",
+                    id.label()
+                );
+            }
+        }
     }
 
     #[test]
