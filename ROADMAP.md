@@ -3681,21 +3681,28 @@ two single-precision estimates of the quotient and corrects the
 remainder; both estimates are now `precise`, so a compiler may not
 substitute an approximate reciprocal, and the corrections stop after 16
 steps in each direction instead of looping until the remainder is in
-range. A division whose remainder is still out of range writes its
-operands to a status buffer, which the host checks before copying any
-pixel: the page fails with the new `BackendError::KernelFault`
+range. Each division then checks its result: the remainder must lie in
+`[0, b)`, and `|q·b − a|`, recomputed in floating point, must be below
+2^62, which rejects a quotient whose 64-bit product wrapped (a
+remainder check alone passes it). A failed check writes the operands to a
+status buffer, which the host reads before copying any pixel: the page
+fails with the new `BackendError::KernelFault`
 (`page_raster_paths: floor_div(a = …, b = …) did not converge within 16
-correction steps; the device's float division is unreliable`), is logged
-at `warn`, and renders on the CPU with the CPU's bytes. The device stays
-in service, as for a page beyond its limits, since the fault concerns
-the operands of one page. Before, an unreliable division would have
-looped on the device or written a wrong pixel. A sweep test compares the
-device's division with the host's over the edge cases of its domain
-(`0 < b < 2^32`, `|a / b| < 2^40`) and 65 536 random pairs, and checks
-that an exhausted bound is reported. Pages stay byte-identical to
-`--backend cpu`. Verified on the RTX 5070 (parity suite over the
-fixtures at 8 and 16 bits), and the sweep also on the AMD Raphael iGPU
-(RADV) and llvmpipe.
+correction steps; the device's float division is unreliable`), renders
+on the CPU with the CPU's bytes, and the device is retired for the
+session with one `warn` naming it and the fault, since its division is
+shown unreliable. Before, an unreliable division would have looped on
+the device or written a wrong pixel. The step count has one source,
+passed to the kernels at build time. Tests compare the device's division
+with the host's over the edge cases of its domain (`0 < b < 2^32`,
+`|a / b| < 2^40`, `|a| ≤ 2^62`) and 65 536 random pairs, check that
+exhausted bounds in both directions and wrapped products (through a
+test-only kernel variant whose first estimates are poisoned) are
+reported, that the first faulting division's operands are the ones
+reported, and that a faulting page leaves the caller's buffer untouched.
+Pages stay byte-identical to `--backend cpu`. Verified on the RTX 5070
+(parity suite over the fixtures at 8 and 16 bits), and the division
+tests also on the AMD Raphael iGPU (RADV) and llvmpipe.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns

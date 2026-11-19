@@ -132,17 +132,16 @@ fn a_cancelled_page_stops_waiting_for_the_opening() {
     assert_eq!((counts.stopped, counts.opening), (1, 0));
 }
 
-/// A device error renders the page on the CPU, identically, and
-/// retires the device: later pages are not offered to it.
-#[test]
-fn a_device_failure_renders_on_the_cpu_and_retires_the_device() {
+/// A device failure of `error` renders the page on the CPU, identically,
+/// and retires the device: later pages are not offered to it.
+fn assert_failure_retires_the_device(error: BackendError) {
     let doc = pdf(&[DEVICE, DEVICE]);
     let Some(session) = gpu_session(doc.clone()) else {
         return;
     };
     let pages = device_pages(&session);
     let params = RenderParams::new(2.0);
-    *pages.faults.fail_next.lock().expect("lock") = Some(BackendError::msg("device lost"));
+    *pages.faults.fail_next.lock().expect("lock") = Some(error);
     let (failed, outcome) = render(&session, 1, &params).expect("render");
     assert_eq!(outcome, DevicePage::Failed);
     assert_eq!(failed, cpu(doc.clone(), 1));
@@ -153,6 +152,25 @@ fn a_device_failure_renders_on_the_cpu_and_retires_the_device() {
     let counts = session.device_page_counts().expect("a GPU-page session");
     assert_eq!((counts.failed, counts.retired, counts.cpu()), (1, 1, 2));
     assert_eq!(counts.rendered, 0);
+}
+
+/// A device error renders the page on the CPU, identically, and
+/// retires the device.
+#[test]
+fn a_device_failure_renders_on_the_cpu_and_retires_the_device() {
+    assert_failure_retires_the_device(BackendError::msg("device lost"));
+}
+
+/// A raster that reports a fault shows the device's arithmetic
+/// unreliable: the page renders on the CPU and the device is retired.
+#[test]
+fn a_kernel_fault_retires_the_device() {
+    assert_failure_retires_the_device(BackendError::KernelFault {
+        kernel: "page_raster_paths",
+        detail: "floor_div(a = -1, b = 3) did not converge within 16 correction steps; \
+                 the device's float division is unreliable"
+            .to_owned(),
+    });
 }
 
 /// A page failed with `error` renders on the CPU and leaves the device in
