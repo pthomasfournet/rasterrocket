@@ -144,29 +144,13 @@ pub(super) fn pick_many(
         failure,
         message: format!("{reason}\navailable Vulkan devices:\n{}", describe(cands)),
     };
-    if selectors.is_empty() {
-        return Err(fail(
-            SelectionFailure::Invalid,
-            "the Vulkan device list is empty".to_owned(),
-        ));
-    }
-    let mut picked: Vec<usize> = Vec::with_capacity(selectors.len());
-    for sel in selectors {
-        let idx = resolve_selector(cands, sel).map_err(|(failure, reason)| {
-            fail(failure, format!("Vulkan device selector {sel}: {reason}"))
-        })?;
-        if let Some(first) = picked.iter().position(|&i| i == idx) {
-            return Err(fail(
-                SelectionFailure::Invalid,
-                format!(
-                    "Vulkan device selectors {} and {sel} both name device {idx} \"{}\"",
-                    selectors[first], cands[idx].name
-                ),
-            ));
-        }
-        picked.push(idx);
-    }
-    Ok(picked)
+    crate::backend::select::resolve_each(
+        selectors,
+        "Vulkan device",
+        |sel| resolve_selector(cands, sel),
+        |i| cands[i].name.as_str(),
+    )
+    .map_err(|(failure, reason)| fail(failure, reason))
 }
 
 /// Every eligible candidate that is a GPU (discrete, integrated or

@@ -133,7 +133,7 @@ impl<T> ScratchPool<T> {
     /// many were dropped; the pool makes new ones on demand.  A scratch is
     /// idle only once the operation it was lent to has returned, so no
     /// device work refers to its buffers.
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     pub(crate) fn free_idle(&self) -> usize {
         let idle = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -256,7 +256,7 @@ mod tests {
     /// Freeing the idle scratches drops them and lets the pool make new
     /// ones in their place, up to its limit; a lent scratch is kept.
     #[test]
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     fn freeing_the_idle_scratches_lets_the_pool_make_new_ones() {
         let pool = ScratchPool::<Vec<u8>>::bounded(2);
         let mut kept = pool.lend();

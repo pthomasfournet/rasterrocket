@@ -1,6 +1,7 @@
 //! The Direct3D 12 backend of the integration tests.
 
 use rasterrocket_gpu::backend::d3d12::D3d12Backend;
+use rasterrocket_gpu::backend::page_device::PageDevice as _;
 use rasterrocket_gpu::backend::select::DeviceSelector;
 
 /// The backend on the adapter `PDF_RASTER_D3D12_DEVICE` names (`warp` or

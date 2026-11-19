@@ -65,7 +65,7 @@ pub struct VulkanBackend {
     /// time.
     page: std::sync::Mutex<()>,
     /// The time page rasters hold the device ([`PageDevice::page_mean`]).
-    page_clock: page::PageClock,
+    page_clock: crate::backend::page_job::PageClock,
     #[expect(
         dead_code,
         reason = "kept for explicit drop ordering; readers go via recorder's Arc clone"
@@ -182,7 +182,7 @@ impl PageDevice for VulkanBackend {
             transfer,
             recorder,
             page: std::sync::Mutex::new(()),
-            page_clock: page::PageClock::default(),
+            page_clock: crate::backend::page_job::PageClock::default(),
             pipelines,
             memory,
             device,

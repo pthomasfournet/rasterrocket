@@ -136,6 +136,30 @@ pub(super) fn pick(
     )
 }
 
+/// The adapters `selectors` name, in their order, each resolved as
+/// [`pick`] resolves one.
+///
+/// # Errors
+///
+/// [`BackendError::DeviceSelection`] when `selectors` is empty, when one
+/// of them does not resolve, or when two resolve to the same adapter; the
+/// message lists every enumerated adapter.
+pub(super) fn pick_many(
+    cands: &[AdapterCandidate],
+    selectors: &[DeviceSelector],
+) -> Result<Vec<usize>, BackendError> {
+    crate::backend::select::resolve_each(
+        selectors,
+        "D3D12 adapter",
+        |sel| resolve_selector(cands, sel),
+        |i| cands[i].name.as_str(),
+    )
+    .map_err(|(failure, reason)| BackendError::DeviceSelection {
+        failure,
+        message: format!("{reason}\navailable D3D12 adapters:\n{}", describe(cands)),
+    })
+}
+
 /// Every usable hardware adapter, those with dedicated video memory first,
 /// each group in enumeration order.
 ///
@@ -443,5 +467,35 @@ mod tests {
             msg.contains("shader model 5.1 below the floor 6.0"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn dxgi_selection_of_several_adapters() {
+        let cands = host();
+        let many = |list: &[&str]| {
+            let sels: Vec<DeviceSelector> = list.iter().map(|s| sel(s)).collect();
+            pick_many(&cands, &sels)
+        };
+        assert_eq!(many(&["intel", "0", "warp"]).unwrap(), [1, 0, 3]);
+        let failure = |list: &[&str]| match many(list) {
+            Err(BackendError::DeviceSelection { failure, message }) => (failure, message),
+            other => panic!("expected DeviceSelection error, got {other:?}"),
+        };
+        let (kind, msg) = failure(&[]);
+        assert_eq!(kind, SelectionFailure::Invalid, "{msg}");
+        assert!(msg.contains("the D3D12 adapter list is empty"), "{msg}");
+        let (kind, msg) = failure(&["1", "intel"]);
+        assert_eq!(kind, SelectionFailure::Invalid, "{msg}");
+        assert!(
+            msg.contains(
+                "D3D12 adapter selectors \"1\" and \"intel\" both name device 1 \
+                 \"Intel(R) UHD Graphics 630\""
+            ),
+            "{msg}"
+        );
+        assert!(msg.contains("available D3D12 adapters:"), "{msg}");
+        let (kind, msg) = failure(&["0", "basic"]);
+        assert_eq!(kind, SelectionFailure::Ineligible, "{msg}");
+        assert!(msg.contains("D3D12 adapter selector \"basic\""), "{msg}");
     }
 }

@@ -7,6 +7,12 @@
 //! ([`crate::backend::layout`]); [`PageJob::finish`] drops each pixel's pad
 //! bytes and writes each row's packed samples at its stride in the
 //! caller's buffer, leaving the samples between rows unchanged.
+//!
+//! [`PageClock`] keeps the mean time page rasters hold a device, and
+//! [`Laps`] the host clock of a timed page.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::backend::kernel_status::{self, STATUS_WORDS};
 use crate::backend::{BackendError, Result};
@@ -15,10 +21,6 @@ use crate::page::{PageCommands, PageSample, TableBases, TileBins, pack_rgb};
 /// The bytes of the page raster's push constants: the 14 words of
 /// `Params` in `kernels/page_raster.slang`.
 pub(crate) const PUSH_BYTES: usize = 56;
-
-/// The kernel that rasterises a page with outlines, as named in the
-/// fault it reports.
-const PAGE_RASTER_PATHS: &str = "page_raster_paths";
 
 /// The most byte slices one input of the page raster is made of: the
 /// parts of the coverage table ([`PageCommands::table_parts`]).
@@ -63,7 +65,7 @@ pub(crate) struct PageJob<'a> {
     /// them and binds the status words.
     pub(crate) kernel_paths: bool,
     /// The kernel a fault in the status words is reported for.
-    pub(crate) fault_kernel: &'static str,
+    fault_kernel: &'static str,
     /// The push constants.
     pub(crate) push: [u8; PUSH_BYTES],
     /// The bytes of the device page.
@@ -82,7 +84,8 @@ pub(crate) struct PageJob<'a> {
 impl<'a> PageJob<'a> {
     /// Check `page` against a buffer of `out_len` samples of `S` at
     /// `stride`, on a device that rasterises outlines when `paths`, and
-    /// bin it.
+    /// bin it; a fault in the status words of its outlines' raster is
+    /// reported for the kernel `fault_kernel`.
     ///
     /// # Errors
     ///
@@ -95,6 +98,7 @@ impl<'a> PageJob<'a> {
         out_len: usize,
         stride: usize,
         paths: bool,
+        fault_kernel: &'static str,
     ) -> Result<Self> {
         let (width, height) = (page.width() as usize, page.height() as usize);
         if width == 0 || height == 0 {
@@ -141,7 +145,7 @@ impl<'a> PageJob<'a> {
             table,
             bins,
             kernel_paths,
-            fault_kernel: PAGE_RASTER_PATHS,
+            fault_kernel,
             push,
             device_page_len,
             device_row,
@@ -256,6 +260,68 @@ fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u
     push
 }
 
+/// The time page rasters hold the device: an exponentially weighted mean
+/// of the page rasters that succeeded, the first excluded.
+#[derive(Default)]
+pub(crate) struct PageClock {
+    /// Set by the first page raster that succeeded, which is not counted.
+    warm: AtomicBool,
+    /// The mean in nanoseconds, at least 1; 0 while none is counted.
+    mean_nanos: AtomicU64,
+}
+
+impl PageClock {
+    /// The weight of the newest run is `1 / WEIGHT`.
+    const WEIGHT: u64 = 8;
+
+    /// Count a page raster that held the device for `held`.
+    pub(crate) fn record(&self, held: Duration) {
+        if !self.warm.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let new = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX).max(1);
+        let _ = self
+            .mean_nanos
+            .update(Ordering::Relaxed, Ordering::Relaxed, |mean| {
+                if mean == 0 {
+                    return new;
+                }
+                let total = u128::from(mean) * u128::from(Self::WEIGHT - 1) + u128::from(new);
+                u64::try_from(total / u128::from(Self::WEIGHT))
+                    .unwrap_or(u64::MAX)
+                    .max(1)
+            });
+    }
+
+    /// The mean, once a run is counted.
+    pub(crate) fn mean(&self) -> Option<Duration> {
+        match self.mean_nanos.load(Ordering::Relaxed) {
+            0 => None,
+            nanos => Some(Duration::from_nanos(nanos)),
+        }
+    }
+}
+
+/// The host clock of a timed page: the time since the previous lap, or
+/// nothing for an untimed page, which never reads the clock.
+pub(crate) struct Laps(Option<Instant>);
+
+impl Laps {
+    pub(crate) fn new(timed: bool) -> Self {
+        Self(timed.then(Instant::now))
+    }
+
+    /// The time since the previous lap; zero when untimed.
+    pub(crate) fn lap(&mut self) -> Duration {
+        self.0.as_mut().map_or(Duration::ZERO, |last| {
+            let now = Instant::now();
+            let lap = now - *last;
+            *last = now;
+            lap
+        })
+    }
+}
+
 /// The bytes of a device row and of the device page of a `width` × `height`
 /// page of `S` samples, [`PageSample::DEVICE_PIXEL_BYTES`] a pixel; `None`
 /// when either overflows `usize`.
@@ -271,7 +337,7 @@ pub(crate) fn device_page_bytes<S: PageSample>(
 mod tests {
     use color::SampleDepth;
 
-    use super::{PAGE_RASTER_PATHS, PageJob};
+    use super::PageJob;
     use crate::backend::BackendError;
     use crate::page::PageCommands;
 
@@ -288,8 +354,8 @@ mod tests {
             u32::try_from(b_bits >> 32).unwrap(),
         ];
         let page = PageCommands::new(2, 1, SampleDepth::Eight, [7; 3]);
-        let job = PageJob::prepare::<u8>(&page, 6, 6, true).expect("prepare");
-        assert_eq!(job.fault_kernel, PAGE_RASTER_PATHS);
+        let job = PageJob::prepare::<u8>(&page, 6, 6, true, "page_raster_paths").expect("prepare");
+        assert_eq!(job.fault_kernel, "page_raster_paths");
         let pixels = [0u8; 8];
         let mut out = [0u8; 6];
         let err = job
@@ -311,5 +377,26 @@ mod tests {
         assert_eq!(out, [0; 6], "a faulting page wrote a sample");
         job.finish(&pixels, Some(&[0; 5]), &mut out, 6)
             .expect("no fault");
+    }
+
+    /// The clock ignores the first page raster, takes the second as its
+    /// mean, and weighs each later one by 1/8, so a slow run is forgotten.
+    #[test]
+    fn the_page_clock_skips_the_first_run_and_forgets_slow_ones() {
+        use std::time::Duration;
+        let clock = super::PageClock::default();
+        clock.record(Duration::from_millis(80));
+        assert_eq!(clock.mean(), None);
+        clock.record(Duration::from_millis(16));
+        assert_eq!(clock.mean(), Some(Duration::from_millis(16)));
+        clock.record(Duration::from_millis(80));
+        assert_eq!(clock.mean(), Some(Duration::from_millis(24)));
+        for _ in 0..64 {
+            clock.record(Duration::from_millis(2));
+        }
+        let mean = clock.mean().expect("a mean");
+        assert!(mean < Duration::from_micros(2010), "{mean:?}");
+        clock.record(Duration::ZERO);
+        assert!(clock.mean().is_some_and(|m| m > Duration::ZERO));
     }
 }

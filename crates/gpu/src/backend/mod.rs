@@ -26,8 +26,8 @@ pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(any(feature = "vulkan", test)),
-    expect(dead_code, reason = "only the Vulkan backend consumes it")
+    not(any(feature = "vulkan", all(windows, feature = "d3d12"), test)),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 mod kernel_status;
 pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu, icc_clut16, random_grid};
@@ -38,8 +38,8 @@ pub mod d3d12;
 pub mod page_device;
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
 #[cfg_attr(
-    not(feature = "vulkan"),
-    expect(dead_code, reason = "only the Vulkan backend consumes it")
+    not(any(feature = "vulkan", all(windows, feature = "d3d12"))),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
 )]
 mod page_job;
 pub mod params;

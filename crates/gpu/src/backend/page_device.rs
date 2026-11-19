@@ -158,7 +158,7 @@ pub trait PageDevice: GpuBackend + Sized {
 /// tests: `body(&backend)` on the backend its `test_backend` opens, the
 /// test being skipped when none opens.  The tests of a backend live in a
 /// module named after it.
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 macro_rules! on_each_backend {
     ($($name:ident => $body:ident;)*) => {
         #[cfg(feature = "vulkan")]
@@ -172,16 +172,28 @@ macro_rules! on_each_backend {
                 }
             )*
         }
+
+        #[cfg(all(windows, feature = "d3d12"))]
+        mod d3d12 {
+            $(
+                #[test]
+                fn $name() {
+                    if let Some(backend) = crate::backend::d3d12::test_backend() {
+                        super::$body(&backend);
+                    }
+                }
+            )*
+        }
     };
 }
 
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 mod image_tests;
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 mod mask_tests;
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 mod modifier_tests;
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 pub(crate) mod path_tests;
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(all(test, any(feature = "vulkan", all(windows, feature = "d3d12"))))]
 mod tests;

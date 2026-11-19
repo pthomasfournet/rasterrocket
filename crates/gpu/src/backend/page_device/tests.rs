@@ -445,9 +445,27 @@ fn vulkan_concurrent_pages_each_get_their_own_pixels() {
     }
 }
 
+#[cfg(all(windows, feature = "d3d12"))]
+#[test]
+fn d3d12_concurrent_pages_each_get_their_own_pixels() {
+    if let Some(backend) = crate::backend::d3d12::test_backend() {
+        concurrent_pages_each_get_their_own_pixels_on(&backend);
+        assert!(
+            backend.page_sets_within_bound(),
+            "more buffer sets than the bound"
+        );
+    }
+}
+
 #[cfg(feature = "vulkan")]
 #[test]
 fn vulkan_retires_device_on_every_error_but_limits_and_memory() {
     retires_device_on_every_error_but_limits_and_memory_of::<crate::backend::vulkan::VulkanBackend>(
     );
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+#[test]
+fn d3d12_retires_device_on_every_error_but_limits_and_memory() {
+    retires_device_on_every_error_but_limits_and_memory_of::<crate::backend::d3d12::D3d12Backend>();
 }

@@ -98,6 +98,46 @@ pub(crate) fn match_selector(
     }
 }
 
+/// The index `resolve` gives each of `selectors`, in their order, or the
+/// kind of reason they do not name distinct devices and the reason: the
+/// list is empty, one does not resolve, or two resolve to the same device.
+/// `kind` names a device of the API (`Vulkan device`) and `name` gives a
+/// device's name, for the reasons.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "d3d12", windows), test)),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
+)]
+pub(crate) fn resolve_each<'a>(
+    selectors: &[DeviceSelector],
+    kind: &str,
+    resolve: impl Fn(&DeviceSelector) -> Result<usize, (SelectionFailure, String)>,
+    name: impl Fn(usize) -> &'a str,
+) -> Result<Vec<usize>, (SelectionFailure, String)> {
+    if selectors.is_empty() {
+        return Err((
+            SelectionFailure::Invalid,
+            format!("the {kind} list is empty"),
+        ));
+    }
+    let mut picked: Vec<usize> = Vec::with_capacity(selectors.len());
+    for sel in selectors {
+        let idx = resolve(sel)
+            .map_err(|(failure, reason)| (failure, format!("{kind} selector {sel}: {reason}")))?;
+        if let Some(first) = picked.iter().position(|&i| i == idx) {
+            return Err((
+                SelectionFailure::Invalid,
+                format!(
+                    "{kind} selectors {} and {sel} both name device {idx} \"{}\"",
+                    selectors[first],
+                    name(idx)
+                ),
+            ));
+        }
+        picked.push(idx);
+    }
+    Ok(picked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

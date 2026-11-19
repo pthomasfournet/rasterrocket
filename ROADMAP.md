@@ -3846,6 +3846,24 @@ match the CPU reference byte for byte, and the cache's device tests pass,
 on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU on
 Windows 11.
 
+**Unreleased on master: the page raster on D3D12.** `D3d12Backend`
+implements `PageDevice`: a page's inputs are staged into persistently mapped
+UPLOAD buffers, copied, rasterised and copied into a READBACK buffer by one
+command list, with one fence wait per page, three buffer sets kept between
+pages. Pages with outlines take `page_raster_paths` on an adapter with
+`Int64ShaderOps` (WARP, the RTX 5070 and the AMD Radeon iGPU all report it),
+others the table kernel. The inputs are structured views of whole elements
+(56-byte commands, 32-bit words); an input or a page past the 2^27 elements
+of a view is a `DeviceLimit` before anything is allocated. A status fault is
+a `KernelFault` and leaves the caller's buffer untouched; a page whose
+completion cannot be confirmed, as on a removed device, retires the device.
+`render_page_timed` times the device stages with timestamp queries at the
+compute queue's frequency. Selection of several adapters (`resolve_devices`)
+follows the single-adapter rules and refuses two selectors naming one
+adapter. No session uses it yet. The page tests shared with Vulkan pass at 8
+and 16 bits on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU
+on Windows 11.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

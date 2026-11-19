@@ -38,19 +38,15 @@ pub(super) const MAX_BINDINGS: u32 = 8;
 pub(super) enum KernelId {
     IccClut,
     BlitImage,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the page raster dispatches it; nothing does yet")
-    )]
     PageRaster,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the page raster dispatches it; nothing does yet")
-    )]
     PageRasterPaths,
     /// The page raster's floor division over operand pairs, for the tests.
     #[cfg(test)]
     FloorDivProbe,
+    /// [`Self::PageRasterPaths`] with its floor divisions' first estimate
+    /// poisoned so that the product with the divisor wraps, for the tests.
+    #[cfg(test)]
+    PageRasterPathsPoisoned,
 }
 
 impl KernelId {
@@ -62,10 +58,11 @@ impl KernelId {
         Self::PageRaster,
         Self::PageRasterPaths,
         Self::FloorDivProbe,
+        Self::PageRasterPathsPoisoned,
     ];
 
     /// The number of kernels.
-    const COUNT: usize = if cfg!(test) { 5 } else { 4 };
+    const COUNT: usize = if cfg!(test) { 6 } else { 4 };
 
     /// The kernel's name: its DXIL artifact and its entry in the register
     /// tables.
@@ -77,6 +74,8 @@ impl KernelId {
             Self::PageRasterPaths => "page_raster_paths",
             #[cfg(test)]
             Self::FloorDivProbe => "floor_div_probe",
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => "page_raster_paths_poisoned",
         }
     }
 
@@ -89,6 +88,8 @@ impl KernelId {
             Self::PageRasterPaths => 3,
             #[cfg(test)]
             Self::FloorDivProbe => 4,
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => 5,
         }
     }
 }
@@ -349,6 +350,10 @@ mod tests {
             }
         );
         assert_eq!(s(KernelId::PageRasterPaths).uavs, 2);
+        assert_eq!(
+            s(KernelId::PageRasterPathsPoisoned),
+            s(KernelId::PageRasterPaths)
+        );
         assert_eq!(
             s(KernelId::FloorDivProbe),
             Shape {

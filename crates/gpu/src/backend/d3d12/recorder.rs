@@ -16,11 +16,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, D3D12_DESCRIPTOR_HEAP_DESC,
     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-    D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE,
-    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-    D3D12_SHADER_RESOURCE_VIEW_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER,
-    D3D12_UAV_DIMENSION_BUFFER, D3D12_UNORDERED_ACCESS_VIEW_DESC,
-    D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12DescriptorHeap, ID3D12Device, ID3D12Resource,
+    D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_QUERY_TYPE_TIMESTAMP, D3D12_RESOURCE_STATE_COPY_DEST,
+    D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_SHADER_RESOURCE_VIEW_DESC,
+    D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER, D3D12_UAV_DIMENSION_BUFFER,
+    D3D12_UNORDERED_ACCESS_VIEW_DESC, D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12DescriptorHeap,
+    ID3D12Device, ID3D12QueryHeap, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 
@@ -319,14 +320,11 @@ impl Recorder {
 
     /// Record a dispatch of `kernel` over `groups` thread groups with the
     /// root constants `constants`, the SRVs `srvs` (`t0..`) and the UAVs
-    /// `uavs` (`u0..`), each a buffer and the stride of its elements.
+    /// `uavs` (`u0..`), each a buffer and the stride of its elements,
+    /// viewed whole.
     ///
     /// # Errors
-    /// When the bindings do not match the kernel's registers, a view holds
-    /// more elements than a view may ([`memory::check_view_elements`]),
-    /// a dimension of `groups` exceeds the dispatch limit, or the page has
-    /// recorded [`MAX_DISPATCHES_PER_PAGE`] dispatches
-    /// ([`BackendError::DescriptorPoolExhausted`]).
+    /// As [`Self::dispatch_ranges`].
     pub(super) fn dispatch(
         &self,
         kernel: KernelId,
@@ -335,10 +333,55 @@ impl Recorder {
         constants: &[u32],
         groups: (u32, u32, u32),
     ) -> Result<()> {
+        let views: Vec<Binding<'_>> = srvs
+            .iter()
+            .copied()
+            .chain(uavs.iter().map(|(b, s)| (&**b, *s)))
+            .map(|(buf, stride)| (buf, stride, buf.width()))
+            .collect();
+        self.record_dispatch(kernel, &views, srvs.len(), constants, groups)
+    }
+
+    /// [`Self::dispatch`] with each view covering the first bytes of its
+    /// buffer the binding gives, a whole number of elements.
+    ///
+    /// # Errors
+    /// When the bindings do not match the kernel's registers, a view
+    /// covers more bytes than its buffer holds or holds more elements than
+    /// a view may ([`memory::check_view_elements`]), a dimension of
+    /// `groups` exceeds the dispatch limit, or the page has recorded
+    /// [`MAX_DISPATCHES_PER_PAGE`] dispatches
+    /// ([`BackendError::DescriptorPoolExhausted`]).
+    pub(super) fn dispatch_ranges(
+        &self,
+        kernel: KernelId,
+        srvs: &[Binding<'_>],
+        uavs: &[(&mut DeviceBuffer, u32, u64)],
+        constants: &[u32],
+        groups: (u32, u32, u32),
+    ) -> Result<()> {
+        let views: Vec<Binding<'_>> = srvs
+            .iter()
+            .copied()
+            .chain(uavs.iter().map(|(b, s, n)| (&**b, *s, *n)))
+            .collect();
+        self.record_dispatch(kernel, &views, srvs.len(), constants, groups)
+    }
+
+    /// Record a dispatch of `kernel` binding `views`, its first `n_srvs`
+    /// as SRVs and the rest as UAVs.
+    fn record_dispatch(
+        &self,
+        kernel: KernelId,
+        views: &[Binding<'_>],
+        n_srvs: usize,
+        constants: &[u32],
+        groups: (u32, u32, u32),
+    ) -> Result<()> {
         let label = kernel.label();
         let pipeline = self.pipelines.get(kernel)?;
         let shape = pipeline.shape;
-        let views = check_bindings(label, shape, srvs, uavs, constants, groups)?;
+        check_bindings(label, shape, views, n_srvs, constants, groups)?;
 
         let mut page = self.recording("dispatch")?;
         if page.dispatches >= MAX_DISPATCHES_PER_PAGE {
@@ -352,13 +395,13 @@ impl Recorder {
         let cpu_start = unsafe { page.heap.GetCPUDescriptorHandleForHeapStart() };
         // SAFETY: the heap is live and shader-visible.
         let gpu_start = unsafe { page.heap.GetGPUDescriptorHandleForHeapStart() };
-        for (i, &(buf, stride)) in views.iter().enumerate() {
+        for (i, &(buf, stride, bytes)) in views.iter().enumerate() {
             let slot = first + u32::try_from(i).unwrap_or(u32::MAX);
             let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
                 ptr: cpu_start.ptr + (slot * self.descriptor_size) as usize,
             };
-            let elements = u32::try_from(buf.width() / u64::from(stride)).unwrap_or(u32::MAX);
-            if i < srvs.len() {
+            let elements = u32::try_from(bytes / u64::from(stride)).unwrap_or(u32::MAX);
+            if i < n_srvs {
                 self.write_srv(buf.resource(), elements, stride, handle);
             } else {
                 self.write_uav(buf.resource(), elements, stride, handle);
@@ -369,15 +412,16 @@ impl Recorder {
         };
 
         let c = &mut page.commands;
-        for &(buf, _) in srvs {
-            c.use_buffer(
-                buf.resource(),
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                false,
-            );
-        }
-        for (buf, _) in uavs {
-            c.use_buffer(buf.resource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+        for (i, &(buf, _, _)) in views.iter().enumerate() {
+            if i < n_srvs {
+                c.use_buffer(
+                    buf.resource(),
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    false,
+                );
+            } else {
+                c.use_buffer(buf.resource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+            }
         }
         c.hold(&pipeline.state);
         c.hold(&pipeline.root_signature);
@@ -403,6 +447,57 @@ impl Recorder {
             c.list.Dispatch(groups.0, groups.1, groups.2);
         }
         page.dispatches += 1;
+        Ok(())
+    }
+
+    /// Record the write of timestamp `index` of `heap`, once every
+    /// command recorded before it has completed.
+    pub(super) fn record_timestamp(&self, heap: &ID3D12QueryHeap, index: u32) -> Result<()> {
+        let mut page = self.recording("record_timestamp")?;
+        let c = &mut page.commands;
+        c.hold(heap);
+        c.flush();
+        // SAFETY: the list is open; the heap is held by the list's
+        // commands, and the caller's heap holds timestamp `index`.
+        unsafe { c.list.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, index) };
+        Ok(())
+    }
+
+    /// Record the resolution of the first `count` timestamps of `heap`,
+    /// each written by this page, into the read-back buffer `dst`, 8 bytes
+    /// each from its start.
+    pub(super) fn record_resolve_timestamps(
+        &self,
+        heap: &ID3D12QueryHeap,
+        count: u32,
+        dst: &HostBuffer,
+    ) -> Result<()> {
+        if dst.heap() != HostHeap::Readback || dst.size() < u64::from(count) * 8 {
+            return Err(BackendError::msg(format!(
+                "record_resolve_timestamps: {count} timestamps do not fit a {}-byte {:?} buffer",
+                dst.size(),
+                dst.heap()
+            )));
+        }
+        let mut page = self.recording("record_resolve_timestamps")?;
+        let c = &mut page.commands;
+        c.hold(heap);
+        c.hold(dst.resource());
+        c.flush();
+        // SAFETY: the list is open; the heap and `dst`, a read-back buffer
+        // in `COPY_DEST` for its whole life, are held by the list's
+        // commands; `dst` holds the `count` 8-byte results at offset 0, and
+        // the caller has recorded every query resolved on this page.
+        unsafe {
+            c.list.ResolveQueryData(
+                heap,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                0,
+                count,
+                dst.resource(),
+                0,
+            );
+        }
         Ok(())
     }
 
@@ -470,25 +565,29 @@ impl Recorder {
     }
 }
 
-/// The views of a dispatch of the kernel `label`, SRVs then UAVs, after
-/// checking them, the root constants and `groups` against `shape` and the
-/// device's limits.
-fn check_bindings<'a>(
+/// A buffer bound to a kernel: the buffer, the stride of its elements, and
+/// the bytes from its start the view covers.
+pub(super) type Binding<'a> = (&'a DeviceBuffer, u32, u64);
+
+/// Check the `views` of a dispatch of the kernel `label`, its first
+/// `n_srvs` SRVs and the rest UAVs, the root constants and `groups`
+/// against `shape` and the device's limits.
+fn check_bindings(
     label: &'static str,
     shape: Shape,
-    srvs: &[(&'a DeviceBuffer, u32)],
-    uavs: &'a [(&mut DeviceBuffer, u32)],
+    views: &[Binding<'_>],
+    n_srvs: usize,
     constants: &[u32],
     groups: (u32, u32, u32),
-) -> Result<Vec<(&'a DeviceBuffer, u32)>> {
-    if srvs.len() != shape.srvs as usize
-        || uavs.len() != shape.uavs as usize
+) -> Result<()> {
+    let n_uavs = views.len() - n_srvs;
+    if n_srvs != shape.srvs as usize
+        || n_uavs != shape.uavs as usize
         || constants.len() != shape.constant_words as usize
     {
         return Err(BackendError::msg(format!(
-            "{label}: {} SRVs, {} UAVs and {} constant words bound; the kernel has {}, {} and {}",
-            srvs.len(),
-            uavs.len(),
+            "{label}: {n_srvs} SRVs, {n_uavs} UAVs and {} constant words bound; the kernel has \
+             {}, {} and {}",
             constants.len(),
             shape.srvs,
             shape.uavs,
@@ -502,26 +601,23 @@ fn check_bindings<'a>(
             groups.0, groups.1, groups.2
         )));
     }
-    let views: Vec<(&DeviceBuffer, u32)> = srvs
-        .iter()
-        .copied()
-        .chain(uavs.iter().map(|(b, s)| (&**b, *s)))
-        .collect();
-    for &(buf, stride) in &views {
-        if stride == 0 || buf.width() < u64::from(stride) {
+    for &(buf, stride, bytes) in views {
+        if stride == 0 || bytes < u64::from(stride) || bytes > buf.width() {
             return Err(BackendError::msg(format!(
-                "{label}: a view of stride {stride} over a buffer of {} bytes",
+                "{label}: a view of {bytes} bytes in elements of {stride} over a buffer of {} \
+                 bytes",
                 buf.width()
             )));
         }
-        memory::check_view_elements(label, buf.width(), stride)?;
+        memory::check_view_elements(label, bytes, stride)?;
     }
-    for (i, (s, _)) in srvs.iter().enumerate() {
-        if uavs.iter().any(|(u, _)| u.resource() == s.resource()) {
+    let (srvs, uavs) = views.split_at(n_srvs);
+    for (i, (s, _, _)) in srvs.iter().enumerate() {
+        if uavs.iter().any(|(u, _, _)| u.resource() == s.resource()) {
             return Err(BackendError::msg(format!(
                 "{label}: SRV t{i} is also bound as a UAV"
             )));
         }
     }
-    Ok(views)
+    Ok(())
 }

@@ -665,7 +665,7 @@ compiles every kernel to DXIL and checks it, on any host that runs the two
 compilers below; no render path loads the DXIL, and the CLI does not forward the
 feature.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
 implements the GPU crate's `GpuBackend` (buffers, copies, the ICC and blit kernels)
-but serves no render path yet): a hardware adapter with shader model 6.0 or above, the
+and `PageDevice` (the whole-page raster), but serves no render path yet): a hardware adapter with shader model 6.0 or above, the
 discrete one first, or the one a selector names (an index or a name substring,
 as for `--vulkan-device`, or `warp` for the WARP software adapter);
 `PDF_RASTER_D3D12_DEBUG=1` enables the Direct3D 12 debug layer.  `scripts/fetch_warp.ps1 DIR` fetches the pinned WARP (NuGet

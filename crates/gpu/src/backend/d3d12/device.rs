@@ -128,6 +128,33 @@ pub(crate) fn usable_gpus() -> Result<Vec<usize>> {
     select::usable_gpus(&cands)
 }
 
+/// Check that `selector` names one usable adapter, without creating a
+/// device on it beyond those enumeration creates for its queries.
+///
+/// # Errors
+///
+/// As [`open_adapter`] with `selector`, before the device is created.
+pub(crate) fn check_selector(selector: &DeviceSelector) -> Result<()> {
+    enable_debug_layer();
+    let (_, cands) = enumerate()?;
+    select::pick(&cands, Some(selector)).map(drop)
+}
+
+/// The indices of the adapters `selectors` name, in their order, by
+/// [`select::pick_many`].
+///
+/// # Errors
+///
+/// [`BackendError::DeviceSelection`](crate::backend::BackendError::DeviceSelection)
+/// when `selectors` is empty, one does not resolve, or two name the same
+/// adapter; [`BackendError::Other`](crate::backend::BackendError::Other)
+/// when enumeration fails.
+pub(crate) fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
+    enable_debug_layer();
+    let (_, cands) = enumerate()?;
+    select::pick_many(&cands, selectors)
+}
+
 /// Whether [`enable_debug_layer`] enabled the layer.
 static DEBUG_LAYER_ON: AtomicBool = AtomicBool::new(false);
 

@@ -21,12 +21,11 @@
 //! clock between its host stages and writes device timestamps between its
 //! device stages; an untimed page does neither.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::kernel_status::{STATUS_BYTES, status_words};
 use crate::backend::page_device::{PageDevice, PageTimes};
-use crate::backend::page_job::{InputParts, PageJob};
+use crate::backend::page_job::{InputParts, Laps, PageJob};
 use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage_parts,
 };
@@ -59,68 +58,6 @@ pub(super) struct PageScratch {
     status: Option<Staged<VulkanBackend>>,
     /// The timestamp queries of timed pages, created by the first.
     clock: Option<StageClock>,
-}
-
-/// The time page rasters hold the device: an exponentially weighted mean
-/// of the page rasters that succeeded, the first excluded.
-#[derive(Default)]
-pub(super) struct PageClock {
-    /// Set by the first page raster that succeeded, which is not counted.
-    warm: AtomicBool,
-    /// The mean in nanoseconds, at least 1; 0 while none is counted.
-    mean_nanos: AtomicU64,
-}
-
-impl PageClock {
-    /// The weight of the newest run is `1 / WEIGHT`.
-    const WEIGHT: u64 = 8;
-
-    /// Count a page raster that held the device for `held`.
-    fn record(&self, held: Duration) {
-        if !self.warm.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let new = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX).max(1);
-        let _ = self
-            .mean_nanos
-            .update(Ordering::Relaxed, Ordering::Relaxed, |mean| {
-                if mean == 0 {
-                    return new;
-                }
-                let total = u128::from(mean) * u128::from(Self::WEIGHT - 1) + u128::from(new);
-                u64::try_from(total / u128::from(Self::WEIGHT))
-                    .unwrap_or(u64::MAX)
-                    .max(1)
-            });
-    }
-
-    /// The mean, once a run is counted.
-    pub(super) fn mean(&self) -> Option<Duration> {
-        match self.mean_nanos.load(Ordering::Relaxed) {
-            0 => None,
-            nanos => Some(Duration::from_nanos(nanos)),
-        }
-    }
-}
-
-/// The host clock of a timed page: the time since the previous lap, or
-/// nothing for an untimed page, which never reads the clock.
-struct Laps(Option<Instant>);
-
-impl Laps {
-    fn new(timed: bool) -> Self {
-        Self(timed.then(Instant::now))
-    }
-
-    /// The time since the previous lap; zero when untimed.
-    fn lap(&mut self) -> Duration {
-        self.0.as_mut().map_or(Duration::ZERO, |last| {
-            let now = Instant::now();
-            let lap = now - *last;
-            *last = now;
-            lap
-        })
-    }
 }
 
 /// `len` bytes as a device size.
@@ -160,8 +97,7 @@ impl VulkanBackend {
         paths: KernelId,
     ) -> Result<()> {
         let mut laps = Laps::new(times.is_some());
-        let mut job = PageJob::prepare::<S>(page, out.len(), stride, self.page_paths())?;
-        job.fault_kernel = paths.label();
+        let job = PageJob::prepare::<S>(page, out.len(), stride, self.page_paths(), paths.label())?;
         // A page with outlines runs `paths` and binds the status buffer.
         let with_status = job.kernel_paths;
         let kernel = if with_status {
@@ -443,27 +379,6 @@ mod tests {
     use crate::backend::page_job::device_page_bytes;
     use crate::backend::vulkan::{test_backend, test_backend_with_int64};
     use crate::page::test_support::Rng;
-
-    /// The clock ignores the first page raster, takes the second as its
-    /// mean, and weighs each later one by 1/8, so a slow run is forgotten.
-    #[test]
-    fn the_page_clock_skips_the_first_run_and_forgets_slow_ones() {
-        use std::time::Duration;
-        let clock = super::PageClock::default();
-        clock.record(Duration::from_millis(80));
-        assert_eq!(clock.mean(), None);
-        clock.record(Duration::from_millis(16));
-        assert_eq!(clock.mean(), Some(Duration::from_millis(16)));
-        clock.record(Duration::from_millis(80));
-        assert_eq!(clock.mean(), Some(Duration::from_millis(24)));
-        for _ in 0..64 {
-            clock.record(Duration::from_millis(2));
-        }
-        let mean = clock.mean().expect("a mean");
-        assert!(mean < Duration::from_micros(2010), "{mean:?}");
-        clock.record(Duration::ZERO);
-        assert!(clock.mean().is_some_and(|m| m > Duration::ZERO));
-    }
 
     #[test]
     fn bindings_past_the_storage_range_are_refused() {

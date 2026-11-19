@@ -12,7 +12,7 @@
 //! barrier (dispatches) or a transition through `COMMON` (copies).
 //!
 //! Every object a list references (buffers, the descriptor heap, pipeline
-//! objects) is held by its [`Commands`] until a wait on the list's own
+//! objects, query heaps) is held by its [`Commands`] until a wait on the list's own
 //! fence succeeds, so a buffer freed by its owner while a page is in
 //! flight is released only after the page.  A list whose completion
 //! cannot be confirmed (its fence was not signalled, a wait on it failed,
@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATES,
     D3D12_RESOURCE_TRANSITION_BARRIER, D3D12_RESOURCE_UAV_BARRIER, ID3D12CommandAllocator,
     ID3D12DescriptorHeap, ID3D12Device, ID3D12GraphicsCommandList, ID3D12PipelineState,
-    ID3D12Resource, ID3D12RootSignature,
+    ID3D12QueryHeap, ID3D12Resource, ID3D12RootSignature,
 };
 use windows::core::Interface;
 
@@ -50,6 +50,7 @@ pub(super) enum Held {
     Heap(ID3D12DescriptorHeap),
     Pipeline(ID3D12PipelineState),
     RootSignature(ID3D12RootSignature),
+    QueryHeap(ID3D12QueryHeap),
 }
 
 impl Held {
@@ -59,6 +60,7 @@ impl Held {
             Self::Heap(o) => o.as_raw(),
             Self::Pipeline(o) => o.as_raw(),
             Self::RootSignature(o) => o.as_raw(),
+            Self::QueryHeap(o) => o.as_raw(),
         }
     }
 }
@@ -78,6 +80,12 @@ impl From<&ID3D12DescriptorHeap> for Held {
 impl From<&ID3D12PipelineState> for Held {
     fn from(o: &ID3D12PipelineState) -> Self {
         Self::Pipeline(o.clone())
+    }
+}
+
+impl From<&ID3D12QueryHeap> for Held {
+    fn from(o: &ID3D12QueryHeap) -> Self {
+        Self::QueryHeap(o.clone())
     }
 }
 
