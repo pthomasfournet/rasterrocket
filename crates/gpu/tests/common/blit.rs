@@ -215,10 +215,8 @@ pub(crate) fn run_blit<B: GpuBackend>(backend: &B, blit: &Blit<'_>, pad: u8) -> 
     out
 }
 
-/// Blit `image` into a `page × page` page over the whole page, through the
-/// CPU reference and `backend`, nearest-neighbour and then interpolated on
-/// both axes, with the source's pad bytes zero and then `0xFF`, asserting
-/// byte equality.
+/// Blit `image` into a `page × page` page over the whole page; see
+/// [`check_blit_parity_in`].
 fn check_blit_parity<B: GpuBackend>(
     backend: &B,
     image: Image<'_>,
@@ -228,13 +226,36 @@ fn check_blit_parity<B: GpuBackend>(
     what: &str,
 ) {
     let side = i32::try_from(page).expect("a test page side fits i32");
-    let bbox = [0, 0, side, side];
+    check_blit_parity_in(
+        backend,
+        image,
+        (page, page),
+        [0, 0, side, side],
+        col_terms,
+        row_terms,
+        what,
+    );
+}
+
+/// Blit `image` over `bbox` into a `page.0 × page.1` page, through the
+/// CPU reference and `backend`, nearest-neighbour and then interpolated on
+/// both axes, with the source's pad bytes zero and then `0xFF`, asserting
+/// byte equality.
+fn check_blit_parity_in<B: GpuBackend>(
+    backend: &B,
+    image: Image<'_>,
+    (page_w, page_h): (u32, u32),
+    bbox: [i32; 4],
+    col_terms: impl Fn(f64) -> (f64, f64),
+    row_terms: impl Fn(f64) -> (f64, f64),
+    what: &str,
+) {
     let (cols, rows) = blit_tables(bbox, col_terms, row_terms);
     for filter in [0, BLIT_FILTER_X | BLIT_FILTER_Y] {
         let blit = Blit {
             image,
-            page_w: page,
-            page_h: page,
+            page_w,
+            page_h,
             bbox,
             cols: &cols,
             rows: &rows,
@@ -361,4 +382,27 @@ pub(crate) fn unpadded_tail_source<B: GpuBackend>(backend: &B) {
             &format!("{what} 2×"),
         );
     }
+}
+
+/// A 5×3 RGB image scaled into the 6×4 box `[3, 1, 9, 5)` of a 10×7 page:
+/// the box's origin, extent and the image's sides differ between the axes,
+/// so a kernel that exchanges x and y anywhere writes other pixels, or
+/// none, and the pixels outside the box stay zero.
+pub(crate) fn offset_box_tells_the_axes_apart<B: GpuBackend>(backend: &B) {
+    let pixels = ramp(5 * 3 * 3, 13, 9, 251);
+    let image = Image {
+        pixels: &pixels,
+        width: 5,
+        height: 3,
+        layout: 0,
+    };
+    check_blit_parity_in(
+        backend,
+        image,
+        (10, 7),
+        [3, 1, 9, 5],
+        |px| ((px - 3.0) * 0.9, 0.0),
+        |py| (0.0, (py - 1.0) * 0.8),
+        "blit offset box",
+    );
 }

@@ -87,3 +87,10 @@ fn blit_reads_an_unpadded_tail_source_exactly() {
         &crate::common::vulkan_backend().expect("VulkanBackend::new"),
     );
 }
+
+#[test]
+fn blit_offset_box_tells_the_axes_apart() {
+    common_blit::offset_box_tells_the_axes_apart(
+        &crate::common::vulkan_backend().expect("VulkanBackend::new"),
+    );
+}

@@ -353,6 +353,14 @@ fn d3d12_blit_reads_an_unpadded_tail_source_exactly() {
     common_blit::unpadded_tail_source(backend);
 }
 
+#[test]
+fn d3d12_blit_offset_box_tells_the_axes_apart() {
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    common_blit::offset_box_tells_the_axes_apart(backend);
+}
+
 /// The WARP the process loaded: always reported; with `RR_WARP_VERSION`
 /// set, it must be the copy beside the test binary and of that version.
 #[test]
