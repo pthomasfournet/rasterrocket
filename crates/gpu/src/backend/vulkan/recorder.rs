@@ -366,7 +366,7 @@ impl PageRecorder {
     ) -> Result<()> {
         // Push: n_nodes(u32), n(u32), wide(u32), the order of
         // icc_clut.slang's uniforms.
-        let mut push = [0u8; 12];
+        let mut push = [0u8; KernelId::IccClut.push_bytes()];
         push[0..4].copy_from_slice(&n_nodes.to_ne_bytes());
         push[4..8].copy_from_slice(&p.n_pixels.to_ne_bytes());
         push[8..12].copy_from_slice(&u32::from(p.wide).to_ne_bytes());
@@ -388,8 +388,8 @@ impl PageRecorder {
         // by1 as i32 and filter as u32 (10×4 = 40 bytes), well under our
         // 128-byte push-constant range.  The sampling tables are storage
         // buffers (bindings 2 and 3).
-        let mut push = [0u8; 40];
-        let put_int = |buf: &mut [u8; 40], off: usize, v: i32| {
+        let mut push = [0u8; KernelId::BlitImage.push_bytes()];
+        let put_int = |buf: &mut [u8; KernelId::BlitImage.push_bytes()], off: usize, v: i32| {
             buf[off..off + 4].copy_from_slice(&v.to_ne_bytes());
         };
         put_int(&mut push, 0, i32::try_from(p.src_w).unwrap_or(i32::MAX));
@@ -565,6 +565,7 @@ impl PageRecorder {
         groups: (u32, u32, u32),
     ) -> Result<()> {
         debug_assert_eq!(buffers.len(), sizes.len());
+        debug_assert_eq!(push.len(), id.push_bytes(), "{}", id.label());
 
         // Look up pipeline handles BEFORE locking — `pipelines.handles`
         // can take its own internal locks (PipelineCache's per-slot

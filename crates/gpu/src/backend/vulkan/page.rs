@@ -156,7 +156,11 @@ impl Laps {
 /// The push constants of the raster of `page` binned as `bins`, its table
 /// words laid out as `bases`, in the order of `Params` in
 /// `kernels/page_raster.slang`.
-fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u8; 56] {
+fn push_constants(
+    page: &PageCommands,
+    bins: &TileBins,
+    bases: TableBases,
+) -> [u8; KernelId::PageRaster.push_bytes()] {
     let n_cmds = u32::try_from(page.len()).expect("the push limit bounds the commands");
     let [paper_rg, paper_b] = pack_rgb(page.paper());
     let values = [
@@ -175,7 +179,7 @@ fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u
         bases.images,
         bases.mods,
     ];
-    let mut push = [0u8; 56];
+    let mut push = [0u8; KernelId::PageRaster.push_bytes()];
     for (dst, v) in push.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         dst.copy_from_slice(&v.to_ne_bytes());
     }
@@ -570,7 +574,7 @@ impl VulkanBackend {
             .collect();
         let operands = bytemuck::cast_slice::<u32, u8>(&operands);
         let quotients_len = pairs.len() * 8;
-        let mut push = [0u8; 8];
+        let mut push = [0u8; KernelId::FloorDivProbe.push_bytes()];
         push[..4].copy_from_slice(&n.to_ne_bytes());
         push[4..].copy_from_slice(&max_steps.to_ne_bytes());
         let (mut input, mut output, mut status) = (None, None, None);

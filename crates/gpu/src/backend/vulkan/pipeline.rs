@@ -253,6 +253,24 @@ impl KernelId {
         }
     }
 
+    /// The bytes of this kernel's push constants, the size of its Slang
+    /// uniforms, which every dispatch of it pushes in full.
+    pub(super) const fn push_bytes(self) -> usize {
+        match self {
+            // n_nodes, n_pixels, wide
+            Self::IccClut => 12,
+            // src_w, src_h, src_layout, dst_w, dst_h, bbox[4], filter
+            Self::BlitImage => 40,
+            // the 14 words of `Params` in page_raster.slang
+            Self::PageRaster | Self::PageRasterPaths => 56,
+            #[cfg(test)]
+            Self::PageRasterPathsPoisoned => 56,
+            // n, max_steps
+            #[cfg(test)]
+            Self::FloorDivProbe | Self::FloorDivProbePoisoned => 8,
+        }
+    }
+
     /// Number of `STORAGE_BUFFER` descriptors in set 0.
     ///
     /// Order matches the Slang signature so the recorder binds in the
@@ -391,8 +409,7 @@ impl PipelineCache {
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
             // 128 bytes: Vulkan's guaranteed minimum max push-constant size.
-            // Our largest kernel push struct is well under this (icc_clut
-            // pushes 12 bytes; blit_image pushes 40).
+            // Every kernel's `push_bytes` is at most this.
             .size(128)];
         let pl_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
@@ -703,6 +720,76 @@ mod tests {
                 "{} binding_slots ({:?}) disagrees with n_storage_buffers ({n})",
                 id.label(),
                 slots,
+            );
+        }
+    }
+
+    /// The registers and root constants of the DXIL build
+    /// (`kernels/d3d12_bindings.rs`), as the Vulkan host binds the same
+    /// kernels: one SRV or UAV a storage buffer, and root constants of the
+    /// push block's words.
+    #[test]
+    fn the_d3d12_tables_match_the_vulkan_kernel_shapes() {
+        mod tables {
+            include!("../../../kernels/d3d12_bindings.rs");
+        }
+        use tables::{KERNEL_CONSTANT_WORDS, KERNEL_REGISTERS, RegisterClass};
+
+        let artifact = |id: KernelId| match id {
+            KernelId::IccClut => "icc_clut",
+            KernelId::BlitImage => "blit_image",
+            KernelId::PageRaster => "page_raster",
+            KernelId::PageRasterPaths => "page_raster_paths",
+            KernelId::FloorDivProbe => "floor_div_probe",
+            KernelId::FloorDivProbePoisoned => "floor_div_probe_poisoned",
+            KernelId::PageRasterPathsPoisoned => "page_raster_paths_poisoned",
+        };
+        assert_eq!(KERNEL_REGISTERS.len(), KernelId::ALL.len());
+        assert_eq!(KERNEL_CONSTANT_WORDS.len(), KernelId::ALL.len());
+        for &id in KernelId::ALL {
+            let name = artifact(id);
+            let registers = KERNEL_REGISTERS
+                .iter()
+                .find(|(k, _)| *k == name)
+                .unwrap_or_else(|| panic!("{name} has no registers"))
+                .1;
+            let count = |class| registers.iter().filter(|r| r.class == class).count();
+            assert!(
+                registers.iter().all(|r| r.space == 0 && !r.name.is_empty()),
+                "{name}"
+            );
+            assert_eq!(
+                count(RegisterClass::Srv) + count(RegisterClass::Uav),
+                id.n_storage_buffers() as usize,
+                "{name}: SRVs and UAVs against storage buffers"
+            );
+            let slots: Vec<u32> = (0..id.n_storage_buffers()).collect();
+            assert_eq!(id.binding_slots(), slots, "{name}");
+            let words = KERNEL_CONSTANT_WORDS
+                .iter()
+                .find(|(k, _)| *k == name)
+                .unwrap_or_else(|| panic!("{name} has no root constants"))
+                .1;
+            assert_eq!(
+                words as usize * 4,
+                id.push_bytes(),
+                "{name}: root constants against the push block"
+            );
+            assert!(
+                id.push_bytes() <= 128,
+                "{name}: past the push-constant range"
+            );
+            assert_eq!(
+                count(RegisterClass::Constants),
+                usize::from(words > 0),
+                "{name}"
+            );
+            assert!(
+                registers
+                    .iter()
+                    .filter(|r| r.class == RegisterClass::Constants)
+                    .all(|r| r.index == 0),
+                "{name}"
             );
         }
     }
