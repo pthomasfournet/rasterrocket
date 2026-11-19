@@ -4,8 +4,13 @@
 
 #![cfg(feature = "cache")]
 
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
+
 use gpu::GpuCtx;
 use gpu::blit::BlitBbox;
+#[cfg(feature = "vulkan")]
+use gpu::cache::{CacheBackend, DeviceImageCache, ImageCache};
 use gpu::cache::{CachedDeviceImage, CachedImage, DevicePageBuffer};
 use raster::pipe::ChannelMask;
 
@@ -212,7 +217,13 @@ impl PageRenderer<'_> {
                     blit_on_cuda(gpu_ctx, cache_state, image, page, &job, composite)
                 }
                 #[cfg(feature = "vulkan")]
-                CachedImage::Vulkan(image) => blit_on_vulkan(cache_state, image, &job, composite),
+                CachedImage::Vulkan(image) => {
+                    if let ImageCache::Vulkan(cache) = &cache_state.cache {
+                        blit_on_device(cache, image, &job, composite)
+                    } else {
+                        backend_mismatch()
+                    }
+                }
             }
         })
     }
@@ -288,22 +299,19 @@ fn blit_on_cuda(
     BlitOutcome::Drawn
 }
 
-/// [`PageRenderer::try_gpu_blit_image`] of a Vulkan image: the table
+/// [`PageRenderer::try_gpu_blit_image`] of an image of a backend whose
+/// cache holds the backend itself (Vulkan): the table
 /// uploads, the zero-fill of a target the size of the bounding box, the
-/// kernel and the target's download run as one page on the cache's
-/// backend ([`gpu::backend::blit_image`], with buffers pooled on the
-/// backend), and the box is passed to `composite` whole.
+/// kernel and the target's download run as one page on `cache`'s backend
+/// ([`gpu::backend::blit_image`], with buffers pooled on the backend), and
+/// the box is passed to `composite` whole.
 #[cfg(feature = "vulkan")]
-fn blit_on_vulkan(
-    state: &CacheState,
-    image: &CachedDeviceImage<gpu::backend::vulkan::VulkanBackend>,
+fn blit_on_device<B: CacheBackend<Device = Arc<B>>>(
+    cache: &DeviceImageCache<B>,
+    image: &CachedDeviceImage<B>,
     job: &BlitJob<'_>,
     mut composite: impl FnMut(RgbaRows<'_>),
 ) -> BlitOutcome {
-    let gpu::cache::ImageCache::Vulkan(cache) = &state.cache else {
-        log::warn!("blit_image: a Vulkan image reached a cache of another backend");
-        return BlitOutcome::NotStarted;
-    };
     let Some(layout) = image.layout.blit_layout() else {
         return BlitOutcome::NotStarted;
     };
@@ -333,10 +341,17 @@ fn blit_on_vulkan(
     match drawn {
         Ok(()) => BlitOutcome::Drawn,
         Err(e) => {
-            log::warn!("blit_image: Vulkan image blit failed: {e}");
+            log::warn!("blit_image: {} image blit failed: {e}", B::NAME);
             BlitOutcome::NotStarted
         }
     }
+}
+
+/// The outcome of an image whose backend is not that of the page's cache.
+#[cfg(feature = "vulkan")]
+fn backend_mismatch() -> BlitOutcome {
+    log::warn!("blit_image: an image reached a cache of another backend");
+    BlitOutcome::NotStarted
 }
 
 #[cfg(test)]
