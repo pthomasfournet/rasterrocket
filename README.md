@@ -509,7 +509,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 Pure in-RAM, no intermediate files; rasterrocket renders pixels and
 hands back a correctly-sized payload — it is not a GCV API client (no
 HTTP/auth/batching in-tree). See the
-[LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) wiki.
+[LLM Vision OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/LLM-Vision-OCR-Integration) wiki.
 No behavioural change to the existing render path; the API is purely
 additive.
 
@@ -557,9 +557,9 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | Platform guides: [Linux](docs/platforms/linux.md), [macOS](docs/platforms/macos.md), [BSD and Windows](docs/platforms/other.md) | Installing, fonts, RAM output, GPU support and known gaps on each operating system |
 | [API Reference](docs/api-reference.md) | Full signatures for `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage`, `RasterError`, `PageDiagnostics`, `rasterrocket-comic`'s `open_comic`, `rasterrocket-camera`, feature flags, GPU dispatch thresholds |
 | [CLI Reference](docs/cli-reference.md) | All `rrocket` command-line flags, output format matrix, size limits, examples, pixel-diff comparison |
-| [Benchmarks](../../wiki/Benchmarks) | Current results (CPU defaults, GPU start-up, `--gpu-pages`), dated historical tables, reproduction steps |
-| [OCR Integration](../../wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, raw-pixel input, DPI wiring, multi-threaded examples, preparing scans |
-| [LLM Vision OCR Integration](../../wiki/LLM-Vision-OCR-Integration) | Google Cloud Vision, OpenAI and Mistral — encoding helper, Rust and Python examples |
+| [Benchmarks](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks) | Current results (CPU defaults, GPU start-up, `--gpu-pages`), dated historical tables, reproduction steps |
+| [OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/OCR-Integration) | Tesseract (`leptess`) and ocrs — instance reuse, raw-pixel input, DPI wiring, multi-threaded examples, preparing scans |
+| [LLM Vision OCR Integration](https://github.com/pthomasfournet/rasterrocket/wiki/LLM-Vision-OCR-Integration) | Google Cloud Vision, OpenAI and Mistral — encoding helper, Rust and Python examples |
 
 ## Crates
 
@@ -839,7 +839,7 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
 
 ## Performance
 
-Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
+Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full methodology, hardware details, and AVX2 vs AVX-512 comparison in **[the Benchmarks wiki page](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks)**.
 
 > These tables were captured at **v0.9.1** (CPU) and before v0.6.0 (GPU) and
 > have not been re-run since, and nvJPEG is now disabled by default. Treat them as historical order-of-magnitude
@@ -860,7 +860,7 @@ Benchmarks vs Poppler's `pdftoppm` on a 10-document corpus at 150 DPI. Full meth
 | 1836 scan, DCT | 490 | 2 859 ms ± 658 ms |
 | Scan, JBIG2+JPX | 576 | 17 616 ms ± 260 ms |
 
-Per-version regression history and the full pdftoppm comparison are in **[the Benchmarks wiki page](../../wiki/Benchmarks)**.
+Per-version regression history and the full pdftoppm comparison are in **[the Benchmarks wiki page](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks)**.
 
 **GPU-accelerated (CUDA: nvJPEG + nvJPEG2000), same machine + RTX 5070 (version not recorded):**
 
@@ -871,4 +871,4 @@ Per-version regression history and the full pdftoppm comparison are in **[the Be
 | 1836 scan, DCT | 490 | 71 s | 356 s | **5.0×** |
 | Scan, JBIG2+JPX | 576 | 19.6 s | 148.9 s | **7.6×** |
 
-Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](../../wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison.
+Largest gains on scan-heavy corpora where SIMD JPEG decoding (CPU) and nvJPEG/nvJPEG2000 (GPU) dominate. Short native-text PDFs are startup-bound and show modest gains. See [the Benchmarks wiki page](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks) for the full table including an Intel i7-8700K (AVX2-only) comparison.

@@ -6,7 +6,7 @@ release was being prepared (v0.6.0 to v0.9.1, all in May 2026). None of it
 describes the current renderer, and none of it has been re-run since.
 
 Current benchmark results, and how to reproduce them, are on the project
-wiki's [Benchmarks](../wiki/Benchmarks.md) page.
+wiki's [Benchmarks](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmarks) page.
 
 ## What is here
 
