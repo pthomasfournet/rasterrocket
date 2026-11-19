@@ -3499,6 +3499,23 @@ carries a `SelectionFailure` kind beside its message; the gpu build script
 runs every tool through one helper that reports its output, takes non-UTF-8
 paths, and says when `CUDA_PATH` is unset.
 
+**Unreleased on master: a benchmark of Linux against Windows on one machine.**
+`os_bench` (in `crates/bench`) and its two drivers, `tests/compare/os_bench.sh`
+and `tests/compare/os_bench.ps1`, run the same rows on both systems of a
+dual-boot machine and separate process start-up, per-page file cost and
+render time (rows and options in `docs/cli-reference.md`). The full run on
+the i7-8700K is still to do.
+
+**Later: the RAM-file-system rows of that benchmark.** Row `R12` writes to a
+RAM file system to take the disk and the file system out of the comparison.
+On Linux it needs a dedicated tmpfs mount at `/mnt/rr-bench-ram`, on Windows
+a RAM disk (a third-party driver such as Arsenal Image Mounter, labelled
+`RR-BENCH-RAM`). Neither exists on the benchmark machine yet, so the first
+run leaves the row out: the Linux driver stops with the mount command when a
+full run includes the `ram` group, so that run names its groups with `-g`;
+the Windows driver skips `R12` without `-RamRoot` and lists it in
+`skipped.txt`. The first published results carry no RAM row.
+
 **Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
 irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one
