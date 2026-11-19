@@ -32,9 +32,9 @@ rasterrocket-color
   │           PDF content stream interpreter + operator dispatcher
   │           │
   │           ├── gpu  (optional, feature-gated)
-  │           │     CUDA and Vulkan kernels, whole-page Vulkan raster,
-  │           │     device image cache, nvJPEG/nvJPEG2k and VA-API decoders,
-  │           │     NPP rotate
+  │           │     CUDA, Vulkan and Direct3D 12 kernels, whole-page raster
+  │           │     on Vulkan or Direct3D 12, device image cache,
+  │           │     nvJPEG/nvJPEG2k and VA-API decoders, NPP rotate
   │           │
   │           ├── zune-jpeg  (crates/zune_jpeg: local fork, pure Rust)
   │           │     JPEG decoder for DCTDecode
@@ -109,7 +109,8 @@ PageRenderer::execute(ops)           dispatch loop:
     │   Flate    ───────────────────▶ libdeflate (default) / flate2 fallback
     │   ICC CMYK ───────────────────▶ profile transform: its tabulated grid on
     │                                 the CPU or (gpu::backend::icc_clut) on
-    │                                 a session's CUDA or Vulkan backend
+    │                                 a session's CUDA, Vulkan or Direct3D 12
+    │                                 backend
     │                                 PageRenderer::blit_image
     ├── shading ops ────────────────▶ raster::shaded_fill / gouraud_triangle_fill
     ├── tiling ops  ────────────────▶ raster::TiledPattern
@@ -117,7 +118,8 @@ PageRenderer::execute(ops)           dispatch loop:
     │
     │   (with SessionConfig::gpu_pages, a qualifying page is recorded as
     │    gpu::page::PageCommands instead and rendered by
-    │    VulkanBackend::render_page into the same canvas; see §3.6)
+    │    PageDevice::render_page (Vulkan or Direct3D 12) into the same
+    │    canvas; see §3.6)
     │
     ▼ PageRenderer::try_finish_keeping(transparent)
     │                                 page group onto white, unless rendered over
@@ -862,11 +864,15 @@ makes unit testing straightforward: inject a `Document` and page `ObjectId`.
   overrides) whose conversion is tabulated converts through the table's
   grid (`color::grid::CmykGrid`) by `gpu::backend::icc_clut` on the
   device, which interpolates it in the integer arithmetic of the CPU
-  conversion; the Vulkan backend when the session holds one, otherwise
-  CUDA. Smaller images, and those the device declines or fails, convert on
-  the CPU, so a GPU session's output is a CPU session's byte for byte. A
-  Vulkan device that fails a one-time exactness probe
-  (`VulkanBackend::icc_clut_is_exact`) is not used.
+  conversion, to 8-bit samples or, through `gpu::backend::icc_clut16`, to
+  16-bit ones where the CPU converts the samples widened at 16 bits. The
+  Vulkan or Direct3D 12 backend converts when the session holds one (a
+  session holds at most one of them), otherwise CUDA. Smaller images, and
+  those the device declines or fails, convert on the CPU, so a GPU
+  session's output is a CPU session's byte for byte. A Vulkan or Direct3D
+  12 device that fails a one-time exactness probe
+  (`VulkanBackend::icc_clut_is_exact`, `D3d12Backend::icc_clut_is_exact`)
+  is not used.
 - Image blit: an image held in the device image cache is sampled by the
   blit kernel of the cache's backend and composited on the host; a draw
   that reduces the image, or a blit that does not start, draws through the
@@ -880,8 +886,9 @@ pool drops — this avoids the CUDA driver teardown race at process exit. A thre
 stream or staging set on a context whose `GpuCtx` has dropped is also dropped when the
 thread next creates one (`gpu::live`).
 
-The CUDA context (`GpuCtx`) and the Vulkan backends are held weakly by process-wide
-registries (`registry::shared`): sessions alive at once share them, the last to drop
+The CUDA context (`GpuCtx`) and the Vulkan and Direct3D 12 backends are held weakly by
+process-wide registries (`registry::shared`; one per API for the page backends,
+`SessionDevice::registry`): sessions alive at once share them, the last to drop
 destroys them, and a `DeviceHold` keeps them open across sessions.
 
 **Error handling**
@@ -912,8 +919,9 @@ destroys them, and a `DeviceHold` keeps them open across sessions.
 
 ### 3.6 `gpu`
 
-GPU compute kernels (CUDA + Vulkan), CUDA decoders, and VA-API decoders.  Not
-linked unless at least one `gpu-*` / `vaapi` / `vulkan` / `cache` feature is
+GPU compute kernels (CUDA, Vulkan, Direct3D 12), CUDA decoders, and VA-API
+decoders.  Not linked unless at least one of `nvjpeg`, `nvjpeg2k`, `vaapi`,
+`gpu-icc`, `gpu-deskew`, `cache`, `vulkan`, `d3d12` or `gpu-validation` is
 active.
 
 **Backend abstraction.**  `crates/gpu/src/backend/` factors the per-page state
@@ -921,8 +929,11 @@ machine out of `GpuCtx`:
 
 ```text
 GpuBackend trait          (backend/mod.rs)
-├── CudaBackend           (backend/cuda/)        — wraps GpuCtx + per-page recorder
-└── VulkanBackend         (backend/vulkan/)      — ash 0.38 + gpu-allocator + slangc-compiled SPIR-V
+├── CudaBackend           (backend/cuda/)   — wraps GpuCtx + per-page recorder
+├── VulkanBackend         (backend/vulkan/) — ash 0.38 + gpu-allocator + slangc-compiled SPIR-V
+└── D3d12Backend          (backend/d3d12/)  — windows 0.62 + slangc → HLSL → dxc-compiled DXIL (Windows)
+
+PageDevice: GpuBackend    (backend/page_device.rs) — whole-page raster; VulkanBackend, D3d12Backend
 ```
 
 The trait surface is `begin_page → record_* → submit_page → wait_page`
@@ -930,15 +941,16 @@ The trait surface is `begin_page → record_* → submit_page → wait_page`
 kernel `record_*` methods (blit, ICC CLUT), the copy and zero-fill records, `alloc_device` / `alloc_host_pinned`
 / `upload` / `download`, and `scratch()`.  GATs (`type DeviceBuffer`) make it
 usable only as a generic parameter, not `dyn` — callers monomorphise per
-backend; the trait is sealed to the two backends of the crate.  The
+backend; the trait is sealed to the three backends of the crate.  The
 backend-generic operations (`backend::blit_image`, `backend::icc_clut`) each
 run as one page: uploads, kernel and download.
 Their device buffers come from the backend's `DeviceScratch`, one
 `ScratchPool` per operation, which lends a scratch to each operation in
 flight and keeps it, at the largest size it served, for later pages.  The
-renderer holds `Option<Arc<GpuCtx>>` for CUDA and `Option<Arc<VulkanBackend>>`
-for Vulkan as parallel fields and the image cache as the backend-erased
-`gpu::cache::ImageCache`.
+renderer holds `Option<Arc<GpuCtx>>` for CUDA, `Option<Arc<VulkanBackend>>`
+for Vulkan and `Option<Arc<D3d12Backend>>` for Direct3D 12 as parallel
+fields (`renderer/page/devices.rs`), and the image cache as the
+backend-erased `gpu::cache::ImageCache`.
 
 **`GpuCtx`** (CUDA) — one per process, holds the CUDA context and all compiled
 PTX kernels as `cudarc` modules.  Shared via `Arc<GpuCtx>`.  `cudarc` is pinned
@@ -951,32 +963,81 @@ integrated > virtual > CPU), creates a single compute queue, and lazy-loads
 SPIR-V → `VkPipeline` per kernel.  Persistent `VkPipelineCache` blob at
 `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin` across runs.  Shared
 via `Arc<VulkanBackend>`.  The renderer dispatches the ICC grid conversion
-and the cached-image blit through it, and `VulkanBackend::render_page`
-renders whole pages (*Page raster* below).
+and the cached-image blit through it, and it renders whole pages through
+`PageDevice` (*Page raster* below).  On Linux and Android a page's canvas is
+faulted in (`MADV_POPULATE_WRITE`, `backend/vulkan/host_pages.rs`) before
+the page's device buffers are allocated, so the canvas takes the free huge
+pages first; elsewhere it faults in on first write.
+
+**`D3d12Backend`** (`d3d12` feature, Windows only; the adapter selection of
+`backend/d3d12/select.rs` is plain data and builds and is tested on every
+host) — one per adapter selector (`SessionConfig::d3d12_device`: an index or
+a name substring over DXGI's high-performance enumeration order, or `warp`),
+opened only under `BackendPolicy::ForceD3d12`; `Auto` never opens it.
+Without a selector it takes the first usable hardware adapter with dedicated
+video memory, else the first usable hardware adapter; it needs shader model
+6.0. The WARP software adapter is named only by `warp` or its own listed
+index: it is never chosen automatically and never included in
+`gpu_devices` `all`. The backend creates one compute queue and a root
+signature and pipeline state per kernel, and runs the same Slang kernels
+compiled to DXIL: the ICC grid conversion (after the same exactness check,
+`D3d12Backend::icc_clut_is_exact`), the image cache and its blit, and the
+page raster. Buffers are committed resources (the DEFAULT heap on the
+device, the UPLOAD and READBACK heaps for transfers). A view holds at most
+2^27 elements, so a page or an input past that is a
+`BackendError::DeviceLimit` and renders on the CPU.
+`PDF_RASTER_D3D12_DEBUG=1` enables the debug layer. Tested on an RTX 5070,
+an AMD Radeon iGPU and WARP 1.0.22 under Windows 11; untested on Intel
+adapters.
+
+**`PageDevice`** (`backend/page_device.rs`) is the whole-page interface the
+two page backends implement: device selection without opening
+(`check_selector`, `resolve_devices`, `usable_gpus`; `open` opens one),
+`render_page` and `render_page_timed` (the latter returns `PageTimes`: the
+host stages, and the device stages measured by timestamps), `page_paths`
+(64-bit integers in kernels: `shaderInt64` on Vulkan, `Int64ShaderOps` on
+Direct3D 12), `page_mean` (an exponentially weighted mean of the time a page
+raster holds the device, the newest weighing 1/8), and `retires_device`
+(every error but `DeviceLimit` and `OutOfMemory`, which concern the page
+alone). Concurrent `render_page` calls stage their inputs and read their
+pixels in parallel, each in one of three buffer sets kept between pages,
+and run on the device one at a time. `rasterrocket` builds on it through
+`SessionDevice` (`device_init.rs`: the API's selector, registry and forcing
+policy) and `SessionDevicePages` (`device_pages/`: Vulkan under `Auto` and
+`ForceVulkan`, Direct3D 12 under `ForceD3d12`; §3.7).
 
 **Backend start-up under `Auto`.**  A session under `BackendPolicy::Auto`
 initialises no GPU backend, image cache or nvJPEG decoder: it renders on the
 CPU, except JPEG 2000 images for which, when `PDF_RASTER_JPX_THRESHOLD` sets a
-pixel area, a thread's nvJPEG2000 decoder is built on demand, and pages `gpu_pages` sends to a Vulkan device it opens when the first page that may render on it is reached.
-`ForceCuda` / `ForceVulkan` initialise their backend.
+pixel area, a thread's nvJPEG2000 decoder is built on demand, and the
+Vulkan devices of `gpu_pages` are opened when the first page that may render
+on one is reached.  `ForceCuda` / `ForceVulkan` / `ForceD3d12` initialise
+their backend.
 
-**Kernel inventory.**  Two kernel sources exist in **both** `.cu` (CUDA, compiled to
-PTX by `nvcc`) and `.slang` (Slang, compiled to SPIR-V by `slangc`) at build
-time, gated on the `vulkan` feature; `page_raster` exists in Slang only, compiled twice.
+**Kernel inventory** (`kernels/kernel_list.rs`).  Two kernel sources exist in
+**both** `.cu` (CUDA, compiled to PTX by `nvcc`) and `.slang` (compiled by
+`slangc` to SPIR-V under the `vulkan` feature, and to HLSL, then DXIL by
+`dxc`, under `d3d12`); `page_raster` exists in Slang only, compiled twice
+(`page_raster`, `page_raster_paths`), and the test-only `floor_div_probe`
+kernels check the 64-bit floor division (`floor_div.slang`) the paths
+kernel uses.
 
 | Kernel | CUDA file | Slang file | Operation | Threshold |
 |---|---|---|---|---|
 | `icc_cmyk_clut` | icc_clut.cu | icc_clut.slang | ICC CMYK→RGB through a tabulated conversion's grid, in its simplices in integers (byte-identical to `CmykGrid::convert`) | 128 000 px |
 | `icc_cmyk_matrix` | icc_clut.cu | — | profile-free CMYK→RGB by the process-ink model; not dispatched by the renderer | — |
 | `blit_image` | blit_image.cu | blit_image.slang | Cached-image sampling onto an RGBA target (`cache` feature) | always |
-| `page_raster` | — | page_raster.slang (+ page_image.slang, page_modifiers.slang) | Whole page from a `PageCommands` list, one workgroup per 16-px tile: coverage tables, glyph masks, images, path clips and soft-masked objects | `gpu_pages`, device without `shaderInt64` |
-| `page_raster_paths` | — | page_raster.slang with `PAGE_PATHS` | As `page_raster`, and computes the exact-area coverage of outlines with the CPU rasteriser's integer walk; needs 64-bit integers | `gpu_pages`, device with `shaderInt64` |
+| `page_raster` | — | page_raster.slang (+ page_image.slang, page_modifiers.slang) | Whole page from a `PageCommands` list, one workgroup per 16-px tile: coverage tables, glyph masks, images, path clips and soft-masked objects | `gpu_pages`, device without 64-bit integers |
+| `page_raster_paths` | — | page_raster.slang with `PAGE_PATHS` | As `page_raster`, and computes the exact-area coverage of outlines with the CPU rasteriser's integer walk; needs 64-bit integers | `gpu_pages`, device with 64-bit integers |
 
-Four kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (ICC
-grid and blit) run the Vulkan kernel against the CUDA kernel or the host
-evaluator and require byte-equal output.
+Six kernel-level parity tests in `crates/gpu/tests/cu_vs_slang_parity.rs` (the
+ICC grid and five blit cases) run the Vulkan kernel against the CUDA kernel
+or the host evaluator and require byte-equal output; the page-device tests
+(`backend/page_device/`) run on each page backend the build tests and
+compare it with the host model of the page raster.
 
-**Page raster** (`gpu::page`, `backend/vulkan/page.rs`, Vulkan only).  A
+**Page raster** (`gpu::page`, `backend/page_job.rs`, `backend/vulkan/page.rs`,
+`backend/d3d12/page.rs`; `PageDevice`).  A
 `PageCommands` list holds a page as paint commands over an opaque RGB page
 of 8 or 16 bits per sample, each limited to an inclusive pixel rectangle and
 painted in push order: one colour at a constant alpha whose per-pixel
@@ -994,12 +1055,15 @@ are bounded by `PAGE_COMMANDS_MAX_BYTES` (128 MiB): a push past it fails
 and leaves the list unchanged.  The host bins the commands into 16-pixel
 tiles (`PageCommands::bin`); an outline's tile lists the segments that may
 deposit a cell in it and its backdrop, and an outline tile covered fully
-and opaquely hides the items below it.  `VulkanBackend::render_page` stages
+and opaquely hides the items below it.  `PageDevice::render_page` stages
 the inputs, runs one workgroup per tile that walks its items in order and
 composites each pixel as the CPU's `aa` pipe (or, for an image at full
 opacity, the CPU's direct image composite) does, and reads the page back,
-in one submission and one wait.  Outlines need `shaderInt64`
-(`page_raster_paths`); on a device without it an outline is recorded as
+in one submission and one wait.  A page with outlines zeroes its status
+words first; a division the outline walk could not complete exactly
+(`floor_div.slang`) fails the page with `BackendError::KernelFault` before
+any pixel is copied.  Outlines need 64-bit integers in kernels
+(`page_raster_paths`); on a device without them an outline is recorded as
 its coverage table and the page runs `page_raster`, and so is an outline
 past the device's integer range (`PATH_COORD_LIMIT`, `PATH_SEGMENTS`,
 `PATH_TILE_SEGMENTS`).  `gpu::page::reference`
@@ -1037,7 +1101,10 @@ when nvcc works, real PTX is compiled regardless of features.  When nvcc fails
 (no CUDA toolkit on a CI runner), 0-byte placeholder PTX files are written and
 `cargo:rustc-cfg=ptx_placeholder` is emitted; `GpuCtx::init` short-circuits
 under that cfg with a clear error pointing at the build host.  Slang→SPIR-V
-compile is gated on `CARGO_FEATURE_VULKAN`.
+compile is gated on `CARGO_FEATURE_VULKAN`.  Slang→HLSL→DXIL compile is gated
+on `CARGO_FEATURE_D3D12` (`build_support/dxil_build.rs`) and requires
+slangc 2026.20 and DXC 1.9.2609; another version, or a missing compiler,
+fails the build with the install commands.
 
 **Optional decoders** (feature-gated)
 - `nvjpeg` — `NvJpegDecoder`, TLS one-per-thread, primary `GPU_HYBRID`, fallback `DEFAULT`
@@ -1045,9 +1112,9 @@ compile is gated on `CARGO_FEATURE_VULKAN`.
 - `gpu-deskew` — `npp_rotate::rotate_gray8()` via `nppiRotate_8u_C1R_Ctx`
 - `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, tested on Raphael VCN 4.0; Intel Quick Sync and Intel Arc untested); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU.
 
-**Device image cache** (`cache` feature, CUDA or Vulkan)
-- `DeviceImageCache<B: CacheBackend>` — three tiers: VRAM (refcount-pinned LRU), host RAM (demote-on-evict / promote-on-hit; `cuMemAllocHost` slabs on CUDA, ordinary memory on Vulkan), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files, shared by both backends; opt-in via `PDF_RASTER_CACHE_DIR`).  `CacheBackend` extends `GpuBackend` with the cache's transfers outside a page; a slab is the backend's `DeviceBuffer`.  `ImageCache` and `CachedImage` erase the backend: a session builds its cache on the Vulkan backend when it holds one, otherwise on the CUDA context.
-- CUDA blit: `DevicePageBuffer` — zero-init RGBA8 per page; lazy-allocated on first GPU image. Each blit samples the cached image through the same Q32 column/row tables the CPU sampler uses (`renderer/page/image_sampler.rs`), then the touched rows are downloaded, source-over composited onto the host bitmap in content-stream order, and re-zeroed.  Vulkan blit: `backend::blit_image_box` uploads the tables, zero-fills a target the size of the draw's bounding box, runs the kernel and reads the box back as one page, and the box is composited through the same `composite_rgba_rows`.  Either way cache-on and cache-off renders are byte-identical. A draw that reduces the image (`image_reduce::draw_reduces`) first copies the cached pixels back to the host (`DeviceImageCache::download`) so they are area-averaged exactly as host-resident pixels are; the kernel samples only images drawn at or near full resolution, and a JPEG drawn below its resolution is never put in the cache.
+**Device image cache** (`cache` feature, CUDA, Vulkan or Direct3D 12)
+- `DeviceImageCache<B: CacheBackend>` — three tiers: VRAM (refcount-pinned LRU), host RAM (demote-on-evict / promote-on-hit; `cuMemAllocHost` slabs on CUDA, ordinary memory on Vulkan and Direct3D 12), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files, shared by every backend; opt-in via `PDF_RASTER_CACHE_DIR`).  `CacheBackend` extends `GpuBackend` with the cache's transfers outside a page; a slab is the backend's `DeviceBuffer`.  `ImageCache` and `CachedImage` erase the backend: a session builds its cache on the Vulkan or Direct3D 12 backend when it holds one, otherwise on the CUDA context.
+- CUDA blit: `DevicePageBuffer` — zero-init RGBA8 per page; lazy-allocated on first GPU image. Each blit samples the cached image through the same Q32 column/row tables the CPU sampler uses (`renderer/page/image_sampler.rs`), then the touched rows are downloaded, source-over composited onto the host bitmap in content-stream order, and re-zeroed.  Vulkan and Direct3D 12 blit: `backend::blit_image_box` uploads the tables, zero-fills a target the size of the draw's bounding box, runs the kernel and reads the box back as one page, and the box is composited through the same `composite_rgba_rows`.  Either way cache-on and cache-off renders are byte-identical. A draw that reduces the image (`image_reduce::draw_reduces`) first copies the cached pixels back to the host (`DeviceImageCache::download`) so they are area-averaged exactly as host-resident pixels are; the kernel samples only images drawn at or near full resolution, and a JPEG drawn below its resolution is never put in the cache.
 - BLAKE3 content hashing (`ContentHash::of`) keys cross-document dedup; `(DocId, ObjId)` alias keys same-document fast paths.
 
 **CPU fallbacks** — every GPU function has a pure-Rust CPU counterpart. The
@@ -1581,8 +1648,9 @@ requires no CUDA toolkit and links no NVIDIA libraries.
 **One GPU context per process.**
 `GpuCtx` is `Arc<_>`, initialised once, shared by all worker threads. PTX kernels
 are loaded at init time. The driver serialises concurrent CUDA calls internally.
-A `VulkanBackend` is built once per device selector and shared the same way;
-its single recording state serialises whole pages (`GpuBackend::run_page`).
+A `VulkanBackend` or `D3d12Backend` is built once per device selector and shared
+the same way; page rasters on it run one at a time (`PageDevice::render_page`),
+and the kernel pages of `GpuBackend::run_page` under its single recording state.
 
 **SIMD dispatch is per-arch, not per-feature.**
 ARM NEON is unconditionally available on aarch64 — no runtime probe. x86 SIMD
