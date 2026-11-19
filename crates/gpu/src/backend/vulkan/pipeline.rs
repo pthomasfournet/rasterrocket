@@ -311,28 +311,104 @@ pub(super) struct PipelineCache {
     /// Slots indexed by `KernelId::slot_index()`. `OnceLock` so the first
     /// caller initialises and the rest read; thread-safe by construction.
     slots: [std::sync::OnceLock<CompiledKernel>; NUM_KERNELS],
-    /// Driver-side pipeline cache — populated from disk at startup if a
-    /// matching file exists, written back at Drop.  Vulkan validates the
-    /// cache header (driver UUID etc.) so a cache from a different driver
-    /// version is silently ignored.  `vk::PipelineCache::null()` is a
-    /// valid passthrough; we never expose this handle directly.
+    /// Driver-side pipeline cache — populated at startup from this
+    /// device's file ([`CacheKey`]) when its header matches the device,
+    /// written back at Drop.
     vk_cache: vk::PipelineCache,
+    /// The device's identity, which names its cache file and which the
+    /// file's header must match.
+    key: CacheKey,
 }
 
-/// Filename of the on-disk pipeline-cache blob.  Lives under the user's
-/// XDG cache root.  Vulkan's own header tags the device/driver, so a
-/// shared filename is safe — mismatched caches are rejected at load.
-const CACHE_FILENAME: &str = "vulkan_pipeline_cache.bin";
+/// The identity of a device's pipeline-cache data: the fields of the
+/// device properties that the data's header
+/// (`VkPipelineCacheHeaderVersionOne`) carries, and the driver version.
+///
+/// Each key has a file of its own, so the devices of one host do not
+/// overwrite one another's data; a file whose header names another vendor,
+/// device or cache UUID, or that is shorter than the header, is not passed
+/// to the driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheKey {
+    vendor_id: u32,
+    device_id: u32,
+    driver_version: u32,
+    uuid: [u8; vk::UUID_SIZE],
+}
+
+/// Bytes of a version-one pipeline-cache header: length, version, vendor
+/// ID and device ID as 32-bit words, then the cache UUID.
+const CACHE_HEADER_BYTES: usize = 16 + vk::UUID_SIZE;
+
+impl CacheKey {
+    const fn of(props: &vk::PhysicalDeviceProperties) -> Self {
+        Self {
+            vendor_id: props.vendor_id,
+            device_id: props.device_id,
+            driver_version: props.driver_version,
+            uuid: props.pipeline_cache_uuid,
+        }
+    }
+
+    /// The name of the key's cache file.
+    fn file_name(&self) -> String {
+        use std::fmt::Write as _;
+        let uuid = self.uuid.iter().fold(String::new(), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        });
+        format!(
+            "vulkan_pipeline_cache-{:04x}-{:04x}-{:08x}-{uuid}.bin",
+            self.vendor_id, self.device_id, self.driver_version
+        )
+    }
+
+    /// Whether `data` opens with a version-one header of this key; the
+    /// header's words are stored least significant byte first.
+    fn matches_header(&self, data: &[u8]) -> bool {
+        let Some((words, uuid)) = data.get(..CACHE_HEADER_BYTES).map(|h| h.split_at(16)) else {
+            return false;
+        };
+        let words: Vec<u32> = words
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect();
+        let version_one = u32::try_from(vk::PipelineCacheHeaderVersion::ONE.as_raw()).ok();
+        usize::try_from(words[0]).is_ok_and(|len| len >= CACHE_HEADER_BYTES)
+            && Some(words[1]) == version_one
+            && words[2] == self.vendor_id
+            && words[3] == self.device_id
+            && uuid == self.uuid
+    }
+}
 
 impl PipelineCache {
     /// Construct the cache, attempting to seed the driver-side
     /// `VkPipelineCache` from the on-disk blob.  A missing or unreadable
     /// file is logged at info level and treated as a cold start.
     pub(super) fn new(device: Arc<DeviceCtx>) -> Result<Arc<Self>> {
-        let initial_data = match read_cache_file() {
-            Ok(bytes) => bytes,
+        // SAFETY: the physical device belongs to the live instance.
+        let props = unsafe { device.instance.get_physical_device_properties(device.phys) };
+        let key = CacheKey::of(&props);
+        if let Some(dir) = cache_path(&key)
+            .as_deref()
+            .and_then(std::path::Path::parent)
+        {
+            remove_stale_files(dir);
+        }
+        let initial_data = match read_cache_file(&key) {
+            Ok(bytes) if key.matches_header(&bytes) => bytes,
+            Ok(_) => {
+                log::debug!(
+                    "{}: header does not name this device; not loaded",
+                    key.file_name()
+                );
+                Vec::new()
+            }
             Err(e) => {
-                log::debug!("vulkan_pipeline_cache.bin not loaded: {e}");
+                log::debug!("{} not loaded: {e}", key.file_name());
                 Vec::new()
             }
         };
@@ -351,6 +427,7 @@ impl PipelineCache {
             device,
             slots: Default::default(),
             vk_cache,
+            key,
         }))
     }
 
@@ -506,8 +583,8 @@ impl Drop for PipelineCache {
         let data = unsafe { self.device.device.get_pipeline_cache_data(self.vk_cache) };
         match data {
             Ok(bytes) if !bytes.is_empty() => {
-                if let Err(e) = write_cache_file(&bytes) {
-                    log::debug!("vulkan_pipeline_cache.bin not written: {e}");
+                if let Err(e) = write_cache_file(&self.key, &bytes) {
+                    log::debug!("{} not written: {e}", self.key.file_name());
                 }
             }
             Ok(_) => {} // empty cache, nothing to persist
@@ -533,28 +610,90 @@ impl Drop for PipelineCache {
     }
 }
 
-/// Resolve the absolute path to the on-disk pipeline cache:
+/// Resolve the absolute path to `key`'s on-disk pipeline cache:
 /// `$XDG_CACHE_HOME/rasterrocket/<file>` (falling back to `$HOME/.cache/...`).
 /// Returns `None` if neither env var is set — pure-batch builds with no
 /// home directory just skip the cache.
-fn cache_path() -> Option<std::path::PathBuf> {
+fn cache_path(key: &CacheKey) -> Option<std::path::PathBuf> {
     let cache_root = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
-    Some(cache_root.join("rasterrocket").join(CACHE_FILENAME))
+    Some(cache_root.join("rasterrocket").join(key.file_name()))
 }
 
-fn read_cache_file() -> std::io::Result<Vec<u8>> {
-    let path = cache_path().ok_or_else(|| std::io::Error::other("no $XDG_CACHE_HOME or $HOME"))?;
+fn read_cache_file(key: &CacheKey) -> std::io::Result<Vec<u8>> {
+    let path =
+        cache_path(key).ok_or_else(|| std::io::Error::other("no $XDG_CACHE_HOME or $HOME"))?;
     std::fs::read(&path)
 }
 
-fn write_cache_file(bytes: &[u8]) -> std::io::Result<()> {
-    let path = cache_path().ok_or_else(|| std::io::Error::other("no $XDG_CACHE_HOME or $HOME"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn write_cache_file(key: &CacheKey, bytes: &[u8]) -> std::io::Result<()> {
+    let path =
+        cache_path(key).ok_or_else(|| std::io::Error::other("no $XDG_CACHE_HOME or $HOME"))?;
+    write_replacing(&path, bytes)
+}
+
+/// The file of the single cache all devices once shared.
+const LEGACY_CACHE_FILE: &str = "vulkan_pipeline_cache.bin";
+
+/// Age past which a temporary cache file is taken to be abandoned by a
+/// writer that was killed between its write and its rename.
+const STALE_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Whether `name` is the legacy cache file, or a temporary file of
+/// [`write_replacing`] for a cache file of this module, last modified
+/// `age` ago, at least [`STALE_TEMPORARY`].
+fn is_stale(name: &str, age: Option<std::time::Duration>) -> bool {
+    name == LEGACY_CACHE_FILE
+        || (name.starts_with("vulkan_pipeline_cache-")
+            && std::path::Path::new(name)
+                .extension()
+                .is_some_and(|e| e == "tmp")
+            && name.contains(".bin.")
+            && age.is_some_and(|age| age >= STALE_TEMPORARY))
+}
+
+/// Remove from `dir` the files [`is_stale`] names; every failure is
+/// ignored, the files being only cache.
+fn remove_stale_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
+        if entry.file_type().is_ok_and(|t| t.is_file()) && is_stale(name, age) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
-    std::fs::write(&path, bytes)
+}
+
+/// Write `bytes` to a file of its own beside `path`, then rename it over
+/// `path`: a rename within one directory replaces the file atomically, so
+/// a reader sees the previous data or all of `bytes`, never a partial
+/// write, and concurrent writers leave one whole file.  The temporary
+/// file is named by process and a per-process count, and is removed when
+/// the write or the rename fails.
+fn write_replacing(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache path has no directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{n}.tmp", std::process::id()));
+    let tmp = dir.join(name);
+    let written = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Pipeline handles needed to record a dispatch.  The Vulkan handles are
@@ -588,6 +727,90 @@ impl PipelineCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key() -> CacheKey {
+        CacheKey {
+            vendor_id: 0x10de,
+            device_id: 0x1e81,
+            driver_version: 0x9b11_8000,
+            uuid: std::array::from_fn(|i| u8::try_from(i * 17).expect("below 256")),
+        }
+    }
+
+    fn header(key: &CacheKey) -> Vec<u8> {
+        let mut h = Vec::new();
+        for w in [32, 1, key.vendor_id, key.device_id] {
+            h.extend_from_slice(&w.to_le_bytes());
+        }
+        h.extend_from_slice(&key.uuid);
+        h
+    }
+
+    #[test]
+    fn cache_files_are_named_per_device_and_driver() {
+        let a = key();
+        assert_eq!(
+            a.file_name(),
+            "vulkan_pipeline_cache-10de-1e81-9b118000-00112233445566778899aabbccddeeff.bin"
+        );
+        let others = [
+            CacheKey {
+                device_id: 0x3e92,
+                ..a
+            },
+            CacheKey {
+                driver_version: 1,
+                ..a
+            },
+            CacheKey { uuid: [0; 16], ..a },
+        ];
+        for b in others {
+            assert_ne!(a.file_name(), b.file_name());
+        }
+    }
+
+    #[test]
+    fn only_a_header_of_the_device_is_loaded() {
+        let k = key();
+        let mut data = header(&k);
+        data.extend_from_slice(&[0xAB; 64]);
+        assert!(k.matches_header(&data));
+        assert!(!k.matches_header(&data[..CACHE_HEADER_BYTES - 1]));
+        assert!(!k.matches_header(&[]));
+        for (at, value) in [(0, 31_u8), (4, 2), (8, 0x02), (12, 0x00), (16, 0xFF)] {
+            let mut bad = data.clone();
+            bad[at] = value;
+            assert!(!k.matches_header(&bad), "byte {at} = {value}");
+        }
+    }
+
+    #[test]
+    fn only_the_legacy_file_and_abandoned_temporaries_are_stale() {
+        let hour = Some(STALE_TEMPORARY);
+        let tmp = "vulkan_pipeline_cache-10de-1e81-9b118000-00.bin.4242.0.tmp";
+        assert!(is_stale(LEGACY_CACHE_FILE, None));
+        assert!(is_stale(tmp, hour));
+        assert!(!is_stale(tmp, Some(std::time::Duration::from_secs(5))));
+        assert!(!is_stale(tmp, None));
+        assert!(!is_stale(&key().file_name(), hour));
+        assert!(!is_stale("other.bin.1.0.tmp", hour));
+        assert!(!is_stale("vulkan_pipeline_cache-x.tmp", hour));
+    }
+
+    #[test]
+    fn a_replacing_write_leaves_only_the_whole_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("rasterrocket");
+        let path = dir.join("cache.bin");
+        write_replacing(&path, &[1; 100]).expect("first write");
+        write_replacing(&path, &[2; 10]).expect("second write");
+        assert_eq!(std::fs::read(&path).expect("read"), [2; 10]);
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["cache.bin"]);
+    }
 
     #[test]
     fn int64_is_declared_by_the_64_bit_kernels_only() {

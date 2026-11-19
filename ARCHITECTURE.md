@@ -1005,7 +1005,8 @@ shared by every session naming it; loads the Vulkan instance, picks a device
 (an index or a name substring when selected, otherwise ranked discrete >
 integrated > virtual > CPU), creates a single compute queue, and lazy-loads
 SPIR-V → `VkPipeline` per kernel.  Persistent `VkPipelineCache` blob at
-`$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin` across runs.  Shared
+`$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache-<vendor>-<device>-<driver>-<uuid>.bin`
+across runs, one file per device and driver, replaced by rename.  Shared
 via `Arc<VulkanBackend>`.  The renderer dispatches the ICC grid conversion
 and the cached-image blit through it, and it renders whole pages through
 `PageDevice` (*Page raster* below).  On Linux and Android a page's canvas is

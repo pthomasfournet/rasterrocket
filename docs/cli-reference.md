@@ -713,7 +713,7 @@ Read at run time:
 | `RROCKET_DECRYPT_OWNED` | any | `1` authorises decryption as `--decrypt-owned` does; any other value does not. |
 | `TMPDIR` | any | The directory of the `--print` spool; unset, `/var/tmp` where it exists, else the system's temporary directory. |
 | `VULKAN_SDK` | `vulkan`, macOS | An absolute path whose `lib/libvulkan.1.dylib` is tried when the default Vulkan loader is not found; see [macOS](platforms/macos.md#vulkan-through-moltenvk). |
-| `XDG_CACHE_HOME`, `HOME` | `vulkan` | The Vulkan pipeline cache is kept at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache.bin`, else under `$HOME/.cache`; with neither set, no pipeline cache is kept. |
+| `XDG_CACHE_HOME`, `HOME` | `vulkan` | The Vulkan pipeline cache is kept at `$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache-<vendor>-<device>-<driver>-<uuid>.bin`, one file per device and driver, else under `$HOME/.cache`; with neither set, no pipeline cache is kept. |
 | `RUST_LOG` | any | The log filter (`env_logger` syntax); default `warn`. `RUST_LOG=debug` adds the device choices, `RUST_LOG=rasterrocket=debug` where each `--gpu-pages` page rendered. |
 
 Read when building the `rasterrocket-gpu` crate (the CUDA, Vulkan and D3D12 features):
