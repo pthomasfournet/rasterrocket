@@ -262,7 +262,7 @@ impl BinnedPath {
 }
 
 /// `⌊a / b⌋` for `b > 0`.
-const fn floor_div(a: i64, b: i64) -> i64 {
+pub(crate) const fn floor_div(a: i64, b: i64) -> i64 {
     a.div_euclid(b)
 }
 

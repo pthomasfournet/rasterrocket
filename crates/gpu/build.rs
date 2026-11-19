@@ -43,8 +43,9 @@ fn link_lib_in_dir(dirs: &[PathBuf], lib: &str, feature: &str) {
 const KERNELS: &[&str] = &["icc_clut", "blit_image"];
 
 /// Compute kernels with a Slang source only, compiled to SPIR-V for the
-/// Vulkan backend; the CUDA backend has no twin of them.
-const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster", "page_raster_paths"];
+/// Vulkan backend; the CUDA backend has no twin of them.  Only the
+/// library's tests embed `floor_div_probe`.
+const VULKAN_ONLY_KERNELS: &[&str] = &["page_raster", "page_raster_paths", "floor_div_probe"];
 
 /// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
 /// capabilities.
@@ -58,6 +59,7 @@ fn slang_entry(kernel: &str) -> &'static str {
         "icc_clut" => "icc_cmyk_clut",
         "blit_image" => "blit_image",
         "page_raster" | "page_raster_paths" => "page_raster",
+        "floor_div_probe" => "floor_div_probe",
         _ => panic!("unknown kernel name: {kernel}"),
     }
 }

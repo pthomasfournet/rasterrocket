@@ -14,6 +14,11 @@
 //! bytes and writes each row's packed samples at its stride in the
 //! caller's buffer, leaving the samples between rows unchanged.
 //!
+//! A page with outlines also binds a status buffer
+//! ([`crate::backend::kernel_status`]), zeroed by the page's command
+//! buffer before the raster and read back with the pixels; a fault it
+//! records fails the page before any pixel is copied.
+//!
 //! A timed page ([`VulkanBackend::render_page_timed`]) also reads the host
 //! clock between its host stages and writes device timestamps between its
 //! device stages; an untimed page does neither.
@@ -21,6 +26,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::backend::kernel_status::{self, STATUS_BYTES, STATUS_WORDS, status_words};
 use crate::backend::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage_parts,
 };
@@ -48,6 +54,9 @@ pub(super) struct PageScratch {
     inputs: [Option<Staged<VulkanBackend>>; 5],
     /// The page.
     target: Option<Staged<VulkanBackend>>,
+    /// The status words of a page with outlines
+    /// ([`crate::backend::kernel_status`]).
+    status: Option<Staged<VulkanBackend>>,
     /// The timestamp queries of timed pages, created by the first.
     clock: Option<StageClock>,
 }
@@ -115,7 +124,8 @@ pub struct PageTimes {
     pub submit_wait: Duration,
     /// Host: copying the pixels into the caller's samples.
     pub read: Duration,
-    /// Device: copying the inputs from the staging buffers.
+    /// Device: copying the inputs from the staging buffers, and zeroing
+    /// the status words of a page with outlines.
     pub device_upload: Duration,
     /// Device: the raster dispatch.
     pub device_raster: Duration,
@@ -172,6 +182,14 @@ fn push_constants(page: &PageCommands, bins: &TileBins, bases: TableBases) -> [u
     push
 }
 
+/// `Ok` when the status words of a raster with outlines record no fault.
+///
+/// # Errors
+/// [`BackendError::KernelFault`] of `page_raster_paths` naming the fault.
+fn check_paths_status(words: &[u32; STATUS_WORDS]) -> Result<()> {
+    kernel_status::check(KernelId::PageRasterPaths.label(), words)
+}
+
 /// `len` bytes as a device size.
 fn device_size(len: usize) -> u64 {
     u64::try_from(len).expect("usize fits u64 on supported targets")
@@ -218,10 +236,12 @@ impl VulkanBackend {
     /// device's `maxStorageBufferRange`, before anything is allocated;
     /// [`BackendError::OutOfMemory`] when the page's buffers do not fit in
     /// the memory left, also once the idle buffer sets of other pages are
-    /// freed; otherwise an error when the page has no pixel, its depth is
-    /// not that of `S`, `out` or `stride` is too small for it, an
-    /// allocation fails otherwise, or the device reports an error.  `out`
-    /// is unchanged then.
+    /// freed; [`BackendError::KernelFault`] when the raster of the page's
+    /// outlines reports a division it could not complete exactly, its
+    /// pixels then being discarded; otherwise an error when the page has no
+    /// pixel, its depth is not that of `S`, `out` or `stride` is too small
+    /// for it, an allocation fails otherwise, or the device reports an
+    /// error.  `out` is unchanged then.
     pub fn render_page<S: PageSample>(
         &self,
         page: &PageCommands,
@@ -342,6 +362,7 @@ impl VulkanBackend {
         let PageScratch {
             inputs: slots,
             target,
+            status,
             clock,
         } = &mut *scratch;
         let clock = match (&times, clock) {
@@ -354,15 +375,21 @@ impl VulkanBackend {
         // Every buffer of the page is grown before any is written; when
         // memory runs out, the idle buffer sets are freed and the growth is
         // retried once.  Staging then allocates nothing.
-        let reserve = |slots: &mut [Option<Staged<Self>>; 5], target: &mut Option<Staged<Self>>| {
+        let reserve = |slots: &mut [Option<Staged<Self>>; 5],
+                       target: &mut Option<Staged<Self>>,
+                       status: &mut Option<Staged<Self>>| {
             for (slot, (_, parts)) in slots.iter_mut().zip(inputs) {
                 ensure(self, slot, staged_len(parts), Direction::ToDevice).map(drop)?;
             }
-            ensure(self, target, page_len, Direction::ToHost).map(drop)
+            ensure(self, target, page_len, Direction::ToHost).map(drop)?;
+            if kernel == KernelId::PageRasterPaths {
+                ensure(self, status, STATUS_BYTES, Direction::ToHost).map(drop)?;
+            }
+            Ok(())
         };
-        match reserve(slots, target) {
+        match reserve(slots, target, status) {
             Err(BackendError::OutOfMemory { .. }) if self.page_scratch.free_idle() > 0 => {
-                reserve(slots, target)?;
+                reserve(slots, target, status)?;
             }
             reserved => reserved?,
         }
@@ -376,11 +403,17 @@ impl VulkanBackend {
             staged.push((stage_parts(self, slot, parts)?, input_len(parts)));
         }
         let target = ensure(self, target, page_len, Direction::ToHost)?;
+        let mut status = match kernel {
+            KernelId::PageRasterPaths => {
+                Some(ensure(self, status, STATUS_BYTES, Direction::ToHost)?)
+            }
+            _ => None,
+        };
         let write = laps.lap();
 
         // Query `i` of a timed page is written once every command before it
-        // has completed: 0 before the uploads, 1 after them, 2 after the
-        // raster, 3 after the download.
+        // has completed: 0 before the uploads, 1 after them and the zeroing
+        // of the status words, 2 after the raster, 3 after the downloads.
         let stamp = |backend: &Self, query: u32| {
             clock.map_or(Ok(()), |c| {
                 backend.recorder.record_timestamp(c.pool(), query)
@@ -406,9 +439,18 @@ impl VulkanBackend {
                 handles.push(input.device.handle());
                 sizes.push(device_size(len));
             }
+            if let Some(status) = status.as_deref() {
+                backend
+                    .recorder
+                    .record_zero_buffer(&status.device, STATUS_BYTES)?;
+            }
             stamp(backend, 1)?;
             handles.push(target.device.handle());
             sizes.push(device_size(page_len));
+            if let Some(status) = status.as_deref() {
+                handles.push(status.device.handle());
+                sizes.push(device_size(STATUS_BYTES));
+            }
             backend.recorder.dispatch_kernel(
                 kernel,
                 &handles,
@@ -418,14 +460,24 @@ impl VulkanBackend {
             )?;
             stamp(backend, 2)?;
             unsafe { record_download(backend, target, page_len) }?;
+            if let Some(status) = status.as_deref_mut() {
+                unsafe { record_download(backend, status, STATUS_BYTES) }?;
+            }
             stamp(backend, 3)?;
             record = laps.lap();
             Ok(())
         });
         run?;
-        self.page_clock.record(held);
         let submit_wait = laps.lap();
 
+        // A fault means some pixel is wrong: no pixel reaches `out`.
+        if let Some(status) = status.as_deref() {
+            let bytes = unsafe { host_view(self, status) }?
+                .first_chunk::<STATUS_BYTES>()
+                .ok_or_else(|| BackendError::msg("render_page: the status buffer is short"))?;
+            check_paths_status(&status_words(bytes))?;
+        }
+        self.page_clock.record(held);
         let pixels = &unsafe { host_view(self, target) }?[..page_len];
         for (dst, src) in out.chunks_mut(stride).zip(pixels.chunks_exact(device_row)) {
             S::copy_from_words(&mut dst[..row], src);
@@ -449,6 +501,86 @@ impl VulkanBackend {
     }
 }
 
+/// The quotients of a [`VulkanBackend::floor_div_probe`], and the operands
+/// `(a, b)` of the first division it recorded as a fault.
+#[cfg(test)]
+pub(crate) type FloorDivProbe = (Vec<i64>, Option<(i64, i64)>);
+
+#[cfg(test)]
+impl VulkanBackend {
+    /// The device's floor division of each pair `(a, b)` of `pairs`, with
+    /// `max_steps` correction steps in each direction, and the operands of
+    /// the first division it records as a fault; one page.
+    pub(crate) fn floor_div_probe(
+        &self,
+        pairs: &[(i64, i64)],
+        max_steps: u32,
+    ) -> Result<FloorDivProbe> {
+        /// The low and high words of `v`.
+        fn words(v: i64) -> [u32; 2] {
+            let v = v.cast_unsigned();
+            [
+                u32::try_from(v & 0xFFFF_FFFF).expect("32 bits"),
+                u32::try_from(v >> 32).expect("32 bits"),
+            ]
+        }
+        let n = u32::try_from(pairs.len()).map_err(BackendError::new)?;
+        let operands: Vec<u32> = pairs
+            .iter()
+            .flat_map(|&(a, b)| words(a).into_iter().chain(words(b)))
+            .collect();
+        let operands = bytemuck::cast_slice::<u32, u8>(&operands);
+        let quotients_len = pairs.len() * 8;
+        let mut push = [0u8; 8];
+        push[..4].copy_from_slice(&n.to_ne_bytes());
+        push[4..].copy_from_slice(&max_steps.to_ne_bytes());
+        let (mut input, mut output, mut status) = (None, None, None);
+        let input = stage_parts(self, &mut input, &[operands])?;
+        let output = ensure(self, &mut output, quotients_len, Direction::ToHost)?;
+        let status = ensure(self, &mut status, STATUS_BYTES, Direction::ToHost)?;
+        // SAFETY: the three buffers are this call's own, and `run_page`
+        // returns only once the page has completed or been waited on.
+        crate::backend::GpuBackend::run_page(self, |backend| {
+            unsafe { record_upload(backend, input, operands.len()) }?;
+            backend
+                .recorder
+                .record_zero_buffer(&status.device, STATUS_BYTES)?;
+            backend.recorder.dispatch_kernel(
+                KernelId::FloorDivProbe,
+                &[
+                    input.device.handle(),
+                    output.device.handle(),
+                    status.device.handle(),
+                ],
+                &[
+                    device_size(operands.len()),
+                    device_size(quotients_len),
+                    device_size(STATUS_BYTES),
+                ],
+                &push,
+                (n.div_ceil(64), 1, 1),
+            )?;
+            unsafe { record_download(backend, output, quotients_len) }?;
+            unsafe { record_download(backend, status, STATUS_BYTES) }
+        })?;
+        let quotients = unsafe { host_view(self, output) }?[..quotients_len]
+            .as_chunks::<4>()
+            .0
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[lo, hi]| kernel_status::join(u32::from_ne_bytes(lo), u32::from_ne_bytes(hi)))
+            .collect();
+        let status = unsafe { host_view(self, status) }?
+            .first_chunk::<STATUS_BYTES>()
+            .ok_or_else(|| BackendError::msg("floor_div_probe: the status buffer is short"))?;
+        Ok((
+            quotients,
+            kernel_status::floor_div_fault(&status_words(status)),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
@@ -462,6 +594,9 @@ mod path_tests;
 mod tests {
     use color::{Sample, SampleDepth};
 
+    use crate::backend::BackendError;
+    use crate::backend::kernel_status::{FLOOR_DIV_STEPS, floor_div_cases};
+    use crate::backend::vulkan::test_backend_with_int64;
     use crate::page::test_support::Rng;
     use crate::page::{CoverageRows, PageCommands, PageSample, PixelBounds};
 
@@ -934,5 +1069,57 @@ mod tests {
             matches!(err, crate::backend::BackendError::DeviceLimit { need, .. } if need == max + 1),
             "{err}"
         );
+    }
+
+    #[test]
+    fn vulkan_floor_div_matches_the_host_model() {
+        let Some(b) = test_backend_with_int64() else {
+            return;
+        };
+        let cases = floor_div_cases(&mut Rng(0x5eed));
+        let (q, fault) = b.floor_div_probe(&cases, FLOOR_DIV_STEPS).unwrap();
+        assert_eq!(fault, None);
+        for (&(a, d), q) in cases.iter().zip(q) {
+            assert_eq!(q, crate::page::path::floor_div(a, d), "{a} / {d}");
+        }
+    }
+
+    #[test]
+    fn vulkan_floor_div_reports_an_exhausted_bound() {
+        let Some(b) = test_backend_with_int64() else {
+            return;
+        };
+        // Truncation toward zero leaves r = -1: one correction step is needed.
+        let (_, fault) = b.floor_div_probe(&[(-1, 3)], 0).unwrap();
+        assert_eq!(fault, Some((-1, 3)));
+    }
+
+    #[test]
+    fn a_set_status_word_fails_the_page_with_a_kernel_fault() {
+        let a: i64 = -(1 << 40) + 7;
+        let b: i64 = (1 << 31) + 5;
+        let (a_bits, b_bits) = (a.cast_unsigned(), b.cast_unsigned());
+        let words = [
+            1,
+            u32::try_from(a_bits & 0xFFFF_FFFF).unwrap(),
+            u32::try_from(a_bits >> 32).unwrap(),
+            u32::try_from(b_bits & 0xFFFF_FFFF).unwrap(),
+            u32::try_from(b_bits >> 32).unwrap(),
+        ];
+        let err = super::check_paths_status(&words).expect_err("a set fault code");
+        assert!(
+            matches!(
+                err,
+                BackendError::KernelFault {
+                    kernel: "page_raster_paths",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(&format!("a = {a}")), "{message}");
+        assert!(message.contains(&format!("b = {b}")), "{message}");
+        assert!(super::check_paths_status(&[0; 5]).is_ok());
     }
 }

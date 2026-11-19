@@ -37,7 +37,7 @@ mod clip;
 mod image;
 mod mask;
 mod object;
-mod path;
+pub(crate) mod path;
 #[doc(hidden)]
 pub mod reference;
 mod runs;

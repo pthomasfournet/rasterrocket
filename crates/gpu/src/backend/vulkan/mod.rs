@@ -272,6 +272,25 @@ pub fn open_devices() -> usize {
     device::open_devices()
 }
 
+/// Whether `PDF_RASTER_REQUIRE_VULKAN` is `1`: a test that would skip for
+/// want of a Vulkan device panics instead.
+#[cfg(test)]
+fn vulkan_required() -> bool {
+    std::env::var("PDF_RASTER_REQUIRE_VULKAN").is_ok_and(|v| v == "1")
+}
+
+/// `None` after reporting that the calling test skips because of
+/// `reason`; a panic instead under `PDF_RASTER_REQUIRE_VULKAN=1`.
+#[cfg(test)]
+fn skip<T>(reason: &str) -> Option<T> {
+    assert!(
+        !vulkan_required(),
+        "PDF_RASTER_REQUIRE_VULKAN=1, but {reason}"
+    );
+    eprintln!("skipping: {reason}");
+    None
+}
+
 /// The backend of the device `PDF_RASTER_VULKAN_DEVICE` names, or of the
 /// automatically ranked one when it is unset or empty; `None` (the calling
 /// test is skipped) when no Vulkan device opens.
@@ -281,9 +300,22 @@ pub(crate) fn test_backend() -> Option<VulkanBackend> {
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
-    VulkanBackend::with_selector(selector.as_ref())
-        .inspect_err(|e| eprintln!("skipping: no Vulkan backend: {e}"))
-        .ok()
+    match VulkanBackend::with_selector(selector.as_ref()) {
+        Ok(backend) => Some(backend),
+        Err(e) => skip(&format!("no Vulkan backend: {e}")),
+    }
+}
+
+/// [`test_backend`] when its device supports 64-bit integers in kernels
+/// (`shaderInt64`); `None` (the calling test is skipped) otherwise.
+#[cfg(test)]
+pub(crate) fn test_backend_with_int64() -> Option<VulkanBackend> {
+    let backend = test_backend()?;
+    if backend.device.has_int64 {
+        Some(backend)
+    } else {
+        skip("the Vulkan device lacks shaderInt64")
+    }
 }
 
 impl Drop for VulkanBackend {

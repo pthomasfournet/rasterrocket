@@ -155,40 +155,59 @@ fn a_device_failure_renders_on_the_cpu_and_retires_the_device() {
     assert_eq!(counts.rendered, 0);
 }
 
-/// A page beyond the device's limits, or beyond the memory it has left,
-/// renders on the CPU and leaves the device in service.
-#[test]
-fn a_page_beyond_the_device_limits_keeps_the_device() {
+/// A page failed with `error` renders on the CPU and leaves the device in
+/// service: the next page renders on it.
+fn assert_failure_keeps_the_device(error: BackendError) {
     let doc = pdf(&[DEVICE, DEVICE]);
     let Some(session) = gpu_session(doc.clone()) else {
         return;
     };
     let pages = device_pages(&session);
     let params = RenderParams::new(2.0);
-    let errors = [
-        BackendError::DeviceLimit {
-            what: "render_page pixels",
-            need: 1 << 40,
-            limit: "maxStorageBufferRange",
-            max: 1 << 27,
-        },
-        BackendError::OutOfMemory {
-            what: "render_page pixels",
-            bytes: 1 << 30,
-        },
-    ];
-    for error in errors {
-        *pages.faults.fail_next.lock().expect("lock") = Some(error);
-        let (page, outcome) = render(&session, 1, &params).expect("render");
-        assert_eq!(outcome, DevicePage::Failed);
-        assert_eq!(page, cpu(doc.clone(), 1));
-        let (page, outcome) = render(&session, 2, &params).expect("render");
-        assert!(
-            matches!(outcome, DevicePage::Rendered { .. }),
-            "{outcome:?}"
-        );
-        assert_eq!(page, cpu(doc.clone(), 2));
-    }
+    *pages.faults.fail_next.lock().expect("lock") = Some(error);
+    let (page, outcome) = render(&session, 1, &params).expect("render");
+    assert_eq!(outcome, DevicePage::Failed);
+    assert_eq!(page, cpu(doc.clone(), 1));
+    let (page, outcome) = render(&session, 2, &params).expect("render");
+    assert!(
+        matches!(outcome, DevicePage::Rendered { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(page, cpu(doc, 2));
+}
+
+/// A page beyond the device's limits renders on the CPU and leaves the
+/// device in service.
+#[test]
+fn a_page_beyond_the_device_limits_keeps_the_device() {
+    assert_failure_keeps_the_device(BackendError::DeviceLimit {
+        what: "render_page pixels",
+        need: 1 << 40,
+        limit: "maxStorageBufferRange",
+        max: 1 << 27,
+    });
+}
+
+/// A page beyond the memory the device has left renders on the CPU and
+/// leaves the device in service.
+#[test]
+fn a_page_beyond_the_memory_left_keeps_the_device() {
+    assert_failure_keeps_the_device(BackendError::OutOfMemory {
+        what: "render_page pixels",
+        bytes: 1 << 30,
+    });
+}
+
+/// A page whose raster reported a fault renders on the CPU and leaves the
+/// device in service.
+#[test]
+fn a_kernel_fault_keeps_the_device() {
+    assert_failure_keeps_the_device(BackendError::KernelFault {
+        kernel: "page_raster_paths",
+        detail: "floor_div(a = -1, b = 3) did not converge within 16 correction steps; \
+                 the device's float division is unreliable"
+            .to_owned(),
+    });
 }
 
 /// A refused recording renders on the CPU once; a cancelled recording

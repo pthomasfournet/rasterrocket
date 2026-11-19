@@ -40,6 +40,10 @@
 //                 per row: at 8 bits one word r | g << 8 | b << 16, at
 //                 16 bits two words r | g << 16 and b; the bits past
 //                 the third sample are zero.
+//   status        with PAGE_PATHS only, binding 6: floor_div's status
+//                 words (floor_div.slang), zero before the dispatch; a
+//                 set fault code means some pixel of the page is not
+//                 the CPU's.
 //
 // An image command samples an image per pixel and composites the sampled
 // colour (page_image.slang); every other command paints one colour with
@@ -231,6 +235,9 @@ void composite(Cmd c, uint cov, inout uint r, inout uint g, inout uint b)
 
 #ifdef PAGE_PATHS
 
+#define STATUS_BINDING 6
+#include "floor_div.slang"
+
 static const int64_t ONE = 256;
 static const int64_t FULL_AREA = 2 * 256 * 256;
 
@@ -246,36 +253,12 @@ groupshared int g_area[BATCH * TILE * TILE];
 groupshared uint g_pairs[BATCH];
 groupshared uint g_list[BATCH];
 
-// floor(a / b) for 0 < b < 2^32 and |a / b| < 2^40, without a 64-bit
-// division: two single-precision estimates of the quotient, each followed
-// by its exact remainder, leave it within a few units, which the final
-// steps correct.  The first estimate is within |a / b| * 2^-23 + 1 of the
-// quotient, so the second divides a remainder below 2^18 * b and is within
-// 2 of it.
-int64_t floor_div(int64_t a, int64_t b)
-{
-    float fb = float(b);
-    int64_t q = int64_t(float(a) / fb);
-    int64_t r = a - q * b;
-    q += int64_t(float(r) / fb);
-    r = a - q * b;
-    while (r < 0) {
-        q -= 1;
-        r += b;
-    }
-    while (r >= b) {
-        q += 1;
-        r -= b;
-    }
-    return q;
-}
-
 // The x of segment (xa, ya) -> (xb, yb), ya < yb, at height y in [ya, yb].
 int64_t x_at(int64_t xa, int64_t ya, int64_t xb, int64_t yb, int64_t y)
 {
     if (y == ya) return xa;
     if (y == yb) return xb;
-    return xa + floor_div((y - ya) * (xb - xa), yb - ya);
+    return xa + floor_div((y - ya) * (xb - xa), yb - ya, FLOOR_DIV_STEPS);
 }
 
 void deposit(uint base, int64_t ex, int64_t ey, int64_t cover, int64_t area)
@@ -321,10 +304,10 @@ void hline(uint base, int64_t ey, int64_t xl, int64_t yl, int64_t xr, int64_t yr
     // y on each cell boundary from start on: yl + floor((n0 + k * step) / dx).
     int64_t n0 = (start * ONE - xl) * dy;
     int64_t step = ONE * dy;
-    int64_t quotient = floor_div(n0, dx);
+    int64_t quotient = floor_div(n0, dx, FLOOR_DIV_STEPS);
     int64_t q = yl + quotient;
     int64_t r = n0 - quotient * dx;
-    int64_t lift = floor_div(step, dx);
+    int64_t lift = floor_div(step, dx, FLOOR_DIV_STEPS);
     int64_t rem = step - lift * dx;
     if (first_cell < 0) deposit(base, 0, ey, sign * (q - yl), 0);
     for (int64_t cell = start; cell <= last_cell; cell++) {

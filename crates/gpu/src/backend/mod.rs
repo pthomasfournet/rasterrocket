@@ -22,6 +22,8 @@ mod staged;
 pub use blit_page::{BlitScratch, BlitSource, blit_image, blit_image_box};
 pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
+#[cfg(feature = "vulkan")]
+mod kernel_status;
 pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu, icc_clut16, random_grid};
 pub mod cuda;
 pub mod params;
@@ -98,6 +100,16 @@ pub enum BackendError {
         what: &'static str,
         /// Bytes the buffer needs.
         bytes: u64,
+    },
+    /// A kernel reported, through its status words, an operation it could
+    /// not complete exactly: the work's output is wrong and was discarded
+    /// before reaching the caller.  The device stays usable for other
+    /// work.
+    KernelFault {
+        /// The kernel, for diagnostic context.
+        kernel: &'static str,
+        /// The failed operation and its operands.
+        detail: String,
     },
     /// An explicit device selector did not resolve to exactly one usable
     /// device, or no usable device exists.  Distinct from
@@ -200,6 +212,7 @@ impl fmt::Display for BackendError {
             Self::OutOfMemory { what, bytes } => {
                 write!(f, "{what}: out of memory for {bytes} bytes")
             }
+            Self::KernelFault { kernel, detail } => write!(f, "{kernel}: {detail}"),
             Self::DeviceSelection { message, .. } => f.write_str(message),
             Self::Other(e) => fmt::Display::fmt(e, f),
         }
