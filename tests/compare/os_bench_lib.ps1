@@ -6,8 +6,9 @@
 
 # ---- output and redaction -------------------------------------------------------
 
-# Initialize-Redaction: the console session's DOMAIN\user and its two parts,
-# read once so that Hide-Path can remove them from every message.
+# Initialize-Redaction: the console session's DOMAIN\user, its two parts and
+# this machine's name, read once so that Hide-Path can remove them from every
+# message.
 function Initialize-Redaction {
     $script:ConsoleUser = ''
     $script:Redactions = @()
@@ -16,10 +17,10 @@ function Initialize-Redaction {
     } catch {
         $script:ConsoleUser = ''
     }
-    if ($ConsoleUser -ne '') {
-        $parts = @($ConsoleUser.Split('\') | Where-Object { $_.Length -ge 2 })
-        $script:Redactions = @(@($ConsoleUser) + $parts)
-    }
+    $names = @()
+    if ($ConsoleUser -ne '') { $names = @(@($ConsoleUser) + $ConsoleUser.Split('\')) }
+    $names += @([string]$env:COMPUTERNAME)
+    $script:Redactions = @($names | Where-Object { $_.Length -ge 2 } | Sort-Object -Property Length -Descending -Unique)
 }
 
 # Hide-Path TEXT: TEXT with the repository path removed, every
@@ -405,6 +406,10 @@ function Invoke-Launch {
     $argument = "-NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-Arg $DriverPath) -ParamsFile $(ConvertTo-Arg $params)"
     if ($ConsoleUser -eq '' -and -not $Dry) {
         Exit-Failure 'no user is logged in at the console; the task runs in that session' 'log in at the console'
+    }
+    $old = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($old -and @('Running', 'Queued') -contains [string]$old.State) {
+        Exit-Failure "the task $TaskName is $($old.State); a launch would replace a run in progress" 'wait for it with tests/compare/os_bench_wait.sh'
     }
     if ($Dry) {
         Write-Line "# $params ($($forward.Count) lines):"

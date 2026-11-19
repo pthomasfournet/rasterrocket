@@ -50,7 +50,8 @@
 #                      runs at normal priority (the scheduler's default is
 #                      below normal) and with the highest run level, so D12
 #                      and D12-excl share one token and the run can remove the
-#                      task.  A task of that name is removed first.  The run
+#                      task.  A task of that name is removed first; one that
+#                      is Running or Queued refuses the launch.  The run
 #                      deletes launch-params.txt once it has read it, and
 #                      unregisters the task when it ends.  From then on every
 #                      failure, usage errors included, writes failed.flag.
@@ -168,9 +169,11 @@ Initialize-Redaction
 
 $Opt = Read-Option $args
 if ($Opt.ParamsFile -ne '') {
-    if ($args.Length -ne 2) { Exit-Usage '-ParamsFile takes no other argument' }
+    # -ParamsFile is the task's own command line: an early exit here still
+    # removes the task.
+    if ($args.Length -ne 2) { Unregister-BenchTask; Exit-Usage '-ParamsFile takes no other argument' }
     $ParamsPath = [System.IO.Path]::GetFullPath($Opt.ParamsFile)
-    if (-not [System.IO.File]::Exists($ParamsPath)) { Exit-Usage "$ParamsPath does not exist" }
+    if (-not [System.IO.File]::Exists($ParamsPath)) { Unregister-BenchTask; Exit-Usage "$ParamsPath does not exist" }
     # The launcher's file marks DIR as this run's own.
     $Out = Split-Path -Parent $ParamsPath
     $TaskMode = $true
