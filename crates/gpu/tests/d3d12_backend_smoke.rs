@@ -15,6 +15,8 @@
 
 #![cfg(all(feature = "d3d12", windows))]
 
+#[path = "common/blit.rs"]
+mod common_blit;
 #[path = "common/d3d12.rs"]
 mod common_d3d12;
 
@@ -317,6 +319,38 @@ fn wait_page_with_a_stale_fence_waits_for_the_page_in_flight() {
     drop(own);
     backend.free_device(buf);
     backend.free_host_pinned(out);
+}
+
+#[test]
+fn d3d12_blit_identity_rgb() {
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    common_blit::identity_rgb(backend);
+}
+
+#[test]
+fn d3d12_blit_scaled_offset_with_carry() {
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    common_blit::scaled_offset_with_carry(backend);
+}
+
+#[test]
+fn d3d12_blit_gray_layout() {
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    common_blit::gray_layout(backend);
+}
+
+#[test]
+fn d3d12_blit_reads_an_unpadded_tail_source_exactly() {
+    let Some((backend, _serial)) = shared() else {
+        return;
+    };
+    common_blit::unpadded_tail_source(backend);
 }
 
 /// The WARP the process loaded: always reported; with `RR_WARP_VERSION`

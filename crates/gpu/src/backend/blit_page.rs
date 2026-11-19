@@ -173,7 +173,14 @@ pub fn blit_image_box<'s, B: GpuBackend>(
     Ok(&pixels[..target_len])
 }
 
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(windows, feature = "d3d12")
+    )
+))]
 mod tests {
     use super::super::layout::word_padded;
     use super::*;
@@ -285,6 +292,15 @@ mod tests {
     #[test]
     fn vulkan_box_blit_writes_the_box() {
         if let Some(backend) = crate::backend::vulkan::test_backend() {
+            check_box_blit(&backend);
+            check_pooled_blit(&backend);
+        }
+    }
+
+    #[cfg(all(windows, feature = "d3d12"))]
+    #[test]
+    fn d3d12_box_blit_writes_the_box() {
+        if let Some(backend) = crate::backend::d3d12::test_backend() {
             check_box_blit(&backend);
             check_pooled_blit(&backend);
         }

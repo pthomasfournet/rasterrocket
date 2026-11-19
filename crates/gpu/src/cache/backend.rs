@@ -19,9 +19,9 @@ use crate::backend::layout::word_padded;
 ///
 /// Implemented by the in-tree backends only ([`GpuBackend`] is sealed).
 /// Every transfer is ordered before any device read issued after the
-/// method returns: it has completed (Vulkan, and every CUDA download), or
-/// it is a CUDA upload whose write event every cudarc launch that reads the
-/// slab waits on.  A slab returned by [`Self::upload_slab`] or
+/// method returns: it has completed (Vulkan, Direct3D 12, and every CUDA
+/// download), or it is a CUDA upload whose write event every cudarc launch
+/// that reads the slab waits on.  A slab returned by [`Self::upload_slab`] or
 /// [`Self::promote`] therefore holds its bytes for every such read, and a
 /// host copy returned by [`Self::demote`] holds them once the source slab
 /// is dropped.
@@ -216,11 +216,7 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
     }
 
     fn alloc_host_slab(_device: &Self::Device, bytes: usize) -> Result<Self::HostSlab, CacheError> {
-        let mut slab = Vec::new();
-        slab.try_reserve_exact(bytes)
-            .map_err(|_| CacheError::HostAlloc { bytes })?;
-        slab.resize(bytes, 0);
-        Ok(slab.into_boxed_slice())
+        boxed_host_slab(bytes)
     }
 
     fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {
@@ -247,4 +243,74 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
     ) -> Result<Self::DeviceBuffer, CacheError> {
         Self::upload_slab(device, host)
     }
+}
+
+/// The Direct3D 12 cache issues its transfers through the backend's
+/// synchronous [`GpuBackend::upload`] and [`GpuBackend::download`], which
+/// copy through UPLOAD and READBACK staging buffers in submissions of
+/// their own; its host tier therefore holds ordinary host memory.
+#[cfg(all(windows, feature = "d3d12"))]
+impl CacheBackend for crate::backend::d3d12::D3d12Backend {
+    type Device = Arc<Self>;
+    type HostSlab = Box<[u8]>;
+
+    fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
+        let slab = device.alloc_device(word_padded(pixels.len()))?;
+        device.upload_word_padded(&slab, pixels)?;
+        Ok(slab)
+    }
+
+    fn download_slab(
+        device: &Self::Device,
+        slab: &Self::DeviceBuffer,
+        out: &mut [u8],
+    ) -> Result<(), CacheError> {
+        Ok(device.download(slab, out)?)
+    }
+
+    fn slab_len(device: &Self::Device, slab: &Self::DeviceBuffer) -> usize {
+        device.device_buffer_len(slab)
+    }
+
+    fn alloc_host_slab(_device: &Self::Device, bytes: usize) -> Result<Self::HostSlab, CacheError> {
+        boxed_host_slab(bytes)
+    }
+
+    fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {
+        Ok(slab)
+    }
+
+    fn host_slab_len(slab: &Self::HostSlab) -> usize {
+        slab.len()
+    }
+
+    fn demote(
+        device: &Self::Device,
+        slab: &Self::DeviceBuffer,
+        bytes: usize,
+    ) -> Result<Self::HostSlab, CacheError> {
+        let mut host = Self::alloc_host_slab(device, bytes)?;
+        Self::download_slab(device, slab, &mut host)?;
+        Ok(host)
+    }
+
+    fn promote(
+        device: &Self::Device,
+        host: &Self::HostSlab,
+    ) -> Result<Self::DeviceBuffer, CacheError> {
+        Self::upload_slab(device, host)
+    }
+}
+
+/// A zeroed host slab of `bytes` bytes in ordinary host memory.
+///
+/// # Errors
+/// [`CacheError::HostAlloc`] when the allocator refuses the size.
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+fn boxed_host_slab(bytes: usize) -> Result<Box<[u8]>, CacheError> {
+    let mut slab = Vec::new();
+    slab.try_reserve_exact(bytes)
+        .map_err(|_| CacheError::HostAlloc { bytes })?;
+    slab.resize(bytes, 0);
+    Ok(slab.into_boxed_slice())
 }

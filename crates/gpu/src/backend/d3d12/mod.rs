@@ -271,6 +271,20 @@ mod host {
             device::debug_layer_enabled()
         }
 
+        /// Copy `src` into `dst[..src.len()]` and zeros into the bytes after
+        /// it up to the next multiple of 4
+        /// ([`word_padded`](crate::backend::layout::word_padded)), in one
+        /// copy, as [`GpuBackend::upload`] copies.
+        ///
+        /// # Errors
+        /// As [`GpuBackend::upload`], with the padded length checked
+        /// against `dst`'s size.
+        #[cfg(any(test, feature = "cache"))]
+        pub(crate) fn upload_word_padded(&self, dst: &DeviceBuffer, src: &[u8]) -> Result<()> {
+            let zeros = crate::backend::layout::word_padded(src.len()) - src.len();
+            self.transfer.upload(dst, src, zeros)
+        }
+
         /// Whether kernels may use 64-bit integers (`Int64ShaderOps`).
         #[must_use]
         pub const fn has_int64(&self) -> bool {
@@ -472,7 +486,7 @@ mod host {
         /// A copy through an UPLOAD staging buffer, in a submission of its
         /// own.
         fn upload(&self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<()> {
-            self.transfer.upload(dst, src)
+            self.transfer.upload(dst, src, 0)
         }
 
         /// A copy through a READBACK staging buffer, in a submission of
@@ -656,6 +670,25 @@ mod host {
                     "waited {waited}: the list's hold on the buffer was released"
                 );
             }
+        }
+
+        /// The padded upload writes zeros after the bytes up to a whole
+        /// word, and refuses a padded length past the buffer.
+        #[test]
+        fn d3d12_padded_upload_zeroes_the_tail() {
+            let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+            let mut buf = backend.alloc_device(8).expect("alloc_device");
+            backend.upload(&mut buf, &[0xFF; 8]).expect("fill");
+            backend
+                .upload_word_padded(&buf, &[1, 2, 3, 4, 5])
+                .expect("upload_word_padded");
+            let mut out = [0; 8];
+            backend.download(&buf, &mut out).expect("download");
+            assert_eq!(out, [1, 2, 3, 4, 5, 0, 0, 0]);
+            let err = backend
+                .upload_word_padded(&buf, &[0; 9])
+                .expect_err("9 bytes pad to 12, past the 8-byte buffer");
+            assert!(err.to_string().contains("copy of 12 bytes"), "{err}");
         }
 
         /// Every kernel's root signature and pipeline state build.

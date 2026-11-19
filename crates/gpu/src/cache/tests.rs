@@ -61,8 +61,13 @@ fn cache_error_is_std_error() {
 }
 
 /// The checks below run on every backend a device is present for:
-/// CUDA under `gpu-validation`, Vulkan under `vulkan`.
-#[cfg(any(feature = "gpu-validation", feature = "vulkan"))]
+/// CUDA under `gpu-validation`, Vulkan under `vulkan`, Direct3D 12 under
+/// `d3d12` on Windows.
+#[cfg(any(
+    feature = "gpu-validation",
+    feature = "vulkan",
+    all(windows, feature = "d3d12")
+))]
 mod device {
     use super::*;
 
@@ -371,7 +376,11 @@ mod device {
 
 /// Defines one test per device check, each on a cache built by
 /// `$mk(vram_bytes, host_bytes)`, which returns `None` to skip.
-#[cfg(any(feature = "gpu-validation", feature = "vulkan"))]
+#[cfg(any(
+    feature = "gpu-validation",
+    feature = "vulkan",
+    all(windows, feature = "d3d12")
+))]
 macro_rules! device_tests {
     ($mk:path) => {
         #[test]
@@ -480,6 +489,48 @@ mod vulkan {
     fn refused_host_slab_is_an_error() {
         let Some(cache) = mk_cache(1, 0) else { return };
         let err = <VulkanBackend as CacheBackend>::alloc_host_slab(cache.device(), usize::MAX)
+            .expect_err("a usize::MAX host slab cannot be allocated");
+        assert!(
+            matches!(err, CacheError::HostAlloc { bytes: usize::MAX }),
+            "{err}"
+        );
+    }
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+mod d3d12 {
+    use super::*;
+    use crate::backend::d3d12::D3d12Backend;
+
+    /// A fresh cache on [`crate::backend::d3d12::test_backend`]'s adapter;
+    /// `None` (the test is skipped) when no adapter opens.
+    fn mk_cache(vram_bytes: u64, host_bytes: u64) -> Option<DeviceImageCache<D3d12Backend>> {
+        crate::backend::d3d12::test_backend().map(|backend| {
+            DeviceImageCache::new(
+                Arc::new(backend),
+                VramBudget { vram_bytes },
+                HostBudget { host_bytes },
+            )
+        })
+    }
+
+    device_tests!(mk_cache);
+
+    /// The VRAM budget an adapter reports is positive and within the hard
+    /// cap.
+    #[test]
+    fn vram_budget_from_backend_is_capped() {
+        let Some(cache) = mk_cache(1, 0) else { return };
+        let budget = VramBudget::from_backend(&**cache.device()).expect("budget query");
+        assert!(budget.vram_bytes > 0);
+        assert!(budget.vram_bytes <= VramBudget::HARD_CAP_BYTES);
+    }
+
+    /// A host-tier allocation the host refuses is an error, not an abort.
+    #[test]
+    fn refused_host_slab_is_an_error() {
+        let Some(cache) = mk_cache(1, 0) else { return };
+        let err = <D3d12Backend as CacheBackend>::alloc_host_slab(cache.device(), usize::MAX)
             .expect_err("a usize::MAX host slab cannot be allocated");
         assert!(
             matches!(err, CacheError::HostAlloc { bytes: usize::MAX }),

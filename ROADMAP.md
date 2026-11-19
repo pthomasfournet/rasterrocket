@@ -3833,6 +3833,19 @@ on. `detect_vram_budget` reads `QueryVideoMemoryInfo` of the local segment.
 The smoke tests pass on WARP, the RTX 5070 and the AMD Radeon iGPU on
 Windows 11; the debug layer was not installed there.
 
+**Unreleased on master: the image blit and the device image cache on
+D3D12.** `D3d12Backend` records `blit_image` (the source and both sampling
+tables as structured-buffer SRVs, the RGBA8 target as a UAV, ten root
+constants, one 16 × 16 thread group per tile of the bounding box) and
+implements `CacheBackend` with `Arc<D3d12Backend>` as its handle: a slab is
+uploaded through the backend's staging buffer with zeros up to a whole
+32-bit word, in the same copy, and the host tier holds ordinary memory. No
+session uses it yet: `ImageCache` still carries the CUDA or the Vulkan
+cache. The blit cases shared with the Vulkan parity tests and the box blit
+match the CPU reference byte for byte, and the cache's device tests pass,
+on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU on
+Windows 11.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

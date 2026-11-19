@@ -43,17 +43,21 @@ impl Transfer {
         })
     }
 
-    /// Copy `src` into the start of `dst` and wait for the copy.
-    pub(super) fn upload(&self, dst: &DeviceBuffer, src: &[u8]) -> Result<()> {
-        let len = copy_len(src.len(), dst.size(), "upload", "destination")?;
+    /// Copy `src` into the start of `dst`, then `zeros` zero bytes, in one
+    /// copy, and wait for the copy.
+    pub(super) fn upload(&self, dst: &DeviceBuffer, src: &[u8], zeros: usize) -> Result<()> {
+        let total = src.len().saturating_add(zeros);
+        let len = copy_len(total, dst.size(), "upload", "destination")?;
         if len == 0 {
             return Ok(());
         }
         let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let t = &mut *guard;
         refuse_stranded(&t.commands)?;
-        let staging = staging(&self.device, &mut t.upload, src.len(), HostHeap::Upload)?;
-        staging.as_mut_slice()[..src.len()].copy_from_slice(src);
+        let staging = staging(&self.device, &mut t.upload, total, HostHeap::Upload)?;
+        let (payload, pad) = staging.as_mut_slice()[..total].split_at_mut(src.len());
+        payload.copy_from_slice(src);
+        pad.fill(0);
         let resource = staging.resource().clone();
         let run = self.one_shot(&mut t.commands, |c| {
             c.hold(&resource);

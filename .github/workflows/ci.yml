@@ -466,7 +466,7 @@ jobs:
       # to the directory of the binary the build reports.
       - name: Build the D3D12 tests
         run: |
-          $json = cargo test --release -p rasterrocket-gpu --features d3d12 --no-run --message-format=json
+          $json = cargo test --release -p rasterrocket-gpu --features d3d12,cache --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed ($LASTEXITCODE)" }
           $exes = @($json | ForEach-Object { $_ | ConvertFrom-Json } |
             Where-Object { $_.executable -and ($_.target.name -like 'd3d12_*' -or ($_.target.kind -contains 'lib' -and $_.profile.test)) } |
@@ -478,12 +478,12 @@ jobs:
       - name: Test the D3D12 backend on the pinned WARP
         env:
           RR_WARP_VERSION: 1.0.22.0
-        run: cargo test --release -p rasterrocket-gpu --features d3d12 --test 'd3d12_*' -- --nocapture --test-threads=1
+        run: cargo test --release -p rasterrocket-gpu --features d3d12,cache --test 'd3d12_*' -- --nocapture --test-threads=1
 
       - name: Test the D3D12 backend's unit tests
         env:
           RR_WARP_VERSION: 1.0.22.0
-        run: cargo test --release -p rasterrocket-gpu --features d3d12 --lib -- d3d12
+        run: cargo test --release -p rasterrocket-gpu --features d3d12,cache --lib -- d3d12
 
   # ── Format and spelling check ─────────────────────────────────────────────
   fmt:

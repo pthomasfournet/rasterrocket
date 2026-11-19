@@ -7,9 +7,10 @@
 //!   cross-process persistence; opt-in via [`DeviceImageCache::with_disk`].
 //!
 //! The cache is generic over the backend its slabs live on
-//! ([`CacheBackend`]: CUDA, and Vulkan with the `vulkan` feature); the disk
-//! tier is host-only and shared by both.  [`ImageCache`] and [`CachedImage`]
-//! hold a cache and an image of either backend.
+//! ([`CacheBackend`]: CUDA, Vulkan with the `vulkan` feature, and Direct3D
+//! 12 with the `d3d12` feature on Windows); the disk tier is host-only and
+//! shared by all.  [`ImageCache`] and [`CachedImage`] hold a cache and an
+//! image of the CUDA or the Vulkan backend.
 //!
 //! # Module layout (private; named for orientation only)
 //!
@@ -687,6 +688,14 @@ const fn _assert_vulkan_thread_safety()
 where
     DeviceImageCache<crate::backend::vulkan::VulkanBackend>: Send + Sync,
     Arc<CachedDeviceImage<crate::backend::vulkan::VulkanBackend>>: Send + Sync,
+{
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+const fn _assert_d3d12_thread_safety()
+where
+    DeviceImageCache<crate::backend::d3d12::D3d12Backend>: Send + Sync,
+    Arc<CachedDeviceImage<crate::backend::d3d12::D3d12Backend>>: Send + Sync,
 {
 }
 
