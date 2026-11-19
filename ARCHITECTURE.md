@@ -49,8 +49,9 @@ rasterrocket-color
   │                 public OCR library — raster_pdf(), render_channel()
   │                 │
   │                 └── rasterrocket-cli
-  │                       `rrocket` binary (pdftoppm-style flags); hands fax
-  │                       and print documents to lp / sendfax
+  │                       `rrocket` binary; hands fax documents to sendfax
+  │                       and print documents to lp (CUPS) or the Windows
+  │                       spooler (GDI)
   │
   ├── rasterrocket-comic  (comic-archive input: .cbz/.cb7/.cbt/.cbr → RenderedPage;
   │     │                  depends on rasterrocket + render + color; used by the CLI)
@@ -58,15 +59,17 @@ rasterrocket-color
   │     └── rav1d  (crates/rav1d: local fork)
   │           AV1 decoder for AVIF page images
   │
-  ├── rasterrocket-parser  (in-tree lazy mmap PDF parser; used by rasterrocket-interp)
-  │
-  ├── rasterrocket-camera  (camera-capture page cleanup on 8-bit gray: crop, rectify,
-  │                         spread split, dewarp; std only, no workspace deps; used by
-  │                         the CLI)
-  │
-  ├── pdf_bridge  (unused in render path; poppler reference baseline only)
-  │
-  └── bench  (vello_cpu throughput comparison; not linked by rasterrocket-cli)
+  └── bench  (benchmark binaries: bench (fill throughput vs vello_cpu), contest_v11,
+              os_bench, paint_trace, page_gpu_bench; not linked by rasterrocket-cli)
+
+Crates with no workspace dependency:
+
+rasterrocket-parser  (in-tree lazy mmap PDF parser; used by rasterrocket-interp)
+
+rasterrocket-camera  (camera-capture page cleanup on 8-bit gray: crop, rectify,
+                      spread split, dewarp; std only; used by the CLI)
+
+pdf_bridge  (unused in render path; poppler reference baseline only)
 ```
 
 `rasterrocket-color` and `rasterrocket-render` are the foundation. Nothing above them has knowledge of PDF.
@@ -196,7 +199,7 @@ Single source of truth for pixel types and colour math. No SIMD, no I/O.
 
 ### 3.2 `rasterrocket-render`
 
-~17 700 lines. The software rendering engine. PDF-agnostic — takes paths,
+~22 900 lines (with its tests). The software rendering engine. PDF-agnostic — takes paths,
 bitmaps, and compositing parameters; knows nothing about operators or resources.
 
 **`Bitmap<P: Pixel>`**
@@ -309,7 +312,7 @@ only the device rectangle the object can touch (∩ clip), not the page.
 Per-arch dispatch helpers; each arch gets its own function, not a cfg/return chain:
 ```
 blend_solid_rgb8 / blend_solid_gray8  (movdir64b → AVX2 → NEON → scalar)
-composite_aa_rgb8_opaque              (AVX-512 → scalar)
+composite_aa_rgb8_opaque              (AVX-512 → AVX2 → scalar)
 unpack_mono_row                       (SSE2 → NEON → scalar)
 ```
 The 8-bit kernels are reached through the sample's byte view; 16-bit
@@ -477,7 +480,8 @@ PDF parsing and operator dispatch. Uses the in-tree `rasterrocket-parser` crate 
 content/
   tokenizer.rs       — byte-level PDF token scanner; nesting capped at 256
   operands.rs        — operand stack + type coercion
-  operator.rs        — 150+ typed operator variants
+  operator.rs        — Operator: one typed variant per content operator
+                       (69, Unknown included)
   mod.rs             — parse(bytes) → Vec<Operator>
 
 intent.rs            — RenderingIntent and IntentSet: the intents a page's
@@ -546,7 +550,7 @@ renderer/
   encodings.rs       — base encodings of Annex D
   fallback.rs        — per-character fallback of a substitute to installed faces
   substitutes.rs     — substitute programs for non-embedded fonts
-  system_fonts.rs    — installed CJK / Arabic / Thai faces; per-character fallback faces
+  system_fonts/      — installed CJK / Arabic / Thai faces; per-character fallback faces
   bundled_fonts.rs   — Noto fallback faces compiled in (`bundled-fonts`)
   page/
     mod.rs           — PageRenderer: construction, execute(), finish()
@@ -682,7 +686,7 @@ resources/
                        applied to painted colours and image samples
   shading/           — shading types 1–7
     gouraud.rs       — Type 4 / 5 triangle meshes
-    patch.rs         — Type 6 / 7 patch meshes
+    patch/           — Type 6 / 7 patch meshes
     stream.rs        — packed mesh vertex data
     mesh.rs          — vertex colours; at most 2^22 triangles per mesh
     triangles.rs     — mesh triangles indexed by device row
@@ -695,7 +699,8 @@ resources/
                        and masks)
     raw.rs           — raw / Flate samples expanded to one byte each
     bitpack.rs       — 1/2/4/16-bpc expansion
-    codecs/          — dct/, jpx.rs, ccitt.rs, jbig2.rs; JPX decodes at
+    codecs/          — dct/, jpx/ (device.rs: the nvJPEG2000 path),
+                       ccitt.rs, jbig2.rs; JPX decodes at
                        `ImageRequest::draw_size` unless masked; CMYK/YCCK
                        JPEG samples are ink; dct/stream.rs reads the frame
                        header that routes and budgets a JPEG and repairs
@@ -798,7 +803,7 @@ and the page reports one set of diagnostics.
   when one is found. Otherwise it uses the base-14 face compiled into the
   binary (`crates/pdf_interp/fonts/foxit/`, BSD-3). Symbol and ZapfDingbats
   always draw with their compiled-in faces and built-in encodings.
-- **Installed fonts.** A `FontLibrary` (`renderer/system_fonts.rs`) walks
+- **Installed fonts.** A `FontLibrary` (`renderer/system_fonts/`) walks
   the session's font directories (`SessionConfig::font_dirs`, from
   `RROCKET_FONT_DIR` by default), then, unless `SessionConfig::system_fonts`
   is off, the standard font directories of the build target (the Windows
@@ -1148,8 +1153,8 @@ fails the build with the install commands.
 **Optional decoders** (feature-gated)
 - `nvjpeg` — `NvJpegDecoder`, TLS one-per-thread, primary `GPU_HYBRID`, fallback `DEFAULT`
 - `nvjpeg2k` — `NvJpeg2kDecoder`, same TLS pattern; C++ exception shim in `shim/nvjpeg2k_shim.cpp`
-- `gpu-deskew` — `npp_rotate::rotate_gray8()` via `nppiRotate_8u_C1R_Ctx`
-- `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, tested on Raphael VCN 4.0; Intel Quick Sync and Intel Arc untested); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU.
+- `gpu-deskew` — `npp_rotate::rotate_gray8()` / `rotate_gray16()` via `nppiRotate_8u_C1R_Ctx` / `nppiRotate_16u_C1R_Ctx`
+- `vaapi` — `VapiJpegDecoder`; VA-API JPEG baseline decode on Linux iGPU/dGPU (AMD VCN, tested on Raphael VCN 4.0; Intel Quick Sync and Intel Arc untested); links `libva.so.2` + `libva-drm.so.2`. Dispatch priority: nvJPEG → VA-API → zune-jpeg (CPU). CMYK and progressive JPEG fall through to CPU. Dormant: VA-API shares `GPU_JPEG_THRESHOLD_PX` (`u32::MAX`), so no JPEG reaches it by default.
 
 **Device image cache** (`cache` feature, CUDA, Vulkan or Direct3D 12)
 - `DeviceImageCache<B: CacheBackend>` — three tiers: VRAM (refcount-pinned LRU), host RAM (demote-on-evict / promote-on-hit; `cuMemAllocHost` slabs on CUDA, ordinary memory on Vulkan and Direct3D 12), disk (`<root>/<doc-blake3>/<content-hash>.bin` sidecar files, shared by every backend; opt-in via `PDF_RASTER_CACHE_DIR`).  `CacheBackend` extends `GpuBackend` with the cache's transfers outside a page; a slab is the backend's `DeviceBuffer`.  `ImageCache` and `CachedImage` erase the backend: a session builds its cache on the Vulkan or Direct3D 12 backend when it holds one, otherwise on the CUDA context.
@@ -1426,8 +1431,12 @@ the CUDA driver is fully live. Every exit path returns from `main` rather than
 calling `process::exit`, so the RAM output directory is removed after a failed
 page too.
 
-`--box`, `--rotate` and `--gpu-pages` set `SessionConfig::page_box`,
-`rotation` and `gpu_pages`; `--transparent` sets
+`--box`, `--rotate`, `--gpu-pages` and `--gpu-devices` set
+`SessionConfig::page_box`, `rotation`, `gpu_pages` and `gpu_devices`;
+`--backend`, `--vulkan-device` and `--d3d12-device` set `policy`,
+`vulkan_device` and `d3d12_device`; `--working-space`, `--proof` and
+`--preserve-black` set `working_space`, `proof` and
+`RenderParams::preserve_black`; `--transparent` sets
 `RenderParams::transparent_background`; it requires PNG or TIFF output,
 which carry the alpha plane, and PDF input. `--depth`, `--cmyk` (and
 `--jpegcmyk`), `--intent` and `--bpc` set `RenderParams::depth`, `color`,
@@ -1514,10 +1523,13 @@ gpu-icc             → gpu-icc            → gpu-icc             → (crate on
 gpu-deskew          → gpu-deskew         →                     → gpu-deskew
 cache               → cache              → cache               → cache
 vulkan              → vulkan             → vulkan              → vulkan
+d3d12               → d3d12              → d3d12               → d3d12   (Windows)
 gpu-validation      → gpu-validation     →                     → gpu-validation
 bundled-fonts *     → bundled-fonts *    → bundled-fonts       →
 
 * on by default
+
+av1-asm *  (CLI only) → rasterrocket-comic/av1-asm  (rav1d assembly; x86 needs nasm)
 
 rasterrocket-render features (orthogonal, no cross-crate effect):
   simd-avx2        default on; enables blend/fill AVX2 paths
@@ -1566,7 +1578,7 @@ fn dispatch_unpack(packed: &[u8], width: usize, out: &mut [u8]) {
 |---|---|---|---|---|
 | Solid fill (RGB) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst3q_u8` |
 | Solid fill (Gray) | `raster/src/simd/blend.rs` | `movdir64b` → AVX2 | AVX2 | `vst1q_u8` |
-| AA composite | `raster/src/simd/composite.rs` | AVX-512 | scalar | scalar |
+| AA composite | `raster/src/simd/composite.rs` | AVX-512 | AVX2 | scalar |
 | Glyph unpack | `raster/src/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` |
 | CMYK→RGB | `color/src/cmyk/simd.rs` | AVX-512 VBMI | AVX2 | `vld4q_u8` + `vst3q_u8` |
 
@@ -1575,11 +1587,10 @@ platform.
 
 ### Key platform facts
 
-Tested on a Ryzen 9 9900X3D (AVX-512, and the AVX2 and scalar tiers) and an
-Apple A18 Pro (NEON), plus CI's GitHub-hosted runners; the "Intel consumer"
-column has not run on an Intel CPU since the i7-8700K testbench was retired
-(2026-07). See the
-README's [Tested hardware](README.md#tested-hardware).
+Tested on a Ryzen 9 9900X3D (AVX-512, and the AVX2 and scalar tiers), an
+Intel i7-8700K (the AVX2 and SSE tiers; no AVX-512) and an Apple A18 Pro
+(NEON), plus CI's GitHub-hosted runners. See the README's
+[Tested hardware](README.md#tested-hardware).
 
 **x86-64 (Intel consumer)**
 - AVX2 is the ceiling on all Alder/Raptor/Arrow Lake. AVX-512 is architecturally
@@ -1589,17 +1600,14 @@ README's [Tested hardware](README.md#tested-hardware).
 
 **ARM / aarch64**
 - NEON is mandatory on all ARMv8-A. No runtime detection needed — `#[cfg(target_arch = "aarch64")]` is sufficient.
-- `vcntq_u8` is hardware-native on all targets (M1–M4, Cortex-A72, Cortex-A76).
-  Never use `__builtin_popcountll` on ARM — it compiles to a software sequence.
-- `STNP` is an allocation hint only, not a cache-bypass guarantee. For zero-fill use
-  `DC ZVA` (zeros full cacheline without read). For non-zero solid fill: `vst1q_u8`.
 - No kernel uses SVE2; the NEON tiers serve every aarch64 target.
 
 ### iGPU / integrated compute
 
 **Intel iGPU (UHD/Iris/Arc laptop) and AMD VCN**
-VA-API JPEG baseline decode is implemented (`vaapi` feature), tested on an AMD
-Raphael iGPU (VCN 4.0, Mesa radeonsi); untested on Intel. Hardware handles
+VA-API JPEG baseline decode is implemented (`vaapi` feature) but dormant
+behind `GPU_JPEG_THRESHOLD_PX` (`u32::MAX`); it is tested on an AMD Raphael
+iGPU (VCN 4.0, Mesa radeonsi); untested on Intel. Hardware handles
 YUV surface allocation and IDCT; the result is extracted to an `Rgb8` bitmap.
 Transfer overhead makes other compute (ICC, fill) not worth it on non-UMA x86.
 CMYK and progressive JPEGs fall through to CPU; the `nvjpeg` feature takes
@@ -1717,7 +1725,7 @@ holds the glyph bitmaps of every page through `quick_cache::sync::Cache`
 
 ## 8. Key design decisions
 
-**No Leptonica; no subprocess.**
+**Everything in process.**
 Everything runs in-process, decryption included. The Poppler wrapper (`pdf_bridge`) is kept as a
 reference baseline for pixel-diff regression tests; it is never linked in the
 production render path.
