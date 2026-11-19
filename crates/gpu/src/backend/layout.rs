@@ -74,8 +74,60 @@ pub fn unpad_pixels(src: &[u8], dst: &mut [u8], sample_bytes: usize) {
          {device}-byte device pixels dst length {dst_len} asks for \
          (sample_bytes {sample_bytes})"
     );
-    for (to, from) in dst.chunks_exact_mut(packed).zip(src.chunks_exact(device)) {
-        to.copy_from_slice(&from[..packed]);
+    let src = &src[..n * device];
+    if sample_bytes == 1 {
+        unpad_words_8(src, dst);
+    } else {
+        unpad_words_16(src, dst);
+    }
+}
+
+/// The little-endian word at byte `4 × i` of `s`.
+fn word<const N: usize>(s: &[u8; N], i: usize) -> u32 {
+    u32::from_le_bytes([s[4 * i], s[4 * i + 1], s[4 * i + 2], s[4 * i + 3]])
+}
+
+/// [`unpad_pixels`] of 1-byte samples, `src` holding exactly the device
+/// pixels of `dst`: four device pixels, words `p0..p3`, pack into the
+/// three words `p0 | p1 << 24`, `p1 >> 8 | p2 << 16`, `p2 >> 16 | p3 << 8`,
+/// the pad byte of each `p` being past the shifted-out bits.
+fn unpad_words_8(src: &[u8], dst: &mut [u8]) {
+    let (dst_quads, dst_tail) = dst.as_chunks_mut::<12>();
+    let (src_quads, src_tail) = src.as_chunks::<16>();
+    for (d, s) in dst_quads.iter_mut().zip(src_quads) {
+        let p = [word(s, 0), word(s, 1), word(s, 2), word(s, 3)];
+        let packed = [
+            p[0] & 0x00FF_FFFF | p[1] << 24,
+            (p[1] >> 8) & 0xFFFF | p[2] << 16,
+            (p[2] >> 16) & 0xFF | p[3] << 8,
+        ];
+        for (to, w) in d.as_chunks_mut::<4>().0.iter_mut().zip(packed) {
+            *to = w.to_le_bytes();
+        }
+    }
+    let (dst_px, _) = dst_tail.as_chunks_mut::<3>();
+    for (to, from) in dst_px.iter_mut().zip(src_tail.as_chunks::<4>().0) {
+        *to = [from[0], from[1], from[2]];
+    }
+}
+
+/// [`unpad_pixels`] of 2-byte samples, `src` holding exactly the device
+/// pixels of `dst`: two device pixels, words `(a0, b0)` and `(a1, b1)`,
+/// pack into the three words `a0`, `b0 | a1 << 16`, `a1 >> 16 | b1 << 16`,
+/// the pad bytes of each `b` being past the shifted-out bits.
+fn unpad_words_16(src: &[u8], dst: &mut [u8]) {
+    let (dst_pairs, dst_tail) = dst.as_chunks_mut::<12>();
+    let (src_pairs, src_tail) = src.as_chunks::<16>();
+    for (d, s) in dst_pairs.iter_mut().zip(src_pairs) {
+        let [a0, b0, a1, b1] = [word(s, 0), word(s, 1), word(s, 2), word(s, 3)];
+        let packed = [a0, b0 & 0xFFFF | a1 << 16, a1 >> 16 | b1 << 16];
+        for (to, w) in d.as_chunks_mut::<4>().0.iter_mut().zip(packed) {
+            *to = w.to_le_bytes();
+        }
+    }
+    let (dst_px, _) = dst_tail.as_chunks_mut::<6>();
+    for (to, from) in dst_px.iter_mut().zip(src_tail.as_chunks::<8>().0) {
+        *to = [from[0], from[1], from[2], from[3], from[4], from[5]];
     }
 }
 
@@ -130,6 +182,27 @@ mod tests {
         let mut dst16 = [0u8; 6];
         unpad_pixels(&src16, &mut dst16, 2);
         assert_eq!(dst16, [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn unpad_pixels_matches_a_per_pixel_copy_at_every_tail_length() {
+        for sample_bytes in [1, 2] {
+            let device = 4 * device_pixel_words(sample_bytes);
+            let packed = 3 * sample_bytes;
+            for n in 0..=13 {
+                let src: Vec<u8> = (0..n * device + 5)
+                    .map(|i| u8::try_from((i * 37 + 11) % 251).unwrap())
+                    .collect();
+                let want: Vec<u8> = src
+                    .chunks_exact(device)
+                    .take(n)
+                    .flat_map(|p| p[..packed].to_vec())
+                    .collect();
+                let mut got = vec![0xA5; n * packed];
+                unpad_pixels(&src, &mut got, sample_bytes);
+                assert_eq!(got, want, "{sample_bytes}-byte samples, {n} pixels");
+            }
+        }
     }
 
     #[test]
