@@ -612,6 +612,65 @@ mod tests {
         }
     }
 
+    /// A table painting every pixel of a `width × height` page `rgb` at
+    /// alpha `a_input`.
+    fn whole_page_cmd(width: u32, height: u32, rgb: [u16; 3], a_input: u16) -> HostCmd {
+        let last = i32::try_from(width).unwrap() - 1;
+        HostCmd {
+            y_min: 0,
+            row_starts: (0..=height).collect(),
+            spans: vec![[0, last, -1]; height as usize],
+            bytes: Vec::new(),
+            bounds: PixelBounds {
+                x0: 0,
+                y0: 0,
+                x1: last,
+                y1: i32::try_from(height).unwrap() - 1,
+            },
+            rgb,
+            a_input,
+        }
+    }
+
+    /// `out`, a page `width` pixels wide read back `stride` samples a row
+    /// into a buffer of `sentinel`, holds the rows of `want`, and every
+    /// sample after each row, the last included, is still `sentinel`.
+    /// `want` holds some pixel other than `paper`.
+    fn assert_rows_at_stride<S: Sample>(
+        out: &[S],
+        want: &[S],
+        paper: [S; 3],
+        width: u32,
+        stride: usize,
+        sentinel: S,
+        what: &str,
+    ) {
+        let row = width as usize * 3;
+        assert!(
+            want.as_chunks::<3>().0.iter().any(|p| *p != paper),
+            "{what}: the commands paint no pixel"
+        );
+        assert_eq!(
+            out.len() / stride,
+            want.len() / row,
+            "{what}: rows read back at stride {stride} ({} samples) against {} samples \
+             of {row}-sample rows",
+            out.len(),
+            want.len()
+        );
+        for (y, (got, want)) in out
+            .chunks_exact(stride)
+            .zip(want.chunks_exact(row))
+            .enumerate()
+        {
+            assert_eq!(&got[..row], want, "{what}: row {y}");
+            assert!(
+                got[row..].iter().all(|&s| s == sentinel),
+                "{what}: samples after row {y} written"
+            );
+        }
+    }
+
     /// Random pages rendered at the depth of `S` match the host model.
     fn page_raster_matches_the_host_composite_at<S: PageSample>(backend: &super::VulkanBackend) {
         let max = u16::try_from(S::MAX.signed()).unwrap();
@@ -619,37 +678,34 @@ mod tests {
         let mut rng = Rng(7);
         for (width, height, n) in [(1, 1, 3), (37, 21, 40), (130, 70, 300), (300, 17, 900)] {
             let paper = [max - 5, max - 15, max - 25];
-            let cmds: Vec<HostCmd> = (0..n)
-                .map(|_| random_cmd(&mut rng, width, height, max))
-                .collect();
+            let cmds: Vec<HostCmd> = std::iter::once(whole_page_cmd(
+                width,
+                height,
+                [max / 5, max / 7, max / 11],
+                max / 2 + 1,
+            ))
+            .chain((0..n).map(|_| random_cmd(&mut rng, width, height, max)))
+            .collect();
             let mut page = PageCommands::new(width, height, S::DEPTH, paper);
             for c in &cmds {
                 page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
                     .expect("push");
             }
-            let row = width as usize * 3;
-            let stride = row + 5;
+            let stride = width as usize * 3 + 5;
             let mut out = vec![pad; stride * height as usize];
             backend
                 .render_page(&page, &mut out, stride)
                 .expect("render_page");
             let want = host_page::<S>(width, height, paper, &cmds);
-            let bits = S::DEPTH.bits();
-            for y in 0..height as usize {
-                assert_eq!(
-                    out[y * stride..][..row],
-                    want[y * row..][..row],
-                    "{bits} bits, {width}×{height}, {n} commands: row {y}"
-                );
-                if y + 1 < height as usize {
-                    assert!(
-                        out[y * stride + row..(y + 1) * stride]
-                            .iter()
-                            .all(|&b| b == pad),
-                        "row padding written"
-                    );
-                }
-            }
+            assert_rows_at_stride(
+                &out,
+                &want,
+                paper.map(sample::<S>),
+                width,
+                stride,
+                pad,
+                &format!("{} bits, {width}×{height}, {n} commands", S::DEPTH.bits()),
+            );
         }
     }
 
@@ -663,36 +719,18 @@ mod tests {
     }
 
     /// Pages at the depth of `S` whose widths make device rows of one
-    /// pixel, of an odd pixel count and of more than two tiles, each
-    /// painted whole and then by random tables, read back into rows
-    /// `width × 3 + 5` samples apart: each row is the reference raster's,
-    /// and the samples after each row keep their prior value.
+    /// pixel, of an odd pixel count and of more than two tiles read back
+    /// as the reference raster renders them.
     fn word_readback_keeps_stride_gaps_at<S: PageSample>(backend: &super::VulkanBackend) {
         let max = u16::try_from(S::MAX.signed()).unwrap();
         let sentinel = sample::<S>(max / 3 + 1);
         let mut rng = Rng(41);
         for (width, height) in [(1, 1), (17, 3), (33, 17)] {
             let mut page = PageCommands::new(width, height, S::DEPTH, [max, max - 1, max - 2]);
-            let rows = i32::try_from(height).unwrap();
-            let last = i32::try_from(width).unwrap() - 1;
-            let cover = HostCmd {
-                y_min: 0,
-                row_starts: (0..=height).collect(),
-                spans: vec![[0, last, -1]; height as usize],
-                bytes: Vec::new(),
-                bounds: PixelBounds {
-                    x0: 0,
-                    y0: 0,
-                    x1: last,
-                    y1: rows - 1,
-                },
-                rgb: [max / 5, max / 7, max / 11],
-                a_input: max / 2 + 1,
-            };
-            page.push_coverage(cover.table(), cover.bounds, cover.rgb, cover.a_input)
-                .expect("push");
-            for _ in 0..30 {
-                let c = random_cmd(&mut rng, width, height, max);
+            let cover = whole_page_cmd(width, height, [max / 5, max / 7, max / 11], max / 2 + 1);
+            for c in std::iter::once(cover)
+                .chain((0..30).map(|_| random_cmd(&mut rng, width, height, max)))
+            {
                 page.push_coverage(c.table(), c.bounds, c.rgb, c.a_input)
                     .expect("push");
             }
@@ -701,29 +739,20 @@ mod tests {
                 .into_iter()
                 .map(sample::<S>)
                 .collect();
-            let paper = page.paper().map(sample::<S>);
-            assert!(
-                want.as_chunks::<3>().0.iter().any(|p| *p != paper),
-                "{width}×{height}: the commands paint no pixel"
-            );
-            let row = width as usize * 3;
-            let stride = row + 5;
+            let stride = width as usize * 3 + 5;
             let mut out = vec![sentinel; stride * height as usize];
             backend
                 .render_page(&page, &mut out, stride)
                 .expect("render_page");
-            let bits = S::DEPTH.bits();
-            for (y, (got, want)) in out
-                .chunks_exact(stride)
-                .zip(want.chunks_exact(row))
-                .enumerate()
-            {
-                assert_eq!(&got[..row], want, "{bits} bits, {width}×{height}: row {y}");
-                assert!(
-                    got[row..].iter().all(|&s| s == sentinel),
-                    "{bits} bits, {width}×{height}: gap after row {y} written"
-                );
-            }
+            assert_rows_at_stride(
+                &out,
+                &want,
+                page.paper().map(sample::<S>),
+                width,
+                stride,
+                sentinel,
+                &format!("{} bits, {width}×{height}", S::DEPTH.bits()),
+            );
         }
     }
 
