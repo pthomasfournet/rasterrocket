@@ -876,7 +876,10 @@ mod tests {
     fn a_missing_required_feature_is_named() {
         let v12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
-            .timeline_semaphore(true);
+            .timeline_semaphore(true)
+            .storage_buffer8_bit_access(true)
+            .uniform_and_storage_buffer8_bit_access(true)
+            .shader_int8(true);
         let v13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
         assert_eq!(missing_required(&v12, &v13), None);
         // A device with none of the 8-bit features is eligible.
