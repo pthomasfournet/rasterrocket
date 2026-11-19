@@ -728,7 +728,7 @@ Read when building the `rasterrocket-gpu` crate (the CUDA, Vulkan and D3D12 feat
 
 | Code | Meaning |
 |---|---|
-| `0` | All pages rendered. A page with a skipped image or content stream counts as rendered unless `--strict` is set; the warning is on stderr. |
+| `0` | All pages rendered. A page with a skipped image, content stream or shading counts as rendered unless `--strict` is set; the warning is on stderr. |
 | `1` | One or more pages failed (errors printed to stderr), the document could not be opened (or its decryption was not authorised), or the arguments are invalid. Clap's own argument errors exit `2`. |
 
 Errors go to stderr as `rrocket: <message>` (`rrocket: page N: <message>` for a

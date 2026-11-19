@@ -85,11 +85,13 @@ impl PageResources<'_> {
         });
         let sh_obj = pattern.get(b"Shading").ok_or(Unresolved::Skipped)?;
         let shading = shading::resolve_shading_object(self, sh_obj, &matrix, canvas, ink)
-            .inspect_err(|_| {
-                log::warn!(
-                    "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
-                    String::from_utf8_lossy(name)
-                );
+            .inspect_err(|&cause| {
+                if cause == Unresolved::Skipped {
+                    log::warn!(
+                        "rasterrocket-interp: shading pattern /{} has no usable Shading — skipping",
+                        String::from_utf8_lossy(name)
+                    );
+                }
             })?;
         let ext_gstate = pattern
             .get(b"ExtGState")

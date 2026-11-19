@@ -1041,7 +1041,8 @@ mod tests {
     #[test]
     fn nesting_is_bounded_by_the_token_limit() {
         // Ten tokens a level, four around them.
-        let within = stop_chain((MAX_PS_TOKENS - 4) / 10);
+        let levels = (MAX_PS_TOKENS - 4) / 10;
+        let within = stop_chain(levels);
         let past = stop_chain(MAX_PS_TOKENS / 10);
         let (run_within, cost_within, refused) = on_small_stack(move || {
             let program = Program::parse(within.as_bytes()).expect("parses");
@@ -1052,7 +1053,9 @@ mod tests {
             )
         });
         assert_eq!(run_within, Some(vec![4.0]));
-        assert!(cost_within > 0);
+        // Each level costs `dup k le`, the `ifelse` and `pop k`; the
+        // innermost procedure `pop n`.
+        assert_eq!(cost_within, 6 * levels as u64 + 2);
         assert!(matches!(refused, Some(ParseError::TooLong(_))));
     }
 }

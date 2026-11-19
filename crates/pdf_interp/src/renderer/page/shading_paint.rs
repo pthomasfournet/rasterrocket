@@ -23,7 +23,7 @@ use super::pixel_rect::PixelRect;
 use super::{DEVICE_MATRIX, PageRenderer};
 use crate::renderer::color::RasterColor;
 use crate::resources::ShadingPattern;
-use crate::resources::shading::{ResolvedShading, ShadingResult};
+use crate::resources::shading::{ResolvedShading, ShadingResult, Unresolved};
 use crate::resources::transfer::Transfer;
 use crate::separation::Separator;
 
@@ -229,10 +229,12 @@ impl PageRenderer<'_> {
         let shading = match self.memo_shading(name, &ctm) {
             Ok(shading) => shading,
             Err(cause) => {
-                log::warn!(
-                    "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
-                    String::from_utf8_lossy(name)
-                );
+                if cause == Unresolved::Skipped {
+                    log::warn!(
+                        "rasterrocket-interp: sh /{} — shading not available (unsupported type or missing resource)",
+                        String::from_utf8_lossy(name)
+                    );
+                }
                 self.record_unresolved_shading(name, false, cause);
                 return;
             }

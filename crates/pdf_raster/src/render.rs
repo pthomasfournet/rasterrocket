@@ -624,6 +624,7 @@ fn render_job(
         check_strict(session, renderer)
     })?;
     log_failures(page_num, renderer.image_failures());
+    log_failures(page_num, renderer.shading_failures());
 
     let (mut bitmap, mut diag, spare) = renderer
         .try_finish_keeping(params.transparent_background)
@@ -714,8 +715,8 @@ pub(crate) fn check_strict(
     Ok(())
 }
 
-/// Log each image or content stream of page `page_num` that was skipped or
-/// drawn in part.
+/// Log each image, content stream or shading of page `page_num` that was
+/// skipped or drawn in part.
 pub(crate) fn log_failures<F: PartialFailure>(page_num: u32, failures: &[F]) {
     for failure in failures {
         if failure.partial() {
@@ -735,6 +736,12 @@ pub(crate) trait PartialFailure: std::fmt::Display {
 impl PartialFailure for pdf_interp::renderer::ImageFailure {
     fn partial(&self) -> bool {
         self.partial
+    }
+}
+
+impl PartialFailure for pdf_interp::renderer::ShadingFailure {
+    fn partial(&self) -> bool {
+        false
     }
 }
 

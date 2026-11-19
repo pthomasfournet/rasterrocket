@@ -1173,7 +1173,8 @@ impl<'doc> PageRenderer<'doc> {
     /// Fold a finished child renderer (a tiling-pattern tile or a Type 3
     /// glyph) into its parent: its watchdog consumption, so the shared
     /// per-page budget keeps accounting for work done inside sub-renders,
-    /// its skipped images and forms, so they are reported on the page, and its device
+    /// its skipped images, forms and shadings, so they are reported on the
+    /// page, and its device
     /// fill counts (zero while children are built without a device).
     ///
     /// Without this the parent's `ops_executed` would not reflect the child's

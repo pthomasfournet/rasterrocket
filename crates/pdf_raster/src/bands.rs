@@ -323,6 +323,7 @@ fn draw_bands<E>(
     log_failures(page_num, &content.failures);
     diag.content_failures = content.failures;
     log_failures(page_num, &diag.image_failures);
+    log_failures(page_num, &diag.shading_failures);
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
     diag.output_intent = intent;

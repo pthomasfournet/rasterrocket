@@ -517,7 +517,7 @@ impl PageRenderer<'_> {
         if self.diag.shading_failures.contains(&failure) {
             return;
         }
-        log::warn!("rasterrocket-interp: skipped {failure}");
+        log::debug!("rasterrocket-interp: skipped {failure}");
         self.diag.shading_failures.push(failure);
     }
 

@@ -1056,10 +1056,10 @@ mod tests {
 
     #[test]
     fn ps_recursion_bomb_is_bounded() {
-        // Deeply nested `{{{{…}}}}` must terminate loud-graceful (None), not
-        // overflow the native stack during parse or exec.  Spawn on a thread
-        // with a small stack so an unbounded recursion would actually abort
-        // the test rather than silently pass on a large default stack.
+        // `{{{{…}}}}` nested 40 000 deep is descended in full by the parser
+        // and then refused (its procedures are not operands of `if`), so
+        // the function evaluates to `None`.  The thread's small stack would
+        // overflow, aborting the test, were parsing to recurse per level.
         let depth = 40_000;
         let mut prog = String::with_capacity(depth * 2 + 8);
         prog.push('{');
