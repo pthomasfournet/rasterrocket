@@ -518,6 +518,32 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     fn detect_vram_budget(&self) -> Result<VramBudget>;
 }
 
+/// [`run_page_steps`] of `record` under `page`, the backend's page lock,
+/// and the time it held the lock: page runs hold the device one at a time,
+/// so that is the device's time for the run.  A poisoned lock is taken
+/// over: the lock guards no data.
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+#[cfg_attr(
+    not(any(feature = "vulkan", all(windows, feature = "d3d12"))),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
+)]
+pub(crate) fn run_page_held<B, F>(
+    backend: &B,
+    page: &std::sync::Mutex<()>,
+    record: F,
+) -> (Result<()>, std::time::Duration)
+where
+    B: GpuBackend,
+    F: FnOnce(&B) -> Result<()>,
+{
+    let _page = page
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let started = std::time::Instant::now();
+    let run = run_page_steps(backend, record);
+    (run, started.elapsed())
+}
+
 /// `begin_page`, `record`, `submit_page` and `wait_page` on `backend`, with
 /// [`GpuBackend::abandon_page`] run when a step fails or `record` unwinds:
 /// the body of [`GpuBackend::run_page`] for every backend.

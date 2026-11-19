@@ -187,120 +187,81 @@ fn upload_padded<Src: HostSlice<u8> + ?Sized>(
     Ok(slab)
 }
 
-/// The Vulkan cache issues its transfers through the backend's synchronous
-/// [`GpuBackend::upload`] and [`GpuBackend::download`], which stage through
-/// the backend's own mapped buffers (or write the slab in place on a device
-/// whose buffers are host memory); its host tier therefore holds ordinary
-/// host memory.
+/// `CacheBackend` for a backend whose cache transfers go through its own
+/// synchronous [`GpuBackend::upload`] and [`GpuBackend::download`] and
+/// whose host tier holds ordinary host memory (`Box<[u8]>`).
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+macro_rules! host_staged_cache_backend {
+    ($backend:ty) => {
+        impl CacheBackend for $backend {
+            type Device = Arc<Self>;
+            type HostSlab = Box<[u8]>;
+
+            fn upload_slab(
+                device: &Self::Device,
+                pixels: &[u8],
+            ) -> Result<Self::DeviceBuffer, CacheError> {
+                let slab = device.alloc_device(word_padded(pixels.len()))?;
+                device.upload_word_padded(&slab, pixels)?;
+                Ok(slab)
+            }
+
+            fn download_slab(
+                device: &Self::Device,
+                slab: &Self::DeviceBuffer,
+                out: &mut [u8],
+            ) -> Result<(), CacheError> {
+                Ok(device.download(slab, out)?)
+            }
+
+            fn slab_len(device: &Self::Device, slab: &Self::DeviceBuffer) -> usize {
+                device.device_buffer_len(slab)
+            }
+
+            fn alloc_host_slab(
+                _device: &Self::Device,
+                bytes: usize,
+            ) -> Result<Self::HostSlab, CacheError> {
+                boxed_host_slab(bytes)
+            }
+
+            fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {
+                Ok(slab)
+            }
+
+            fn host_slab_len(slab: &Self::HostSlab) -> usize {
+                slab.len()
+            }
+
+            fn demote(
+                device: &Self::Device,
+                slab: &Self::DeviceBuffer,
+                bytes: usize,
+            ) -> Result<Self::HostSlab, CacheError> {
+                let mut host = Self::alloc_host_slab(device, bytes)?;
+                Self::download_slab(device, slab, &mut host)?;
+                Ok(host)
+            }
+
+            fn promote(
+                device: &Self::Device,
+                host: &Self::HostSlab,
+            ) -> Result<Self::DeviceBuffer, CacheError> {
+                Self::upload_slab(device, host)
+            }
+        }
+    };
+}
+
+// The Vulkan backend's transfers stage through its own mapped buffers,
+// or write the slab in place on a device whose buffers are host memory.
 #[cfg(feature = "vulkan")]
-impl CacheBackend for crate::backend::vulkan::VulkanBackend {
-    type Device = Arc<Self>;
-    type HostSlab = Box<[u8]>;
+host_staged_cache_backend!(crate::backend::vulkan::VulkanBackend);
 
-    fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
-        let slab = device.alloc_device(word_padded(pixels.len()))?;
-        device.upload_word_padded(&slab, pixels)?;
-        Ok(slab)
-    }
-
-    fn download_slab(
-        device: &Self::Device,
-        slab: &Self::DeviceBuffer,
-        out: &mut [u8],
-    ) -> Result<(), CacheError> {
-        Ok(device.download(slab, out)?)
-    }
-
-    fn slab_len(device: &Self::Device, slab: &Self::DeviceBuffer) -> usize {
-        device.device_buffer_len(slab)
-    }
-
-    fn alloc_host_slab(_device: &Self::Device, bytes: usize) -> Result<Self::HostSlab, CacheError> {
-        boxed_host_slab(bytes)
-    }
-
-    fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {
-        Ok(slab)
-    }
-
-    fn host_slab_len(slab: &Self::HostSlab) -> usize {
-        slab.len()
-    }
-
-    fn demote(
-        device: &Self::Device,
-        slab: &Self::DeviceBuffer,
-        bytes: usize,
-    ) -> Result<Self::HostSlab, CacheError> {
-        let mut host = Self::alloc_host_slab(device, bytes)?;
-        Self::download_slab(device, slab, &mut host)?;
-        Ok(host)
-    }
-
-    fn promote(
-        device: &Self::Device,
-        host: &Self::HostSlab,
-    ) -> Result<Self::DeviceBuffer, CacheError> {
-        Self::upload_slab(device, host)
-    }
-}
-
-/// The Direct3D 12 cache issues its transfers through the backend's
-/// synchronous [`GpuBackend::upload`] and [`GpuBackend::download`], which
-/// copy through UPLOAD and READBACK staging buffers in submissions of
-/// their own; its host tier therefore holds ordinary host memory.
+// The Direct3D 12 backend's transfers copy through UPLOAD and READBACK
+// staging buffers in submissions of their own.
 #[cfg(all(windows, feature = "d3d12"))]
-impl CacheBackend for crate::backend::d3d12::D3d12Backend {
-    type Device = Arc<Self>;
-    type HostSlab = Box<[u8]>;
-
-    fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
-        let slab = device.alloc_device(word_padded(pixels.len()))?;
-        device.upload_word_padded(&slab, pixels)?;
-        Ok(slab)
-    }
-
-    fn download_slab(
-        device: &Self::Device,
-        slab: &Self::DeviceBuffer,
-        out: &mut [u8],
-    ) -> Result<(), CacheError> {
-        Ok(device.download(slab, out)?)
-    }
-
-    fn slab_len(device: &Self::Device, slab: &Self::DeviceBuffer) -> usize {
-        device.device_buffer_len(slab)
-    }
-
-    fn alloc_host_slab(_device: &Self::Device, bytes: usize) -> Result<Self::HostSlab, CacheError> {
-        boxed_host_slab(bytes)
-    }
-
-    fn host_slab_mut(slab: &mut Self::HostSlab) -> Result<&mut [u8], CacheError> {
-        Ok(slab)
-    }
-
-    fn host_slab_len(slab: &Self::HostSlab) -> usize {
-        slab.len()
-    }
-
-    fn demote(
-        device: &Self::Device,
-        slab: &Self::DeviceBuffer,
-        bytes: usize,
-    ) -> Result<Self::HostSlab, CacheError> {
-        let mut host = Self::alloc_host_slab(device, bytes)?;
-        Self::download_slab(device, slab, &mut host)?;
-        Ok(host)
-    }
-
-    fn promote(
-        device: &Self::Device,
-        host: &Self::HostSlab,
-    ) -> Result<Self::DeviceBuffer, CacheError> {
-        Self::upload_slab(device, host)
-    }
-}
+host_staged_cache_backend!(crate::backend::d3d12::D3d12Backend);
 
 /// A zeroed host slab of `bytes` bytes in ordinary host memory.
 ///

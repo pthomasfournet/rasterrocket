@@ -127,7 +127,7 @@ pub(crate) fn test_backend() -> Option<D3d12Backend> {
 
 #[cfg(windows)]
 mod host {
-    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use windows::Win32::Graphics::Dxgi::{
         DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3,
@@ -146,7 +146,7 @@ mod host {
     use crate::backend::select::DeviceSelector;
     use crate::backend::{
         DeviceScratch, GpuBackend, Result, ScratchPool, VramBudget, params, recorded_copy_len,
-        reject_zero_size, run_page_steps,
+        reject_zero_size,
     };
 
     /// Direct3D 12 compute backend on one DXGI adapter.
@@ -488,8 +488,7 @@ mod host {
         where
             F: FnOnce(&Self) -> Result<()>,
         {
-            let _page = self.page.lock().unwrap_or_else(PoisonError::into_inner);
-            run_page_steps(self, record)
+            crate::backend::run_page_held(self, &self.page, record).0
         }
 
         /// A copy through an UPLOAD staging buffer, in a submission of its

@@ -498,7 +498,7 @@ impl GpuBackend for VulkanBackend {
     where
         F: FnOnce(&Self) -> Result<()>,
     {
-        self.run_held(record).0
+        crate::backend::run_page_held(self, &self.page, record).0
     }
 
     /// A mapped buffer (integrated GPU) is written in place under

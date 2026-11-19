@@ -27,8 +27,7 @@
 //! device stages and resolves them into a READBACK buffer at its end; an
 //! untimed page does neither.
 
-use std::sync::PoisonError;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::D3d12Backend;
 use super::memory::check_view_elements;
@@ -104,19 +103,6 @@ fn check_views(inputs: &[InputParts<'_>; 5], page_len: usize) -> Result<[u64; 5]
 }
 
 impl D3d12Backend {
-    /// [`crate::backend::GpuBackend::run_page`] of `record` under the
-    /// backend's page lock, and the time it held the lock: page runs hold
-    /// the device one at a time, so that is the device's time for the run.
-    fn run_held<F>(&self, record: F) -> (Result<()>, Duration)
-    where
-        F: FnOnce(&Self) -> Result<()>,
-    {
-        let _page = self.page.lock().unwrap_or_else(PoisonError::into_inner);
-        let started = Instant::now();
-        let run = crate::backend::run_page_steps(self, record);
-        (run, started.elapsed())
-    }
-
     /// [`PageDevice::render_page`], timed into `times` when given, a page
     /// with outlines rasterised by the kernel `paths`.
     #[expect(
@@ -218,11 +204,11 @@ impl D3d12Backend {
             })
         };
         let mut record = Duration::ZERO;
-        let (run, held) = self.run_held(|backend| {
+        let (run, held) = crate::backend::run_page_held(self, &self.page, |backend| {
             stamp(backend, 0)?;
             for (input, len) in &mut staged {
                 // SAFETY: the scratch is lent to this call alone for its
-                // whole duration, and `run_held` returns only once the page
+                // whole duration, and `run_page_held` returns only once the page
                 // has completed or, on failure, been waited on or stranded
                 // with its references held.
                 unsafe { record_upload(backend, input, *len) }?;

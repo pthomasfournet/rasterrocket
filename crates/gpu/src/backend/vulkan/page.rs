@@ -21,7 +21,7 @@
 //! clock between its host stages and writes device timestamps between its
 //! device stages; an untimed page does neither.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::backend::kernel_status::{STATUS_BYTES, status_words};
 use crate::backend::page_device::{PageDevice, PageTimes};
@@ -66,22 +66,6 @@ fn device_size(len: usize) -> u64 {
 }
 
 impl VulkanBackend {
-    /// [`GpuBackend::run_page`] of `record` under the backend's page lock,
-    /// and the time it held the lock: page runs hold the device one at a
-    /// time, so that is the device's time for the run.
-    pub(super) fn run_held<F>(&self, record: F) -> (Result<()>, Duration)
-    where
-        F: FnOnce(&Self) -> Result<()>,
-    {
-        let _page = self
-            .page
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let started = Instant::now();
-        let run = crate::backend::run_page_steps(self, record);
-        (run, started.elapsed())
-    }
-
     /// [`PageDevice::render_page`], timed into `times` when given, a page
     /// with outlines rasterised by the kernel `paths`.
     #[expect(
@@ -183,7 +167,7 @@ impl VulkanBackend {
         // lent to this call alone for its whole duration, and `run_page` returns
         // only once its page has completed or, on failure, been waited on;
         // nothing touches the buffers in between.
-        let (run, held) = self.run_held(|backend| {
+        let (run, held) = crate::backend::run_page_held(self, &self.page, |backend| {
             if let Some(c) = clock {
                 backend
                     .recorder
