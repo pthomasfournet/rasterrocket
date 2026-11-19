@@ -661,8 +661,8 @@ cargo build --release -p rasterrocket-cli --features vulkan
 The CLI crate forwards each feature name to the `rasterrocket` library.
 
 The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
-compiles every kernel to DXIL, on any host, for the Direct3D 12 backend under
-construction; nothing renders through it yet, and the CLI does not forward it.
+compiles every kernel to DXIL, on any host, and checks it; no render path loads
+the DXIL, and the CLI does not forward the feature.
 It needs two pinned compilers, and the build fails, printing the install commands,
 when either is missing or of another version: slangc **2026.20** exactly (the
 compiler of the Vulkan shaders too; `SLANGC` names it, else the Vulkan SDK's when

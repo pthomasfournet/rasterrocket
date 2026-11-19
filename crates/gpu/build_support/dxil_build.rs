@@ -10,7 +10,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{KERNELS, VULKAN_ONLY_KERNELS, find_slangc, run_tool, slang_args, slang_entry};
+use super::{
+    CUDA_KERNELS, SLANG_ONLY_KERNELS, find_slangc, run_tool, slang_args, slang_entry, slang_source,
+};
 
 include!("tools.rs");
 include!("dxil_container.rs");
@@ -84,21 +86,30 @@ pub(super) fn compile_dxil_kernels(kernels_dir: &Path, out_dir: &Path) {
         install_hint("dxc", cfg!(windows)),
     );
     println!(
-        "cargo:warning=d3d12: slangc {slangc_version} ({}), {dxc_version} ({})",
+        "cargo:warning=d3d12: slangc {} ({}), {} ({})",
+        one_line(&slangc_version),
         slangc.display(),
+        one_line(&dxc_version),
         dxc.display(),
     );
 
-    for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
+    let kernels: Vec<&str> = CUDA_KERNELS
+        .iter()
+        .chain(SLANG_ONLY_KERNELS)
+        .copied()
+        .collect();
+    check_tables_cover(&kernels);
+    for &kernel in &kernels {
         let out = |ext: &str| out_dir.join(format!("{kernel}.{ext}"));
         let (hlsl, json, dxil, listing) = (out("hlsl"), out("json"), out("dxil"), out("ll"));
+        let source = slang_source(kernel);
         run_tool(
-            slang_args(&mut Command::new(&slangc), kernels_dir, kernel)
+            slang_args(&mut Command::new(&slangc), kernels_dir, kernel, source)
                 .args(["-target", "hlsl", "-o"])
                 .arg(&hlsl)
                 .arg("-reflection-json")
                 .arg(&json),
-            &format!("{kernel} (HLSL)"),
+            &format!("{kernel} ({}.slang, HLSL)", source.0),
             "",
         );
         let text = std::fs::read_to_string(&json)
@@ -127,6 +138,36 @@ pub(super) fn compile_dxil_kernels(kernels_dir: &Path, out_dir: &Path) {
             "{}: the DXIL container of {kernel} is not hashed; DXC signs it only when its \
              validator library (dxil.dll, libdxil.so) is installed beside it",
             dxil.display(),
+        );
+    }
+}
+
+/// `text` with its lines joined by `; `, for a `cargo:warning`, which
+/// shows one line.
+fn one_line(text: &str) -> String {
+    text.lines().collect::<Vec<_>>().join("; ")
+}
+
+/// Panic unless [`KERNEL_REGISTERS`] and [`KERNEL_CONSTANT_WORDS`] each
+/// hold one entry for every kernel of `kernels` and none for another.
+fn check_tables_cover(kernels: &[&str]) {
+    let mut want: Vec<&str> = kernels.to_vec();
+    want.sort_unstable();
+    for (table, mut names) in [
+        (
+            "KERNEL_REGISTERS",
+            KERNEL_REGISTERS.iter().map(|e| e.0).collect::<Vec<_>>(),
+        ),
+        (
+            "KERNEL_CONSTANT_WORDS",
+            KERNEL_CONSTANT_WORDS.iter().map(|e| e.0).collect(),
+        ),
+    ] {
+        names.sort_unstable();
+        assert!(
+            names == want,
+            "{table} lists the kernels {names:?}; the build compiles {want:?} \
+             (kernels/kernel_list.rs)"
         );
     }
 }
@@ -248,15 +289,38 @@ fn reflect(kernel: &str, reflection: &Value) -> (Vec<Reflected>, u32) {
     (found, constant_bytes)
 }
 
-/// Panic unless `found`, the reflected registers of `kernel`, are its
-/// [`KERNEL_REGISTERS`] entry, parameter by parameter, and that entry is
-/// in descriptor-table order.
+/// Panic unless the [`KERNEL_REGISTERS`] entry of `kernel` is in its
+/// documented order, each class's registers running from 0 in space 0
+/// without a gap, and `found`, its reflected registers, are that entry,
+/// parameter by parameter.
 fn check_registers(kernel: &str, found: &[Reflected]) {
     let expected = KERNEL_REGISTERS
         .iter()
         .find(|(name, _)| *name == kernel)
         .unwrap_or_else(|| panic!("{kernel} has no entry in KERNEL_REGISTERS"))
         .1;
+    assert!(
+        expected
+            .windows(2)
+            .all(|w| (w[0].class, w[0].space, w[0].index) < (w[1].class, w[1].space, w[1].index)),
+        "KERNEL_REGISTERS of {kernel} is not in order (constants, SRVs, UAVs, each by register)"
+    );
+    for class in [
+        RegisterClass::Constants,
+        RegisterClass::Srv,
+        RegisterClass::Uav,
+    ] {
+        let of_class = expected.iter().filter(|r| r.class == class);
+        for (n, r) in (0..).zip(of_class) {
+            assert!(
+                (r.index, r.space) == (n, 0),
+                "{kernel}: parameter {} is {}; the registers of each class must run from 0 in \
+                 space 0 without a gap, one descriptor range per class",
+                r.name,
+                register_text(r.class, r.index, r.space),
+            );
+        }
+    }
     for want in expected {
         let shown = register_text(want.class, want.index, want.space);
         let got = found
@@ -285,13 +349,6 @@ fn check_registers(kernel: &str, found: &[Reflected]) {
         extra.is_empty(),
         "{kernel}: parameters missing from KERNEL_REGISTERS: {}",
         extra.join(", ")
-    );
-    assert!(
-        expected
-            .windows(2)
-            .all(|w| (w[0].class, w[0].space, w[0].index) < (w[1].class, w[1].space, w[1].index)),
-        "KERNEL_REGISTERS of {kernel} is not in descriptor-table order (constants, SRVs, UAVs, \
-         each by register)"
     );
 }
 

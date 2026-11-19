@@ -83,9 +83,12 @@ const FLOOR_DIV_PROBE: &[Register] = &[
     reg("quotients", RegisterClass::Uav, 1),
 ];
 
-/// The registers of every kernel compiled to DXIL, in descriptor-table
-/// order: the constant buffer, then the SRVs, then the UAVs, each class by
-/// register number.  A poisoned variant has its base kernel's registers.
+/// The registers of every kernel compiled to DXIL: the `Constants`
+/// register first, then the SRVs, then the UAVs, each class from register
+/// 0 in space 0 without a gap.  The `Constants` register is the root
+/// constants, a root parameter of its own; the descriptor table holds the
+/// SRVs and the UAVs alone, in this order, one range per class.  A
+/// poisoned variant has its base kernel's registers.
 pub(crate) const KERNEL_REGISTERS: &[(&str, &[Register])] = &[
     ("icc_clut", ICC_CLUT),
     ("blit_image", BLIT_IMAGE),

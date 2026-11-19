@@ -7,20 +7,6 @@ include!("../../build_support/dxil_container.rs");
 /// them under.
 pub(crate) const KERNELS: &[&str] = &["icc_clut", "blit_image", "page_raster", "page_raster_paths"];
 
-/// Every kernel `build.rs` compiles to DXIL: [`KERNELS`], then the
-/// test-only kernels (the floor division probe, and the variants whose
-/// floor division is poisoned to fault).
-#[cfg(test)]
-const TEST_KERNELS: &[&str] = &[
-    "icc_clut",
-    "blit_image",
-    "page_raster",
-    "page_raster_paths",
-    "floor_div_probe",
-    "floor_div_probe_poisoned",
-    "page_raster_paths_poisoned",
-];
-
 /// The DXIL container of `kernel`.
 ///
 /// # Panics
@@ -70,19 +56,28 @@ fn listing(kernel: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    include!("../../kernels/kernel_list.rs");
+
+    /// Every kernel `build.rs` compiles to DXIL, from its own list.
+    fn test_kernels() -> impl Iterator<Item = &'static str> {
+        CUDA_KERNELS.iter().chain(SLANG_ONLY_KERNELS).copied()
+    }
+
     /// The listing line that introduces the optional features a shader
     /// requires, and the one naming 64-bit integers.
     const REQUIRES: &str = "; Note: shader requires additional functionality:";
     const INT64: &str = ";       64-Bit integer";
 
     #[test]
-    fn test_kernels_begin_with_the_production_kernels() {
-        assert!(TEST_KERNELS.starts_with(KERNELS));
+    fn the_build_compiles_every_production_kernel() {
+        for k in KERNELS {
+            assert!(test_kernels().any(|t| t == *k), "{k}");
+        }
     }
 
     #[test]
     fn every_dxil_container_is_hashed() {
-        for k in TEST_KERNELS {
+        for k in test_kernels() {
             assert!(container_is_hashed(dxil(k)), "{k}");
         }
     }
@@ -101,7 +96,7 @@ mod tests {
 
     #[test]
     fn no_division_in_any_dxil_is_fast() {
-        for k in TEST_KERNELS {
+        for k in test_kernels() {
             for line in listing(k).lines().filter(|l| l.contains("fdiv")) {
                 assert!(!line.contains("fast"), "{k}: {line}");
             }
@@ -117,10 +112,10 @@ mod tests {
             "floor_div_probe",
             "floor_div_probe_poisoned",
         ];
-        for k in TEST_KERNELS {
+        for k in test_kernels() {
             let lines: Vec<&str> = listing(k).lines().collect();
             let declared = lines.windows(2).any(|w| w == [REQUIRES, INT64]);
-            assert_eq!(declared, int64.contains(k), "{k}");
+            assert_eq!(declared, int64.contains(&k), "{k}");
             if !declared {
                 assert!(
                     !lines.iter().any(|l| l.contains("64-Bit integer")),

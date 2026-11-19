@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 include!("kernels/floor_div_params.rs");
+include!("kernels/kernel_list.rs");
 
 #[cfg(feature = "d3d12")]
 #[path = "build_support/dxil_build.rs"]
@@ -42,25 +43,6 @@ fn link_lib_in_dir(dirs: &[PathBuf], lib: &str, feature: &str) {
     }
     println!("cargo:rustc-link-lib=dylib={lib}");
 }
-
-/// Compute kernels compiled to PTX by nvcc and (optionally) to SPIR-V by slangc.
-///
-/// Listed once here to ensure the placeholder-write loops, the nvcc-compile loop,
-/// and the slangc-compile loop stay in sync — adding a new kernel only requires
-/// updating this list.
-const KERNELS: &[&str] = &["icc_clut", "blit_image"];
-
-/// Compute kernels with a Slang source only, compiled to SPIR-V for the
-/// Vulkan backend; the CUDA backend has no twin of them.  Only the
-/// library's tests embed the `floor_div_probe` kernels and
-/// `page_raster_paths_poisoned`.
-const VULKAN_ONLY_KERNELS: &[&str] = &[
-    "page_raster",
-    "page_raster_paths",
-    "floor_div_probe",
-    "floor_div_probe_poisoned",
-    "page_raster_paths_poisoned",
-];
 
 /// Slang profile for every kernel: baseline `spirv_1_5`, no subgroup
 /// capabilities.
@@ -471,7 +453,7 @@ fn nvcc_works(nvcc: &OsStr) -> bool {
 fn compile_cuda_kernels(kernels_dir: &Path, out_dir: &Path, nvcc: &OsStr, host: &HostCompiler) {
     let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_75".to_owned());
 
-    for kernel in KERNELS {
+    for kernel in CUDA_KERNELS {
         let src = kernels_dir.join(format!("{kernel}.cu"));
         let ptx = out_dir.join(format!("{kernel}.ptx"));
         run_tool(
@@ -506,7 +488,7 @@ fn tool_diagnostic(output: &std::process::Output) -> String {
 /// Always overwritten (no existence check) because `OUT_DIR` is fresh on each
 /// clean build and cargo guarantees this script only runs when inputs change.
 fn write_placeholder_ptx(out_dir: &Path) {
-    for kernel in KERNELS {
+    for kernel in CUDA_KERNELS {
         let ptx = out_dir.join(format!("{kernel}.ptx"));
         std::fs::write(&ptx, "")
             .unwrap_or_else(|e| panic!("failed to write placeholder {kernel}.ptx: {e}"));
@@ -514,10 +496,15 @@ fn write_placeholder_ptx(out_dir: &Path) {
 }
 
 /// `slangc`, a slangc command, with the arguments that compile `kernel`
-/// added: its source (`slang_source`), its entry point and its
-/// preprocessor macros.  The caller adds the target and the output.
-fn slang_args<'a>(slangc: &'a mut Command, kernels_dir: &Path, kernel: &str) -> &'a mut Command {
-    let (source, defines) = slang_source(kernel);
+/// from `(source, defines)`, its [`slang_source`], added: the source file,
+/// the entry point and the preprocessor macros.  The caller adds the
+/// target and the output.
+fn slang_args<'a>(
+    slangc: &'a mut Command,
+    kernels_dir: &Path,
+    kernel: &str,
+    (source, defines): (&str, &[&str]),
+) -> &'a mut Command {
     let src = kernels_dir.join(format!("{source}.slang"));
     assert!(
         src.exists(),
@@ -543,18 +530,16 @@ fn slang_args<'a>(slangc: &'a mut Command, kernels_dir: &Path, kernel: &str) -> 
 fn compile_slang_kernels(kernels_dir: &Path, out_dir: &Path) {
     let slangc = find_slangc();
 
-    for kernel in KERNELS.iter().chain(VULKAN_ONLY_KERNELS) {
+    for kernel in CUDA_KERNELS.iter().chain(SLANG_ONLY_KERNELS) {
         let spv = out_dir.join(format!("{kernel}.spv"));
         let profile = SLANG_PROFILE;
+        let source = slang_source(kernel);
         run_tool(
-            slang_args(&mut Command::new(&slangc), kernels_dir, kernel)
+            slang_args(&mut Command::new(&slangc), kernels_dir, kernel, source)
                 .args(["-target", "spirv", "-profile", profile])
                 .arg("-o")
                 .arg(&spv),
-            &format!(
-                "{kernel} ({}.slang, profile={profile})",
-                slang_source(kernel).0
-            ),
+            &format!("{kernel} ({}.slang, profile={profile})", source.0),
             "; install the LunarG Vulkan SDK (it sets VULKAN_SDK), `apt install slang`, or \
              name slangc in SLANGC",
         );

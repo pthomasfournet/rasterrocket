@@ -3725,8 +3725,8 @@ another version fails the build with the install commands; a build without
 `d3d12` needs neither DXC nor a particular slangc. Tests check that every
 container is hashed, that no DXIL division is `fast`, that only the
 outline raster and its division probe declare 64-bit integers, and that no
-SPIR-V module carries an `FPFastMathMode` decoration. No D3D12 backend
-runs yet. Install commands for Linux and Windows are in the README's
+SPIR-V module carries an `FPFastMathMode` decoration. No render path
+loads the DXIL. Install commands for Linux and Windows are in the README's
 [Build](README.md#build) section.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end

@@ -88,11 +88,19 @@ const CAPABILITY_STORAGE_BUFFER_8_BIT: u32 = 4448;
 #[cfg(test)]
 const CAPABILITY_UNIFORM_AND_STORAGE_BUFFER_8_BIT: u32 = 4449;
 
-/// `OpDecorate` and the `FPFastMathMode` decoration.
+/// `OpDecorate` and the `FPFastMathMode` decoration; `OpExecutionMode`,
+/// `OpExecutionModeId` and the `FPFastMathDefault` execution mode
+/// (`SPV_KHR_float_controls2`).
 #[cfg(test)]
 const OP_DECORATE: u32 = 71;
 #[cfg(test)]
 const DECORATION_FP_FAST_MATH_MODE: u32 = 40;
+#[cfg(test)]
+const OP_EXECUTION_MODE: u32 = 16;
+#[cfg(test)]
+const OP_EXECUTION_MODE_ID: u32 = 331;
+#[cfg(test)]
+const EXECUTION_MODE_FP_FAST_MATH_DEFAULT: u32 = 6028;
 
 /// The instructions of the SPIR-V module `words`, each with its operands,
 /// after the five-word header.  The walk ends at a zero instruction length
@@ -127,13 +135,21 @@ fn spirv_declares_capability(words: &[u32], capability: u32) -> bool {
         .any(|instruction| instruction.get(1) == Some(&capability))
 }
 
-/// Whether the SPIR-V module `words` decorates any id `FPFastMathMode`
-/// (`OpDecorate %id FPFastMathMode`), anywhere in the module.
+/// Whether the SPIR-V module `words` permits fast math anywhere: an
+/// `OpDecorate %id FPFastMathMode`, or an entry point's `FPFastMathDefault`
+/// execution mode (`OpExecutionModeId`, or `OpExecutionMode`).  The
+/// decoration or mode is the instruction's second operand.
 #[cfg(test)]
-fn spirv_decorates_fast_math(words: &[u32]) -> bool {
+fn spirv_permits_fast_math(words: &[u32]) -> bool {
     spirv_instructions(words).any(|instruction| {
-        instruction[0] & 0xFFFF == OP_DECORATE
-            && instruction.get(2) == Some(&DECORATION_FP_FAST_MATH_MODE)
+        let operand = instruction.get(2);
+        match instruction[0] & 0xFFFF {
+            OP_DECORATE => operand == Some(&DECORATION_FP_FAST_MATH_MODE),
+            OP_EXECUTION_MODE | OP_EXECUTION_MODE_ID => {
+                operand == Some(&EXECUTION_MODE_FP_FAST_MATH_DEFAULT)
+            }
+            _ => false,
+        }
     })
 }
 
@@ -605,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn spirv_carries_no_fast_math_decoration() {
+    fn spirv_permits_no_fast_math() {
         for &id in KernelId::ALL {
             let words = spirv_words(id.spirv(), id.label()).unwrap();
             let walked: usize = spirv_instructions(&words).map(<[u32]>::len).sum();
@@ -615,7 +631,7 @@ mod tests {
                 "{} is walked to its end",
                 id.label()
             );
-            assert!(!spirv_decorates_fast_math(&words), "{}", id.label());
+            assert!(!spirv_permits_fast_math(&words), "{}", id.label());
         }
     }
 
@@ -630,14 +646,42 @@ mod tests {
             .chain([op(3, OP_DECORATE), 7, 6])
             .chain([op(4, OP_DECORATE), 7, DECORATION_FP_FAST_MATH_MODE, 0])
             .collect();
-        assert!(spirv_decorates_fast_math(&module));
+        assert!(spirv_permits_fast_math(&module));
         // The same decoration with another opcode, and one cut short by
         // the module's end, are not found.
         let mut other = module.clone();
         other[13] = op(4, 72);
-        assert!(!spirv_decorates_fast_math(&other));
+        assert!(!spirv_permits_fast_math(&other));
         let truncated = &module[..module.len() - 1];
-        assert!(!spirv_decorates_fast_math(truncated));
+        assert!(!spirv_permits_fast_math(truncated));
+    }
+
+    #[test]
+    fn fast_math_walk_finds_a_fast_math_default_execution_mode() {
+        let op = |count: u32, opcode: u32| (count << 16) | opcode;
+        let header = [SPIRV_MAGIC, 0x0001_0600, 0, 8, 0];
+        let with = |opcode: u32, mode: u32| -> Vec<u32> {
+            header
+                .into_iter()
+                .chain([op(2, OP_CAPABILITY), 1])
+                .chain([op(3, OP_EXECUTION_MODE), 4, 17])
+                .chain([op(5, opcode), 4, mode, 2, 3])
+                .collect()
+        };
+        assert!(spirv_permits_fast_math(&with(
+            OP_EXECUTION_MODE_ID,
+            EXECUTION_MODE_FP_FAST_MATH_DEFAULT
+        )));
+        assert!(spirv_permits_fast_math(&with(
+            OP_EXECUTION_MODE,
+            EXECUTION_MODE_FP_FAST_MATH_DEFAULT
+        )));
+        // LocalSizeId (38) is another mode; OpDecorateId (332) another opcode.
+        assert!(!spirv_permits_fast_math(&with(OP_EXECUTION_MODE_ID, 38)));
+        assert!(!spirv_permits_fast_math(&with(
+            332,
+            EXECUTION_MODE_FP_FAST_MATH_DEFAULT
+        )));
     }
 
     /// The recorder feeds `binding_slots` to descriptor-set
