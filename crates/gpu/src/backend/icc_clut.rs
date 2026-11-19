@@ -218,13 +218,27 @@ pub fn icc_clut_matches_cpu<B: GpuBackend>(backend: &B) -> Result<bool> {
 
 /// The grid shapes the device evaluators are checked on: one cell, uneven
 /// spans, the 17⁴ and 33⁴ node grids of the converter's CMYK tables.
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(feature = "d3d12", windows)
+    )
+))]
 const EXACTNESS_SPANS: [[u32; 4]; 4] = [[1; 4], [20, 15, 16, 7], [16; 4], [32; 4]];
 
 /// Converts, on a grid of each of the [`EXACTNESS_SPANS`] in each range,
 /// every grey level and 65 536 pseudo-random pixels with `device`, and
 /// asserts equality with `host`, value for value.
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(feature = "d3d12", windows)
+    )
+))]
 fn assert_exact_across_grids<T: PartialEq>(
     label: &str,
     host: impl Fn(&CmykGrid, &[u8]) -> Vec<T>,
@@ -250,7 +264,14 @@ fn assert_exact_across_grids<T: PartialEq>(
 
 /// Conversions reuse one pooled scratch, whose grid buffer follows the
 /// grid's length down as well as up.
-#[cfg(all(test, any(feature = "gpu-validation", feature = "vulkan")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(feature = "d3d12", windows)
+    )
+))]
 fn check_scratch_is_pooled<B: GpuBackend>(backend: &B) {
     let cmyk: Vec<u8> = (0..=u8::MAX)
         .flat_map(|v| [v, 255 - v, v / 2, v / 3])
@@ -300,6 +321,37 @@ mod vulkan_tests {
     #[test]
     fn vulkan_icc_clut_scratch_is_pooled() {
         let Some(backend) = crate::backend::vulkan::test_backend() else {
+            return;
+        };
+        check_scratch_is_pooled(&backend);
+    }
+}
+
+#[cfg(all(test, feature = "d3d12", windows))]
+mod d3d12_tests {
+    use super::*;
+
+    /// On a device that passes the exactness probe, the D3D12 kernel is
+    /// byte-identical to the host on every grid, at 8 and 16 bits.
+    #[test]
+    fn d3d12_icc_clut_exact_across_grids() {
+        let Some(backend) = crate::backend::d3d12::test_backend() else {
+            return;
+        };
+        let exact = backend.icc_clut_is_exact();
+        eprintln!("icc_clut_is_exact: {exact}");
+        assert!(exact, "the device fails the exactness probe");
+        assert_exact_across_grids("d3d12", CmykGrid::convert, |cmyk, grid| {
+            icc_clut(&backend, cmyk, grid).expect("icc_clut")
+        });
+        assert_exact_across_grids("d3d12 16-bit", CmykGrid::convert16, |cmyk, grid| {
+            icc_clut16(&backend, cmyk, grid).expect("icc_clut16")
+        });
+    }
+
+    #[test]
+    fn d3d12_icc_clut_scratch_is_pooled() {
+        let Some(backend) = crate::backend::d3d12::test_backend() else {
             return;
         };
         check_scratch_is_pooled(&backend);

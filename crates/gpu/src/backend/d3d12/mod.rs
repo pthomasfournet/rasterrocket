@@ -49,9 +49,67 @@ pub use host::D3d12Backend;
 #[cfg(windows)]
 pub use memory::{DeviceBuffer, HostBuffer};
 
+/// The backend on the adapter `PDF_RASTER_D3D12_DEVICE` names, or on the
+/// automatically chosen one when it is unset or empty; `None` (the calling
+/// test is skipped) when none opens, unless `PDF_RASTER_REQUIRE_D3D12` is
+/// `1`.  On WARP, the loaded module is logged, and with `RR_WARP_VERSION`
+/// set it must be the copy beside the test binary and of that version.
+///
+/// # Panics
+/// When the variable holds a selector that does not parse, when no adapter
+/// opens and `PDF_RASTER_REQUIRE_D3D12` is `1`, or when the WARP check fails.
+#[cfg(all(test, windows))]
+pub(crate) fn test_backend() -> Option<D3d12Backend> {
+    use crate::backend::select::DeviceSelector;
+
+    let selector = std::env::var("PDF_RASTER_D3D12_DEVICE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            s.parse::<DeviceSelector>()
+                .expect("PDF_RASTER_D3D12_DEVICE holds a device selector")
+        });
+    match D3d12Backend::open(selector.as_ref()) {
+        Ok(backend) => {
+            eprintln!(
+                "adapter {} \"{}\"",
+                backend.device_index(),
+                backend.device_name()
+            );
+            if backend.is_warp() {
+                let loaded = D3d12Backend::loaded_warp();
+                match &loaded {
+                    Some((path, v)) => eprintln!("WARP module: {} version {v}", path.display()),
+                    None => eprintln!("WARP module: not loaded"),
+                }
+                if let Ok(expected) = std::env::var("RR_WARP_VERSION") {
+                    let (path, version) = loaded.expect("d3d10warp.dll is loaded");
+                    let exe = std::env::current_exe().expect("test binary path");
+                    assert_eq!(
+                        path.parent(),
+                        exe.parent(),
+                        "the loaded WARP is not the one beside the test binary: {}",
+                        path.display()
+                    );
+                    assert_eq!(version, expected.trim(), "WARP version");
+                }
+            }
+            Some(backend)
+        }
+        Err(e) => {
+            assert!(
+                !std::env::var("PDF_RASTER_REQUIRE_D3D12").is_ok_and(|v| v == "1"),
+                "PDF_RASTER_REQUIRE_D3D12=1, but no D3D12 backend opens: {e}"
+            );
+            eprintln!("skipping: no D3D12 backend: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(windows)]
 mod host {
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
     use windows::Win32::Graphics::Dxgi::{
         DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3,
@@ -88,6 +146,9 @@ mod host {
         /// has one recording state, so pages from several threads run one
         /// at a time.
         page: Mutex<()>,
+        /// Whether the ICC grid kernel reproduces the host on this
+        /// device; measured on first use ([`Self::icc_clut_is_exact`]).
+        icc_clut_exact: OnceLock<bool>,
         submitter: Arc<Submitter>,
         device: D3d12Device,
     }
@@ -113,6 +174,7 @@ mod host {
                 recorder,
                 transfer,
                 page: Mutex::new(()),
+                icc_clut_exact: OnceLock::new(),
                 submitter,
                 device,
             })
@@ -125,6 +187,38 @@ mod host {
         /// As [`Self::open`] with the selector `warp`.
         pub fn warp() -> Result<Self> {
             Self::open(Some(&"warp".parse()?))
+        }
+
+        /// Whether the ICC grid kernel reproduces
+        /// [`color::grid::CmykGrid::convert`] byte for byte on this device.
+        ///
+        /// The kernel interpolates in 32-bit integers and reads the pixels
+        /// and the grid through 32-bit structured views.  The first call
+        /// runs [`crate::backend::icc_clut_matches_cpu`], which catches a
+        /// device whose integer arithmetic, view access or shader
+        /// translation is faulty, and logs a mismatch or a device error at
+        /// `warn`; later calls return the same answer.
+        #[must_use]
+        pub fn icc_clut_is_exact(&self) -> bool {
+            *self
+                .icc_clut_exact
+                .get_or_init(|| match crate::backend::icc_clut_matches_cpu(self) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        log::warn!(
+                            "d3d12: the ICC grid kernel does not reproduce the host on this \
+                             device; ICC CMYK images convert on the CPU"
+                        );
+                        false
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "d3d12: the ICC grid kernel check failed: {e}; ICC CMYK images \
+                             convert on the CPU"
+                        );
+                        false
+                    }
+                })
         }
 
         /// The indices of every usable hardware adapter: those with
