@@ -24,12 +24,13 @@ path = "src/paint_trace/main.rs"
 [[bin]]
 name = "page_gpu_bench"
 path = "src/page_gpu/main.rs"
-required-features = ["vulkan"]
 
 [features]
 # Vulkan page-raster benchmark (`page_gpu_bench`): the library's GPU page
 # path, on the gpu crate's Vulkan backend.
 vulkan = ["dep:gpu", "gpu/vulkan", "pdf_raster/vulkan"]
+# The same benchmark on the gpu crate's Direct3D 12 backend (Windows only).
+d3d12  = ["dep:gpu", "gpu/d3d12", "pdf_raster/d3d12"]
 
 [dependencies]
 raster     = { package = "rasterrocket-render", path = "../raster" }
