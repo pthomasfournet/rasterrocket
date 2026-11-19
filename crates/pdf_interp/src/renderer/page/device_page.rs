@@ -531,5 +531,5 @@ impl PageRenderer<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests;

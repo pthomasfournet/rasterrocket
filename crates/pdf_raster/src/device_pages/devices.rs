@@ -203,7 +203,7 @@ impl<B: PageDevice> Device<B> {
     }
 
     /// Whether the device's opening has not started.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     pub(super) fn deferred_still(&self) -> bool {
         matches!(
             *self.opener.lock().unwrap_or_else(PoisonError::into_inner),
@@ -212,7 +212,7 @@ impl<B: PageDevice> Device<B> {
     }
 
     /// Whether a thread opens, or opened, the device.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     pub(super) fn opening_started(&self) -> bool {
         matches!(
             *self.opener.lock().unwrap_or_else(PoisonError::into_inner),
@@ -221,13 +221,13 @@ impl<B: PageDevice> Device<B> {
     }
 
     /// Whether the device has opened.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     pub(super) fn is_open(&self) -> bool {
         matches!(self.slot.get(), Some(Some(_)))
     }
 
     /// Whether the device's opening has finished.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     pub(super) fn settled(&self) -> bool {
         self.slot.get().is_some()
     }

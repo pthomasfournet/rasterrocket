@@ -93,9 +93,8 @@ pub struct RasterSession {
     pub(crate) d3d12_backend: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
     /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
     /// renders every page on the CPU.
-    #[cfg(feature = "vulkan")]
-    pub(crate) device_pages:
-        Option<crate::device_pages::DevicePages<gpu::backend::vulkan::VulkanBackend>>,
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    pub(crate) device_pages: Option<crate::device_pages::SessionDevicePages>,
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
@@ -248,12 +247,12 @@ impl RasterSession {
     /// CPU and why ([`SessionConfig::gpu_pages`]); `None` when the session
     /// renders no GPU pages.  The same counts are logged at `info` when
     /// the session drops.
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     #[must_use]
     pub fn device_page_counts(&self) -> Option<crate::DevicePageCounts> {
         self.device_pages
             .as_ref()
-            .map(crate::device_pages::DevicePages::counts)
+            .map(crate::device_pages::SessionDevicePages::counts)
     }
 
     /// Resolve a 1-based page number to its [`pdf::ObjectId`].
@@ -504,8 +503,14 @@ fn open_session_with_doc(
         config.policy,
         gpu::backend::d3d12::D3d12Backend::session_selector(config),
     )?;
-    #[cfg(feature = "vulkan")]
-    let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+    let device_pages = crate::device_pages::SessionDevicePages::for_session(
+        config,
+        #[cfg(feature = "vulkan")]
+        vk_backend.as_ref(),
+        #[cfg(all(windows, feature = "d3d12"))]
+        d3d12_backend.as_ref(),
+    )?;
 
     #[cfg(any(feature = "gpu-icc", feature = "cache"))]
     let gpu_ctx = init_gpu_ctx(config.policy)?;
@@ -580,7 +585,7 @@ fn open_session_with_doc(
         vk_backend,
         #[cfg(all(windows, feature = "d3d12"))]
         d3d12_backend,
-        #[cfg(feature = "vulkan")]
+        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
         device_pages,
         #[cfg(feature = "vaapi")]
         vaapi_queue,

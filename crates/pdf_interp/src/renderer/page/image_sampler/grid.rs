@@ -184,7 +184,7 @@ impl SampleGrid {
     }
 
     /// The width and height in samples of the image the grid samples.
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     pub(in crate::renderer::page) const fn source_size(&self) -> (u32, u32) {
         (self.img_w, self.img_h)
     }
@@ -193,7 +193,12 @@ impl SampleGrid {
     /// table, `(y1 - y0) * ENTRY_WORDS` words; `None` when the draw's terms
     /// exceed the Q32 table range and the grid evaluates the inverse matrix
     /// per pixel instead.
-    #[cfg(any(feature = "cache", feature = "vulkan", test))]
+    #[cfg(any(
+        feature = "cache",
+        feature = "vulkan",
+        all(windows, feature = "d3d12"),
+        test
+    ))]
     pub(in crate::renderer::page) fn tables(&self) -> Option<(&[u32], &[u32])> {
         match &self.map {
             GridMap::Tables { cols, rows } => Some((cols, rows)),

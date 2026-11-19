@@ -119,7 +119,7 @@ mod decoders;
 pub mod deskew;
 #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 mod device_init;
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 mod device_pages;
 mod error;
 pub(crate) mod gcv;
@@ -176,7 +176,7 @@ pub mod dev {
     /// # Errors
     ///
     /// As [`crate::render_page_canvas`], for the page's recording.
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     pub fn device_page_commands(
         session: &RasterSession,
         page_num: u32,
@@ -203,7 +203,7 @@ pub use color::SampleDepth;
 pub use config::{
     BackendPolicy, DEFAULT_VAAPI_DEVICE, GPU_PAGE_OPEN_WAIT, ParseBackendPolicyError, SessionConfig,
 };
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 pub use device_pages::DevicePageCounts;
 pub use error::RasterError;
 pub use gcv::{GcvBudget, GcvError, GcvImage, encode_for_gcv};

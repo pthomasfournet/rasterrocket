@@ -27,9 +27,9 @@ use crate::{RasterError, SessionConfig};
 /// [`ForceD3d12`](crate::BackendPolicy::ForceD3d12), the CUDA context
 /// under [`ForceCuda`](crate::BackendPolicy::ForceCuda) and
 /// `ForceVaapi`, and with [`SessionConfig::gpu_pages`] the devices of the
-/// GPU pages ([`SessionConfig::gpu_devices`]), which a session under
-/// [`Auto`](crate::BackendPolicy::Auto) opens when a page first asks for
-/// one.  It holds nothing under
+/// GPU pages ([`SessionConfig::gpu_devices`]) on the API of the policy,
+/// which a session under [`Auto`](crate::BackendPolicy::Auto) opens when a
+/// page first asks for one.  It holds nothing under
 /// every other configuration.
 #[must_use = "the held devices close when the hold drops"]
 pub struct DeviceHold {
@@ -38,7 +38,7 @@ pub struct DeviceHold {
     #[cfg(feature = "vulkan")]
     vulkan: Vec<Arc<gpu::backend::vulkan::VulkanBackend>>,
     #[cfg(all(windows, feature = "d3d12"))]
-    d3d12: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
+    d3d12: Vec<Arc<gpu::backend::d3d12::D3d12Backend>>,
 }
 
 impl DeviceHold {
@@ -59,32 +59,16 @@ impl DeviceHold {
         crate::open::check_backend_compiled(config.policy)?;
         config.check()?;
         #[cfg(feature = "vulkan")]
-        let vulkan = {
-            use crate::device_init::SessionDevice as _;
-            use gpu::backend::vulkan::VulkanBackend;
-            let session = crate::device_init::init_backend::<VulkanBackend>(
-                config.policy,
-                VulkanBackend::session_selector(config),
-            )?;
-            let mut held = crate::device_pages::open_all(config, session.as_ref())?;
-            let session = session.filter(|s| !held.iter().any(|h| Arc::ptr_eq(h, s)));
-            held.extend(session);
-            held
-        };
+        let vulkan = held_devices(config)?;
+        #[cfg(all(windows, feature = "d3d12"))]
+        let d3d12 = held_devices(config)?;
         Ok(Self {
             #[cfg(any(feature = "gpu-icc", feature = "cache"))]
             cuda: crate::open::init_gpu_ctx(config.policy)?,
             #[cfg(feature = "vulkan")]
             vulkan,
             #[cfg(all(windows, feature = "d3d12"))]
-            d3d12: {
-                use crate::device_init::SessionDevice as _;
-                use gpu::backend::d3d12::D3d12Backend;
-                crate::device_init::init_backend::<D3d12Backend>(
-                    config.policy,
-                    D3d12Backend::session_selector(config),
-                )?
-            },
+            d3d12,
         })
     }
 
@@ -114,10 +98,29 @@ impl DeviceHold {
             #[cfg(feature = "vulkan")]
             (!self.vulkan.is_empty()).then_some("Vulkan"),
             #[cfg(all(windows, feature = "d3d12"))]
-            self.d3d12.is_some().then_some("Direct3D 12"),
+            (!self.d3d12.is_empty()).then_some("Direct3D 12"),
         ];
         held.iter().flatten().copied().collect()
     }
+}
+
+/// The devices of `B` a session of `config` opens: its own device and
+/// its GPU page devices, each once.
+///
+/// # Errors
+///
+/// As [`crate::device_init::init_backend`] and
+/// [`crate::device_pages::open_all`].
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+fn held_devices<B: crate::device_init::SessionDevice>(
+    config: &SessionConfig,
+) -> Result<Vec<Arc<B>>, RasterError> {
+    let session =
+        crate::device_init::init_backend::<B>(config.policy, B::session_selector(config))?;
+    let mut held = crate::device_pages::open_all(config, session.as_ref())?;
+    let session = session.filter(|s| !held.iter().any(|h| Arc::ptr_eq(h, s)));
+    held.extend(session);
+    Ok(held)
 }
 
 impl std::fmt::Debug for DeviceHold {

@@ -51,7 +51,7 @@ With `cache`, the device image cache runs on the Vulkan device under `--backend 
 |---|---|---|
 | `d3d12` | A Direct3D 12 adapter with shader model 6.0 or later (tested: RTX 5070, AMD Radeon iGPU), or WARP | the in-box Direct3D 12 runtime; slangc 2026.20 and DXC 1.9.2609 at *build* time |
 
-`BackendPolicy::ForceD3d12` (`PDF_RASTER_BACKEND=d3d12`) opens the adapter `SessionConfig::d3d12_device` (`PDF_RASTER_D3D12_DEVICE`: an index, a name substring or `warp`) names, and with `gpu-icc` runs the ICC CMYK lookup table on it after the same exactness probe as Vulkan, byte-identical to the CPU, and with `cache` keeps the device image cache on it and draws cached images with its blit kernel, byte-identical to the CPU.  `--gpu-pages` does not run on it, and `rrocket` does not forward the feature.
+`BackendPolicy::ForceD3d12` (`PDF_RASTER_BACKEND=d3d12`) opens the adapter `SessionConfig::d3d12_device` (`PDF_RASTER_D3D12_DEVICE`: an index, a name substring or `warp`) names, and with `gpu-icc` runs the ICC CMYK lookup table on it after the same exactness probe as Vulkan, byte-identical to the CPU, and with `cache` keeps the device image cache on it and draws cached images with its blit kernel, byte-identical to the CPU.  With `SessionConfig::gpu_pages` it renders qualifying pages whole on the adapter, or on the adapters `SessionConfig::gpu_devices` lists (`all` takes every hardware adapter, never WARP), byte-identical to the CPU.  `rrocket` does not forward the feature, so `--gpu-pages` stays on Vulkan there.
 
 **VA-API (Linux iGPU/dGPU — AMD VCN; Intel Quick Sync and Intel Arc untested):**
 

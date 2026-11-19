@@ -246,15 +246,14 @@ impl Error for BackendError {
     }
 }
 
-/// What a lost device means where the code runs.  Windows resets a GPU
-/// whose submission runs past its timeout detection delay (TDR, 2 s by
-/// default), and every call on the device then fails as lost.
+/// What a lost device means where the code runs, as the message of an
+/// error that reports a lost device carries it.
+///
+/// Windows resets a GPU whose submission runs past its timeout detection
+/// delay (TDR, 2 s by default), and every call on the device then fails
+/// as lost.
 #[cfg(any(feature = "vulkan", feature = "d3d12"))]
-#[cfg_attr(
-    not(any(feature = "vulkan", all(feature = "d3d12", windows))),
-    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
-)]
-pub(crate) const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
+pub const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
     "the device was lost; on Windows the likely cause is a GPU timeout \
      (TDR: a submission that runs past about 2 s resets the device)"
 } else {

@@ -486,7 +486,7 @@ impl PageRenderer<'_> {
         rule: FillRule,
         region: Option<PixelRect>,
     ) {
-        #[cfg(feature = "vulkan")]
+        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
         if self.device_recording() {
             self.record_device_fill(path, rule);
             return;
@@ -644,7 +644,7 @@ impl PageRenderer<'_> {
         line_width: f64,
         region: Option<PixelRect>,
     ) {
-        #[cfg(feature = "vulkan")]
+        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
         if self.device_recording() {
             self.record_device_stroke(path, line_width);
             return;

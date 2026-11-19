@@ -57,6 +57,15 @@ pub use host::D3d12Backend;
 #[cfg(windows)]
 pub use memory::{DeviceBuffer, HostBuffer};
 
+/// The error a failed call `call` returns when it reports the device
+/// removed (`DXGI_ERROR_DEVICE_REMOVED`), as the backend builds it.
+#[cfg(windows)]
+#[doc(hidden)]
+#[must_use]
+pub fn device_removed_error(call: &'static str) -> crate::backend::BackendError {
+    error::hr_err(call)(windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED.into())
+}
+
 /// The backend on the adapter `PDF_RASTER_D3D12_DEVICE` names, or on the
 /// automatically chosen one when it is unset or empty; `None` (the calling
 /// test is skipped) when none opens, unless `PDF_RASTER_REQUIRE_D3D12` is

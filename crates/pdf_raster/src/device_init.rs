@@ -46,7 +46,6 @@ impl From<BackendError> for InitError {
 }
 
 /// The device indices a device list resolves to, or why it does not.
-#[cfg(feature = "vulkan")]
 pub(crate) type Resolution = Result<Vec<usize>, InitError>;
 
 /// A page device a session opens: its process-wide state and the words
@@ -59,7 +58,6 @@ pub(crate) trait SessionDevice: PageDevice + Send + Sync + 'static {
 
     /// Device lists already resolved by [`resolve_page_devices`], with the
     /// outcome.
-    #[cfg(feature = "vulkan")]
     fn resolved() -> &'static Mutex<Vec<(Vec<String>, Resolution)>>;
 
     /// The selector of the session's own device in `config`, or `None`
@@ -77,6 +75,10 @@ pub(crate) trait SessionDevice: PageDevice + Send + Sync + 'static {
     /// The policy that requires the backend and opens its device with the
     /// session.
     const FORCE: BackendPolicy;
+
+    /// Whether [`BackendPolicy::Auto`] renders GPU pages on the API's
+    /// devices.
+    const UNDER_AUTO: bool;
 }
 
 #[cfg(feature = "vulkan")]
@@ -103,6 +105,7 @@ impl SessionDevice for VulkanBackend {
     const PROBE_HINT: &'static str =
         "Verify with `vulkaninfo` that a Vulkan 1.3+ device is present.";
     const FORCE: BackendPolicy = BackendPolicy::ForceVulkan;
+    const UNDER_AUTO: bool = true;
 }
 
 #[cfg(all(windows, feature = "d3d12"))]
@@ -112,7 +115,6 @@ impl SessionDevice for D3d12Backend {
         &BACKENDS
     }
 
-    #[cfg(feature = "vulkan")]
     fn resolved() -> &'static Mutex<Vec<(Vec<String>, Resolution)>> {
         static RESOLVED: Mutex<Vec<(Vec<String>, Resolution)>> = Mutex::new(Vec::new());
         &RESOLVED
@@ -132,6 +134,7 @@ impl SessionDevice for D3d12Backend {
     const PROBE_HINT: &'static str = "A D3D12 adapter with shader model 6.0 or later is required; \
          `PDF_RASTER_D3D12_DEVICE=warp` selects the WARP software adapter.";
     const FORCE: BackendPolicy = BackendPolicy::ForceD3d12;
+    const UNDER_AUTO: bool = false;
 }
 
 /// The error of an unavailable API under [`SessionDevice::FORCE`].
@@ -209,7 +212,8 @@ fn checked_selector<B: SessionDevice>(selector: &str) -> Result<(), InitError> {
 /// ([`crate::SessionConfig::gpu_devices`], not empty): each device's
 /// enumeration index, which names it for the rest of the process, resolved
 /// once per list per process without opening a device.  `all` is every
-/// usable GPU of `B`.  Under `Auto` an unavailable API is not an error: the
+/// usable GPU of `B`, never a software implementation of the API (a CPU
+/// Vulkan device, the WARP adapter), which an entry may still name.  Under `Auto` an unavailable API is not an error: the
 /// entries are returned as given (`all` as the automatically ranked
 /// device), and their opening fails, logged, when a page asks for them.
 ///
@@ -219,7 +223,6 @@ fn checked_selector<B: SessionDevice>(selector: &str) -> Result<(), InitError> {
 /// entry does not resolve, two name the same device, or `all` finds no
 /// GPU; [`RasterError::BackendUnavailable`] for an unavailable API under
 /// [`SessionDevice::FORCE`].
-#[cfg(feature = "vulkan")]
 pub(crate) fn resolve_page_devices<B: SessionDevice>(
     policy: BackendPolicy,
     list: &[String],
@@ -252,7 +255,6 @@ pub(crate) fn resolve_page_devices<B: SessionDevice>(
 ///
 /// Why the device did not open: a selector that does not resolve, or an
 /// unavailable API.
-#[cfg(feature = "vulkan")]
 pub(crate) fn open_backend<B: SessionDevice>(selector: Option<&str>) -> Result<Arc<B>, String> {
     cached_backend::<B>(selector).map_err(|e| match e {
         InitError::Selection(msg) | InitError::Unavailable(msg) => msg,

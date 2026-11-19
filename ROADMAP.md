@@ -3878,8 +3878,8 @@ several, is `InvalidOptions` listing them; no adapter opening is
 `BackendUnavailable`. Sessions alive at once share one device per selector,
 and `DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
 adapter after the same one-time exactness probe as Vulkan, byte-identical to
-the CPU; GPU pages stay on the CPU under it (the image cache and blits
-follow below), and no CUDA context or Vulkan device is opened. `d3d12_device` is read under
+the CPU (the image cache, blits and GPU pages follow below), and no CUDA
+context or Vulkan device is opened. `d3d12_device` is read under
 `ForceD3d12` only, and `vulkan_device` never under it. A build without the
 feature, or for another platform, refuses `ForceD3d12` with
 `BackendUnavailable` naming the feature; `rrocket` does not forward it yet,
@@ -3900,6 +3900,30 @@ cached for a 16-bit canvas, and a 16-bit canvas never takes the device blit.
 `PDF_RASTER_REQUIRE_VULKAN=1`); they pass on the RTX 5070, the AMD Radeon
 iGPU and the pinned WARP 1.0.22 on Windows 11, and the Vulkan cases on the
 RTX 2080 SUPER on Ubuntu.
+
+**Unreleased on master: GPU pages and GPU page devices on D3D12 adapters.**
+`SessionConfig::gpu_pages` is accepted under `ForceD3d12` in a Windows build
+with `d3d12` (`check_gpu_pages` now names `--backend auto`, `vulkan` and
+`d3d12` when it refuses a backend): qualifying pages render whole on the
+session's adapter, byte-identical to the CPU at 8 and 16 bits, or on the
+adapters `SessionConfig::gpu_devices` lists, with the same scheduler,
+retirement and fallback rules as on Vulkan. `all` takes every hardware
+adapter and never WARP; `warp`, or WARP's listed index, names it. One
+session's GPU pages are all on one API (Vulkan under `Auto` and
+`ForceVulkan`, Direct3D 12 under `ForceD3d12`), so a list never mixes them;
+`DevicePageCounts::by_device` names each adapter by its DXGI description,
+and `DeviceHold` holds a `ForceD3d12` configuration's page adapters.
+`DEVICE_LOST_CAUSE` is public in the GPU crate. `rrocket` does not forward
+the feature yet. The GPU-page parity test takes its policy from
+`RR_GPU_PAGE_POLICY` (`vulkan`, the default, or `d3d12`) and fails instead
+of skipping under `PDF_RASTER_REQUIRE_VULKAN=1` or
+`PDF_RASTER_REQUIRE_D3D12=1`; under `d3d12` every first fixture page (41)
+renders on the RTX 5070, the AMD Radeon iGPU and the pinned WARP 1.0.22 at
+both depths on Windows 11, and with `cache` on the RTX 5070. The scheduler's
+unit tests run on each API compiled in: 48 concurrent pages split 24/24
+between the RTX 5070 and the Radeon iGPU (D3D12) and between the RTX 2080
+SUPER and the UHD 630 (Vulkan, Ubuntu), and a removed adapter retires with
+one warning naming it and the likely cause.
 
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns

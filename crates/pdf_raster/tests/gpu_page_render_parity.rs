@@ -3,23 +3,29 @@
 //! byte-identical to the CPU render of the same page, and a page it
 //! declines must render on the CPU with the reason reported.
 //!
-//! Sessions run under `ForceVulkan`, which opens the device at session
-//! open, so every page is offered to it; `PDF_RASTER_VULKAN_DEVICE` picks
-//! the device.  The tests skip when no Vulkan device opens.
+//! Sessions run under the forcing policy `RR_GPU_PAGE_POLICY` names
+//! (`vulkan`, the default, or `d3d12`), which opens the device at session
+//! open, so every page is offered to it; `PDF_RASTER_VULKAN_DEVICE` or
+//! `PDF_RASTER_D3D12_DEVICE` picks the device.  The tests skip when no
+//! device opens, unless `PDF_RASTER_REQUIRE_VULKAN=1` or
+//! `PDF_RASTER_REQUIRE_D3D12=1` requires the policy's API.
 //!
 //! Run with:
 //!   `cargo test -p rasterrocket --features vulkan --test gpu_page_render_parity`
+//!   `RR_GPU_PAGE_POLICY=d3d12 cargo test -p rasterrocket --features d3d12 --test gpu_page_render_parity`
 
-#![cfg(feature = "vulkan")]
+#![cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 
 #[expect(
     dead_code,
     reason = "each test binary compiles all shared helpers and uses a subset"
 )]
 mod common;
+#[cfg(all(windows, feature = "d3d12"))]
+#[path = "common/warp.rs"]
+mod warp;
 
-use std::time::{Duration, Instant};
-
+use common::device::{DeviceApi, gpu_page_policy, gpu_pages_or_skip};
 use common::{
     Page, SCALE, assert_identical, corpus_fixture, render, render_diagnosed, session,
     stream_object, with_page_tree,
@@ -30,21 +36,29 @@ use rasterrocket::{
     render_page_canvas_with_diagnostics,
 };
 
-/// A config rendering GPU pages under `policy` on the device
-/// `PDF_RASTER_VULKAN_DEVICE` names.
+/// A config rendering GPU pages under `policy` on the device the
+/// environment names for the policy's API, with no device list, so the
+/// pages render on the session's device.
 fn gpu_config(policy: BackendPolicy) -> SessionConfig {
     let mut config = SessionConfig::with_policy(policy);
-    config.vulkan_device = SessionConfig::vulkan_device_from_env();
+    if let Some(api) = DeviceApi::of_policy(policy) {
+        api.select_from_env(&mut config);
+    }
     config.gpu_pages = true;
     config
 }
 
-/// A GPU-page session over `pdf` under `ForceVulkan`, or `None` (the test
-/// is skipped) when no Vulkan device opens.
+/// A GPU-page session over `pdf` under [`gpu_page_policy`], or `None`
+/// (the test is skipped) when no device opens and the run does not
+/// require one.
 fn gpu_session(pdf: Vec<u8>) -> Option<RasterSession> {
-    open_session_from_bytes(pdf, &gpu_config(BackendPolicy::ForceVulkan))
-        .inspect_err(|e| eprintln!("skipping: no Vulkan device: {e}"))
-        .ok()
+    let policy = gpu_page_policy();
+    let session = gpu_pages_or_skip(policy, open_session_from_bytes(pdf, &gpu_config(policy)));
+    #[cfg(all(windows, feature = "d3d12"))]
+    if policy == BackendPolicy::ForceD3d12 {
+        warp::report_loaded_warp();
+    }
+    session
 }
 
 /// A one-page PDF of `content` on a 400 × 400 pt page whose resources
@@ -192,11 +206,18 @@ fn declined_pages_render_on_the_cpu_with_the_reason() {
     }
 }
 
-/// Under `Auto` the device opens beside the renders: pages render on the
-/// CPU until it is open, then on the device, identically.
+/// Under `Auto` the Vulkan device opens beside the renders: pages render
+/// on the CPU until it is open, then on the device, identically.
+#[cfg(feature = "vulkan")]
 #[test]
 fn auto_opens_the_device_beside_the_renders() {
+    use std::time::{Duration, Instant};
+
     let pdf = page_pdf(DEVICE_CONTENT);
+    if gpu_page_policy() != BackendPolicy::ForceVulkan {
+        eprintln!("skipping: Auto renders GPU pages on Vulkan only");
+        return;
+    }
     if gpu_session(pdf.clone()).is_none() {
         return;
     }
@@ -218,12 +239,18 @@ fn auto_opens_the_device_beside_the_renders() {
     }
 }
 
+/// GPU pages under a backend that renders none are refused, naming the
+/// backends that do.
 #[test]
-fn gpu_pages_need_a_vulkan_policy() {
+fn gpu_pages_need_a_gpu_page_policy() {
     let mut config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
     config.gpu_pages = true;
     match open_session_from_bytes(page_pdf(DEVICE_CONTENT), &config) {
-        Err(RasterError::InvalidOptions(msg)) => assert!(msg.contains("Vulkan"), "{msg}"),
+        Err(RasterError::InvalidOptions(msg)) => {
+            for named in ["--backend auto", "--backend vulkan", "--backend d3d12"] {
+                assert!(msg.contains(named), "{msg}");
+            }
+        }
         Err(other) => panic!("expected InvalidOptions, got {other:?}"),
         Ok(_) => panic!("a CPU-only session accepted GPU pages"),
     }
@@ -267,8 +294,8 @@ fn corpus_pages_render_identically_with(cpu_render: Render, gpu_render: Diagnose
         found += 1;
         let cpu = open_session(&path, &SessionConfig::with_policy(BackendPolicy::CpuOnly))
             .expect("CPU session");
-        let Ok(gpu) = open_session(&path, &gpu_config(BackendPolicy::ForceVulkan)) else {
-            eprintln!("skipping: no Vulkan device");
+        let policy = gpu_page_policy();
+        let Some(gpu) = gpu_pages_or_skip(policy, open_session(&path, &gpu_config(policy))) else {
             return;
         };
         for page in 1..=cpu.total_pages().min(4) {

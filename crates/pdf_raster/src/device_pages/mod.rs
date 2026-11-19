@@ -2,7 +2,9 @@
 //! CPU workers ([`SessionConfig::gpu_pages`]).
 //!
 //! A session renders its GPU pages on one device, or on several
-//! ([`SessionConfig::gpu_devices`]).  Unless the session holds its devices
+//! ([`SessionConfig::gpu_devices`]), all of one API: Vulkan under `Auto`
+//! and `ForceVulkan`, Direct3D 12 under `ForceD3d12`
+//! ([`SessionDevicePages`]).  Unless the session holds its devices
 //! already, each is opened on a thread of its own when the first page that
 //! qualifies asks for one, so a job none of whose pages qualifies opens
 //! none.  Every page that qualifies renders on a device: its worker waits
@@ -37,7 +39,11 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use gpu::backend::BackendError;
+#[cfg(all(windows, feature = "d3d12"))]
+use gpu::backend::d3d12::D3d12Backend;
 use gpu::backend::page_device::PageDevice;
+#[cfg(feature = "vulkan")]
+use gpu::backend::vulkan::VulkanBackend;
 use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRenderer};
 
 pub use counts::DevicePageCounts;
@@ -57,6 +63,73 @@ const OPEN_WAIT: Duration = crate::GPU_PAGE_OPEN_WAIT;
 /// The interval at which a page waiting for a device to open checks its
 /// cancellation.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// The GPU pages of a session, on the devices of the one API its policy
+/// renders them on.
+pub(crate) enum SessionDevicePages {
+    /// Under `Auto` and `ForceVulkan`.
+    #[cfg(feature = "vulkan")]
+    Vulkan(DevicePages<VulkanBackend>),
+    /// Under `ForceD3d12`.
+    #[cfg(all(windows, feature = "d3d12"))]
+    D3d12(DevicePages<D3d12Backend>),
+}
+
+impl SessionDevicePages {
+    /// The GPU pages of a session opened with `config` that holds the
+    /// Vulkan backend `vulkan` and the Direct3D 12 backend `d3d12`, on the
+    /// API of `config`'s policy: `None` unless the config asks for them
+    /// ([`DevicePages::for_session`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`DevicePages::for_session`].
+    pub(crate) fn for_session(
+        config: &crate::SessionConfig,
+        #[cfg(feature = "vulkan")] vulkan: Option<&Arc<VulkanBackend>>,
+        #[cfg(all(windows, feature = "d3d12"))] d3d12: Option<&Arc<D3d12Backend>>,
+    ) -> Result<Option<Self>, RasterError> {
+        match config.policy {
+            #[cfg(feature = "vulkan")]
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan => {
+                Ok(DevicePages::for_session(config, vulkan)?.map(Self::Vulkan))
+            }
+            #[cfg(all(windows, feature = "d3d12"))]
+            BackendPolicy::ForceD3d12 => {
+                Ok(DevicePages::for_session(config, d3d12)?.map(Self::D3d12))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Where the pages offered so far went.
+    pub(crate) fn counts(&self) -> DevicePageCounts {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(pages) => pages.counts(),
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12(pages) => pages.counts(),
+        }
+    }
+
+    /// Render `job`'s page as [`DevicePages::render`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageJob::run`].
+    fn render<'a>(
+        &self,
+        job: &PageJob<'a>,
+        buffers: &mut CanvasBuffers,
+    ) -> Result<(PageRenderer<'a>, DevicePage), RasterError> {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(pages) => pages.render(job, buffers),
+            #[cfg(all(windows, feature = "d3d12"))]
+            Self::D3d12(pages) => pages.render(job, buffers),
+        }
+    }
+}
 
 /// The devices of a session's GPU pages, of the backend `B`.
 pub(crate) struct DevicePages<B: PageDevice> {
@@ -164,8 +237,9 @@ fn forced_backends<B: SessionDevice>(
 /// The GPU page devices of `config` opened now, beside `session`, the
 /// session's own device: under `B`'s forcing policy every one
 /// ([`forced_backends`]), or the error of the first that does not open;
-/// under `Auto` with [`crate::SessionConfig::gpu_pages`] those that open,
-/// each that does not being logged at `error`; otherwise none.
+/// under `Auto` with [`crate::SessionConfig::gpu_pages`], on an API that
+/// renders GPU pages under `Auto` ([`SessionDevice::UNDER_AUTO`]), those
+/// that open, each that does not being logged at `error`; otherwise none.
 ///
 /// # Errors
 ///
@@ -182,7 +256,7 @@ pub(crate) fn open_all<B: SessionDevice>(
             .into_iter()
             .map(|(_, backend)| backend)
             .collect()),
-        (BackendPolicy::Auto, _) => Ok(selectors::<B>(config)?
+        (BackendPolicy::Auto, _) if B::UNDER_AUTO => Ok(selectors::<B>(config)?
             .iter()
             .filter_map(|s| open_device::<B>(s.as_deref()))
             .collect()),
@@ -437,93 +511,110 @@ pub(crate) fn render<'a>(
     job: &PageJob<'a>,
     buffers: &mut CanvasBuffers,
 ) -> Result<(PageRenderer<'a>, DevicePage), RasterError> {
-    let Some(pages) = job.session.device_pages.as_ref() else {
-        return Ok((job.run(buffers)?, DevicePage::NotOffered));
-    };
-    if let Some(reason) = ruled_out(job) {
-        log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
-        pages.count(Outcome::Ineligible(reason));
-        if let Some(warning) = (reason == WIDE)
-            .then(|| pages.wide_declined(job.page_num))
-            .flatten()
-        {
-            log::warn!("{warning}");
+    match job.session.device_pages.as_ref() {
+        Some(pages) => pages.render(job, buffers),
+        None => Ok((job.run(buffers)?, DevicePage::NotOffered)),
+    }
+}
+
+impl<B: SessionDevice> DevicePages<B> {
+    /// Render `job`'s page on one of these devices when it qualifies and a
+    /// device is open and in service, and on the CPU otherwise, as
+    /// [`render`] describes.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageJob::run`].
+    fn render<'a>(
+        &self,
+        job: &PageJob<'a>,
+        buffers: &mut CanvasBuffers,
+    ) -> Result<(PageRenderer<'a>, DevicePage), RasterError> {
+        if let Some(reason) = ruled_out(job) {
+            log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+            self.count(Outcome::Ineligible(reason));
+            if let Some(warning) = (reason == WIDE)
+                .then(|| self.wide_declined(job.page_num))
+                .flatten()
+            {
+                log::warn!("{warning}");
+            }
+            return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
         }
-        return Ok((job.run(buffers)?, DevicePage::Ineligible(reason)));
-    }
-    let claim = match pages.claim(job.params.cancel.as_ref()) {
-        Ok(claim) => claim,
-        Err(miss) => {
-            log::debug!(
-                "page {}: rendered on the CPU: {}",
-                job.page_num,
-                miss.describe()
-            );
-            pages.count(Outcome::Missed(miss));
-            return Ok((job.run(buffers)?, DevicePage::NotOffered));
+        let claim = match self.claim(job.params.cancel.as_ref()) {
+            Ok(claim) => claim,
+            Err(miss) => {
+                log::debug!(
+                    "page {}: rendered on the CPU: {}",
+                    job.page_num,
+                    miss.describe()
+                );
+                self.count(Outcome::Missed(miss));
+                return Ok((job.run(buffers)?, DevicePage::NotOffered));
+            }
+        };
+        // The device paints every sample of the canvas; a page it does not
+        // paint is painted paper white first.
+        let mut renderer = job.unpainted_renderer(std::mem::take(buffers))?;
+        if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
+            drop(claim);
+            log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+            self.count(Outcome::Ineligible(reason));
+            renderer.paint_paper();
+            let renderer = job.executed(renderer, buffers)?;
+            return Ok((renderer, DevicePage::Ineligible(reason)));
         }
-    };
-    // The device paints every sample of the canvas; a page it does not
-    // paint is painted paper white first.
-    let mut renderer = job.unpainted_renderer(std::mem::take(buffers))?;
-    if let Err(reason) = renderer.record_for_device(claim.backend.page_paths()) {
-        drop(claim);
-        log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
-        pages.count(Outcome::Ineligible(reason));
-        renderer.paint_paper();
-        let renderer = job.executed(renderer, buffers)?;
-        return Ok((renderer, DevicePage::Ineligible(reason)));
-    }
-    #[cfg(test)]
-    if let Some(token) = TestFaults::take(&pages.faults.cancel_recording) {
-        token.cancel();
-    }
-    let mut renderer = job.executed(renderer, buffers)?;
-    let recording = renderer.take_device_recording();
-    if renderer.budget_status().is_some() {
-        pages.count(Outcome::Stopped);
-        renderer.paint_paper();
-        return Ok((renderer, DevicePage::NotOffered));
-    }
-    let outcome = match recording {
-        Some(DeviceRecording::Recorded(page)) => {
-            #[cfg(test)]
-            let painted = TestFaults::take(&pages.faults.fail_next)
-                .map_or_else(|| renderer.paint_device_page(claim.backend, &page), Err);
-            #[cfg(not(test))]
-            let painted = renderer.paint_device_page(claim.backend, &page);
-            match painted {
-                Ok(()) => {
-                    let commands = u32::try_from(page.len()).unwrap_or(u32::MAX);
-                    log::debug!(
-                        "page {}: rendered on the GPU from {commands} commands",
-                        job.page_num
-                    );
-                    pages.count(Outcome::Rendered);
-                    let _ = claim.device.rendered.fetch_add(1, Ordering::Relaxed);
-                    return Ok((renderer, DevicePage::Rendered { commands }));
-                }
-                Err(e) => {
-                    claim.device.fail(job.page_num, &e);
-                    pages.count(Outcome::Failed);
-                    DevicePage::Failed
+        #[cfg(test)]
+        if let Some(token) = TestFaults::take(&self.faults.cancel_recording) {
+            token.cancel();
+        }
+        let mut renderer = job.executed(renderer, buffers)?;
+        let recording = renderer.take_device_recording();
+        if renderer.budget_status().is_some() {
+            self.count(Outcome::Stopped);
+            renderer.paint_paper();
+            return Ok((renderer, DevicePage::NotOffered));
+        }
+        let outcome = match recording {
+            Some(DeviceRecording::Recorded(page)) => {
+                #[cfg(test)]
+                let painted = TestFaults::take(&self.faults.fail_next)
+                    .map_or_else(|| renderer.paint_device_page(claim.backend, &page), Err);
+                #[cfg(not(test))]
+                let painted = renderer.paint_device_page(claim.backend, &page);
+                match painted {
+                    Ok(()) => {
+                        let commands = u32::try_from(page.len()).unwrap_or(u32::MAX);
+                        log::debug!(
+                            "page {}: rendered on the GPU from {commands} commands",
+                            job.page_num
+                        );
+                        self.count(Outcome::Rendered);
+                        let _ = claim.device.rendered.fetch_add(1, Ordering::Relaxed);
+                        return Ok((renderer, DevicePage::Rendered { commands }));
+                    }
+                    Err(e) => {
+                        claim.device.fail(job.page_num, &e);
+                        self.count(Outcome::Failed);
+                        DevicePage::Failed
+                    }
                 }
             }
-        }
-        Some(DeviceRecording::Refused(reason)) => {
-            log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
-            pages.count(Outcome::Ineligible(reason));
-            DevicePage::Ineligible(reason)
-        }
-        None => unreachable!("a renderer recording for the device yields its recording"),
-    };
-    drop(claim);
-    #[cfg(test)]
-    let _ = pages.faults.cpu_reruns.fetch_add(1, Ordering::Relaxed);
-    let fallback = renderer.take_device_fallback();
-    let mut cpu = job.renderer(renderer.into_buffers())?;
-    cpu.resume_after_device(fallback);
-    Ok((job.executed(cpu, buffers)?, outcome))
+            Some(DeviceRecording::Refused(reason)) => {
+                log::debug!("page {}: rendered on the CPU: {reason}", job.page_num);
+                self.count(Outcome::Ineligible(reason));
+                DevicePage::Ineligible(reason)
+            }
+            None => unreachable!("a renderer recording for the device yields its recording"),
+        };
+        drop(claim);
+        #[cfg(test)]
+        let _ = self.faults.cpu_reruns.fetch_add(1, Ordering::Relaxed);
+        let fallback = renderer.take_device_fallback();
+        let mut cpu = job.renderer(renderer.into_buffers())?;
+        cpu.resume_after_device(fallback);
+        Ok((job.executed(cpu, buffers)?, outcome))
+    }
 }
 
 #[cfg(test)]

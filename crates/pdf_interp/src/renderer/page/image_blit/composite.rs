@@ -80,7 +80,10 @@ impl PageRenderer<'_> {
     ) -> Result<(), String> {
         // A page recorded for the device raster takes the host copy of
         // device-resident samples.
-        #[cfg(all(feature = "cache", feature = "vulkan"))]
+        #[cfg(all(
+            feature = "cache",
+            any(feature = "vulkan", all(windows, feature = "d3d12"))
+        ))]
         if self.device_recording() && matches!(img.data, crate::resources::image::ImageData::Gpu(_))
         {
             let Some(host) = self.host_copy(img, "a recorded page") else {
@@ -124,7 +127,7 @@ impl PageRenderer<'_> {
             }
             None => None,
         };
-        #[cfg(feature = "vulkan")]
+        #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
         if self.device_recording() {
             self.record_device_image(img, (wide, bytes), mask.as_ref(), grid);
             return Ok(());

@@ -20,6 +20,6 @@ pub use page::{
     CanvasBuffers, DevicePage, FinishedCanvas, GlyphCounts, GroupSpaceApproximations, ImageFailure,
     MAX_FORM_DEPTH, PageDiagnostics, PageRenderer, PageState, PageView, PaintTrace, RenderAbort,
 };
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 pub use page::{DeviceFallback, DeviceRecording, device_page_ineligible};
 pub use pdf::ContentFailure;

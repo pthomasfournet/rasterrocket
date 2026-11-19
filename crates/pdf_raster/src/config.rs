@@ -447,14 +447,17 @@ pub struct SessionConfig {
     /// reports and renders, and a [`RenderRegion`](crate::RenderRegion) is
     /// placed on the turned page.  Default [`Rotation::None`].
     pub rotation: Rotation,
-    /// Whether pages are rendered whole on a Vulkan GPU beside the CPU
-    /// workers.
+    /// Whether pages are rendered whole on a GPU beside the CPU workers:
+    /// on Vulkan under [`Auto`](BackendPolicy::Auto) and
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), on Direct3D 12 under
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12).
     ///
     /// Default `false`.  `true` under [`Auto`](BackendPolicy::Auto) opens
     /// the device of [`vulkan_device`](Self::vulkan_device) on a thread of
     /// its own when the first page that may render on it is rendered, so a
     /// job none of whose pages can never opens it; under
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) the session's device is
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) and
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12) the session's device is
     /// used.  A page whose every paint the GPU raster renders (fills,
     /// strokes and text in solid colours, images, forms and annotation
     /// appearances, under path clips and soft masks, `Normal` blend) is
@@ -471,21 +474,30 @@ pub struct SessionConfig {
     /// reports where each page rendered and why.  A device that does not
     /// open is logged at `error` and leaves every page on the CPU.
     ///
-    /// Requires a build with the `vulkan` feature,
-    /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), and
+    /// Requires [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) in a build with the
+    /// `vulkan` feature, or [`ForceD3d12`](BackendPolicy::ForceD3d12) in a
+    /// Windows build with the `d3d12` feature, and
     /// [`vector_antialias`](Self::vector_antialias); otherwise
     /// [`open_session`] returns [`RasterError::InvalidOptions`] (see
     /// [`check_gpu_pages`](Self::check_gpu_pages)).
     pub gpu_pages: bool,
-    /// The Vulkan devices the GPU pages ([`gpu_pages`](Self::gpu_pages))
-    /// render on, each a selector as [`vulkan_device`](Self::vulkan_device)
-    /// takes, or the one entry `all`: every usable GPU (discrete,
-    /// integrated or virtual, not a CPU implementation of Vulkan).
+    /// The devices the GPU pages ([`gpu_pages`](Self::gpu_pages)) render
+    /// on, all of the policy's API: Vulkan devices under
+    /// [`Auto`](BackendPolicy::Auto) and
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), each a selector as
+    /// [`vulkan_device`](Self::vulkan_device) takes; Direct3D 12 adapters
+    /// under [`ForceD3d12`](BackendPolicy::ForceD3d12), each a selector as
+    /// [`d3d12_device`](Self::d3d12_device) takes (`warp` or its index
+    /// names the WARP adapter).  The one entry `all` is every usable GPU of
+    /// the API (discrete, integrated or virtual), never a CPU
+    /// implementation of Vulkan or the WARP adapter.
     ///
     /// Default empty: the GPU pages render on the device of
-    /// [`vulkan_device`](Self::vulkan_device) (under
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), the session's device).
+    /// [`vulkan_device`](Self::vulkan_device) under
+    /// [`Auto`](BackendPolicy::Auto), and on the session's device under
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) and
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12).
     /// With several devices each page takes the open device where it
     /// expects the shortest wait (the pages the device holds and itself,
     /// times the device's recent mean time per page raster), so a faster device takes more
@@ -493,11 +505,13 @@ pub struct SessionConfig {
     /// [`Auto`](BackendPolicy::Auto) the devices are opened, each on a
     /// thread of its own, when the first page that may render on one asks
     /// for one, and a page waits for the first to open; under
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) [`open_session`] opens
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) and
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12) [`open_session`] opens
     /// every one and fails as it fails for its own device.
     /// [`RasterSession::device_page_counts`](crate::RasterSession::device_page_counts)
-    /// counts the pages each device rendered.  Tested with two devices
-    /// (a discrete and an integrated GPU of different vendors); more
+    /// counts the pages each device rendered, by its name (the adapter
+    /// description on Direct3D 12).  Tested with two devices (a discrete
+    /// and an integrated GPU of different vendors) on each API; more
     /// devices, and datacenter GPUs, are untested.
     ///
     /// [`open_session`] resolves the list against the enumerated devices
@@ -668,9 +682,11 @@ impl SessionConfig {
     }
 
     /// Check that this config can render GPU pages when it asks for them
-    /// ([`gpu_pages`](Self::gpu_pages)): a build with the `vulkan` feature,
-    /// [`policy`](Self::policy) [`Auto`](BackendPolicy::Auto) or
-    /// [`ForceVulkan`](BackendPolicy::ForceVulkan), and
+    /// ([`gpu_pages`](Self::gpu_pages)): [`policy`](Self::policy)
+    /// [`Auto`](BackendPolicy::Auto) or
+    /// [`ForceVulkan`](BackendPolicy::ForceVulkan) in a build with the
+    /// `vulkan` feature, or [`ForceD3d12`](BackendPolicy::ForceD3d12) in a
+    /// Windows build with the `d3d12` feature, and
     /// [`vector_antialias`](Self::vector_antialias) on, since the device
     /// raster paints antialiased coverage only.  [`open_session`] applies
     /// the same check; calling it first refuses the combination before any
@@ -697,23 +713,38 @@ impl SessionConfig {
                 "GPU page rendering (`gpu_pages`, --gpu-pages) {why}"
             )))
         };
-        if !cfg!(feature = "vulkan") {
+        let vulkan = cfg!(feature = "vulkan");
+        let d3d12 = cfg!(all(windows, feature = "d3d12"));
+        if !vulkan && !d3d12 {
             return refuse(
-                "needs a build with the `vulkan` feature; rebuild with `--features vulkan` \
-                 or drop --gpu-pages"
+                "needs a build with the `vulkan` feature (or, on Windows, the `d3d12` \
+                 feature); rebuild with `--features vulkan` or drop --gpu-pages"
                     .to_owned(),
             );
         }
-        if !matches!(
-            self.policy,
-            BackendPolicy::Auto | BackendPolicy::ForceVulkan
-        ) {
-            return refuse(format!(
-                "runs on Vulkan, which backend `{0}` (`policy`, --backend {0} or \
-                 PDF_RASTER_BACKEND={0}) does not use; use --backend auto or --backend vulkan, \
-                 or drop --gpu-pages",
-                self.policy.name()
-            ));
+        match self.policy {
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan if vulkan => {}
+            BackendPolicy::ForceD3d12 if d3d12 => {}
+            BackendPolicy::Auto | BackendPolicy::ForceVulkan | BackendPolicy::ForceD3d12 => {
+                let (api, feature) = if self.policy == BackendPolicy::ForceD3d12 {
+                    ("Direct3D 12", "a Windows build with the `d3d12` feature")
+                } else {
+                    ("Vulkan", "a build with the `vulkan` feature")
+                };
+                return refuse(format!(
+                    "on {api} (backend `{}`) needs {feature}; rebuild with it or drop \
+                     --gpu-pages",
+                    self.policy.name()
+                ));
+            }
+            _ => {
+                return refuse(format!(
+                    "runs on Vulkan or Direct3D 12, which backend `{0}` (`policy`, \
+                     --backend {0} or PDF_RASTER_BACKEND={0}) does not use; use --backend \
+                     auto, --backend vulkan or --backend d3d12, or drop --gpu-pages",
+                    self.policy.name()
+                ));
+            }
         }
         if !self.vector_antialias {
             return refuse(
@@ -905,6 +936,55 @@ mod tests {
             "{msg}"
         );
         assert_eq!(msg.contains("vaapi"), cfg!(feature = "vaapi"), "{msg}");
+    }
+
+    /// GPU pages are accepted under `ForceD3d12` in a Windows build with
+    /// the `d3d12` feature, with a device list beside the session's own
+    /// adapter; elsewhere they are refused naming the feature.
+    #[test]
+    fn gpu_pages_accept_force_d3d12() {
+        use super::SessionConfig;
+        use crate::RasterError;
+        let mut config = SessionConfig::with_policy(BackendPolicy::ForceD3d12);
+        config.gpu_pages = true;
+        config.gpu_devices = vec!["all".to_owned()];
+        config.d3d12_device = Some("0".to_owned());
+        let d3d12 = cfg!(all(windows, feature = "d3d12"));
+        match config.check_gpu_pages() {
+            Ok(()) => assert!(d3d12, "accepted without the D3D12 backend"),
+            Err(RasterError::InvalidOptions(msg)) => {
+                assert!(!d3d12, "{msg}");
+                assert!(msg.contains("`d3d12` feature"), "{msg}");
+            }
+            Err(other) => panic!("expected InvalidOptions, got {other:?}"),
+        }
+    }
+
+    /// GPU pages under a backend that renders none are refused naming the
+    /// backends that do: `auto`, `vulkan` and `d3d12`.
+    #[test]
+    fn gpu_pages_are_refused_under_other_backends_naming_the_three() {
+        use super::SessionConfig;
+        use crate::RasterError;
+        for policy in [BackendPolicy::CpuOnly, BackendPolicy::ForceCuda] {
+            let mut config = SessionConfig::with_policy(policy);
+            config.gpu_pages = true;
+            let Err(RasterError::InvalidOptions(msg)) = config.check_gpu_pages() else {
+                panic!("{policy:?}: GPU pages accepted");
+            };
+            if cfg!(any(feature = "vulkan", all(windows, feature = "d3d12"))) {
+                for named in [
+                    format!("--backend {}", policy.name()),
+                    "--backend auto".to_owned(),
+                    "--backend vulkan".to_owned(),
+                    "--backend d3d12".to_owned(),
+                ] {
+                    assert!(msg.contains(&named), "{policy:?}: {msg}");
+                }
+            } else {
+                assert!(msg.contains("`vulkan` feature"), "{policy:?}: {msg}");
+            }
+        }
     }
 
     /// The variable a child process of this test runs under.

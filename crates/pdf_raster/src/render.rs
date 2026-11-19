@@ -610,9 +610,9 @@ fn render_job(
     } = page;
     let (session, params) = (job.session, job.params);
     let (page_num, page_id) = (job.page_num, job.page_id);
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     let (renderer, device_page) = crate::device_pages::render(job, buffers)?;
-    #[cfg(not(feature = "vulkan"))]
+    #[cfg(not(any(feature = "vulkan", all(windows, feature = "d3d12"))))]
     let renderer = job.run(buffers)?;
 
     let renderer = checked(renderer, buffers, |renderer| {
@@ -643,7 +643,7 @@ fn render_job(
     diag.output_intent = output_intent;
     diag.form_type = session.form_type;
     diag.unsupported_features = unsupported_features;
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     {
         diag.device_page = device_page;
     }
@@ -861,7 +861,7 @@ impl<'a> PageJob<'a> {
     /// session, whose canvas samples are unspecified
     /// ([`pdf_interp::renderer::PageRenderer::try_unpainted_in`]), its
     /// bitmap built in `buffers`.
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
     pub(crate) fn unpainted_renderer(
         &self,
         buffers: CanvasBuffers,
