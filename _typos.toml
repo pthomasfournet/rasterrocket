@@ -27,6 +27,9 @@ extend-ignore-re = [
     # Glyph test strings: `café` as a byte or char escape, kerning pairs.
     "caf\\\\(x[Ee]9|u\\{e9\\})",
     "AaBb AbBa BaAb",
+    # DXC's output-file flag and PowerShell's case-sensitive `-ccontains`.
+    "-Fo\\b",
+    "-ccontains\\b",
 ]
 
 [default.extend-identifiers]

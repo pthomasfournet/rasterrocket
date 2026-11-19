@@ -3347,7 +3347,7 @@ pages and no speed. `DevicePageCounts::busy` is gone. Whole process,
 median of 5 interleaved, ms, renders discarded (every output a symlink to
 `/dev/null`), CPU / Auto before → after / `--backend vulkan` before →
 after, pages on the device after = all:
-| doc | dpi | thr | CPU | Auto | vk | device pages before (Auto / vk) |
+| doc | dpi | threads | CPU | Auto | vk | device pages before (Auto / vk) |
 |---|---|---|---|---|---|---|
 | corpus-03 (254 p) | 150 | 24 | 168 | 190 → 647 | 296 → 655 | 0 / 19 |
 | corpus-03 | 300 | 24 | 420 | 456 → 1411 | 613 → 1334 | 0 / 14 |
