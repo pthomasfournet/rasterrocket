@@ -143,10 +143,14 @@ pub trait PageDevice: GpuBackend + Sized {
         stride: usize,
     ) -> Result<PageTimes>;
 
-    /// Whether `error` retires the device: every error but `DeviceLimit`.
+    /// Whether `error` retires the device: every error but `DeviceLimit`
+    /// and `OutOfMemory`, which concern the page alone.
     #[must_use]
     fn retires_device(error: &BackendError) -> bool {
-        !matches!(error, BackendError::DeviceLimit { .. })
+        !matches!(
+            error,
+            BackendError::DeviceLimit { .. } | BackendError::OutOfMemory { .. }
+        )
     }
 }
 

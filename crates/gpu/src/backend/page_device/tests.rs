@@ -462,3 +462,27 @@ fn vulkan_a_stride_past_the_address_space_is_refused() {
         a_stride_past_the_address_space_is_refused_on(&backend);
     }
 }
+
+/// A page past a device limit or the memory left keeps the device in
+/// service; any other error retires it.
+#[test]
+fn vulkan_retires_device_on_every_error_but_limits_and_memory() {
+    use crate::backend::BackendError;
+    use crate::backend::vulkan::VulkanBackend;
+    let retires = <VulkanBackend as PageDevice>::retires_device;
+    assert!(!retires(&BackendError::DeviceLimit {
+        what: "render_page pixels",
+        need: 2,
+        limit: "maxStorageBufferRange",
+        max: 1,
+    }));
+    assert!(!retires(&BackendError::OutOfMemory {
+        what: "render_page pixels",
+        bytes: 1,
+    }));
+    assert!(retires(&BackendError::KernelFault {
+        kernel: "page_raster_paths",
+        detail: String::new(),
+    }));
+    assert!(retires(&BackendError::msg("device lost")));
+}

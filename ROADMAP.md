@@ -3726,7 +3726,7 @@ API changes in `rasterrocket-gpu` (callers bring the trait into scope):
   usable_gpus, device_index, device_name, page_mean, page_paths,
   render_page, render_page_timed}` are `PageDevice` methods;
   `with_selector` is `PageDevice::open`. `PageDevice::retires_device` is
-  new: every error but `DeviceLimit` retires a device.
+  new: every error but `DeviceLimit` and `OutOfMemory` retires a device.
 - `DeviceSelector` moves to `backend::select`, `PageTimes` to
   `backend::page_device`; neither is re-exported from `backend::vulkan`.
   An empty selector's error reads "device selector is empty" (was "Vulkan
