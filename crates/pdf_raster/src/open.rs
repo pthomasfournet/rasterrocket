@@ -443,7 +443,8 @@ pub fn open_session_from_reader(
 /// Why `policy` cannot run in this build: a `Force*` policy whose backend
 /// was not compiled in (`ForceVulkan` without the `vulkan` feature,
 /// `ForceD3d12` without the `d3d12` feature or off Windows, `ForceCuda`
-/// without `gpu-icc`, `cache` or `gpu-deskew`).  Without this gate the backend's
+/// without `gpu-icc`, `cache`, `gpu-deskew` or `nvjpeg2k`; `nvjpeg` alone
+/// leaves nothing on the device, its decoder being disabled).  Without this gate the backend's
 /// cfg-gated initialisation disappears and the forced render silently runs
 /// on the CPU, the fallback the `Force*` variants exist to prevent.
 const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
@@ -452,7 +453,8 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     let cuda = cfg!(any(
         feature = "gpu-icc",
         feature = "cache",
-        feature = "gpu-deskew"
+        feature = "gpu-deskew",
+        feature = "nvjpeg2k"
     ));
     match policy {
         BackendPolicy::ForceVulkan if !vulkan => Some(
@@ -467,7 +469,7 @@ const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
              pick another --backend."
         }),
         BackendPolicy::ForceCuda if !cuda => Some(
-            "ForceCuda requires the `gpu-icc`, `cache` or `gpu-deskew` Cargo feature; \
+            "ForceCuda requires the `gpu-icc`, `cache`, `gpu-deskew` or `nvjpeg2k` Cargo feature; \
              rebuild with the desired feature set or pick another --backend.",
         ),
         _ => None,
