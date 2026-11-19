@@ -12,6 +12,10 @@
 //! and in the wide working space under an output profile, where it gives
 //! the 16-bit samples the CPU converts the image's samples widened to.
 //!
+//! A third document draws one image of more pixels than one device dispatch
+//! covers (`MAX_ICC_CLUT_DISPATCH_PIXELS`) onto a 64 × 64 page; the device
+//! must convert it, in runs, and match the CPU session.
+//!
 //! The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE` names, or
 //! the automatically ranked one; the D3D12 case (Windows) on the adapter
 //! `PDF_RASTER_D3D12_DEVICE` names, or the automatically chosen one.  Each
@@ -239,6 +243,66 @@ fn assert_device_conversion_matches_cpu(
     }
 }
 
+/// Sides of the image of [`large_pdf`]: 16 781 312 pixels, above the
+/// 16 776 960 of one dispatch of 65 535 groups of 256 threads.
+const LARGE: (usize, usize) = (4097, 4096);
+
+/// One 64 × 64 page drawing a `LARGE` image of zero samples in the CMYK
+/// space of [`CMYK_PROFILE`], Flate-compressed.
+fn large_pdf() -> Vec<u8> {
+    use std::io::Write as _;
+    let (w, h) = LARGE;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    z.write_all(&vec![0; w * h * 4]).expect("compress");
+    let data = z.finish().expect("compress");
+    assemble_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] \
+          /Resources << /XObject << /Im 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream_object("", b"q 64 0 0 64 0 0 cm /Im Do Q"),
+        stream_object("/N 4", CMYK_PROFILE),
+        stream_object(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width {w} /Height {h} \
+                 /ColorSpace [/ICCBased 5 0 R] /BitsPerComponent 8 /Filter /FlateDecode"
+            ),
+            &data,
+        ),
+    ])
+}
+
+/// The device converts the image of [`large_pdf`], at 8 and 16 bits,
+/// without a failure, and the page is the CPU session's; `gpu` opens the
+/// GPU session of a configuration (`None`: skipped).
+fn assert_large_image_converts_on_device(
+    gpu: impl Fn(&SessionConfig, Vec<u8>) -> Option<RasterSession>,
+    config: &SessionConfig,
+    what: &str,
+) {
+    if std::env::var_os("PDF_RASTER_ICC_CLUT_THRESHOLD").is_some() {
+        eprintln!("skipping: PDF_RASTER_ICC_CLUT_THRESHOLD overrides the threshold");
+        return;
+    }
+    for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
+        let what = format!("{what} {depth:?}");
+        let Some(gpu) = gpu(config, large_pdf()) else {
+            return;
+        };
+        let cpu_config = SessionConfig::with_policy(BackendPolicy::CpuOnly);
+        let cpu_session = open_session_from_bytes(large_pdf(), &cpu_config).expect("CPU session");
+        let (device, diag) = render(&gpu, 1, depth);
+        assert_eq!(
+            (diag.device_icc_conversions, diag.device_icc_failures),
+            (1, 0),
+            "{what}: device ICC conversions and failures on the image above one dispatch"
+        );
+        let (cpu, _) = render(&cpu_session, 1, depth);
+        assert_identical(&cpu, &device, &what);
+    }
+}
+
 #[cfg(feature = "vulkan")]
 #[test]
 fn icc_cmyk_image_converts_on_vulkan() {
@@ -277,4 +341,39 @@ fn icc_cmyk_image_converts_on_cuda() {
     };
     let config = SessionConfig::with_policy(BackendPolicy::ForceCuda);
     assert_device_conversion_matches_cpu(open, &config, "cuda");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn icc_cmyk_image_above_one_dispatch_converts_on_vulkan() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
+    config.vulkan_device = SessionConfig::vulkan_device_from_env();
+    let open = |config: &SessionConfig, pdf: Vec<u8>| {
+        common::device::or_skip(DeviceApi::Vulkan, open_session_from_bytes(pdf, config))
+    };
+    assert_large_image_converts_on_device(open, &config, "vulkan");
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+#[test]
+fn icc_cmyk_image_above_one_dispatch_converts_on_d3d12() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::ForceD3d12);
+    config.d3d12_device = SessionConfig::d3d12_device_from_env();
+    let open = |config: &SessionConfig, pdf: Vec<u8>| {
+        let session =
+            common::device::or_skip(DeviceApi::D3d12, open_session_from_bytes(pdf, config));
+        warp::report_loaded_warp();
+        session
+    };
+    assert_large_image_converts_on_device(open, &config, "d3d12");
+}
+
+#[cfg(feature = "gpu-validation")]
+#[test]
+fn icc_cmyk_image_above_one_dispatch_converts_on_cuda() {
+    let open = |config: &SessionConfig, pdf: Vec<u8>| {
+        Some(open_session_from_bytes(pdf, config).expect("CUDA session"))
+    };
+    let config = SessionConfig::with_policy(BackendPolicy::ForceCuda);
+    assert_large_image_converts_on_device(open, &config, "cuda");
 }

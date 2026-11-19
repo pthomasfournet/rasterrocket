@@ -9,7 +9,7 @@
 use color::grid::{CmykGrid, NodeRange};
 
 use super::layout::{device_pixel_words, unpad_pixels};
-use super::params::{IccClutParams, MAX_KERNEL_PIXELS, MAX_WIDE_CLUT_PIXELS};
+use super::params::{IccClutParams, MAX_ICC_CLUT_DISPATCH_PIXELS};
 use super::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage, stage_exact,
 };
@@ -52,8 +52,7 @@ impl<B: GpuBackend> Default for IccClutScratch<B> {
 /// # Errors
 ///
 /// [`BackendError::InvariantViolation`] when `cmyk` does not hold whole
-/// pixels or the pixel count violates the [`IccClutParams`] invariants;
-/// the backend's error when an allocation, a transfer or the kernel fails.
+/// pixels; the backend's error when an allocation, a transfer or the kernel fails.
 pub fn icc_clut<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> Result<Vec<u8>> {
     convert(backend, cmyk, grid, false)
 }
@@ -73,53 +72,60 @@ pub fn icc_clut16<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> R
         .collect())
 }
 
-/// `n` pixels as the pixel count of an [`IccClutParams`] conversion, `wide`
-/// or not, checked against the bound [`IccClutParams::validate`] enforces
-/// before anything is staged or allocated.
-///
-/// # Errors
-/// [`BackendError::InvariantViolation`] when `n` exceeds
-/// [`MAX_KERNEL_PIXELS`], or [`MAX_WIDE_CLUT_PIXELS`] when `wide`.
-fn pixel_count(n: usize, wide: bool) -> Result<u32> {
-    let (max, name) = if wide {
-        (MAX_WIDE_CLUT_PIXELS, "MAX_WIDE_CLUT_PIXELS")
-    } else {
-        (MAX_KERNEL_PIXELS, "MAX_KERNEL_PIXELS")
-    };
-    u32::try_from(n).ok().filter(|&n| n <= max).ok_or_else(|| {
-        BackendError::invariant(
-            "IccClutInvariantViolation",
-            format!("n_pixels {n} exceeds {name} {max} (32-bit byte addressing)"),
-        )
-    })
-}
-
 /// [`icc_clut`], the output of 16-bit values, two bytes each, low first,
 /// when `wide`: the device's output words, unpadded.
+///
+/// The pixels convert in runs of at most [`MAX_ICC_CLUT_DISPATCH_PIXELS`],
+/// one page each, whose outputs are written in order.
 fn convert<B: GpuBackend>(
     backend: &B,
     cmyk: &[u8],
     grid: &CmykGrid,
     wide: bool,
 ) -> Result<Vec<u8>> {
-    const KIND: &str = "IccClutInvariantViolation";
     if !cmyk.len().is_multiple_of(4) {
         return Err(BackendError::invariant(
-            KIND,
+            "IccClutInvariantViolation",
             format!(
                 "cmyk buffer length {} bytes is not a multiple of 4",
                 cmyk.len()
             ),
         ));
     }
-    let n = cmyk.len() / 4;
-    if n == 0 {
-        return Ok(Vec::new());
+    let sample_bytes = if wide { 2 } else { 1 };
+    let run = MAX_ICC_CLUT_DISPATCH_PIXELS as usize;
+    let mut rgb = vec![0; cmyk.len() / 4 * 3 * sample_bytes];
+    for (cmyk, rgb) in cmyk
+        .chunks(run * 4)
+        .zip(rgb.chunks_mut(run * 3 * sample_bytes))
+    {
+        convert_run(backend, cmyk, grid, wide, rgb)?;
     }
-    let n_pixels = pixel_count(n, wide)?;
+    Ok(rgb)
+}
+
+/// The conversion of the whole pixels `cmyk`, at most
+/// [`MAX_ICC_CLUT_DISPATCH_PIXELS`] of them, as one page, into `rgb`, of
+/// three samples of 1 byte a pixel, 2 when `wide`.
+fn convert_run<B: GpuBackend>(
+    backend: &B,
+    cmyk: &[u8],
+    grid: &CmykGrid,
+    wide: bool,
+    rgb: &mut [u8],
+) -> Result<()> {
+    let n = cmyk.len() / 4;
+    let n_pixels = u32::try_from(n)
+        .ok()
+        .filter(|&n| n <= MAX_ICC_CLUT_DISPATCH_PIXELS)
+        .ok_or_else(|| {
+            BackendError::invariant(
+                "IccClutInvariantViolation",
+                format!("a run of {n} pixels exceeds {MAX_ICC_CLUT_DISPATCH_PIXELS}"),
+            )
+        })?;
     let table = grid.as_bytes();
     let sample_bytes = if wide { 2 } else { 1 };
-    let rgb_len = n * 3 * sample_bytes;
     let device_len = n * 4 * device_pixel_words(sample_bytes);
     backend.scratch().icc_clut.with(|scratch| {
         let IccClutScratch {
@@ -146,9 +152,8 @@ fn convert<B: GpuBackend>(
             unsafe { record_download(backend, d_rgb, device_len) }
         })?;
         let device = unsafe { host_view(backend, d_rgb) }?;
-        let mut rgb = vec![0; rgb_len];
-        unpad_pixels(&device[..device_len], &mut rgb, sample_bytes);
-        Ok(rgb)
+        unpad_pixels(&device[..device_len], rgb, sample_bytes);
+        Ok(())
     })
 }
 
@@ -295,6 +300,32 @@ fn check_scratch_is_pooled<B: GpuBackend>(backend: &B) {
     }
 }
 
+/// A conversion of more pixels than one dispatch covers
+/// ([`MAX_ICC_CLUT_DISPATCH_PIXELS`]) completes on the device, at 8 and 16 bits, and is the
+/// host's value for value, across the boundary of each run.
+#[cfg(all(
+    test,
+    any(
+        feature = "gpu-validation",
+        feature = "vulkan",
+        all(feature = "d3d12", windows)
+    )
+))]
+fn check_above_the_dispatch_limit<B: GpuBackend>(backend: &B) {
+    let n = MAX_ICC_CLUT_DISPATCH_PIXELS as usize + 4_097;
+    let mut next = lcg(0x5ca1_ab1e);
+    let cmyk: Vec<u8> = (0..n / 64)
+        .flat_map(|_| [next().to_be_bytes()[0]; 4 * 64])
+        .chain(std::iter::repeat_n(0x80, 4 * (n % 64)))
+        .collect();
+    assert_eq!(cmyk.len(), 4 * n);
+    let grid = random_grid(11, [16; 4], NodeRange::Unit);
+    let device = icc_clut(backend, &cmyk, &grid).expect("icc_clut above the dispatch limit");
+    assert!(device == grid.convert(&cmyk), "8-bit output differs");
+    let device = icc_clut16(backend, &cmyk, &grid).expect("icc_clut16 above the dispatch limit");
+    assert!(device == grid.convert16(&cmyk), "16-bit output differs");
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod vulkan_tests {
     use super::*;
@@ -324,6 +355,14 @@ mod vulkan_tests {
             return;
         };
         check_scratch_is_pooled(&backend);
+    }
+
+    #[test]
+    fn vulkan_icc_clut_above_the_dispatch_limit() {
+        let Some(backend) = crate::backend::vulkan::test_backend() else {
+            return;
+        };
+        check_above_the_dispatch_limit(&backend);
     }
 }
 
@@ -355,6 +394,14 @@ mod d3d12_tests {
             return;
         };
         check_scratch_is_pooled(&backend);
+    }
+
+    #[test]
+    fn d3d12_icc_clut_above_the_dispatch_limit() {
+        let Some(backend) = crate::backend::d3d12::test_backend() else {
+            return;
+        };
+        check_above_the_dispatch_limit(&backend);
     }
 }
 
@@ -402,6 +449,15 @@ mod tests {
         check_scratch_is_pooled(&backend);
     }
 
+    #[test]
+    fn cuda_icc_clut_above_the_dispatch_limit() {
+        let Ok(backend) = crate::backend::cuda::CudaBackend::new() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        check_above_the_dispatch_limit(&backend);
+    }
+
     /// Malformed input is an invariant error, and zero pixels are no work.
     #[test]
     fn malformed_input_is_rejected() {
@@ -417,22 +473,5 @@ mod tests {
             icc_clut(&backend, &[], &grid).expect("empty"),
             Vec::<u8>::new()
         );
-    }
-}
-
-#[cfg(test)]
-mod bound_tests {
-    use super::*;
-
-    /// Each width's pixel bound is checked before staging, at its edge.
-    #[test]
-    fn the_pixel_bound_of_each_width() {
-        let invariant = |r: Result<u32>| matches!(r, Err(BackendError::InvariantViolation { .. }));
-        for (wide, max) in [(false, MAX_KERNEL_PIXELS), (true, MAX_WIDE_CLUT_PIXELS)] {
-            assert_eq!(pixel_count(max as usize, wide).expect("at the bound"), max);
-            assert!(invariant(pixel_count(max as usize + 1, wide)), "{wide}");
-        }
-        let err = pixel_count(MAX_WIDE_CLUT_PIXELS as usize + 1, true).expect_err("wide");
-        assert!(err.to_string().contains("MAX_WIDE_CLUT_PIXELS"), "{err}");
     }
 }

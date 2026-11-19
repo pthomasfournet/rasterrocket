@@ -84,6 +84,36 @@ pub(crate) fn copy_len(
         })
 }
 
+/// Check a dispatch of `kernel` over `groups` thread groups against the
+/// device's group count per dimension, `max`, named `limit`.
+///
+/// # Errors
+/// [`BackendError::DeviceLimit`] in thread groups, for the first dimension
+/// above its maximum.
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+#[cfg_attr(
+    not(any(feature = "vulkan", all(windows, feature = "d3d12"), test)),
+    expect(dead_code, reason = "only the Vulkan and D3D12 backends consume it")
+)]
+pub(crate) fn check_dispatch_groups(
+    kernel: &'static str,
+    groups: (u32, u32, u32),
+    max: [u32; 3],
+    limit: &'static str,
+) -> Result<()> {
+    let need: [u32; 3] = groups.into();
+    match need.iter().zip(max).find(|&(&n, m)| n > m) {
+        Some((&need, max)) => Err(BackendError::DeviceLimit {
+            what: kernel,
+            need: need.into(),
+            limit,
+            max: max.into(),
+            unit: "thread groups",
+        }),
+        None => Ok(()),
+    }
+}
+
 /// The size of a recorded copy of `len` bytes from a buffer of `src` bytes
 /// to one of `dst` bytes, `None` for an empty copy.
 pub(crate) fn recorded_copy_len(
@@ -574,6 +604,27 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("alloc_device"), "missing context: {msg}");
         assert!(msg.contains("size = 0"), "missing diagnostic: {msg}");
+    }
+
+    /// A dispatch above the group count of any dimension is a device
+    /// limit, in thread groups, which keeps the device.
+    #[cfg(any(feature = "vulkan", feature = "d3d12"))]
+    #[test]
+    fn a_dispatch_above_the_group_count_is_a_device_limit() {
+        let max = [65_535, 65_535, 1];
+        check_dispatch_groups("k", (65_535, 65_535, 1), max, "L").expect("at the limit");
+        for groups in [(65_536, 1, 1), (1, 65_536, 1), (1, 1, 2)] {
+            let err = check_dispatch_groups("k", groups, max, "L").expect_err("above");
+            assert!(
+                matches!(
+                    err,
+                    BackendError::DeviceLimit { what: "k", limit: "L", unit: "thread groups", need, max }
+                        if need == max + 1
+                ),
+                "{err:?}"
+            );
+            assert!(err.to_string().contains("thread groups"), "{err}");
+        }
     }
 
     #[test]

@@ -252,6 +252,17 @@ pub struct IccClutParams<'a, B: GpuBackend + ?Sized> {
     pub wide: bool,
 }
 
+/// Largest pixel count of one [`IccClutParams`] dispatch.
+///
+/// It is 65 535 groups of 256 threads along one dimension, the group count
+/// every Vulkan device supports (`maxComputeWorkGroupCount`) and the Direct3D 12 maximum
+/// (`D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION`).
+/// [`icc_clut`](super::icc_clut) converts larger images in runs of this
+/// many pixels.
+pub const MAX_ICC_CLUT_DISPATCH_PIXELS: u32 = 65_535 * 256;
+
+const _: () = assert!(MAX_ICC_CLUT_DISPATCH_PIXELS <= MAX_WIDE_CLUT_PIXELS);
+
 /// Largest pixel count of a 16-bit [`IccClutParams`] conversion: the
 /// output of pixel `i` lies at bytes `[i × 8, i × 8 + 8)`, addressed in
 /// 32-bit arithmetic.

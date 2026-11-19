@@ -411,6 +411,7 @@ fn retires_device_on_every_error_but_limits_and_memory_of<B: PageDevice>() {
         need: 2,
         limit: "a buffer limit",
         max: 1,
+        unit: "bytes",
     }));
     assert!(!B::retires_device(&BackendError::OutOfMemory {
         what: "render_page pixels",

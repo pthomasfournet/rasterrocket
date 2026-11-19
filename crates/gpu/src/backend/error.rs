@@ -50,17 +50,21 @@ pub enum BackendError {
         /// Human-readable description of the specific violation.
         detail: Cow<'static, str>,
     },
-    /// A buffer the work needs exceeds a limit of the device: the work is
-    /// too large for it, and the device itself is sound.
+    /// A buffer or a dispatch the work needs exceeds a limit of the
+    /// device: the work is too large for it, and the device itself is
+    /// sound.
     DeviceLimit {
-        /// The buffer, for diagnostic context.
+        /// The buffer or the kernel, for diagnostic context.
         what: &'static str,
-        /// Bytes the work needs.
+        /// What the work needs, in `unit`.
         need: u64,
         /// The device limit's name.
         limit: &'static str,
-        /// The device limit, in bytes.
+        /// The device limit, in `unit`.
         max: u64,
+        /// The unit of `need` and `max`: `"bytes"` for a buffer,
+        /// `"thread groups"` for a dispatch.
+        unit: &'static str,
     },
     /// The device or the host had no memory left for a buffer the work
     /// needs: the work does not fit beside what is allocated now, and the
@@ -175,9 +179,10 @@ impl fmt::Display for BackendError {
                 need,
                 limit,
                 max,
+                unit,
             } => write!(
                 f,
-                "{what} need {need} bytes, above the device's {limit} of {max} bytes"
+                "{what} need {need} {unit}, above the device's {limit} of {max} {unit}"
             ),
             Self::OutOfMemory { what, bytes } => {
                 write!(f, "{what}: out of memory for {bytes} bytes")

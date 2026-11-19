@@ -140,6 +140,7 @@ pub(super) fn a_page_beyond_the_device_limits_keeps_the_device<B: Api>() {
         need: 1 << 40,
         limit: "maxStorageBufferRange",
         max: 1 << 27,
+        unit: "bytes",
     });
 }
 

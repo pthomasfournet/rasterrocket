@@ -197,6 +197,7 @@ impl DeviceCtx {
                 need: len,
                 limit: "maxStorageBufferRange",
                 max,
+                unit: "bytes",
             });
         }
         Ok(())

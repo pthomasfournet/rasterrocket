@@ -37,6 +37,7 @@ pub(super) fn check_view_elements(what: &'static str, bytes: u64, stride: u32) -
             need: bytes,
             limit: VIEW_LIMIT,
             max,
+            unit: "bytes",
         });
     }
     Ok(())
@@ -313,7 +314,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                BackendError::DeviceLimit { what: "page", need, limit: VIEW_LIMIT, max }
+                BackendError::DeviceLimit { what: "page", need, limit: VIEW_LIMIT, max, unit: "bytes" }
                     if need == max4 + 1 && max == max4
             ),
             "{err:?}"

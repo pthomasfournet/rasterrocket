@@ -349,7 +349,8 @@ impl Recorder {
     /// When the bindings do not match the kernel's registers, a view
     /// covers more bytes than its buffer holds or holds more elements than
     /// a view may ([`memory::check_view_elements`]), a dimension of
-    /// `groups` exceeds the dispatch limit, or the page has recorded
+    /// `groups` exceeds the dispatch limit ([`BackendError::DeviceLimit`]),
+    /// or the page has recorded
     /// [`MAX_DISPATCHES_PER_PAGE`] dispatches
     /// ([`BackendError::DescriptorPoolExhausted`]).
     pub(super) fn dispatch_ranges(
@@ -595,12 +596,12 @@ fn check_bindings(
         )));
     }
     let max = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
-    if groups.0 > max || groups.1 > max || groups.2 > max {
-        return Err(BackendError::msg(format!(
-            "{label}: dispatch ({},{},{}) exceeds the {max} thread groups a dimension allows",
-            groups.0, groups.1, groups.2
-        )));
-    }
+    crate::backend::check_dispatch_groups(
+        label,
+        groups,
+        [max; 3],
+        "D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION",
+    )?;
     for &(buf, stride, bytes) in views {
         if stride == 0 || bytes < u64::from(stride) || bytes > buf.width() {
             return Err(BackendError::msg(format!(

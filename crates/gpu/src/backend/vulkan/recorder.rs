@@ -538,20 +538,6 @@ impl PageRecorder {
         Ok(s)
     }
 
-    /// Bail if `groups` exceeds the device's `maxComputeWorkGroupCount`
-    /// per axis.  Without this, an oversized dispatch returns an opaque
-    /// `ERROR_DEVICE_LOST` from the driver later — much harder to debug.
-    fn check_dispatch_size(&self, groups: (u32, u32, u32), kernel: &str) -> Result<()> {
-        let limits = self.device.max_workgroup_count;
-        if groups.0 > limits[0] || groups.1 > limits[1] || groups.2 > limits[2] {
-            return Err(BackendError::msg(format!(
-                "{kernel}: dispatch ({},{},{}) exceeds device maxComputeWorkGroupCount ({},{},{})",
-                groups.0, groups.1, groups.2, limits[0], limits[1], limits[2]
-            )));
-        }
-        Ok(())
-    }
-
     /// Allocate a descriptor set, bind pipeline + buffers + push constants,
     /// dispatch, emit a barrier to every later page command.  Holds the mutex
     /// for the whole body so two threads can't race on `s.cmd` (command
@@ -573,7 +559,12 @@ impl PageRecorder {
         let handles = self.pipelines.handles(id)?;
         debug_assert_eq!(buffers.len(), handles.n_storage_buffers as usize);
 
-        self.check_dispatch_size(groups, id.label())?;
+        crate::backend::check_dispatch_groups(
+            id.label(),
+            groups,
+            self.device.max_workgroup_count,
+            "maxComputeWorkGroupCount",
+        )?;
         for &size in sizes {
             self.device.check_storage_range(id.label(), size)?;
         }
