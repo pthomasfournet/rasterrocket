@@ -23,9 +23,11 @@
 //!    each 32-byte third takes its per-byte alpha by an in-lane byte
 //!    shuffle (`vpshufb`, byte `b` of third `g` from pixel `(32g + b) / 3`)
 //!    of a fixed arrangement of the alpha vector's 128-bit halves; the
-//!    per-lane source colour of each third is a constant vector.  A
-//!    remainder of 1–31 pixels is one more block ending at the span's last
-//!    pixel, overlapping the previous block.
+//!    per-lane source colour of each third is a byte shuffle of the
+//!    broadcast RGB triple, built once per call.  A remainder of 3–31 pixels
+//!    is one more block ending at the span's last pixel, overlapping the
+//!    previous block; one or two remaining pixels go through the scalar
+//!    loop.
 //! 3. **Scalar** per-pixel loop, also the tier for every other architecture,
 //!    for one-pixel spans and, under AVX2 only, for spans below 32 px.
 //!    LLVM auto-vectorises it under `-C target-cpu=native`.
@@ -290,12 +292,48 @@ const fn widened_byte(j: usize, high: bool) -> usize {
     (j / 8) * 16 + (j % 8) + if high { 8 } else { 0 }
 }
 
+/// Byte-shuffle tables placing the source colour in the u16 lanes of the
+/// low (`[g][0]`) and high (`[g][1]`) widening of third `g`: lane `j` takes
+/// channel `c = (32g + widened_byte(j, high)) % 3`, i.e. bytes `2c` and
+/// `2c + 1` of a 128-bit lane that holds the RGB triple as u16 lanes 0–2.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+const SHUFFLE_COLOUR: [[[u8; 32]; 2]; 3] = {
+    let mut t = [[[0u8; 32]; 2]; 3];
+    let mut g = 0;
+    while g < 3 {
+        let mut h = 0;
+        while h < 2 {
+            let mut j = 0;
+            while j < 16 {
+                let c = (32 * g + widened_byte(j, h == 1)) % 3;
+                let lane = (j % 8) * 2 + (j / 8) * 16;
+                #[expect(clippy::cast_possible_truncation, reason = "every entry is < 6")]
+                {
+                    t[g][h][lane] = (2 * c) as u8;
+                    t[g][h][lane + 1] = (2 * c + 1) as u8;
+                }
+                j += 1;
+            }
+            h += 1;
+        }
+        g += 1;
+    }
+    t
+};
+
+/// Shortest remainder the AVX2 tier covers with an overlapping block; a
+/// shorter one (one or two pixels) takes the scalar loop, which is cheaper
+/// there than a second full block.
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
+const OVERLAP_MIN_PX: usize = 3;
+
 /// AVX2 tier: 32 pixels (96 destination bytes) per block.  A span of
-/// fewer than 32 pixels takes the scalar loop.  A remainder of 1–31 pixels
+/// fewer than 32 pixels takes the scalar loop.  A remainder of 3–31 pixels
 /// is covered by one more block ending at the span's last pixel, computed
 /// from the destination before any block is stored and stored last: each
 /// output pixel depends only on its own input, so the pixels it shares
-/// with the preceding block receive the same values twice.
+/// with the preceding block receive the same values twice.  A remainder of
+/// one or two pixels takes the scalar loop.
 ///
 /// Bytes are widened to u16 with in-lane unpacks against zero and narrowed
 /// back with an in-lane unsigned pack, which restores their order, so no
@@ -312,9 +350,9 @@ const fn widened_byte(j: usize, high: bool) -> usize {
 unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]) {
     use std::arch::x86_64::{
         __m256i, _mm256_add_epi16, _mm256_loadu_si256, _mm256_mulhi_epu16, _mm256_mullo_epi16,
-        _mm256_packus_epi16, _mm256_permute2x128_si256, _mm256_set1_epi16, _mm256_setzero_si256,
-        _mm256_shuffle_epi8, _mm256_storeu_si256, _mm256_sub_epi16, _mm256_unpackhi_epi8,
-        _mm256_unpacklo_epi8,
+        _mm256_packus_epi16, _mm256_permute2x128_si256, _mm256_set1_epi16, _mm256_set1_epi64x,
+        _mm256_setzero_si256, _mm256_shuffle_epi8, _mm256_storeu_si256, _mm256_sub_epi16,
+        _mm256_unpackhi_epi8, _mm256_unpacklo_epi8,
     };
 
     // Only pixels that both slices cover are processed.
@@ -330,16 +368,26 @@ unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]
     let v128 = _mm256_set1_epi16(0x80);
     let v257 = _mm256_set1_epi16(257);
     let div255 = |v: __m256i| _mm256_mulhi_epu16(_mm256_add_epi16(v, v128), v257);
-    // The per-lane source colour of each third's low and high widening.
-    let colour = |g: usize, high: bool| -> [i16; 16] {
-        std::array::from_fn(|j| i16::from(src[(32 * g + widened_byte(j, high)) % 3]))
-    };
-    let colours: [[[i16; 16]; 2]; 3] = std::array::from_fn(|g| [colour(g, false), colour(g, true)]);
-    // SAFETY: each shuffle and colour table is exactly 32 bytes.
+    // The RGB triple in u16 lanes 0–2 of every qword; SHUFFLE_COLOUR spreads
+    // it to the per-lane source colour of each third's low and high widening.
+    let rgb = _mm256_set1_epi64x(
+        i64::from(src[0]) | (i64::from(src[1]) << 16) | (i64::from(src[2]) << 32),
+    );
+    // SAFETY: each shuffle table is exactly 32 bytes.
     let (pixel_of, src_of) = unsafe {
+        let load = |t: &[u8; 32]| _mm256_loadu_si256(t.as_ptr().cast());
         (
-            SHUFFLE_PIXEL.map(|t| _mm256_loadu_si256(t.as_ptr().cast())),
-            colours.map(|c| c.map(|t| _mm256_loadu_si256(t.as_ptr().cast()))),
+            [
+                load(&SHUFFLE_PIXEL[0]),
+                load(&SHUFFLE_PIXEL[1]),
+                load(&SHUFFLE_PIXEL[2]),
+            ],
+            [0, 1, 2].map(|g| {
+                [
+                    _mm256_shuffle_epi8(rgb, load(&SHUFFLE_COLOUR[g][0])),
+                    _mm256_shuffle_epi8(rgb, load(&SHUFFLE_COLOUR[g][1])),
+                ]
+            }),
         )
     };
 
@@ -391,14 +439,19 @@ unsafe fn composite_avx2(dst: &mut [u8], src: [u8; 3], a_input: u8, shape: &[u8]
         }
     };
 
+    let blocks = n / BLOCK_PX;
+    let done = blocks * BLOCK_PX;
+    let rest = n - done;
     let last = n - BLOCK_PX;
-    let tail = (!n.is_multiple_of(BLOCK_PX)).then(|| block(last));
-    for b in 0..n / BLOCK_PX {
+    let tail = (rest >= OVERLAP_MIN_PX).then(|| block(last));
+    for b in 0..blocks {
         let px = b * BLOCK_PX;
         store(px, block(px));
     }
     if let Some(out) = tail {
         store(last, out);
+    } else if rest > 0 {
+        composite_scalar(&mut dst[done * 3..], src, a_input, &shape[done..]);
     }
 }
 
@@ -598,8 +651,9 @@ mod tests {
     }
 
     /// The AVX2 tier for every span length 0..=100 and a few long ones: the
-    /// scalar fallback below one block, whole 32-pixel blocks and every
-    /// overlapping remainder.  Skipped where the CPU lacks AVX2.
+    /// scalar fallback below one block, whole 32-pixel blocks, every
+    /// overlapping remainder and the one- and two-pixel scalar remainders.
+    /// Skipped where the CPU lacks AVX2.
     #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     #[test]
     fn avx2_tier_matches_scalar_at_every_length() {
@@ -609,7 +663,7 @@ mod tests {
         // SAFETY: avx2 confirmed present above.
         unsafe {
             assert_tier_matches_scalar(
-                (0..=100).chain([1000, 1001, 1023]),
+                (0..=100).chain([1000, 1001, 1023, 1025, 1026, 1027]),
                 0x7f4a_7c15,
                 composite_avx2,
             );
@@ -650,41 +704,51 @@ mod tests {
         }
     }
 
-    /// Timing of the scalar, AVX2 and AVX-512 tiers on spans of 4 to 1 920
-    /// pixels.  Always passes; run with `--ignored --nocapture` in a release
-    /// build to see the times.
+    /// Timing of the scalar, AVX2 and AVX-512 tiers and of the dispatcher on
+    /// spans of 4 to 1 920 pixels, each tier called through an opaque
+    /// function pointer so that neither inlining nor hoisting of its per-call
+    /// setup out of the timing loop is possible.  Always passes; run with
+    /// `--ignored --nocapture` in a release build to see the times.
     #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore = "manual perf smoke test; run with `--ignored --nocapture` for timing"]
     fn composite_tier_timing() {
         const TOTAL_PX: usize = 200_000_000;
-        for n in [4usize, 13, 40, 200, 1920] {
+        let mut tiers: Vec<(&str, Tier)> = vec![("scalar", composite_scalar)];
+        #[cfg(feature = "simd-avx2")]
+        if is_x86_feature_detected!("avx2") {
+            tiers.push(("avx2", composite_avx2));
+        }
+        if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl") {
+            tiers.push(("avx512", composite_avx512));
+        }
+        tiers.push(("dispatch", composite_aa_rgb8_opaque));
+        for n in [
+            4usize, 13, 24, 32, 33, 34, 35, 36, 40, 44, 48, 56, 64, 65, 72, 80, 96, 97, 104, 128,
+            129, 160, 200, 256, 512, 1920,
+        ] {
             let shape = pseudorandom(n, 1);
             let mut dst = pseudorandom(n * 3, 2);
             let iters = TOTAL_PX / n;
-            let mut run = |name: &str, f: &dyn Fn(&mut [u8], &[u8])| {
-                f(&mut dst, &shape);
+            for &(name, tier) in &tiers {
+                let tier = std::hint::black_box(tier);
+                // SAFETY: every tier in the list had its features confirmed.
+                unsafe { tier(&mut dst, [7, 250, 128], 200, &shape) };
                 let t0 = std::time::Instant::now();
                 for _ in 0..iters {
-                    f(std::hint::black_box(&mut dst), std::hint::black_box(&shape));
+                    // SAFETY: as above.
+                    unsafe {
+                        tier(
+                            std::hint::black_box(&mut dst),
+                            std::hint::black_box([7, 250, 128]),
+                            std::hint::black_box(200),
+                            std::hint::black_box(&shape),
+                        );
+                    }
                 }
                 #[expect(clippy::cast_precision_loss, reason = "timing display only")]
                 let ns_px = t0.elapsed().as_secs_f64() * 1e9 / (iters * n) as f64;
                 println!("n={n} {name}: {ns_px:.3} ns/px");
-            };
-            run("scalar", &|d, s| composite_scalar(d, [7, 250, 128], 200, s));
-            #[cfg(feature = "simd-avx2")]
-            if is_x86_feature_detected!("avx2") {
-                // SAFETY: avx2 confirmed present.
-                run("avx2", &|d, s| unsafe {
-                    composite_avx2(d, [7, 250, 128], 200, s);
-                });
-            }
-            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl") {
-                // SAFETY: both features confirmed present.
-                run("avx512", &|d, s| unsafe {
-                    composite_avx512(d, [7, 250, 128], 200, s);
-                });
             }
         }
     }
