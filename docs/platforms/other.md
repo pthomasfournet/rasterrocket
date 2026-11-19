@@ -119,8 +119,8 @@ tested. Please report what you find.
   byte-identical to `--backend cpu` under `--backend d3d12` and under
   `--backend d3d12 --gpu-pages`, on the RTX 5070 and on the Radeon alone, and
   under `--gpu-pages --gpu-devices all` with both; WARP ran corpus-01 only.
-  A page whose device buffers pass the 2^27 elements of a view (a Letter page
-  at 1200 dpi, 556 MB) is declined and renders on the CPU. A device removal
+  A page whose device buffers pass the 2^27 elements of a view (corpus-04 page 271
+  at 1200 dpi, 556 MB of device pixels) is declined and renders on the CPU. A device removal
   (the Windows GPU timeout, TDR) retires the device and the page renders on
   the CPU; the timeout is Windows' to configure, and nothing here needs it
   changed. `scripts/fetch_warp.ps1 DIR` puts the pinned WARP beside a test

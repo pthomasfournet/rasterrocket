@@ -3181,19 +3181,19 @@ adapter. The full fixture corpus (corpus-01 to 11 at 8 and 16 bits, RGB and
 gray, 150 dpi: 12 096 pages per variant) is byte-identical to `--backend cpu`
 on the RTX 5070, on the Radeon, on both together under `--gpu-pages
 --gpu-devices all`, and on WARP for corpus-01 (64 pages). A page past the
-2^27 elements of a device view (a Letter page at 1200 dpi, 556 MB) is
+2^27 elements of a device view (corpus-04 page 271 at 1200 dpi, 555 930 624 bytes) is
 declined and renders on the CPU, the device kept. A device removal (TDR)
 retires the device and the page renders on the CPU; a longer Windows timeout
 (`TdrDelay`) is the user's own choice and nothing requires it. Whole process
 on the RTX 5070, `--gpu-pages` at 150 dpi, the first 64 pages of each
 fixture: Direct3D 12 takes 1.41 times Vulkan's time, mostly start-up (one
 page: 0.351 s against 0.177 s); the device raster is level with Vulkan's.
-Tables belong on the Benchmarks wiki page.
 
 Open on Direct3D 12:
-- **UMA read-back.** On an integrated adapter the page's pixels are copied
-  into a READBACK buffer and then to the host; a read of the shared memory
-  in place is not written.
+- **Read-back.** A page's pixels reach the caller through a host copy whose
+  cost dominates (RTX 5070, corpus-04 page 271 at 600 dpi: 2.63 ms to copy the
+  138 982 656 device bytes, 42.6 to 42.8 ms to copy the 104 236 992 packed
+  bytes on the host); reading back without that copy is not done.
 - **Start-up cost.** About 0.17 s a process above Vulkan's.
 - **Debug layer.** `PDF_RASTER_D3D12_DEBUG=1` has not run on the test box
   (Graphics Tools is not installed), so a mismatched view stride, which
