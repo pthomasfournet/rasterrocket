@@ -198,8 +198,8 @@ impl CacheBackend for crate::backend::vulkan::VulkanBackend {
     type HostSlab = Box<[u8]>;
 
     fn upload_slab(device: &Self::Device, pixels: &[u8]) -> Result<Self::DeviceBuffer, CacheError> {
-        let mut slab = device.alloc_device(word_padded(pixels.len()))?;
-        device.upload_word_padded(&mut slab, pixels)?;
+        let slab = device.alloc_device(word_padded(pixels.len()))?;
+        device.upload_word_padded(&slab, pixels)?;
         Ok(slab)
     }
 

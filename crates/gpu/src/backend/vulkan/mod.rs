@@ -241,20 +241,18 @@ impl VulkanBackend {
     /// As [`GpuBackend::upload`], with the padded length checked against
     /// `dst`'s capacity.
     #[cfg(any(test, feature = "cache"))]
-    pub(crate) fn upload_word_padded(&self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<()> {
+    pub(crate) fn upload_word_padded(&self, dst: &DeviceBuffer, src: &[u8]) -> Result<()> {
         let zeros = crate::backend::layout::word_padded(src.len()) - src.len();
         self.upload_zero_tail(dst, src, zeros)
     }
 
     /// Copy `src` into `dst[..src.len()]` and `zeros` zero bytes after it;
     /// returns once the copy has completed.
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "the copy writes `dst` through its mapping or by a device copy; the \
-                  exclusive borrow orders it against other host access, as the trait's \
-                  `upload` does"
-    )]
-    fn upload_zero_tail(&self, dst: &mut DeviceBuffer, src: &[u8], zeros: usize) -> Result<()> {
+    ///
+    /// The write goes through the shared borrow: a mapped buffer is written
+    /// under `PageRecorder::with_quiescent` (see
+    /// [`DeviceBuffer::write_mapped`]), any other by a blocking device copy.
+    fn upload_zero_tail(&self, dst: &DeviceBuffer, src: &[u8], zeros: usize) -> Result<()> {
         if !dst.is_mapped() {
             return self.transfer.upload(&self.memory, dst, src, zeros);
         }
@@ -619,7 +617,7 @@ mod tests {
         let mut out = [0_u8; 8];
         backend.upload(&mut buf, &[0xFF; 8]).expect("fill");
         backend
-            .upload_word_padded(&mut buf, &src)
+            .upload_word_padded(&buf, &src)
             .expect("upload_word_padded");
         backend.download(&buf, &mut out).expect("download");
         assert_eq!(out, expect, "mapped: {}", buf.is_mapped());
@@ -632,7 +630,7 @@ mod tests {
         backend.download(&buf, &mut out).expect("download");
         assert_eq!(out, expect, "staged");
         let err = backend
-            .upload_word_padded(&mut buf, &[0; 9])
+            .upload_word_padded(&buf, &[0; 9])
             .expect_err("9 bytes pad to 12, past the 8-byte buffer");
         assert!(err.to_string().contains("copy of 12 bytes"), "{err}");
     }
