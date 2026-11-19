@@ -2,7 +2,9 @@
 //! (`PDF_RASTER_D3D12_DEBUG=1`), the device's info queue stores them, and a
 //! page or transfer after which the queue holds a message of severity
 //! `ERROR` or `CORRUPTION` fails with them.  Without the layer the device
-//! has no info queue and nothing is read.
+//! has no info queue and nothing is read.  A device is one per adapter, so
+//! every backend on an adapter shares its queue: a message fails whichever
+//! page or transfer on that adapter reads the queue first.
 
 use std::sync::{Mutex, PoisonError};
 

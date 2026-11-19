@@ -524,6 +524,13 @@ jobs:
           RR_WARP_VERSION: 1.0.22.0
         run: cargo test --locked --release -p rasterrocket-gpu --features d3d12,cache --lib -- d3d12
 
+      # The injected-error test shares the adapter's info queue with every
+      # other test, so it runs by itself.
+      - name: Test that a validation error fails the page
+        env:
+          RR_WARP_VERSION: 1.0.22.0
+        run: cargo test --locked --release -p rasterrocket-gpu --features d3d12,cache --lib -- --ignored --exact backend::d3d12::tests::a_validation_error_fails_the_page
+
       # Byte-identity of GPU pages and of the ICC conversion against the CPU.
       # The corpus tests skip here, the fixtures not being in the repository
       # (a missing fixture fails only under PDF_RASTER_REQUIRE_FIXTURES, which

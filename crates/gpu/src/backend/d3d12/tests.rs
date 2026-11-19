@@ -371,8 +371,11 @@ fn validation_follows_the_debug_layer() {
 }
 
 /// Under the debug layer, an error stored during a page fails the page
-/// with its text, and the next page runs clean.
+/// with its text, and the next page runs clean.  A device is one per
+/// adapter, so the injected error is in the queue every test on the
+/// adapter reads; the test runs alone (`--ignored`).
 #[test]
+#[ignore = "injects into the adapter's shared info queue; run alone"]
 fn a_validation_error_fails_the_page() {
     let backend = D3d12Backend::warp().expect("the WARP adapter opens");
     if !backend.device.validation.is_active() {
