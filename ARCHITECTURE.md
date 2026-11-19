@@ -1226,32 +1226,45 @@ canvas, alpha plane nor output. The bytes are those of the owned-buffer
 entry points.
 
 **GPU page queue** (`device_pages/`). With `SessionConfig::gpu_pages`
-(requires the `vulkan` feature, policy `Auto` or `ForceVulkan`, and vector
-antialiasing; otherwise `open_session` returns `InvalidOptions`), pages
-render on the session's Vulkan device under `ForceVulkan`; under `Auto` the
-device is opened on a thread of its own when the first page that is not
-ruled out (`device_page_ineligible`) asks for it, and every page renders on
-the CPU until it is open, so a job none of whose pages qualifies opens
-nothing and a one-page job never uses it. Up to two pages (`IN_FLIGHT`)
-hold the device at once: a worker whose page is not ruled out claims it
-while fewer hold it, records the page and renders it there, the device
-rasterising one page at a time, so one page is recorded while the other
-rasterises; a worker that finds the device fully claimed, or a page ruled
-out, renders on the CPU, as does a page of the wide working space. The
-page canvas is faulted in before any device buffer is allocated, and not
-cleared: the device writes every sample. A page whose recording is
-refused, or which the device fails on, is executed again on the CPU in the
-first pass's bitmap buffers, drawing the images the first pass decoded,
-sharing the page's deadline, with its own operator budget. A device error
-retires the device for the session; a page beyond the device's limits
-renders on the CPU and leaves it in service. `render_page_bands` renders
-on the CPU, so a page the CLI renders in bands (larger than `--band-mib`)
-does not reach the device. Pages are returned by index, so output order
-does not depend on where a page rendered; `PageDiagnostics::device_page`
-(`DevicePage`) records the outcome. The device is the process-wide
-backend of its selector (`device_init.rs`, generic over the session's
-device API), held weakly: sessions open at once share it, and the last of
-them to drop destroys it.
+(requires the `vulkan` feature under `Auto` or `ForceVulkan`, or the `d3d12`
+feature on Windows under `ForceD3d12`, and vector antialiasing; otherwise
+`open_session` returns `InvalidOptions`), pages render on one device or on
+several (`SessionConfig::gpu_devices`, `rrocket --gpu-devices`; `all` is
+every usable GPU of the API, never a CPU implementation of Vulkan or WARP),
+all of one API (`SessionDevicePages`). Under `ForceVulkan` and
+`ForceD3d12` `open_session` opens every device and fails as it fails for
+its own. Under `Auto` each device is opened on a thread of its own when the
+first page not ruled out (`device_page_ineligible`) asks for one, so a job
+none of whose pages qualifies opens none; a device that does not open is
+logged at `error`. Every page that qualifies renders on a device: its
+worker waits for a device to open (at most `GPU_PAGE_OPEN_WAIT`, 30 s,
+counted from the first page that waits, with a warning then; while none is
+open afterwards, pages render on the CPU), takes the open device in service
+where it expects the shortest wait (the pages holding the device and its
+own, times the device's mean page raster, `PageDevice::page_mean`;
+`choose`), records the page and renders it there. A page holds its device
+from before its recording, since what it records depends on the device
+(`page_paths`). Workers record in parallel; each device rasterises one page
+at a time while others stage their inputs or read their pixels back. A
+page ruled out renders on the CPU, and so does a page of the wide working
+space, with a warning at the first. The canvas is not cleared: the device
+writes every sample. A page whose recording is refused, or which the device
+fails on, is executed again on the CPU in the first pass's bitmap buffers,
+drawing the images the first pass decoded, sharing the page's deadline,
+with its own operator budget. A device error retires that device for the
+session (later pages go to the session's other devices, or to the CPU once
+none is in service); a page beyond the device's limits, or the memory it
+has left, renders on the CPU and leaves it in service. `render_page_bands`
+renders on the CPU, so a page the CLI renders in bands (larger than
+`--band-mib`) does not reach a device. Pages are returned by index, so
+output order does not depend on where a page rendered;
+`PageDiagnostics::device_page` (`DevicePage`) records each page's outcome,
+and `RasterSession::device_page_counts` (`DevicePageCounts`) where every
+page went, by device, which is logged at `info` when the session drops.
+Each device is the process-wide backend of its selector (`device_init.rs`,
+generic over `SessionDevice`), held weakly: sessions open at once share
+it, the last of them to drop destroys it, and a `DeviceHold` of the
+configuration keeps it open across sessions.
 
 `render_channel` spawns a Rayon background task and feeds pages into a bounded
 `sync_channel`. Typical use: `capacity=4`, Tesseract consumes from the other end
@@ -1540,10 +1553,12 @@ main thread
   │     ├── worker 1: render page N+1 ─── TLS NvJpegDecoder
   │     └── ...
   │
-  ├── GPU page device opener (gpu_pages under Auto only): started by the
-  │     first page that may use the device, opens it, then exits (joined
-  │     when the session drops); up to two workers claim the open device,
-  │     one recording while the other's page rasterises on it
+  ├── GPU page device openers (gpu_pages under Auto, one per device):
+  │     started by the first page that may use a device, each opens its
+  │     device, then exits (joined when the session drops); qualifying
+  │     pages wait for an open device and take the one with the shortest
+  │     expected wait; each device rasterises one page at a time while
+  │     other pages record, stage or read back
   │
   │   pool.install() blocks until all pages done
   │
