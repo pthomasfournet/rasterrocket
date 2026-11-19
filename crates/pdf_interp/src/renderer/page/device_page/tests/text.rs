@@ -1,5 +1,7 @@
 //! Text recorded for the device against the CPU render.
 
+use gpu::backend::page_device::PageDevice;
+
 use super::super::DeviceRecording;
 use super::{DEPTHS, Rng, VulkanBackend, backend, cpu_aa, device_aa, doc, record};
 

@@ -39,6 +39,7 @@ use std::rc::Rc;
 
 use color::{Sample, SampleDepth};
 use gpu::backend::BackendError;
+use gpu::backend::page_device::PageDevice;
 use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::{
     AreaPath, CoverageRows, PAGE_COMMANDS_MAX_BYTES, PageCommands, PageCommandsError, PixelBounds,

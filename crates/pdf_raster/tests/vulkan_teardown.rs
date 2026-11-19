@@ -154,7 +154,7 @@ fn an_auto_hold_opens_the_gpu_page_device() {
 #[test]
 fn several_gpu_page_devices_are_destroyed_with_their_session() {
     let _serial = serial();
-    let gpus = match gpu::backend::vulkan::VulkanBackend::usable_gpus() {
+    let gpus = match <gpu::backend::vulkan::VulkanBackend as gpu::backend::page_device::PageDevice>::usable_gpus() {
         Ok(gpus) if gpus.len() >= 2 => gpus.len(),
         _ => {
             eprintln!("skipping: fewer than two usable Vulkan GPUs");

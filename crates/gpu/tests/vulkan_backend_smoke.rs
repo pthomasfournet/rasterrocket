@@ -36,6 +36,7 @@ mod common;
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use rasterrocket_gpu::backend::page_device::PageDevice;
 use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 use rasterrocket_gpu::backend::{BackendError, GpuBackend, SelectionFailure};
 
@@ -416,7 +417,7 @@ fn integrated_backend() -> Option<VulkanBackend> {
     drop(default);
     ["radv", "intel"].iter().find_map(|name| {
         let selector = name.parse().expect("non-empty selector");
-        match VulkanBackend::with_selector(Some(&selector)) {
+        match VulkanBackend::open(Some(&selector)) {
             Ok(backend) => backend.is_integrated().then_some(backend),
             Err(BackendError::DeviceSelection {
                 failure: SelectionFailure::NoMatch,

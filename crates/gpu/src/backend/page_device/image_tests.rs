@@ -4,14 +4,12 @@
 use color::SampleDepth;
 
 use super::path_tests::{assert_device_matches_model, random_page};
+use crate::backend::page_device::PageDevice;
+use crate::backend::vulkan::test_backend;
 use crate::page::PageCommands;
 use crate::page::test_support::{Rng, push_random_images};
 
-#[test]
-fn random_images_match_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn random_images_match_the_host_model_on<B: PageDevice>(backend: &B) {
     let mut rng = Rng(0x1_3A6E_5EED);
     for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
         let max = depth.max_sample();
@@ -20,7 +18,7 @@ fn random_images_match_the_host_model() {
             push_random_images(&mut rng, &mut page, n);
             assert!(!page.has_paths());
             assert_device_matches_model(
-                &backend,
+                backend,
                 &page,
                 &format!("{}-bit {width}×{height}, {n} images", depth.bits()),
             );
@@ -28,11 +26,7 @@ fn random_images_match_the_host_model() {
     }
 }
 
-#[test]
-fn images_among_outlines_match_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn images_among_outlines_match_the_host_model_on<B: PageDevice>(backend: &B) {
     if !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
@@ -44,10 +38,24 @@ fn images_among_outlines_match_the_host_model() {
             push_random_images(&mut rng, &mut page, n);
             assert!(page.has_paths());
             assert_device_matches_model(
-                &backend,
+                backend,
                 &page,
                 &format!("{}-bit {width}×{height}, outlines and images", depth.bits()),
             );
         }
+    }
+}
+
+#[test]
+fn vulkan_random_images_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        random_images_match_the_host_model_on(&backend);
+    }
+}
+
+#[test]
+fn vulkan_images_among_outlines_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        images_among_outlines_match_the_host_model_on(&backend);
     }
 }

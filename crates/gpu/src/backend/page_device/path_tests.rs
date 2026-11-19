@@ -2,15 +2,16 @@
 
 use color::SampleDepth;
 
-use crate::backend::vulkan::VulkanBackend;
+use crate::backend::page_device::PageDevice;
+use crate::backend::vulkan::test_backend;
 use crate::page::reference::render_page;
 use crate::page::test_support::{Rng, polygon, slivers, wide_rectangle};
 use crate::page::{AreaPath, PATH_COORD_LIMIT, PATH_TILE_SEGMENTS, PageCommands, PixelBounds};
 
 /// `page` on `backend` against its host model, packed rows of samples of
 /// its depth widened to 16 bits.
-pub(super) fn assert_device_matches_model(
-    backend: &VulkanBackend,
+pub(crate) fn assert_device_matches_model<B: PageDevice>(
+    backend: &B,
     page: &PageCommands,
     what: &str,
 ) {
@@ -47,7 +48,7 @@ pub(super) fn assert_device_matches_model(
 }
 
 /// A page of random outlines and opaque runs at `depth`.
-pub(super) fn random_page(
+pub(crate) fn random_page(
     rng: &mut Rng,
     width: u32,
     height: u32,
@@ -96,11 +97,7 @@ pub(super) fn random_page(
     page
 }
 
-#[test]
-fn random_outlines_match_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn random_outlines_match_the_host_model_on<B: PageDevice>(backend: &B) {
     if !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
@@ -116,7 +113,7 @@ fn random_outlines_match_the_host_model() {
         ] {
             let page = random_page(&mut rng, width, height, n, depth);
             assert_device_matches_model(
-                &backend,
+                backend,
                 &page,
                 &format!("{}-bit {width}×{height}, {n} commands", depth.bits()),
             );
@@ -124,11 +121,7 @@ fn random_outlines_match_the_host_model() {
     }
 }
 
-#[test]
-fn outlines_at_the_integer_bounds_match_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn outlines_at_the_integer_bounds_match_the_host_model_on<B: PageDevice>(backend: &B) {
     if !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
@@ -160,14 +153,10 @@ fn outlines_at_the_integer_bounds_match_the_host_model() {
         page.push_area_path(&path, [20, 90, 160], 140)
             .expect("push outline");
     }
-    assert_device_matches_model(&backend, &page, "integer bounds");
+    assert_device_matches_model(backend, &page, "integer bounds");
 }
 
-#[test]
-fn backdrops_and_segments_held_in_items_match_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn backdrops_and_segments_held_in_items_match_the_host_model_on<B: PageDevice>(backend: &B) {
     if !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
@@ -195,7 +184,7 @@ fn backdrops_and_segments_held_in_items_match_the_host_model() {
                 .expect("push outline");
         }
         assert_device_matches_model(
-            &backend,
+            backend,
             &page,
             &format!("{}-bit held backdrops and segments", depth.bits()),
         );
@@ -203,32 +192,22 @@ fn backdrops_and_segments_held_in_items_match_the_host_model() {
 }
 
 #[test]
-fn a_faulting_raster_leaves_the_page_untouched() {
-    let Some(backend) = crate::backend::vulkan::test_backend_with_int64() else {
-        return;
-    };
-    let page = random_page(&mut Rng(0xFA17), 37, 21, 30, SampleDepth::Eight);
-    let stride = 37 * 3 + 5;
-    let mut out = vec![0xA5u8; stride * 21];
-    let err = backend
-        .render_page_poisoned(&page, &mut out, stride)
-        .expect_err("a poisoned raster faults");
-    assert!(
-        matches!(
-            err,
-            crate::backend::BackendError::KernelFault {
-                kernel: "page_raster_paths_poisoned",
-                ..
-            }
-        ),
-        "{err:?}"
-    );
-    assert!(err.to_string().contains("wrapped"), "{err}");
-    assert!(
-        out.iter().all(|&s| s == 0xA5),
-        "a faulting page wrote a sample"
-    );
-    backend
-        .render_page(&page, &mut out, stride)
-        .expect("the unpoisoned raster renders");
+fn vulkan_random_outlines_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        random_outlines_match_the_host_model_on(&backend);
+    }
+}
+
+#[test]
+fn vulkan_outlines_at_the_integer_bounds_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        outlines_at_the_integer_bounds_match_the_host_model_on(&backend);
+    }
+}
+
+#[test]
+fn vulkan_backdrops_and_segments_held_in_items_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        backdrops_and_segments_held_in_items_match_the_host_model_on(&backend);
+    }
 }

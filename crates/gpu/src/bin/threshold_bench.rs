@@ -256,11 +256,13 @@ fn bench_icc_clut<B: GpuBackend>(label: &str, backend: &B, cfg: &Config) {
 /// backend's construction and first exactness check.
 #[cfg(feature = "vulkan")]
 fn bench_icc_clut_vulkan(cfg: &Config) {
-    use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+    use rasterrocket_gpu::backend::page_device::PageDevice;
+    use rasterrocket_gpu::backend::select::DeviceSelector;
+    use rasterrocket_gpu::backend::vulkan::VulkanBackend;
     for name in &cfg.vulkan_devices {
         let selector: DeviceSelector = gpu_unwrap(name.parse(), "device selector");
         let t = Instant::now();
-        let backend = gpu_unwrap(VulkanBackend::with_selector(Some(&selector)), "Vulkan init");
+        let backend = gpu_unwrap(VulkanBackend::open(Some(&selector)), "Vulkan init");
         let init = t.elapsed();
         let t = Instant::now();
         let exact = backend.icc_clut_is_exact();

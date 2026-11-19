@@ -28,11 +28,25 @@ mod staged;
 pub use blit_page::{BlitScratch, BlitSource, blit_image, blit_image_box};
 pub use scratch::{DeviceScratch, ScratchPool};
 mod icc_clut;
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+#[cfg_attr(
+    not(any(feature = "vulkan", test)),
+    expect(dead_code, reason = "only the Vulkan backend consumes it")
+)]
 mod kernel_status;
 pub use icc_clut::{IccClutScratch, icc_clut, icc_clut_matches_cpu, icc_clut16, random_grid};
 pub mod cuda;
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+pub mod page_device;
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+#[cfg_attr(
+    not(feature = "vulkan"),
+    expect(dead_code, reason = "only the Vulkan backend consumes it")
+)]
+mod page_job;
 pub mod params;
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+pub mod select;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
@@ -233,6 +247,21 @@ impl Error for BackendError {
         }
     }
 }
+
+/// What a lost device means where the code runs.  Windows resets a GPU
+/// whose submission runs past its timeout detection delay (TDR, 2 s by
+/// default), and every call on the device then fails as lost.
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
+#[cfg_attr(
+    not(feature = "vulkan"),
+    expect(dead_code, reason = "only the Vulkan backend consumes it")
+)]
+pub(crate) const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
+    "the device was lost; on Windows the likely cause is a GPU timeout \
+     (TDR: a submission that runs past about 2 s resets the device)"
+} else {
+    "the device was lost: a driver reset or a GPU fault"
+};
 
 /// Convenience alias for `Result<T, BackendError>`.
 pub type Result<T> = std::result::Result<T, BackendError>;

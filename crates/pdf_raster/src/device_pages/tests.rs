@@ -545,7 +545,9 @@ fn a_failed_device_leaves_the_others_in_service() {
 /// A device list naming one device twice is refused at open.
 #[test]
 fn a_device_list_naming_one_device_twice_is_refused() {
-    if gpu::backend::vulkan::VulkanBackend::usable_gpus().is_err() {
+    if <gpu::backend::vulkan::VulkanBackend as gpu::backend::page_device::PageDevice>::usable_gpus()
+        .is_err()
+    {
         eprintln!("skipping: no usable Vulkan GPU");
         return;
     }

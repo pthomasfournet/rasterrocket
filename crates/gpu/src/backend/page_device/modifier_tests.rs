@@ -4,13 +4,12 @@
 use color::SampleDepth;
 
 use super::path_tests::assert_device_matches_model;
+use crate::backend::page_device::PageDevice;
+use crate::backend::vulkan::test_backend;
 use crate::page::PageCommands;
 use crate::page::test_support::{Rng, object_over_tiles, push_random_modified};
 
-fn random_modified_pages(seed: u64, tables: bool) {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn random_modified_pages<B: PageDevice>(backend: &B, seed: u64, tables: bool) {
     if !tables && !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
@@ -23,7 +22,7 @@ fn random_modified_pages(seed: u64, tables: bool) {
             push_random_modified(&mut rng, &mut page, n, tables);
             assert!(tables != page.has_paths() || page.is_empty() || width == 1);
             assert_device_matches_model(
-                &backend,
+                backend,
                 &page,
                 &format!("{}-bit {width}×{height}, tables {tables}", depth.bits()),
             );
@@ -31,29 +30,44 @@ fn random_modified_pages(seed: u64, tables: bool) {
     }
 }
 
-#[test]
-fn clipped_and_masked_tables_match_the_host_model() {
-    random_modified_pages(0xC11F_7AB1, true);
+fn clipped_and_masked_tables_match_the_host_model_on<B: PageDevice>(backend: &B) {
+    random_modified_pages(backend, 0xC11F_7AB1, true);
 }
 
-#[test]
-fn clipped_and_masked_outlines_match_the_host_model() {
-    random_modified_pages(0xC11F_0A71, false);
+fn clipped_and_masked_outlines_match_the_host_model_on<B: PageDevice>(backend: &B) {
+    random_modified_pages(backend, 0xC11F_0A71, false);
 }
 
 /// An opaque tile-covering outline inside a soft-masked object, members
 /// absent from some tiles and an object spanning tiles: device = model.
-#[test]
-fn an_object_over_tiles_matches_the_host_model() {
-    let Some(backend) = super::super::test_backend() else {
-        return;
-    };
+fn an_object_over_tiles_matches_the_host_model_on<B: PageDevice>(backend: &B) {
     if !backend.page_paths() {
         eprintln!("skipping: the device has no 64-bit integers");
         return;
     }
     for depth in [SampleDepth::Eight, SampleDepth::Sixteen] {
         let page = object_over_tiles(depth);
-        assert_device_matches_model(&backend, &page, &format!("{}-bit", depth.bits()));
+        assert_device_matches_model(backend, &page, &format!("{}-bit", depth.bits()));
+    }
+}
+
+#[test]
+fn vulkan_clipped_and_masked_tables_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        clipped_and_masked_tables_match_the_host_model_on(&backend);
+    }
+}
+
+#[test]
+fn vulkan_clipped_and_masked_outlines_match_the_host_model() {
+    if let Some(backend) = test_backend() {
+        clipped_and_masked_outlines_match_the_host_model_on(&backend);
+    }
+}
+
+#[test]
+fn vulkan_an_object_over_tiles_matches_the_host_model() {
+    if let Some(backend) = test_backend() {
+        an_object_over_tiles_matches_the_host_model_on(&backend);
     }
 }

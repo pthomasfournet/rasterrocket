@@ -84,7 +84,7 @@ fn cached_type3_glyphs_match_the_cpu_render() {
             let want = cpu_aa(&doc, (width, height), depth, &content, true);
             let paths = backend
                 .as_ref()
-                .is_some_and(gpu::backend::vulkan::VulkanBackend::page_paths);
+                .is_some_and(<gpu::backend::vulkan::VulkanBackend as gpu::backend::page_device::PageDevice>::page_paths);
             for b in [None, backend.as_ref()] {
                 let got = device_aa(b, &doc, (width, height), depth, &content, (paths, true));
                 assert!(

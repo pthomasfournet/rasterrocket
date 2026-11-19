@@ -3,51 +3,16 @@
 //! [`Candidate`] holds the properties of one enumerated physical device that
 //! selection depends on.  The functions here choose among candidates without
 //! any driver call, so every matching and ordering rule is testable without
-//! the hardware it describes.
+//! the hardware it describes.  A selector names a device by the rules of
+//! [`match_selector`].
 
 use std::cmp::Reverse;
 use std::fmt::{self, Write as _};
-use std::str::FromStr;
 
 use ash::vk;
 
+use crate::backend::select::{DeviceSelector, match_selector};
 use crate::backend::{BackendError, SelectionFailure};
-
-/// Explicit choice of Vulkan physical device.
-///
-/// Resolution against the enumerated devices: a selector of ASCII digits
-/// below the device count is a position in `vkEnumeratePhysicalDevices`
-/// order, counted from 0.  Any other selector is a case-insensitive
-/// substring of the device name; an exact (case-insensitive) name match
-/// takes precedence over substring matches, and more than one remaining
-/// match is an error.  Digits that are not a valid position are matched
-/// as a name substring, so a model number selects by name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceSelector(String);
-
-impl FromStr for DeviceSelector {
-    type Err = BackendError;
-
-    /// Surrounding whitespace is trimmed; empty input is rejected.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        if s.is_empty() {
-            return Err(BackendError::DeviceSelection {
-                failure: SelectionFailure::Invalid,
-                message: "Vulkan device selector is empty; expected an index or a device-name \
-                          substring"
-                    .to_owned(),
-            });
-        }
-        Ok(Self(s.to_owned()))
-    }
-}
-
-impl fmt::Display for DeviceSelector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
 
 /// Why an enumerated device cannot host the compute backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,53 +226,8 @@ fn resolve_selector(
     cands: &[Candidate],
     sel: &DeviceSelector,
 ) -> Result<usize, (SelectionFailure, String)> {
-    let raw = sel.0.as_str();
-    let all_digits = raw.bytes().all(|b| b.is_ascii_digit());
-    let as_index = if all_digits {
-        raw.parse::<usize>().ok()
-    } else {
-        None
-    };
-    let idx = match as_index {
-        Some(i) if i < cands.len() => i,
-        _ => {
-            let needle = raw.to_lowercase();
-            let lowered: Vec<String> = cands.iter().map(|c| c.name.to_lowercase()).collect();
-            let exact: Vec<usize> = (0..cands.len()).filter(|&i| lowered[i] == needle).collect();
-            let partial: Vec<usize> = (0..cands.len())
-                .filter(|&i| lowered[i].contains(&needle))
-                .collect();
-            match (exact.as_slice(), partial.as_slice()) {
-                ([only], _) | ([], [only]) => *only,
-                ([], []) if all_digits => {
-                    return Err((
-                        SelectionFailure::NoMatch,
-                        format!(
-                            "not a device index ({} device(s) enumerated) and no device name \
-                             contains it",
-                            cands.len()
-                        ),
-                    ));
-                }
-                ([], []) => {
-                    return Err((
-                        SelectionFailure::NoMatch,
-                        "no device name contains it".to_owned(),
-                    ));
-                }
-                ([], many) | (many, _) => {
-                    let list: Vec<String> = many.iter().map(usize::to_string).collect();
-                    return Err((
-                        SelectionFailure::Ambiguous,
-                        format!(
-                            "ambiguous, matches devices {}; select by index instead",
-                            list.join(", ")
-                        ),
-                    ));
-                }
-            }
-        }
-    };
+    let names: Vec<&str> = cands.iter().map(|c| c.name.as_str()).collect();
+    let idx = match_selector(&names, sel)?;
     match cands[idx].compute_queue {
         Ok(_) => Ok(idx),
         Err(why) => Err((
@@ -440,28 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_trims_and_rejects_empty() {
-        assert_eq!(sel(" 0 "), DeviceSelector("0".to_owned()));
-        assert!(matches!(
-            "  ".parse::<DeviceSelector>(),
-            Err(BackendError::DeviceSelection { .. })
-        ));
-    }
-
-    #[test]
-    fn out_of_range_digits_match_as_a_name() {
-        assert_eq!(pick(&host(), Some(&sel("5070"))).unwrap(), 2);
-        let msg = selection_error(&host(), "99999999999999999999999");
-        assert!(msg.contains("not a device index"), "{msg}");
-    }
-
-    #[test]
-    fn in_range_digits_are_an_index_even_if_a_name_contains_them() {
-        // Device 2's name contains "0", but 0 is a valid position.
-        assert_eq!(pick(&host(), Some(&sel("0"))).unwrap(), 0);
-    }
-
-    #[test]
     fn auto_prefers_discrete_over_enumeration_order() {
         assert_eq!(pick(&host(), None).unwrap(), 2);
     }
@@ -567,48 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn substring_match_is_case_insensitive() {
-        assert_eq!(pick(&host(), Some(&sel("5070"))).unwrap(), 2);
-        assert_eq!(pick(&host(), Some(&sel("radv"))).unwrap(), 1);
-        assert_eq!(pick(&host(), Some(&sel("LLVMPIPE"))).unwrap(), 0);
-    }
-
-    #[test]
     fn unmatched_substring_lists_devices() {
         let msg = selection_error(&host(), "nosuch");
         assert!(msg.contains("selector \"nosuch\""), "{msg}");
         assert!(msg.contains("no device name contains it"), "{msg}");
         assert!(msg.contains("  1: AMD Radeon Graphics"), "{msg}");
-    }
-
-    #[test]
-    fn ambiguous_substring_is_an_error_naming_the_matches() {
-        let cands = vec![
-            cand("NVIDIA GeForce RTX 5070", DISCRETE),
-            cand("AMD Radeon RX 7900 XTX", DISCRETE),
-            cand("NVIDIA GeForce RTX 4090", DISCRETE),
-        ];
-        let msg = selection_error(&cands, "nvidia");
-        assert!(msg.contains("ambiguous, matches devices 0, 2"), "{msg}");
-    }
-
-    #[test]
-    fn identical_names_are_ambiguous_even_on_exact_match() {
-        let cands = vec![
-            cand("NVIDIA GeForce RTX 5070", DISCRETE),
-            cand("NVIDIA GeForce RTX 5070", DISCRETE),
-        ];
-        let msg = selection_error(&cands, "nvidia geforce rtx 5070");
-        assert!(msg.contains("matches devices 0, 1"), "{msg}");
-    }
-
-    #[test]
-    fn exact_name_wins_over_longer_names_containing_it() {
-        let cands = vec![
-            cand("Radeon RX 7900 XTX", DISCRETE),
-            cand("Radeon RX 7900", DISCRETE),
-        ];
-        assert_eq!(pick(&cands, Some(&sel("radeon rx 7900"))).unwrap(), 1);
     }
 
     #[test]

@@ -419,6 +419,10 @@ pub(crate) fn push_fill(
 /// and 9 regions and none, soft-masked objects begun and ended over random
 /// planes and rectangles, and fills (outlines unless `tables`), masks,
 /// images and opaque runs at random alphas.
+#[cfg_attr(
+    not(feature = "vulkan"),
+    expect(dead_code, reason = "only the device tests use it")
+)]
 pub(crate) fn push_random_modified(rng: &mut Rng, page: &mut PageCommands, n: usize, tables: bool) {
     let (width, height, depth) = (page.width(), page.height(), page.depth());
     let max = depth.max_sample();

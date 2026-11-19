@@ -3,6 +3,7 @@
 
 use std::fmt::Write as _;
 
+use gpu::backend::page_device::PageDevice;
 use pdf::Document;
 
 use super::super::DeviceRecording;

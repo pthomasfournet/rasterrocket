@@ -1,5 +1,7 @@
 use color::SampleDepth;
-use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+use gpu::backend::page_device::PageDevice;
+use gpu::backend::select::DeviceSelector;
+use gpu::backend::vulkan::VulkanBackend;
 use pdf::Document;
 
 use super::super::{CanvasBuffers, CanvasRequest};
@@ -28,7 +30,7 @@ fn backend() -> Option<VulkanBackend> {
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
-    VulkanBackend::with_selector(selector.as_ref())
+    VulkanBackend::open(selector.as_ref())
         .inspect_err(|e| eprintln!("skipping: no Vulkan backend: {e}"))
         .ok()
 }

@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::backend::{BackendError, Result};
 
 use super::error::vk_err;
-use super::select::{self, Candidate, DeviceSelector, Ineligible, PciAddress};
+use super::select::{self, Candidate, Ineligible, PciAddress};
+use crate::backend::select::DeviceSelector;
 
 /// Owned Vulkan handles.
 ///

@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::registry::{Registry, shared};
 use crate::{BackendPolicy, RasterError};
 use gpu::backend::BackendError;
-use gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+use gpu::backend::page_device::PageDevice;
+use gpu::backend::select::DeviceSelector;
+use gpu::backend::vulkan::VulkanBackend;
 
 /// Why a backend could not be constructed.
 #[derive(Debug, Clone)]
@@ -80,7 +82,7 @@ pub(crate) fn init_vk_backend(
     }
 }
 
-/// Parse `selector` into the form [`VulkanBackend::with_selector`] takes.
+/// Parse `selector` into the form [`PageDevice::open`] takes.
 ///
 /// # Errors
 ///
@@ -194,7 +196,7 @@ fn memo<K: PartialEq, T: Clone>(cache: &Mutex<Vec<(K, T)>>, key: K, make: impl F
 
 fn construct(selector: Option<&str>) -> Result<Arc<VulkanBackend>, InitError> {
     let parsed = parse_selector(selector)?;
-    Ok(Arc::new(VulkanBackend::with_selector(parsed.as_ref())?))
+    Ok(Arc::new(VulkanBackend::open(parsed.as_ref())?))
 }
 
 #[cfg(test)]

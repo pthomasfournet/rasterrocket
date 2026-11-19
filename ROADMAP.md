@@ -3716,6 +3716,22 @@ in `rasterrocket-gpu`:
   `unpad_pixels`) is a new public module, hidden from the documentation,
   for the crate's own integration tests and bench binary.
 
+**Unreleased on master: the page raster is a `PageDevice` trait.** The
+whole-page raster moves off `VulkanBackend`'s inherent methods onto a
+sealed trait, `backend::page_device::PageDevice`, which `VulkanBackend`
+implements; the checks, push constants, inputs and read-back of a page are
+shared by every backend that implements it.  Rendered pages are unchanged.
+API changes in `rasterrocket-gpu` (callers bring the trait into scope):
+- `VulkanBackend::{with_selector, check_selector, resolve_devices,
+  usable_gpus, device_index, device_name, page_mean, page_paths,
+  render_page, render_page_timed}` are `PageDevice` methods;
+  `with_selector` is `PageDevice::open`. `PageDevice::retires_device` is
+  new: every error but `DeviceLimit` retires a device.
+- `DeviceSelector` moves to `backend::select`, `PageTimes` to
+  `backend::page_device`; neither is re-exported from `backend::vulkan`.
+  An empty selector's error reads "device selector is empty" (was "Vulkan
+  device selector is empty").
+
 **Unreleased on master: Vulkan devices without 8-bit storage are
 eligible.** The Vulkan device no longer requests `storageBuffer8BitAccess`,
 `uniformAndStorageBuffer8BitAccess` or `shaderInt8`, since no kernel

@@ -1,5 +1,6 @@
 //! Form `XObjects` recorded for the device against the CPU render.
 
+use gpu::backend::page_device::PageDevice;
 use pdf::Document;
 
 use super::super::DeviceRecording;

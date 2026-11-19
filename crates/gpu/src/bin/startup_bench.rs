@@ -85,7 +85,9 @@ fn cuda() {
 
 #[cfg(feature = "vulkan")]
 fn vulkan(device: Option<&str>) {
-    use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+    use rasterrocket_gpu::backend::page_device::PageDevice;
+    use rasterrocket_gpu::backend::select::DeviceSelector;
+    use rasterrocket_gpu::backend::vulkan::VulkanBackend;
     let selector: Option<DeviceSelector> = device.map(|d| {
         d.parse().unwrap_or_else(|e| {
             eprintln!("startup_bench: {e}");
@@ -93,7 +95,7 @@ fn vulkan(device: Option<&str>) {
         })
     });
     let backend = step("VulkanBackend (instance, device, pipeline cache)", || {
-        VulkanBackend::with_selector(selector.as_ref())
+        VulkanBackend::open(selector.as_ref())
     });
     let _ = step("ICC CLUT exactness probe (first kernel)", || {
         Ok::<_, String>(backend.icc_clut_is_exact())

@@ -2,7 +2,7 @@
 
 use ash::vk;
 
-use crate::backend::BackendError;
+use crate::backend::{BackendError, DEVICE_LOST_CAUSE};
 
 /// Wrap a Vulkan call's `vk::Result` failure into a `BackendError` with
 /// the failing call's name baked into the message.
@@ -11,17 +11,6 @@ use crate::backend::BackendError;
 pub(super) fn vk_err(call: &'static str) -> impl Fn(vk::Result) -> BackendError + use<> {
     move |code| BackendError::msg(describe(call, code))
 }
-
-/// What a lost device means where the code runs.  Windows resets a GPU
-/// whose submission runs past its timeout detection delay (TDR, 2 s by
-/// default), and every call on the device then returns
-/// `ERROR_DEVICE_LOST`.
-const DEVICE_LOST_CAUSE: &str = if cfg!(windows) {
-    "the device was lost; on Windows the likely cause is a GPU timeout \
-     (TDR: a submission that runs past about 2 s resets the device)"
-} else {
-    "the device was lost: a driver reset or a GPU fault"
-};
 
 /// `call failed: CODE`, with [`DEVICE_LOST_CAUSE`] appended for
 /// `ERROR_DEVICE_LOST`.

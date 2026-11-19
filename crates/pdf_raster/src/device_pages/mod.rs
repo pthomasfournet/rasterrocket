@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use gpu::backend::BackendError;
+use gpu::backend::page_device::PageDevice;
 use gpu::backend::vulkan::VulkanBackend;
 use pdf_interp::renderer::{CanvasBuffers, DevicePage, DeviceRecording, PageRenderer};
 

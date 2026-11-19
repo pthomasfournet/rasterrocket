@@ -56,7 +56,7 @@ pub(crate) mod decode_queue;
 #[cfg(feature = "vaapi")]
 pub(crate) mod jpeg;
 pub(crate) mod jpeg_sof;
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", feature = "d3d12"))]
 pub mod page;
 #[cfg(feature = "cache")]
 mod staging;

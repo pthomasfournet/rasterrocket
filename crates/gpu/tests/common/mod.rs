@@ -3,7 +3,9 @@
 #![cfg(feature = "vulkan")]
 
 use rasterrocket_gpu::backend::Result;
-use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+use rasterrocket_gpu::backend::page_device::PageDevice;
+use rasterrocket_gpu::backend::select::DeviceSelector;
+use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 
 /// A backend on the device `PDF_RASTER_VULKAN_DEVICE` names, or on the
 /// automatically ranked one when it is unset or empty.
@@ -18,5 +20,5 @@ pub(crate) fn vulkan_backend() -> Result<VulkanBackend> {
             s.parse::<DeviceSelector>()
                 .expect("PDF_RASTER_VULKAN_DEVICE holds a device selector")
         });
-    VulkanBackend::with_selector(selector.as_ref())
+    VulkanBackend::open(selector.as_ref())
 }

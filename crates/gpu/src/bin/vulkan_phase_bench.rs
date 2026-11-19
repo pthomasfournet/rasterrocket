@@ -32,8 +32,10 @@ use std::time::Instant;
 
 use bench_common::smooth_cmyk;
 use rasterrocket_gpu::backend::layout::{unpad_pixels, word_padded};
+use rasterrocket_gpu::backend::page_device::PageDevice;
 use rasterrocket_gpu::backend::params::{BLIT_FILTER_X, BlitParams, IccClutParams};
-use rasterrocket_gpu::backend::vulkan::{DeviceSelector, VulkanBackend};
+use rasterrocket_gpu::backend::select::DeviceSelector;
+use rasterrocket_gpu::backend::vulkan::VulkanBackend;
 use rasterrocket_gpu::backend::{
     BlitScratch, BlitSource, GpuBackend, blit_image_box, icc_clut, random_grid,
 };
@@ -553,7 +555,7 @@ fn main() {
         .device
         .as_deref()
         .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
-    let backend = ok(VulkanBackend::with_selector(selector.as_ref()), "backend");
+    let backend = ok(VulkanBackend::open(selector.as_ref()), "backend");
     println!(
         "device {} integrated={} iters={} warmup={}",
         backend.device_name(),

@@ -7,6 +7,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use gpu::backend::BackendError;
+use gpu::backend::page_device::PageDevice;
 use gpu::backend::vulkan::VulkanBackend;
 
 /// One device of a session's GPU pages.

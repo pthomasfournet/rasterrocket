@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use gpu::backend::page_device::PageDevice;
 use pdf::Document;
 
 use super::super::super::xobject::IMAGE_DECODES;

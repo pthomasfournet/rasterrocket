@@ -101,6 +101,8 @@ impl std::fmt::Debug for DeviceHold {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
+    use gpu::backend::page_device::PageDevice;
+
     use super::DeviceHold;
     use crate::{BackendPolicy, SessionConfig};
 

@@ -14,7 +14,7 @@
 //! - `memory` — slab sub-allocator, host-visible staging pool.
 //! - `page` — whole-page raster from a command list.
 //! - `pipeline` — descriptor set layouts + pipeline cache (lazy SPIR-V compile).
-//! - `select` — device selector parsing and physical-device ranking.
+//! - `select` — physical-device eligibility and ranking.
 //! - `recorder` — per-page command buffer + timeline-semaphore fence.
 //! - `timestamps` — device timestamps between the stages of a page.
 //! - `transfer` — synchronous staged upload and download.
@@ -32,15 +32,16 @@ mod timestamps;
 mod transfer;
 
 pub use memory::{DeviceBuffer, HostBuffer};
-pub use page::PageTimes;
 pub use recorder::PageFence;
-pub use select::DeviceSelector;
 
 use std::sync::Arc;
 
+use crate::backend::page_device::{PageDevice, PageTimes};
+use crate::backend::select::DeviceSelector;
 use crate::backend::{
     GpuBackend, Result, VramBudget, copy_len, params, recorded_copy_len, reject_zero_size,
 };
+use crate::page::{PageCommands, PageSample};
 
 /// Vulkan compute backend.
 ///
@@ -51,7 +52,7 @@ pub struct VulkanBackend {
     // Field order = drop order: children that record into command buffers
     // / hold pool handles must drop before the device they were created on.
     scratch: crate::backend::DeviceScratch<Self>,
-    /// Buffers of [`Self::render_page`], kept between pages: one set per
+    /// Buffers of [`PageDevice::render_page`], kept between pages: one set per
     /// page being staged, rendered or read back.
     page_scratch: crate::backend::ScratchPool<page::PageScratch>,
     /// Whether the ICC grid kernel reproduces the host on this device;
@@ -63,7 +64,7 @@ pub struct VulkanBackend {
     /// one recording state, so pages from several threads run one at a
     /// time.
     page: std::sync::Mutex<()>,
-    /// The time page rasters hold the device ([`Self::page_mean`]).
+    /// The time page rasters hold the device ([`PageDevice::page_mean`]).
     page_clock: page::PageClock,
     #[expect(
         dead_code,
@@ -83,95 +84,7 @@ impl VulkanBackend {
     /// any required feature is missing, kernel SPIR-V fails to load, or any
     /// driver call returns a non-success status.
     pub fn new() -> Result<Self> {
-        Self::with_selector(None)
-    }
-
-    /// As [`Self::new`], on the device named by `selector` when given.
-    ///
-    /// # Errors
-    /// As [`Self::new`]; additionally [`BackendError::DeviceSelection`]
-    /// when `selector` matches no device, several devices, or a device
-    /// that is not eligible.
-    ///
-    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
-    pub fn with_selector(selector: Option<&DeviceSelector>) -> Result<Self> {
-        let device = device::init(selector)?;
-        let memory = memory::SlabAllocator::new(device.clone())?;
-        let pipelines = pipeline::PipelineCache::new(device.clone())?;
-        let recorder = recorder::PageRecorder::new(device.clone(), pipelines.clone())?;
-        let transfer = transfer::TransferContext::new(device.clone())?;
-        Ok(Self {
-            scratch: crate::backend::DeviceScratch::new(),
-            page_scratch: crate::backend::ScratchPool::bounded(page::PAGE_SETS),
-            icc_clut_exact: std::sync::OnceLock::new(),
-            transfer,
-            recorder,
-            page: std::sync::Mutex::new(()),
-            page_clock: page::PageClock::default(),
-            pipelines,
-            memory,
-            device,
-        })
-    }
-
-    /// Check that `selector` names exactly one device that can host the
-    /// backend, without opening it: an instance is created and destroyed,
-    /// no logical device or pipeline is built.
-    ///
-    /// # Errors
-    /// [`BackendError::DeviceSelection`] when it does not resolve; the
-    /// loader's or instance's error when Vulkan is unavailable.
-    ///
-    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
-    pub fn check_selector(selector: &DeviceSelector) -> Result<()> {
-        device::check_selector(selector)
-    }
-
-    /// The enumeration indices of the devices `selectors` name, in their
-    /// order, without opening any: each resolves as in
-    /// [`Self::with_selector`], and the index, as a selector, names the
-    /// same device for the rest of the process.
-    ///
-    /// # Errors
-    /// [`BackendError::DeviceSelection`] when `selectors` is empty, one
-    /// does not resolve, or two name the same device; the loader's or
-    /// instance's error when Vulkan is unavailable.
-    ///
-    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
-    pub fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
-        device::resolve_devices(Some(selectors))
-    }
-
-    /// The enumeration indices of every device that can host the backend
-    /// and is a GPU (discrete, integrated or virtual, not a CPU
-    /// implementation), without opening any.
-    ///
-    /// # Errors
-    /// [`BackendError::DeviceSelection`] when there is none; the loader's
-    /// or instance's error when Vulkan is unavailable.
-    ///
-    /// [`BackendError::DeviceSelection`]: crate::backend::BackendError::DeviceSelection
-    pub fn usable_gpus() -> Result<Vec<usize>> {
-        device::resolve_devices(None)
-    }
-
-    /// The device's position in Vulkan enumeration order: as a selector,
-    /// it names this device.
-    #[must_use]
-    pub fn device_index(&self) -> usize {
-        self.device.index
-    }
-
-    /// The device's `deviceName`.
-    #[must_use]
-    pub fn device_name(&self) -> String {
-        // SAFETY: the instance and the physical device outlive `self`.
-        let props = unsafe {
-            self.device
-                .instance
-                .get_physical_device_properties(self.device.phys)
-        };
-        device::device_name(&props)
+        Self::open(None)
     }
 
     /// Whether the device is an integrated GPU, whose device buffers are
@@ -214,17 +127,6 @@ impl VulkanBackend {
             })
     }
 
-    /// The mean time a page raster ([`Self::render_page`]) holds the
-    /// device, from recording its command buffer to the end of the wait
-    /// for it: an exponentially weighted mean over the page rasters that
-    /// succeeded, the newest weighing 1/8, the backend's first excluded
-    /// (it includes the driver's first dispatch of the kernel).  `None`
-    /// until a page raster after the first has succeeded.
-    #[must_use]
-    pub fn page_mean(&self) -> Option<std::time::Duration> {
-        self.page_clock.mean()
-    }
-
     /// Queue submissions this backend has made so far: one per page, one
     /// per synchronous transfer or zero-fill.
     #[must_use]
@@ -264,6 +166,110 @@ impl VulkanBackend {
     }
 }
 
+impl PageDevice for VulkanBackend {
+    /// As [`VulkanBackend::new`], on the device named by `selector` when
+    /// given.
+    fn open(selector: Option<&DeviceSelector>) -> Result<Self> {
+        let device = device::init(selector)?;
+        let memory = memory::SlabAllocator::new(device.clone())?;
+        let pipelines = pipeline::PipelineCache::new(device.clone())?;
+        let recorder = recorder::PageRecorder::new(device.clone(), pipelines.clone())?;
+        let transfer = transfer::TransferContext::new(device.clone())?;
+        Ok(Self {
+            scratch: crate::backend::DeviceScratch::new(),
+            page_scratch: crate::backend::ScratchPool::bounded(page::PAGE_SETS),
+            icc_clut_exact: std::sync::OnceLock::new(),
+            transfer,
+            recorder,
+            page: std::sync::Mutex::new(()),
+            page_clock: page::PageClock::default(),
+            pipelines,
+            memory,
+            device,
+        })
+    }
+
+    /// An instance is created and destroyed; no logical device or pipeline
+    /// is built.
+    fn check_selector(selector: &DeviceSelector) -> Result<()> {
+        device::check_selector(selector)
+    }
+
+    fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
+        device::resolve_devices(Some(selectors))
+    }
+
+    /// Discrete, integrated or virtual GPUs.
+    fn usable_gpus() -> Result<Vec<usize>> {
+        device::resolve_devices(None)
+    }
+
+    /// The position in `vkEnumeratePhysicalDevices` order.
+    fn device_index(&self) -> usize {
+        self.device.index
+    }
+
+    /// The device's `deviceName`.
+    fn device_name(&self) -> String {
+        // SAFETY: the instance and the physical device outlive `self`.
+        let props = unsafe {
+            self.device
+                .instance
+                .get_physical_device_properties(self.device.phys)
+        };
+        device::device_name(&props)
+    }
+
+    /// The backend's first page raster includes the driver's first
+    /// dispatch of the kernel.
+    fn page_mean(&self) -> Option<std::time::Duration> {
+        self.page_clock.mean()
+    }
+
+    /// `shaderInt64`.
+    fn page_paths(&self) -> bool {
+        self.device.has_int64
+    }
+
+    /// Up to three calls stage their inputs and read their pixels at once,
+    /// each with a buffer set of its own, the others waiting for one;
+    /// other kernels' pages may run on the device between them.  An input
+    /// or the page past the device's `maxStorageBufferRange` is a
+    /// [`BackendError::DeviceLimit`]; when the page's buffers do not fit,
+    /// the idle buffer sets of other pages are freed and the allocation is
+    /// retried once before [`BackendError::OutOfMemory`].
+    ///
+    /// [`BackendError::DeviceLimit`]: crate::backend::BackendError::DeviceLimit
+    /// [`BackendError::OutOfMemory`]: crate::backend::BackendError::OutOfMemory
+    fn render_page<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+    ) -> Result<()> {
+        self.render_page_with(page, out, stride, None, pipeline::KernelId::PageRasterPaths)
+    }
+
+    /// The device stages are timed by timestamps of the compute queue;
+    /// a queue that writes none fails the page before anything is staged.
+    fn render_page_timed<S: PageSample>(
+        &self,
+        page: &PageCommands,
+        out: &mut [S],
+        stride: usize,
+    ) -> Result<PageTimes> {
+        let mut times = PageTimes::default();
+        self.render_page_with(
+            page,
+            out,
+            stride,
+            Some(&mut times),
+            pipeline::KernelId::PageRasterPaths,
+        )?;
+        Ok(times)
+    }
+}
+
 /// The Vulkan devices the process holds open: one for each
 /// [`VulkanBackend`] alive, none once every backend has dropped and its
 /// device and instance are destroyed.
@@ -300,7 +306,7 @@ pub(crate) fn test_backend() -> Option<VulkanBackend> {
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<DeviceSelector>().expect("device selector"));
-    match VulkanBackend::with_selector(selector.as_ref()) {
+    match VulkanBackend::open(selector.as_ref()) {
         Ok(backend) => Some(backend),
         Err(e) => skip(&format!("no Vulkan backend: {e}")),
     }
@@ -315,6 +321,14 @@ pub(crate) fn test_backend_with_int64() -> Option<VulkanBackend> {
         Some(backend)
     } else {
         skip("the Vulkan device lacks shaderInt64")
+    }
+}
+
+#[cfg(test)]
+impl VulkanBackend {
+    /// Whether the idle page buffer sets are within their bound.
+    pub(crate) fn page_sets_within_bound(&self) -> bool {
+        self.page_scratch.idle_len() <= page::PAGE_SETS
     }
 }
 
@@ -581,7 +595,7 @@ mod tests {
     fn integrated() -> Option<VulkanBackend> {
         let found = ["radv", "intel"].iter().find_map(|name| {
             let selector = name.parse().expect("non-empty selector");
-            match VulkanBackend::with_selector(Some(&selector)) {
+            match VulkanBackend::open(Some(&selector)) {
                 Ok(backend) => backend.is_integrated().then_some(backend),
                 Err(crate::backend::BackendError::DeviceSelection {
                     failure: crate::backend::SelectionFailure::NoMatch,

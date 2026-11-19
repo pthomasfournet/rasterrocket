@@ -5,7 +5,7 @@
 //! (see `stars.rs`).  The GPU page is the library's GPU page path in two
 //! steps: the recording of the page's paint commands by the interpreter
 //! (`pdf_raster::dev::device_page_commands`, the CPU's exact-area coverage
-//! of every fill), then `VulkanBackend::render_page_timed`, which reports
+//! of every fill), then `PageDevice::render_page_timed`, which reports
 //! the duration of each of its host and device stages.  The CPU page is the
 //! library's render of the same page (`render_page_rgb`).
 //!
@@ -37,7 +37,9 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use gpu::backend::vulkan::{DeviceSelector, PageTimes, VulkanBackend};
+use gpu::backend::page_device::{PageDevice, PageTimes};
+use gpu::backend::select::DeviceSelector;
+use gpu::backend::vulkan::VulkanBackend;
 use gpu::page::PageCommands;
 use pdf_raster::{BackendPolicy, RasterSession, RenderParams, SessionConfig};
 
@@ -124,7 +126,7 @@ fn fmt_stats(v: Vec<u64>) -> String {
 
 fn open_device(selector: Option<&str>) -> VulkanBackend {
     let selector = selector.map(|s| s.parse::<DeviceSelector>().expect("--device selector"));
-    VulkanBackend::with_selector(selector.as_ref()).expect("Vulkan device")
+    VulkanBackend::open(selector.as_ref()).expect("Vulkan device")
 }
 
 fn open_cpu(pdf: &[u8]) -> RasterSession {
