@@ -89,12 +89,16 @@ pub(crate) const fn rotated_on_gpu<P: DeskewPixel>(
 /// Whether `policy` rotates on the GPU.  The rotation is a CUDA kernel, so
 /// only `ForceCuda` takes it: `Auto` creates no CUDA context for a page
 /// whose CPU rotation costs less than the context's start-up, and
-/// `CpuOnly`, `ForceVulkan` and `ForceVaapi` make no CUDA call.
+/// `CpuOnly`, `ForceVulkan`, `ForceD3d12` and `ForceVaapi` make no CUDA
+/// call.
 #[cfg(feature = "gpu-deskew")]
 const fn rotates_on_gpu(policy: BackendPolicy) -> bool {
     match policy {
         BackendPolicy::ForceCuda => true,
-        BackendPolicy::Auto | BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => false,
+        BackendPolicy::Auto
+        | BackendPolicy::CpuOnly
+        | BackendPolicy::ForceVulkan
+        | BackendPolicy::ForceD3d12 => false,
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => false,
     }
@@ -265,6 +269,7 @@ mod tests {
         assert!(!rotates_on_gpu(BackendPolicy::Auto));
         assert!(!rotates_on_gpu(BackendPolicy::CpuOnly));
         assert!(!rotates_on_gpu(BackendPolicy::ForceVulkan));
+        assert!(!rotates_on_gpu(BackendPolicy::ForceD3d12));
         #[cfg(feature = "vaapi")]
         assert!(!rotates_on_gpu(BackendPolicy::ForceVaapi));
     }
@@ -279,6 +284,7 @@ mod tests {
             BackendPolicy::Auto,
             BackendPolicy::CpuOnly,
             BackendPolicy::ForceVulkan,
+            BackendPolicy::ForceD3d12,
             #[cfg(feature = "vaapi")]
             BackendPolicy::ForceVaapi,
         ] {

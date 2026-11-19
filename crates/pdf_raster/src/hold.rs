@@ -1,7 +1,12 @@
 //! Holding the GPU devices of a session configuration open across
 //! sessions.
 
-#[cfg(any(feature = "gpu-icc", feature = "cache", feature = "vulkan"))]
+#[cfg(any(
+    feature = "gpu-icc",
+    feature = "cache",
+    feature = "vulkan",
+    all(windows, feature = "d3d12")
+))]
 use std::sync::Arc;
 
 use crate::{RasterError, SessionConfig};
@@ -17,7 +22,9 @@ use crate::{RasterError, SessionConfig};
 ///
 /// A hold of a configuration opens what a session of it opens: the Vulkan
 /// device of [`SessionConfig::vulkan_device`] under
-/// [`ForceVulkan`](crate::BackendPolicy::ForceVulkan), the CUDA context
+/// [`ForceVulkan`](crate::BackendPolicy::ForceVulkan), the Direct3D 12
+/// adapter of [`SessionConfig::d3d12_device`] under
+/// [`ForceD3d12`](crate::BackendPolicy::ForceD3d12), the CUDA context
 /// under [`ForceCuda`](crate::BackendPolicy::ForceCuda) and
 /// `ForceVaapi`, and with [`SessionConfig::gpu_pages`] the devices of the
 /// GPU pages ([`SessionConfig::gpu_devices`]), which a session under
@@ -30,6 +37,8 @@ pub struct DeviceHold {
     cuda: Option<Arc<gpu::GpuCtx>>,
     #[cfg(feature = "vulkan")]
     vulkan: Vec<Arc<gpu::backend::vulkan::VulkanBackend>>,
+    #[cfg(all(windows, feature = "d3d12"))]
+    d3d12: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
 }
 
 impl DeviceHold {
@@ -40,7 +49,7 @@ impl DeviceHold {
     /// The errors [`open_session`](crate::open_session) returns for
     /// `config` before it reads the document:
     /// [`RasterError::InvalidOptions`] for an invalid configuration or an
-    /// unresolvable Vulkan selector, and
+    /// unresolvable Vulkan or Direct3D 12 selector, and
     /// [`RasterError::BackendUnavailable`] for a forced backend that is not
     /// compiled in or does not open.  A GPU-page device that does not open
     /// under `Auto` is logged at `error`, as a session logs it, and is not
@@ -51,9 +60,11 @@ impl DeviceHold {
         config.check()?;
         #[cfg(feature = "vulkan")]
         let vulkan = {
-            let session = crate::device_init::init_backend::<gpu::backend::vulkan::VulkanBackend>(
+            use crate::device_init::SessionDevice as _;
+            use gpu::backend::vulkan::VulkanBackend;
+            let session = crate::device_init::init_backend::<VulkanBackend>(
                 config.policy,
-                config.vulkan_device.as_deref(),
+                VulkanBackend::session_selector(config),
             )?;
             let mut held = crate::device_pages::open_all(config, session.as_ref())?;
             let session = session.filter(|s| !held.iter().any(|h| Arc::ptr_eq(h, s)));
@@ -65,6 +76,15 @@ impl DeviceHold {
             cuda: crate::open::init_gpu_ctx(config.policy)?,
             #[cfg(feature = "vulkan")]
             vulkan,
+            #[cfg(all(windows, feature = "d3d12"))]
+            d3d12: {
+                use crate::device_init::SessionDevice as _;
+                use gpu::backend::d3d12::D3d12Backend;
+                crate::device_init::init_backend::<D3d12Backend>(
+                    config.policy,
+                    D3d12Backend::session_selector(config),
+                )?
+            },
         })
     }
 
@@ -76,7 +96,12 @@ impl DeviceHold {
 
     /// The backends of the devices held.
     #[cfg_attr(
-        not(any(feature = "gpu-icc", feature = "cache", feature = "vulkan")),
+        not(any(
+            feature = "gpu-icc",
+            feature = "cache",
+            feature = "vulkan",
+            all(windows, feature = "d3d12")
+        )),
         expect(
             clippy::unused_self,
             reason = "no device is held without a GPU feature"
@@ -88,6 +113,8 @@ impl DeviceHold {
             self.cuda.is_some().then_some("CUDA"),
             #[cfg(feature = "vulkan")]
             (!self.vulkan.is_empty()).then_some("Vulkan"),
+            #[cfg(all(windows, feature = "d3d12"))]
+            self.d3d12.is_some().then_some("Direct3D 12"),
         ];
         held.iter().flatten().copied().collect()
     }
@@ -128,5 +155,34 @@ mod tests {
         indices.sort_unstable();
         indices.dedup();
         assert_eq!(indices.len(), count, "a device is held twice");
+    }
+}
+
+#[cfg(all(test, windows, feature = "d3d12"))]
+mod d3d12_tests {
+    use super::DeviceHold;
+    use crate::{BackendPolicy, RasterError, SessionConfig};
+
+    /// Under `ForceD3d12` the hold holds the adapter of `d3d12_device`;
+    /// one naming no adapter is refused as an invalid option.
+    #[test]
+    fn a_hold_holds_the_d3d12_adapter() {
+        let mut config = SessionConfig::with_policy(BackendPolicy::ForceD3d12);
+        config.d3d12_device = SessionConfig::d3d12_device_from_env();
+        match DeviceHold::open(&config) {
+            Ok(hold) => assert_eq!(hold.held(), ["Direct3D 12"]),
+            Err(e) => {
+                assert!(
+                    !std::env::var("PDF_RASTER_REQUIRE_D3D12").is_ok_and(|v| v == "1"),
+                    "PDF_RASTER_REQUIRE_D3D12=1, but no D3D12 adapter opens: {e}"
+                );
+                eprintln!("skipping: no D3D12 adapter: {e}");
+            }
+        }
+        config.d3d12_device = Some("no-such-gpu-7f3c".to_owned());
+        assert!(matches!(
+            DeviceHold::open(&config),
+            Err(RasterError::InvalidOptions(_))
+        ));
     }
 }

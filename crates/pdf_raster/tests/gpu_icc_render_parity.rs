@@ -13,17 +13,25 @@
 //! the 16-bit samples the CPU converts the image's samples widened to.
 //!
 //! The Vulkan case runs on the device `PDF_RASTER_VULKAN_DEVICE` names, or
-//! the automatically ranked one, and is skipped when no Vulkan device
-//! opens.
+//! the automatically ranked one; the D3D12 case (Windows) on the adapter
+//! `PDF_RASTER_D3D12_DEVICE` names, or the automatically chosen one.  Each
+//! is skipped when its session does not open, unless
+//! `PDF_RASTER_REQUIRE_VULKAN=1` or `PDF_RASTER_REQUIRE_D3D12=1` requires
+//! it.
 //!
 //! Run with:
 //!   `cargo test -p rasterrocket --features vulkan,gpu-icc --test gpu_icc_render_parity`
 //!   `PDF_RASTER_VULKAN_DEVICE=radv cargo test -p rasterrocket --features vulkan,gpu-icc --test gpu_icc_render_parity`
+//!   `PDF_RASTER_D3D12_DEVICE=warp cargo test -p rasterrocket --features d3d12,gpu-icc --test gpu_icc_render_parity`
 //!   `cargo test -p rasterrocket --features gpu-icc,gpu-validation --test gpu_icc_render_parity`
 
 #![cfg(all(
     feature = "gpu-icc",
-    any(feature = "vulkan", feature = "gpu-validation")
+    any(
+        feature = "vulkan",
+        all(windows, feature = "d3d12"),
+        feature = "gpu-validation"
+    )
 ))]
 
 #[expect(
@@ -36,6 +44,8 @@ use std::fmt::Write as _;
 
 use std::sync::Arc;
 
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+use common::device::DeviceApi;
 use common::{assemble_pdf, assert_identical, stream_object};
 use rasterrocket::{
     BackendPolicy, FinishedCanvas, OutputProfile, PageDiagnostics, RasterSession, RenderParams,
@@ -231,14 +241,29 @@ fn assert_device_conversion_matches_cpu(
 fn icc_cmyk_image_converts_on_vulkan() {
     let mut config = SessionConfig::with_policy(BackendPolicy::ForceVulkan);
     config.vulkan_device = SessionConfig::vulkan_device_from_env();
-    let open = |config: &SessionConfig| match open_session_from_bytes(fixture_pdf(), config) {
-        Ok(session) => Some(session),
-        Err(e) => {
-            eprintln!("skipping: no Vulkan session ({e})");
-            None
-        }
+    let open = |config: &SessionConfig| {
+        common::device::or_skip(
+            DeviceApi::Vulkan,
+            open_session_from_bytes(fixture_pdf(), config),
+        )
     };
     assert_device_conversion_matches_cpu(open, &config, "vulkan");
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+#[test]
+fn icc_cmyk_image_converts_on_d3d12() {
+    let mut config = SessionConfig::with_policy(BackendPolicy::ForceD3d12);
+    config.d3d12_device = SessionConfig::d3d12_device_from_env();
+    let open = |config: &SessionConfig| {
+        let session = common::device::or_skip(
+            DeviceApi::D3d12,
+            open_session_from_bytes(fixture_pdf(), config),
+        );
+        report_loaded_warp();
+        session
+    };
+    assert_device_conversion_matches_cpu(open, &config, "d3d12");
 }
 
 #[cfg(feature = "gpu-validation")]
@@ -249,4 +274,33 @@ fn icc_cmyk_image_converts_on_cuda() {
     };
     let config = SessionConfig::with_policy(BackendPolicy::ForceCuda);
     assert_device_conversion_matches_cpu(open, &config, "cuda");
+}
+
+/// Print the `d3d10warp.dll` loaded in the process, if any; with
+/// `RR_WARP_VERSION` set, require a loaded one beside the test binary, of
+/// that version.
+///
+/// # Panics
+///
+/// When `RR_WARP_VERSION` is set and the loaded module is missing, lies
+/// elsewhere or has another version.
+#[cfg(all(windows, feature = "d3d12"))]
+fn report_loaded_warp() {
+    let loaded = rasterrocket::dev::loaded_warp();
+    match &loaded {
+        Some((path, version)) => eprintln!("WARP module: {} version {version}", path.display()),
+        None => eprintln!("WARP module: not loaded"),
+    }
+    if let Ok(expected) = std::env::var("RR_WARP_VERSION") {
+        let (path, version) = loaded.expect("RR_WARP_VERSION is set, but no WARP is loaded");
+        let exe = std::env::current_exe().expect("test binary path");
+        let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+        assert_eq!(
+            path.parent().and_then(canonical),
+            exe.parent().and_then(canonical),
+            "the loaded WARP is not the one beside the test binary: {}",
+            path.display()
+        );
+        assert_eq!(version, expected.trim(), "WARP version");
+    }
 }

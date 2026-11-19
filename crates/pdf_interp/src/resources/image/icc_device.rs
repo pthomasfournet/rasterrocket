@@ -10,10 +10,12 @@
 //! without a backend.  A GPU session's output is therefore a CPU
 //! session's, byte for byte.
 //!
-//! The Vulkan backend is used when the session holds one, otherwise the
-//! CUDA context; both run [`gpu::backend::icc_clut`].  A Vulkan device
-//! whose kernel fails the backend's exactness check
-//! (`VulkanBackend::icc_clut_is_exact`) is not used.
+//! The Vulkan or Direct3D 12 backend is used when the session holds one (a
+//! session holds at most one of them), otherwise the CUDA context; each
+//! runs [`gpu::backend::icc_clut`].  A Vulkan or Direct3D 12 device whose
+//! kernel fails the backend's exactness check
+//! (`VulkanBackend::icc_clut_is_exact`, `D3d12Backend::icc_clut_is_exact`)
+//! is not used.
 
 #![cfg(feature = "gpu-icc")]
 
@@ -24,6 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use color::grid::CmykGrid;
 use gpu::GpuCtx;
 use gpu::backend::GpuBackend;
+#[cfg(all(windows, feature = "d3d12"))]
+use gpu::backend::d3d12::D3d12Backend;
 #[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
 
@@ -32,11 +36,15 @@ use crate::resources::colorspace::icc::IccConversion;
 /// The GPU backends an ICC CMYK conversion may run on, and the counters
 /// its outcome is recorded in.
 pub struct IccHandles<'a> {
-    /// CUDA context; used when no Vulkan backend is attached.
+    /// CUDA context; used when no Vulkan or Direct3D 12 backend is
+    /// attached.
     pub gpu_ctx: Option<&'a Arc<GpuCtx>>,
     /// Vulkan backend; used in preference to the CUDA context.
     #[cfg(feature = "vulkan")]
     pub vk_backend: Option<&'a VulkanBackend>,
+    /// Direct3D 12 backend; used in preference to the CUDA context.
+    #[cfg(all(windows, feature = "d3d12"))]
+    pub d3d12_backend: Option<&'a D3d12Backend>,
     /// Counters of the device conversions; `None` counts nothing.
     pub counts: Option<&'a DeviceIccCounts>,
 }
@@ -50,6 +58,8 @@ impl IccHandles<'_> {
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]
             vk_backend: None,
+            #[cfg(all(windows, feature = "d3d12"))]
+            d3d12_backend: None,
             counts: None,
         }
     }
@@ -58,6 +68,10 @@ impl IccHandles<'_> {
     const fn has_device(&self) -> bool {
         #[cfg(feature = "vulkan")]
         if self.vk_backend.is_some() {
+            return true;
+        }
+        #[cfg(all(windows, feature = "d3d12"))]
+        if self.d3d12_backend.is_some() {
             return true;
         }
         self.gpu_ctx.is_some()
@@ -160,6 +174,13 @@ pub(super) fn cmyk_clut_to_rgb<T: ClutSample>(
                 break 'device DeviceIcc::Declined;
             }
             break 'device run(vk, cmyk, grid);
+        }
+        #[cfg(all(windows, feature = "d3d12"))]
+        if let Some(d3d12) = icc.d3d12_backend {
+            if !d3d12.icc_clut_is_exact() {
+                break 'device DeviceIcc::Declined;
+            }
+            break 'device run(d3d12, cmyk, grid);
         }
         let Some(ctx) = icc.gpu_ctx else {
             break 'device DeviceIcc::Declined;

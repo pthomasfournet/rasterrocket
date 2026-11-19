@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-#[cfg(feature = "vulkan")]
-use crate::device_init::init_backend;
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
+use crate::device_init::{SessionDevice, init_backend};
 use crate::{BackendPolicy, FormType, RasterError, SessionConfig, UnsupportedFeature};
 
 /// An opened PDF document ready for per-page rendering.
@@ -84,6 +84,13 @@ pub struct RasterSession {
     /// returns `None` under `ForceVulkan`.  Shared across all pages.
     #[cfg(feature = "vulkan")]
     pub(crate) vk_backend: Option<Arc<gpu::backend::vulkan::VulkanBackend>>,
+    /// Direct3D 12 compute backend.  `Some` when the build is for Windows
+    /// with the `d3d12` feature, the policy is `ForceD3d12`, and the
+    /// adapter of [`crate::SessionConfig::d3d12_device`] opened.  No CUDA
+    /// context or Vulkan device is initialised beside it.  Shared across
+    /// all pages.
+    #[cfg(all(windows, feature = "d3d12"))]
+    pub(crate) d3d12_backend: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
     /// The GPU page queue ([`crate::SessionConfig::gpu_pages`]); `None`
     /// renders every page on the CPU.
     #[cfg(feature = "vulkan")]
@@ -92,7 +99,7 @@ pub struct RasterSession {
     /// Single-threaded VA-API JPEG decode queue.  One worker thread owns the
     /// `VapiJpegDecoder`; all Rayon page-render threads share handles to it.
     /// `None` when the `vaapi` feature is disabled, policy is `CpuOnly` /
-    /// `ForceCuda` / `ForceVulkan`, or VA-API initialisation failed (soft
+    /// `ForceCuda` / `ForceVulkan` / `ForceD3d12`, or VA-API initialisation failed (soft
     /// failure on `Auto`).
     #[cfg(feature = "vaapi")]
     pub(crate) vaapi_queue: Option<Arc<gpu::DecodeQueue<gpu::vaapi::VapiJpegDecoder>>>,
@@ -336,12 +343,14 @@ const _: fn() = || {
 ///   with `config.read_into_memory`, also when the file's bytes cannot be
 ///   allocated.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is
-///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
-///   was not compiled in or fails to initialise.
+///   `ForceCuda`, `ForceVaapi`, `ForceVulkan` or `ForceD3d12` and the
+///   required backend was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
-///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
-///   `config.vulkan_device` matches no usable Vulkan device or several, or
-///   an entry of `config.gpu_devices` does, or two name the same device.
+///   honoured (see [`SessionConfig::check_gpu_pages`]), or if the session
+///   device's selector (`config.vulkan_device` under `Auto` and
+///   `ForceVulkan`, `config.d3d12_device` under `ForceD3d12`) matches no
+///   usable device or several, or an entry of `config.gpu_devices` does,
+///   or two name the same device.
 pub fn open_session(
     path: &std::path::Path,
     config: &SessionConfig,
@@ -362,12 +371,14 @@ pub fn open_session(
 ///   encrypted document whose decryption is not authorised or whose
 ///   password is wrong.
 /// - [`RasterError::BackendUnavailable`] if `config.policy` is
-///   `ForceCuda`, `ForceVaapi` or `ForceVulkan` and the required backend
-///   was not compiled in or fails to initialise.
+///   `ForceCuda`, `ForceVaapi`, `ForceVulkan` or `ForceD3d12` and the
+///   required backend was not compiled in or fails to initialise.
 /// - [`RasterError::InvalidOptions`] if `config.gpu_pages` cannot be
-///   honoured (see [`SessionConfig::check_gpu_pages`]), or if
-///   `config.vulkan_device` matches no usable Vulkan device or several, or
-///   an entry of `config.gpu_devices` does, or two name the same device.
+///   honoured (see [`SessionConfig::check_gpu_pages`]), or if the session
+///   device's selector (`config.vulkan_device` under `Auto` and
+///   `ForceVulkan`, `config.d3d12_device` under `ForceD3d12`) matches no
+///   usable device or several, or an entry of `config.gpu_devices` does,
+///   or two name the same device.
 pub fn open_session_from_bytes(
     bytes: Vec<u8>,
     config: &SessionConfig,
@@ -431,16 +442,22 @@ pub fn open_session_from_reader(
 
 /// Why `policy` cannot run in this build: a `Force*` policy whose backend
 /// was not compiled in (`ForceVulkan` without the `vulkan` feature,
-/// `ForceCuda` without any CUDA feature).  Without this gate the backend's
+/// `ForceD3d12` without the `d3d12` feature or off Windows, `ForceCuda`
+/// without any CUDA feature).  Without this gate the backend's
 /// cfg-gated initialisation disappears and the forced render silently runs
 /// on the CPU, the fallback the `Force*` variants exist to prevent.
 const fn uncompiled_backend(policy: BackendPolicy) -> Option<&'static str> {
     let vulkan = cfg!(feature = "vulkan");
+    let d3d12 = cfg!(all(windows, feature = "d3d12"));
     let cuda = cfg!(any(feature = "gpu-icc", feature = "cache"));
     match policy {
         BackendPolicy::ForceVulkan if !vulkan => Some(
             "ForceVulkan requires the `vulkan` Cargo feature; \
              rebuild with `--features vulkan` or pick another --backend.",
+        ),
+        BackendPolicy::ForceD3d12 if !d3d12 => Some(
+            "ForceD3d12 requires a Windows build with the `d3d12` Cargo feature; \
+             rebuild on Windows with `--features d3d12` or pick another --backend.",
         ),
         BackendPolicy::ForceCuda if !cuda => Some(
             "ForceCuda requires the `gpu-icc` or `cache` Cargo feature; \
@@ -479,7 +496,12 @@ fn open_session_with_doc(
     #[cfg(feature = "vulkan")]
     let vk_backend = init_backend::<gpu::backend::vulkan::VulkanBackend>(
         config.policy,
-        config.vulkan_device.as_deref(),
+        gpu::backend::vulkan::VulkanBackend::session_selector(config),
+    )?;
+    #[cfg(all(windows, feature = "d3d12"))]
+    let d3d12_backend = init_backend::<gpu::backend::d3d12::D3d12Backend>(
+        config.policy,
+        gpu::backend::d3d12::D3d12Backend::session_selector(config),
     )?;
     #[cfg(feature = "vulkan")]
     let device_pages = crate::device_pages::DevicePages::for_session(config, vk_backend.as_ref())?;
@@ -567,6 +589,8 @@ fn open_session_with_doc(
         gpu_ctx,
         #[cfg(feature = "vulkan")]
         vk_backend,
+        #[cfg(all(windows, feature = "d3d12"))]
+        d3d12_backend,
         #[cfg(feature = "vulkan")]
         device_pages,
         #[cfg(feature = "vaapi")]
@@ -653,9 +677,9 @@ fn new_vulkan_image_cache(
 
 /// The CUDA GPU context for ICC colour transforms and image blits.
 ///
-/// Returns `None` on `Auto`, `CpuOnly` and `ForceVulkan`.  Errors loudly on
-/// `ForceCuda` if init fails; logs a warning and returns `None` on
-/// `ForceVaapi` if init fails.
+/// Returns `None` on `Auto`, `CpuOnly`, `ForceVulkan` and `ForceD3d12`.
+/// Errors loudly on `ForceCuda` if init fails; logs a warning and returns
+/// `None` on `ForceVaapi` if init fails.
 ///
 /// The context, with its kernel modules and scratch buffers, is shared by
 /// every session alive at once and freed with the last of them
@@ -672,7 +696,10 @@ static GPU_CTX: crate::registry::Registry<(), gpu::GpuCtx, String> =
 pub(crate) fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuCtx>>, RasterError> {
     if matches!(
         policy,
-        BackendPolicy::Auto | BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan
+        BackendPolicy::Auto
+            | BackendPolicy::CpuOnly
+            | BackendPolicy::ForceVulkan
+            | BackendPolicy::ForceD3d12
     ) {
         return Ok(None);
     }
@@ -693,5 +720,33 @@ pub(crate) fn init_gpu_ctx(policy: BackendPolicy) -> Result<Option<Arc<gpu::GpuC
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_backend_compiled;
+    use crate::BackendPolicy;
+
+    /// A build without the D3D12 backend refuses `ForceD3d12`, naming the
+    /// feature and the platform it needs.
+    #[cfg(not(all(windows, feature = "d3d12")))]
+    #[test]
+    fn force_d3d12_without_the_feature_is_unavailable() {
+        match check_backend_compiled(BackendPolicy::ForceD3d12) {
+            Err(crate::RasterError::BackendUnavailable(msg)) => {
+                assert!(msg.contains("`d3d12`"), "{msg}");
+                assert!(msg.contains("Windows"), "{msg}");
+            }
+            other => panic!("expected BackendUnavailable, got {other:?}"),
+        }
+    }
+
+    /// A build with the D3D12 backend accepts `ForceD3d12` before any
+    /// adapter is opened.
+    #[cfg(all(windows, feature = "d3d12"))]
+    #[test]
+    fn force_d3d12_with_the_feature_is_compiled() {
+        assert!(check_backend_compiled(BackendPolicy::ForceD3d12).is_ok());
     }
 }

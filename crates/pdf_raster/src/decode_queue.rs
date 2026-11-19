@@ -91,7 +91,10 @@ pub(crate) fn build_vaapi_queue(
 ) -> Result<Option<gpu::DecodeQueue<gpu::vaapi::VapiJpegDecoder>>, String> {
     if matches!(
         policy,
-        BackendPolicy::CpuOnly | BackendPolicy::ForceCuda | BackendPolicy::ForceVulkan
+        BackendPolicy::CpuOnly
+            | BackendPolicy::ForceCuda
+            | BackendPolicy::ForceVulkan
+            | BackendPolicy::ForceD3d12
     ) {
         return Ok(None);
     }

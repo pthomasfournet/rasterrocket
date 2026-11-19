@@ -899,6 +899,9 @@ impl<'a> PageJob<'a> {
         #[cfg(feature = "vulkan")]
         renderer.set_vk_backend(session.vk_backend.as_ref().map(Arc::clone));
 
+        #[cfg(all(windows, feature = "d3d12"))]
+        renderer.set_d3d12_backend(session.d3d12_backend.as_ref().map(Arc::clone));
+
         #[cfg(feature = "cache")]
         renderer.set_image_cache(session.image_cache.clone(), session.doc_id);
         renderer

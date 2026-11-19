@@ -20,7 +20,7 @@ use crate::{PageBox, Password, RasterError, RenderPurpose, Rotation};
 ///
 /// At runtime, [`SessionConfig::default()`] resolves the policy via
 /// [`BackendPolicy::from_env`], so users can switch backends per process by
-/// setting `PDF_RASTER_BACKEND={auto,cpu,cuda,vaapi,vulkan}` without
+/// setting `PDF_RASTER_BACKEND={auto,cpu,cuda,vaapi,vulkan,d3d12}` without
 /// rebuilding.  [`SessionConfig::with_policy`] bypasses the env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -56,6 +56,17 @@ pub enum BackendPolicy {
     /// through `VulkanBackend`, and in a build with the `cache` feature the
     /// device-resident image cache keeps its slabs on the Vulkan device.
     ForceVulkan,
+    /// Require the Direct3D 12 compute backend (Windows).  Returns
+    /// [`RasterError::BackendUnavailable`] if no D3D12 adapter opens, or the
+    /// binary was built without `--features d3d12` or for another platform.
+    ///
+    /// The session's device is the adapter
+    /// [`SessionConfig::d3d12_device`] names, or the automatically chosen
+    /// hardware adapter.  The ICC CMYK→RGB CLUT kernel dispatches through
+    /// `D3d12Backend`, after the device passes the same exactness check as
+    /// a Vulkan device; images it does not convert, and every other kernel,
+    /// run on the CPU.
+    ForceD3d12,
 }
 
 impl BackendPolicy {
@@ -63,7 +74,8 @@ impl BackendPolicy {
     ///
     /// Convenience wrapper for [`BackendPolicy::from_env_var`] with the
     /// canonical name.  Accepted values (case-insensitive): `auto`, `cpu`,
-    /// `cuda`, `vulkan`, and `vaapi` in a build with the `vaapi` feature.
+    /// `cuda`, `vulkan`, `d3d12`, and `vaapi` in a build with the `vaapi`
+    /// feature.
     /// Unset, empty, or unrecognised values fall back to
     /// [`BackendPolicy::Auto`] — unrecognised values also emit a
     /// `log::warn!` so a typo doesn't silently mis-route.
@@ -113,6 +125,7 @@ impl BackendPolicy {
         #[cfg(feature = "vaapi")]
         Self::ForceVaapi,
         Self::ForceVulkan,
+        Self::ForceD3d12,
     ];
 }
 
@@ -148,7 +161,8 @@ impl std::error::Error for ParseBackendPolicyError {}
 
 impl BackendPolicy {
     /// The name [`FromStr`](std::str::FromStr) and `PDF_RASTER_BACKEND`
-    /// accept for this policy: `auto`, `cpu`, `cuda`, `vaapi` or `vulkan`.
+    /// accept for this policy: `auto`, `cpu`, `cuda`, `vaapi`, `vulkan` or
+    /// `d3d12`.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -158,6 +172,7 @@ impl BackendPolicy {
             #[cfg(feature = "vaapi")]
             Self::ForceVaapi => "vaapi",
             Self::ForceVulkan => "vulkan",
+            Self::ForceD3d12 => "d3d12",
         }
     }
 }
@@ -200,8 +215,9 @@ pub const GPU_PAGE_OPEN_WAIT: std::time::Duration = std::time::Duration::from_se
 ///
 /// Passed to [`open_session`].  Use [`Default::default()`] for the standard
 /// behaviour: backend resolved from `PDF_RASTER_BACKEND` env var (or `Auto`
-/// if unset), Vulkan device from `PDF_RASTER_VULKAN_DEVICE` (or automatic),
-/// probed DRM render node, image-cache prefetch off.
+/// if unset), Vulkan device from `PDF_RASTER_VULKAN_DEVICE` and D3D12
+/// adapter from `PDF_RASTER_D3D12_DEVICE` (or automatic), probed DRM render
+/// node, image-cache prefetch off.
 ///
 /// This struct is `#[non_exhaustive]`: construct it via [`SessionConfig::default()`]
 /// or [`SessionConfig::with_policy()`] rather than a struct literal.  This allows
@@ -242,6 +258,25 @@ pub struct SessionConfig {
     /// `vulkan` feature is enabled and `policy` is
     /// [`Auto`](BackendPolicy::Auto) or [`ForceVulkan`](BackendPolicy::ForceVulkan).
     pub vulkan_device: Option<String>,
+    /// Direct3D 12 adapter to use under
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12), or `None` to pick the
+    /// first usable hardware adapter with dedicated video memory, else the
+    /// first usable hardware adapter.
+    ///
+    /// The selectors of [`vulkan_device`](Self::vulkan_device), over DXGI's
+    /// adapters in high-performance order, plus `warp` (case-insensitive),
+    /// which names the WARP software adapter; WARP's own listed index names
+    /// it too, and no other selector names a software adapter.  A value
+    /// that does not resolve to exactly one usable adapter makes
+    /// [`open_session`] return [`RasterError::InvalidOptions`] listing the
+    /// adapters.
+    ///
+    /// [`SessionConfig::with_policy`] sets `None`; [`SessionConfig::default`]
+    /// reads `PDF_RASTER_D3D12_DEVICE` (see
+    /// [`SessionConfig::d3d12_device_from_env`]).  Read only under
+    /// [`ForceD3d12`](BackendPolicy::ForceD3d12), in a Windows build with the
+    /// `d3d12` feature; every other policy ignores it.
+    pub d3d12_device: Option<String>,
     /// Whether to spawn the image-cache prefetcher at session open.
     /// Default `false` — opt-in because the prefetcher reads every
     /// page's resource dict eagerly, which is wasted work for short
@@ -540,6 +575,7 @@ impl SessionConfig {
             policy,
             vaapi_device: DEFAULT_VAAPI_DEVICE.to_owned(),
             vulkan_device: None,
+            d3d12_device: None,
             #[cfg(feature = "cache")]
             prefetch: false,
             #[cfg(feature = "cache")]
@@ -730,13 +766,16 @@ impl SessionConfig {
     /// trimmed.
     #[must_use]
     pub fn vulkan_device_from_env() -> Option<String> {
-        let raw = std::env::var_os(VULKAN_DEVICE_ENV)?;
-        let Some(s) = raw.to_str() else {
-            log::warn!("{VULKAN_DEVICE_ENV} contains non-UTF-8 bytes; ignoring it");
-            return None;
-        };
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.to_owned())
+        selector_from_env(VULKAN_DEVICE_ENV)
+    }
+
+    /// The D3D12 adapter selector named by the `PDF_RASTER_D3D12_DEVICE`
+    /// environment variable, read as
+    /// [`vulkan_device_from_env`](Self::vulkan_device_from_env) reads its
+    /// own.
+    #[must_use]
+    pub fn d3d12_device_from_env() -> Option<String> {
+        selector_from_env(D3D12_DEVICE_ENV)
     }
 
     /// The font directories named by the `RROCKET_FONT_DIR` environment
@@ -758,8 +797,24 @@ pub(crate) fn is_all(entry: &str) -> bool {
     entry.trim().eq_ignore_ascii_case("all")
 }
 
+/// The device selector the environment variable `name` holds: `None` when
+/// it is unset, empty after trimming, or not UTF-8 (the last with a
+/// `log::warn!`); surrounding whitespace is trimmed.
+fn selector_from_env(name: &str) -> Option<String> {
+    let raw = std::env::var_os(name)?;
+    let Some(s) = raw.to_str() else {
+        log::warn!("{name} contains non-UTF-8 bytes; ignoring it");
+        return None;
+    };
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
 /// Environment variable read by [`SessionConfig::vulkan_device_from_env`].
 const VULKAN_DEVICE_ENV: &str = "PDF_RASTER_VULKAN_DEVICE";
+
+/// Environment variable read by [`SessionConfig::d3d12_device_from_env`].
+const D3D12_DEVICE_ENV: &str = "PDF_RASTER_D3D12_DEVICE";
 
 /// Environment variable read by [`SessionConfig::font_dirs_from_env`].
 const FONT_DIR_ENV: &str = "RROCKET_FONT_DIR";
@@ -767,12 +822,15 @@ const FONT_DIR_ENV: &str = "RROCKET_FONT_DIR";
 impl Default for SessionConfig {
     /// Policy from `PDF_RASTER_BACKEND` ([`BackendPolicy::from_env`]),
     /// Vulkan device from `PDF_RASTER_VULKAN_DEVICE`
-    /// ([`SessionConfig::vulkan_device_from_env`]), font directories from
+    /// ([`SessionConfig::vulkan_device_from_env`]), D3D12 adapter from
+    /// `PDF_RASTER_D3D12_DEVICE`
+    /// ([`SessionConfig::d3d12_device_from_env`]), font directories from
     /// `RROCKET_FONT_DIR` ([`SessionConfig::font_dirs_from_env`]), every
     /// other field as in [`SessionConfig::with_policy`].
     fn default() -> Self {
         let mut config = Self::with_policy(BackendPolicy::from_env());
         config.vulkan_device = Self::vulkan_device_from_env();
+        config.d3d12_device = Self::d3d12_device_from_env();
         config.font_dirs = Self::font_dirs_from_env();
         config
     }
@@ -800,6 +858,15 @@ mod tests {
             BackendPolicy::from_str("vulkan"),
             Ok(BackendPolicy::ForceVulkan)
         );
+        assert_eq!(
+            BackendPolicy::from_str("d3d12"),
+            Ok(BackendPolicy::ForceD3d12)
+        );
+        assert_eq!(
+            BackendPolicy::from_str("D3D12"),
+            Ok(BackendPolicy::ForceD3d12)
+        );
+        assert_eq!(BackendPolicy::ForceD3d12.name(), "d3d12");
     }
 
     #[test]
@@ -836,5 +903,82 @@ mod tests {
             "{msg}"
         );
         assert_eq!(msg.contains("vaapi"), cfg!(feature = "vaapi"), "{msg}");
+    }
+
+    /// The variable a child process of this test runs under.
+    const CHILD: &str = "RR_CONFIG_ENV_CHILD";
+
+    /// Run the test `name` of this binary alone in a child process, under
+    /// `env` and without the device variables the parent has.
+    fn run_child(name: &str, env: &[(&str, &str)]) {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let status = std::process::Command::new(exe)
+            .args(["--exact", name, "--test-threads=1", "--quiet"])
+            .env(CHILD, "1")
+            .env_remove(super::VULKAN_DEVICE_ENV)
+            .env_remove(super::D3D12_DEVICE_ENV)
+            .envs(env.iter().copied())
+            .status()
+            .expect("the child test runs");
+        assert!(status.success(), "the child test {name} failed: {status}");
+    }
+
+    /// `PDF_RASTER_D3D12_DEVICE`, trimmed, is the D3D12 selector, and the
+    /// Vulkan one stays unset; `SessionConfig::default` takes it.
+    #[test]
+    fn d3d12_device_from_env_reads_its_variable() {
+        use super::SessionConfig;
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                SessionConfig::d3d12_device_from_env().as_deref(),
+                Some("warp")
+            );
+            assert_eq!(SessionConfig::vulkan_device_from_env(), None);
+            let config = SessionConfig::default();
+            assert_eq!(config.d3d12_device.as_deref(), Some("warp"));
+            assert_eq!(config.vulkan_device, None);
+            return;
+        }
+        run_child(
+            "config::tests::d3d12_device_from_env_reads_its_variable",
+            &[("PDF_RASTER_D3D12_DEVICE", "  warp ")],
+        );
+    }
+
+    /// `PDF_RASTER_VULKAN_DEVICE`, trimmed, is the Vulkan selector, and the
+    /// D3D12 one stays unset.
+    #[test]
+    fn vulkan_device_from_env_reads_its_variable() {
+        use super::SessionConfig;
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                SessionConfig::vulkan_device_from_env().as_deref(),
+                Some("2080")
+            );
+            assert_eq!(SessionConfig::d3d12_device_from_env(), None);
+            return;
+        }
+        run_child(
+            "config::tests::vulkan_device_from_env_reads_its_variable",
+            &[("PDF_RASTER_VULKAN_DEVICE", " 2080")],
+        );
+    }
+
+    /// A blank device variable selects nothing.
+    #[test]
+    fn a_blank_device_variable_is_no_selector() {
+        use super::SessionConfig;
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(SessionConfig::d3d12_device_from_env(), None);
+            assert_eq!(SessionConfig::vulkan_device_from_env(), None);
+            return;
+        }
+        run_child(
+            "config::tests::a_blank_device_variable_is_no_selector",
+            &[
+                ("PDF_RASTER_D3D12_DEVICE", "  "),
+                ("PDF_RASTER_VULKAN_DEVICE", ""),
+            ],
+        );
     }
 }

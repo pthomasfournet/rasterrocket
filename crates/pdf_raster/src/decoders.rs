@@ -16,7 +16,7 @@ use pdf_interp::DeviceKernel;
 /// On `CpuOnly` this is a no-op.  The nvJPEG decoder is built only where
 /// `wants_nvjpeg_decoder` says so, and the nvJPEG2000 decoder as
 /// `nvjpeg2k_supply` says: on `Auto` only when the page draws an image it
-/// takes, never under `ForceVulkan` nor while the policy's threshold
+/// takes, never under `ForceVulkan` or `ForceD3d12` nor while the policy's threshold
 /// disables it (`nvjpeg2k_supply`).  On `ForceCuda`/`ForceVaapi` init
 /// failure is returned as `RasterError::BackendUnavailable` rather than
 /// silently falling back.
@@ -99,7 +99,7 @@ pub(crate) fn lend_decoders(
 const fn wants_nvjpeg_decoder(policy: BackendPolicy, kernel_enabled: bool) -> bool {
     match policy {
         BackendPolicy::Auto | BackendPolicy::ForceCuda => kernel_enabled,
-        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => false,
+        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan | BackendPolicy::ForceD3d12 => false,
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => false,
     }
@@ -133,7 +133,9 @@ fn nvjpeg2k_supply(
             Nvjpeg2kSupply::Eager
         }
         BackendPolicy::Auto | BackendPolicy::ForceCuda => Nvjpeg2kSupply::None,
-        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan => Nvjpeg2kSupply::None,
+        BackendPolicy::CpuOnly | BackendPolicy::ForceVulkan | BackendPolicy::ForceD3d12 => {
+            Nvjpeg2kSupply::None
+        }
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => Nvjpeg2kSupply::None,
     }
@@ -153,6 +155,7 @@ const fn inert_jpx_threshold(policy: BackendPolicy) -> Option<&'static str> {
         BackendPolicy::Auto | BackendPolicy::ForceCuda => None,
         BackendPolicy::CpuOnly => Some("backend `cpu` starts no CUDA context"),
         BackendPolicy::ForceVulkan => Some("backend `vulkan` starts no CUDA context"),
+        BackendPolicy::ForceD3d12 => Some("backend `d3d12` starts no CUDA context"),
         #[cfg(feature = "vaapi")]
         BackendPolicy::ForceVaapi => Some("backend `vaapi` starts no CUDA context"),
     }
@@ -249,7 +252,11 @@ mod cuda_decoder_tests {
             assert!(!wants_nvjpeg_decoder(policy, false), "{policy:?}");
             assert!(wants_nvjpeg_decoder(policy, true), "{policy:?}");
         }
-        for policy in [BackendPolicy::CpuOnly, BackendPolicy::ForceVulkan] {
+        for policy in [
+            BackendPolicy::CpuOnly,
+            BackendPolicy::ForceVulkan,
+            BackendPolicy::ForceD3d12,
+        ] {
             assert!(!wants_nvjpeg_decoder(policy, true), "{policy:?}");
         }
         #[cfg(feature = "vaapi")]
@@ -274,7 +281,11 @@ mod cuda_decoder_tests {
         assert_eq!(nvjpeg2k_supply(auto, attached), Nvjpeg2kSupply::None);
         assert_eq!(nvjpeg2k_supply(cuda, attached), Nvjpeg2kSupply::Eager);
         assert_eq!(nvjpeg2k_supply(cuda, on_demand), Nvjpeg2kSupply::None);
-        for policy in [BackendPolicy::ForceVulkan, BackendPolicy::CpuOnly] {
+        for policy in [
+            BackendPolicy::ForceVulkan,
+            BackendPolicy::ForceD3d12,
+            BackendPolicy::CpuOnly,
+        ] {
             assert_eq!(nvjpeg2k_supply(policy, |_| true), Nvjpeg2kSupply::None);
         }
         for policy in [auto, cuda] {
@@ -320,5 +331,6 @@ mod inert_jpx_tests {
         );
         assert!(inert_jpx_threshold(BackendPolicy::CpuOnly).is_some());
         assert!(inert_jpx_threshold(BackendPolicy::ForceVulkan).is_some());
+        assert!(inert_jpx_threshold(BackendPolicy::ForceD3d12).is_some());
     }
 }

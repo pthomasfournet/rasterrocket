@@ -1,12 +1,19 @@
 //! GPU decoders, kernels and the device image cache attached to a renderer.
 
-#[cfg(any(feature = "gpu-icc", feature = "cache", feature = "vulkan"))]
+#[cfg(any(
+    feature = "gpu-icc",
+    feature = "cache",
+    feature = "vulkan",
+    all(windows, feature = "d3d12")
+))]
 use std::sync::Arc;
 
 #[cfg(any(feature = "gpu-icc", feature = "cache"))]
 use gpu::GpuCtx;
 #[cfg(feature = "vaapi")]
 use gpu::JpegQueueHandle;
+#[cfg(all(windows, feature = "d3d12"))]
+use gpu::backend::d3d12::D3d12Backend;
 #[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
 #[cfg(feature = "cache")]
@@ -150,6 +157,15 @@ impl PageRenderer<'_> {
     #[cfg(feature = "vulkan")]
     pub fn set_vk_backend(&mut self, backend: Option<Arc<VulkanBackend>>) {
         self.vk_backend = backend;
+    }
+
+    /// Attach a Direct3D 12 compute backend for kernel dispatch.
+    ///
+    /// When set, ICC CMYK→RGB conversions run on it, ahead of any CUDA
+    /// context.
+    #[cfg(all(windows, feature = "d3d12"))]
+    pub fn set_d3d12_backend(&mut self, backend: Option<Arc<D3d12Backend>>) {
+        self.d3d12_backend = backend;
     }
 
     /// Attach a device-resident image cache.

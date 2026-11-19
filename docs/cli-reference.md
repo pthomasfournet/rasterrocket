@@ -689,7 +689,7 @@ Read at run time:
 
 | Variable | Build | Effect |
 |---|---|---|
-| `PDF_RASTER_BACKEND` | any | The backend when `--backend` is not given: `auto`, `cpu`, `cuda`, `vulkan`, or `vaapi` in a `vaapi` build. An unrecognised value warns and means `auto`. |
+| `PDF_RASTER_BACKEND` | any | The backend when `--backend` is not given: `auto`, `cpu`, `cuda`, `vulkan`, `d3d12`, or `vaapi` in a `vaapi` build. An unrecognised value warns and means `auto`. `d3d12` is the library's Direct3D 12 policy; `rrocket` does not forward the `d3d12` feature, so it exits with an error naming the feature. |
 | `PDF_RASTER_VULKAN_DEVICE` | `vulkan` | The Vulkan device when `--vulkan-device` is not given, in the same syntax. |
 | `PDF_RASTER_JPX_THRESHOLD` | `nvjpeg2k` | A pixel area, in decimal: `JPXDecode` images of at least that area decode on nvJPEG2000, under `auto` (otherwise dormant) and under `cuda` (otherwise 2 097 152 px). A value that is not a non-negative integer warns and keeps the default. Set where it cannot act (a build without `nvjpeg2k`, or `--backend cpu`, `vulkan` or `vaapi`), it draws one warning. |
 | `PDF_RASTER_ICC_CLUT_THRESHOLD` | `gpu-icc` | The pixel area from which an ICC CMYK image converts on the GPU backend (default 128 000; `0` every image). A value that is not a non-negative integer warns and keeps the default. |

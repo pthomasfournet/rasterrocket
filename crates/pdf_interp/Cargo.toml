@@ -28,6 +28,8 @@ vaapi            = ["dep:gpu", "gpu/vaapi"]
 gpu-icc          = ["dep:gpu"]
 cache            = ["dep:gpu", "gpu/cache"]
 vulkan           = ["dep:gpu", "gpu/vulkan"]
+# Direct3D 12 compute backend (Windows only; inert elsewhere).
+d3d12            = ["dep:gpu", "gpu/d3d12"]
 # Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai,
 # Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the
 # binary (fonts/noto/, ~0.75 MB), drawn when no installed face covers a

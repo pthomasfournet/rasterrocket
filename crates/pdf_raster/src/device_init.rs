@@ -1,23 +1,28 @@
 //! Process-wide compute backends, one per API and device selector.
 //!
 //! A backend owns a logical device and its compiled pipelines, so it is
-//! built once per distinct selector ([`SessionConfig::vulkan_device`] for
-//! Vulkan) and shared by every session alive at once that names the same
-//! selector.  The registry of each API ([`SessionDevice::registry`]) holds a
+//! built once per distinct selector ([`SessionDevice::session_selector`]:
+//! [`SessionConfig::vulkan_device`] for Vulkan,
+//! [`SessionConfig::d3d12_device`] for Direct3D 12) and shared by every
+//! session alive at once that names the same selector.  The registry of each API ([`SessionDevice::registry`]) holds a
 //! backend weakly: it is destroyed, its device and instance with it, when
 //! the last session holding it drops, and a later session builds it anew.
 //! Failures are retained: repeated sessions do not retry an init that
 //! already failed.
 //!
 //! [`SessionConfig::vulkan_device`]: crate::SessionConfig::vulkan_device
+//! [`SessionConfig::d3d12_device`]: crate::SessionConfig::d3d12_device
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::registry::{Registry, shared};
-use crate::{BackendPolicy, RasterError};
+use crate::{BackendPolicy, RasterError, SessionConfig};
 use gpu::backend::BackendError;
+#[cfg(all(windows, feature = "d3d12"))]
+use gpu::backend::d3d12::D3d12Backend;
 use gpu::backend::page_device::PageDevice;
 use gpu::backend::select::DeviceSelector;
+#[cfg(feature = "vulkan")]
 use gpu::backend::vulkan::VulkanBackend;
 
 /// Why a backend could not be constructed.
@@ -41,6 +46,7 @@ impl From<BackendError> for InitError {
 }
 
 /// The device indices a device list resolves to, or why it does not.
+#[cfg(feature = "vulkan")]
 pub(crate) type Resolution = Result<Vec<usize>, InitError>;
 
 /// A page device a session opens: its process-wide state and the words
@@ -53,7 +59,13 @@ pub(crate) trait SessionDevice: PageDevice + Send + Sync + 'static {
 
     /// Device lists already resolved by [`resolve_page_devices`], with the
     /// outcome.
+    #[cfg(feature = "vulkan")]
     fn resolved() -> &'static Mutex<Vec<(Vec<String>, Resolution)>>;
+
+    /// The selector of the session's own device in `config`, or `None`
+    /// for the automatically chosen device or when `config`'s policy does
+    /// not read it.
+    fn session_selector(config: &SessionConfig) -> Option<&str>;
 
     /// The API's name, as errors and logs give it.
     const API: &'static str;
@@ -67,6 +79,7 @@ pub(crate) trait SessionDevice: PageDevice + Send + Sync + 'static {
     const FORCE: BackendPolicy;
 }
 
+#[cfg(feature = "vulkan")]
 impl SessionDevice for VulkanBackend {
     fn registry() -> &'static Registry<Option<String>, Self, InitError> {
         static BACKENDS: Registry<Option<String>, VulkanBackend, InitError> =
@@ -79,10 +92,46 @@ impl SessionDevice for VulkanBackend {
         &RESOLVED
     }
 
+    /// [`SessionConfig::vulkan_device`], which `Auto` and `ForceVulkan`
+    /// read; under every other policy [`init_backend`] opens no Vulkan
+    /// device.
+    fn session_selector(config: &SessionConfig) -> Option<&str> {
+        config.vulkan_device.as_deref()
+    }
+
     const API: &'static str = "Vulkan";
     const PROBE_HINT: &'static str =
         "Verify with `vulkaninfo` that a Vulkan 1.3+ device is present.";
     const FORCE: BackendPolicy = BackendPolicy::ForceVulkan;
+}
+
+#[cfg(all(windows, feature = "d3d12"))]
+impl SessionDevice for D3d12Backend {
+    fn registry() -> &'static Registry<Option<String>, Self, InitError> {
+        static BACKENDS: Registry<Option<String>, D3d12Backend, InitError> = Mutex::new(Vec::new());
+        &BACKENDS
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn resolved() -> &'static Mutex<Vec<(Vec<String>, Resolution)>> {
+        static RESOLVED: Mutex<Vec<(Vec<String>, Resolution)>> = Mutex::new(Vec::new());
+        &RESOLVED
+    }
+
+    /// [`SessionConfig::d3d12_device`] under `ForceD3d12`, the one policy
+    /// that opens a D3D12 device; `None` under every other, so that `Auto`
+    /// does not check it.
+    fn session_selector(config: &SessionConfig) -> Option<&str> {
+        config
+            .d3d12_device
+            .as_deref()
+            .filter(|_| config.policy == Self::FORCE)
+    }
+
+    const API: &'static str = "Direct3D 12";
+    const PROBE_HINT: &'static str = "A D3D12 adapter with shader model 6.0 or later is required; \
+         `PDF_RASTER_D3D12_DEVICE=warp` selects the WARP software adapter.";
+    const FORCE: BackendPolicy = BackendPolicy::ForceD3d12;
 }
 
 /// The error of an unavailable API under [`SessionDevice::FORCE`].
@@ -170,6 +219,7 @@ fn checked_selector<B: SessionDevice>(selector: &str) -> Result<(), InitError> {
 /// entry does not resolve, two name the same device, or `all` finds no
 /// GPU; [`RasterError::BackendUnavailable`] for an unavailable API under
 /// [`SessionDevice::FORCE`].
+#[cfg(feature = "vulkan")]
 pub(crate) fn resolve_page_devices<B: SessionDevice>(
     policy: BackendPolicy,
     list: &[String],
@@ -202,6 +252,7 @@ pub(crate) fn resolve_page_devices<B: SessionDevice>(
 ///
 /// Why the device did not open: a selector that does not resolve, or an
 /// unavailable API.
+#[cfg(feature = "vulkan")]
 pub(crate) fn open_backend<B: SessionDevice>(selector: Option<&str>) -> Result<Arc<B>, String> {
     cached_backend::<B>(selector).map_err(|e| match e {
         InitError::Selection(msg) | InitError::Unavailable(msg) => msg,
@@ -238,12 +289,80 @@ fn construct<B: SessionDevice>(selector: Option<&str>) -> Result<Arc<B>, InitErr
 
 #[cfg(test)]
 mod tests {
-    use super::init_backend;
-    use crate::{BackendPolicy, RasterError};
+    use super::{SessionDevice, init_backend};
+    use crate::{BackendPolicy, RasterError, SessionConfig};
+    #[cfg(all(windows, feature = "d3d12"))]
+    use gpu::backend::d3d12::D3d12Backend;
+    #[cfg(feature = "vulkan")]
     use gpu::backend::vulkan::VulkanBackend;
+
+    /// A config of `policy` naming the selector `selector` for both APIs.
+    fn naming(policy: BackendPolicy, selector: &str) -> SessionConfig {
+        let mut config = SessionConfig::with_policy(policy);
+        config.vulkan_device = Some(format!("vk-{selector}"));
+        config.d3d12_device = Some(format!("dx-{selector}"));
+        config
+    }
+
+    /// The Vulkan session device is named by `vulkan_device`, never by
+    /// `d3d12_device`.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn the_vulkan_session_selector_is_vulkan_device() {
+        for policy in [BackendPolicy::Auto, BackendPolicy::ForceVulkan] {
+            let config = naming(policy, "x");
+            assert_eq!(
+                VulkanBackend::session_selector(&config),
+                Some("vk-x"),
+                "{policy:?}"
+            );
+        }
+    }
+
+    /// The D3D12 session device is named by `d3d12_device` under
+    /// `ForceD3d12` alone; under `Auto` an unresolvable one is not
+    /// checked, since `Auto` opens no D3D12 device.
+    #[cfg(all(windows, feature = "d3d12"))]
+    #[test]
+    fn the_d3d12_selector_is_read_under_force_d3d12_only() {
+        let config = naming(BackendPolicy::ForceD3d12, "x");
+        assert_eq!(D3d12Backend::session_selector(&config), Some("dx-x"));
+        for policy in [
+            BackendPolicy::Auto,
+            BackendPolicy::CpuOnly,
+            BackendPolicy::ForceVulkan,
+        ] {
+            let config = naming(policy, "no-such-gpu-7f3c");
+            assert_eq!(D3d12Backend::session_selector(&config), None, "{policy:?}");
+            assert!(
+                matches!(
+                    init_backend::<D3d12Backend>(policy, D3d12Backend::session_selector(&config)),
+                    Ok(None)
+                ),
+                "{policy:?}"
+            );
+        }
+    }
+
+    /// Under `ForceD3d12` a selector naming no adapter is a configuration
+    /// error naming the selector.
+    #[cfg(all(windows, feature = "d3d12"))]
+    #[test]
+    fn force_d3d12_rejects_an_unresolvable_selector() {
+        const SELECTOR: &str = "no-such-gpu-7f3c";
+        match init_backend::<D3d12Backend>(BackendPolicy::ForceD3d12, Some(SELECTOR)) {
+            Err(RasterError::InvalidOptions(msg)) => assert!(msg.contains(SELECTOR), "{msg}"),
+            Ok(backend) => panic!(
+                "expected InvalidOptions, got Ok (backend opened: {})",
+                backend.is_some()
+            ),
+            Err(other) => panic!("expected InvalidOptions, got {other:?}"),
+        }
+    }
 
     /// A selector naming no device is a configuration error under `Auto`,
     /// which opens no device.
+    #[cfg(feature = "vulkan")]
     #[test]
     fn auto_rejects_an_unresolvable_selector_while_vulkan_is_idle() {
         const SELECTOR: &str = "no-such-gpu-7f3c";

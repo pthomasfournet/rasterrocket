@@ -26,6 +26,8 @@ gpu-icc          = ["dep:gpu",                          "pdf_interp/gpu-icc"]
 gpu-deskew       = ["dep:gpu", "gpu/gpu-deskew"]
 cache            = ["dep:gpu", "gpu/cache",             "pdf_interp/cache"]
 vulkan           = ["dep:gpu", "gpu/vulkan",            "pdf_interp/vulkan"]
+# Direct3D 12 compute backend (Windows only; `ForceD3d12` is refused elsewhere).
+d3d12            = ["dep:gpu", "gpu/d3d12",             "pdf_interp/d3d12"]
 gpu-validation   = ["dep:gpu", "gpu/gpu-validation"]
 # Bundled Noto fallback faces; on by default, off for a slim build.
 default          = ["bundled-fonts"]

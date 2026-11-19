@@ -117,7 +117,7 @@ mod config;
 pub(crate) mod decode_queue;
 mod decoders;
 pub mod deskew;
-#[cfg(feature = "vulkan")]
+#[cfg(any(feature = "vulkan", all(windows, feature = "d3d12")))]
 mod device_init;
 #[cfg(feature = "vulkan")]
 mod device_pages;
@@ -131,7 +131,12 @@ mod output;
 pub(crate) mod page;
 mod page_buffer;
 mod proof;
-#[cfg(any(feature = "vulkan", feature = "gpu-icc", feature = "cache"))]
+#[cfg(any(
+    feature = "vulkan",
+    all(windows, feature = "d3d12"),
+    feature = "gpu-icc",
+    feature = "cache"
+))]
 mod registry;
 mod render;
 mod request;
@@ -182,6 +187,14 @@ pub mod dev {
         crate::render::with_page_job(session, (page_num, page_id), &geom, params, |job, _| {
             crate::device_pages::record(job)
         })
+    }
+
+    /// The path and file version of the `d3d10warp.dll` loaded in the
+    /// process, or `None` when none is loaded.
+    #[cfg(all(windows, feature = "d3d12"))]
+    #[must_use]
+    pub fn loaded_warp() -> Option<(std::path::PathBuf, String)> {
+        gpu::backend::d3d12::D3d12Backend::loaded_warp()
     }
 }
 

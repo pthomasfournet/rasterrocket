@@ -103,7 +103,8 @@ impl TestFaults {
 
 /// The selectors of the GPU page devices of `config`, one per device:
 /// [`crate::SessionConfig::gpu_devices`] resolved to device indices, or
-/// [`crate::SessionConfig::vulkan_device`] when it is empty.
+/// the session's own selector ([`SessionDevice::session_selector`]) when
+/// it is empty.
 ///
 /// # Errors
 ///
@@ -112,7 +113,7 @@ fn selectors<B: SessionDevice>(
     config: &crate::SessionConfig,
 ) -> Result<Vec<Option<String>>, RasterError> {
     if config.gpu_devices.is_empty() {
-        Ok(vec![config.vulkan_device.clone()])
+        Ok(vec![B::session_selector(config).map(str::to_owned)])
     } else {
         crate::device_init::resolve_page_devices::<B>(config.policy, &config.gpu_devices)
     }
@@ -124,9 +125,9 @@ type OpenDevice<B> = (Option<String>, Arc<B>);
 /// The GPU page devices of `config` under `B`'s forcing policy
 /// ([`SessionDevice::FORCE`]), with the selector each is opened with:
 /// `session`, the session's own device, for the entry that names it (or
-/// for [`crate::SessionConfig::vulkan_device`] when
-/// [`crate::SessionConfig::gpu_devices`] is empty), each other one opened
-/// now.
+/// for the session's own selector, [`SessionDevice::session_selector`],
+/// when [`crate::SessionConfig::gpu_devices`] is empty), each other one
+/// opened now.
 ///
 /// # Errors
 ///
@@ -136,7 +137,10 @@ fn forced_backends<B: SessionDevice>(
     session: &Arc<B>,
 ) -> Result<Vec<OpenDevice<B>>, RasterError> {
     if config.gpu_devices.is_empty() {
-        return Ok(vec![(config.vulkan_device.clone(), Arc::clone(session))]);
+        return Ok(vec![(
+            B::session_selector(config).map(str::to_owned),
+            Arc::clone(session),
+        )]);
     }
     let own = Some(session.device_index().to_string());
     selectors::<B>(config)?

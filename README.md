@@ -662,10 +662,11 @@ The CLI crate forwards each feature name to the `rasterrocket` library.
 
 The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
 compiles every kernel to DXIL and checks it, on any host that runs the two
-compilers below; no render path loads the DXIL, and the CLI does not forward the
-feature.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
+compilers below; the CLI does not forward the feature, so `rrocket` never loads
+the DXIL.  On Windows it also opens a Direct3D 12 adapter (`D3d12Backend`, which
 implements the GPU crate's `GpuBackend` (buffers, copies, the ICC and blit kernels)
-and `PageDevice` (the whole-page raster), but serves no render path yet): a hardware adapter with shader model 6.0 or above, the
+and `PageDevice` (the whole-page raster); a `rasterrocket` session under
+`BackendPolicy::ForceD3d12` runs its ICC conversion on it): a hardware adapter with shader model 6.0 or above, the
 discrete one first, or the one a selector names (an index or a name substring,
 as for `--vulkan-device`, or `warp` for the WARP software adapter);
 `PDF_RASTER_D3D12_DEBUG=1` enables the Direct3D 12 debug layer.  `scripts/fetch_warp.ps1 DIR` fetches the pinned WARP (NuGet
@@ -730,11 +731,12 @@ The `CUDA_ARCH` environment variable sets the Compute Capability the PTX kernels
 |---|---|---|
 | `nvjpeg` | GPU JPEG decode for `DCTDecode` (dormant: `GPU_JPEG_THRESHOLD_PX = u32::MAX`) | `libnvjpeg.so` (ships with the CUDA 13 toolkit) |
 | `nvjpeg2k` | GPU JPEG-2000 decode for `JPXDecode`: dormant under `auto` unless `PDF_RASTER_JPX_THRESHOLD` sets a pixel area; under `--backend cuda`, images of at least 2 097 152 px | `libnvjpeg2k.so` |
-| `gpu-icc` | GPU CMYK→RGB ICC transform through the grid of the profile's tabulated table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU conversion | CUDA, or Vulkan with `vulkan` |
+| `gpu-icc` | GPU CMYK→RGB ICC transform through the grid of the profile's tabulated table, for images of at least 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides); byte-identical to the CPU conversion | CUDA, Vulkan with `vulkan`, or Direct3D 12 with `d3d12` |
 | `gpu-deskew` | GPU deskew rotation via NPP, under `--backend cuda` | CUDA + NPP |
 | `cache` | Device-resident image cache (3-tier VRAM/host/disk) | CUDA or Vulkan |
 | `vaapi` | Linux iGPU/dGPU JPEG decode (tested on an AMD iGPU; untested on Intel) and `--backend vaapi` (dormant: shares `GPU_JPEG_THRESHOLD_PX`) | `libva.so.2` + DRM render node |
 | `vulkan` | Vulkan compute backend (cross-vendor; see [Tested hardware](#tested-hardware)) for whole-page rendering (`--gpu-pages`: fills, strokes, text, images, forms, path clips and soft masks, byte-identical to the CPU), and with `cache` / `gpu-icc` for the image cache and ICC lookup table | Vulkan 1.3+ ICD. Slang shaders compiled to SPIR-V via `slangc` from the `LunarG` Vulkan SDK |
+| `d3d12` (library only; Windows) | `BackendPolicy::ForceD3d12`: the Direct3D 12 compute backend, with `gpu-icc` for the ICC lookup table. The CLI does not forward it | A Direct3D 12 adapter with shader model 6.0 or later, or WARP. slangc 2026.20 and DXC 1.9.2609 at build time |
 | `bundled-fonts` (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the binary (~0.75 MB, SIL OFL 1.1; CJK is left to installed faces), drawn for a character of a non-embedded font that no installed face covers, so a server without fonts still draws these scripts. `--no-default-features` builds without them | none |
 
 All GPU features fall back to CPU automatically when the runtime requirement is missing, except `--backend cuda` / `--backend vulkan` / `--backend vaapi` which fail loudly with a clear error.
@@ -758,6 +760,8 @@ PDF_RASTER_BACKEND=cuda rrocket --backend cpu input.pdf out   # uses CPU
 ```
 
 On a host with more than one Vulkan device, `--vulkan-device <index|name>` (or `PDF_RASTER_VULKAN_DEVICE`) picks one by enumeration index or by a name substring such as `5070` or `radv`; a value that matches nothing lists the available devices. See [docs/cli-reference.md](docs/cli-reference.md#backend-selection).
+
+The library also takes `PDF_RASTER_BACKEND=d3d12` (`BackendPolicy::ForceD3d12`): in a Windows build of `rasterrocket` with the `d3d12` feature, the session opens a Direct3D 12 adapter, and with `gpu-icc` converts ICC CMYK images on it, byte-identical to the CPU, after the same one-time exactness probe as Vulkan. `SessionConfig::d3d12_device` (from `PDF_RASTER_D3D12_DEVICE` in `SessionConfig::default()`) names the adapter by index, name substring, or `warp` for the WARP software adapter; without it the discrete hardware adapter is taken first. Other policies never read it. A build without the feature, or for another platform, refuses `d3d12` with `BackendUnavailable` naming the feature, as does `rrocket`, which does not forward the feature.
 
 ### Compile cache (`sccache`) — optional
 

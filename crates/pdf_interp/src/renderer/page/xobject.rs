@@ -256,6 +256,8 @@ impl PageRenderer<'_> {
                 gpu_ctx: self.gpu_ctx.as_ref(),
                 #[cfg(feature = "vulkan")]
                 vk_backend: self.vk_backend.as_deref(),
+                #[cfg(all(windows, feature = "d3d12"))]
+                d3d12_backend: self.d3d12_backend.as_deref(),
                 counts: Some(&icc_counts),
             },
             #[cfg(feature = "cache")]

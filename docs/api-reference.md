@@ -28,9 +28,9 @@ Renders a range of pages from a PDF file. Returns an iterator that yields `(page
 
 **Errors (yielded as iterator items):**
 
-- `RasterError::InvalidOptions` — `opts` violates constraints (e.g. `dpi ≤ 0`, `first_page > last_page`), or, in a `vulkan` build, `PDF_RASTER_VULKAN_DEVICE` matches no single usable device. Yielded as `(1, Err(...))`, iterator ends immediately.
+- `RasterError::InvalidOptions` — `opts` violates constraints (e.g. `dpi ≤ 0`, `first_page > last_page`), or, in a `vulkan` build, `PDF_RASTER_VULKAN_DEVICE` matches no single usable device (in a Windows `d3d12` build under `PDF_RASTER_BACKEND=d3d12`, `PDF_RASTER_D3D12_DEVICE` no single usable adapter). Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::Pdf` — document cannot be opened or parsed. Yielded as `(1, Err(...))`, iterator ends immediately.
-- `RasterError::BackendUnavailable` — `PDF_RASTER_BACKEND` names a backend (`cuda`, `vaapi`, `vulkan`) that cannot be initialised. Yielded as `(1, Err(...))`, iterator ends immediately.
+- `RasterError::BackendUnavailable` — `PDF_RASTER_BACKEND` names a backend (`cuda`, `vaapi`, `vulkan`, `d3d12`) that cannot be initialised. Yielded as `(1, Err(...))`, iterator ends immediately.
 - `RasterError::PageOutOfRange` — page number exceeds document length.
 - `RasterError::PageDegenerate` — page has zero pixel dimensions.
 - `RasterError::PageTooLarge` / `RasterError::PageExceedsCeiling` — the bitmap exceeds the byte budget (`SessionConfig::max_page_bytes`, default 1.8 GB), or a side exceeds `MAX_PX_SIDE` (2²⁴).
@@ -802,6 +802,8 @@ pub enum BackendPolicy {
     ForceVaapi,  // Require VA-API JPEG; error if unavailable — only when `vaapi` feature is enabled
     ForceVulkan, // Require the Vulkan compute backend; error if unavailable
                  // (or if the binary was built without `--features vulkan`)
+    ForceD3d12,  // Require the Direct3D 12 compute backend (Windows); error if no adapter opens
+                 // (or if the binary was built without `--features d3d12` or for another platform)
 }
 ```
 
@@ -809,7 +811,9 @@ Controls which compute backend is used. The `Force*` variants convert silent GPU
 
 `ForceVulkan` runs the session's GPU work on the Vulkan compute backend (cross-vendor: NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`; see [Tested hardware](../README.md#tested-hardware)).  In a build with the `cache` feature the device-resident image cache keeps its images in Vulkan device memory and draws them with the Vulkan blit kernel, byte-identical to the CPU render; with `gpu-icc`, ICC CMYK→RGB runs on the Vulkan device too. Sessions open at the same time with the same `vulkan_device` share one Vulkan device; the last of them to drop destroys it, and a later session builds it again.
 
-`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`: `value()` returns the rejected input, and its `Display` names it and lists the accepted names (`unknown backend "cdua"; expected one of auto, cpu, cuda, vulkan`). `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
+`ForceD3d12` (added after v2.4.1; additive, since the enum is `#[non_exhaustive]`) opens the Direct3D 12 adapter `SessionConfig::d3d12_device` names, or the first hardware adapter with dedicated video memory, else the first hardware adapter. With `gpu-icc` the ICC CMYK→RGB lookup table runs on it, byte-identical to the CPU, after a one-time exactness probe (a device that fails it converts on the CPU); every other kernel, the image cache and `gpu_pages` stay off under it. It initialises no CUDA context or Vulkan device. Tested on an RTX 5070, an AMD Radeon iGPU and the pinned WARP 1.0.22 on Windows 11.
+
+`BackendPolicy` parses from `auto`, `cpu`, `cuda`, `vulkan`, `d3d12` and, with the `vaapi` feature, `vaapi` (`FromStr`; case-insensitive, whitespace trimmed, empty is `Auto`), and `name()` returns that spelling; `BackendPolicy::ALL` lists the policies of the build. A name it does not accept is a `ParseBackendPolicyError`: `value()` returns the rejected input, and its `Display` names it and lists the accepted names (`unknown backend "cdua"; expected one of auto, cpu, cuda, vulkan`). `BackendPolicy::from_env()` reads `PDF_RASTER_BACKEND`, and `from_env_var(name)` any other variable; an unrecognised value logs a warning and resolves to `Auto`.
 
 ---
 
@@ -822,6 +826,7 @@ pub struct SessionConfig {
     pub policy: BackendPolicy,
     pub vaapi_device: String,  // default: DEFAULT_VAAPI_DEVICE ("auto", probe render nodes)
     pub vulkan_device: Option<String>,  // default: None (automatic)
+    pub d3d12_device: Option<String>,   // default: None (automatic); read under ForceD3d12 only
     // `prefetch: bool` and `prefetch_scale: Option<(f64, f64)>` exist only when `cache` feature is enabled
     pub decrypt_authorized: bool,  // default: false
     pub password: Option<Password>, // default: None
@@ -846,11 +851,12 @@ pub struct SessionConfig {
     pub working_space: Option<WorkingSpace>,        // default: None (Wide under an output profile, else Srgb)
 }
 
-impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE, font directories from RROCKET_FONT_DIR */ }
+impl Default for SessionConfig { /* policy from PDF_RASTER_BACKEND, Vulkan device from PDF_RASTER_VULKAN_DEVICE, D3D12 adapter from PDF_RASTER_D3D12_DEVICE, font directories from RROCKET_FONT_DIR */ }
 
 impl SessionConfig {
     pub fn with_policy(policy: BackendPolicy) -> Self;      // reads no env vars
     pub fn vulkan_device_from_env() -> Option<String>;     // PDF_RASTER_VULKAN_DEVICE
+    pub fn d3d12_device_from_env() -> Option<String>;      // PDF_RASTER_D3D12_DEVICE
     pub fn font_dirs_from_env() -> Vec<PathBuf>;           // RROCKET_FONT_DIR
     pub fn check_working_space(&self) -> Result<(), RasterError>; // Wide needs an output profile
     pub fn check_gpu_pages(&self) -> Result<(), RasterError>;     // gpu_pages needs vulkan, Auto/ForceVulkan, vector AA
@@ -931,7 +937,7 @@ impl DeviceHold {
 }
 ```
 
-A session holds its GPU devices only while it lives: sessions alive at once share one Vulkan device per `vulkan_device` selector and one CUDA context, the last of them to drop destroys it, and the next session builds it again (measured 74–89 ms for the Vulkan device on an RTX 5070, 50–65 ms on RADV, 52–62 ms for the CUDA context). `DeviceHold::open` opens what a session of `config` opens up front — the Vulkan device under `ForceVulkan`, the CUDA context under `ForceCuda` and `ForceVaapi` — and, under `Auto` with `gpu_pages`, the GPU-page device a session opens on its first page; a session under `ForceVulkan` that lists its own device in `gpu_devices` shares the hold's backend for that entry rather than opening the device a second time; every session opened while the hold lives, under a configuration naming the same devices (including `raster_pdf` and `render_channel` under the same `PDF_RASTER_BACKEND`), shares them, and they are destroyed once the hold and those sessions have dropped. It fails as `open_session` fails for the configuration before reading a document; a GPU-page device that does not open under `Auto` is logged at `error` and not held. Under any other configuration it holds nothing (`is_empty`).
+A session holds its GPU devices only while it lives: sessions alive at once share one Vulkan device per `vulkan_device` selector, one Direct3D 12 device per `d3d12_device` selector and one CUDA context, the last of them to drop destroys it, and the next session builds it again (measured 74–89 ms for the Vulkan device on an RTX 5070, 50–65 ms on RADV, 52–62 ms for the CUDA context). `DeviceHold::open` opens what a session of `config` opens up front — the Vulkan device under `ForceVulkan`, the CUDA context under `ForceCuda` and `ForceVaapi` — and, under `Auto` with `gpu_pages`, the GPU-page device a session opens on its first page; a session under `ForceVulkan` that lists its own device in `gpu_devices` shares the hold's backend for that entry rather than opening the device a second time; every session opened while the hold lives, under a configuration naming the same devices (including `raster_pdf` and `render_channel` under the same `PDF_RASTER_BACKEND`), shares them, and they are destroyed once the hold and those sessions have dropped. It fails as `open_session` fails for the configuration before reading a document; a GPU-page device that does not open under `Auto` is logged at `error` and not held. Under any other configuration it holds nothing (`is_empty`).
 
 ---
 
@@ -1493,11 +1499,12 @@ and the guides for [Linux](platforms/linux.md), [macOS](platforms/macos.md) and
 |---|---|---|
 | `nvjpeg` | CUDA 13, `libnvjpeg.so` | GPU JPEG decode (DCTDecode). Wired but disabled: `GPU_JPEG_THRESHOLD_PX` is `u32::MAX`, so JPEGs decode on the CPU (zune-jpeg). |
 | `nvjpeg2k` | CUDA 13, `libnvjpeg2k.so` | GPU JPEG 2000 decode (JPXDecode). Dormant under `Auto` (`GPU_JPEG2K_THRESHOLD_PX` = `u32::MAX`); under `ForceCuda` it dispatches from 2 097 152 px (`GPU_JPEG2K_ATTACHED_THRESHOLD_PX`). `PDF_RASTER_JPX_THRESHOLD` sets the pixel area for both. Below that area, or for a codestream the device does not take, the CPU decoder (pure-Rust `hayro-jpeg2000`) decodes. The device takes one or three unsigned components of 8 bits, or of 9 to 16 on a 16-bit canvas, on the image grid, under the reversible 5-3 wavelet only (under the irreversible 9-7 one nvJPEG2000's samples differ from the CPU's by a level), with no palette, channel definition or colour conversion, no code-block style but predictable termination, and every tile complete; a draw at half the image's size or less on both axes, which the CPU decodes at a reduced resolution level, decodes on the CPU as well. A decline is a warning, once per kind. |
-| `gpu-icc` | CUDA 13, or `vulkan` | An image in an ICC-based CMYK space converts through the grid the CPU tabulates for the profile (`color::grid::CmykGrid`, its cells aligned with the profile's CLUT) on the session's GPU backend (Vulkan when attached, else CUDA) from 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it); the device output is byte-identical to the CPU evaluation of the table. Smaller images, those a Vulkan device whose kernel fails a one-time exactness check declines, and those a device conversion fails on convert through the profile transform, as without a backend; a GPU session therefore differs from a CPU session only in the images counted in `PageDiagnostics::device_icc_conversions`. |
+| `gpu-icc` | CUDA 13, `vulkan`, or `d3d12` (Windows) | An image in an ICC-based CMYK space converts through the grid the CPU tabulates for the profile (`color::grid::CmykGrid`, its cells aligned with the profile's CLUT) on the session's GPU backend (Vulkan or Direct3D 12 when attached, else CUDA) from 128 000 px (`PDF_RASTER_ICC_CLUT_THRESHOLD` overrides it); the device output is byte-identical to the CPU evaluation of the table. Smaller images, those a Vulkan or Direct3D 12 device whose kernel fails a one-time exactness check declines, and those a device conversion fails on convert through the profile transform, as without a backend; a GPU session therefore differs from a CPU session only in the images counted in `PageDiagnostics::device_icc_conversions`. |
 | `gpu-deskew` | CUDA 13, CUDA NPP | GPU bilinear rotation (nppiRotate) under `ForceCuda`, its border recomputed with the CPU kernel, within 2 levels of the CPU elsewhere at 8 bits and 8 levels of 65 535 at 16 (see `deskew::apply`). Without the feature, the CPU rotation. |
 | `cache` | CUDA 13, or `vulkan` | Device-resident image cache (3-tier VRAM/host/disk). Cross-document content-hash dedup. Runs on the session's backend: CUDA, or Vulkan under `--backend vulkan` with the `vulkan` feature; an `Auto` session has none. A JPEG drawn below its resolution (every scanned page rendered under its scan resolution) is neither looked up nor inserted: it is area-averaged on the host from host-resident samples. Disk-tier persistence is opt-in via `PDF_RASTER_CACHE_DIR`. |
 | `vaapi` | `libva.so.2`, `libva-drm.so.2` | VA-API JPEG baseline decode on Linux iGPU/dGPU (tested on an AMD iGPU; untested on Intel); adds `BackendPolicy::ForceVaapi` and `--backend vaapi`. Shares the disabled `GPU_JPEG_THRESHOLD_PX` gate with `nvjpeg`, so JPEGs still decode on the CPU. |
 | `vulkan` | Vulkan 1.3+ ICD; LunarG `slangc` at build time. | Vulkan compute backend. Whole-page rendering (`gpu_pages`; with `gpu-icc`, the ICC CMYK lookup) is written for any Vulkan 1.3+ device (NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`); see [Tested hardware](../README.md#tested-hardware). With `cache`, the device image cache and its blit kernel run on the Vulkan device. No nvJPEG under this backend. |
+| `d3d12` | Windows; a Direct3D 12 adapter with shader model 6.0 or later, or WARP; slangc 2026.20 and DXC 1.9.2609 at build time | Direct3D 12 compute backend: adds `ForceD3d12` sessions (`SessionConfig::d3d12_device`, `PDF_RASTER_D3D12_DEVICE`), which with `gpu-icc` run the ICC CMYK lookup on the adapter. Elsewhere it compiles the DXIL and `ForceD3d12` is refused with `BackendUnavailable`. Not forwarded by the CLI. |
 | `gpu-validation` | CUDA device at test time | Enables GPU vs CPU parity tests (`cargo test -p rasterrocket-gpu --features gpu-validation`). |
 | `bundled-fonts` | — (**on by default**) | Noto fallback faces for Greek, Cyrillic, Hebrew, Arabic, Devanagari, Thai, Bengali, Tamil, Armenian, Georgian, Ethiopic and symbols compiled into the library (~0.75 MB, SIL OFL 1.1; provenance in `crates/pdf_interp/fonts/README.md`). A character of a non-embedded font that neither its substitute nor any installed face covers is drawn from them; an installed face is always preferred. Disable with `default-features = false` for a slim build. |
 

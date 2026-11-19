@@ -490,6 +490,11 @@ pub struct PageRenderer<'doc> {
     /// nvJPEG2000 decoder is built.
     #[cfg(feature = "vulkan")]
     vk_backend: Option<Arc<VulkanBackend>>,
+    /// Direct3D 12 compute backend, attached when the session was opened
+    /// with `ForceD3d12`; the ICC CMYK→RGB CLUT then runs on it.  Such a
+    /// session initialises no CUDA context or Vulkan device.
+    #[cfg(all(windows, feature = "d3d12"))]
+    d3d12_backend: Option<Arc<gpu::backend::d3d12::D3d12Backend>>,
     /// Device-image-cache state.  `Some` only when the `cache` feature is
     /// on AND a cache was wired in via [`Self::set_image_cache`];
     /// `None` keeps the renderer fully CPU-resident.
@@ -857,6 +862,8 @@ impl<'doc> PageRenderer<'doc> {
             gpu_ctx: None,
             #[cfg(feature = "vulkan")]
             vk_backend: None,
+            #[cfg(all(windows, feature = "d3d12"))]
+            d3d12_backend: None,
             #[cfg(feature = "cache")]
             cache_state: None,
             #[cfg(feature = "vulkan")]

@@ -3864,6 +3864,30 @@ adapter. No session uses it yet. The page tests shared with Vulkan pass at 8
 and 16 bits on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU
 on Windows 11.
 
+**Unreleased on master: `BackendPolicy::ForceD3d12`, with ICC conversion on
+Direct3D 12.** `rasterrocket` and `rasterrocket-interp` gain a `d3d12`
+feature. `BackendPolicy` gains `ForceD3d12` (`d3d12` in `FromStr`, `name()`
+and `PDF_RASTER_BACKEND`); the enum is `#[non_exhaustive]`, so the variant is
+additive, but an exhaustive `match` inside the workspace needs the arm. In a
+Windows build with the feature, a `ForceD3d12` session opens the adapter
+`SessionConfig::d3d12_device` names (new field; `SessionConfig::default()`
+reads `PDF_RASTER_D3D12_DEVICE`, `d3d12_device_from_env()` reads it alone):
+an index, a name substring or `warp`, or without one the first hardware
+adapter with dedicated video memory. A selector that matches no adapter, or
+several, is `InvalidOptions` listing them; no adapter opening is
+`BackendUnavailable`. Sessions alive at once share one device per selector,
+and `DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
+adapter after the same one-time exactness probe as Vulkan, byte-identical to
+the CPU; the image cache, blits and GPU pages stay on the CPU under it, and no
+CUDA context or Vulkan device is opened. `d3d12_device` is read under
+`ForceD3d12` only, and `vulkan_device` never under it. A build without the
+feature, or for another platform, refuses `ForceD3d12` with
+`BackendUnavailable` naming the feature; `rrocket` does not forward it yet,
+so `PDF_RASTER_BACKEND=d3d12` now fails there instead of warning and
+rendering on `auto`. The ICC parity test passes at 8 and 16 bits, in sRGB and
+the wide working space, on the RTX 5070, the AMD Radeon iGPU and the pinned
+WARP 1.0.22 on Windows 11.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past

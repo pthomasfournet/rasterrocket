@@ -45,6 +45,14 @@ Three GPU backends are available on Linux:
 
 With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, the wide working space of an output profile, pages past 128 MiB of device commands and pages rendered in bands stay on the CPU. It is off by default: it beats the CPU with few threads on most vector and image documents measured, but every page that may render on the device waits for it, so with many threads the CPU is faster.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs (ANV), M-series Macs and datacenter GPUs are untested.
 
+**Direct3D 12 compute (Windows, library only):**
+
+| Feature | Supported hardware | Libraries required |
+|---|---|---|
+| `d3d12` | A Direct3D 12 adapter with shader model 6.0 or later (tested: RTX 5070, AMD Radeon iGPU), or WARP | the in-box Direct3D 12 runtime; slangc 2026.20 and DXC 1.9.2609 at *build* time |
+
+`BackendPolicy::ForceD3d12` (`PDF_RASTER_BACKEND=d3d12`) opens the adapter `SessionConfig::d3d12_device` (`PDF_RASTER_D3D12_DEVICE`: an index, a name substring or `warp`) names, and with `gpu-icc` runs the ICC CMYK lookup table on it after the same exactness probe as Vulkan, byte-identical to the CPU.  The image cache and `--gpu-pages` do not run on it, and `rrocket` does not forward the feature.
+
 **VA-API (Linux iGPU/dGPU — AMD VCN; Intel Quick Sync and Intel Arc untested):**
 
 | Feature | Supported hardware | Libraries required |
