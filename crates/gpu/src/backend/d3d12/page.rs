@@ -331,7 +331,7 @@ impl PageDevice for D3d12Backend {
     }
 
     /// The position in DXGI's high-performance enumeration order, WARP
-    /// last.  WARP's index is not a selector of it: `warp` is.
+    /// last.
     fn device_index(&self) -> usize {
         self.device.index
     }

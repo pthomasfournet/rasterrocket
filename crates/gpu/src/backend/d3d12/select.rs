@@ -4,8 +4,8 @@
 //! that selection depends on.  The functions here choose among candidates
 //! without any driver call, so every rule is testable on any host.  A
 //! selector names an adapter by the rules of [`match_selector`], except
-//! that the selector `warp` names the WARP adapter and no other selector
-//! does.
+//! that `warp` or WARP's own index names the WARP adapter and no other
+//! selector does.
 //!
 //! The candidate list is in DXGI enumeration order, with the WARP adapter,
 //! when present, appended last: the last candidate is the WARP adapter
@@ -105,8 +105,8 @@ fn warp_index(cands: &[AdapterCandidate]) -> Option<usize> {
 ///
 /// [`BackendError::DeviceSelection`] when the selector matches no adapter,
 /// matches several, or names an unusable or software adapter (other than
-/// WARP through `warp`); [`BackendError::Other`] when no selector is given
-/// and no hardware adapter is usable.
+/// WARP through `warp` or its index); [`BackendError::Other`] when no
+/// selector is given and no hardware adapter is usable.
 pub(super) fn pick(
     cands: &[AdapterCandidate],
     selector: Option<&DeviceSelector>,
@@ -195,15 +195,18 @@ fn ranked_gpus(cands: &[AdapterCandidate]) -> Vec<usize> {
 }
 
 /// Resolve `sel` to one usable candidate index, or the kind of reason it
-/// does not and the reason.  `warp` names the WARP adapter; WARP's index
-/// is refused; every other selector is matched against the candidates
-/// before it.
+/// does not and the reason.  `warp` or WARP's own index names the WARP
+/// adapter, so the index of every adapter selects it; every other selector
+/// is matched against the candidates before it.
 fn resolve_selector(
     cands: &[AdapterCandidate],
     sel: &DeviceSelector,
 ) -> Result<usize, (SelectionFailure, String)> {
     let warp = warp_index(cands);
-    let idx = if sel.as_str().eq_ignore_ascii_case("warp") {
+    let warp_index_named = warp.is_some()
+        && sel.as_str().bytes().all(|b| b.is_ascii_digit())
+        && sel.as_str().parse::<usize>().ok() == warp;
+    let idx = if sel.as_str().eq_ignore_ascii_case("warp") || warp_index_named {
         warp.ok_or_else(|| {
             (
                 SelectionFailure::NoMatch,
@@ -211,18 +214,6 @@ fn resolve_selector(
             )
         })?
     } else {
-        if let Some(w) = warp
-            && sel.as_str().bytes().all(|b| b.is_ascii_digit())
-            && sel.as_str().parse::<usize>().ok() == Some(w)
-        {
-            return Err((
-                SelectionFailure::Ineligible,
-                format!(
-                    "device {w} \"{}\" is the WARP adapter; select it with \"warp\"",
-                    cands[w].name
-                ),
-            ));
-        }
         let names: Vec<&str> = cands[..warp.unwrap_or(cands.len())]
             .iter()
             .map(|c| c.name.as_str())
@@ -385,30 +376,32 @@ mod tests {
     }
 
     #[test]
-    fn dxgi_selection_warp_is_reachable_only_through_warp() {
+    fn dxgi_selection_warp_is_reachable_only_when_named_or_indexed() {
         // DXGI names the WARP adapter as it names the basic render driver.
         let mut cands = host();
         cands[3].name = "Microsoft Basic Render Driver".to_owned();
         assert_eq!(picked(&cands, "warp"), 3);
         let (failure, msg) = selection_failure(&cands, "basic");
         assert_eq!(failure, SelectionFailure::Ineligible, "{msg}");
-        // Index 3 is past the adapters a selector other than `warp` sees,
-        // so the digits match as a name, and no name contains "4".
+        // Index 4 is past every adapter, so the digits match as a name, and
+        // no name contains "4".
         let (failure, msg) = selection_failure(&cands, "4");
         assert_eq!(failure, SelectionFailure::NoMatch, "{msg}");
         assert!(msg.contains("3 device(s) enumerated"), "{msg}");
-        // WARP's own index is refused, not matched as a name ("630").
-        let (failure, msg3) = selection_failure(&cands, "3");
-        assert_eq!(failure, SelectionFailure::Ineligible, "{msg3}");
-        assert!(
-            msg3.contains(
-                "device 3 \"Microsoft Basic Render Driver\" is the WARP adapter; \
-                 select it with \"warp\""
-            ),
-            "{msg3}"
-        );
-        let (failure, _) = selection_failure(&host(), "3");
-        assert_eq!(failure, SelectionFailure::Ineligible);
+        // WARP's own index selects it as an index, before any name match.
+        assert_eq!(picked(&cands, "3"), 3);
+        // On the plan's host "3" is also a substring of "Intel(R) UHD
+        // Graphics 630"; the index wins.
+        assert_eq!(picked(&host(), "3"), 3);
+        // Every adapter's index, WARP's included, selects that adapter.
+        let warp = picked(&cands, "warp");
+        assert_eq!(picked(&cands, &warp.to_string()), 3);
+        for i in [0, 1] {
+            assert_eq!(picked(&cands, &i.to_string()), i);
+        }
+        // Neither the automatic choice nor the usable GPUs reach WARP.
+        assert_eq!(pick(&cands, None).unwrap(), 0);
+        assert_eq!(usable_gpus(&cands).unwrap(), [0, 1]);
         assert!(
             msg.contains("3: Microsoft Basic Render Driver (WARP"),
             "{msg}"
@@ -461,12 +454,14 @@ mod tests {
     fn dxgi_selection_warp_below_the_floor_is_an_error() {
         let mut cands = host();
         cands[3].shader_model = Some(0x51);
-        let (failure, msg) = selection_failure(&cands, "warp");
-        assert_eq!(failure, SelectionFailure::Ineligible, "{msg}");
-        assert!(
-            msg.contains("shader model 5.1 below the floor 6.0"),
-            "{msg}"
-        );
+        for warp in ["warp", "3"] {
+            let (failure, msg) = selection_failure(&cands, warp);
+            assert_eq!(failure, SelectionFailure::Ineligible, "{msg}");
+            assert!(
+                msg.contains("shader model 5.1 below the floor 6.0"),
+                "{msg}"
+            );
+        }
     }
 
     #[test]

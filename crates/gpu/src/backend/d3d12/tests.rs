@@ -289,3 +289,22 @@ fn hardware_adapters_open_by_index_and_automatically() {
         );
     }
 }
+
+/// WARP's index, as a selector, re-opens WARP: device indices round-trip
+/// through selectors.
+#[test]
+fn warp_reopens_by_its_index() {
+    let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+    let sel: DeviceSelector = backend
+        .device_index()
+        .to_string()
+        .parse()
+        .expect("selector");
+    let again = D3d12Backend::open(Some(&sel)).expect("WARP's index opens an adapter");
+    assert!(again.is_warp(), "{}", again.device_name());
+    assert_eq!(again.device_index(), backend.device_index());
+    assert_eq!(
+        D3d12Backend::resolve_devices(&[sel]).expect("resolves"),
+        [backend.device_index()]
+    );
+}

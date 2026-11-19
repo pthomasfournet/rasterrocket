@@ -3800,7 +3800,7 @@ yet. Adapters are listed by DXGI's high-performance order, then the WARP
 adapter. Without a selector it takes the first hardware adapter with
 dedicated video memory, else the first hardware adapter; `usable_gpus` lists
 them all in that order. A selector is an index or a name substring, as for
-`--vulkan-device`, and `warp` (only that word) names WARP; naming another
+`--vulkan-device`, and `warp` or WARP's own index names WARP; naming another
 software adapter, or an adapter below shader model 6.0 or with no device, is
 an error that lists every adapter. The shader model and `Int64ShaderOps` are
 read from a device created and dropped for each adapter. When WARP opens,
