@@ -191,7 +191,8 @@ impl From<pdf::PdfError> for InterpError {
 /// each one that changes what renders, or carries a script, is warned
 /// about once (see [`document_unsupported_features`]):
 /// - JavaScript at the catalog's `/OpenAction` or `/AA`, in the
-///   `/Names /JavaScript` tree, or in `/AcroForm /AA`.  Scripts are never
+///   `/Names /JavaScript` tree, in `/AcroForm /AA`, or in the `/AA` of a
+///   field of the `/AcroForm /Fields` tree.  Scripts are never
 ///   executed, and an action counts only when it runs a script and the
 ///   tree only when it holds an entry, never on bare key presence;
 /// - a dynamic XFA form, whose rendered pages are the placeholder content

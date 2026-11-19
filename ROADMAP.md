@@ -3169,6 +3169,8 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: scripts on parent form fields are reported.** A form field's keystroke, format, validate and calculate scripts can sit on a parent field rather than on the widget drawn on the page. The JavaScript report now walks the field hierarchy: the `/AcroForm /Fields` tree through `/Kids` (new document location `ScriptLocation::FormFields`) and, per page, each widget's `/Parent` chain (new page location `ScriptLocation::FieldActions { index }`), at most 64 levels, each object once, so a cyclic hierarchy ends. Rendering is unchanged.
+
 **Unreleased on master: deeply nested Type 4 functions; skipped shadings are reported.** A Type 4 (PostScript calculator) function nested more than 64 procedures deep was refused, so its shading was not drawn and nothing but a log line said so. Typst writes one nested `ifelse` per gradient stop, and its conic gradients with many stops disappeared. Programs are now parsed, costed and run without recursion, so nesting is limited only by the 100 000-token limit that already applied. A shading left out because its function gives no colour is listed in the new `PageDiagnostics::shading_failures`, and fails its page under `--strict` (`RasterError::ShadingFailed`).
 
 **Unreleased on master: a moveto right after a moveto replaces it.** A path

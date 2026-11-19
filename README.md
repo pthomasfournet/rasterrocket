@@ -818,8 +818,9 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   exist to keep the renderer from reaching one.
 - **No script execution.** rasterrocket has no JavaScript engine. A PDF
   containing JavaScript — catalog `/OpenAction`, `/AA`, `/Names/JavaScript`,
-  `/AcroForm/AA`, or a page-level `/AA` / per-annotation/widget `/A`/`/AA`
-  (checked as each page is rendered; one warning per document) — is rendered
+  `/AcroForm/AA`, a form field's `/AA` anywhere in the field hierarchy, or a
+  page-level `/AA` / per-annotation/widget `/A`/`/AA` (checked as each page
+  is rendered; one warning per document) — is rendered
   for its static appearance and a loud warning is logged per entry point;
   detection is purely structural and no `/JS` is ever decoded or evaluated.
 - **Native code in the build.** Embedded fonts are parsed by local forks of

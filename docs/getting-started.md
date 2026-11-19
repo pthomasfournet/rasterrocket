@@ -347,8 +347,9 @@ Flagged only when genuinely JavaScript (never on bare key presence — that woul
 - `/Catalog/Names/JavaScript` (the JS-specific name subtree)
 - `/Catalog/AcroForm/AA` with a `/S /JavaScript` sub-action (a `/S /SubmitForm` AcroForm is not flagged)
 - page-level `/AA` and per-annotation/widget `/A`/`/AA` with a `/S /JavaScript` action (the calculate/format/validate JS of a fillable form lives here — the most common real-world placement)
+- the `/AA` of a form field higher in the hierarchy: each field in the `/Catalog/AcroForm/Fields` tree (walked through `/Kids`), and, per page, the fields on a widget's `/Parent` chain (a non-terminal field's keystroke/format scripts apply to all its widgets); the hierarchy is followed at most 64 levels and each object once, so a cyclic `/Parent` or `/Kids` link ends the walk
 
-The four catalog locations are checked when the document opens, with one warning per location. Opening reads no page objects, so page and annotation actions are checked as each page is rendered: the first rendered page that carries JavaScript produces one warning for the document, naming that page. A page that is never rendered is never inspected, and at most 8192 annotations are inspected per page.
+The catalog locations (including the field tree) are checked when the document opens, with one warning per location. Opening reads no page objects, so page and annotation actions are checked as each page is rendered: the first rendered page that carries JavaScript produces one warning for the document, naming that page. A page that is never rendered is never inspected, and at most 8192 annotations are inspected per page.
 
 ### XFA forms
 
