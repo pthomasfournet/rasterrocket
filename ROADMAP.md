@@ -3203,14 +3203,14 @@ retires the device and the page renders on the CPU; a longer Windows timeout
 (`TdrDelay`) is the user's own choice and nothing requires it. Whole process
 on the RTX 5070, `--gpu-pages` at 150 dpi, the first 64 pages of each
 fixture: Direct3D 12 takes 1.41 times Vulkan's time, mostly start-up (one
-page: 0.351 s against 0.177 s); the device raster is level with Vulkan's.
+page: 0.355 s against 0.189 s); the device raster is level with Vulkan's.
 
 Open on Direct3D 12:
 - **Read-back.** A page's pixels reach the caller through a host copy whose
   cost dominates (RTX 5070, corpus-04 page 271 at 600 dpi: 2.63 ms to copy the
   138 982 656 device bytes, 42.6 to 42.8 ms to copy the 104 236 992 packed
   bytes on the host); reading back without that copy is not done.
-- **Start-up cost.** About 0.17 s a process above Vulkan's.
+- **Start-up cost.** About 0.17 s (0.166 s) a process above Vulkan's.
 - **Debug layer.** `PDF_RASTER_D3D12_DEBUG=1` has not run on the test box
   (Graphics Tools is not installed), so a mismatched view stride, which
   only the debug layer sees, is unchecked there.
