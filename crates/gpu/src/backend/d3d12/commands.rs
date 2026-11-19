@@ -15,7 +15,8 @@
 //! objects) is held by its [`Commands`] until a wait on the list's own
 //! fence succeeds, so a buffer freed by its owner while a page is in
 //! flight is released only after the page.  A list whose completion
-//! cannot be confirmed (its fence was not signalled, or the wait failed)
+//! cannot be confirmed (its fence was not signalled, a wait on it failed,
+//! or the queue could not be drained when the backend was dropped)
 //! strands its [`Commands`]: they are never reset, and their references
 //! are leaked rather than released, even when the backend is dropped.
 

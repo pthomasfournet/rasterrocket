@@ -167,6 +167,7 @@ mod host {
         fn drop(&mut self) {
             if let Err(e) = self.submitter.wait_idle() {
                 log::warn!("d3d12: waiting for the queue to drain on drop failed: {e}");
+                self.recorder.strand_in_flight();
             }
         }
     }
@@ -510,6 +511,36 @@ mod host {
             assert!(stranded.begin().is_err(), "stranded commands are not reset");
             drop(stranded);
             assert_eq!(refs(&unknown), base + 1, "the stranded hold is leaked");
+        }
+
+        /// A page whose own fence cannot be waited on keeps everything its
+        /// list references, through `wait_page` and the backend's drop, and
+        /// no further page begins; a page dropped unwaited does the same
+        /// when the queue cannot be drained.
+        #[test]
+        fn unconfirmed_pages_keep_their_references() {
+            for waited in [true, false] {
+                let backend = D3d12Backend::warp().expect("the WARP adapter opens");
+                let mut buf = backend.alloc_device(64).expect("alloc_device");
+                let unknown: windows::core::IUnknown = buf.resource().clone().into();
+                let base = refs(&unknown);
+                backend.begin_page().expect("begin_page");
+                backend.record_zero_buffer(&mut buf, 64).expect("fill");
+                let fence = backend.submit_page().expect("submit_page");
+                backend.submitter.fail_waits();
+                if waited {
+                    assert!(backend.wait_page(fence).is_err(), "the wait fails");
+                    let err = backend.begin_page().expect_err("the recorder is lost");
+                    assert!(err.to_string().contains("could not be confirmed"), "{err}");
+                    backend.abandon_page();
+                }
+                drop(backend);
+                assert_eq!(
+                    refs(&unknown),
+                    base + 1,
+                    "waited {waited}: the list's hold on the buffer was released"
+                );
+            }
         }
 
         /// Every kernel's root signature and pipeline state build.

@@ -48,6 +48,9 @@ pub(super) struct Submitter {
     /// The value the last submission signalled; held across each
     /// execute-and-signal so that values rise in queue order.
     last: Mutex<u64>,
+    /// Makes every wait fail, as on a removed device.
+    #[cfg(test)]
+    fail_waits: std::sync::atomic::AtomicBool,
 }
 
 impl Submitter {
@@ -61,6 +64,8 @@ impl Submitter {
             queue: queue.clone(),
             fence,
             last: Mutex::new(0),
+            #[cfg(test)]
+            fail_waits: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -92,10 +97,11 @@ impl Submitter {
         let value = signalled
             .checked_add(1)
             .ok_or_else(|| unqueued(BackendError::msg("the D3D12 fence value overflowed u64")))?;
-        // SAFETY: `list` is closed.  Its recorder holds every object the
+        // SAFETY: `list` is closed.  Its commands hold every object the
         // list references until a wait on this submission's fence
-        // succeeds; when the signal below fails, the caller keeps them for
-        // the life of the process (`SubmitError::queued`).
+        // succeeds; when the signal below fails, or no wait confirms the
+        // submission's completion, they are stranded and kept for the life
+        // of the process (`SubmitError::queued`, `Commands::strand`).
         unsafe { self.queue.ExecuteCommandLists(&[Some(list)]) };
         // SAFETY: `queue` and `fence` are live.
         unsafe { self.queue.Signal(&self.fence, value) }
@@ -107,6 +113,13 @@ impl Submitter {
         *signalled = value;
         drop(signalled);
         Ok(PageFence(Arc::new((self.fence.clone(), value))))
+    }
+
+    /// Make every later wait fail, as on a removed device.
+    #[cfg(test)]
+    pub(super) fn fail_waits(&self) {
+        self.fail_waits
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Block until `fence` has been reached.
@@ -126,6 +139,10 @@ impl Submitter {
     /// Block until the fence reaches `value`.  A removed device sets the
     /// fence to `u64::MAX`, which is reported as the loss it is.
     fn wait_value(&self, value: u64) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_waits.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(BackendError::msg("waiting failed (injected)"));
+        }
         // SAFETY: `fence` is live.
         let mut done = unsafe { self.fence.GetCompletedValue() };
         if done < value {

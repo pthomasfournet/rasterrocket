@@ -185,7 +185,9 @@ impl Recorder {
     }
 
     /// Wait for the submitted page: on its own fence, and on `fence` as
-    /// well when that is another submission's.
+    /// well when that is another submission's.  A failed wait on the
+    /// page's own fence strands its commands; the recorder then accepts no
+    /// further page.
     pub(super) fn wait_page(&self, fence: &PageFence) -> Result<()> {
         let mut page = self.lock();
         let own = match (&page.phase, &page.submitted) {
@@ -197,14 +199,33 @@ impl Recorder {
                 )));
             }
         };
-        self.submitter.wait(&own)?;
-        if !own.same(fence) {
-            self.submitter.wait(fence)?;
+        if let Err(e) = self.submitter.wait(&own) {
+            page.commands.strand();
+            page.submitted = None;
+            page.phase = Phase::Lost;
+            return Err(e);
         }
+        // The page has completed: its references may go whatever the wait
+        // on the caller's fence reports.
         page.commands.release();
         page.submitted = None;
         page.phase = Phase::Idle;
-        Ok(())
+        if own.same(fence) {
+            Ok(())
+        } else {
+            self.submitter.wait(fence)
+        }
+    }
+
+    /// Strand the commands of a submitted page whose completion cannot be
+    /// confirmed, and accept no further page.
+    pub(super) fn strand_in_flight(&self) {
+        let mut page = self.lock();
+        if page.phase == Phase::Submitted {
+            page.commands.strand();
+            page.submitted = None;
+            page.phase = Phase::Lost;
+        }
     }
 
     /// Return to `Idle`: a recording page is discarded, a submitted one is
