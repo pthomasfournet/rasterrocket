@@ -661,8 +661,13 @@ cargo build --release -p rasterrocket-cli --features vulkan
 The CLI crate forwards each feature name to the `rasterrocket` library.
 
 The GPU crate's `d3d12` feature (`cargo build -p rasterrocket-gpu --features d3d12`)
-compiles every kernel to DXIL, on any host, and checks it; no render path loads
-the DXIL, and the CLI does not forward the feature.
+compiles every kernel to DXIL and checks it, on any host that runs the two
+compilers below; no render path loads the DXIL, and the CLI does not forward the
+feature.  DXC 1.9.2609 publishes builds for Linux x86-64 and Windows only: a macOS
+or Linux aarch64 host builds DXC from the source of that release
+([releases](https://github.com/microsoft/DirectXShaderCompiler/releases)) and names
+it in `DXC`, while slangc 2026.20 publishes builds for both
+([releases](https://github.com/shader-slang/slang/releases)).
 It needs two pinned compilers, and the build fails, printing the install commands,
 when either is missing or of another version: slangc **2026.20** exactly (the
 compiler of the Vulkan shaders too; `SLANGC` names it, else the Vulkan SDK's when

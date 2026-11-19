@@ -3715,15 +3715,18 @@ tests also on the AMD Raphael iGPU (RADV) and llvmpipe.
 
 **Unreleased on master: the GPU kernels compile to DXIL.** The GPU crate's
 new `d3d12` feature compiles every Slang kernel to DXIL at build time, on
-any host, in two steps with pinned compilers: slangc 2026.20 writes HLSL
-and its JSON reflection, DXC 1.9.2609 compiles the HLSL for `cs_6_0`. The
+any host that runs both pinned compilers (DXC publishes Linux x86-64 and
+Windows builds only; elsewhere it is built from source), in two steps:
+slangc 2026.20 writes HLSL and its JSON reflection, DXC 1.9.2609 compiles
+the HLSL for `cs_6_0`. The
 slangc is the one that compiles the SPIR-V (`SLANGC`, else the Vulkan
 SDK's, else `PATH`'s), so both targets come from one compiler; DXC is
 `DXC`, else `PATH`'s. Each kernel's reflected registers and root-constant
 size are checked against one table (`crates/gpu/kernels/d3d12_bindings.rs`),
 and each container must carry the validator's hash. A missing compiler or
-another version fails the build with the install commands; a build without
-`d3d12` needs neither DXC nor a particular slangc. Tests check that every
+another version fails the build with the install commands for the host,
+or, where DXC publishes no build, the note that it is built from source;
+a build without `d3d12` needs neither DXC nor a particular slangc. Tests check that every
 container is hashed, that no DXIL division is `fast`, that only the
 outline raster and its division probe declare 64-bit integers, and that no
 SPIR-V module carries an `FPFastMathMode` decoration. No render path

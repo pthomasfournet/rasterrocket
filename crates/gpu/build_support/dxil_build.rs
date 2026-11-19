@@ -36,7 +36,7 @@ fn find_dxc() -> PathBuf {
 /// stderr both.  Panics with the install commands when it cannot be run
 /// or fails.
 fn tool_version_text(path: &Path, flag: &str, tool: &str) -> String {
-    let hint = install_hint(tool, cfg!(windows));
+    let hint = install_hint(tool, env::consts::OS, env::consts::ARCH);
     let output = Command::new(path).arg(flag).output().unwrap_or_else(|e| {
         panic!(
             "failed to run {} {flag}: {e}; the d3d12 feature compiles the kernels with {tool} {}.\n{hint}",
@@ -75,7 +75,7 @@ pub(super) fn compile_dxil_kernels(kernels_dir: &Path, out_dir: &Path) {
          slangc when VULKAN_SDK is set, else slangc from PATH: name a slangc \
          {SLANGC_VERSION} in SLANGC.\n{}",
         slangc.display(),
-        install_hint("slangc", cfg!(windows)),
+        install_hint("slangc", env::consts::OS, env::consts::ARCH),
     );
     let dxc_version = tool_version_text(&dxc, "--version", "dxc");
     assert!(
@@ -83,7 +83,7 @@ pub(super) fn compile_dxil_kernels(kernels_dir: &Path, out_dir: &Path) {
         "dxc at {} printed version `{dxc_version}`; the d3d12 feature compiles the kernels with \
          DXC {DXC_VERSION}: name it in DXC.\n{}",
         dxc.display(),
-        install_hint("dxc", cfg!(windows)),
+        install_hint("dxc", env::consts::OS, env::consts::ARCH),
     );
     println!(
         "cargo:warning=d3d12: slangc {} ({}), {} ({})",
