@@ -8,8 +8,8 @@ license.workspace    = true
 repository.workspace = true
 readme               = "README.md"
 publish     = false
-description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a printer, with pdftoppm-style flags."
-keywords    = ["pdf", "raster", "cli", "pdftoppm", "renderer"]
+description = "The rrocket command: renders PDF pages and comic archives to PPM, PGM, PBM, PNG, JPEG or TIFF files, a fax document or a printer, with flags for resolution, page range, scaling and output format."
+keywords    = ["pdf", "raster", "cli", "rasterizer", "renderer"]
 categories  = ["command-line-utilities", "multimedia::images", "rendering"]
 
 [[bin]]

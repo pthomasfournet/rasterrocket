@@ -10,7 +10,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket" }
 ```
 
 ```bash
-# CLI — `rrocket`, with pdftoppm-style flags
+# CLI — `rrocket`, with flags for resolution, page range, scaling and output format
 git clone https://github.com/pthomasfournet/rasterrocket
 cd rasterrocket && cargo build --release -p rasterrocket-cli
 ```
@@ -132,7 +132,7 @@ take rows; the full list is in [ROADMAP.md](ROADMAP.md).
 - **Text census.** `PageDiagnostics::glyphs` (`GlyphCounts`) counts the
   glyphs shown by rendering mode, and `has_visible_text()` tells native
   text from a scan with an invisible OCR layer.
-- **Fixes.** JPEG decodes with libjpeg-accurate IDCT and YCbCr rounding;
+- **Fixes.** JPEG decodes with an accurate IDCT and YCbCr rounding;
   the vendored shaper, font, JBIG2, CCITT and JPEG 2000 forks take upstream
   fixes; shading and Gouraud mesh edge fixes.
 
@@ -187,7 +187,7 @@ backend-neutral cache. The full list is in
 substituted fonts; no API break.** The full list is in
 [ROADMAP.md](ROADMAP.md#release-history).
 
-- **JPEG and TIFF output.** `--jpeg` / `--jpegopt` as `pdftoppm -jpeg`, and
+- **JPEG and TIFF output.** `--jpeg` / `--jpegopt`, and
   `--tiff` with `--tiffcompression none|packbits|lzw|deflate|g3|g3-2d|g4`.
 - **Printing and fax.** `--print` (with `--printer`, `--copies`, `--duplex`;
   `--list-printers` lists the queues) hands the pages to CUPS; `--fax`
@@ -300,7 +300,7 @@ behaviour change for library users (first item); otherwise no API change.
   their own resolution, which also makes masked JPEG 2000 pages decode about
   3× faster at 150 dpi.
 - **Missing content restored.**
-  - Images compressed with LZW, RunLength, ASCII85 or ASCIIHex (as ImageMagick
+  - Images compressed with LZW, RunLength, ASCII85 or ASCIIHex (as image tools
     and older scanners write them) were dropped as "unsupported filter".
   - Transparency groups placed away from the page origin, and isolated
     groups, were shifted or not drawn.
@@ -355,10 +355,9 @@ behaviour change for library users (first item); otherwise no API change.
 - **CMYK JPEGs are no longer negatives.** They were always inverted. Now the
   samples are read as ink and the PDF's `/Decode` array is applied, as the
   spec requires.
-- **JPEG 2000 decodes in pure Rust.** OpenJPEG is replaced by a local fork of
+- **JPEG 2000 decodes in pure Rust.** JPEG 2000 is decoded by a local fork of
   `hayro-jpeg2000`, which removes the last C parser of untrusted image data from
-  the default build. Images are decoded at the size they are drawn; fidelity
-  matches OpenJPEG.
+  the default build. Images are decoded at the size they are drawn.
 - **CCITT fax images** honour `/Columns` and `/EncodedByteAlign`.
 - **Dependencies** brought current, with fewer of them.
 
@@ -479,7 +478,7 @@ No public API changes.
 
 **Google Cloud Vision input optimization.** First public API addition
 since 1.0. A new in-process path produces an upload-ready, size-fitted
-grayscale JPEG for a `pdf_oxide → rasterrocket → GCV` pipeline — no
+grayscale JPEG for a text extraction → rasterrocket → GCV pipeline — no
 external `image` crate, no network guesswork, so the only bottleneck
 left is GCV's own round-trip.
 
@@ -521,7 +520,7 @@ silent rendering loss after v1.0.2 — blank or partially-blank pages on
 input variants the curated suite did not cover. Every root cause is
 fixed and the codebase hardened per-commit; a 238-PDF exhaustive corpus
 is now 100% legible (zero silent loss, zero crash) measured by OCR
-against a MuPDF oracle. No public API changes. See
+against an independent reference renderer. No public API changes. See
 [ROADMAP.md](ROADMAP.md#release-history) for the full breakdown
 (NF-1…NF-12 silent-loss roots, the per-commit hardening pass, DoS caps,
 and the page/annotation JavaScript-disclosure work).
@@ -569,7 +568,7 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 | `rasterrocket` | Library — `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`, `RasterOptions`, `RenderedPage` |
 | `rasterrocket-comic` | Library — `open_comic` for `.cbz`/`.cb7`/`.cbt`/`.cbr` comic-archive input |
 | `rasterrocket-camera` | Library — camera-capture page cleanup measured on 8-bit grayscale and replayed at 8 or 16 bits: crop, rectify, spread split, dewarp; OCR preparation of scans: background normalisation, Sauvola binarisation, border cleanup; no dependencies |
-| `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with `pdftoppm`-style flags; also reads comic archives; prepares scans for OCR (`--deskew`, `--clean-borders`, `--clean-background`, `--threshold sauvola`) |
+| `rasterrocket-cli` | `rrocket` binary — renders pages to PPM/PGM/PBM/PNG/JPEG/TIFF files with flags for resolution, page range, scaling and output format; also reads comic archives; prepares scans for OCR (`--deskew`, `--clean-borders`, `--clean-background`, `--threshold sauvola`) |
 
 All four are built from this repository. Nothing here is maintained on
 crates.io (see the note at the top).
