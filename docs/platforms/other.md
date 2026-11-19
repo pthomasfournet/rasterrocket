@@ -102,7 +102,7 @@ tested. Please report what you find.
   pixels) does not. The TDR gate on it, the same pages whole at 600 and
   1200 dpi plus `corpus-09` at 950 dpi and `corpus-06` and `corpus-02` at
   1200 dpi in 16 bits, is byte-identical and loses no device; no whole
-  process took over 3 s on the device. The gate ran on 2026-11-18, before
+  process took over 3 s on the device. The gate ran before
   the word layout, when the device stored three samples a pixel: the
   950 dpi page (1.0 GB then, the largest that fitted) and the 16-bit pages
   (0.8 GB then) take 1.33 GB and 1.11 GB of device pixels now, so they
