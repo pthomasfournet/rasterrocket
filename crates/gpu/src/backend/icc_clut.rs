@@ -9,7 +9,7 @@
 use color::grid::{CmykGrid, NodeRange};
 
 use super::layout::{device_pixel_words, unpad_pixels};
-use super::params::{IccClutParams, MAX_KERNEL_PIXELS};
+use super::params::{IccClutParams, MAX_KERNEL_PIXELS, MAX_WIDE_CLUT_PIXELS};
 use super::staged::{
     Direction, Staged, ensure, host_view, record_download, record_upload, stage, stage_exact,
 };
@@ -73,6 +73,27 @@ pub fn icc_clut16<B: GpuBackend>(backend: &B, cmyk: &[u8], grid: &CmykGrid) -> R
         .collect())
 }
 
+/// `n` pixels as the pixel count of an [`IccClutParams`] conversion, `wide`
+/// or not, checked against the bound [`IccClutParams::validate`] enforces
+/// before anything is staged or allocated.
+///
+/// # Errors
+/// [`BackendError::InvariantViolation`] when `n` exceeds
+/// [`MAX_KERNEL_PIXELS`], or [`MAX_WIDE_CLUT_PIXELS`] when `wide`.
+fn pixel_count(n: usize, wide: bool) -> Result<u32> {
+    let (max, name) = if wide {
+        (MAX_WIDE_CLUT_PIXELS, "MAX_WIDE_CLUT_PIXELS")
+    } else {
+        (MAX_KERNEL_PIXELS, "MAX_KERNEL_PIXELS")
+    };
+    u32::try_from(n).ok().filter(|&n| n <= max).ok_or_else(|| {
+        BackendError::invariant(
+            "IccClutInvariantViolation",
+            format!("n_pixels {n} exceeds {name} {max} (32-bit byte addressing)"),
+        )
+    })
+}
+
 /// [`icc_clut`], the output of 16-bit values, two bytes each, low first,
 /// when `wide`: the device's output words, unpadded.
 fn convert<B: GpuBackend>(
@@ -95,18 +116,7 @@ fn convert<B: GpuBackend>(
     if n == 0 {
         return Ok(Vec::new());
     }
-    let n_pixels = u32::try_from(n)
-        .ok()
-        .filter(|&n| n <= MAX_KERNEL_PIXELS)
-        .ok_or_else(|| {
-            BackendError::invariant(
-                KIND,
-                format!(
-                    "n_pixels {n} exceeds MAX_KERNEL_PIXELS {MAX_KERNEL_PIXELS} \
-                     (32-bit byte addressing)"
-                ),
-            )
-        })?;
+    let n_pixels = pixel_count(n, wide)?;
     let table = grid.as_bytes();
     let sample_bytes = if wide { 2 } else { 1 };
     let rgb_len = n * 3 * sample_bytes;
@@ -355,5 +365,22 @@ mod tests {
             icc_clut(&backend, &[], &grid).expect("empty"),
             Vec::<u8>::new()
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    /// Each width's pixel bound is checked before staging, at its edge.
+    #[test]
+    fn the_pixel_bound_of_each_width() {
+        let invariant = |r: Result<u32>| matches!(r, Err(BackendError::InvariantViolation { .. }));
+        for (wide, max) in [(false, MAX_KERNEL_PIXELS), (true, MAX_WIDE_CLUT_PIXELS)] {
+            assert_eq!(pixel_count(max as usize, wide).expect("at the bound"), max);
+            assert!(invariant(pixel_count(max as usize + 1, wide)), "{wide}");
+        }
+        let err = pixel_count(MAX_WIDE_CLUT_PIXELS as usize + 1, true).expect_err("wide");
+        assert!(err.to_string().contains("MAX_WIDE_CLUT_PIXELS"), "{err}");
     }
 }
