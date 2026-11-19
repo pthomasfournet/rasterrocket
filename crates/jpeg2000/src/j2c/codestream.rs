@@ -32,6 +32,47 @@ pub(crate) struct Header {
     pub(crate) skipped_resolution_levels: u8,
     /// Whether strict mode is enabled for decoding.
     pub(crate) strict: bool,
+    /// The markers of the main header the decoder records without acting
+    /// on them.
+    pub(crate) markers: HeaderMarkers,
+}
+
+/// Markers of a main or tile-part header that the decoder records without
+/// acting on them: reported by [`Survey`](super::Survey) and otherwise
+/// skipped or applied as before.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HeaderMarkers {
+    /// An RGN marker segment.
+    pub(crate) rgn: bool,
+    /// A CRG marker segment.
+    pub(crate) crg: bool,
+    /// A marker of the range 0xFF30 to 0xFF3F, which has no segment.
+    pub(crate) reserved: bool,
+    /// A PPT marker segment.
+    pub(crate) ppt: bool,
+    /// A COD, COC, QCD or QCC marker segment in a tile-part header other
+    /// than the first of its tile.
+    pub(crate) late_coding_style: bool,
+    /// A tile-part whose declared length ends before an SOD marker.
+    pub(crate) missing_sod: bool,
+    /// A tile-part of length 0, which extends to the end of the
+    /// codestream.
+    pub(crate) open_ended: bool,
+}
+
+impl HeaderMarkers {
+    /// The markers of `self` or `other`.
+    pub(crate) fn union(self, other: Self) -> Self {
+        Self {
+            rgn: self.rgn || other.rgn,
+            crg: self.crg || other.crg,
+            reserved: self.reserved || other.reserved,
+            ppt: self.ppt || other.ppt,
+            late_coding_style: self.late_coding_style || other.late_coding_style,
+            missing_sod: self.missing_sod || other.missing_sod,
+            open_ended: self.open_ended || other.open_ended,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +109,7 @@ pub(crate) fn read_header<'a>(
     let mut roi_shifts = vec![0; num_components as usize];
     let mut ppm_markers = vec![];
     let mut progression_changes = vec![];
+    let mut header_markers = HeaderMarkers::default();
 
     loop {
         match reader.peek_marker().ok_or(MarkerError::Invalid)? {
@@ -101,6 +143,7 @@ pub(crate) fn read_header<'a>(
             }
             markers::RGN => {
                 reader.read_marker()?;
+                header_markers.rgn = true;
                 let (component_index, roi_shift) =
                     rgn_marker(reader, num_components).ok_or(MarkerError::ParseFailure("RGN"))?;
                 *roi_shifts
@@ -127,6 +170,7 @@ pub(crate) fn read_header<'a>(
             }
             markers::CRG => {
                 reader.read_marker()?;
+                header_markers.crg = true;
                 skip_marker_segment(reader);
             }
             markers::CAP | markers::CPF => {
@@ -141,6 +185,7 @@ pub(crate) fn read_header<'a>(
                 // have no marker segment parameters. They shall be skipped by
                 // the decoder."
                 reader.read_marker()?;
+                header_markers.reserved = true;
                 // skip_marker_segment(reader);
             }
             _ => {
@@ -213,6 +258,7 @@ pub(crate) fn read_header<'a>(
         progression_changes,
         skipped_resolution_levels,
         strict: settings.strict,
+        markers: header_markers,
     };
 
     validate(&header)?;

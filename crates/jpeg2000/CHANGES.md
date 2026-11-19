@@ -179,6 +179,20 @@ byte-identical on the benchmark images and passes the full test suite.
   `NotPlain::Precision` names a precision outside the range asked for.
   `Survey::irreversible` reports whether the 9-7 wavelet is in force for
   some component of some tile.
+- `Survey` also reports, from the main header and the tile-part headers:
+  SOP markers allowed (`Scod` bit 1), PPM or PPT markers, RGN, CRG and
+  reserved (0xFF30–0xFF3F) markers, components of one tile with differing
+  decomposition levels, the component transformation selected on fewer
+  than three components, a COD/COC/QCD/QCC marker in a tile-part other
+  than the first of its tile, a tile-part whose length ends before its SOD
+  marker, no EOC marker after a last tile-part of declared length, and an
+  image area offset from the grid origin.  `j2c/codestream.rs` and
+  `j2c/tile.rs` record the markers in a `HeaderMarkers` of the main header
+  and of each tile; parsing and decoding are unchanged.
+  `Image::codestream` returns the codestream from its SOC marker (the
+  contiguous codestream box of a JP2 file), kept in a new field `stream`;
+  the field holding the codestream after its main header is renamed
+  `tile_data`.
 - `j2c/codestream.rs`: the signedness bit of `Ssiz`, read and dropped
   before, and the raw code-block style byte are kept.  The decoder still
   reconstructs signed components as unsigned.  Decoded output is

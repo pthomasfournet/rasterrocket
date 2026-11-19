@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 
 use super::build::{PrecinctData, SubBandType};
 use super::codestream::{
-    ComponentInfo, Header, ProgressionChange, ProgressionOrder, WaveletTransform, markers,
-    skip_marker_segment,
+    ComponentInfo, Header, HeaderMarkers, ProgressionChange, ProgressionOrder, WaveletTransform,
+    markers, skip_marker_segment,
 };
 use super::rect::IntRect;
 use crate::error::{MarkerError, Result, TileError, ValidationError, bail, err};
@@ -43,6 +43,9 @@ pub(crate) struct Tile<'a> {
     parsed_parts: u16,
     /// Bytes of packet headers and packet data in the tile's tile-parts.
     data_bytes: usize,
+    /// The markers of the tile's tile-part headers the decoder records
+    /// without acting on them.
+    markers: HeaderMarkers,
 }
 
 /// A tile part where packet headers and packet data are interleaved.
@@ -138,6 +141,7 @@ impl<'a> Tile<'a> {
             declared_parts: None,
             parsed_parts: 0,
             data_bytes: 0,
+            markers: HeaderMarkers::default(),
         }
     }
 
@@ -221,8 +225,8 @@ impl Completeness {
     }
 }
 
-/// What the tile-part headers of a codestream declare, read without
-/// decoding a code-block.
+/// What the main and tile-part headers of a codestream declare, read
+/// without decoding a code-block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Survey {
     /// How much of its tile data the codestream holds: the
@@ -235,16 +239,66 @@ pub struct Survey {
     /// Whether the irreversible 9-7 wavelet transform is in force for some
     /// component of some tile (`SPcod`/`SPcoc` transformation 0).
     pub irreversible: bool,
+    /// Whether SOP marker segments may precede the packets of some
+    /// component of some tile (`Scod`/`Scoc` bit 1, Table A.13).
+    pub sop_markers: bool,
+    /// Whether packet headers are packed in PPM or PPT marker segments.
+    pub packed_packet_headers: bool,
+    /// Whether a header holds an RGN marker segment.
+    pub region_of_interest: bool,
+    /// Whether the main header holds a CRG marker segment.
+    pub component_registration: bool,
+    /// Whether a header holds a marker of the range 0xFF30 to 0xFF3F.
+    pub reserved_markers: bool,
+    /// Whether the components of some tile differ in their number of
+    /// decomposition levels.
+    pub component_levels_differ: bool,
+    /// Whether the multiple component transformation is selected for a
+    /// tile of fewer than three components, where it does not apply.
+    pub idle_component_transform: bool,
+    /// Whether a COD, COC, QCD or QCC marker segment is in a tile-part
+    /// header other than the first of its tile.
+    pub late_coding_style: bool,
+    /// Whether the declared length of some tile-part ends before its SOD
+    /// marker.
+    pub tile_part_without_data: bool,
+    /// Whether no EOC marker follows the last tile-part, which has a
+    /// declared length (`Psot` other than 0).
+    pub unterminated: bool,
+    /// Whether the image area is offset from the reference grid origin
+    /// (`XOsiz` or `YOsiz` other than 0).
+    pub image_offset: bool,
 }
 
 impl Survey {
-    pub(crate) fn of(tiles: &[Tile<'_>]) -> Self {
+    /// The survey of the `tiles` of the codestream of `header`, after whose
+    /// last tile-part an EOC marker follows when `terminated`.
+    pub(crate) fn of(header: &Header, tiles: &[Tile<'_>], terminated: bool) -> Self {
         let components = || tiles.iter().flat_map(|t| &t.component_infos);
+        let markers = tiles
+            .iter()
+            .fold(header.markers, |acc, t| acc.union(t.markers));
+        let size = &header.size_data;
         Self {
             completeness: Completeness::of(tiles),
             code_block_styles: components().fold(0, |acc, c| acc | c.code_block_style().raw),
             irreversible: components()
                 .any(|c| c.wavelet_transform() == WaveletTransform::Irreversible97),
+            sop_markers: components().any(|c| c.coding_style.flags.may_use_sop_markers()),
+            packed_packet_headers: !header.ppm_packets.is_empty() || markers.ppt,
+            region_of_interest: markers.rgn,
+            component_registration: markers.crg,
+            reserved_markers: markers.reserved,
+            component_levels_differ: tiles.iter().any(|t| {
+                t.component_infos
+                    .windows(2)
+                    .any(|w| w[0].num_decomposition_levels() != w[1].num_decomposition_levels())
+            }),
+            idle_component_transform: tiles.iter().any(|t| t.mct && t.component_infos.len() < 3),
+            late_coding_style: markers.late_coding_style,
+            tile_part_without_data: markers.missing_sod,
+            unterminated: !terminated && !markers.open_ended,
+            image_offset: size.image_area_x_offset != 0 || size.image_area_y_offset != 0,
         }
     }
 }
@@ -279,7 +333,9 @@ fn parse_tile_part<'a>(
 
     let tile = &mut tiles[tile_part_header.tile_index as usize];
     let num_components = tile.component_infos.len();
+    let first_part = tile.parsed_parts == 0;
     tile.parsed_parts = tile.parsed_parts.saturating_add(1);
+    tile.markers.open_ended |= tile_part_header.tile_part_length == 0;
     if tile_part_header.num_tile_parts != 0 {
         tile.declared_parts = Some(tile_part_header.num_tile_parts);
     }
@@ -291,6 +347,7 @@ fn parse_tile_part<'a>(
         // but some files contain tile-parts that only consist of the SOT
         // marker segment. Those don't contain any data and can be skipped.
         if reader.offset() - start >= data_len {
+            tile.markers.missing_sod = true;
             return if main_header.strict {
                 err!(MarkerError::Expected("SOD"))
             } else {
@@ -306,6 +363,12 @@ fn parse_tile_part<'a>(
                 Ok(())
             };
         };
+
+        tile.markers.late_coding_style |= !first_part
+            && matches!(
+                marker,
+                markers::COD | markers::COC | markers::QCD | markers::QCC
+            );
 
         match marker {
             markers::SOD => {
@@ -366,10 +429,12 @@ fn parse_tile_part<'a>(
                 }
 
                 reader.read_marker()?;
+                tile.markers.ppt = true;
                 ppt_headers.push(ppt_marker(reader).ok_or(MarkerError::ParseFailure("PPT"))?);
             }
             markers::RGN => {
                 reader.read_marker()?;
+                tile.markers.rgn = true;
                 let (component_index, roi_shift) =
                     codestream::rgn_marker(reader, num_components as u16)
                         .ok_or(MarkerError::ParseFailure("RGN"))?;
@@ -400,6 +465,7 @@ fn parse_tile_part<'a>(
                 // have no marker segment parameters. They shall be skipped by
                 // the decoder."
                 reader.read_marker()?;
+                tile.markers.reserved = true;
                 // skip_marker_segment(reader);
             }
             _ => {
@@ -978,6 +1044,7 @@ mod tests {
             progression_changes: vec![],
             skipped_resolution_levels: 0,
             strict: false,
+            markers: HeaderMarkers::default(),
         };
 
         let tile_0_0 = Tile::new(0, &header);

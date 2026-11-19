@@ -30,20 +30,26 @@ pub use decode::DecoderContext;
 pub(crate) use decode::{Deferred, decode};
 pub use tile::{Completeness, Survey};
 
-/// The [`Survey`] of the tile-parts of `data`, the codestream after the
-/// main header `header`: the tile-part headers are parsed as a decode
-/// parses them, and no packet is read.
+/// The [`Survey`] of `data`, the codestream after the main header
+/// `header`: the tile-part headers are parsed as a decode parses them, and
+/// no packet is read.
 pub(crate) fn survey(data: &[u8], header: &Header) -> Result<Survey> {
-    let tiles = tile::parse(&mut BitReader::new(data), header)?;
+    let mut reader = BitReader::new(data);
+    let tiles = tile::parse(&mut reader, header)?;
     if tiles.is_empty() {
         bail!(TileError::Invalid);
     }
-    Ok(Survey::of(&tiles))
+    // In strict mode the parse has read the EOC marker.
+    let terminated = header.strict || reader.peek_marker() == Some(markers::EOC);
+    Ok(Survey::of(header, &tiles, terminated))
 }
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,
+    /// The codestream after the main header.
     pub(crate) data: &'a [u8],
+    /// The codestream from its SOC marker.
+    pub(crate) stream: &'a [u8],
 }
 
 /// Decoded data for one JPEG2000 component.
@@ -161,7 +167,8 @@ pub(crate) fn parse<'a>(
     };
 
     Ok(Image {
-        codestream: parsed_codestream.data,
+        tile_data: parsed_codestream.data,
+        stream: parsed_codestream.stream,
         header: parsed_codestream.header,
         boxes,
         settings: *settings,
@@ -187,5 +194,6 @@ pub(crate) fn parse_raw<'a>(
     Ok(ParsedCodestream {
         header,
         data: code_stream_data,
+        stream,
     })
 }

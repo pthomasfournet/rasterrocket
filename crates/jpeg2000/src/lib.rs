@@ -139,8 +139,11 @@ impl Default for DecodeSettings {
 
 /// A JPEG2000 image or codestream.
 pub struct Image<'a> {
-    /// The codestream containing the data to decode.
-    pub(crate) codestream: &'a [u8],
+    /// The codestream containing the data to decode, after its main
+    /// header.
+    pub(crate) tile_data: &'a [u8],
+    /// The codestream from its SOC marker.
+    pub(crate) stream: &'a [u8],
     /// The header of the J2C codestream.
     pub(crate) header: Header,
     /// The JP2 boxes of the image. In the case of a raw codestream, we
@@ -237,7 +240,7 @@ impl<'a> Image<'a> {
         if !self.fused_u8_path() {
             return Ok(self.decode(decoder_context)?.data_u8());
         }
-        match j2c::decode(self.codestream, &self.header, decoder_context, true)? {
+        match j2c::decode(self.tile_data, &self.header, decoder_context, true)? {
             j2c::Deferred::Mct(pending) => Ok(j2c::mct::inverse_into_rgb8(
                 &decoder_context.channel_data,
                 pending,
@@ -345,12 +348,19 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
+    /// The codestream of the image, from its SOC marker: the contents of
+    /// the contiguous codestream box of a JP2 file, or the data of a raw
+    /// codestream.
+    pub fn codestream(&self) -> &'a [u8] {
+        self.stream
+    }
+
     /// The [`Survey`] of the codestream: its tile-part headers parsed as
     /// [`Image::decode`] parses them, without decoding a code-block.  Its
     /// completeness is the one a decode would report; an error is one the
     /// decode would fail with before decoding a tile.
     pub fn survey(&self) -> Result<Survey> {
-        j2c::survey(self.codestream, &self.header)
+        j2c::survey(self.tile_data, &self.header)
     }
 
     /// Decode the image and return its decoded components.
@@ -359,7 +369,7 @@ impl<'a> Image<'a> {
         decoder_context: &'b mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'b>> {
         let settings = &self.settings;
-        j2c::decode(self.codestream, &self.header, decoder_context, false)?;
+        j2c::decode(self.tile_data, &self.header, decoder_context, false)?;
         let mut decoded_image = DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
             boxes: self.boxes.clone(),

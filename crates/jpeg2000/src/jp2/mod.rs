@@ -134,7 +134,8 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
         resolve_alpha_and_color_space(&image_boxes, &parsed_codestream.header, &settings)?;
 
     Ok(Image {
-        codestream: parsed_codestream.data,
+        tile_data: parsed_codestream.data,
+        stream: parsed_codestream.stream,
         header: parsed_codestream.header,
         boxes: image_boxes,
         settings,
