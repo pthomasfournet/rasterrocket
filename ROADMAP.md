@@ -3675,6 +3675,28 @@ per pixel.
 Verified on the RTX 5070: the GPU-page parity suite over the fixtures,
 at 8 and 16 bits.
 
+**Unreleased on master: the GPU outline raster reports an inexact
+division.** The `--gpu-pages` outline raster divides 64-bit integers by
+two single-precision estimates of the quotient and corrects the
+remainder; both estimates are now `precise`, so a compiler may not
+substitute an approximate reciprocal, and the corrections stop after 16
+steps in each direction instead of looping until the remainder is in
+range. A division whose remainder is still out of range writes its
+operands to a status buffer, which the host checks before copying any
+pixel: the page fails with the new `BackendError::KernelFault`
+(`page_raster_paths: floor_div(a = …, b = …) did not converge within 16
+correction steps; the device's float division is unreliable`), is logged
+at `warn`, and renders on the CPU with the CPU's bytes. The device stays
+in service, as for a page beyond its limits, since the fault concerns
+the operands of one page. Before, an unreliable division would have
+looped on the device or written a wrong pixel. A sweep test compares the
+device's division with the host's over the edge cases of its domain
+(`0 < b < 2^32`, `|a / b| < 2^40`) and 65 536 random pairs, and checks
+that an exhausted bound is reported. Pages stay byte-identical to
+`--backend cpu`. Verified on the RTX 5070 (parity suite over the
+fixtures at 8 and 16 bits), and the sweep also on the AMD Raphael iGPU
+(RADV) and llvmpipe.
+
 **Released in v2.4.1: hairline row crossings stay within the segment's end
 columns.** `stroke::narrow_runs` clamps each row's crossing to the columns
 of the segment's ends; in floating point it could round one column past
