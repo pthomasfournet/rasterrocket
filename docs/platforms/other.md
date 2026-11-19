@@ -110,6 +110,23 @@ tested. Please report what you find.
   older driver, 26.20.100.7642, reports
   Vulkan 1.1 and is listed as unusable (`Vulkan API below 1.3`). Other GPUs
   under Windows are untested.
+- **GPU (Direct3D 12):** the `d3d12` feature (`--backend d3d12`) needs
+  slangc 2026.20 and DXC 1.9.2609 on the build host, named by `SLANGC` and
+  `DXC` (the Vulkan SDK's own slangc is another release); at run time only the
+  system's Direct3D 12 runtime. Tested on Windows 11 on the Ryzen 9 9900X3D
+  machine: the RTX 5070, its AMD Radeon iGPU and WARP 1.0.22. Every fixture
+  page (12 096 per variant: corpus-01 to 11, 8 and 16 bits, RGB and gray) is
+  byte-identical to `--backend cpu` under `--backend d3d12` and under
+  `--backend d3d12 --gpu-pages`, on the RTX 5070 and on the Radeon alone, and
+  under `--gpu-pages --gpu-devices all` with both; WARP ran corpus-01 only.
+  A page whose device buffers pass the 2^27 elements of a view (a Letter page
+  at 1200 dpi, 556 MB) is declined and renders on the CPU. A device removal
+  (the Windows GPU timeout, TDR) retires the device and the page renders on
+  the CPU; the timeout is Windows' to configure, and nothing here needs it
+  changed. `scripts/fetch_warp.ps1 DIR` puts the pinned WARP beside a test
+  executable, where it loads in place of the system's. Direct3D 12 has not run
+  on an Intel adapter, and the debug layer (`PDF_RASTER_D3D12_DEBUG=1`) has
+  not run on the test box, which lacks Graphics Tools.
 - **Printing:** `--print` sends the pages to the printer's driver through
   GDI, fitting, centring and turning each page to the sheet itself (see
   [Printing on Windows](../cli-reference.md#printing-on-windows));

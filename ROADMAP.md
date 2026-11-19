@@ -3155,6 +3155,52 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
+**Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
+(`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
+the ICC lookup table, the image cache and blits, and `--gpu-pages` (one
+adapter or `--gpu-devices`) on a Direct3D 12 adapter, byte-identical to the
+CPU at 8 and 16 bits; the entries above give the pieces. Build prerequisites:
+slangc 2026.20 and DXC 1.9.2609, named by `SLANGC` and `DXC`. Release-note
+text for the next release:
+- `BackendPolicy::ForceD3d12` is new (additive; a `match` on the
+  `#[non_exhaustive]` enum already needs a wildcard arm), with
+  `SessionConfig::d3d12_device`, `PDF_RASTER_D3D12_DEVICE`,
+  `--d3d12-device` and `PDF_RASTER_BACKEND=d3d12`.
+- `rasterrocket-gpu`: the whole-page raster is the sealed `PageDevice`
+  trait, and `DeviceSelector` and `PageTimes` moved to
+  `backend::select` and `backend::page_device`, so in-workspace callers
+  change their imports.
+- Vulkan devices no longer need 8-bit storage, so more of them are eligible.
+- `IccClutParams` words: its `rgb` and `cmyk` buffers hold one 32-bit word
+  a pixel (two for 16-bit output), as the entry on the lookup-table kernels
+  above states.
+
+Where it was tested: Windows 11 on the Ryzen 9 9900X3D machine, on its RTX
+5070, its AMD Radeon iGPU and WARP 1.0.22. Direct3D 12 never ran on an Intel
+adapter. The full fixture corpus (corpus-01 to 11 at 8 and 16 bits, RGB and
+gray, 150 dpi: 12 096 pages per variant) is byte-identical to `--backend cpu`
+on the RTX 5070, on the Radeon, on both together under `--gpu-pages
+--gpu-devices all`, and on WARP for corpus-01 (64 pages). A page past the
+2^27 elements of a device view (a Letter page at 1200 dpi, 556 MB) is
+declined and renders on the CPU, the device kept. A device removal (TDR)
+retires the device and the page renders on the CPU; a longer Windows timeout
+(`TdrDelay`) is the user's own choice and nothing requires it. Whole process
+on the RTX 5070, `--gpu-pages` at 150 dpi, the first 64 pages of each
+fixture: Direct3D 12 takes 1.41 times Vulkan's time, mostly start-up (one
+page: 0.351 s against 0.177 s); the device raster is level with Vulkan's.
+Tables belong on the Benchmarks wiki page.
+
+Open on Direct3D 12:
+- **UMA read-back.** On an integrated adapter the page's pixels are copied
+  into a READBACK buffer and then to the host; a read of the shared memory
+  in place is not written.
+- **Start-up cost.** About 0.17 s a process above Vulkan's.
+- **Debug layer.** `PDF_RASTER_D3D12_DEBUG=1` has not run on the test box
+  (Graphics Tools is not installed), so a mismatched view stride, which
+  only the debug layer sees, is unchecked there.
+- **`d3d12-warp` CI job.** It runs the D3D12 tests on the pinned WARP and has
+  not run yet.
+
 **Unreleased on master: `rrocket --backend d3d12`.** The CLI gains the
 `d3d12` feature (forwarded to `rasterrocket`), `--backend d3d12`
 (`BackendPolicy::ForceD3d12`) and `--d3d12-device INDEX|NAME|warp`, which
@@ -3825,8 +3871,8 @@ removal reason. Selection is tested on any host; the RTX 5070, the AMD
 Radeon iGPU and WARP open on Windows 11.
 
 **Unreleased on master: D3D12 buffers, recorder and root signatures behind
-`GpuBackend`.** `D3d12Backend` implements `GpuBackend`; no render path uses
-it yet. Device buffers are committed resources in the DEFAULT heap with
+`GpuBackend`.** `D3d12Backend` implements `GpuBackend`; no render path used
+it at this step. Device buffers are committed resources in the DEFAULT heap with
 unordered access, sized to whole 32-bit words and created without zeroing
 except for `alloc_device_zeroed`; host buffers sit in the UPLOAD
 (`alloc_host_pinned`) or READBACK (`alloc_host_readback`) heap, mapped for
@@ -3873,7 +3919,7 @@ completion cannot be confirmed, as on a removed device, retires the device.
 `render_page_timed` times the device stages with timestamp queries at the
 compute queue's frequency. Selection of several adapters (`resolve_devices`)
 follows the single-adapter rules and refuses two selectors naming one
-adapter. No session uses it yet. The page tests shared with Vulkan pass at 8
+adapter. The page tests shared with Vulkan pass at 8
 and 16 bits on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU
 on Windows 11.
 
@@ -3925,8 +3971,7 @@ session's GPU pages are all on one API (Vulkan under `Auto` and
 `ForceVulkan`, Direct3D 12 under `ForceD3d12`), so a list never mixes them;
 `DevicePageCounts::by_device` names each adapter by its DXGI description,
 and `DeviceHold` holds a `ForceD3d12` configuration's page adapters.
-`DEVICE_LOST_CAUSE` is public in the GPU crate. `rrocket` does not forward
-the feature yet. The GPU-page parity test takes its policy from
+`DEVICE_LOST_CAUSE` is public in the GPU crate. The GPU-page parity test takes its policy from
 `RR_GPU_PAGE_POLICY` (`vulkan`, the default, or `d3d12`) and fails instead
 of skipping under `PDF_RASTER_REQUIRE_VULKAN=1` or
 `PDF_RASTER_REQUIRE_D3D12=1`; under `d3d12` every first fixture page (41)
