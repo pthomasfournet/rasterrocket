@@ -171,8 +171,9 @@ fn ranked_gpus(cands: &[AdapterCandidate]) -> Vec<usize> {
 }
 
 /// Resolve `sel` to one usable candidate index, or the kind of reason it
-/// does not and the reason.  `warp` names the WARP adapter; every other
-/// selector is matched against the candidates before it.
+/// does not and the reason.  `warp` names the WARP adapter; WARP's index
+/// is refused; every other selector is matched against the candidates
+/// before it.
 fn resolve_selector(
     cands: &[AdapterCandidate],
     sel: &DeviceSelector,
@@ -186,6 +187,18 @@ fn resolve_selector(
             )
         })?
     } else {
+        if let Some(w) = warp
+            && sel.as_str().bytes().all(|b| b.is_ascii_digit())
+            && sel.as_str().parse::<usize>().ok() == Some(w)
+        {
+            return Err((
+                SelectionFailure::Ineligible,
+                format!(
+                    "device {w} \"{}\" is the WARP adapter; select it with \"warp\"",
+                    cands[w].name
+                ),
+            ));
+        }
         let names: Vec<&str> = cands[..warp.unwrap_or(cands.len())]
             .iter()
             .map(|c| c.name.as_str())
@@ -360,7 +373,18 @@ mod tests {
         let (failure, msg) = selection_failure(&cands, "4");
         assert_eq!(failure, SelectionFailure::NoMatch, "{msg}");
         assert!(msg.contains("3 device(s) enumerated"), "{msg}");
-        assert_ne!(pick(&cands, Some(&sel("3"))).ok(), Some(3));
+        // WARP's own index is refused, not matched as a name ("630").
+        let (failure, msg3) = selection_failure(&cands, "3");
+        assert_eq!(failure, SelectionFailure::Ineligible, "{msg3}");
+        assert!(
+            msg3.contains(
+                "device 3 \"Microsoft Basic Render Driver\" is the WARP adapter; \
+                 select it with \"warp\""
+            ),
+            "{msg3}"
+        );
+        let (failure, _) = selection_failure(&host(), "3");
+        assert_eq!(failure, SelectionFailure::Ineligible);
         assert!(
             msg.contains("3: Microsoft Basic Render Driver (WARP"),
             "{msg}"
