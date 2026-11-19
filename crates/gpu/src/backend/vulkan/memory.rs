@@ -338,12 +338,19 @@ fn free_buffer(parent: &Arc<Inner>, buffer: vk::Buffer, alloc: Allocation, kind:
 
 /// Shared state held by every `DeviceBuffer` / `HostBuffer` so they can
 /// reach back to the allocator and the device on Drop.
+///
+/// Fields drop in declaration order: the allocator, whose drop frees its
+/// memory blocks on the device, precedes `device`, which may hold the last
+/// reference to the device context and destroy the device and instance
+/// when it drops.  A buffer that outlives its backend holds the last
+/// reference to this struct, so this order is what keeps the allocator's
+/// teardown on a live device.
 struct Inner {
-    device: Arc<DeviceCtx>,
     /// gpu-allocator is `Send` but not `Sync`; wrap in a `Mutex` for the
     /// allocate/free hot path.  Contention is negligible — we make ~tens
     /// of allocations per page.
     allocator: Mutex<Allocator>,
+    device: Arc<DeviceCtx>,
 }
 
 /// How the host accesses a device buffer, which selects its memory on a
@@ -389,8 +396,8 @@ impl SlabAllocator {
             .map_err(|e| BackendError::msg(format!("gpu_allocator::Allocator::new: {e}")))?;
         Ok(Self {
             inner: Arc::new(Inner {
-                device,
                 allocator: Mutex::new(allocator),
+                device,
             }),
         })
     }

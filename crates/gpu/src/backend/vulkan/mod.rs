@@ -585,6 +585,19 @@ mod tests {
             .any(|t| t.property_flags.contains(wanted))
     }
 
+    /// Buffers that outlive their backend free their memory on a live
+    /// device: the device and its instance are destroyed only after the
+    /// last buffer, and the allocator, are gone.
+    #[test]
+    fn vulkan_buffers_outlive_their_backend() {
+        let Some(backend) = test_backend() else { return };
+        let device = backend.alloc_device(4096).expect("alloc_device");
+        let host = backend.alloc_host_pinned(4096).expect("alloc_host_pinned");
+        drop(backend);
+        drop(device);
+        drop(host);
+    }
+
     #[test]
     fn vulkan_quiescent_host_access_excludes_submission() {
         let Some(backend) = backend() else { return };
