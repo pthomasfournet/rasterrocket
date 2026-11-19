@@ -8,13 +8,10 @@
 
 use super::{BackendError, Result};
 
-/// The 32-bit words of a kernel's status buffer.
-pub(crate) const STATUS_WORDS: usize = 5;
+include!("../../kernels/floor_div_params.rs");
 
 /// The bytes of a kernel's status buffer.
 pub(crate) const STATUS_BYTES: usize = STATUS_WORDS * 4;
-
-include!("../../kernels/floor_div_params.rs");
 
 /// The status words of the status buffer's bytes `bytes`, in the device's
 /// byte order, which is the host's.

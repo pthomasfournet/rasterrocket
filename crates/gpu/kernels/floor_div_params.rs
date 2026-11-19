@@ -1,3 +1,8 @@
+/// The 32-bit words of a kernel's status buffer
+/// (`crate::backend::kernel_status`); the macro `STATUS_WORDS`, which
+/// `kernels/floor_div.slang` requires to match the words it writes.
+pub(crate) const STATUS_WORDS: usize = 5;
+
 /// The correction steps the outline raster's floor division
 /// (`kernels/floor_div.slang`) takes in each direction.  Every Slang
 /// kernel is compiled with it as the macro `FLOOR_DIV_STEPS`.

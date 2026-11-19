@@ -4,7 +4,7 @@
 //
 // The includer defines STATUS_BINDING, the binding of set 0 the status
 // buffer takes, before including this file; the build defines
-// FLOOR_DIV_STEPS, FAULT_FLOOR_DIV and FAULT_FLOOR_DIV_WRAP
+// STATUS_WORDS, FLOOR_DIV_STEPS, FAULT_FLOOR_DIV and FAULT_FLOOR_DIV_WRAP
 // (kernels/floor_div_params.rs).
 //
 // Status words, zero before the dispatch:
@@ -21,6 +21,9 @@
 #endif
 #if !defined(FLOOR_DIV_STEPS) || !defined(FAULT_FLOOR_DIV) || !defined(FAULT_FLOOR_DIV_WRAP)
 #error "the build passes FLOOR_DIV_STEPS and the fault codes (kernels/floor_div_params.rs)"
+#endif
+#if !defined(STATUS_WORDS) || STATUS_WORDS != 5
+#error "the host's status buffer (STATUS_WORDS, kernels/floor_div_params.rs) is not the five words written below"
 #endif
 
 // |q * b - a| below which a quotient q is taken not to have wrapped: 2^62.

@@ -77,8 +77,9 @@ fn slang_source(kernel: &str) -> (&str, &'static [&'static str]) {
 
 /// The preprocessor macros every Slang kernel is compiled with, as
 /// `NAME=value`: the constants of `kernels/floor_div_params.rs`.
-fn slang_common_defines() -> [String; 3] {
+fn slang_common_defines() -> [String; 4] {
     [
+        format!("STATUS_WORDS={STATUS_WORDS}"),
         format!("FLOOR_DIV_STEPS={FLOOR_DIV_STEPS}"),
         format!("FAULT_FLOOR_DIV={FAULT_FLOOR_DIV}"),
         format!("FAULT_FLOOR_DIV_WRAP={FAULT_FLOOR_DIV_WRAP}"),
