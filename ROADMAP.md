@@ -3276,6 +3276,12 @@ empty hand back into the thread's slot, dropping the decoder for good; under
 `ForceCuda` that thread's later JPEG 2000 pages then decoded on the CPU without
 a word. A renderer holding no decoder now leaves the slot as it is.
 
+**Unreleased on master: a GPU page device whose opening panics has failed.**
+In an unwinding build a panic while a `gpu_pages` device opened left it
+"opening" for the rest of the session, so every page waited out the open
+deadline and was counted as "no device opened in time". The device is now
+settled as having no device, logged at `error`.
+
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one

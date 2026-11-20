@@ -264,7 +264,7 @@ impl<B: SessionDevice> Device<B> {
         let spawned = std::thread::Builder::new()
             .name("rrocket-gpu-pages".to_owned())
             .spawn(move || {
-                wake.settle(&slot, open_device::<B>(selector.as_deref()));
+                settle_opening(&wake, &slot, || open_device::<B>(selector.as_deref()));
             });
         *opener = match spawned {
             Ok(thread) => Opener::Running(thread),
@@ -280,6 +280,35 @@ impl<B: SessionDevice> Device<B> {
             }
         };
     }
+}
+
+/// Settle `slot` with the device `open` returns.  A panic in `open` settles
+/// it with no device as the stack unwinds, so the pages waiting see the
+/// device as failed rather than as opening until their wait runs out.
+fn settle_opening<B>(
+    openings: &Openings,
+    slot: &OnceLock<Option<Arc<B>>>,
+    open: impl FnOnce() -> Option<Arc<B>>,
+) {
+    /// Settles its slot with no device when dropped; a slot already
+    /// settled keeps its outcome.
+    struct Unsettled<'a, B> {
+        openings: &'a Openings,
+        slot: &'a OnceLock<Option<Arc<B>>>,
+    }
+    impl<B> Drop for Unsettled<'_, B> {
+        fn drop(&mut self) {
+            if self.slot.get().is_none() {
+                log::error!(
+                    "rasterrocket: GPU page rendering was requested, but opening its device \
+                     panicked; no page renders on it"
+                );
+                self.openings.settle(self.slot, None);
+            }
+        }
+    }
+    let guard = Unsettled { openings, slot };
+    guard.openings.settle(guard.slot, open());
 }
 
 /// The load of an open device: the pages holding it and its mean time
@@ -345,4 +374,36 @@ pub(crate) fn open_device<B: SessionDevice>(selector: Option<&str>) -> Option<Ar
             );
         })
         .ok()
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use std::sync::{Arc, OnceLock};
+
+    use super::{Openings, settle_opening};
+
+    /// An opening that panics settles its device as failed, so no page
+    /// waits on it as still opening.
+    #[test]
+    fn a_panicking_opening_settles_without_a_device() {
+        let openings = Arc::new(Openings::default());
+        let slot: Arc<OnceLock<Option<Arc<u8>>>> = Arc::new(OnceLock::new());
+        let opener = {
+            let (openings, slot) = (Arc::clone(&openings), Arc::clone(&slot));
+            std::thread::spawn(move || {
+                settle_opening(&openings, &slot, || panic!("the driver panicked"));
+            })
+        };
+        assert!(opener.join().is_err(), "the opening panics");
+        assert_eq!(slot.get(), Some(&None));
+    }
+
+    /// An opening that returns keeps its outcome.
+    #[test]
+    fn an_opening_keeps_its_device() {
+        let openings = Openings::default();
+        let slot = OnceLock::new();
+        settle_opening(&openings, &slot, || Some(Arc::new(7_u8)));
+        assert_eq!(slot.get(), Some(&Some(Arc::new(7))));
+    }
 }
