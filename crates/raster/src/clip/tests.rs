@@ -392,3 +392,24 @@ fn test_rect_accepts_i32_max_edges() {
         ClipResult::AllOutside
     );
 }
+
+/// A rectangle whose edges lie far past the `i32` range of device space
+/// saturates its integer bounds and contains no pixel near the origin.
+#[test]
+fn rect_beyond_the_i32_range_saturates_its_bounds() {
+    let far = 1e18;
+    let below = Clip::new(-far, -far, -far / 2.0, -far / 2.0, false);
+    assert_eq!(
+        (below.x_min_i, below.y_min_i, below.x_max_i, below.y_max_i),
+        (i32::MIN, i32::MIN, i32::MIN, i32::MIN)
+    );
+    assert!(!below.test(0, 0));
+    let mut clip = Clip::new(0.0, 0.0, 16.0, 16.0, false);
+    clip.clip_to_rect(-far, -far, -far / 2.0, -far / 2.0);
+    assert!(!clip.test(0, 0));
+    let above = Clip::new(far / 2.0, far / 2.0, far, far, false);
+    assert_eq!(
+        (above.x_min_i, above.y_min_i, above.x_max_i, above.y_max_i),
+        (i32::MAX, i32::MAX, i32::MAX - 1, i32::MAX - 1)
+    );
+}

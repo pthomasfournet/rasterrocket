@@ -226,11 +226,13 @@ impl Clip {
         self.recompute_int_bounds();
     }
 
+    /// The integer bounds of the rectangle; `ceil(max) - 1` saturates at
+    /// `i32::MIN` for an edge at or below it.
     fn recompute_int_bounds(&mut self) {
         self.x_min_i = floor_i32(self.x_min);
         self.y_min_i = floor_i32(self.y_min);
-        self.x_max_i = ceil_i32(self.x_max) - 1;
-        self.y_max_i = ceil_i32(self.y_max) - 1;
+        self.x_max_i = ceil_i32(self.x_max).saturating_sub(1);
+        self.y_max_i = ceil_i32(self.y_max).saturating_sub(1);
     }
 
     /// The path-clip regions, newest first, each with its identity: the

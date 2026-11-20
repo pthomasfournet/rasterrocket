@@ -69,8 +69,9 @@ Windows, and `--print` prints there through GDI.
 Rendering: TikZ circles and grids (a `moveto` after a lone `moveto` replaces
 it), every `x y m h` dot of a stroke, a segment after `h`, flatness capped at
 one device pixel, text above 65 535 pixels per em, coordinates past the
-rasteriser's fixed-point range, deeply nested Type 4 functions, a short last
-row under a PNG predictor, and tiling cells overprinted per pixel. Shadings
+rasteriser's fixed-point range, clip rectangles past the integer range,
+deeply nested Type 4 functions, a short last row under a PNG predictor, and
+tiling cells overprinted per pixel. Shadings
 whose function yields no colour are reported (`PageDiagnostics::
 shading_failures`) and fail the page under `--strict`.
 
@@ -3303,6 +3304,14 @@ the bound are now cut where they cross it, the rows beyond dropped and the
 columns beyond moved onto it, which leaves every pixel inside unchanged; both
 cases now match their scaled-down equivalents. A stroke so wide that its
 corners exceed f64 precision (`1e20 w` on a 10 pt segment) still collapses.
+
+**Released in v2.5.0: a clip rectangle past the integer range clips.** A clip
+rectangle whose right or bottom edge lay more than 2^31 device pixels before
+the origin (`0 1e12 100 100 re W n` on a 100 pt page) wrapped its last pixel
+column or row to the far end of the integer range, so it clipped nothing and
+`0 0 100 100 re f` under it filled the page. The bound now saturates and that
+page stays white; in-range clips are unchanged (370 fixture pages at 72 dpi
+gray, byte-identical).
 
 **Released in v2.5.0: a short last row under a PNG predictor is kept.** When a Flate or LZW stream with a PNG predictor ends partway through a row, that last row is now decoded as far as its bytes go instead of being thrown away. Bitmap glyphs written by the dvips route with PK fonts end this way, so they lost their bottom rows ("=" drew as "−"); they now draw whole. Other files render as before (the fixtures are byte-identical).
 
