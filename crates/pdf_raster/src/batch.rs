@@ -287,12 +287,12 @@ fn render_one_caught(
     )
 }
 
-/// The body of the [`render_channel`] rayon worker, with every panic site —
+/// The body of the [`render_channel`] thread, with every panic site —
 /// including session setup — inside a single `catch_unwind`.
 ///
 /// `open_session` is a deep parser entry point (decryption, xref repair,
 /// page-tree walks over adversarial input).  If it — or the page cursor —
-/// panicked *outside* the catch, the rayon closure would unwind, `tx` would
+/// panicked *outside* the catch, the thread would unwind, `tx` would
 /// drop, and the consumer would observe a silently closed channel with no
 /// `(page_num, Err)` ever delivered: total, undiagnosable page loss.  Catching
 /// here guarantees the contract documented on [`render_channel`]: a setup
@@ -309,6 +309,7 @@ fn render_one_caught(
 /// mutated through a shared reference.
 fn render_channel_worker(
     tx: &std::sync::mpsc::SyncSender<(u32, Result<RenderedPage, RasterError>)>,
+    pool: &rayon::ThreadPool,
     path: &std::path::Path,
     opts: RasterOptions,
 ) {
@@ -328,7 +329,10 @@ fn render_channel_worker(
         };
 
         while let Some(page_num) = state.next_in_range() {
-            let item = render_one_caught(&state, page_num);
+            // The page renders on the render pool, which runs nothing else:
+            // its parallel work (the deskew sweep) never waits on a worker
+            // held by a consumer, and no worker ever waits on a channel.
+            let item = pool.install(|| render_one_caught(&state, page_num));
             let cancelled = matches!(item.1, Err(RasterError::Cancelled));
             if tx.send(item).is_err() || cancelled {
                 return;
@@ -376,14 +380,70 @@ pub(crate) fn render_channel(
         return rx;
     }
 
+    let pool = match render_pool() {
+        Ok(pool) => pool,
+        Err(e) => {
+            let _sent = tx.send((1, Err(RasterError::BackendUnavailable(e.clone()))));
+            return rx;
+        }
+    };
+
     let path_owned = path.to_owned();
     let opts_owned = opts.clone();
+    let spawn_failure_tx = tx.clone();
 
-    rayon::spawn(move || {
-        render_channel_worker(&tx, &path_owned, opts_owned);
-    });
+    // The driver runs on a thread of its own, never on a rayon worker: it
+    // blocks in `send` while the channel is full, and a blocked worker can
+    // neither run the jobs queued behind it nor resume a render buried under
+    // a job it stole.  It submits each page to the render pool and waits
+    // for it there without stealing, since it is no worker of that pool.
+    let spawned = std::thread::Builder::new()
+        .name(CHANNEL_DRIVER_THREAD.to_owned())
+        .spawn(move || render_channel_worker(&tx, pool, &path_owned, opts_owned));
+    if let Err(e) = spawned {
+        let _sent = spawn_failure_tx.send((
+            1,
+            Err(RasterError::BackendUnavailable(format!(
+                "the render thread did not start: {e}"
+            ))),
+        ));
+    }
 
     rx
+}
+
+/// Name of the thread that drives one [`render_channel`] document.
+const CHANNEL_DRIVER_THREAD: &str = "rasterrocket-channel";
+
+/// The process-wide pool every [`render_channel`] page renders on, built
+/// on first use and never dropped, or why it could not be built.
+///
+/// Its workers run page renders and the parallel work inside them, nothing
+/// else: no caller's closure, so no worker is ever held by a consumer
+/// blocked on a channel, and a page render never waits on a channel.  It
+/// has as many threads as rayon's global pool has at its first use (read
+/// from a thread outside every pool, so it follows `RAYON_NUM_THREADS` or
+/// an embedder's `build_global`), fixed from then on, and is shared by
+/// every open channel.  The workers keep their thread-local GPU decoders
+/// across pages and documents for the life of the process; as the pool is
+/// never dropped, its threads never exit during process teardown.
+fn render_pool() -> Result<&'static rayon::ThreadPool, &'static String> {
+    static POOL: std::sync::OnceLock<Result<rayon::ThreadPool, String>> =
+        std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::scope(|scope| {
+            scope
+                .spawn(rayon::current_num_threads)
+                .join()
+                .unwrap_or_else(|_| rayon::current_num_threads())
+        });
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("rasterrocket-render-{i}"))
+            .build()
+            .map_err(|e| format!("the render thread pool did not start: {e}"))
+    })
+    .as_ref()
 }
 
 // ── Single-page render (gray + deskew, RGBA or CMYK) ──────────────────────────────────
@@ -412,6 +472,21 @@ mod channel_tests {
             last_page: 1,
             ..RasterOptions::default()
         }
+    }
+
+    /// The render pool has as many threads as the global pool, however
+    /// deep in another pool it is first asked for.
+    #[test]
+    fn the_render_pool_is_the_global_pools_size() {
+        let global = std::thread::spawn(rayon::current_num_threads)
+            .join()
+            .expect("global pool size");
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-thread pool");
+        let pool = one.install(|| render_pool().expect("render pool").current_num_threads());
+        assert_eq!(pool, global);
     }
 
     #[test]

@@ -1351,8 +1351,12 @@ generic over `SessionDevice`), held weakly: sessions open at once share
 it, the last of them to drop destroys it, and a `DeviceHold` of the
 configuration keeps it open across sessions.
 
-`render_channel` spawns a Rayon background task and feeds pages into a bounded
-`sync_channel`. Typical use: `capacity=4`, Tesseract consumes from the other end
+`render_channel` drives each document from a thread of its own
+(`rasterrocket-channel`) that feeds pages into a bounded `sync_channel` and is the
+only thread blocked when it is full. The pages render on a private Rayon pool
+(`rasterrocket-render-N`, built once, never dropped) shared by every channel and
+running nothing else, so a consumer on any pool cannot starve a render or its
+deskew sweep. Typical use: `capacity=4`, Tesseract consumes from the other end
 while the next page renders.
 
 ### 3.8 `hayro-jpeg2000` (`crates/jpeg2000`)

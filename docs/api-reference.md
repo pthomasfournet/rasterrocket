@@ -74,7 +74,9 @@ pub fn render_channel(
 ) -> std::sync::mpsc::Receiver<(u32, Result<RenderedPage, RasterError>)>
 ```
 
-Renders pages concurrently in a background Rayon task, streaming results through a bounded sync channel.
+Renders pages in ascending order, streaming results through a bounded sync channel.
+
+**Threads** — each call drives its document from a thread of its own (`rasterrocket-channel`), the only thread that waits on a full channel. Pages render on a private Rayon pool built on first use (`rasterrocket-render-N`, as many threads as Rayon's global pool has then, following `RAYON_NUM_THREADS` or an embedder's `build_global`, fixed from then on), shared by every open channel and running nothing else, the parallel work inside a page (the `deskew` sweep) included. The receiver may be drained anywhere, from inside any Rayon pool too, with any number of channels open; each channel renders one page at a time, and together they use at most the private pool's threads. Each open channel holds one OS thread, its open document and up to `capacity + 1` rendered pages until they are received, so memory grows with the number of channels open at once: drain or drop the channels you are not reading. The pool is never dropped; its workers keep their GPU decoders across documents for the life of the process, beyond the reach of `release_gpu_thread_state`.
 
 **`capacity`** — maximum number of rendered pages buffered before the producer blocks (natural backpressure). `capacity = 0` is silently raised to `1`. Use `2`–`8` for typical OCR pipelines.
 
@@ -83,6 +85,7 @@ Renders pages concurrently in a background Rayon task, streaming results through
 - Options validation failure → `(1, Err(RasterError::InvalidOptions(...)))`, channel closes.
 - File open failure → `(1, Err(RasterError::Pdf(...)))`, channel closes.
 - Forced backend unavailable (e.g. `PDF_RASTER_BACKEND=cuda` with no CUDA driver) → `(1, Err(RasterError::BackendUnavailable(...)))`, channel closes.
+- Render thread or render pool not started → `(1, Err(RasterError::BackendUnavailable(...)))`, channel closes.
 - Per-page failures → `(page_num, Err(...))`, remaining pages continue.
 - Per-page panic → `(page_num, Err(RasterError::RenderPanic { .. }))` and rendering continues, **only** in builds with `panic = "unwind"` (test profiles, or an embedder that overrides the workspace's `panic = "abort"` release profile). Under `panic = "abort"` a panicking page aborts the process.
 

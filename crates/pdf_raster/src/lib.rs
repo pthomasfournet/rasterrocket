@@ -52,9 +52,9 @@
 //!
 //! # Streaming: render and process pages in parallel
 //!
-//! For large documents, [`render_channel`] renders on a background rayon thread
-//! and sends pages as they complete, so downstream work (e.g. OCR) can start
-//! immediately rather than waiting for the full render:
+//! For large documents, [`render_channel`] renders on a background thread of
+//! its own and sends pages as they complete, so downstream work (e.g. OCR) can
+//! start immediately rather than waiting for the full render:
 //!
 //! ```rust,no_run
 //! use std::path::Path;
@@ -63,15 +63,9 @@
 //! // `rayon` is a transitive dependency of `rasterrocket`; add it explicitly
 //! // to your Cargo.toml only if you call rayon APIs directly: rayon = "1"
 //! //
-//! // The consumer `recv` loop MUST run on the calling thread (not inside a
-//! // `rayon::scope` or a worker closure): `render_channel`'s producer also
-//! // runs on rayon's global pool, so a recv loop inside a scope task could
-//! // deadlock if the pool fills with scope tasks all blocked on `recv`.
-//! //
-//! // `rayon::spawn` *inside* the recv-arm is safe — those tasks return
-//! // without blocking on recv themselves.  For non-CPU consumer work
-//! // (Tesseract OCR, disk I/O), prefer `std::thread::spawn` to keep the
-//! // rayon pool free for the renderer.
+//! // Pages render on a private pool of the library and never on a pool of
+//! // the caller, so the `recv` loop may run anywhere, inside a rayon pool
+//! // too.
 //! let mut opts = RasterOptions::new(300.0);
 //! opts.deskew = true;
 //! let rx = render_channel(Path::new("scan.pdf"), &opts, 4); // 4-page buffer
@@ -258,8 +252,11 @@ pub use request::{CancelToken, ColorModel, RenderParams, RenderRegion};
 /// last session to drop is released only once no thread holds a stream
 /// on it.  Each object is created again on the thread's next use.
 ///
-/// `raster_pdf` and `render_channel` do not call it: they do not own the
-/// pool they render on.
+/// `raster_pdf` does not call it: it does not own the pool it renders on.
+/// `render_channel` renders on a private pool that is never dropped: the
+/// GPU state of its threads lives for the process, is kept for later
+/// documents, and is not reached by this function; the threads never exit
+/// before the process does.
 ///
 /// # No-op builds
 ///
@@ -888,14 +885,35 @@ pub fn raster_pdf_from_bytes(
 
 /// Render a range of pages concurrently using a bounded sync channel.
 ///
-/// Spawns a background Rayon task that renders pages in ascending order and
-/// sends each `(page_num, Result<RenderedPage, RasterError>)` to the returned
-/// [`Receiver`](std::sync::mpsc::Receiver) as it completes.
+/// Spawns a background thread (named `rasterrocket-channel`) that renders
+/// pages in ascending order and sends each `(page_num, Result<RenderedPage,
+/// RasterError>)` to the returned [`Receiver`](std::sync::mpsc::Receiver) as
+/// it completes.
 ///
 /// `capacity` is the maximum number of rendered pages buffered before the
 /// producer blocks.  Use `2`–`8` for typical OCR pipelines (one page rendering
 /// while the previous is being OCR-processed).  `capacity = 0` is silently
-/// raised to `1`.
+/// raised to `1`.  Dropping the receiver stops the producer after the page
+/// it is rendering.
+///
+/// # Threads
+///
+/// Each call drives its document from a thread of its own
+/// (`rasterrocket-channel`), the only thread that waits on a full channel.
+/// Pages render on a private rayon pool built on first use
+/// (`rasterrocket-render-N`, as many threads as rayon's global pool has then,
+/// following `RAYON_NUM_THREADS` or an embedder's `build_global`, fixed from
+/// then on), which every open channel shares and which runs nothing else,
+/// the parallel work inside a page (the [`deskew`](RasterOptions::deskew)
+/// sweep) included.  The receiver may therefore be drained anywhere, from
+/// inside any rayon pool too, with any number of channels open; each channel
+/// renders one page at a time, and all of them together use at most the
+/// private pool's threads.
+///
+/// Each open channel holds one OS thread, its open document and up to
+/// `capacity + 1` rendered pages until they are received, so memory grows
+/// with the number of channels open at once: drain or drop the channels
+/// you are not reading.
 ///
 /// # Errors delivered through the channel
 ///
@@ -904,6 +922,8 @@ pub fn raster_pdf_from_bytes(
 /// - Forced backend unavailable (e.g. `PDF_RASTER_BACKEND=cuda` with no
 ///   CUDA driver) → `(1, Err(RasterError::BackendUnavailable(...)))`,
 ///   channel closes.
+/// - Render thread or render pool not started →
+///   `(1, Err(RasterError::BackendUnavailable(...)))`, channel closes.
 /// - Per-page render errors → `(page_num, Err(...))`, rendering of
 ///   subsequent pages continues.
 /// - Per-page panics → delivered as `(page_num, Err(RasterError::RenderPanic

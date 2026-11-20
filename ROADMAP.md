@@ -3255,6 +3255,20 @@ corners exceed f64 precision (`1e20 w` on a 10 pt segment) still collapses.
 
 **Unreleased on master: new AVX2 and AVX-512 tiers; comic pages on the thread pool.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. The AVX2 composite takes spans of 32 px and more (a remainder of one or two pixels goes to the scalar loop) and is at least level with the scalar loop at every length measured from 32 px up: on the i7-8700K 0.36 against 0.45 ns/px at 32 px, 0.26 against 0.39 at 128 px and 0.24 against 0.36 at 1920 px; on the Ryzen 9 9900X3D, timed as an AVX2-only build (`-C target-cpu=x86-64-v3`), 0.47 against 0.56, 0.18 against 0.27 and 0.12 against 0.20. Comic pages render on the thread pool.
 
+**Unreleased on master: `render_channel` never blocks a rayon worker.** Its
+producer ran as one job on rayon's global pool and waited in `send` on the
+bounded channel, so draining channels from inside the pool (a `par_iter` over
+as many documents as workers, or one channel under `RAYON_NUM_THREADS=1`) hung
+every time, and several deskewed channels drained in turn could hang when a
+page's angle sweep stole another document's producer. Each channel is now
+driven by a thread of its own (`rasterrocket-channel`), the only one waiting in
+`send`, and its pages render on a private pool (`rasterrocket-render-N`, sized
+as rayon's default, shared by every channel and running nothing else, deskew
+sweeps included), whose workers keep their GPU decoders across documents;
+ordering, backpressure, early stop on a dropped receiver and panic delivery
+are unchanged. `tests/render_channel_pool.rs` runs four cases under a
+deadline, among them deskewed channels drained by every global-pool worker.
+
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one

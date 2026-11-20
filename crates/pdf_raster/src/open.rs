@@ -309,7 +309,7 @@ pub fn prescan_session(
 }
 
 // Compile-time assertions: RasterSession must be Sync (shared across rayon threads) and
-// Send (moved into the rayon::spawn closure in render_channel).
+// Send (moved to the render thread of render_channel).
 const _: fn() = || {
     const fn assert_sync<T: Sync>() {}
     const fn assert_send<T: Send>() {}
@@ -323,7 +323,7 @@ const _: fn() = || {
 /// per-page id resolution until the first render of each page — opening
 /// a 100 000-page document and rendering one page no longer pays for a
 /// full page-tree walk.  GPU context (AA/ICC) is initialised here; JPEG
-/// decoders are initialised lazily per rayon worker thread on first page
+/// decoders are initialised lazily per rendering thread on first page
 /// render.
 ///
 /// An encrypted document opens only with `config.decrypt_authorized`; its
