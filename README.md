@@ -37,7 +37,7 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 > comic-archive input, `raster_pdf_from_bytes`, `encode_for_gcv`, and every
 > fix since 1.0.1.
 
-## What's new on master (unreleased)
+## What's new in v2.5.0
 
 - **Direct3D 12 (Windows, opt-in).** `--backend d3d12` (`BackendPolicy::ForceD3d12`, `--features d3d12`) runs the ICC lookup table, the image cache and `--gpu-pages` (one adapter or `--gpu-devices`) on a Direct3D 12 adapter, byte-identical to the CPU at 8 and 16 bits; `--d3d12-device` picks the adapter. The build needs slangc 2026.20 and DXC 1.9.2609; see [Build](#build).
 - **CUDA and Vulkan on Windows.** The CUDA features (CUDA 13.4 or later with the Visual Studio 2026 Build Tools) and the `vulkan` feature (the LunarG SDK's slangc) build and run on Windows; a lost Vulkan device names a GPU timeout (TDR) as its likely cause there.
@@ -94,7 +94,7 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
   sessions; the NPP deskew's border follows the CPU's edge rule, its 16-bit
   bound stated as 8 levels of 65 535.
 
-The full list, with measurements and API changes, is in [ROADMAP.md](ROADMAP.md) under "Current status".
+The full list, with measurements and API changes, is in [ROADMAP.md](ROADMAP.md) under "Current status" ("Released in v2.5.0").
 
 ## What's new in v2.4.0
 

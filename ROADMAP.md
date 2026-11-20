@@ -35,7 +35,7 @@ Phase 5 is complete. The API exists and is integrated.
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
-**Direct3D 12 is new and has open items.** Windows only, unreleased: page read-back goes through a host copy (which dominated at 600 dpi before the word-at-a-time repack cut it about ninefold; not re-measured there), process start-up is about 0.17 s above Vulkan's, and it never ran on an Intel adapter. See Current status, "the Direct3D 12 backend".
+**Direct3D 12 is new and has open items.** Windows only, new in v2.5.0: page read-back goes through a host copy (which dominated at 600 dpi before the word-at-a-time repack cut it about ninefold; not re-measured there), process start-up is about 0.17 s above Vulkan's, and it never ran on an Intel adapter. See Current status, "the Direct3D 12 backend".
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -50,6 +50,52 @@ v1.2.0 and exists only as a pixel-diff reference baseline.
 ---
 
 ## Release history
+
+### v2.5.0 (November 2026)
+
+**Direct3D 12, GPU pages on several devices, CUDA and Vulkan on Windows,
+printing on Windows, transparent gray output, a hardening pass over
+concurrency, hostile input and numeric edges; the API changes in a few
+places.** `--backend d3d12` (`BackendPolicy::ForceD3d12`, `--features
+d3d12`) runs the ICC lookup table, the image cache and `--gpu-pages` on a
+Direct3D 12 adapter, byte-identical to `--backend cpu` at 8 and 16 bits,
+from the same Slang kernels as the Vulkan backend; its CI job runs on WARP
+under the debug layer. `--gpu-devices` spreads one session's GPU pages over
+several Vulkan devices or Direct3D 12 adapters; every page that may render on
+a device waits for it, and `RasterSession::device_page_counts()` says where
+each page went and why. The CUDA and Vulkan features build and run on
+Windows, and `--print` prints there through GDI.
+
+Rendering: TikZ circles and grids (a `moveto` after a lone `moveto` replaces
+it), every `x y m h` dot of a stroke, a segment after `h`, flatness capped at
+one device pixel, text above 65 535 pixels per em, coordinates past the
+rasteriser's fixed-point range, deeply nested Type 4 functions, a short last
+row under a PNG predictor, and tiling cells overprinted per pixel. Shadings
+whose function yields no colour are reported (`PageDiagnostics::
+shading_failures`) and fail the page under `--strict`.
+
+Hardening: an edge-case review of the CLI, the library's sessions, the GPU
+backends, the parser and the renderer fixed one hang (`render_channel`
+drained from inside a Rayon pool, now rendered on a private pool), a Vulkan
+use-after-free when a buffer outlived its backend, Vulkan devices reused
+after a failed wait, three parser inputs whose time or memory grew out of
+proportion to the file (a 10 MB file: 17 s and 2.6 GB before, 0.08 s and
+23 MB after), and RAM output left behind by an interrupted run.
+
+Speed: AVX2 tiers for the antialiased span composite and the deskew
+rotation, AVX-512 in the JPEG decoder, bilevel images kept as bits, function-
+based shadings evaluated only where they are read, and the GPU-page read-back
+repacked a word at a time.
+
+**API changes.** In `rasterrocket-render`, `PathBuilder::move_to` returns
+`()` and `PathError::BogusPath` is removed. `DevicePageCounts` gains
+`device_limit` (and `DevicePage::DeviceLimit`), `PageDiagnostics` gains
+`shading_failures` and `has_omissions()`, `RasterError` gains
+`ShadingFailed`, `ScriptLocation` gains `FieldActions`, and `GpuBackend`
+gains `max_binding_bytes` and `refuse_lost`. New: `RasterOptions::gray_alpha`,
+`render_page_gray_alpha`, `PageBuffer::render_gray_alpha_into`,
+`SessionConfig::gpu_devices`. Every change is under Current status,
+"Released in v2.5.0".
 
 ### v2.4.1 (November 2026)
 
@@ -2864,7 +2910,7 @@ Vector output (PostScript, SVG or PDF) and dynamic XFA forms: rasterrocket rende
 **Status: in progress; what exists shipped in v2.1.0.** The four fax layers are on
 master (2026-11-01), with `--jpeg` and `--jpegopt` (colour or
 gray), and printing through CUPS (2026-11-04); printing
-through GDI on Windows is on master, unreleased (2026-11-18).
+through GDI on Windows shipped in v2.5.0.
 
 **Printing through the OS spooler.** No device or driver code of our own.
 **Done on Linux and macOS:** `rrocket --print [--printer NAME] [--copies N]
@@ -2882,7 +2928,7 @@ resolution, landscape pages are turned, and the page images round-trip
 pixel-exact. `--list-printers` lists the CUPS queues (`lpstat -e`), the
 default one marked. **Untested:** printing from macOS, and any physical printer
 (back-side orientation under `--duplex`, `--copies` on a printer without copy
-support). **Done on Windows (unreleased):** GDI printing, with
+support). **Done on Windows (v2.5.0):** GDI printing, with
 `--print-file` for printers that print to a file (see Current status).
 **Not done:** PDF pass-through to IPP printers on Windows, and Windows fax.
 
@@ -3169,45 +3215,45 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
-**Unreleased on master: a Vulkan buffer may outlive its backend.** A device or host buffer dropped after its `VulkanBackend` (a cached image held past the cache and session that owned the backend, say) crashed the process: the buffer held the last reference to the device, which was destroyed before the allocator returned its memory. The allocator now frees its memory first; a device test drops both buffer kinds after their backend.
+**Released in v2.5.0: a Vulkan buffer may outlive its backend.** A device or host buffer dropped after its `VulkanBackend` (a cached image held past the cache and session that owned the backend, say) crashed the process: the buffer held the last reference to the device, which was destroyed before the allocator returned its memory. The allocator now frees its memory first; a device test drops both buffer kinds after their backend.
 
-**Unreleased on master: Vulkan ICC conversions and blits bind only what they address.** The pooled scratch of the ICC grid conversion and the image blit grows to the largest conversion seen, and each dispatch bound the whole buffer. Once it grew past the device's `maxStorageBufferRange` (2^27 bytes on some devices, e.g. llvmpipe: a 16-bit conversion of 9 MP then 16 MP), every later conversion that reused it failed with `DeviceLimit` and fell back to the CPU, small ones included. Dispatches now bind the bytes the kernel addresses, and reused buffers stop growing at the device's binding limit (`GpuBackend::max_binding_bytes`, new; unbounded except on Vulkan).
+**Released in v2.5.0: Vulkan ICC conversions and blits bind only what they address.** The pooled scratch of the ICC grid conversion and the image blit grows to the largest conversion seen, and each dispatch bound the whole buffer. Once it grew past the device's `maxStorageBufferRange` (2^27 bytes on some devices, e.g. llvmpipe: a 16-bit conversion of 9 MP then 16 MP), every later conversion that reused it failed with `DeviceLimit` and fell back to the CPU, small ones included. Dispatches now bind the bytes the kernel addresses, and reused buffers stop growing at the device's binding limit (`GpuBackend::max_binding_bytes`, new; unbounded except on Vulkan).
 
-**Unreleased on master: the host tier of the image cache counts a replaced entry once.** Two threads inserting one image into the host tier at once (two pages promoting it from the disk tier) both charged its bytes, and the replaced copy was never uncharged, so the tier's usage drifted upward for the rest of the session and it evicted ever more. An insertion now uncharges the entry it displaces.
+**Released in v2.5.0: the host tier of the image cache counts a replaced entry once.** Two threads inserting one image into the host tier at once (two pages promoting it from the disk tier) both charged its bytes, and the replaced copy was never uncharged, so the tier's usage drifted upward for the rest of the session and it evicted ever more. An insertion now uncharges the entry it displaces.
 
-**Unreleased on master: the Vulkan pipeline cache is kept per device and written atomically.** One file served every device, so with two GPUs the last to close overwrote the other's cache, and it was rewritten in place, so a concurrent run or a kill mid-write could leave a torn file. Each device now has its own file, named by vendor, device, driver version and cache UUID (`$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache-<vendor>-<device>-<driver>-<uuid>.bin`), written to a temporary file and renamed over it, and a file whose header does not name the device is not passed to the driver. The old shared `vulkan_pipeline_cache.bin` is removed at start-up, as are temporary files a killed writer left behind an hour or more ago.
+**Released in v2.5.0: the Vulkan pipeline cache is kept per device and written atomically.** One file served every device, so with two GPUs the last to close overwrote the other's cache, and it was rewritten in place, so a concurrent run or a kill mid-write could leave a torn file. Each device now has its own file, named by vendor, device, driver version and cache UUID (`$XDG_CACHE_HOME/rasterrocket/vulkan_pipeline_cache-<vendor>-<device>-<driver>-<uuid>.bin`), written to a temporary file and renamed over it, and a file whose header does not name the device is not passed to the driver. The old shared `vulkan_pipeline_cache.bin` is removed at start-up, as are temporary files a killed writer left behind an hour or more ago.
 
-**Unreleased on master: a Vulkan device whose work cannot be confirmed complete is retired.** A failed wait on a page, a transfer or the device left the backend accepting pages and reusing the command buffers and buffers the unfinished work might still use. The device is now marked lost: it refuses further pages, transfers and allocations, host data is not staged into buffers the unfinished work may use, ICC conversions stop offering it images, buffers freed meanwhile are leaked rather than released, and a backend dropped without a confirmed drain, or after leaking a buffer, leaks its device rather than destroy it under running work, as the Direct3D 12 backend does. Successful runs are unchanged.
+**Released in v2.5.0: a Vulkan device whose work cannot be confirmed complete is retired.** A failed wait on a page, a transfer or the device left the backend accepting pages and reusing the command buffers and buffers the unfinished work might still use. The device is now marked lost: it refuses further pages, transfers and allocations, host data is not staged into buffers the unfinished work may use, ICC conversions stop offering it images, buffers freed meanwhile are leaked rather than released, and a backend dropped without a confirmed drain, or after leaking a buffer, leaks its device rather than destroy it under running work, as the Direct3D 12 backend does. Successful runs are unchanged.
 
-**Unreleased on master: a device-limit decline is not summarised as a failure.** A GPU page beyond a device's limits or the memory it has left (`BackendError::DeviceLimit`, `OutOfMemory`) renders on the CPU and keeps the device in service, but was counted and reported as `device failed`. It now has its own category: `DevicePageCounts::device_limit` (`device limit: N` in the `GPU pages:` summary) and `DevicePage::DeviceLimit`; `failed` and `DevicePage::Failed` keep the errors that retire a device. API: new public field and enum variant (both types are `#[non_exhaustive]`).
+**Released in v2.5.0: a device-limit decline is not summarised as a failure.** A GPU page beyond a device's limits or the memory it has left (`BackendError::DeviceLimit`, `OutOfMemory`) renders on the CPU and keeps the device in service, but was counted and reported as `device failed`. It now has its own category: `DevicePageCounts::device_limit` (`device limit: N` in the `GPU pages:` summary) and `DevicePage::DeviceLimit`; `failed` and `DevicePage::Failed` keep the errors that retire a device. API: new public field and enum variant (both types are `#[non_exhaustive]`).
 
-**Unreleased on master: a banded page is counted off the GPU.** Under `gpu_pages` (`--gpu-pages`) a page larger than one band (`SessionConfig::band_bytes`, `--band-mib`) renders in bands on the CPU, as before, but was neither logged nor counted, so a one-page run printed no `GPU pages:` summary. It is now counted as ineligible, `"larger than one band"`, in `DevicePageCounts::ineligible` and `PageDiagnostics::device_page`, logged per page at `debug`, and the first such page of a session warns, naming the band size and `--band-mib`. corpus-04 p271 at 600 dpi on Vulkan: `GPU pages: 0 on the device, 1 on the CPU (larger than one band: 1)`.
+**Released in v2.5.0: a banded page is counted off the GPU.** Under `gpu_pages` (`--gpu-pages`) a page larger than one band (`SessionConfig::band_bytes`, `--band-mib`) renders in bands on the CPU, as before, but was neither logged nor counted, so a one-page run printed no `GPU pages:` summary. It is now counted as ineligible, `"larger than one band"`, in `DevicePageCounts::ineligible` and `PageDiagnostics::device_page`, logged per page at `debug`, and the first such page of a session warns, naming the band size and `--band-mib`. corpus-04 p271 at 600 dpi on Vulkan: `GPU pages: 0 on the device, 1 on the CPU (larger than one band: 1)`.
 
-**Unreleased on master: the pixel-diff registry re-checked.** `compare.sh` over all 3024 fixture pages (150 dpi, pdftoppm): 3000 pass, the 24 registered divergences fail as registered, nothing unexpected and nothing registered passes. RMSE does not separate them (passing pages 0–40, divergences 5–21), so the default stays tile-judged with `-t none`.
+**Released in v2.5.0: the pixel-diff registry re-checked.** `compare.sh` over all 3024 fixture pages (150 dpi, pdftoppm): 3000 pass, the 24 registered divergences fail as registered, nothing unexpected and nothing registered passes. RMSE does not separate them (passing pages 0–40, divergences 5–21), so the default stays tile-judged with `-t none`.
 
-**Unreleased on master: a `gpu-deskew` or `nvjpeg2k` build opens `ForceCuda` sessions.** A build whose only CUDA feature was `gpu-deskew` (or `nvjpeg2k`, whose decoder `ForceCuda` attaches) refused `BackendPolicy::ForceCuda` (`--backend cuda`) as uncompiled, so its NPP rotation could not run. It now opens the session and rotates on the device, a missing device failing the page loudly. A device test (`gpu_deskew_page_buffer`, skipped without a CUDA device unless `PDF_RASTER_REQUIRE_CUDA=1`) deskews a skewed page into a reused `PageBuffer` twice: both renders and the owned `render_page_gray` are byte-identical, and the page is within the NPP bound of the CPU deskew (RTX 2080 SUPER: 1 level at 8 bits, 4 of 65 535 at 16).
+**Released in v2.5.0: a `gpu-deskew` or `nvjpeg2k` build opens `ForceCuda` sessions.** A build whose only CUDA feature was `gpu-deskew` (or `nvjpeg2k`, whose decoder `ForceCuda` attaches) refused `BackendPolicy::ForceCuda` (`--backend cuda`) as uncompiled, so its NPP rotation could not run. It now opens the session and rotates on the device, a missing device failing the page loudly. A device test (`gpu_deskew_page_buffer`, skipped without a CUDA device unless `PDF_RASTER_REQUIRE_CUDA=1`) deskews a skewed page into a reused `PageBuffer` twice: both renders and the owned `render_page_gray` are byte-identical, and the page is within the NPP bound of the CPU deskew (RTX 2080 SUPER: 1 level at 8 bits, 4 of 65 535 at 16).
 
-**Unreleased on master: scripts on parent form fields are reported.** A form field's keystroke, format, validate and calculate scripts can sit on a parent field rather than on the widget drawn on the page. The JavaScript report now walks the field hierarchy: the `/AcroForm /Fields` tree through `/Kids` (new document location `ScriptLocation::FormFields`) and, per page, each widget's `/Parent` chain (new page location `ScriptLocation::FieldActions { index }`), at most 64 levels, each object once, so a cyclic hierarchy ends. Rendering is unchanged.
+**Released in v2.5.0: scripts on parent form fields are reported.** A form field's keystroke, format, validate and calculate scripts can sit on a parent field rather than on the widget drawn on the page. The JavaScript report now walks the field hierarchy: the `/AcroForm /Fields` tree through `/Kids` (new document location `ScriptLocation::FormFields`) and, per page, each widget's `/Parent` chain (new page location `ScriptLocation::FieldActions { index }`), at most 64 levels, each object once, so a cyclic hierarchy ends. Rendering is unchanged.
 
-**Unreleased on master: deeply nested Type 4 functions; skipped shadings are reported.** A Type 4 (PostScript calculator) function nested more than 64 procedures deep was refused, so its shading was not drawn and nothing but a log line said so. Typst writes one nested `ifelse` per gradient stop, and its conic gradients with many stops disappeared. Programs are now parsed, costed and run without recursion, so nesting is limited only by the 100 000-token limit that already applied. A shading left out because its function gives no colour is listed in the new `PageDiagnostics::shading_failures`, and fails its page under `--strict` (`RasterError::ShadingFailed`).
+**Released in v2.5.0: deeply nested Type 4 functions; skipped shadings are reported.** A Type 4 (PostScript calculator) function nested more than 64 procedures deep was refused, so its shading was not drawn and nothing but a log line said so. Typst writes one nested `ifelse` per gradient stop, and its conic gradients with many stops disappeared. Programs are now parsed, costed and run without recursion, so nesting is limited only by the 100 000-token limit that already applied. A shading left out because its function gives no colour is listed in the new `PageDiagnostics::shading_failures`, and fails its page under `--strict` (`RasterError::ShadingFailed`).
 
-**Unreleased on master: the GPU page read-back repacks a word at a time.** Dropping the pad byte of each device pixel copied three bytes a pixel through a copy whose length the compiler did not see, about 2.6 ms a 150 dpi page on the RTX 5070 and 5.5 ms on the RTX 2080 SUPER; four pixels (two at 16 bits) now pack into three words, 0.3 ms and 1.0 ms. The ICC CLUT read-back shares the copy. corpus-04, first 64 pages at 150 dpi, one driving thread, whole process: Vulkan 541 → 394 ms, Direct3D 12 739 → 580 ms on the RTX 5070; `rrocket --backend vulkan --gpu-pages` on the RTX 2080 SUPER (Linux) 458 → 399 ms median (12 alternating rounds) against 374 ms before the word layout, the rest mostly the larger page copy (1.29 ms against 0.95 ms a page over its PCIe 3 link; 0.17 ms on the RTX 5070). Pages unchanged.
+**Released in v2.5.0: the GPU page read-back repacks a word at a time.** Dropping the pad byte of each device pixel copied three bytes a pixel through a copy whose length the compiler did not see, about 2.6 ms a 150 dpi page on the RTX 5070 and 5.5 ms on the RTX 2080 SUPER; four pixels (two at 16 bits) now pack into three words, 0.3 ms and 1.0 ms. The ICC CLUT read-back shares the copy. corpus-04, first 64 pages at 150 dpi, one driving thread, whole process: Vulkan 541 → 394 ms, Direct3D 12 739 → 580 ms on the RTX 5070; `rrocket --backend vulkan --gpu-pages` on the RTX 2080 SUPER (Linux) 458 → 399 ms median (12 alternating rounds) against 374 ms before the word layout, the rest mostly the larger page copy (1.29 ms against 0.95 ms a page over its PCIe 3 link; 0.17 ms on the RTX 5070). Pages unchanged.
 
-**Unreleased on master: parser hardening against resource amplification.** A stream whose `/Length` misses `endstream` and that has no terminator of its own now ends before the next object's `N G obj` header once that object's own `stream` or `endobj` follows it, rather than running on to a terminator later in the file (header text inside a body, such as a string `(1 0 obj)`, does not end it): K such streams sharing one `endstream` cost time and memory quadratic in K (5 MB file, 256 streams: 4.3 s and 652 MB resident before, 0.04 s and 13 MB after), and the repair scan now finds the objects that follow such a stream. Decoded object streams are cached under a 256 MiB aggregate budget, least recently used first out (four 256 MiB containers from a 1 MB file: 2.09 GB retained before, 268 MB after); evicted containers are decoded again for at most 1 GiB, past which an evicted container is an error (two 200 MiB containers read in alternation, 500 lookups: 71 s of re-decoding without the allowance, 1.4 s with it), and a container that fails to open is cached as that failure and decoded outside the cache lock (20 lookups into one failing 256 MiB container: 6.9 s before, 0.64 s after). A member whose xref index is wrong is found through a per-container map built once, not a directory search per lookup (200 000 members, every index 0: 8.2 s before, 0.07 s after). `ASCII85Decode` data opening with the PostScript `<~` decodes; it decoded to nothing, unreported. A malformed number in an object (`612.0.`, `--5`) has the value of its longest well-formed prefix, as in content streams; it ended its array there (`/MediaBox [0 0 612.0. 792]` read as `[0 0]`).
-**Unreleased on master: a late Ctrl-C under `--print` on Windows no longer claims to abort a job it prints.** An interrupt after `main`'s last check printed "aborting the print job", yet `EndDoc` still handed the whole job to the spooler and rrocket exited 0. The run's state now moves once, to interrupted or to committed, the job committing just before `EndDoc`: an earlier interrupt aborts it, a later one says the job is already with the spooler. Not yet run on Windows.
+**Released in v2.5.0: parser hardening against resource amplification.** A stream whose `/Length` misses `endstream` and that has no terminator of its own now ends before the next object's `N G obj` header once that object's own `stream` or `endobj` follows it, rather than running on to a terminator later in the file (header text inside a body, such as a string `(1 0 obj)`, does not end it): K such streams sharing one `endstream` cost time and memory quadratic in K (5 MB file, 256 streams: 4.3 s and 652 MB resident before, 0.04 s and 13 MB after), and the repair scan now finds the objects that follow such a stream. Decoded object streams are cached under a 256 MiB aggregate budget, least recently used first out (four 256 MiB containers from a 1 MB file: 2.09 GB retained before, 268 MB after); evicted containers are decoded again for at most 1 GiB, past which an evicted container is an error (two 200 MiB containers read in alternation, 500 lookups: 71 s of re-decoding without the allowance, 1.4 s with it), and a container that fails to open is cached as that failure and decoded outside the cache lock (20 lookups into one failing 256 MiB container: 6.9 s before, 0.64 s after). A member whose xref index is wrong is found through a per-container map built once, not a directory search per lookup (200 000 members, every index 0: 8.2 s before, 0.07 s after). `ASCII85Decode` data opening with the PostScript `<~` decodes; it decoded to nothing, unreported. A malformed number in an object (`612.0.`, `--5`) has the value of its longest well-formed prefix, as in content streams; it ended its array there (`/MediaBox [0 0 612.0. 792]` read as `[0 0]`).
+**Released in v2.5.0: a late Ctrl-C under `--print` on Windows no longer claims to abort a job it prints.** An interrupt after `main`'s last check printed "aborting the print job", yet `EndDoc` still handed the whole job to the spooler and rrocket exited 0. The run's state now moves once, to interrupted or to committed, the job committing just before `EndDoc`: an earlier interrupt aborts it, a later one says the job is already with the spooler. Not yet run on Windows.
 
-**Unreleased on master: RAM output spills when its file system fills.** The spill to disk watched only the available memory, but `/dev/shm` is capped at half the memory by default, so a long run filled it with gigabytes of memory to spare and every later page failed with "No space left on device". The policy now also reads the RAM file system's free space (`statvfs`) and spills once it would not hold one page per render thread (the largest page so far) plus 64 MiB; a page whose write still finds the file system full is written again on disk, and every later page with it.
+**Released in v2.5.0: RAM output spills when its file system fills.** The spill to disk watched only the available memory, but `/dev/shm` is capped at half the memory by default, so a long run filled it with gigabytes of memory to spare and every later page failed with "No space left on device". The policy now also reads the RAM file system's free space (`statvfs`) and spills once it would not hold one page per render thread (the largest page so far) plus 64 MiB; a page whose write still finds the file system full is written again on disk, and every later page with it.
 
-**Unreleased on master: an interrupted run removes its RAM output.** Ctrl-C, `SIGTERM` and `SIGHUP` (on Windows the console's events, formerly caught only under `--print`) now stop a run as a failed page does: no further page is begun, the pages rendering finish, the RAM directory is removed and rrocket exits with status 1; a second Ctrl-C ends it at once. Before, every interrupt left the `/dev/shm` directory and its pages in RAM until reboot. A closed standard output no longer aborts the run (status 134) when the RAM directory's name is written to it, nor does a closed standard error on a diagnostic. Page files are written as `<name>.part` and renamed once complete, so no truncated page bears a page's name. A panic still ends the process without removing the directory. The ordered
+**Released in v2.5.0: an interrupted run removes its RAM output.** Ctrl-C, `SIGTERM` and `SIGHUP` (on Windows the console's events, formerly caught only under `--print`) now stop a run as a failed page does: no further page is begun, the pages rendering finish, the RAM directory is removed and rrocket exits with status 1; a second Ctrl-C ends it at once. Before, every interrupt left the `/dev/shm` directory and its pages in RAM until reboot. A closed standard output no longer aborts the run (status 134) when the RAM directory's name is written to it, nor does a closed standard error on a diagnostic. Page files are written as `<name>.part` and renamed once complete, so no truncated page bears a page's name. A panic still ends the process without removing the directory. The ordered
 pool that drives comic and `--print` pages checked for cancellation only
 between pages, so under `--print` a page finishing as an interrupt landed was
 still spooled; it now checks before reporting each page.
 
-**Unreleased on master: `--forcenum` takes 1 to 10.** A width above 65 535 ended the run with a panic on the first page (and left a RAM output directory behind); `--forcenum` is now refused outside 1–10 when the arguments are parsed, a page number having at most 10 digits.
+**Released in v2.5.0: `--forcenum` takes 1 to 10.** A width above 65 535 ended the run with a panic on the first page (and left a RAM output directory behind); `--forcenum` is now refused outside 1–10 when the arguments are parsed, a page number having at most 10 digits.
 
-**Unreleased on master: a function-based shading is evaluated only where it is read.** A Type 1 shading sampled its function at every lattice point of its Domain on the page, whatever the clip, the painted path or the rendered window. It now evaluates only the lattice points that interpolate a pixel of the clip (`sh`) or of the painted object (a shading pattern), within the window; the lattice itself is unchanged, so every pixel is byte-identical (all pages of the LaTeX study corpus at 150 dpi, with crops, 1 MiB bands, 16-bit, CMYK, gray and 300 dpi on the TikZ pages, and the first 30 pages of every fixture). A memoised shading is resolved again, for the whole page, when a later use reads past its region. One thread, 150 dpi, median of 7: the PGF TikZ page 195 → 167 ms, its LuaLaTeX build 165 → 106 ms, and a 280-pixel strip below the shadings 111 → 18 ms.
+**Released in v2.5.0: a function-based shading is evaluated only where it is read.** A Type 1 shading sampled its function at every lattice point of its Domain on the page, whatever the clip, the painted path or the rendered window. It now evaluates only the lattice points that interpolate a pixel of the clip (`sh`) or of the painted object (a shading pattern), within the window; the lattice itself is unchanged, so every pixel is byte-identical (all pages of the LaTeX study corpus at 150 dpi, with crops, 1 MiB bands, 16-bit, CMYK, gray and 300 dpi on the TikZ pages, and the first 30 pages of every fixture). A memoised shading is resolved again, for the whole page, when a later use reads past its region. One thread, 150 dpi, median of 7: the PGF TikZ page 195 → 167 ms, its LuaLaTeX build 165 → 106 ms, and a 280-pixel strip below the shadings 111 → 18 ms.
 
-**Unreleased on master: a moveto right after a moveto replaces it.** A path
+**Released in v2.5.0: a moveto right after a moveto replaces it.** A path
 `m` that directly follows another `m` now moves the start of the new subpath,
 as the PDF specification says; before, the second `m` was dropped and the
 path started at the first point. TikZ draws every `circle` and `grid` this
@@ -3216,13 +3262,13 @@ before `re` misdrew the rectangle the same way. API change in
 `rasterrocket-render`: `PathBuilder::move_to` returns `()` and
 `PathError::BogusPath` is removed.
 
-**Unreleased on master: every `x y m h` dot of one stroke is drawn.** A closed
+**Released in v2.5.0: every `x y m h` dot of one stroke is drawn.** A closed
 one-point subpath lost its closed flag when the stroker flattened the path, so
 the next `m` replaced it: of several round-capped dots in one `S` only the last
 was drawn, and a dot followed by a line vanished. A closed dot is now kept as
 its own subpath; only a lone, unclosed `m` is replaced.
 
-**Unreleased on master: a segment after `h` starts at the closed subpath's
+**Released in v2.5.0: a segment after `h` starts at the closed subpath's
 start.** An `l`, `c`, `v` or `y` right after a closepath was dropped, since the
 path had no current point; as the PDF specification says, it now begins a new
 subpath at the first point of the subpath just closed (`… h 90 90 l S` draws its
@@ -3230,21 +3276,21 @@ line, and a dot `20 20 m h` followed by `80 80 l` draws both). API in
 `rasterrocket-render`: `Path::closed_subpath_start`, and
 `PathBuilder::cur_pt` returns that point after a close.
 
-**Unreleased on master: the flatness tolerance is capped at one device
+**Released in v2.5.0: the flatness tolerance is capped at one device
 pixel.** The `i` operand and `/FL` were bounded only from below, so a legal
 `50 i` reduced every curve shorter than about 50 pixels to its chord (a 40 pt
 circle at 72 dpi painted nothing). Curves are now flattened to within
 `clamp(flatness, 0.1, 1.0)` device pixels; the first 30 pages of every fixture
 render byte-identically (their `1 i` is at the cap).
 
-**Unreleased on master: text over 65 535 pixels per em is drawn.** A face whose
+**Released in v2.5.0: text over 65 535 pixels per em is drawn.** A face whose
 em spanned more than 65 535 device pixels failed to load, so very large text
 (posters at high resolution, deep crops) vanished. Such glyphs are already
 filled as paths; the face now loads with its nominal size held at 65 535, and
 its outlines follow the full matrix. `LoadError::DegenerateSize` now means a
 non-finite matrix or a size below one pixel.
 
-**Unreleased on master: coordinates past 2^44 device pixels keep their
+**Released in v2.5.0: coordinates past 2^44 device pixels keep their
 slopes.** The rasteriser's fixed-point coordinates are bounded at 2^44 pixels,
 and each coordinate was clamped on its own, so a far vertex moved and the edges
 through the page changed slope: a triangle with a vertex at 2e15 painted 4950
@@ -3254,11 +3300,11 @@ columns beyond moved onto it, which leaves every pixel inside unchanged; both
 cases now match their scaled-down equivalents. A stroke so wide that its
 corners exceed f64 precision (`1e20 w` on a 10 pt segment) still collapses.
 
-**Unreleased on master: a short last row under a PNG predictor is kept.** When a Flate or LZW stream with a PNG predictor ends partway through a row, that last row is now decoded as far as its bytes go instead of being thrown away. Bitmap glyphs written by the dvips route with PK fonts end this way, so they lost their bottom rows ("=" drew as "−"); they now draw whole. Other files render as before (the fixtures are byte-identical).
+**Released in v2.5.0: a short last row under a PNG predictor is kept.** When a Flate or LZW stream with a PNG predictor ends partway through a row, that last row is now decoded as far as its bytes go instead of being thrown away. Bitmap glyphs written by the dvips route with PK fonts end this way, so they lost their bottom rows ("=" drew as "−"); they now draw whole. Other files render as before (the fixtures are byte-identical).
 
-**Unreleased on master: new AVX2 and AVX-512 tiers; comic pages on the thread pool.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. The AVX2 composite takes spans of 32 px and more (a remainder of one or two pixels goes to the scalar loop) and is at least level with the scalar loop at every length measured from 32 px up: on the i7-8700K 0.36 against 0.45 ns/px at 32 px, 0.26 against 0.39 at 128 px and 0.24 against 0.36 at 1920 px; on the Ryzen 9 9900X3D, timed as an AVX2-only build (`-C target-cpu=x86-64-v3`), 0.47 against 0.56, 0.18 against 0.27 and 0.12 against 0.20. Comic pages render on the thread pool.
+**Released in v2.5.0: new AVX2 and AVX-512 tiers; comic pages on the thread pool.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. The AVX2 composite takes spans of 32 px and more (a remainder of one or two pixels goes to the scalar loop) and is at least level with the scalar loop at every length measured from 32 px up: on the i7-8700K 0.36 against 0.45 ns/px at 32 px, 0.26 against 0.39 at 128 px and 0.24 against 0.36 at 1920 px; on the Ryzen 9 9900X3D, timed as an AVX2-only build (`-C target-cpu=x86-64-v3`), 0.47 against 0.56, 0.18 against 0.27 and 0.12 against 0.20. Comic pages render on the thread pool.
 
-**Unreleased on master: `render_channel` never blocks a rayon worker.** Its
+**Released in v2.5.0: `render_channel` never blocks a rayon worker.** Its
 producer ran as one job on rayon's global pool and waited in `send` on the
 bounded channel, so draining channels from inside the pool (a `par_iter` over
 as many documents as workers, or one channel under `RAYON_NUM_THREADS=1`) hung
@@ -3272,25 +3318,25 @@ ordering, backpressure, early stop on a dropped receiver and panic delivery
 are unchanged. `tests/render_channel_pool.rs` runs four cases under a
 deadline, among them deskewed channels drained by every global-pool worker.
 
-**Unreleased on master: a text-only page keeps the thread's GPU decoders.**
+**Released in v2.5.0: a text-only page keeps the thread's GPU decoders.**
 A page rendered `CpuOnly` (the CLI so marks every page without images) is lent
 no nvJPEG or nvJPEG2000 decoder, but on its way out it wrote the renderer's
 empty hand back into the thread's slot, dropping the decoder for good; under
 `ForceCuda` that thread's later JPEG 2000 pages then decoded on the CPU without
 a word. A renderer holding no decoder now leaves the slot as it is.
 
-**Unreleased on master: a GPU page device whose opening panics has failed.**
+**Released in v2.5.0: a GPU page device whose opening panics has failed.**
 In an unwinding build a panic while a `gpu_pages` device opened left it
 "opening" for the rest of the session, so every page waited out the open
 deadline and was counted as "no device opened in time". The device is now
 settled as having no device, logged at `error`.
 
-**Unreleased on master: `device_page_counts` is one snapshot.** A rendered
+**Released in v2.5.0: `device_page_counts` is one snapshot.** A rendered
 page bumped `DevicePageCounts::rendered` and its device's count separately, so
 a snapshot taken while pages rendered could hold a `rendered` one above the sum
 of `by_device`. Both are now counted, and read, under one lock.
 
-**Unreleased on master: one backend per GPU, however it is named.** The
+**Released in v2.5.0: one backend per GPU, however it is named.** The
 process-wide Vulkan and Direct3D 12 backends were keyed by the selector
 string, so two live sessions naming one GPU differently (the automatically
 ranked device, its index from `gpu_devices`, its name) each opened a logical
@@ -3300,7 +3346,7 @@ a session finds the live backend of that device under any name; the
 automatically ranked device is known only once opened, and a second backend
 opened for it is dropped for the live one.
 
-**Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
+**Released in v2.5.0: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one
 adapter or `--gpu-devices`) on a Direct3D 12 adapter, byte-identical to the
@@ -3348,7 +3394,7 @@ Open on Direct3D 12:
   tests and the page and ICC parity suites ran under the layer on WARP and
   the RTX 5070 without a validation error; the fixture corpus has not.
 
-**Unreleased on master: `rrocket --backend d3d12`.** The CLI gains the
+**Released in v2.5.0: `rrocket --backend d3d12`.** The CLI gains the
 `d3d12` feature (forwarded to `rasterrocket`), `--backend d3d12`
 (`BackendPolicy::ForceD3d12`) and `--d3d12-device INDEX|NAME|warp`, which
 reaches `SessionConfig::d3d12_device`; `PDF_RASTER_D3D12_DEVICE` is read only
@@ -3361,7 +3407,7 @@ feature-missing errors are per host: a Windows build without the feature names
 `--gpu-pages` refusal reads the same way, and the open-error hint names
 `PDF_RASTER_BACKEND=d3d12` when the policy came from the environment.
 
-**Unreleased on master: where GPU pages went.** A `--gpu-pages` session
+**Released in v2.5.0: where GPU pages went.** A `--gpu-pages` session
 counts every page under the place it rendered and why:
 `RasterSession::device_page_counts()` (`vulkan` feature) returns a
 `DevicePageCounts` of pages the device rendered, pages ineligible by reason,
@@ -3373,7 +3419,7 @@ counts at `info` when it drops (`rasterrocket: GPU pages: 121 on the device,
 and each page sent to the CPU logs why at `debug`. Before, a page that
 found the device busy or not yet open went to the CPU without a log line.
 
-**Unreleased on master: the NPP deskew's border follows the CPU's.** NPP
+**Released in v2.5.0: the NPP deskew's border follows the CPU's.** NPP
 interpolates a destination pixel whose source position lies half a pixel
 before the source's first row or column, where the CPU rotation paints
 white, and leaves white one whose position lies past the last, where the
@@ -3395,7 +3441,7 @@ so the GPU rotation is not byte-identical to the CPU's, as every other GPU
 path is; that would take a CUDA kernel of the CPU's arithmetic in place of
 NPP.
 
-**Unreleased on master: a failed `PageBuffer` render keeps its canvas.**
+**Released in v2.5.0: a failed `PageBuffer` render keeps its canvas.**
 A render cancelled, stopped by its operator budget or deadline, refused a
 bitmap the drawing needs, or failed by a strict session returns the page
 canvas's storage to the `PageBuffer` instead of dropping it, so the next
@@ -3404,7 +3450,7 @@ finished bitmap the allocator refuses is still released.
 `PageRenderer::into_buffers` in `rasterrocket-interp` returns an unfinished
 renderer's storage.
 
-**Unreleased on master: gray and alpha over a transparent backdrop.**
+**Released in v2.5.0: gray and alpha over a transparent backdrop.**
 `--transparent --gray`, refused before, writes a gray and alpha PNG (colour
 type 4) or TIFF (a gray and an unassociated-alpha sample, `ExtraSamples` 2)
 at 8 or 16 bits, and `--transparent` under a gray `--output-profile`, also
@@ -3426,7 +3472,7 @@ an alpha plane is stored under them, and `write_png` writes a gray
 bitmap's alpha plane. `RowLayout` is exhaustive, so a match on it needs the
 new arms.
 
-**Unreleased on master: tiling cells overprint per pixel.** Under
+**Released in v2.5.0: tiling cells overprint per pixel.** Under
 `--overprint`, a coloured tiling pattern on an ink page wrote, at every
 pixel of its tile, the union of the channels its cell's paints wrote, so
 a cell that painted black alone under overprint in one place and cyan in
@@ -3445,7 +3491,7 @@ before. Group composites still paint every colorant (ISO 32000-1 Table
 archive PDFs that set `OP`, the one coloured-pattern page among them
 included, render byte-identical to before in all three modes.
 
-**Unreleased on master: bilevel images kept as bits.** A `CCITTFaxDecode`
+**Released in v2.5.0: bilevel images kept as bits.** A `CCITTFaxDecode`
 or `JBIG2Decode` image decodes to `ImageData::Bilevel`, one bit a sample
 with its two sample values, instead of a byte a pixel (a 600 dpi page is
 1.4 MB instead of 11 MB), and a reduced draw resamples it from the bits.
@@ -3458,7 +3504,7 @@ image's bits and their expansion, which the document and page image
 caches charge. The pattern memo charges a tiling cell its painted-channels
 plane (`Bitmap::heap_bytes`).
 
-**Unreleased on master: GPU pages wait for the device.** Every page that
+**Released in v2.5.0: GPU pages wait for the device.** Every page that
 may render on the device now does: its thread waits for the device to open
 (at most 30 s a page, then the page renders on the CPU with one warning;
 the wait is now the session's: see below) and for
@@ -3499,7 +3545,7 @@ beats the CPU (724 vs 793 ms). Making pages wait for a free place while
 keeping two places (measured, dropped) was the slowest option: the two
 held pages record serially (corpus-07 300 dpi, 1687 ms). Defaults stay CPU.
 
-**Unreleased on master: GPU pages on several devices.**
+**Released in v2.5.0: GPU pages on several devices.**
 `SessionConfig::gpu_devices` / `rrocket --gpu-devices LIST|all` spreads the
 GPU pages of one session over several Vulkan devices: selectors in the
 `--vulkan-device` syntax, or `all` for every usable GPU (llvmpipe and other
@@ -3555,7 +3601,7 @@ H100-class cards and their Vulkan driver, more than two devices, many
 devices of one kind, 80 GB pages, and a CUDA twin of the page raster (there
 is none; the page raster runs on Vulkan and, on Windows, Direct3D 12).
 
-**Unreleased on master: CUDA on Windows.** The CUDA features (`nvjpeg`,
+**Released in v2.5.0: CUDA on Windows.** The CUDA features (`nvjpeg`,
 `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`) build and run on Windows.
 `crates/gpu/build.rs` takes nvcc and the import libraries from
 `%CUDA_PATH%` (`bin\nvcc.exe`, `lib\x64`), finds MSVC's `cl.exe` for nvcc
@@ -3581,7 +3627,7 @@ nvJPEG2000 0.11, differs the same way; with `PDF_RASTER_JPX_THRESHOLD`
 above every image the pages are identical). `--deskew` on the scans
 (`corpus-08`–`10`, 1 456 pages) differs by at most 1 level, on 738 pages.
 
-**Unreleased on master: Vulkan on Windows.** The `vulkan` feature builds and
+**Released in v2.5.0: Vulkan on Windows.** The `vulkan` feature builds and
 runs on Windows. `crates/gpu/build.rs` runs `SLANGC`, else the LunarG
 SDK's slangc (`$VULKAN_SDK/bin/slangc`, `%VULKAN_SDK%\Bin\slangc.exe`),
 else `slangc` from `PATH`; before, only `SLANGC` or `PATH`, which a shell
@@ -3611,7 +3657,7 @@ The machine's Intel UHD 630 had driver 26.20.100.7642 (January 2020),
 which reports Vulkan 1.1; the backend needs 1.3, so the device was listed
 as unusable and skipped (see the UHD 630 entry below).
 
-**Unreleased on master: Vulkan on an Intel GPU (UHD 630, Windows).** With
+**Released in v2.5.0: Vulkan on an Intel GPU (UHD 630, Windows).** With
 Intel's driver 31.0.101.2141 (Vulkan 1.3.215) the i7-8700K's UHD 630 is
 usable, the first Intel GPU tested. It has `shaderInt64` (paths kernel),
 32 KiB of shared memory, subgroups of 8 to 32 and one 16 GB device-local
@@ -3636,7 +3682,7 @@ in 16 bits, `corpus-06` page 2 (3 188 commands) and `corpus-02` page 3
 device lost, each whole process under 3 s on the device (CPU fallbacks
 up to 6 s), so no submission needs splitting.
 
-**Unreleased on master: `--print` on Windows.** `--print`, `--printer`,
+**Released in v2.5.0: `--print` on Windows.** `--print`, `--printer`,
 `--copies`, `--duplex` and `--list-printers` work on Windows, through GDI
 with `windows-sys` and no feature flag: `EnumPrintersW` and
 `GetDefaultPrinterW` list the printers; the driver's DEVMODE
@@ -3676,7 +3722,7 @@ and runs them. Untested: any physical printer on Windows (driver copies,
 duplex, back sides); PDF pass-through to IPP printers is not built (a spike
 on calling it from an unpackaged process comes first).
 
-**Unreleased on master: Windows printing follow-ups.** Replayed copies
+**Released in v2.5.0: Windows printing follow-ups.** Replayed copies
 under `--duplex` close a copy of an odd number of pages with a blank back,
 so the next copy starts on a sheet of its own. Ctrl-C, Ctrl-Break and the
 console closing are caught: no further page is begun, the job is aborted
@@ -3701,7 +3747,7 @@ carries a `SelectionFailure` kind beside its message; the gpu build script
 runs every tool through one helper that reports its output, takes non-UTF-8
 paths, and says when `CUDA_PATH` is unset.
 
-**Unreleased on master: a benchmark of Linux against Windows on one machine.**
+**Released in v2.5.0: a benchmark of Linux against Windows on one machine.**
 `os_bench` (in `crates/bench`) and its two drivers, `tests/compare/os_bench.sh`
 and `tests/compare/os_bench.ps1`, run the same rows on both systems of a
 dual-boot machine and separate process start-up, per-page file cost and
@@ -3728,7 +3774,7 @@ Vulkan one behind `GpuBackend`. Exactness rests on the same integer kernels:
 devices without them. Not planned before a machine that needs it is found;
 any such backend stays opt-in and byte-identical to the CPU, like the others.
 
-**Unreleased on master: nvJPEG2000 declines the codestreams it fails on.**
+**Released in v2.5.0: nvJPEG2000 declines the codestreams it fails on.**
 Of the decoder's 217 test streams, 45 passed the device's header checks and
 then failed on nvJPEG2000 0.12 (RTX 2080 SUPER, Linux, CUDA 13.5), each
 costing a device round trip and a CPU decode, with a warning every time.
@@ -3754,7 +3800,7 @@ device and requires each taken one to decode equal; of the synthetic
 variants only two corrupt ones (a bad stuff bit, an overflowing tile-part
 index, both declined in their SOP form) still fail on the device.
 
-**Unreleased on master: nvJPEG2000 declines the 9-7 wavelet at 8 bits
+**Released in v2.5.0: nvJPEG2000 declines the 9-7 wavelet at 8 bits
 too.** The device's header checks took 8-bit codestreams under the
 irreversible 9-7 wavelet, and nvJPEG2000 0.11 reconstructs them up to one
 level apart from the CPU decoder: every one of `corpus-10`'s 1 148
@@ -3774,7 +3820,7 @@ not decode on both paths, most failing on the device, POC, PPM, PPT and
 SOP among them, and decode on the CPU after a warning, as before); it also
 reads `corpus-10`'s codestreams, all declined. Verified on the RTX 5070 only.
 
-**Unreleased on master: an attached nvJPEG2000 decoder declines reduced
+**Released in v2.5.0: an attached nvJPEG2000 decoder declines reduced
 draws.** Under `--backend cuda` the attached decoder was offered every
 `JPXDecode` draw, including one at half the image's size or less on both
 axes, which the CPU decoder decodes at a reduced resolution level: the
@@ -3794,7 +3840,7 @@ decodes (872 pages; 361 device decodes in each mode), and on
 `corpus-10`'s first 64 pages at 300 dpi, whose 9-7 images are declined.
 Verified on the RTX 5070 only.
 
-**Unreleased on master: one session-wide, cancellable wait for a GPU page
+**Released in v2.5.0: one session-wide, cancellable wait for a GPU page
 device.** The 30 s wait for a device to open was computed per page, so with
 a device that never opened every qualifying page waited the full 30 s, and
 it ignored the page's cancel token. The deadline is now the session's, set
@@ -3808,7 +3854,7 @@ opening when the wait ended. Dropping a session still joins the threads
 opening its devices without a bound; one still opening is logged at `warn`
 before the join.
 
-**Unreleased on master: GPU page devices are chosen by a recent mean.** A
+**Released in v2.5.0: GPU page devices are chosen by a recent mean.** A
 device's expected wait used its lifetime mean over every `run_page`: ICC
 conversions, image blits, the one-time ICC probe, failed runs and the cold
 first run with the driver's first dispatch, so one slow first run starved a
@@ -3819,7 +3865,7 @@ first excluded, kept in one atomic so a reader never sees a time without
 its count. A page still claims its device before recording, since what it
 records depends on the device.
 
-**Unreleased on master: out of device memory is a page-sized failure.** A
+**Released in v2.5.0: out of device memory is a page-sized failure.** A
 failed Vulkan allocation came back as a generic error, and the GPU page
 queue retired the device on anything but `DeviceLimit`, so a page whose
 buffers did not fit beside the three buffer sets of the page raster took
@@ -3836,7 +3882,7 @@ packed length; either is now an error naming the page's size, depth and
 stride (reachable only by direct callers of the gpu crate, since sessions
 bound pages by `max_page_bytes`).
 
-**Unreleased on master: a `DeviceHold` opens the session's own device
+**Released in v2.5.0: a `DeviceHold` opens the session's own device
 once.** Under `--backend vulkan` with `gpu_devices`, a session reuses its
 own backend for the list entry naming its device, but `DeviceHold::open`
 opened every entry through the registry, keyed by selector, so the
@@ -3845,7 +3891,7 @@ session's device was opened a second time under its index (`None` against
 Session and hold now share `forced_backends`, which reuses the session's
 backend for its own device, and the hold holds the backend it opened once.
 
-**Unreleased on master: the 16-bit NPP deskew bound is 8 levels.** The
+**Released in v2.5.0: the 16-bit NPP deskew bound is 8 levels.** The
 bound the module documented for the NPP rotation at 16 bits, 2 × 257
 levels, and the device test's 2 levels were both below the difference
 measured on a real scan (`corpus-09` page 3: 7 levels of 65 535). The bound
@@ -3857,14 +3903,14 @@ temporary `Vec`, and the CPU border pass keeps a row's four column spans in a
 fixed array, not a `Vec` allocated per row (up to 32 768 a page). The AVX2
 and AVX-512 gather kernels share one `GatherGeometry`.
 
-**Unreleased on master: `PageDiagnostics::has_omissions`.** `has_omissions()`
+**Released in v2.5.0: `PageDiagnostics::has_omissions`.** `has_omissions()`
 is `true` when a page was drawn with something left out or substituted: a
 skipped image or content stream, a form past the depth limit, a font that
 resolved to nothing or an unsupported feature (the five lists
 `image_failures`, `content_failures`, `forms_too_deep`, `missing_fonts` and
 `unsupported_features`; a partial entry counts).
 
-**Unreleased on master: comic input reports progress, and its errors say
+**Released in v2.5.0: comic input reports progress, and its errors say
 what failed.** `--progress` and `--timings` now report comic pages as they
 report PDF pages (the per-page line and the ETA arithmetic moved into
 `progress::PageLog`, shared by both paths, the ETA a tested function). A
@@ -3876,7 +3922,7 @@ driver are one ordered, bounded `pool::run_in_order`, whose ordering, bound,
 stop and unwind behaviour are tested on it, and `pool::RenderPool` releases
 every worker's GPU thread state when it drops.
 
-**Unreleased on master: JPEG fixes in the local `zune-jpeg` fork.** A
+**Released in v2.5.0: JPEG fixes in the local `zune-jpeg` fork.** A
 progressive refinement correction bit read past a marker, inside an
 end-of-band run, was an uncounted zero, so a block short of its last
 correction was reported intact; all three successive-approximation
@@ -3892,7 +3938,7 @@ samples through one `join16` and the crate builds without its default
 features, the composite tiers share one `BLOCK_PX`, and two fork
 documentation comments (JBIG2, text shaper) were reworded.
 
-**Unreleased on master: GPU pages store whole-word pixels.** The
+**Released in v2.5.0: GPU pages store whole-word pixels.** The
 `--gpu-pages` raster writes each pixel in whole 32-bit words, one word
 (`r | g << 8 | b << 16`) at 8 bits and two (`r | g << 16`, then `b`) at
 16, the bytes past the third sample zero, and the host drops those bytes
@@ -3917,7 +3963,7 @@ between 0.89 and 1.01 a fixture except `corpus-04` (mixed text and
 images), 1.09 in alternating runs (19 ms on 64 pages); that cost is not
 yet attributed.
 
-**Unreleased on master: the ICC lookup-table and image-blit kernels read
+**Released in v2.5.0: the ICC lookup-table and image-blit kernels read
 and write whole words.** The grid CMYK → RGB kernel (`icc_clut`, CUDA and
 Vulkan) reads each CMYK pixel as one 32-bit word and writes each RGB
 pixel as one word (`r | g << 8 | b << 16`) at 8 bits or two (`r | g <<
@@ -3948,7 +3994,7 @@ in `rasterrocket-gpu`:
   `unpad_pixels`) is a new public module, hidden from the documentation,
   for the crate's own integration tests and bench binary.
 
-**Unreleased on master: the page raster is a `PageDevice` trait.** The
+**Released in v2.5.0: the page raster is a `PageDevice` trait.** The
 whole-page raster moves off `VulkanBackend`'s inherent methods onto a
 sealed trait, `backend::page_device::PageDevice`, which `VulkanBackend`
 implements; the checks, push constants, inputs and read-back of a page are
@@ -3967,13 +4013,13 @@ API changes in `rasterrocket-gpu` (callers bring the trait into scope):
   `PageDevice` (was `&VulkanBackend`); `rasterrocket`'s GPU page queue is
   generic over it the same way.
 
-**Unreleased on master: Vulkan devices without 8-bit storage are
+**Released in v2.5.0: Vulkan devices without 8-bit storage are
 eligible.** The Vulkan device no longer requests `storageBuffer8BitAccess`,
 `uniformAndStorageBuffer8BitAccess` or `shaderInt8`, since no kernel
 declares the matching capabilities: a Vulkan 1.3 device without 8-bit
 storage is now eligible.
 
-**Unreleased on master: the GPU outline raster reports an inexact
+**Released in v2.5.0: the GPU outline raster reports an inexact
 division.** The `--gpu-pages` outline raster divides 64-bit integers by
 two single-precision estimates of the quotient and corrects the
 remainder; both estimates are now `precise`, so a compiler may not
@@ -4005,7 +4051,7 @@ Pages stay byte-identical to `--backend cpu`. Verified on the RTX 5070
 (parity suite over the fixtures at 8 and 16 bits), and the division
 tests also on the AMD Raphael iGPU (RADV) and llvmpipe.
 
-**Unreleased on master: the GPU kernels compile to DXIL.** The GPU crate's
+**Released in v2.5.0: the GPU kernels compile to DXIL.** The GPU crate's
 new `d3d12` feature compiles every Slang kernel to DXIL at build time, on
 any host that runs both pinned compilers (DXC publishes Linux x86-64 and
 Windows builds only; elsewhere it is built from source), in two steps:
@@ -4025,7 +4071,7 @@ SPIR-V module carries an `FPFastMathMode` decoration. No render path
 loaded the DXIL at this step. Install commands for Linux and Windows are in the README's
 [Build](README.md#build) section.
 
-**Unreleased on master: D3D12 adapter selection and device creation.** On
+**Released in v2.5.0: D3D12 adapter selection and device creation.** On
 Windows, the `d3d12` feature's `D3d12Backend` opens a DXGI adapter with a
 device at feature level 11_0 and one compute queue; it dispatched no kernel
 at this step. Adapters are listed by DXGI's high-performance order, then the WARP
@@ -4043,7 +4089,7 @@ A device-removed, hung or reset error names the likely TDR cause and the
 removal reason. Selection is tested on any host; the RTX 5070, the AMD
 Radeon iGPU and WARP open on Windows 11.
 
-**Unreleased on master: D3D12 buffers, recorder and root signatures behind
+**Released in v2.5.0: D3D12 buffers, recorder and root signatures behind
 `GpuBackend`.** `D3d12Backend` implements `GpuBackend`; no render path used
 it at this step. Device buffers are committed resources in the DEFAULT heap with
 unordered access, sized to whole 32-bit words and created without zeroing
@@ -4065,7 +4111,7 @@ on. `detect_vram_budget` reads `QueryVideoMemoryInfo` of the local segment.
 The smoke tests pass on WARP, the RTX 5070 and the AMD Radeon iGPU on
 Windows 11.
 
-**Unreleased on master: the image blit and the device image cache on
+**Released in v2.5.0: the image blit and the device image cache on
 D3D12.** `D3d12Backend` records `blit_image` (the source and both sampling
 tables as structured-buffer SRVs, the RGBA8 target as a UAV, ten root
 constants, one 16 × 16 thread group per tile of the bounding box) and
@@ -4078,7 +4124,7 @@ match the CPU reference byte for byte, and the cache's device tests pass,
 on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU on
 Windows 11.
 
-**Unreleased on master: the page raster on D3D12.** `D3d12Backend`
+**Released in v2.5.0: the page raster on D3D12.** `D3d12Backend`
 implements `PageDevice`: a page's inputs are staged into persistently mapped
 UPLOAD buffers, copied, rasterised and copied into a READBACK buffer by one
 command list, with one fence wait per page, three buffer sets kept between
@@ -4096,7 +4142,7 @@ adapter. The page tests shared with Vulkan pass at 8
 and 16 bits on the pinned WARP 1.0.22, the RTX 5070 and the AMD Radeon iGPU
 on Windows 11.
 
-**Unreleased on master: `BackendPolicy::ForceD3d12`, with ICC conversion on
+**Released in v2.5.0: `BackendPolicy::ForceD3d12`, with ICC conversion on
 Direct3D 12.** `rasterrocket` and `rasterrocket-interp` gain a `d3d12`
 feature. `BackendPolicy` gains `ForceD3d12` (`d3d12` in `FromStr`, `name()`
 and `PDF_RASTER_BACKEND`); the enum is `#[non_exhaustive]`, so the variant is
@@ -4124,7 +4170,7 @@ the CLI entry below). The ICC parity test passes at 8 and 16 bits, in sRGB and
 the wide working space, on the RTX 5070, the AMD Radeon iGPU and the pinned
 WARP 1.0.22 on Windows 11.
 
-**Unreleased on master: image blits and the device image cache in D3D12
+**Released in v2.5.0: image blits and the device image cache in D3D12
 sessions.** With `cache`, a `ForceD3d12` session builds its device image
 cache on the adapter (`ImageCache::D3d12`, `CachedImage::D3d12`; the VRAM
 budget the adapter reports, the disk tier under `PDF_RASTER_CACHE_DIR`), and
@@ -4137,7 +4183,7 @@ cached for a 16-bit canvas, and a 16-bit canvas never takes the device blit.
 iGPU and the pinned WARP 1.0.22 on Windows 11, and the Vulkan cases on the
 RTX 2080 SUPER on Ubuntu.
 
-**Unreleased on master: GPU pages and GPU page devices on D3D12 adapters.**
+**Released in v2.5.0: GPU pages and GPU page devices on D3D12 adapters.**
 `SessionConfig::gpu_pages` is accepted under `ForceD3d12` in a Windows build
 with `d3d12` (`check_gpu_pages` now names `--backend auto`, `vulkan` and
 `d3d12` when it refuses a backend): qualifying pages render whole on the

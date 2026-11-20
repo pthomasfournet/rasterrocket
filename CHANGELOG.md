@@ -2,11 +2,303 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.0] - 2026-11-20
+
+### Bug Fixes
+
+- The NPP rotation's border follows the CPU's edge rule
+- A failed PageBuffer render keeps its canvas
+- Tiling cells overprint the channels painted at each pixel
+- A failed nvcc or slangc reports its stdout as well as its stderr
+- The shared CUDA driver bindings compile only with gpu-deskew or nvjpeg2k
+- Initialise the CUDA runtime once, retrying a transient code 35
+- NvJPEG2000 declines the irreversible 9-7 wavelet at 8 bits too
+- An attached nvJPEG2000 decoder declines draws the CPU decodes reduced
+- Find slangc in the Vulkan SDK, so the Vulkan feature builds on Windows
+- The Vulkan feature passes clippy off Linux
+- Comic page-selection and pool failures no longer read as a malformed archive
+- --progress and --timings report comic pages too
+- A refinement correction bit past a marker is a counted fill bit
+- One AVX-512 gate with an opt-out; the colour kernel is an unsafe fn
+- One session-wide wait for a GPU page device to open, cancellable
+- Choose GPU page devices by a recent mean of their page rasters
+- A DeviceHold opens the session's own GPU page device once
+- Out of device memory is a page-sized failure, not a lost device
+- Warn before the unbounded join of a device still opening; one allocation per pick
+- One stated 16-bit NPP bound that covers the measured one; one copy of the NPP output
+- Checked size arithmetic in the page raster's bounds
+- A bilevel image whose bytes cannot be allocated stays bilevel and names that cause
+- Image caches charge a bilevel image its bits and its byte expansion
+- A bilevel stencil under /Decode [1 0] complements its two values
+- Bitmap clears reset the painted-channels plane and conversions keep it
+- The pattern memo charges a cell its painted-channels plane
+- Refuse output-profile conflicts once, before any page renders
+- Assert that no group or soft-mask canvas is swapped in when a renderer gives up its storage
+- Replayed two-sided copies start each copy on a sheet of its own
+- Windows --print refuses --output-profile and --depth 16
+- An interrupted Windows print job is aborted and its file removed
+- Every merged DEVMODE of a Windows job is checked
+- Readers of a spilled PdfPage read by position
+- A printer name that is not valid UTF-16 is logged
+- A failed CUDA runtime initialisation is retried by a later call
+- NvJPEG2000 declines a reduced draw before it decodes
+- Windows prints reshaped pages unscaled-up and centres on the sheet
+- Stretched Windows print bands overlap and are clipped
+- Os_bench failure-path tests, diagnostics count, deskew flag conflicts
+- Os_bench process rows: marker-guarded output dirs, explicit spill dir, shared RAM path, parser tests
+- Os_bench summarize: rerun.tsv precedence, threads-aware file cost, narrow f64 cast, tests, docs
+- Os_bench summarize: one S-version per directory, matched by group and row
+- Os_bench.sh: dedicated tmpfs RAM root, THP and RUSTFLAGS checks, signal flag
+- Os_bench.sh: CARGO_BUILD_RUSTFLAGS guard, HOME rewrite guard, header wrap
+- Os_bench.ps1: normal-priority task, waiter end states, redaction
+- Os_bench.ps1: refuse a launch over a running task, redact the machine name
+- Layout helpers check their domain, and tests share the unpad walk
+- Invariant violations report the sizes they compare
+- Pad bytes of device buffers are zero on every backend; the cache charges the padded slab
+- Floor_div divides precisely, bounds its correction and reports a fault through a status word
+- Floor_div rejects a wrapped quotient; one source for its step count
+- A kernel fault retires the GPU page device
+- A wrapped floor_div product has its own fault code
+- One predicate decides whether a page carries the status buffer
+- The ICC conversion checks its width's pixel bound before staging
+- A page device stays in service on DeviceLimit and OutOfMemory
+- A D3D12 adapter index naming WARP is refused
+- D3D12 pages keep their resources until their own fence completes
+- A D3D12 page whose own fence cannot be waited on is stranded
+- WARP's listed index selects it, so device indices round-trip as selectors
+- The device copy's bandwidth counts the device page bytes
+- ICC CLUT conversions above one dispatch convert in runs
+- GPU-page refusal names Direct3D 12 on Windows only
+- A lost recorder refuses pages before staging; drop leaks under doubt
+- Debug-layer validation errors fail the page that raised them
+- The injected validation-error test runs alone
+- Decode a partial final row under a PNG predictor
+- A partial final predictor row logs at debug
+- A moveto after a lone moveto replaces its point
+- Type 4 functions nest without a depth cap
+- Report shadings whose function yields no colour
+- Log a shading's real cause once, with its page
+- Report scripts on parent form fields
+- A gpu-deskew build opens ForceCuda sessions
+- An nvjpeg2k build opens ForceCuda sessions too
+- Count a banded page as declined by the GPU pages
+- Count device-limit declines apart from failures
+- NvJPEG2000 declines the codestreams it fails on
+- An nvJPEG2000 decode failure warns once per kind
+- A run cancelled by a job never reports that job
+- Bound --forcenum to 1..=10 digits
+- An interrupted run removes its RAM output
+- Spill RAM output when its file system fills
+- A late interrupt never prints a job it claimed to abort
+- Free Vulkan allocator memory before the device is destroyed
+- Bind the addressed range of Vulkan ICC and blit buffers
+- Uncharge the host-tier entry an insert displaces
+- Keep the Vulkan pipeline cache per device, replaced by rename
+- Retire a Vulkan device whose work cannot be confirmed complete
+- A closed one-point subpath survives curve flattening
+- Cap the flatness tolerance at one device pixel
+- Load faces larger than 65 535 pixels per em
+- Cut segments at the fixed-point limits instead of clamping
+- A segment after closepath starts at the closed subpath's start
+- End a stream body without terminator at the next object
+- Bound the object-stream cache and cache failed opens
+- Find object-stream members by a map when the index is wrong
+- Skip a leading <~ in ASCII85Decode data
+- Read a malformed number token by its well-formed prefix
+- Render_channel never blocks a rayon worker
+- A CPU-only page keeps the thread's GPU decoders
+- A panicking GPU page device opening settles as failed
+- Device page counts agree with their per-device breakdown
+- One GPU backend per device, however it is named
+
+### Chores
+
+- Allow DXC's -Fo and PowerShell's -ccontains; spell out a column header
+- Allow JPEG 2000's Psot
+- Parked D3D12 review minors
+
+### Documentation
+
+- Point the pinning example at v2.4.1 and name v2.4.0 where README said after v2.3.0
+- GPU pages on several devices, and whether recording keeps them busy
+- CUDA on Windows, built and tested on the RTX 2080 SUPER
+- Vulkan on Windows, built and tested on the RTX 2080 SUPER
+- Printing on Windows through GDI and --print-file
+- Vulkan on the Intel UHD 630 under Windows, tested
+- The renderer packs PageBitmap rows into a bilevel image
+- State the AAT class-count bound without naming another shaper
+- Describe has_omissions, the comic CLI fixes, the zune-jpeg fixes and the GPU-pages and deskew fixes
+- Gray+alpha PageBuffer entry, alpha-keeping gray conversions, profile checks, bilevel memory accounting
+- The Windows printing follow-ups in README, ROADMAP and the platform guide
+- The Linux/Windows benchmark harness, and its RAM-disk row deferred
+- Lead with what rasterrocket does, not with the libraries it does not use
+- Describe the CLI and release notes on their own terms in README, CLI README and Cargo metadata
+- State rrocket's own flag and CMYK behaviour without naming other tools
+- Describe shipped behaviour and history without naming other tools outside measurements
+- Drop a competitor name from a deferred-items note
+- State the deskew design's own goals instead of a comparison that was never measured
+- An OpenGL compute backend, as a nice-to-have
+- GPU pages store whole-word pixels
+- Intra-doc links resolve under every feature set
+- The GPU outline raster reports an inexact division as a kernel fault
+- The 8-bit storage entry carries the Unreleased marker; the removal test clears set features
+- The word layout's API changes and its UHD 630 page limits
+- Drop the 'any host' DXIL claim from the d3d12 feature note and the gate date from the UHD 630 text
+- The word layout's parity and timing on the RTX 5070 and RTX 2080 SUPER
+- The device-init module and page scheduler paths in the architecture notes
+- The Direct3D 12 backend
+- The Direct3D 12 notes name only what was measured
+- Delete the stale in-repo wiki copies and link the GitHub wiki
+- README opening, unreleased notes, hardware rows and competitor-name sweep
+- Crate READMEs, bench README, getting-started and platform guides match the current backends and test hardware
+- Cli-reference covers d3d12 refusals, env rows, --max-archive-mib; drops scratch paths and engine names
+- Roadmap live sections match the code; competitor names reworded outside benchmarks; wiki links repointed
+- Api-reference covers ForceD3d12 GPU pages, DeviceHold and the review's corrections
+- Architecture covers the Direct3D 12 backend and PageDevice
+- Architecture's GPU page queue and concurrency model match the multi-device queue
+- Architecture covers soft proofing, working spaces, group spaces, the PCS and the paint trace
+- Architecture's counts, SIMD tiers, feature graph, paths and tested hardware match the code
+- Roadmap keeps names in measured comparisons and repairs the reworded sentences
+- Roadmap bench commands run as written; hardware and history lines match the record
+- README opening states the formats once; v1.5.0 headlines name what was added; measured RMSE names its reference
+- --gpu-pages, platform and getting-started pages say which adapter ran which API
+- Architecture names the third page-raster build, the lp fax route and the run_page clause's verb; api-reference's Auto opens nothing at start-up
+- Roadmap dates cross-string shaping to v2.2.0 and fitting to v2.4.0
+- Roadmap's D3D12 start-up figures follow the recorded medians (0.355 s against 0.189 s)
+- Cli-reference's --gpu-devices covers Direct3D 12 adapters
+- README's font-rasteriser note states the result; roadmap drops an unmeasured tool reference
+- Help text describes behaviour without naming other tools
+- The D3D12 debug layer has run on WARP and the RTX 5070
+- The d3d12-warp CI job is no longer open; it ran green
+- Drop duplicated parser hardening entries from ROADMAP
+- README's unreleased notes cover everything since v2.4.1
+- ROADMAP current status matches the last fixes
+- References, getting started and platform guides follow master
+- Architecture covers the last backend, parser and path changes
+- Crate READMEs, help text and crate docs follow master
+
+### Features
+
+- Count where GPU-page sessions sent each page
+- Gray and alpha pages over a transparent backdrop
+- GPU pages wait for the device instead of falling to the CPU
+- GPU pages on several Vulkan devices (--gpu-devices)
+- Build the CUDA features on Windows
+- A lost Vulkan device names its likely cause, a GPU timeout on Windows
+- A PdfPage reads back its image and reports its size
+- --print on Windows through GDI, with --print-file
+- PageDiagnostics::has_omissions
+- PageBuffer::render_gray_alpha_into; gray conversions keep alpha; one gray+alpha page builder
+- Os_bench, in-memory render rows for the cross-OS comparison
+- Os_bench child-process rows: start-up, disk, RAM, GPU back ends
+- Os_bench summarize: noise flags, env whitelist, cross-OS table
+- D3D12 adapter selection and device creation
+- D3D12 buffers, recorder and root signatures behind GpuBackend
+- Icc_clut on D3D12, byte-identical to the CPU at 8 and 16 bits
+- Blit_image and the image cache on D3D12
+- The page raster on D3D12
+- BackendPolicy::ForceD3d12 with ICC conversion on D3D12
+- Image blits and the device image cache in D3D12 sessions
+- GPU pages and --gpu-devices on D3D12 adapters
+- --backend d3d12
+- Page_gpu_bench times D3D12 pages
+- The header survey reports packet and marker structures
+
+### Other
+
+- The Windows print-test step fails with cargo, not with grep
+- Compile every kernel to hashed DXIL with pinned slangc and DXC, checking registers against reflection
+- One kernel list for the build and the DXIL tests; registers run from 0 per class
+- The status buffer's word count is a build define of the kernels
+- The DXIL tools' install hint names the host it was made for
+- D3D12 tests on pinned WARP on windows-latest
+- The D3D12 lib tests run on the pinned WARP
+- D3D12 page and ICC parity on WARP
+- The D3D12 job lints, builds the CLI and installs the debug layer
+- Name the device-page backend condition with a device_pages cfg
+
+### Performance
+
+- AVX2 tier for the opaque RGB8 AA span composite
+- AVX2 + FMA tier for the bilinear row rotation
+- Render comic pages on the thread pool
+- SIMD rounding in decode_u8's fused 8-bit outputs
+- Skip AAT subtables without completer glyphs (upstream #612)
+- The page raster keeps three buffer sets, not one
+- A GPU page takes the device where it expects the shortest wait
+- Return the page bitmap and expand it by table (upstream #1783)
+- Keep CCITT and JBIG2 images as bits and reduce them from the bits
+- Refill in AC refinement only for a correction bit (upstream 2be3e47d)
+- AVX-512 tier for the IDCT, YCbCr to RGB and up-sampling
+- The border pass keeps a row's four spans on the stack
+- Record painted channels in the composite pass instead of re-rendering the span
+- AVX2 span composite builds its colour vectors by shuffle
+- Evaluate a function-based shading only where it is read
+- Unpad device pixels a word at a time
+
+### Refactor
+
+- One ordered, bounded pool driver and render pool for comic and print
+- One block constant and one tier test helper for the composite tiers
+- One join16 for the fused paths' 16-sample staging; no_std builds clean
+- One GatherGeometry for the AVX2 and AVX-512 row kernels
+- One interleave_alpha/push_with_alpha helper for RGBA and gray+alpha rows
+- ImageColour::convert ends in one budget-spend epilogue
+- Group the PixelFormat gray+alpha variants with the gray ones
+- One helper returns a failed renderer's storage to the page buffer
+- One run_tool helper for the build script's tools
+- A Dc guard owns each printer context
+- Device-selection failures carry their kind
+- Os_bench uses PageDiagnostics::has_omissions, no wrappers
+- Icc_clut reads and writes whole words, one layout for every backend
+- Blit_image reads its source as words; blit sources are padded to whole words
+- The Vulkan zero-tail upload takes its buffer by shared borrow
+- The page raster stores whole-word pixels; read-back repacks rows
+- Vulkan no longer requires 8-bit storage or 8-bit integers
+- The page raster is a sealed PageDevice trait; Vulkan implements it
+- The GPU page scheduler and renderer are generic over PageDevice
+- The Vulkan image blit is generic over the cache backend
+- BackendError moves into backend/error.rs
+- One cache impl and one held page run for Vulkan and D3D12
+- Split config.rs into policy, session and tests
+
+### Testing
+
+- Vulkan tests skip an ineligible iGPU and take a Windows absolute path
+- A comic run reports progress and names no archive for an empty selection
+- Well-formed degraded-font fixture, has_omissions over every field
+- Os_bench read_dir S-version check on disk
+- Os_bench.sh, the Linux driver of the cross-OS benchmark
+- Os_bench.ps1 and the done-flag waiter for the Windows side
+- Blit parity runs with the source's pad bytes zero and 0xFF
+- Page read-back tests share one stride check
+- The page's storage-range check is asked for the word-sized page
+- Vulkan's kernel shapes match the D3D12 register tables
+- The blit parity cases and their CPU reference run on any backend
+- The blit parity cases tell the x and y axes apart
+- Floor_div sweep on D3D12
+- The generic page tests run through one wrapper per backend
+- Three library tests follow the behaviour they pin
+- The GPU-page refusal names d3d12 only on Windows builds
+- Record the corpus evidence for judging tiles, not RMSE
+- The Vulkan lost-device test takes the backend's own error
+- A lost-device test on one device; two-device tests honour REQUIRE
+- A cached image on a recorded GPU page matches the CPU
+- Seed fuzz_parse with the parser's amplification cases
+
 ## [2.4.1] - 2026-11-17
 
 ### Bug Fixes
 
 - A hairline's row crossings stay within its end columns
+
+### Chores
+
+- Release v2.4.1
+
+### Documentation
+
+- Prep v2.4.1 release notes
 
 ## [2.4.0] - 2026-11-17
 
