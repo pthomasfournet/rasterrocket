@@ -7,7 +7,8 @@ Writes OUT_DIR/<target>/ for every target in fuzz/fuzz_targets, from:
 
 - files committed to this repository (JPEG / JPEG 2000 test images, ICC
   profiles, comic archives and page images, test fonts, hand-written
-  content streams, CMaps and functions) and synthetic camera captures;
+  content streams, CMaps and functions), synthetic camera captures and
+  synthetic PDFs whose parsing cost once grew faster than their size;
 - the thirteen encrypted variants of the encryption integration suite,
   produced with qpdf (skipped with a note when qpdf is absent);
 - with --pdfium, the PDFs under PDFIUM_SRC/testing/resources (BSD-3-Clause,
@@ -16,7 +17,10 @@ Writes OUT_DIR/<target>/ for every target in fuzz/fuzz_targets, from:
 
 Each seed carries the selector bytes its target's layout expects (see the
 header comment of each target).  Run `cargo fuzz run <target> OUT_DIR/<target>`
-or pass the directory as an extra corpus.
+or pass the directory as an extra corpus.  A target binary run directly,
+not through `cargo fuzz run`, needs `ASAN_OPTIONS=detect_odr_violation=0`:
+libdeflate's tables are linked twice, which AddressSanitizer reports at
+start-up as an ODR violation.
 """
 
 import argparse
@@ -355,6 +359,137 @@ def filter_seeds(out: pathlib.Path) -> None:
         write(out, "fuzz_filters", bytes(selector) + body)
 
 
+def classic_xref(body: bytearray, offsets: list[int], trailer: bytes) -> bytes:
+    """Append a classic xref for objects 1..len(offsets) and `trailer` to `body`."""
+    xref = len(body)
+    body += b"xref\n0 %d\n0000000000 65535 f\r\n" % (len(offsets) + 1)
+    for o in offsets:
+        body += b"%010d 00000 n\r\n" % o
+    body += b"trailer\n<<%s>>\nstartxref\n%d\n%%%%EOF\n" % (trailer, xref)
+    return bytes(body)
+
+
+def amplification_seeds(out: pathlib.Path) -> None:
+    """Write `fuzz_parse` seeds whose cost once grew faster than their size.
+
+    - Stream objects whose /Length misses and that share one `endstream`
+      at the end of the file: each body must end at the next object.
+    - Member lookups into an object stream that decodes to 64 MiB but whose
+      /First lies past its data: the failed open must be decoded once.
+    """
+    head = b"%PDF-1.7\n"
+    catalog = (
+        b"1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n",
+        b"2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\n",
+    )
+
+    body = bytearray(head)
+    offsets = []
+    for obj in catalog:
+        offsets.append(len(body))
+        body += obj
+    for i in range(500):
+        offsets.append(len(body))
+        body += b"%d 0 obj <</Length 1>>stream\n" % (i + 3) + b"A" * 1500 + b"\n"
+    body += b"endstream\nendobj\n"
+    write_pdf(out, classic_xref(body, offsets, b"/Size %d/Root 1 0 R" % (len(offsets) + 1)))
+
+    size = 64 << 20
+    members = 500
+    packed = zlib.compress(bytes(size), 9)
+    body = bytearray(head)
+    offsets = []
+    for obj in catalog:
+        offsets.append(len(body))
+        body += obj
+    offsets.append(len(body))
+    body += b"3 0 obj <</Type/ObjStm/N 1/First %d/Filter/FlateDecode/Length %d>>stream\n" % (
+        size + 10,
+        len(packed),
+    )
+    body += packed + b"\nendstream\nendobj\n"
+    entries = b"".join(b"\x02" + (3).to_bytes(4, "big") + bytes([i % 256]) for i in range(members))
+    xref_stm = len(body)
+    body += b"%d 0 obj <</Type/XRef/Size %d/W[1 4 1]/Index[4 %d]/Length %d>>stream\n" % (
+        4 + members,
+        5 + members,
+        members,
+        len(entries),
+    )
+    body += entries + b"\nendstream\nendobj\n"
+    trailer = b"/Size %d/Root 1 0 R/XRefStm %d" % (5 + members, xref_stm)
+    write_pdf(out, classic_xref(body, offsets, trailer))
+
+
+def alternation_seeds(out: pathlib.Path) -> None:
+    """Write the `fuzz_parse` seeds of object-stream thrash and header text in a body.
+
+    - Members of two 200 MiB object streams read in alternation: re-decodes
+      of evicted containers must stop at the cache's allowance.
+    - A content stream under an indirect /Length holding the text `1 0 obj`:
+      its body must not end there.
+    """
+    head = b"%PDF-1.7\n"
+    catalog = (
+        b"1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n",
+        b"2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\n",
+    )
+    # Two object streams of 200 MiB each, whose members alternate by
+    # number, so that reading them in order alternates the containers.
+    size = 200 << 20
+    members = 250
+    body = bytearray(head)
+    offsets = []
+    for obj in catalog:
+        offsets.append(len(body))
+        body += obj
+    for c in range(2):
+        nums = [5 + 2 * i + c for i in range(members)]
+        directory = b"".join(b"%d %d " % (n, 5 * i) for i, n in enumerate(nums))
+        data = directory + b"null " * members
+        packed = zlib.compress(data + bytes(size - len(data)), 9)
+        offsets.append(len(body))
+        body += b"%d 0 obj <</Type/ObjStm/N %d/First %d/Filter/FlateDecode/Length %d>>stream\n" % (
+            3 + c,
+            members,
+            len(directory),
+            len(packed),
+        )
+        body += packed + b"\nendstream\nendobj\n"
+    entries = b"".join(
+        b"\x02" + (3 + i % 2).to_bytes(4, "big") + (i // 2).to_bytes(2, "big")
+        for i in range(2 * members)
+    )
+    total = 5 + 2 * members
+    xref_stm = len(body)
+    body += b"%d 0 obj <</Type/XRef/Size %d/W[1 4 2]/Index[5 %d]/Length %d>>stream\n" % (
+        total,
+        total + 1,
+        2 * members,
+        len(entries),
+    )
+    body += entries + b"\nendstream\nendobj\n"
+    trailer = b"/Size %d/Root 1 0 R/XRefStm %d" % (total + 1, xref_stm)
+    write_pdf(out, classic_xref(body, offsets, trailer))
+
+    # A page whose content stream, under an indirect /Length, shows the
+    # text of an object header.
+    content = b"BT /F1 12 Tf 72 712 Td (1 0 obj) Tj 0 -14 Td (2 0 obj <<) Tj ET"
+    body = bytearray(head)
+    offsets = []
+    for obj in (
+        b"1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n",
+        b"2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n",
+        b"3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R"
+        b"/Resources<</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>> endobj\n",
+        b"4 0 obj <</Length 5 0 R>>stream\n" + content + b"\nendstream\nendobj\n",
+        b"5 0 obj %d endobj\n" % len(content),
+    ):
+        offsets.append(len(body))
+        body += obj
+    write_pdf(out, classic_xref(body, offsets, b"/Size 6/Root 1 0 R"))
+
+
 def repo_seeds(out: pathlib.Path) -> None:
     """Write the seeds built from files committed to this repository."""
     image_seeds(out)
@@ -365,6 +500,8 @@ def repo_seeds(out: pathlib.Path) -> None:
     camera_seeds(out)
     font_seeds(out)
     filter_seeds(out)
+    amplification_seeds(out)
+    alternation_seeds(out)
     for c in CONTENT_SEEDS:
         write(out, "fuzz_content", c)
     for c in CMAP_SEEDS:
