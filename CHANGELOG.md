@@ -110,6 +110,8 @@ All notable changes to this project will be documented in this file.
 - A panicking GPU page device opening settles as failed
 - Device page counts agree with their per-device breakdown
 - One GPU backend per device, however it is named
+- Keep the hairline walk's column arithmetic in range
+- Saturate the clip rectangle's last column and row
 
 ### Chores
 
@@ -176,6 +178,9 @@ All notable changes to this project will be documented in this file.
 - References, getting started and platform guides follow master
 - Architecture covers the last backend, parser and path changes
 - Crate READMEs, help text and crate docs follow master
+- Prep v2.5.0 release notes
+- V2.5.0 notes state render_channel's memory per open channel
+- README opens with the project banner
 
 ### Features
 
@@ -285,6 +290,7 @@ All notable changes to this project will be documented in this file.
 - A lost-device test on one device; two-device tests honour REQUIRE
 - A cached image on a recorded GPU page matches the CPU
 - Seed fuzz_parse with the parser's amplification cases
+- Scale the parser's decode limits to instrumented builds
 
 ## [2.4.1] - 2026-11-17
 
