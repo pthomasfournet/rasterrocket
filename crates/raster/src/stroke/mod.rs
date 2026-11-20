@@ -332,15 +332,20 @@ fn narrow_runs(
             let cross = |y: f64| floor_i32((y - sy0).mul_add(dxdy, sx0)).clamp(xl, xr);
             let cy0 = y0.max(clip.y_min_i);
             let cy1 = y1.min(clip.y_max_i);
-            let mut xa = if cy0 > y0 { cross(f64::from(cy0)) } else { x0 };
+            //
+            // The walk runs in `i64`: the last row's exclusive end lies one
+            // column past `x1`, beyond `i32` for an end at an `i32` extreme.
+            // A nonempty span lies within `[xl, xr]` and narrows losslessly;
+            // an empty one paints nothing and is dropped.
+            let mut xa = i64::from(if cy0 > y0 { cross(f64::from(cy0)) } else { x0 });
             let left_to_right = x0 <= x1;
             for y in cy0..=cy1 {
                 let xb = if y < y1 {
-                    cross(f64::from(y) + 1.0)
+                    i64::from(cross(f64::from(y) + 1.0))
                 } else if left_to_right {
-                    x1 + 1
+                    i64::from(x1) + 1
                 } else {
-                    x1 - 1
+                    i64::from(x1) - 1
                 };
                 let (span_x0, span_x1) = if left_to_right {
                     if xa == xb { (xa, xa) } else { (xa, xb - 1) }
@@ -349,7 +354,11 @@ fn narrow_runs(
                 } else {
                     (xb + 1, xa)
                 };
-                span(span_x0, span_x1, y, clip_res);
+                if let (Ok(span_x0), Ok(span_x1)) = (i32::try_from(span_x0), i32::try_from(span_x1))
+                    && span_x0 <= span_x1
+                {
+                    span(span_x0, span_x1, y, clip_res);
+                }
                 xa = xb;
             }
         }
@@ -631,6 +640,47 @@ mod tests {
                     vec![0; 24]
                 };
                 assert_eq!(clipped[row], want, "{from:?} to {to:?}, row {y}");
+            }
+        }
+    }
+
+    /// A hairline whose ends lie at or past the `i32` extremes of device
+    /// space emits only runs on the bitmap, whatever its direction.
+    #[test]
+    fn hairline_with_ends_at_i32_extremes_stays_on_the_bitmap() {
+        let far = 1e18;
+        let ends = [
+            (-far, -far),
+            (far, far),
+            (-far, far),
+            (far, -far),
+            (far, 5.0),
+            (-far, 5.0),
+            (5.0, far),
+            (5.0, -far),
+            (7.5, 9.5),
+        ];
+        let clip = make_clip(16, 16);
+        for &from in &ends {
+            for &to in &ends {
+                let mut b = PathBuilder::new();
+                b.move_to(from.0, from.1);
+                b.line_to(to.0, to.1).unwrap();
+                let mut runs = Vec::new();
+                hairline_runs(
+                    &b.build(),
+                    &identity_matrix(),
+                    &default_params(),
+                    &clip,
+                    16,
+                    16,
+                    |x0, x1, y| runs.push((x0, x1, y)),
+                );
+                assert!(
+                    runs.iter()
+                        .all(|&(x0, x1, y)| 0 <= x0 && x0 <= x1 && x1 < 16 && (0..16).contains(&y)),
+                    "{from:?} to {to:?}: {runs:?}"
+                );
             }
         }
     }

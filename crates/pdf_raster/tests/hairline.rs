@@ -55,3 +55,25 @@ fn zero_height_rectangle_strokes_a_one_pixel_hairline() {
     assert!(rect.iter().all(|&(_, row)| row == SIZE - 50), "{rect:?}");
     assert_eq!(rect.len(), 61, "columns 20 through 80");
 }
+
+/// A hairline from a point far past the `i32` range of device space to a
+/// point on the page draws its on-page end.
+#[test]
+fn hairline_from_beyond_device_range_draws_its_on_page_end() {
+    let near = marked("0 w 533333333333333333 5 m 59 95 l S");
+    assert!(near.contains(&(59, SIZE - 95)), "{near:?}");
+}
+
+/// A content stream mixing malformed operators with a stroke from a point
+/// far past the `i32` range of device space renders at half scale.
+#[test]
+fn stroke_from_beyond_device_range_renders() {
+    let content: &[u8] =
+        b"0.2 0.4 08 rg 10 10 8\xb0 60 reobj f 0 g$1 w 533333333333333333 5 m 59 95 l S";
+    let pdf = one_page(
+        &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {SIZE} {SIZE}] /Contents 4 0 R >>"),
+        vec![stream_object("", content)],
+    );
+    let bmp = render_page_rgb(&session(pdf, BackendPolicy::CpuOnly), 1, 0.5).expect("render");
+    assert_eq!((bmp.width, bmp.height), (SIZE / 2, SIZE / 2));
+}
