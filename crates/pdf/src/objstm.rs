@@ -37,6 +37,9 @@ const MAX_OBJECTS: usize = 1_000_000;
 pub(crate) struct ObjStm {
     data: Vec<u8>,
     directory: Vec<(u32, usize)>,
+    /// Object number to its first directory position, built on the first
+    /// lookup whose xref index does not name the object.
+    positions: OnceLock<HashMap<u32, usize>>,
 }
 
 impl ObjStm {
@@ -60,24 +63,51 @@ impl ObjStm {
             ));
         }
         let directory = read_directory(&data, n, first);
-        Ok(Self { data, directory })
+        Ok(Self {
+            data,
+            directory,
+            positions: OnceLock::new(),
+        })
     }
 
     /// The directory position of object `num`, taking `index` when it names
-    /// that object and searching the directory otherwise.
+    /// that object and otherwise the first position the directory lists it
+    /// at.
     fn position_of(&self, num: u32, index: u32) -> Option<usize> {
         let hint = usize::try_from(index).ok()?;
         if self.directory.get(hint).is_some_and(|&(n, _)| n == num) {
             return Some(hint);
         }
-        self.directory.iter().position(|&(n, _)| n == num)
+        // Inserted last to first, so a number listed twice keeps its first
+        // position.
+        let positions = self.positions.get_or_init(|| {
+            self.directory
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(pos, &(n, _))| (n, pos))
+                .collect()
+        });
+        positions.get(&num).copied()
     }
 
-    /// Bytes held by this container: its decoded data and its directory.
+    /// Bytes held by this container: its decoded data, its directory, and
+    /// the position map, counted in advance at the size a map of one entry
+    /// per directory entry takes: a power-of-two bucket count at most 7/8
+    /// full, each bucket an entry and a control byte.
     const fn retained_bytes(&self) -> usize {
+        let entry = size_of::<(u32, usize)>();
+        let len = self.directory.len();
+        let buckets = match len {
+            0 => 0,
+            1..=3 => 4,
+            4..=7 => 8,
+            _ => len.saturating_mul(8).div_ceil(7).next_power_of_two(),
+        };
         self.data
             .capacity()
-            .saturating_add(self.directory.capacity() * size_of::<(u32, usize)>())
+            .saturating_add(self.directory.capacity().saturating_mul(entry))
+            .saturating_add(buckets.saturating_mul(entry + 1))
     }
 
     /// The directory: `(object number, absolute byte offset)` per entry.
@@ -433,6 +463,45 @@ mod tests {
         assert_eq!(
             get(&cache, &data, &dict, 9, 1).unwrap(),
             Object::Integer(42)
+        );
+    }
+
+    /// A directory listing a number twice resolves it to the first
+    /// position when the xref index names neither.
+    #[test]
+    fn duplicate_number_resolves_to_its_first_position() {
+        let (data, dict) = objstm(&[(1, "42"), (2, "true"), (1, "43")], 3);
+        let cache = ObjStmCache::new();
+        assert_eq!(
+            get(&cache, &data, &dict, 1, 1).unwrap(),
+            Object::Integer(42)
+        );
+        assert_eq!(
+            get(&cache, &data, &dict, 2, 1).unwrap(),
+            Object::Integer(43)
+        );
+    }
+
+    /// Lookups whose xref indexes are all wrong take time linear in the
+    /// number of members.
+    #[test]
+    fn wrong_indexes_resolve_in_linear_time() {
+        const N: u32 = 100_000;
+        let bodies: Vec<(u32, String)> = (1..=N).map(|n| (n, n.to_string())).collect();
+        let refs: Vec<(u32, &str)> = bodies.iter().map(|(n, b)| (*n, b.as_str())).collect();
+        let (data, dict) = objstm(&refs, refs.len());
+        let cache = ObjStmCache::new();
+        let start = std::time::Instant::now();
+        for n in 1..=N {
+            assert_eq!(
+                get(&cache, &data, &dict, 0, n).unwrap(),
+                Object::Integer(i64::from(n))
+            );
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            start.elapsed()
         );
     }
 
