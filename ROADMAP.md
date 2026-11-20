@@ -3269,6 +3269,13 @@ ordering, backpressure, early stop on a dropped receiver and panic delivery
 are unchanged. `tests/render_channel_pool.rs` runs four cases under a
 deadline, among them deskewed channels drained by every global-pool worker.
 
+**Unreleased on master: a text-only page keeps the thread's GPU decoders.**
+A page rendered `CpuOnly` (the CLI so marks every page without images) is lent
+no nvJPEG or nvJPEG2000 decoder, but on its way out it wrote the renderer's
+empty hand back into the thread's slot, dropping the decoder for good; under
+`ForceCuda` that thread's later JPEG 2000 pages then decoded on the CPU without
+a word. A renderer holding no decoder now leaves the slot as it is.
+
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one

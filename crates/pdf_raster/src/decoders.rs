@@ -196,15 +196,27 @@ fn reclaim_decoders(renderer: &mut pdf_interp::renderer::PageRenderer) {
     #[cfg(feature = "nvjpeg")]
     gpu_init::NVJPEG_DEC.with(|cell| {
         if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
-            *slot = renderer.take_nvjpeg();
+            restore(slot, renderer.take_nvjpeg());
         }
     });
     #[cfg(feature = "nvjpeg2k")]
     gpu_init::NVJPEG2K_DEC.with(|cell| {
         if let gpu_init::DecoderInit::Ready(slot) = &mut *cell.borrow_mut() {
-            *slot = renderer.take_nvjpeg2k();
+            restore(slot, renderer.take_nvjpeg2k());
         }
     });
+}
+
+/// Put `held`, the decoder a renderer holds after its page, back in the
+/// thread's `slot`.  A renderer holding none leaves `slot` as it is: a page
+/// lent no decoder (a `CpuOnly` page) has none to return, and the decoder
+/// the slot keeps serves the thread's later pages.  Lending a decoder
+/// empties its slot, so a returned decoder never replaces another.
+#[cfg(any(feature = "nvjpeg", feature = "nvjpeg2k", test))]
+fn restore<T>(slot: &mut Option<T>, held: Option<T>) {
+    if let Some(decoder) = held {
+        *slot = Some(decoder);
+    }
 }
 
 // ── RAII guard: return decoder handles to TLS even on unwind ─────────────────
@@ -311,6 +323,31 @@ mod cuda_decoder_tests {
             nvjpeg2k_supply(BackendPolicy::Auto, enabled),
             Nvjpeg2kSupply::None
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::restore;
+
+    /// A page lent no decoder leaves the thread's decoder in its slot.
+    #[test]
+    fn a_page_without_a_decoder_keeps_the_threads_decoder() {
+        let mut slot = Some("decoder");
+        restore(&mut slot, None);
+        assert_eq!(slot, Some("decoder"));
+    }
+
+    /// A lent decoder returns to its emptied slot, and a slot whose
+    /// decoder was dropped during the page stays empty.
+    #[test]
+    fn a_lent_decoder_returns_to_its_slot() {
+        let mut slot = None;
+        restore(&mut slot, Some("decoder"));
+        assert_eq!(slot, Some("decoder"));
+        let mut slot: Option<&str> = None;
+        restore(&mut slot, None);
+        assert_eq!(slot, None);
     }
 }
 
