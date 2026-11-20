@@ -1,5 +1,7 @@
 # rasterrocket
 
+![rasterrocket: PDF to pixels, high-speed](docs/assets/banner.jpg)
+
 Fast PDF to image conversion, as a Rust library and CLI (`rrocket`): it rasterizes PDF pages and comic archives to pixel buffers for OCR, or to PNG, JPEG, TIFF, PPM, PGM and PBM files (PDF to PNG, PDF to JPEG and the rest), a printer or a fax. It runs on the CPU (AVX-512, AVX2, NEON) and, optionally, the GPU (CUDA, Vulkan, and Direct3D 12 on Windows), and handles hostile input as a bounded error.
 
 To render PDF pages for OCR, the library returns 8-bit grayscale pixel buffers for direct consumption by Tesseract or any other downstream consumer, with no intermediate files. Pages can also be rendered as RGB, RGBA or CMYK, at 8 or 16 bits per sample, and converted to an ICC output profile.
