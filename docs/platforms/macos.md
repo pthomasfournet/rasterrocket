@@ -97,7 +97,7 @@ Mac:
 - `--ram` on its own is refused with a message saying so;
 - `--ram-path DIR` writes into a RAM disk you have mounted. rrocket watches
   free memory, using the same figure as macOS's `memory_pressure` tool, and
-  moves to disk if it runs low.
+  the RAM disk's free space, and moves to disk if either runs low.
 
 You rarely need it: on Apple silicon the internal SSD is as fast as a RAM
 disk for page output. To mount a 2 GiB RAM disk at `/Volumes/rrocket`:
@@ -108,7 +108,8 @@ rrocket --ram-path /Volumes/rrocket/out -r 300 document.pdf page
 ```
 
 The directory you name must not exist yet. rrocket creates it, makes it
-readable by you alone, and removes it with its contents when it exits.
+readable by you alone, and removes it with its contents when it exits or is
+interrupted (Ctrl-C, `SIGTERM`, `SIGHUP`).
 
 ## GPU
 

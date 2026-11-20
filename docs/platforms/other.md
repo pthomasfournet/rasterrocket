@@ -33,9 +33,11 @@ tested. Please report what you find.
 - **CI:** each push runs clippy on `windows-latest`, then the test suites
   of the renderer, interpreter, library, font, parser, colour, encoder,
   comic and command-line crates (the last including end-to-end runs of the
-  binary). The runner has no GPU; a separate job (`d3d12-warp`) runs the
-  Direct3D 12 tests on the pinned WARP software adapter; its build needs
-  slangc 2026.20 and DXC 1.9.2609.
+  binary). The runner has no GPU; a separate job (`d3d12-warp`) lints the
+  `d3d12` feature, builds the CLI with it, installs the debug layer and
+  runs the Direct3D 12 tests and the GPU-page and ICC parity suites on the
+  pinned WARP software adapter; its build needs slangc 2026.20 and DXC
+  1.9.2609.
 - **Build:** with the MSVC toolchain from `rustup`, the Visual Studio
   Build Tools and, on x86-64, `nasm` on `PATH` (`choco install nasm`; the
   installer leaves it in `C:\Program Files\NASM`) for the AV1 decoder's
@@ -47,7 +49,9 @@ tested. Please report what you find.
 - **Writing output to RAM:** there is no `/dev/shm`, so a bare prefix writes
   to the current directory and `--ram` is refused. `--ram-path` writes into
   a directory on a RAM disk you have mounted, moving to disk once the
-  available physical memory falls below 1 GiB.
+  available physical memory falls below 1 GiB or a write finds the RAM
+  disk full. The directory is removed when rrocket exits or is
+  interrupted (Ctrl-C, Ctrl-Break, closing the console, logging off).
 - **GPU (CUDA):** the CUDA features (`nvjpeg`, `nvjpeg2k`, `gpu-icc`,
   `gpu-deskew`, `cache`) need CUDA 13.4 or later and the Visual Studio 2026
   Build Tools (C++ workload); CUDA 13.1's and 13.3's nvcc refuse VS 2026's
@@ -127,8 +131,10 @@ tested. Please report what you find.
   the CPU; the timeout is Windows' to configure, and nothing here needs it
   changed. `scripts/fetch_warp.ps1 DIR` puts the pinned WARP beside a test
   executable, where it loads in place of the system's. Direct3D 12 has not run
-  on an Intel adapter, and the debug layer (`PDF_RASTER_D3D12_DEBUG=1`) has
-  not run on the test box, which lacks Graphics Tools.
+  on an Intel adapter. Under the debug layer (`PDF_RASTER_D3D12_DEBUG=1`) a
+  validation error fails the page or transfer that raised it; the D3D12
+  tests and the page and ICC parity suites ran under it on WARP and the
+  RTX 5070 without one (the fixture corpus has not).
 - **Printing:** `--print` sends the pages to the printer's driver through
   GDI, fitting, centring and turning each page to the sheet itself (see
   [Printing on Windows](../cli-reference.md#printing-on-windows));
@@ -139,7 +145,8 @@ tested. Please report what you find.
   The driver takes 8-bit sRGB bitmaps, so `--output-profile` and
   `--depth 16` are refused with `--print`. Ctrl-C, Ctrl-Break or closing
   the console aborts the job and removes the `--print-file` it was
-  writing; a second Ctrl-C quits at once.
+  writing; an interrupt after the job has been handed to the spooler says
+  so and does not claim to abort it; a second Ctrl-C quits at once.
   Tested on Windows 11 Pro (build 26200) through Microsoft Print to PDF;
   no physical printer has been tested on Windows. The tests that print to
   it skip, saying so, where it is missing; `RR_REQUIRE_PRINT_TO_PDF=1` makes

@@ -4,7 +4,7 @@ rasterrocket renders PDF pages and comic archives to pixel buffers in process, r
 
 ## What it does
 
-Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in memory. The primary use case is feeding pages directly into Tesseract OCR without writing any intermediate files. The same pages can also be rendered as RGB, RGBA over a transparent backdrop or CMYK, at 8 or 16 bits per sample, and converted to an output ICC profile; see [Colour, depth and CMYK](#colour-depth-and-cmyk).
+Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in memory. The primary use case is feeding pages directly into Tesseract OCR without writing any intermediate files. The same pages can also be rendered as RGB, RGBA or gray and alpha over a transparent backdrop, or CMYK, at 8 or 16 bits per sample, and converted to an output ICC profile; see [Colour, depth and CMYK](#colour-depth-and-cmyk).
 
 ## Hardware requirements
 
@@ -23,7 +23,7 @@ Given a PDF file, rasterrocket renders each page to an 8-bit grayscale buffer in
 
 ### GPU (optional)
 
-Three GPU backends are available on Linux:
+GPU backends: CUDA, Vulkan and VA-API on Linux; CUDA, Vulkan and Direct3D 12 on Windows; Vulkan through MoltenVK on macOS.
 
 **NVIDIA (CUDA 13.x):** tested on an RTX 5070 (`sm_120`), and on an RTX 2080 SUPER (`sm_75`) from an nvcc 12.4 build under Linux and a CUDA 13.5 build under Windows (see the README's [Tested hardware](../README.md#tested-hardware)); other NVIDIA GPUs are untested.
 
@@ -37,13 +37,13 @@ Three GPU backends are available on Linux:
 
 `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
-**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel (untested), Apple via `MoltenVK`):**
+**Vulkan compute (cross-vendor — NVIDIA, AMD, Intel (tested on a UHD 630 under Windows only), Apple via `MoltenVK`):**
 
 | Feature | Supported hardware | Libraries required |
 |---|---|---|
 | `vulkan` | Any Vulkan 1.3+ device | Vulkan ICD (e.g. `mesa-vulkan-drivers`, `nvidia-driver`); `slangc` from the LunarG Vulkan SDK at *build* time |
 
-With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, the wide working space of an output profile, pages past 128 MiB of device commands and pages rendered in bands stay on the CPU. It is off by default: it beats the CPU with few threads on most vector and image documents measured, but every page that may render on the device waits for it, so with many threads the CPU is faster.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs (ANV), M-series Macs and datacenter GPUs are untested.
+With `cache`, the device image cache runs on the Vulkan device under `--backend vulkan`, and with `gpu-icc` the ICC CMYK lookup table does (after a one-time exactness probe of the device, byte-identical to the CPU evaluator); there is no `nvjpeg` support.  `--gpu-pages` (`SessionConfig::gpu_pages`) renders pages whole on the Vulkan device, beside the CPU workers and with the same bytes at 8 and 16 bits: fills, strokes, text, images, forms, annotation appearances, path clips and soft masks; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, the wide working space of an output profile, pages past 128 MiB of device commands and pages rendered in bands stay on the CPU. It is off by default: it beats the CPU with few threads on most vector and image documents measured, but every page that may render on the device waits for it, so with many threads the CPU is faster.  `--gpu-devices LIST|all` (`SessionConfig::gpu_devices`) spreads them over several devices.  GPU pages are tested on the RTX 5070, an RTX 2080 SUPER, AMD RADV (a Raphael iGPU), an Intel UHD 630 (under Windows), an A18 Pro's GPU through MoltenVK (see [macOS](platforms/macos.md#vulkan-through-moltenvk)) and llvmpipe.  Intel GPUs under Linux (ANV), M-series Macs and datacenter GPUs are untested.
 
 **Direct3D 12 compute (Windows):**
 
@@ -105,7 +105,7 @@ rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", feature
 rasterrocket = { git = "https://github.com/pthomasfournet/rasterrocket", features = ["vaapi"] }
 ```
 
-For reproducible builds pin the dependency to a release tag (`tag = "v2.4.1"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
+For reproducible builds pin the dependency to a release tag (`tag = "v2.5.0"`) or a commit (`rev = "..."`). Do not use `cargo add rasterrocket` without `--git`: it would resolve to the abandoned crates.io release.
 
 ## Quickstart
 
@@ -265,10 +265,15 @@ A `/Contents` stream that cannot be decoded is treated the same way: the page
 is drawn from its other content streams and the skipped one is listed in
 `page.diagnostics.content_failures`. A stream or image whose data ends early
 (a truncated download, a corrupt filter) is drawn from what decoded and listed
-with `partial: true`.
+with `partial: true`. A shading whose function yields no colour is left out
+and listed in `page.diagnostics.shading_failures`.
+`page.diagnostics.has_omissions()` is `true` when any of these lists, or the
+missing fonts, forms past the depth limit or unsupported features, is not
+empty.
 
 Set `RasterOptions::strict` to make such a page an `Err` instead
-(`RasterError::ImageDecodeFailed` or `RasterError::ContentDecodeFailed`).
+(`RasterError::ImageDecodeFailed`, `RasterError::ContentDecodeFailed` or
+`RasterError::ShadingFailed`).
 
 ## Page geometry, regions, non-square pixels and cancellation
 
@@ -436,6 +441,6 @@ path — the crates.io packages are abandoned at 1.0.1.
 
 ### A note on output destination
 
-The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits**; the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when available memory drops below 1 GiB. On systems without `/dev/shm` (macOS, the BSDs, Windows) there is no default redirect and a bare stem writes to the working directory; see the [macOS guide](platforms/macos.md#writing-output-to-ram) for RAM disks there.
+The CLI defaults to writing rendered pages into a fresh `/dev/shm/rrocket-<pid>-<nanos>/` tmpfs directory whenever `OUTPUT_PREFIX` looks like a bare stem (e.g. `out`, `p`), and **removes that directory when it exits or is interrupted** (Ctrl-C, `SIGTERM`, `SIGHUP`); the directory is printed on stdout so a consumer running alongside can read the pages. To keep the pages, give a path-like prefix (anything containing `/` or starting with `.`, e.g. `./out`), which writes where you asked, or pass `--no-ram`. `--ram-path <DIR>` overrides the tmpfs location. A built-in spill policy falls through to disk when available memory drops below 1 GiB or the RAM file system's free space below one page per render thread plus 64 MiB. On systems without `/dev/shm` (macOS, the BSDs, Windows) there is no default redirect and a bare stem writes to the working directory; see the [macOS guide](platforms/macos.md#writing-output-to-ram) for RAM disks there.
 
 See [cli-reference.md](cli-reference.md) for CLI usage.
