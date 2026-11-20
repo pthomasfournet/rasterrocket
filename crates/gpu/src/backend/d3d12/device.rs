@@ -75,10 +75,22 @@ pub(crate) struct D3d12Device {
 /// fails.
 pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Device> {
     enable_debug_layer();
-    let (adapters, cands) = enumerate()?;
-    let index = select::pick(&cands, selector)?;
-    let cand = &cands[index];
-    let device = create_device(&adapters[index]).map_err(hr_err("D3D12CreateDevice"))?;
+    let mut set = AdapterSet::enumerate()?;
+    let index = match selector {
+        None => {
+            set.probe_first_gpu();
+            set.decide(Vec::new(), |cands| select::pick(cands, None))?
+        }
+        Some(sel) => {
+            let named = select::named(&set.cands, sel).into_iter().collect();
+            set.decide(named, |cands| select::pick(cands, Some(sel)))?
+        }
+    };
+    let device = match set.devices[index].take() {
+        Some(device) => device,
+        None => create_device(&set.adapters[index]).map_err(hr_err("D3D12CreateDevice"))?,
+    };
+    let cand = &set.cands[index];
     let desc = D3D12_COMMAND_QUEUE_DESC {
         Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
         ..Default::default()
@@ -110,7 +122,7 @@ pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Dev
     Ok(D3d12Device {
         device,
         queue,
-        adapter: adapters[index].clone(),
+        adapter: set.adapters[index].clone(),
         index,
         name: cand.name.clone(),
         warp,
@@ -129,20 +141,23 @@ pub(crate) fn open_adapter(selector: Option<&DeviceSelector>) -> Result<D3d12Dev
 /// when enumeration fails.
 pub(crate) fn usable_gpus() -> Result<Vec<usize>> {
     enable_debug_layer();
-    let (_, cands) = enumerate()?;
-    select::usable_gpus(&cands)
+    let mut set = AdapterSet::enumerate()?;
+    let hardware = select::hardware_order(&set.cands);
+    set.decide(hardware, select::usable_gpus)
 }
 
 /// Check that `selector` names one usable adapter, without creating a
-/// device on it beyond those enumeration creates for its queries.
+/// device beyond those created to read capabilities.
 ///
 /// # Errors
 ///
 /// As [`open_adapter`] with `selector`, before the device is created.
 pub(crate) fn check_selector(selector: &DeviceSelector) -> Result<()> {
     enable_debug_layer();
-    let (_, cands) = enumerate()?;
-    select::pick(&cands, Some(selector)).map(drop)
+    let mut set = AdapterSet::enumerate()?;
+    let named = select::named(&set.cands, selector).into_iter().collect();
+    set.decide(named, |cands| select::pick(cands, Some(selector)))
+        .map(drop)
 }
 
 /// The indices of the adapters `selectors` name, in their order, by
@@ -156,8 +171,12 @@ pub(crate) fn check_selector(selector: &DeviceSelector) -> Result<()> {
 /// when enumeration fails.
 pub(crate) fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
     enable_debug_layer();
-    let (_, cands) = enumerate()?;
-    select::pick_many(&cands, selectors)
+    let mut set = AdapterSet::enumerate()?;
+    let named = selectors
+        .iter()
+        .filter_map(|sel| select::named(&set.cands, sel))
+        .collect();
+    set.decide(named, |cands| select::pick_many(cands, selectors))
 }
 
 /// Whether [`enable_debug_layer`] enabled the layer.
@@ -197,40 +216,119 @@ fn enable_debug_layer() {
     });
 }
 
-/// Every adapter DXGI lists, by high-performance preference, then the WARP
-/// adapter, with the candidate data selection reads for each.  DXGI lists
-/// software adapters after hardware ones, so the last entry is the WARP
-/// adapter exactly when it is a software adapter.
-fn enumerate() -> Result<(Vec<IDXGIAdapter1>, Vec<AdapterCandidate>)> {
-    // SAFETY: no flags; the factory interface is returned by value.
-    let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
-        .map_err(hr_err("CreateDXGIFactory2"))?;
-    let mut adapters: Vec<IDXGIAdapter1> = Vec::new();
-    for i in 0.. {
-        // SAFETY: `factory` is live; an index past the last adapter returns
-        // `DXGI_ERROR_NOT_FOUND`.
-        match unsafe {
-            factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
-                i,
-                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-            )
-        } {
-            Ok(adapter) => adapters.push(adapter),
-            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(e) => return Err(hr_err("EnumAdapterByGpuPreference")(e)),
-        }
-    }
-    // SAFETY: `factory` is live.
-    match unsafe { factory.EnumWarpAdapter::<IDXGIAdapter1>() } {
-        Ok(adapter) => adapters.push(adapter),
-        Err(e) => log::debug!("d3d12: {}", describe("EnumWarpAdapter", e.code())),
-    }
-    let cands = adapters.iter().map(candidate).collect::<Result<Vec<_>>>()?;
-    Ok((adapters, cands))
+/// The enumerated adapters with their candidate data, each adapter's
+/// capabilities read at most once, on first need.
+///
+/// Reading the capabilities creates a device on the adapter, which takes
+/// a hardware driver tens of milliseconds.  Selection succeeds on the capabilities
+/// of the adapters it takes alone, so only those are read first; a
+/// failing selection is repeated with every adapter read, so its error
+/// describes each one.
+struct AdapterSet {
+    /// Every adapter DXGI lists, by high-performance preference, then the
+    /// WARP adapter.  DXGI lists software adapters after hardware ones, so
+    /// the last entry is the WARP adapter exactly when it is a software
+    /// adapter.
+    adapters: Vec<IDXGIAdapter1>,
+    /// The candidate data of each adapter; `shader_model` is `None` and
+    /// `int64` false until it is probed.
+    cands: Vec<AdapterCandidate>,
+    /// Whether each adapter has been probed.
+    probed: Vec<bool>,
+    /// The device each probe created, kept for [`open_adapter`] to use.
+    devices: Vec<Option<ID3D12Device>>,
 }
 
-/// The candidate data of `adapter`.  The shader model and `Int64ShaderOps`
-/// are read from a device created for the query and dropped after it.
+impl AdapterSet {
+    /// List the adapters and read their descriptions; no device is created.
+    fn enumerate() -> Result<Self> {
+        // SAFETY: no flags; the factory interface is returned by value.
+        let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
+            .map_err(hr_err("CreateDXGIFactory2"))?;
+        let mut adapters: Vec<IDXGIAdapter1> = Vec::new();
+        for i in 0.. {
+            // SAFETY: `factory` is live; an index past the last adapter
+            // returns `DXGI_ERROR_NOT_FOUND`.
+            match unsafe {
+                factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                    i,
+                    DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                )
+            } {
+                Ok(adapter) => adapters.push(adapter),
+                Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(e) => return Err(hr_err("EnumAdapterByGpuPreference")(e)),
+            }
+        }
+        // SAFETY: `factory` is live.
+        match unsafe { factory.EnumWarpAdapter::<IDXGIAdapter1>() } {
+            Ok(adapter) => adapters.push(adapter),
+            Err(e) => log::debug!("d3d12: {}", describe("EnumWarpAdapter", e.code())),
+        }
+        let cands = adapters.iter().map(candidate).collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            probed: vec![false; adapters.len()],
+            devices: std::iter::repeat_with(|| None)
+                .take(adapters.len())
+                .collect(),
+            adapters,
+            cands,
+        })
+    }
+
+    /// Read the shader model and `Int64ShaderOps` of adapter `i` from a
+    /// device created on it, unless already read.
+    fn probe(&mut self, i: usize) {
+        if std::mem::replace(&mut self.probed[i], true) {
+            return;
+        }
+        let cand = &mut self.cands[i];
+        match create_device(&self.adapters[i]) {
+            Ok(device) => {
+                cand.shader_model = Some(shader_model(&device));
+                cand.int64 = int64_ops(&device);
+                self.devices[i] = Some(device);
+            }
+            Err(e) => log::debug!(
+                "d3d12: adapter \"{}\": {}",
+                cand.name,
+                describe("D3D12CreateDevice", e.code())
+            ),
+        }
+    }
+
+    /// Probe the hardware adapters in [`select::hardware_order`] up to the
+    /// first usable one, the automatic choice.
+    fn probe_first_gpu(&mut self) {
+        for i in select::hardware_order(&self.cands) {
+            self.probe(i);
+            if self.cands[i].is_usable_gpu() {
+                return;
+            }
+        }
+    }
+
+    /// `choose` over the candidates once `needed` are probed; when it
+    /// fails, again once every adapter is probed.
+    fn decide<T>(
+        &mut self,
+        needed: Vec<usize>,
+        choose: impl Fn(&[AdapterCandidate]) -> Result<T>,
+    ) -> Result<T> {
+        for i in needed {
+            self.probe(i);
+        }
+        choose(&self.cands).or_else(|_| {
+            for i in 0..self.adapters.len() {
+                self.probe(i);
+            }
+            choose(&self.cands)
+        })
+    }
+}
+
+/// The candidate data of `adapter` from its description, its capabilities
+/// not yet read.
 fn candidate(adapter: &IDXGIAdapter1) -> Result<AdapterCandidate> {
     // SAFETY: `adapter` is live.
     let desc = unsafe { adapter.GetDesc1() }.map_err(hr_err("GetDesc1"))?;
@@ -243,23 +341,13 @@ fn candidate(adapter: &IDXGIAdapter1) -> Result<AdapterCandidate> {
     let software = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0;
     let luid = (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
         | u64::from(desc.AdapterLuid.LowPart);
-    let (shader_model, int64) = match create_device(adapter) {
-        Ok(device) => (Some(shader_model(&device)), int64_ops(&device)),
-        Err(e) => {
-            log::debug!(
-                "d3d12: adapter \"{name}\": {}",
-                describe("D3D12CreateDevice", e.code())
-            );
-            (None, false)
-        }
-    };
     Ok(AdapterCandidate {
         name,
         software,
         luid,
         dedicated_bytes: desc.DedicatedVideoMemory as u64,
-        shader_model,
-        int64,
+        shader_model: None,
+        int64: false,
     })
 }
 

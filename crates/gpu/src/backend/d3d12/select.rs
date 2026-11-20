@@ -83,7 +83,7 @@ impl AdapterCandidate {
 
     /// Whether automatic choice and `all` may take the adapter: a usable
     /// hardware adapter.
-    const fn is_usable_gpu(&self) -> bool {
+    pub(super) const fn is_usable_gpu(&self) -> bool {
         !self.software && self.unusable().is_none()
     }
 }
@@ -186,12 +186,27 @@ pub(super) fn usable_gpus(cands: &[AdapterCandidate]) -> Result<Vec<usize>, Back
 /// The usable hardware adapters, those with dedicated video memory first,
 /// each group in enumeration order.
 fn ranked_gpus(cands: &[AdapterCandidate]) -> Vec<usize> {
-    let mut gpus: Vec<usize> = (0..cands.len())
-        .filter(|&i| cands[i].is_usable_gpu())
-        .collect();
+    hardware_order(cands)
+        .into_iter()
+        .filter(|&i| cands[i].unusable().is_none())
+        .collect()
+}
+
+/// The hardware adapters, those with dedicated video memory first, each
+/// group in enumeration order: the order in which the automatic choice
+/// takes the first usable one.  Reads no capability.
+pub(super) fn hardware_order(cands: &[AdapterCandidate]) -> Vec<usize> {
+    let mut gpus: Vec<usize> = (0..cands.len()).filter(|&i| !cands[i].software).collect();
     // A stable sort keeps enumeration order within each group.
     gpus.sort_by_key(|&i| cands[i].dedicated_bytes == 0);
     gpus
+}
+
+/// The adapter `sel` names, before its capabilities are read: the index
+/// whose usability decides whether [`pick`] with `sel` succeeds, or `None`
+/// when `sel` fails on names alone.
+pub(super) fn named(cands: &[AdapterCandidate], sel: &DeviceSelector) -> Option<usize> {
+    name_index(cands, sel).ok()
 }
 
 /// Resolve `sel` to one usable candidate index, or the kind of reason it
@@ -202,40 +217,48 @@ fn resolve_selector(
     cands: &[AdapterCandidate],
     sel: &DeviceSelector,
 ) -> Result<usize, (SelectionFailure, String)> {
-    let warp = warp_index(cands);
-    let warp_index_named = warp.is_some()
-        && sel.as_str().bytes().all(|b| b.is_ascii_digit())
-        && sel.as_str().parse::<usize>().ok() == warp;
-    let idx = if sel.as_str().eq_ignore_ascii_case("warp") || warp_index_named {
-        warp.ok_or_else(|| {
-            (
-                SelectionFailure::NoMatch,
-                "no WARP adapter was enumerated".to_owned(),
-            )
-        })?
-    } else {
-        let names: Vec<&str> = cands[..warp.unwrap_or(cands.len())]
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
-        let idx = match_selector(&names, sel)?;
-        if cands[idx].software {
-            return Err((
-                SelectionFailure::Ineligible,
-                format!(
-                    "device {idx} \"{}\" is a software adapter; select WARP with \"warp\"",
-                    cands[idx].name
-                ),
-            ));
-        }
-        idx
-    };
+    let idx = name_index(cands, sel)?;
     cands[idx].unusable().map_or(Ok(idx), |why| {
         Err((
             SelectionFailure::Ineligible,
             format!("device {idx} \"{}\" is not usable: {why}", cands[idx].name),
         ))
     })
+}
+
+/// The part of [`resolve_selector`] that reads names, the software flag
+/// and WARP's position, but no capability.
+fn name_index(
+    cands: &[AdapterCandidate],
+    sel: &DeviceSelector,
+) -> Result<usize, (SelectionFailure, String)> {
+    let warp = warp_index(cands);
+    let warp_index_named = warp.is_some()
+        && sel.as_str().bytes().all(|b| b.is_ascii_digit())
+        && sel.as_str().parse::<usize>().ok() == warp;
+    if sel.as_str().eq_ignore_ascii_case("warp") || warp_index_named {
+        return warp.ok_or_else(|| {
+            (
+                SelectionFailure::NoMatch,
+                "no WARP adapter was enumerated".to_owned(),
+            )
+        });
+    }
+    let names: Vec<&str> = cands[..warp.unwrap_or(cands.len())]
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let idx = match_selector(&names, sel)?;
+    if cands[idx].software {
+        return Err((
+            SelectionFailure::Ineligible,
+            format!(
+                "device {idx} \"{}\" is a software adapter; select WARP with \"warp\"",
+                cands[idx].name
+            ),
+        ));
+    }
+    Ok(idx)
 }
 
 /// One line per candidate: `  <index>: <name> (<kind>, <MiB> MiB
@@ -462,6 +485,95 @@ mod tests {
                 "{msg}"
             );
         }
+    }
+
+    /// `cands` as seen before probing: no capability read.
+    fn unprobed(cands: &[AdapterCandidate]) -> Vec<AdapterCandidate> {
+        cands
+            .iter()
+            .map(|c| AdapterCandidate {
+                shader_model: None,
+                int64: false,
+                ..c.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dxgi_selection_needs_only_the_adapters_it_takes() {
+        // Every combination of no device, shader model 5.1 and 6.6 over
+        // the four adapters of `host`.
+        let models = [None, Some(0x51), Some(0x66)];
+        let selectors = ["warp", "3", "intel", "nvidia", "0", "1", "basic", "radeon"];
+        for code in 0..models.len().pow(4) {
+            let mut full = host();
+            let mut rest = code;
+            for c in &mut full {
+                c.shader_model = models[rest % models.len()];
+                rest /= models.len();
+            }
+            // The automatic choice, the hardware adapters probed in order
+            // up to the first usable one.
+            let mut partial = unprobed(&full);
+            for i in hardware_order(&partial) {
+                partial[i] = full[i].clone();
+                if partial[i].is_usable_gpu() {
+                    break;
+                }
+            }
+            if let Ok(i) = pick(&partial, None) {
+                assert_eq!(pick(&full, None).ok(), Some(i), "{full:?}");
+            }
+            let mut hardware = unprobed(&full);
+            for i in hardware_order(&full) {
+                hardware[i] = full[i].clone();
+            }
+            if let Ok(gpus) = usable_gpus(&hardware) {
+                assert_eq!(usable_gpus(&full).ok(), Some(gpus), "{full:?}");
+            }
+            // A selector, only the adapter it names probed.
+            for s in selectors {
+                let sel = sel(s);
+                let mut partial = unprobed(&full);
+                if let Some(i) = named(&partial, &sel) {
+                    partial[i] = full[i].clone();
+                }
+                if let Ok(i) = pick(&partial, Some(&sel)) {
+                    assert_eq!(pick(&full, Some(&sel)).ok(), Some(i), "{s} {full:?}");
+                }
+                assert_eq!(
+                    pick(&partial, Some(&sel)).is_ok(),
+                    pick(&full, Some(&sel)).is_ok(),
+                    "{s} {full:?}"
+                );
+            }
+            // The automatic choice succeeds lazily whenever it can.
+            assert_eq!(
+                pick(&partial, None).is_ok(),
+                pick(&full, None).is_ok(),
+                "{full:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dxgi_probe_order_and_names() {
+        let cands = vec![
+            cand("integrated", false, 0, 0x66, false),
+            cand("discrete a", false, 4, 0x66, false),
+            cand("discrete b", false, 16, 0x51, false),
+            cand("WARP", true, 0, 0x62, true),
+        ];
+        assert_eq!(hardware_order(&cands), [1, 2, 0]);
+        let named = |s: &str| named(&cands, &sel(s));
+        assert_eq!(
+            named("discrete b"),
+            Some(2),
+            "named whatever its shader model"
+        );
+        assert_eq!(named("warp"), Some(3));
+        assert_eq!(named("discrete"), None, "ambiguous");
+        assert_eq!(named("nothing"), None);
     }
 
     #[test]

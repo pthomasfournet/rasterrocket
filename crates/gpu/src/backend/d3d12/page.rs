@@ -305,8 +305,9 @@ impl PageDevice for D3d12Backend {
         Self::open_adapter(selector)
     }
 
-    /// The adapters are enumerated, a device being created and dropped on
-    /// each for its capabilities; no queue or pipeline is built.
+    /// The adapters are enumerated and a device is created, then dropped,
+    /// on the one the selector names for its capabilities (on every
+    /// adapter when the selector fails); no queue or pipeline is built.
     fn check_selector(selector: &DeviceSelector) -> Result<()> {
         super::device::check_selector(selector)
     }
