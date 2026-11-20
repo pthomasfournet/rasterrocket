@@ -35,7 +35,7 @@ Phase 5 is complete. The API exists and is integrated.
 decode every JPEG on the CPU; `--backend vaapi` opens the decoder but never
 dispatches to it.
 
-**Direct3D 12 is new and has open items.** Windows only, unreleased: page read-back goes through a host copy that dominates, process start-up is about 0.17 s above Vulkan's, and it never ran on an Intel adapter. See Current status, "the Direct3D 12 backend".
+**Direct3D 12 is new and has open items.** Windows only, unreleased: page read-back goes through a host copy (which dominated at 600 dpi before the word-at-a-time repack cut it about ninefold; not re-measured there), process start-up is about 0.17 s above Vulkan's, and it never ran on an Intel adapter. See Current status, "the Direct3D 12 backend".
 
 **Camera dewarp is experimental.** `rasterrocket-camera`'s dewarp is validated
 on synthetic page curls only; no real phone captures exist yet.
@@ -3198,7 +3198,10 @@ page diagnostics, so its output is unchanged.
 
 **Unreleased on master: RAM output spills when its file system fills.** The spill to disk watched only the available memory, but `/dev/shm` is capped at half the memory by default, so a long run filled it with gigabytes of memory to spare and every later page failed with "No space left on device". The policy now also reads the RAM file system's free space (`statvfs`) and spills once it would not hold one page per render thread (the largest page so far) plus 64 MiB; a page whose write still finds the file system full is written again on disk, and every later page with it.
 
-**Unreleased on master: an interrupted run removes its RAM output.** Ctrl-C, `SIGTERM` and `SIGHUP` (on Windows the console's events, formerly caught only under `--print`) now stop a run as a failed page does: no further page is begun, the pages rendering finish, the RAM directory is removed and rrocket exits with status 1; a second Ctrl-C ends it at once. Before, every interrupt left the `/dev/shm` directory and its pages in RAM until reboot. A closed standard output no longer aborts the run (status 134) when the RAM directory's name is written to it, nor does a closed standard error on a diagnostic. Page files are written as `<name>.part` and renamed once complete, so no truncated page bears a page's name. A panic still ends the process without removing the directory.
+**Unreleased on master: an interrupted run removes its RAM output.** Ctrl-C, `SIGTERM` and `SIGHUP` (on Windows the console's events, formerly caught only under `--print`) now stop a run as a failed page does: no further page is begun, the pages rendering finish, the RAM directory is removed and rrocket exits with status 1; a second Ctrl-C ends it at once. Before, every interrupt left the `/dev/shm` directory and its pages in RAM until reboot. A closed standard output no longer aborts the run (status 134) when the RAM directory's name is written to it, nor does a closed standard error on a diagnostic. Page files are written as `<name>.part` and renamed once complete, so no truncated page bears a page's name. A panic still ends the process without removing the directory. The ordered
+pool that drives comic and `--print` pages checked for cancellation only
+between pages, so under `--print` a page finishing as an interrupt landed was
+still spooled; it now checks before reporting each page.
 
 **Unreleased on master: `--forcenum` takes 1 to 10.** A width above 65 535 ended the run with a panic on the first page (and left a RAM output directory behind); `--forcenum` is now refused outside 1–10 when the arguments are parsed, a page number having at most 10 digits.
 
@@ -3335,7 +3338,9 @@ Open on Direct3D 12:
 - **Read-back.** A page's pixels reach the caller through a host copy whose
   cost dominates (RTX 5070, corpus-04 page 271 at 600 dpi: 2.63 ms to copy the
   138 982 656 device bytes, 42.6 to 42.8 ms to copy the 104 236 992 packed
-  bytes on the host); reading back without that copy is not done.
+  bytes on the host, measured before the word-at-a-time repack below, which
+  cut the host copy of a 150 dpi page from 2.68 to 0.29 ms; the 600 dpi page
+  has not been re-measured); reading back without that copy is not done.
 - **Start-up cost.** About 0.17 s (0.166 s) a process above Vulkan's.
 - **Debug layer.** Under `PDF_RASTER_D3D12_DEBUG=1` a stored validation
   error fails the next page or transfer on that adapter to read the info
@@ -3548,7 +3553,7 @@ nothing there. The knee on this box is about four recording threads per
 RTX-class device on text pages. Everything datacenter-specific is untested:
 H100-class cards and their Vulkan driver, more than two devices, many
 devices of one kind, 80 GB pages, and a CUDA twin of the page raster (there
-is none; the page raster is Vulkan only).
+is none; the page raster runs on Vulkan and, on Windows, Direct3D 12).
 
 **Unreleased on master: CUDA on Windows.** The CUDA features (`nvjpeg`,
 `nvjpeg2k`, `gpu-icc`, `gpu-deskew`, `cache`) build and run on Windows.
@@ -4102,12 +4107,15 @@ reads `PDF_RASTER_D3D12_DEVICE`, `d3d12_device_from_env()` reads it alone):
 an index, a name substring or `warp`, or without one the first hardware
 adapter with dedicated video memory. A selector that matches no adapter, or
 several, is `InvalidOptions` listing them; no adapter opening is
-`BackendUnavailable`. Sessions alive at once share one device per selector,
-and `DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
+`BackendUnavailable`. Sessions alive at once share one device (one per
+adapter, however it is named: see "one backend per GPU" above), and
+`DeviceHold` holds it. With `gpu-icc` the ICC CMYK→RGB lookup runs on the
 adapter after the same one-time exactness probe as Vulkan, byte-identical to
 the CPU (the image cache, blits and GPU pages follow below; an image above
 65 535 dispatch groups, 16 776 960 pixels, converts in runs of that size on
-D3D12 and Vulkan alike, where it fell to the CPU before), and no CUDA
+D3D12 and Vulkan alike, where it fell to the CPU before; a dispatch above
+the group limit is `BackendError::DeviceLimit`, whose new `unit` field reads
+`thread groups` there and `bytes` for a buffer), and no CUDA
 context or Vulkan device is opened. `d3d12_device` is read under
 `ForceD3d12` only, and `vulkan_device` never under it. A build without the
 feature, or for another platform, refuses `ForceD3d12` with
