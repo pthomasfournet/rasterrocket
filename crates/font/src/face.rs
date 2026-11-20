@@ -75,7 +75,11 @@ impl FontFace {
     /// Bind `program` to the matrix in `params`.
     ///
     /// Returns `None` when the matrix is degenerate: a non-finite entry, or
-    /// a nominal pixel size outside `[1, 65535]`.
+    /// a nominal pixel size below 1.  A nominal size above 65 535 is held
+    /// as 65 535: glyphs that large are filled as paths
+    /// ([`Self::prefers_path_fill`]), whose outlines take the matrix
+    /// itself, and a program that requires hinting is grid-fitted at the
+    /// held size, then mapped by the matrix over that size.
     #[must_use]
     pub(crate) fn new(
         id: FaceId,
@@ -88,15 +92,15 @@ impl FontFace {
             return None;
         }
         let size_f = f64::hypot(mat[2], mat[3]).round();
-        if !(1.0..=f64::from(u16::MAX)).contains(&size_f) {
+        if size_f.is_nan() || size_f < 1.0 {
             return None;
         }
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "size_f is finite and within [1, 65535] by the check above"
+            reason = "size_f is within [1, 65535] by the check and the bound above"
         )]
-        let size_px = size_f as u16;
+        let size_px = size_f.min(f64::from(u16::MAX)) as u16;
         Some(Self {
             id,
             code_to_gid,

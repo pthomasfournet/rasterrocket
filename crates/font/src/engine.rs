@@ -165,8 +165,7 @@ pub enum LoadError {
     /// The bytes look like a supported format but cannot be parsed or carry
     /// no outlines.
     Malformed(String),
-    /// The face matrix is degenerate (non-finite, or a pixel size outside
-    /// `[1, 65535]`).
+    /// The face matrix is degenerate (non-finite, or a pixel size below 1).
     DegenerateSize,
 }
 

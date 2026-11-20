@@ -168,7 +168,6 @@ fn degenerate_matrices_are_rejected() {
         [10.0, 0.0, 0.0, 0.4],
         [f64::NAN, 0.0, 0.0, 10.0],
         [10.0, 0.0, 0.0, f64::INFINITY],
-        [10.0, 0.0, 0.0, 70_000.0],
     ] {
         assert!(
             matches!(try_face(data, mat), Err(LoadError::DegenerateSize)),
@@ -192,6 +191,23 @@ fn oversized_glyphs_have_paths_but_no_bitmap() {
         .glyph_path_by_gid(gid)
         .expect("outline still available");
     assert!(bounds(&path).3 > 30_000.0);
+}
+
+/// A face larger than 65 535 pixels per em loads, its nominal size held at
+/// 65 535, and its glyph outlines scale with the matrix.
+#[test]
+fn faces_past_the_nominal_size_limit_keep_their_scale() {
+    let data = font_test_data::TINOS_SUBSET;
+    let (small, large) = (face_at(data, 50_000.0), face_at(data, 100_000.0));
+    assert_eq!(large.size_px, u16::MAX);
+    assert!(large.prefers_path_fill());
+    let gid = large.raw_get_char_index(u32::from('A'));
+    let height = |face: &FontFace| {
+        let (_, y0, _, y1) = bounds(&face.glyph_path_by_gid(gid).expect("outline"));
+        y1 - y0
+    };
+    let ratio = height(&large) / height(&small);
+    assert!((ratio - 2.0).abs() < 1e-4, "outline scale {ratio}");
 }
 
 // ── Routing ───────────────────────────────────────────────────────────────────
