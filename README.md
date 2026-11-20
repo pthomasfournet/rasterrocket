@@ -40,25 +40,61 @@ is `--max-page-mib` / `SessionConfig::max_page_bytes`; see the
 ## What's new on master (unreleased)
 
 - **Direct3D 12 (Windows, opt-in).** `--backend d3d12` (`BackendPolicy::ForceD3d12`, `--features d3d12`) runs the ICC lookup table, the image cache and `--gpu-pages` (one adapter or `--gpu-devices`) on a Direct3D 12 adapter, byte-identical to the CPU at 8 and 16 bits; `--d3d12-device` picks the adapter. The build needs slangc 2026.20 and DXC 1.9.2609; see [Build](#build).
-- **Printing.** `--print` works on Windows through GDI (8-bit sRGB bitmaps; `--depth 16` and `--output-profile` are refused there).
-- **Transparent gray.** `--transparent --gray` (and `--transparent` under a gray `--output-profile`) writes a gray and alpha PNG or TIFF; the library has `RasterOptions::gray_alpha` and `render_page_gray_alpha`.
+- **CUDA and Vulkan on Windows.** The CUDA features (CUDA 13.4 or later with the Visual Studio 2026 Build Tools) and the `vulkan` feature (the LunarG SDK's slangc) build and run on Windows; a lost Vulkan device names a GPU timeout (TDR) as its likely cause there.
+- **GPU pages on several devices.** `--gpu-devices LIST|all` (`SessionConfig::gpu_devices`) spreads one session's GPU pages over several Vulkan devices or Direct3D 12 adapters, each page taking the device where it expects the shortest wait. Every page that may render on a device now waits for it rather than falling to the CPU; `RasterSession::device_page_counts()` and the `GPU pages:` summary say where each page went and why (`DevicePageCounts`, with `device_limit` for pages a device declined for its limits or memory, kept apart from the failures that retire it, and banded pages counted as ineligible). Vulkan no longer requires 8-bit storage, so more devices are eligible.
+- **Printing.** `--print` works on Windows through GDI (8-bit sRGB bitmaps; `--depth 16` and `--output-profile` are refused there), with `--print-file` for printers that print to a file.
+- **Transparent gray.** `--transparent --gray` (and `--transparent` under a gray `--output-profile`) writes a gray and alpha PNG or TIFF; the library has `RasterOptions::gray_alpha`, `render_page_gray_alpha` and `PageBuffer::render_gray_alpha_into`.
 - **Library.** `PageDiagnostics::has_omissions()` is `true` when a page was
-  drawn with a skipped image or content stream, a form past the depth limit,
-  a missing font or an unsupported feature.
-- **Comic input** honours `--progress` and `--timings`; a page selection
-  that selects nothing, or contradicts the page count, no longer reports a
-  malformed archive.
+  drawn with a skipped image, content stream or shading, a form past the
+  depth limit, a missing font or an unsupported feature;
+  `PageDiagnostics::shading_failures` lists shadings whose function yields
+  no colour, which fail the page under `strict` / `--strict`
+  (`RasterError::ShadingFailed`). The JavaScript report finds scripts on
+  parent form fields (`ScriptLocation::FormFields`, `FieldActions`).
+  `render_channel` drives each document from a thread of its own and renders
+  on a private pool, so draining it from inside a Rayon pool no longer
+  hangs. A failed `PageBuffer` render keeps its canvas. In
+  `rasterrocket-render`, `PathBuilder::move_to` returns `()` and
+  `PathError::BogusPath` is removed.
+- **Output files (`rrocket`).** Ctrl-C, `SIGTERM` and `SIGHUP` stop a run and
+  remove its RAM output directory; page files, on disk or in RAM, appear
+  only once complete (written as `.part`, then renamed); RAM output spills to disk when the RAM file system, not only memory, runs
+  low. `--forcenum` takes 1 to 10.
+- **Rendering fixes.** A `moveto` after a `moveto` replaces it (TikZ circles
+  and grids), every `x y m h` dot of a stroke is drawn, a segment after `h`
+  starts at the closed subpath's start, the flatness tolerance is capped at
+  one device pixel, text above 65 535 pixels per em draws, coordinates past
+  the rasteriser's fixed-point range keep their slopes, deeply nested Type 4
+  functions evaluate, a short last row under a PNG predictor is kept, and
+  tiling cells overprint per pixel.
+- **Parser hardening.** Streams without a terminator, object-stream caches,
+  wrong object-stream indices and malformed numbers no longer cost time or
+  memory out of proportion to the file; `ASCII85Decode` data opening with
+  `<~` decodes.
+- **Speed.** AVX2 tiers for the antialiased span composite and the deskew
+  rotation, AVX-512 for the JPEG decoder's IDCT, colour conversion and
+  up-sampling, CCITT and JBIG2 images kept as bits, function-based shadings
+  evaluated only where they are read, and comic pages rendered on the thread
+  pool.
 - **JPEG.** A progressive refinement bit read past a marker is a counted
   fill bit, so the rows it affects are reported as not intact (the image
   `partial`). `ZUNE_JPEG_NO_AVX512` keeps JPEG decodes on the AVX2 kernels
   of an AVX-512 CPU.
-- **GPU pages.** A session waits once, cancellably, for a device to open
-  (`GPU_PAGE_OPEN_WAIT`, 30 s from the first page that waits) and then
-  renders on the CPU while none is open. A device is chosen by a recent mean
-  of its page rasters, a page that does not fit in device memory renders on
-  the CPU and leaves the device in service (`BackendError::OutOfMemory`), and
-  a `DeviceHold` reuses the session's own device. The NPP deskew's
-  16-bit bound is stated as 8 levels of 65 535.
+- **Comic input** honours `--progress` and `--timings`; a page selection
+  that selects nothing, or contradicts the page count, no longer reports a
+  malformed archive.
+- **GPU fixes.** A session waits once, cancellably, for a GPU-page device
+  to open (`GPU_PAGE_OPEN_WAIT`, 30 s from the first page that waits); a
+  page that does not fit in device memory renders on the CPU and leaves the
+  device in service; sessions naming one GPU differently share one backend;
+  a Vulkan device whose work cannot be confirmed complete is retired; the
+  Vulkan pipeline cache is kept per device and replaced atomically;
+  nvJPEG2000 declines the codestreams and reduced draws it would not decode
+  as the CPU does; a `gpu-deskew` or `nvjpeg2k` build opens `--backend cuda`
+  sessions; the NPP deskew's border follows the CPU's edge rule, its 16-bit
+  bound stated as 8 levels of 65 535.
+
+The full list, with measurements and API changes, is in [ROADMAP.md](ROADMAP.md) under "Current status".
 
 ## What's new in v2.4.0
 
@@ -598,7 +634,7 @@ is **untested**: it is expected to work, nothing more.
 | NVIDIA RTX 5070, AMD Radeon iGPU (the 9900X3D's) and WARP 1.0.22, Windows 11, on the 9900X3D machine | Direct3D 12 (`--backend d3d12`): the GPU crate's D3D12 tests and the ICC, image-cache and GPU-page parity suites on all three, and every fixture page (corpus-01 to 11, 8 and 16 bits, RGB and gray, 12 096 per variant) byte-identical to `--backend cpu` under `--backend d3d12`, with and without `--gpu-pages`, on the RTX 5070 and on the Radeon, and under `--gpu-pages --gpu-devices all` with both; WARP ran corpus-01 only. The D3D12 tests and the parity suites also ran under the debug layer on WARP and the RTX 5070, without a validation error |
 | Intel UHD 630 (the i7-8700K's), Windows, driver 31.0.101.2141 (Vulkan 1.3.215) | Vulkan: the GPU crate's Vulkan tests and the GPU-page, image-cache, ICC and teardown suites on it, and every fixture page under `--backend vulkan`, `--gpu-pages` and `--gpu-devices all` (with the RTX 2080 SUPER) byte-identical to the CPU at 8 and 16 bits; it has `shaderInt64`, so it takes the paths kernel. Its `maxStorageBufferRange` is 1 GiB, so a page whose device pixels exceed it (4 bytes a pixel at 8 bits, 8 at 16, gray included) renders on the CPU, with a warning. The TDR gate ran before the device stored whole-word pixels: its largest pages then, `corpus-09` at 950 dpi (1.0 GB at three samples a pixel) and `corpus-06` / `corpus-02` at 1200 dpi in 16 bits (0.8 GB), now exceed the limit and render on the CPU. The 26.20.100.7642 driver it had before reports Vulkan 1.1 and is listed as unusable |
 | Apple A18 Pro, 8 GB, macOS 27.2 | NEON tiers, the macOS build and system fonts; Vulkan through MoltenVK 1.4.2, including `--gpu-pages` |
-| GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows). No runner has a GPU |
+| GitHub Actions runners | x86-64 Linux: the full CPU test suite; arm64 Linux: clippy and the NEON tests; macOS (Apple-silicon virtual machine, no GPU): clippy and the renderer, interpreter, library and font suites; Windows x86-64: clippy and the CPU suites listed in [BSD and Windows](docs/platforms/other.md#windows), and the Direct3D 12 tests and the GPU-page and ICC parity suites on the pinned WARP 1.0.22. No runner has a GPU |
 | CUPS on the Linux machine | `--print` through an `everywhere` queue on `ippeveprinter`, a virtual IPP printer |
 | Windows 11 Pro (build 26200) on the i7-8700K machine | `--print` through GDI to Microsoft Print to PDF with `--print-file`, A4 and Letter |
 
@@ -614,7 +650,7 @@ is **untested**: it is expected to work, nothing more.
 - **NVIDIA GPUs other than the RTX 5070 and the RTX 2080 SUPER**: other
   `CUDA_ARCH` targets (see [the table](#picking-cuda_arch-for-your-gpu))
   and datacenter cards (A100, H100); on the RTX 2080 SUPER under Linux, a
-  CUDA 13 build and nvJPEG2000.
+  CUDA 13 build beyond the nvJPEG2000 device tests.
 - **Windows GPUs:** CUDA on Windows on any GPU but the RTX 2080 SUPER,
   Vulkan on any but it and the UHD 630, and Direct3D 12 on any adapter but
   the RTX 5070, the AMD Radeon iGPU and WARP. **Direct3D 12 has never run on
@@ -633,7 +669,7 @@ is **untested**: it is expected to work, nothing more.
 
 **GPU (optional):**
 - **NVIDIA via CUDA 13** — nvJPEG2000, ICC CLUT, deskew and the image cache, plus nvJPEG, which is wired but dormant by default because the CPU decoder beats it. Under `auto`, nvJPEG2000 is dormant too: its decoder start-up costs more than it saves.  `cudarc` is pinned to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required. Tested on the RTX 5070; on the RTX 2080 SUPER from an nvcc 12.4 build under Linux and a CUDA 13.5 build under Windows (see [Tested hardware](#tested-hardware)).
-- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages composited in the wide working space (under an output profile), pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an Intel UHD 630 (under Windows), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs under Linux (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`.  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
+- **Cross-vendor via Vulkan compute** — whole-page rendering (`--gpu-pages`) is written for any Vulkan 1.3+ device. The device computes exact-area coverage and renders fills, strokes, text, images, forms, annotation appearances, path clips and soft masks, byte-identical to the CPU at 8 and 16 bits; transparency-group forms, blend modes other than Normal, patterns and shadings, Type 3 glyphs that run their CharProc, overprint simulation, pages composited in the wide working space (under an output profile), pages past the 128 MiB command list and pages rendered in bands (larger than `--band-mib`) stay on the CPU. On the vector and image documents measured, a GPU page usually costs less than a CPU page and a single-threaded run is faster; beside all CPU workers it is level or slower, and it loses on cheap pages such as plain text, so the defaults stay on the CPU. GPU pages are tested on an RTX 5070, an RTX 2080 SUPER, an AMD integrated GPU (RADV), an Intel UHD 630 (under Windows), an A18 Pro's GPU (MoltenVK) and llvmpipe. Untested on Intel GPUs under Linux (ANV), on M-series Macs and on datacenter GPUs. Select a device with `--vulkan-device`, or several with `--gpu-devices` (tested with an RTX 5070 and the RADV iGPU under Linux, and an RTX 2080 SUPER and the UHD 630 under Windows).  The image cache (`cache` feature) and the ICC CMYK lookup table (`gpu-icc`) run under Vulkan too; nvJPEG does not.
 - **Windows via Direct3D 12** — `--backend d3d12` (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs the ICC lookup table, the image cache and `--gpu-pages` on a Direct3D 12 adapter with shader model 6.0 or later, byte-identical to the CPU at 8 and 16 bits; `--d3d12-device` (an index, a name substring, `warp`, or WARP's listed index) picks the adapter, and `--gpu-devices all` takes every hardware adapter, never WARP. Tested on an RTX 5070, an AMD Radeon iGPU and WARP 1.0.22 (see [Tested hardware](#tested-hardware)); untested on Intel adapters. A page whose device buffers pass the 2^27 elements of a view (the 555 930 624-byte page of corpus-04 page 271 at 1200 dpi) renders on the CPU. A device removal (TDR) retires the device and the page renders on the CPU; the timeout itself is the user's to configure. Whole-process time on the RTX 5070 (`--gpu-pages`, 150 dpi, first 64 pages of each fixture, 2026-11-19) is 1.41 times Vulkan's in sum, mostly start-up (about 0.17 s a process); on the largest page's device raster the two are level.
 - **Linux iGPU/dGPU via VA-API** — JPEG baseline decode, wired but dormant, sharing nvJPEG's disabled size gate. Tested on the AMD Raphael iGPU (VCN); untested on Intel Quick Sync and Intel Arc.
 
@@ -813,7 +849,10 @@ rasterrocket parses untrusted PDF and comic-archive input. Its hardening posture
   pipeline enforces a per-page operator/wall-clock/form-depth watchdog, an
   aggregate content-size cap, a filter-chain length and decompression-bomb
   cap, a per-page bitmap byte budget and a per-image decode budget (see
-  [Size limits](docs/cli-reference.md#size-limits)). Release builds use
+  [Size limits](docs/cli-reference.md#size-limits)); decoded object streams
+  are cached under a 256 MiB budget with a bounded allowance for decoding
+  evicted ones again, and a stream with neither a correct `/Length` nor a
+  terminator of its own ends before the next object, so a small file cannot claim time or memory quadratic in its size. Release builds use
   `panic = "abort"`, so a panic would end the process; the fuzz targets
   exist to keep the renderer from reaching one.
 - **No script execution.** rasterrocket has no JavaScript engine. A PDF
