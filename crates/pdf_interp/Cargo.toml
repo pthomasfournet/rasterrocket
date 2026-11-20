@@ -38,10 +38,10 @@ bundled-fonts    = []
 
 [dependencies]
 gpu      = { package = "rasterrocket-gpu",    path = "../gpu",    optional = true, default-features = false }
-raster = { package = "rasterrocket-render", path = "../raster", version = "2.4" }
-color  = { package = "rasterrocket-color",  path = "../color",  version = "2.4" }
-font   = { package = "rasterrocket-font",   path = "../font",   version = "2.4" }
-pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "2.4" }
+raster = { package = "rasterrocket-render", path = "../raster", version = "2.5" }
+color  = { package = "rasterrocket-color",  path = "../color",  version = "2.5" }
+font   = { package = "rasterrocket-font",   path = "../font",   version = "2.5" }
+pdf    = { package = "rasterrocket-parser", path = "../pdf",    version = "2.5" }
 log    = { workspace = true }
 # CCITT fax: a local fork of hayro-ccitt (crates/ccitt).
 hayro-ccitt = { path = "../ccitt" }
@@ -59,7 +59,7 @@ unicode-bidi-mirroring = "0.4.0"
 [dev-dependencies]
 env_logger       = { workspace = true }
 jpeg-encoder     = "0.7"
-encode           = { package = "rasterrocket-encode", path = "../encode", version = "2.4" }
+encode           = { package = "rasterrocket-encode", path = "../encode", version = "2.5" }
 
 
 [lints.rust]

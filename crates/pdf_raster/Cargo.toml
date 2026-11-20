@@ -35,12 +35,12 @@ bundled-fonts    = ["pdf_interp/bundled-fonts"]
 
 [dependencies]
 gpu         = { package = "rasterrocket-gpu",         path = "../gpu",        optional = true, default-features = false }
-pdf_interp  = { package = "rasterrocket-interp",  path = "../pdf_interp", version = "2.4" }
-raster      = { package = "rasterrocket-render",  path = "../raster",     version = "2.4" }
-color       = { package = "rasterrocket-color",   path = "../color",      version = "2.4" }
-encode      = { package = "rasterrocket-encode",  path = "../encode",     version = "2.4" }
+pdf_interp  = { package = "rasterrocket-interp",  path = "../pdf_interp", version = "2.5" }
+raster      = { package = "rasterrocket-render",  path = "../raster",     version = "2.5" }
+color       = { package = "rasterrocket-color",   path = "../color",      version = "2.5" }
+encode      = { package = "rasterrocket-encode",  path = "../encode",     version = "2.5" }
 base64      = "0.23"
-pdf         = { package = "rasterrocket-parser",  path = "../pdf",        version = "2.4" }
+pdf         = { package = "rasterrocket-parser",  path = "../pdf",        version = "2.5" }
 rayon       = "1"
 log         = { workspace = true }
 

@@ -17,7 +17,7 @@ default     = ["simd-avx2"]
 simd-avx2   = []                   # AVX2 blend / fill paths
 
 [dependencies]
-color    = { package = "rasterrocket-color", path = "../color", version = "2.4" }
+color    = { package = "rasterrocket-color", path = "../color", version = "2.5" }
 bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
 bitflags = { workspace = true }
 log      = { workspace = true }
