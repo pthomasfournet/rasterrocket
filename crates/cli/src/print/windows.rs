@@ -10,7 +10,7 @@
 //! writing is removed.
 
 use std::ffi::OsStr;
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _};
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::PathBuf;
 use std::ptr;
@@ -38,8 +38,6 @@ use windows_sys::Win32::Storage::Xps::{
     AbortDoc, DC_COLLATE, DC_COPIES, DC_DUPLEX, DOCINFOW, DeviceCapabilitiesW, EndDoc, EndPage,
     StartDocW, StartPage,
 };
-use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
-use windows_sys::core::BOOL;
 
 use super::gdi::{self, Claims, Copies, DibFormat, Orientation, Placement, Surface, Surfaces};
 use super::{Duplex, PageOut, Spool};
@@ -668,55 +666,9 @@ impl Settings {
 /// The printer could not be opened, cannot print the job as asked, or the
 /// job could not be started.
 pub(crate) fn begin(args: &mut Args, paper: Option<i16>) -> Result<Spool<Job>, String> {
-    catch_interrupts();
     let job = Job::open(&Settings::of(args, paper))?;
     args.print_surfaces = Some(job.surfaces);
     Ok(Spool::new(job))
-}
-
-/// Install [`on_console_event`] as a console control handler of the
-/// process.  A failure is logged: the job then prints, and an interrupted
-/// run leaves it to the spooler.
-#[expect(
-    unsafe_code,
-    reason = "SetConsoleCtrlHandler installs the console control handler"
-)]
-fn catch_interrupts() {
-    // SAFETY: the handler is a function that lives as long as the process
-    // and touches only an atomic flag and standard error.
-    if unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) } == 0 {
-        log::warn!(
-            "cannot catch Ctrl-C: {}; an interrupted run leaves its print job to the spooler",
-            io::Error::last_os_error()
-        );
-    }
-}
-
-/// The console control handler of a print run.  The first Ctrl-C or
-/// Ctrl-Break, the console's closing, the user's logging off and the
-/// system's shutting down mark the run interrupted ([`super::interrupt`]):
-/// no further page is begun, and `main` returns through the job's `Drop`,
-/// which aborts it and removes the file it was writing.  A later Ctrl-C or
-/// Ctrl-Break goes on to the default handler, which ends the process at
-/// once.  On the other events the system ends the process when the handler
-/// returns, so it does not return: the process ends when `main` does or
-/// when the system's grace period runs out.
-extern "system" fn on_console_event(event: u32) -> BOOL {
-    let first = super::interrupt();
-    match event {
-        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-            if first {
-                let _ = writeln!(
-                    io::stderr(),
-                    "rrocket: interrupted: aborting the print job; interrupt again to quit at once"
-                );
-            }
-            BOOL::from(first)
-        }
-        _ => loop {
-            std::thread::park();
-        },
-    }
 }
 
 /// A print job being drawn.  Its fields drop in their order: the device
@@ -1228,14 +1180,14 @@ mod tests {
         let required = std::env::var_os("RR_REQUIRE_PRINT_TO_PDF").is_some_and(|v| v == "1");
         let reason = match printer_names() {
             Ok(names) if names.iter().any(|n| n == PRINT_TO_PDF) => {
-                eprintln!("{test}: ran");
+                note!("{test}: ran");
                 return true;
             }
             Ok(names) => format!("{PRINT_TO_PDF:?} is not among the printers {names:?}"),
             Err(e) => format!("the printers cannot be listed: {e}"),
         };
         assert!(!required, "RR_REQUIRE_PRINT_TO_PDF=1: {reason}");
-        eprintln!("{test}: skipped: {reason}");
+        note!("{test}: skipped: {reason}");
         false
     }
 
@@ -1424,7 +1376,7 @@ mod tests {
                     "paper {paper} page {page}: {size:?}, not {want:?}"
                 );
                 let ink = (f64::from(x1 - x0), f64::from(y1 - y0));
-                eprintln!("paper {paper} page {page}: sheet {size:?}, ink {ink:?} at ({x0}, {y0})");
+                note!("paper {paper} page {page}: sheet {size:?}, ink {ink:?} at ({x0}, {y0})");
                 // Fitted to the sheet at most: the printable area may be
                 // smaller.
                 let scale = (size.0 / w).min(size.1 / h).min(1.0);

@@ -731,6 +731,76 @@ fn failed_run_removes_its_ram_directory() {
     assert!(!ram.exists(), "the RAM directory outlived a failed run");
 }
 
+/// A closed standard output does not fail the run: the RAM directory's
+/// name written there finds no reader, the pages render, and the directory
+/// is removed.
+#[test]
+fn a_closed_standard_output_is_not_an_error() {
+    let (dir, input) = workdir(&two_page_pdf());
+    let ram = dir.path().join("ram");
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let out = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .args(["--backend", "cpu", "-r", "72", "--ram-path"])
+        .arg(&ram)
+        .arg(&input)
+        .arg("out")
+        .stdout(writer)
+        .output()
+        .expect("run rrocket");
+    assert!(
+        out.status.success(),
+        "{:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ram.exists(), "the RAM directory outlived the run");
+}
+
+/// `SIGINT` once the RAM directory is announced: rrocket begins no further
+/// page, exits with status 1 naming the interrupt, and removes its RAM
+/// directory.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_removes_the_ram_directory() {
+    use std::io::{BufRead as _, BufReader, Read as _};
+    use std::process::Stdio;
+
+    let (dir, input) = workdir(&black_a4_pages(1000));
+    let ram = dir.path().join("ram");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rrocket"))
+        .args(["--backend", "cpu", "--threads", "1", "--mono"])
+        .args(["-r", "20", "--ram-path"])
+        .arg(&ram)
+        .arg(&input)
+        .arg("out")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rrocket");
+    let mut announced = String::new();
+    let _ = BufReader::new(child.stdout.take().expect("piped stdout"))
+        .read_line(&mut announced)
+        .expect("read stdout");
+    assert_eq!(Path::new(announced.trim_end()), ram);
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success());
+    let mut seen = String::new();
+    let _ = child
+        .stderr
+        .take()
+        .expect("piped stderr")
+        .read_to_string(&mut seen)
+        .expect("read stderr");
+    let status = child.wait().expect("wait for rrocket");
+    assert_eq!(status.code(), Some(1), "{seen}");
+    assert!(seen.contains("rrocket: interrupted"), "{seen}");
+    assert!(!ram.exists(), "the RAM directory outlived the interrupt");
+}
+
 /// One 40 × 40 pt white page carrying a `/Square` annotation whose
 /// appearance fills (10, 10)–(30, 30) black.
 fn annotated_pdf() -> Vec<u8> {
@@ -1202,7 +1272,6 @@ fn print_to_pdf_writes_the_pages_to_the_print_file() {
 }
 
 /// `pages` A4 pages, each painted black whole.
-#[cfg(windows)]
 fn black_a4_pages(pages: usize) -> Vec<u8> {
     let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 3 + i)).collect();
     let mut objects = vec![

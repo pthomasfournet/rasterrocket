@@ -1,3 +1,12 @@
+/// `eprintln!` whose write may fail: a closed or full standard error ends
+/// no run, since every line written there is a diagnostic.
+macro_rules! note {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod args;
 mod bands;
 mod cleanup;
@@ -6,6 +15,7 @@ mod decrypt_gate;
 mod deliver;
 mod diagnostics;
 mod fax;
+mod interrupt;
 mod naming;
 mod ocr_prep;
 mod pool;
@@ -28,7 +38,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 /// Print `rrocket: {message}` to stderr and yield the failure exit status.
 fn fail(message: impl std::fmt::Display) -> ExitCode {
-    eprintln!("rrocket: {message}");
+    note!("rrocket: {message}");
     ExitCode::FAILURE
 }
 
@@ -55,9 +65,23 @@ fn read_stdin_pdf() -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Apply the RAM output policy (see `ram`): the guard removes the RAM
+/// directory when it drops, and the spill policy chooses each page's
+/// directory.  Interrupts are caught first (see `interrupt`), so an
+/// interrupt from the creation of the directory on stops the run through
+/// `main`'s return, which drops the guard.
+///
+/// # Errors
+///
+/// The failure exit status, the error reported.
+fn begin_output(args: &mut Args) -> Result<(ram::RamDirGuard, ram::SpillPolicy), ExitCode> {
+    interrupt::catch();
+    ram::redirect_to_ram(args).map_err(fail)
+}
+
 /// Every exit path returns through here rather than `std::process::exit`,
 /// so the RAM output guard and the thread pool are dropped before the
-/// process ends.
+/// process ends; an interrupt (see `interrupt`) also ends the run here.
 #[expect(
     clippy::too_many_lines,
     reason = "linear startup sequence: arg parse → session open → page list → parallel render"
@@ -72,7 +96,7 @@ fn main() -> ExitCode {
     if args.list_printers {
         return match print::list_printers() {
             Ok(list) if list.is_empty() => {
-                eprintln!("rrocket: {}", print::NO_PRINTERS);
+                note!("rrocket: {}", print::NO_PRINTERS);
                 ExitCode::SUCCESS
             }
             Ok(list) => match print::write_printer_list(&mut std::io::stdout().lock(), &list) {
@@ -92,13 +116,6 @@ fn main() -> ExitCode {
     args.apply_fax_preset();
     args.apply_print_preset();
 
-    // RAM output (see `ram`): the guard removes the RAM directory when it
-    // drops, and the spill policy chooses each page's directory.
-    let (_ram_guard, spill_policy) = match ram::redirect_to_ram(&mut args) {
-        Ok(redirect) => redirect,
-        Err(e) => return fail(e),
-    };
-
     let mut session_config = match args.session_config() {
         Ok(config) => config,
         Err(e) => return fail(e),
@@ -110,7 +127,7 @@ fn main() -> ExitCode {
         }
     }
     if let Some(warning) = args.untagged_output_warning() {
-        eprintln!("rrocket: warning: {warning}");
+        note!("rrocket: warning: {warning}");
     }
 
     // The password is an input to decryption, not an authorisation: it is
@@ -119,11 +136,17 @@ fn main() -> ExitCode {
 
     // Dispatch on the input extension. Comic archives render via the comic crate
     // and share the PDF path's output encoder; everything else (incl. `.pdf` and
-    // unknown extensions) falls through to the native PDF interpreter below. The
-    // `--ram` redirect above already applies, so comic output honours it too;
-    // the decryption gate below is skipped for comics, whose embedded PDF
-    // opens with the same session settings otherwise.
+    // unknown extensions) falls through to the native PDF interpreter below.
+    // Comic output takes the same RAM output policy as PDF output; the
+    // decryption gate below is skipped for comics, whose embedded PDF opens
+    // with the same session settings otherwise.  The output of either begins
+    // after any prompt, so an interrupt before it ends the process at once,
+    // with nothing to remove.
     if args.is_comic_input() {
+        let (_ram_guard, spill_policy) = match begin_output(&mut args) {
+            Ok(output) => output,
+            Err(status) => return status,
+        };
         return match comic::run(&args, &spill_policy, session_config) {
             Ok((0, _)) => fail("no pages rendered"),
             // Per-page errors were already printed to stderr inside `run`; a
@@ -165,6 +188,11 @@ fn main() -> ExitCode {
         session_config.decrypt_authorized = true;
     }
 
+    let (_ram_guard, spill_policy) = match begin_output(&mut args) {
+        Ok(output) => output,
+        Err(status) => return status,
+    };
+
     let pool = match pool::RenderPool::new(args.num_threads) {
         Ok(pool) => pool,
         Err(e) => return fail(format_args!("cannot start the render thread pool: {e}")),
@@ -195,7 +223,7 @@ fn main() -> ExitCode {
         Err(e) => return fail(e),
     };
     for w in &page_warnings {
-        eprintln!("rrocket: warning: {w}");
+        note!("rrocket: warning: {w}");
     }
 
     let n_pages = pages.len();
@@ -240,7 +268,7 @@ fn main() -> ExitCode {
             reason = "page_num ≥ 1, enforced by build_page_list"
         )]
         let page_u32 = page_num as u32;
-        if document_failed.load(Ordering::Relaxed) {
+        if document_failed.load(Ordering::Relaxed) || interrupt::interrupted() {
             return None;
         }
 
@@ -278,7 +306,7 @@ fn main() -> ExitCode {
         // Page errors are reported whether or not the spool failed.
         let pages_failed = !errors.is_empty();
         let status = diagnostics::report_errors(errors, &args);
-        if print::interrupted() {
+        if interrupt::interrupted() {
             return fail("nothing printed: interrupted; the print job is aborted");
         }
         if let Some(e) = spool_error {
@@ -287,7 +315,7 @@ fn main() -> ExitCode {
             ));
         }
         if pages_failed {
-            eprintln!("rrocket: nothing printed: pages failed to render");
+            note!("rrocket: nothing printed: pages failed to render");
             return status;
         }
         if let Err(e) = print::complete(spool, &args) {
@@ -295,11 +323,15 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    if interrupt::interrupted() {
+        let _ = diagnostics::report_errors(errors, &args);
+        return fail("interrupted: the pages not yet begun were not rendered");
+    }
     if let Some(document) = fax {
         // A fax missing pages would read as complete: none is written.
         if !errors.is_empty() {
             let status = diagnostics::report_errors(errors, &args);
-            eprintln!("rrocket: no fax document written: pages failed to render");
+            note!("rrocket: no fax document written: pages failed to render");
             return status;
         }
         let path = format!("{}.tif", spill_policy.next_prefix());

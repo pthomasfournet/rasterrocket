@@ -323,8 +323,6 @@ pub(crate) fn write_cleaned(
             half,
         );
 
-        // Pages are written in place, not renamed into place, so that no
-        // per-page rename waits on the file system's flush of the data.
         write_output(&out_path, |mut out| {
             if let Some(image) = page.wide_image() {
                 return bands::write_whole(out, format, image, args);
@@ -394,26 +392,44 @@ impl<K: Ord + Copy, P> PageCollector<K, P> {
 /// writes bypasses the buffer.
 pub(crate) const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
 
-/// Create the page output file `out_path` and fill it through an
-/// [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`, which returns the
-/// buffer once the file is complete.  A file this call created and failed
-/// to complete is removed; a file that could not be created is left as it
-/// was.
+/// Write the output file `out_path`: create `<out_path>.part`, fill it
+/// through an [`OUTPUT_BUFFER_BYTES`] write buffer with `encode`, which
+/// returns the buffer once the file is complete, and rename it to
+/// `out_path`.  No incomplete file ever bears `out_path`: one this call
+/// failed to complete is removed, and one left by a process that ended
+/// while writing keeps the `.part` name.  An existing `out_path` that
+/// cannot be opened for writing is left as it was.  The rename replaces a
+/// file only where one exists, where creating `out_path` in place would
+/// have truncated it, so a file system that writes a replaced file's data
+/// out before the replacement does so in the same cases as before.
 ///
 /// # Errors
-/// The creation, encoding or final flush failed.
+/// The creation, encoding, final flush or rename failed.
 pub(crate) fn write_output(
     out_path: &str,
     encode: impl FnOnce(BufWriter<File>) -> Result<BufWriter<File>, RenderError>,
 ) -> Result<(), RenderError> {
-    let file = File::create(out_path)
-        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create {out_path}: {e}")))?;
+    let cannot_create =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("cannot create {out_path}: {e}"));
+    match fs::OpenOptions::new().write(true).open(out_path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(cannot_create(e).into()),
+        _ => {}
+    }
+    let part = format!("{out_path}.part");
+    let file = File::create(&part).map_err(cannot_create)?;
     let out = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
-    let written = encode(out).and_then(|mut out| out.flush().map_err(RenderError::from));
+    let written = encode(out)
+        .and_then(|mut out| out.flush().map_err(RenderError::from))
+        .and_then(|()| {
+            fs::rename(&part, out_path).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("cannot rename {part} to {out_path}: {e}"))
+                    .into()
+            })
+        });
     if written.is_err()
-        && let Err(e) = fs::remove_file(out_path)
+        && let Err(e) = fs::remove_file(&part)
     {
-        eprintln!("rrocket: warning: could not remove the incomplete {out_path}: {e}");
+        note!("rrocket: warning: could not remove the incomplete {part}: {e}");
     }
     written
 }
@@ -463,5 +479,44 @@ fn encode_page<W: Write + Seek>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Write as _;
+
+    use super::{RenderError, write_output};
+
+    /// A complete file appears under its name, replacing an earlier one,
+    /// and an incomplete one under neither its name nor the `.part` name.
+    #[test]
+    fn only_a_complete_page_bears_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out-1.ppm");
+        let path = path.to_str().unwrap();
+        let part = format!("{path}.part");
+        fs::write(path, b"earlier run").unwrap();
+
+        write_output(path, |mut out| {
+            out.write_all(b"page")?;
+            assert!(fs::exists(&part).unwrap(), "pages are written to {part}");
+            assert_eq!(fs::read(path).unwrap(), b"earlier run");
+            Ok(out)
+        })
+        .unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"page");
+        assert!(!fs::exists(&part).unwrap());
+
+        let failed = dir.path().join("out-2.ppm");
+        let failed = failed.to_str().unwrap();
+        let result = write_output(failed, |mut out| {
+            out.write_all(b"half a pa")?;
+            Err(RenderError::Io(std::io::Error::other("encoder failed")))
+        });
+        assert!(result.is_err());
+        assert!(!fs::exists(failed).unwrap());
+        assert!(!fs::exists(format!("{failed}.part")).unwrap());
     }
 }

@@ -33,7 +33,7 @@ fn error_chain(e: &dyn std::error::Error) -> Vec<String> {
 /// Print [`error_chain`] of `e` to stderr, one "caused by:" line per level.
 pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
     for cause in error_chain(e) {
-        eprintln!("  caused by: {cause}");
+        note!("  caused by: {cause}");
     }
 }
 
@@ -44,12 +44,12 @@ pub(crate) fn print_error_chain(e: &dyn std::error::Error) {
 /// even when no `--backend` flag was passed.
 pub(crate) fn report_open_error(e: &RasterError, args: &Args, policy: BackendPolicy) {
     if matches!(e, RasterError::BackendUnavailable(_)) {
-        eprintln!("rrocket: {e}");
+        note!("rrocket: {e}");
         print_backend_hint(policy, args.vaapi_device.as_deref(), args.backend.is_none());
     } else if matches!(e, RasterError::InvalidOptions(_)) {
-        eprintln!("rrocket: {e}");
+        note!("rrocket: {e}");
     } else {
-        eprintln!("rrocket: failed to open PDF: {e}");
+        note!("rrocket: failed to open PDF: {e}");
         print_error_chain(e);
     }
 }
@@ -64,7 +64,7 @@ fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env
     let _ = vaapi_device;
     let source_hint = |backend: &str| {
         if via_env {
-            eprintln!("  hint: PDF_RASTER_BACKEND={backend} is set in your environment.");
+            note!("  hint: PDF_RASTER_BACKEND={backend} is set in your environment.");
         }
     };
     match policy {
@@ -86,41 +86,41 @@ fn print_backend_hint(policy: BackendPolicy, vaapi_device: Option<&str>, via_env
             print_d3d12_hint();
         }
         _ => {
-            eprintln!("  hint: use --backend auto to fall back to CPU when GPU is unavailable,");
-            eprintln!("        or --backend cpu to force CPU-only mode.");
+            note!("  hint: use --backend auto to fall back to CPU when GPU is unavailable,");
+            note!("        or --backend cpu to force CPU-only mode.");
         }
     }
 }
 
 fn print_cuda_hint() {
-    eprintln!("        --backend cuda requires a CUDA driver and GPU that load this");
-    eprintln!("        build's kernels; the error above names what failed.");
-    eprintln!("        --backend auto renders on the CPU (and on Vulkan under --gpu-pages)");
-    eprintln!("        and starts CUDA only for PDF_RASTER_JPX_THRESHOLD; --backend cpu");
-    eprintln!("        skips every GPU.");
+    note!("        --backend cuda requires a CUDA driver and GPU that load this");
+    note!("        build's kernels; the error above names what failed.");
+    note!("        --backend auto renders on the CPU (and on Vulkan under --gpu-pages)");
+    note!("        and starts CUDA only for PDF_RASTER_JPX_THRESHOLD; --backend cpu");
+    note!("        skips every GPU.");
 }
 
 #[cfg(feature = "vaapi")]
 fn print_vaapi_hint(device: Option<&str>) {
     if let Some(node) = device.filter(|d| *d != pdf_raster::DEFAULT_VAAPI_DEVICE) {
-        eprintln!("        --backend vaapi could not use the DRM device {node}.");
-        eprintln!("        Verify it is readable by your user, pass one of the render");
-        eprintln!("        nodes listed above, or --vaapi-device auto to probe them all.");
+        note!("        --backend vaapi could not use the DRM device {node}.");
+        note!("        Verify it is readable by your user, pass one of the render");
+        note!("        nodes listed above, or --vaapi-device auto to probe them all.");
     } else {
-        eprintln!("        --backend vaapi found no render node with VA-API baseline JPEG");
-        eprintln!("        decode.  Check that a VA-API driver for the device is installed");
-        eprintln!("        (`vainfo --display drm --device <node>`).");
+        note!("        --backend vaapi found no render node with VA-API baseline JPEG");
+        note!("        decode.  Check that a VA-API driver for the device is installed");
+        note!("        (`vainfo --display drm --device <node>`).");
     }
-    eprintln!(
+    note!(
         "        Use --backend auto to fall back to CPU silently, \
          or --backend cpu to skip GPU entirely."
     );
 }
 
 fn print_vulkan_hint() {
-    eprintln!("        --backend vulkan requires a Vulkan 1.3+ device and the loader.");
-    eprintln!("        Run `vulkaninfo` to verify a usable Vulkan device is present.");
-    eprintln!(
+    note!("        --backend vulkan requires a Vulkan 1.3+ device and the loader.");
+    note!("        Run `vulkaninfo` to verify a usable Vulkan device is present.");
+    note!(
         "        Use --backend auto to fall back to CUDA / CPU silently, \
          or --backend cpu to skip GPU entirely."
     );
@@ -128,13 +128,13 @@ fn print_vulkan_hint() {
 
 fn print_d3d12_hint() {
     if cfg!(windows) {
-        eprintln!("        --backend d3d12 requires a build with the `d3d12` feature and a");
-        eprintln!("        Direct3D 12 adapter with shader model 6.0 or later, or WARP");
-        eprintln!("        (--d3d12-device warp); the error above names what failed.");
+        note!("        --backend d3d12 requires a build with the `d3d12` feature and a");
+        note!("        Direct3D 12 adapter with shader model 6.0 or later, or WARP");
+        note!("        (--d3d12-device warp); the error above names what failed.");
     } else {
-        eprintln!("        --backend d3d12 is available on Windows only.");
+        note!("        --backend d3d12 is available on Windows only.");
     }
-    eprintln!(
+    note!(
         "        Use --backend auto to fall back to CPU silently, \
          or --backend cpu to skip GPU entirely."
     );
@@ -154,7 +154,7 @@ pub(crate) fn report_errors(
     errors.sort_by_key(|(p, _)| *p);
     let (mut over_budget, mut over_ceiling, mut unallocated) = (false, false, false);
     for (page, err) in &errors {
-        eprintln!("rrocket: page {page}: {err}");
+        note!("rrocket: page {page}: {err}");
         print_error_chain(err);
         match err {
             RenderError::Raster(RasterError::PageTooLarge { .. }) => over_budget = true,
@@ -164,20 +164,20 @@ pub(crate) fn report_errors(
         }
     }
     if over_ceiling {
-        eprintln!("  hint: lower the resolution with -r; no budget raises the per-side ceiling");
+        note!("  hint: lower the resolution with -r; no budget raises the per-side ceiling");
     }
     if (over_budget || unallocated) && args.printing() {
-        eprintln!(
+        note!(
             "  hint: lower the resolution with -r (--print renders at 600 dpi by default, \
              360 dpi for pages larger than A0), or raise the page budget with --max-page-mib"
         );
     } else if over_budget {
-        eprintln!(
+        note!(
             "  hint: raise the page budget with --max-page-mib, lower the resolution with -r, \
              or render the page in tiles with -x/-y/-W/-H, each tile within the budget"
         );
     } else if unallocated {
-        eprintln!(
+        note!(
             "  hint: lower the resolution with -r, or render the page in tiles with \
              -x/-y/-W/-H so each tile's bitmap fits in memory"
         );

@@ -39,12 +39,12 @@ impl PageLog {
         if let Some(t0) = t0 {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let tid = rayon::current_thread_index().unwrap_or(99);
-            eprintln!("timing: page {page_num:4}  {ms:7.1}ms  thread {tid}");
+            note!("timing: page {page_num:4}  {ms:7.1}ms  thread {tid}");
         }
         if self.progress {
             let completed = self.done.fetch_add(1, Ordering::Relaxed) + 1;
             let elapsed = self.start.elapsed().as_secs_f64();
-            eprintln!(
+            note!(
                 "rrocket: page {page_num} done  [{completed}/{}]  {elapsed:.1}s elapsed  {}",
                 self.pages,
                 eta(completed, self.pages, elapsed)

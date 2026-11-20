@@ -26,6 +26,9 @@
 //! # What this module returns
 //!
 //! 1. A [`RamDirGuard`] that removes the tmpfs dir on drop (no-op when on disk).
+//!    An interrupt stops the run through `main`'s return (see
+//!    [`crate::interrupt`]), so it drops the guard too; a process killed
+//!    outright or aborted by a panic leaves the directory.
 //! 2. A [`SpillPolicy`] queried per-page: returns the RAM prefix while free
 //!    memory is comfortable, and the disk prefix from the first page that
 //!    finds it tight.
@@ -79,7 +82,7 @@ impl Drop for RamDirGuard {
         if let Err(e) = fs::remove_dir_all(&dir) {
             // Stderr only; the user's stdout may already be committed to a
             // pipeline and a stray log line would corrupt downstream parsing.
-            eprintln!(
+            note!(
                 "rrocket: warning: could not remove ram dir {}: {e}",
                 dir.display()
             );
@@ -141,7 +144,7 @@ impl SpillPolicy {
             } else {
                 "free memory can no longer be read"
             };
-            eprintln!("rrocket: {reason}; writing subsequent pages to disk with prefix {disk}");
+            note!("rrocket: {reason}; writing subsequent pages to disk with prefix {disk}");
         }
         disk
     }
@@ -349,6 +352,9 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     }
 
     let dir = create_ram_dir(args.ram_path.as_deref().map(Path::new), Path::new(RAM_ROOT))?;
+    let guard = RamDirGuard {
+        dir: Some(dir.clone()),
+    };
 
     // The stem of the user's prefix names the files inside the directory;
     // a prefix with no file name ("/", "") falls back to "out".
@@ -359,20 +365,39 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
         .unwrap_or("out");
     let ram_prefix = dir.join(stem).to_string_lossy().into_owned();
 
-    eprintln!(
+    note!(
         "rrocket: writing to RAM at {} (auto-removed on exit; use --no-ram to write to disk)",
         dir.display()
     );
-    println!("{}", dir.display());
+    announce(&mut std::io::stdout().lock(), &dir).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot write the RAM directory to standard output: {e}"),
+        )
+    })?;
 
     args.output_prefix = Some(ram_prefix.clone());
     Ok((
-        RamDirGuard { dir: Some(dir) },
+        guard,
         SpillPolicy::new(Targets::Ram {
             ram: ram_prefix,
             disk: original_prefix,
         }),
     ))
+}
+
+/// Write `dir`, the RAM directory, as a line to `out`, standard output.  A
+/// reader that closed the pipe did not want the name, so a broken pipe is
+/// not an error.
+///
+/// # Errors
+///
+/// Any other write error.
+fn announce(out: &mut impl std::io::Write, dir: &Path) -> std::io::Result<()> {
+    match writeln!(out, "{}", dir.display()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 /// Create the RAM directory: `explicit` (`--ram-path`) when given,
@@ -472,6 +497,23 @@ mod tests {
             let mode = fs::metadata(&dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o077, 0, "mode {mode:o}");
         }
+    }
+
+    #[test]
+    fn the_directory_is_announced_and_a_closed_pipe_is_not_an_error() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Vec::new();
+        announce(&mut out, Path::new("/ram/dir")).unwrap();
+        assert_eq!(out, b"/ram/dir\n");
+        announce(&mut Closed, Path::new("/ram/dir")).unwrap();
     }
 
     #[test]

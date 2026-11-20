@@ -25,6 +25,9 @@ pub(crate) enum RunError {
     Selection(String),
     /// The render thread pool could not be started.
     Pool(rayon::ThreadPoolBuildError),
+    /// The run was interrupted (see [`crate::interrupt`]): no further page
+    /// was begun.
+    Interrupted,
 }
 
 impl std::fmt::Display for RunError {
@@ -33,6 +36,9 @@ impl std::fmt::Display for RunError {
             Self::Archive(e) => e.fmt(f),
             Self::Selection(message) => f.write_str(message),
             Self::Pool(e) => write!(f, "cannot start the render thread pool: {e}"),
+            Self::Interrupted => {
+                f.write_str("interrupted: the pages not yet begun were not rendered")
+            }
         }
     }
 }
@@ -90,11 +96,12 @@ pub(crate) fn run(
     // warnings behave identically across input types.
     let (selected, warnings) = args.build_page_list(total).map_err(RunError::Selection)?;
     for w in &warnings {
-        eprintln!("rrocket: warning: {w}");
+        note!("rrocket: warning: {w}");
     }
     // Drop the pages the selector excluded (odd/even/single/window) before
     // any is decoded; `selected` is ascending.
     pages.retain(|page| i32::try_from(page).is_ok_and(|p| selected.binary_search(&p).is_ok()));
+    let wanted = pages.len();
 
     let pool = crate::pool::RenderPool::new(args.num_threads).map_err(RunError::Pool)?;
     let log = crate::progress::PageLog::new(args.timings, args.progress, selected.len());
@@ -112,20 +119,26 @@ pub(crate) fn run(
             (page_num, outcome)
         },
         |_, (page_num, outcome)| {
+            if crate::interrupt::interrupted() {
+                return ControlFlow::Break(());
+            }
             match outcome {
                 Ok(()) => written += 1,
                 Err(e) => {
-                    eprintln!("rrocket: page {page_num}: {e}");
+                    note!("rrocket: page {page_num}: {e}");
                     failed += 1;
                 }
             }
             ControlFlow::Continue(())
         },
     );
-    debug_assert!(unreported.is_empty(), "every comic page is reported");
     // `pool` drops here, before `pages`, whose embedded PDF's session holds
     // the device context of the workers' GPU state.
     drop(pool);
+    if written + failed < wanted && crate::interrupt::interrupted() {
+        return Err(RunError::Interrupted);
+    }
+    debug_assert!(unreported.is_empty(), "every comic page is reported");
     Ok((written, failed))
 }
 
