@@ -445,7 +445,10 @@ system shutting down: no further page is begun, the pages rendering finish,
 and rrocket exits with status 1 ("nothing printed: interrupted"). A second
 Ctrl-C quits at once, and the console closing gives rrocket only the
 system's few seconds of grace; either can leave the incomplete job to the
-spooler and the file in place. rrocket never shows a print dialog.
+spooler and the file in place. An interrupt once the last page is drawn
+and the job is being handed to the spooler cannot abort it: rrocket says
+so ("the print job is already with the spooler"), and the job prints
+unless cancelled in the printer's queue. rrocket never shows a print dialog.
 Print to PDF writes the file before rrocket exits on the machine tested.
 
 Printing is tested through a CUPS `everywhere` queue on `ippeveprinter`, a

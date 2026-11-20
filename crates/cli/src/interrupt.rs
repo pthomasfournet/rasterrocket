@@ -8,16 +8,34 @@
 //! job are removed by their owners' destructors.  A second interrupt ends
 //! the process at once: on Linux and macOS the handler is installed
 //! one-shot (`SA_RESETHAND`), so the signal's default action applies.
+//!
+//! The run's state moves from running to interrupted, for good, or to
+//! committed while a print job is handed to the spooler.  The job is
+//! committed with `commit`: an interrupt that arrives before makes the
+//! commit fail, and the job is abandoned; one that arrives while it is
+//! committed cannot cancel it, and the user is told so.  No job is
+//! submitted after an interrupt was acknowledged as aborting it.
+//!
+//! The state is armed by [`catch`]: until then no interrupt can be
+//! acknowledged, [`interrupted`] is false and every commit succeeds, so a
+//! process that never installs the handler (a test binary) shares no
+//! interrupt state between its jobs.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// The run is going on.
 const RUNNING: u8 = 0;
 /// The run is interrupted: no further page is begun.
 const INTERRUPTED: u8 = 1;
+/// The print job is being handed to the spooler; an interrupt no longer
+/// cancels it.
+const COMMITTED: u8 = 2;
 
-/// The state of the run: [`RUNNING`] or [`INTERRUPTED`].
+/// The state of the run: [`RUNNING`], [`INTERRUPTED`] or [`COMMITTED`].
 static STATE: AtomicU8 = AtomicU8::new(RUNNING);
+
+/// Whether [`catch`] armed [`STATE`].
+static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the run is interrupted.
 pub(crate) fn interrupted() -> bool {
@@ -31,20 +49,62 @@ enum Interrupt {
     First,
     /// Nothing: the run was already interrupted.
     Again,
+    /// Nothing: the print job was already committed.
+    TooLate,
 }
 
 /// Mark the run whose state is `state` interrupted, unless it is already
-/// interrupted.
+/// interrupted or its print job committed.
 fn interrupt(state: &AtomicU8) -> Interrupt {
     match state.compare_exchange(RUNNING, INTERRUPTED, Ordering::Relaxed, Ordering::Relaxed) {
         Ok(_) => Interrupt::First,
+        Err(COMMITTED) => Interrupt::TooLate,
         Err(_) => Interrupt::Again,
     }
+}
+
+/// A committed print job: while it lives, an interrupt does not mark the
+/// run interrupted; dropped, it returns the run to running.
+#[cfg(any(windows, test))]
+pub(crate) struct Committed<'a> {
+    /// The committed state; `None` when no state is armed.
+    state: Option<&'a AtomicU8>,
+}
+
+#[cfg(any(windows, test))]
+impl Drop for Committed<'_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state {
+            let _ =
+                state.compare_exchange(COMMITTED, RUNNING, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Commit the print job of the run whose state is `state`, when armed:
+/// `None` when the run is interrupted.
+#[cfg(any(windows, test))]
+fn commit_state(state: Option<&AtomicU8>) -> Option<Committed<'_>> {
+    let Some(state) = state else {
+        return Some(Committed { state: None });
+    };
+    state
+        .compare_exchange(RUNNING, COMMITTED, Ordering::Relaxed, Ordering::Relaxed)
+        .ok()
+        .map(|_| Committed { state: Some(state) })
+}
+
+/// Commit the print job, just before it is handed to the spooler, for as
+/// long as the returned value lives: `None` when the run is interrupted.
+#[cfg(windows)]
+pub(crate) fn commit() -> Option<Committed<'static>> {
+    commit_state(ARMED.load(Ordering::Relaxed).then_some(&STATE))
 }
 
 /// Install the interrupt handler of this platform.  A failure is logged:
 /// an interrupt then ends the process at once.
 pub(crate) fn catch() {
+    ARMED.store(true, Ordering::Relaxed);
     #[cfg(unix)]
     unix::catch();
     #[cfg(windows)]
@@ -136,10 +196,12 @@ mod windows {
     /// its own.  The first Ctrl-C or Ctrl-Break, the console's closing, the
     /// user's logging off and the system's shutting down mark the run
     /// interrupted.  A later Ctrl-C or Ctrl-Break goes on to the default
-    /// handler, which ends the process at once.  On the other events the system ends the
-    /// process when the handler returns, so it does not return: the
-    /// process ends when `main` does or when the system's grace period
-    /// runs out.
+    /// handler, which ends the process at once; so does a second one after
+    /// the print job was committed, the first having told the user that
+    /// the job is already with the spooler.  On the other events the
+    /// system ends the process when the handler returns, so it does not
+    /// return: the process ends when `main` does or when the system's
+    /// grace period runs out.
     extern "system" fn on_console_event(event: u32) -> BOOL {
         let outcome = super::interrupt(&super::STATE);
         match event {
@@ -152,6 +214,7 @@ mod windows {
                     );
                     1
                 }
+                Interrupt::TooLate => BOOL::from(told_too_late()),
                 Interrupt::Again => 0,
             },
             _ => loop {
@@ -159,18 +222,57 @@ mod windows {
             },
         }
     }
+
+    /// Tell the user, once, that the print job is already with the
+    /// spooler; whether this call told them.
+    fn told_too_late() -> bool {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static TOLD: AtomicBool = AtomicBool::new(false);
+        if TOLD.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        let _ = writeln!(
+            io::stderr(),
+            "rrocket: interrupted: the print job is already with the spooler; \
+             cancel it in the printer's queue"
+        );
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicU8;
 
-    use super::{Interrupt, RUNNING, interrupt};
+    use super::{Interrupt, RUNNING, commit_state, interrupt};
 
     #[test]
     fn the_first_interrupt_marks_the_run_and_later_ones_do_nothing() {
         let state = AtomicU8::new(RUNNING);
         assert_eq!(interrupt(&state), Interrupt::First);
         assert_eq!(interrupt(&state), Interrupt::Again);
+        assert!(
+            commit_state(Some(&state)).is_none(),
+            "an interrupted job is not committed"
+        );
+    }
+
+    #[test]
+    fn a_committed_job_is_not_interrupted_and_the_next_one_commits() {
+        let state = AtomicU8::new(RUNNING);
+        let committed = commit_state(Some(&state)).expect("a running run commits");
+        assert_eq!(interrupt(&state), Interrupt::TooLate);
+        assert_eq!(interrupt(&state), Interrupt::TooLate);
+        drop(committed);
+        let next = commit_state(Some(&state)).expect("the next job commits");
+        drop(next);
+        assert_eq!(interrupt(&state), Interrupt::First);
+    }
+
+    #[test]
+    fn an_unarmed_run_always_commits() {
+        let first = commit_state(None);
+        assert!(first.is_some());
+        assert!(commit_state(None).is_some(), "jobs at once share no state");
     }
 }

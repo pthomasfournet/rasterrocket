@@ -849,6 +849,11 @@ impl Job {
         if self.pages == 0 {
             return Err("no page was printed".to_owned());
         }
+        // An interrupt either precedes the commit, and the job is aborted
+        // when it drops, or follows it and leaves the job to the spooler.
+        let Some(_committed) = crate::interrupt::commit() else {
+            return Err("interrupted; the print job is aborted".to_owned());
+        };
         // SAFETY: the job was started on `dc`, and no page is open.
         if unsafe { EndDoc(self.dc.raw()) } <= 0 {
             return Err(format!(
