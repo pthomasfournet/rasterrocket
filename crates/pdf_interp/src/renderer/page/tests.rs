@@ -1005,6 +1005,28 @@ fn closed_dots_before_moveto_are_all_stroked() {
     assert_eq!(px[50 * 100 + 70], 0, "line");
 }
 
+/// A segment operator after `h` starts a new subpath at the closed
+/// subpath's first point (ISO 32000-1 §8.5.2.1) instead of being dropped,
+/// after a polygon and after a dot.
+#[test]
+fn segment_after_closepath_starts_at_the_subpath_start() {
+    let px = render_gray(100, b"0 J 4 w 0 g 10 50 m 30 50 l 30 70 l h 90 50 l S");
+    for x in [40, 60, 85] {
+        assert_eq!(px[50 * 100 + x], 0, "line at x = {x}");
+    }
+
+    let px = render_gray(100, b"1 J 10 w 0 g 20 50 m h 80 50 l S");
+    for x in [20, 50, 80] {
+        assert_eq!(px[50 * 100 + x], 0, "dot and line at x = {x}");
+    }
+
+    let px = render_gray(
+        100,
+        b"0 J 4 w 0 g 10 50 m 30 50 l 30 70 l h 50 50 70 50 90 50 c S",
+    );
+    assert_eq!(px[50 * 100 + 60], 0, "curve after closepath");
+}
+
 /// A 2×2 all-black `DeviceGray` inline image stretched over the whole
 /// 8 pt page.  Without a clip it would blacken every pixel.
 const BLACK_IMAGE_OVER_PAGE: &[u8] =

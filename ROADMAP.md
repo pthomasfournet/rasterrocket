@@ -3218,6 +3218,14 @@ the next `m` replaced it: of several round-capped dots in one `S` only the last
 was drawn, and a dot followed by a line vanished. A closed dot is now kept as
 its own subpath; only a lone, unclosed `m` is replaced.
 
+**Unreleased on master: a segment after `h` starts at the closed subpath's
+start.** An `l`, `c`, `v` or `y` right after a closepath was dropped, since the
+path had no current point; as the PDF specification says, it now begins a new
+subpath at the first point of the subpath just closed (`… h 90 90 l S` draws its
+line, and a dot `20 20 m h` followed by `80 80 l` draws both). API in
+`rasterrocket-render`: `Path::closed_subpath_start`, and
+`PathBuilder::cur_pt` returns that point after a close.
+
 **Unreleased on master: the flatness tolerance is capped at one device
 pixel.** The `i` operand and `/FL` were bounded only from below, so a legal
 `50 i` reduced every curve shorter than about 50 pixels to its chord (a 40 pt

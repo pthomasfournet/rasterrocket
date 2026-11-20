@@ -220,6 +220,18 @@ impl Path {
         }
     }
 
+    /// The first point of the last subpath when that subpath is closed and
+    /// no subpath has begun after it: the point a segment operator after a
+    /// closepath starts from (ISO 32000-1 §8.5.2.1).  `None` otherwise.
+    #[must_use]
+    pub fn closed_subpath_start(&self) -> Option<PathPoint> {
+        if !self.no_current_point() || !self.flags.last()?.is_closed() {
+            return None;
+        }
+        let start = self.flags.iter().rposition(|f| f.is_first())?;
+        Some(self.pts[start])
+    }
+
     /// This path with the stroke-adjust hints a fill applies to a lone
     /// quadrilateral, or `None` when the rule does not apply.
     ///
@@ -373,20 +385,30 @@ impl PathBuilder {
         self.path.cur_subpath = len;
     }
 
+    /// After a closepath, begin a new subpath at the closed subpath's first
+    /// point, so that the segment that follows starts there.
+    fn reopen_after_close(&mut self) {
+        if let Some(p) = self.path.closed_subpath_start() {
+            self.move_to(p.x, p.y);
+        }
+    }
+
     /// Add a line segment from the current point to `(x, y)`.
     ///
     /// Equivalent to the PDF `l` operator.
     ///
     /// # Errors
     ///
-    /// Returns [`PathError::NoCurPt`] if there is no current point. Callers
-    /// must call [`Self::move_to`] before this method.
+    /// Returns [`PathError::NoCurPt`] if there is no current point and the
+    /// last subpath is not closed. Callers must call [`Self::move_to`]
+    /// before this method.
     ///
     /// # Panics
     ///
     /// Panics if `flags` is empty despite a current point existing, which
     /// would indicate a broken `Path` invariant (`pts.len() == flags.len()`).
     pub fn line_to(&mut self, x: f64, y: f64) -> Result<(), PathError> {
+        self.reopen_after_close();
         if self.path.no_current_point() {
             return Err(PathError::NoCurPt);
         }
@@ -407,8 +429,9 @@ impl PathBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`PathError::NoCurPt`] if there is no current point. Callers
-    /// must call [`Self::move_to`] before this method.
+    /// Returns [`PathError::NoCurPt`] if there is no current point and the
+    /// last subpath is not closed. Callers must call [`Self::move_to`]
+    /// before this method.
     ///
     /// # Panics
     ///
@@ -423,6 +446,7 @@ impl PathBuilder {
         x3: f64,
         y3: f64,
     ) -> Result<(), PathError> {
+        self.reopen_after_close();
         if self.path.no_current_point() {
             return Err(PathError::NoCurPt);
         }
@@ -455,7 +479,8 @@ impl PathBuilder {
     ///
     /// After closing, `cur_subpath` is advanced to `pts.len()` (the
     /// "no current point" sentinel), so [`Path::current_point`] returns `None`
-    /// until the next `move_to`.
+    /// until the next `move_to`; a `line_to` or `curve_to` before then
+    /// begins a new subpath at this subpath's first point.
     ///
     /// # Errors
     ///
@@ -522,12 +547,14 @@ impl PathBuilder {
 
     /// Returns the current point (last appended endpoint), if any.
     ///
-    /// Returns `None` when there is no current point — i.e. on a freshly
-    /// created builder or immediately after a successful [`Self::close`].
-    /// Delegates to [`Path::current_point`].
+    /// After a successful [`Self::close`] it is the closed subpath's first
+    /// point ([`Path::closed_subpath_start`]); `None` on a freshly created
+    /// builder.
     #[must_use]
     pub fn cur_pt(&self) -> Option<PathPoint> {
-        self.path.current_point()
+        self.path
+            .current_point()
+            .or_else(|| self.path.closed_subpath_start())
     }
 
     /// Returns the number of points accumulated in the builder so far.
@@ -626,6 +653,52 @@ mod tests {
         b.line_to(1.0, 0.0).unwrap();
         b.close(false).unwrap();
         assert_eq!(b.path.current_point(), None);
+    }
+
+    /// A segment after a close begins a new subpath at the closed
+    /// subpath's first point; so does a curve, and the builder reports that
+    /// point as its current point in between.
+    #[test]
+    fn segment_after_close_starts_at_the_closed_subpath_start() {
+        let mut b = PathBuilder::new();
+        b.move_to(1.0, 2.0);
+        b.line_to(5.0, 2.0).unwrap();
+        b.line_to(5.0, 6.0).unwrap();
+        b.close(false).unwrap();
+        assert_eq!(b.cur_pt(), Some(PathPoint::new(1.0, 2.0)));
+        b.line_to(9.0, 9.0).unwrap();
+        b.close(false).unwrap();
+        b.curve_to(0.0, 0.0, 3.0, 3.0, 4.0, 0.0).unwrap();
+        let p = b.build();
+        let firsts: Vec<_> = (0..p.pts.len())
+            .filter(|&i| p.flags[i].is_first())
+            .collect();
+        assert_eq!(firsts, [0, 4, 7]);
+        assert_eq!(p.pts[4], PathPoint::new(1.0, 2.0));
+        assert_eq!(p.pts[7], PathPoint::new(1.0, 2.0));
+        assert!(p.flags[4].is_closed() && !p.flags[7].is_closed());
+        assert_eq!(p.pts.len(), 11);
+    }
+
+    /// A closed one-point subpath followed by a segment: the segment starts
+    /// at the dot, which stays a subpath of its own.
+    #[test]
+    fn segment_after_closed_dot_starts_at_the_dot() {
+        let mut b = PathBuilder::new();
+        b.move_to(2.0, 2.0);
+        b.close(false).unwrap();
+        b.line_to(8.0, 8.0).unwrap();
+        let p = b.build();
+        assert_eq!(
+            p.pts,
+            [
+                PathPoint::new(2.0, 2.0),
+                PathPoint::new(2.0, 2.0),
+                PathPoint::new(8.0, 8.0)
+            ]
+        );
+        assert!(p.flags[0].is_first() && p.flags[0].is_last() && p.flags[0].is_closed());
+        assert!(p.flags[1].is_first() && !p.flags[1].is_closed());
     }
 
     /// A one-point subpath (`moveTo` with no drawing operators) should have
