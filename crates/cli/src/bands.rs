@@ -25,7 +25,7 @@ use crate::cleanup::Page;
 use crate::naming::output_path_with_prefix;
 use crate::print::{PageSink, page_encoder};
 use crate::ram::SpillPolicy;
-use crate::render::{RenderError, write_output};
+use crate::render::RenderError;
 use crate::tone;
 
 /// Where a page written band by band goes.
@@ -347,15 +347,12 @@ pub(crate) fn write_page_banded(
         reason = "total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
     let (number, total) = (page_num as i32, total_pages as i32);
-    let path = output_path_with_prefix(
-        spill.next_prefix(),
-        args,
-        number,
-        total,
-        args.output_format(),
-        None,
-    );
-    write_output(&path, |out| {
+    let path_of = |prefix: &str| {
+        output_path_with_prefix(prefix, args, number, total, args.output_format(), None)
+    };
+    // A page that finds the RAM file system full is rendered again for
+    // its file on disk (see `SpillPolicy::write_page`).
+    spill.write_page(path_of, |out| {
         let model = (Model::of(args), args.depth());
         let mut writer = FileWriter::new(
             out,

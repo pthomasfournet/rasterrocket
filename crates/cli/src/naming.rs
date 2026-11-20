@@ -20,7 +20,7 @@ pub(crate) fn output_path(
 
 /// Compute the output filename for a given page with an explicit prefix
 /// override. Used by `--ram` mode to redirect individual pages to disk when
-/// the [`SpillPolicy`](crate::ram::SpillPolicy) reports tight memory.
+/// the [`SpillPolicy`](crate::ram::SpillPolicy) finds RAM tight.
 ///
 /// `half` names one page of a split spread: the page number takes an `a`
 /// (left) or `b` (right) suffix, which sorts the halves after an unsplit

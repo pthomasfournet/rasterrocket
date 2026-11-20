@@ -239,8 +239,8 @@ fn write_cmyk_page(
         reason = "page_num and total_pages ≤ i32::MAX; validated in main before calling this function"
     )]
     let (number, total) = (page_num as i32, total_pages as i32);
-    let path = output_path_with_prefix(spill.next_prefix(), args, number, total, format, None);
-    write_output(&path, |mut out| {
+    let path_of = |prefix: &str| output_path_with_prefix(prefix, args, number, total, format, None);
+    spill.write_page(path_of, |mut out| {
         write_jpeg(
             &cmyk,
             options,
@@ -309,21 +309,13 @@ pub(crate) fn write_cleaned(
                 continue;
             }
         };
-        // Pick RAM vs disk per file: when --ram is active, the SpillPolicy
-        // hands back the tmpfs prefix until free memory drops below the
-        // safety margin, then transparently spills the rest of the run to the
-        // user's disk path. When --ram is off, the policy is a passthrough
-        // that always returns the original prefix.
-        let out_path = output_path_with_prefix(
-            spill.next_prefix(),
-            args,
-            page_num,
-            total_pages,
-            format,
-            half,
-        );
-
-        write_output(&out_path, |mut out| {
+        // RAM or disk per file: under RAM output the spill policy writes to
+        // the RAM directory while pages fit there and to the user's prefix
+        // from then on; otherwise it always writes to the user's prefix.
+        let path_of = |prefix: &str| {
+            output_path_with_prefix(prefix, args, page_num, total_pages, format, half)
+        };
+        spill.write_page(path_of, |mut out| {
             if let Some(image) = page.wide_image() {
                 return bands::write_whole(out, format, image, args);
             }
@@ -402,13 +394,14 @@ pub(crate) const OUTPUT_BUFFER_BYTES: usize = encode::PACKED_WRITE_BYTES;
 /// file only where one exists, where creating `out_path` in place would
 /// have truncated it, so a file system that writes a replaced file's data
 /// out before the replacement does so in the same cases as before.
+/// Returns the size of the file in bytes.
 ///
 /// # Errors
 /// The creation, encoding, final flush or rename failed.
 pub(crate) fn write_output(
     out_path: &str,
     encode: impl FnOnce(BufWriter<File>) -> Result<BufWriter<File>, RenderError>,
-) -> Result<(), RenderError> {
+) -> Result<u64, RenderError> {
     let cannot_create =
         |e: std::io::Error| std::io::Error::new(e.kind(), format!("cannot create {out_path}: {e}"));
     match fs::OpenOptions::new().write(true).open(out_path) {
@@ -419,12 +412,15 @@ pub(crate) fn write_output(
     let file = File::create(&part).map_err(cannot_create)?;
     let out = BufWriter::with_capacity(OUTPUT_BUFFER_BYTES, file);
     let written = encode(out)
-        .and_then(|mut out| out.flush().map_err(RenderError::from))
-        .and_then(|()| {
+        .and_then(|mut out| {
+            out.flush()?;
+            Ok(out.get_ref().metadata()?.len())
+        })
+        .and_then(|bytes| {
             fs::rename(&part, out_path).map_err(|e| {
                 std::io::Error::new(e.kind(), format!("cannot rename {part} to {out_path}: {e}"))
-                    .into()
-            })
+            })?;
+            Ok(bytes)
         });
     if written.is_err()
         && let Err(e) = fs::remove_file(&part)
@@ -499,13 +495,14 @@ mod tests {
         let part = format!("{path}.part");
         fs::write(path, b"earlier run").unwrap();
 
-        write_output(path, |mut out| {
+        let bytes = write_output(path, |mut out| {
             out.write_all(b"page")?;
             assert!(fs::exists(&part).unwrap(), "pages are written to {part}");
             assert_eq!(fs::read(path).unwrap(), b"earlier run");
             Ok(out)
         })
         .unwrap();
+        assert_eq!(bytes, 4);
         assert_eq!(fs::read(path).unwrap(), b"page");
         assert!(!fs::exists(&part).unwrap());
 

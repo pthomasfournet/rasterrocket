@@ -141,6 +141,7 @@ impl FaxDocument {
             writer.write(&mut out)?;
             Ok(out)
         })
+        .map(drop)
     }
 }
 

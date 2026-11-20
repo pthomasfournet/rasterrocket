@@ -30,8 +30,9 @@
 //!    [`crate::interrupt`]), so it drops the guard too; a process killed
 //!    outright or aborted by a panic leaves the directory.
 //! 2. A [`SpillPolicy`] queried per-page: returns the RAM prefix while free
-//!    memory is comfortable, and the disk prefix from the first page that
-//!    finds it tight.
+//!    memory is comfortable and the RAM file system has room for the pages
+//!    in flight, and the disk prefix from the first page that finds either
+//!    tight, or that finds the RAM file system full when it is written.
 //!
 //! The chosen directory is printed on stderr and on stdout at startup, so
 //! callers can capture it via `out=$(rrocket doc.pdf p)`.
@@ -42,22 +43,30 @@
 //! relies on (a) reading every page's `MediaBox` at startup (slow) and (b)
 //! guessing PNG/JPEG compression ratios (impossible). The dynamic approach
 //! lets the renderer start producing pages immediately and only switches to
-//! disk if the kernel reports tight memory — at which point we've already
+//! disk if the kernel reports tight memory or a nearly full RAM file
+//! system — at which point we've already
 //! benefited from RAM-speed writes for the early pages.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::args::Args;
+use crate::render::{RenderError, write_output};
 
 /// Minimum free RAM (bytes) we insist remains after the next write. Below
 /// this, the writer spills to disk. 1 GiB is enough headroom for one more
 /// in-flight page bitmap (worst-case ~50 MB at 600 DPI A3) plus normal
 /// per-thread scratch and OS workings.
 const RAM_SAFETY_MARGIN: u64 = 1024 * 1024 * 1024;
+
+/// Free space (bytes) the RAM file system keeps above the pages in flight.
+/// A RAM file system has a size of its own, half the memory by default for
+/// `/dev/shm`, reached long before the available memory runs out.
+const RAM_SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
 /// How long a memory-availability reading is cached before being re-probed.
 /// A probe costs ~10µs but would otherwise run N×M times per render
@@ -96,19 +105,62 @@ impl Drop for RamDirGuard {
 /// One instance is shared by all worker threads.
 pub(crate) struct SpillPolicy {
     targets: Targets,
-    /// The cached available-memory reading, taken under the lock by the
-    /// first caller after it expires.
-    probe: Mutex<MemoryProbe>,
+    /// The cached readings, taken under the lock by the first caller after
+    /// they expire.
+    probe: Mutex<Probe>,
     /// Set by the first page sent to disk; every later page goes there too.
     spilled: AtomicBool,
+    /// The size in bytes of the largest page file written so far.
+    largest_page: AtomicU64,
 }
 
 /// Where a [`SpillPolicy`] writes pages.
 enum Targets {
     /// Every page to the user's prefix: RAM output is off.
     Disk(String),
-    /// Pages to `ram` while memory allows, then to `disk`.
-    Ram { ram: String, disk: String },
+    /// Pages to `ram`, a prefix inside the RAM directory `dir`, while they
+    /// fit there, then to `disk`.
+    Ram {
+        dir: PathBuf,
+        ram: String,
+        disk: String,
+    },
+}
+
+/// Where the next page goes, and why it no longer goes to RAM.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Ram,
+    Spill(&'static str),
+}
+
+/// Where the next page goes: to RAM while the available memory, when
+/// readable, stays at least [`RAM_SAFETY_MARGIN`], and the free space of
+/// the RAM file system, when readable, holds `in_flight` pages of
+/// `page_bytes` above [`RAM_SPACE_MARGIN`].  Unreadable memory spills,
+/// since pages could not be moved before memory runs out; unreadable free
+/// space does not, the write of a page that finds the file system full
+/// spilling instead (see [`SpillPolicy::write_page`]).
+fn verdict(
+    available: Option<u64>,
+    free_space: Option<u64>,
+    page_bytes: u64,
+    in_flight: u64,
+) -> Verdict {
+    match available {
+        None => return Verdict::Spill("free memory can no longer be read"),
+        Some(bytes) if bytes < RAM_SAFETY_MARGIN => {
+            return Verdict::Spill("free memory dropped below safety margin");
+        }
+        Some(_) => {}
+    }
+    let needed = page_bytes
+        .saturating_mul(in_flight.max(1))
+        .saturating_add(RAM_SPACE_MARGIN);
+    if free_space.is_some_and(|free| free < needed) {
+        return Verdict::Spill("the RAM file system is nearly full");
+    }
+    Verdict::Ram
 }
 
 impl SpillPolicy {
@@ -116,71 +168,167 @@ impl SpillPolicy {
     const fn new(targets: Targets) -> Self {
         Self {
             targets,
-            probe: Mutex::new(MemoryProbe::new()),
+            probe: Mutex::new(Probe::new()),
             spilled: AtomicBool::new(false),
+            largest_page: AtomicU64::new(0),
         }
     }
 
     /// The prefix for the next page write: the user's prefix when RAM
-    /// output is off; otherwise the RAM prefix until available memory is
-    /// below [`RAM_SAFETY_MARGIN`] or unreadable, and the disk prefix from
-    /// then on.
+    /// output is off; otherwise the RAM prefix while pages fit in RAM (see
+    /// [`verdict`]), and the disk prefix from then on.
     #[must_use]
     pub(crate) fn next_prefix(&self) -> &str {
-        let (ram, disk) = match &self.targets {
-            Targets::Disk(prefix) => return prefix,
-            Targets::Ram { ram, disk } => (ram, disk),
+        self.choose().0
+    }
+
+    /// [`Self::next_prefix`], and whether it is the RAM prefix.
+    fn choose(&self) -> (&str, bool) {
+        let (dir, ram, disk) = match &self.targets {
+            Targets::Disk(prefix) => return (prefix, false),
+            Targets::Ram { dir, ram, disk } => (dir, ram, disk),
         };
         if self.spilled.load(Ordering::Relaxed) {
-            return disk;
+            return (disk, false);
         }
-        let available = self.available_bytes();
-        if available.is_some_and(|bytes| bytes >= RAM_SAFETY_MARGIN) {
-            return ram;
+        let (available, free_space) = {
+            let mut probe = crate::render::lock(&self.probe);
+            probe.refresh_if_stale(dir);
+            (probe.available, probe.free_space)
+        };
+        let in_flight = u64::try_from(rayon::current_num_threads()).unwrap_or(u64::MAX);
+        match verdict(
+            available,
+            free_space,
+            self.largest_page.load(Ordering::Relaxed),
+            in_flight,
+        ) {
+            Verdict::Ram => (ram, true),
+            Verdict::Spill(reason) => (self.spill(reason), false),
         }
+    }
+
+    /// Send every later page to disk, telling the user the first time why;
+    /// the disk prefix.
+    fn spill(&self, reason: &str) -> &str {
+        let disk = match &self.targets {
+            Targets::Disk(prefix) | Targets::Ram { disk: prefix, .. } => prefix,
+        };
         if !self.spilled.swap(true, Ordering::Relaxed) {
-            let reason = if available.is_some() {
-                "free memory dropped below safety margin"
-            } else {
-                "free memory can no longer be read"
-            };
             note!("rrocket: {reason}; writing subsequent pages to disk with prefix {disk}");
         }
         disk
     }
 
-    /// Available memory in bytes, re-probed at most once per [`PROBE_TTL`];
-    /// `None` when the platform offers no reading.
-    fn available_bytes(&self) -> Option<u64> {
-        let mut probe = crate::render::lock(&self.probe);
-        probe.refresh_if_stale();
-        probe.last_available_bytes
+    /// Write a page file, named by `path_of` from the prefix
+    /// [`Self::next_prefix`] chooses, with `encode` (see
+    /// [`write_output`]).  A page that finds the RAM file system full
+    /// spills: it is written again, and every later page, to disk.
+    ///
+    /// # Errors
+    ///
+    /// The write failed, on disk or for a reason other than a full RAM
+    /// file system.
+    pub(crate) fn write_page(
+        &self,
+        path_of: impl Fn(&str) -> String,
+        mut encode: impl FnMut(BufWriter<File>) -> Result<BufWriter<File>, RenderError>,
+    ) -> Result<(), RenderError> {
+        let (prefix, in_ram) = self.choose();
+        match write_output(&path_of(prefix), &mut encode) {
+            Ok(bytes) => {
+                if in_ram {
+                    let _ = self.largest_page.fetch_max(bytes, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+            Err(e) if in_ram && storage_full(&e) => {
+                let disk = self.spill("the RAM file system is full");
+                write_output(&path_of(disk), encode).map(drop)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
-/// Cached [`available_memory`] reading. Refreshed on TTL.
-struct MemoryProbe {
-    /// When `last_available_bytes` was read; `None` before the first read.
-    last_read: Option<Instant>,
-    /// The last reading; `None` when the platform offers none.
-    last_available_bytes: Option<u64>,
+/// Whether `e` is, or is caused by, a full file system.
+fn storage_full(e: &RenderError) -> bool {
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(error) = next {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull)
+        {
+            return true;
+        }
+        next = error.source();
+    }
+    false
 }
 
-impl MemoryProbe {
+/// Cached [`available_memory`] and [`free_space`] readings, refreshed
+/// after [`PROBE_TTL`].
+struct Probe {
+    /// When the readings were taken; `None` before the first.
+    last_read: Option<Instant>,
+    /// The available memory; `None` when the platform offers no reading.
+    available: Option<u64>,
+    /// The free space of the RAM file system; `None` when it cannot be
+    /// read.
+    free_space: Option<u64>,
+}
+
+impl Probe {
     const fn new() -> Self {
         Self {
             last_read: None,
-            last_available_bytes: None,
+            available: None,
+            free_space: None,
         }
     }
 
-    fn refresh_if_stale(&mut self) {
+    /// Take the readings again, of the RAM directory `dir`, when they are
+    /// older than [`PROBE_TTL`].
+    fn refresh_if_stale(&mut self, dir: &Path) {
         if self.last_read.is_some_and(|t| t.elapsed() < PROBE_TTL) {
             return;
         }
-        self.last_available_bytes = available_memory();
+        self.available = available_memory();
+        self.free_space = free_space(dir);
         self.last_read = Some(Instant::now());
     }
+}
+
+/// The space, in bytes, an unprivileged process can still write on the
+/// file system holding `dir`; `None` when it cannot be read.
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "statvfs is the only interface to a file system's free space"
+)]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: an all-zero `statvfs` is a valid value of the C structure.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `stat` is writable; the call
+    // writes only within it.
+    if unsafe { libc::statvfs(path.as_ptr(), &raw mut stat) } != 0 {
+        return None;
+    }
+    #[expect(
+        clippy::useless_conversion,
+        reason = "the field types differ between platforms"
+    )]
+    let (blocks, size) = (u64::from(stat.f_bavail), u64::from(stat.f_frsize));
+    Some(blocks.saturating_mul(size))
+}
+
+/// No free-space reading on this platform: a full RAM disk is found by the
+/// write that fails.
+#[cfg(not(unix))]
+const fn free_space(_: &Path) -> Option<u64> {
+    None
 }
 
 /// The kernel's estimate, in bytes, of the memory a new workload can
@@ -380,6 +528,7 @@ pub(crate) fn redirect_to_ram(args: &mut Args) -> std::io::Result<(RamDirGuard, 
     Ok((
         guard,
         SpillPolicy::new(Targets::Ram {
+            dir,
             ram: ram_prefix,
             disk: original_prefix,
         }),
@@ -537,22 +686,25 @@ mod tests {
         );
     }
 
-    /// A RAM policy whose cached memory reading is `reading`.
-    fn policy_with(reading: Option<u64>) -> SpillPolicy {
+    /// A RAM policy whose cached readings are `available` and
+    /// `free_space`.
+    fn policy_with(available: Option<u64>, free_space: Option<u64>) -> SpillPolicy {
         let policy = SpillPolicy::new(Targets::Ram {
+            dir: "/ram".into(),
             ram: "/ram/out".into(),
             disk: "/disk/out".into(),
         });
-        *policy.probe.lock().unwrap() = MemoryProbe {
+        *policy.probe.lock().unwrap() = Probe {
             last_read: Some(Instant::now()),
-            last_available_bytes: reading,
+            available,
+            free_space,
         };
         policy
     }
 
     #[test]
     fn unreadable_memory_spills_to_disk() {
-        let policy = policy_with(None);
+        let policy = policy_with(None, None);
         assert_eq!(policy.next_prefix(), "/disk/out");
         assert!(policy.spilled.load(Ordering::Relaxed));
     }
@@ -560,29 +712,168 @@ mod tests {
     #[test]
     fn comfortable_memory_keeps_pages_in_ram() {
         assert_eq!(
-            policy_with(Some(RAM_SAFETY_MARGIN)).next_prefix(),
+            policy_with(Some(RAM_SAFETY_MARGIN), None).next_prefix(),
             "/ram/out"
         );
     }
 
     #[test]
     fn a_spill_is_kept_when_memory_recovers() {
-        let policy = policy_with(Some(RAM_SAFETY_MARGIN - 1));
+        let policy = policy_with(Some(RAM_SAFETY_MARGIN - 1), None);
         assert_eq!(policy.next_prefix(), "/disk/out");
-        policy.probe.lock().unwrap().last_available_bytes = Some(RAM_SAFETY_MARGIN);
+        policy.probe.lock().unwrap().available = Some(RAM_SAFETY_MARGIN);
         assert_eq!(policy.next_prefix(), "/disk/out");
+    }
+
+    /// The RAM file system fills long before memory runs out: the free
+    /// space must hold the pages in flight, the size of the largest page
+    /// so far, above the margin.
+    #[test]
+    fn a_nearly_full_ram_file_system_spills_with_memory_to_spare() {
+        const MIB: u64 = 1024 * 1024;
+        let plenty = Some(20 * 1024 * MIB);
+        let page = 104 * MIB;
+        let room = page * 12 + RAM_SPACE_MARGIN;
+        assert_eq!(verdict(plenty, Some(room), page, 12), Verdict::Ram);
+        assert_eq!(
+            verdict(plenty, Some(room - 1), page, 12),
+            Verdict::Spill("the RAM file system is nearly full")
+        );
+        // Before any page is written only the margin is asked for.
+        assert_eq!(verdict(plenty, Some(RAM_SPACE_MARGIN), 0, 12), Verdict::Ram);
+        assert!(matches!(
+            verdict(plenty, Some(RAM_SPACE_MARGIN - 1), 0, 12),
+            Verdict::Spill(_)
+        ));
+        // Unreadable free space is no reason to spill; the memory still is.
+        assert_eq!(verdict(plenty, None, page, 12), Verdict::Ram);
+        assert!(matches!(
+            verdict(Some(RAM_SAFETY_MARGIN - 1), Some(u64::MAX), 0, 1),
+            Verdict::Spill(_)
+        ));
+        assert_eq!(
+            verdict(plenty, Some(u64::MAX - 1), u64::MAX, u64::MAX),
+            Verdict::Spill("the RAM file system is nearly full")
+        );
+    }
+
+    #[test]
+    fn the_largest_page_written_sets_the_room_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let ram = dir.path().join("ram");
+        fs::create_dir(&ram).unwrap();
+        let disk = dir.path().join("disk");
+        fs::create_dir(&disk).unwrap();
+        let policy = SpillPolicy::new(Targets::Ram {
+            dir: ram.clone(),
+            ram: ram.join("p").to_string_lossy().into_owned(),
+            disk: disk.join("p").to_string_lossy().into_owned(),
+        });
+        *policy.probe.lock().unwrap() = Probe {
+            last_read: Some(Instant::now()),
+            available: Some(u64::MAX),
+            free_space: Some(RAM_SPACE_MARGIN + 1000),
+        };
+        let page = |bytes: usize| {
+            move |mut out: BufWriter<File>| {
+                use std::io::Write as _;
+                out.write_all(&vec![0; bytes])?;
+                Ok(out)
+            }
+        };
+        let path_of = |n| move |prefix: &str| format!("{prefix}-{n}");
+        let one_thread = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        one_thread.install(|| {
+            policy.write_page(path_of(1), page(100)).unwrap();
+            assert!(ram.join("p-1").exists());
+            assert_eq!(policy.largest_page.load(Ordering::Relaxed), 100);
+            // One page in flight: 100 bytes fit above the margin, 1001 not.
+            policy.write_page(path_of(2), page(1001)).unwrap();
+            assert!(ram.join("p-2").exists());
+            policy.write_page(path_of(3), page(1)).unwrap();
+            assert!(disk.join("p-3").exists(), "the largest page no longer fits");
+        });
+    }
+
+    #[test]
+    fn a_full_file_system_is_found_through_the_error_chain() {
+        let full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(storage_full(&RenderError::Io(full())));
+        assert!(storage_full(&RenderError::Encode(encode::EncodeError::Io(
+            full()
+        ))));
+        assert!(!storage_full(&RenderError::Io(std::io::Error::other("no"))));
+        assert!(!storage_full(&RenderError::Camera("no".into())));
+    }
+
+    /// A RAM write that finds the file system full is written again on
+    /// disk, and so is every later page; any other failure is the page's.
+    #[test]
+    fn a_full_ram_file_system_spills_the_page_and_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let ram = dir.path().join("ram");
+        fs::create_dir(&ram).unwrap();
+        let disk = dir.path().join("disk");
+        fs::create_dir(&disk).unwrap();
+        let policy = SpillPolicy::new(Targets::Ram {
+            dir: ram.clone(),
+            ram: ram.join("p").to_string_lossy().into_owned(),
+            disk: disk.join("p").to_string_lossy().into_owned(),
+        });
+        *policy.probe.lock().unwrap() = Probe {
+            last_read: Some(Instant::now()),
+            available: Some(u64::MAX),
+            free_space: None,
+        };
+        let path_of = |n| move |prefix: &str| format!("{prefix}-{n}");
+        let other = policy.write_page(path_of(1), |_| {
+            Err(RenderError::Io(std::io::Error::other("encoder failed")))
+        });
+        assert!(other.is_err(), "a failure other than a full file system");
+        assert!(!policy.spilled.load(Ordering::Relaxed));
+
+        let mut attempts = 0;
+        policy
+            .write_page(path_of(2), |mut out| {
+                use std::io::Write as _;
+                attempts += 1;
+                if attempts == 1 {
+                    return Err(RenderError::Io(std::io::ErrorKind::StorageFull.into()));
+                }
+                out.write_all(b"page")?;
+                Ok(out)
+            })
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(fs::read(disk.join("p-2")).unwrap(), b"page");
+        assert!(
+            fs::read_dir(&ram).unwrap().next().is_none(),
+            "RAM is left empty"
+        );
+        policy.write_page(path_of(3), Ok).unwrap();
+        assert!(disk.join("p-3").exists());
     }
 
     #[test]
     fn probe_caches_within_ttl() {
-        let mut probe = MemoryProbe::new();
+        let mut probe = Probe::new();
         assert!(probe.last_read.is_none());
-        probe.refresh_if_stale();
+        probe.refresh_if_stale(Path::new("/"));
         let first = probe.last_read;
         assert!(first.is_some(), "the first check reads");
         // Immediately re-checking should NOT update last_read.
-        probe.refresh_if_stale();
+        probe.refresh_if_stale(Path::new("/"));
         assert_eq!(probe.last_read, first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn free_space_is_read_where_the_directory_exists() {
+        assert!(free_space(Path::new("/")).is_some());
+        assert_eq!(free_space(Path::new("/no/such/rrocket/dir")), None);
     }
 
     #[test]
