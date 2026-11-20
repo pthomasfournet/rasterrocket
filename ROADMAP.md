@@ -3220,7 +3220,7 @@ running heads set beside the page, counted `off_page`.  No
 pixel changes (ab_render: 0 of 215 fixture outputs).  The CLI prints no
 page diagnostics, so its output is unchanged.
 
-**Unreleased on master: Direct3D 12 opens one device per adapter it needs.** Opening the backend created a device on every adapter to read its shader model, dropped them, then created the chosen adapter's device again: on the RTX 5070 with the Radeon iGPU beside it, about 210 ms of enumeration (120 ms for the 5070's device, 42 ms for the Radeon's) and another 100 ms for the second device, with a warm driver. Capabilities are now read on first need: the automatic choice probes the hardware adapters in its ranking order up to the first usable one, a selector probes only the adapter it names, and the probe's device becomes the backend's. A selection that fails is repeated with every adapter probed, so its error still lists each one in full. A one-page `--gpu-pages` run (corpus-11, 72 dpi) takes 180 ms against 358 ms before and Vulkan's 186 ms (hyperfine, 15 runs). The first run of a new binary still builds the page kernel from DXIL (about 220 ms); the driver caches it for later runs.
+**Unreleased on master: Direct3D 12 opens one device per adapter it needs.** Opening the backend created a device on every adapter to read its shader model, dropped them, then created the chosen adapter's device again: on the RTX 5070 with the Radeon iGPU beside it, about 210 ms of enumeration (120 ms for the 5070's device, 42 ms for the Radeon's) and another 100 ms for the second device, with a warm driver. Capabilities are now read on first need: the automatic choice probes the hardware adapters in its ranking order up to the first usable one, a selector probes only the adapter it names, and the probe's device becomes the backend's. A selection that fails is repeated with every adapter probed, so its error still lists each one in full. A session finds which adapter a selector names (to share a live backend) from the adapters' names alone (`PageDevice::named_index`, new), so `--d3d12-device` also creates one device; `--gpu-devices` creates two on each adapter it takes, one to check the list and one to open it. A one-page `--gpu-pages` run (corpus-11, 72 dpi) takes 180 ms against 358 ms before and Vulkan's 186 ms (hyperfine, 15 runs). The first run of a new binary still builds the page kernel from DXIL (about 220 ms); the driver caches it for later runs.
 
 **Released in v2.5.0: a Vulkan buffer may outlive its backend.** A device or host buffer dropped after its `VulkanBackend` (a cached image held past the cache and session that owned the backend, say) crashed the process: the buffer held the last reference to the device, which was destroyed before the allocator returned its memory. The allocator now frees its memory first; a device test drops both buffer kinds after their backend.
 
@@ -3394,9 +3394,10 @@ retires the device and the page renders on the CPU; a longer Windows timeout
 on the RTX 5070, `--gpu-pages` at 150 dpi, the first 64 pages of each
 fixture: Direct3D 12 took 1.41 times Vulkan's time in v2.5.0, mostly
 start-up (one page: 0.355 s against 0.189 s); the device raster is level
-with Vulkan's. Since the adapter probe below, start-up is level too (gray
-output, fastest of five runs a fixture: 5.33 s against 5.03 s, 1.06
-times; one page 0.180 s against 0.186 s).
+with Vulkan's. Since the adapter probe below, start-up is level too: one
+page takes 0.180 s against 0.186 s, and the same 64 pages of each fixture
+in gray, the fastest of five runs each, 5.33 s against 5.03 s (1.06
+times, measured otherwise than the 1.41 above).
 
 Open on Direct3D 12:
 - **Read-back.** A page's pixels reach the caller through a host copy whose

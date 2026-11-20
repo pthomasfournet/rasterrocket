@@ -305,15 +305,23 @@ impl PageDevice for D3d12Backend {
         Self::open_adapter(selector)
     }
 
-    /// The adapters are enumerated and a device is created, then dropped,
-    /// on the one the selector names for its capabilities (on every
-    /// adapter when the selector fails); no queue or pipeline is built.
+    /// The adapters are enumerated, and a device is created, then dropped,
+    /// for its capabilities on the adapter the selector names by name, or
+    /// on every adapter when the selector fails; no queue or pipeline is
+    /// built.
     fn check_selector(selector: &DeviceSelector) -> Result<()> {
         super::device::check_selector(selector)
     }
 
     fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>> {
         super::device::resolve_devices(selectors)
+    }
+
+    /// Resolved on the adapters' names, software flags and WARP's
+    /// position; no device is created, and an adapter it names may be
+    /// unusable.
+    fn named_index(selector: &DeviceSelector) -> Option<usize> {
+        super::device::named_index(selector)
     }
 
     /// The usable hardware adapters, those with dedicated video memory

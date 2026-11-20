@@ -151,13 +151,21 @@ pub(crate) fn usable_gpus() -> Result<Vec<usize>> {
 ///
 /// # Errors
 ///
-/// As [`open_adapter`] with `selector`, before the device is created.
+/// As [`open_adapter`] with `selector`, before its queue is created.
 pub(crate) fn check_selector(selector: &DeviceSelector) -> Result<()> {
     enable_debug_layer();
     let mut set = AdapterSet::enumerate()?;
     let named = select::named(&set.cands, selector).into_iter().collect();
     set.decide(named, |cands| select::pick(cands, Some(selector)))
         .map(drop)
+}
+
+/// The index of the adapter `selector` names by [`select::named`], read
+/// from the adapters' descriptions without creating a device; `None` when
+/// enumeration fails or the selector fails on names alone.
+pub(crate) fn named_index(selector: &DeviceSelector) -> Option<usize> {
+    let set = AdapterSet::enumerate().ok()?;
+    select::named(&set.cands, selector)
 }
 
 /// The indices of the adapters `selectors` name, in their order, by
@@ -219,8 +227,7 @@ fn enable_debug_layer() {
 /// The enumerated adapters with their candidate data, each adapter's
 /// capabilities read at most once, on first need.
 ///
-/// Reading the capabilities creates a device on the adapter, which takes
-/// a hardware driver tens of milliseconds.  Selection succeeds on the capabilities
+/// Reading the capabilities creates a device on the adapter.  Selection succeeds on the capabilities
 /// of the adapters it takes alone, so only those are read first; a
 /// failing selection is repeated with every adapter read, so its error
 /// describes each one.
@@ -268,9 +275,7 @@ impl AdapterSet {
         let cands = adapters.iter().map(candidate).collect::<Result<Vec<_>>>()?;
         Ok(Self {
             probed: vec![false; adapters.len()],
-            devices: std::iter::repeat_with(|| None)
-                .take(adapters.len())
-                .collect(),
+            devices: vec![None; adapters.len()],
             adapters,
             cands,
         })

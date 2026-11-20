@@ -289,10 +289,10 @@ type Indices = Vec<((&'static str, String), usize)>;
 static INDICES: Mutex<Indices> = Mutex::new(Vec::new());
 
 /// The enumeration index of the device `selector` names
-/// ([`PageDevice::resolve_devices`]), resolved without opening a device
-/// and retained per API and selector for the process; `None`, retained
-/// for no later call, when it does not resolve, which construction then
-/// reports.
+/// ([`PageDevice::named_index`]), resolved without opening a device and
+/// retained per API and selector for the process; `None`, retained for no
+/// later call, when it names none.  Construction reports a selector that
+/// does not resolve.
 fn device_index<B: SessionDevice>(selector: &str) -> Option<usize> {
     let key = (B::API, selector.to_owned());
     let lock = || INDICES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -300,9 +300,7 @@ fn device_index<B: SessionDevice>(selector: &str) -> Option<usize> {
         return Some(index);
     }
     let parsed = selector.parse::<DeviceSelector>().ok()?;
-    let index = *B::resolve_devices(std::slice::from_ref(&parsed))
-        .ok()?
-        .first()?;
+    let index = B::named_index(&parsed)?;
     let mut indices = lock();
     if !indices.iter().any(|(k, _)| *k == key) {
         indices.push((key, index));

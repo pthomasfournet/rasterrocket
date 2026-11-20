@@ -70,6 +70,19 @@ pub trait PageDevice: GpuBackend + Sized {
     /// when the API is unavailable.
     fn resolve_devices(selectors: &[DeviceSelector]) -> Result<Vec<usize>>;
 
+    /// The enumeration index of the device `selector` names: the index
+    /// [`Self::resolve_devices`] gives for `selector` alone whenever that
+    /// resolves.  A backend whose capability queries open devices may
+    /// return an index for a selector that does not resolve, whose
+    /// [`Self::open`] then fails; `None` when it names no device.
+    #[must_use]
+    fn named_index(selector: &DeviceSelector) -> Option<usize> {
+        Self::resolve_devices(std::slice::from_ref(selector))
+            .ok()?
+            .first()
+            .copied()
+    }
+
     /// The enumeration indices of every device that can host the backend
     /// and is a GPU, not a CPU implementation, without opening any.
     ///
