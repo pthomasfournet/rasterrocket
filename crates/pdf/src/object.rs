@@ -5,8 +5,8 @@
 
 use crate::dictionary::Dictionary;
 use crate::lexer::{
-    is_delim, is_number_byte, is_ws, parse_u64, read_hex_string, read_literal_string, read_name,
-    scan_token, skip_ws,
+    is_delim, is_number_byte, is_ws, parse_number, parse_u64, read_hex_string, read_literal_string,
+    read_name, scan_token, skip_ws,
 };
 
 /// A PDF indirect-object identifier `(object_number, generation)`.
@@ -724,6 +724,21 @@ fn parse_scalar(data: &[u8], pos: &mut usize) -> Option<Object> {
         if let Some(r) = parse_real(s) {
             return Some(Object::Real(r));
         }
+    }
+    // A malformed number token (`612.0.`, `--5`) has the value of its
+    // longest well-formed prefix, as in content streams.
+    if word.iter().any(u8::is_ascii_digit)
+        && let Some(value) = parse_number(word)
+    {
+        log::debug!(
+            "malformed number {:?} read as {value}",
+            String::from_utf8_lossy(word)
+        );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the value is clamped to the f32 range; only precision is lost"
+        )]
+        return Some(Object::Real(value as f32));
     }
 
     None
@@ -1475,6 +1490,56 @@ mod tests {
         assert_eq!(parse(b"-1e999"), Object::Real(-f32::MAX));
         assert_eq!(parse(b"4."), Object::Real(4.0));
         assert_eq!(parse(b"-.002"), Object::Real(-0.002));
+    }
+
+    /// A malformed number token has the value of its longest well-formed
+    /// prefix, as in content streams, so an array or dictionary holding one
+    /// keeps the elements after it.
+    #[test]
+    fn malformed_number_keeps_the_rest_of_its_array() {
+        let Object::Array(items) = parse(b"[0 0 612.0. 792]") else {
+            panic!("an array");
+        };
+        assert_eq!(
+            items,
+            [
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Real(612.0),
+                Object::Integer(792)
+            ]
+        );
+        for (src, value) in [
+            (&b"--5"[..], -5.0),
+            (b"1.2.3", 1.2),
+            (b"5-", 5.0),
+            (b"1e", 1.0),
+        ] {
+            assert_eq!(
+                parse(src),
+                Object::Real(value),
+                "{}",
+                String::from_utf8_lossy(src)
+            );
+        }
+        let entries = entries(b"<< /W [500 --5 600] /X 1 >>");
+        assert_eq!(
+            entries,
+            [
+                (
+                    b"W".to_vec(),
+                    Object::Array(vec![
+                        Object::Integer(500),
+                        Object::Real(-5.0),
+                        Object::Integer(600)
+                    ])
+                ),
+                (b"X".to_vec(), Object::Integer(1)),
+            ]
+        );
+        // A token without a digit is still no number.
+        let mut pos = 0;
+        assert!(parse_object(b"-.", &mut pos).is_none());
     }
 
     /// A dictionary that runs into a long token that is no key (stream data
