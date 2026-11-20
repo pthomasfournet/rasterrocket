@@ -262,6 +262,16 @@ pub trait GpuBackend: Send + Sync + sealed::Sealed {
     /// transfers without holding a parallel length field per entry.
     fn device_buffer_len(&self, buf: &Self::DeviceBuffer) -> usize;
 
+    /// Fail when the backend accepts no further work because completion of
+    /// earlier work could not be confirmed; host buffers that work may
+    /// still access are then not written.  Never fails by default.
+    ///
+    /// # Errors
+    /// The backend's error then.
+    fn refuse_lost(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The most bytes one kernel binding of a buffer may address on the
     /// device; reused buffers are not grown past it beyond the length a
     /// transfer requests.  Unbounded by default.

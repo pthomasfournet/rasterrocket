@@ -20,6 +20,7 @@
 //! `wait_page`, the caller still holds the `DeviceBuffer` (we hand back
 //! a fence, not a buffer), so this is a documentation issue, not a leak.
 
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
@@ -321,7 +322,15 @@ impl Drop for HostBuffer {
 /// Free a buffer + allocation pair.  Used by both `DeviceBuffer::drop`
 /// and `HostBuffer::drop`; logs but does not propagate the gpu-allocator
 /// free error since we're already on the destruction path.
+///
+/// On a lost device ([`DeviceCtx::mark_lost`]) work that reads or writes
+/// the buffer may still run, so the buffer and its memory are leaked.
 fn free_buffer(parent: &Arc<Inner>, buffer: vk::Buffer, alloc: Allocation, kind: &str) {
+    if parent.device.is_lost() {
+        parent.device.note_leak();
+        std::mem::forget(alloc);
+        return;
+    }
     let mut allocator = parent.allocator.lock().expect("allocator mutex poisoned");
     if let Err(e) = allocator.free(alloc) {
         log::warn!("{kind} free returned: {e}");
@@ -339,18 +348,30 @@ fn free_buffer(parent: &Arc<Inner>, buffer: vk::Buffer, alloc: Allocation, kind:
 /// Shared state held by every `DeviceBuffer` / `HostBuffer` so they can
 /// reach back to the allocator and the device on Drop.
 ///
-/// Fields drop in declaration order: the allocator, whose drop frees its
-/// memory blocks on the device, precedes `device`, which may hold the last
+/// The allocator, whose drop frees its memory blocks on the device, is
+/// dropped by `Drop::drop`, before `device`, which may hold the last
 /// reference to the device context and destroy the device and instance
 /// when it drops.  A buffer that outlives its backend holds the last
 /// reference to this struct, so this order is what keeps the allocator's
-/// teardown on a live device.
+/// teardown on a live device.  On a lost device the allocator is leaked
+/// with the memory work may still use.
 struct Inner {
     /// gpu-allocator is `Send` but not `Sync`; wrap in a `Mutex` for the
     /// allocate/free hot path.  Contention is negligible — we make ~tens
-    /// of allocations per page.
-    allocator: Mutex<Allocator>,
+    /// of allocations per page.  Dropped only by `Drop::drop`.
+    allocator: ManuallyDrop<Mutex<Allocator>>,
     device: Arc<DeviceCtx>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if self.device.is_lost() {
+            return;
+        }
+        // SAFETY: the allocator is dropped here once, and `self` is not
+        // used after this drop returns.
+        unsafe { ManuallyDrop::drop(&mut self.allocator) };
+    }
 }
 
 /// How the host accesses a device buffer, which selects its memory on a
@@ -396,7 +417,7 @@ impl SlabAllocator {
             .map_err(|e| BackendError::msg(format!("gpu_allocator::Allocator::new: {e}")))?;
         Ok(Self {
             inner: Arc::new(Inner {
-                allocator: Mutex::new(allocator),
+                allocator: ManuallyDrop::new(Mutex::new(allocator)),
                 device,
             }),
         })
@@ -511,6 +532,8 @@ impl SlabAllocator {
         location: MemoryLocation,
         name: &'static str,
     ) -> Result<(vk::Buffer, Allocation)> {
+        // A lost device would leak every buffer allocated on it.
+        self.inner.device.refuse_lost(name)?;
         let bytes = u64::try_from(size).expect("size fits u64");
         let out_of_memory = || BackendError::OutOfMemory { what: name, bytes };
         let create_info = vk::BufferCreateInfo::default()

@@ -17,7 +17,7 @@ use ash::khr::{portability_enumeration, portability_subset};
 use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::{BackendError, Result};
@@ -46,6 +46,12 @@ pub(super) struct DeviceCtx {
     compute_queue: Mutex<vk::Queue>,
     /// Successful `vkQueueSubmit` calls on `compute_queue`.
     submits: AtomicU64,
+    /// Whether work submitted to the device may still run although a wait
+    /// for it failed ([`Self::mark_lost`]).
+    lost: AtomicBool,
+    /// Whether a buffer was leaked while the device was lost
+    /// ([`Self::note_leak`]); the device then stays lost.
+    leaked: AtomicBool,
     /// Cached physical-device handle for memory-property + budget queries.
     pub(super) phys: vk::PhysicalDevice,
     /// Cached memory properties (memoryTypeBits → `MemoryType` lookup).
@@ -88,10 +94,18 @@ pub(super) struct DeviceCtx {
 
 impl Drop for DeviceCtx {
     fn drop(&mut self) {
+        if self.is_lost() {
+            log::warn!(
+                "vulkan: device {} is left undestroyed: work submitted to it may still run",
+                self.index
+            );
+            return;
+        }
         // Safety: every owned handle was created via the matching create_*
         // call above; matching destroy_* calls here, in reverse order, are
-        // sound because we have exclusive ownership and `VulkanBackend::drop`
-        // calls `vkDeviceWaitIdle` before any child of the device drops.
+        // sound because we have exclusive ownership, `VulkanBackend::drop`
+        // waited for the device to go idle before any child of the device
+        // dropped, and a device whose drain failed is lost (returned above).
         let _lifecycle = instance_lifecycle();
         unsafe {
             self.device.destroy_device(None);
@@ -168,6 +182,8 @@ pub(super) fn init(selector: Option<&DeviceSelector>) -> Result<Arc<DeviceCtx>> 
         compute_queue_family,
         compute_queue: Mutex::new(compute_queue),
         submits: AtomicU64::new(0),
+        lost: AtomicBool::new(false),
+        leaked: AtomicBool::new(false),
         phys,
         mem_props,
         max_workgroup_count,
@@ -221,15 +237,98 @@ impl DeviceCtx {
         fence: vk::Fence,
         what: &'static str,
     ) -> Result<()> {
+        self.refuse_lost(what)?;
         let queue = self.compute_queue.lock().expect("compute_queue poisoned");
         // Safety: the queue is held exclusively; the caller guarantees `submit`.
         unsafe {
             self.device
                 .queue_submit(*queue, std::slice::from_ref(submit), fence)
         }
-        .map_err(vk_err(what))?;
+        .map_err(|code| {
+            // A failed submission leaves its resources unaffected unless
+            // it reports the device lost.
+            if code == vk::Result::ERROR_DEVICE_LOST {
+                self.mark_lost();
+            }
+            vk_err(what)(code)
+        })?;
         let _ = self.submits.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Record that work submitted to the device may still run although a
+    /// wait for it failed, or that a submission's effect is unknown
+    /// (`ERROR_DEVICE_LOST`).
+    ///
+    /// A lost device accepts no further page or transfer, and the handles
+    /// and memory such work may use are leaked rather than destroyed or
+    /// reused: buffers freed while it is lost, the pools, pipelines and
+    /// allocator of its backend, and the device itself.  Only a successful
+    /// drain ([`Self::drain`]) clears it, and only while no buffer has been
+    /// leaked: a leaked buffer is a child of the device, which must not be
+    /// destroyed before it.
+    pub(super) fn mark_lost(&self) {
+        if !self.lost.swap(true, Ordering::AcqRel) {
+            log::warn!(
+                "vulkan: device {} is lost: completion of its submitted work could not be \
+                 confirmed; it accepts no further work",
+                self.index
+            );
+        }
+    }
+
+    /// Record that a buffer of the lost device was leaked: the device
+    /// stays lost for the rest of its life.
+    pub(super) fn note_leak(&self) {
+        self.leaked.store(true, Ordering::Release);
+    }
+
+    /// Whether the device is lost ([`Self::mark_lost`]).
+    pub(super) fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    /// Fail with an error naming `what` when the device is lost.
+    ///
+    /// # Errors
+    /// [`BackendError::Other`] then.
+    pub(super) fn refuse_lost(&self, what: &str) -> Result<()> {
+        if self.is_lost() {
+            return Err(BackendError::msg(format!(
+                "{what}: completion of earlier work on the device could not be confirmed; {}",
+                crate::backend::DEVICE_LOST_CAUSE
+            )));
+        }
+        Ok(())
+    }
+
+    /// `vkDeviceWaitIdle`: on success no submitted work runs, and a lost
+    /// device that leaked no buffer is no longer lost; on failure the
+    /// device is lost.
+    ///
+    /// # Errors
+    /// The wait's error.
+    pub(super) fn drain(&self) -> Result<()> {
+        let queue = self
+            .compute_queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Safety: the device is live; its one queue is reached only through
+        // `compute_queue`, held here, so no submission races the wait.
+        let waited = unsafe { self.device.device_wait_idle() };
+        drop(queue);
+        match waited {
+            Ok(()) => {
+                if !self.leaked.load(Ordering::Acquire) {
+                    self.lost.store(false, Ordering::Release);
+                }
+                Ok(())
+            }
+            Err(code) => {
+                self.mark_lost();
+                Err(vk_err("vkDeviceWaitIdle")(code))
+            }
+        }
     }
 
     /// Successful submissions to the compute queue so far.

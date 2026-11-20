@@ -15,7 +15,8 @@
 //! runs [`gpu::backend::icc_clut`].  A Vulkan or Direct3D 12 device whose
 //! kernel fails the backend's exactness check
 //! (`VulkanBackend::icc_clut_is_exact`, `D3d12Backend::icc_clut_is_exact`)
-//! is not used.
+//! is not used, nor is a Vulkan device whose earlier work could not be
+//! confirmed complete (`VulkanBackend::is_lost`).
 
 #![cfg(feature = "gpu-icc")]
 
@@ -170,7 +171,7 @@ pub(super) fn cmyk_clut_to_rgb<T: ClutSample>(
     let outcome = 'device: {
         #[cfg(feature = "vulkan")]
         if let Some(vk) = icc.vk_backend {
-            if !vk.icc_clut_is_exact() {
+            if vk.is_lost() || !vk.icc_clut_is_exact() {
                 break 'device DeviceIcc::Declined;
             }
             break 'device run(vk, cmyk, grid);

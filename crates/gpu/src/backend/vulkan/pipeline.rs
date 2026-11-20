@@ -576,6 +576,11 @@ impl PipelineCache {
 
 impl Drop for PipelineCache {
     fn drop(&mut self) {
+        // A lost device's work may still use the pipelines: they are
+        // leaked, and the cache is not persisted.
+        if self.device.is_lost() {
+            return;
+        }
         // Persist the driver-side pipeline cache to disk before tearing
         // down handles.  Failures are logged but not propagated — we're
         // already on the destruction path and the cache is opportunistic.

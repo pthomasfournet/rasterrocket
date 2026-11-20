@@ -114,8 +114,13 @@ impl StageClock {
 
 impl Drop for StageClock {
     fn drop(&mut self) {
-        // SAFETY: `VulkanBackend::drop` waits for the device before the
-        // page scratch holding the clock drops; no page uses the pool.
+        // A lost device's work may still write the pool: it is leaked.
+        if self.device.is_lost() {
+            return;
+        }
+        // SAFETY: `VulkanBackend::drop` drains the device before the page
+        // scratch holding the clock drops, and the device is not lost, so
+        // no page uses the pool.
         unsafe { self.device.device.destroy_query_pool(self.pool, None) };
     }
 }

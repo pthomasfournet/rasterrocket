@@ -60,7 +60,8 @@ pub(crate) fn grown_size_within(capacity: usize, len: usize, limit: usize) -> us
 ///
 /// # Errors
 /// [`BackendError::ZeroSizeAlloc`] for a zero `len`; the backend's error
-/// when an allocation fails, the slot then being empty.
+/// when it accepts no further work ([`GpuBackend::refuse_lost`]) or an
+/// allocation fails, the slot then being empty.
 pub(crate) fn ensure<'a, B: GpuBackend>(
     backend: &B,
     slot: &'a mut Option<Staged<B>>,
@@ -68,6 +69,7 @@ pub(crate) fn ensure<'a, B: GpuBackend>(
     direction: Direction,
 ) -> Result<&'a mut Staged<B>> {
     reject_zero_size(len, "staged transfer")?;
+    backend.refuse_lost()?;
     let capacity = slot.as_ref().map_or(0, |s| capacity(backend, s));
     if capacity < len {
         let size = grown_size_within(capacity, len, backend.max_binding_bytes());
@@ -185,7 +187,9 @@ pub(crate) fn stage_parts<'a, B: GpuBackend>(
     let staged = ensure(backend, slot, len, Direction::ToDevice)?;
     // SAFETY: the slot is borrowed exclusively (`&mut`), and every page
     // that used its buffers was waited on before the call that recorded it
-    // returned, whether it succeeded or failed (`run_page`).
+    // returned, whether it succeeded or failed (`run_page`); a page whose
+    // wait failed left the backend refusing work, which `ensure` checked
+    // above, so no such page's buffers are written.
     let target = unsafe { host_view_mut(backend, staged) }?;
     let mut at = 0;
     for part in parts {
@@ -207,6 +211,7 @@ pub(crate) fn stage_exact<'a, B: GpuBackend>(
     bytes: &[u8],
 ) -> Result<&'a mut Staged<B>> {
     reject_zero_size(bytes.len(), "staged transfer")?;
+    backend.refuse_lost()?;
     if slot
         .as_ref()
         .is_none_or(|s| backend.device_buffer_len(&s.device) != bytes.len())

@@ -175,6 +175,9 @@ impl PageRecorder {
 
     pub(super) fn begin_page(&self) -> Result<()> {
         let mut s = self.inner.lock().expect("recorder mutex poisoned");
+        // A lost device's command buffer may still be pending: it is not
+        // reset.
+        self.device.refuse_lost("begin_page")?;
         if s.state != State::Idle {
             return Err(BackendError::msg(format!(
                 "begin_page called from {:?} state; expected Idle",
@@ -280,14 +283,16 @@ impl PageRecorder {
     /// Abandon the current page and return to `Idle`: a recording page is
     /// discarded (the next `begin_page` resets its pools), a submitted one
     /// is waited for first, so that no in-flight work outlives the page.
-    /// The wait's own failure leaves the device's state to its error and is
-    /// logged.
+    /// A failed wait is logged and leaves the device lost
+    /// ([`DeviceCtx::mark_lost`]), so the page's command buffer is never
+    /// reset; the next `begin_page` refuses.
     pub(super) fn abort_page(&self) {
         let mut s = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.state == State::Submitted
+            && !self.device.is_lost()
             && let Some(last) = s.last_submitted
             && let Err(e) = self.wait_timeline(last)
         {
@@ -321,6 +326,8 @@ impl PageRecorder {
     /// accesses are serialised by the same lock.
     pub(super) fn with_quiescent<R>(&self, f: impl FnOnce() -> R) -> Result<R> {
         let s = self.inner.lock().expect("recorder mutex poisoned");
+        // A lost device's work may still access the buffers.
+        self.device.refuse_lost("host access")?;
         if let Some(last) = s.last_submitted {
             self.wait_timeline(last)?;
         }
@@ -339,20 +346,19 @@ impl PageRecorder {
     }
 
     /// `vkWaitSemaphores` on the timeline reaching `value`, with no
-    /// timeout.
+    /// timeout.  A failed wait leaves the device lost
+    /// ([`DeviceCtx::mark_lost`]): the work waited for may still run.
     fn wait_timeline(&self, value: NonZeroU64) -> Result<()> {
         let semaphores = [self.timeline];
         let values = [value.get()];
         let wait_info = vk::SemaphoreWaitInfo::default()
             .semaphores(&semaphores)
             .values(&values);
-        unsafe {
-            self.device
-                .device
-                .wait_semaphores(&wait_info, u64::MAX)
-                .map_err(vk_err("vkWaitSemaphores"))?;
-        }
-        Ok(())
+        // Safety: the timeline semaphore lives as long as the recorder.
+        unsafe { self.device.device.wait_semaphores(&wait_info, u64::MAX) }.map_err(|code| {
+            self.device.mark_lost();
+            vk_err("vkWaitSemaphores")(code)
+        })
     }
 
     // ── record_* ─────────────────────────────────────────────────────
@@ -721,9 +727,13 @@ impl Drop for PageRecorder {
                 poisoned.into_inner()
             }
         };
-        // Safety: device_wait_idle was called by VulkanBackend::drop
-        // before us, so all submissions are complete and no work
-        // references these handles.
+        // A lost device's work may still use the handles: they are leaked.
+        if self.device.is_lost() {
+            return;
+        }
+        // Safety: VulkanBackend::drop drained the device before us (a
+        // failed drain leaves it lost, returned above), so all submissions
+        // are complete and no work references these handles.
         unsafe {
             self.device
                 .device

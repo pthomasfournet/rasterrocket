@@ -101,6 +101,9 @@ impl VulkanBackend {
         self.device
             .check_storage_range("render_page pixels", device_size(page_len))?;
 
+        // A lost device refuses the page before a buffer set is lent: a set
+        // staged now may still be read by the unconfirmed page.
+        self.device.refuse_lost("render_page")?;
         let mut scratch = self.page_scratch.lend();
         let PageScratch {
             inputs: slots,

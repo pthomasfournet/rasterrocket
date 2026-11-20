@@ -114,6 +114,10 @@ impl TransferContext {
             .upload_staging
             .lock()
             .expect("transfer staging mutex poisoned");
+        // An upload whose wait failed held this lock until the device was
+        // marked lost, and its copy may still read the staging buffer: a
+        // lost device's staging is not written.
+        self.device.refuse_lost("upload")?;
         let staging = ensure_staging(&mut staging_slot, len, |n| allocator.alloc_host(n))?;
         let (payload, pad) = staging.as_mut_slice()[..len].split_at_mut(src.len());
         payload.copy_from_slice(src);
@@ -139,6 +143,8 @@ impl TransferContext {
             .download_staging
             .lock()
             .expect("transfer staging mutex poisoned");
+        // As in `upload`: a copy into the staging buffer may still run.
+        self.device.refuse_lost("download")?;
         let staging = ensure_staging(&mut staging_slot, dst.len(), |n| {
             allocator.alloc_host_readback(n)
         })?;
@@ -199,6 +205,9 @@ impl TransferContext {
     /// for the submit.
     fn run_one_shot<F: FnOnce(vk::CommandBuffer)>(&self, f: F) -> Result<()> {
         let pool = self.cmd_pool.lock().expect("transfer cmd_pool poisoned");
+        // A lost device's transfer command buffer and fence may still be
+        // pending: neither is reset.
+        self.device.refuse_lost("transfer")?;
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // Safety: pool mutex held throughout; cmd buffer was allocated
@@ -250,7 +259,12 @@ impl TransferContext {
             self.device
                 .device
                 .wait_for_fences(&fences, true, u64::MAX)
-                .map_err(vk_err("vkWaitForFences (transfer)"))
+                .map_err(|code| {
+                    // The copy may still run: the device is lost, which
+                    // keeps its staging buffers, pool and fence alive.
+                    self.device.mark_lost();
+                    vk_err("vkWaitForFences (transfer)")(code)
+                })
         }
     }
 }
@@ -292,9 +306,13 @@ fn ensure_staging(
 
 impl Drop for TransferContext {
     fn drop(&mut self) {
-        // VulkanBackend::drop calls device_wait_idle before module Drops
-        // run, so the cached cmd buffer is not in flight.  Destroying
-        // the pool also frees its allocated buffers.
+        // VulkanBackend::drop drains the device before module Drops run,
+        // so the cached cmd buffer is not in flight unless the device is
+        // lost, when the pool and fence are leaked.  Destroying the pool
+        // also frees its allocated buffers.
+        if self.device.is_lost() {
+            return;
+        }
         let pool = self.cmd_pool.lock().expect("transfer cmd_pool poisoned");
         // Safety: pool is owned by us; no in-flight references.
         unsafe {

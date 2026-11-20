@@ -95,6 +95,14 @@ impl VulkanBackend {
         Self::open(None)
     }
 
+    /// Whether completion of work submitted to the device could not be
+    /// confirmed: the backend then refuses every page, transfer and
+    /// allocation, and callers should stop offering it work.
+    #[must_use]
+    pub fn is_lost(&self) -> bool {
+        self.device.is_lost()
+    }
+
     /// Whether the device is an integrated GPU, whose device buffers are
     /// host memory the host writes and reads directly.
     #[must_use]
@@ -340,17 +348,14 @@ impl VulkanBackend {
     }
 }
 
+/// Every submitted page and transfer completes before any handle of the
+/// backend is destroyed.  A drain that fails leaves the device lost, and
+/// the per-module Drop impls then leak their handles rather than destroy
+/// them under running work.
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
-        // Wait for all in-flight work before any handle in any submodule
-        // tears down; the per-module Drop impls assume nothing is using
-        // their resources.  Failure here is logged and ignored — we're
-        // already on the destruction path.
-        // Safety: sole owner; called exactly once.
-        unsafe {
-            if let Err(e) = self.device.device.device_wait_idle() {
-                log::warn!("vkDeviceWaitIdle failed during VulkanBackend::drop: {e:?}");
-            }
+        if let Err(e) = self.device.drain() {
+            log::warn!("vulkan: waiting for the device to drain on drop failed: {e}");
         }
     }
 }
@@ -463,6 +468,10 @@ impl GpuBackend for VulkanBackend {
         recorded_copy_len(len, src.size(), dst.size(), "record_copy_to_host")?.map_or(Ok(()), |n| {
             self.recorder.record_copy(src.handle(), dst.handle(), n)
         })
+    }
+
+    fn refuse_lost(&self) -> Result<()> {
+        self.device.refuse_lost("staged transfer")
     }
 
     /// `maxStorageBufferRange`.
@@ -603,6 +612,43 @@ mod tests {
         drop(backend);
         drop(device);
         drop(host);
+    }
+
+    /// A lost device refuses pages, transfers and host accesses, and the
+    /// buffers freed meanwhile are leaked; a drain that succeeds at drop
+    /// clears the loss, and the backend tears down as usual.
+    #[test]
+    fn vulkan_lost_device_refuses_work() {
+        let Some(backend) = test_backend() else {
+            return;
+        };
+        let buf = backend.alloc_device(4096).expect("alloc_device");
+        let freed = backend.alloc_device(4096).expect("alloc_device");
+        backend.run_page(|_| Ok(())).expect("an empty page");
+        backend.device.mark_lost();
+        let err = backend
+            .run_page(|_| Ok(()))
+            .expect_err("a page on a lost device");
+        assert!(err.to_string().contains("could not be confirmed"), "{err}");
+        let mut out = [0_u8; 16];
+        assert!(backend.download(&buf, &mut out).is_err());
+        assert!(backend.upload_word_padded(&buf, &[1; 16]).is_err());
+        assert!(backend.alloc_device(4096).is_err());
+        assert!(backend.alloc_host_pinned(4096).is_err());
+        let mut slot = None;
+        assert!(crate::backend::staged::stage(&backend, &mut slot, &[1; 16]).is_err());
+        assert!(slot.is_none(), "nothing is staged on a lost device");
+        // Nothing leaked yet: a successful drain clears the loss.
+        backend.device.drain().expect("drain");
+        assert!(!backend.is_lost());
+        // A buffer freed while lost is leaked, and the device stays lost
+        // (it is then itself left undestroyed at drop).
+        backend.device.mark_lost();
+        drop(freed);
+        backend.device.drain().expect("drain");
+        assert!(backend.is_lost());
+        drop(backend);
+        drop(buf);
     }
 
     #[test]
