@@ -712,9 +712,11 @@ fn apply_lzw(data: &[u8], params: Option<&Object>) -> Result<Decoded, String> {
 
 /// Decode `ASCII85Decode` data (ISO 32000-2 §7.4.3).
 ///
-/// The data ends at `~`, or at the first byte that cannot occur in it (a
-/// byte outside `!`..=`u` and whitespace, or `z` inside a group); the
-/// latter keeps the bytes decoded before it and marks them truncated.  A final
+/// A leading `<~` after optional whitespace, the PostScript framing some
+/// writers carry over, is skipped.  The data ends at `~`, or at the first
+/// byte that cannot occur in it (a byte outside `!`..=`u` and whitespace,
+/// or `z` inside a group); the latter keeps the bytes decoded before it and
+/// marks them truncated.  A final
 /// partial group of `n` characters yields `n - 1` bytes; a lone final
 /// character carries no byte and is dropped with a warning.  A group above
 /// `s8W-!` (2^32 − 1) wraps modulo 2^32.
@@ -729,7 +731,16 @@ fn decode_ascii85(data: &[u8]) -> Decoded {
     let mut count = 0usize;
     let mut truncated = None;
 
-    for (i, &b) in data.iter().enumerate() {
+    let lead = data
+        .iter()
+        .take_while(|&&b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0x0C | 0x00))
+        .count();
+    let skip = if data[lead..].starts_with(b"<~") {
+        lead + 2
+    } else {
+        0
+    };
+    for (i, &b) in data.iter().enumerate().skip(skip) {
         match b {
             b'z' if count == 0 => out.extend_from_slice(&[0u8; 4]),
             b'~' => break,
@@ -1312,6 +1323,20 @@ mod tests {
             Decoded::whole(b"Man ".to_vec())
         );
         assert_eq!(decode_ascii85(b"uuuuu~>").bytes.len(), 4);
+    }
+
+    /// The `<~` opening of the PostScript framing, after optional
+    /// whitespace, is skipped; elsewhere `<` is a digit.
+    #[test]
+    fn ascii85_skips_a_leading_frame_opening() {
+        let plain = decode_ascii85(b"87cURD]i,\"Ebo80~>");
+        assert_eq!(plain.bytes, b"Hello World!");
+        for framed in [&b"<~87cURD]i,\"Ebo80~>"[..], b"\r\n <~87cURD]i,\"Ebo80~>"] {
+            let out = decode_ascii85(framed);
+            assert_eq!(out.bytes, plain.bytes, "{framed:?}");
+            assert!(out.truncated.is_none());
+        }
+        assert_eq!(decode_ascii85(b"8<~>").bytes, decode_ascii85(b"8<").bytes);
     }
 
     #[test]
