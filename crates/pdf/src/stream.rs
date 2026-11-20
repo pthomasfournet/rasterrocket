@@ -169,7 +169,13 @@ fn apply_flate(data: &[u8], params: Option<&dyn DictLookup>) -> Result<Decoded, 
 }
 
 /// Maximum decompressed size we will accept, to defeat decompression bombs.
+#[cfg(not(fuzzing))]
 pub(crate) const MAX_DECOMPRESSED: usize = 1 << 30; // 1 GiB
+
+/// Maximum decompressed size under `cfg(fuzzing)`: 64 MiB, a stream an
+/// instrumented build decodes in a fraction of the per-input time limit.
+#[cfg(fuzzing)]
+pub(crate) const MAX_DECOMPRESSED: usize = 1 << 26;
 
 /// Inflate a zlib (RFC 1950) or raw deflate stream, as `FlateDecode` does
 /// for a stream without predictor parameters.
@@ -242,7 +248,7 @@ fn decompress_zlib_flate2(data: &[u8]) -> Result<Decoded, std::io::Error> {
     if out.len() > MAX_DECOMPRESSED {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "FlateDecode: decompressed output exceeds 1 GiB cap",
+            format!("FlateDecode: decompressed output exceeds {MAX_DECOMPRESSED}-byte cap"),
         ));
     }
     Ok(Decoded {
@@ -273,7 +279,9 @@ fn decompress_zlib(data: &[u8]) -> Result<Decoded, std::io::Error> {
                 if out.len() >= MAX_DECOMPRESSED {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "FlateDecode: decompressed output exceeds 1 GiB cap",
+                        format!(
+                            "FlateDecode: decompressed output exceeds {MAX_DECOMPRESSED}-byte cap"
+                        ),
                     ));
                 }
                 let new_len = out.len().saturating_mul(2).min(MAX_DECOMPRESSED);
@@ -313,7 +321,9 @@ fn decompress_raw_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
                 if out.len() >= MAX_DECOMPRESSED {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "FlateDecode (raw): decompressed output exceeds 1 GiB cap",
+                        format!(
+                            "FlateDecode (raw): decompressed output exceeds {MAX_DECOMPRESSED}-byte cap"
+                        ),
                     ));
                 }
                 let new_len = out.len().saturating_mul(2).min(MAX_DECOMPRESSED);
@@ -650,7 +660,10 @@ impl std::io::Write for BoundedSink {
             self.tripped = true;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "LZWDecode: decompressed output exceeds 1 GiB cap (possible LZW bomb)",
+                format!(
+                    "LZWDecode: decompressed output exceeds {MAX_DECOMPRESSED}-byte cap \
+                     (possible LZW bomb)"
+                ),
             ));
         }
         self.buf.extend_from_slice(buf);

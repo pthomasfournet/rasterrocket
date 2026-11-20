@@ -424,8 +424,9 @@ def amplification_seeds(out: pathlib.Path) -> None:
 def alternation_seeds(out: pathlib.Path) -> None:
     """Write the `fuzz_parse` seeds of object-stream thrash and header text in a body.
 
-    - Members of two 200 MiB object streams read in alternation: re-decodes
-      of evicted containers must stop at the cache's allowance.
+    - Members of two 768 KiB object streams read in alternation: together
+      past the 1 MiB cache budget of a fuzzing build, so re-decodes of
+      evicted containers must stop at the cache's allowance.
     - A content stream under an indirect /Length holding the text `1 0 obj`:
       its body must not end there.
     """
@@ -434,9 +435,9 @@ def alternation_seeds(out: pathlib.Path) -> None:
         b"1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n",
         b"2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\n",
     )
-    # Two object streams of 200 MiB each, whose members alternate by
+    # Two object streams of 768 KiB each, whose members alternate by
     # number, so that reading them in order alternates the containers.
-    size = 200 << 20
+    size = 768 << 10
     members = 250
     body = bytearray(head)
     offsets = []

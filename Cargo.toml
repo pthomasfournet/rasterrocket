@@ -104,6 +104,8 @@ unsafe_code          = "deny"
 missing_docs         = "warn"
 unused_results       = "warn"
 unreachable_pub      = "warn"
+# cargo-fuzz builds every crate with `--cfg fuzzing`.
+unexpected_cfgs      = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 all      = { level = "warn", priority = -1 }

@@ -126,7 +126,15 @@ impl ObjStm {
 /// before it evicts the least recently used.  Half the aggregate cap on a
 /// page's decoded content; a single container larger than the budget (up to
 /// the 1 GiB per-stream decode cap) is retained alone.
+#[cfg(not(fuzzing))]
 const CACHE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// Bytes of decoded containers the cache retains under `cfg(fuzzing)`,
+/// where instrumentation slows decoding by more than an order of magnitude:
+/// eviction and the re-decode allowance, which scales with the budget, are
+/// reached by inputs of a few megabytes.
+#[cfg(fuzzing)]
+const CACHE_BUDGET: usize = 1024 * 1024;
 
 /// Bytes the cache may decode again for evicted containers, as a multiple
 /// of its budget.  Containers whose sizes together exceed the budget, read
