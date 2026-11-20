@@ -404,17 +404,33 @@ impl<B: PageDevice> DevicePages<B> {
             .add(outcome);
     }
 
-    /// Where the pages offered so far went.
+    /// Count one page `claim`'s device rendered, under the same lock as
+    /// [`DevicePageCounts::rendered`], so that a snapshot ([`Self::counts`])
+    /// sees the two agree.
+    fn count_rendered(&self, claim: &Claim<'_, B>) {
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        counts.add(Outcome::Rendered);
+        let _ = claim.device.rendered.fetch_add(1, Ordering::Relaxed);
+        drop(counts);
+    }
+
+    /// Where the pages offered so far went.  The per-device counts are
+    /// read under the lock that [`Self::count_rendered`] takes, so they
+    /// sum to `rendered`.
     pub(crate) fn counts(&self) -> DevicePageCounts {
-        let mut counts = self
-            .counts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let guard = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut counts = guard.clone();
+        let rendered: Vec<u32> = self
+            .devices
+            .iter()
+            .map(|d| d.rendered.load(Ordering::Relaxed))
+            .collect();
+        drop(guard);
         counts.by_device = self
             .devices
             .iter()
-            .map(|d| (d.name(), d.rendered.load(Ordering::Relaxed)))
+            .zip(rendered)
+            .map(|(d, n)| (d.name(), n))
             .collect();
         counts
     }
@@ -624,8 +640,7 @@ impl<B: SessionDevice> DevicePages<B> {
                             "page {}: rendered on the GPU from {commands} commands",
                             job.page_num
                         );
-                        self.count(Outcome::Rendered);
-                        let _ = claim.device.rendered.fetch_add(1, Ordering::Relaxed);
+                        self.count_rendered(&claim);
                         return Ok((renderer, DevicePage::Rendered { commands }));
                     }
                     Err(e) if claim.device.fail(job.page_num, &e) => {

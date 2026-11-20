@@ -190,12 +190,25 @@ pub(super) fn a_cancelled_recording_is_not_rendered_again<B: Api>() {
 }
 
 /// Pages `1..=pages` of `session` rendered at once, each by a thread of
-/// its own: every one renders on a device, with `want`'s bytes.
-fn render_concurrently(session: &crate::RasterSession, pages: u32, want: &[u8]) {
+/// its own: every one renders on a device, with `want`'s bytes.  Every
+/// count taken meanwhile has per-device counts that sum to its
+/// `rendered`.
+fn render_concurrently<B: Api>(session: &crate::RasterSession, pages: u32, want: &[u8]) {
+    let done = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
+        let done = &done;
+        let watcher = scope.spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                let counts = device_pages::<B>(session).counts();
+                let sum: u32 = counts.by_device.iter().map(|&(_, n)| n).sum();
+                assert_eq!(sum, counts.rendered, "{counts}");
+                std::thread::yield_now();
+            }
+        });
         let workers: Vec<_> = (1..=pages)
             .map(|page| scope.spawn(move || render(session, page, &RenderParams::new(2.0))))
             .collect();
+        let watching = DoneOnDrop(done);
         for w in workers {
             let (page, outcome) = w.join().expect("worker").expect("render");
             assert!(
@@ -204,7 +217,19 @@ fn render_concurrently(session: &crate::RasterSession, pages: u32, want: &[u8]) 
             );
             assert_eq!(page, want, "{outcome:?}");
         }
+        drop(watching);
+        watcher.join().expect("every count agrees with its devices");
     });
+}
+
+/// Sets its flag when dropped, on unwind too, so a scoped thread polling
+/// it ends and the scope can join it.
+struct DoneOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for DoneOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// Pages rendered at once by several threads all render on the device,
@@ -215,7 +240,7 @@ pub(super) fn concurrent_pages_all_render_on_the_device<B: Api>() {
     let Some(session) = gpu_session::<B>(doc.clone()) else {
         return;
     };
-    render_concurrently(&session, PAGES, &cpu(doc, 1));
+    render_concurrently::<B>(&session, PAGES, &cpu(doc, 1));
     let counts = device_pages::<B>(&session).counts();
     assert_eq!((counts.rendered, counts.cpu()), (PAGES, 0), "{counts}");
 }
@@ -382,7 +407,7 @@ fn pages_spread_over_two_devices<B: Api>() {
     let Some(session) = two_device_session::<B>(doc.clone()) else {
         return;
     };
-    render_concurrently(&session, PAGES, &cpu(doc, 1));
+    render_concurrently::<B>(&session, PAGES, &cpu(doc, 1));
     let counts = device_pages::<B>(&session).counts();
     eprintln!("{counts}");
     assert_eq!((counts.rendered, counts.cpu()), (PAGES, 0), "{counts}");

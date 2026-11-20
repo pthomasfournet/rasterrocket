@@ -3282,6 +3282,11 @@ In an unwinding build a panic while a `gpu_pages` device opened left it
 deadline and was counted as "no device opened in time". The device is now
 settled as having no device, logged at `error`.
 
+**Unreleased on master: `device_page_counts` is one snapshot.** A rendered
+page bumped `DevicePageCounts::rendered` and its device's count separately, so
+a snapshot taken while pages rendered could hold a `rendered` one above the sum
+of `by_device`. Both are now counted, and read, under one lock.
+
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one
