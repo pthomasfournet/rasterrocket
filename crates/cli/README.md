@@ -2,7 +2,7 @@
 
 The command-line renderer: PDF pages, and comic archives (`.cbz`, `.cb7`,
 `.cbt`, `.cbr`), to PPM, PGM, PBM, PNG, JPEG or TIFF files, to one fax document
-(`--fax`, sent with `--fax-to`), or to a printer through CUPS (`--print`), with
+(`--fax`, sent with `--fax-to`), or to a printer (`--print`: CUPS on Linux and macOS, GDI on Windows), with
 flags for resolution, page range, scaling and output format. Pages render at 8 or 16 bits per sample (`--depth`),
 as CMYK TIFF or JPEG (`--cmyk`, `--jpegcmyk`), and through an output ICC
 profile (`--output-profile`, `--intent`, `--bpc`) that is embedded in the
@@ -15,7 +15,9 @@ target/release/rrocket -r 300 --gray --png document.pdf ./out
 ```
 
 A bare output prefix such as `out` writes to a temporary RAM directory (under
-`/dev/shm`, where the system has one) that is removed when `rrocket` exits; use a path (`./out`) or `--no-ram` to keep the
+`/dev/shm`, where the system has one) that is removed when `rrocket` exits or
+is interrupted, and spills to disk when memory or the RAM file system runs
+low; use a path (`./out`) or `--no-ram` to keep the
 files; a `--fax` document is always written to disk, and `--print` writes no
 files.
 

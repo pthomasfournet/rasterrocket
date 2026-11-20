@@ -31,9 +31,9 @@ wiki's [Benchmarks](https://github.com/pthomasfournet/rasterrocket/wiki/Benchmar
 - **Software.** The binaries measured were the release of the directory's
   name, or the commit named in the file (`v10` and `v11*` are named after
   the roadmap stage they gated, not a release). Rendering, decoding and GPU dispatch
-  have changed substantially since; in particular nvJPEG and the
-  parallel-Huffman GPU JPEG path are dormant by default today, and the GPU AA
-  fill, with the 4 × 4 supersampled antialiasing it reproduced, has been
+  have changed substantially since; in particular nvJPEG is dormant by
+  default today, the parallel-Huffman GPU JPEG path has been removed, and so
+  has the GPU AA fill, with the 4 × 4 supersampled antialiasing it reproduced, has been
   removed: fills, clips and glyphs now take exact-area coverage on the CPU.
 - **Scripts.** The files name the scripts that produced them
   (`scripts/bench_v0*.sh`, `tests/bench_corpus.sh`, `scripts/run_contest_v11*.sh`

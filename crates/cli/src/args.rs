@@ -539,7 +539,7 @@ pub(crate) struct Args {
     /// RAM redirect. Default is a fresh `/dev/shm/rrocket-<pid>-<nanos>/`.
     /// On systems without `/dev/shm` (macOS, Windows), point it into a RAM disk.
     /// The path must not exist: the directory is created for the run and
-    /// removed, with its contents, on exit.
+    /// removed, with its contents, on exit or interrupt.
     #[arg(long = "ram-path", value_name = "PATH", conflicts_with = "no_ram")]
     pub ram_path: Option<String>,
 
@@ -656,8 +656,9 @@ pub(crate) struct Args {
     /// byte-identical to the CPU at 8 and 16 bits.  A page with a
     /// transparency-group form, a blend mode other than Normal, a pattern
     /// or shading, a Type 3 glyph that runs its `CharProc`, overprint
-    /// simulation, or more than 128 MiB of device commands renders on the
-    /// CPU, as does a page rendered in bands (larger than --band-mib).
+    /// simulation, the wide working space (--working-space wide), or more
+    /// than 128 MiB of device commands renders on the CPU, as does a page
+    /// rendered in bands (larger than --band-mib).
     /// Needs a build with the `vulkan` feature and --backend auto or
     /// vulkan, or a Windows build with the `d3d12` feature and --backend
     /// d3d12; and --aaVector yes.
@@ -668,7 +669,7 @@ pub(crate) struct Args {
     /// of device indices (from 0, in enumeration order) or name
     /// substrings, as --vulkan-device (or, under --backend d3d12,
     /// --d3d12-device, which also takes `warp`) takes, or `all` for every usable
-    /// GPU (not a CPU implementation such as llvmpipe).
+    /// GPU (not a CPU implementation such as llvmpipe, nor WARP).
     ///
     /// Each page takes the open device where it expects the shortest wait
     /// (the pages it holds and this one, times its recent mean time per
@@ -676,8 +677,9 @@ pub(crate) struct Args {
     /// bytes.  A list naming one device twice, or an entry matching no
     /// device or several, is an error that lists the devices.  Needs
     /// --gpu-pages; under --backend auto it replaces --vulkan-device.
-    /// Tested on two devices (an NVIDIA and an AMD GPU); more devices and
-    /// datacenter GPUs are untested.
+    /// Tested on two devices (an NVIDIA and an AMD GPU; under Windows, also
+    /// an NVIDIA and an Intel GPU); more devices and datacenter GPUs are
+    /// untested.
     #[arg(
         long = "gpu-devices",
         value_name = "LIST|all",

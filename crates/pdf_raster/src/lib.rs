@@ -1,4 +1,4 @@
-//! PDF rasterisation library — zero subprocess, zero Leptonica.
+//! PDF rasterisation library: PDF pages to pixel buffers, in process.
 //!
 //! Converts PDF pages to 8-bit grayscale pixel buffers ready for Tesseract OCR
 //! (or any other consumer) without writing files or spawning processes.

@@ -1,7 +1,8 @@
 # rasterrocket
 
 The library entry point of the rasterrocket workspace: PDF pages to 8-bit
-grayscale pixel buffers (or RGB, RGBA and CMYK, at 8 or 16 bits per sample),
+grayscale pixel buffers (or gray and alpha, RGB, RGBA and CMYK, at 8 or 16
+bits per sample),
 in process, ready for Tesseract or any other OCR engine.
 
 ```rust
@@ -19,13 +20,15 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 ```
 
 - `raster_pdf`, `raster_pdf_from_bytes`, `render_channel`: page iterators
-  and a bounded background channel.
+  and a bounded channel, driven by a thread of its own and rendered on a
+  private pool, so it can be drained from inside any Rayon pool.
 - `open_session` + `render_page_rgb_with` / `render_page_gray`: one open
   document, per-page renders from any thread, with `RenderParams` for
   per-axis scale, a `RenderRegion` window and a `CancelToken`.
-- `PageBuffer::render_gray_into` / `render_rgb_into` / `render_rgba_into`:
-  pages written into a buffer the caller owns and reuses, at its stride,
-  with the page canvas kept between renders; `RasterSession::page_size_px`
+- `PageBuffer::render_gray_into` / `render_gray_alpha_into` /
+  `render_rgb_into` / `render_rgba_into`: pages written into a buffer the
+  caller owns and reuses, at its stride, with the page canvas kept between
+  renders, failed ones included; `RasterSession::page_size_px`
   sizes the buffer first.
 - `open_session_from_shared` (`Arc<[u8]>`, `&'static [u8]` or any other
   `AsRef<[u8]>` storage, read in place) and `open_session_from_reader`
@@ -41,12 +44,16 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - `SessionConfig::gpu_pages` (`vulkan` feature, or `d3d12` on Windows) renders pages whole on a
   Vulkan or Direct3D 12 GPU beside the CPU workers (fills, strokes, text, images, forms,
   path clips and soft masks), with the same bytes at 8 and 16 bits;
+  `gpu_devices` spreads them over several devices;
   `PageDiagnostics::device_page` reports where each page rendered and why
-  a page stayed on the CPU.
+  a page stayed on the CPU, and `RasterSession::device_page_counts` totals
+  them.
 - `transparent_background` (off by default) renders over a transparent
   backdrop: RGBA pages (`PixelFormat::Rgba8`, straight alpha) from the batch
   entry points and `render_page_rgba`, and an RGB bitmap with an alpha plane
-  from `render_page_rgb_with` with `RenderParams::with_transparent_background`.
+  from `render_page_rgb_with` with `RenderParams::with_transparent_background`;
+  with `gray_alpha`, gray and alpha pages (`PixelFormat::GrayAlpha8` /
+  `GrayAlpha16`, `render_page_gray_alpha`).
 - `encode_for_gcv`: a size-fitted grayscale JPEG for Google Cloud Vision.
 - Encrypted documents are decrypted in process when `decrypt_authorized` is set.
 - `overprint` (off by default) simulates overprint and spot inks on pages
@@ -62,6 +69,10 @@ for (page_num, result) in raster_pdf(Path::new("scan.pdf"), &opts) {
 - `max_page_bytes` bounds the bitmap of a page (default 1.8 GB), and
   `render_page_bands` renders a larger page as bands of rows, byte-identical
   to a whole-page render.
+- `PageDiagnostics::has_omissions()` tells whether a page was drawn with
+  something left out (an image, content stream or shading skipped, a form
+  too deep, a missing font, an unsupported feature); `strict` fails such
+  pages instead.
 - `PageDiagnostics::glyphs` counts the glyphs shown by text rendering mode,
   and `has_visible_text()` tells a page of native text from a scan with an
   invisible OCR layer.

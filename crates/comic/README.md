@@ -26,7 +26,9 @@ fn ocr_archive(path: &Path) -> Result<(), ComicError> {
 
 `open_comic` returns an iterator that decodes each page when it is reached;
 its `len()` is the number of pages still to come and `retain` drops pages
-before any is decoded. Entries are read under a
+before any is decoded. `next_job` takes the next page as a `PageJob`, which
+owns what its page is rendered from and renders on any thread, so pages can
+decode in parallel (`rrocket` renders them on its thread pool). Entries are read under a
 512 MiB decompressed-size cap per entry and a total cap for the archive
 (`ComicOptions::max_archive_bytes`, default 4 GiB; an archive over it fails
 with `ComicError::ArchiveTooLarge`), and image dimensions are checked before
