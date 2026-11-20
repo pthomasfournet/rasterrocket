@@ -224,7 +224,11 @@ PathBuilder  →  Path  →  flatten_path()  →  XPath (edge table)
                        CoverageTable)
 ```
 Bézier flattening by De Casteljau subdivision: a curve is a segment once both
-control points lie within the flatness of its chord segment. Stroke expansion
+control points lie within the flatness of its chord segment (the interpreter
+clamps the graphics state's flatness to 0.1–1.0 device pixels). A `moveto`
+that follows a `moveto` replaces it, a closed one-point subpath is kept, and a
+segment after a closepath starts a subpath at the closed one's first point
+(`Path::closed_subpath_start`). Stroke expansion
 produces a fill path from
 the outline — strokes and fills share a single rasterizer. The geometry
 stages are public on their own: `fill::aa_fill_coverage` (the coverage
@@ -419,9 +423,13 @@ cached as `Arc<Object>`.
   every position in the file. `read_xref` returns that base with the table
   and `Document::body()` exposes the file from the header on, so offsets
   are applied as written.
-- **Object streams** (`objstm.rs`). Each container is decoded and its
-  directory read once per document. Objects are parsed on demand and looked
-  up by number; the xref index is a hint checked against the directory.
+- **Object streams** (`objstm.rs`). Decoded containers are cached under a
+  256 MiB aggregate budget, least recently used first out; an evicted
+  container is decoded again within an allowance of four budgets (1 GiB),
+  past which it is an error, and a container that fails to open is cached as
+  that failure. Objects are parsed on demand and looked up by number; the
+  xref index is a hint checked against the directory, and a wrong one is
+  resolved through a number-to-member map built once per container.
   A container is decoded only when it is an object stream (`/Type /ObjStm`,
   or untyped with integer `/N` and `/First`), and it is always read from a
   direct entry, so object streams never nest.
@@ -684,7 +692,9 @@ resources/
   tiling.rs          — Type 1 tiling pattern dictionaries
   transfer.rs        — ExtGState /TR and /TR2 tabulated to 256-entry tables,
                        applied to painted colours and image samples
-  shading/           — shading types 1–7
+  shading/           — shading types 1–7 (a Type 1 function is evaluated
+                       only at the lattice points that interpolate a pixel
+                       of the clip or painted object)
     gouraud.rs       — Type 4 / 5 triangle meshes
     patch/           — Type 6 / 7 patch meshes
     stream.rs        — packed mesh vertex data
@@ -944,8 +954,11 @@ destroys them, and a `DeviceHold` keeps them open across sessions.
   decoded, so a script's structural presence cannot change the static render.
   Detection is structural (`/S /JavaScript` only) and emits a loud `WARN` per
   entry point; the document opens and renders normally. The catalog entry
-  points are checked at open; page `/AA` and annotation `/A`/`/AA` are checked
-  per rendered page, warned once per session.  `unsupported.rs` reports
+  points, the `/AcroForm /Fields` tree through `/Kids` included, are checked
+  at open; page `/AA`, annotation `/A`/`/AA` and each widget's `/Parent`
+  chain are checked per rendered page, warned once per session
+  (`ScriptLocation`; the field hierarchy is walked at most 64 levels, each
+  object once).  `unsupported.rs` reports
   every ignored feature as a typed `UnsupportedFeature`: per document
   (`document_unsupported_features`: catalog JavaScript, XFA, portable
   collection), returned by `RasterSession::unsupported_features`, and per
@@ -1000,8 +1013,11 @@ backend-erased `gpu::cache::ImageCache`.
 PTX kernels as `cudarc` modules.  Shared via `Arc<GpuCtx>`.  `cudarc` is pinned
 to the `cuda-13030` driver-API binding, so a CUDA 13.x driver is required.
 
-**`VulkanBackend`** — one per device selector (`SessionConfig::vulkan_device`),
-shared by every session naming it; loads the Vulkan instance, picks a device
+**`VulkanBackend`** — one per device, shared by every session naming it by any
+selector (`SessionConfig::vulkan_device`, an entry of `gpu_devices`, or none:
+a selector is resolved to its device index before the registry lookup, and a
+backend opened for the automatically ranked device on a device that already
+has one is dropped for the live one); loads the Vulkan instance, picks a device
 (an index or a name substring when selected, otherwise ranked discrete >
 integrated > virtual > CPU), creates a single compute queue, and lazy-loads
 SPIR-V → `VkPipeline` per kernel.  Persistent `VkPipelineCache` blob at
@@ -1012,11 +1028,17 @@ and the cached-image blit through it, and it renders whole pages through
 `PageDevice` (*Page raster* below).  On Linux and Android a page's canvas is
 faulted in (`MADV_POPULATE_WRITE`, `backend/vulkan/host_pages.rs`) before
 the page's device buffers are allocated, so the canvas takes the free huge
-pages first; elsewhere it faults in on first write.
+pages first; elsewhere it faults in on first write.  A failed wait on a
+page, a transfer or the device marks the backend lost: it refuses further
+work, leaks the buffers freed meanwhile and, dropped without a confirmed
+drain, leaks its device rather than destroy it under running work, as the
+Direct3D 12 backend does.  ICC and blit dispatches bind only the range the
+kernel addresses, and pooled buffers stop growing at
+`GpuBackend::max_binding_bytes` (`maxStorageBufferRange`).
 
 **`D3d12Backend`** (`d3d12` feature, Windows only; the adapter selection of
 `backend/d3d12/select.rs` is plain data and builds and is tested on every
-host) — one per adapter selector (`SessionConfig::d3d12_device`: an index or
+host) — one per adapter, however a selector names it (`SessionConfig::d3d12_device`: an index or
 a name substring over DXGI's high-performance enumeration order, or `warp`),
 opened only under `BackendPolicy::ForceD3d12`; `Auto` never opens it.
 Without a selector it takes the first usable hardware adapter with dedicated
@@ -1031,7 +1053,9 @@ page raster. Buffers are committed resources (the DEFAULT heap on the
 device, the UPLOAD and READBACK heaps for transfers). A view holds at most
 2^27 elements, so a page or an input past that is a
 `BackendError::DeviceLimit` and renders on the CPU.
-`PDF_RASTER_D3D12_DEBUG=1` enables the debug layer. Tested on an RTX 5070,
+`PDF_RASTER_D3D12_DEBUG=1` enables the debug layer; the device then keeps
+its info queue, and a stored validation error fails the page or transfer
+that reads it. Tested on an RTX 5070,
 an AMD Radeon iGPU and WARP 1.0.22 under Windows 11; untested on Intel
 adapters.
 
@@ -1346,8 +1370,8 @@ output order does not depend on where a page rendered;
 `PageDiagnostics::device_page` (`DevicePage`) records each page's outcome,
 and `RasterSession::device_page_counts` (`DevicePageCounts`) where every
 page went, by device, which is logged at `info` when the session drops.
-Each device is the process-wide backend of its selector (`device_init.rs`,
-generic over `SessionDevice`), held weakly: sessions open at once share
+Each device is one process-wide backend, whatever selector names it
+(`device_init.rs` and `registry.rs`, generic over `SessionDevice`), held weakly: sessions open at once share
 it, the last of them to drop destroys it, and a `DeviceHold` of the
 configuration keeps it open across sessions.
 
@@ -1401,7 +1425,10 @@ Both bases are ahead of their last crates.io releases by upstream fixes
 (overflows, truncated-data recovery, a strict mode). The JBIG2 API parses
 embedded global segments once into `Globals`, then opens each image with
 `Page::new_embedded`. The interpreter builds `Globals` with the `std`
-feature, which makes them `Send + Sync` so they can be shared across pages.
+feature, which makes them `Send + Sync` so they can be shared across pages. The interpreter keeps a CCITT or JBIG2 image as packed bits
+(`ImageData::Bilevel`, one bit a sample with its two sample values; the JBIG2
+fork returns its `PageBitmap` for it); a reduced draw resamples from the
+bits, and `ImageData::as_cpu` expands them to bytes only on first request.
 
 ### 3.8c `zune-jpeg` and `rav1d` (`crates/zune_jpeg`, `crates/rav1d`)
 
@@ -1437,7 +1464,12 @@ All rendering is inside `pool.install()`. The broadcast teardown is the last thi
 that happens before the pool is dropped, ensuring GPU decoders are released while
 the CUDA driver is fully live. Every exit path returns from `main` rather than
 calling `process::exit`, so the RAM output directory is removed after a failed
-page too.
+page too. An interrupt (Ctrl-C, `SIGTERM`, `SIGHUP`; the console events on
+Windows) cancels the run as a failed page does, so no page is begun after it
+and the directory is removed as well. Page files are written as `<name>.part`
+and renamed once complete. The RAM spill policy (`ram.rs`) reads the
+available memory and, with `statvfs`, the RAM file system's free space, and
+a write that finds that file system full is retried on disk.
 
 `--box`, `--rotate`, `--gpu-pages` and `--gpu-devices` set
 `SessionConfig::page_box`, `rotation`, `gpu_pages` and `gpu_devices`;
@@ -1589,6 +1621,8 @@ fn dispatch_unpack(packed: &[u8], width: usize, out: &mut [u8]) {
 | AA composite | `raster/src/simd/composite.rs` | AVX-512 | AVX2 | scalar |
 | Glyph unpack | `raster/src/simd/glyph_unpack.rs` | SSE2 | SSE2 | `vtstq_u8` |
 | CMYK→RGB | `color/src/cmyk/simd.rs` | AVX-512 VBMI | AVX2 | `vld4q_u8` + `vst3q_u8` |
+| Deskew rotation (bilinear rows) | `pdf_raster/src/deskew/simd.rs` | AVX-512 | AVX2 + FMA | NEON |
+| JPEG IDCT, YCbCr→RGB, up-sampling | `zune_jpeg/src/{idct,color_convert,upsampler}/` | AVX-512 (`ZUNE_JPEG_NO_AVX512` opts out) | AVX2 | NEON |
 
 Exact-area coverage (`raster/src/coverage/`) is integer scalar code on every
 platform.
@@ -1759,7 +1793,7 @@ requires no CUDA toolkit and links no NVIDIA libraries.
 **One GPU context per process.**
 `GpuCtx` is `Arc<_>`, initialised once, shared by all worker threads. PTX kernels
 are loaded at init time. The driver serialises concurrent CUDA calls internally.
-A `VulkanBackend` or `D3d12Backend` is built once per device selector and shared
+A `VulkanBackend` or `D3d12Backend` is built once per device, under any selector, and shared
 the same way; its page rasters (`PageDevice::render_page`) run on the device one
 at a time, and its kernel pages (`GpuBackend::run_page`) one at a time under its
 single recording state.
