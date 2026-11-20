@@ -1,10 +1,11 @@
-//! Process-wide compute backends, one per API and device selector.
+//! Process-wide compute backends, one per API and device.
 //!
 //! A backend owns a logical device and its compiled pipelines, so it is
-//! built once per distinct selector ([`SessionDevice::session_selector`]:
-//! [`SessionConfig::vulkan_device`] for Vulkan,
-//! [`SessionConfig::d3d12_device`] for Direct3D 12) and shared by every
-//! session alive at once that names the same selector.  The registry of each API ([`SessionDevice::registry`]) holds a
+//! built once per device, however a selector names it
+//! ([`SessionDevice::session_selector`]: [`SessionConfig::vulkan_device`]
+//! for Vulkan, [`SessionConfig::d3d12_device`] for Direct3D 12, or a
+//! device index from [`resolve_page_devices`]), and shared by every
+//! session alive at once that names the same device.  The registry of each API ([`SessionDevice::registry`]) holds a
 //! backend weakly: it is destroyed, its device and instance with it, when
 //! the last session holding it drops, and a later session builds it anew.
 //! Failures are retained: repeated sessions do not retry an init that
@@ -15,7 +16,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::registry::{Registry, shared};
+use crate::registry::{Registry, shared_by_identity};
 use crate::{BackendPolicy, RasterError, SessionConfig};
 use gpu::backend::BackendError;
 #[cfg(all(windows, feature = "d3d12"))]
@@ -264,10 +265,50 @@ pub(crate) fn open_backend<B: SessionDevice>(selector: Option<&str>) -> Result<A
 /// The live backend for `selector`, or the failure of its construction,
 /// or else a backend constructed now.  The lock is held across
 /// construction so concurrent first sessions build one device.
+///
+/// Backends are one per device, not per selector: a selector naming the
+/// device of a live backend under another selector (an index, a name, the
+/// automatically ranked device) shares it.  A selector's device index is
+/// resolved first, without opening a device; the automatically ranked
+/// device is known only once opened, and a backend opened for it on a
+/// device that already has one is dropped for that one.
 fn cached_backend<B: SessionDevice>(selector: Option<&str>) -> Result<Arc<B>, InitError> {
-    shared(B::registry(), selector.map(str::to_owned), || {
-        construct::<B>(selector)
-    })
+    let known = selector.and_then(device_index::<B>);
+    shared_by_identity(
+        B::registry(),
+        selector.map(str::to_owned),
+        known,
+        PageDevice::device_index,
+        || construct::<B>(selector),
+    )
+}
+
+/// Selectors' device indices already resolved by [`device_index`], keyed
+/// by API ([`SessionDevice::API`]) and selector.
+type Indices = Vec<((&'static str, String), usize)>;
+static INDICES: Mutex<Indices> = Mutex::new(Vec::new());
+
+/// The enumeration index of the device `selector` names
+/// ([`PageDevice::resolve_devices`]), resolved without opening a device
+/// and retained per API and selector for the process; `None`, retained
+/// for no later call, when it does not resolve, which construction then
+/// reports.
+fn device_index<B: SessionDevice>(selector: &str) -> Option<usize> {
+    let key = (B::API, selector.to_owned());
+    let lock = || INDICES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&(_, index)) = lock().iter().find(|(k, _)| *k == key) {
+        return Some(index);
+    }
+    let parsed = selector.parse::<DeviceSelector>().ok()?;
+    let index = *B::resolve_devices(std::slice::from_ref(&parsed))
+        .ok()?
+        .first()?;
+    let mut indices = lock();
+    if !indices.iter().any(|(k, _)| *k == key) {
+        indices.push((key, index));
+    }
+    drop(indices);
+    Some(index)
 }
 
 /// The value `cache` holds for `key`, computed by `make` and retained on
@@ -360,6 +401,32 @@ mod tests {
             ),
             Err(other) => panic!("expected InvalidOptions, got {other:?}"),
         }
+    }
+
+    /// The automatically ranked device and its index name one backend,
+    /// whichever is opened first.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn one_device_named_two_ways_is_one_backend() {
+        use super::cached_backend;
+        use gpu::backend::page_device::PageDevice;
+        let auto = match cached_backend::<VulkanBackend>(None) {
+            Ok(backend) => backend,
+            Err(e) if std::env::var_os("PDF_RASTER_REQUIRE_VULKAN").is_some() => {
+                panic!("no Vulkan device: {e:?}")
+            }
+            Err(_) => {
+                eprintln!("skipping: no Vulkan device");
+                return;
+            }
+        };
+        let index = auto.device_index().to_string();
+        let named = cached_backend::<VulkanBackend>(Some(&index)).expect("the same device");
+        assert!(std::sync::Arc::ptr_eq(&auto, &named));
+        drop((auto, named));
+        let named = cached_backend::<VulkanBackend>(Some(&index)).expect("the device");
+        let auto = cached_backend::<VulkanBackend>(None).expect("the same device");
+        assert!(std::sync::Arc::ptr_eq(&auto, &named));
     }
 
     /// A selector naming no device is a configuration error under `Auto`,

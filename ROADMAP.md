@@ -3287,6 +3287,16 @@ page bumped `DevicePageCounts::rendered` and its device's count separately, so
 a snapshot taken while pages rendered could hold a `rendered` one above the sum
 of `by_device`. Both are now counted, and read, under one lock.
 
+**Unreleased on master: one backend per GPU, however it is named.** The
+process-wide Vulkan and Direct3D 12 backends were keyed by the selector
+string, so two live sessions naming one GPU differently (the automatically
+ranked device, its index from `gpu_devices`, its name) each opened a logical
+device, pipelines and an image cache budgeting the whole VRAM. A selector's
+device index is now resolved, without opening a device, before the lookup, and
+a session finds the live backend of that device under any name; the
+automatically ranked device is known only once opened, and a second backend
+opened for it is dropped for the live one.
+
 **Unreleased on master: the Direct3D 12 backend.** `rrocket --backend d3d12`
 (`BackendPolicy::ForceD3d12`, a Windows build with the `d3d12` feature) runs
 the ICC lookup table, the image cache and blits, and `--gpu-pages` (one
