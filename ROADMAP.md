@@ -94,7 +94,11 @@ repacked a word at a time.
 `ShadingFailed`, `ScriptLocation` gains `FieldActions`, and `GpuBackend`
 gains `max_binding_bytes` and `refuse_lost`. New: `RasterOptions::gray_alpha`,
 `render_page_gray_alpha`, `PageBuffer::render_gray_alpha_into`,
-`SessionConfig::gpu_devices`. Every change is under Current status,
+`SessionConfig::gpu_devices`. `render_channel` now drives each document
+from a thread of its own, which keeps the document open and renders up to
+`capacity + 1` pages ahead: memory grows with the number of channels left
+open (about 33 MB each at 300 dpi), so drain or drop channels that are not
+being read. Every change is under Current status,
 "Released in v2.5.0".
 
 ### v2.4.1 (November 2026)
