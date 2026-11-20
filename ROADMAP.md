@@ -3232,6 +3232,16 @@ filled as paths; the face now loads with its nominal size held at 65 535, and
 its outlines follow the full matrix. `LoadError::DegenerateSize` now means a
 non-finite matrix or a size below one pixel.
 
+**Unreleased on master: coordinates past 2^44 device pixels keep their
+slopes.** The rasteriser's fixed-point coordinates are bounded at 2^44 pixels,
+and each coordinate was clamped on its own, so a far vertex moved and the edges
+through the page changed slope: a triangle with a vertex at 2e15 painted 4950
+pixels instead of 7500, and a `1e15 w` stroke painted nothing. Segments past
+the bound are now cut where they cross it, the rows beyond dropped and the
+columns beyond moved onto it, which leaves every pixel inside unchanged; both
+cases now match their scaled-down equivalents. A stroke so wide that its
+corners exceed f64 precision (`1e20 w` on a 10 pt segment) still collapses.
+
 **Unreleased on master: a short last row under a PNG predictor is kept.** When a Flate or LZW stream with a PNG predictor ends partway through a row, that last row is now decoded as far as its bytes go instead of being thrown away. Bitmap glyphs written by the dvips route with PK fonts end this way, so they lost their bottom rows ("=" drew as "−"); they now draw whole. Other files render as before (the fixtures are byte-identical).
 
 **Unreleased on master: new AVX2 and AVX-512 tiers; comic pages on the thread pool.** An AVX2 tier for the opaque RGB8 antialiased span composite and for the bilinear row rotation (with FMA), an AVX-512 tier for the zune-jpeg fork's IDCT, YCbCr conversion and up-sampling, and SIMD rounding in the JPEG 2000 fork's fused 8-bit outputs. The AVX2 composite takes spans of 32 px and more (a remainder of one or two pixels goes to the scalar loop) and is at least level with the scalar loop at every length measured from 32 px up: on the i7-8700K 0.36 against 0.45 ns/px at 32 px, 0.26 against 0.39 at 128 px and 0.24 against 0.36 at 1920 px; on the Ryzen 9 9900X3D, timed as an AVX2-only build (`-C target-cpu=x86-64-v3`), 0.47 against 0.56, 0.18 against 0.27 and 0.12 against 0.20. Comic pages render on the thread pool.

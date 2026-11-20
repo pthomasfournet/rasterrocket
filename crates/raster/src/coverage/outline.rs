@@ -1,7 +1,7 @@
 //! An outline as the exact-area rasteriser takes it: fixed-point segments
 //! and the pixel window they are rasterised over.
 
-use super::{AreaRaster, CoverageTable, fixed};
+use super::{AreaRaster, CoverageTable, fixed_segments};
 use crate::xpath::{XPath, XPathFlags};
 
 /// The input of one exact-area rasterisation.
@@ -30,20 +30,19 @@ impl AreaOutline {
     /// The outline of the device-space `xpath` over `window`.
     #[must_use]
     pub fn of(xpath: &XPath, window: (i32, i32, i32, i32), even_odd: bool, weight: u8) -> Self {
-        let segs = xpath
-            .segs
-            .iter()
-            .filter(|s| ![s.x0, s.y0, s.x1, s.y1].iter().any(|v| v.is_nan()))
-            .map(|s| {
-                let (a, b) = ((s.x0, s.y0), (s.x1, s.y1));
-                let (from, to) = if s.flags.contains(XPathFlags::FLIPPED) {
-                    (b, a)
-                } else {
-                    (a, b)
-                };
-                [fixed(from.0), fixed(from.1), fixed(to.0), fixed(to.1)]
-            })
-            .collect();
+        let mut segs = Vec::with_capacity(xpath.segs.len());
+        for s in &xpath.segs {
+            if [s.x0, s.y0, s.x1, s.y1].iter().any(|v| v.is_nan()) {
+                continue;
+            }
+            let (a, b) = ((s.x0, s.y0), (s.x1, s.y1));
+            let (from, to) = if s.flags.contains(XPathFlags::FLIPPED) {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            fixed_segments(from, to, |seg| segs.push(seg));
+        }
         Self {
             window,
             segs,

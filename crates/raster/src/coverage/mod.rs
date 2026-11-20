@@ -95,6 +95,84 @@ fn fixed(v: f64) -> i64 {
     ((v * 256.0).floor() as i64).clamp(-COORD_LIMIT, COORD_LIMIT)
 }
 
+/// [`COORD_LIMIT`] in device pixels, `2^44`.
+const LIMIT_PX: f64 = 17_592_186_044_416.0;
+
+/// The fixed-point segments the device segment `a → b` deposits, passed to
+/// `emit` as `[ax, ay, bx, by]`; no NaN coordinate is allowed.
+///
+/// A segment within `±LIMIT_PX` on both axes is one segment, converted
+/// coordinate by coordinate.  A longer one is cut where it crosses the
+/// limits, so each piece keeps the segment's slope: the parts beyond
+/// `|y| = LIMIT_PX` lie in rows outside every window and are dropped, and
+/// the parts beyond `|x| = LIMIT_PX` are moved onto that line, which keeps
+/// their rows and the cover they add to every pixel between the limits.
+/// A segment with an infinite coordinate or extent has no slope to keep,
+/// and one too long for its cuts to be resolved has none that can be kept;
+/// both are clamped coordinate by coordinate.
+fn fixed_segments(a: (f64, f64), b: (f64, f64), mut emit: impl FnMut([i64; 4])) {
+    let within = |v: f64| v.abs() <= LIMIT_PX;
+    let clamped = |a: (f64, f64), b: (f64, f64)| [fixed(a.0), fixed(a.1), fixed(b.0), fixed(b.1)];
+    if within(a.0) && within(a.1) && within(b.0) && within(b.1) {
+        emit(clamped(a, b));
+        return;
+    }
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    if ![dx, dy].iter().all(|v| v.is_finite()) {
+        emit(clamped(a, b));
+        return;
+    }
+    let at = |t: f64| (dx.mul_add(t, a.0), dy.mul_add(t, a.1));
+    // The parameter interval of the rows within the limits.
+    let (lo, hi) = if dy == 0.0 {
+        if !within(a.1) {
+            return;
+        }
+        (0.0, 1.0)
+    } else {
+        let (t0, t1) = ((-LIMIT_PX - a.1) / dy, (LIMIT_PX - a.1) / dy);
+        (t0.min(t1).max(0.0), t0.max(t1).min(1.0))
+    };
+    if lo >= hi {
+        // An interval that rounds to nothing while the segment's rows meet
+        // the limits belongs to a segment too long for its cuts to be
+        // resolved; it is clamped, which keeps the outline closed.
+        if a.1.min(b.1) <= LIMIT_PX && a.1.max(b.1) >= -LIMIT_PX {
+            emit(clamped(a, b));
+        }
+        return;
+    }
+    // Cuts at the columns `x = ±LIMIT_PX` inside that interval.
+    let mut cuts = [lo, hi, hi, hi];
+    let mut n = 1;
+    if dx != 0.0 {
+        let (t0, t1) = ((-LIMIT_PX - a.0) / dx, (LIMIT_PX - a.0) / dx);
+        for t in [t0.min(t1), t0.max(t1)] {
+            if lo < t && t < hi {
+                cuts[n] = t;
+                n += 1;
+            }
+        }
+    }
+    cuts[n] = hi;
+    #[expect(
+        clippy::float_cmp,
+        reason = "an uncut end has the parameter 0 or 1 exactly, and keeps its endpoint"
+    )]
+    let point = |t: f64| {
+        if t == 0.0 {
+            a
+        } else if t == 1.0 {
+            b
+        } else {
+            at(t)
+        }
+    };
+    for pair in cuts[..=n].windows(2) {
+        emit(clamped(point(pair[0]), point(pair[1])));
+    }
+}
+
 /// Bytes per block in which a coverage row is searched for runs of one
 /// value.
 pub(crate) const BLOCK: usize = 16;
@@ -187,17 +265,20 @@ impl AreaRaster {
         }
     }
 
-    /// Add the segment `(x0, y0) → (x1, y1)` (device space).  Segments with
-    /// a NaN coordinate are skipped.
+    /// Add the segment `(x0, y0) → (x1, y1)` (device space), cut at the
+    /// fixed-point limits as [`fixed_segments`] cuts it.  Segments with a
+    /// NaN coordinate are skipped.
     pub fn add_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         if [x0, y0, x1, y1].iter().any(|v| v.is_nan()) {
             return;
         }
-        self.add_fixed(fixed(x0), fixed(y0), fixed(x1), fixed(y1));
+        fixed_segments((x0, y0), (x1, y1), |[ax, ay, bx, by]| {
+            self.add_fixed(ax, ay, bx, by);
+        });
     }
 
     /// Add the segment `(ax, ay) → (bx, by)`, device coordinates in fixed
-    /// point as [`fixed`] makes them.
+    /// point as [`fixed_segments`] makes them.
     pub(crate) fn add_fixed(&mut self, ax: i64, ay: i64, bx: i64, by: i64) {
         if self.is_empty() {
             return;

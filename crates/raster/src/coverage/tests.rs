@@ -198,6 +198,70 @@ fn non_finite_segments_are_skipped() {
 }
 
 #[test]
+fn the_pixel_limit_is_the_fixed_point_limit() {
+    assert_eq!(fixed(LIMIT_PX), COORD_LIMIT);
+    assert_eq!(fixed(-LIMIT_PX), -COORD_LIMIT);
+}
+
+/// Vertices far past the fixed-point limits leave every edge's slope as it
+/// was: a triangle whose far vertices are beyond `2^44` pixels covers the
+/// window as a small triangle with the same edges through it does.
+#[test]
+fn far_vertices_keep_their_edge_slopes() {
+    let big = [(0.0, 0.0), (2e15, 1e15), (0.0, 2e15)];
+    let small = [(0.0, 0.0), (200.0, 100.0), (0.0, 200.0)];
+    assert_eq!(
+        render(&[&big], false, 100, 50),
+        render(&[&small], false, 100, 50)
+    );
+    // Mirrored across both axes, so the far parts lie left of and above
+    // the window.
+    let flip = |t: [(f64, f64); 3]| t.map(|(x, y)| (99.0 - x, 49.0 - y));
+    assert_eq!(
+        render(&[&flip(big)], false, 100, 50),
+        render(&[&flip(small)], false, 100, 50)
+    );
+}
+
+/// Edges so long that their cuts at the limits round to one parameter are
+/// clamped rather than dropped, so the outline stays closed: a wedge whose
+/// vertices are at `±1e307` covers the half of the window above its
+/// diagonal, not all of it.
+#[test]
+fn edges_too_long_to_cut_keep_the_outline_closed() {
+    let wedge = [
+        (-1e307, -1e307),
+        (1e307, 1e307),
+        (-1e307, 0.1),
+        (-1e307, -0.1),
+    ];
+    let cov = render(&[&wedge], false, 100, 100);
+    let ink = ink(&cov);
+    assert!((4900.0..=5100.0).contains(&ink), "ink {ink}");
+}
+
+/// A band many times wider than the limits, crossing the window, covers
+/// what the same band with its far corners nearer covers, to within the
+/// rounding of corners `3.5e14` pixels out (a spacing of 1/16 pixel).
+#[test]
+fn a_band_wider_than_the_limits_covers_the_window() {
+    let band = |r: f64| {
+        [
+            (10.0 - r, 10.0 + r),
+            (10.0 + r, 10.0 - r),
+            (20.0 + r, 20.0 - r),
+            (20.0 - r, 20.0 + r),
+        ]
+    };
+    let cov = render(&[&band(3.5e14)], false, 64, 64);
+    let near = render(&[&band(1e4)], false, 64, 64);
+    for (i, (&c, &n)) in cov.iter().zip(&near).enumerate() {
+        assert!(c.abs_diff(n) <= 2, "pixel {i}: {c} against {n}");
+    }
+    assert!(ink(&cov) > 500.0);
+}
+
+#[test]
 fn table_products_and_queries() {
     let mut raster = AreaRaster::new(0, 0, 15, 15);
     for (i, &(x0, y0)) in rect(2.5, 2.0, 10.0, 8.0).iter().enumerate() {
