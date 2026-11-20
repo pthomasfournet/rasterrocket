@@ -2666,3 +2666,31 @@ fn a_shading_whose_function_fails_is_recorded() {
     );
     assert!(renderer.finish().1.has_omissions());
 }
+
+// ── Flatness ──────────────────────────────────────────────────────────────
+
+/// A filled circle of radius 40 centred on a 100 × 100 page, drawn under
+/// the flatness operand `flatness`.
+fn circle_under_flatness(flatness: &str) -> Vec<u8> {
+    let k = 40.0 * 0.552_284_75;
+    let (hi, lo) = (50.0 + k, 50.0 - k);
+    let content = format!(
+        "{flatness} i 0 g 90 50 m 90 {hi} {hi} 90 50 90 c {lo} 90 10 {hi} 10 50 c \
+         10 {lo} {lo} 10 50 10 c {hi} 10 90 {lo} 90 50 c f"
+    );
+    render_gray(100, content.as_bytes())
+}
+
+/// A flatness above one device pixel flattens curves as one pixel does,
+/// so no operand, in the legal range or past it, reduces a circle to its
+/// chords.
+#[test]
+fn flatness_is_capped_at_one_device_pixel() {
+    let one = circle_under_flatness("1");
+    for big in ["50", "100", "1e300"] {
+        assert!(circle_under_flatness(big) == one, "flatness {big}");
+    }
+    let dark = one.iter().filter(|&&v| v < 128).count();
+    // π · 40² ≈ 5027 pixels.
+    assert!((4900..=5100).contains(&dark), "dark pixels {dark}");
+}

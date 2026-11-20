@@ -26,6 +26,14 @@ pub(crate) type Ctm = [f64; 6];
 /// The identity CTM.
 pub(crate) const CTM_IDENTITY: Ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+/// The smallest flatness tolerance, in device pixels, curves are flattened
+/// to; the default, which a flatness of 0 selects.
+const MIN_DEVICE_FLATNESS: f64 = 0.1;
+
+/// The largest flatness tolerance, in device pixels, curves are flattened
+/// to, whatever the graphics state's flatness.
+const MAX_DEVICE_FLATNESS: f64 = 1.0;
+
 /// Multiply two CTMs: result = `a * b` (both in column-major PDF order).
 #[must_use]
 pub(crate) fn ctm_multiply(a: &Ctm, b: &Ctm) -> Ctm {
@@ -336,6 +344,23 @@ impl InterpGState {
             trace_fill: None,
             trace_stroke: None,
             trace_smask: 0,
+        }
+    }
+
+    /// The flatness tolerance curves are flattened to, in device pixels:
+    /// the operand of `i` or `/FL` bounded to
+    /// `[MIN_DEVICE_FLATNESS, MAX_DEVICE_FLATNESS]` (NaN maps to the
+    /// minimum).  The lower bound is the default, which an operand of 0
+    /// selects; the upper bound keeps a flattened curve within one pixel
+    /// of the curve, so an operand anywhere in the range PDF allows
+    /// (0 to 100) cannot reduce a curve to its chord.
+    #[must_use]
+    pub(crate) const fn device_flatness(&self) -> f64 {
+        if self.flatness.is_nan() {
+            MIN_DEVICE_FLATNESS
+        } else {
+            self.flatness
+                .clamp(MIN_DEVICE_FLATNESS, MAX_DEVICE_FLATNESS)
         }
     }
 

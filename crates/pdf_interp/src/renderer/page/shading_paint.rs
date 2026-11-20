@@ -224,7 +224,7 @@ impl PageRenderer<'_> {
         self.trace_shading(name);
         let gs = self.gstate.current();
         let ctm = gs.ctm;
-        let flatness = gs.flatness.max(0.1);
+        let flatness = gs.device_flatness();
         // The shading paints no pixel outside the clip in effect.
         let reach = self.clip_rect();
 

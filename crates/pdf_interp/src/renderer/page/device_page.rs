@@ -441,7 +441,7 @@ impl PageRenderer<'_> {
             Ok(paint) => paint,
             Err(reason) => return self.refuse_device(reason),
         };
-        let flatness = self.gstate.current().flatness.max(0.1);
+        let flatness = self.gstate.current().device_flatness();
         let outlines = raster::fill::aa_fill_outlines(
             path,
             &DEVICE_MATRIX,

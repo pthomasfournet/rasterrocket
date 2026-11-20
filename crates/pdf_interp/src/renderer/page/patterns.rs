@@ -832,7 +832,7 @@ impl PageRenderer<'_> {
         if antialias {
             self.intersect_clip_path(&pb.build(), false);
         } else {
-            let flatness = self.gstate.current().flatness.max(0.1);
+            let flatness = self.gstate.current().device_flatness();
             let xpath = XPath::new(&pb.build(), &DEVICE_MATRIX, flatness, true);
             self.gstate
                 .current_mut()

@@ -65,7 +65,7 @@ impl GlyphStroke {
             line_cap: gs.line_cap,
             line_join: gs.line_join,
             miter_limit: gs.miter_limit,
-            flatness: gs.flatness.max(0.1) / area_scale(device)?,
+            flatness: gs.device_flatness() / area_scale(device)?,
             reach,
         })
     }

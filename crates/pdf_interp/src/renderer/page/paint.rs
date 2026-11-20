@@ -292,7 +292,7 @@ impl PageRenderer<'_> {
     /// [`Self::clip_path_into_gstate`] unrecorded in the paint trace: the
     /// clip of an operation the trace records as a whole.
     pub(super) fn intersect_clip_path(&mut self, path: &raster::path::Path, even_odd: bool) {
-        let flatness = self.gstate.current().flatness.max(0.1);
+        let flatness = self.gstate.current().device_flatness();
         let xpath = XPath::new(path, &DEVICE_MATRIX, flatness, true);
         self.gstate
             .current_mut()
@@ -493,7 +493,7 @@ impl PageRenderer<'_> {
         }
         let gs = self.gstate.current();
         let clip = gs.clip.clone_shared();
-        let flatness = gs.flatness.max(0.1);
+        let flatness = gs.device_flatness();
         let (fill_alpha, blend_mode) = (gs.fill_alpha, gs.blend_mode);
         let transfer = gs.transfer.clone();
 
@@ -615,7 +615,7 @@ impl PageRenderer<'_> {
     pub(super) fn stroke_shape(&self, path: &raster::path::Path, line_width: f64) -> StrokeShape {
         let gs = self.gstate.current();
         let device = self.device_matrix();
-        let device_flatness = gs.flatness.max(0.1);
+        let device_flatness = gs.device_flatness();
         let (path, matrix, flatness) = match (invert_affine(&device), area_scale(&device)) {
             (Some(inv), Some(scale)) => {
                 (transform_path(path, &inv), device, device_flatness / scale)
